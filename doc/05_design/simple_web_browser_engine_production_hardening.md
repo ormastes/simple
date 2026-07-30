@@ -1010,7 +1010,15 @@ numeric NFR is selected.
 
 Status: **PROPOSED / UNIMPLEMENTED / RED**.
 
+Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; IMPLEMENTATION RED**.
+
 ### Frozen API
+
+The import-free
+`src/lib/gc_async_mut/gpu/browser_engine/dom_limits.spl` contains only
+`HTML_MAX_TREE_DEPTH` and `HTML_MAX_NODES`. Both
+`html_tree_builder.spl` and the identity owner import it; neither duplicates
+these limits.
 
 The sole owner is
 `src/lib/gc_async_mut/gpu/browser_engine/dom_identity_index.spl`:
@@ -1024,6 +1032,7 @@ The sole owner is
 - `radio_group_for_route(route) -> DomRadioGroupKey?`
 - `radio_members(group) -> [DomNodeRoute]`
 - `contains_route(route) -> bool`
+- `route_for_layout_target_key(target_key) -> Result<DomNodeRoute, text>`
 - `dom_node_route_text(route) -> text`
 - `dom_node_route_parse(value) -> Result<DomNodeRoute, text>`
 
@@ -1036,6 +1045,20 @@ author-ID scan or lookup in a newer index. Public input uses exactly
 decimal. Signs, leading zeroes, overflow, NUL legacy strings, missing fields,
 and trailing data reject before lookup.
 
+`route_for_layout_target_key` accepts only `id:<author-id>` and the canonical
+`path:<child-ordinal-path>` emitted by the web layout hit index. The ID form
+uses the first-preorder author-ID winner. The path form starts at the first
+preorder `body` route (`path:`) and walks index entries keyed exactly by
+`(layout_parent_route, layout_element_ordinal)`. The ordinal counts only direct
+children whose tag is neither `#text`, `style`, `script`, `title`, `head`,
+`meta`, `link`, nor `base`; interspersed excluded nodes do not increment it.
+The path lookup never walks the DOM and rejects malformed, over-depth, missing,
+or non-layout-element paths. The session gate is
+`BrowserSession.route_for_layout_target_key(target_key,
+expected_generation) -> Result<DomNodeRoute, text>`. It compares the expected
+generation with the published pair before parsing or lookup; hosted callers
+must not retry a stale key against a newer generation.
+
 ### Build and publication
 
 Pass one uses iterative preorder with a stack bounded by
@@ -1047,6 +1070,10 @@ owners/labels and inserts radios into
 `(generation, optional form owner, name)` groups in preorder. No-owner is an
 explicit optional value, never the document-root route. Anonymous radios have
 no named group.
+
+The index admits at most `HTML_MAX_NODES`; this is the parser's shared bound,
+not the private JavaScript bridge-object count. A stricter bridge allocation
+cap may remain, but it cannot redefine document admission.
 
 `BrowserSession` starts generation 1. `_install_document_identity` builds the
 candidate index and only then swaps `current_dom`, generation, and index.
@@ -1061,6 +1088,13 @@ under `Generation-qualified DOM identity implementation lanes`. This detail
 design does not define a second phase plan. No lane may publish a mix where one
 owner compares bare IDs and another compares routes; production retains the
 current implementation until the four production lanes compile together.
+
+The atomic source set includes `dom.spl` to remove stored text target fields
+and constructor arguments from `BeDomEvent` plus the legacy text route fields
+from `BeDomEventDispatch`. Page-facing author IDs are computed on demand from
+the captured route/index. `BrowserDomDispatchFrame` and route-bound
+listener/action records carry typed `DomNodeRoute`; no production branch
+reparses an author-ID projection.
 
 ### Dispatch and mutation
 
@@ -1101,6 +1135,19 @@ immediately before one serialization of post-event state.
 remain bounded. Dispatch freezes the ordered route path once; listener delivery
 does not scan the DOM.
 
+`BrowserRuntimeState`, `SimpleScriptExecutor`, `ScriptHost`, `JsDomBridge`,
+and `browser_session_loading.spl` return staged mutation/listener state to the
+session transaction. An
+identity-preserving batch publishes changed DOM/script state with the existing
+generation/index. An identity-changing batch builds the index first and
+publishes DOM, generation, index, `BrowserRuntimeState`, ScriptHost and
+SimpleScript roots, both runner roots, bridge maps, route listeners, and
+callable callbacks at one assignment boundary. Index-build or script staging
+failure restores every prior component. Replacement during a callback
+discards the old-generation candidate and callbacks; direct
+`SimpleScriptExecutor.bind_dom`, `BrowserRuntimeState.bind_dom`, or
+script-private root publication after binding is forbidden.
+
 Focus, pending Space, selection, and dirty-edit state store routes. Each
 blur/change/focusout phase first checks generation after the previous handler;
 same-generation work may re-resolve, while an invalidating mutation stops the
@@ -1119,10 +1166,89 @@ when current hit route equals stored press route; generation change clears it.
 Replacement and close:
 
 1. prevent new page dispatch;
-2. clear pending Space, selection, hosted pointer, and UI snapshot routes;
-3. remove listeners/callbacks keyed by the retiring generation;
-4. publish the built candidate pair, or no document on close;
+2. stage clears for pending Space, selection, hosted pointer, and UI snapshot
+   routes without mutating published state;
+3. stage removal of listeners/callbacks keyed by the retiring generation,
+   again without mutating published state;
+4. publish the built candidate pair plus every staged script/bridge clear at
+   one assignment boundary, or publish no document on close;
 5. unwind active host cleanup, then release the retired index.
+
+The atomic migration uses this file-by-file production deletion census:
+
+- `gpu/browser_engine/dom_accessors.spl`: delete
+  `be_dom_event_identity` as routing identity and its `node:<node_id>`
+  fallback, `be_dom_route_identity`, `be_dom_route_node_id`,
+  `be_dom_matches_identity`, `be_dom_event_identity_at_element_path`,
+  `_be_dom_layout_target_key_from`, `be_dom_layout_target_key`,
+  `_be_dom_find_path_to_identity`, `be_dom_find_path_to_id`,
+  `be_dom_focused_id`, `be_dom_focused_route_id`,
+  `_be_dom_next_focus_id`, `be_dom_next_focus_id`,
+  `be_dom_next_focus_route_id`, `be_dom_form_owner_id`,
+  `be_dom_submit_form_owner_id`, `be_dom_reset_form_owner_id`,
+  `_be_dom_default_submitter_id`, `be_dom_default_submitter_id`,
+  `_be_dom_implicit_submit_blocker_count`,
+  `be_dom_form_allows_direct_implicit_submit`,
+  `be_dom_dispatch_event_to_id`,
+  `be_dom_dispatch_keyboard_event_to_id`,
+  `be_dom_checked_radio_id_for_target`,
+  `_be_dom_apply_default_action_to_id`, and
+  `be_dom_apply_default_action_to_id`, plus every NUL `route-node:`
+  formatter/parser/conditional. Their route/query replacements use
+  `DomIdentityIndex`. Implicit-submit traversal remains one O(N) control
+  traversal but accepts a `DomNodeRoute` form and resolves each control's
+  already-indexed owner; it performs no recursive association lookup.
+- `gpu/browser_engine/dom.spl` and `script/event_api.spl`: delete stored
+  `BeDomEvent.target_id`, `current_target_id`, `related_target_id`, text target
+  constructor inputs, text `BeDomEventDispatch.target_route_id` and
+  `current_target_route_ids`, and `event_create(event_type, target_id)`.
+  Production event creation/dispatch accepts typed routes; author IDs are
+  on-demand content projections.
+- `web/browser_session_form.spl`: remove text `form_id`/`submitter_id`
+  routing and all `be_dom_matches_identity`, `be_dom_find_path_to_id`, and
+  `be_dom_form_owner_id` consumers; form and submitter inputs are routes.
+- `script/script_host.spl`, `script/simple_script.spl`, and
+  `js/dom_bridge.spl`: delete
+  `_script_host_apply_event_action_to_id`,
+  `script_host_apply_action_to_id`, `JsDomListener.node_id`, author/bare-ID
+  listener matching, and independently published DOM/runner roots.
+- `web/browser_session.spl`: replace `BrowserRuntimeState.dom_node_ids` with
+  generation-qualified routes, replace separate `dom_bridge_generation` with
+  the document generation, and replace
+  `pending_space_activation_target`/`text_selection_target_id` with
+  `DomNodeRoute?`. `dom_element_ids`, other runtime object IDs,
+  `target_object_id`, and `dom_id_snapshots` remain explicitly JS-heap IDs or
+  author-attribute snapshots; they are not DOM routing authority.
+- `web/browser_session_runtime.spl`: delete
+  `_browser_session_dom_route_id` and every recursive
+  `be_dom_find_path_to_id`, focus/form/default/dispatch `*_id`, and
+  `script_host_apply_action_to_id` consumer. Public focus/edit/keyboard/event
+  entry points accept routes or strictly parse `dom-route-v1` before entering
+  the typed owner.
+- `web/browser_session_loading.spl`: remove all direct
+  `SimpleScriptExecutor.bind_dom` and `BrowserRuntimeState.bind_dom`
+  publication; load-time script roots/listeners join the session candidate.
+- `web/browser_session_ui_access.spl`: delete `_browser_dom_target` and its NUL
+  route encoding; snapshot/actions serialize and parse only `dom-route-v1`.
+- `hosted_web_content_session.spl` and
+  `hosted_browser_renderer_worker.spl`: delete
+  `be_dom_event_identity_at_element_path`, `be_dom_layout_target_key`,
+  recursive path/focus consumers, and bare `pressed_target_id`/
+  `last_target_id`; frame, press, release, focus, edit, and keyboard state use
+  generation-qualified routes.
+
+Renderer-only numeric identifiers are excluded from deletion:
+`BeDomNode.node_id` remains the generation-local index key; HNode/child/layout
+indices, image/resource `render_node_id`, Draw IR command owner/node metadata,
+window IDs, request IDs, and JS heap object IDs remain internal typed
+identifiers. They must never cross into page/host route comparison.
+Standards-facing author-ID lookup remains but resolves through
+`DomIdentityIndex.route_for_author_id`; an absent author ID projects empty text,
+never `node:<node_id>`. Recursive `dom.spl::be_dom_find_by_id` and
+`be_dom_query_selector("#id")` may remain only as non-routing generic selector
+compatibility. Production `getElementById`, label/form association, and host
+mutation use the O(1) index. General recursive DOM serialization, layout,
+selector, and text-content algorithms are not identity hot paths.
 
 Counters expose build visits, resolved/unresolved associations, duplicate
 author IDs, stale/budget rejects, live/retired index count, index bytes, build

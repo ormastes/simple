@@ -657,13 +657,38 @@ and `Reject stale routes and release the index`. Frozen helpers are
 and `check_stale_routes_and_index_release`; each checker fails explicitly until
 production exists.
 
+Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; IMPLEMENTATION RED**.
+
 | Order | Lane | Exact ownership | Acceptance / dependency |
 | --- | --- | --- | --- |
-| 1 | `dom_identity_index_owner` | Add only `src/lib/gc_async_mut/gpu/browser_engine/dom_identity_index.spl`; two-pass O(N) build, route parsing, association queries, counters | independent high review; RED SSpec first |
+| 1 | `dom_identity_index_owner` | Add import-free `dom_limits.spl` owning only `HTML_MAX_TREE_DEPTH`/`HTML_MAX_NODES`, move `html_tree_builder.spl` to those imports, and add `dom_identity_index.spl`; two-pass O(N) build, route/layout-key parsing, association queries, counters | independent high review; no GPU-to-web import; RED SSpec first |
 | 2 | `dom_accessor_form_migration` | `dom_accessors.spl`, `browser_session_form.spl`; replace recursive identity/form/label/radio/event-path scans | depends on 1; optional no-form-owner key, first-ID rule, no parallel registry |
-| 3 | `dom_dispatch_bridge_migration` | `browser_session.spl`, `browser_session_runtime.spl`; atomic pair publication, focus/Space/edit/blur, label/radio actions, bridge/listener route keys, shared reentrant budget | depends on 1-2; stale generation aborts without new-index lookup; exact label order/cancel/rollback |
-| 4 | `dom_ui_hosted_migration` | `browser_session_ui_access.spl`, `hosted_web_content_session.spl`, `hosted_browser_renderer_worker.spl`; generation-bound snapshots and press/release/focus routes | depends on 3; stale release produces no click |
+| 3 | `dom_dispatch_bridge_migration` | `dom.spl`, `browser_session.spl`, `browser_session_runtime.spl`, `browser_session_loading.spl`, `script/script_host.spl`, `script/simple_script.spl`, `script/event_api.spl`, and `js/dom_bridge.spl`; typed event routes, atomic DOM/index/script/listener publication, focus/Space/edit/blur, label/radio actions, and shared reentrant budget | depends on 1-2; stale generation aborts without new-index lookup; retire direct `bind_dom`; exact label order/cancel/rollback |
+| 4 | `dom_ui_hosted_migration` | `browser_session_ui_access.spl`, `hosted_web_content_session.spl`, `hosted_browser_renderer_worker.spl`; consume `route_for_layout_target_key` through the session generation gate; generation-bound snapshots and press/release/focus routes | depends on 3; stale/malformed hit keys reject and stale release produces no click |
 | 5 | `dom_identity_sspec` | focused modern SSpec, mirrored manual, N/2N and 10,000-cycle production receipts | depends on 1-4 and admitted current pure-Simple CLI |
+
+Exact production ownership:
+
+- Lane 1:
+  `src/lib/gc_async_mut/gpu/browser_engine/dom_limits.spl`,
+  `src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl`, and
+  `src/lib/gc_async_mut/gpu/browser_engine/dom_identity_index.spl`.
+- Lane 2:
+  `src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl` and
+  `src/lib/gc_async_mut/web/browser_session_form.spl`.
+- Lane 3:
+  `src/lib/gc_async_mut/gpu/browser_engine/dom.spl`,
+  `src/lib/gc_async_mut/web/browser_session.spl`,
+  `src/lib/gc_async_mut/web/browser_session_runtime.spl`,
+  `src/lib/gc_async_mut/web/browser_session_loading.spl`,
+  `src/lib/gc_async_mut/gpu/browser_engine/script/script_host.spl`,
+  `src/lib/gc_async_mut/gpu/browser_engine/script/simple_script.spl`,
+  `src/lib/gc_async_mut/gpu/browser_engine/script/event_api.spl`, and
+  `src/lib/gc_async_mut/gpu/browser_engine/js/dom_bridge.spl`.
+- Lane 4:
+  `src/lib/gc_async_mut/web/browser_session_ui_access.spl`,
+  `src/os/hosted/hosted_web_content_session.spl`, and
+  `src/os/hosted/hosted_browser_renderer_worker.spl`.
 
 Lower-model sidecars may inspect one owner per lane only after Lane 1 lands;
 they may not rename this API or add label/radio/listener identity maps. Merge
@@ -672,10 +697,40 @@ available normal/highest-capability review of the combined source/spec/manual
 diff and one admitted target-runtime execution.
 
 Migration is not piecemeal: production stays on the current route model until
-Lanes 1-4 compile together. The merge deletes NUL legacy route parsing, bare
-`pressed_target_id`/`last_target_id`, recursive hot-path lookup, and prototype
-registries. Label, radio, and SimpleScript HOLDs remain non-mergeable until
-this prerequisite lands.
+Lanes 1-4 compile in one tree. Lane commits are review artifacts only and must
+not be pushed or merged independently. The merge deletes
+`be_dom_event_identity` as routing identity and its `node:<node_id>` fallback,
+`be_dom_route_identity`, `be_dom_route_node_id`,
+`be_dom_matches_identity`, `be_dom_event_identity_at_element_path`,
+`be_dom_layout_target_key`, `_be_dom_find_path_to_identity`,
+`be_dom_find_path_to_id`, `_be_dom_implicit_submit_blocker_count`,
+`be_dom_form_allows_direct_implicit_submit`,
+focus/form/default/dispatch `*_id` routing, every
+NUL `route-node:` branch, text `BeDomEvent`/event-api/dispatch routes,
+`_script_host_apply_event_action_to_id`,
+`script_host_apply_action_to_id`, `BrowserRuntimeState.dom_node_ids` and
+separate bridge generation, bare Space/selection/hosted press/focus fields,
+`JsDomListener.node_id`, `_browser_dom_target`, and every runtime recursive
+consumer. The normative file-by-file census and renderer-only `node_id`
+exclusions are in the detail design; any omitted production consumer blocks
+the combined merge. Label, radio, and SimpleScript HOLDs remain non-mergeable
+until this prerequisite lands.
+
+Lane 1 owns the shared limit relocation because the identity index cannot
+import private web/session constants. Lane 3 is the sole merge owner for typed
+event and script state: page-visible author-ID strings are projections only,
+and candidate DOM/index/bridge/listener state publishes or rolls back
+together, including load-time bindings and both script runner roots. Lane 4
+captures the frame generation and calls the session
+`route_for_layout_target_key` gate exactly once per hit; it never retries an
+old layout key against a replacement document.
+
+Lane 2 retains a single O(N) implicit-submit control traversal, but it accepts
+a form route and consults indexed form ownership rather than recursively
+recomputing association. Generic recursive selector compatibility is outside
+routing; production author lookup remains O(1) through
+`route_for_author_id`, and an absent author ID has no `node:<node_id>`
+projection.
 
 ## Production navigation batch 9 (2026-07-30)
 

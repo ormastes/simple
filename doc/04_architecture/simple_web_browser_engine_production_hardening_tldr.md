@@ -20,6 +20,16 @@ DrawIrComposition -> persistent Engine2dCompositorBackend
 - Reuse BrowserSession; add no chrome/history facade.
 - Browser-only JS profile excludes Node/native capabilities.
 - One canonical DOM event path and one monotonic animation/timer/rAF clock.
+- Proposed DOM identity uses one immutable two-pass index per generation.
+  Import-free `dom_limits.spl` owns only tree depth/node count; layout hits
+  become `DomNodeRoute` through a generation-gated session lookup. Body-rooted
+  paths use `(parent route, layout-element-child ordinal)` and ignore
+  interspersed text/non-layout nodes.
+- Event routing, hosted press/focus, UI access, callable listeners,
+  SimpleScript, and JavaScript carry typed routes. Script DOM, index, bridge,
+  runtime state, runner roots, listeners, and callbacks publish atomically,
+  including load-time binding; staging failure rolls all of them back and
+  stale generations never retry in the new index.
 - One persistent render session with staged invalidation.
 - BrowserSession reuses its repaired UI-access revision as the document
   revision and adds only style/resource revisions; the renderer owns viewport
@@ -55,6 +65,16 @@ Hot-path evidence: stage counters/timings, frame/input latency, cache reuse,
 Engine2D/font create/shutdown counts, memtrack/heap/RSS, 10,000-cycle soak.
 Current executable evidence is host C only; pure-Simple runtime evidence remains
 compiler-blocked and no bootstrap/seed substitute is accepted.
+
+The DOM identity migration is one-tree only. It removes recursive identity
+lookup, NUL/bare route parsing, text dispatch route fields, and hosted bare
+press/focus IDs only when index, accessors/forms, dispatch/scripts, and
+UI/hosted hit conversion compile together. General DOM layout/serialization
+walks, renderer/resource/Draw IR node IDs, JS heap IDs, and page-visible
+author-ID projections remain non-routing data; a missing author ID never
+projects `node:<node_id>`, and production author lookup uses the O(1) index.
+Retirement clears are staged into the same publication boundary. Its
+ownership/API audit is resolved; implementation and execution remain RED.
 
 Proposed `SBRF8` binds a 512-byte document-title witness to generation, reply,
 and committed URL. Invalid or missing titles derive the canonical URL only at

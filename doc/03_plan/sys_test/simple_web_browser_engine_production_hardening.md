@@ -889,6 +889,8 @@ REQ-WEB-BROWSER-007/008/017/018 and
 NFR-WEB-BROWSER-004/005/006/008/014/015/016, but cannot promote them before
 production execution.
 
+Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; EXECUTION RED**.
+
 The future modern SSpec and mirrored manual expose exactly four steps:
 
 1. `Build the document identity index`
@@ -907,7 +909,13 @@ Step 1 builds one document with duplicate author IDs, forward external form
 ownership, explicit and nested labels, same-name radios with distinct form
 owners, text controls, and capture/target/bubble listeners. It asserts the
 first-preorder ID winner, exact form/label/radio routes, and root-to-target
-event path. Counters show exactly two bounded passes and no recursive lookup.
+event path. It also admits canonical `id:` and `path:` layout hit keys and
+rejects malformed/over-depth keys. A body fixture intersperses text,
+`style`/`script`/`meta`/`link`, and layout elements at two depths. It proves
+the exact `(layout_parent_route, layout_element_ordinal) -> route` relation:
+only layout-element children advance the body-rooted ordinal. Counters show
+exactly two bounded passes using shared
+`HTML_MAX_TREE_DEPTH`/`HTML_MAX_NODES` and no recursive lookup.
 
 Step 2 exercises pointer press/release, label forwarding, radio selection,
 Space activation, text editing, focus, beforeinput/input/change/blur/focusout,
@@ -920,17 +928,51 @@ retarget after handler removal, and nested actions share one document-wide
 budget. Radio fixtures prove an explicit no-form-owner key, never a
 document-root sentinel.
 
+The dispatch assertions distinguish page-visible author-ID projections from
+typed route authority. They require typed target/current/related routes on
+every production receipt and generation-owned callable, SimpleScript, and
+JavaScript listeners. A script batch that changes `id`, `form`, `for`, radio
+identity, or labelable structure publishes DOM/index/bridge/listeners once;
+an index-build failure publishes none. Value/style/text-only mutation keeps
+the generation.
+
 Step 3 replaces the document from a target handler with author and numeric IDs
 resembling the old document. The handler unwinds, but old callbacks/defaults do
 not query the new index and do not focus, click, select, edit, or submit the
 replacement. Hosted press, pending Space, selection, UI-access targets, and
 bridge listener keys clear or become stale.
 
+Before replacement, the fixture snapshots `BrowserRuntimeState`, its route to
+JS-heap-object map, callable callbacks, `ScriptHost` and
+`SimpleScriptExecutor` roots, both runner roots, and all route-bound listener
+sets. Replacement proves the new DOM/generation/index and every new script
+component publish together while all old-generation callbacks disappear. A
+separate injected index-build/script-staging failure proves every prior
+component remains byte-for-byte/current-route identical and no candidate root,
+listener, callback, or generation escapes.
+
+The hosted fixture retains the old layout hit key and captured generation,
+then replaces the document before release. The session
+`route_for_layout_target_key` gate returns `stale_target` without parsing or
+new-index lookup; no release click or focus/edit reaches the replacement.
+
 Step 4 submits forged old-generation routes through runtime bridge, UI access,
 pointer release, keyboard activation, edit, focus, label, radio, and form
 paths. Each returns `stale_target` without mutation/callback. Close then
 proves zero live/retired indexes and generation-owned listeners after bounded
 quiescence.
+
+The rejection matrix is behavioral, not source-only. It sends a NUL
+`route-node:` string, a bare author ID, a bare numeric/node ID, a valid
+old-generation `dom-route-v1`, a stale `id:`/`path:` hit key, and a
+same-generation press/release locator pair that resolves to different routes
+through runtime bridge, UI access, hosted press/release, keyboard/Space,
+selection/edit/focus, label/radio/form/default action, callable listeners,
+SimpleScript, JavaScript, and public event creation/dispatch. Every case
+returns the canonical invalid-route or `stale_target` result before callback,
+mutation, focus, submission, or Draw IR work. Standards-facing
+`getElementById(author_id)` remains the only author-ID lookup and returns the
+first-preorder route projection; it never authorizes a host mutation.
 
 Folded cases run the production fixture at `N` and `2N` routable elements.
 Visits/allocations scale within 10%, elapsed `2N/N <= 2.2`, and repeated
@@ -944,7 +986,27 @@ stale/budget rejects. Acceptance requires input-to-paint p95 <=50 ms, RSS
 callback or unreleased index.
 
 Step 4 also captures canonical component-bound Draw IR and Engine2D pixels for
-the surviving current control; retired routes contribute no action or pixels.
+the surviving current control. The oracle asserts the exact current
+`DomNodeRoute`, Draw IR command owner/node, and current-control inside/outside
+pixels; retired routes contribute no action, command, or pixel.
+
+Static review additionally runs an exact deletion census for
+the detail-design file-by-file matrix: `be_dom_event_identity` routing and its
+`node:<node_id>` fallback, event-identity-at-path,
+layout-target-key, identity matching, recursive route lookup,
+implicit-submit association recursion,
+focus/form/default/dispatch `*_id`, NUL routes, text `BeDomEvent`/event-api
+targets, ScriptHost/SimpleScript/JS bridge IDs, BrowserRuntimeState numeric DOM
+IDs and separate generation, Space/selection/hosted IDs, direct load-time
+`bind_dom`, UI NUL encoding, and every runtime recursive consumer. Any
+production hit is RED. Renderer-only node/resource/Draw IR IDs, JS heap object
+IDs, and standards-facing author-ID projections are explicit exclusions.
+
+Behavioral author lookup proves production `getElementById` uses the O(1)
+first-preorder index winner and that an element without an author ID exposes
+no `node:<node_id>` projection. The implicit-submit folded case visits
+controls once and reports indexed form-owner queries with no recursive
+association lookup.
 
 The executable spec uses built-in matchers and fail-fast placeholders until
 production exists. Its generated manual hides setup mechanics, keeps these

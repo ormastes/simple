@@ -1056,12 +1056,21 @@ downgrade flags, and mixed SBR1/SBR2 deployments are forbidden.
 
 Status: **PROPOSED / UNIMPLEMENTED / RED**.
 
+Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; IMPLEMENTATION RED**.
+
 The current author-ID-or-`node_id` strings and recursive
 `be_dom_find_path_to_id` calls are not a production identity model. They can
 retarget stale events after a reparse, make external form/radio association
 quadratic, and let label, listener, UI-access, and hosted pointer paths
 disagree. The replacement is one semantic DOM-owned index, not separate label,
 radio, or listener identity registries.
+
+The import-free
+`src/lib/gc_async_mut/gpu/browser_engine/dom_limits.spl` owns only
+`HTML_MAX_TREE_DEPTH` and `HTML_MAX_NODES`. The parser and identity index
+import those constants; the limits module imports neither DOM nor web/session
+code. This removes the private-constant and GPU-to-web dependency without
+creating another policy owner.
 
 `src/lib/gc_async_mut/gpu/browser_engine/dom_identity_index.spl` exclusively
 owns:
@@ -1088,12 +1097,24 @@ passes. Pass one assigns routes, parent identity/child ordinal entries, first
 author IDs, and unresolved associations. Pass two resolves form/label
 references and radio groups from recorded rows. Neither pass invokes a tree
 search. Duplicate `node_id`, checked-generation exhaustion, excessive depth,
-or the existing
-script-visible element/resource bound rejects before publication. Expected
+or `HTML_MAX_NODES` rejects before publication. Expected
 O(1) index queries cover route membership, author ID, form owner, label
 control, and radio key. Structural-path reconstruction, route-to-node, and
 event-path queries are O(depth), bounded by admitted depth; radio enumeration
 is O(group size).
+
+Layout hit keys are renderer output, not DOM identity.
+`DomIdentityIndex.route_for_layout_target_key` accepts only the existing
+canonical `id:` and `path:` forms, resolves `id:` through the first-author-ID
+map and `path:` through a body-rooted layout relation, and returns a
+`DomNodeRoute`. Pass one records exactly
+`(layout_parent_route, layout_element_ordinal) -> route`. The root is the
+first preorder `body`; `path:` names that route. An ordinal counts only direct
+children accepted by the existing layout-element predicate, so text plus
+`style`, `script`, `title`, `head`, `meta`, `link`, and `base` neither receive
+a relation entry nor increment it. `BrowserSession.route_for_layout_target_key`
+additionally requires the caller's captured `DomDocumentGeneration`; mismatch
+returns `stale_target` before parsing or consulting the current index.
 
 `BrowserSession` owns exactly one current
 `(DomDocumentGeneration, DomIdentityIndex)` pair. Navigation/document/root
@@ -1113,6 +1134,17 @@ default-action work re-resolve its route in that same index. Removal and
 identity mutation therefore cannot retarget by author ID or reused numeric ID.
 Dispatch may pin the old immutable index only until unwind; escaped bridge
 objects retain routes, never the index.
+
+`BeDomEvent` remains the page-visible payload, but its stored text
+`target_id`, `current_target_id`, and `related_target_id` fields and
+text-target constructor parameters are removed from production dispatch.
+Author-facing IDs are computed on demand as projections after resolving a
+typed route in the captured index. The production dispatch frame owns typed
+`target_route`,
+`current_target_route`, `related_target_route`, and frozen
+`[DomNodeRoute]` propagation state. The legacy text
+`BeDomEventDispatch.target_route_id` and `current_target_route_ids` fields are
+removed in the atomic migration.
 
 The outermost dispatch owns one document-wide budget shared with reentrant
 dispatch: at most the existing 4,096 live callable listeners, 4,096 examined
@@ -1137,12 +1169,30 @@ uses the admitted post-event group once. Callable and SimpleScript listeners
 bind routes, freeze the propagation path once, and do not search the DOM per
 listener.
 
+Script mutation uses the same candidate transaction as parser/navigation
+replacement. `BrowserRuntimeState`, `SimpleScriptExecutor`, `ScriptHost`,
+`JsDomBridge`, and load-time script wiring stage candidate DOM, runner roots,
+route-bound listeners/callbacks, and identity inputs;
+only `BrowserSession` builds the candidate index and publishes
+`(DOM, generation, index, script state)` atomically. Failed index construction
+or any script/bridge staging failure restores the prior `BrowserRuntimeState`,
+`ScriptHost`/`SimpleScriptExecutor` roots, runner roots, listeners, and
+callbacks. Handler-triggered replacement discards every old-generation
+candidate component. No script owner or `browser_session_loading.spl`
+`bind_dom` call publishes a private root/listener set ahead of the session
+pair.
+
 All consumers carry `DomNodeRoute`, never author ID or bare `node_id`:
 
 - `browser_session.spl` owns generation/index, pending-Space, selection, focus,
   and runtime-bridge route state;
 - `browser_session_runtime.spl` owns atomic publication, dispatch frames,
   handler re-resolution, blur/change/focusout, and default actions;
+- `script_host.spl`, `simple_script.spl`, `event_api.spl`, and
+  `js/dom_bridge.spl` stage typed route/listener/script mutations and never
+  retain an independently current DOM;
+- `browser_session_loading.spl` joins that transaction and retires direct
+  `bind_dom` publication;
 - `dom_accessors.spl` becomes an index-query shim and retires recursive
   identity/form/radio/event-path scans;
 - `browser_session_form.spl` accepts qualified form and submitter routes;
@@ -1154,9 +1204,30 @@ All consumers carry `DomNodeRoute`, never author ID or bare `node_id`:
 - JavaScript/SimpleScript bridge objects and listeners store routes; host
   mutation first requires the same generation, then resolves in that index.
 
-Replacement and close clear pending Space, selection, hosted press/release,
-UI-access targets, and listener/action queues before the retired index is
-released. Production accepts no NUL-prefixed legacy route after migration.
+Replacement and close stage clears for pending Space, selection, hosted
+press/release, UI-access targets, and listener/action queues. Those clears
+publish with the candidate DOM/index/script state at one assignment boundary;
+only after host cleanup unwinds is the retired index released. Production
+accepts no NUL-prefixed legacy route after migration.
+
+The one-tree integration deletes, rather than deprecates, the production
+legacy census: `be_dom_event_identity` and its `node:<node_id>` fallback,
+`be_dom_route_identity`, `be_dom_route_node_id`,
+`_be_dom_find_path_to_identity`, `be_dom_find_path_to_id`,
+`_be_dom_implicit_submit_blocker_count`,
+`be_dom_form_allows_direct_implicit_submit`, every NUL
+`route-node:` parser/branch, `_script_host_apply_event_action_to_id`,
+`script_host_apply_action_to_id`, text
+`BeDomEvent.target_id`/`current_target_id`/`related_target_id`,
+`BeDomEventDispatch.target_route_id`/`current_target_route_ids`,
+`event_api.event_create(..., target_id)`, `JsDomListener.node_id`, hosted
+`pressed_target_id`/`last_target_id`, and `_browser_dom_target`. Author IDs
+remain content attributes and page-visible on-demand projections, but an
+absent author ID projects empty text rather than `node:<node_id>`. Production
+`getElementById` and author association use the index's O(1)
+`route_for_author_id`; generic recursive selector compatibility may remain
+only outside routing authority. Recursive selector/text/layout walks that are not identity,
+association, event-path, or dispatch lookup remain outside this deletion.
 
 At `N` and `2N` routable elements, build visits/allocations must scale within
 10%, elapsed `2N/N <= 2.2`, and queries must report no recursive/full-tree
