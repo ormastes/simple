@@ -13,6 +13,7 @@ do not replace source-matched native or prepared-host acceptance evidence.
 | CUDA | 3 smoke | 6,466,705,755 ns | 7,273,005,377 ns | FAIL; hit slower, source `device_identity_unknown`, handle `0`, identity `nil` |
 | Vulkan | 0 | n/a | n/a | FAIL before measurement; cached interpreter lacks `rt_is_interpreter_runtime` |
 | Metal | 0 | n/a | n/a | Postponed to prepared macOS host under TODO 588 |
+| process/pipe | 0 | n/a | n/a | FAIL before measurement; cached runtime parser rejects `hosted_browser_renderer_process.spl` |
 
 The CUDA 21-pair run first reached the 300-second bound. The three-pair smoke
 mode then completed and failed the strict device-provenance gate. The process
@@ -33,5 +34,6 @@ so this is not accepted as source or runtime evidence.
    below forced-render p50.
 3. Run the Metal and Vulkan commands in
    `doc/03_plan/agent_tasks/gpu_backend_mac_host_remaining.md` on macOS.
-4. Add a separate process/pipe benchmark; the current response-route benchmark
-   intentionally excludes request encoding, pipe copies, and process scheduling.
+4. Run `test/05_perf/browser/hosted_browser_process_pipe_perf_spec.spl` with
+   the source-matched executable. It covers request encoding, pipe copies,
+   process scheduling, worker execution, response decode, and compositor reuse.

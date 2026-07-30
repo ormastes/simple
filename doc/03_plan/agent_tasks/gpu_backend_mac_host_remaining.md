@@ -57,6 +57,10 @@ SIMPLE_LIB=src bin/simple test \
   test/05_perf/browser/hosted_browser_revision_wire_perf_spec.spl \
   --mode=interpreter
 
+SIMPLE_HOSTED_BROWSER_EXECUTABLE=bin/simple SIMPLE_LIB=src bin/simple test \
+  test/05_perf/browser/hosted_browser_process_pipe_perf_spec.spl \
+  --mode=interpreter
+
 SIMPLE_HOSTED_REVISION_CACHE_BACKEND=metal SIMPLE_LIB=src bin/simple test \
   test/05_perf/browser/hosted_compositor_revision_cache_perf_spec.spl \
   --mode=interpreter
@@ -93,6 +97,10 @@ SIMPLE_HOSTED_REVISION_CACHE_BACKEND=vulkan SIMPLE_LIB=src bin/simple test \
 - The hosted response-route benchmark proves exact alternating red/blue pixels,
   one unchanged reuse after each changed frame, and lower unchanged p50 while
   including render-session work plus response SBRF7 encode/decode.
+- The hosted process/pipe benchmark launches the admitted `bin/simple` worker,
+  proves producer generation round-trips and worker-owned composition revision
+  survives the response pipe, then admits exactly one unchanged reuse after
+  every changed reply.
 - The hosted compositor revision-cache benchmark records 21 paired forced and
   unchanged frames for both Metal and Vulkan. Each row must report
   `device_readback`, positive stable handle and device identity, exact pixels,
