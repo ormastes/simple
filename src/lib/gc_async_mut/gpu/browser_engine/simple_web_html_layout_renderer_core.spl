@@ -2455,6 +2455,20 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         val nd = nodes[i]
         if trace_stages:
             print "[layout-trace] style_stage=node-start index={i} parent={nd.parent} tag={nd.tag}"
+        # Level-gated (default off, permanent per log-retention policy):
+        # pins whether the parent's OWN cascade-resolved font_family/
+        # font_size (i.e. its inline `style=` was applied to ITS style
+        # entry) and whether inherit_from() actually copies them onto the
+        # child, independent of trace_stages (which every real caller
+        # hardwires false). See doc/08_tracking/bug/
+        # jit_run_file_pipeline_gaps_2026-07-30.md section 16.
+        if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+            val style_attr_len: i64 = nd.style_attr.len()
+            val style_attr_has_bungee: bool = nd.style_attr.contains("Bungee")
+            val raw_style_attr: text = attr_value(nd.attrs_raw, "style")
+            val raw_style_attr_len: i64 = raw_style_attr.len()
+            if raw_style_attr_len > 0:
+                print "[font-inherit-trace] index={i} tag={nd.tag} parent={nd.parent} style_attr_len={style_attr_len} style_attr_has_bungee={style_attr_has_bungee} raw_attrs_style_len={raw_style_attr_len}"
         var st = renderer_default_style()
         if nd.parent >= 0:
             val parent_style = styles[nd.parent]
@@ -2462,9 +2476,13 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 print "[layout-trace] style_stage=parent-loaded index={i}"
                 print "[layout-trace] style_stage=parent-display index={i} display={parent_style.display}"
                 print "[layout-trace] style_stage=parent-font index={i} size={parent_style.font_size} family={parent_style.font_family}"
+            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+                print "[font-inherit-trace] index={i} parent_font_family={parent_style.font_family} parent_font_size={parent_style.font_size}"
             st.inherit_from(parent_style)
             if trace_stages:
                 print "[layout-trace] style_stage=inherit-returned index={i} display={st.display} font={st.font_family}"
+            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+                print "[font-inherit-trace] index={i} post_inherit_font_family={st.font_family} post_inherit_font_size={st.font_size}"
         # em/% font-size resolve against the inherited (parent) font-size, not the
         # UA-default set by tag_defaults (so h1{font-size:1.5em} == 1.5 x parent).
         val em_base = if nd.parent >= 0: styles[nd.parent].font_size else: 16
@@ -2574,6 +2592,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             val inline_priority = css_declaration_priority_split(nd.style_attr)
             inline_normal = inline_priority.normal
             inline_important = inline_priority.important
+        if env_get("SIMPLE_TRACE_FONT_STYLE") != nil and nd.style_attr.len() > 0:
+            print "[font-inline-trace] index={i} raw_style_attr_len={nd.style_attr.len()} inline_normal_len={inline_normal.len()}"
         if inline_normal != "":
             val inline_empty_cells_decl = decl_get(
                 inline_normal, "empty-cells"
@@ -2583,6 +2603,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                     inline_empty_cells_decl.trim().lower() == "hide"
                 )
             st = apply_decls(st, inline_normal, em_base)
+            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+                print "[font-inline-trace] index={i} post_inline_apply_font_family={st.font_family} post_inline_apply_font_size={st.font_size}"
         # Author-important declarations outrank every author-normal declaration,
         # including inline style. Within the important origin, retain the same
         # specificity/source order as the normal author cascade.
@@ -2774,6 +2796,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             not cpu_admitted and not solid_admitted
         ):
             print "[web-style-producer] entry-rejected index={i} mode={wm_material_mode} bg={mat_bg} gf={mat_gf} gt={mat_gt} layers_len={mat_layers.len()} backdrop_len={mat_backdrop.len()} animation={st.animation_name}"
+        if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+            print "[font-inherit-trace] index={i} final_font_family={st.font_family} final_font_size={st.font_size}"
         styles[i] = st
         if trace_stages:
             print "[layout-trace] style_stage=node-complete index={i}"
