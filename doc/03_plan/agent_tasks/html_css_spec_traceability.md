@@ -22,11 +22,18 @@ Fieldset/legend bounded lane:
 - `Lower authored fieldset and legend boxes to exact Draw IR geometry`
 - `Rasterize exact component pixels against an unstyled control`
 
+Definition-list bounded lane:
+
+- `Parse omitted dt and dd end tags as definition-list siblings`
+- `Apply definition-list user-agent defaults before authored CSS`
+- `Lower authored definition-list boxes to exact Draw IR geometry`
+- `Rasterize exact definition-list pixels against a plain control`
+
 ## Completed audit and bounded implementation lanes
 
 | Lane | Result |
 |---|---|
-| HTML element traceability | RED: 12 Full, 77 Partial remaining, bounded `hr`, 2 bounded fieldset/legend fallback rows, 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
+| HTML element traceability | RED: 12 Full, 74 Partial remaining, 6 bounded selected-profile rows (`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`), 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
@@ -35,6 +42,7 @@ Fieldset/legend bounded lane:
 | Iframe | Design landed in `771dfb23835b`; TDD regeneration and implementation remain open |
 | HTML `hr` | Current bounded lane: native UA defaults plus exact `0`/`0px`/`none`/`hidden` and mixed-invalid/missing border cascade controls through semantic Web layout, DrawIR, and exact Engine2D pixels; qualified execution remains open |
 | Fieldset/legend selected profile | Current bounded lane: canonical UA defaults, four-side authored border clearing, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; special legend formatting/cutout, disabled propagation, admitted docgen, and qualified execution remain open |
+| Definition-list selected profile | Current bounded lane: cross-kind omitted-end-tag repair, canonical `dl`/`dt`/`dd` UA defaults and authored overrides, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; admitted docgen, qualified execution, and corpus accounting remain open |
 
 ## Safe parallel implementation lanes
 
