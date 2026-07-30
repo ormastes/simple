@@ -318,6 +318,29 @@ describe "demo":
     }
 
     #[test]
+    fn test_spipe_infix_expect_is_a_real_assertion() {
+        let code = r#"
+describe "generated native wrapper":
+    it "keeps rewritten matcher evidence":
+        val expected = 7
+        expect expected == 7
+"#;
+        let diagnostics = check_code_in_file("generated_spec.spl", code);
+        assert!(diagnostics.iter().all(|d| d.lint != LintName::SPipeEmptyExamples));
+    }
+
+    #[test]
+    fn test_spipe_expected_binding_is_not_an_assertion() {
+        let code = r#"
+describe "generated native wrapper":
+    it "has no assertion":
+        val expected = 7
+"#;
+        let diagnostics = check_code_in_file("generated_spec.spl", code);
+        assert!(diagnostics.iter().any(|d| d.lint == LintName::SPipeEmptyExamples));
+    }
+
+    #[test]
     fn test_stub_placeholder_body_detected() {
         let code = r#"
 fn not_done(port: i64) -> i64:

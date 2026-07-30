@@ -597,7 +597,9 @@ impl LintChecker {
         width
     }
 
-    pub(super) fn is_assertion_like(normalized: &str) -> bool {
+    pub(super) fn is_assertion_like(line: &str) -> bool {
+        let trimmed = line.trim();
+        let normalized = Self::normalize_quality_line(trimmed);
         normalized.contains("expect(")
             || normalized.contains("expect_not(")
             || normalized.contains("to_equal(")
@@ -607,6 +609,9 @@ impl LintChecker {
             || normalized.contains("to_end_with(")
             || normalized.contains("to_be_greater_than(")
             || normalized.contains("to_be_less_than(")
+            || trimmed
+                .strip_prefix("expect ")
+                .is_some_and(|subject| !subject.trim().is_empty())
     }
 
     pub(super) fn is_sanctioned_skip(normalized: &str) -> bool {
@@ -883,9 +888,7 @@ impl LintChecker {
                 continue;
             }
 
-            let has_real_assertion = statements
-                .iter()
-                .any(|stmt| Self::is_assertion_like(&Self::normalize_quality_line(stmt)));
+            let has_real_assertion = statements.iter().any(|stmt| Self::is_assertion_like(stmt));
             let has_sanctioned_skip = statements
                 .iter()
                 .any(|stmt| Self::is_sanctioned_skip(&Self::normalize_quality_line(stmt)));

@@ -40,6 +40,17 @@ mode reached compilation and failed on nested `trim_start` calls in the
 pure-Simple test runner; those receiver chains are now staged explicitly but
 were not rerun after the third cycle. No process/pipe measurement is admitted.
 
+The next native-only cycle cleared the nested-call failure. Its first run
+exposed `get_temp_dir()` resolving to `nil` in the flattened test-runner closure.
+The stale `src/lib` platform mirror was aligned with the already-correct
+`src/std` nil guards, and the focused owner spec passes 2/2. Because the closure
+still selected a colliding symbol, the test runner now owns a uniquely named
+fail-closed temp adapter; the next run advanced from `nil/...` to `/tmp/...`.
+The third run then exposed the SPipe linter rejecting the wrapper's generated,
+valid `expect condition` assertions. Both lint implementations now admit
+nonempty infix expectations, and the focused Rust regression passes 1/1. The
+benchmark was not rerun after the three-cycle cap, so timings remain unproven.
+
 ## Required Follow-up
 
 1. Run the 21-pair CUDA and Vulkan rows with the admitted source-matched
