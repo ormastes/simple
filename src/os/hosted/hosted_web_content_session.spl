@@ -998,6 +998,7 @@ class HostedWebContentRegistry:
                     bookmarks_before = latest
                     val _ = session.browser.load_bookmark_snapshot(latest)
                     self.bookmark_store = Some(bookmark_store)
+        val browser_before_commit = session.browser
         val receipt = session.dispatch_chrome_pointer(
             event_id, control, down
         )
@@ -1005,11 +1006,12 @@ class HostedWebContentRegistry:
         if not down and control == "favorite" and receipt.callback_count > 0:
             var bookmark_store = self.bookmark_store.unwrap()
             val url = current_url
-            match bookmark_store.toggle_bookmark(url, current_title):
+            match bookmark_store.toggle_bookmark_with_snapshot(
+                url, current_title
+            ):
                 Err(e):
-                    val _ = session.browser.load_bookmark_snapshot(
-                        bookmarks_before
-                    )
+                    session.browser = browser_before_commit
+                    session.pressed_chrome_control = ""
                     session.mutation_revision = revision_before
                     self.sessions[index] = session
                     self.bookmark_store = Some(bookmark_store)
@@ -1022,18 +1024,12 @@ class HostedWebContentRegistry:
                         mutation_revision: revision_before,
                         reason: self.profile_failure_reason
                     )
-                Ok(enabled):
+                Ok(mutation):
                     val _ = session.browser.load_bookmark_snapshot(
-                        bookmarks_before
+                        mutation.bookmarks
                     )
-                    if enabled:
-                        session.browser.add_favorite(url, current_title)
-                    else:
-                        session.browser.remove_favorite(url)
                     self.sessions[index] = session
-                    self.profile_bookmarks = (
-                        session.browser.bookmark_snapshot()
-                    )
+                    self.profile_bookmarks = mutation.bookmarks
                     self.profile_failure_reason = ""
                     self.bookmark_store = Some(bookmark_store)
         receipt

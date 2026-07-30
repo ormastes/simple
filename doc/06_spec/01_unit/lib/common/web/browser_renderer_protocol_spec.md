@@ -23,6 +23,9 @@
    - Expected: frame.document_title equals `title_512`
 -  renderer protocol fixture
    - Expected: oversized.reason equals `invalid-document-title`
+   - Expected: forged_title.len() equals `684`
+- base64 encode
+   - Expected: forged_rejection.document_title equals ``
 -  renderer protocol fixture
 - browser renderer decoder new
 -  renderer protocol fixture
@@ -32,7 +35,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 111 lines folded for reproduction.
+Runnable source: 130 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -70,6 +73,25 @@ val oversized = (
     )
 )
 expect(oversized.reason).to_equal("invalid-document-title")
+val forged_title = base64_encode(title_513)
+expect(forged_title.len()).to_equal(684)
+val forged_oversized = BrowserRendererMessage(
+    kind: "frame",
+    generation: decoded_message.message.generation,
+    request_id: decoded_message.message.request_id,
+    payload: decoded_message.message.payload.replace(
+        base64_encode(title_512), forged_title
+    )
+)
+val forged_rejection = browser_renderer_frame_decode(
+    forged_oversized, 64, 48
+)
+expect(forged_rejection.ok).to_be(false)
+expect(forged_rejection.reason).to_equal(
+    "invalid-document-title"
+)
+expect(forged_rejection.document_title_present).to_be(false)
+expect(forged_rejection.document_title).to_equal("")
 val noncanonical = BrowserRendererMessage(
     kind: "frame",
     generation: decoded_message.message.generation,

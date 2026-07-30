@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 5 | 5 | 0 | 0 |
+| 6 | 6 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -28,6 +28,107 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 check_in_process_registry_profile_reopen()
+```
+
+</details>
+
+#### rolls back bookmark mutation when its canonical snapshot read fails
+
+- remove profile files
+- var profile = BrowserProfileStore open
+- BrowserBookmarkStore from profile
+   - Expected: down.reason equals `chrome-pressed`
+- var bookmark owner = registry bookmark store unwrap
+- bookmark owner inject post mutation bookmark snapshot read failure
+- registry bookmark store = Some
+   - Expected: rejected.callback_count equals `0`
+   - Expected: rejected.mutation_revision equals `revision_before`
+- profile before entries len
+   - Expected: ui_after.nodes.len() equals `ui_before.nodes.len()`
+   - Expected: registry.close() is true
+- var restarted = BrowserProfileStore open
+   - Expected: restarted_bookmarks.entries.len() equals `1`
+- restarted close
+- remove profile files
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 70 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+remove_profile_files()
+var profile = BrowserProfileStore.open(PROFILE_PATH)?
+profile.set_bookmark(
+    "https://atomic.test/page", "Committed title", true
+)?
+var registry = HostedWebContentRegistry.create_with_bookmark_store(
+    BrowserBookmarkStore.from_profile(profile)
+)
+val _ = registry.advance_window(
+    92, "<div>browser</div>", 64, 48, 100000, true
+)
+var session = registry.sessions[0]
+expect(session.browser.open_html(
+    "https://atomic.test/page",
+    "<title>Replacement title</title><p>atomic</p>"
+).is_ok()).to_equal(true)
+registry.sessions[0] = session
+val down = registry.dispatch_chrome_pointer(
+    50, 92, "favorite", true
+)
+expect(down.reason).to_equal("chrome-pressed")
+val revision_before = registry.sessions[0].mutation_revision
+val ui_before = registry.sessions[0].browser.ui_access_snapshot()
+val profile_before = registry.profile_bookmarks
+var bookmark_owner = registry.bookmark_store.unwrap()
+bookmark_owner.inject_post_mutation_bookmark_snapshot_read_failure()
+registry.bookmark_store = Some(bookmark_owner)
+
+val rejected = registry.dispatch_chrome_pointer(
+    51, 92, "favorite", false
+)
+expect(rejected.callback_count).to_equal(0)
+expect(rejected.reason).to_contain(
+    "injected post-mutation bookmark snapshot read failure"
+)
+expect(rejected.mutation_revision).to_equal(revision_before)
+expect(registry.sessions[0].mutation_revision).to_equal(
+    revision_before
+)
+expect(registry.profile_bookmarks.entries.len()).to_equal(
+    profile_before.entries.len()
+)
+expect(registry.profile_bookmarks.entries[0].first).to_equal(
+    profile_before.entries[0].first
+)
+expect(registry.profile_bookmarks.entries[0].second).to_equal(
+    "Committed title"
+)
+val ui_after = registry.sessions[0].browser.ui_access_snapshot()
+expect(ui_after.snapshot_revision).to_equal(
+    ui_before.snapshot_revision
+)
+expect(ui_after.nodes.len()).to_equal(ui_before.nodes.len())
+expect(ui_after.nodes[5].selected).to_equal(
+    ui_before.nodes[5].selected
+)
+expect(ui_after.nodes[5].selected).to_be(true)
+expect(registry.close()).to_equal(true)
+
+var restarted = BrowserProfileStore.open(PROFILE_PATH)?
+val restarted_bookmarks = restarted.load_bookmarks()?
+expect(restarted_bookmarks.entries.len()).to_equal(1)
+expect(restarted_bookmarks.entries[0].first).to_equal(
+    "https://atomic.test/page"
+)
+expect(restarted_bookmarks.entries[0].second).to_equal(
+    "Committed title"
+)
+restarted.close()?
+remove_profile_files()
 ```
 
 </details>
@@ -446,8 +547,8 @@ Tests covering hosted browser profile store.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 5 |
-| Active scenarios | 5 |
+| Total scenarios | 6 |
+| Active scenarios | 6 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

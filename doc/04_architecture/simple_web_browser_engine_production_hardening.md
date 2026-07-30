@@ -845,6 +845,14 @@ Before this implementation, both hosted production paths committed
 `hosted_browser_parent_toggle_bookmark` transaction; the SSpec invokes that
 same production function after the real `favorite-parent` action.
 
+`BrowserProfileStore` owns one SQLite boundary for the current-row read,
+insert/delete, and ordered canonical snapshot query. It commits only after the
+snapshot query succeeds and returns the snapshot as part of the committed
+mutation result. Any mutation, snapshot-read, or commit error rolls back; the
+parent may update bookmark revision and UI state only from that committed
+result. The in-process host follows the same contract and restores its exact
+pre-release browser value on failure.
+
 The existing frame contract is the only new authority needed. `SBRF8` extends
 `SBRF7` with one base64 document-title payload and encoded-length field:
 
@@ -892,7 +900,10 @@ window/host restart. The in-process path calls the same validator with
 `current_title` and must not overwrite the accepted title with `(url, url)`.
 
 Static source, hostile protocol fixtures, generated manuals, and profile
-restart coverage exist. They do not establish an executable PASS; production
+restart coverage exist. The hostile fixtures include a syntactically valid
+forged SBRF8 whose decoded title is 513 bytes, and the profile fixture injects
+a post-mutation snapshot-read error and proves row/title/revision/UI and restart
+parity remain unchanged. They do not establish an executable PASS; production
 acceptance remains held for an admitted current pure-Simple full CLI and hosted
 artifact run.
 

@@ -26,8 +26,13 @@ fn browser_profile_default_dir() -> text:
 fn browser_profile_default_path() -> text:
     browser_profile_default_dir() + "/profile.sqlite3"
 
+pub struct BrowserBookmarkMutation:
+    enabled: bool
+    bookmarks: BrowserBookmarkSnapshot
+
 class BrowserProfileStore:
     db: Database
+    _fail_next_bookmark_snapshot_read: bool
 
 impl BrowserProfileStore:
     static fn open(path: text) -> Result<BrowserProfileStore, DbError>:
@@ -45,7 +50,10 @@ impl BrowserProfileStore:
         BrowserProfileStore.from_database(Database.memory()?)
 
     static fn from_database(db: Database) -> Result<BrowserProfileStore, DbError>:
-        var store = BrowserProfileStore(db: db)
+        var store = BrowserProfileStore(
+            db: db,
+            _fail_next_bookmark_snapshot_read: false
+        )
         match store.init_schema():
             Ok(_):
                 Ok(store)
@@ -135,7 +143,7 @@ impl BrowserProfileStore:
 
     me _change_bookmark(
         raw_url: text, title: text, toggle: bool, requested_enabled: bool
-    ) -> Result<bool, DbError>:
+    ) -> Result<BrowserBookmarkMutation, DbError>:
         if raw_url.len() > 2048:
             return Err(DbError.ConstraintViolation(
                 "oversized browser bookmark"
@@ -247,12 +255,27 @@ impl BrowserProfileStore:
             ):
                 tx.rollback()?
                 return Err(e)
+        if self._fail_next_bookmark_snapshot_read:
+            self._fail_next_bookmark_snapshot_read = false
+            tx.rollback()?
+            return Err(DbError.ConstraintViolation(
+                "injected post-mutation bookmark snapshot read failure"
+            ))
+        val bookmarks = match self.load_bookmarks():
+            Err(e):
+                tx.rollback()?
+                return Err(e)
+            Ok(value):
+                value
         match tx.commit():
             Err(e):
                 val _ = tx.rollback()
                 Err(e)
             Ok(_):
-                Ok(enabled)
+                Ok(BrowserBookmarkMutation(
+                    enabled: enabled,
+                    bookmarks: bookmarks
+                ))
 
     me set_bookmark(
         raw_url: text, title: text, enabled: bool
@@ -265,7 +288,17 @@ impl BrowserProfileStore:
     me toggle_bookmark(
         raw_url: text, title: text
     ) -> Result<bool, DbError>:
+        Ok(self._change_bookmark(
+            raw_url, title, true, false
+        )?.enabled)
+
+    me toggle_bookmark_with_snapshot(
+        raw_url: text, title: text
+    ) -> Result<BrowserBookmarkMutation, DbError>:
         self._change_bookmark(raw_url, title, true, false)
+
+    me inject_post_mutation_bookmark_snapshot_read_failure():
+        self._fail_next_bookmark_snapshot_read = true
 
     fn load_bookmarks() -> Result<BrowserBookmarkSnapshot, DbError>:
         val rows = self.db.query(
@@ -414,7 +447,7 @@ pub fn hosted_browser_parent_toggle_bookmark(
     stored_title: text
 ) -> HostedBrowserParentBookmarkCommit:
     var profile = profile_in
-    match profile.toggle_bookmark(url, stored_title):
+    match profile.toggle_bookmark_with_snapshot(url, stored_title):
         Err(error):
             HostedBrowserParentBookmarkCommit(
                 profile: profile,
@@ -423,24 +456,14 @@ pub fn hosted_browser_parent_toggle_bookmark(
                 bookmarks: BrowserBookmarkSnapshot.create([]),
                 reason: error.message()
             )
-        Ok(enabled):
-            match profile.load_bookmarks():
-                Err(error):
-                    HostedBrowserParentBookmarkCommit(
-                        profile: profile,
-                        ok: false,
-                        enabled: enabled,
-                        bookmarks: BrowserBookmarkSnapshot.create([]),
-                        reason: error.message()
-                    )
-                Ok(bookmarks):
-                    HostedBrowserParentBookmarkCommit(
-                        profile: profile,
-                        ok: true,
-                        enabled: enabled,
-                        bookmarks: bookmarks,
-                        reason: ""
-                    )
+        Ok(mutation):
+            HostedBrowserParentBookmarkCommit(
+                profile: profile,
+                ok: true,
+                enabled: mutation.enabled,
+                bookmarks: mutation.bookmarks,
+                reason: ""
+            )
 
 class BrowserBookmarkStore:
     _profile: BrowserProfileStore
@@ -468,6 +491,14 @@ impl BrowserBookmarkStore:
         raw_url: text, title: text
     ) -> Result<bool, DbError>:
         self._profile.toggle_bookmark(raw_url, title)
+
+    me toggle_bookmark_with_snapshot(
+        raw_url: text, title: text
+    ) -> Result<BrowserBookmarkMutation, DbError>:
+        self._profile.toggle_bookmark_with_snapshot(raw_url, title)
+
+    me inject_post_mutation_bookmark_snapshot_read_failure():
+        self._profile.inject_post_mutation_bookmark_snapshot_read_failure()
 
     me close() -> Result<(), DbError>:
         self._profile.close()

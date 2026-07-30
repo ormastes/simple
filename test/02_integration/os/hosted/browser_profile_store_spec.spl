@@ -6,6 +6,7 @@ use std.gc_async_mut.web.browser_session.{
 }
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_ui_access.*
 use os.hosted.browser_profile_store.{
     BrowserBookmarkStore, BrowserProfileStore
 }
@@ -114,6 +115,78 @@ fn check_in_process_registry_profile_reopen():
 describe "hosted browser profile store":
     it "reopens bounded bookmark titles through public registry actions":
         check_in_process_registry_profile_reopen()
+
+    it "rolls back bookmark mutation when its canonical snapshot read fails":
+        remove_profile_files()
+        var profile = BrowserProfileStore.open(PROFILE_PATH)?
+        profile.set_bookmark(
+            "https://atomic.test/page", "Committed title", true
+        )?
+        var registry = HostedWebContentRegistry.create_with_bookmark_store(
+            BrowserBookmarkStore.from_profile(profile)
+        )
+        val _ = registry.advance_window(
+            92, "<div>browser</div>", 64, 48, 100000, true
+        )
+        var session = registry.sessions[0]
+        expect(session.browser.open_html(
+            "https://atomic.test/page",
+            "<title>Replacement title</title><p>atomic</p>"
+        ).is_ok()).to_equal(true)
+        registry.sessions[0] = session
+        val down = registry.dispatch_chrome_pointer(
+            50, 92, "favorite", true
+        )
+        expect(down.reason).to_equal("chrome-pressed")
+        val revision_before = registry.sessions[0].mutation_revision
+        val ui_before = registry.sessions[0].browser.ui_access_snapshot()
+        val profile_before = registry.profile_bookmarks
+        var bookmark_owner = registry.bookmark_store.unwrap()
+        bookmark_owner.inject_post_mutation_bookmark_snapshot_read_failure()
+        registry.bookmark_store = Some(bookmark_owner)
+
+        val rejected = registry.dispatch_chrome_pointer(
+            51, 92, "favorite", false
+        )
+        expect(rejected.callback_count).to_equal(0)
+        expect(rejected.reason).to_contain(
+            "injected post-mutation bookmark snapshot read failure"
+        )
+        expect(rejected.mutation_revision).to_equal(revision_before)
+        expect(registry.sessions[0].mutation_revision).to_equal(
+            revision_before
+        )
+        expect(registry.profile_bookmarks.entries.len()).to_equal(
+            profile_before.entries.len()
+        )
+        expect(registry.profile_bookmarks.entries[0].first).to_equal(
+            profile_before.entries[0].first
+        )
+        expect(registry.profile_bookmarks.entries[0].second).to_equal(
+            "Committed title"
+        )
+        val ui_after = registry.sessions[0].browser.ui_access_snapshot()
+        expect(ui_after.snapshot_revision).to_equal(
+            ui_before.snapshot_revision
+        )
+        expect(ui_after.nodes.len()).to_equal(ui_before.nodes.len())
+        expect(ui_after.nodes[5].selected).to_equal(
+            ui_before.nodes[5].selected
+        )
+        expect(ui_after.nodes[5].selected).to_be(true)
+        expect(registry.close()).to_equal(true)
+
+        var restarted = BrowserProfileStore.open(PROFILE_PATH)?
+        val restarted_bookmarks = restarted.load_bookmarks()?
+        expect(restarted_bookmarks.entries.len()).to_equal(1)
+        expect(restarted_bookmarks.entries[0].first).to_equal(
+            "https://atomic.test/page"
+        )
+        expect(restarted_bookmarks.entries[0].second).to_equal(
+            "Committed title"
+        )
+        restarted.close()?
+        remove_profile_files()
 
     it "cancels network jobs before fallible profile shutdown":
         var closed_store = BrowserBookmarkStore.memory()?

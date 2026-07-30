@@ -803,8 +803,12 @@ introduced.
    then reloads the canonical profile snapshot; it removes the current
    `add_favorite(url, url)` reconciliation.
 7. `BrowserProfileStore` continues to store canonical URL plus a 0..512-byte
-   title. `BrowserSession.load_bookmark_snapshot` preserves the empty sentinel,
-   and UI-access bookmark nodes call `browser_bookmark_title_or_url`.
+   title. Its mutation method reads the ordered canonical snapshot inside the
+   same SQLite transaction, commits only after that read succeeds, and returns
+   `{enabled, bookmarks}` as one committed result. `BrowserSession` and the
+   parent revision consume only that result. `BrowserSession.load_bookmark_snapshot`
+   preserves the empty sentinel, and UI-access bookmark nodes call
+   `browser_bookmark_title_or_url`.
 
 The parent transaction is
 `hosted_browser_parent_toggle_bookmark`. Both hosted-entry Favorite branches
@@ -839,8 +843,12 @@ hash.
 Protocol forgery fails the frame with the existing renderer-failure path.
 Hostile document content merely produces an absent title witness and does not
 deny rendering. Profile write/load failure preserves the prior immutable
-snapshot and reports the existing profile error. No error may partially change
-the bookmark URL, title, revision, or UI snapshot.
+snapshot and reports the existing profile error. A one-shot profile-owned test
+seam injects failure after insert/delete but before the ordered snapshot query;
+the integration fixture proves rollback preserves the database URL/title,
+parent mutation revision, exact UI snapshot revision/selection, and file-backed
+restart state. No error may partially change the bookmark URL, title, revision,
+or UI snapshot.
 
 <!-- codex-design -->
 ## RED detail contract: renderer command capabilities (2026-07-30)

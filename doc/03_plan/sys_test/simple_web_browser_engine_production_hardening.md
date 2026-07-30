@@ -627,6 +627,11 @@ Required assertions use built-in matchers only:
 - title lengths above 684, noncanonical base64, checked-offset overflow or
   truncation, and encoded-plus-decoded title work exceeding the remaining
   1 MiB frame/Draw-IR budget reject before decoded-title allocation;
+- a forged, syntactically valid SBRF8 carrying a 513-byte decoded title rejects
+  before title decode/admission without using the trusted frame encoder;
+- an injected post-mutation canonical snapshot-read failure rolls back the
+  SQLite row/title and leaves parent revision/UI snapshot and restart state
+  unchanged;
 - legacy `SBRF7` renders with no title witness and cannot reuse a prior
   generation's title.
 

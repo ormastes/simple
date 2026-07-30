@@ -76,6 +76,10 @@ REQ-WEB-BROWSER-009 now traces bounded document-title transport and persistence
 through `SBRF8`, the shared parent profile transaction
 `hosted_browser_parent_toggle_bookmark`, and the exact four-step scenario in
 `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`.
+The transaction owns mutation plus its ordered canonical snapshot read,
+commits only after both succeed, and rolls back before parent revision/UI
+publication on either error. A forged 513-byte decoded SBRF8 title is rejected
+from its declared wire slice before title decode or admission.
 Focused protocol, lifecycle, display, and file-backed restart coverage lives in
 the matching unit/integration specs and generated `doc/06_spec` manuals.
 These source and generated-manual artifacts are not an executable PASS; runtime
