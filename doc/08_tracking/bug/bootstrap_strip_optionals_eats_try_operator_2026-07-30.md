@@ -55,3 +55,86 @@ all green in both engines with and without SIMPLE_BOOTSTRAP;
 integration); spec `test/01_unit/bugs/result_interpret_lane_spec.spl`
 (11 examples) runs under the test lane by construction; parser suite
 240/240; json_unicode_escape_spec unchanged at its 5 pre-existing reds.
+
+## Retroactive exposure audit (2026-07-30)
+
+Two rewrite implementations exist; their exposure windows differ.
+
+| Lane | Rewrite | `f(x)?` call-form | `r?` var-form | `xs[i]?` index-form | Window |
+|---|---|---|---|---|---|
+| run/test (module_loader `strip_optionals`) | blind textual strip | EATEN | EATEN | EATEN | 2026-07-01 (7241743871e) -> 2026-07-30 (d8822a3e337, now fallback-only) |
+| native-build (`apply_bootstrap_rewrite`, native_project/compiler.rs) | 07-16 root fix preserves `)?` only | kept since 07-16 (eaten 07-01..07-16) | **STILL EATEN at tip** | **STILL EATEN at tip** | 07-16 partial fix; var/index gap OPEN |
+
+PROVED (ad-hoc unit test calling `apply_bootstrap_rewrite` directly):
+`CALL_FORM_KEPT=true`, `VAR_FORM_KEPT=false`, `INDEX_FORM_KEPT=false`.
+
+Both rewrites fire only when `SIMPLE_BOOTSTRAP=1` — set both by genuine
+bootstrap lanes AND by tooling that merely wants the seed banner
+suppressed, which is why the blast radius is wide.
+
+### Who sets SIMPLE_BOOTSTRAP=1 (75 files at tip d8822a3e337)
+
+| Harness family | Files | Exercises `?`-bearing code? | Exposure verdict |
+|---|---|---|---|
+| `scripts/check` gates (7x check-simpleos-* QEMU evidence, check-stage4-selfhost-parse-memory-multifile, check-bootstrap-nonentry-module-global, bootstrap-stage3 self-test + manifest-verify) | 11 | YES — src/os (28 `?`-bearing files), src/compiler (53), src/lib (273) | EXPOSED 07-01..07-30 (PROVED env+code overlap); per-gate verdict impact UNVERIFIED |
+| `.github/workflows` (build-binaries, release, t32-tools-build, t32-tools-release) | 4 | YES — release builds compile src/* | EXPOSED (PROVED overlap); artifacts built 07-01..07-16 had call-form `?` eaten, 07-16..now var/index only |
+| `scripts/os` QEMU/OS harnesses | 21 | YES — src/os | EXPOSED (PROVED overlap), verdicts UNVERIFIED |
+| `test/` harness wrappers | ~11 | YES | EXPOSED (PROVED overlap), verdicts UNVERIFIED |
+| seed pipeline internals (module_loader, execution, native_project) | 3 | n/a | the defect sites themselves |
+
+### Verdict flip actually observed (PROVED, concrete)
+
+Not a named check-script re-run (see UNVERIFIED list below) — the flip
+was measured at the API/lane level, which is where the gates' trust
+comes from:
+
+- **`bencode_decode_value("i42e")` under the forced-interpret test lane
+  flipped FAIL -> PASS.** Before: `error: semantic: unknown class
+  Result`, exit 1 — i.e. every spec targeting that Result API could only
+  red, and the json lane had to retarget its spec at a lower-level
+  Result-free function to get any coverage at all. After (d8822a3e337):
+  matches `Ok`. Evidence: same probe file, same env, pre- and post-fix
+  seed binaries.
+- **`?` semantics flipped no-op -> correct under SIMPLE_BOOTSTRAP=1 in
+  BOTH engines.** Before: `val h = half(10)?` bound the whole
+  `Result::Ok(5)` enum and Err/None never propagated (JIT then did
+  arithmetic on the enum pointer; interpreter errored "cannot convert
+  enum to int"). After: unwraps and propagates. Evidence: probe
+  `f_h.spl`/`f_err.spl` under both engines, pre/post binaries.
+
+Consequence for the campaign: any gate verdict in the 07-01..07-30
+window that depended on `?` behavior in seed-run/tested code is
+untrustworthy in BOTH directions — fail-open (an error path whose `?`
+never propagated looked clean) and false-red. This is the second
+systemic fail-open class found in the verification layer after the
+2026-07-28 five-way finding.
+
+### UNVERIFIED-EXPOSED (not re-run this pass — visible, not implied-clean)
+
+Each is a QEMU/stage3-scale job, beyond this pass's budget; re-run
+opportunistically on the post-fix seed and record the verdict:
+
+1. `scripts/check/lib/bootstrap-stage3/self-test.shs` (574 lines; sets the env on its seed invocations)
+2. `scripts/check/lib/bootstrap-stage3/manifest-verify.shs` (626 lines)
+3. `scripts/check/check-stage4-selfhost-parse-memory-multifile.shs`
+4. `scripts/check/check-bootstrap-nonentry-module-global.shs`
+5. `scripts/check/check-simpleos-memory-leveling-qemu.shs`
+6. `scripts/check/check-simpleos-wm-visible-display-evidence.shs`
+7. `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`
+8. `scripts/check/check-simpleos-x86-64-wm-hello-lifecycle-evidence.shs`
+9. `scripts/check/check-simpleos-usb-xhci-qemu.shs`
+10. `scripts/check/check-simpleos-servers-qemu.shs`
+11. `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`
+
+### LIVE gap (open; owned by the native-build lane, NOT fixed here)
+
+`apply_bootstrap_rewrite` still deletes variable-form (`r?`) and
+index-form (`xs[i]?`) try operators at native-build time. Measured
+genuine source exposure at tip: **4 sites** — 2 in
+`src/lib/gc_async_mut/gpu/browser_engine/net/h1_client.spl` (lines 355,
+384: `val raw_response = read_result?`) and 2 in `src/os`; ZERO in
+src/compiler and src/app (their `]?$` matches are `[u8]?` optional
+TYPES, which the rewrite legitimately strips). Current bootstrap
+artifacts therefore mis-execute `?` at exactly those 4 sites.
+Recommended shape is the same fallback-only pattern now used in
+module_loader: parse pristine first, rewrite only on parse failure.
