@@ -1,0 +1,52 @@
+use std.spec.{describe, it, assert_equal}
+
+# Regression pin for gap 7 in the JIT web-pipeline chase (2026-07-30):
+# `showcase_resolution_dims()` (examples/06_io/ui/web_render_file_gui.spl)
+# parses "480x360" via `parts[0].trim().to_i64()` / `parts[1].trim().to_i64()`
+# and returns visibly correct dims under the interpreter but silently wrong,
+# large-magnitude garbage under `SIMPLE_EXECUTION_MODE=jit` (no crash, no
+# `[jit-fallback]`, no unresolved-symbol error — SIMPLE_JIT_STRICT has
+# nothing to catch here since nothing fails to link).
+#
+# IMPORTANT — this spec does NOT vacuity-probe the JIT bug. `simple test`
+# never routes through the cranelift/JIT backend even under
+# `SIMPLE_EXECUTION_MODE=jit` (proved for gap 6, the same conclusion holds
+# here — confirmed directly: this spec passes identically regardless of the
+# JIT bug's presence). It only pins the INTENDED behavior, which the
+# interpreter already gets right. The only real evidence for gap 7 is
+# `simple run` under `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` on the
+# minimal repro below (captured verbatim in
+# doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md):
+#
+#   fn main():
+#       val a = "480"
+#       val b = "360"
+#       val pw = a.trim().to_i64()
+#       val ph = b.trim().to_i64()
+#       print "pw={pw} ph={ph}"
+#
+#   SIMPLE_EXECUTION_MODE=interpreter -> pw=480 ph=360 (correct)
+#   SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 -> pw=<garbage> ph=<garbage>,
+#   consistently 32 apart, reproduced across 4 independent runs.
+describe "chained two-hop method calls ending in to_i64() (interpreter oracle)":
+    it "parses a single trimmed numeric string":
+        assert_equal("  480  ".trim().to_i64(), 480)
+
+    it "parses two independent trimmed numeric strings in the same function":
+        val pw = "480".trim().to_i64()
+        val ph = "360".trim().to_i64()
+        assert_equal(pw, 480)
+        assert_equal(ph, 360)
+
+    it "matches the exact motivating pattern: split + index + trim + to_i64":
+        val parts = "480x360".split("x")
+        val pw = parts[0].trim().to_i64()
+        val ph = parts[1].trim().to_i64()
+        assert_equal(pw, 480)
+        assert_equal(ph, 360)
+
+    it "generalizes beyond trim(): any text-returning hop before to_i64()":
+        val pw = "480".lower().to_i64()
+        val ph = "360".lower().to_i64()
+        assert_equal(pw, 480)
+        assert_equal(ph, 360)

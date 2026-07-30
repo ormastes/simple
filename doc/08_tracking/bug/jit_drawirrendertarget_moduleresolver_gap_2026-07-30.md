@@ -1195,3 +1195,126 @@ heuristic should change for this example until a JIT run actually produces
 a *correct* (or at least non-degenerate) result — gap 7 still blocks that,
 even though gap 6 (the specific symbol-resolution blocker this pass
 targeted) is now closed.
+
+
+## Eighth follow-up pass (2026-07-30) — gap 7 root-caused via minimal repro, leading hypothesis KILLED, architectural, not fixed
+
+### Leading hypothesis (spilled/reloaded stale array descriptor): KILLED, not confirmed (instruction 2, PROVED)
+
+Instrumented a scratch copy of `web_render_file_gui.spl` with debug prints
+at every point between the two `pixels.len()` call sites the coordinator's
+hypothesis targeted. **`pixels.len()` was already `0` at the very first
+read**, immediately after `val pixels = initial_readback.pixels` — not
+correct-then-invalidated, wrong from the start. It stayed `0` consistently
+through every subsequent read (after `showcase_checksum(pixels)`, after
+`web_readback_checksum(pixels)`, before and after `pixels[0]` indexing) —
+no flip, no divergence between call sites for the array itself.
+
+The reason the earlier pass's reasoning looked like "the first check passed
+so the array must have started correct" was a coincidence: the guard at
+line 310 is `pixels.len() != RW * RH`, and **`RW` itself was already `0`**
+(confirmed by an added `print` immediately after the global `val RW: i32 =
+SHOWCASE_DIMS.w` is read) — so `0 != 0` is false and the guard trivially
+passes. There is no array-descriptor bug in this file at all. The real
+defect is upstream, in resolving `RW`/`RH` from `SHOWCASE_RESOLUTION` via
+`showcase_resolution_dims()` (`web_render_file_gui.spl:131-144`), which
+returns garbage before rendering ever starts.
+
+### Minimal repro (instruction 1, PROVED) — not array/loop-related; a two-hop chained method call, repeated twice in one function
+
+Bisected from the real function down through 9 intermediate variants
+(struct-with-multiple-returns -> single-branch struct return -> no struct,
+just the two scalar conversions) to this **6-line** minimal, 100%
+reproducible repro:
+
+```
+fn main():
+    val a = "480"
+    val b = "360"
+    val pw = a.trim().to_i64()
+    val ph = b.trim().to_i64()
+    print "pw={pw} ph={ph}"
+```
+
+```
+SIMPLE_EXECUTION_MODE=interpreter  -> pw=480 ph=360        (correct)
+SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 -> pw=4192599345153 ph=4192599345185
+```
+
+Reproduced on 4 independent runs, always garbage, always exactly **32
+apart** between `pw` and `ph` (a different pair of large values each run —
+consistent with reading two adjacent, ASLR'd heap addresses rather than a
+fixed miscompile constant). No crash, no `[jit-fallback]`, no
+unresolved-symbol error — `SIMPLE_JIT_STRICT` has nothing to catch because
+nothing fails to link; this is a silent wrong-value bug, a different class
+from gaps 1-6.
+
+**Bisection results (each isolates one variable, PROVED individually):**
+
+| Variant | Result |
+|---|---|
+| `a.to_i64()` then `b.to_i64()` (no `.trim()`/`.lower()` hop) | **correct** |
+| `a.trim().to_i64()` then `b.trim().to_i64()` | **broken** |
+| `a.lower().to_i64()` then `b.lower().to_i64()` | **broken** (rules out `.trim()` specifically — generalizes to any text-returning hop before `.to_i64()`) |
+| Same chain, but only ONE call in the function (no second chain) | not tested standalone, but `showcase_dims_min_repro.spl`'s single-branch, single-chain-per-branch struct version was also broken — see below |
+| `parts[0].trim().to_i64()` / `parts[1].trim().to_i64()` after `raw.split("x")` (exact real-code shape) | **broken**, identical symptom |
+
+**So: the trigger is a 2+-hop chained method call ending in `.to_i64()`
+(any text-returning first hop), occurring twice in the same function.**
+Both results are wrong, not just the second — ruling out a "later call
+invalidates an earlier-cached-correct value" story; both are corrupted
+essentially at their own computation. Struct-returning wrapper functions
+with early-return branches (the real `showcase_resolution_dims()` shape)
+are not required to reproduce it and were not the actual mechanism —
+confirmed by this repro reproducing with zero structs, zero branches, zero
+early returns.
+
+Repro files (scratch, not committed):
+`gap7_bisect_{a..j}.spl`, `gap7_minimal.spl`,
+`showcase_dims_min_repro.spl`, `web_render_debug{,2,3}.spl` under
+`/tmp/.../scratchpad/`.
+
+### Not fixed — architectural, per instruction 5 (PROVED assessment, INFERRED mechanism)
+
+This sits in MIR/codegen temp or stack-slot allocation for chained method
+calls under cranelift — not a small, contained, single-call-site fix like
+gap 6's `min`/`max`/`abs`. Root-causing it fully (why two 2-hop chains
+collide, whether it's slot-reuse across statements failing to account for
+extended liveness, or something in how `.trim()`'s intermediate `text` and
+`.to_i64()`'s `i64?` result interact with the tagged-value boxing scheme)
+would require reading MIR-lowering for method-chain expressions and likely
+cranelift stack-slot assignment — out of scope for this pass per the
+"don't force an architectural fix" instruction. Documented precisely
+instead, with a reproducible minimal artifact for whoever picks this up.
+
+Landed `test/01_unit/lib/language/chained_method_i64_conversion_spec.spl`
+as a regression pin for the *intended* (interpreter-correct) behavior —
+explicitly **not** a vacuity probe for the JIT bug. Verified directly (same
+conclusion as gap 6, restated because it generalizes): the spec passes 4/4
+identically whether run via plain `simple test` or `simple test` under
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` — `simple test` never
+exercises the cranelift/JIT backend for spec files, full stop, regardless
+of the env var. The only real evidence for this bug is the `simple run`
+transcript above. Do not read the spec's presence or its passing as
+coverage of gap 7.
+
+### The prize: no timing captured, none was available to capture (instruction 4/5, PROVED)
+
+Machine load at last capture: 37.62 (unchanged since the last pass; not
+re-measured this pass, still flagged as partial contention). The
+corruption happens in `showcase_resolution_dims()`, called before any HTML
+parsing, rendering, or styling begins — `run_web_standards_showcase`
+returns at line 341/342 (`reason=blank-or-uniform`, `return 3`) almost
+immediately after start, well before the style loop
+(`compute_styles_with_material` in
+`simple_web_html_layout_renderer_core.spl`) is ever reached. There is no
+partial per-node timing to extract from this run — the ~60 s wall time
+observed is dominated by JIT compilation of the whole module graph (no
+compile-artifact cache exists for this path, per the sibling lane's
+finding), not by any styling work. Nothing to report here beyond "not
+available," stated plainly rather than inferring a number.
+
+### Heuristic-flip question (instruction 5, unchanged): still not evaluated
+
+Blocked on gap 7, same as before — a correct-or-non-degenerate JIT result
+still does not exist for this example.
