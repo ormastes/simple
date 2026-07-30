@@ -1579,13 +1579,73 @@ into the Draw-IR command before font selection; not yet identified
 which of the ~12 `compute_styles` call sites (or which distinct code
 path through `simple_web_layout_engine2d_fast.spl`) produces that
 specific `Style` object, or why it differs from the correctly-computed
-one. Next step for whoever picks this up: instrument
-`draw_ir_style_prop("font-identity", st.resolved_font_identity)` at
-`simple_web_html_layout_renderer_paint_layout.spl:1152` directly (same
-`SIMPLE_TRACE_FONT_STYLE` gate, trivial to extend) to catch the value
-at the moment of its actual computation, one hop earlier than this
-pass's trace point.
+one.
+
+### 16.5 Named the call site by static read alone -- refutes the "different Style computation" hypothesis
+
+Per instruction: a pure call-graph read (no new instrumented run) to
+name which of the ~12 `compute_styles` call sites feeds
+`paint_layout.spl:1152`.
+
+Traced upward from the consumer: `_html_draw_ir_style_props` (defines
+line 1152) has one plural-form caller, `_html_draw_ir_commands`
+(`simple_web_html_layout_renderer.spl:1235`); that function's sole
+caller is `_simple_web_layout_compose_retained`, called at line 1534
+from `_simple_web_layout_render_html_draw_ir_result_at_time` (defined
+line 1390). Every `pub fn simple_web_layout_render_html_draw_ir_result*
+_with_images` wrapper the fast Draw-IR path
+(`simple_web_layout_engine2d_fast.spl`) imports and uses funnels into
+this one private function, with `vector_fonts=true` threaded through
+from the wrapper. It has exactly one style computation:
+**`simple_web_html_layout_renderer.spl:1482` --
+`compute_styles_with_material(nodes, rules, child_index, false,
+vector_fonts, material_entries, material_counts, cpu_material_nodes,
+solid_material_nodes)`.**
+
+**This is the same shared implementation already instrumented and
+proven correct in 16.2/16.4 step 1** (the one whose live trace showed
+the marker resolving `Bungee`/`100`), not a different one. The "a
+different Style computation feeds paint" hypothesis from 16.4 does not
+survive this read -- refuted by the call graph, the same discipline
+applied to hypotheses all session.
+
+**Revised next-step hypothesis, precise but not confirmed:** since the
+single named style-computation call site is proven correct, the
+divergence must happen *after* correct style computation and *before*
+`paint_layout.spl:1152` consumes it -- most plausibly an index/ordering
+mismatch between `styles[]` and the filtered/reordered draw-command
+list (`_html_draw_ir_visible_nodes`, `_html_draw_ir_append_context_
+paint_order`, `_html_draw_ir_node_paint_order` all reorder/filter nodes
+for paint purposes), associating the marker's draw command with a
+*different* node's `Style` entry -- one that legitimately resolved to
+Noto Sans SC via real CSS elsewhere on the page (e.g. a `lang="zh"`
+element matching Noto Sans SC's language coverage). Confirming this
+needs one more instrumented run: compare the node index actually used
+to fetch `st` at `paint_layout.spl:1152` (or in
+`_html_draw_ir_command`) against the marker's real index (150, per the
+16.4 trace) for the *same* run. Not run in this pass -- past the cap,
+next owner's instrumented pass.
 
 **Disposition: web showcase cell stays BLOCKED. Scoreboard: 2 GREEN.**
-Diagnostics only landed in this final step (`font_renderer_debug_resolve`,
-the `draw_ir_adv.spl` trace point); no fix attempted, per the cap.
+Diagnostics landed this pass (`font_renderer_debug_resolve`, the
+`draw_ir_adv.spl` trace point); the call site named this step by read
+only; no fix attempted, per the cap.
+
+**Handoff summary for the next owner:**
+- Ruled out: font loading/caching (`_browser_default_for_family_cached`
+  / `resolve_font_metrics_with_language`, correct under both engines in
+  isolation); `eng.select_font_identity`'s own lookup (the wrong value
+  is already in its input); a *different* Style computation feeding
+  paint (refuted by call-graph read -- it's the same one, proven
+  correct).
+- Ruled in / named: `simple_web_html_layout_renderer.spl:1482`
+  (`compute_styles_with_material`) is the sole style source for the
+  showcase's Draw-IR path; `simple_web_html_layout_renderer_paint_
+  layout.spl:1152` (`draw_ir_style_prop("font-identity", st.
+  resolved_font_identity)`) is the consumer with the wrong value.
+- Next instrumentation, one hop, already gated and ready to extend:
+  print the node index and `st.resolved_font_identity` immediately
+  around `paint_layout.spl:1152` (and/or inside `_html_draw_ir_
+  commands`'s node/style pairing) using the existing
+  `SIMPLE_TRACE_FONT_STYLE` gate, in the same run, and compare against
+  index 150's known-correct value from 16.4.
