@@ -173,10 +173,12 @@ fn cli_compile_uses_simple_driver(args: [text]) -> bool:
     while i < args.len():
         val arg = args[i]
         if arg == "--backend" and i + 1 < args.len():
-            if args[i + 1] == "vhdl" or args[i + 1] == "wasm":
+            if args[i + 1] == "vhdl" or args[i + 1] == "wasm" or args[i + 1] == "vulkan" or args[i + 1] == "spirv":
                 return true
             i = i + 1
-        elif arg == "--backend=vhdl" or arg == "--backend=wasm":
+        elif arg == "--backend=vhdl" or arg == "--backend=wasm" or arg == "--backend=vulkan" or arg == "--backend=spirv":
+            return true
+        elif arg == "--emit-vulkan-spirv-assembly" or arg.starts_with("--emit-vulkan-spirv-assembly="):
             return true
         elif arg == "--format=smf":
             return true
@@ -247,6 +249,7 @@ fn cli_compile(args: [text]) -> i64:
     var optimization_requested: bool = false
     var profile: text = "dev"
     var debug_trace_level: text = ""
+    var vulkan_assembly_output: text = ""
 
     var i = 0
     if args.len() > 0 and args[0] == "compile":
@@ -266,6 +269,7 @@ fn cli_compile(args: [text]) -> i64:
             print "  --format=<fmt>        Output: native, smf, self-contained (sc), both"
             print "  --native              Compile to native binary via C codegen + gcc"
             print "  --backend=<backend>   Backend: auto, cranelift, llvm, vhdl, c, cuda, vulkan (default: auto)"
+            print "  --emit-vulkan-spirv-assembly <path>  Emit Vulkan SPIR-V assembly"
             print "  --driver-mode=<mode>  Driver packaging mode: dynamic emits .lsm"
             print "  --emit-c              Emit C++20 source code (C backend)"
             print "  --coverage            Enable coverage instrumentation"
@@ -329,6 +333,25 @@ fn cli_compile(args: [text]) -> i64:
             else:
                 _cli_eprint("Error: --backend requires an argument")
                 return 1
+        elif arg.starts_with("--emit-vulkan-spirv-assembly="):
+            vulkan_assembly_output = arg.substring("--emit-vulkan-spirv-assembly=".len())
+            if vulkan_assembly_output == "":
+                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires a path")
+                return 1
+            if backend != "auto" and backend != "vulkan" and backend != "spirv":
+                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires --backend=vulkan")
+                return 1
+            backend = "vulkan"
+        elif arg == "--emit-vulkan-spirv-assembly":
+            i = i + 1
+            if i >= args.len() or args[i] == "" or args[i].starts_with("-"):
+                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires a path")
+                return 1
+            vulkan_assembly_output = args[i]
+            if backend != "auto" and backend != "vulkan" and backend != "spirv":
+                _cli_eprint("Error: --emit-vulkan-spirv-assembly requires --backend=vulkan")
+                return 1
+            backend = "vulkan"
         elif arg.starts_with("--driver-mode="):
             driver_mode = arg.substring(14)
         elif arg == "--driver-mode":
@@ -476,6 +499,10 @@ fn cli_compile(args: [text]) -> i64:
         _cli_eprint("Error: Source file not found: {source_file}")
         return 1
 
+    if vulkan_assembly_output != "" and backend != "vulkan" and backend != "spirv":
+        _cli_eprint("Error: --emit-vulkan-spirv-assembly requires --backend=vulkan")
+        return 1
+
     if driver_mode != "":
         if driver_mode != "dynamic":
             _cli_eprint("Error: Unknown driver mode: {driver_mode}")
@@ -491,6 +518,14 @@ fn cli_compile(args: [text]) -> i64:
 
     if backend == "opencl" or backend == "opencl-c" or backend == "opencl-spirv" or backend == "cl":
         return compile_opencl(source_file, output_file, verbose)
+
+    if backend == "vulkan" or backend == "spirv":
+        var vulkan_output = vulkan_assembly_output
+        if vulkan_output == "":
+            vulkan_output = output_file
+        if vulkan_output == "":
+            vulkan_output = source_file.replace(".spl", ".spvasm")
+        return cli_compile_pure_simple(source_file, vulkan_output, "vulkan", "vulkan", verbose, release, low_memory, opt_level, profile, _compile_target_opt_ctx, debug_trace_level)
 
     if backend == "c" or backend == "cpp" or backend == "ccodegen" or emit_c:
         return compile_c_backend(source_file, output_file, verbose)

@@ -15,6 +15,7 @@ CHECKER_SPIRV_MODULE="${CHECKER_SPIRV_MODULE:-$BUILD_DIR/live-dispatch/checker-o
 SPIRV_AS="${SPIRV_AS:-spirv-as}"
 SPIRV_VAL="${SPIRV_VAL:-spirv-val}"
 PRODUCER="${SIMPLE_VULKAN_SPIRV_PRODUCER:-}"
+PRODUCER_SOURCE="${SIMPLE_VULKAN_SPIRV_SOURCE:-}"
 
 unavailable() {
     echo "vulkan_compiler_live_lane_status=unavailable"
@@ -73,6 +74,7 @@ self_test() {
     source_contract || unavailable source-contract-failed
     grep -Fq "TODO(compiler-vulkan-live)" "$0" || unavailable admission-todo-missing
     grep -Fq "SIMPLE_VULKAN_SPIRV_PRODUCER" "$0" || unavailable producer-contract-missing
+    grep -Fq "SIMPLE_VULKAN_SPIRV_SOURCE" "$0" || unavailable producer-source-contract-missing
     [ "$CHECKER_SPIRV_MODULE" != "$BINARY" ] || unavailable checker-output-aliases-compiler-binary
     mkdir -p "$BUILD_DIR"
     make_external_harness || unavailable external-harness-transform-failed
@@ -85,7 +87,7 @@ case "${1:-}" in
     --self-test) self_test; exit 0 ;;
     --help)
         echo "usage: $0 [--self-test]"
-        echo "set SIMPLE_VULKAN_SPIRV_PRODUCER to a canonical producer accepting --emit-vulkan-spirv-assembly PATH"
+        echo "set SIMPLE_VULKAN_SPIRV_PRODUCER and SIMPLE_VULKAN_SPIRV_SOURCE to the canonical compiler and pinned kernel source"
         exit 0
         ;;
 esac
@@ -95,11 +97,13 @@ esac
 source_contract || unavailable source-contract-failed
 [ -n "$PRODUCER" ] || unavailable compiler-producer-unset
 [ -x "$PRODUCER" ] || unavailable compiler-producer-not-executable
+[ -n "$PRODUCER_SOURCE" ] || unavailable compiler-producer-source-unset
+[ -f "$PRODUCER_SOURCE" ] || unavailable compiler-producer-source-missing
 command -v "$SPIRV_AS" >/dev/null 2>&1 || unavailable spirv-as-missing
 command -v "$SPIRV_VAL" >/dev/null 2>&1 || unavailable spirv-val-missing
 mkdir -p "$BUILD_DIR"
 
-if ! "$PRODUCER" --emit-vulkan-spirv-assembly "$ASSEMBLY" >"$BUILD_DIR/compiler-producer.out" 2>"$BUILD_DIR/compiler-producer.err"; then
+if ! "$PRODUCER" compile --backend=vulkan --emit-vulkan-spirv-assembly "$ASSEMBLY" "$PRODUCER_SOURCE" >"$BUILD_DIR/compiler-producer.out" 2>"$BUILD_DIR/compiler-producer.err"; then
     unavailable compiler-producer-failed
 fi
 [ -s "$ASSEMBLY" ] || unavailable compiler-assembly-missing
