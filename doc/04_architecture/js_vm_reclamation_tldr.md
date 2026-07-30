@@ -1,11 +1,17 @@
 # JavaScript VM Reclamation — TLDR
 
-Status: **RED — architecture and tests are planned, not implemented.**
+Status: **PROPOSED / RED — ownership ABI and SSpec contract only.**
 
 - Production owner: `src/lib/nogc_sync_mut/js/engine/**`, reached through
   `BrowserRuntimeState`; `common/js` and the `gc_async_mut` interpreter facade
   are not implementation owners.
-- Add real environment parents and lexical-chain lookup before enabling GC.
+- Preserve the landed static lexical-parent semantics during handle migration;
+  they are a prerequisite, not reclamation evidence.
+- Freeze `JsHeapHandle(slot:i64,generation:i64)`,
+  `JsExternalRootKey(handle,owner_kind,owner_id)`, and
+  `JsTypedEdge(kind,handle)` before implementation.
+- External roots are independently keyed and reference-counted; stale
+  retain/resolve/mark/release operations cannot affect a reused slot.
 - At outermost host-turn safe points, `JsInterpreter` traces typed roots across
   object, function, and environment stores using an iterative worklist.
 - Browser roots include listener callbacks **and `target_object_id`**, all
@@ -13,7 +19,8 @@ Status: **RED — architecture and tests are planned, not implemented.**
 - Collection is inhibited/deferred during execution, recursion, async drains,
   exception unwind, and listener mutation.
 - Replace numeric ownership IDs such as `__simple_typed_array_buffer` with
-  typed side-table edges before sweep.
+  typed side-table edges before sweep; property-name inference is forbidden.
+- Migrate every reference boundary atomically; mixed raw-ID/handle mode is RED.
 - Preserve live IDs; sweep with tombstones/free lists and generation checks.
   Observe allocated/live/high-water/capacity/reclaimed counters for objects,
   functions, environments, globals, and properties.
@@ -23,6 +30,13 @@ Status: **RED — architecture and tests are planned, not implemented.**
   save/restore APIs; object properties remain owned by `ObjectStore`.
 - Share Event native methods once per runtime and scope the global `event`
   binding. Navigation/close must emit a page-disposal receipt.
+- The typed inventory explicitly covers object/function/environment,
+  WASM-function, pending-event, temporary-host-return, timer, Promise, stream,
+  iterator, DOM, listener, and closure edges.
+- Allocation/release counters are O(1); for N=128 and 2N=256, allocation scans
+  stay zero and visits obey `visits_2n <= 2 * visits_n + 32`.
+- The focused 1,000-cycle contract is separate from the planned external
+  production 10,000-cycle gate.
 - Planned modern SSpecs contribute focused evidence to
   REQ-WEB-BROWSER-017/018 and NFR-WEB-BROWSER-005..008; canonical browser and
   performance gates remain required for closure.
