@@ -93,6 +93,32 @@ byte-residue gates, not RSS ceiling alone.
     while parallel agents were mid-edit in src/compiler — attribution
     unreliable. Rerun required from a consistent tree (all lane edits now
     landed at a9e61476da97).
+  - Runs 4-8 (cranelift, hermetic worktree): stage2 sanity PASS; stage3
+    fails with a parse error in `vhdl_codegen_helpers.spl`. Run 4 recorded
+    this as a `Result<(), E>` grammar divergence — **that diagnosis is
+    RETRACTED** (see
+    doc/08_tracking/bug/stage2_parser_result_unit_generic_divergence_2026-07-29.md).
+    Runs 5-8 established the hermeticity requirements: consistent tree (no
+    mid-edit agents), origin-only content, a real `.git` (provenance binds
+    HEAD/dirty), no symlinks under `src/compiler_rust` (fingerprint check),
+    an isolated build dir, and clean `git status`.
+  - Run 9 (2026-07-30, origin 110f743b2a2, faithful stage-3 invocation):
+    **the parse failure is a parser STATE bug, not a grammar gap, and it is
+    the remaining L7 blocker.** Measured with a real stage-2 binary: the
+    unit-generic construct, the inline-if-as-match-subject construct, the
+    exact failing block, and the ENTIRE victim file all parse clean in
+    isolation at both origin and the run-8 pin (byte-identical files); the
+    file fails ONLY in the whole-tree focused build, first erroring at the
+    statement after a `match` block's last arm. `SIMPLE_AST_GEN_CHECK=1`
+    reported **zero** stale-generation/OOB diagnostics during the failing
+    run — so the L6 gate is clean and the memory/arena half of the
+    admission criteria is met; what remains is this parse-state defect.
+    Full evidence, three ranked hypotheses, and the repro:
+    doc/08_tracking/bug/stage3_whole_tree_parse_state_vhdl_helpers_2026-07-30.md
+  - Also found in run 9: a non-closure whole-tree build cannot even start —
+    `src/app/__init__.spl` and `src/compiler/__init__.spl` both sanitize to
+    module `__init__`, aborting the multi-root scan. `--entry-closure`
+    masks it. Filed in the same bug doc.
   - Admission criteria unchanged: zero stale-generation/OOB diagnostics +
     byte gates. Successor plan for the M-milestones:
     doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md.
