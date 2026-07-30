@@ -421,3 +421,89 @@ Exact next task after all listed processes clear:
 7. Physical Cocoa click/drag/typing/Ctrl evidence remains a manual user action.
    Synthetic QMP, AppleScript, or other injected input is diagnostic only and
    is inadmissible for REQ-QRS-004 through REQ-QRS-007.
+
+## 2026-07-30 — task dispatch to the sole QEMU owner (session 3 handoff)
+
+This section is the task assignment. Per the project owner's direction, QEMU
+work is dispatched **only through this document**, and is executed by exactly
+**one** agent session at a time. Do not launch QEMU from any other session.
+
+### What changed since session 2's fail-closed verdict
+
+- **The ENOSPC risk session 2 flagged actually fired.** Free disk reached
+  **0 GiB**. `git prune` then aborted with `fatal: bad tree object
+  0b9d64735680743c2f4db53618b67b424c94f7b3`, and two independent agent
+  sessions reported `jj` fully broken (`Object ... not found`, missing
+  working-copy commit) plus dangling refs whose target objects are absent from
+  the local object store. **The local repository has object-level corruption.**
+  All landed work is safe at `origin/main` and was content-verified there;
+  nothing is lost. But local `jj` is unreliable — use plain `git`
+  (fetch/commit/push) until the repo is repaired.
+- **Partial recovery to ~6 GiB free**, achieved only by removing
+  `build/worktrees/stage4-2b6ca665` after verifying it had zero uncommitted
+  changes and a HEAD already contained in `origin/main`. The other 23
+  worktrees were deliberately left untouched: each has either uncommitted
+  changes or a HEAD not in `origin/main`, i.e. other sessions' unpushed work.
+  **Do not delete them to make room.**
+- **6 GiB is still not a safe margin.** Session 2 correctly treated 8.9 GiB as
+  marginal. A cold real-screen run needs a full artifact build plus framebuffer
+  captures. Reclaiming a further ~5.2 GiB is pending a decision by the project
+  owner on an unversioned tree outside the repo; that decision is theirs, not
+  an agent's.
+
+### Blocking preconditions — verify each before any build or launch
+
+1. Free disk at a genuinely safe margin (> 8.9 GiB), re-checked immediately
+   before the build **and** again before launching QEMU. Fail closed if it
+   regresses mid-run; do not push through ENOSPC. It has already corrupted the
+   repo once today.
+2. No competing host compiler build active (session 2 found `rustc
+   --crate-name simple_compiler`, PID 4881). Do not kill a peer's build — wait.
+3. The five canonical artifacts listed in session 2's entry still absent → they
+   must be built at step 3, not assumed present.
+4. Confirm sole QEMU ownership. An unrelated peer `qemu-system-x86_64` may be
+   running for different work: **do not kill it, do not reuse it**, and account
+   for its CPU/disk contention.
+
+### Assigned work, in order
+
+Resume at "Required execution order" step 2 — do **not** repeat the disk/CPU
+diagnosis already established as blocked twice today.
+
+- Step 2: SIMD prerequisite. REQ-QRS-002 requires same-run
+  `requested=cpu_simd`, `actual=cpu_simd`, CPU feature/profile, a positive
+  native SIMD hit count, and no fallback marker. Per the fail-closed rules, a
+  CPU-looking image with zero SIMD hits or any fallback marker is a **failure**
+  — report it as such, do not soften it.
+- Step 3: incremental artifact build. Pin the compiler explicitly. It must be
+  an **admitted pure-Simple** binary, never the Rust seed. Note the hazard:
+  several wrappers auto-detect and prefer `build/bootstrap/stage2/*/simple`
+  over `bin/release/*/simple`, and that stage2 binary's version string
+  `simple-bootstrap 1.0.0-beta` passes filters that reject only
+  `*bootstrap*seed*`. Record the binary path + sha256 + version in the
+  evidence. Do not run a full bootstrap; do not `cargo clean`.
+- Steps 4–7: boot via real OVMF pflash into a visible Cocoa window (never
+  `-kernel` semantics, never `isa-debug-exit`), capture pre-input framebuffer
+  and macOS window, open the serial evidence interval.
+
+### Human-input boundary — plan for it explicitly
+
+REQ-QRS-004 through REQ-QRS-007 **cannot be satisfied by any agent**. The plan
+forbids synthetic input for acceptance: QMP `send-key`, mouse injection, and
+AppleScript are all disallowed. Therefore:
+
+- Complete REQ-QRS-001, 002, 003 and 008 autonomously.
+- Then **stop with the QEMU instance alive and the serial interval open**, and
+  hand the project owner numbered instructions for the five physical actions in
+  order (click the showcase, drag its title bar, type `a`, press Ctrl, release
+  Ctrl), naming the exact window to act on.
+- Only after they confirm, capture the post-input framebuffer and window, and
+  correlate each accepted input sequence with a **later** frame generation.
+
+### Reporting contract
+
+Report per-REQ-QRS status as satisfied / pending-human-input / failed, with the
+evidence path for each. A precise negative result is a valid outcome; a vague
+or overstated positive is not. Evidence directories and reports stay **out of
+git** (repo rule: do not add reports to git unless requested) — this plan doc
+and any `.shs`/`.spl` runner do get committed. No Bash, no Python.
