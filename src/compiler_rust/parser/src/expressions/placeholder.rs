@@ -309,13 +309,30 @@ fn count_placeholders(expr: &Expr) -> usize {
             .iter()
             .map(|(k, v)| count_placeholders(k) + count_placeholders(v))
             .sum(),
-        Expr::FString { parts, .. } => parts
-            .iter()
-            .map(|part| match part {
-                FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => count_placeholders(expr),
-                FStringPart::Literal(_) => 0,
-            })
-            .sum(),
+        // Bug (2026-07-30, string_template_multi_placeholder_slot_not_found): a
+        // bare (unnumbered) `_` used more than once across an f-string's
+        // `{...}` interpolation regions always refers to the SAME implicit
+        // bound value -- the one argument a higher-order callback such as
+        // `.map("{_.0}: {_.1}")` receives per call -- unlike an ordinary
+        // expression like `_ + _`, where each `_` is legitimately a distinct
+        // positional lambda parameter. Summing per-occurrence (as the
+        // general-expression arms above do) over-counts and makes
+        // `force_transform_placeholder_lambda` synthesize a lambda with more
+        // parameters than `.map` ever supplies, leaving the extra `__pN`
+        // unbound ("semantic: variable `__pN` not found"). Collapse to at
+        // most 1 (presence, not count) so the whole f-string shares one slot,
+        // mirroring how a repeated numbered placeholder (`_1` used twice)
+        // already collapses via `find_max_numbered`/`replace_numbered_placeholders`.
+        Expr::FString { parts, .. } => {
+            if parts.iter().any(|part| match part {
+                FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => count_placeholders(expr) > 0,
+                FStringPart::Literal(_) => false,
+            }) {
+                1
+            } else {
+                0
+            }
+        }
         Expr::OptionalChain { expr, .. } => count_placeholders(expr),
         Expr::Coalesce { expr, default } => count_placeholders(expr) + count_placeholders(default),
         Expr::Slice {
@@ -418,7 +435,21 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
                 .collect(),
         ),
         Expr::FString { parts, .. } => {
-            let parts = replace_fstring_parts(parts, counter);
+            // See the matching note in `count_placeholders`'s `Expr::FString`
+            // arm: every bare `_` inside one f-string shares a SINGLE slot
+            // (reserved once from the outer counter), instead of each
+            // occurrence grabbing its own incrementing slot.
+            let has_bare_placeholder = parts.iter().any(|part| match part {
+                FStringPart::Expr(expr) | FStringPart::ExprWithFormat(expr, _) => count_placeholders(expr) > 0,
+                FStringPart::Literal(_) => false,
+            });
+            let parts = if has_bare_placeholder {
+                let slot = *counter;
+                *counter += 1;
+                replace_fstring_parts_shared_slot(parts, slot)
+            } else {
+                parts
+            };
             let type_meta = TypeMeta::with_const_keys(extract_fstring_keys(&parts));
             Expr::FString { parts, type_meta }
         }
@@ -460,6 +491,128 @@ fn replace_placeholders(expr: Expr, counter: &mut usize) -> Expr {
     }
 }
 
+/// Replace every bare `_` placeholder inside an f-string's interpolation
+/// parts with the SAME fixed slot number (see the note in
+/// `replace_placeholders`'s `Expr::FString` arm). Used only for f-string
+/// bodies, where all bare `_` occurrences denote one shared implicit value
+/// rather than independent positional lambda parameters.
+fn replace_fstring_parts_shared_slot(parts: Vec<FStringPart>, slot: usize) -> Vec<FStringPart> {
+    parts
+        .into_iter()
+        .map(|part| match part {
+            FStringPart::Expr(expr) => FStringPart::Expr(replace_bare_placeholder_fixed(expr, slot)),
+            FStringPart::ExprWithFormat(expr, format_spec) => {
+                FStringPart::ExprWithFormat(replace_bare_placeholder_fixed(expr, slot), format_spec)
+            }
+            FStringPart::Literal(text) => FStringPart::Literal(text),
+        })
+        .collect()
+}
+
+/// Like `replace_placeholders`, but every bare `_` maps to the SAME fixed
+/// slot instead of an incrementing counter.
+fn replace_bare_placeholder_fixed(expr: Expr, slot: usize) -> Expr {
+    match expr {
+        Expr::Identifier(name) if name == "_" => Expr::Identifier(format!("__p{}", slot)),
+        Expr::Binary { op, left, right } => Expr::Binary {
+            op,
+            left: Box::new(replace_bare_placeholder_fixed(*left, slot)),
+            right: Box::new(replace_bare_placeholder_fixed(*right, slot)),
+        },
+        Expr::Unary { op, operand } => Expr::Unary {
+            op,
+            operand: Box::new(replace_bare_placeholder_fixed(*operand, slot)),
+        },
+        Expr::Call { callee, args } => Expr::Call {
+            callee: Box::new(replace_bare_placeholder_fixed(*callee, slot)),
+            args: args
+                .into_iter()
+                .map(|a| Argument::with_span(a.name, replace_bare_placeholder_fixed(a.value, slot), a.span))
+                .collect(),
+        },
+        Expr::MethodCall {
+            receiver,
+            method,
+            args,
+            generic_args,
+        } => Expr::MethodCall {
+            receiver: Box::new(replace_bare_placeholder_fixed(*receiver, slot)),
+            method,
+            args: args
+                .into_iter()
+                .map(|a| Argument::with_span(a.name, replace_bare_placeholder_fixed(a.value, slot), a.span))
+                .collect(),
+            generic_args,
+        },
+        Expr::FieldAccess { receiver, field } => Expr::FieldAccess {
+            receiver: Box::new(replace_bare_placeholder_fixed(*receiver, slot)),
+            field,
+        },
+        Expr::TupleIndex { receiver, index } => Expr::TupleIndex {
+            receiver: Box::new(replace_bare_placeholder_fixed(*receiver, slot)),
+            index,
+        },
+        Expr::Index { receiver, index } => Expr::Index {
+            receiver: Box::new(replace_bare_placeholder_fixed(*receiver, slot)),
+            index: Box::new(replace_bare_placeholder_fixed(*index, slot)),
+        },
+        Expr::If {
+            let_pattern,
+            condition,
+            then_branch,
+            else_branch,
+        } => Expr::If {
+            let_pattern,
+            condition: Box::new(replace_bare_placeholder_fixed(*condition, slot)),
+            then_branch: Box::new(replace_bare_placeholder_fixed(*then_branch, slot)),
+            else_branch: else_branch.map(|e| Box::new(replace_bare_placeholder_fixed(*e, slot))),
+        },
+        Expr::Tuple(items) => Expr::Tuple(items.into_iter().map(|e| replace_bare_placeholder_fixed(e, slot)).collect()),
+        Expr::Array(items) => Expr::Array(items.into_iter().map(|e| replace_bare_placeholder_fixed(e, slot)).collect()),
+        Expr::Dict(entries) => Expr::Dict(
+            entries
+                .into_iter()
+                .map(|(k, v)| (replace_bare_placeholder_fixed(k, slot), replace_bare_placeholder_fixed(v, slot)))
+                .collect(),
+        ),
+        Expr::FString { parts, .. } => {
+            let parts = replace_fstring_parts_shared_slot(parts, slot);
+            let type_meta = TypeMeta::with_const_keys(extract_fstring_keys(&parts));
+            Expr::FString { parts, type_meta }
+        }
+        Expr::OptionalChain { expr, field } => Expr::OptionalChain {
+            expr: Box::new(replace_bare_placeholder_fixed(*expr, slot)),
+            field,
+        },
+        Expr::Coalesce { expr, default } => Expr::Coalesce {
+            expr: Box::new(replace_bare_placeholder_fixed(*expr, slot)),
+            default: Box::new(replace_bare_placeholder_fixed(*default, slot)),
+        },
+        Expr::Slice {
+            receiver,
+            start,
+            end,
+            step,
+        } => Expr::Slice {
+            receiver: Box::new(replace_bare_placeholder_fixed(*receiver, slot)),
+            start: start.map(|e| Box::new(replace_bare_placeholder_fixed(*e, slot))),
+            end: end.map(|e| Box::new(replace_bare_placeholder_fixed(*e, slot))),
+            step: step.map(|e| Box::new(replace_bare_placeholder_fixed(*e, slot))),
+        },
+        Expr::Cast { expr, target_type } => Expr::Cast {
+            expr: Box::new(replace_bare_placeholder_fixed(*expr, slot)),
+            target_type,
+        },
+        Expr::Spread(inner) => Expr::Spread(Box::new(replace_bare_placeholder_fixed(*inner, slot))),
+        Expr::Lambda { .. } => expr,
+        Expr::Match { subject, arms } => Expr::Match {
+            subject: Box::new(replace_bare_placeholder_fixed(*subject, slot)),
+            arms,
+        },
+        _ => expr,
+    }
+}
+
 fn replace_numbered_fstring_parts(parts: Vec<FStringPart>) -> Vec<FStringPart> {
     parts
         .into_iter()
@@ -467,19 +620,6 @@ fn replace_numbered_fstring_parts(parts: Vec<FStringPart>) -> Vec<FStringPart> {
             FStringPart::Expr(expr) => FStringPart::Expr(replace_numbered_placeholders(expr)),
             FStringPart::ExprWithFormat(expr, format_spec) => {
                 FStringPart::ExprWithFormat(replace_numbered_placeholders(expr), format_spec)
-            }
-            FStringPart::Literal(text) => FStringPart::Literal(text),
-        })
-        .collect()
-}
-
-fn replace_fstring_parts(parts: Vec<FStringPart>, counter: &mut usize) -> Vec<FStringPart> {
-    parts
-        .into_iter()
-        .map(|part| match part {
-            FStringPart::Expr(expr) => FStringPart::Expr(replace_placeholders(expr, counter)),
-            FStringPart::ExprWithFormat(expr, format_spec) => {
-                FStringPart::ExprWithFormat(replace_placeholders(expr, counter), format_spec)
             }
             FStringPart::Literal(text) => FStringPart::Literal(text),
         })
@@ -571,6 +711,89 @@ mod tests {
                     }
                     other => panic!("expected f-string body, got {other:?}"),
                 }
+            }
+            other => panic!("expected lambda, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn two_bare_placeholders_in_one_fstring_share_one_param() {
+        // Regression for string_template_multi_placeholder_slot_not_found
+        // (2026-07-30): `"{_.0}: {_.1}"` (two bare `_` across different
+        // interpolation regions of the SAME f-string) must synthesize a
+        // single-parameter lambda (`__p0` reused for both), not a two-param
+        // lambda -- `.map()` only ever supplies one argument per call, so a
+        // second parameter is never bound and previously failed at semantic
+        // analysis with "variable `__p1` not found".
+        let parts = vec![
+            FStringPart::Expr(Expr::TupleIndex {
+                receiver: Box::new(Expr::Identifier("_".to_string())),
+                index: 0,
+            }),
+            FStringPart::Literal(": ".to_string()),
+            FStringPart::Expr(Expr::TupleIndex {
+                receiver: Box::new(Expr::Identifier("_".to_string())),
+                index: 1,
+            }),
+        ];
+        let transformed = force_transform_placeholder_lambda(Expr::FString {
+            type_meta: TypeMeta::with_const_keys(extract_fstring_keys(&parts)),
+            parts,
+        });
+
+        match transformed {
+            Expr::Lambda { params, body, .. } => {
+                assert_eq!(params.len(), 1, "expected exactly one shared parameter");
+                assert_eq!(params[0].name, "__p0");
+                match *body {
+                    Expr::FString { parts, .. } => {
+                        assert_eq!(
+                            parts[0],
+                            FStringPart::Expr(Expr::TupleIndex {
+                                receiver: Box::new(Expr::Identifier("__p0".to_string())),
+                                index: 0,
+                            })
+                        );
+                        assert_eq!(
+                            parts[2],
+                            FStringPart::Expr(Expr::TupleIndex {
+                                receiver: Box::new(Expr::Identifier("__p0".to_string())),
+                                index: 1,
+                            })
+                        );
+                    }
+                    other => panic!("expected f-string body, got {other:?}"),
+                }
+            }
+            other => panic!("expected lambda, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_bare_placeholder_reused_twice_in_one_fstring_shares_one_param() {
+        // Regression: `"{_.0}-{_.0}"` (the SAME field, referenced twice)
+        // previously ALSO failed with "variable `__p1` not found" -- proving
+        // this was never about distinct positions, just occurrence count.
+        let parts = vec![
+            FStringPart::Expr(Expr::TupleIndex {
+                receiver: Box::new(Expr::Identifier("_".to_string())),
+                index: 0,
+            }),
+            FStringPart::Literal("-".to_string()),
+            FStringPart::Expr(Expr::TupleIndex {
+                receiver: Box::new(Expr::Identifier("_".to_string())),
+                index: 0,
+            }),
+        ];
+        let transformed = force_transform_placeholder_lambda(Expr::FString {
+            type_meta: TypeMeta::with_const_keys(extract_fstring_keys(&parts)),
+            parts,
+        });
+
+        match transformed {
+            Expr::Lambda { params, .. } => {
+                assert_eq!(params.len(), 1, "expected exactly one shared parameter");
+                assert_eq!(params[0].name, "__p0");
             }
             other => panic!("expected lambda, got {other:?}"),
         }
