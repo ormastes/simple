@@ -5,16 +5,145 @@ ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
 . "$ROOT_DIR/scripts/deps/generated-2d-readback-lib.shs"
+ADMISSION_HELPER="$ROOT_DIR/scripts/check/lib/macos-gpu-trusted-build-admission.shs"
+[ -f "$ADMISSION_HELPER" ] || {
+    echo "Metal generated 2D readback: FAIL (manifest-admission-helper-missing)" >&2
+    exit 1
+}
+. "$ADMISSION_HELPER"
 
 BUILD_DIR="${BUILD_DIR:-build/metal_generated_2d_readback}"
 REPORT_PATH="${REPORT_PATH:-doc/09_report/metal_generated_2d_readback_$(date -u +%F).md}"
 TOOLCHAIN_BUILD_DIR="${TOOLCHAIN_BUILD_DIR:-$BUILD_DIR/toolchains}"
+REQUESTED_METALLIB_PATH="${METALLIB_PATH:-}"
 METALLIB_PATH="${METALLIB_PATH:-$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.metallib}"
 METAL_TOOL="${METAL_TOOL:-metal}"
 METALLIB_TOOL="${METALLIB_TOOL:-metallib}"
 METAL_RUNTIME_PROBE="${METAL_RUNTIME_PROBE:-system_profiler}"
-SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
+REQUESTED_SIMPLE_BIN="${SIMPLE_BIN:-}"
+SIMPLE_BIN="${SIMPLE_BIN:-}"
 HARNESS_SPL="${HARNESS_SPL:-scripts/check/metal_generated_2d_readback_harness.spl}"
+CANONICAL_HARNESS_SPL="scripts/check/metal_generated_2d_readback_harness.spl"
+TRUSTED_MANIFEST="$ROOT_DIR/build/macos_gpu_2d_live_native/metal/trusted-build.env"
+TOOLCHAIN_MANIFEST="$TOOLCHAIN_BUILD_DIR/evidence.env"
+GENERATED_SOURCE="$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.metal"
+TRUSTED_MANIFEST_SHA256=""
+TOOLCHAIN_MANIFEST_SHA256=""
+SIMPLE_BIN_SHA256=""
+GENERATED_SOURCE_SHA256=""
+METALLIB_SHA256=""
+PROVENANCE_STATUS="unavailable"
+
+sha256_file() {
+    [ -f "$1" ] || return 1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+sha256_valid() {
+    case "${1:-}" in
+        *[!0-9a-f]*|"") return 1 ;;
+        *) [ "${#1}" -eq 64 ] ;;
+    esac
+}
+
+[ "$HARNESS_SPL" = "$CANONICAL_HARNESS_SPL" ] || {
+    echo "Metal generated 2D readback: FAIL (non-canonical-harness)" >&2
+    exit 1
+}
+
+manifest_value() {
+    key="$1"
+    manifest="$2"
+    [ "$(grep -c "^${key}=" "$manifest" 2>/dev/null || true)" = 1 ] ||
+        return 1
+    sed -n "s/^${key}=//p" "$manifest"
+}
+
+canonical_file() {
+    path="$1"
+    case "$path" in
+        /*) ;;
+        *) path="$ROOT_DIR/$path" ;;
+    esac
+    macos_gpu_admission_canonical_file "$path"
+}
+
+admit_trusted_compiler() {
+    macos_gpu_trusted_manifest_admit \
+        "$TRUSTED_MANIFEST" metal "$ROOT_DIR" || return 1
+    SIMPLE_BIN="$MACOS_GPU_ADMISSION_COMPILER"
+    SIMPLE_BIN_SHA256="$MACOS_GPU_ADMISSION_BUILD_COMPILER_SHA256"
+    TRUSTED_MANIFEST_SHA256="$MACOS_GPU_ADMISSION_MANIFEST_SHA256"
+
+    if [ -n "$REQUESTED_SIMPLE_BIN" ]; then
+        [ "$(canonical_file "$REQUESTED_SIMPLE_BIN")" = "$SIMPLE_BIN" ] ||
+            return 1
+    fi
+}
+
+verify_trusted_artifacts() {
+    [ -n "$SIMPLE_BIN" ] || admit_trusted_compiler || return 1
+    [ -f "$TOOLCHAIN_MANIFEST" ] && [ ! -L "$TOOLCHAIN_MANIFEST" ] ||
+        return 1
+    TOOLCHAIN_MANIFEST="$(canonical_file "$TOOLCHAIN_MANIFEST")" || return 1
+    TOOLCHAIN_MANIFEST_SHA256="$(sha256_file "$TOOLCHAIN_MANIFEST")" ||
+        return 1
+    sha256_valid "$TOOLCHAIN_MANIFEST_SHA256" || return 1
+
+    manifest_simple="$(canonical_file "$(
+        manifest_value simple_bin_path "$TOOLCHAIN_MANIFEST"
+    )")" || return 1
+    manifest_simple_sha="$(
+        manifest_value simple_bin_sha256 "$TOOLCHAIN_MANIFEST"
+    )" || return 1
+    [ "$manifest_simple" = "$SIMPLE_BIN" ] &&
+        [ "$manifest_simple_sha" = "$SIMPLE_BIN_SHA256" ] &&
+        [ "$(sha256_file "$manifest_simple")" = "$manifest_simple_sha" ] ||
+        return 1
+
+    GENERATED_SOURCE="$(canonical_file "$GENERATED_SOURCE")" || return 1
+    [ ! -L "$GENERATED_SOURCE" ] || return 1
+    GENERATED_SOURCE_SHA256="$(
+        manifest_value metal_generated_source_sha256 "$TOOLCHAIN_MANIFEST"
+    )" || return 1
+    sha256_valid "$GENERATED_SOURCE_SHA256" &&
+        [ "$(sha256_file "$GENERATED_SOURCE")" = "$GENERATED_SOURCE_SHA256" ] ||
+        return 1
+
+    manifest_metallib="$(canonical_file "$(
+        manifest_value metal_artifact "$TOOLCHAIN_MANIFEST"
+    )")" || return 1
+    expected_metallib="$(canonical_file \
+        "$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.metallib")" || return 1
+    [ ! -L "$manifest_metallib" ] || return 1
+    METALLIB_SHA256="$(
+        manifest_value metal_artifact_sha256 "$TOOLCHAIN_MANIFEST"
+    )" || return 1
+    [ "$(manifest_value metal_status "$TOOLCHAIN_MANIFEST")" = \
+        compiled_artifact_verified ] &&
+        [ "$(manifest_value metal_candidate_compiled \
+            "$TOOLCHAIN_MANIFEST")" = true ] &&
+        [ "$(manifest_value metal_artifact_validated \
+            "$TOOLCHAIN_MANIFEST")" = true ] &&
+        [ "$manifest_metallib" = "$expected_metallib" ] &&
+        sha256_valid "$METALLIB_SHA256" &&
+        [ "$(sha256_file "$manifest_metallib")" = "$METALLIB_SHA256" ] ||
+        return 1
+    if [ -n "$REQUESTED_METALLIB_PATH" ]; then
+        [ "$(canonical_file "$REQUESTED_METALLIB_PATH")" = \
+            "$manifest_metallib" ] || return 1
+    fi
+    METALLIB_PATH="$manifest_metallib"
+    [ "$(sha256_file "$TOOLCHAIN_MANIFEST")" = \
+        "$TOOLCHAIN_MANIFEST_SHA256" ] || return 1
+    PROVENANCE_STATUS="trusted-build-admitted-toolchain-verified"
+}
 
 resolve_darwin_tool() {
     tool="$1"
@@ -51,6 +180,17 @@ emit_env() {
         echo "metal_generated_2d_readback_backend_name=metal"
         echo "metal_generated_2d_readback_metallib=$METALLIB_PATH"
         echo "metal_generated_2d_readback_metallib_bytes=$bytes"
+        echo "metal_generated_2d_readback_provenance_status=$PROVENANCE_STATUS"
+        echo "metal_generated_2d_readback_trusted_manifest=$TRUSTED_MANIFEST"
+        echo "metal_generated_2d_readback_trusted_manifest_sha256=$TRUSTED_MANIFEST_SHA256"
+        echo "metal_generated_2d_readback_toolchain_manifest=$TOOLCHAIN_MANIFEST"
+        echo "metal_generated_2d_readback_toolchain_manifest_sha256=$TOOLCHAIN_MANIFEST_SHA256"
+        echo "metal_generated_2d_readback_simple_bin_path=$SIMPLE_BIN"
+        echo "metal_generated_2d_readback_simple_bin_sha256=$SIMPLE_BIN_SHA256"
+        echo "metal_generated_2d_readback_generated_source=$GENERATED_SOURCE"
+        echo "metal_generated_2d_readback_generated_source_sha256=$GENERATED_SOURCE_SHA256"
+        echo "metal_generated_2d_readback_metallib_sha256=$METALLIB_SHA256"
+        echo "metal_generated_2d_readback_harness_exit_code=not-run"
         echo "metal_generated_2d_readback_runtime_present=$runtime_present"
         echo "metal_generated_2d_readback_metal_tool_present=$metal_tool_present"
         echo "metal_generated_2d_readback_metallib_tool_present=$metallib_tool_present"
@@ -95,8 +235,9 @@ readback_checksum_sum() {
 }
 
 emit_env_harness() {
-    # Emit evidence.env from harness output file $1
+    # Emit evidence.env from harness output file $1 and process exit code $2.
     harness_out="$1"
+    harness_exit="$2"
     bytes="$(generated_2d_bytes_of "$METALLIB_PATH")"
     h_status="$(grep '^status=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
     h_fill_ck="$(grep '^fill_checksum=' "$harness_out" 2>/dev/null | head -1 | cut -d= -f2)"
@@ -127,7 +268,10 @@ emit_env_harness() {
     h_expected="$(readback_checksum_sum "$h_fill_ex" "$h_copy_ex" "$h_alpha_ex" "$h_scroll_ex")"
     h_mismatch_count=0
     reason="harness-executed"
-    if [ "$h_status" = "pass" ]; then
+    if [ "$harness_exit" != 0 ]; then
+        h_status="fail"
+        reason="harness-exit-status-$harness_exit"
+    elif [ "$h_status" = "pass" ]; then
         if [ "$h_submit" != "true" ]; then
             h_status="fail"
             reason="missing-submit-attempt"
@@ -179,6 +323,17 @@ emit_env_harness() {
         echo "metal_generated_2d_readback_backend_name=metal"
         echo "metal_generated_2d_readback_metallib=$METALLIB_PATH"
         echo "metal_generated_2d_readback_metallib_bytes=$bytes"
+        echo "metal_generated_2d_readback_provenance_status=$PROVENANCE_STATUS"
+        echo "metal_generated_2d_readback_trusted_manifest=$TRUSTED_MANIFEST"
+        echo "metal_generated_2d_readback_trusted_manifest_sha256=$TRUSTED_MANIFEST_SHA256"
+        echo "metal_generated_2d_readback_toolchain_manifest=$TOOLCHAIN_MANIFEST"
+        echo "metal_generated_2d_readback_toolchain_manifest_sha256=$TOOLCHAIN_MANIFEST_SHA256"
+        echo "metal_generated_2d_readback_simple_bin_path=$SIMPLE_BIN"
+        echo "metal_generated_2d_readback_simple_bin_sha256=$SIMPLE_BIN_SHA256"
+        echo "metal_generated_2d_readback_generated_source=$GENERATED_SOURCE"
+        echo "metal_generated_2d_readback_generated_source_sha256=$GENERATED_SOURCE_SHA256"
+        echo "metal_generated_2d_readback_metallib_sha256=$METALLIB_SHA256"
+        echo "metal_generated_2d_readback_harness_exit_code=$harness_exit"
         echo "metal_generated_2d_readback_runtime_present=$runtime_present"
         echo "metal_generated_2d_readback_metal_tool_present=$metal_tool_present"
         echo "metal_generated_2d_readback_metallib_tool_present=$metallib_tool_present"
@@ -226,7 +381,7 @@ alpha_expected=1
 scroll_checksum=1
 scroll_expected=1
 EOF
-    emit_env_harness "$self_dir/missing_submit.out"
+    emit_env_harness "$self_dir/missing_submit.out" 0
     if ! grep -q '^metal_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
         || ! grep -q '^metal_generated_2d_readback_reason=missing-submit-attempt$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
@@ -246,7 +401,7 @@ alpha_expected=1
 scroll_checksum=1
 scroll_expected=1
 EOF
-    emit_env_harness "$self_dir/missing_readback.out"
+    emit_env_harness "$self_dir/missing_readback.out" 0
     if ! grep -q '^metal_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
         || ! grep -q '^metal_generated_2d_readback_reason=missing-readback$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
@@ -268,7 +423,7 @@ alpha_expected=1
 scroll_checksum=1
 scroll_expected=1
 EOF
-    emit_env_harness "$self_dir/valid.out"
+    emit_env_harness "$self_dir/valid.out" 0
     if ! grep -q '^metal_generated_2d_readback_status=pass$' "$BUILD_DIR/evidence.env" \
         || ! grep -q '^metal_generated_2d_readback_reason=gpu-readback-verified$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
@@ -278,6 +433,14 @@ EOF
     if ! grep -q '^metal_generated_2d_readback_mismatch_count=0$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=valid-readback-missing-zero-mismatch-count"
+        exit 1
+    fi
+    emit_env_harness "$self_dir/valid.out" 7
+    if ! grep -q '^metal_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^metal_generated_2d_readback_reason=harness-exit-status-7$' "$BUILD_DIR/evidence.env" \
+        || ! grep -q '^metal_generated_2d_readback_harness_exit_code=7$' "$BUILD_DIR/evidence.env"; then
+        echo "self_test_status=fail"
+        echo "self_test_reason=nonzero-harness-exit-accepted"
         exit 1
     fi
 
@@ -294,7 +457,7 @@ alpha_expected=1
 scroll_checksum=1
 scroll_expected=1
 EOF
-    emit_env_harness "$self_dir/missing_upload.out"
+    emit_env_harness "$self_dir/missing_upload.out" 0
     if ! grep -q '^metal_generated_2d_readback_reason=missing-host-upload$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
         echo "self_test_reason=missing-host-upload-accepted"
@@ -322,7 +485,7 @@ alpha_expected=0
 scroll_checksum=1
 scroll_expected=1
 EOF
-    emit_env_harness "$self_dir/zero_alpha.out"
+    emit_env_harness "$self_dir/zero_alpha.out" 0
     if ! grep -q '^metal_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
         || ! grep -q '^metal_generated_2d_readback_reason=alpha-checksum-missing-or-zero$' "$BUILD_DIR/evidence.env"; then
         echo "self_test_status=fail"
@@ -344,7 +507,7 @@ alpha_expected=1
 scroll_checksum=1
 scroll_expected=1
 EOF
-    emit_env_harness "$self_dir/fill_mismatch.out"
+    emit_env_harness "$self_dir/fill_mismatch.out" 0
     if ! grep -q '^metal_generated_2d_readback_status=fail$' "$BUILD_DIR/evidence.env" \
         || ! grep -q '^metal_generated_2d_readback_reason=fill-checksum-mismatch$' "$BUILD_DIR/evidence.env" \
         || ! grep -q '^metal_generated_2d_readback_mismatch_count=1$' "$BUILD_DIR/evidence.env"; then
@@ -374,15 +537,32 @@ if generated_2d_have "$METALLIB_TOOL"; then
 fi
 
 module_verified=false
-if ! generated_2d_module_verified "$METALLIB_PATH"; then
-    REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" METAL_TOOL="$METAL_TOOL" METALLIB_TOOL="$METALLIB_TOOL" sh scripts/check/check-portable-compute-toolchains.shs >/dev/null
+admission_ready=false
+if admit_trusted_compiler; then
+    admission_ready=true
 fi
 
-if generated_2d_module_verified "$METALLIB_PATH"; then
+if [ "$admission_ready" = true ] &&
+        { [ ! -f "$TOOLCHAIN_MANIFEST" ] ||
+          [ ! -f "$GENERATED_SOURCE" ] ||
+          ! generated_2d_module_verified \
+              "$TOOLCHAIN_BUILD_DIR/simple_2d_optimization.metallib"; }; then
+    PORTABLE_COMPUTE_TARGETS=metal \
+        SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_RUNTIME_BIN="$SIMPLE_BIN" \
+        REPORT_PATH="$BUILD_DIR/toolchains.md" BUILD_DIR="$TOOLCHAIN_BUILD_DIR" \
+        METAL_TOOL="$METAL_TOOL" METALLIB_TOOL="$METALLIB_TOOL" \
+        sh scripts/check/check-portable-compute-toolchains.shs >/dev/null ||
+        admission_ready=false
+fi
+
+if [ "$admission_ready" = true ] && verify_trusted_artifacts &&
+        generated_2d_module_verified "$METALLIB_PATH"; then
     module_verified=true
 fi
 
-if [ "$module_verified" != "true" ]; then
+if [ "$PROVENANCE_STATUS" != "trusted-build-admitted-toolchain-verified" ]; then
+    emit_env "unavailable" "trusted-artifact-admission-failed" "false" "false"
+elif [ "$module_verified" != "true" ]; then
     reason="missing-verified-metallib"
     if [ "$metal_tool_present" != "true" ]; then
         reason="missing-primary-tool"
@@ -402,15 +582,18 @@ else
     else
         harness_out="$BUILD_DIR/harness.out"
         harness_err="$BUILD_DIR/harness.err"
+        set +e
         SIMPLE_EXECUTION_MODE=interpret SIMPLE_LIB="${SIMPLE_LIB:-src}" \
             "$SIMPLE_BIN" test "$HARNESS_SPL" \
-            >"$harness_out" 2>"$harness_err" || true
-        emit_env_harness "$harness_out"
+            >"$harness_out" 2>"$harness_err"
+        harness_exit=$?
+        set -e
+        emit_env_harness "$harness_out" "$harness_exit"
     fi
 fi
 
 . "$BUILD_DIR/evidence.env"
-metal_report_note="Generated Metal evidence has two explicit proofs: the native tools validate a metallib built from Simple-emitted MSL, while the runtime harness independently compiles the same current emitter output through Metal SFFI and executes it. The harness does not claim to load the metallib. Runtime proof is fail-closed until device/pipeline/encoder calls, a patterned host upload, submit, synchronization, host download, and position-sensitive per-op hashes all succeed.\n\n## Host Validation Checklist (Darwin/macOS)\n- Ensure Xcode command-line tools are installed and discoverable: xcode-select --install.\n- Validate toolchain and runtime visibility: xcrun --find metal, xcrun --find metallib, system_profiler SPDisplaysDataType.\n- Refresh and rebuild generated toolchains:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-portable-compute-toolchains.shs\n- Run proof lane directly:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} sh scripts/check/check-metal-generated-2d-readback.shs\n- Promote through platform aggregate:\n  SIMPLE_BIN=${SIMPLE_BIN:-bin/simple} SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs"
+metal_report_note="Generated Metal evidence has two explicit proofs: the native tools validate a metallib built from Simple-emitted MSL, while the runtime harness independently compiles the same current emitter output through Metal SFFI and executes it. The harness does not claim to load the metallib. Runtime proof is fail-closed until trusted manifest admission binds the canonical Simple binary and generated source/metallib hashes, the harness exits zero, and device/pipeline/encoder calls, a patterned host upload, submit, synchronization, host download, and position-sensitive per-op hashes all succeed.\n\n## Host Validation Checklist (Darwin/macOS)\n- Ensure Xcode command-line tools are installed and discoverable: xcode-select --install.\n- Validate toolchain and runtime visibility: xcrun --find metal, xcrun --find metallib, system_profiler SPDisplaysDataType.\n- Run proof lane directly after producing the canonical trusted-build manifest:\n  SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-metal-generated-2d-readback.shs\n- Promote through platform aggregate:\n  SIMPLE_LIB=${SIMPLE_LIB:-src} sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs"
 
 generated_2d_report_from_env "$REPORT_PATH" "Metal Generated 2D Readback Evidence" "$BUILD_DIR/evidence.env" "$metal_report_note"
 

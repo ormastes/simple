@@ -86,6 +86,26 @@ sha256_valid() {
     esac
 }
 
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
+sha256_stream() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    else
+        return 1
+    fi
+}
+
 pid_matches_executable() {
     target_pid="$1"
     target_executable="$2"
@@ -363,8 +383,7 @@ if [ "$BACKEND" = vulkan ]; then
     [ "$MOLTENVK_ICD_PATH" = \
         "/opt/homebrew/etc/vulkan/icd.d/MoltenVK_icd.json" ] ||
         fail "canonical-moltenvk-icd-path-mismatch"
-    MOLTENVK_ICD_SHA256="$(shasum -a 256 "$MOLTENVK_ICD_PATH" |
-        awk '{print $1}')"
+    MOLTENVK_ICD_SHA256="$(sha256_file "$MOLTENVK_ICD_PATH")"
     sha256_valid "$MOLTENVK_ICD_SHA256" ||
         fail "canonical-moltenvk-icd-sha256-invalid"
     moltenvk_library_reference="$(
@@ -390,8 +409,7 @@ if [ "$BACKEND" = vulkan ]; then
         fail "canonical-moltenvk-library-name-mismatch"
     [ -f "$MOLTENVK_LIBRARY_PATH" ] ||
         fail "canonical-moltenvk-library-missing"
-    MOLTENVK_LIBRARY_SHA256="$(shasum -a 256 "$MOLTENVK_LIBRARY_PATH" |
-        awk '{print $1}')"
+    MOLTENVK_LIBRARY_SHA256="$(sha256_file "$MOLTENVK_LIBRARY_PATH")"
     sha256_valid "$MOLTENVK_LIBRARY_SHA256" ||
         fail "canonical-moltenvk-library-sha256-invalid"
     LAUNCH_DYLD_LIBRARY_PATH="$ROOT_DIR/build/sffi:/opt/homebrew/lib"
@@ -407,7 +425,7 @@ if [ "$BACKEND" = vulkan ]; then
     MOLTENVK_VULKANINFO_PATH="/opt/homebrew/bin/vulkaninfo"
     if [ -x "$MOLTENVK_VULKANINFO_PATH" ]; then
         MOLTENVK_VULKANINFO_SHA256="$(
-            shasum -a 256 "$MOLTENVK_VULKANINFO_PATH" | awk '{print $1}'
+            sha256_file "$MOLTENVK_VULKANINFO_PATH"
         )"
         vulkaninfo_out="$BUILD_DIR_ABS/moltenvk-vulkaninfo-summary.out"
         vulkaninfo_err="$BUILD_DIR_ABS/moltenvk-vulkaninfo-summary.err"
@@ -416,7 +434,7 @@ if [ "$BACKEND" = vulkan ]; then
                 15 2 "$MOLTENVK_VULKANINFO_PATH" "$MOLTENVK_ICD_PATH" &&
                 [ -s "$vulkaninfo_out" ]; then
             MOLTENVK_VULKANINFO_OUTPUT_SHA256="$(
-                shasum -a 256 "$vulkaninfo_out" | awk '{print $1}'
+                sha256_file "$vulkaninfo_out"
             )"
             MOLTENVK_DEVICE_NAME="$(awk -F= '
                 /^[[:space:]]*deviceName[[:space:]]*=/ {
@@ -459,16 +477,16 @@ SELECTED_DRIVER_PATH="$(printf '%s\n' "$trusted_manifest_result" |
     sed -n '/^trusted_build_manifest_output_path=/p' | wc -l | tr -d ' ')" = 1 ] ||
     fail "trusted-build-output-not-singular"
 [ -x "$SELECTED_DRIVER_PATH" ] || fail "trusted-build-output-not-executable"
-driver_manifest_sha256="$(shasum -a 256 "$TRUSTED_BUILD_MANIFEST" | awk '{print $1}')"
+driver_manifest_sha256="$(sha256_file "$TRUSTED_BUILD_MANIFEST")"
 for provider in "$SPL_WINIT_LIB" "$SIMPLE_RUNTIME_DYLIB" "$SIMPLE_RUNTIME_C_DYLIB"; do
     [ -s "$provider" ] || fail "runtime-provider-missing"
     otool -L "$SELECTED_DRIVER_PATH" |
         grep -Fq "@rpath/$(basename -- "$provider")" ||
         fail "runtime-provider-not-linked"
 done
-winit_provider_sha256="$(shasum -a 256 "$SPL_WINIT_LIB" | awk '{print $1}')"
-simple_runtime_provider_sha256="$(shasum -a 256 "$SIMPLE_RUNTIME_DYLIB" | awk '{print $1}')"
-simple_runtime_c_provider_sha256="$(shasum -a 256 "$SIMPLE_RUNTIME_C_DYLIB" | awk '{print $1}')"
+winit_provider_sha256="$(sha256_file "$SPL_WINIT_LIB")"
+simple_runtime_provider_sha256="$(sha256_file "$SIMPLE_RUNTIME_DYLIB")"
+simple_runtime_c_provider_sha256="$(sha256_file "$SIMPLE_RUNTIME_C_DYLIB")"
 otool -l "$SELECTED_DRIVER_PATH" |
     grep -Fq "$(dirname -- "$SIMPLE_RUNTIME_DYLIB")" ||
     fail "runtime-provider-rpath-missing"
@@ -489,17 +507,17 @@ if [ "$BACKEND" = vulkan ]; then
         fail "vulkan-runtime-provider-device-count-alias-missing"
 fi
 
-driver_sha256="$(shasum -a 256 "$SELECTED_DRIVER_PATH" | awk '{print $1}')"
+driver_sha256="$(sha256_file "$SELECTED_DRIVER_PATH")"
 repo_revision="$(git rev-parse HEAD)"
 shared_scene_fingerprint="$(cat "$SHARED_HARNESS" "$FIXTURE_SOURCE" |
-    shasum -a 256 | awk '{print $1}')"
+    sha256_stream)"
 source_revision="$(printf '%s\n' "$repo_revision" \
     "$(git hash-object "$HARNESS")" "$(git hash-object "$SHARED_HARNESS")" \
     "$(git hash-object "$FIXTURE_SOURCE")" \
     "$(git hash-object "$BACKEND_SOURCE")" "$driver_sha256" \
     "$winit_provider_sha256" "$simple_runtime_provider_sha256" \
     "$simple_runtime_c_provider_sha256" |
-    shasum -a 256 | awk '{print $1}')"
+    sha256_stream)"
 
 # LaunchServices reports canonical /private/var paths while mktemp may return
 # the /var symlink spelling.  Canonicalize before deriving the exact executable
@@ -858,12 +876,24 @@ if [ "$BACKEND" = vulkan ]; then
         fail "vulkan-font-warm-atlas-payload-changed"
 fi
 backend_handle="$(value_of gpu_2d_live_backend_handle "$RECEIPT")"
+device_identity="$(value_of gpu_2d_live_device_identity "$RECEIPT")"
+draw_ir_device_identity="$(value_of gpu_2d_live_draw_ir_device_identity "$RECEIPT")"
+interaction_device_identity="$(value_of gpu_2d_live_interaction_device_identity "$RECEIPT")"
 initial_checksum="$(value_of gpu_2d_live_initial_checksum "$RECEIPT")"
 interaction_checksum="$(value_of gpu_2d_live_interaction_checksum "$RECEIPT")"
 positive_integer "$font_cold" ||
     fail "vector-font-cold-rasterization-missing"
 positive_integer "$font_hits" || fail "vector-font-warm-hit-missing"
 positive_integer "$backend_handle" || fail "backend-handle-missing"
+positive_integer "$device_identity" || fail "device-identity-missing"
+positive_integer "$draw_ir_device_identity" ||
+    fail "draw-ir-device-identity-missing"
+positive_integer "$interaction_device_identity" ||
+    fail "interaction-device-identity-missing"
+[ "$draw_ir_device_identity" = "$device_identity" ] ||
+    fail "draw-ir-device-identity-changed"
+[ "$interaction_device_identity" = "$device_identity" ] ||
+    fail "interaction-device-identity-changed"
 positive_integer "$initial_checksum" || fail "initial-checksum-missing"
 positive_integer "$interaction_checksum" || fail "interaction-checksum-missing"
 [ "$initial_checksum" != "$interaction_checksum" ] ||
@@ -874,7 +904,7 @@ ppm_bytes="$(wc -c <"$CAPTURE_PPM" | tr -d ' ')"
 ppm_header="$(head -n 3 "$CAPTURE_PPM" | tr '\n' '|')"
 [ "$ppm_header" = "P6|3840 2160|255|" ] || fail "capture-header-mismatch"
 pixel_sha256="$(dd if="$CAPTURE_PPM" bs=1 skip=17 2>/dev/null |
-    shasum -a 256 | awk '{print $1}')"
+    sha256_stream)"
 case "$pixel_sha256" in
     [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
         [ "${#pixel_sha256}" -eq 64 ] || fail "pixel-sha256-invalid" ;;
@@ -934,6 +964,9 @@ png_dpi_height="$(sips -g dpiHeight "$CAPTURE_PNG" |
     echo "${PREFIX}_shared_scene_fingerprint=$shared_scene_fingerprint"
     echo "${PREFIX}_source=device_readback"
     echo "${PREFIX}_backend_handle=$backend_handle"
+    echo "${PREFIX}_device_identity=$device_identity"
+    echo "${PREFIX}_draw_ir_device_identity=$draw_ir_device_identity"
+    echo "${PREFIX}_interaction_device_identity=$interaction_device_identity"
     echo "${PREFIX}_initial_checksum=$initial_checksum"
     echo "${PREFIX}_interaction_checksum=$interaction_checksum"
     echo "${PREFIX}_width=3840"

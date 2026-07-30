@@ -16,10 +16,11 @@ xcrun --find metal
 xcrun --find metallib
 system_profiler SPDisplaysDataType
 
-SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
-  sh scripts/check/check-portable-compute-toolchains.shs
-
-SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
+# Requires the admitted canonical compiler from
+# build/macos_gpu_2d_live_native/metal/trusted-build.env. The checker creates
+# or verifies its generated-source/metallib toolchain manifest itself via
+# scripts/check/check-portable-compute-toolchains.shs.
+SIMPLE_LIB=src \
   BUILD_DIR=build/metal_backend_mac_host \
   REPORT_PATH=build/metal_backend_mac_host/report.md \
   sh scripts/check/check-metal-generated-2d-readback.shs
@@ -29,6 +30,12 @@ SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 
 SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
   sh scripts/check/check-engine2d-cpu-metal-parity-evidence.shs
+
+# Windowless MSL compiler/device diagnostic. This is the admitted preflight;
+# it stops after MTLDevice + MTLLibrary creation and does not claim dispatch.
+# Entry: test/02_integration/rendering/macos_metal_msl_library_micro_diagnostic.spl
+SIMPLE_LIB=src \
+  sh scripts/check/check-macos-metal-msl-library-micro-diagnostic.shs
 
 SIMPLE_LIB=src bin/simple test \
   test/03_system/gpu/metal_backend_mac_host_spec.spl \
@@ -76,12 +83,22 @@ SIMPLE_HOSTED_REVISION_CACHE_BACKEND=vulkan SIMPLE_LIB=src bin/simple test \
   `metal_generated_2d_readback_status=pass`.
 - The generated lane records `module_verified=true`,
   `submit_attempted=true`, `readback_available=true`, and matching nonzero
-  `fill`, `copy`, `alpha`, and `scroll` checksums.
+  `fill`, `copy`, `alpha`, and `scroll` checksums, with
+  `gpu-readback-verified`, `mismatch_count=0`, and `harness_exit_code=0`.
+  Its receipt records the admitted trusted-build manifest plus canonical
+  Simple, generated MSL source, and metallib paths and matching SHA-256 values;
+  caller-overridden Simple or metallib paths must match those admitted values.
+- The MSL micro diagnostic records a source SHA-256, positive device/library
+  handles, bounded compiler diagnostics, and trusted compiler/provider
+  admission. It is a library-creation preflight, not a GPU execution pass.
 - The framebuffer and CPU/Metal parity reports identify a real Metal device
   readback, not a CPU mirror or fallback.
 - The production `MetalBackend` host scenario enables `gpu_only`, renders the
   16x16 clear/rectangle fixture, and proves exact pixels plus stable positive
   framebuffer handle and device identity across both device readbacks.
+- The live runtime receipt records one positive Metal `device_identity` and
+  equal initial, Draw IR, and interaction identities; a changed or missing
+  identity is rejected.
 - The live gate records the native device/queue/submit/readback receipt and
   matching pixels. Linux or unavailable output is not a pass.
 - The Vulkan ProcessingIR receipt records 64 exact values, fixed checksum
