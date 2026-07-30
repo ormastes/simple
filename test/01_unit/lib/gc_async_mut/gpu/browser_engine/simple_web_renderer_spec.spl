@@ -148,6 +148,86 @@ fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
         idx = idx + 1
     ""
 
+fn setup_abbr_inline_fixtures() -> [text]:
+    val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}#row{font-size:16px;color:#111827}</style></head><body><div id='row'>"
+    [
+        common + "LEFT<abbr id='term'>MID</abbr>RIGHT</div></body></html>",
+        common + "LEFT<span id='term'>MID</span>RIGHT</div></body></html>",
+        common + "LEFT<span id='term' style='display:block'>MID</span>RIGHT</div></body></html>"
+    ]
+
+fn check_abbr_computed_inline_style(fixtures: [text]):
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[0], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[1], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[2], "term", "display"
+    )).to_equal("block")
+
+fn check_abbr_layout_and_draw_ir_parity(fixtures: [text]):
+    val abbr_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[0], 128, 48
+    ).batches[0].commands
+    val span_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[1], 128, 48
+    ).batches[0].commands
+    val block_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[2], 128, 48
+    ).batches[0].commands
+    val abbr_term = _draw_ir_command_by_id(abbr_commands, "term")
+    val span_term = _draw_ir_command_by_id(span_commands, "term")
+    val block_term = _draw_ir_command_by_id(block_commands, "term")
+    val abbr_mid = _draw_ir_text_command(abbr_commands, "MID")
+    val span_mid = _draw_ir_text_command(span_commands, "MID")
+    val abbr_right = _draw_ir_text_command(abbr_commands, "RIGHT")
+    val span_right = _draw_ir_text_command(span_commands, "RIGHT")
+    val block_right = _draw_ir_text_command(block_commands, "RIGHT")
+
+    expect(_draw_ir_style_value(abbr_term, "display")).to_equal("inline")
+    expect([
+        abbr_term.x, abbr_term.y, abbr_term.width, abbr_term.height
+    ]).to_equal([
+        span_term.x, span_term.y, span_term.width, span_term.height
+    ])
+    expect([
+        abbr_mid.x, abbr_mid.y, abbr_mid.width, abbr_mid.height
+    ]).to_equal([
+        span_mid.x, span_mid.y, span_mid.width, span_mid.height
+    ])
+    expect([
+        abbr_right.x, abbr_right.y, abbr_right.width, abbr_right.height
+    ]).to_equal([
+        span_right.x, span_right.y, span_right.width, span_right.height
+    ])
+    expect(abbr_mid.advance_widths).to_equal(span_mid.advance_widths)
+    expect(abbr_right.advance_widths).to_equal(span_right.advance_widths)
+    expect([
+        abbr_term.x, abbr_term.y, abbr_term.width, abbr_term.height
+    ]).not.to_equal([
+        block_term.x, block_term.y, block_term.width, block_term.height
+    ])
+    expect([
+        abbr_right.x, abbr_right.y, abbr_right.width, abbr_right.height
+    ]).not.to_equal([
+        block_right.x, block_right.y, block_right.width, block_right.height
+    ])
+
+fn check_abbr_cpu_pixel_parity(fixtures: [text]):
+    val abbr_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[0], 128, 48, "cpu"
+    )
+    val span_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[1], 128, 48, "cpu"
+    )
+    val block_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[2], 128, 48, "cpu"
+    )
+    expect(abbr_pixels).to_equal(span_pixels)
+    expect(abbr_pixels).not.to_equal(block_pixels)
+
 fn _wm_material_section(component_id: text, image_declarations: text) -> text:
     (
         "<section id='" + component_id + "'" +
@@ -1077,6 +1157,19 @@ describe "SimpleWebRenderer":
         expect(lower.len()).to_equal(96 * 32)
         expect(_count_color(lower, 0xFF111827u32)).to_be_greater_than(0)
         expect(_pixels_equal(lower, upper)).to_equal(false)
+
+    it "keeps abbr in canonical inline flow":
+        step("Build abbr span and block-control fixtures")
+        val fixtures = setup_abbr_inline_fixtures()
+
+        step("Resolve abbr to the inline user-agent display")
+        check_abbr_computed_inline_style(fixtures)
+
+        step("Match span layout and canonical Draw IR geometry")
+        check_abbr_layout_and_draw_ir_parity(fixtures)
+
+        step("Match span pixels and reject block fallback")
+        check_abbr_cpu_pixel_parity(fixtures)
 
     it "lowers text-transform through Draw IR to exact uppercase pixels":
         val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}.label{color:#111827;font-size:16px}</style></head><body>"

@@ -1618,6 +1618,46 @@ expect(_pixels_equal(lower, upper)).to_equal(false)
 
 </details>
 
+#### keeps abbr in canonical inline flow
+
+<details>
+<summary>Executable SSpec</summary>
+
+The four-step scenario calls the same frozen helpers as the executable source:
+
+```simple
+step("Build abbr span and block-control fixtures")
+val fixtures = setup_abbr_inline_fixtures()
+
+step("Resolve abbr to the inline user-agent display")
+check_abbr_computed_inline_style(fixtures)
+
+step("Match span layout and canonical Draw IR geometry")
+check_abbr_layout_and_draw_ir_parity(fixtures)
+
+step("Match span pixels and reject block fallback")
+check_abbr_cpu_pixel_parity(fixtures)
+```
+
+`setup_abbr_inline_fixtures` builds three otherwise-identical documents:
+index 0 uses `<abbr id='term'>MID</abbr>`, index 1 uses the literal inline
+control `<span id='term'>MID</span>`, and index 2 uses the negative control
+`<span id='term' style='display:block'>MID</span>`. Each fixture preserves the
+same `LEFT`, `MID`, and `RIGHT` text-node order.
+
+`check_abbr_computed_inline_style` requires exact computed `display` values of
+`inline`, `inline`, and `block`, respectively.
+
+`check_abbr_layout_and_draw_ir_parity` requires the abbr and span `term`,
+`MID`, and `RIGHT` Draw IR geometry arrays `[x, y, width, height]` to match and
+requires their `MID` and `RIGHT` glyph advances to match. It also requires the
+abbr `term` and `RIGHT` geometry to differ from the forced-block control.
+
+`check_abbr_cpu_pixel_parity` requires the complete CPU pixel array for abbr to
+equal the span pixels and to differ from the forced-block pixels.
+
+</details>
+
 #### lowers text-transform through Draw IR to exact uppercase pixels
 
 <details>
