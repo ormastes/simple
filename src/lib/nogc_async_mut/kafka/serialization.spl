@@ -51,8 +51,20 @@ fn is_valid_compression_codec(codec: i64) -> bool:
 # ============================================================================
 
 # Encode unsigned varint (used in Kafka protocol)
-fn encode_varint_unsigned(value: i64) -> list:
-    var result = []
+#
+# `list`-typed params/returns retyped to `[i64]` throughout this file (byte
+# values 0-255): a bare `: list` parameter/return corrupts indexed element
+# reads under the default engine (JIT/native codegen) -- `list` resolves to
+# `HirType::Array { element: ANY }`, so the compiler has no static evidence
+# the elements are integers and skips the UnboxInt decode that a concrete
+# `[i64]` type gets; the read returns the raw tag-boxed word (e.g. 5 reads
+# back as 40 = 5<<3). Root-caused via a MIR dump: `[i64]` reads emit
+# `Call rt_array_get` -> `UnboxInt` -> use; `list` reads emit
+# `Call rt_array_get` -> use directly, no UnboxInt. See
+# doc/08_tracking/bug/untyped_list_element_read_seed_rootcause_2026-07-30.md.
+# Interpreter is unaffected (dynamic per-value tag dispatch).
+fn encode_varint_unsigned(value: i64) -> [i64]:
+    var result: [i64] = []
     var remaining = value
     var continue_encoding = true
 
@@ -75,7 +87,7 @@ fn encode_varint_unsigned(value: i64) -> list:
     result
 
 # Decode unsigned varint
-fn decode_varint_unsigned(bytes: list) -> i64:
+fn decode_varint_unsigned(bytes: [i64]) -> i64:
     var result = 0
     var shift = 0
     var idx = 0
@@ -101,7 +113,7 @@ fn decode_varint_unsigned(bytes: list) -> i64:
     result
 
 # Encode signed varint using zigzag encoding
-fn encode_varint_signed(value: i64) -> list:
+fn encode_varint_signed(value: i64) -> [i64]:
     var zigzag = 0
     if value >= 0:
         zigzag = value * 2
@@ -110,7 +122,7 @@ fn encode_varint_signed(value: i64) -> list:
     encode_varint_unsigned(zigzag)
 
 # Decode signed varint using zigzag encoding
-fn decode_varint_signed(bytes: list) -> i64:
+fn decode_varint_signed(bytes: [i64]) -> i64:
     var zigzag = decode_varint_unsigned(bytes)
     var is_negative = (zigzag % 2) == 1
 
@@ -125,7 +137,7 @@ fn decode_varint_signed(bytes: list) -> i64:
 
 # Simple CRC32 implementation for Kafka message integrity
 # Using standard CRC32 polynomial: 0xEDB88320
-fn crc32_table() -> list:
+fn crc32_table() -> [i64]:
     [
         0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA, 0x076DC419, 0x706AF48F,
         0xE963A535, 0x9E6495A3, 0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988,
@@ -141,7 +153,7 @@ fn crc32_table() -> list:
     ]
 
 fn crc32_calculate(data: text) -> i64:
-    var table = crc32_table()
+    var table: [i64] = crc32_table()
     var crc = 0xFFFFFFFF
     var idx = 0
     var data_len = data.len()
@@ -174,7 +186,7 @@ fn crc32_verify(data: text, expected_crc: i64) -> bool:
 # ============================================================================
 
 # Convert i64 to 4-byte representation (big-endian)
-fn int32_to_bytes(value: i64) -> list:
+fn int32_to_bytes(value: i64) -> [i64]:
     var byte0 = (value / 16777216) % 256
     var byte1 = (value / 65536) % 256
     var byte2 = (value / 256) % 256
@@ -182,7 +194,7 @@ fn int32_to_bytes(value: i64) -> list:
     [byte0, byte1, byte2, byte3]
 
 # Convert i64 to 8-byte representation (big-endian)
-fn int64_to_bytes(value: i64) -> list:
+fn int64_to_bytes(value: i64) -> [i64]:
     var upper = value / 4294967296
     var lower = value % 4294967296
     var bytes_upper = int32_to_bytes(upper)
@@ -190,7 +202,7 @@ fn int64_to_bytes(value: i64) -> list:
     bytes_upper + bytes_lower
 
 # Convert 4 bytes to i64 (big-endian)
-fn bytes_to_int32(bytes: list) -> i64:
+fn bytes_to_int32(bytes: [i64]) -> i64:
     if bytes.len() < 4:
         return 0
     var result = bytes[0] * 16777216
@@ -200,20 +212,20 @@ fn bytes_to_int32(bytes: list) -> i64:
     result
 
 # Convert 8 bytes to i64 (big-endian)
-fn bytes_to_int64(bytes: list) -> i64:
+fn bytes_to_int64(bytes: [i64]) -> i64:
     if bytes.len() < 8:
         return 0
-    var upper_bytes = [bytes[0], bytes[1], bytes[2], bytes[3]]
-    var lower_bytes = [bytes[4], bytes[5], bytes[6], bytes[7]]
+    var upper_bytes: [i64] = [bytes[0], bytes[1], bytes[2], bytes[3]]
+    var lower_bytes: [i64] = [bytes[4], bytes[5], bytes[6], bytes[7]]
     var upper = bytes_to_int32(upper_bytes)
     var lower = bytes_to_int32(lower_bytes)
     (upper * 4294967296) + lower
 
 # Serialize text with length prefix
-fn serialize_string(value: text) -> list:
+fn serialize_string(value: text) -> [i64]:
     var length = value.len()
-    var length_bytes = int32_to_bytes(length)
-    var result = length_bytes
+    var length_bytes: [i64] = int32_to_bytes(length)
+    var result: [i64] = length_bytes
     var idx = 0
     # Byte-indexed via .bytes(), not single-index `value[idx].ord()` -- see
     # crc32_calculate above for the full explanation. The 4-byte length
@@ -228,13 +240,13 @@ fn serialize_string(value: text) -> list:
     result
 
 # Deserialize text with length prefix
-fn deserialize_string(bytes: list, offset: i64) -> text:
+fn deserialize_string(bytes: [i64], offset: i64) -> text:
     if offset < 0:
         return ""
     if offset + 4 > bytes.len():
         return ""
 
-    var length_bytes = [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]
+    var length_bytes: [i64] = [bytes[offset], bytes[offset + 1], bytes[offset + 2], bytes[offset + 3]]
     var length = bytes_to_int32(length_bytes)
 
     if length <= 0:
