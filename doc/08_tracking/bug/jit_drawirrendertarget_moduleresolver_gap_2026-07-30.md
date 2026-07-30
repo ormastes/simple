@@ -29,13 +29,24 @@ after the identical `Lowerer::with_module_resolver` constructor. Fixed by
 switching to the already-existing `lower_with_context_lenient_and_project_hint`
 — one line, zero new code, byte-identical-archive-verified safe.** Re-ran
 the full web pipeline JIT repro: **all four HIR-lowering gaps are now
-cleared, zero errors of any kind.** A **fifth**, categorically different
-gap remains: the repro does not complete within the time budgets tried —
-confirmed (via direct utime sampling) to be a **near-zero-CPU hang, not a
-compile error and not slow-but-working computation** — root cause not
-established this pass (a GPU-backend-SFFI-probing lead is noted but
-unproven). The strategic question (does JIT make styling fast enough to
-retire the 900s budget problem) remains open pending gap 5.
+cleared, zero errors of any kind.** **CORRECTION (same day, later pass):**
+the "fifth gap = hang" finding above was a measurement error and is
+retracted — re-investigated with a correctly-targeted live process
+(the earlier sample most likely hit a `<defunct>` zombie sibling, not the
+live worker) and found the process is genuinely CPU-bound and busy during
+JIT compilation, not blocked. **The real gap 5 is a well-diagnosed,
+gracefully-handled (not crashing) unresolved-symbol whole-program fallback:
+`text_dot_from_any` (`text.from_any(...)`, called at exactly one site,
+`src/lib/common/jwt/encode.spl:273`, an unrelated JWT-encoding helper pulled
+in only transitively) drops the entire program to interpreted execution at
+Cranelift codegen time, per the tool's own diagnostic ("~100-1000x
+slowdown"). Not fixed this pass** — `from_any` is confirmed implemented
+nowhere (Rust intrinsic or `.spl` function), so the correct replacement is
+unclear without deeper JWT-encoding-specific investigation, out of scope.
+**The strategic per-node JIT-vs-interpreted timing was NOT captured this
+pass** — gap 5 still forces this specific run to fall back to interpreted
+execution before ever reaching the style loop under real JIT. The strategic
+prize remains one narrowly-scoped fix away.
 **Component:** `src/compiler_rust/driver/src/exec_core.rs` (`run_file_jit`),
 `src/compiler_rust/compiler/src/module_resolver/*`,
 `src/compiler_rust/compiler/src/hir/lower/type_registration.rs` (`register_trait`),
@@ -740,4 +751,114 @@ are discoverable in one compile instead of N.
   (near-zero CPU via direct utime sampling — not a compile error, not
   slow-but-working computation). Root cause NOT established — reported with
   a circumstantial, unproven lead (GPU-backend SFFI modules in the closure)
-  for the next pass.
+  for the next pass. **CORRECTED below — this was a measurement error, not
+  a real finding.**
+
+## Gap 5 CORRECTED (2026-07-30, fifth follow-up pass) — NOT a hang; a genuine, well-diagnosed unresolved-symbol fallback
+
+Per instruction, reproduced with a properly-targeted, correctly-monitored
+process (learning directly from this campaign's own established
+`native_build_worker` measurement-trap pattern) before reaching for
+`strace`/`gdb`.
+
+**The earlier "near-zero CPU / hang" finding is RETRACTED — it does not
+reproduce.** Re-ran with `SIMPLE_TIMEOUT_SECONDS=180` and correctly
+identified the actual working process this time (the process tree includes
+a `[simple-main] <defunct>` zombie sibling — `ps -o stat` showed `Z` — which
+is the most likely target the earlier, hastier sample actually measured
+instead of the live worker; not proven which PID was sampled before, since
+that session was lost, but a zombie with a frozen `/proc/<pid>/stat` would
+produce exactly the "empty/zero utime" artifact previously reported as
+"near-zero CPU").
+
+**Correctly monitored this time (PROVED, direct `/proc/<pid>/stat` utime
+sampling on the live, non-zombie worker PID, confirmed via `ps -o stat`
+showing `R`/`Rl` running state throughout):** the process is genuinely
+CPU-bound and busy — 71-90% CPU sustained across three consecutive 30-55s
+samples (utime deltas of 2292 and 3807 ticks per sample window) — this is
+real, ongoing whole-program JIT compilation work, not a stall.
+
+**It then completes compilation and hits a real, precisely-identified,
+gracefully-handled fallback (PROVED — the tool prints its own clear
+diagnostic):**
+
+```
+[jit-fallback] unresolved external symbol 'text_dot_from_any': whole module dropped to
+  the interpreter (expect ~100-1000x slowdown). Set SIMPLE_JIT_STRICT=1 to turn this
+  into a hard error.
+[INFO] JIT compilation failed, falling back to interpreter: Cranelift JIT compile:
+  Module error: unresolved external symbol 'text_dot_from_any' would NULL-jump in JIT;
+  deferring to interpreter
+```
+
+This is **not a crash** (the `SIMPLE_JIT_STRICT` fail-open fix,
+`0609a5a6570`, is doing exactly its job here — converting what would have
+been a NULL-jump crash into a safe fallback) but it **is** a real
+fifth gap: one unresolved symbol drops the **entire** program to
+interpreted execution, at the tool's own stated "~100-1000x slowdown" —
+matching, almost exactly, this whole campaign's founding observation about
+silent interpreted fallback from a single unresolvable name, just relocated
+from HIR-lowering time to Cranelift codegen/link time.
+
+**Root cause of the missing symbol (PROVED by direct source read):**
+`text_dot_from_any` is the mangled form of a call to `text.from_any(...)` —
+found at exactly **one** call site in the entire owned source tree,
+`src/lib/common/jwt/encode.spl:273`: `var value_str =
+text.from_any(value)`, in a JSON-value-stringification helper inside the
+JWT encoding library — **completely unrelated to web page rendering or
+styling**, pulled into the whole-program JIT closure only transitively.
+**Confirmed (PROVED, exhaustive grep) `from_any` is not implemented
+anywhere as a Rust-side intrinsic/builtin** (`grep -rln from_any
+src/compiler_rust/compiler/src` — zero hits) **and is not defined as a
+`.spl`-side function anywhere either** (`grep -rn "fn from_any"` — zero
+hits). This looks like either a typo/stale call in `jwt/encode.spl` (most
+likely candidate: a `to_string`/`to_text`-style conversion that was
+intended but never landed, or renamed elsewhere without updating this call
+site) or a genuinely never-implemented intrinsic. **Not fixed this
+pass** — guessing at the correct replacement without understanding what
+`text.from_any` was meant to do risks silently changing JWT encoding
+behavior, out of scope and out of time for this pass, and this file is
+unrelated to the web-rendering investigation this whole campaign has been
+chasing.
+
+**Why this reads as "the interpreted lane running slowly" per instruction
+3's comparison:** because it literally is — once this one unresolved symbol
+is hit, JIT **is** the interpreted lane for the rest of this run (the
+fallback is whole-program, not partial). There is no JIT-vs-interpreter
+asymmetry left to compare at this point; the two converge exactly here.
+This also fully explains why the run "hangs" from an impatient outside
+view: it isn't stuck, it is running the same well-known ~4s/node interpreted
+style loop this whole campaign started from, just reached a few minutes
+later than a direct interpreted run would (after paying the JIT compile
+cost for the other four gaps' worth of code, for nothing, since it all gets
+thrown away at the fallback).
+
+**Strategic number NOT captured this pass:** gap 5 blocks JIT from ever
+reaching the style loop with JIT'd code — there is no JIT-vs-interpreted
+per-node timing to report yet, because the run in question **is**
+interpreted from the fallback point onward. **The strategic prize remains
+exactly one small, well-identified fix away**: resolve or remove the
+`text.from_any` call in `jwt/encode.spl`, rebuild, and this specific run
+would very plausibly reach real JIT'd styling — recommended as the very
+next, narrowly-scoped step for whoever continues this chase.
+
+**Heuristic-flip question (instruction 5): not evaluated this pass** —
+whether `exec_core.rs`'s source-content heuristic should stop
+force-interpreting this example by default cannot be responsibly assessed
+until JIT actually completes a full run without falling back, which did not
+happen this pass. Flagging the question forward, not proposing an answer
+yet, per instruction.
+
+## Validation performed this fifth follow-up pass
+
+- Gap 5 "hang": RETRACTED. PROVED (via correctly-targeted `/proc` utime
+  sampling on the confirmed-live, non-zombie worker PID, `ps -o stat`
+  showing running state) that the process is genuinely CPU-bound and busy,
+  not blocked, during JIT compilation.
+- Real gap 5 (`text_dot_from_any` unresolved-symbol whole-module fallback):
+  PROVED via the tool's own diagnostic message, and PROVED to originate
+  from a single, unrelated call site (`jwt/encode.spl:273`) via direct
+  source read and exhaustive grep confirming `from_any` is implemented
+  nowhere. Not fixed (unclear intended replacement, out of scope).
+- Strategic per-node JIT timing: NOT captured — gap 5 still blocks reaching
+  real JIT'd execution of the style loop in this run.
