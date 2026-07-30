@@ -1,14 +1,19 @@
 # `native-build` invoked directly against the seed hangs under JIT; `SIMPLE_EXECUTION_MODE=interpret` terminates. Mechanism UNKNOWN — an earlier version of this doc asserted a wrong explanation; see the correction below.
 
-**Status:** open. **Confirmed:** default-mode `native-build`, invoked directly
+**Status:** open, mechanism honestly unresolved after eight tested
+explanations. **Confirmed:** default-mode `native-build`, invoked directly
 against the Rust seed binary, never terminates; `SIMPLE_EXECUTION_MODE=interpret`
 terminates on two independent trees. **NOT confirmed:** why. An earlier
 version of this doc claimed the interpret guard in `run_native_build_worker`
-was bypassed on direct-seed invocation. That claim is **retracted** — see
-"Correction" below — and the mechanism is open again. Filed 2026-07-30,
-during a self-hosted-interpreter string-interpolation fix pass whose own
-`native-build` verification build never completed and triggered this
-separate investigation.
+was bypassed on direct-seed invocation — retracted (see "Correction"). A
+follow-up instrumented run then confirmed the guard DOES fire and its
+env var DOES propagate correctly to the spawned worker (verified via
+`/proc/<pid>/environ` directly), yet the worker still hangs before its own
+`main()` is ever entered — see "Decisive instrumentation run" at the end
+of this doc. The mechanism is open at a layer earlier than either prior
+candidate explanation. Filed 2026-07-30, during a self-hosted-interpreter
+string-interpolation fix pass whose own `native-build` verification build
+never completed and triggered this separate investigation.
 
 See also `doc/08_tracking/bug/native_build_worker_jit_vs_interpret_measurement_2026-07-30.md`
 (sibling finding, same day, independent angle: JIT vs interpret timing on a
@@ -328,3 +333,87 @@ done
 ```
 The busy thread has `wchan=0` and a `utime` that grows in lockstep with
 successive samples' wall-clock gap.
+
+
+## Decisive instrumentation run (2026-07-30) — the mechanism reopens, doesn't close
+
+Per the "decisive next step" above, instrumented a fresh worktree (temporary,
+local, not committed — given the hour, a level-gated permanent trace was not
+worth the extra land/verify cycle for a one-shot diagnostic):
+
+- `run_native_build_worker` (`native_build_main.spl`): a print immediately
+  before the guard (`mode-before={mode}`) and one immediately after
+  (`mode-after-guard={env_get("SIMPLE_EXECUTION_MODE")}`).
+- `native_build_worker.spl`'s `main()`: a print as its literal first
+  statement, before even the `SIMPLE_NATIVE_BUILD_WORKER` check, reading
+  `SIMPLE_EXECUTION_MODE` back.
+
+Ran the exact default-mode reproduction (`SIMPLE_EXECUTION_MODE` unset in
+the shell, direct-seed `native-build` invocation).
+
+**Result — outcome 1 of the three anticipated, the "surprising and
+important" one:**
+
+```
+GUARD-PROBE: run_native_build_worker entered, mode-before=nil
+GUARD-PROBE: mode-after-guard=interpret
+```
+
+Both printed within ~10 seconds, confirming (again, directly) that the
+guard runs and its own `env_get`/`env_set` round-trip believes it succeeded.
+
+The worker subprocess was then confirmed alive (`pgrep`) and its **actual
+OS-level environment was read directly, bypassing the need for the worker's
+own code to run at all**:
+
+```
+$ cat /proc/<worker-pid>/environ | tr '\0' '\n' | grep SIMPLE_EXECUTION_MODE
+SIMPLE_EXECUTION_MODE=interpret
+```
+
+**The environment variable does propagate correctly to the child.** This
+directly refutes explanation 1 from the Correction above ("`env_set`
+doesn't reach the spawned worker") — it does reach it, confirmed at the
+OS level, not inferred.
+
+And yet: **`WORKER-PROBE` — the literal first statement of the worker's
+`main()` — never printed**, across more than 4.5 minutes of the worker
+process showing the exact same signature documented throughout this doc
+(one thread pegged, `wchan=0`, `utime` tracking wall-clock 1:1, per
+`/proc/<pid>/task/*/stat`). The worker hangs before its own `main()` is
+ever entered — before argument parsing, before `cli_native_build`, before
+anything this doc's earlier sections attributed the spin to. This is
+consistent with, and sharpens, the standing "upstream of the closure BFS"
+finding: the spin is not merely upstream of `_native_build_entry_closure`,
+it is upstream of the worker's `main()` entirely — in the seed's own
+loading/compilation of `native_build_worker.spl` and its transitive import
+closure (most of `src/compiler`), which happens automatically before any
+user code in the script runs.
+
+**This reopens the diagnosis rather than closing it, exactly as
+anticipated for this outcome.** The env var is confirmed correct in the
+hanging child's own environment; the mechanism by which execution mode
+still determines hang-vs-terminate is now open at a different, earlier
+layer than either previously-proposed explanation named.
+
+**One unreconciled tension, flagged rather than chased further:** this
+run's child had `SIMPLE_EXECUTION_MODE=interpret` in its own environment
+from spawn and still hung. But the two prior successful terminations
+(the mutated tree at ~5.5 min, the pristine tree at ~13 min, both earlier
+in this doc) were produced by setting `SIMPLE_EXECUTION_MODE=interpret`
+directly in the invoking shell, before starting the *entire* process tree
+— meaning in those runs the **parent** `native-build` process itself also
+ran under interpret, not just the worker child. This run's parent ran
+under default mode (JIT), with only the child's environment corrected via
+the in-process guard. A plausible reconciling hypothesis — **the parent's
+own execution mode matters too, independent of what the child's
+environment says, possibly via a shared cache, lock file, or other
+inherited state rather than the env var itself** — was not tested. That is
+the natural next instrumentation run for whoever continues this, not
+undertaken here per the "no fix, no further chase tonight" instruction.
+
+**Status of the mitigation, restated:** still not safe to apply. The
+env-propagation explanation it was implicitly compatible with is now
+directly refuted. Any fix attempt needs to target the pre-`main()`
+script-loading phase, a layer neither this doc's original mitigation nor
+its two prior candidate explanations addressed.
