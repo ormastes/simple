@@ -176,6 +176,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
             let right = self.parse_comparison()?;
             left = Expr::Binary {
                 op,
@@ -216,6 +217,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.advance();
+            self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
             let right = self.parse_range()?;
 
             comparisons.push(Expr::Binary {

@@ -1369,11 +1369,15 @@ fn test_discover_files_from_entry_excludes_unrelated_source_files() {
     let unrelated_file = project_root.join("src/unrelated.spl");
     let entry_file = examples_dir.join("main.spl");
 
-    std::fs::write(&helper_file, "fn helper() -> i64:\n    return 1\n").unwrap();
+    std::fs::write(
+        &helper_file,
+        "fn helper(value: i64) -> bool:\n    return value ==\n        1 and value >\n        0\n",
+    )
+    .unwrap();
     std::fs::write(&unrelated_file, "fn unrelated() -> i64:\n    return 2\n").unwrap();
     std::fs::write(
         &entry_file,
-        "use app.mcp_t32.helper\nfn main() -> i64:\n    return helper()\n",
+        "use app.mcp_t32.helper\nfn main() -> bool:\n    return helper(1)\n",
     )
     .unwrap();
 

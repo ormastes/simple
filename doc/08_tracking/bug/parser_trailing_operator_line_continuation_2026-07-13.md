@@ -2,10 +2,9 @@
 
 **ID:** parser_trailing_operator_line_continuation_2026-07-13
 **Filed:** 2026-07-13
-**Status:** OPEN — self-hosted dynload recurrence confirmed on 2026-07-23
+**Status:** SOURCE FIXED — refreshed Stage2/RV64 verification pending
 **Severity:** P2 — silently-confusing parse failure on a plausible/idiomatic form
-**Component:** compiler frontend / parser (both the deployed self-hosted `bin/simple`
-and the fresh Rust seed reject the same input)
+**Component:** Rust discovery parser equality/comparison continuation
 
 ## Symptom
 
@@ -66,3 +65,17 @@ are parsed as identifiers. A focused semantic regression and the smallest UFCS
 suppression for Array/Slice `join` are staged. A fresh bootstrap was not run
 because the three-cycle cap had already been reached; Stage 4 remains
 unqualified.
+
+## 2026-07-30 Rust discovery fix
+
+Fresh Stage2 RV64 entry-closure discovery exposed the same missing continuation
+at `window_scene.spl:444:39` and `simple_web_window_renderer.spl:235:73`:
+`Unexpected token: expected expression, found Newline`.
+
+The generated binary-precedence parsers already skip newline/indent after a
+trailing operator. The hand-written Rust `parse_equality` and
+`parse_comparison` paths did not. Both now call the same shared continuation
+helper after consuming their operator. The existing native-project discovery
+test uses multiline `==` and `>` expressions and passes. Closure audit found
+21 affected RV64 equality sites covered by this root fix. Closure requires a
+fresh seed and Stage2 before this bug can close.

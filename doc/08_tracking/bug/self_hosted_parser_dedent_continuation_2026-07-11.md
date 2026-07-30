@@ -7,6 +7,11 @@ corrected (see "Re-diagnosis" below). Regression spec added:
 ("Unexpected token: expected expression, found Dedent"), blocking the redeploy carrying the
 RuntimeDict fix.
 
+The 2026-07-30 RV64 `==`/`>` discovery failure is a separate Rust
+equality/comparison parser omission tracked in
+`parser_trailing_operator_line_continuation_2026-07-13.md`; pure-Simple G27
+remains correct.
+
 ## Re-diagnosis (2026-07-11, later same day)
 
 Both halves of the original claim were re-checked directly against current source and turned
