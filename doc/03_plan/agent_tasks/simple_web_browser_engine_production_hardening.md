@@ -728,3 +728,20 @@ this prerequisite lands.
 The capped history-ledger, primary-close, stale-pressed navigation chrome, and
 hosted-navigation-visible lanes were not retried. Page Draw IR pixels are not
 claimed for the parent-owned textual chrome control.
+
+## Production browser crash-recovery batch 10 (2026-07-30)
+
+| Lane | Root-cause result | Status |
+| --- | --- | --- |
+| `script_resource_bound` | The shared event loop now caps timer and animation-frame queues at 256, including direct callers; draining restores scheduling. | INTEGRATED `d4ffb28dae4`; static review PASS, target execution HELD |
+| `associated_form_controls` | Submission now traverses document order and uses canonical form ownership, so external `form="..."` controls are included and sibling-form controls are excluded. | INTEGRATED `d4ffb28dae4`; modern SSpec/manual present, target execution HELD |
+| `https_ipv6_authority` | All three HTTP URL parsers structurally validate bracketed IPv6, including compression and final embedded IPv4, and browser admission reuses the parser. | INTEGRATED `d4ffb28dae4`; parser/browser truth tables present, target execution HELD |
+| `sandbox_stateful_commit` | A pending document commit now rejects a stateless legacy renderer frame before URL/history mutation and tears down broker state. | INTEGRATED `d4ffb28dae4`; adversarial SSpec/manual present, target execution HELD |
+| `renderer_site_swap_release` | Site swap invalidates the prior frame receipt and clears retained raster/image state before the replacement process becomes ready. | INTEGRATED `d4ffb28dae4`; live-starting replacement discriminator present, target execution HELD |
+| `navigation_home_gate` | Proposed empty-home gate contradicted the canonical `about:blank` session state. | REJECTED; `ca3a3cffa9f` must not merge |
+| `cross_origin_image_credentials` | Proposed unconditional credential omission exceeded the standard image-fetch boundary. | REJECTED; `21f57875664` must not merge |
+
+Recovery used isolated commit trees and one static verification pass. No
+bootstrap, Rust seed, or repeated crashing target command was used. Qualified
+pure-Simple execution/docgen remains blocked by the recorded self-hosted
+interpreter string-interpolation defect.

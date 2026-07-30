@@ -1004,3 +1004,22 @@ snapshot empty, and proves add/remove success against one canonical HTTPS
 document. The page renderer does not own this parent chrome control, so this
 scenario makes no Draw IR or Engine2D pixel claim. Runtime status remains HELD
 until the current source has an admitted pure-Simple build receipt.
+
+## Crash-recovery batch 10 evidence
+
+Commit `d4ffb28dae4` adds executable modern SSpec coverage for:
+
+- `REQ-WEB-BROWSER-017` / `NFR-WEB-BROWSER-006`: bounded timer and animation
+  queues reject overflow and resume after drain;
+- `REQ-WEB-BROWSER-007/008/010/021`: externally associated controls submit in
+  document order while controls owned by another form do not leak;
+- `REQ-WEB-BROWSER-010/011`: valid and invalid bracketed IPv6 authorities share
+  canonical HTTP/parser admission;
+- a forged stateless renderer reply cannot commit a pending document; and
+- prior-site frame, image, and raster-cache state is gone while a real
+  replacement renderer is still starting.
+
+Each scenario has a mirrored manual and a behavioral failure discriminator.
+Static diff/layout/direct-environment guards passed once. Target execution and
+docgen remain HELD; the current pure-Simple interpreter crash is recorded
+separately and neither bootstrap nor the Rust seed is admissible evidence.
