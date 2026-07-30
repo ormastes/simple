@@ -888,3 +888,140 @@ tag-boxing-on-global-read mechanism unified in §9) are fixed: gap 9 itself
 open by design (out of this pass's scope). The two cross-lane-contested
 fixtures (`chained_to_i64_twice`, `list_get_shifted`) remain unresolved
 and untouched — this fix does not bear on that contradiction.
+
+## 12. Gap 8's write-side defect — investigated, NOT fixed: this is a missing feature, not a pipeline gap
+
+**Re-ran gap 8's repro first, on the read-side-fixed binary, per
+instruction, before theorizing.** Still `X=0` under both plain JIT and
+`SIMPLE_JIT_STRICT=1`; interpreter still correctly gives `42`. The
+read-side fix changed nothing about gap 8's presentation — confirming
+gap 8's remaining defect is a genuinely separate, write-side mechanism,
+not a compound symptom the read-side fix would have altered. Established
+today's actual behavior with a real run before building any theory on it,
+exactly the discipline this whole chase has needed repeatedly.
+
+### 12.1 Ruled out: `record_function_init` is for bare function references, not calls
+
+The obvious next place to look, `record_function_init`
+(`module_pass.rs:300-319`, populating `global_init_functions`), turned out
+not to apply: it requires `types.get(ty)` to itself be a `HirType::Function`
+(i.e. the *global's own type* is "function", as in `val handler =
+some_function` assigning a function *reference*) and requires the
+initializer expression to be a bare `Expr::Identifier`/`Expr::Path`. Gap
+8's `val X = get_value()` is a `Expr::Call`, matching neither condition —
+this map and its consumer never see gap 8's case at all. Read before
+building on it, matching the discipline that caught the wrong `@cfg` and
+`Node::Static` premises earlier in this document.
+
+### 12.2 The actual write-side mechanism: there isn't one, for any non-trivial initializer
+
+Traced `generate_module_init` (`codegen/common_backend.rs:2150`), the
+function that emits the actual Cranelift IR for the runtime module-init
+function every JIT compile calls (via `run_module_init_once`, established
+in the §6 gap-9 investigation). Its parameters:
+
+```rust
+fn generate_module_init(
+    &mut self,
+    init_strings: &HashMap<String, String>,
+    init_arrays: &HashMap<String, HirGlobalArrayInit>,
+    init_functions: &HashMap<String, String>,   // bare fn REFERENCES only, §12.1
+    init_structs: &HashMap<String, HirGlobalStructInit>,
+) -> BackendResult<()>
+```
+
+and the set that decides which globals even get visited by it
+(`common_backend.rs:1937-1941`):
+
+```rust
+let mut runtime_init_globals = HashSet::new();
+runtime_init_globals.extend(mir.global_init_strings.keys().cloned());
+runtime_init_globals.extend(mir.global_init_arrays.keys().cloned());
+runtime_init_globals.extend(mir.global_init_functions.keys().cloned());
+runtime_init_globals.extend(mir.global_init_structs.keys().cloned());
+```
+
+There is no fifth category. A module-level global's initializer is
+handled in exactly one of two ways anywhere in this codegen:
+
+1. **Const-evaluable** (`try_const_eval`/`try_const_float_eval`, integer
+   and float literals and simple literal arithmetic): baked directly into
+   the global's static `.data` bytes at `declare_data` time — no runtime
+   code at all, correct and fast.
+2. **String / array / struct-literal / bare-function-reference**: handled
+   by dedicated runtime-init code generated in `generate_module_init`.
+
+**Anything else — any expression requiring genuine runtime evaluation
+that isn't one of those four recognized shapes — has no code path.** The
+global's `.data` slot is declared but never written by any generated
+code, so it silently keeps its zero-initialized default forever. This is
+not specific to function calls: confirmed with a second, independent
+repro using no function call at all —
+
+```simple
+val BASE = 10
+val DERIVED = BASE + 5   # not const-evaluable: try_const_eval doesn't resolve
+                          # a reference to another global, only literal operands
+
+fn main():
+    print("BASE={BASE} DERIVED={DERIVED}")
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple run derived.spl
+BASE=10 DERIVED=15
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run derived.spl
+BASE=10 DERIVED=0
+```
+
+Identical shape to gap 8's own repro: `BASE` (a plain literal) is
+correct; `DERIVED` (an expression that needs runtime evaluation to
+produce a value) silently reads `0`. Per the explicit instruction to
+verify a candidate premise with a second form before escalating: this
+second, function-call-free repro confirms the gap is general — "any
+non-const module-level initializer" — not narrowly about function calls.
+
+### 12.3 Not a JIT-only defect
+
+`generate_module_init` lives in `codegen/common_backend.rs`, shared by
+the Cranelift JIT backend and (per its surrounding code, referenced
+throughout this file for the whole-program native-build path too) the
+AOT/native-build codegen. This is not a "the whole-program pipeline does
+X and `run_file_jit` skips it" pipeline-completeness gap — the shape
+every other gap in this document has been. **It is a genuine missing
+codegen feature, present identically in both compilation modes**: no
+code anywhere lowers a general (non-literal, non-string/array/struct/
+bare-fn-ref) module-level initializer expression into real "evaluate
+this and store the result" runtime code. Whole-program native builds
+were not independently re-tested this pass (out of scope — the
+differential harness's fixtures target `run_file_jit`), but the absence
+of any relevant call to `generate_module_init` with additional
+parameters, and the absence of any other module-init-generating function
+in this codegen file, makes it very unlikely the native build path
+somehow handles this case through a different mechanism this pass missed.
+Flagged as an inference worth a direct native-build check in a future
+pass, not verified here.
+
+### 12.4 Not attempted as a patch — stopped and surfaced, per instruction
+
+**This is a companion to gap 9's open architecture question, not a
+patch.** Implementing correct behavior needs: for a module-level
+initializer that isn't const-evaluable and isn't one of the four
+recognized dynamic shapes, lower the initializer *expression itself* as
+real code inside the generated `__module_init` function body (the same
+general expression-lowering machinery an ordinary function body already
+uses for a local `val`'s initializer — calls, binary ops, arbitrary
+expressions), then emit a `GlobalStore` of the result. That is a new
+codegen capability (teaching `generate_module_init` — or a MIR pass
+feeding it — to walk an arbitrary `HirExpr`/MIR initializer, not just
+recognize four closed-form shapes), not a call-site fix on the order of
+§11's. It is comparable in scope to gap 9's still-open question (§6),
+though structurally unrelated: §6 is about cross-file symbol identity for
+already-correct init values; this is about the module-init generator's
+initializer-shape coverage being fundamentally incomplete, in a single
+compilation unit, for both JIT and native builds alike.
+
+**Disposition:** left open. `module_global_from_fn_call_reads_zero.spl`
+and `module_level_val_from_call.spl` remain in the differential harness
+exactly as before (`known_good: "interpret"`), correctly still failing.
+No source change made this pass for the write side, per instruction.
