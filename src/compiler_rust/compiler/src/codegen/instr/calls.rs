@@ -2542,7 +2542,12 @@ pub fn text_cstr_arg_indices(func_name: &str) -> Option<&'static [usize]> {
     }
 }
 
-fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
+// pub(crate): called cross-module by the llvm-feature-gated backend
+// (codegen/llvm/functions.rs and codegen/llvm/functions/calls.rs); private
+// visibility broke every `--features llvm` seed build with E0603 — the
+// canonical bootstrap seed recipe — while default-feature builds stayed
+// green, so CI-less feature lanes never caught it.
+pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static [usize], &'static [usize])> {
     match func_name {
         "rt_process_run"
         | "rt_process_run_inherit"
