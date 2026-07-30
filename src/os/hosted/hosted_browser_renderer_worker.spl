@@ -35,7 +35,6 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResourceRevision
 }
 use common.ui.access.{WinTextActionRequest}
-use std.common.encoding.utf8.{text_without_last_codepoint}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity_at_element_path, be_dom_find_path_to_id,
     be_dom_focused_id, be_dom_layout_target_key
@@ -55,7 +54,7 @@ use std.gc_async_mut.web.browser_session.{
     browser_bookmark_stored_title
 }
 use std.gc_async_mut.web.browser_session_url.{
-    normalize_network_navigation_url
+    browser_address_backspace, normalize_network_navigation_url
 }
 use std.js.types.pair.{Pair}
 
@@ -570,7 +569,10 @@ pub class HostedBrowserRendererWorkerSession:
         if not action.ok:
             return action.reason
         if self.chrome_focus == "address":
-            val current = if self.browser.address_draft != "":
+            val current = if (
+                self.browser.address_draft != "" or
+                not self.address_replace_on_text
+            ):
                 self.browser.address_draft
             else:
                 self.browser.current_url
@@ -599,14 +601,18 @@ pub class HostedBrowserRendererWorkerSession:
             if action.key_code == 13:
                 return "navigation-command-required"
             elif action.key_code == 8:
-                val current = if self.browser.address_draft != "":
+                val current = if (
+                    self.browser.address_draft != "" or
+                    not self.address_replace_on_text
+                ):
                     self.browser.address_draft
                 else:
                     self.browser.current_url
-                val shortened = if current.len() > 0:
-                    text_without_last_codepoint(current)
-                else:
-                    ""
+                val shortened = match browser_address_backspace(
+                    current, self.address_replace_on_text
+                ):
+                    Err(reason): return reason
+                    Ok(value): value
                 self.address_replace_on_text = false
                 self._chrome_action("address", "set_value", shortened)
             elif action.key_code == 27:

@@ -36,7 +36,9 @@ use std.common.web.browser_renderer_protocol.{
 }
 use common.ui.access.{WinTextActionRequest}
 use common.string_builder.{StringBuilder}
-use std.common.encoding.utf8.{text_without_last_codepoint}
+use std.gc_async_mut.web.browser_session_url.{
+    browser_address_backspace
+}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_browser_http_job_start_public_limited(
@@ -354,6 +356,11 @@ class HostedWebContentSession:
                     self.network_job_fetch_request = Some(prepared.request)
 
     fn address_text() -> text:
+        if (
+            self.chrome_focus == "address" and
+            not self.address_replace_on_text
+        ):
+            return self.browser.address_draft
         if self.browser.address_draft != "":
             return self.browser.address_draft
         if self.browser.pending_url != "":
@@ -696,7 +703,19 @@ class HostedWebContentSession:
                 )
             if keycode == 8:
                 val current = self.address_text()
-                val shortened = text_without_last_codepoint(current)
+                val shortened = match browser_address_backspace(
+                    current, self.address_replace_on_text
+                ):
+                    Err(reason):
+                        return HostedWebContentDispatch(
+                            event_id: event_id,
+                            wm_target_id: self.window_id,
+                            semantic_target_id: "browser:session#address",
+                            callback_count: 0,
+                            mutation_revision: self.mutation_revision,
+                            reason: reason
+                        )
+                    Ok(value): value
                 self.address_replace_on_text = false
                 return self._chrome_action(
                     event_id, "address", "set_value", shortened
