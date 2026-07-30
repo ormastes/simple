@@ -1,0 +1,134 @@
+# JIT-vs-interpreter differential harness.
+#
+# `bin/simple test` can NEVER exercise the Cranelift JIT lane: the runner
+# unconditionally overwrites SIMPLE_EXECUTION_MODE to "interpret" before
+# every child spec run (src/lib/nogc_sync_mut/test_runner/
+# test_runner_execute.spl:86, test_runner_single.spl:168) -- so no exported
+# env var, however set, can route the suite through cranelift. JIT is also
+# the DEFAULT engine for plain `simple run`. That combination means the
+# whole spec suite is structurally blind to JIT-only defects -- and this
+# session alone found several by hand, all silent-wrong-answer, none
+# crashing, so the suite reports green through every one of them.
+#
+# This script sidesteps the runner entirely: it shells out to `simple run`
+# directly under both engines for a small corpus of known repro programs
+# and diffs the outputs against a pinned ground-truth value AND against
+# each other. Disagreement between the two engines is itself a signal --
+# both engines have independently been found untrustworthy in different
+# ways this session, so neither serves as ground truth alone; the pinned
+# `expected` value (established by hand from the original bug reports) is
+# what actually decides correctness.
+#
+# See doc/08_tracking/bug/jit_test_suite_blind_spot_2026-07-30.md for the
+# investigation into why the runner forces interpret mode, and why this
+# script -- not a change to the runner -- was chosen as the vehicle.
+#
+# Usage: bin/simple run scripts/check/check_jit_interpreter_differential.spl
+# Optional: SIMPLE_BIN=<path> to target a specific binary.
+# Exit code: number of fixtures whose `known_good` engine(s) failed to
+# match the pinned expected value (0 = every known-good engine is still
+# behaving as documented; known, still-open JIT bugs do NOT count as a
+# failure here -- they are expected to keep failing until fixed).
+
+use std.io.{process_run, env_get}
+
+struct Fixture:
+    name: text
+    path: text
+    expected: text
+    known_good: text
+
+fn fixtures() -> [Fixture]:
+    [
+        Fixture(
+            name: "chained_to_i64_twice",
+            path: "test/fixtures/jit_differential/chained_to_i64_twice.spl",
+            expected: "pw=480 ph=360",
+            known_good: "interpret",
+        ),
+        Fixture(
+            name: "module_level_val_from_call",
+            path: "test/fixtures/jit_differential/module_level_val_from_call.spl",
+            expected: "X=42",
+            known_good: "interpret",
+        ),
+        Fixture(
+            name: "struct_field_compound_assign",
+            path: "test/fixtures/jit_differential/struct_field_compound_assign.spl",
+            expected: "n=7",
+            known_good: "interpret",
+        ),
+        Fixture(
+            name: "list_get_shifted",
+            path: "test/fixtures/jit_differential/list_get_shifted.spl",
+            expected: "idx=5 get=5",
+            known_good: "interpret",
+        ),
+        Fixture(
+            name: "sentinel_basic_arithmetic",
+            path: "test/fixtures/jit_differential/sentinel_basic_arithmetic.spl",
+            expected: "sum=30",
+            known_good: "both",
+        ),
+    ]
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_engine(binary: text, path: text, mode_env: text) -> text:
+    val command = mode_env + " " + binary + " run " + path
+    val (stdout, stderr, _code) = process_run("/bin/sh", ["-c", command])
+    stdout + stderr
+
+fn main() -> i64:
+    val binary = simple_binary()
+    var unexpected_failures = 0
+    var known_bug_count = 0
+    print("JIT-vs-interpreter differential harness -- binary: {binary}")
+    print("")
+    for f in fixtures():
+        val interp_out = run_engine(binary, f.path, "SIMPLE_EXECUTION_MODE=interpret")
+        val jit_out = run_engine(binary, f.path, "SIMPLE_EXECUTION_MODE=jit")
+        val interp_ok = interp_out.contains(f.expected)
+        val jit_ok = jit_out.contains(f.expected)
+        val agree = interp_out == jit_out
+
+        var status = "?"
+        var is_unexpected = false
+        if f.known_good == "both":
+            if interp_ok and jit_ok:
+                status = "OK (both correct)"
+            else:
+                status = "REGRESSION"
+                is_unexpected = true
+        else:
+            # known_good == "interpret": interpreter must still match ground
+            # truth; the JIT side is a KNOWN, still-open bug and is reported
+            # informationally, not counted as a failure -- unless it has been
+            # fixed (jit_ok true), which is good news, printed, not a failure.
+            if interp_ok:
+                if jit_ok:
+                    status = "JIT BUG APPEARS FIXED (re-pin this fixture)"
+                else:
+                    status = "known JIT bug, still present (expected)"
+                    known_bug_count = known_bug_count + 1
+            else:
+                status = "REGRESSION (interpreter itself now wrong)"
+                is_unexpected = true
+
+        if is_unexpected:
+            unexpected_failures = unexpected_failures + 1
+
+        print("[{f.name}] expected={f.expected}")
+        print("  interpret: ok={interp_ok} agree_with_jit={agree}")
+        print("  jit:       ok={jit_ok}")
+        print("  status: {status}")
+        print("")
+
+    print("---")
+    print("known open JIT bugs reproduced: {known_bug_count}")
+    print("unexpected failures (regressions): {unexpected_failures}")
+    unexpected_failures
