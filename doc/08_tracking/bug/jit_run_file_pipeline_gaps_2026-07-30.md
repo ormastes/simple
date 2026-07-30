@@ -1649,3 +1649,76 @@ only; no fix attempted, per the cap.
   commands`'s node/style pairing) using the existing
   `SIMPLE_TRACE_FONT_STYLE` gate, in the same run, and compare against
   index 150's known-correct value from 16.4.
+
+### 16.6 Consumption-site instrumentation landed; hypothesis NOT yet tested (run exceeded budget)
+
+Per the 16.5 handoff, the next step was one instrumented run comparing the
+index/style actually consumed at `paint_layout.spl:1152` against the
+marker's known-correct index 150.
+
+**Instrumentation landed and verified compilable** — a level-gated trace
+(default off) at the *definition* of `_html_draw_ir_style_props`
+(`simple_web_html_layout_renderer_paint_layout.spl`), so it covers **all
+four** call sites (1380, 1544, 1716, 1806) rather than one. It joins the
+existing `SIMPLE_TRACE_FONT_STYLE` family per the log-retention rule and
+prints, for the marker node or any node whose style claims `Bungee`:
+
+```
+draw_ir_style_props_pairing tag=… id=… class=… marker=… font_family=… font_size=… identity=…
+```
+
+`HNode` carries no index field, so the node is identified by `id`/`class`;
+that is sufficient to answer the actual question — whether the **marker
+node** receives a wrong `Style`, or a **different node's** `Style` entry
+(the index/ordering mismatch hypothesis).
+
+Two corrections made while landing it, both worth keeping:
+- the marker is an **`id`** (`id='simple-web-vector-font-evidence'`), not a
+  class — an initial class-based predicate would never have fired;
+- `paint_layout.spl` does **not** import `env_get`; the trace needs
+  `use std.gc_async_mut.io.mod_stub.{env_get}`, the same import
+  `simple_web_html_layout_renderer_core.spl:3` uses.
+
+**Result: the hypothesis is neither confirmed nor refuted.** Two runs were
+made and neither reached the consumption site:
+
+1. first run — killed at the 10-minute harness cap, still in style
+   computation;
+2. second run (detached, 3000 s budget) — **~30 minutes, log frozen at 522
+   lines**, of which 514 are the pre-existing font traces. It never
+   emitted a `draw_ir_style_props_pairing` line.
+
+**The second run's zero hits are NOT evidence of anything**: it was
+launched *before* the `env_get` import was added, so its copy of
+`paint_layout.spl` could not have compiled that trace had it reached it.
+Recorded explicitly so nobody reads "0 pairing lines" as a refutation.
+
+What both runs *did* reproduce, consistent with 16.4: index 150 resolves
+correctly right up to the end of style computation —
+`[font-style-trace] index=150 font_family=Bungee font_size=100 language=en
+text=Simple Web 300 DPI` and `final_font_family=Bungee final_font_size=100`.
+So the correct-computation half of 16.5 is re-confirmed on today's binary.
+
+The blocker is cost, not correctness: this path is the documented 48-min+
+web-module compile class, and the marker's paint phase sits behind it.
+
+**Next owner: one command, no further derivation needed** (from a worktree
+with `find assets/fonts -type f | wc -l` = 57, using a protected binary
+name so `kill_simple_monitor.shs` does not SIGTERM it at 60 s):
+
+```sh
+SIMPLE_TRACE_FONT_STYLE=1 SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+SIMPLE_TIMEOUT_SECONDS=0 \
+  build/tmp/claude_simple run examples/06_io/ui/web_render_file_gui.spl \
+  2>&1 | grep -E 'draw_ir_style_props_pairing|index=150'
+```
+
+If the marker line shows `identity=` Noto Sans SC while `font_family=Bungee`,
+the Style was computed correctly and corrupted after — not an index
+mismatch. If instead the marker line never appears but a *non-marker* node
+prints `font_family=Bungee`, the marker's draw command was paired with
+another node's entry, confirming the index/ordering mismatch and naming the
+filter that reordered it.
+
+**Disposition: web showcase cell stays BLOCKED. Scoreboard: 2 GREEN.** No
+fix attempted; no fifth mask chased.
