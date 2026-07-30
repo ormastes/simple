@@ -2336,3 +2336,12 @@ implementation in progress / target evidence blocked
   its tick wording is stale; review/docgen reached the cycle cap. Resume only
   with an admitted current pure-Simple full CLI, running each focused spec once;
   no seed or bootstrap substitute. Root Codex is merge owner and final reviewer.
+- JS VM animation-retention blocker (2026-07-30): Repeated rAF
+  `body.innerHTML` replacement allocates seven bridge objects per frame and
+  drives fresh-generation property scans to Theta(frames^2); frame 4,682 is
+  rejected by the cumulative 32,768-object cap. Bridge-only deletion is unsafe
+  because detached elements, callbacks, listeners, and closures can escape.
+  The scoped tracing-GC diagnosis/design passed high-capability review, but its
+  SSpec, N/2N performance gate, implementation, and production receipt remain
+  RED/open. Detail:
+  `doc/08_tracking/bug/js_vm_dom_bridge_retention_quadratic_2026-07-30.md`.

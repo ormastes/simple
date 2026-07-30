@@ -146,6 +146,19 @@ and run each focused spec once. Seed and bootstrap output are not substitutes.
 Root Codex is merge owner and final reviewer. This table changes no production
 phase or acceptance-criterion status.
 
+## Open JS animation retention blocker (2026-07-30)
+
+| Surface | Current state | Required evidence | SPipe state |
+| --- | --- | --- | --- |
+| JS rAF body replacement | The minimal 1+2*3 bridge costs 7 objects/replacement: frame 4,681 is accepted at 32,767 retained objects and frame 4,682 is rejected at 32,774; `JsInterpreter.set_object_property` scans monotonically growing fresh-key storage, making the path Theta(frames^2) | Scoped tracing-GC prerequisite; retained detached-element/callback/listener identity; 256-frame live-count plateau at current+explicit roots; N/2N elapsed <=2.2x and report-only RSS receipt until a selected numeric NFR threshold; navigation/close reclaim | RED design only; do not mark REQ-WEB-BROWSER-005, REQ-WEB-BROWSER-006, REQ-WEB-BROWSER-018, NFR-WEB-BROWSER-005, NFR-WEB-BROWSER-006, NFR-WEB-BROWSER-008, or NFR-WEB-BROWSER-014 complete |
+
+Tracked detail: `doc/08_tracking/bug/js_vm_dom_bridge_retention_quadratic_2026-07-30.md`.
+Bridge-generation deletion, ID reuse, counter reset, and per-mutation runtime
+rebuild are unsafe because escaped detached elements, closures, listeners, and
+timers retain JavaScript identity. The diagnosis/design passed high-capability
+review; Root Codex remains merge owner. This is an open blocker, not a
+production claim.
+
 ## False-green repairs
 
 Before reuse, `test/03_system/gui/browser_interaction_spec.spl` must fail when
