@@ -14,7 +14,6 @@ Landed v1 2026-07-29 (ledger:
   WhenPredicate), `registry.spl` (CommandRegistry, EventListenerRegistry,
   LanguageIndex), `host.spl` (activation router, dispatch, lifecycle),
   `runtime.spl` (path containment, permissions, crash containment),
-  `settings.spl` / `menus.spl` / `keybindings.spl` (Wave-2 registries),
   `builtin/` (14 manifest providers + activation hooks).
 - `src/lib/editor/document/` — `model.spl`, `transaction.spl`, `registry.spl`
   (handles, views, autosave, hot exit), `traits.spl` (DocumentCodec /
@@ -76,7 +75,17 @@ Measured 2026-07-30, do not re-derive:
   so `activate_language`/`activate_command` return 0 for them and every builtin
   capability reports `bound`. Laziness holds only for the discovered path.
   Filed: `doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md`.
-- **`settings.spl` / `menus.spl` / `keybindings.spl` have no consumers** outside
-  their own unit specs. Manifest `keybindings` and `themes` decode but nothing
-  binds them; `custom_editors` are declared by three builtins and routed by
-  none. Wire or delete before claiming these as working extension points.
+- **`settings.spl` / `menus.spl` / `keybindings.spl` were DELETED** 2026-07-30 —
+  zero importers, and each duplicated a live stack: settings →
+  `lib/editor/00.common/settings_schema.spl` + `view/settings_view.spl`
+  (consumed by `editor_ctrl_core.spl`, both shells); keybindings →
+  `lib/editor/00.common/keybindings.spl` + `core/keybinding_manager.spl`
+  (consumed by `editor_controller.spl`); menus had **neither** end — there is no
+  `contributes_menus` field, so an extension cannot contribute a menu at all.
+  Do not recreate them; extend the live stacks.
+- `api.spl`'s `ContextKeys` / `WhenPredicate` / `when_eval` were used only by
+  those registries and are now unreferenced — sweep or cover them.
+- Manifest `keybindings` and `themes` decode but nothing binds them;
+  `custom_editors` are declared by three builtins and routed by none. The right
+  fix for keybindings is feeding them to `keybinding_manager_add_override`, not
+  a parallel registry.

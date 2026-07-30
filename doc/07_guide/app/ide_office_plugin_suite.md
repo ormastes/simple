@@ -30,7 +30,7 @@ decode and line/col diagnostics, `CommandRegistry` with typed handlers and
 first-wins conflict policy, lazy activation for disk-discovered extensions
 with once-per-activation hooks,
 Disposable lifecycles, default-deny permissions with canonical path
-containment, and the settings/menus/keybindings registries. Writer, Sheets and
+containment. Writer, Sheets and
 Slides route their toolbar/menu actions through `CommandRegistry` instead of
 literal `match action:` arms; Sheets formula functions and Slides
 layouts/element kinds are extensible registries; Writer saves through a
@@ -40,11 +40,13 @@ capability's real state (`declared → indexed → activatable → bound`).
 
 Caveat measured 2026-07-30: of those registries, only `CommandRegistry`,
 `LanguageIndex` and the event listeners have consumers outside the kernel. The
-`settings.spl` / `menus.spl` / `keybindings.spl` registries are imported by
-their own unit specs and **nothing else** — they exist and pass tests, but no
-app code reads them yet. Likewise the manifest decodes `keybindings` and
-`themes` contributions that no host code binds, and `custom_editors` that the
-Writer/Sheets/Slides builtins declare but the host never routes to.
+kernel's `settings.spl` / `menus.spl` / `keybindings.spl` had zero importers and
+were **deleted** — settings and keybindings duplicated the live
+`lib/editor/00.common/*` stacks the shells already use, and menus had no
+contribution point at all (`ExtensionManifest` has no `contributes_menus`).
+The manifest still decodes `keybindings` and `themes` contributions that no host
+code binds, and `custom_editors` that the Writer/Sheets/Slides builtins declare
+but the host never routes to.
 Authoring guide: `doc/07_guide/app/ide/extension_authoring.md`.
 
 **Not yet** — service tokens exist as a type but scoped DI is not wired

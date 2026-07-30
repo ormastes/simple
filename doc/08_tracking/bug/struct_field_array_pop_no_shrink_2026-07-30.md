@@ -1,10 +1,10 @@
-# `.pop()` on a struct-field array does not shrink the array (Rust debug engine)
+# `.pop()` on a struct-field array does not shrink the array
 
 - **Found:** 2026-07-30, re-verifying `test/01_unit/lib/editor/document_service_spec.spl`
-- **Status:** OPEN (engine defect). Call sites in the extension kernel worked
-  around; the primitive is still wrong.
+- **Status:** OPEN, **root-caused** 2026-07-30. Present on current `main`.
 - **Severity:** silent wrong results. `pop()` returns the correct element, so
   nothing errors — the array just keeps its length.
+- **Root cause:** `src/compiler_rust/compiler/src/interpreter_method/mod.rs:1789-1794`
 
 ## Symptom
 
@@ -27,47 +27,198 @@ fn main():
     val p = plain.pop()              # 3, len 2 -- correct
 ```
 
-## Engine matrix
+## ROOT CAUSE
+
+`interpreter_method/mod.rs:1789`, in `evaluate_method_call_with_self_update`:
+
+```rust
+let updated_self =
+    if MUTATING_METHODS.contains(&method)
+        && std::mem::discriminant(&result) == std::mem::discriminant(&recv_val) {
+        Some(result.clone())
+    } else {
+        None
+    };
+```
+
+The write-back of a mutated receiver is gated on **the method's return value
+having the same `Value` discriminant as the receiver**. That guard was added to
+stop non-mutating same-type methods (`slice`, `filter`, `map`, `trim`) from
+clobbering the receiver — see the comment above the list at mod.rs:1743.
+
+`pop` is the one entry in `MUTATING_METHODS` whose result is **not** the
+receiver: it returns the *popped element*. For `[i64]`, `result` is
+`Value::Int` and `recv_val` is `Value::Array`, the discriminants differ, so
+`updated_self` is `None` and **the mutated array is never written back**.
+
+`push`/`clear`/`remove`/`insert` all return the array itself, discriminants
+match, write-back fires — which is exactly why `push` works and `pop` does not.
+
+### Why a plain local array is unaffected
+
+A bare-identifier receiver never reaches that gate. It is served by the
+dedicated array-mutator fast path in
+`src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs:557`, whose
+mutation kernel `apply_array_mutation_in_place`
+(`patterns.rs:135-148`) special-cases `pop` explicitly:
+
+```rust
+"pop" => Ok(Some(vec.pop().unwrap_or(Value::Nil))),
+```
+
+It mutates the `Vec` in place and returns the element separately, so the two
+concerns are not conflated. Field receivers never get there.
+
+### Both field-receiver routes hit the same gate
+
+- one hop (`b.xs.pop()`) — `interpreter/expr/calls.rs:133-166`, the two-level
+  `FieldAccess` branch. It stashes the field in a `__nested_field_<f>__` temp,
+  calls `evaluate_method_call_with_self_update`, and writes the field back
+  **only if `updated_self` is `Some`** (calls.rs:160).
+- two or more hops (`o.inner.zs.pop()`) — `try_place_receiver_method_call`
+  (`interpreter/expr/calls.rs:31-70`), added by the place model
+  `61bfb659210`. Same call, and `write_place` is likewise guarded by
+  `if let Some(new_self) = updated_self` (calls.rs:86-88).
+
+So a single gate breaks every depth.
+
+## Confirming evidence
+
+Probes run on both a known-good and a known-bad binary. Every result is
+predicted by the discriminant gate:
+
+| probe | receiver | `pop` result type | discriminant match | writes back? | observed |
+|---|---|---|---|---|---|
+| `a.xs.clear()` | field | Array | yes | yes | len 0 — correct on both |
+| `a2.xs.remove(0)` | field | Array | yes | yes | len 1 — correct on both |
+| `b.ys.pop()`, `ys: [[i64]]` | field | **Array** | **yes** | **yes** | len 1 — **correct on both** |
+| `b.xs.pop()`, `xs: [i64]` | field | Int | **no** | **no** | len unchanged |
+| `o.inner.zs.pop()` | 2-hop field | Int | no | no | len unchanged |
+| `plain.pop()` | identifier | Int | n/a (fast path) | yes | correct |
+
+The nested-array row is the decisive one: **`pop` on a field becomes correct the
+moment the popped element happens to be an array**, purely because the
+discriminants then match. That is not a plausible signature for UB or for a
+`debug_assert`; it is the type-discriminant guard and nothing else.
+
+## Engine matrix — CORRECTED
 
 | Binary | built | struct-field `pop()` | local `pop()` |
 |---|---|---|---|
-| `bin/release/x86_64-unknown-linux-gnu/simple` (deployed — a **Rust bootstrap seed**, it prints the seed warning banner) | 07-29 06:00 | correct | correct |
-| `src/compiler_rust/target/release/simple` | 07-30 02:33 | correct | correct |
-| `src/compiler_rust/target/debug/simple` | 07-29 16:42 | **len unchanged** | correct |
+| `bin/release/x86_64-unknown-linux-gnu/simple` (deployed Rust bootstrap seed) | 07-29 06:00 | correct | correct |
+| `src/compiler_rust/target/release/simple` | **07-30 07:47** | **len unchanged** | correct |
+| `src/compiler_rust/target/debug/simple` | 07-29 16:42 | len unchanged | correct |
 
-All rows measured with `SIMPLE_EXECUTION_MODE=interpreter`, so this is not a
-JIT-vs-interpreter split. It is also **not** old-vs-new: the newest build
-(release, 07-30) is correct while the older debug build is wrong. The axis is
-**Rust debug vs Rust release** of the same codebase — which for a behavioral
-difference like this points at UB or a `debug_assert`-gated path rather than an
-ordinary logic bug.
+All rows with `SIMPLE_EXECUTION_MODE=interpreter`.
 
-Earlier revision of this file labelled the deployed binary "self-hosted" and
-framed the split as self-hosted-vs-seed. That was wrong: `bin/simple` is
-currently a Rust seed (`bin/simple --version` emits
-"this Rust-built Simple binary is a bootstrap seed only"), so every row above is
-a Rust build.
+### The "Rust debug vs Rust release" framing was WRONG
+
+The earlier revision of this file recorded `target/release` as built 07-30 02:33
+and **correct**. That binary has since been rebuilt (07-30 07:47) and now
+reproduces the bug. Re-measured on 07-30:
+
+- It is **not** debug-vs-release — the current release build is broken too.
+- It is **not** fixed in the newest source — current `main` is broken. No commit
+  fixes it.
+- It is **not** UB and **not** a `debug_assert`-gated path.
+
+It is an ordinary logic bug in a single `if` condition, present in every build
+from current source. The only correct binary is the stale deployed seed.
+
+### Unconfirmed: why the deployed 07-29 06:00 seed is correct
+
+Not explained. Ruled out:
+
+- It is not a pre-place-model binary — `strings -a … | grep 'interpreter/place.rs'`
+  hits in all three binaries, so all three contain `61bfb659210`.
+- `interpreter_method/mod.rs` and `interpreter_helpers/patterns.rs` have no
+  commit since `dec6bc3738f` (07-29 01:58), *before* that seed was built;
+  `interpreter/expr/calls.rs` and `interpreter/place.rs` none since
+  `61bfb659210` (07-27 22:23). So committed source for the whole path is
+  identical between that seed's build time and now.
+
+Most likely the deployed seed was built from a working tree carrying an
+uncommitted fix that was never landed (or was lost to a WC clobber — see
+`.claude/rules/vcs.md`). **This was not verified** and the deployed binary has no
+embedded build sha (`--version` prints only `Simple Language v1.0.0-beta`).
+Treat the deployed seed's correctness as unexplained, not as a target to bisect.
 
 ## Why it matters more than it looks
 
 `bin/simple test` **spawns the Rust debug binary as its child** (the run log
-prints `child binary: .../target/debug/simple`). So the spec suite exercises the
-broken engine while `bin/simple run` exercises the correct one — a spec can go
-red on correct code, and conversely a real defect in the deployed binary can
-stay green. This is the same class as
-`run_vs_test_harness_divergence_2026-07-28.md`.
+prints `child binary: .../target/debug/simple`), while `bin/simple run` uses the
+deployed seed. So the spec suite exercises an engine that differs from the one
+interactive runs use — a spec can go red on correct code, and a real defect can
+stay green. Same class as `run_vs_test_harness_divergence_2026-07-28.md`.
+
+Note this divergence is *narrower* than it appeared: the two binaries differ
+because one is stale, not because of build profile. Any freshly built binary of
+either profile is broken.
 
 ## Reproduction
 
 ```bash
-SIMPLE_EXECUTION_MODE=interpreter src/compiler_rust/target/debug/simple run <the probe above>
-SIMPLE_EXECUTION_MODE=interpreter src/compiler_rust/target/release/simple run <the probe above>
+D=/tmp/pop_repro && mkdir -p $D
+cat > $D/pop.spl <<'EOF'
+struct Box:
+    xs: [i64]
+
+fn main():
+    var b = Box(xs: [])
+    b.xs.push(7)
+    print("after push len=" + b.xs.len().to_text())
+    val v = b.xs.pop()
+    print("popped=" + v.to_text())
+    print("after pop len=" + b.xs.len().to_text())
+    var plain = [1, 2, 3]
+    val p = plain.pop()
+    print("plain popped=" + p.to_text() + " len=" + plain.len().to_text())
+EOF
+
+for B in bin/release/x86_64-unknown-linux-gnu/simple \
+         src/compiler_rust/target/release/simple \
+         src/compiler_rust/target/debug/simple; do
+  echo "=== $B"
+  SIMPLE_EXECUTION_MODE=interpreter "$B" run $D/pop.spl 2>&1 | grep -E 'len=|popped='
+done
+```
+
+The discriminating probe (nested array pops correctly, scalar does not):
+
+```
+struct A:
+    xs: [i64]
+struct B:
+    ys: [[i64]]
+
+fn main():
+    var a = A(xs: [])
+    a.xs.push(1)
+    a.xs.push(2)
+    a.xs.clear()
+    print("clear len=" + a.xs.len().to_text())        # 0  correct
+    var b = B(ys: [])
+    b.ys.push([9])
+    b.ys.push([8])
+    val e = b.ys.pop()
+    print("nested pop len=" + b.ys.len().to_text())   # 1  correct (!)
+```
+
+Provenance check that refuted the debug-vs-release framing:
+
+```bash
+ls -l --time-style=full-iso bin/release/x86_64-unknown-linux-gnu/simple \
+  src/compiler_rust/target/{release,debug}/simple
+git log -6 --format='%h %ad %s' --date=format:'%m-%d %H:%M' \
+  -- src/compiler_rust/compiler/src/interpreter_method/mod.rs \
+     src/compiler_rust/compiler/src/interpreter_helpers/patterns.rs
+strings -a <binary> | grep -c 'interpreter/place\.rs'
 ```
 
 ## Workaround (in use)
 
-Index-read the last element and slice-reassign the field — correct on both
-engines:
+Index-read the last element and slice-reassign the field — correct on every
+engine, because the field is assigned explicitly rather than via write-back:
 
 ```
 val last_index = handle.undo_stack.len() - 1
@@ -79,8 +230,45 @@ Applied at `src/lib/editor/document/registry.spl` `DocumentRegistry.undo`.
 
 ## Fix direction
 
-Find where the array method receiver is resolved for a field access in the Rust
-runtime's list builtins: `pop` almost certainly mutates a temporary copy of the
-field's array and never stores it back, while `push` does (push works). Same
-shape as the known "class instances in array FIELDS lose mutations" family, so
-check whether one write-back path covers both.
+The discriminant test is a proxy for "did this method mutate the receiver?", and
+it is simply the wrong question for `pop`. The receiver must be returned
+alongside the result rather than inferred from it.
+
+Minimal, targeted fix at `interpreter_method/mod.rs:1789` — special-case the
+methods in `MUTATING_METHODS` whose result is an *element* rather than the
+receiver, and write back the receiver as it stands after dispatch:
+
+```rust
+// Methods that mutate the receiver but return an ELEMENT, so the
+// discriminant proxy below cannot detect them.
+const ELEMENT_RETURNING_MUTATORS: &[&str] =
+    &["pop", "pop_back", "pop_front", "remove_first", "remove_last", "drain"];
+```
+
+...and for those, take the post-dispatch receiver value as `updated_self`.
+
+**Caveat — this requires more than editing the one condition.** The current
+dispatch discards the mutated receiver for these methods: `handle_array_methods`
+(`interpreter_method/collections.rs:73`) computes `vec.pop()` on a borrowed
+slice and returns only the element, so at mod.rs:1789 there is no mutated array
+to write back. The dispatch must be changed to surface both. The clean version
+is to route field receivers through the existing kernel
+`apply_array_mutation_in_place` (`interpreter_helpers/patterns.rs:135`), which
+already returns `(mutated vec, Option<popped elem>)` correctly and is documented
+as "the single mutation kernel shared by BOTH paths" — the field path is
+precisely the caller that does not yet share it. That is the real fix: make the
+field-receiver route reuse the identifier route's kernel instead of the
+discriminant heuristic.
+
+Per repo policy (`.claude/rules/`), prefer fixing this in pure Simple over the
+Rust seed if the pure-Simple interpreter has the same shape; the Rust change
+above is the seed-side equivalent. **Not implemented here** — no rebuild was
+attempted (diagnosis-only lane).
+
+## Related
+
+- `doc/08_tracking/bug/self_hosted_array_pop_segfault_lex_command_2026-07-29.md`
+  — `pop` in the native/codegen lane (`fbb00ce463c` routed bare `pop`/`push`/
+  `append` to the array-mutator builtins). Different lane, same primitive.
+- `doc/08_tracking/bug/run_vs_test_harness_divergence_2026-07-28.md`
+- `doc/08_tracking/bug/module_global_write_lost_on_frame_pop_2026-07-28.md`

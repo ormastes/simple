@@ -100,9 +100,18 @@ Extend a domain instead of forking it:
 | `app/office/sheets/function_registry.spl` | formula functions (`DOUBLE(n)`) |
 | `app/office/slides/layout_registry.spl` | slide layouts + placeholders |
 | `app/office/slides/element_kind_registry.spl` | slide element kinds |
-| `extensions/settings.spl` | settings with defaults + SDN persistence |
-| `extensions/menus.spl` | menu items with `when` predicates |
-| `extensions/keybindings.spl` | chords (last-registered-wins) |
+
+Settings and keybindings do **not** go through the extension kernel. Use the
+live stacks: `lib/editor/00.common/settings_schema.spl` →
+`lib/editor/view/settings_view.spl` for settings, and
+`lib/editor/00.common/keybindings.spl` → `lib/editor/core/keybinding_manager.spl`
+for chords. Kernel-side `settings.spl` / `menus.spl` / `keybindings.spl` were
+deleted 2026-07-30 as unused duplicates of those. There is no menu contribution
+point: `ExtensionManifest` has no `contributes_menus` field.
+
+Manifest `keybindings` are parsed but **not yet applied** — nothing feeds them
+into `keybinding_manager_add_override`, so an extension keybinding does not
+reach the editor. Don't rely on it.
 
 ## 5. Shipping a builtin
 
