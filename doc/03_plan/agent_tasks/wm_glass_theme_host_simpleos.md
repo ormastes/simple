@@ -886,3 +886,19 @@ This is source repair only. Static review cannot promote host pixels, native
 events, timing, RSS, browser rendering, or either QEMU row. Host execution
 still requires one admitted exact-current pure-Simple CLI; QEMU remains owned
 by its delegated plan and is not executed by the merge owner.
+
+### GUI root material projection
+
+The 2026-07-30 GUI audit found that the correct selected snapshot reached
+`UISession`, but the widget producer discarded its material and emitted only
+flat rectangles. The scoped source repair makes
+`common.ui.theme_draw_ir_material` the common WM/GUI material-style owner,
+adds one opaque initializer and one eligible root material request, and removes
+the hardcoded hosted GUI frame seed. Nested controls deliberately remain plain
+semantic rectangles; no private GUI raster path or nested backdrop sample was
+introduced. Focused source contracts cover the root-only request, initializer,
+primitive roots, fallback/backend metadata, and neutral renderer seed.
+
+Independent Sol review accepted the final source diff. Runtime pixels, native
+host events, device receipts, and QEMU parity remain unverified until an
+admitted exact-current pure-Simple CLI is available.

@@ -17,6 +17,11 @@
 use common.ui.layout.{compute_layout, find_rect_index}
 use common.ui.widget.{WidgetNode, WidgetRect}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot, theme_role_color}
+use common.ui.theme_draw_ir_material.{
+    theme_draw_ir_surface_command_color,
+    theme_draw_ir_surface_initializer_color,
+    theme_draw_ir_surface_style
+}
 use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_theme}
 use common.ui.draw_ir.{
     DRAW_IR_BACKEND_CPU,
@@ -24,10 +29,13 @@ use common.ui.draw_ir.{
     DrawIrComposition,
     DrawIrCommand,
     draw_ir_batch_with_source,
+    draw_ir_box_with_style,
     draw_ir_composition,
     draw_ir_embedding_config,
     draw_ir_image_command,
+    draw_ir_no_rect,
     draw_ir_rect,
+    draw_ir_rect_bounds,
     draw_ir_source_gui_ast,
     draw_ir_text,
     draw_ir_text_resolved_font,
@@ -328,6 +336,62 @@ fn _collect_scroll_batches(node: WidgetNode, rects: [WidgetRect], backend: text,
     return result
 
 # =========================================================================
+# Root surface projection
+# =========================================================================
+
+# The scalar walker deliberately remains unchanged.  Only its root panel is
+# upgraded to the package material; nested controls and scroll content keep
+# their historic simple RECT semantics and never sample a backdrop themselves.
+fn _widget_draw_ir_root_is_surface(root: WidgetNode) -> bool:
+    val kind = root.kind_name()
+    not (kind == "button" or kind == "checkbox" or
+        kind == "input" or kind == "textfield" or
+        kind == "progress" or kind == "image" or
+        kind == "text" or kind == "label" or kind == "heading" or
+        kind == "status_chip" or kind == "toast" or kind == "scroll")
+
+fn _widget_draw_ir_root_surface_commands(root: WidgetNode, width: i32, height: i32, backend: text, snapshot: ThemeRenderSnapshot, commands: [DrawIrCommand]) -> [DrawIrCommand]:
+    var out: [DrawIrCommand] = [draw_ir_rect(
+        "{root.id}-surface-initializer", 0, 0, width, height,
+        theme_draw_ir_surface_initializer_color(snapshot)
+    )]
+    var replaced = false
+    val root_is_surface = _widget_draw_ir_root_is_surface(root)
+    val raw_border = snapshot.material.border_width_px
+    for command in commands:
+        if (root_is_surface and not replaced and
+            command.component_id == root.id):
+            val max_inset = if command.width < command.height:
+                command.width / 2
+            else:
+                command.height / 2
+            val inset = if raw_border < 0: 0 elif raw_border > max_inset:
+                max_inset
+            else:
+                raw_border
+            val content_width = command.width - inset * 2
+            val content_height = command.height - inset * 2
+            out.push(draw_ir_box_with_style(
+                root.id, command.x, command.y, command.width, command.height,
+                theme_draw_ir_surface_command_color(
+                    snapshot, true, "body", backend
+                ),
+                draw_ir_rect_bounds(
+                    command.x, command.y, command.width, command.height
+                ),
+                draw_ir_rect_bounds(
+                    command.x + inset, command.y + inset,
+                    content_width, content_height
+                ),
+                draw_ir_no_rect(), draw_ir_no_rect(),
+                theme_draw_ir_surface_style(snapshot, true, "body", backend)
+            ))
+            replaced = true
+        else:
+            out.push(command)
+    out
+
+# =========================================================================
 # Public API
 # =========================================================================
 
@@ -343,6 +407,9 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     val rects = compute_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
     main_cmds = _walk_main(root, rects, main_cmds, theme)
+    main_cmds = _widget_draw_ir_root_surface_commands(
+        root, w, h, backend, snapshot, main_cmds
+    )
     val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
     val source = draw_ir_source_gui_ast(root.id, "widget-tree", "1")
     val main_batch = draw_ir_batch_with_source("widget-main", backend, embedding, main_cmds, source)

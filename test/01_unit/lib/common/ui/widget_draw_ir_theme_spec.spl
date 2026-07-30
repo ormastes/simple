@@ -1,5 +1,5 @@
 use std.spec.*
-use common.ui.builder.{button, panel}
+use common.ui.builder.{button, panel, text_field}
 use common.ui.draw_ir.{DrawIrComposition, DRAW_IR_BACKEND_CPU}
 use common.ui.theme_render_snapshot.{
     ThemeMaterialSemantics,
@@ -9,6 +9,7 @@ use common.ui.theme_render_snapshot.{
 }
 use common.ui.widget.{WidgetNode}
 use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_with_theme}
+use common.ui.theme_draw_ir_material.{theme_draw_ir_surface_command_color, theme_draw_ir_surface_initializer_color}
 use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
 
 fn _theme_snapshot(
@@ -72,6 +73,31 @@ fn _command_text(composition: DrawIrComposition, component_id: text) -> text:
             if command.component_id == component_id:
                 return command.text_value
     ""
+
+fn _command_style(composition: DrawIrComposition, component_id: text, key: text) -> text:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                for prop in command.computed_style:
+                    if prop.key == key:
+                        return prop.value
+    ""
+
+fn _command_style_count(composition: DrawIrComposition, component_id: text) -> i32:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command.computed_style.len()
+    -1
+
+fn _material_request_count(composition: DrawIrComposition) -> i32:
+    var count = 0
+    for batch in composition.batches:
+        for command in batch.commands:
+            for prop in command.computed_style:
+                if prop.key == "wm-material-request":
+                    count = count + 1
+    count
 
 describe "widget Draw IR semantic theme handoff":
 
@@ -140,3 +166,121 @@ describe "widget Draw IR semantic theme handoff":
         expect(_command_color(draw, "unknown-chip")).to_equal(theme_role_color(snapshot, "workbench.panel").rgba)
         expect(_command_color(draw, "info-toast")).to_equal(theme_role_color(snapshot, "semantic.info").rgba)
         expect(_command_text(draw, "info-toast-label")).to_equal("Informational message")
+
+
+    it "carries Aetheric glass material from GUI snapshot into canonical Draw IR":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        var scroll = WidgetNode.new("nested-scroll", "scroll")
+        scroll = scroll.add_child(button("scroll-child", "Inner", "inner"))
+        val root = panel("glass-root", "", [
+            panel("nested-panel", "", [button("glass-button", "Save", "save")]),
+            text_field("glass-input", "theme", "Theme"),
+            scroll
+        ])
+        val draw = widget_tree_to_draw_ir_with_theme(root, 240, 160, DRAW_IR_BACKEND_CPU, snapshot)
+        val initializer = draw.batches[0].commands[0]
+
+        expect(_material_request_count(draw)).to_equal(1)
+        expect(initializer.component_id).to_equal("glass-root-surface-initializer")
+        expect(initializer.x).to_equal(0)
+        expect(initializer.y).to_equal(0)
+        expect(initializer.width).to_equal(240)
+        expect(initializer.height).to_equal(160)
+        expect(initializer.color).to_equal(theme_draw_ir_surface_initializer_color(snapshot))
+        expect(initializer.computed_style.len()).to_equal(0)
+
+        expect(_command_color(draw, "glass-root")).to_equal(
+            theme_draw_ir_surface_command_color(
+                snapshot, true, "body", DRAW_IR_BACKEND_CPU
+            )
+        )
+        expect(_command_style(draw, "glass-root", "wm-theme-id")).to_equal(snapshot.id)
+        expect(_command_style(draw, "glass-root", "wm-theme-family-id")).to_equal(snapshot.family_id)
+        expect(_command_style(draw, "glass-root", "wm-theme-source-manifest-sha256")).to_equal(snapshot.source_manifest_sha256)
+        expect(_command_style(draw, "glass-root", "wm-theme-material-sha256")).to_equal(snapshot.material_sha256)
+        expect(_command_style(draw, "glass-root", "background-color")).to_equal(snapshot.material.window_fill_rgba.to_string())
+        expect(_command_style(draw, "glass-root", "border-radius")).to_equal(snapshot.material.corner_radius_px.to_string())
+        expect(_command_style(draw, "glass-root", "border-top-width")).to_equal(snapshot.material.border_width_px.to_string())
+        expect(_command_style(draw, "glass-root", "border-top-color")).to_equal(snapshot.material.border_rgba.to_string())
+        expect(_command_style(draw, "glass-root", "box-shadow-layer-count")).to_equal(snapshot.material.active_shadows.len().to_string())
+        expect(_command_style(draw, "glass-root", "backdrop-filter-capability")).to_equal("engine2d-cpu-composited-material-v1")
+        expect(_command_style(draw, "glass-root", "backdrop-filter-requested-target")).to_equal("cpu-scalar-glass-v1")
+
+        expect(_command_color(draw, "glass-button")).to_equal(snapshot.accent_rgba)
+        expect(_command_style_count(draw, "glass-button")).to_equal(0)
+        expect(_command_style_count(draw, "glass-input")).to_equal(0)
+        expect(_command_style_count(draw, "glass-input-field")).to_equal(0)
+        expect(_command_style_count(draw, "nested-panel")).to_equal(0)
+        expect(_command_style_count(draw, "scroll-child")).to_equal(0)
+        for batch in draw.batches:
+            for command in batch.commands:
+                if command.component_id == "scroll-child":
+                    expect(command.hit_rect.present).to_equal(false)
+                    expect(command.clip_rect.present).to_equal(false)
+
+
+    it "keeps unsupported GUI backend on explicit opaque solid fallback":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        val root = panel("fallback-root", "", [button("fallback-button", "Save", "save")])
+        val draw = widget_tree_to_draw_ir_with_theme(root, 180, 100, "auto", snapshot)
+
+        expect(_command_color(draw, "fallback-root")).to_equal(
+            theme_draw_ir_surface_command_color(snapshot, true, "body", "auto")
+        )
+        expect(_command_style(draw, "fallback-root", "background-color")).to_equal(
+            theme_draw_ir_surface_command_color(
+                snapshot, true, "body", "auto"
+            ).to_string()
+        )
+        expect(_command_style(draw, "fallback-root", "backdrop-filter-capability")).to_equal("unavailable")
+        expect(_command_style(draw, "fallback-root", "backdrop-filter-requested-target")).to_equal("solid-material")
+        expect(_command_style(draw, "fallback-root", "backdrop-filter-fallback")).to_equal("solid-material")
+        expect(_command_style_count(draw, "fallback-button")).to_equal(0)
+
+    it "maps concrete GUI backends to material policy without claiming a device receipt":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        val root = panel("matrix-root", "", [])
+        for backend in ["cpu", "software", "cpu_simd", "vulkan"]:
+            val draw = widget_tree_to_draw_ir_with_theme(root, 80, 60, backend, snapshot)
+            expect(_command_style(draw, "matrix-root", "backdrop-filter-capability")).to_equal("engine2d-cpu-composited-material-v1")
+            expect(_command_style(draw, "matrix-root", "backdrop-filter-requested-target")).to_equal("cpu-scalar-glass-v1")
+        val metal = widget_tree_to_draw_ir_with_theme(root, 80, 60, "metal", snapshot)
+        expect(_command_style(metal, "matrix-root", "backdrop-filter-capability")).to_equal("engine2d-composited-glass-material-v1")
+        expect(_command_style(metal, "matrix-root", "backdrop-filter-requested-target")).to_equal("metal-device-glass-v1")
+        for backend in ["auto", "gpu", "unknown"]:
+            val draw = widget_tree_to_draw_ir_with_theme(root, 80, 60, backend, snapshot)
+            expect(_command_style(draw, "matrix-root", "backdrop-filter-capability")).to_equal("unavailable")
+            expect(_command_style(draw, "matrix-root", "background-color")).to_equal(
+                theme_draw_ir_surface_command_color(
+                    snapshot, true, "body", backend
+                ).to_string()
+            )
+
+    it "preserves a non-surface root's semantic rectangle":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        val root = button("root-button", "Save", "save")
+        val draw = widget_tree_to_draw_ir_with_theme(
+            root, 120, 48, DRAW_IR_BACKEND_CPU, snapshot
+        )
+
+        expect(_material_request_count(draw)).to_equal(0)
+        expect(draw.batches[0].commands[0].component_id).to_equal(
+            "root-button-surface-initializer"
+        )
+        expect(draw.batches[0].commands[1].component_id).to_equal("root-button")
+        expect(_command_color(draw, "root-button")).to_equal(snapshot.accent_rgba)
+
+    it "initializes a primitive root that has no root-id rectangle":
+        val snapshot = theme_package_render_snapshot("aetheric_dark")
+        val root = WidgetNode.new("root-scroll", "scroll")
+        val draw = widget_tree_to_draw_ir_with_theme(
+            root, 120, 48, DRAW_IR_BACKEND_CPU, snapshot
+        )
+
+        expect(_material_request_count(draw)).to_equal(0)
+        expect(draw.batches[0].commands[0].component_id).to_equal(
+            "root-scroll-surface-initializer"
+        )
+        expect(draw.batches[0].commands[1].component_id).to_equal(
+            "root-scroll-track"
+        )

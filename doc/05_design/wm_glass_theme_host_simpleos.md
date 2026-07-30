@@ -254,6 +254,26 @@ effects: the generated theme package remains authoritative for
 fail-closed metadata. A stable `wm-app-content` id exists for computed-style
 evidence and is not a second theme selector.
 
+### GUI root material projection
+
+`UISession.submit_widget_draw_ir` keeps its recursive widget traversal
+scalar-only. After layout, the GUI producer prepends one opaque full-surface
+initializer and upgrades only an eligible root surface to the shared
+`ThemeRenderSnapshot` material style. The initializer is required even for a
+button, checkbox, image, or scroll root whose emitted primitives do not carry
+the root ID. It seeds a complete GUI content frame without adding a glass
+request. Nested panels, controls, caret, progress, image, and scroll
+primitives retain their existing semantic rectangles; they must not sample a
+backdrop or acquire generic window borders until their component-specific
+policy is designed.
+
+`theme_draw_ir_surface_style` is shared with WM. CPU/software/CPU-SIMD/Vulkan
+request bounded CPU material, Metal requests device material, and AUTO/GPU or
+unknown targets keep the opaque fallback. These are producer requests only;
+runtime receipts remain owned by Engine2D. The content-frame renderer clears
+neutral pixels because the canonical initializer, not a host hardcoded color,
+owns the seed.
+
 ### Simple Web CSS-to-material source implementation
 
 The implementation order is fixed:

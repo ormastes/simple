@@ -337,6 +337,12 @@ ResolvedThemePackage
 - GUI, Web, and WM are semantic producers. They may parse or select theme
   values and emit producer-neutral `DrawIrStyleProp` values, but they do not
   import Engine2D or allocate raster effect material.
+- `common.ui.theme_draw_ir_material` owns the shared snapshot-to-surface
+  Draw-IR vocabulary (identity, fallback, gradient, border, shadow, and
+  backdrop request). WM delegates to that owner; GUI emits exactly one root
+  surface request after an opaque initializer. Nested GUI controls and scroll
+  primitives remain ordinary semantic rectangles until they have their own
+  component-specific material policy.
 - Draw IR is the stable cross-producer contract. Ordered Web shadows use
   `box-shadow-layer-schema=web-box-shadow-layers-v1`, the existing bounded
   `box-shadow-layer-count`, and complete indexed layer fields. Existing four
