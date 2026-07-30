@@ -1181,3 +1181,28 @@ Summary, since it bears directly on how to read §§1-13 above:
   compile --native`; it is not established for `native-build` specifically,
   which instead hard-crashes rather than silently zeroing, for a related
   but distinct initializer shape.
+
+## 15. Re-run of the original web showcase repro — still blocked, and it is this document's own write-side defect
+
+The web showcase repro (`examples/06_io/ui/web_render_file_gui.spl`,
+`web_standards_showcase status=fail reason=blank-or-uniform pixels=0
+nonzero=0 checksum=0`) is the repro that launched this entire chase —
+attributed in turn to gap 7, then gap 8, then gap 9. Re-run after §11's
+fix landed, per instruction, rather than assuming a fix landing means the
+blocker cleared (the exact lesson gap 7→8 already taught this chase
+once). **Still blocked, byte-identical output before and after the fix.**
+Full evidence, binary identity (sha256 for both the deployed-unfixed and
+freshly-built-fixed binaries, confirmed by behavior not just hash),
+environment preconditions (57-file `assets/fonts` worktree, 0-timeout,
+protected binary paths), and an isolated minimal repro pinning the exact
+mechanism: `doc/08_tracking/bug/
+web_showcase_repro_rerun_after_read_side_fix_2026-07-30.md`.
+
+**Not a new gap.** The cell's own `RW`/`RH` resolve through
+`SHOWCASE_DIMS = showcase_resolution_dims()` — a function-call
+initializer, exactly this document's own §12 write-side defect, which
+this pass's read-side fix (§11) was explicitly scoped not to touch. This
+confirms the write-side defect (already proved to affect real AOT
+binaries in §13) is not just a synthetic-fixture concern — it is the
+actual, real-world blocker in the code that motivated the whole
+investigation.
