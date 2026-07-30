@@ -244,14 +244,106 @@ re-enable the `SymbolKind` filter in `field_module_callable` — per the
 existing classification above, that remains blocked on further runtime
 investigation.
 
+## DISC2 update (2026-07-30): ROOT CAUSE NAILED — bare-name collision between `SymbolKind` variants and `parser_types.spl` struct names
+
+Bisected by instrumenting directly inside `SymbolTable.define` in
+`src/compiler/20.hir/hir_types.spl` (temporary `print(rt_enum_discriminant(...))`
+calls, all reverted — file diffs clean against origin after this lane).
+
+**First corrupting hop:** there is no hop — the value is already "corrupt"
+(`rt_enum_discriminant == -1`, real `match`/`case` never fires) at the very
+first point it can be observed: a **freshly-constructed local literal**,
+e.g. `val fresh_local: SymbolKind = SymbolKind.Function` followed
+immediately by `match fresh_local: case SymbolKind.Function: ...`, two
+lines apart, inside `SymbolTable.define` itself — zero Dict round-trips,
+zero struct/class wrapping, zero cross-function or cross-module boundary.
+This falsifies every hypothesis in the previous update's "Fix direction"
+(Dict round-trip, retrieval-time corruption, cross-module boundary): **the
+bug is not about value flow at all.** It is a property of the `SymbolKind`
+*type itself*, in the context of the real program, independent of how/where
+a value of it is constructed or read.
+
+**Mechanism, confirmed by a 6/6 controlled prediction test** (all run
+in-place inside `hir_types.spl:SymbolTable.define`, same function, same
+scope):
+
+`compiler.frontend.parser_types.spl` declares **structs whose bare names
+exactly match 11 of `SymbolKind`'s 15 variant names**: `Module`, `Import`,
+`Function`, `TypeParam`, `Class`, `Struct`, `Enum`, `Field`, `Trait`,
+`TypeAlias`, `Const` (verified via `grep -n '^struct ' parser_types.spl`).
+The 4 non-colliding variants are `Method`, `Variable`, `Parameter`,
+`EnumVariant` (parser_types.spl has `Param`, not `Parameter`, and `Variant`,
+not `EnumVariant` — near-misses, not collisions). `hir_types.spl` and
+`module_lowering.spl` both pull every one of these structs into scope via
+`use compiler.frontend.parser_types.*` (glob import).
+
+Prediction vs. observed result for `SymbolKind` variants, real `match`/`case`
+and `rt_enum_discriminant`, all evaluated in the same function/scope:
+
+| Variant | Colliding struct in parser_types.spl? | Predicted | Observed match `ok` | Observed `disc` |
+|---|---|---|---|---|
+| `Function` | yes (`struct Function`) | FAIL | false | -1 |
+| `Module` | yes (`struct Module`) | FAIL | false | -1 |
+| `TypeParam` | yes (`struct TypeParam`) | FAIL | false | -1 |
+| `Struct` | yes (`struct Struct`) | FAIL | false | -1 |
+| `EnumVariant` | no | WORK | true | 1582233792 |
+| `Method` | no | WORK | true | 2509199419 |
+
+6/6 correct. As an independent cross-check, `ScopeKind` (declared in the
+same file as `SymbolKind`, sharing the variant names `Function`/`Module`/
+`Class` with it) shows the identical failure for `ScopeKind.Function`
+(`ok=false`, `disc=-1`) — the collision is keyed on the bare name, not on
+`SymbolKind` specifically. Two enums that don't share any name with an
+in-scope struct — `Visibility` (`Public`/`Peer`/`Up`/`Internal`/`Package`/
+`Private`, no collision) and an isolated from-scratch 15-variant enum with
+zero other declarations in its file — both discriminant *and* match/case
+work correctly (`disc` is a plausible hash value, not `-1`; match succeeds),
+which is why none of DISC1's negative controls (small isolated files with
+no colliding struct in scope) ever reproduced it.
+
+This is the **same defect family already documented** at
+`hir_lowering/expressions.spl:416-426` ("SEED PATTERN HAZARD ... when a
+variant pattern's name is ALSO a struct name in scope, the seed compiles the
+`case ExprKind.Field(...)` TEST as a struct pattern = ALWAYS TRUE ...
+`rt_enum_discriminant` = `DefaultHasher(variant name)` truncated to u32")
+— but that comment describes the *payload-carrying* variant case, which
+manifests as an **always-true** dead arm. `SymbolKind`'s colliding variants
+are all *bare* (no payload), and the same underlying bare-name collision in
+the seed's (Rust, `compiler_rust`) pattern/discriminant machinery manifests
+here as **always-false** (`-1` is evidently a "name is ambiguous across
+multiple registered declarations" sentinel in the seed's flat, non-type-
+qualified name registry, distinct from a real — if collision-corrupted —
+hash value). Same root registry, two different visible symptoms depending on
+whether the colliding pattern carries a payload.
+
+### Why no fix was applied this lane
+
+A real fix is **not contained**: 11 of `SymbolKind`'s 15 variants collide.
+Renaming `SymbolKind`'s variants, or renaming `parser_types.spl`'s 11
+colliding structs, both have blast radius across dozens of `case
+SymbolKind.X:` / `Function`/`Module`/`Class`/`Struct`/`Enum`/`Field`/
+`Trait`/`TypeAlias`/`TypeParam`/`Const`/`Import` call sites throughout
+`20.hir` and the whole frontend/parser — far beyond a single lane's safe,
+verifiable scope. The alternative (fixing the seed's Rust pattern/
+discriminant codegen to qualify by enclosing enum type instead of a flat
+bare-name registry) is a `compiler_rust` runtime change, excluded by this
+campaign's rule against patching the seed runtime without prior orchestrator
+sign-off even now that the root cause is nailed down.
+
+**Practical implication (unchanged, now precisely justified):** any `case
+SymbolKind.X:` where `X` is one of `Function`, `Field`, `Class`, `Struct`,
+`Enum`, `Trait`, `TypeAlias`, `TypeParam`, `Const`, `Module`, `Import`, in
+any file that has `compiler.frontend.parser_types.*` (or an explicit import
+of the colliding struct name) in scope, is a **dead arm that silently never
+fires**. This is effectively "most `SymbolKind` pattern matches inside
+`20.hir`" — an audit of other `case SymbolKind.` sites for this shape is
+still open work for a future lane. IMP2's `(defining_module, name)`-keyed
+workaround in `field_module_callable`/the `MethodCall` module-call check
+(`expressions.spl`) must stay; it is the only verified-safe way to test
+symbol identity in this code today.
+
 ## Fix direction (next lane)
 
-Root-cause requires instrumenting *inside* the real `HirLowering` call graph
-(e.g. print `rt_enum_discriminant` immediately after
-`self.symbols.define(module_alias, SymbolKind.Module, ...)` at
-`module_lowering.spl:1010`, before any Dict round-trip, to determine whether
-the value is already corrupt at construction or only goes bad on retrieval),
-since no standalone reproduction has isolated it yet. Until fixed, avoid
-`SymbolKind` pattern gates on any symbol pulled from
-`HirLowering.symbols.symbols`, cross-module or not; audit other `case
-SymbolKind.` sites for the same dead-gate shape.
+1. **Audit**: grep `20.hir/**/*.spl` for `case SymbolKind\.(Function|Field|Class|Struct|Enum|Trait|TypeAlias|TypeParam|Const|Module|Import)` and treat every hit as a confirmed-dead arm needing the `(defining_module, name)`-style workaround (or an equivalent non-`.kind`-pattern-match rewrite) until the underlying seed bug is fixed.
+2. **Real fix options** (both out of this lane's scope, need explicit sign-off before attempting): (a) seed `compiler_rust` codegen/pattern-matching fix to qualify bare-name enum-variant/struct resolution by the enclosing type instead of a flat global name table; (b) a coordinated, whole-codebase rename of either `SymbolKind`'s colliding variants or `parser_types.spl`'s colliding structs, verified file-by-file.
+3. Do **not** re-attempt "isolated small repro" experiments for this family — the mechanism requires the colliding struct name to be in the same file/scope as the enum-variant pattern; a repro must deliberately include that colliding declaration (this is why DISC1's negative controls, which never included a same-named struct alongside the enum, came back green).
