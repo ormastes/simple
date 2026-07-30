@@ -33,7 +33,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_reset_form_owner_id,
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
     be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
-    be_dom_input_blocks_implicit_submission, be_dom_next_focus_route_id
+    be_dom_input_blocks_implicit_submission, be_dom_next_focus_route_id,
+    be_dom_default_action_to_id
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build, html_tree_builder_build_with_scripts
@@ -704,6 +705,10 @@ fn _browser_session_focus_default(action: text) -> bool:
         action == "input-checkbox-toggle" or action == "input-radio-select" or
         action == "form-reset"
 
+fn _browser_session_checkable_default(action: text) -> bool:
+    action == "input-checkbox-toggle" or
+        action == "input-radio-select"
+
 fn _browser_session_dom_route_id(root: BeDomNode, target_id: text) -> text:
     val path = be_dom_find_path_to_id(root, target_id)
     if path.len() == 0:
@@ -1357,7 +1362,26 @@ impl BrowserSession:
                 self._sync_runtime_body_from_dom()
                 val _ = self.eval_script(action)
             action_index = action_index + 1
-        if checkable_action != "" and not dispatch.default_action_allowed:
+        if (
+            dispatch.default_action_allowed and
+            normalized_event_type == "click"
+        ):
+            dispatch.default_action = be_dom_default_action_to_id(
+                self.current_dom, dispatch.target_route_id, event_type
+            )
+            dispatch.default_action_allowed = dispatch.default_action != ""
+        val live_checkable_action = if (
+            dispatch.default_action_allowed and
+            _browser_session_checkable_default(dispatch.default_action)
+        ):
+            dispatch.default_action
+        else:
+            ""
+        val preactivation_matches_live = (
+            checkable_action != "" and
+            checkable_action == live_checkable_action
+        )
+        if checkable_action != "" and not preactivation_matches_live:
             val restore_action = if checked_before:
                 "set-attr:checked:checked"
             else:
@@ -1397,12 +1421,17 @@ impl BrowserSession:
                 if val Err(e) = started:
                     self._append_warning("default navigation blocked: {e}")
                 return dispatch
-            if checkable_action == "":
+            if live_checkable_action == "":
                 self.current_dom = script_host_apply_action_to_id(
                     self.current_dom, dispatch.target_route_id,
                     dispatch.default_action, true
                 )
             else:
+                if not preactivation_matches_live:
+                    self.current_dom = script_host_apply_action_to_id(
+                        self.current_dom, dispatch.target_route_id,
+                        live_checkable_action, true
+                    )
                 self._sync_body_html_from_dom()
                 val _ = self.dispatch_dom_event(
                     dispatch.target_route_id, "input", true, false
