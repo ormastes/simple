@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 15 | 15 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -321,6 +321,61 @@ expect(session.current_url).to_equal("https://example.com/start")
 val submit = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#address", action: "submit", text_value: "", x: 0, y: 0))
 expect(submit.ok).to_equal(true)
 expect(session.current_url).to_equal("https://example.com/target")
+```
+
+</details>
+
+#### publishes address edits through a newer UI snapshot revision
+
+**Requirements exercised:** REQ-WEB-BROWSER-007, REQ-WEB-BROWSER-008,
+REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-021.
+
+- Capture the address snapshot before editing
+- Edit the address without starting navigation
+   - Expected: edit succeeds, the snapshot revision increases, the visible
+     address is found by canonical query, and the committed URL remains
+     unchanged.
+- Keep the published revision stable for unchanged or invalid text
+   - Expected: setting the same address and rejected control text do not
+     change the revision.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Capture the address snapshot before editing")
+var session = BrowserSession.new()
+session.open_html("https://example.com/start", "<html><body>Start</body></html>")
+val before = session.ui_access_snapshot()
+
+step("Edit the address without starting navigation")
+val edited = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#address", action: "set_value",
+    text_value: "https://example.com/target", x: 0, y: 0
+))
+val after = session.ui_access_snapshot()
+expect(edited.ok).to_equal(true)
+expect(after.snapshot_revision).to_be_greater_than(before.snapshot_revision)
+val addresses = ui_access_find_nodes(
+    after, "browser:session", "textfield", "https://example.com/target", 1
+)
+expect(addresses.len()).to_equal(1)
+expect(addresses[0].canonical_id).to_equal("browser:session#address")
+expect(session.current_url).to_equal("https://example.com/start")
+
+step("Keep the published revision stable for unchanged or invalid text")
+val unchanged = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#address", action: "set_value",
+    text_value: "https://example.com/target", x: 0, y: 0
+))
+expect(unchanged.ok).to_equal(true)
+expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_revision)
+val rejected = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#address", action: "set_value",
+    text_value: "https://example.com/\nblocked", x: 0, y: 0
+))
+expect(rejected.code).to_equal("address-invalid-control")
+expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_revision)
 ```
 
 </details>
@@ -1322,8 +1377,8 @@ expect(textarea_focused).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 14 |
-| Active scenarios | 14 |
+| Total scenarios | 15 |
+| Active scenarios | 15 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

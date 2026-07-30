@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 55 | 55 | 0 | 0 |
+| 57 | 57 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2574,6 +2574,47 @@ expect(broker.network.cookie_store.get_header_for_origin(
     old_origin, "/next", Some(old_origin), "GET", false,
     rt_time_now_unix_micros() / 1000000
 ).contains("fresh=yes")).to_be(false)
+```
+
+</details>
+
+#### partitions script cookies by the active broker document not a stale request
+
+- Seed the broker transport with hostile requester `https://stale.test`.
+- Write a `Secure; SameSite=None; Partitioned` script cookie from
+  `https://app.test/page`.
+- Expected: the cookie is visible only through `cookie_partition_key(app)`;
+  the stale partition remains empty.
+
+Docgen: pending — reviewed manual mirror because this isolated worktree has no
+deployed self-hosted runtime.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.document_url = "https://app.test/page"
+broker.document_origin = "https://app.test"
+broker.network.set_requester_origin("https://stale.test")
+
+expect(broker._apply_script_cookie_writes([
+    "part=active; Secure; SameSite=None; Partitioned; Path=/"
+])).to_equal(true)
+val app = Origin(scheme: "https", host: "app.test", port: 443)
+val stale = Origin(scheme: "https", host: "stale.test", port: 443)
+val now = rt_time_now_unix_micros() / 1000000
+expect(broker.network.cookie_store.get_header_for_origin(
+    app, "/", Some(app), "GET", false, now,
+    cookie_partition_key(app)
+)).to_equal("part=active")
+expect(broker.network.cookie_store.get_header_for_origin(
+    app, "/", Some(stale), "GET", false, now,
+    cookie_partition_key(stale)
+)).to_equal("")
 ```
 
 </details>

@@ -50,6 +50,9 @@ use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{
     BrowserLogLevel, Logger
 }
+use std.gc_async_mut.gpu.browser_engine.security.cookie_policy.{
+    cookie_partition_key
+}
 use std.gc_async_mut.web.browser_session.{
     BrowserHstsSnapshot, BrowserHstsSnapshotEntry,
     BrowserRequest, BrowserResponse, BrowserSession
@@ -2056,6 +2059,32 @@ describe "hosted browser renderer broker policy":
             old_origin, "/next", Some(old_origin), "GET", false,
             rt_time_now_unix_micros() / 1000000
         ).contains("fresh=yes")).to_be(false)
+
+    # @req REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-014
+    it "partitions script cookies by the active broker document not a stale request":
+        step("Leave a hostile prior requester origin in the broker transport")
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.document_url = "https://app.test/page"
+        broker.document_origin = "https://app.test"
+        broker.network.set_requester_origin("https://stale.test")
+
+        step("Store a Partitioned script cookie through the active document")
+        expect(broker._apply_script_cookie_writes([
+            "part=active; Secure; SameSite=None; Partitioned; Path=/"
+        ])).to_equal(true)
+        val app = Origin(scheme: "https", host: "app.test", port: 443)
+        val stale = Origin(scheme: "https", host: "stale.test", port: 443)
+        val now = rt_time_now_unix_micros() / 1000000
+
+        step("Expose it only under the active document partition")
+        expect(broker.network.cookie_store.get_header_for_origin(
+            app, "/", Some(app), "GET", false, now,
+            cookie_partition_key(app)
+        )).to_equal("part=active")
+        expect(broker.network.cookie_store.get_header_for_origin(
+            app, "/", Some(stale), "GET", false, now,
+            cookie_partition_key(stale)
+        )).to_equal("")
 
     it "validates renderer initiators before cookie writes or fetch":
         var broker = HostedBrowserRendererProcess.create(1, 640, 480)

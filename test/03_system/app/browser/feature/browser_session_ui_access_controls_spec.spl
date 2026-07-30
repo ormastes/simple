@@ -289,6 +289,49 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(submit.ok).to_equal(true)
         expect(session.current_url).to_equal("https://example.com/target")
 
+    # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
+    it "publishes address edits through a newer UI snapshot revision":
+        step("Capture the address snapshot before editing")
+        var session = BrowserSession.new()
+        session.open_html("https://example.com/start", "<html><body>Start</body></html>")
+        val before = session.ui_access_snapshot()
+
+        step("Edit the address without starting navigation")
+        val edited = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#address", action: "set_value",
+            text_value: "https://example.com/target", x: 0, y: 0
+        ))
+        val after = session.ui_access_snapshot()
+        expect(edited.ok).to_equal(true)
+        expect(after.snapshot_revision).to_be_greater_than(
+            before.snapshot_revision
+        )
+        val addresses = ui_access_find_nodes(
+            after, "browser:session", "textfield",
+            "https://example.com/target", 1
+        )
+        expect(addresses.len()).to_equal(1)
+        expect(addresses[0].canonical_id).to_equal("browser:session#address")
+        expect(session.current_url).to_equal("https://example.com/start")
+
+        step("Keep the published revision stable for unchanged or invalid text")
+        val unchanged = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#address", action: "set_value",
+            text_value: "https://example.com/target", x: 0, y: 0
+        ))
+        expect(unchanged.ok).to_equal(true)
+        expect(session.ui_access_snapshot().snapshot_revision).to_equal(
+            after.snapshot_revision
+        )
+        val rejected = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#address", action: "set_value",
+            text_value: "https://example.com/\nblocked", x: 0, y: 0
+        ))
+        expect(rejected.code).to_equal("address-invalid-control")
+        expect(session.ui_access_snapshot().snapshot_revision).to_equal(
+            after.snapshot_revision
+        )
+
     it "bounds UTF-8 address input without partial state or pixel mutation":
         """The address trust boundary checks raw UTF-8 bytes and controls before mutation."""
         # @step: Accept exactly 2048 UTF-8 bytes and project the draft accessibly
