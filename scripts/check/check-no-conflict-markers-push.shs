@@ -1,0 +1,114 @@
+#!/bin/sh
+# Refuse to push literal conflict markers left in file CONTENT.
+#
+# scripts/check/check-no-conflict-tree-push.shs already blocks jj CONFLICT
+# TREES (a commit whose git tree is only .jjconflict-base-0/.jjconflict-side-N/
+# entries, real content absent). This script closes a different gap: a `jj
+# rebase` can also inject literal conflict-marker TEXT into otherwise-normal
+# file content, without the commit being tree-conflicted.
+#
+# This happened on 2026-07-30: a peer's rebase wrote conflict markers into the
+# content of 38 tracked files, including the Rust seed file
+# src/compiler_rust/runtime/src/value/mod.rs (inside a `pub use {...}` list),
+# breaking every seed build with "unknown start of token" / "encountered diff
+# marker". Two of the 38 were .spl files under src/compiler/. Had any of these
+# been pushed, literal "<<<<<<< conflict" text would have landed on `main`.
+# The tree-conflict guard would not have caught this — the trees were fine,
+# only the content was corrupted.
+#
+# jj and git use different marker vocabularies; both are detected:
+#   jj:  <<<<<<< conflict 1 of 2 / %%%%%%% diff from: ... / \\\\\\\ to: ... /
+#        +++++++ <rev> (rebased revision) / >>>>>>> conflict 1 of 2 ends
+#   git: <<<<<<< HEAD / ======= / >>>>>>> <branch>
+#
+# False-positive handling: legitimate files (this repo's own vcs.md, jj's
+# vendored docs under src/compiler_rust/vendor/, bug reports describing THIS
+# incident) may mention marker syntax in prose without containing a real
+# conflict block. To avoid flagging those, a file is only flagged when it
+# contains a MATCHING PAIR — both an open marker line (^<<<<<<< ) and a close
+# marker line (^>>>>>>> ) — which prose mentions essentially never produce.
+# Verified clean against .claude/rules/vcs.md and doc/**/*.md at the time this
+# guard was added (git grep -lE '<<<<<<< conflict|<<<<<<< HEAD' -- doc/ .claude/
+# found nothing). If a genuine false positive ever shows up, add its path to
+# ALLOWLIST below rather than weakening the pair requirement.
+#
+# Only the OUTGOING RANGE is scanned (files actually changed by commits being
+# pushed) — never the whole working copy, which legitimately holds thousands
+# of stale modified files from parallel sessions and would make this guard
+# fire constantly.
+#
+# Usage: check-no-conflict-markers-push.shs [rev-range]
+#   default range: main@origin..@-   (what a `jj git push --bookmark main` sends)
+# Exit 0 = safe to push, 1 = markers found, 2 = could not determine.
+
+set -u
+
+range="${1:-}"
+
+# Paths to skip entirely even if they somehow contain a matching pair (e.g. a
+# deliberate test fixture). Empty by default — add "path/to/file" lines only
+# with a comment explaining why it is legitimately allowed to contain markers.
+ALLOWLIST=""
+
+if [ -z "$range" ]; then
+    base=$(jj --ignore-working-copy log -r 'main@origin' --no-graph -T 'commit_id' 2>/dev/null)
+    tip=$(jj --ignore-working-copy log -r '@-' --no-graph -T 'commit_id' 2>/dev/null)
+    if [ -z "$base" ] || [ -z "$tip" ]; then
+        echo "check-no-conflict-markers-push: cannot resolve main@origin..@- via jj" >&2
+        exit 2
+    fi
+    range="$base..$tip"
+fi
+
+revs=$(git rev-list "$range" 2>/dev/null)
+if [ -z "$revs" ]; then
+    echo "check-no-conflict-markers-push: nothing to push in $range"
+    exit 0
+fi
+
+is_allowlisted() {
+    path="$1"
+    for entry in $ALLOWLIST; do
+        [ "$entry" = "$path" ] && return 0
+    done
+    return 1
+}
+
+found=0
+# Collect every path touched anywhere in the range, then check each one's
+# content at the range tip (the state that actually gets pushed).
+changed_paths=$(git diff --name-only "$range" -- 2>/dev/null | sort -u)
+tip=$(echo "$revs" | head -1)
+
+for f in $changed_paths; do
+    is_allowlisted "$f" && continue
+    content=$(git show "$tip:$f" 2>/dev/null) || continue
+    open_lines=$(printf '%s\n' "$content" | grep -n '^<<<<<<< ')
+    close_lines=$(printf '%s\n' "$content" | grep -n '^>>>>>>> ')
+    if [ -n "$open_lines" ] && [ -n "$close_lines" ]; then
+        echo "CONFLICT MARKERS: $f" >&2
+        printf '%s\n' "$open_lines" | while IFS=: read -r ln _; do
+            echo "  open  line $ln" >&2
+        done
+        printf '%s\n' "$close_lines" | while IFS=: read -r ln _; do
+            echo "  close line $ln" >&2
+        done
+        found=1
+    fi
+done
+
+if [ "$found" -ne 0 ]; then
+    cat >&2 <<'EOF'
+
+DO NOT PUSH. The files above contain literal conflict-marker text from an
+unresolved (or badly resolved) jj rebase. Resolve the conflict properly —
+do not just delete the marker lines, verify the surrounding code is correct —
+then re-check:
+  jj resolve --list
+  jj log -r 'roots(conflicts())'    # resolve the ROOT, descendants auto-rebase
+EOF
+    exit 1
+fi
+
+echo "check-no-conflict-markers-push: OK — no conflict markers in $range"
+exit 0
