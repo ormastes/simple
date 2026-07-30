@@ -520,3 +520,202 @@ pre-existing fixtures were re-verified unaffected by this pass's edits
 (only fixture/doc/comment changes were made — no source code was touched).
 Reverse-control non-vacuity re-confirmed after every edit in this pass
 (corrupt sentinel → exit 1; restore → exit 0).
+
+## 9. Unification: gaps 8, 9, and 10 are ONE defect, bit-exact confirmation
+
+**Result: full unification, not partial.** Per instruction, checked whether
+the wrong value in each gap's original repro is arithmetically consistent
+with an untagged (raw) read of the correct value misinterpreted through the
+runtime's tagged-`RuntimeValue` dispatch — and whether the same theory
+explains every case that *passed* in the earlier investigations, not just
+the failures. It does, for all three, including gap 8 — the one flagged as
+least likely to reduce.
+
+### 9.1 The tag scheme, reconstructed empirically from five independent raw values
+
+A properly boxed `RuntimeValue`'s low 3 bits are a type tag; a correctly
+tagged small int is `(n << 3) | 0`. A **module-level global's raw,
+never-boxed value** has whatever low 3 bits its own bit pattern happens to
+have — and print/format code that assumes every value it receives is
+properly tagged decodes those bits as if they *were* a tag, giving a
+result that depends entirely on the raw value's low 3 bits:
+
+| Raw value | Low 3 bits | Tag read as | Observed output | Consistent? |
+|---|---|---|---|---|
+| `64` (gap 10) | `000` | INT — unbox via `>>3` | `8` (`64>>3`) | Yes — exact arithmetic match |
+| `100` (gap 10 / §7.3) | `100` | unrecognized — raw dump | `<value:0x64>` (0x64 = 100) | Yes — exact hex match |
+| `99` (gap 9, `val`) | `011` | SPECIAL — payload `>>3` | `<special:12>` (`99>>3=12`) | Yes — exact arithmetic match |
+| `77` (gap 9, `var`) | `101` | unrecognized — raw dump | `<value:0x4d>` (0x4d = 77) | Yes — exact hex match |
+| `42` (literal control, this pass) | `010` | FLOAT — reinterpret bits as f64 | denormalized near-zero float, huge leading-zero string | Yes — matches the "raw int bits reinterpreted as float64" prediction; this is a NEW confirmation, not previously catalogued as its own gap, and is the same defect, not a sixth one |
+| `9` (this pass, direct probe) | `001` | HEAP pointer — dereference `raw>>3` as an address | `<invalid-heap:0x9>` — **the runtime's own diagnostic message confirms the tag reconstruction directly**, not just consistency with it | Yes — definitional |
+
+Five independently-chosen raw values (64, 100, 99, 77, 42) plus one
+diagnostic probe (9) all land exactly where the reconstructed tag table
+predicts, with no free parameters left to explain any of them after the
+first two fixed the INT and SPECIAL tags. This is the "arithmetic works
+out" bar the instruction asked for, met for every case, not just the
+convenient ones.
+
+### 9.2 Gap 8 reduces too — the piece assumed hardest fits once decomposed correctly
+
+Gap 8's repro (`val X = get_value()`, `get_value()` returns `42`) prints
+`X=0` and, initially, looked like it broke the pattern: `0` is not an
+"arithmetic transform of `42`" under the tag table above (`42`'s own tag
+is FLOAT, not INT, so a correctly-stored `42` would print as a garbled
+float, matching §9.1's new confirmation — not `0`). The resolution is that
+**the stored raw value is not 42 at all** — gap 8's write side (a
+function-call initializer) never runs, so the slot holds its default
+zeroed memory, raw `0`. That `0` is a *second*, independent instance of the
+*same* read-side defect, not a special case:
+
+- `print("X={X}")` / `print(X)`: raw `0`, tag `000` (INT), unbox `0>>3=0`
+  → **`0`**. Matches.
+- `X == 0`: true (raw-bit equality, unaffected by tag confusion since `0`
+  is a fixed point either way). Matches — this is why the "is it truly
+  zero" check doesn't itself distinguish the two hypotheses; it needed the
+  next test.
+- `X == nil`: **false** — ruled out the competing hypothesis that the slot
+  holds the nil sentinel (raw `3`) rather than genuine `0`.
+- `X * 2`: `0` — consistent with raw arithmetic on a true `0`.
+- `val y = X + 1; print(y)`: **`nil`**, not `1`. This is the result that
+  looked hardest to explain, and is what confirmed the raw-`0` hypothesis
+  precisely: arithmetic on `X` itself is not tag-confused (`0 + 1` computes
+  the correct raw `1`), but the **result** `y` is *also* an unboxed raw
+  value with no tag applied before it flows into `print`. `1`'s low 3 bits
+  are `001` — the HEAP-pointer tag, per §9.1's table. `1 >> 3 = 0`, a null
+  address. The formatter's null-heap-pointer case resolves to `nil` rather
+  than crashing or reporting `<invalid-heap:0x0>` — exactly the observed
+  output.
+
+Every one of gap 8's four independently-checked behaviors (`print`,
+`==0`, `==nil`, `X+1` then `print`) is explained by exactly the same
+read-side tag-dispatch-on-raw-bits mechanism as gaps 9 and 10, applied to
+`0` instead of `42`, `64`, `99`, `77`, or `100`. No separate read-side
+mechanism is needed for gap 8.
+
+### 9.3 What does NOT unify: gap 8 has an extra, distinct write-side defect
+
+Gap 8 is not *purely* the same bug as 9 and 10. There is a second,
+independent defect specific to gap 8: the function-call initializer for a
+module-level global apparently never executes (or its result never
+reaches the global's storage slot), leaving the slot at its default `0`
+rather than the computed `42`. This write-side defect is **not** present
+in gaps 9 or 10 — both of those had the *correct* value sitting in the
+global's slot (confirmed: `HELPER_Y`'s slot genuinely holds `99`, since a
+function call that reads it via a proper return, `get_helper_y()`, reports
+`99` correctly; `PLATFORM_ID`/`X`'s literal-initialized slots equally hold
+their true literal values, per §9.1's exact arithmetic matches). Gap 8
+therefore has **two** defects layered together: (a) the universal
+read-side tag-dispatch-on-raw-global-value defect shared with 9 and 10,
+and (b) a distinct, gap-8-only write-side defect where a function-call
+initializer's result never lands in the slot at all.
+
+This second point was not independently traced to a codegen line this
+pass (that would start to be fix work, out of scope here) — it is
+established only by exclusion (the raw value present is definitively `0`,
+not `42`, and not the nil sentinel `3`), which is sufficient to establish
+that a write-side failure exists without characterizing its mechanism.
+
+### 9.4 The "passing" cases also unify — function-call *return* boundaries re-box
+
+The instruction asked whether the same theory explains what worked, not
+just what failed. It does, consistently:
+
+- Gap 9's `get_helper_y()` (a function returning the global's value)
+  prints correctly. A local, non-global `val`/`var` also always prints
+  correctly (used throughout this session's other fixtures without
+  incident). Both cross a **function call boundary or a fresh
+  local-value-construction path** before reaching print — and both are
+  observed correct. The unifying claim is: JIT-compiled function
+  **returns**, and freshly-computed **local** values, get properly
+  tag-boxed as part of their own codegen; a **direct module-level global
+  load** does not, and nothing re-boxes it afterward, no matter how many
+  local variables or arithmetic operations it subsequently passes through
+  (§7.3's `val y = X; print(y)` control: still wrong, because copying to a
+  local does not itself insert a box step — only a function's return
+  convention, or presumably genuinely fresh local computation, does).
+- Gap 8's own local-`val`-with-a-function-call-initializer case working
+  correctly (from the original memory note) is consistent with this too:
+  a **local** variable initialized by a function call receives the
+  function's properly-boxed return value directly, with no module-global
+  storage in between to strip the tag.
+
+### 9.5 One remaining discrepancy worth recording plainly
+
+Gap 8's own original memory note states "a module-level `val` initialized
+by a **literal** → correct." §7.3 and §9.1 directly contradict this for
+the general case: a module-level literal-initialized global
+(`val X = 100`, `val X = 42`, `val X = 64` — none function-call
+initializers) reads **wrong** under JIT when printed directly, for every
+value tested this pass. The most likely reconciliation: gap 8's original
+"literal is correct" check used a value whose raw bits coincidentally
+survive the read-side misinterpretation unchanged or unnoticed (e.g. a
+literal `0`, where `0 >> 3 = 0` is a fixed point and the wrong-mechanism
+output happens to equal the right answer), or checked a different
+consumption shape than a direct `print` in `main`. This is not resolved
+here — it is exactly the kind of thing a coincidentally-passing control
+can hide, and is flagged rather than assumed away.
+
+## 10. Consequences for the bug tracker, memory notes, and the harness
+
+**One defect, several presentations — not three independent bugs.** The
+canonical description going forward: *a module-level `val`/`var` global's
+value, once loaded from its storage slot, is never converted into a
+tag-boxed `RuntimeValue` before flowing into a consumer that expects one
+(print/format, and any further computation whose result is itself printed
+without crossing a function-return or fresh-local-construction boundary).
+The specific wrong output is fully determined by the raw value's low 3
+bits against the runtime's own type-tag encoding (§9.1's table). Gap 8
+additionally has a second, independent, write-side defect (function-call
+initializers for module-level globals don't store their result), which
+determines that gap 8's raw starting value is `0` rather than the intended
+result — after which the same universal read-side defect applies.*
+
+- `doc/08_tracking/bug/jit_drawirrendertarget_moduleresolver_gap_2026-07-30.md`
+  (gap 8's original filing, not owned by this doc/pass) should be
+  cross-referenced from here rather than restated; its "literal is
+  correct" claim should be re-checked against §9.5 before being relied on
+  again.
+- Memory notes `reference_jit_module_level_val_from_function_call_reads_zero.md`
+  (gap 8), `reference_jit_module_level_val_from_function_call_reads_zero`'s
+  sibling for gap 9 (cross-module framing), and any note describing gap 10
+  should be updated to point at this section as the unified explanation,
+  rather than being treated as three separately-rooted defects. (This
+  agent cannot edit user-level session memory files directly; flagging
+  here for the operator/coordinator to fold in.)
+- **Not to be conflated**: `reference-list-get-returns-value-shifted-left-3`
+  (`xs.get(i)` returns `value << 3`, a *left*-shift/over-boxing defect on
+  reads through a specific method) is the **opposite direction** of this
+  defect (`>>3`/under-boxing on direct global reads) and a different
+  mechanism. Keep separate.
+
+### Harness fixtures — kept distinct, relabeled as manifestations
+
+Per instruction, the existing fixtures are **not** collapsed into one file
+(each remains an independent regression case — losing gap 9's
+cross-module shape or gap 10's `@cfg` shape would lose real coverage, even
+though the underlying cause is now understood to be one thing), but their
+labels/comments are corrected to say so explicitly:
+
+- `cross_module_global_import` (gap 9) — comment updated to reference this
+  section as the unifying explanation instead of standing alone.
+- `cfg_arch_global_variants` — already corrected in §7 to point at
+  `module_global_direct_read_untagged`; that pointer now additionally
+  resolves to this section's fuller unification.
+- `module_global_direct_read_untagged` — the cleanest, most general
+  instance of the shared read-side defect; comment updated to state this
+  explicitly and cross-reference §9.
+- Gap 8's `fn`-call-initializer shape is not yet in the differential
+  harness as its own fixture (the earlier passes that found it predate
+  this harness). Adding it is a natural follow-up so all three
+  manifestations are standing regression coverage, not just two of three
+  — noted, not done this pass to stay within "establish the unification,
+  don't fix or over-expand" scope.
+
+No fix attempted this pass, per instruction. The fix question is now
+single and well-posed: **where should a module-level global's raw value
+get tag-boxed on read under JIT, and why doesn't it currently** — a
+distinct, likely larger question from gap 8's separate write-side "why
+doesn't the function-call initializer's result reach the slot" question.
+Both are architecture/codegen questions for a dedicated pass, not this
+enumeration-and-now-unification one.
