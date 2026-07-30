@@ -32,6 +32,30 @@ and instead produce target-correct relocatable objects where supported.
 | Bare-metal RV32 | Relocatable object | Explicit unsupported rejection | ELF32 RISC-V, RV32IMAC, soft-float | Wired; fresh receipt pending |
 | Linux RV64 | QEMU-user executable | QEMU-user executable | ELF64 RISC-V + exact exit/output | Wired; Cranelift CI execution must be mandatory |
 
+### macOS Metal GPU evidence
+
+The hosted compiler rows above do not claim Metal execution. The existing
+Metal contract tests remain the sole contract coverage; completion requires a
+fresh native receipt on each macOS architecture row.
+
+| Platform/architecture | Canonical checks | Required evidence | Current state |
+|---|---|---|---|
+| macOS x86_64 | `scripts/check/check-metal-generated-2d-readback.shs`; `scripts/check/check-macos-metal-msl-library-micro-diagnostic.shs`; `scripts/check/check-macos-metal-2d-live-evidence.shs` | Metal `device_readback`, positive device/backend/command handles, submit-wait completion, exact nonzero per-operation and Draw IR checksums; archive under `build/macos_metal_2d_live/`, `build/macos_metal_msl_library_micro_diagnostic/`, and `build/metal_generated_2d_readback/` | Fresh Mac-host receipt pending |
+| macOS AArch64 | Same canonical checks and receipt schema as macOS x86_64 | Same device/readback/handle/submit-wait/checksum requirements; archive with explicit `arch=aarch64` metadata in the same build directories | Fresh Mac-host receipt pending |
+
+Run parity after both receipts exist:
+
+```sh
+scripts/check/check-macos-vulkan-metal-2d-parity-evidence.shs \
+  build/macos_vulkan_2d_live/evidence.env \
+  build/macos_metal_2d_live/evidence.env
+```
+
+CPU mirrors, Vulkan fallback, metadata-only output, missing submit-wait, or
+missing exact device checksum do not satisfy either macOS Metal row. Linux may
+prepare and run the source/contract checks, but cannot credit native Metal
+execution.
+
 OpenBSD and NetBSD are excluded from completion until a VM/hosted runtime lane
 exists; header compilation alone is not runtime evidence.
 
