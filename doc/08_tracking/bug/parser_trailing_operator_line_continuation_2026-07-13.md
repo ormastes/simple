@@ -2,7 +2,7 @@
 
 **ID:** parser_trailing_operator_line_continuation_2026-07-13
 **Filed:** 2026-07-13
-**Status:** SOURCE FIXED — refreshed Stage2/RV64 verification pending
+**Status:** CLOSED — RV64 attempt 17 passed every recorded continuation boundary
 **Severity:** P2 — silently-confusing parse failure on a plausible/idiomatic form
 **Component:** Rust discovery parser equality/comparison continuation
 
@@ -93,5 +93,10 @@ next boundary, `simple_web_window_renderer.spl:237:1`, where block-form
 `if` expected its branch `Indent` before consuming the condition's deferred
 continuation `Dedent`. `parse_if_expr` now drains only the recorded deferred
 continuation layout after the header newline and before the branch indent. The
-focused block-if parser regression passes; one final refreshed Stage2/RV64
-build remains the closure gate.
+focused block-if parser regression passed; RV64 attempt 17 was its refreshed
+closure gate.
+
+RV64 attempt 17, built with verified Stage2 attempt 14, advanced beyond all
+three recorded equality/comparison and deferred-Dedent sites. Its later failure
+at `draw_ir_adv.spl:1067` is the distinct assignment-RHS newline bug tracked by
+`assign_rhs_newline_continuation_parse_2026-07-25.md`.

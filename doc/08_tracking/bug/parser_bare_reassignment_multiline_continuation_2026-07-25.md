@@ -1,7 +1,8 @@
 # Parser rejects multi-line continuation of a bare reassignment RHS (`x =\n expr`), while `val x =\n expr` is accepted
 
 - **ID:** parser_bare_reassignment_multiline_continuation_2026-07-25
-- **Status:** OPEN (filed, not fixed)
+- **Status:** SUPERSEDED — source fix tracked by
+  `assign_rhs_newline_continuation_parse_2026-07-25`
 - **Severity:** low-medium (forces a formatting workaround; asymmetric grammar)
 - **Found via:** `web × headless` showcase-matrix cell — `examples/06_io/ui/web_render_file_gui.spl`
   failed to parse, blocking the web showcase's child process.
@@ -84,3 +85,7 @@ Either fix it, or document the reassignment case explicitly in
 `.claude/rules/language.md` alongside the boolean note — the current state,
 where only half the limitation is written down, is what let this reach a
 showcase cell.
+
+The shared assignment parser fix and refreshed Stage2/RV64 closure evidence are
+now recorded in
+`doc/08_tracking/bug/assign_rhs_newline_continuation_parse_2026-07-25.md`.

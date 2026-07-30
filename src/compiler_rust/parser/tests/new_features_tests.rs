@@ -104,11 +104,11 @@ fn test_implicit_var_disabled() {
 
 #[test]
 fn test_implicit_val_does_not_trigger_for_field_assign() {
-    // obj.field = value should NOT be implicit val — it should be assignment
-    let src = "obj.field = 42\n";
+    // A continued field assignment stays an assignment and preserves its sibling.
+    let src = "obj.field =\n    function_call(42)\nnext = 1\n";
     let mut parser = Parser::new(src);
     let module = parser.parse().unwrap();
-    assert_eq!(module.items.len(), 1);
+    assert_eq!(module.items.len(), 2);
     match &module.items[0] {
         Node::Assignment(_) => {} // correct: field assignment
         other => panic!("Expected Assignment for field assign, got {:?}", other),

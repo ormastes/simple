@@ -27,9 +27,11 @@ impl<'a> Parser<'a> {
         if let Some(op) = assign_op {
             let span = self.current.span;
             self.advance();
+            let continuation_indents = self.skip_newlines_and_indents_for_method_chain();
             let mut value = self.parse_expression()?;
             // Support no-paren calls in assignment: x = double 5
             value = self.parse_with_no_paren_calls(value)?;
+            self.consume_dedents_for_method_chain(continuation_indents);
 
             // B4: desugar `x.bits[lo..hi] = v` to `x = (x & ~mask) | ((v & mask) << lo)`.
             // Phase 2 also desugars arithmetic augmented assigns
