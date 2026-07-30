@@ -1,11 +1,9 @@
-# JIT `Unknown type: DrawIrRenderTarget` — confirmed reproduction, root-caused, fix attempted and reverted (unverified), architectural blocker identified
+# JIT `Unknown type: DrawIrRenderTarget` — resolved by trait pre-registration
 
 **Date:** 2026-07-30
-**Status:** OPEN — reproduction and root-cause analysis are solid (PROVED); a
-mirrored fix was implemented, built, and validated as safe, but could not be
-proven to fix anything and was reverted rather than landed unverified. The
-actual blocker for the assigned repro is a second, architecturally separate
-JIT entry point with no cross-module type-fallback infrastructure at all.
+**Status:** RESOLVED — HIR Pass 0 now pre-registers trait names before
+declaration lowering. The focused regression passes and the original web GUI
+JIT reproduction no longer reports `Unknown type: DrawIrRenderTarget`.
 **Component:** `src/compiler_rust/driver/src/exec_core.rs` (`run_file_jit`),
 `src/compiler_rust/compiler/src/module_resolver/*`,
 `src/compiler_rust/compiler/src/hir/lower/type_registration.rs` (`register_trait`),
@@ -35,6 +33,26 @@ first blocker forcing JIT hits, from a pristine checkout, today.
 DrawIrRenderTarget:`, `src/lib/gc_async_mut/gpu/engine2d/draw_ir_target.spl:28`),
 implemented by `Engine2D` (`engine.spl:181`) and `MetalDrawIrRenderTarget`
 (`draw_ir_target_metal.spl:32`).
+
+## Resolution correction (2026-07-30)
+
+The original architectural conclusion below was incomplete. The JIT path
+does load imported traits through `hir/lower/import_loader.rs`; the actual
+ordering defect was that both HIR Pass 0 variants pre-registered
+struct/class/enum/actor names but omitted traits. Flattened imports can put
+`class Engine2D with DrawIrRenderTarget` before the trait declaration, so
+declaration registration attempted to resolve a name that had not yet entered
+the type registry.
+
+The fix adds trait aliases to the existing pre-registration passes and to the
+shared imported-type placeholder helper. Regression:
+`test_trait_type_can_be_used_before_declaration`.
+
+Validation:
+
+- focused Rust compiler regression: PASS (1 passed)
+- original web GUI JIT command: advances past `DrawIrRenderTarget`; the example
+  runner reaches its configured timeout without that HIR fallback
 
 ## Root cause (PROVED by code reading) — a real, confirmed asymmetry
 

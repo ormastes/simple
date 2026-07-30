@@ -1129,6 +1129,9 @@ impl Lowerer {
                         },
                     );
                 }
+                Node::Trait(t) => {
+                    self.module.types.register_alias(t.name.clone(), TypeId::ANY);
+                }
                 _ => {}
             }
         }
@@ -1624,6 +1627,9 @@ impl Lowerer {
                             type_bindings: std::collections::HashMap::new(),
                         },
                     );
+                }
+                Node::Trait(t) => {
+                    self.module.types.register_alias(t.name.clone(), TypeId::ANY);
                 }
                 _ => {}
             }

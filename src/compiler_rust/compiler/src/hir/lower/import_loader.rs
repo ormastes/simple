@@ -169,6 +169,9 @@ impl Lowerer {
                     );
                 }
             }
+            Node::Trait(trait_def) => {
+                self.module.types.register_alias(trait_def.name.clone(), TypeId::ANY);
+            }
             _ => {}
         }
     }

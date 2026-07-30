@@ -121,3 +121,20 @@ trait Cloneable:
         "Self return type in trait method should resolve for vtable metadata"
     );
 }
+
+#[test]
+fn test_trait_type_can_be_used_before_declaration() {
+    let source = r#"
+class Surface:
+    fn target() -> RenderTarget:
+        nil
+
+trait RenderTarget:
+    fn present()
+"#;
+    let result = parse_and_lower(source);
+    assert!(
+        result.is_ok(),
+        "trait names must be pre-registered before declaration lowering: {result:?}"
+    );
+}
