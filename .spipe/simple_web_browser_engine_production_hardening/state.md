@@ -2318,3 +2318,11 @@ implementation in progress / target evidence blocked
   mismatch, untrusted, stall, reset, and trickle modes pass. This proves only
   `rt_tls_client_*` address+SNI behavior, not hosted `rt_browser_http_job`, a
   live `BrowserSession`, or a TLS production row.
+- runtime sandbox receipt (2026-07-30):
+  `sh test/01_unit/runtime/run_process_piped_write_test.shs` now emits
+  `STATUS: PASS browser renderer runtime sandbox` only after its live C gate.
+  The narrow claim is current runtime `rt_browser_renderer_spawn_sandboxed`
+  preinit plus `rt_browser_renderer_sandbox_enter` second-stage path:
+  environment/cwd/inherited-FD sanitization and Landlock/seccomp/rlimit
+  containment/limits. It does not admit a hosted renderer artifact, prove
+  broker/CSP or Electron containment, or promote a SANDBOX production row.

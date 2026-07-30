@@ -124,11 +124,13 @@ replace their live assertions.
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | trusted Electron form events only |
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a /home/ormastes/dev/pub/simple/tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | pinned Electron/Chromium injected-JS rAF and CSS keyframes changed captured pixels |
 | `cargo test --offline --manifest-path src/compiler_rust/runtime/Cargo.toml --lib --no-default-features public_address_policy_rejects_any_mixed_resolution_set` | PASS | mixed-resolution egress policy unit |
+| `sh test/01_unit/runtime/run_process_piped_write_test.shs` | PASS | current runtime `rt_browser_renderer_spawn_sandboxed` preinit plus `rt_browser_renderer_sandbox_enter` second-stage path: environment/cwd/inherited-FD sanitization and Landlock/seccomp/rlimit containment/limits only |
 
 These checks do not prove a live HTTPS certificate matrix, hosted
 `rt_browser_http_job`, a live HTTPS `BrowserSession`, SimpleScript, WebIR,
-DrawIR, Engine2D, or Chromium process sandboxing. They do not promote any TLS
-or SANDBOX production row.
+DrawIR, Engine2D, an admitted hosted renderer artifact, broker/CSP enforcement,
+Electron, or Chromium process sandboxing. They do not promote any TLS or
+SANDBOX production row.
 
 ## False-green repairs
 

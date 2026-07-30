@@ -178,7 +178,18 @@ preserving learned HSTS for persistence.
 On Linux, renderer READY is admissible only after the executable preinit hook
 has activated the stage-one Landlock/seccomp marker. Calling the stage-two
 sandbox entry without that marker fails closed before applying worker limits;
-`test/01_unit/runtime/run_process_piped_write_test.shs` covers both paths.
+`test/01_unit/runtime/run_process_piped_write_test.shs` covers both paths:
+
+```bash
+sh test/01_unit/runtime/run_process_piped_write_test.shs
+```
+
+Its PASS receipt proves only the current runtime
+`rt_browser_renderer_spawn_sandboxed` preinit plus
+`rt_browser_renderer_sandbox_enter` second-stage path: environment/cwd/
+inherited-FD sanitization and Landlock/seccomp/rlimit containment/limits. It
+does not admit a hosted renderer artifact, prove broker/CSP enforcement or
+Electron containment, or promote a production SANDBOX row.
 
 ### Post-load and transport invariants
 
