@@ -23,13 +23,13 @@ use compiler.core.ast_expr.{
     EXPR_CAST, EXPR_INTERPOLATED_STRING, EXPR_RANGE, EXPR_SPREAD,
     EXPR_DO_BLOCK, EXPR_LIST_COMP, EXPR_DICT_COMP,
     EXPR_PASS_TODO, EXPR_PASS_DO_NOTHING, EXPR_PASS_DN,
-    expr_tag, expr_s_val, expr_left, expr_right, expr_extra, expr_args, expr_stmts
+    expr_get_tag, expr_get_str, expr_get_left, expr_get_right, expr_get_extra, expr_get_args, expr_get_stmts
 }
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_MATCH, STMT_BLOCK,
     STMT_COMPOUND_ASSIGN, STMT_LAZY_VAL_DECL,
-    stmt_tag, stmt_expr, stmt_name, stmt_body
+    stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_body
 }
 use compiler.core.ast.{
     DECL_FN, DECL_EXTERN_FN, DECL_VAL, DECL_VAR, DECL_USE, DECL_LAZY_VAL,
@@ -174,16 +174,16 @@ fn collect_local_decls(stmts: [i64], locals: [text]):
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL or tag == STMT_LAZY_VAL_DECL:
-            val name = stmt_name[s]
+            val name = stmt_get_name(s)
             if name != "":
                 locals.push(name)
 
         # Recurse into nested blocks
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_MATCH:
-            collect_local_decls(stmt_body[s], locals)
+            collect_local_decls(stmt_get_body(s), locals)
 
 # ============================================================================
 # UNUSED002: Unused Imports
@@ -244,15 +244,15 @@ fn collect_refs_in_stmts(stmts: [i64], refs: {text: bool}):
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         # Collect from expression
-        val e = stmt_expr[s]
+        val e = stmt_get_expr(s)
         if e >= 0:
             collect_refs_in_expr(e, refs)
 
         # Recurse into child statements
-        val children = stmt_body[s]
+        val children = stmt_get_body(s)
         collect_refs_in_stmts(children, refs)
 
 fn collect_refs_in_expr(e: i64, refs: {text: bool}):
@@ -260,29 +260,29 @@ fn collect_refs_in_expr(e: i64, refs: {text: bool}):
     if e < 0:
         return
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     if tag == EXPR_IDENT:
-        val name = expr_s_val[e]
+        val name = expr_get_str(e)
         if name != "":
             refs[name] = true
         return
 
     # Recurse into sub-expressions
-    collect_refs_in_expr(expr_left[e], refs)
-    collect_refs_in_expr(expr_right[e], refs)
-    collect_refs_in_expr(expr_extra[e], refs)
+    collect_refs_in_expr(expr_get_left(e), refs)
+    collect_refs_in_expr(expr_get_right(e), refs)
+    collect_refs_in_expr(expr_get_extra(e), refs)
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         collect_refs_in_expr(arg, refs)
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if child_stmt >= 0:
-            val child_tag = stmt_tag[child_stmt]
-            val child_e = stmt_expr[child_stmt]
+            val child_tag = stmt_get_tag(child_stmt)
+            val child_e = stmt_get_expr(child_stmt)
             if child_e >= 0:
                 collect_refs_in_expr(child_e, refs)
-            collect_refs_in_stmts(stmt_body[child_stmt], refs)
+            collect_refs_in_stmts(stmt_get_body(child_stmt), refs)
 
 # ============================================================================
 # Pass Marker Detection (local copy to avoid circular imports)
@@ -293,9 +293,9 @@ fn body_has_pass_marker_uv(stmts: [i64]) -> bool:
     for s in stmts:
         if s < 0:
             continue
-        val e = stmt_expr[s]
+        val e = stmt_get_expr(s)
         if e >= 0:
-            val etag = expr_tag[e]
+            val etag = expr_get_tag(e)
             if etag == EXPR_PASS_TODO or etag == EXPR_PASS_DO_NOTHING or etag == EXPR_PASS_DN:
                 return true
     false

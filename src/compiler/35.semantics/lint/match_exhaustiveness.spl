@@ -27,12 +27,12 @@
 use compiler.core.ast_expr.{
     EXPR_MATCH, EXPR_IDENT, EXPR_CALL, EXPR_FIELD_ACCESS,
     EXPR_NIL_LIT, EXPR_BOOL_LIT, EXPR_INT_LIT, EXPR_STRING_LIT,
-    expr_tag, expr_s_val, expr_i_val, expr_left, expr_right, expr_args, expr_stmts
+    expr_get_tag, expr_get_str, expr_get_int, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts
 }
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_IF, STMT_FOR,
     STMT_WHILE, STMT_BLOCK, STMT_MATCH,
-    stmt_tag, stmt_expr, stmt_body
+    stmt_get_tag, stmt_get_expr, stmt_get_body
 }
 use compiler.core.ast.{
     DECL_FN, DECL_ENUM,
@@ -127,19 +127,19 @@ fn check_stmts_match(stmts: [i64], fn_name: text, enums: {text: [text]}) -> [Mat
     for s in stmts:
         if s < 0:
             continue
-        val tag = stmt_tag[s]
+        val tag = stmt_get_tag(s)
 
         # Check match statements directly
         if tag == STMT_MATCH:
-            val scrutinee = stmt_expr[s]
-            val arm_indices = stmt_body[s]
+            val scrutinee = stmt_get_expr(s)
+            val arm_indices = stmt_get_body(s)
             val ws = analyze_match(scrutinee, arm_indices, fn_name, enums)
             for w in ws:
                 warnings.push(w)
 
         # Check expressions for match exprs
         if tag == STMT_EXPR or tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
-            val e = stmt_expr[s]
+            val e = stmt_get_expr(s)
             if e >= 0:
                 val ws = check_expr_for_match(e, fn_name, enums)
                 for w in ws:
@@ -147,7 +147,7 @@ fn check_stmts_match(stmts: [i64], fn_name: text, enums: {text: [text]}) -> [Mat
 
         # Recurse into nested blocks
         if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
-            val nested = check_stmts_match(stmt_body[s], fn_name, enums)
+            val nested = check_stmts_match(stmt_get_body(s), fn_name, enums)
             for w in nested:
                 warnings.push(w)
 
@@ -159,12 +159,12 @@ fn check_expr_for_match(e: i64, fn_name: text, enums: {text: [text]}) -> [MatchE
     if e < 0:
         return warnings
 
-    val tag = expr_tag[e]
+    val tag = expr_get_tag(e)
 
     # Found a match expression
     if tag == EXPR_MATCH:
-        val scrutinee = expr_left[e]
-        val arm_indices = expr_args[e]
+        val scrutinee = expr_get_left(e)
+        val arm_indices = expr_get_args(e)
         val ws = analyze_match(scrutinee, arm_indices, fn_name, enums)
         for w in ws:
             warnings.push(w)
@@ -178,31 +178,31 @@ fn check_expr_children_for_match(e: i64, fn_name: text, enums: {text: [text]}, w
     if e < 0:
         return
 
-    val left = expr_left[e]
+    val left = expr_get_left(e)
     if left >= 0:
         val ws = check_expr_for_match(left, fn_name, enums)
         for w in ws:
             warnings.push(w)
 
-    val right = expr_right[e]
+    val right = expr_get_right(e)
     if right >= 0:
         val ws = check_expr_for_match(right, fn_name, enums)
         for w in ws:
             warnings.push(w)
 
-    for arg in expr_args[e]:
+    for arg in expr_get_args(e):
         if arg >= 0:
             val ws = check_expr_for_match(arg, fn_name, enums)
             for w in ws:
                 warnings.push(w)
 
-    for child_stmt in expr_stmts[e]:
+    for child_stmt in expr_get_stmts(e):
         if child_stmt >= 0:
-            val child_body = stmt_body[child_stmt]
+            val child_body = stmt_get_body(child_stmt)
             val ws = check_stmts_match(child_body, fn_name, enums)
             for w in ws:
                 warnings.push(w)
-            val child_e = stmt_expr[child_stmt]
+            val child_e = stmt_get_expr(child_stmt)
             if child_e >= 0:
                 val ws2 = check_expr_for_match(child_e, fn_name, enums)
                 for w in ws2:
@@ -245,12 +245,12 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
             arm_pos = arm_pos + 1
             continue
 
-        val pat_tag = expr_tag[pattern]
+        val pat_tag = expr_get_tag(pattern)
         var pat_repr = ""
 
         # Wildcard pattern: EXPR_IDENT with name "_"
         if pat_tag == EXPR_IDENT:
-            val pat_name = expr_s_val[pattern]
+            val pat_name = expr_get_str(pattern)
             if pat_name == "_":
                 if not has_wildcard:
                     has_wildcard = true
@@ -276,15 +276,15 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
 
         # Enum variant with payload: EXPR_CALL where callee is EXPR_IDENT
         elif pat_tag == EXPR_CALL:
-            val callee = expr_left[pattern]
-            if callee >= 0 and expr_tag[callee] == EXPR_IDENT:
-                val variant_name = expr_s_val[callee]
+            val callee = expr_get_left(pattern)
+            if callee >= 0 and expr_get_tag(callee) == EXPR_IDENT:
+                val variant_name = expr_get_str(callee)
                 covered_variants.push(variant_name)
                 pat_repr = variant_name + "(...)"
 
         # Enum variant via field access: Type.Variant
         elif pat_tag == EXPR_FIELD_ACCESS:
-            val field_name = expr_s_val[pattern]
+            val field_name = expr_get_str(pattern)
             covered_variants.push(field_name)
             pat_repr = "." + field_name
 
@@ -295,7 +295,7 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
 
         # Bool literal pattern
         elif pat_tag == EXPR_BOOL_LIT:
-            if expr_i_val[pattern] == 0:
+            if expr_get_int(pattern) == 0:
                 covered_variants.push("false")
                 pat_repr = "false"
             else:
@@ -304,11 +304,11 @@ fn analyze_match(scrutinee: i64, arm_indices: [i64], fn_name: text, enums: {text
 
         # Int literal pattern — not exhaustible, but track for duplicates
         elif pat_tag == EXPR_INT_LIT:
-            pat_repr = "int:" + expr_i_val[pattern].to_text()
+            pat_repr = "int:" + expr_get_int(pattern).to_text()
 
         # String literal pattern — not exhaustible, but track for duplicates
         elif pat_tag == EXPR_STRING_LIT:
-            pat_repr = "str:" + expr_s_val[pattern]
+            pat_repr = "str:" + expr_get_str(pattern)
 
         # Check for unreachable: arm after wildcard
         if has_wildcard and arm_pos > wildcard_arm_pos:
@@ -418,13 +418,13 @@ fn infer_scrutinee_type(scrutinee: i64, enums: {text: [text]}) -> text:
     if scrutinee < 0:
         return ""
 
-    val tag = expr_tag[scrutinee]
+    val tag = expr_get_tag(scrutinee)
 
     # Field access: e.g., Color.Red — left is "Color"
     if tag == EXPR_FIELD_ACCESS:
-        val left = expr_left[scrutinee]
-        if left >= 0 and expr_tag[left] == EXPR_IDENT:
-            val type_name = expr_s_val[left]
+        val left = expr_get_left(scrutinee)
+        if left >= 0 and expr_get_tag(left) == EXPR_IDENT:
+            val type_name = expr_get_str(left)
             if enums.has(type_name):
                 return type_name
 
