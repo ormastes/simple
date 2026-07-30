@@ -504,6 +504,12 @@ Exact owners are frozen: common codec
 | `command_capability_sspec` | focused exact-four-step RED spec, FIFO separate-read and split-write staged/issued oracles, numeric/payload maxima, lifecycle cleanup, conforming echo, 10k latency/allocation/RSS receipt | depends on implementation lanes |
 | `command_capability_final_review` | protocol bounds, causal binding, lifecycle cleanup, backward rejection, manual quality | normal/highest-capability reviewer |
 
+The codec foundation is opt-in only. Production remains on its current
+`SBR1`/`SBRN1`/`SBRF7` path until one atomic migration changes the parent,
+worker, nested response/frame schemas, and their callers together. No commit
+may point either production direction at the opt-in `SBR2` helpers by itself,
+and no mixed-version production deployment is an accepted intermediate state.
+
 Lower-model sidecars may enumerate malformed codec fixtures only after these
 names are frozen. They may not change entropy policy, weaken fail-closed legacy
 admission, introduce negotiation, commit, or push. Root Codex is merge owner;

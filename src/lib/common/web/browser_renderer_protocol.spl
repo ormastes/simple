@@ -65,12 +65,18 @@ pub struct BrowserRendererMessage:
     kind: text
     generation: i64
     request_id: i64
-    root_command_request_id: i64 = 0
-    command_capability: text = ""
     payload: text
 
 pub struct BrowserRendererCommandCapability:
     value: text
+
+pub struct BrowserRendererCapabilityMessage:
+    kind: text
+    generation: i64
+    request_id: i64
+    root_command_request_id: i64
+    command_capability: text
+    payload: text
 
 pub struct BrowserTextInputOverlay:
     target_key: text
@@ -100,6 +106,17 @@ pub struct BrowserRendererDecoder:
     payload_start: i64
     pending_kind: text
     pending_request_id: i64
+    expected_generation: i64
+    last_request_id: i64
+    error: text
+
+pub struct BrowserRendererCapabilityDecoder:
+    parts: [text]
+    buffer_len: i64
+    expected_total: i64
+    payload_start: i64
+    pending_kind: text
+    pending_request_id: i64
     pending_root_command_request_id: i64
     pending_capability_bytes: i64
     expected_generation: i64
@@ -110,6 +127,11 @@ pub struct BrowserRendererDecodeResult:
     decoder: BrowserRendererDecoder
     status: text
     message: BrowserRendererMessage
+
+pub struct BrowserRendererCapabilityDecodeResult:
+    decoder: BrowserRendererCapabilityDecoder
+    status: text
+    message: BrowserRendererCapabilityMessage
 
 pub struct BrowserRendererFrameDecodeResult:
     ok: bool
@@ -182,7 +204,11 @@ pub struct BrowserRendererNetworkDecodeResult:
     initiator_origin: text = ""
 
 fn _browser_renderer_empty_message() -> BrowserRendererMessage:
-    BrowserRendererMessage(
+    BrowserRendererMessage(kind: "", generation: 0, request_id: 0, payload: "")
+
+fn _browser_renderer_empty_capability_message(
+) -> BrowserRendererCapabilityMessage:
+    BrowserRendererCapabilityMessage(
         kind: "", generation: 0, request_id: 0,
         root_command_request_id: 0, command_capability: "", payload: ""
     )
@@ -289,8 +315,6 @@ fn _browser_renderer_violation(decoder: BrowserRendererDecoder, reason: text) ->
             payload_start: 0,
             pending_kind: "",
             pending_request_id: 0,
-            pending_root_command_request_id: 0,
-            pending_capability_bytes: 0,
             expected_generation: decoder.expected_generation,
             last_request_id: decoder.last_request_id,
             error: reason
@@ -301,6 +325,185 @@ fn _browser_renderer_violation(decoder: BrowserRendererDecoder, reason: text) ->
 
 pub fn browser_renderer_decoder_new(expected_generation: i64) -> BrowserRendererDecoder:
     BrowserRendererDecoder(
+        parts: [],
+        buffer_len: 0,
+        expected_total: -1,
+        payload_start: 0,
+        pending_kind: "",
+        pending_request_id: 0,
+        expected_generation: expected_generation,
+        last_request_id: 0,
+        error: if expected_generation > 0: "" else: "invalid-generation"
+    )
+
+pub fn browser_renderer_message_encode(kind: text, generation: i64, request_id: i64, payload: text) -> BrowserRendererEncodeResult:
+    if not _browser_renderer_kind_valid(kind):
+        return _browser_renderer_reject_encode("invalid-kind")
+    if generation <= 0:
+        return _browser_renderer_reject_encode("invalid-generation")
+    if request_id <= 0:
+        return _browser_renderer_reject_encode("invalid-request-id")
+    if payload.contains("\0"):
+        return _browser_renderer_reject_encode("nul-payload")
+    val payload_bytes = text_to_bytes(payload)
+    if payload_bytes.len().to_i64() > BROWSER_RENDERER_MAX_PAYLOAD_BYTES:
+        return _browser_renderer_reject_encode("payload-too-large")
+    val header = "SBR1\t{kind}\t{generation}\t{request_id}\t{payload_bytes.len()}\n"
+    if text_to_bytes(header).len().to_i64() > BROWSER_RENDERER_MAX_HEADER_BYTES:
+        return _browser_renderer_reject_encode("header-too-large")
+    BrowserRendererEncodeResult(ok: true, reason: "ok", wire: header + payload)
+
+pub fn browser_renderer_message_resequence(
+    wire: text, generation: i64, request_id: i64
+) -> BrowserRendererEncodeResult:
+    val decoded = browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(generation), wire
+    )
+    if (decoded.status != "message" or
+        decoded.decoder.buffer_len != 0):
+        return _browser_renderer_reject_encode("invalid-message")
+    browser_renderer_message_encode(
+        decoded.message.kind, generation, request_id,
+        decoded.message.payload
+    )
+
+pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: text) -> BrowserRendererDecodeResult:
+    if decoder.error != "":
+        return _browser_renderer_violation(decoder, decoder.error)
+    val max_buffer = BROWSER_RENDERER_MAX_HEADER_BYTES + BROWSER_RENDERER_MAX_PAYLOAD_BYTES + BROWSER_RENDERER_MAX_READ_CHUNK_BYTES
+    if chunk.len() > max_buffer - decoder.buffer_len:
+        return _browser_renderer_violation(decoder, "stream-too-large")
+    var parts = decoder.parts
+    if chunk != "":
+        parts.push(chunk)
+    val buffer_len = decoder.buffer_len + chunk.len()
+    var expected_total = decoder.expected_total
+    var payload_start = decoder.payload_start
+    var pending_kind = decoder.pending_kind
+    var pending_request_id = decoder.pending_request_id
+    if expected_total < 0:
+        # Header discovery is validated against the 256-byte limit; after it
+        # is known, retain fragments and join once at frame completion.
+        val header_buffer = parts.join("")
+        val header_end = _browser_renderer_header_end(header_buffer)
+        if header_end < 0:
+            if buffer_len >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+                return _browser_renderer_violation(decoder, "header-too-large")
+            return BrowserRendererDecodeResult(
+                decoder: BrowserRendererDecoder(
+                    parts: parts,
+                    buffer_len: buffer_len,
+                    expected_total: -1,
+                    payload_start: 0,
+                    pending_kind: "",
+                    pending_request_id: 0,
+                    expected_generation: decoder.expected_generation,
+                    last_request_id: decoder.last_request_id,
+                    error: ""
+                ),
+                status: "need_more",
+                message: _browser_renderer_empty_message()
+            )
+        if header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
+            return _browser_renderer_violation(decoder, "header-too-large")
+        val fields = _browser_renderer_byte_slice(
+            header_buffer, 0, header_end
+        ).split("\t")
+        if fields.len() != 5 or fields[0] != "SBR1" or
+           not _browser_renderer_kind_valid(fields[1]):
+            return _browser_renderer_violation(decoder, "malformed-header")
+        val generation = _browser_renderer_positive_i64(fields[2])
+        val request_id = _browser_renderer_positive_i64(fields[3])
+        val payload_length = fields[4].to_i64() ?? -1
+        if generation < 0 or request_id < 0 or payload_length < 0 or
+           str(payload_length) != fields[4]:
+            return _browser_renderer_violation(decoder, "malformed-header")
+        if payload_length > BROWSER_RENDERER_MAX_PAYLOAD_BYTES:
+            return _browser_renderer_violation(decoder, "payload-too-large")
+        if generation != decoder.expected_generation:
+            return _browser_renderer_violation(decoder, "stale-generation")
+        if request_id <= decoder.last_request_id:
+            return _browser_renderer_violation(decoder, "duplicate-request")
+        if (decoder.last_request_id > 0 and
+            request_id != decoder.last_request_id + 1):
+            return _browser_renderer_violation(
+                decoder, "unexpected-request-id"
+            )
+        payload_start = header_end + 1
+        expected_total = payload_start + payload_length
+        pending_kind = fields[1]
+        pending_request_id = request_id
+    if buffer_len < expected_total:
+        return BrowserRendererDecodeResult(
+            decoder: BrowserRendererDecoder(
+                parts: parts,
+                buffer_len: buffer_len,
+                expected_total: expected_total,
+                payload_start: payload_start,
+                pending_kind: pending_kind,
+                pending_request_id: pending_request_id,
+                expected_generation: decoder.expected_generation,
+                last_request_id: decoder.last_request_id,
+                error: ""
+            ),
+            status: "need_more",
+            message: _browser_renderer_empty_message()
+        )
+    val buffer = parts.join("")
+    val next_buffer = _browser_renderer_byte_slice(
+        buffer, expected_total, buffer_len
+    )
+    var next_parts: [text] = []
+    if next_buffer != "":
+        next_parts.push(next_buffer)
+    BrowserRendererDecodeResult(
+        decoder: BrowserRendererDecoder(
+            parts: next_parts,
+            buffer_len: next_buffer.len(),
+            expected_total: -1,
+            payload_start: 0,
+            pending_kind: "",
+            pending_request_id: 0,
+            expected_generation: decoder.expected_generation,
+            last_request_id: pending_request_id,
+            error: ""
+        ),
+        status: "message",
+        message: BrowserRendererMessage(
+            kind: pending_kind,
+            generation: decoder.expected_generation,
+            request_id: pending_request_id,
+            payload: _browser_renderer_byte_slice(
+                buffer, payload_start, expected_total
+            )
+        )
+    )
+
+fn _browser_renderer_capability_violation(
+    decoder: BrowserRendererCapabilityDecoder, reason: text
+) -> BrowserRendererCapabilityDecodeResult:
+    BrowserRendererCapabilityDecodeResult(
+        decoder: BrowserRendererCapabilityDecoder(
+            parts: [],
+            buffer_len: 0,
+            expected_total: -1,
+            payload_start: 0,
+            pending_kind: "",
+            pending_request_id: 0,
+            pending_root_command_request_id: 0,
+            pending_capability_bytes: 0,
+            expected_generation: decoder.expected_generation,
+            last_request_id: decoder.last_request_id,
+            error: reason
+        ),
+        status: "violation",
+        message: _browser_renderer_empty_capability_message()
+    )
+
+pub fn browser_renderer_capability_decoder_new(
+    expected_generation: i64
+) -> BrowserRendererCapabilityDecoder:
+    BrowserRendererCapabilityDecoder(
         parts: [],
         buffer_len: 0,
         expected_total: -1,
@@ -318,13 +521,13 @@ pub fn browser_renderer_decoder_new(expected_generation: i64) -> BrowserRenderer
             "invalid-generation"
     )
 
-pub fn browser_renderer_message_encode(
+pub fn browser_renderer_capability_message_encode(
     kind: text,
     generation: i64,
     request_id: i64,
+    root_command_request_id: i64,
     payload: text,
-    root_command_request_id: i64 = 0,
-    command_capability: text = ""
+    command_capability: text
 ) -> BrowserRendererEncodeResult:
     if not _browser_renderer_kind_valid(kind):
         return _browser_renderer_reject_encode("invalid-kind")
@@ -357,38 +560,50 @@ pub fn browser_renderer_message_encode(
         "{root_command_request_id}\t{payload_bytes.len()}\t" +
         "{capability_bytes}\n"
     )
-    if text_to_bytes(header).len().to_i64() > BROWSER_RENDERER_MAX_HEADER_BYTES:
+    if text_to_bytes(header).len().to_i64() >
+       BROWSER_RENDERER_MAX_HEADER_BYTES:
         return _browser_renderer_reject_encode("header-too-large")
     BrowserRendererEncodeResult(
         ok: true, reason: "ok",
         wire: header + payload + command_capability
     )
 
-pub fn browser_renderer_message_resequence(
+pub fn browser_renderer_capability_message_resequence(
     wire: text,
     generation: i64,
     request_id: i64,
-    root_command_request_id: i64 = 0,
-    command_capability: text = ""
+    root_command_request_id: i64,
+    command_capability: text
 ) -> BrowserRendererEncodeResult:
-    val decoded = browser_renderer_decoder_feed(
-        browser_renderer_decoder_new(generation), wire
+    val decoded = browser_renderer_capability_decoder_feed(
+        browser_renderer_capability_decoder_new(generation), wire
     )
     if (decoded.status != "message" or
         decoded.decoder.buffer_len != 0):
         return _browser_renderer_reject_encode("invalid-message")
-    browser_renderer_message_encode(
+    browser_renderer_capability_message_encode(
         decoded.message.kind, generation, request_id,
-        decoded.message.payload,
-        root_command_request_id, command_capability
+        root_command_request_id, decoded.message.payload,
+        command_capability
     )
 
-pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: text) -> BrowserRendererDecodeResult:
+pub fn browser_renderer_capability_decoder_feed(
+    decoder: BrowserRendererCapabilityDecoder,
+    chunk: text
+) -> BrowserRendererCapabilityDecodeResult:
     if decoder.error != "":
-        return _browser_renderer_violation(decoder, decoder.error)
-    val max_buffer = BROWSER_RENDERER_MAX_HEADER_BYTES + BROWSER_RENDERER_MAX_PAYLOAD_BYTES + BROWSER_RENDERER_MAX_READ_CHUNK_BYTES
+        return _browser_renderer_capability_violation(
+            decoder, decoder.error
+        )
+    val max_buffer = (
+        BROWSER_RENDERER_MAX_HEADER_BYTES +
+        BROWSER_RENDERER_MAX_PAYLOAD_BYTES +
+        BROWSER_RENDERER_MAX_READ_CHUNK_BYTES
+    )
     if chunk.len() > max_buffer - decoder.buffer_len:
-        return _browser_renderer_violation(decoder, "stream-too-large")
+        return _browser_renderer_capability_violation(
+            decoder, "stream-too-large"
+        )
     var parts = decoder.parts
     if chunk != "":
         parts.push(chunk)
@@ -397,18 +612,20 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
     var payload_start = decoder.payload_start
     var pending_kind = decoder.pending_kind
     var pending_request_id = decoder.pending_request_id
-    var pending_root_command_request_id = decoder.pending_root_command_request_id
+    var pending_root_command_request_id = (
+        decoder.pending_root_command_request_id
+    )
     var pending_capability_bytes = decoder.pending_capability_bytes
     if expected_total < 0:
-        # Header discovery is validated against the 256-byte limit; after it
-        # is known, retain fragments and join once at frame completion.
         val header_buffer = parts.join("")
         val header_end = _browser_renderer_header_end(header_buffer)
         if header_end < 0:
             if buffer_len >= BROWSER_RENDERER_MAX_HEADER_BYTES:
-                return _browser_renderer_violation(decoder, "header-too-large")
-            return BrowserRendererDecodeResult(
-                decoder: BrowserRendererDecoder(
+                return _browser_renderer_capability_violation(
+                    decoder, "header-too-large"
+                )
+            return BrowserRendererCapabilityDecodeResult(
+                decoder: BrowserRendererCapabilityDecoder(
                     parts: parts,
                     buffer_len: buffer_len,
                     expected_total: -1,
@@ -422,16 +639,20 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
                     error: ""
                 ),
                 status: "need_more",
-                message: _browser_renderer_empty_message()
+                message: _browser_renderer_empty_capability_message()
             )
         if header_end >= BROWSER_RENDERER_MAX_HEADER_BYTES:
-            return _browser_renderer_violation(decoder, "header-too-large")
+            return _browser_renderer_capability_violation(
+                decoder, "header-too-large"
+            )
         val fields = _browser_renderer_byte_slice(
             header_buffer, 0, header_end
         ).split("\t")
         if fields.len() != 7 or fields[0] != "SBR2" or
            not _browser_renderer_kind_valid(fields[1]):
-            return _browser_renderer_violation(decoder, "malformed-header")
+            return _browser_renderer_capability_violation(
+                decoder, "malformed-header"
+            )
         val generation = _browser_renderer_positive_i64(fields[2])
         val request_id = _browser_renderer_positive_i64(fields[3])
         val root_command_request_id = fields[4].to_i64() ?? -1
@@ -447,7 +668,9 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
             payload_length < 0 or str(payload_length) != fields[5] or
             capability_length < 0 or
             str(capability_length) != fields[6]):
-            return _browser_renderer_violation(decoder, "malformed-header")
+            return _browser_renderer_capability_violation(
+                decoder, "malformed-header"
+            )
         val ready = fields[1] == "ready"
         if ((ready and
              (request_id != 1 or root_command_request_id != 0 or
@@ -456,19 +679,25 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
              (root_command_request_id <= 0 or
               capability_length !=
                   BROWSER_RENDERER_COMMAND_CAPABILITY_BYTES))):
-            return _browser_renderer_violation(
+            return _browser_renderer_capability_violation(
                 decoder, "malformed-command-capability"
             )
         if payload_length >
            BROWSER_RENDERER_MAX_PAYLOAD_BYTES - capability_length:
-            return _browser_renderer_violation(decoder, "payload-too-large")
+            return _browser_renderer_capability_violation(
+                decoder, "payload-too-large"
+            )
         if generation != decoder.expected_generation:
-            return _browser_renderer_violation(decoder, "stale-generation")
+            return _browser_renderer_capability_violation(
+                decoder, "stale-generation"
+            )
         if request_id <= decoder.last_request_id:
-            return _browser_renderer_violation(decoder, "duplicate-request")
+            return _browser_renderer_capability_violation(
+                decoder, "duplicate-request"
+            )
         if (decoder.last_request_id > 0 and
             request_id != decoder.last_request_id + 1):
-            return _browser_renderer_violation(
+            return _browser_renderer_capability_violation(
                 decoder, "unexpected-request-id"
             )
         payload_start = header_end + 1
@@ -480,8 +709,8 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
         pending_root_command_request_id = root_command_request_id
         pending_capability_bytes = capability_length
     if buffer_len < expected_total:
-        return BrowserRendererDecodeResult(
-            decoder: BrowserRendererDecoder(
+        return BrowserRendererCapabilityDecodeResult(
+            decoder: BrowserRendererCapabilityDecoder(
                 parts: parts,
                 buffer_len: buffer_len,
                 expected_total: expected_total,
@@ -496,7 +725,7 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
                 error: ""
             ),
             status: "need_more",
-            message: _browser_renderer_empty_message()
+            message: _browser_renderer_empty_capability_message()
         )
     val buffer = parts.join("")
     val capability = _browser_renderer_byte_slice(
@@ -504,7 +733,7 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
     )
     if (pending_capability_bytes > 0 and
         not browser_renderer_command_capability_valid(capability)):
-        return _browser_renderer_violation(
+        return _browser_renderer_capability_violation(
             decoder, "malformed-command-capability"
         )
     val next_buffer = _browser_renderer_byte_slice(
@@ -513,8 +742,8 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
     var next_parts: [text] = []
     if next_buffer != "":
         next_parts.push(next_buffer)
-    BrowserRendererDecodeResult(
-        decoder: BrowserRendererDecoder(
+    BrowserRendererCapabilityDecodeResult(
+        decoder: BrowserRendererCapabilityDecoder(
             parts: next_parts,
             buffer_len: next_buffer.len(),
             expected_total: -1,
@@ -528,7 +757,7 @@ pub fn browser_renderer_decoder_feed(decoder: BrowserRendererDecoder, chunk: tex
             error: ""
         ),
         status: "message",
-        message: BrowserRendererMessage(
+        message: BrowserRendererCapabilityMessage(
             kind: pending_kind,
             generation: decoder.expected_generation,
             request_id: pending_request_id,

@@ -1,6 +1,6 @@
-# Browser Renderer Command Capability Codec
+# Opt-in Browser Renderer Command Capability Codec
 
-> The SBR2 codec binds each non-ready renderer command to one canonical lowercase capability trailer. This focused scenario proves framing and validation only; entropy, issuance, and renderer lifecycle are separate lanes.
+> The explicit opt-in SBR2 helpers frame one canonical lowercase capability trailer without changing the production SBR1 encoder, decoder, resequencer, or their callers. This scenario proves only isolated framing, canonical validation, bounds, and decoder cleanup.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,9 +9,9 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Browser Renderer Command Capability Codec
+# Opt-in Browser Renderer Command Capability Codec
 
-The SBR2 codec binds each non-ready renderer command to one canonical lowercase capability trailer. This focused scenario proves framing and validation only; entropy, issuance, and renderer lifecycle are separate lanes.
+The explicit opt-in SBR2 helpers frame one canonical lowercase capability trailer without changing the production SBR1 encoder, decoder, resequencer, or their callers. This scenario proves only isolated framing, canonical validation, bounds, and decoder cleanup.
 
 ## At a Glance
 
@@ -19,7 +19,7 @@ The SBR2 codec binds each non-ready renderer command to one canonical lowercase 
 |-------|-------|
 | Category | Standard Library |
 | Status | Active |
-| Requirements | doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md |
+| Requirements | N/A |
 | Plan | doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md |
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
@@ -29,22 +29,24 @@ The SBR2 codec binds each non-ready renderer command to one canonical lowercase 
 
 ## Overview
 
-The SBR2 codec binds each non-ready renderer command to one canonical
-lowercase capability trailer. This focused scenario proves framing and
-validation only; entropy, issuance, and renderer lifecycle are separate lanes.
+The explicit opt-in SBR2 helpers frame one canonical lowercase capability
+trailer without changing the production SBR1 encoder, decoder, resequencer, or
+their callers. This scenario proves only isolated framing, canonical
+validation, bounds, and decoder cleanup.
 
 The four named checker functions below contain the complete executable
 evidence for the four manual steps.
 
-Requirement trace: REQ-WEB-BROWSER-014, REQ-WEB-BROWSER-018, and
-REQ-WEB-BROWSER-020.
+The opt-in wire is not a causal capability boundary. Entropy, staged issuance,
+parent/worker correlation, nested schema migration, secret retirement, and
+production requirement completion remain outside this scenario.
 
 ## Examples
 
-The scenario encodes one deterministic 16-byte fixture to 32 lowercase
-hexadecimal bytes, feeds the wire across every split point, and rejects legacy,
-noncanonical, oversized, or truncated inputs. The capability value itself is
-never included in an error reason or manual evidence row.
+The scenario preserves a successful SBR1 round trip, then encodes one
+deterministic 16-byte fixture to 32 lowercase hexadecimal bytes, feeds only the
+opt-in SBR2 decoder across every split point, and rejects malformed,
+noncanonical, oversized, or truncated opt-in inputs.
 
 ## Scenarios
 
@@ -52,10 +54,10 @@ never included in an error reason or manual evidence row.
 
 #### should fail closed at every SBR2 framing boundary
 
-- Encode the renderer command capability
-- Decode the bounded command
-- Reject malformed or legacy commands
-- Clear capability material
+- Encode the opt-in renderer command capability
+- Decode the bounded opt-in command
+- Reject malformed opt-in capability commands
+- Clear bounded opt-in decoder state
 
 
 <details>
@@ -68,7 +70,7 @@ Reproduction: this block contains the complete executable scenario source.
 check_renderer_command_capability_encode()
 check_renderer_command_capability_decode()
 check_renderer_command_capability_rejection()
-check_renderer_command_capability_clear()
+check_renderer_capability_decoder_cleanup()
 ```
 
 </details>
@@ -86,7 +88,6 @@ check_renderer_command_capability_clear()
 
 ## Related Documentation
 
-- **Requirements:** `doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md`
 - **Plan:** `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md`
 - **Design:** `doc/05_design/simple_web_browser_engine_production_hardening.md`
 - **Research:** `doc/01_research/local/simple_web_browser_engine_production_hardening.md`
