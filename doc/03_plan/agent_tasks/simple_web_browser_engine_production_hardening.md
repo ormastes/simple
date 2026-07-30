@@ -768,3 +768,21 @@ Static guards passed once. Qualified pure-Simple execution/docgen remain HELD.
 All accepted lanes received independent normal/high-capability static review.
 The combined diff/layout/placeholder/direct-environment guards passed once.
 No bootstrap, seed fallback, stale artifact, or runtime PASS was used.
+
+## Production browser batch 15 (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `csp_animation_clock` | Script-denying CSP advances the sole browser clock, then returns before JS/SimpleScript timers or rAF; CSS frames still progress. | INTEGRATED `b0f47f6aac0`; exact Draw IR/Engine2D evidence |
+| `invalid_form_method` | Missing/empty/invalid methods use GET; valid GET/POST remain exact; unsupported `dialog` and forbidden transport fail before network. | INTEGRATED `b0f47f6aac0`; public-action evidence |
+| `canonical_drawir_upload` | Web upload and comparison consume the identical composition through the shared Engine2D helper with real result receipt and full-frame absolute oracle. | INTEGRATED `b0f47f6aac0`; private CPU route removed |
+| `details_summary` | Omitted-p parsing, first-summary visibility, nested/interactive activation, cancellation, and post-animation suppression are O(N) and canonical. | INTEGRATED `d25b474cf0f`; HTML bounded rows now 11 |
+| `raf_alignment` | rAF deadlines align to document origin, nested callbacks defer, refresh metadata remains aligned, and capped wakeups saturate safely at i64 bounds. | INTEGRATED `d25b474cf0f`; exact callback/frame evidence |
+| `sbr2_capability` | Existing entropy facade + common validator + private parent issuance are reconciled across architecture/TLDR/detail/agent/system-test docs. | DESIGN PASS `d25b474cf0f`; atomic production migration remains RED |
+| `stage4_admission` | No clean full CLI includes current compiler/browser source. | HELD; no runtime/docgen PASS |
+
+All implementation lanes received independent normal/high-capability static
+review. Review caught CSP ordering, form `dialog`, correlated pixel evidence,
+summary interactive precedence, rAF deadline/wakeup overflow, and SBR2
+authority-model contradictions before integration. Two combined static guard
+passes succeeded; no bootstrap, seed fallback, or stale runtime was used.

@@ -2522,3 +2522,26 @@ implementation in progress / target evidence blocked
   stale-lineage, dirty/unfingerprinted, incomplete, racing, or Stage 2/3 only.
   No browser spec/docgen/runtime PASS is claimed and no seed substitute was
   used.
+- production browser batch 15 (2026-07-30): commits `b0f47f6aac0` and
+  `d25b474cf0f` integrate five independently reviewed implementation lanes.
+  A script-denying CSP now advances the shared monotonic clock before returning
+  without JS/SimpleScript callbacks, so CSS animation frames remain live.
+  Invalid/missing/empty form methods use selected-profile GET semantics while
+  valid-but-unsupported `dialog` fails before network. Web upload consumes the
+  same canonical Draw IR composition through Engine2D with actual software
+  readback receipt and every-pixel absolute evidence. Details/summary parsing,
+  O(N) structural visibility, nested/interactive default actions, cancellation,
+  and post-animation suppression now agree. rAF deadlines align to the document
+  frame origin, use overflow-safe due/refresh/wakeup math, and remain safe after
+  the 1,000-task drain cap at `i64.max`.
+- batch-15 SBR2 design repair: the architecture/TLDR/detail/agent/system-test
+  plans now reuse the existing `crypto_sffi.random_hex(16)` facade while the
+  private hosted parent alone validates with the common protocol validator and
+  installs staged/issued authority. Arbitrary random hex grants no authority.
+  One future atomic change must migrate every parent/worker command, network,
+  fetch, and frame direction with no mixed SBR1/SBR2 production fallback.
+  This is design-only; SBR2 production and its 10,000-cycle evidence remain RED.
+- batch-15 verification boundary: both integration tranches passed one static
+  diff/layout/placeholder/direct-environment guard. No provenance-qualified
+  current Stage-4 CLI exists, so focused runtime execution and docgen remain
+  unclaimed.

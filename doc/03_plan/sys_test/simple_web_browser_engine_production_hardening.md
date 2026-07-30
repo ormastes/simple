@@ -1069,3 +1069,31 @@ content-visibility GPU guard required no duplicate change.
 Static guards passed once. Qualified execution/docgen remain HELD because the
 artifact audit found no clean provenance-qualified Stage-4 full CLI at or after
 the current compiler/browser commits.
+
+## Batch 15 executable evidence
+
+Commits `b0f47f6aac0` and `d25b474cf0f` add modern executable specs and complete
+manuals for:
+
+- a script-denying CSP that advances the shared clock and exact CSS animation
+  frame while executing zero script callbacks or mutations;
+- missing/empty/invalid form method GET fallback, exact valid GET/POST, and
+  fail-closed `dialog`/transport behavior through public submit actions;
+- identical WebIR-produced Draw IR submitted through the canonical Engine2D
+  upload/comparison route, with actual software result receipt and all 2,048
+  pixels checked against an absolute panel oracle;
+- details/summary omitted-paragraph parsing, closed/open/missing/nested
+  visibility, nearest interactive descendant precedence, preventDefault, and
+  post-keyframe structural suppression; and
+- document-origin-aligned rAF deadlines, nested deferral, cancellation,
+  pending/completed refresh metadata, overflow-safe timer math, and a
+  1,001-task `i64.max` wakeup boundary.
+
+The same tranche reconciles the SBR2 design contract around the existing
+entropy facade, common capability validator, private parent issuance, atomic
+all-direction activation, and retained 1 MiB/i64/10,000-cycle gates. SBR2
+remains design-only and RED.
+
+Independent review and one static guard pass per integration tranche succeeded.
+Qualified execution/docgen remain HELD pending a clean provenance-qualified
+current Stage-4 pure-Simple CLI.
