@@ -669,6 +669,15 @@ fn stmt_get(idx: i64) -> CoreStmt:
     )
 
 fn decl_get(idx: i64) -> CoreDecl:
+    # `idx` can be a decl id captured before ast_reset() (or a module-level
+    # `var` global that does not reliably persist a write across a call into
+    # a different module under this interpreter, see decl_alloc/
+    # module_get_decls investigation) left decl_tag shorter than the id
+    # implies. Return a neutral, tag-0 CoreDecl (no real DECL_* constant is
+    # 0; they all start at 1) instead of indexing out of range.
+    # (doc/08_tracking/bug/lint_pipeline_array_index_out_of_bounds_2026-07-30.md)
+    if idx < 0 or idx >= decl_tag.len():
+        return make_core_decl(0, -1)
     CoreDecl(
         tag: decl_tag[idx],
         span_id: decl_span[idx],
@@ -693,7 +702,12 @@ fn decl_get(idx: i64) -> CoreDecl:
 # These access both expr and stmt pools so they stay in the unified module.
 
 fn expr_contains_yield(eid: i64) -> bool:
-    if eid < 0: return false
+    # `eid` may be stale relative to the CURRENT expr_tag arena (reset by
+    # ast_reset() for a later parse, or a cross-module global-var visibility
+    # gap under the interpreter). Bound-check like the existing negative
+    # "no expr" sentinel guard, not just `eid < 0`.
+    # (doc/08_tracking/bug/lint_pipeline_array_index_out_of_bounds_2026-07-30.md)
+    if eid < 0 or eid >= expr_tag.len(): return false
     val tag = expr_tag[eid]
     if tag == EXPR_YIELD: return true
     if tag == EXPR_LAMBDA: return false
@@ -707,7 +721,8 @@ fn expr_contains_yield(eid: i64) -> bool:
     false
 
 fn stmt_contains_yield(sid: i64) -> bool:
-    if sid < 0: return false
+    # Same stale-arena-id hazard as expr_contains_yield above.
+    if sid < 0 or sid >= stmt_expr.len(): return false
     if expr_contains_yield(stmt_expr[sid]): return true
     for child_sid in stmt_body[sid]:
         if stmt_contains_yield(child_sid): return true
