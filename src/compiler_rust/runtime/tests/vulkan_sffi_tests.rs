@@ -339,6 +339,119 @@ fn test_kernel_compile_minimal() {
 }
 
 #[test]
+fn test_kernel_launch_1d_writes_storage_buffer() {
+    if rt_vk_available() == 0 {
+        println!("Skipping test: Vulkan not available");
+        return;
+    }
+
+    let device = rt_vk_device_create();
+    if device == 0 {
+        panic!("Vulkan reported available but device creation failed");
+    }
+
+    let buffer = rt_vk_buffer_alloc(device, std::mem::size_of::<u32>() as u64);
+    if buffer == 0 {
+        let device_free = rt_vk_device_free(device);
+        assert_eq!(device_free, VulkanFfiError::Success as i32);
+        panic!("Vulkan device created but storage-buffer allocation failed");
+    }
+
+    // This is the repository's validated storage-buffer layout, reduced to a
+    // kernel that writes one constant so every dispatched invocation is safe.
+    #[rustfmt::skip]
+    let spirv_words: &[u32] = &[
+        0x07230203, 0x00010300, 0x00070000, 14, 0,
+        0x00020011, 1, 0x0003000e, 0, 1,
+        0x0005000f, 5, 1, 0x6e69616d, 0,
+        0x00060010, 1, 17, 1, 1, 1,
+        0x00040047, 2, 34, 0,
+        0x00040047, 2, 33, 0,
+        0x00040047, 3, 6, 4,
+        0x00050048, 4, 0, 35, 0,
+        0x00030047, 4, 2,
+        0x00020013, 5,
+        0x00040015, 6, 32, 0,
+        0x0004002b, 6, 7, 0x12345678,
+        0x0004002b, 6, 8, 0,
+        0x0003001d, 3, 6,
+        0x0003001e, 4, 3,
+        0x00040020, 9, 12, 4,
+        0x00040020, 10, 12, 6,
+        0x0004003b, 9, 2, 12,
+        0x00030021, 11, 5,
+        0x00050036, 5, 1, 0, 11,
+        0x000200f8, 12,
+        0x00060041, 10, 13, 2, 8, 8,
+        0x0003003e, 13, 7,
+        0x000100fd,
+        0x00010038,
+    ];
+    let spirv_bytes: Vec<u8> = spirv_words.iter().flat_map(|word| word.to_le_bytes()).collect();
+
+    let initial = 0xdead_beefu32.to_le_bytes();
+    let upload_result = rt_vk_buffer_upload(buffer, initial.as_ptr(), initial.len() as u64);
+    let kernel = rt_vk_kernel_compile(device, spirv_bytes.as_ptr(), spirv_bytes.len() as u64);
+    let buffers = [buffer];
+    let launch_result = if kernel != 0 {
+        rt_vk_kernel_launch_1d(kernel, buffers.as_ptr(), buffers.len() as u64, 1)
+    } else {
+        VulkanFfiError::InvalidHandle as i32
+    };
+    let sync_result = if kernel != 0 {
+        rt_vk_device_sync(device)
+    } else {
+        VulkanFfiError::InvalidHandle as i32
+    };
+    let mut output = [0u8; std::mem::size_of::<u32>()];
+    let download_result = if kernel != 0 {
+        rt_vk_buffer_download(buffer, output.as_mut_ptr(), output.len() as u64)
+    } else {
+        VulkanFfiError::InvalidHandle as i32
+    };
+
+    // Perform all cleanup before assertions so a failed GPU operation cannot
+    // leak the handles that this regression creates.
+    let kernel_free_result = if kernel != 0 {
+        rt_vk_kernel_free(kernel)
+    } else {
+        VulkanFfiError::Success as i32
+    };
+    let buffer_free_result = rt_vk_buffer_free(buffer);
+    let device_free_result = rt_vk_device_free(device);
+
+    assert_ne!(kernel, 0, "Valid storage-buffer SPIR-V must compile to a pipeline");
+    assert_eq!(upload_result, VulkanFfiError::Success as i32, "Sentinel upload failed");
+    assert_eq!(launch_result, VulkanFfiError::Success as i32, "Kernel launch failed");
+    assert_eq!(
+        sync_result,
+        VulkanFfiError::Success as i32,
+        "Device synchronization failed"
+    );
+    assert_eq!(download_result, VulkanFfiError::Success as i32, "GPU readback failed");
+    assert_eq!(
+        u32::from_le_bytes(output),
+        0x1234_5678,
+        "GPU did not write the sentinel"
+    );
+    assert_eq!(
+        kernel_free_result,
+        VulkanFfiError::Success as i32,
+        "Kernel cleanup failed"
+    );
+    assert_eq!(
+        buffer_free_result,
+        VulkanFfiError::Success as i32,
+        "Buffer cleanup failed"
+    );
+    assert_eq!(
+        device_free_result,
+        VulkanFfiError::Success as i32,
+        "Device cleanup failed"
+    );
+}
+
+#[test]
 fn test_kernel_compile_null_spirv() {
     if rt_vk_available() == 0 {
         println!("Skipping test: Vulkan not available");

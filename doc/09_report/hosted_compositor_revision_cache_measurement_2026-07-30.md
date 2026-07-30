@@ -51,6 +51,24 @@ valid `expect condition` assertions. Both lint implementations now admit
 nonempty infix expectations, and the focused Rust regression passes 1/1. The
 benchmark was not rerun after the three-cycle cap, so timings remain unproven.
 
+A fresh source-pinned native cycle used absolute `SIMPLE_LIB` and worker
+executable paths from commit `a9ee4f425284`. The first run confirmed the
+generated wrapper still received source-spec lint under the deployed compiler.
+The second retained the wrapper and proved its lowered `expect condition`
+assertions were valid but its `_spec.spl` suffix incorrectly triggered that
+lint. Generated native wrappers now end in `_native.spl`; the focused
+preprocessing regression passed 1/1 before its consecutive-declaration coverage
+was strengthened. The third run cleared lint and exposed
+`PIPE_PERF_PAIRS` as undefined because the wrapper moved every second
+consecutive top-level declaration into `main`. The state transition now
+reclassifies the terminating line before body lowering, and the regression pins
+both declarations before generated `main`. A direct source check was stopped by
+the repository's 60-second CPU monitor (retained output:
+`/tmp/check-test-runner-execute-20260730.log`). The strengthened declaration,
+class, function, and `describe` placement assertions postdate the earlier 1/1
+pass and remain unrun. The benchmark was not rerun after the three-cycle cap.
+No timing or process/pipe acceptance is claimed.
+
 ## Required Follow-up
 
 1. Run the 21-pair CUDA and Vulkan rows with the admitted source-matched
