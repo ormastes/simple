@@ -837,12 +837,13 @@ References:
 - [CSS Overflow Level 3 — `overflow: clip`](https://www.w3.org/TR/css-overflow-3/#valdef-overflow-clip)
 
 <!-- codex-architecture -->
-## Bookmark title witness boundary (PROPOSED / UNIMPLEMENTED)
+## Bookmark title witness boundary (IMPLEMENTED STATIC / EXECUTION HELD)
 
-The parent currently commits `toggle_bookmark(url, url)` in both hosted
-production paths. That discards the bounded `BrowserSession.current_title`
-already used by the in-process Favorite action, and persisted/UI bookmark
-labels become the URL after a renderer or profile restart.
+Before this implementation, both hosted production paths committed
+`toggle_bookmark(url, url)`, discarding the bounded
+`BrowserSession.current_title`. Both paths now call the single profile-owned
+`hosted_browser_parent_toggle_bookmark` transaction; the SSpec invokes that
+same production function after the real `favorite-parent` action.
 
 The existing frame contract is the only new authority needed. `SBRF8` extends
 `SBRF7` with one base64 document-title payload and encoded-length field:
@@ -889,6 +890,11 @@ must produce a newly admitted witness; title state is never copied across the
 generation boundary. Persisted bookmarks remain profile-owned and survive
 window/host restart. The in-process path calls the same validator with
 `current_title` and must not overwrite the accepted title with `(url, url)`.
+
+Static source, hostile protocol fixtures, generated manuals, and profile
+restart coverage exist. They do not establish an executable PASS; production
+acceptance remains held for an admitted current pure-Simple full CLI and hosted
+artifact run.
 
 <!-- codex-architecture -->
 ## Renderer command capability boundary (PROPOSED / UNIMPLEMENTED / RED)

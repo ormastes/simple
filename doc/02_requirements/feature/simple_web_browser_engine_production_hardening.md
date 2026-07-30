@@ -68,6 +68,20 @@ Selection: Feature Option B — Secure interactive web core
 - REQ-WEB-BROWSER-021: Executable SSpec and mirrored manuals shall trace every
   requirement; missing platform/capability evidence remains blocked.
 
+## Bookmark title implementation traceability
+
+Status: **IMPLEMENTED STATIC / EXECUTION HELD**.
+
+REQ-WEB-BROWSER-009 now traces bounded document-title transport and persistence
+through `SBRF8`, the shared parent profile transaction
+`hosted_browser_parent_toggle_bookmark`, and the exact four-step scenario in
+`test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`.
+Focused protocol, lifecycle, display, and file-backed restart coverage lives in
+the matching unit/integration specs and generated `doc/06_spec` manuals.
+These source and generated-manual artifacts are not an executable PASS; runtime
+acceptance remains held until the scenario runs on an admitted current
+pure-Simple full CLI with the admitted hosted artifact and SHA-256.
+
 ## Non-goals
 
 - No claim of complete web-platform parity.

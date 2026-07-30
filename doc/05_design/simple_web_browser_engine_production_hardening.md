@@ -746,9 +746,9 @@ Normative references:
 - <https://www.w3.org/TR/css-overflow-3/#valdef-overflow-clip>
 
 <!-- codex-design -->
-## RED detail contract: persisted bookmark titles (2026-07-30)
+## Persisted bookmark titles (2026-07-30)
 
-**Status: PROPOSED / UNIMPLEMENTED.**
+**Status: IMPLEMENTED STATIC / EXECUTION HELD.**
 
 ### Shared interfaces
 
@@ -806,6 +806,11 @@ introduced.
    title. `BrowserSession.load_bookmark_snapshot` preserves the empty sentinel,
    and UI-access bookmark nodes call `browser_bookmark_title_or_url`.
 
+The parent transaction is
+`hosted_browser_parent_toggle_bookmark`. Both hosted-entry Favorite branches
+and the system scenario use this exact function; the test does not duplicate
+`profile.toggle_bookmark`/`load_bookmarks` routing.
+
 ### Lifecycle and compatibility
 
 - Navigation replacement clears the retained witness before a new request can
@@ -823,6 +828,11 @@ introduced.
   stale-generation, stale-reply, or wrong-URL title cannot enter persistence;
   the visible label falls back to the canonical URL without changing its
   navigation target.
+
+Static implementation and generated manuals are present, but no executable
+production PASS is claimed. Runtime status remains held until the exact system
+scenario runs with an admitted current pure-Simple full CLI and hosted artifact
+hash.
 
 ### Error handling
 

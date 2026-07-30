@@ -2058,8 +2058,6 @@ expect(registry.pressed_window_id).to_equal(0)
 
 #### should persist bounded page titles across renderer and profile restart
 
-- Open bounded titled documents through hosted chrome
-   - Text capture: after_step
 - setup hosted bookmark title profile
    - Text capture: after_step
 - fail
@@ -2068,8 +2066,10 @@ expect(registry.pressed_window_id).to_equal(0)
    - Text capture: after_step
 - fail
    - Text capture: after_step
-- Commit bookmarks through the parent profile owner
+- Open bounded titled documents through hosted chrome
    - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: admitted_title equals `BOOKMARK_TITLE_512`
 - Err
    - Text capture: after_step
 - fail
@@ -2082,16 +2082,30 @@ expect(registry.pressed_window_id).to_equal(0)
    - Text capture: after_step
 - registry bookmark stored title
    - Text capture: after_step
-- Restart the renderer generation and profile-backed window
+   - Evidence: text output verified by 1 expected check
+   - Expected: second_commit.bookmarks.entries[1].second equals ``
+- Commit bookmarks through the parent profile owner
    - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: accepted_persisted_title equals `BOOKMARK_TITLE_512`
+   - Expected: fallback_persisted_title equals ``
 - profile close
    - Text capture: after_step
 - BrowserProfileStore open
    - Text capture: after_step
-- List persisted bookmarks with safe titles
+- Restart the renderer generation and profile-backed window
    - Text capture: after_step
+   - Evidence: text output verified by 3 expected checks
+   - Expected: restarted_count equals `2`
+   - Expected: restarted.profile_bookmarks.entries.len() equals `2`
+   - Expected: restarted.profile_bookmarks.entries[1].second equals ``
 - check restarted bookmark listing
    - Text capture: after_step
+- List persisted bookmarks with safe titles
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: restored_title equals `BOOKMARK_TITLE_512`
+   - Expected: restored_fallback equals ``
 - set mock registry
    - Text capture: after_step
 - rt file delete
@@ -2105,11 +2119,10 @@ expect(registry.pressed_window_id).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 82 lines folded for reproduction.
+Runnable source: 121 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Open bounded titled documents through hosted chrome")
 setup_hosted_bookmark_title_profile()
 val artifact = env_get("HOSTED_WM_ARTIFACT")
 val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
@@ -2131,11 +2144,16 @@ expect(_await_browser_registry_ready(
 _open_hosted_bookmark_document(
     registry, 93, "https://accepted-title.test/", 100, body_html
 )
+expect(registry.bookmark_stored_title(93)).to_equal(
+    BOOKMARK_TITLE_512
+)
 check_bookmark_title_witness_admission(
     registry, 93, BOOKMARK_TITLE_512
 )
+val admitted_title = registry.bookmark_stored_title(93)
+step("Open bounded titled documents through hosted chrome")
+expect(admitted_title).to_equal(BOOKMARK_TITLE_512)
 
-step("Commit bookmarks through the parent profile owner")
 var profile = match BrowserProfileStore.open(
     BOOKMARK_TITLE_PROFILE_PATH
 ):
@@ -2149,10 +2167,17 @@ val _ = registry.dispatch_chrome_pointer(
 expect(registry.dispatch_chrome_pointer(
     111, 93, "favorite", false
 ).reason).to_equal("favorite-parent")
-expect(profile.toggle_bookmark(
+val first_commit = hosted_browser_parent_toggle_bookmark(
+    profile,
     "https://accepted-title.test/",
     registry.bookmark_stored_title(93)
-)?).to_be(true)
+)
+expect(first_commit.ok).to_be(true)
+expect(first_commit.enabled).to_be(true)
+expect(first_commit.bookmarks.entries[0].second).to_equal(
+    BOOKMARK_TITLE_512
+)
+profile = first_commit.profile
 _open_hosted_bookmark_document(
     registry, 93, "https://fallback-title.test/", 120, body_html
 )
@@ -2163,12 +2188,25 @@ val _ = registry.dispatch_chrome_pointer(
 expect(registry.dispatch_chrome_pointer(
     131, 93, "favorite", false
 ).reason).to_equal("favorite-parent")
-expect(profile.toggle_bookmark(
+val second_commit = hosted_browser_parent_toggle_bookmark(
+    profile,
     "https://fallback-title.test/",
     registry.bookmark_stored_title(93)
-)?).to_be(true)
+)
+expect(second_commit.ok).to_be(true)
+expect(second_commit.enabled).to_be(true)
+expect(second_commit.bookmarks.entries[1].second).to_equal("")
+profile = second_commit.profile
+val accepted_persisted_title = (
+    first_commit.bookmarks.entries[0].second
+)
+val fallback_persisted_title = (
+    second_commit.bookmarks.entries[1].second
+)
+step("Commit bookmarks through the parent profile owner")
+expect(accepted_persisted_title).to_equal(BOOKMARK_TITLE_512)
+expect(fallback_persisted_title).to_equal("")
 
-step("Restart the renderer generation and profile-backed window")
 expect(registry.next_generation).to_be_greater_than(2)
 expect(registry.close()).to_be(true)
 profile.close()?
@@ -2180,12 +2218,27 @@ var restarted = HostedWebContentRegistry.create_with_bookmark_store(
 val _ = restarted.advance_window(
     94, "<main>restarted</main>", 64, 48, 100000, true
 )
+val restarted_count = restarted.profile_bookmarks.entries.len()
+step("Restart the renderer generation and profile-backed window")
+expect(registry.next_generation).to_be_greater_than(2)
+expect(restarted_count).to_equal(2)
 
-step("List persisted bookmarks with safe titles")
+expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
+expect(restarted.profile_bookmarks.entries[0].second).to_equal(
+    BOOKMARK_TITLE_512
+)
+expect(restarted.profile_bookmarks.entries[1].second).to_equal("")
 check_restarted_bookmark_listing(restarted.profile_bookmarks)
 check_in_process_registry_profile_reopen(
     restarted.profile_bookmarks
 )
+val restored_title = restarted.profile_bookmarks.entries[0].second
+val restored_fallback = (
+    restarted.profile_bookmarks.entries[1].second
+)
+step("List persisted bookmarks with safe titles")
+expect(restored_title).to_equal(BOOKMARK_TITLE_512)
+expect(restored_fallback).to_equal("")
 expect(restarted.close()).to_be(true)
 set_mock_registry(MockResponseRegistry.create())
 rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)

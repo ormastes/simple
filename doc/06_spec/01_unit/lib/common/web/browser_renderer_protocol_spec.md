@@ -32,7 +32,7 @@
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 78 lines folded for reproduction.
+Runnable source: 111 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -103,6 +103,39 @@ val nul_title = BrowserRendererMessage(
 expect(browser_renderer_frame_decode(
     nul_title, 64, 48
 ).reason).to_equal("invalid-document-title")
+val invalid_padding = BrowserRendererMessage(
+    kind: "frame",
+    generation: short_message.message.generation,
+    request_id: short_message.message.request_id,
+    payload: short_message.message.payload.replace(
+        "b2s=", "b=8="
+    )
+)
+expect(browser_renderer_frame_decode(
+    invalid_padding, 64, 48
+).reason).to_equal("invalid-document-title")
+val truncated_title = BrowserRendererMessage(
+    kind: "frame",
+    generation: short_message.message.generation,
+    request_id: short_message.message.request_id,
+    payload: short_message.message.payload.replace(
+        "\t4\t0\t", "\t5\t0\t"
+    )
+)
+expect(browser_renderer_frame_decode(
+    truncated_title, 64, 48
+).ok).to_be(false)
+val overlapping_title = BrowserRendererMessage(
+    kind: "frame",
+    generation: short_message.message.generation,
+    request_id: short_message.message.request_id,
+    payload: short_message.message.payload.replace(
+        "\t4\t0\t", "\t0\t0\t"
+    )
+)
+expect(browser_renderer_frame_decode(
+    overlapping_title, 64, 48
+).ok).to_be(false)
 val legacy = browser_renderer_frame_encode_with_state_and_retained_images(
     _renderer_protocol_fixture(),
     7, 2, 41, -1, 0, "", 0, "", "",

@@ -33,7 +33,8 @@ use os.hosted.hosted_browser_renderer_registry.{
     HostedBrowserRendererRegistry
 }
 use os.hosted.browser_profile_store.{
-    BrowserBookmarkStore, BrowserProfileStore
+    BrowserBookmarkStore, BrowserProfileStore,
+    hosted_browser_parent_toggle_bookmark
 }
 use os.hosted.hosted_web_content_session.{HostedWebContentRegistry}
 use os.hosted.hosted_browser_renderer_worker.{
@@ -1664,7 +1665,6 @@ describe "Production Simple browser user flow":
     # @capture(text)
     # @req REQ-WEB-BROWSER-009
     it "should persist bounded page titles across renderer and profile restart":
-        step("Open bounded titled documents through hosted chrome")
         setup_hosted_bookmark_title_profile()
         val artifact = env_get("HOSTED_WM_ARTIFACT")
         val expected_artifact_sha = env_get("HOSTED_WM_ARTIFACT_SHA256")
@@ -1686,11 +1686,16 @@ describe "Production Simple browser user flow":
         _open_hosted_bookmark_document(
             registry, 93, "https://accepted-title.test/", 100, body_html
         )
+        expect(registry.bookmark_stored_title(93)).to_equal(
+            BOOKMARK_TITLE_512
+        )
         check_bookmark_title_witness_admission(
             registry, 93, BOOKMARK_TITLE_512
         )
+        val admitted_title = registry.bookmark_stored_title(93)
+        step("Open bounded titled documents through hosted chrome")
+        expect(admitted_title).to_equal(BOOKMARK_TITLE_512)
 
-        step("Commit bookmarks through the parent profile owner")
         var profile = match BrowserProfileStore.open(
             BOOKMARK_TITLE_PROFILE_PATH
         ):
@@ -1704,10 +1709,17 @@ describe "Production Simple browser user flow":
         expect(registry.dispatch_chrome_pointer(
             111, 93, "favorite", false
         ).reason).to_equal("favorite-parent")
-        expect(profile.toggle_bookmark(
+        val first_commit = hosted_browser_parent_toggle_bookmark(
+            profile,
             "https://accepted-title.test/",
             registry.bookmark_stored_title(93)
-        )?).to_be(true)
+        )
+        expect(first_commit.ok).to_be(true)
+        expect(first_commit.enabled).to_be(true)
+        expect(first_commit.bookmarks.entries[0].second).to_equal(
+            BOOKMARK_TITLE_512
+        )
+        profile = first_commit.profile
         _open_hosted_bookmark_document(
             registry, 93, "https://fallback-title.test/", 120, body_html
         )
@@ -1718,12 +1730,25 @@ describe "Production Simple browser user flow":
         expect(registry.dispatch_chrome_pointer(
             131, 93, "favorite", false
         ).reason).to_equal("favorite-parent")
-        expect(profile.toggle_bookmark(
+        val second_commit = hosted_browser_parent_toggle_bookmark(
+            profile,
             "https://fallback-title.test/",
             registry.bookmark_stored_title(93)
-        )?).to_be(true)
+        )
+        expect(second_commit.ok).to_be(true)
+        expect(second_commit.enabled).to_be(true)
+        expect(second_commit.bookmarks.entries[1].second).to_equal("")
+        profile = second_commit.profile
+        val accepted_persisted_title = (
+            first_commit.bookmarks.entries[0].second
+        )
+        val fallback_persisted_title = (
+            second_commit.bookmarks.entries[1].second
+        )
+        step("Commit bookmarks through the parent profile owner")
+        expect(accepted_persisted_title).to_equal(BOOKMARK_TITLE_512)
+        expect(fallback_persisted_title).to_equal("")
 
-        step("Restart the renderer generation and profile-backed window")
         expect(registry.next_generation).to_be_greater_than(2)
         expect(registry.close()).to_be(true)
         profile.close()?
@@ -1735,12 +1760,27 @@ describe "Production Simple browser user flow":
         val _ = restarted.advance_window(
             94, "<main>restarted</main>", 64, 48, 100000, true
         )
+        val restarted_count = restarted.profile_bookmarks.entries.len()
+        step("Restart the renderer generation and profile-backed window")
+        expect(registry.next_generation).to_be_greater_than(2)
+        expect(restarted_count).to_equal(2)
 
-        step("List persisted bookmarks with safe titles")
+        expect(restarted.profile_bookmarks.entries.len()).to_equal(2)
+        expect(restarted.profile_bookmarks.entries[0].second).to_equal(
+            BOOKMARK_TITLE_512
+        )
+        expect(restarted.profile_bookmarks.entries[1].second).to_equal("")
         check_restarted_bookmark_listing(restarted.profile_bookmarks)
         check_in_process_registry_profile_reopen(
             restarted.profile_bookmarks
         )
+        val restored_title = restarted.profile_bookmarks.entries[0].second
+        val restored_fallback = (
+            restarted.profile_bookmarks.entries[1].second
+        )
+        step("List persisted bookmarks with safe titles")
+        expect(restored_title).to_equal(BOOKMARK_TITLE_512)
+        expect(restored_fallback).to_equal("")
         expect(restarted.close()).to_be(true)
         set_mock_registry(MockResponseRegistry.create())
         rt_file_delete(BOOKMARK_TITLE_PROFILE_PATH)
