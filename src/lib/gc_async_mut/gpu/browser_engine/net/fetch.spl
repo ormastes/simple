@@ -14,7 +14,9 @@ use std.gc_async_mut.gpu.browser_engine.shared.error {BrowserError, BrowserResul
 use std.gc_async_mut.gpu.browser_engine.shared.logging {Logger, BrowserLogLevel}
 use std.gc_async_mut.gpu.browser_engine.net.dns {DnsResolver}
 use std.gc_async_mut.gpu.browser_engine.net.cors {CorsChecker, is_simple_method, needs_preflight}
-use std.gc_async_mut.gpu.browser_engine.net.h1_client {H1Client}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    H1Client, h1_default_deadline_ms, h1_deadline_expired
+}
 use std.gc_async_mut.gpu.browser_engine.net.tls {TlsManager, TlsConnection}
 use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types {TlsConfig, TlsVersion}
 
@@ -123,21 +125,34 @@ class FetchEngine:
     # The main fetch function. Implements the Fetch specification request lifecycle.
     # Steps: CORS check -> cache -> DNS -> HTTP -> redirects -> cookies -> cache store.
     me fetch(request: FetchRequest) -> Result<FetchResponse>:
-        self.fetch_with_redirect(request, 0)
+        self.fetch_with_redirect(
+            request, 0, h1_default_deadline_ms()
+        )
 
     # Execute exactly one request URL. Redirect responses are returned unchanged
     # so higher-level browser policy can inspect and commit every hop.
-    me fetch_single_hop(request: FetchRequest) -> Result<FetchResponse>:
-        val prepared = self.prepare_single_hop(request)?
+    me fetch_single_hop(
+        request: FetchRequest, deadline_ms: i64 = 0
+    ) -> Result<FetchResponse>:
+        val request_deadline_ms = if deadline_ms > 0:
+            deadline_ms
+        else:
+            h1_default_deadline_ms()
+        val prepared = self.prepare_single_hop(
+            request, "", false, request_deadline_ms
+        )?
         if val Some(response) = prepared.response:
             return Ok(response)
-        val response = self.execute_http(prepared.request)?
+        val response = self.execute_http(
+            prepared.request, request_deadline_ms
+        )?
         self.finalize_single_hop(prepared.request, response)
 
     me prepare_single_hop(
         request: FetchRequest,
         site_for_cookies_url: text = "",
-        is_top_level_navigation: bool = false
+        is_top_level_navigation: bool = false,
+        deadline_ms: i64 = 0
     ) -> Result<FetchSingleHopPreparation>:
         self.logger.info("fetch: {request.method.to_upper()} {request.url.to_text()}")
         val policy_request = self.cors.prepare_actual_request(request)
@@ -153,7 +168,7 @@ class FetchEngine:
         match policy_request.mode:
             RequestMode.Cors:
                 val preflight_result = self.handle_cors_preflight(
-                    policy_request
+                    policy_request, deadline_ms
                 )?
                 if not preflight_result:
                     return Err(network_error("CORS preflight denied"))
@@ -250,12 +265,18 @@ class FetchEngine:
     # Internal fetch loop that follows redirects up to max_redirects.
     # Each redirect decrements the remaining count and constructs a new request
     # targeting the Location header URL.
-    me fetch_with_redirect(request: FetchRequest, redirect_count: i64) -> Result<FetchResponse>:
+    me fetch_with_redirect(
+        request: FetchRequest, redirect_count: i64, deadline_ms: i64
+    ) -> Result<FetchResponse>:
+        if h1_deadline_expired(deadline_ms):
+            return Err(network_error(
+                "h1: aggregate request deadline exceeded"
+            ))
         if redirect_count > self.max_redirects:
             self.logger.error("fetch: exceeded maximum redirects ({self.max_redirects})")
             return Err(network_error("Too many redirects (max: {self.max_redirects})"))
 
-        val response = self.fetch_single_hop(request)?
+        val response = self.fetch_single_hop(request, deadline_ms)?
 
         # Step 3f: Handle redirects (301, 302, 303, 307, 308)
         if should_redirect(response.status):
@@ -271,7 +292,9 @@ class FetchEngine:
                         "Blocked insecure redirect from {request.url.to_text()} to {redirect_url.to_text()}"
                     ))
                 val redirect_request = self.create_redirect_request(request, redirect_url, response.status)
-                return self.fetch_with_redirect(redirect_request, redirect_count + 1)
+                return self.fetch_with_redirect(
+                    redirect_request, redirect_count + 1, deadline_ms
+                )
             else:
                 self.logger.warn("fetch: redirect status {response.status} but no Location header")
 
@@ -279,7 +302,9 @@ class FetchEngine:
 
     # Execute the CORS preflight sequence if needed.
     # Returns true if the request is allowed, false if denied.
-    me handle_cors_preflight(request: FetchRequest) -> Result<bool>:
+    me handle_cors_preflight(
+        request: FetchRequest, deadline_ms: i64 = 0
+    ) -> Result<bool>:
         if not self.cors.needs_preflight(request):
             self.logger.debug("fetch: no preflight needed")
             return Ok(true)
@@ -288,7 +313,9 @@ class FetchEngine:
         val preflight_req = self.cors.create_preflight(request)
 
         # Send the OPTIONS preflight
-        val preflight_response = self.execute_http(preflight_req)?
+        val preflight_response = self.execute_http(
+            preflight_req, deadline_ms
+        )?
         if preflight_response.status < 200 or preflight_response.status >= 300:
             self.logger.warn("fetch: CORS preflight returned HTTP {preflight_response.status}")
             return Ok(false)
@@ -361,7 +388,9 @@ class FetchEngine:
 
     # Perform the actual HTTP request over the network.
     # Routes through the H1 client which supports mock registry and plain HTTP TCP.
-    me execute_http(request: FetchRequest) -> Result<FetchResponse>:
+    me execute_http(
+        request: FetchRequest, deadline_ms: i64 = 0
+    ) -> Result<FetchResponse>:
         self.logger.debug("fetch: HTTP {request.method.to_upper()} for {request.url.to_text()}")
 
         # Build a temporary H1 client to handle the request.
@@ -369,7 +398,7 @@ class FetchEngine:
         val tls_config = default_tls_config()
         var tls_mgr = TlsManager.new(self.logger, tls_config)
         var h1 = H1Client.new(self.logger, self.dns, tls_mgr)
-        val response = h1.request(request)?
+        val response = h1.request(request, deadline_ms)?
         Ok(response)
 
     # Resolve a redirect Location URL against the original request URL.

@@ -22,6 +22,9 @@ the production browser, sandbox, HTTPS, live events, or GC/performance targets.
    - startup/render/frame/input;
    - RSS, GC, lifecycle, soak, cancellation;
    - hot-path and regression budgets.
+4. `test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl`
+   - one absolute Fetch deadline across local HTTP/HTTPS redirects;
+   - deterministic within-budget, aggregate-timeout, and redirect-limit cases.
 
 Mirrored manuals use the same paths below `doc/06_spec/`.
 
@@ -66,6 +69,17 @@ Each row has a normal (`N`), edge (`E`), and denial/error (`D`) case.
 | REQ-WEB-BROWSER-019 corpora/fuzz | security | CORPUS-N/E/D | pinned manifest, unsupported list, retained reproducer |
 | REQ-WEB-BROWSER-020 diagnostics | all | DIAG-N/E/D | typed safe diagnostics and secret/path redaction |
 | REQ-WEB-BROWSER-021 SSpec/manual | all | MANUAL-N/E/D | executable paths, mirrored docs, no stubs/placeholder passes |
+
+The focused Fetch deadline spec supplies `FETCH-DEADLINE-N/E/D` supporting
+evidence for REQ-WEB-BROWSER-010 and REQ-WEB-BROWSER-017. Its virtual monotonic
+clock models local hop latency without sleeps or live network access. It proves
+deadline propagation and no cache commit after timeout; it does not replace the
+blocked live platform-TLS certificate/HSTS evidence.
+
+Blocking DNS is excluded from the aggregate elapsed-time claim. The current
+DNS facade accepts only a hostname, not the remaining absolute deadline; H1
+checks the shared deadline immediately after lookup, but cannot interrupt the
+lookup itself.
 
 ## NFR traceability
 

@@ -50,6 +50,7 @@ class MockResponseEntry:
     status_text: text
     headers: [Pair<text, text>]
     body: text
+    delay_ms: i64
 
     static fn create(url_pattern: text, status: i64, body: text) -> MockResponseEntry:
         MockResponseEntry(
@@ -57,15 +58,20 @@ class MockResponseEntry:
             status: status,
             status_text: status_text_for_code(status),
             headers: [],
-            body: body
+            body: body,
+            delay_ms: 0
         )
 
 class MockResponseRegistry:
     entries: [MockResponseEntry]
     observed_requests: [FetchRequest]
+    now_ms: i64
 
     static fn create() -> MockResponseRegistry:
-        MockResponseRegistry(entries: [], observed_requests: [])
+        MockResponseRegistry(entries: [], observed_requests: [], now_ms: 0)
+
+    static fn create_at(now_ms: i64) -> MockResponseRegistry:
+        MockResponseRegistry(entries: [], observed_requests: [], now_ms: now_ms)
 
     me register(url_pattern: text, status: i64, body: text):
         val entry = MockResponseEntry.create(url_pattern, status, body)
@@ -74,6 +80,15 @@ class MockResponseRegistry:
     me register_with_headers(url_pattern: text, status: i64, headers: [Pair<text, text>], body: text):
         var entry = MockResponseEntry.create(url_pattern, status, body)
         entry.headers = headers
+        self.entries.push(entry)
+
+    me register_slow(
+        url_pattern: text, status: i64, headers: [Pair<text, text>],
+        body: text, delay_ms: i64
+    ):
+        var entry = MockResponseEntry.create(url_pattern, status, body)
+        entry.headers = headers
+        entry.delay_ms = delay_ms
         self.entries.push(entry)
 
     fn lookup(url: text) -> MockResponseEntry?:
@@ -106,10 +121,27 @@ fn observed_mock_request(url_pattern: text) -> FetchRequest?:
     nil
 
 fn h1_mock_response(req: FetchRequest) -> Result<FetchResponse>?:
+    h1_mock_response_until(req, 0)
+
+fn h1_mock_response_until(
+    req: FetchRequest, deadline_ms: i64
+) -> Result<FetchResponse>?:
     var registry = get_mock_registry()
     registry.observed_requests.push(req)
-    _global_mock_registry = registry
     if val Some(mock) = registry.lookup(req.url.to_text()):
+        if deadline_ms > 0 and mock.delay_ms > 0:
+            if registry.now_ms <= 0:
+                registry.now_ms = browser_monotonic_ms()
+            if mock.delay_ms >= h1_deadline_remaining_ms(
+                registry.now_ms, deadline_ms
+            ):
+                registry.now_ms = deadline_ms
+                _global_mock_registry = registry
+                return Some(Err(network_error(
+                    "h1: aggregate request deadline exceeded"
+                )))
+            registry.now_ms = registry.now_ms + mock.delay_ms
+        _global_mock_registry = registry
         if not h1_response_size_allowed(0, mock.body.len()):
             return Some(Err(network_error(
                 "h1: response exceeds 50 MiB limit"
@@ -127,7 +159,18 @@ fn h1_mock_response(req: FetchRequest) -> Result<FetchResponse>?:
             headers: serialize_headers(headers),
             body: rt_text_to_bytes(mock.body)
         )))
+    _global_mock_registry = registry
     nil
+
+fn h1_deadline_now_ms() -> i64:
+    val registry = get_mock_registry()
+    if registry.now_ms > 0: registry.now_ms else: browser_monotonic_ms()
+
+fn h1_deadline_expired(deadline_ms: i64) -> bool:
+    h1_deadline_remaining_ms(h1_deadline_now_ms(), deadline_ms) == 0
+
+fn h1_default_deadline_ms() -> i64:
+    h1_deadline_now_ms() + H1_TOTAL_TIMEOUT_MS
 
 # --- H1Connection ---
 
@@ -168,7 +211,15 @@ class H1Client:
         )
 
     # Send an HTTP/1.1 request and return the parsed response.
-    me request(req: FetchRequest) -> Result<FetchResponse>:
+    me request(req: FetchRequest, deadline_ms: i64 = 0) -> Result<FetchResponse>:
+        val request_deadline_ms = if deadline_ms > 0:
+            deadline_ms
+        else:
+            h1_default_deadline_ms()
+        if h1_deadline_expired(request_deadline_ms):
+            return Err(network_error(
+                "h1: aggregate request deadline exceeded"
+            ))
         if req.url.scheme != "http" and req.url.scheme != "https":
             return Err(network_error("h1: unsupported URL scheme '{req.url.scheme}'"))
         val host = req.url.host
@@ -178,21 +229,24 @@ class H1Client:
         self.logger.info("h1: {req.method.to_upper()} {req.url.to_text()}")
 
         # Canned responses must not touch DNS, TCP, or TLS.
-        if val Some(mock_result) = h1_mock_response(req):
+        if val Some(mock_result) = h1_mock_response_until(
+            req, request_deadline_ms
+        ):
             self.logger.debug("h1: mock response for {req.url.to_text()}")
             return mock_result
 
         # ponytail: one-shot connections until response framing can preserve a
         # live socket; both response readers currently consume-to-EOF and close.
-        val deadline_ms = browser_monotonic_ms() + H1_TOTAL_TIMEOUT_MS
-        var conn = self.get_connection(host, port, is_tls, deadline_ms)?
+        var conn = self.get_connection(
+            host, port, is_tls, request_deadline_ms
+        )?
 
         if is_tls and conn.tls_conn.? == false:
             val addresses = self.dns.resolve(host)?
             var tls_conn: TlsConnection? = nil
             for address in addresses:
                 val remaining = h1_deadline_remaining_ms(
-                    browser_monotonic_ms(), deadline_ms
+                    browser_monotonic_ms(), request_deadline_ms
                 )
                 if remaining == 0:
                     break
@@ -210,7 +264,7 @@ class H1Client:
                 ))
             val established = tls_conn.unwrap()
             if h1_deadline_remaining_ms(
-                browser_monotonic_ms(), deadline_ms
+                browser_monotonic_ms(), request_deadline_ms
             ) == 0:
                 val _ = established.close()
                 return Err(network_error("h1: TLS handshake deadline exceeded"))
@@ -221,8 +275,12 @@ class H1Client:
         self.logger.trace("h1: sending request:\n{request_bytes}")
 
         if is_tls:
-            return self.execute_tls_http(req, conn, request_bytes, deadline_ms)
-        return self.execute_plain_http(req, conn, request_bytes, deadline_ms)
+            return self.execute_tls_http(
+                req, conn, request_bytes, request_deadline_ms
+            )
+        return self.execute_plain_http(
+            req, conn, request_bytes, request_deadline_ms
+        )
 
     # Create a one-shot connection.
     me get_connection(
