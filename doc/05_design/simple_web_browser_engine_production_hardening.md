@@ -620,3 +620,21 @@ refresh, bootstrap, or Rust-seed fallback is claimed.
   and adds the existing border overlay only after the complete set lowers.
 - Visible material witness lines use preallocated indexed lists plus one join;
   hashes, order, culling, animation scheduling, and composition stay unchanged.
+
+## RED detail contracts: overflow cascade and History API (2026-07-30)
+
+- Extend the existing CSS rule record rather than adding a second cascade:
+  retain origin, important bit, layer ID/order, specificity, and source order
+  when parser output becomes `Rules`. The existing cascade owner resolves the
+  winner, including CSS-wide values and shorthand/longhand interaction, then
+  maps `overflow: clip` to a computed value separate from scroll-container
+  modes. Parser flattening that erases this provenance is rejected.
+- Replace the neighbor heuristic only when the wire contract can carry at most
+  the existing 64 history entries, one checked current index, and a
+  parent-issued document/origin/CSP witness. Decode into temporary bounded
+  storage; validate sizes, index, canonical URLs, order, origin permissions,
+  and every witness against the parent ledger; then swap the full ledger and
+  index atomically. Any failure preserves committed chrome/history unchanged.
+
+Both contracts are RED designs. They authorize no production or conformance
+claim until modern SSpecs and an admitted pure-Simple executable prove them.

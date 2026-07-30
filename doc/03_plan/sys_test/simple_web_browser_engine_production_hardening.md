@@ -454,3 +454,42 @@ unit oracle compares dense visible/offscreen counts, hashes, and Draw-IR command
 counts. Runtime-provider shell self-tests cover explicit hash admission,
 bootstrap-content denial, private staging, and fd-bound launch, but the
 production row remains RED until trusted provider build provenance exists.
+
+## Batch-2 held and RED evidence (2026-07-30)
+
+- `details_summary_rendering_spec.spl` is a held, unexecuted modern SSpec with
+  four visible steps: parse disclosure elements, resolve closed/open semantics,
+  emit canonical Draw IR, and verify exact Engine2D pixels. Its O(N) production
+  pass, phase-2 manual, and high review passed; executable status remains RED.
+- `browser_invalid_form_method_spec.spl` holds the final-reviewed production,
+  modern SSpec, and canonical phase-2 manual behavior: invalid or empty form
+  and submitter method tokens normalize to GET, POST remains POST, and
+  unsupported `dialog` remains rejected. It is held and unexecuted pending an
+  admitted current pure-Simple full CLI.
+- No `maxlength` regression is planned: accepting a valid leading digit
+  sequence is the required parser behavior, so the rejected candidate is not a
+  bug or coverage gap.
+- `overflow: clip` remains RED. Its future SSpec must distinguish origin,
+  importance, `@layer` order, specificity, source order, shorthand/longhand,
+  and CSS-wide values before asserting clip-without-scroll-container pixels.
+  Existing flattened-rule evidence cannot prove that contract.
+- History API parent evidence remains structurally RED. A future protocol SSpec
+  must send the bounded complete ledger plus current index and parent-issued CSP
+  witness, then prove atomic rejection of unknown, reordered, oversized,
+  out-of-range, origin-mismatched, or witness-mismatched state. A current/back/
+  forward neighbor tuple is not sufficient evidence.
+- Primary renderer close-retry is HOLD/FAIL at the three-review cap. Fatal poll
+  can revoke authority inside an already-entered block, after which
+  `begin_resize` lacks a fresh authority check and may call the closed/failed
+  renderer. The remaining lifecycle work reviewed sound, but the patch has no
+  accepted manual, executable PASS, merge, or production status.
+- Fractional animation is HOLD/FAIL at the three-review cap for two blockers:
+  invalid longhand/shorthand tail declarations erase the earlier valid winner
+  instead of selecting the last valid declaration (`2; -1` computes default 1,
+  and an invalid shorthand wipes its predecessor); and unchecked i64
+  subtraction remains in reconcile (`current - old.start`, `current -
+  old.paused`) and apply (`animation_time - start`). The next SSpec must prove
+  last-valid cascade selection plus saturating subtraction at i64-min and both
+  timestamp boundaries. The f64, negative-zero, fractional, zero, infinite,
+  fill, exact-color, and checked-add work reviewed sound but remains unpromoted,
+  unmerged, and unexecuted.

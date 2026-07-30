@@ -2365,3 +2365,30 @@ implementation in progress / target evidence blocked
   target behavior or executable PASS is claimed: an admitted current
   pure-Simple full CLI remains unavailable, and each applicable focused SSpec
   must run once after admission. No bootstrap or seed substitute is authorized.
+- intensive batch-2 ledger (2026-07-30): Details/summary rendering
+  (`/tmp/simple-details-summary-render`) has an O(N) production pass, modern
+  four-step SSpec, phase-2 manual, and high-review PASS, but remains held and
+  unexecuted. Invalid form method
+  (`/tmp/simple-invalid-form-method.M1cWuX`) has production, modern SSpec,
+  canonical phase-2 manual, and final high-review PASS, but remains held and
+  unexecuted. The maxlength candidate was rejected because leading-digit
+  parsing is the required non-negative-integer behavior, not a bug.
+  `overflow: clip` remains RED after its patch was rejected for losing
+  origin/`@layer` provenance; implementation requires parser -> `Rules` ->
+  cascade-owner provenance. History API remains a structural RED until a
+  bounded full-ledger/current-index protocol and parent-issued CSP witness
+  replace neighbor-only validation. Primary-renderer close retry
+  (`/tmp/simple-primary-close-retry.RotRUO`) is HOLD/FAIL at the three-review
+  cap: fatal poll revokes authority inside an already-entered block, but
+  `begin_resize` lacks a fresh authority check and may call the closed/failed
+  renderer. Other lifecycle work reviewed sound; none of it is promoted or
+  merged. Fractional animation (`/tmp/simple-animation-slice2`) is HOLD/FAIL at
+  the three-review cap: invalid longhand/shorthand tails erase the earlier
+  valid winner (`2; -1` computes default 1 and an invalid shorthand wipes its
+  predecessor), while reconcile (`current - old.start`, `current -
+  old.paused`) and apply (`animation_time - start`) retain unchecked i64
+  subtraction. A fresh cycle must implement last-valid selection and saturating
+  subtraction with i64-min/boundary evidence. The f64, negative-zero,
+  fractional, zero, infinite, fill, exact-color, and checked-add work reviewed
+  sound but remains unpromoted. No patch is merged, no target SSpec has
+  executed, and no acceptance row is promoted by this ledger.

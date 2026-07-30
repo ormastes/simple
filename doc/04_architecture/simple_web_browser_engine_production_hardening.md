@@ -611,3 +611,22 @@ bootstrap or Rust-seed result is production browser evidence.
 - Visible material provenance retains identical ordered hashes but collects
   accepted witness lines and joins once, avoiding quadratic transient text on
   static and animated render paths.
+
+## Cascade provenance and parent-history authority (2026-07-30)
+
+`overflow: clip` remains unimplemented. Flattening `@layer` blocks before rule
+admission discards information required by the cascade, so a boolean added at
+paint time would be a false implementation. The canonical path must preserve
+declaration origin, importance, layer identity/order, specificity, and source
+order from the parser through `Rules` to the single cascade owner. Only the
+winning computed value may lower to clip semantics; it must remain distinct
+from `hidden`, `auto`, and `scroll`.
+
+History authority remains parent-owned. The current neighbor snapshot is not a
+security boundary for History API mutation. The renderer protocol must carry a
+bounded complete ledger and current index, with a parent-issued witness binding
+the committed document generation, origin, and effective CSP. The parent must
+validate the complete ledger/index against its authority and commit it
+atomically, rejecting unknown, reordered, over-budget, out-of-range, origin- or
+witness-mismatched state. Until that structural protocol exists, neighbor
+matching does not close the history/CSP row.
