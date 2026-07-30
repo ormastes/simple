@@ -377,3 +377,146 @@ declaration path broadly enough that either deserves its own scoped
 investigation and review, not a same-pass patch bolted onto an enumeration
 pass. Gap 9 remains open, confirmed, and pinned in the differential harness
 (§3).
+
+## 7. Attempting to fix gap 10 — premise checked and found FALSE; deeper, more general defect found underneath (not fixed)
+
+**Instruction was: fix gap 10 by reusing the whole-program path's existing
+`@cfg` stripping, checking first whether it's callable from `run_file_jit`'s
+position in the pipeline.** That check came back "yes, callable, and
+already called" — which made the fix a non-starter for a different reason
+than expected.
+
+### 7.1 The stripping call already exists in `run_file_jit`'s path
+
+`module_loader.rs:1655`, inside `load_module_with_imports_internal` (called,
+recursively, by `run_file_jit`'s `load_module_with_imports` for the entry
+file and every transitive import):
+
+```rust
+source = crate::pipeline::cfg_strip::strip_inactive_cfg_arch_globals(&source, target_arch);
+```
+
+`target_arch` here is threaded from `load_module_with_imports_for_target`,
+which the plain `load_module_with_imports` wrapper (what `run_file_jit`
+calls) hardcodes to `TargetArch::host()`. The `cfg_strip` module's own
+top-of-file doc comment confirms this is intentional, existing, shared
+wiring: *"`bin/simple run` JIT + interpreter paths (driver `exec_core.rs`)
+... strip against the HOST arch, since interpreted/JIT code always executes
+on the host."* This directly answers the "check first" instruction: the
+strip does **not** need to be invoked from a new call site — it already
+runs at the right stage, before parsing, for both engines equally.
+
+### 7.2 So gap 10's fixture still failed after confirming the call runs — the wrong value is not caused by `@cfg`
+
+Hand-traced `strip_inactive_cfg_arch_globals`'s algorithm against
+`cfg_arch_global_variants.spl`'s exact source and confirmed by hand that it
+should (and, per the code, does) blank out the inactive `@cfg(riscv64)`
+block entirely, leaving exactly one surviving `val PLATFORM_ID = 64`. To
+verify empirically rather than trust the trace: built the hand-stripped
+output myself (same blank-line structure the function would produce, zero
+`@cfg` lines) and ran it directly:
+
+```
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run hand_stripped.spl   # no @cfg at all, one `val PLATFORM_ID = 64`
+PLATFORM_ID=8
+```
+
+**Identical wrong value to the un-stripped original.** This proves the
+`@cfg` machinery is not the cause — a program with no `@cfg` construct
+anywhere produces the exact same corruption.
+
+### 7.3 Root cause is far more general: module-level globals are never tag-boxed before reaching `print`/formatting
+
+Isolated with a two-line program, no `@cfg`, no imports, no functions
+beyond `main`:
+
+```simple
+val X = 100
+
+fn main():
+    print(X)
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple run x.spl
+100
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run x.spl
+<value:0x64>
+```
+
+Confirmed on the real deployed `bin/simple`, not just a candidate build.
+Further isolation:
+
+- `val X = 64` (instead of 100) prints `8` under JIT — `64 >> 3 == 8`, the
+  same untagging shift seen in `list.get` returning `value << 3`
+  (`reference-list-get-returns-value-shifted-left-3`), but in the opposite
+  direction and triggered differently: here a **raw, never-tagged** value
+  whose low 3 bits happen to be `000` gets misread by print's tag-dispatch
+  as *already* a tagged small-int and incorrectly un-shifted.
+- `val X = 100` (binary low bits `100`, not `000`) doesn't match that
+  false-positive tag pattern, so print instead falls through to a raw debug
+  format, `<value:0x64>` — the correct bits (100 = 0x64), just displayed
+  as an unboxed word rather than a decimal int.
+- A **local** `val x = 100` inside `main` prints correctly (`100`) — this
+  is specific to **module-level** globals.
+- Copying the global to a local first (`val y = X; print(y)`) does **not**
+  fix it — `y` still prints `<value:0x64>`. The corruption travels with the
+  raw value itself, not with "how directly" it's read.
+- `SIMPLE_JIT_STRICT=1` is silent — same "nothing to catch" shape as every
+  other gap in this family.
+
+**This generalizes gap 9, and narrows its own framing to the wrong axis.**
+Gap 9 was filed as "cross-module global value import reads wrong" because
+the repro that found it happened to combine two things: a direct reference
+to a global, and that reference crossing a file boundary. §7.3's finding
+shows the file boundary was never the relevant variable — a **direct**
+reference to a module-level global is wrong whether or not it crosses a
+file boundary; what actually differed in gap 9's own repro was that
+`get_helper_y()` returned the value through a **function call**, and a
+function's return value convention evidently re-boxes/re-tags it correctly,
+masking the defect for that one path. Gap 9's fixture and doc description
+remain accurate as written (both are still true, confirmed facts) but
+should be read as **one instance** of this broader defect, not a
+cross-module-specific one.
+
+### 7.4 Not fixed — this is a deeper defect than the one that was assigned
+
+The instruction was to fix "the one genuinely contained item" — reuse an
+existing, working stripping pass for a call-site gap. That gap turned out
+not to exist: the call site is already correct. What's actually broken is
+JIT codegen's tag-boxing of module-level global reads reaching a
+print/format sink — a **codegen** defect, not a **pipeline-completeness**
+defect, and outside the shape this whole sweep has been enumerating (a
+missing call to an existing pass). Fixing it is not a small, self-contained
+change on the order of "call this one more function"; it needs its own
+investigation into where JIT-compiled global loads are supposed to be
+tag-boxed and currently aren't (or aren't consistently across all four
+observed call shapes: direct print, direct arithmetic-then-print, local-var
+copy, and the gap-9 cross-module case) — surfaced here rather than
+attempted, per the same standard applied to gap 9 in §6.
+
+**Added to the harness** as its own fixture,
+`module_global_direct_read_untagged` (`expected: "X=100"`), the cleanest,
+most general repro found this pass — no `@cfg`, no cross-module import,
+two lines of actual logic. `cfg_arch_global_variants.spl`'s own header
+comment was corrected in place to record that its originally-filed cause
+was checked and found false, and to point at this fixture as the real
+explanation, rather than silently leaving a wrong diagnosis standing next
+to a fixture that still (correctly) fails.
+
+## 8. Updated summary
+
+| Finding | Status |
+|---|---|
+| Cross-module global value import (val + var) — gap 9 | Confirmed, open; reframed by §7.3 as one instance of a more general defect, not cross-module-specific |
+| Module-level global direct read never tag-boxed before print/format | **Root cause of both gap 9 and the original "gap 10" observation** — confirmed, open, not fixed (§7.3-7.4) |
+| Global `@cfg(<arch>)` variant stripping | **DISMISSED as a distinct defect** — the stripping call already runs correctly in `run_file_jit`'s pipeline (§7.1); `cfg_arch_global_variants.spl`'s wrong value is the tag-boxing defect above, not a stripping gap |
+| DI/`@inject` cross-module trait-impl registry | Dismissed — not a gap (§5.1) |
+| Entry-file re-exported-`main` trampoline | Dismissed — not a gap (§5.3) |
+
+No fix landed this pass. The differential harness now has 5 standing
+fixtures (4 confirmed-open bugs + 1 correctness sentinel); all four
+pre-existing fixtures were re-verified unaffected by this pass's edits
+(only fixture/doc/comment changes were made — no source code was touched).
+Reverse-control non-vacuity re-confirmed after every edit in this pass
+(corrupt sentinel → exit 1; restore → exit 0).
