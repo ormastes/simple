@@ -3,7 +3,7 @@ use compiler.frontend.flat_ast_bridge.*
 # Flat AST Bridge
 #
 # Converts the core parser's flat, index-based AST into the richer frontend
-# Module shape expected by HIR lowering. This is used as the bootstrap-safe
+# ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
 use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path}
@@ -54,7 +54,7 @@ fn flat_bootstrap_enabled() -> bool:
 fn flat_bridge_trace_enabled() -> bool:
     (flat_module_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1"
 
-fn flat_module_trace_function(stage: text, fn_: Function):
+fn flat_module_trace_function(stage: text, fn_: ParserFunction):
     if flat_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") == "1":
         val return_name = parser_type_kind_named_name(fn_.return_type.kind)
         eprint("[flat-function-roundtrip] phase={stage} name={fn_.name} return={return_name}")
@@ -107,7 +107,7 @@ fn flat_i64_list_at(raw: text, target: i64) -> i64:
         i = i + 1
     0
 
-fn flat_ast_to_module(path: text) -> Module:
+fn flat_ast_to_module(path: text) -> ParserModule:
     if flat_bridge_trace_enabled():
         print "[flat-bridge] path={path}"
     if flat_bootstrap_enabled() and not flat_is_bootstrap_entry_path(path):
@@ -126,9 +126,9 @@ fn flat_ast_to_module(path: text) -> Module:
     # parses all 88 decls); never truncate here.
     if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
         eprint("[flat-bridge] decl_count {decl_count}")
-    var functions: Dict<text, Function> = {}
+    var functions: Dict<text, ParserFunction> = {}
     var function_order: [text] = []
-    var structs: Dict<text, Struct> = {}
+    var structs: Dict<text, ParserStruct> = {}
     # bug s19_class_free_fn_mutation_dropped_native_2026-07-17: `class` decls
     # used to always land in `structs` below (this dict was the only sink),
     # so HIR/MIR never saw a distinct `class` (module.classes stayed
@@ -143,11 +143,11 @@ fn flat_ast_to_module(path: text) -> Module:
     # to a free function and mutated inside had the mutation dropped for the
     # caller; the tree-walking interpreter path already got this right via
     # `interp_struct_is_value_type`).
-    var classes: Dict<text, Class> = {}
-    var enums: Dict<text, Enum> = {}
-    var traits: Dict<text, Trait> = {}
-    var constants: Dict<text, Const> = {}
-    var imports: [Import] = []
+    var classes: Dict<text, ParserClass> = {}
+    var enums: Dict<text, ParserEnum> = {}
+    var traits: Dict<text, ParserTrait> = {}
+    var constants: Dict<text, ParserConst> = {}
+    var imports: [ParserImport] = []
     var exports: [Export] = []
     var domain_blocks: [DomainBlock] = []
     var impls: [Impl] = []
@@ -164,7 +164,7 @@ fn flat_ast_to_module(path: text) -> Module:
     # source order so they can be wrapped into a synthetic `fn main` when the
     # module defines none (e.g. `-c "print(1+1)"` snippets / script-style files).
     var top_level_stmt_names: [text] = []
-    var top_level_stmt_consts: [Const] = []
+    var top_level_stmt_consts: [ParserConst] = []
     var top_level_stmts: [Stmt] = []
     val span = make_span()
 
@@ -175,18 +175,18 @@ fn flat_ast_to_module(path: text) -> Module:
         if flat_bootstrap_enabled() and flat_bridge_trace_enabled():
             eprint("[flat-bridge] decl:start {di} tag {tag_text}")
         if tag_text == "1":
-            val fn_: Function = convert_decl_fn(idx)
+            val fn_: ParserFunction = convert_decl_fn(idx)
             flat_module_trace_function("before", fn_)
             functions[fn_.name] = fn_
             function_order.push(fn_.name)
-            val stored_fn: Function = functions[fn_.name]
+            val stored_fn: ParserFunction = functions[fn_.name]
             flat_module_trace_function("after", stored_fn)
         elif tag_text == "2":
-            val fn_: Function = convert_decl_extern_fn(idx)
+            val fn_: ParserFunction = convert_decl_extern_fn(idx)
             flat_module_trace_function("before", fn_)
             functions[fn_.name] = fn_
             function_order.push(fn_.name)
-            val stored_fn: Function = functions[fn_.name]
+            val stored_fn: ParserFunction = functions[fn_.name]
             flat_module_trace_function("after", stored_fn)
         elif tag_text == "3":
             val s_name = decl_get_name(idx)
@@ -196,10 +196,10 @@ fn flat_ast_to_module(path: text) -> Module:
             # un-overridden defaults; skip struct/class emission to avoid a
             # phantom zero-field `s_name` struct shadowing the trait.
             if decl_get_is_trait(idx) != 0:
-                var t_methods: [Function] = []
+                var t_methods: [ParserFunction] = []
                 for t_method_id in decl_get_body(idx):
                     t_methods.push(convert_decl_method_fn(t_method_id, s_name))
-                traits[s_name] = Trait(
+                traits[s_name] = ParserTrait(
                     name: s_name,
                     type_params: [],
                     super_traits: [],
@@ -324,14 +324,14 @@ fn flat_ast_to_module(path: text) -> Module:
                 # ...>` names (threaded through by parse_struct_decl via
                 # decl_set_type_params -- previously dropped entirely, always
                 # `[]` here regardless of a declared `<T>`, see fn_struct_decls.spl).
-                # Build real [TypeParam] so HIR lowering can register `T` as a
+                # Build real [ParserTypeParam] so HIR lowering can register `T` as a
                 # genuine SymbolKind.TypeParam symbol instead of it falling
                 # through to the unrelated bareword-forward-declared-type path.
                 val s_tp_names = decl_get_type_params(idx)
-                var s_type_params: [TypeParam] = []
+                var s_type_params: [ParserTypeParam] = []
                 var s_tpi = 0
                 while s_tpi < s_tp_names.len():
-                    s_type_params.push(TypeParam(
+                    s_type_params.push(ParserTypeParam(
                         name: s_tp_names[s_tpi],
                         bounds: [],
                         has_default: false,
@@ -348,7 +348,7 @@ fn flat_ast_to_module(path: text) -> Module:
                     # `methods` stays empty: class methods are carried via the
                     # synthesized `impl` block (tag_text == "9" below), the
                     # same mechanism plain structs already use.
-                    classes[s_name] = Class(
+                    classes[s_name] = ParserClass(
                         name: s_name,
                         type_params: s_type_params,
                         fields: fields,
@@ -361,7 +361,7 @@ fn flat_ast_to_module(path: text) -> Module:
                         span: span
                     )
                 else:
-                    structs[s_name] = Struct(
+                    structs[s_name] = ParserStruct(
                         name: s_name,
                         type_params: s_type_params,
                         fields: fields,
@@ -417,7 +417,7 @@ fn flat_ast_to_module(path: text) -> Module:
                     span: span
                 ))
                 e_vi = e_vi + 1
-            enums[e_name] = Enum(
+            enums[e_name] = ParserEnum(
                 name: e_name,
                 type_params: [],
                 variants: e_variants,
@@ -430,11 +430,11 @@ fn flat_ast_to_module(path: text) -> Module:
         elif tag_text == "9":
             val target_name = decl_get_name(idx)
             val method_ids = decl_get_body(idx)
-            var methods: Dict<text, Function> = {}
+            var methods: Dict<text, ParserFunction> = {}
             var mi = 0
             while mi < method_ids.len():
                 val method_id = method_ids[mi]
-                val fn_: Function = convert_decl_method_fn(method_id, target_name)
+                val fn_: ParserFunction = convert_decl_method_fn(method_id, target_name)
                 methods[fn_.name] = fn_
                 mi = mi + 1
             # decl_get_type_params(idx) here reads the type params threaded by
@@ -442,10 +442,10 @@ fn flat_ast_to_module(path: text) -> Module:
             # the synthesized impl block of a generic struct/class's nested
             # methods (see fn_struct_decls.spl). Previously hardcoded `[]`.
             val i_tp_names = decl_get_type_params(idx)
-            var i_type_params: [TypeParam] = []
+            var i_type_params: [ParserTypeParam] = []
             var i_tpi = 0
             while i_tpi < i_tp_names.len():
-                i_type_params.push(TypeParam(
+                i_type_params.push(ParserTypeParam(
                     name: i_tp_names[i_tpi],
                     bounds: [],
                     has_default: false,
@@ -455,7 +455,7 @@ fn flat_ast_to_module(path: text) -> Module:
                 i_tpi = i_tpi + 1
             # #157: restore the trait link that parse_impl_decl records via
             # decl_set_impl_trait. Empty => inherent `impl Type:` (trait_ Infer);
-            # non-empty => `impl Trait for Type:`, needed so lower_impl injects
+            # non-empty => `impl ParserTrait for Type:`, needed so lower_impl injects
             # un-overridden trait default methods for the concrete type.
             val impl_trait_name = decl_get_impl_trait(idx)
             val impl_has_trait = impl_trait_name != ""
@@ -513,7 +513,7 @@ fn flat_ast_to_module(path: text) -> Module:
                                 pass
                     case _:
                         pass
-            val decl_const = Const(
+            val decl_const = ParserConst(
                 name: c_name,
                 has_type_: false,
                 type_: Type(kind: TypeKind.Infer, span: span),
@@ -561,7 +561,7 @@ fn flat_ast_to_module(path: text) -> Module:
                     alias: import_alias
                 ))
                 ii = ii + 1
-            imports.push(Import(
+            imports.push(ParserImport(
                 module: module_path,
                 items: import_items,
                 is_lazy: decl_get_is_lazy(idx) != 0,
@@ -659,7 +659,7 @@ fn flat_ast_to_module(path: text) -> Module:
             )
             function_order.push("main")
         else:
-            # Module already defines main: keep previous behavior (store as
+            # ParserModule already defines main: keep previous behavior (store as
             # `_expr_N` constants) to avoid any semantic change.
             var tsi = 0
             while tsi < top_level_stmt_names.len():
@@ -695,21 +695,18 @@ fn flat_ast_to_module(path: text) -> Module:
         print "[flat-bridge] built frontend module path={path}"
     built_module
 
-pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> Module:
+pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: bool) -> ParserModule:
     val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     reset_all_pools()
     parser_init_with_path(source, path)
     # The caller has already admitted this only for the experimental Stage4
-    # AOT low-memory path. Keep the scope alive while the rich Module is
+    # AOT low-memory path. Keep the scope alive while the rich ParserModule is
     # copied out of the flat AST, then promote that retained graph before the
     # arena is cleared.
     val transient_scope = if streaming_scope: rt_transient_array_scope_begin() else: false
-    print "ZZZTRACE: before parse_module_body"
     parse_module_body()
-    print "ZZZTRACE: after parse_module_body, before desugar_collections"
     desugar_collections(0, 0)
-    print "ZZZTRACE: after desugar_collections"
     if parser_has_errors():
         val errors = parser_get_errors()
         var ei = 0
@@ -729,5 +726,5 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
     built_module
 
-fn parse_and_build_module(source: text, path: text) -> Module:
+fn parse_and_build_module(source: text, path: text) -> ParserModule:
     parse_and_build_module_scoped(source, path, false)

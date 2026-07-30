@@ -1,4 +1,4 @@
-# Module Surface - compact cross-module declarations for staged HIR lowering.
+# ParserModule Surface - compact cross-module declarations for staged HIR lowering.
 #
 # codex-impl: Stage4 module retention is reduced by keeping declaration
 # surfaces.  The surface deliberately omits ordinary executable bodies,
@@ -21,7 +21,7 @@ struct ModuleSurfaceParam:
 
 struct ModuleSurfaceCallable:
     name: text
-    type_params: [TypeParam]
+    type_params: [ParserTypeParam]
     params: [ModuleSurfaceParam]
     has_return_type: bool
     return_type: Type
@@ -39,14 +39,14 @@ struct ModuleSurfaceCallable:
 struct ModuleSurfaceComposite:
     name: text
     kind: text
-    type_params: [TypeParam]
+    type_params: [ParserTypeParam]
     visibility: Visibility
     is_public: bool
     span: Span
 
 struct ModuleSurfaceEnum:
     name: text
-    type_params: [TypeParam]
+    type_params: [ParserTypeParam]
     # Variant.Struct carries its Fields, including the one permitted retained
     # expression form: an enum struct-variant field default.
     variants: [Variant]
@@ -56,13 +56,13 @@ struct ModuleSurfaceEnum:
 
 struct ModuleSurfaceTrait:
     name: text
-    type_params: [TypeParam]
+    type_params: [ParserTypeParam]
     super_traits: [Type]
     where_clause: [TraitBound]
     methods: [ModuleSurfaceCallable]
     # These original AST nodes are the sole executable-body exception: impl
     # lowering must inject a trait's unoverridden default methods.
-    default_methods: [Function]
+    default_methods: [ParserFunction]
     assoc_types: [AssocTypeDecl]
     visibility: Visibility
     is_public: bool
@@ -72,7 +72,7 @@ struct ModuleSurfaceImpl:
     type_: Type
     has_trait_: bool
     trait_: Type
-    type_params: [TypeParam]
+    type_params: [ParserTypeParam]
     where_clause: [TraitBound]
     methods: Dict<text, ModuleSurfaceCallable>
     assoc_types: [AssocTypeDecl]
@@ -92,7 +92,7 @@ struct ModuleSurfaceConst:
 
 struct ModuleSurfaceTypeAlias:
     name: text
-    type_params: [TypeParam]
+    type_params: [ParserTypeParam]
     type_: Type
     visibility: Visibility
     is_public: bool
@@ -104,7 +104,7 @@ struct ModuleSurface:
     module_name: text
     content_length: i64
     content_hash: i64
-    imports: [Import]
+    imports: [ParserImport]
     exports: [Export]
     callables: Dict<text, ModuleSurfaceCallable>
     composites: Dict<text, ModuleSurfaceComposite>
@@ -130,7 +130,7 @@ impl ModuleSurfaceBuilder:
     me has_path(path: text) -> bool:
         self.index_by_path.contains_key(module_surface_canonical_path(path))
 
-    me add_parsed(module: Module, source: SourceFile, source_index: i64) -> Result<(), text>:
+    me add_parsed(module: ParserModule, source: SourceFile, source_index: i64) -> Result<(), text>:
         val canonical_path = module_surface_canonical_path(source.path)
         if self.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
@@ -164,7 +164,7 @@ impl ModuleSurfaceBuilder:
     me finish() -> ModuleSurfacesByName:
         ModuleSurfacesByName(surfaces: self.surfaces, index_by_name: self.index_by_name)
 
-fn module_surface_callable_from_function(function_: Function) -> ModuleSurfaceCallable:
+fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
     for param in function_.params:
         params = params.push(ModuleSurfaceParam(
@@ -193,9 +193,9 @@ fn module_surface_callable_from_function(function_: Function) -> ModuleSurfaceCa
         span: function_.span
     )
 
-fn module_surface_trait_from_trait(trait_: Trait) -> ModuleSurfaceTrait:
+fn module_surface_trait_from_trait(trait_: ParserTrait) -> ModuleSurfaceTrait:
     var methods: [ModuleSurfaceCallable] = []
-    var default_methods: [Function] = []
+    var default_methods: [ParserFunction] = []
     for method in trait_.methods:
         methods = methods.push(module_surface_callable_from_function(method))
         if not method.body.stmts.is_empty():
@@ -228,7 +228,7 @@ fn module_surface_impl_from_impl(impl_: Impl) -> ModuleSurfaceImpl:
         span: impl_.span
     )
 
-fn module_surface_from_module(module: Module, source: SourceFile, source_index: i64) -> ModuleSurface:
+fn module_surface_from_module(module: ParserModule, source: SourceFile, source_index: i64) -> ModuleSurface:
     var callables: Dict<text, ModuleSurfaceCallable> = {}
     for name in module.functions.keys():
         callables[name] = module_surface_callable_from_function(module.functions[name])
@@ -340,7 +340,7 @@ fn module_surfaces_add_name(index_by_name: Dict<text, i64>, name: text, surface_
     index_by_name[name] = surface_index
     Ok(index_by_name)
 
-fn module_surface_declaration_matches(surface: ModuleSurface, module: Module) -> bool:
+fn module_surface_declaration_matches(surface: ModuleSurface, module: ParserModule) -> bool:
     if surface.imports.len() != module.imports.len(): return false
     if surface.exports.len() != module.exports.len(): return false
     # Native Dict.len() returns -1. Compare key-array lengths so aliases of one
@@ -370,7 +370,7 @@ fn module_surface_declaration_matches(surface: ModuleSurface, module: Module) ->
         if not surface.constants.contains_key(name): return false
     true
 
-fn module_surfaces_from_modules(modules: Dict<text, Module>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
+fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [SourceFile]) -> Result<ModuleSurfacesByName, text>:
     var builder = ModuleSurfaceBuilder.new()
     var source_index = 0
     while source_index < sources.len():
@@ -395,7 +395,7 @@ fn module_surfaces_from_modules(modules: Dict<text, Module>, sources: [SourceFil
         if builder.index_by_name.contains_key(alias):
             continue
         val module = modules[alias]
-        # Parsed aliases retain the physical source path in Module.name.
+        # Parsed aliases retain the physical source path in ParserModule.name.
         # Resolve that identity before declaration-shape matching: unrelated
         # physical modules may expose the same API.
         val parsed_path = module_surface_canonical_path(module.name)

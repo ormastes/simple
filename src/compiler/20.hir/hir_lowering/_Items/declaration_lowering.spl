@@ -7,7 +7,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
@@ -118,7 +118,7 @@ impl HirLowering:
             span: span
         )
 
-    me lower_function(fn_: Function) -> HirFunction:
+    me lower_function(fn_: ParserFunction) -> HirFunction:
         if fn_.name == "__simple_rt_string_char_code_at":
             val owns_alias = self.module_filename.replace("\\", "/") == "src/runtime/simple_core/core_string.spl"
             if not owns_alias:
@@ -236,7 +236,7 @@ impl HirLowering:
         # `T` parameter/return type silently degrades to `Infer`/ANY, which
         # previously made calls to generic functions return 0 instead of the
         # real argument (silent-wrong, no diagnostic). Now that
-        # `Function.type_params` is threaded through from the frontend
+        # `ParserFunction.type_params` is threaded through from the frontend
         # (convert_decl_fn in the flat-AST bridge), fail loudly here instead
         # of proceeding into codegen with an unmonomorphized generic. Real
         # monomorphization is tracked separately (#158 Phase B) -- this is a
@@ -481,14 +481,14 @@ impl HirLowering:
             is_mutable: p.is_mutable
         )
 
-    me lower_class(class_: Class) -> HirClass:
+    me lower_class(class_: ParserClass) -> HirClass:
         # DIRECT field access, NOT `match class_: case Class(...)` — struct
         # destructure yields garbage positional fields on stage4 (same hazard as
         # lower_struct; bug doc iteration 17/20 #86).
         val class_name: text = class_.name
-        val class_type_params: [TypeParam] = class_.type_params
+        val class_type_params: [ParserTypeParam] = class_.type_params
         val class_fields: [Field] = class_.fields
-        val class_methods: Dict<text, Function> = class_.methods
+        val class_methods: Dict<text, ParserFunction> = class_.methods
         val class_visibility: Visibility = class_.visibility
         val class_is_public: bool = class_.is_public
         val class_attributes: [Attribute] = class_.attributes
@@ -523,7 +523,7 @@ impl HirLowering:
         val previous_self_type = self.current_method_self_type
         self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(symbol, []), span: class_span))
         for name in class_methods.keys():
-            val fn_: Function = class_methods[name]
+            val fn_: ParserFunction = class_methods[name]
             val hir_fn = self.lower_function(fn_)
             methods[name] = hir_fn.symbol
             # Merge class-embedded method bodies into module.functions the
@@ -574,7 +574,7 @@ impl HirLowering:
             type_bindings: {}
         )
 
-    me lower_struct(struct_: Struct) -> HirStruct:
+    me lower_struct(struct_: ParserStruct) -> HirStruct:
         # DIRECT field access, NOT `match struct_: case Struct(...)`: the struct
         # destructure yields GARBAGE positional fields on stage4 (struct-pattern
         # destructure hazard, bug doc iteration 17/20 #86). The garbage `fields`
@@ -583,7 +583,7 @@ impl HirLowering:
         # struct/class run file). A typed receiver's direct field access
         # resolves correct offsets.
         val struct_name: text = struct_.name
-        val struct_type_params: [TypeParam] = struct_.type_params
+        val struct_type_params: [ParserTypeParam] = struct_.type_params
         val struct_fields: [Field] = struct_.fields
         val struct_visibility: Visibility = struct_.visibility
         val struct_is_public: bool = struct_.is_public
@@ -697,12 +697,12 @@ impl HirLowering:
             span: fld.span
         )
 
-    me lower_enum(enum_: Enum, owner_module: text) -> HirEnum:
+    me lower_enum(enum_: ParserEnum, owner_module: text) -> HirEnum:
         self.lower_enum_with_symbol(enum_, owner_module, enum_.name)
 
-    me lower_enum_with_symbol(enum_: Enum, owner_module: text, lookup_name: text) -> HirEnum:
+    me lower_enum_with_symbol(enum_: ParserEnum, owner_module: text, lookup_name: text) -> HirEnum:
         match enum_:
-            case Enum(name, type_params, variants, visibility, is_public, _, doc_comment, span):
+            case ParserEnum(name, type_params, variants, visibility, is_public, _, doc_comment, span):
                 val symbol = self.symbols.lookup_or_invalid(lookup_name)
                 var hir_type_params: [HirTypeParam] = []
                 for tp in type_params:

@@ -7,7 +7,7 @@ use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{Function, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at, flat_bootstrap_function_decl_at}
 use compiler.common.diagnostics.span.{Span}
@@ -84,7 +84,7 @@ fn hir_module_surface_get(surfaces: ModuleSurfacesByName, name: text) -> ModuleS
 fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:
     """True when module `m` itself declares `name` as any importable decl
     kind register_imported_symbol knows how to register (functions covers
-    `extern fn` too — the parser stores externs in Module.functions with
+    `extern fn` too — the parser stores externs in ParserModule.functions with
     is_extern=true)."""
     if m.callables.contains_key(name):
         return true
@@ -103,11 +103,11 @@ fn hir_surface_param_to_param(param: ModuleSurfaceParam) -> Param:
         has_default: false, default: Expr(kind: ExprKind.NilLit, span: param.span),
         span: param.span, is_mutable: param.is_mutable)
 
-fn hir_surface_callable_to_header(callable: ModuleSurfaceCallable) -> Function:
+fn hir_surface_callable_to_header(callable: ModuleSurfaceCallable) -> ParserFunction:
     var params: [Param] = []
     for param in callable.params:
         params = params.push(hir_surface_param_to_param(param))
-    Function(
+    ParserFunction(
         name: callable.name, type_params: callable.type_params, params: params,
         has_return_type: callable.has_return_type, return_type: callable.return_type,
         body: Block(stmts: [], span: callable.span), visibility: callable.visibility,
@@ -117,22 +117,22 @@ fn hir_surface_callable_to_header(callable: ModuleSurfaceCallable) -> Function:
         is_kernel: callable.is_kernel, is_extern: callable.is_extern,
         attributes: [], has_doc_comment: false, doc_comment: "", span: callable.span)
 
-fn hir_surface_trait_to_trait(surface_trait: ModuleSurfaceTrait, local_name: text) -> Trait:
-    var methods: [Function] = []
+fn hir_surface_trait_to_trait(surface_trait: ModuleSurfaceTrait, local_name: text) -> ParserTrait:
+    var methods: [ParserFunction] = []
     for callable in surface_trait.methods:
         var method = hir_surface_callable_to_header(callable)
         for default_method in surface_trait.default_methods:
             if default_method.span.start == callable.span.start and default_method.span.end == callable.span.end and default_method.span.file == callable.span.file:
                 method = default_method
         methods = methods.push(method)
-    Trait(name: local_name, type_params: surface_trait.type_params,
+    ParserTrait(name: local_name, type_params: surface_trait.type_params,
         super_traits: surface_trait.super_traits, where_clause: surface_trait.where_clause,
         methods: methods, assoc_types: surface_trait.assoc_types,
         visibility: surface_trait.visibility, is_public: surface_trait.is_public,
         has_doc_comment: false, doc_comment: "", span: surface_trait.span)
 
-fn hir_surface_enum_to_enum(surface_enum: ModuleSurfaceEnum, local_name: text) -> Enum:
-    Enum(name: local_name, type_params: surface_enum.type_params,
+fn hir_surface_enum_to_enum(surface_enum: ModuleSurfaceEnum, local_name: text) -> ParserEnum:
+    ParserEnum(name: local_name, type_params: surface_enum.type_params,
         variants: surface_enum.variants, visibility: surface_enum.visibility,
         is_public: surface_enum.is_public, has_doc_comment: false,
         doc_comment: "", span: surface_enum.span)
@@ -143,7 +143,7 @@ fn hir_module_logical_name_from_path(path: text) -> text:
     `_driver_module_name_from_path` (80.driver/driver_source_loading.spl) --
     reimplemented locally rather than imported to avoid a 20.hir ->
     80.driver layering violation. Under `SIMPLE_BOOTSTRAP=1`,
-    `Module.name`/`HirModule.name` is the raw parsed PATH
+    `ParserModule.name`/`HirModule.name` is the raw parsed PATH
     (`flat_ast_to_module`, `_FlatAstBridge/module_assembly.spl`, `name:
     path`), not the logical name an `use module.{..}` import statement
     references -- qualifying a function's accumulator/symbol name by the
@@ -238,12 +238,12 @@ impl HirLowering:
 
     # Untyped-return inference (native --entry path) -- see the `ReturnScan`
     # doc comment in lowering_helpers.spl for the full rationale. Runs over
-    # the raw parser AST (`Function.body`), NOT the HIR, because it has to
+    # the raw parser AST (`ParserFunction.body`), NOT the HIR, because it has to
     # happen during this module's up-front signature-declaration pass --
     # before ANY function body is lowered -- so a caller elsewhere in the
     # module sees the promoted return type too, not just the callee's own
     # generated `ret` instruction.
-    me infer_untyped_return_type(fn_decl: Function) -> HirType:
+    me infer_untyped_return_type(fn_decl: ParserFunction) -> HirType:
         val scan = self.scan_ast_block_for_returns(fn_decl.body, fn_decl.params)
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
@@ -257,12 +257,12 @@ impl HirLowering:
             return HirType(kind: hir_type_kind_from_simple_name(rn), span: fn_decl.span)
         return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
 
-    me declared_callable_type(fn_decl: Function, owner_symbol: SymbolId?) -> HirType?:
+    me declared_callable_type(fn_decl: ParserFunction, owner_symbol: SymbolId?) -> HirType?:
         # Generic callables keep the existing untyped-symbol behavior until
         # monomorphization supplies a concrete signature.
         if fn_decl.type_params.len() > 0:
             return nil
-        # Import/sibling registration is fail-soft: signature diagnostics
+        # ParserImport/sibling registration is fail-soft: signature diagnostics
         # (untyped returns, param types unlowerable in the importer's
         # context) belong to the defining module's own pass. Register the
         # symbol untyped instead of erroring the importing module.
@@ -936,11 +936,11 @@ impl HirLowering:
                 glob_it = glob_it + 1
             glob_imp_idx = glob_imp_idx + 1
 
-    me resolve_import_symbols(module: Module):
+    me resolve_import_symbols(module: ParserModule):
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
-            # Struct-valued Dict.get() corrupts native hit payloads. Track the
+            # ParserStruct-valued Dict.get() corrupts native hit payloads. Track the
             # winning key and read the value only with bracket indexing.
             var imported_key = if self.module_surfaces.index_by_name.contains_key(imp.module): imp.module else: ""
             if (rt_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? "") == "1":
@@ -1017,7 +1017,7 @@ impl HirLowering:
                         item_idx = item_idx + 1
             import_idx = import_idx + 1
 
-    me resolve_package_sibling_symbols(module: Module):
+    me resolve_package_sibling_symbols(module: ParserModule):
         """Directory-package semantics: files in one source directory share a
         namespace — e.g. std.common.json.array_ops calls json_array from
         types.spl with NO import line. The seed's flat global registry gives
@@ -1062,7 +1062,7 @@ impl HirLowering:
     # to the wrong same-named sibling (the process_module hazard of iteration
     # 14, recurring here — bug doc iteration 17). The unique name forces
     # dispatch to the real HIR lowering body.
-    me lower_parser_module_unstub(module: Module) -> HirModule:
+    me lower_parser_module_unstub(module: ParserModule) -> HirModule:
         # Trap D (iteration 17): env-GATED eprint probes are mute in the
         # hir_lowering modules — `(hir_*_env_get("X") ?? "") == "1"` evaluates
         # false on stage4 even when X=1 — while UNGATED eprint works fine.
@@ -1119,7 +1119,7 @@ impl HirLowering:
                 eprint("[hir-finalize] cache done")
         lowered_module
 
-    me lower_module_enum_definitions(module: Module) -> Dict<SymbolId, HirEnum>:
+    me lower_module_enum_definitions(module: ParserModule) -> Dict<SymbolId, HirEnum>:
         var lowered: Dict<SymbolId, HirEnum> = {}
         val imported_names = self.imported_enums.keys()
         var enum_idx = 0
@@ -1139,7 +1139,7 @@ impl HirLowering:
             enum_idx = enum_idx + 1
         lowered
 
-    me lower_module(module: Module) -> HirModule:
+    me lower_module(module: ParserModule) -> HirModule:
         # Probe MUST be eprint AND ungated (Traps A/C/D, bug doc iters 13-17).
         val bootstrap_mode = (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
         # Phase profiling records bounded phase boundaries. Per-item logging
@@ -1160,9 +1160,9 @@ impl HirLowering:
         # behavior for the closure path.
         val bootstrap_closure = bootstrap_mode and (hir_module_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         if bootstrap_diag:
-            # NOTE: parser Module has no `path` field (parser_types.spl) — a
+            # NOTE: parser ParserModule has no `path` field (parser_types.spl) — a
             # `{module.path}` interpolation here aborted the whole worker under
-            # SIMPLE_COMPILER_TRACE=1 ("class `Module` has no field named `path`").
+            # SIMPLE_COMPILER_TRACE=1 ("class `ParserModule` has no field named `path`").
             eprint("[hir-lower] lower_module:start module={module.name}")
         self.lowered_impl_functions = {}
         self.imported_traits = {}
@@ -1190,7 +1190,7 @@ impl HirLowering:
         val prescan_enum_names = module.enums.keys()
         var prescan_enum_idx = 0
         while prescan_enum_idx < prescan_enum_names.len():
-            val prescan_enum: Enum = module.enums[prescan_enum_names[prescan_enum_idx]]
+            val prescan_enum: ParserEnum = module.enums[prescan_enum_names[prescan_enum_idx]]
             for prescan_variant in prescan_enum.variants:
                 self.enum_variant_names[prescan_variant.name] = true
             prescan_enum_idx = prescan_enum_idx + 1
@@ -1257,14 +1257,14 @@ impl HirLowering:
         var prescan_idx = 0
         while prescan_idx < prescan_struct_names.len():
             val prescan_name = prescan_struct_names[prescan_idx]
-            val prescan_struct: Struct = module.structs[prescan_name]
+            val prescan_struct: ParserStruct = module.structs[prescan_name]
             self.prescan_composite_field_types(prescan_name, prescan_struct.fields)
             prescan_idx = prescan_idx + 1
         val prescan_class_names = module.classes.keys()
         prescan_idx = 0
         while prescan_idx < prescan_class_names.len():
             val prescan_name = prescan_class_names[prescan_idx]
-            val prescan_class: Class = module.classes[prescan_name]
+            val prescan_class: ParserClass = module.classes[prescan_name]
             self.prescan_composite_field_types(prescan_name, prescan_class.fields)
             prescan_idx = prescan_idx + 1
 
@@ -1333,7 +1333,7 @@ impl HirLowering:
             val bootstrap_decl_module_name = hir_module_logical_name_from_path(module.name)
             var bootstrap_decl_idx = 0
             while bootstrap_decl_idx < bootstrap_function_keys.len():
-                val bootstrap_decl_fn: Function = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
+                val bootstrap_decl_fn: ParserFunction = bootstrap_module_functions[bootstrap_function_keys[bootstrap_decl_idx]]
                 val bootstrap_decl_sym = self.symbols.define(bootstrap_decl_fn.name, SymbolKind.Function, nil, Span.empty(), false, false, nil)
                 # Extern fns must keep their BARE runtime symbol: qualifying
                 # them ("std.nogc_sync_mut.simd.rt_simd_has_avx2") makes every
@@ -1345,7 +1345,7 @@ impl HirLowering:
                     self.symbols.rename_symbol(bootstrap_decl_sym, "{bootstrap_decl_module_name}.{bootstrap_decl_fn.name}")
                 bootstrap_decl_idx = bootstrap_decl_idx + 1
             while lower_idx < bootstrap_function_keys.len():
-                val bootstrap_fn: Function = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
+                val bootstrap_fn: ParserFunction = bootstrap_module_functions[bootstrap_function_keys[lower_idx]]
                 if bootstrap_diag:
                     eprint("[hir-lower] function:start module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 val hir_fn = self.lower_function(bootstrap_fn)
@@ -1361,7 +1361,7 @@ impl HirLowering:
             while lower_idx < lower_function_keys.len():
                 val name = lower_function_keys[lower_idx]
                 hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
-                val fn_: Function = lower_module_functions[name]
+                val fn_: ParserFunction = lower_module_functions[name]
                 val hir_fn = self.lower_function(fn_)
                 # Key the HIR functions Dict by the function's REAL SymbolId
                 # (the same id `declare_module_symbols` registered it under, and
@@ -1419,7 +1419,7 @@ impl HirLowering:
                 val bootstrap_class_keys = bootstrap_module_classes.keys()
                 var bootstrap_class_idx = 0
                 while bootstrap_class_idx < bootstrap_class_keys.len():
-                    val bootstrap_class_: Class = bootstrap_module_classes[bootstrap_class_keys[bootstrap_class_idx]]
+                    val bootstrap_class_: ParserClass = bootstrap_module_classes[bootstrap_class_keys[bootstrap_class_idx]]
                     val bootstrap_hir_class = self.lower_class(bootstrap_class_)
                     classes[bootstrap_hir_class.symbol] = bootstrap_hir_class
                     bootstrap_class_idx = bootstrap_class_idx + 1
@@ -1428,7 +1428,7 @@ impl HirLowering:
                 val bootstrap_struct_keys = bootstrap_module_structs.keys()
                 var bootstrap_struct_idx = 0
                 while bootstrap_struct_idx < bootstrap_struct_keys.len():
-                    val bootstrap_struct_: Struct = bootstrap_module_structs[bootstrap_struct_keys[bootstrap_struct_idx]]
+                    val bootstrap_struct_: ParserStruct = bootstrap_module_structs[bootstrap_struct_keys[bootstrap_struct_idx]]
                     val bootstrap_hir_struct = self.lower_struct(bootstrap_struct_)
                     structs[bootstrap_hir_struct.symbol] = bootstrap_hir_struct
                     self.register_struct_field_types(bootstrap_hir_struct)
@@ -1449,7 +1449,7 @@ impl HirLowering:
                 val bootstrap_trait_keys = bootstrap_module_traits.keys()
                 var bootstrap_trait_idx = 0
                 while bootstrap_trait_idx < bootstrap_trait_keys.len():
-                    val bootstrap_trait_: Trait = bootstrap_module_traits[bootstrap_trait_keys[bootstrap_trait_idx]]
+                    val bootstrap_trait_: ParserTrait = bootstrap_module_traits[bootstrap_trait_keys[bootstrap_trait_idx]]
                     val bootstrap_hir_trait = self.lower_trait(bootstrap_trait_)
                     traits[bootstrap_hir_trait.symbol] = bootstrap_hir_trait
                     bootstrap_trait_idx = bootstrap_trait_idx + 1
@@ -1465,7 +1465,7 @@ impl HirLowering:
                 for bootstrap_impl_sym in self.lowered_impl_functions.keys():
                     functions[SymbolId(id: bootstrap_impl_fn_key)] = self.lowered_impl_functions[bootstrap_impl_sym]
                     bootstrap_impl_fn_key = bootstrap_impl_fn_key + 1
-            # Module-level `val` constants: this bootstrap early-return used to
+            # ParserModule-level `val` constants: this bootstrap early-return used to
             # hard-code `constants: {}`, so module globals never reached HIR ->
             # MIR and every reference lowered to an uninitialized alloca (stack
             # garbage; LSP server startup SIGSEGV,
@@ -1477,7 +1477,7 @@ impl HirLowering:
                 eprint("[hir-lower] bootstrap-constants:count module={module.name} count={bootstrap_const_names.len()}")
             var bootstrap_const_idx = 0
             while bootstrap_const_idx < bootstrap_const_names.len():
-                val bootstrap_const_src: Const = module.constants[bootstrap_const_names[bootstrap_const_idx]]
+                val bootstrap_const_src: ParserConst = module.constants[bootstrap_const_names[bootstrap_const_idx]]
                 val bootstrap_hir_const = self.lower_hir_const_decl(bootstrap_const_src)
                 bootstrap_constants[bootstrap_hir_const.symbol] = bootstrap_hir_const
                 bootstrap_const_idx = bootstrap_const_idx + 1
@@ -1524,7 +1524,7 @@ impl HirLowering:
         lower_idx = 0
         while lower_idx < lower_class_keys.len():
             val name = lower_class_keys[lower_idx]
-            val class_: Class = lower_module_classes[name]
+            val class_: ParserClass = lower_module_classes[name]
             val hir_class = self.lower_class(class_)
             classes[hir_class.symbol] = hir_class
             lower_idx = lower_idx + 1
@@ -1534,7 +1534,7 @@ impl HirLowering:
         lower_idx = 0
         while lower_idx < lower_struct_keys.len():
             val name = lower_struct_keys[lower_idx]
-            val struct_: Struct = lower_module_structs[name]
+            val struct_: ParserStruct = lower_module_structs[name]
             val hir_struct = self.lower_struct(struct_)
             structs[hir_struct.symbol] = hir_struct
             self.register_struct_field_types(hir_struct)
@@ -1557,7 +1557,7 @@ impl HirLowering:
         lower_idx = 0
         while lower_idx < lower_trait_keys.len():
             val name = lower_trait_keys[lower_idx]
-            val trait_: Trait = lower_module_traits[name]
+            val trait_: ParserTrait = lower_module_traits[name]
             val hir_trait = self.lower_trait(trait_)
             traits[hir_trait.symbol] = hir_trait
             lower_idx = lower_idx + 1
@@ -1577,7 +1577,7 @@ impl HirLowering:
         val lower_const_values = module.constants.values()
         lower_idx = 0
         while lower_idx < lower_const_values.len():
-            val const_: Const = lower_const_values[lower_idx]
+            val const_: ParserConst = lower_const_values[lower_idx]
             val hir_const = self.lower_hir_const_decl(const_)
             constants[SymbolId(id: lower_idx)] = hir_const
             lower_idx = lower_idx + 1
@@ -1645,7 +1645,7 @@ impl HirLowering:
             types: []
         )
 
-    me declare_module_symbols(module: Module):
+    me declare_module_symbols(module: ParserModule):
         # Closure builds need this pass even under SIMPLE_BOOTSTRAP=1 (see the
         # call site in lower_module) so a module's own struct/enum/class/
         # trait names resolve inside its own function bodies.
@@ -1698,14 +1698,14 @@ impl HirLowering:
             self.symbols.define(name, SymbolKind.Trait, nil, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1
 
-        # Function signatures are lowered after type symbols so named returns
+        # ParserFunction signatures are lowered after type symbols so named returns
         # and recursive calls are typed before any function body is lowered.
         val module_functions = module.functions
         val fn_keys = module_functions.keys()
         idx = 0
         while idx < fn_keys.len():
             val name = fn_keys[idx]
-            val fn_decl: Function = module_functions[name]
+            val fn_decl: ParserFunction = module_functions[name]
             if (hir_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") ?? "") == "1":
                 val return_name: text = parser_type_kind_named_name(fn_decl.return_type.kind)
                 eprint("[flat-function-roundtrip] phase=hir name={fn_decl.name} return={return_name}")
@@ -1749,7 +1749,7 @@ impl HirLowering:
                 mi = mi + 1
             impl_idx = impl_idx + 1
 
-    me lower_import(imp: Import) -> HirImport:
+    me lower_import(imp: ParserImport) -> HirImport:
         var items: [HirImportItem] = []
         for item in imp.items:
             match item:

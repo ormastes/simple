@@ -35,7 +35,7 @@ extern fn rt_file_write_text(path: text, content: text) -> bool
 # Flat AST → Rich AST Converter
 # ============================================================================
 # The core parser produces a flat, index-based AST stored in global arrays.
-# The HIR lowering expects a rich Module with Dict<text, Function> etc.
+# The HIR lowering expects a rich ParserModule with Dict<text, ParserFunction> etc.
 # This bridge converts between the two formats.
 
 fn make_span() -> Span:
@@ -326,7 +326,7 @@ fn convert_flat_stmt(idx: i64) -> Stmt:
         print "[bridge] WARNING: unhandled stmt tag {tag}"
         Stmt(kind: StmtKind.Expr(Expr(kind: ExprKind.NilLit, span: span)), span: span)
 
-fn convert_decl_fn(idx: i64) -> Function:
+fn convert_decl_fn(idx: i64) -> ParserFunction:
     val name = decl_name[idx]
     val p_names = decl_param_names[idx]
     val p_types = decl_param_types[idx]
@@ -354,7 +354,7 @@ fn convert_decl_fn(idx: i64) -> Function:
         si = si + 1
 
     val visibility = convert_decl_visibility(idx)
-    Function(
+    ParserFunction(
         name: name,
         type_params: [],
         params: params,
@@ -376,7 +376,7 @@ fn convert_decl_fn(idx: i64) -> Function:
         span: span
     )
 
-fn convert_decl_extern_fn(idx: i64) -> Function:
+fn convert_decl_extern_fn(idx: i64) -> ParserFunction:
     val name = decl_name[idx]
     val p_names = decl_param_names[idx]
     val p_types = decl_param_types[idx]
@@ -397,7 +397,7 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
 
     val ret = decl_ret_type[idx]
     val visibility = convert_decl_visibility(idx)
-    Function(
+    ParserFunction(
         name: name,
         type_params: [],
         params: params,
@@ -419,19 +419,19 @@ fn convert_decl_extern_fn(idx: i64) -> Function:
         span: span
     )
 
-fn flat_ast_to_module(path: text) -> Module:
+fn flat_ast_to_module(path: text) -> ParserModule:
     val decls = module_get_decls()
-    var functions: Dict<text, Function> = {}
+    var functions: Dict<text, ParserFunction> = {}
     var function_order: [text] = []
-    var structs: Dict<text, Struct> = {}
-    var enums: Dict<text, Enum> = {}
-    var constants: Dict<text, Const> = {}
-    var imports: [Import] = []
+    var structs: Dict<text, ParserStruct> = {}
+    var enums: Dict<text, ParserEnum> = {}
+    var constants: Dict<text, ParserConst> = {}
+    var imports: [ParserImport] = []
     var exports: [Export] = []
     var impls: [Impl] = []
     val span = make_span()
 
-    print "[bridge] Converting {decls.len()} declarations to rich Module"
+    print "[bridge] Converting {decls.len()} declarations to rich ParserModule"
 
     var di = 0
     while di < decls.len():
@@ -439,7 +439,7 @@ fn flat_ast_to_module(path: text) -> Module:
         val tag = decl_tag[idx]
         if tag == DECL_FN:
             val fn_ = convert_decl_fn(idx)
-            print "[bridge] Function: {fn_.name}"
+            print "[bridge] ParserFunction: {fn_.name}"
             functions[fn_.name] = fn_
             function_order.push(fn_.name)
         elif tag == DECL_EXTERN_FN:
@@ -449,7 +449,7 @@ fn flat_ast_to_module(path: text) -> Module:
             function_order.push(fn_.name)
         elif tag == DECL_STRUCT:
             val s_name = decl_name[idx]
-            print "[bridge] Struct: {s_name} (stub)"
+            print "[bridge] ParserStruct: {s_name} (stub)"
             var fields: [Field] = []
             val f_names = decl_field_names[idx]
             val f_types = decl_field_types[idx]
@@ -470,7 +470,7 @@ fn flat_ast_to_module(path: text) -> Module:
                     span: span
                 ))
                 fi = fi + 1
-            structs[s_name] = Struct(
+            structs[s_name] = ParserStruct(
                 name: s_name,
                 type_params: [],
                 fields: fields,
@@ -483,8 +483,8 @@ fn flat_ast_to_module(path: text) -> Module:
             )
         elif tag == DECL_ENUM:
             val e_name = decl_name[idx]
-            print "[bridge] Enum: {e_name} (stub)"
-            enums[e_name] = Enum(
+            print "[bridge] ParserEnum: {e_name} (stub)"
+            enums[e_name] = ParserEnum(
                 name: e_name,
                 type_params: [],
                 variants: [],
@@ -498,7 +498,7 @@ fn flat_ast_to_module(path: text) -> Module:
             val c_name = decl_name[idx]
             val body = decl_body_stmts[idx]
             val init = if body.len() > 0: convert_flat_expr(body[0]) else: Expr(kind: ExprKind.NilLit, span: span)
-            constants[c_name] = Const(
+            constants[c_name] = ParserConst(
                 name: c_name,
                 has_type_: false,
                 type_: Type(kind: TypeKind.Infer, span: span),
@@ -523,7 +523,7 @@ fn flat_ast_to_module(path: text) -> Module:
                     alias: ""
                 ))
                 ii = ii + 1
-            imports = imports.push(Import(
+            imports = imports.push(ParserImport(
                 module: module_path,
                 items: import_items,
                 is_lazy: decl_is_lazy[idx] != 0,
@@ -536,7 +536,7 @@ fn flat_ast_to_module(path: text) -> Module:
             print "[bridge] WARNING: unhandled decl tag {tag}"
         di = di + 1
 
-    Module(
+    ParserModule(
         name: path,
         imports: imports,
         exports: exports,
@@ -560,7 +560,7 @@ fn flat_ast_to_module(path: text) -> Module:
         mock_decls: []
     )
 
-fn parse_and_build_module(source: text, path: text) -> Module:
+fn parse_and_build_module(source: text, path: text) -> ParserModule:
     # Manually call parser steps instead of parse_module() to debug
     print "[bridge] Step A: ast_reset..."
     ast_reset()
@@ -663,7 +663,7 @@ fn main() -> i64:
         symbols: {}
     )
     val retained_sources: [SourceFile] = [SourceFile(path: source_file, content: source_text, module_name: ast_module.name)]
-    val retained_modules: Dict<text, Module> = {ast_module.name: ast_module}
+    val retained_modules: Dict<text, ParserModule> = {ast_module.name: ast_module}
     val retained_module_surfaces: ModuleSurfacesByName = match module_surfaces_from_modules(retained_modules, retained_sources):
         case Ok(value): value
         case Err(error):

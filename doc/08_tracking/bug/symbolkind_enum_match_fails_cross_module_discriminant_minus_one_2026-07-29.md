@@ -347,3 +347,82 @@ symbol identity in this code today.
 1. **Audit**: grep `20.hir/**/*.spl` for `case SymbolKind\.(Function|Field|Class|Struct|Enum|Trait|TypeAlias|TypeParam|Const|Module|Import)` and treat every hit as a confirmed-dead arm needing the `(defining_module, name)`-style workaround (or an equivalent non-`.kind`-pattern-match rewrite) until the underlying seed bug is fixed.
 2. **Real fix options** (both out of this lane's scope, need explicit sign-off before attempting): (a) seed `compiler_rust` codegen/pattern-matching fix to qualify bare-name enum-variant/struct resolution by the enclosing type instead of a flat global name table; (b) a coordinated, whole-codebase rename of either `SymbolKind`'s colliding variants or `parser_types.spl`'s colliding structs, verified file-by-file.
 3. Do **not** re-attempt "isolated small repro" experiments for this family — the mechanism requires the colliding struct name to be in the same file/scope as the enum-variant pattern; a repro must deliberately include that colliding declaration (this is why DISC1's negative controls, which never included a same-named struct alongside the enum, came back green).
+
+## PTR1 update (2026-07-30): pure-Simple fix LANDED for 9 of the 11 colliding structs
+
+Renamed the colliding `parser_types.spl` structs to a `Parser`-prefixed name
+(matching the file's own existing `parser_module_new`/`parser_function_new`
+naming precedent; confirmed zero pre-existing `Parser<Name>` collisions
+repo-wide before renaming). `Field` and `TypeAlias` were **not** renamed —
+their only real external call sites are inside `35.semantics/lint/`
+(`primitive_api.spl`, `alias_registry.spl`), which is on this campaign's
+do-not-touch list; leaving them means `SymbolKind.Field` /
+`SymbolKind.TypeAlias` pattern gates remain in the same dead-arm state as
+before this lane. `ScopeKind` shares no variant name with `Field`/`TypeAlias`,
+so this only affects `SymbolKind` sites for those two specific variants.
+
+| Old name | New name | Renamed? | Files containing new name (of the 30 touched) |
+|---|---|---|---|
+| `Module` | `ParserModule` | yes | 18 |
+| `Import` | `ParserImport` | yes | 7 |
+| `Function` | `ParserFunction` | yes | 21 |
+| `TypeParam` | `ParserTypeParam` | yes | 8 |
+| `Class` | `ParserClass` | yes | 6 |
+| `Struct` | `ParserStruct` | yes | 10 |
+| `Enum` | `ParserEnum` | yes | 11 |
+| `Trait` | `ParserTrait` | yes | 8 |
+| `Const` | `ParserConst` | yes | 9 |
+| `Field` | *(unchanged)* | no — blocked by lint/ scope guard | n/a |
+| `TypeAlias` | *(unchanged)* | no — blocked by lint/ scope guard | n/a |
+
+30 files touched total (29 with real edits + `parser_factory.spl`, a
+glob-importer with zero actual bare-name usage, edited as a no-op).
+`driver.spl` (the literal file) was checked and has zero call sites of any
+colliding name — not touched, consistent with the do-not-touch rule.
+`lexer.spl` and `35.semantics/lint/` were not touched.
+
+**One real bug caught by the battery, fixed in-scope:**
+`hir_lowering/_Items/declaration_lowering.spl:705` had
+`match enum_: case Enum(name, type_params, variants, visibility, is_public, _, doc_comment, span):`
+— a genuine positional **struct**-pattern destructuring `enum_: ParserEnum`
+by its old bare name `Enum`. This one case-arm was a real call site (not a
+`SymbolKind`/`Kind`-enum dispatch like every other bare `case Name(...)` in
+the touched files, which were verified individually against their actual
+match-subject type — `PatternKind`, `EnumPayload`, `HirTypeKind`,
+`ast.Node`, `TypeKind`, or `compiler.hir.inference.types.Type`, all
+unrelated to `parser_types` and correctly left untouched). Missing this one
+turned `lower_enum_with_symbol` into a silently-nil-returning function for
+every user `enum` declaration once `struct Enum` was renamed away, breaking
+`test/01_unit/compiler/hir/symbol_table_id_zero_spec.spl`'s second scenario
+("cannot access field 'symbol' on nil") — caught by the battery, root-caused
+via targeted `print` probes (reverted), fixed by renaming this one arm to
+`case ParserEnum(...)`. All batteries green after the fix (see below).
+
+**Probe result (payoff confirmed):** a scratch spec (deleted after use)
+lowering `fn main() -> i64: ...` and reading `hir.symbols.symbols[key].kind`
+printed `name=main disc=2452922934 mod_matched=false fn_matched=true` — a
+real, non-sentinel discriminant and a correctly-matching
+`case SymbolKind.Function:` arm, replacing the pre-fix `disc=-1
+fn_matched=false` from the DISC2 repro above. **The pure-Simple fix lands for
+these 9 variants**: `case SymbolKind.{Function,Module,Class,Struct,Enum,
+Trait,Const,Import,TypeParam}:` are no longer dead arms in files that
+wildcard-import (or explicitly import) `parser_types` — no seed-codegen
+change was needed or made. `SymbolKind.Field` and `SymbolKind.TypeAlias`
+remain dead arms pending a future lane that can touch `35.semantics/lint/`.
+The IMP2 `(defining_module, name)`-keyed workaround in
+`hir_lowering/expressions.spl`'s `field_module_callable`/`MethodCall`
+module-call check was left in place as defense-in-depth, per instruction —
+not removed.
+
+**Battery (all green except one pre-existing, unrelated failure):**
+- `qualified_import_call_spec.spl`: 3/3
+- `resolve_import_symbols_spec.spl`: 8/8
+- `symbol_table_id_zero_spec.spl`: 3/3 (was 2/3 until the `declaration_lowering.spl` fix above landed)
+- `enum_payload_capture_spec.spl`: 7/7
+- `type_alias_capture_spec.spl`: 4/4
+- `capability_system_spec.spl`: 40/40
+- `tuple_destructure_parser_spec.spl`: 16/16
+- `parser_spec.spl`: 40/41 — **1 pre-existing failure, unrelated to this lane**: "parse optional chaining" / "expected 42 to equal true". Confirmed via a HEAD-vs-renamed A/B swap (restore all 30 touched files to `git show HEAD:<path>`, re-run, restore back) that this exact failure reproduces identically on unmodified `HEAD` — not caused by this rename.
+
+No commit/push performed (per campaign rule); changes left in-tree for
+orchestrator review.
