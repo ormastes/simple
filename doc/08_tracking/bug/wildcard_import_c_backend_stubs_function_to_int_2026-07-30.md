@@ -85,13 +85,157 @@ this same false-red, independent of what the spec actually tests. Worth a
 repo-wide grep for `c_backend_stubs\.\*` and similar `_stubs.*` /
 conditionally-gated-import modules.
 
-## To actually fix
+## UPDATE 2026-07-30 (lane WCI1): NOT scoped to c_backend_stubs — 6 independent
+## trigger modules found; mechanism still not pinned to a symbol pair
 
-Root-cause the exact colliding symbol per the sibling bug doc's suggested
-method: bisect by commenting out `c_backend_stubs.spl`'s transitive imports
-one at a time under the wildcard, or instrument the interpreter's flat
-registry lookup to log the symbol name at the point of the failed int
-conversion.
+### The bug is much broader than the title suggests
+
+Bisecting via single-module `use compiler.X.*` specs (trivial `it`, no calls
+into the imported module at all) shows the crash is **independently**
+triggered — with `c_backend_stubs` removed from the import list entirely —
+by wildcard-importing any of:
+
+| module (wildcard alone reproduces) | result |
+|---|---|
+| `compiler.backend.backend.c_backend_stubs` | FAIL (original finding) |
+| `compiler.backend.common.type_mapper` | FAIL |
+| `compiler.backend.backend_api` | FAIL |
+| `compiler.backend.backend_helpers` | FAIL |
+| `compiler.backend.codegen_factory` | FAIL |
+| `compiler.backend.wasm_backend` | FAIL |
+
+None of these five share a `use`-graph with `c_backend_stubs.spl` (confirmed
+by reading each file's own `use` list) — so this is not "one bad file", it's
+a property of wildcard-importing several different, otherwise-unrelated
+backend modules.
+
+### What does NOT reproduce it alone (ruling out single-file causes)
+
+Every module transitively reachable from the FAIL set above was tested with
+its own standalone `use compiler.X.*` + trivial `it`, and **all pass clean**:
+`compiler.mir.mir_data`, `compiler.mir.mir_instructions`,
+`compiler.backend.c_ir_builder`, `compiler.backend.common.mir_text_codegen`,
+`compiler.backend.backend.backend_types` (the double-`backend` one, direct),
+`compiler.backend.codegen_types`, `compiler.backend.llvm_codegen_adapter`,
+`compiler.backend.llvm_lib_backend`, `compiler.backend.cranelift_codegen_adapter`,
+`compiler.mir_opt.mir_opt.mod`, `compiler.backend.llvm_support_matrix`,
+`compiler.common.mir_target_context`.
+
+So no *single* sub-module carries the offending symbol either — the crash
+needs the **combination** each FAIL-set module assembles (its own
+declarations plus several `use`d names flattened together), not any one
+piece in isolation. This argues against a simple two-file name clash and
+for either (a) a collision between two specific names that only co-occur
+once a module's full transitive `use` graph is flattened, or (b) a
+scale/depth effect in the interpreter's flat wildcard-import registry
+(number of names flattened, or wildcard-of-a-wildcard re-export depth)
+rather than a single reproducible name pair.
+
+### Mechanism confirmed: child-process Rust seed, `Value::as_int()`
+
+The "child binary" line in a full-output run (not just the tail) shows the
+crash happens in `bin/release/x86_64-unknown-linux-gnu/simple`, i.e. the
+**Rust-built seed**, invoked as a child process by the test runner — the
+seed itself prints `WARNING: this Rust-built Simple binary is a bootstrap
+seed only; do not use it as the normal tool.` on every run. So `bin/simple
+test` currently executes specs via the seed's interpreter, not the
+pure-Simple one (worth flagging separately from this bug — the "default
+tooling = self-hosted binary" rule is currently not what's deployed at
+`bin/release/x86_64-unknown-linux-gnu/simple`).
+
+The exact error text (`"type mismatch: cannot convert {actual_type} to
+int"`) is generated at `src/compiler_rust/compiler/src/value_impl.rs:137`,
+inside `Value::as_int()`'s fallback arm. Every other `Value` variant has an
+explicit conversion (Int, UInt, Float, Bool, Unit, Unique/Shared/Weak/Handle/
+Borrow unwrap, single-field newtype-object unwrap, Str/Symbol get dedicated
+messages) — a bare `Function` value only reaches this fallback, so *some*
+code path calls `.as_int()` on a `Value::Function` after the spec's real `it`
+blocks finish. We were not able to find the call site (would require
+instrumenting/rebuilding the Rust seed, out of scope for this contained
+lane) or the name of the symbol whose lookup returns a function where an int
+was expected.
+
+### A SEPARATE, unrelated bug found by accident while probing this one
+
+`test/01_unit/compiler/backend/type_mapper_spec.spl`'s "handles composite
+types using each backend strategy" test has a **genuine, real** failure
+(`semantic: undefined field 'kind': cannot access field on value of type
+'function'`) that is **not** this bug — bisected down to:
+```
+[("count", MirType.i64()), ("ready", MirType.bool())].map("{_.0}: {_.1}")
+```
+i.e. `Array<(text, T)>.map(...)` with a **string-template closure that
+tuple-indexes the placeholder** (`_.0` / `_.1`) inside string interpolation
+combined with a nested `self.` method call, is broken standalone (reproduced
+in a fresh scratch spec with zero backend imports). Filed only as a note
+here since it was found alongside; not investigated further and no fix
+attempted — worth its own bug doc if picked up.
+
+### Real specs confirmed currently affected and fixed (same workaround as
+### the original `backend_capability_spec.spl` fix: drop the `.*`)
+
+| spec | before | after |
+|---|---|---|
+| `test/01_unit/compiler/backend/c_backend_async_spec.spl` | 4 total, 3 passed, 1 failed | 3 total, 3 passed, 0 failed |
+| `test/01_unit/compiler/backend/c_backend_bulk_hint_spec.spl` | 5 total, 4 passed, 1 failed | 4 total, 4 passed, 0 failed |
+| `test/01_unit/compiler/backend/c_backend_bulk_copy_memmove_spec.spl` | 6 total, 5 passed, 1 failed | 5 total, 5 passed, 0 failed |
+| `test/unit/compiler/backend/c_backend_async_spec.spl` (legacy dup tree) | 4 total, 3 passed, 1 failed | 3 total, 3 passed, 0 failed |
+| `test/01_unit/compiler/backend/type_mapper_spec.spl` | 4 total, 3 passed, 1 failed (phantom stacked on the real map/template bug above) | 4 total, 3 passed, 1 failed (phantom gone; the 1 failure is now only the real, separate map/template bug) |
+
+All five changed `use compiler.backend.backend.c_backend_stubs.*` (or
+`use compiler.backend.common.type_mapper.*`) to the non-wildcard form
+(`use compiler.backend.backend.c_backend_stubs` /
+`use compiler.backend.common.type_mapper`), verified by grep that no bare
+name from the wildcarded module is used directly in the file (the import
+exists only for its `impl`/trait-registration side effect), and re-ran each
+spec to confirm the real assertion count/pass count is unchanged and the
+`cannot convert function to int` error is gone.
+
+### Found but NOT fixed (deferred — larger blast radius)
+
+- `test/feature/usage/wasm_compile_spec.spl` (+ `test/03_system/feature/usage/`
+  duplicate) wildcard-imports `compiler.backend.wasm_backend.*` (confirmed
+  FAIL-set member above) **and** uses ~7 bare names from it
+  (`WasmBackend__create`, `WasmTarget`, `WatBuilder__create`, `WasmType`,
+  `JsGlueGenerator__create`, `WasmImport`, `WasmCompileResult`). Fixing this
+  one requires enumerating `wasm_backend.spl`'s full export surface into an
+  explicit `.{...}` import instead of just dropping the wildcard (unlike the
+  `c_backend_stubs`/`type_mapper` cases, which used only the `impl`
+  side-effect and nothing else by bare name) — deferred as too large a
+  blast-radius edit for this contained lane. Its `use
+  compiler.backend.backend_api.*` was narrowed to a bare
+  `use compiler.backend.backend_api` (verified no regression) since that
+  half of the fix was zero-risk, but the file is still red on this bug via
+  `wasm_backend.*`.
+- `.spipe_matchers_*` generated-fixture copies of the fixed specs (e.g.
+  `.spipe_matchers_c_backend_async_spec.spl`) were left untouched —
+  auto-generated SPipe artifacts, out of scope per repo convention.
+
+### Repo-wide wildcard-import audit (test/)
+
+`grep -rEo 'use compiler\.backend\.[A-Za-z0-9_.]+\*' test/` found ~115
+matches across the `test/`, `test/01_unit/`, `test/unit/`, `test/03_system/`
+and `.spipe_matchers_*` mirror trees (heavy duplication from the ongoing
+test-tree reorg, not 115 distinct specs). Of the confirmed FAIL-set modules,
+only `c_backend_stubs.*`, `type_mapper.*`, `backend_api.*` and
+`wasm_backend.*` are actually wildcard-imported by real specs today (see
+tables above); `backend_helpers.*` and `codegen_factory.*` are not
+wildcard-imported by any spec currently, only confirmed as independent
+crash triggers in isolation — worth a grep sweep again if new specs start
+using them with `.*`.
+
+## To actually fix (still open)
+
+Root-causing the exact colliding symbol requires instrumenting the Rust
+seed's interpreter (`src/compiler_rust/compiler/src/value_impl.rs` and
+whatever calls `.as_int()` on a value produced via the flat wildcard-import
+registry) and rebuilding it — out of scope for a contained lane. The
+workaround (drop `.*`, use bare `use module` when only the side effect is
+needed, or an explicit `.{...}` list when bare names are used) remains the
+safe per-spec fix; it does not address the underlying registry bug, which
+can resurface in any new spec that wildcard-imports one of the FAIL-set
+modules (or, per the scale/depth theory above, any other module whose own
+`use` graph reaches a similar size/depth).
 
 ## Related
 
