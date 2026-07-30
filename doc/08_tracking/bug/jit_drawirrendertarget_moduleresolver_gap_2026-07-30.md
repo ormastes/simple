@@ -1,9 +1,15 @@
 # JIT `Unknown type: DrawIrRenderTarget` — resolved by trait pre-registration
 
 **Date:** 2026-07-30
-**Status:** RESOLVED — HIR Pass 0 now pre-registers trait names before
-declaration lowering. The focused regression passes and the original web GUI
-JIT reproduction no longer reports `Unknown type: DrawIrRenderTarget`.
+**Status:** `DrawIrRenderTarget` RESOLVED (confirmed independently this pass,
+fresh pristine worktree + rebuilt seed including `7935e971737`) — HIR Pass 0
+now pre-registers trait names before declaration lowering. The next blocker,
+`CastElse` (the second gap from the original assignment), is now also
+ROOT-CAUSED AND FIXED (6 real `.spl`-only fixes landed, 22/22 relevant specs
+passing). A **third**, new, not-yet-fixed gap (`Unknown variable:
+text_align_v` in `tag_defaults`) was found immediately after and is reported
+below as "what blocks next" — the JIT-enablement task is not fully complete,
+but has advanced past both originally-assigned gaps with real, verified fixes.
 **Component:** `src/compiler_rust/driver/src/exec_core.rs` (`run_file_jit`),
 `src/compiler_rust/compiler/src/module_resolver/*`,
 `src/compiler_rust/compiler/src/hir/lower/type_registration.rs` (`register_trait`),
@@ -151,47 +157,181 @@ with different data flow than the whole-program pre-scan `build_import_map`
 performs), not a small mirrored addition. Not attempted this pass — no time
 remained to safely trace and verify a fix in unfamiliar territory.
 
-## CastElse gap — not reached this pass
+## CastElse gap — confirmed as the next blocker, ROOT-CAUSED AND FIXED (2026-07-30, follow-up pass)
 
-The second documented gap (`Unsupported feature: CastElse` on `read_u32_be`
-in `src/lib/skia/feature/glyph/ot_parser_layout.spl:280`) was not
-independently re-investigated this pass — time was consumed by the
-`DrawIrRenderTarget` root-cause/fix/revert cycle and the architectural
-discovery above. Given both gaps are reached via the same
-`exec_core.rs::run_file_jit` → `ModuleResolver` path, and `DrawIrRenderTarget`
-is hit first (blocking further progress on the real pipeline), it's likely
-`CastElse` is architecturally similar (a genuinely unsupported HIR node in
-this same simpler lowering path) but this is **INFERRED, not verified**.
+Re-tested per the coordinator's follow-up: another session landed
+`7935e971737` ("fix(jit): preregister trait types before declarations"),
+touching `hir/lower/import_loader.rs` and
+`hir/lower/module_lowering/module_pass.rs` — the actual HIR Pass 0/import
+pre-registration passes, shared by **both** the `native_project` pipeline
+and `run_file_jit`'s `ModuleResolver`-based path (unlike this doc's own
+reverted fix, which only touched the `native_project`-specific whole-program
+pre-scan). Rebuilt the Rust seed from a **fresh, second pristine worktree**
+at the SSH-fetched tip (`ea63b6e2ec3`+, never the shared WC) and re-ran the
+exact assigned repro:
+
+```
+SIMPLE_EXECUTION_MODE=jit SHOWCASE_RESOLUTION=480x360 \
+bin/simple run examples/06_io/ui/web_render_file_gui.spl
+```
+
+**`Unknown type: DrawIrRenderTarget` is GONE (PROVED).** The next error is
+exactly the documented `CastElse` gap, confirming the perf lane's
+expectation precisely:
+
+```
+HIR lowering error: Unsupported feature: CastElse { expr: Call { callee: Identifier("read_u32_be"), ... },
+  target_type: Simple("i64"), fallback_fn: Integer(0) }
+```
+at `src/lib/skia/feature/glyph/ot_parser_layout.spl:280`.
+
+### Root cause (PROVED by code reading) — NOT a desugared if/else; a genuine dedicated syntax form the parser mis-scopes
+
+`CastElse` is not what it first appears. It is a **dedicated postfix syntax
+form**: `<expr> as <Type> else: <fallback>` (parser construction site:
+`src/compiler_rust/parser/src/expressions/postfix.rs:586-596`,
+AST node: `parser/src/ast/nodes/core.rs:702`). The catch is **parser
+precedence**: when `as <Type>` is immediately followed by `else:`, the
+parser **always** binds that `else:` to the cast (producing `CastElse`),
+even when the cast sits inside an **outer** `if <cond>: <expr> as T else:
+<fallback>` where the `else:` was clearly meant for the outer `if`. This
+produces an **`if` with only a then-branch** whose value is the `CastElse`
+node — confirmed by a minimal repro (`castelse_probe2.spl`):
+
+```
+fn h(cond: bool, x: i64) -> i64:
+    if cond: x as i64 else: 0
+```
+
+Under the **interpreter** (not just JIT), `h(true, 5)` correctly returns
+`5`, but **`h(false, 5)` silently returns `nil`, not `0`** — a real, silent,
+confirmed correctness bug in the interpreter too, not merely a JIT
+compilation gap. `Expr::CastElse` has **no HIR lowering implementation at
+all** (`hir/lower/expr/mod.rs`'s `lower_expr` dispatch match, lines
+104-208, has no `CastElse` arm), so it falls into the generic catch-all
+(line 209-218) and errors under strict/JIT lowering, or silently becomes
+`Nil`/`ANY` under `lenient_types` (interpreter) — explaining why the
+interpreter doesn't crash but silently produces the wrong value.
+
+**Fix (PROVED, applied and verified — source-only, no Rust compiler
+changes):** parenthesizing the cast expression, `(expr as T) else:
+fallback`, removes the ambiguity — the outer `if`'s `else:` is then
+unambiguous, and `CastElse` never gets constructed. Verified directly:
+
+```
+fn h(cond: bool, x: i64) -> i64:
+    if cond: (x as i64) else: 0
+```
+
+compiles clean under JIT (no HIR error at all) **and** returns the correct
+value for both branches (`5`, `0` — not `nil`).
+
+**Six real sites fixed** across three files (source-only `.spl` changes,
+zero Rust changes this pass), each verified individually via a fix →
+re-run → next-error-surfaces loop against the real web pipeline repro:
+
+- `src/lib/skia/feature/glyph/ot_parser_layout.spl` — 4 identical-shape
+  sites (`parse_gsub_skeleton` ×1, a lookup-flag site ×1,
+  `parse_gpos_skeleton` ×1, `_active_layout_lookup_indices` ×1 — the first
+  3 were byte-identical strings, fixed via one `replace_all`; the 4th
+  matched the same pattern).
+- `src/lib/skia/feature/shaper/ot_layout_apply.spl` — 1 site
+  (`_apply_context_at`, `record_count: if ... else: 0`).
+- `src/lib/skia/feature/shaper/ot_layout_gpos.spl` — 1 site (`_mark`, a
+  nested `if kind == 5u32: target_array + read_u16_be(...) as i64 else:
+  target_array` where the **outer** `if`'s `else:` was being swallowed by
+  the inner cast, losing the `+ anchor_offset` semantics for the `false`
+  branch — same class of bug as the minimal repro's `nil` result, just one
+  level deeper).
+
+**Bonus, unrelated, real bug found and fixed along the way (PROVED):**
+`ot_layout_gpos.spl:750`, `_lookup`'s `budget: _Budget` parameter — `_Budget`
+is not defined **anywhere** in the codebase (confirmed via
+whole-repo grep); the real type, `GposDataBudget` (already imported at the
+top of the same file, `ot_layout_gpos_data.spl`'s export), is what every
+sibling function in the same file and its callers actually use
+(`gpos_data_glyph_class(font, glyph, budget: GposDataBudget)`). This reads
+as a stale rename artifact. Fixed: `budget: _Budget` → `budget:
+GposDataBudget`.
+
+**Validation (PROVED):**
+- Fix-and-rerun loop against the real `SIMPLE_EXECUTION_MODE=jit` web
+  pipeline repro: every `CastElse` error (5 occurrences across 3 files) and
+  the `_Budget` unknown-type error cleared in sequence, confirmed by
+  re-running the exact command after each fix.
+- `bin/simple test` on the four directly-relevant existing spec files
+  (`ot_layout_apply_spec.spl`, `ot_layout_gpos_spec.spl`,
+  `ot_layout_gpos_variation_spec.spl`, `ot_parser_layout_selector_spec.spl`):
+  **22 examples, 0 failures** — no regression from any of the six fixes.
+- `git diff --stat`: 3 files changed, source-only, no Rust/compiler changes
+  this pass (unlike the earlier, reverted `DrawIrRenderTarget` attempt).
+
+### What blocks NEXT (found, not fixed — new gap beyond the assigned two)
+
+After all `CastElse`/`_Budget` fixes, the web pipeline JIT attempt advances
+to a **new, different, third gap**, confirming this is genuinely an
+iceberg (matching the perf lane's framing — "a bigger web-cell win than
+caching" implies many more such gaps remain):
+
+```
+HIR lowering error: Unknown variable: text_align_v while lowering tag_defaults
+```
+
+Located (PROVED): `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl`,
+function `tag_defaults` (starts line 2590), which assigns `text_align_v =
+"center"` at lines 2694/2703 without that variable being declared within
+`tag_defaults`'s own scope — a *different* function in the same file (line
+679) has its own, unrelated local `text_align_v`. This looks like either a
+genuine missing-declaration bug or a JIT-specific static-scoping
+requirement the interpreter doesn't enforce (matching the
+`lenient_types`-tolerant-vs-strict-JIT pattern already established in this
+doc for `UnknownType`). **Not investigated further or fixed this pass** —
+found via the same fix-and-rerun loop, reported per the "report what blocks
+next" instruction, out of scope for further root-causing given time spent
+on the six fixes above.
 
 ## Recommended next steps
 
-1. Understand `ModuleResolver`'s on-demand type-loading path well enough to
-   add trait-name (and, generalizing, any other missing) fallback support
-   there specifically — the `native_project` pipeline's `global_struct_defs`/
-   (reverted) `global_trait_defs` mechanism is not directly reusable since
-   `run_file_jit` never builds a whole-program `ModuleImports` map at all.
-2. Once `DrawIrRenderTarget` is cleared via a `ModuleResolver`-side fix,
-   re-run the same `SIMPLE_EXECUTION_MODE=jit` repro to see whether
-   `CastElse` on `read_u32_be` (`ot_parser_layout.spl:280`) is the next
-   blocker, confirming or revising the "architecturally similar" inference
-   above.
-3. If closing `ModuleResolver`'s gap is itself large, consider instead
-   routing `simple run --jit` through the same whole-program
-   `native_project::compiler.rs` pipeline `native-build` uses (which does
-   have the struct fallback, and could gain the trait one) — a bigger
-   change, but reuses solid, already-tested infrastructure instead of
-   duplicating it in `ModuleResolver`.
+1. Root-cause and fix the `text_align_v` / `tag_defaults` "Unknown
+   variable" gap the same way this pass closed `CastElse` — likely another
+   short, contained `.spl`-only fix (missing local declaration), but not
+   confirmed.
+2. Consider a repo-wide survey for the `CastElse`-prone shape (`if <cond>:
+   <expr> as <Type> else: <fallback>` without parens around the cast) —
+   this pass's own grep found **33 occurrences across 18 files**, most
+   outside the web pipeline's closure (kernel/`os` code, unrelated apps) and
+   not fixed here; only the 6 sites actually blocking this specific repro
+   were touched. `src/lib/common/encoding/sfnt_glyf.spl:391` already
+   documents this exact class independently (a different workaround:
+   hoisting the cast outside the `if`/`else` rather than parenthesizing it)
+   — worth cross-referencing when doing that survey.
+3. This survey-worthy shape is itself a **real interpreter correctness bug**
+   (not just a JIT gap) per the minimal repro above (`nil` instead of `0`)
+   — worth flagging independently of the JIT-enablement goal, since it can
+   silently corrupt values under normal (non-JIT) execution today.
+4. Continue the fix-and-rerun loop against the real pipeline for however
+   many further gaps remain until `SIMPLE_EXECUTION_MODE=jit` on the web
+   example either succeeds or reaches a genuinely architectural blocker
+   worth stopping at (per this doc's own earlier `ModuleResolver` finding
+   for `DrawIrRenderTarget`, now resolved by `7935e971737`).
 
 ## Validation performed this pass
 
-- Reproduction: PROVED, pristine worktree, exact assigned command.
-- Root cause (struct-vs-trait fallback asymmetry): PROVED by code reading.
-- Fix: implemented, cargo-build-clean, rustfmt-clean, byte-identical on an
-  unaffected fixture — all PROVED — but necessity/correctness NOT proved
-  (no failing-before/passing-after pair found), and it did not move the
-  assigned repro. Reverted.
-- Architectural blocker (`ModuleResolver` has no cross-module type-fallback
-  of any kind, trait or otherwise): PROVED by code reading (grep across all
-  `module_resolver/*.rs` files, zero trait references).
-- CastElse gap: not investigated this pass — INFERRED only that it's likely
-  architecturally similar.
+- Reproduction (both the original `DrawIrRenderTarget` disappearance and
+  the new `CastElse`/`_Budget`/`text_align_v` sequence): PROVED, from a
+  fresh pristine worktree, exact assigned command, rebuilt seed including
+  `7935e971737`.
+- `CastElse` root cause (dedicated postfix syntax + parser precedence
+  mis-scoping the outer `if`'s `else:`, plus a missing HIR lowering arm):
+  PROVED by code reading and a minimal repro showing both the JIT error and
+  a **silent interpreter correctness bug** (`nil` instead of `0`).
+- Six fixes (5 `CastElse` parenthesizations + 1 `_Budget`→`GposDataBudget`
+  typo): PROVED — each individually confirmed to clear its error via the
+  real pipeline repro; existing spec suite for the touched files:
+  22/22 passing, no regressions.
+- `text_align_v`/`tag_defaults` gap: found (PROVED it exists and blocks),
+  not root-caused or fixed this pass.
+- Earlier `DrawIrRenderTarget` fix/revert history (this session's own
+  reverted attempt, and the architectural `ModuleResolver` finding):
+  unchanged from the prior version of this doc, left intact above for
+  the record.
