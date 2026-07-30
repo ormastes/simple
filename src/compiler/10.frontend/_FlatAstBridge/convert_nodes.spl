@@ -6,14 +6,11 @@ use compiler.frontend.flat_ast_bridge.*
 # ParserModule shape expected by HIR lowering. This is used as the bootstrap-safe
 # frontend path when the newer parser surface is unavailable.
 
-use compiler.core.parser.{parser_has_errors, parser_get_errors, parser_init_with_path, parser_advance, par_kind_get, parser_set_had_error}
 use compiler.core.parser.{parser_error}
-use compiler.core.parser.{parser_diagnostics_suppressed_get, parser_diagnostics_suppressed_set}
 use compiler.core.parser_decls.{parse_module_body}
-use compiler.frontend.core.parser_expr.{parse_expr}
-use compiler.frontend.core.lexer.{lex_init_with_path}
-use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
-use compiler.core.tokens.{TOK_EOF}
+use compiler.frontend.core.string_interpolation_expand.{
+    parse_interpolation_fragment
+}
 use compiler.core.ast.*
 use compiler.core.ast.{decl_get_body, decl_get_field_bits, decl_get_field_defaults, decl_get_field_types, decl_get_fields}
 use compiler.core.ast.{decl_get_imports, decl_get_is_comptime, decl_get_is_lazy, decl_get_name, decl_get_param_names}
@@ -553,69 +550,6 @@ fn flat_asm_match_arm(arm_idx: i64, span: Span) -> AsmMatchArm:
         span: span
     )
 
-fn flat_bridge_parse_interp_inner(inner: text) -> i64:
-    # Sub-lex + parse a single expression from `inner`, APPENDING to the shared
-    # flat AST arena (no ast_reset), so the outer conversion's arena stays
-    # intact. This is safe because the lexer is idle during flat->frontend
-    # conversion: parse_and_build_module runs parse_module_body() to completion
-    # (filling the arena) BEFORE flat_ast_to_module() converts it. Returns the
-    # parsed expr idx, or -1 when `inner` is not a single clean expression
-    # (leftover tokens / parse failure) so the caller can fall back to a plain
-    # literal.
-    # Sticky par_had_error guard (bug: driver.spl's phase-2 gate reads
-    # par_had_error_get() right after this file's parse_full_frontend()
-    # returns; parser_tok_save/restore only snapshot kind/line/col/text, not
-    # this flag, so a recovered failure here — deliberately swallowed below
-    # via the idx<0 fallback-to-literal path — would otherwise stay set and
-    # fail phase 2 on a file whose real AST is fine). Save/restore around the
-    # whole speculative fragment parse so only a REAL top-level parse error
-    # (raised outside this function, on the real module lex) can trip the
-    # gate.
-    val had_error_before = parser_has_errors()
-    val diagnostics_suppressed_before = parser_diagnostics_suppressed_get()
-    parser_diagnostics_suppressed_set(true)
-    # Bug wildcard_import_c_backend_stubs_function_to_int (bonus-find,
-    # 2026-07-30): a bare `_` inside an interpolation region already has a
-    # fixed meaning -- the value bound by the enclosing call (e.g.
-    # `.map("{_.0}: {self.map_type(_.1)}")` -- `_` is the current tuple
-    # element). But parse_call_arg() unconditionally applies the
-    # `_`-placeholder-shorthand transform to EVERY call/method-call argument
-    # anywhere in the language, so a nested call parsed while sub-parsing this
-    # region (e.g. `self.map_type(_.1)`'s argument `_.1`) got hijacked into an
-    # unapplied `\__p0: __p0.1` closure instead of staying a plain field
-    # access on the template's `_`. Suppress the placeholder-shorthand
-    # transform for the duration of this mini-parse; restore the previous
-    # value on every return path (nested interpolation regions still work
-    # since this saves/restores rather than hardcoding false).
-    val ph_suppress_before = set_placeholder_transform_suppressed(true)
-    # Bug interp_brace_literal_collides_with_string_interpolation: a
-    # placeholder written with padding spaces (e.g. `{ x }`, the common style
-    # for JSON/SDN-shaped text) previously sub-lexed the RAW inner text
-    # including the surrounding whitespace; something about that leading/
-    # trailing padding made the sub-parse fail to land exactly on TOK_EOF, so
-    # `part_idx` came back -1 and the whole placeholder silently fell back to
-    # printing its literal `{ x }` text -- even though `x` is a perfectly
-    # valid, declared variable. The seed oracle trims this padding before
-    # parsing (`{ x }` interpolates fine there); do the same here so a
-    # spaced-out placeholder behaves identically to its unspaced `{x}` form.
-    lex_init_with_path(inner.trim(), "")
-    parser_advance()
-    val idx = parse_expr()
-    if idx < 0:
-        parser_set_had_error(had_error_before)
-        parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
-        set_placeholder_transform_suppressed(ph_suppress_before)
-        return -1
-    if par_kind_get() != TOK_EOF:
-        parser_set_had_error(had_error_before)
-        parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
-        set_placeholder_transform_suppressed(ph_suppress_before)
-        return -1
-    parser_set_had_error(had_error_before)
-    parser_diagnostics_suppressed_set(diagnostics_suppressed_before)
-    set_placeholder_transform_suppressed(ph_suppress_before)
-    idx
-
 fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
     # Bug #136 (normal native path): the core lexer copies each `{expr}`
     # interpolation region VERBATIM into the string token and never parses the
@@ -657,7 +591,7 @@ fn flat_bridge_build_string_interps(value: text, span: Span) -> [Interpolation]:
         elif depth > 0 and ch == "}":
             depth = depth - 1
             if depth == 0:
-                val part_idx = flat_bridge_parse_interp_inner(inner)
+                val part_idx = parse_interpolation_fragment(inner)
                 if part_idx < 0:
                     return []
                 interps.push(Interpolation(
@@ -723,7 +657,7 @@ fn convert_flat_expr(idx: i64) -> Expr:
         return Expr(kind: ExprKind.FloatLit(expr_get_float(idx).to_float()), span: span)
     elif tag == EXPR_STRING_LIT:
         val str_val = expr_get_str(idx)
-        if expr_get_int(idx) == 1:
+        if expr_get_int(idx) != 0:
             return Expr(kind: ExprKind.StringLit(str_val, nil), span: span)
         val str_interps = flat_bridge_build_string_interps(str_val, span)
         if str_interps.len() > 0:

@@ -214,3 +214,28 @@ than rush a fix touching a load-bearing, pervasively-used code path. A
 non-vacuous regression spec (assert interpolated output; prove it fails on
 the current self-hosted binary and passes after) is the natural first step
 for whoever implements the fix.
+
+## Fix implemented 2026-07-30 — execution pending
+
+Status: **IMPLEMENTED STATIC / PHASE-2/3 EXECUTION HELD**.
+
+The core frontend now expands newly parsed ordinary string nodes after the
+enclosing module parse is complete. Valid regions become the existing
+`EXPR_INTERPOLATED_STRING` node with pre-parsed expression IDs; malformed or
+unmatched regions remain plain strings, doubled braces decode once, and raw
+strings remain non-interpolating. The tree-walking evaluator only interleaves
+those canonical parts with literal segments—there is no parser dependency or
+parsing during evaluation. Flat-bridge and bootstrap HIR paths consume the
+same promoted node and preserve processed plain-string state.
+
+`test/01_unit/compiler/interpreter/string_interpolation_spec.spl` covers
+variables, expressions, multiple regions, a nested quoted method argument,
+mixed escaped/real regions, malformed CSS-shaped braces, parser recovery, and
+raw strings. Independent static review accepted the dependency direction,
+arena ownership mirrors, append-range handling, and native/interpreter parity.
+
+The isolated bootstrap-seed syntax probe could not execute because its CLI
+delegation expected a missing worktree-local `bin/simple`; it is not a PASS.
+Concurrent sessions were already writing the shared bootstrap cache and
+running full bootstrap jobs, so this lane did not start a competing build.
+Qualified phase-2/3 build plus the focused SSpec remain required.

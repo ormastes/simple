@@ -21,7 +21,7 @@ use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
-use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
+use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
 use compiler.frontend.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_TEXT, TYPE_DICT, custom_primitive_bind_symbol, custom_primitive_is_name}
@@ -1827,7 +1827,7 @@ impl HirLowering:
         val tag = expr_get_tag(expr_idx)
         if tag == EXPR_STRING_LIT:
             val raw_str_value = expr_get_str(expr_idx)
-            if expr_get_int(expr_idx) == 1:
+            if expr_get_int(expr_idx) != 0:
                 return HirExpr(kind: HirExprKind.StringLit(raw_str_value, nil), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
             # Bug #136: the bootstrap flat parser stores the raw string value
             # with any `{expr}` interpolations copied VERBATIM (e.g.
@@ -1841,6 +1841,23 @@ impl HirLowering:
             val interp_parts = self.build_bootstrap_interpolations(raw_str_value, span)
             val str_interps = if interp_parts.len() > 0: Some(interp_parts) else: nil
             return HirExpr(kind: HirExprKind.StringLit(raw_str_value, str_interps), has_type_: true, type_: HirType(kind: HirTypeKind.Str, span: span), span: span)
+        if tag == EXPR_INTERPOLATED_STRING:
+            var interp_parts: [HirInterpolation] = []
+            for part_idx in expr_get_args(expr_idx):
+                interp_parts.push(HirInterpolation(
+                    expr: self.lower_bootstrap_flat_expr(part_idx),
+                    has_format: false,
+                    format: "",
+                    span: span
+                ))
+            return HirExpr(
+                kind: HirExprKind.StringLit(
+                    expr_get_str(expr_idx), Some(interp_parts)
+                ),
+                has_type_: true,
+                type_: HirType(kind: HirTypeKind.Str, span: span),
+                span: span
+            )
         if tag == EXPR_INT_LIT:
             return HirExpr(kind: HirExprKind.IntLit(expr_get_int(expr_idx), nil), has_type_: true, type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
         if tag == EXPR_BOOL_LIT:
