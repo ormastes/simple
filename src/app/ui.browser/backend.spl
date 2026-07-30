@@ -1,11 +1,12 @@
 # Browser Engine Render Backend
 #
-# Bridges the UI render library to the canonical widget Draw IR + Engine2D
-# pipeline. DOM/CSS remains for semantics, hit testing, and Chromium
-# compatibility; pure-Simple pixels come from the widget composition.
+# Bridges the UI render library to the canonical Web semantic/layout Draw IR +
+# Engine2D pipeline. The GUI widget composition remains a separate submission
+# lane; default Web pixels are produced from the same HTML/CSS that carries
+# Web semantics, while Chromium remains an explicit compatibility renderer.
 #
 # Architecture:
-#   App -> BrowserBackend -> widget_tree_to_draw_ir -> Engine2D
+#   App -> BrowserBackend -> HTML/CSS layout -> Draw IR -> Engine2D
 
 use common.ui.widget.{UITree, UIState, UIEvent, WidgetNode, WidgetRect, widget_store_revision}
 use common.ui.widget.{UIMode}
@@ -19,7 +20,7 @@ use common.ui.web_render_api.{WebRenderRequest, web_render_pixel_artifact, web_r
 use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css, wm_root_data_attrs}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
-use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_draw_ir_request_to_pixel_artifact, web_render_resolved_engine2d_backend_name}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_html_request_to_pixel_artifact_with_backend, web_render_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, web_render_backend_names}
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
@@ -28,7 +29,7 @@ use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
 
 # Gap B (backend_isolation_plan.md): WebRenderer facade selector, distinct
 # from the Engine2D `--backend` selector above. "pure_simple" (default)
-# executes the canonical widget Draw IR composition through Engine2D;
+# executes canonical HTML/CSS layout Draw IR through Engine2D;
 # "chromium" routes HTML through the
 # WebRenderBackend facade's real offscreen-Chromium engine instead.
 pub val WEB_RENDER_ENGINE_PURE_SIMPLE: text = "pure_simple"
@@ -83,6 +84,19 @@ fn browser_backend_chromium_pixel_artifact(req: WebRenderRequest, width: i32, he
         web_render_pixel_artifact(req, chromium_pixels),
         WEB_RENDER_ENGINE_CHROMIUM,
         "rendered via WebRenderBackend facade (chromium engine, not Engine2D)"
+    )
+
+pub fn browser_backend_pure_simple_pixel_artifact(
+    req: WebRenderRequest, full_html: text, backend_name: text
+) -> WebRenderArtifact:
+    """Render the default Web artifact through canonical HTML/CSS layout.
+
+    This is intentionally distinct from GUI's widget Draw IR submission lane:
+    Web CSS computed style must remain authoritative for Web pixels and
+    material provenance.
+    """
+    web_render_html_request_to_pixel_artifact_with_backend(
+        req, full_html, backend_name
     )
 
 # =========================================================================
@@ -262,7 +276,7 @@ class BrowserBackend:
 
         backend: "cuda", "vulkan", "cpu", "software", or "auto" (auto-detect).
         web_engine: WebRenderer facade engine name — "pure_simple" (default,
-        canonical widget Draw IR Engine2D pipeline) or "chromium" (real offscreen Chromium
+        canonical HTML/CSS layout Draw IR pipeline) or "chromium" (real offscreen Chromium
         via the WebRenderBackend facade). Unknown names loud-fail (Err) rather
         than silently falling back to the default engine.
         """
@@ -437,7 +451,7 @@ class BrowserBackend:
     me render_frame(tree: UITree, state: UIState):
         self.render_frame_with_composition(tree, state, self.widget_draw_ir_composition(state))
 
-    me render_frame_with_composition(tree: UITree, state: UIState, composition: DrawIrComposition):
+    me render_frame_with_composition(tree: UITree, state: UIState, _composition: DrawIrComposition):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
         val revision = widget_store_revision()
         val theme_snapshot = theme_package_render_snapshot(state.tree.theme_name())
@@ -481,8 +495,10 @@ class BrowserBackend:
         self.layout_cache_theme_identity = theme_identity
         self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
 
-        # Step 4: Render canonical widget Draw IR through Engine2D for the
-        # pure-Simple lane; Chromium remains an explicit HTML compatibility
+        # Step 4: Render canonical Web HTML/CSS layout Draw IR through Engine2D
+        # for the pure-Simple lane. `_composition` preserves the independent
+        # GUI widget submission boundary used by callers; Web pixels must not
+        # bypass computed CSS. Chromium remains an explicit HTML compatibility
         # renderer. Mirror the selected pixels into the legacy host framebuffer.
         val html_start_us = browser_backend_time_us()
         var full_html = ""
@@ -498,7 +514,8 @@ class BrowserBackend:
         self.last_render_html_us = browser_backend_time_us() - html_start_us
         val pixel_start_us = browser_backend_time_us()
         # Gap B: engine selection happens here, through the WebRenderer facade
-        # shape. Default ("pure_simple") executes `widget_tree_to_draw_ir`.
+        # shape. Default ("pure_simple") executes canonical HTML/CSS layout
+        # Draw IR.
         # "chromium" instead renders through the real
         # WebRenderBackend facade and reports honest provenance (engine2d
         # status "compatibility_renderer" + backend "chromium"). The former
@@ -507,7 +524,9 @@ class BrowserBackend:
         var artifact = if self.web_render_engine == WEB_RENDER_ENGINE_CHROMIUM:
             browser_backend_chromium_pixel_artifact(req, self.width, self.height, full_html)
         else:
-            web_render_draw_ir_request_to_pixel_artifact(req, composition, self.gpu_backend_name)
+            browser_backend_pure_simple_pixel_artifact(
+                req, full_html, self.gpu_backend_name
+            )
         self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
         self.last_render_draw_ir_dispatch_us = 0
         val framebuffer_start_us = browser_backend_time_us()
