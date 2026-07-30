@@ -266,6 +266,18 @@ fn browser_header_value(headers: text, expected_name: text) -> text:
             return line.slice(colon + 1, line.len()).trim()
     ""
 
+pub fn browser_header_has_attachment_disposition(headers: text) -> bool:
+    """Whether any Content-Disposition field selects attachment handling."""
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().lower() == "content-disposition"):
+            val value = line.slice(colon + 1, line.len())
+            if value.split(";")[0].trim().lower() == "attachment":
+                return true
+    false
+
 fn browser_header_media_type(headers: text) -> text:
     val value = browser_header_value(headers, "content-type").lower()
     value.split(";")[0].trim()
@@ -2630,6 +2642,10 @@ impl BrowserSession:
         if response.kind == "document":
             if not self.is_loading or normalize_browser_url(response.url) != self.pending_url:
                 return Err("stale document response")
+            if browser_header_has_attachment_disposition(response.headers):
+                self.stop_loading()
+                self.warnings.push("document-attachment-unsupported")
+                return Ok(true)
             if response.error != "":
                 self.pending_url = ""
                 self.pending_navigation_target_index = -1

@@ -56,7 +56,8 @@ use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.gc_async_mut.web.browser_session.{
     BrowserBookmarkSnapshot, BrowserHstsSnapshot, BrowserSession,
-    browser_header_content_security_policy
+    browser_header_content_security_policy,
+    browser_header_has_attachment_disposition
 }
 use std.gc_async_mut.web.browser_session_context.{
     browser_csp_allows, browser_csp_header_sandbox,
@@ -1737,6 +1738,8 @@ pub class HostedBrowserRendererProcess:
         if response.status <= 0:
             return Ok(response.headers)
         if not hosted_browser_redirect_status(response.status):
+            if browser_header_has_attachment_disposition(response.headers):
+                return Err("document-attachment-unsupported")
             self.pending_document_commit_url = policy.canonical_url
             self.provisional_document_origin = hosted_browser_network_origin(
                 policy.canonical_url
@@ -1834,7 +1837,27 @@ pub class HostedBrowserRendererProcess:
         transport_upgrade: bool = false
     ) -> text:
         var response_headers = response.headers
-        if policy.consumes_navigation:
+        var response_status = response.status
+        var response_body = response.body
+        var response_error = response.error
+        val attachment_rejected = (
+            policy.consumes_navigation and
+            response.status > 0 and
+            not hosted_browser_redirect_status(response.status) and
+            browser_header_has_attachment_disposition(response.headers)
+        )
+        if attachment_rejected:
+            self.navigation_permit = hosted_browser_empty_navigation_permit()
+            self.pending_history_action = ""
+            self.pending_history_index = -1
+            self.pending_history_target_url = ""
+            self.pending_document_commit_url = ""
+            self.provisional_document_origin = ""
+            self._clear_pending_document_csp()
+            response_status = 0
+            response_body = ""
+            response_error = "document-attachment-unsupported"
+        elif policy.consumes_navigation:
             match self._record_document_response(
                 fetch, policy, response, redirect_count
             ):
@@ -1900,10 +1923,10 @@ pub class HostedBrowserRendererProcess:
             fetch.request_id,
             fetch.kind,
             fetch.url,
-            response.status,
+            response_status,
             response_headers,
-            response.body,
-            response.error
+            response_body,
+            response_error
         )
         if not wire.ok:
             return wire.reason
