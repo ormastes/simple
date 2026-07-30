@@ -268,3 +268,78 @@ INFERRED until that run exists.
 wall 7's cause is now a known, dated, one-commit regression with a named
 owner decision required, and the blast radius is 34 consumers rather than
 3 cells.
+
+## Option A implemented (2026-07-30) — wall 7 CLEARED; wall 6 is the sole remaining barrier
+
+Owner approved Option A (restore + declare); landed as `cdadda01da2`.
+
+**Restore (PROVED byte-exact).** A sibling lane had already restored the
+`bungee` family (3 files — TTF + `METADATA.pb` + `OFL.txt`, verified
+byte-exact against `a4b4c008aff^`), but had **not** restored the pinned
+`notosansmono` asset, so wall 7 was still broken. The remaining **54**
+paths were restored from `a4b4c008aff^` by git plumbing (`update-index
+--cacheinfo` with the historical blob hashes, mode 100644) — no text-mode
+round-trip. At origin: **57/57 font files present, 0 byte mismatches**
+against `a4b4c008aff^`, and the pinned asset hashes to
+`2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081` —
+exactly the gate's `FONT_ASSET_SHA256`. Full bundle, not a subset: the 34
+consumers reference all 16 `.ttf` families and the companion file pins 35
+`METADATA.pb`/`OFL.txt` files, so a font is never restored without its
+licence companion.
+
+**Declare.** Added `assets/FILE.md` (declaring `fonts/`, `cldr/`,
+`google-fonts/{CORPUS.sdn,apache/,ofl/}`, and recording why the tree is
+tracked and what breaks if removed) plus both root `FILE.md` links (Root
+Files row + Child Manifests row).
+
+**Verification (a) — manifest guard:** `scripts/check-workspace-root-guard.shs`
+passes (rc=0, zero assets findings) with the tree restored and declared.
+
+**CORRECTION to this census's earlier INFERRED cause:** that guard does
+**not** flag `assets/`. It returned rc=0 even with 57
+tracked-but-undeclared asset files staged, *before* any declaration
+existed. So the removal was a **manual/human "undeclared" judgement, not
+a guard-driven sweep**, and the declaration is intent-documentation plus
+defence-in-depth — it is *not* what unbreaks the guard. The earlier
+high-confidence inference is withdrawn.
+
+**Verification (b) — wall 7:** CLEARED, proven by equivalence rather than
+observation: the gate's check is exactly
+`sha256(FONT_ASSET) == FONT_ASSET_SHA256`, and the restored file's sha256
+equals that constant. The gate no longer reaches wall 7 because **wall 6
+fires first**.
+
+### Wall 6 is now the SOLE remaining barrier for cells #4-#6
+
+Re-run after the restore (clean worktree, `SIMPLE_BIN`=stage2 self-hosted,
+provider passed with attested sha): the only `reason=` emitted is
+`runtime-provider-bootstrap-forbidden`. Walls 1-5 satisfied, wall 7
+satisfied. **The single thing between this campaign and its first three
+GREEN cells on linux-x86_64 is a deployed non-bootstrap self-hosted
+runtime provider** — which the sibling seed-redeploy lane has flipped to
+GO. Settling command after redeploy:
+
+```
+SIMPLE_BIN=<redeployed self-hosted> \
+SIMPLE_WM_RUNTIME_LIB=<non-bootstrap provider .so> \
+SIMPLE_WM_RUNTIME_LIB_SHA256=<its sha256> \
+sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs
+```
+run in a clean worktree; expect `runtime_provider_status=pass`, then the
+~25 window/input/semantic assertions execute for the first time here.
+
+**Scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN** — unchanged in
+count, but #4-#6 are now blocked on exactly ONE named, already-in-flight
+prerequisite instead of two, and the 34-consumer font regression is fully
+repaired at origin.
+
+## Process hazard recorded: `FETCH_HEAD` is unsafe in the shared clone
+
+While landing this, `git rev-parse FETCH_HEAD` in the shared working copy
+returned `2cf72ec21f1` — the June-14 head of a Codex branch, i.e. the same
+sha involved in an earlier mispush-to-main incident — because a concurrent
+session's fetch had overwritten the shared `.git/FETCH_HEAD` between my
+fetch and my read. Origin `main` was fine (`ls-remote` confirmed
+`7a18961e303`, with the restore still an ancestor). **Use the sha from
+`git ls-remote` as the base, never a re-read of `FETCH_HEAD`, when landing
+from a shared clone.**
