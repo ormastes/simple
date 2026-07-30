@@ -97,7 +97,10 @@ Missing login origins fail closed.
 
 Disallowed login origins fail closed.
 
-Default loopback policy accepts valid loopback origins with numeric ports.
+Default loopback policy accepts loopback origins only with ports 1 through
+65535.
+
+Duplicate Origin headers fail closed, including identical duplicates.
 
 Explicit allowlists remain exact.
 
@@ -168,7 +171,7 @@ Renderer parity and host GPU evidence remain separate release gates.
 No bootstrap, package, release, or deployment behavior is exercised here.
 """
 
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, step, expect}
 use app.ui.web.origin_guard.{OriginGuard, _is_loopback_origin}
 use app.ui.web.session_token.{SessionToken, _allow_insecure_dev_secret_flag, _missing_secret_fatal, verify}
 use app.ui.web.ui_routes.{ui_web_authorization_status, ui_web_request_authorized, ui_web_query_percent_decode, ui_web_resume_body_status}
@@ -209,6 +212,29 @@ describe "ui.web production auth hardening":
         expect(default_guard.check("Origin: http://localhost:8080\n").is_ok()).to_be(true)
         val strict_guard = OriginGuard(allowed: ["https://localhost"])
         expect(strict_guard.check("Origin: http://localhost:8080\n").is_err()).to_be(true)
+
+    it "rejects ambiguous origins and out-of-range loopback ports":
+        step("Accept the lowest valid loopback port")
+        expect(_is_loopback_origin("http://localhost:1")).to_be(true)
+
+        step("Accept the highest valid loopback port")
+        expect(_is_loopback_origin("https://[::1]:65535")).to_be(true)
+
+        step("Reject duplicate Origin headers")
+        val guard = OriginGuard(allowed: ["https://localhost"])
+        expect(guard.check(
+            "Origin: https://localhost\nOrigin: https://evil.example\n"
+        ).is_err()).to_be(true)
+        expect(guard.check(
+            "Origin: https://localhost\nOrigin: https://localhost\n"
+        ).is_err()).to_be(true)
+
+        step("Reject invalid loopback ports")
+        expect(_is_loopback_origin("http://localhost:0")).to_be(false)
+        expect(_is_loopback_origin("http://localhost:65536")).to_be(false)
+        expect(_is_loopback_origin(
+            "http://127.0.0.1:999999999999999999999"
+        )).to_be(false)
 
     it "parses explicit origin allowlists as trimmed exact entries":
         val guard = OriginGuard.from_env_value(" https://app.example , http://localhost:8080, ")
