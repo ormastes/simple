@@ -80,6 +80,12 @@ Renderer and compositor receivers plus all aggregate render results are now
 explicitly typed, but that later strengthening is unrun after the three-cycle
 cap. No samples or timing claim were produced.
 
+A subsequent source-matched native lane ran twice with absolute library and
+worker paths. It confirmed imported aggregate receivers still erase to `ANY`
+in the generated wrapper, most recently at `producer_generation`. Both
+attempts produced zero samples. Retained output:
+`/tmp/hosted-process-pipe-native-owned-20260730-final.log`.
+
 ## Required Follow-up
 
 1. Run the 21-pair CUDA and Vulkan rows with the admitted source-matched

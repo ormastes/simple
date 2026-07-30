@@ -10,6 +10,8 @@ use parking_lot::Mutex;
 #[cfg(feature = "vulkan")]
 use std::collections::HashMap;
 #[cfg(feature = "vulkan")]
+use std::any::Any;
+#[cfg(feature = "vulkan")]
 use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
@@ -23,6 +25,9 @@ pub struct CommandBufferState {
     pub device: Arc<VulkanDevice>,
     pub command_buffer: vk::CommandBuffer,
     pub is_recording: bool,
+    pub submitted_once: bool,
+    pub completion_unknown: bool,
+    pub resource_guards: Vec<Arc<dyn Any + Send + Sync>>,
 }
 
 #[cfg(feature = "vulkan")]

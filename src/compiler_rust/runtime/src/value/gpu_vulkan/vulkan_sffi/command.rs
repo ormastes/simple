@@ -7,7 +7,7 @@ use super::common::VulkanFfiError;
 #[cfg(feature = "vulkan")]
 use super::common::{
     next_handle, CommandBufferState, BUFFER_REGISTRY, COMMAND_BUFFER_REGISTRY, DEVICE_REGISTRY, FRAMEBUFFER_REGISTRY,
-    GRAPHICS_PIPELINE_REGISTRY, RENDER_PASS_REGISTRY,
+    GRAPHICS_PIPELINE_REGISTRY, IMAGE_REGISTRY, RENDER_PASS_REGISTRY, SWAPCHAIN_REGISTRY,
 };
 #[cfg(feature = "vulkan")]
 use ash::vk;
@@ -42,21 +42,7 @@ pub extern "C" fn rt_vk_command_buffer_begin(device: u64) -> u64 {
             }
         };
 
-        // Get graphics pool
-        let graphics_pool = match device_arc.graphics_queue_family() {
-            Some(_) => {
-                // We need to get the graphics command pool from the device
-                // For now, we'll use the compute pool since graphics pool is not directly accessible
-                // In a real implementation, we'd need to add a graphics_pool accessor
-            }
-            None => {
-                tracing::error!("No graphics queue available");
-                return 0;
-            }
-        };
-
-        // Allocate command buffer from compute pool (graphics would be better)
-        let cmd = match device_arc.begin_compute_command() {
+        let cmd = match device_arc.begin_graphics_command() {
             Ok(cmd) => cmd,
             Err(e) => {
                 tracing::error!("Failed to allocate command buffer: {:?}", e);
@@ -68,6 +54,9 @@ pub extern "C" fn rt_vk_command_buffer_begin(device: u64) -> u64 {
             device: device_arc,
             command_buffer: cmd,
             is_recording: true,
+            submitted_once: false,
+            completion_unknown: false,
+            resource_guards: Vec::new(),
         };
 
         let handle = next_handle();
@@ -144,9 +133,13 @@ pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
         let registry = COMMAND_BUFFER_REGISTRY.lock();
         match registry.get(&cmd) {
             Some(state_arc) => {
-                let state = state_arc.lock();
+                let mut state = state_arc.lock();
                 if state.is_recording {
                     tracing::error!("Command buffer still recording");
+                    return VulkanFfiError::InvalidParameter as i32;
+                }
+                if state.submitted_once {
+                    tracing::error!("One-time command buffer was already submitted");
                     return VulkanFfiError::InvalidParameter as i32;
                 }
 
@@ -169,10 +162,21 @@ pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
 
                 match result {
                     Ok(()) => {
+                        state.submitted_once = true;
                         // Wait for completion
-                        if let Some(queue) = state.device.graphics_queue() {
+                        let wait_failed = if let Some(queue) = state.device.graphics_queue() {
                             let q = queue.lock();
-                            let _ = unsafe { state.device.handle().queue_wait_idle(*q) };
+                            match unsafe { state.device.handle().queue_wait_idle(*q) } {
+                                Ok(()) => None,
+                                Err(error) => Some(error),
+                            }
+                        } else {
+                            None
+                        };
+                        if let Some(e) = wait_failed {
+                            tracing::error!("Failed to wait for command buffer completion: {:?}", e);
+                            state.completion_unknown = true;
+                            return VulkanFfiError::ExecutionFailed as i32;
                         }
                         VulkanFfiError::Success as i32
                     }
@@ -207,13 +211,33 @@ pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
 pub extern "C" fn rt_vk_command_buffer_free(cmd: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        if COMMAND_BUFFER_REGISTRY.lock().remove(&cmd).is_some() {
-            tracing::debug!("Command buffer freed: handle={}", cmd);
-            VulkanFfiError::Success as i32
-        } else {
-            tracing::error!("Invalid command buffer handle: {}", cmd);
-            VulkanFfiError::InvalidHandle as i32
+        let state_arc = {
+            let mut registry = COMMAND_BUFFER_REGISTRY.lock();
+            match registry.remove(&cmd) {
+                Some(state) => state,
+                None => {
+                    tracing::error!("Invalid command buffer handle: {}", cmd);
+                    return VulkanFfiError::InvalidHandle as i32;
+                }
+            }
+        };
+
+        let mut state = state_arc.lock();
+        if state.completion_unknown {
+            tracing::error!("Cannot free command buffer before completion is proven");
+            drop(state);
+            COMMAND_BUFFER_REGISTRY.lock().insert(cmd, state_arc);
+            return VulkanFfiError::ExecutionFailed as i32;
         }
+        if let Err(e) = state.device.free_graphics_command(state.command_buffer) {
+            tracing::error!("Failed to free command buffer {:?}: {:?}", state.command_buffer, e);
+            drop(state);
+            COMMAND_BUFFER_REGISTRY.lock().insert(cmd, state_arc);
+            return VulkanFfiError::from(e) as i32;
+        }
+
+        tracing::debug!("Command buffer freed: handle={}", cmd);
+        VulkanFfiError::Success as i32
     }
 
     #[cfg(not(feature = "vulkan"))]
@@ -257,9 +281,8 @@ pub extern "C" fn rt_vk_cmd_begin_render_pass(
                 return VulkanFfiError::InvalidHandle as i32;
             }
         };
+        let mut state = state_arc.lock();
         drop(cmd_registry);
-
-        let state = state_arc.lock();
         if !state.is_recording {
             tracing::error!("Command buffer not recording");
             return VulkanFfiError::InvalidParameter as i32;
@@ -303,6 +326,16 @@ pub extern "C" fn rt_vk_cmd_begin_render_pass(
             })
             .clear_values(&clear_values);
 
+        state.resource_guards.push(rp);
+        state.resource_guards.push(fb);
+        // Framebuffer creation accepts raw image views, so retain all current
+        // image/swapchain owners if this submission later becomes unknowable.
+        for image in IMAGE_REGISTRY.lock().values() {
+            state.resource_guards.push(image.clone());
+        }
+        for swapchain in SWAPCHAIN_REGISTRY.lock().values() {
+            state.resource_guards.push(swapchain.clone());
+        }
         unsafe {
             state.device.handle().cmd_begin_render_pass(
                 state.command_buffer,
@@ -385,9 +418,8 @@ pub extern "C" fn rt_vk_cmd_bind_pipeline(cmd: u64, pipeline: u64) -> i32 {
                 return VulkanFfiError::InvalidHandle as i32;
             }
         };
+        let mut state = state_arc.lock();
         drop(cmd_registry);
-
-        let state = state_arc.lock();
         if !state.is_recording {
             return VulkanFfiError::InvalidParameter as i32;
         }
@@ -403,6 +435,7 @@ pub extern "C" fn rt_vk_cmd_bind_pipeline(cmd: u64, pipeline: u64) -> i32 {
             }
         };
 
+        state.resource_guards.push(pipeline_arc.clone());
         unsafe {
             state.device.handle().cmd_bind_pipeline(
                 state.command_buffer,
@@ -442,9 +475,8 @@ pub extern "C" fn rt_vk_cmd_bind_vertex_buffer(cmd: u64, buffer: u64, binding: u
                 return VulkanFfiError::InvalidHandle as i32;
             }
         };
+        let mut state = state_arc.lock();
         drop(cmd_registry);
-
-        let state = state_arc.lock();
         if !state.is_recording {
             return VulkanFfiError::InvalidParameter as i32;
         }
@@ -460,6 +492,7 @@ pub extern "C" fn rt_vk_cmd_bind_vertex_buffer(cmd: u64, buffer: u64, binding: u
             }
         };
 
+        state.resource_guards.push(buffer_arc.clone());
         unsafe {
             state
                 .device
@@ -498,9 +531,8 @@ pub extern "C" fn rt_vk_cmd_bind_index_buffer(cmd: u64, buffer: u64, index_type:
                 return VulkanFfiError::InvalidHandle as i32;
             }
         };
+        let mut state = state_arc.lock();
         drop(cmd_registry);
-
-        let state = state_arc.lock();
         if !state.is_recording {
             return VulkanFfiError::InvalidParameter as i32;
         }
@@ -525,6 +557,7 @@ pub extern "C" fn rt_vk_cmd_bind_index_buffer(cmd: u64, buffer: u64, index_type:
             }
         };
 
+        state.resource_guards.push(buffer_arc.clone());
         unsafe {
             state
                 .device

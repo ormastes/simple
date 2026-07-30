@@ -6,6 +6,8 @@
 #![cfg(feature = "vulkan")]
 
 use crate::value::gpu_vulkan::*;
+use crate::value::gpu_vulkan::vulkan_sffi::common::DEVICE_REGISTRY;
+use ash::vk;
 use std::ptr;
 
 // =============================================================================
@@ -340,7 +342,9 @@ fn test_kernel_compile_minimal() {
 
 #[test]
 fn test_kernel_launch_1d_writes_storage_buffer() {
+    let require_physical = std::env::var_os("SIMPLE_REQUIRE_PHYSICAL_VULKAN").is_some();
     if rt_vk_available() == 0 {
+        assert!(!require_physical, "A physical Vulkan device was required");
         println!("Skipping test: Vulkan not available");
         return;
     }
@@ -349,6 +353,19 @@ fn test_kernel_launch_1d_writes_storage_buffer() {
     if device == 0 {
         panic!("Vulkan reported available but device creation failed");
     }
+    let (device_name, device_type) = {
+        let registry = DEVICE_REGISTRY.lock();
+        let selected = registry.get(&device).expect("created Vulkan device must be registered");
+        (
+            selected.physical_device().name(),
+            selected.physical_device().properties.device_type,
+        )
+    };
+    println!("Selected Vulkan device: {device_name} ({device_type:?})");
+    let physical_device_selected = matches!(
+        device_type,
+        vk::PhysicalDeviceType::DISCRETE_GPU | vk::PhysicalDeviceType::INTEGRATED_GPU
+    );
 
     let buffer = rt_vk_buffer_alloc(device, std::mem::size_of::<u32>() as u64);
     if buffer == 0 {
@@ -449,6 +466,12 @@ fn test_kernel_launch_1d_writes_storage_buffer() {
         VulkanFfiError::Success as i32,
         "Device cleanup failed"
     );
+    if require_physical {
+        assert!(
+            physical_device_selected,
+            "Expected a physical Vulkan GPU, selected {device_name} ({device_type:?})"
+        );
+    }
 }
 
 #[test]
