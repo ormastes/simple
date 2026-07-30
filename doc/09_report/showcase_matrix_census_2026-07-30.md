@@ -451,3 +451,69 @@ self-hosted binary. Settling sequence:
 **Scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN** — unchanged in
 count. Wall 6 is retired; the live-toolchain finding above is the pass's
 most consequential result.
+
+## Toolchain provenance, settled with the script's own marker method (2026-07-30, follow-up)
+
+Re-checked using exactly `check-compiler-provenance.shs`'s method —
+`strings -a <bin> | grep -cF <literal>` over its four MARKER literals — so
+all three artifacts are apples-to-apples. **This changes the
+recommendation: the `bootstrap-clobber-bak` is evidence of the regression
+but is NOT a restore candidate.**
+
+| Artifact | Date | Size | `[jit-fallback]` | `SIMPLE_JIT_STRICT` | `rt_index_of` (`.?` fix) | `ambiguous LLVM method resolution` |
+|---|---|---|---|---|---|---|
+| **live** `bin/release/x86_64-unknown-linux-gnu/simple` (`40edbb49`) | 2026-07-29 06:00 | 57,345,808 | 1 | 2 | **9** | **0** |
+| `simple.bootstrap-clobber-bak` (`ce2fcaff`) | 2026-07-23 03:41 | 124,596,016 | **0** | **0** | **0** | **1** |
+| `build/fable_s2/runtime/simple` (`e5c461a5`) | 2026-07-28 12:13 | 145,448,208 | 1 | 2 | 4 | **1** |
+
+Readings:
+
+- **The dated toolchain regression is CONFIRMED** on the LLVM axis: the
+  live binary carries **no** LLVM codegen marker (and 0 `llvm::` strings,
+  vs 576 in the clobber-bak), so everything measured since 2026-07-29
+  06:00 ran on a no-LLVM, non-canonical toolchain.
+- **But the clobber-bak is strictly OLDER in capability**: it has **none**
+  of the three fix markers (JIT manifest, strict-mode knob, `.?` fix) —
+  it predates them. Restoring it would trade LLVM for the loss of three
+  landed fixes. It is diagnostic evidence, not a rollback target.
+- **`build/fable_s2/runtime/simple` (`e5c461a5`) is the only artifact with
+  LLVM *and* all three fixes** — the correct restore target, and the
+  binary this session began against.
+
+### Why the restore is still NOT performed autonomously (sharpened)
+
+Beyond the shared-state risk, there is now positive evidence the live
+binary is **newer on at least one axis**: `rt_index_of` occurs **9** times
+in the live binary versus **4** in the `e5c461a5` baseline. The
+provenance script only tests presence (`>0`), so this count delta is not
+proof of extra behaviour — but it is consistent with the live binary
+containing later `.?`/`rt_index_of` work that the baseline lacks.
+Restoring the baseline could therefore **silently revert another lane's
+landed fix**, which is exactly the failure mode the anti-revert rule
+exists to prevent. Settling that question requires identifying which
+commit produced the live 57MB binary (INFERRED: a plain
+`cargo build --release`, per the readiness report's warning) and diffing
+its `.?`-related content against `e5c461a5` — not a judgement to make by
+overwriting first.
+
+Recommended sequence for whoever owns the toolchain:
+1. Rebuild canonically — `cargo build --profile bootstrap -p simple-driver
+   --features llvm` — which yields LLVM **and** current source, making the
+   restore-vs-newer dilemma moot;
+2. verify all four markers PRESENT plus `llvm::` >> 0 with `lld::` = 0;
+3. `.new` + `mv` into `bin/release/x86_64-unknown-linux-gnu/` (the only
+   live deploy path; `bin/release/linux-x86_64/` does not exist);
+4. keep `simple.deployed-noLLVM-2026-07-29.bak` as the rollback.
+
+### Deployment: still not possible (re-confirmed)
+
+`scratchpad/cargo_target_w/bootstrap/simple` is **STILL ABSENT** on
+re-check, and no `28e528ccd55d642d` / 154,084,544-byte artifact exists
+anywhere on this host. Its readiness report's headline remains
+**"Recommendation: NO-GO"**. So steps 2-4 of the deployment brief have no
+sanctioned artifact to act on; nothing was deployed, nothing overwritten,
+and no `.new` file was left behind.
+
+**Scoreboard unchanged: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN.** The
+host-WM cells remain blocked at wall 8 (stale self-hosted binary), which
+the same canonical rebuild would also address.
