@@ -37,6 +37,11 @@ struct Fixture:
     path: text
     expected: text
     known_good: text
+    # Set on entries where a JIT-side "pass" is contested by another lane's
+    # observation on the same deployed binary hash (see
+    # doc/08_tracking/bug/jit_test_suite_blind_spot_2026-07-30.md section 3a).
+    # Empty string for uncontested fixtures.
+    contested_note: text
 
 fn fixtures() -> [Fixture]:
     [
@@ -45,30 +50,35 @@ fn fixtures() -> [Fixture]:
             path: "test/fixtures/jit_differential/chained_to_i64_twice.spl",
             expected: "pw=480 ph=360",
             known_good: "interpret",
+            contested_note: "UNRESOLVED cross-lane contradiction: lane a894 reports this reproduces (garbage, 32 apart) on the same binary hash this ran against. Do NOT re-pin as fixed -- see doc section 3a.",
         ),
         Fixture(
             name: "module_level_val_from_call",
             path: "test/fixtures/jit_differential/module_level_val_from_call.spl",
             expected: "X=42",
             known_good: "interpret",
+            contested_note: "",
         ),
         Fixture(
             name: "struct_field_compound_assign",
             path: "test/fixtures/jit_differential/struct_field_compound_assign.spl",
             expected: "n=7",
             known_good: "interpret",
+            contested_note: "",
         ),
         Fixture(
             name: "list_get_shifted",
             path: "test/fixtures/jit_differential/list_get_shifted.spl",
             expected: "idx=5 get=5",
             known_good: "interpret",
+            contested_note: "UNRESOLVED: this lane could not reproduce the documented value<<3 shift bug on the deployed binary despite repeat runs. Do NOT re-pin as fixed -- see doc section 3a.",
         ),
         Fixture(
             name: "sentinel_basic_arithmetic",
             path: "test/fixtures/jit_differential/sentinel_basic_arithmetic.spl",
             expected: "sum=30",
             known_good: "both",
+            contested_note: "",
         ),
     ]
 
@@ -77,6 +87,35 @@ fn simple_binary() -> text:
     if configured.len() > 0:
         return configured
     "bin/simple"
+
+# Prints the exact binary identity (resolved path + sha256) being tested.
+# The "deployed bin/simple" is a moving target in a shared, multi-lane
+# environment -- recording the hash at test time is what makes a later
+# cross-lane reconciliation possible (see doc section 3a / "moving target"
+# lesson in section 5).
+fn print_binary_identity(binary: text):
+    val (resolved, _e1, _c1) = process_run("/bin/sh", ["-c", "readlink -f " + binary])
+    val (hash_line, _e2, _c2) = process_run("/bin/sh", ["-c", "sha256sum " + binary + " 2>/dev/null"])
+    print("resolved path: {resolved.trim()}")
+    print("sha256: {hash_line.trim()}")
+
+# Classifies a wrong JIT value as "address-shaped" (implausibly large in
+# magnitude, consistent with a leaked frame/spill-slot address rather than a
+# computed result) versus "other". Diagnostic only -- does not affect
+# pass/fail, which stays a literal ground-truth comparison (see doc section
+# 3a for why literal, not structural, ground truth was kept for this
+# corpus).
+fn looks_address_shaped(output: text) -> bool:
+    for token in output.split(" "):
+        val cleaned = token.trim()
+        if cleaned.len() >= 6:
+            var all_digits = true
+            for ch in cleaned.chars():
+                if ch < "0" or ch > "9":
+                    all_digits = false
+            if all_digits:
+                return true
+    false
 
 fn run_engine(binary: text, path: text, mode_env: text) -> text:
     val command = mode_env + " " + binary + " run " + path
@@ -88,6 +127,7 @@ fn main() -> i64:
     var unexpected_failures = 0
     var known_bug_count = 0
     print("JIT-vs-interpreter differential harness -- binary: {binary}")
+    print_binary_identity(binary)
     print("")
     for f in fixtures():
         val interp_out = run_engine(binary, f.path, "SIMPLE_EXECUTION_MODE=interpret")
@@ -108,10 +148,17 @@ fn main() -> i64:
             # known_good == "interpret": interpreter must still match ground
             # truth; the JIT side is a KNOWN, still-open bug and is reported
             # informationally, not counted as a failure -- unless it has been
-            # fixed (jit_ok true), which is good news, printed, not a failure.
+            # fixed (jit_ok true), which is good news, printed, not a failure,
+            # UNLESS the fixture is `contested` (see Fixture.contested_note):
+            # a "pass" there is NOT reported as fixed, because another lane
+            # has reported the opposite result on the same binary hash and
+            # this contradiction is unresolved -- see doc section 3a.
             if interp_ok:
                 if jit_ok:
-                    status = "JIT BUG APPEARS FIXED (re-pin this fixture)"
+                    if f.contested_note.len() > 0:
+                        status = "JIT passed THIS run, but CONTESTED -- do not re-pin (see note below)"
+                    else:
+                        status = "JIT BUG APPEARS FIXED (re-pin this fixture)"
                 else:
                     status = "known JIT bug, still present (expected)"
                     known_bug_count = known_bug_count + 1
@@ -124,8 +171,10 @@ fn main() -> i64:
 
         print("[{f.name}] expected={f.expected}")
         print("  interpret: ok={interp_ok} agree_with_jit={agree}")
-        print("  jit:       ok={jit_ok}")
+        print("  jit:       ok={jit_ok} address_shaped_if_wrong={looks_address_shaped(jit_out)}")
         print("  status: {status}")
+        if f.contested_note.len() > 0:
+            print("  NOTE: {f.contested_note}")
         print("")
 
     print("---")
