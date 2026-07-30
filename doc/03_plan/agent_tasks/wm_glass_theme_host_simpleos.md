@@ -79,15 +79,15 @@ overlapping dirty work and remains read-only for this lane.
 | SimpleOS ARM64 QEMU | SOURCE INPUT PREFLIGHT IMPLEMENTED; BRR2 SOURCE SERIES REJECTED; LIVE PROOF PENDING | generated Aetheric startup and capability-discovered VirtIO-MMIO input wiring exist, but BRR2 cannot yet be admitted as truthful lifecycle evidence; the self-hosted ARM payload and QMP key/pointer/frame/RAMFB evidence remain unavailable |
 | Aggregate SSpec | FAIL-FAST BY DESIGN | `require_wm_glass_theme_evidence()` remains a real failure until host and required QEMU rows produce current-source evidence |
 | Simple GUI theme handoff | SOURCE FIXED; product proof pending | resolved snapshot now reaches canonical widget Draw IR; 2 bootstrap-driver scenarios pass diagnostically |
-| Simple Web theme authority | INITIAL HOSTED HANDOFF SOURCE FIXED; default Web CSS pixel route SOURCE FIXED; REVIEW PENDING | The default `ui.browser.backend.render_frame` pure-Simple route sends request HTML/CSS through canonical layout -> Draw IR -> Engine2D. The hosted production registry now uses copied canonical install wire and the ordered `create_with_theme -> theme_ready -> begin_init(themed_html)` state machine. `simple_web_window_renderer` privately decodes the wire and owns exact snapshot CSS/identity projection; no `ThemePackageInstallProjection` crosses a hosted/compositor module boundary. The themed worker rejects HTML before acknowledgement and rejects raw/mismatched init HTML after acknowledgement. Theme readiness matches revision, theme ID, source-manifest hash, and material hash. Cross-site renderer replacement now creates a fresh themed generation, performs the exact theme handshake, initializes canonical empty themed HTML without publishing that bootstrap frame, and only then resumes the saved navigation permit. Live runtime/capture evidence remains open. |
+| Simple Web theme authority | INITIAL HOSTED HANDOFF SOURCE FIXED; default Web CSS pixel route SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | The default `ui.browser.backend.render_frame` pure-Simple route sends request HTML/CSS through canonical layout -> Draw IR -> Engine2D. The hosted production registry uses copied canonical install wire and the ordered `create_with_theme -> theme_ready -> begin_init(themed_html)` state machine. `simple_web_window_renderer` privately decodes the wire and owns exact snapshot CSS/identity projection; no `ThemePackageInstallProjection` crosses a hosted/compositor module boundary. The themed worker rejects HTML before acknowledgement and rejects raw/mismatched init HTML after acknowledgement. Theme readiness matches revision, theme ID, source-manifest hash, and material hash. Cross-site renderer replacement creates a fresh themed generation, performs the exact theme handshake, initializes canonical empty themed HTML without publishing that bootstrap frame, and only then resumes the saved navigation permit. Final Sol review accepted the source/test contract. Live runtime/capture evidence remains open because no exact-current provenance-admitted pure-Simple CLI exists. |
 | WM glass material projection | SOURCE FIXED; REVIEW ACCEPTED; RUNTIME UNVERIFIED | CPU preserves parent sampling/500/930 opacity; opaque Metal uses session-owned identity and exact per-request receipts; sub-opaque Metal fails before dispatch until a GPU-only delta path exists |
 | Runtime theme switching | PROTOCOL/CACHE + K1 + CANONICAL WIRE SOURCE ACCEPTED; K2/CATALOG/PACKAGE/SOURCE-CAPTURE SERIES STOPPED; fail-fast system contract | `ThemeChangedV1`, BrowserBackend cache identity, K1 copied-payload queues, and canonical `theme-package-install-wire-v1` text are landed. K2 exhausted three cycles on cross-architecture registration/entry stability gaps; generated catalog exhausted three cycles on stale active/frame authority; package transactions remain unintegrated; source-capture design exhausted three cycles on the missing cache-owning wrapper and contradictory strict-versus-legacy missing-core semantics. The proposed parent-owned `HostedThemeRuntime` handoff is specified but not source implemented. ThemeService/consumer wiring remains unsafe; see the linked K2, catalog, package, and source-capture blocker docs |
 
-### Hosted runtime handoff acceptance blockers — 2026-07-30
+### Hosted runtime handoff source resolution and runtime blocker — 2026-07-30
 
-The first takeover implementation draft is deliberately **unmerged** after
-independent review.  The next bounded owner must address all of these as one
-initial-production handoff, before attempting refresh transactions:
+The listed initial-production handoff constraints were resolved and accepted in
+the reviewed source series. They remain invariants for later runtime-refresh
+work; they are not evidence of live execution:
 
 - No `ThemePackageInstallProjection` or `ThemeRenderSnapshot` aggregate may
   cross a hosted/compositor native boundary.  The package-wire owner explicitly
@@ -112,11 +112,20 @@ initial-production handoff, before attempting refresh transactions:
   resume the pending navigation.  It must not fail normal cross-origin swaps as
   `theme-restart-replay-unavailable`.
 
-Required focused evidence is projection CSS/attributes and global-mutation
-independence; registry and direct-entry ordering; malformed/oversize and exact
-identity protocol rejection; worker no-init-before-theme; primary-browser
-coverage; and restart/replay generation/identity coverage.  Runtime refresh
-remains explicitly unavailable until this initial path is accepted.
+Focused source evidence now covers projection CSS/attributes and
+global-mutation independence; registry and direct-entry ordering;
+malformed/oversize and exact identity protocol rejection; worker
+no-init-before-theme; primary-browser coverage; and restart/replay
+generation/identity coverage. Runtime refresh remains explicitly unavailable.
+
+Current host execution blocker: the canonical candidate pair
+`build/bootstrap/full/aarch64-apple-darwin/simple` plus adjacent
+`simple.provenance.env` is absent from current `origin/main`. The only located
+Stage 4 binary is older, dirty, and lacks its adjacent manifest; deployed
+`bin/simple` likewise has no adjacent manifest. Do not use either for tests,
+captures, or QEMU admission. A prepared-host owner must first produce and
+admit an exact-current non-symlink pair with
+`stage4_verify_candidate_provenance`, then run the focused hosted tests once.
 
 ### Hosted theme runtime prerequisite — design handoff (2026-07-27)
 
