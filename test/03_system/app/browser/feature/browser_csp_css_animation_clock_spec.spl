@@ -1,0 +1,170 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006 REQ-WEB-BROWSER-012 REQ-WEB-BROWSER-021
+"""# CSP-Denied Script CSS Animation Clock
+
+Proves that a response-header CSP sandbox blocks JavaScript timers and
+requestAnimationFrame without freezing the renderer-owned monotonic clock.
+CSS animation frames still lower through web layout, canonical Draw IR, and
+Engine2D with exact command and pixel evidence.
+"""
+
+use std.spec.*
+use std.gc_async_mut.web.browser_session.{
+    BrowserResponse, BrowserSession
+}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result_at_time_with_animations
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+val CSP_CLOCK_WIDTH: i32 = 16
+val CSP_CLOCK_HEIGHT: i32 = 16
+
+fn _csp_clock_color_count(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn setup_csp_clock_fixture() -> BrowserSession:
+    var session = BrowserSession.new()
+    match session.begin_network_navigation(
+        "https://clock.example/page", "GET", "", "", ""
+    ):
+        Ok(_):
+            ()
+        Err(reason):
+            fail("CSP clock navigation failed: {reason}")
+    match session.take_pending_request():
+        Some(request):
+            match session.commit_network_response(BrowserResponse.create(
+                request_id: request.id,
+                kind: "document",
+                url: request.url,
+                status: 200,
+                headers: "Content-Security-Policy: sandbox\n",
+                body: (
+                    "<html><head><title>clock-safe</title><style>" +
+                    "html,body{margin:0}@keyframes clock{" +
+                    "from{background-color:#dc2626}" +
+                    "to{background-color:#2563eb}}" +
+                    "#box{width:8px;height:8px;background-color:#dc2626;" +
+                    "animation:clock 1000ms linear forwards}" +
+                    "</style></head><body><div id='box'></div>" +
+                    "<script>setTimeout(function(){" +
+                    "document.body.innerHTML='<div id=\"timer-ran\"></div>'" +
+                    "},1);requestAnimationFrame(function(){" +
+                    "document.body.innerHTML='<div id=\"raf-ran\"></div>'" +
+                    "});document.title='script-ran';</script></body></html>"
+                ),
+                error: ""
+            )):
+                Ok(_):
+                    ()
+                Err(reason):
+                    fail("CSP clock response failed: {reason}")
+        nil:
+            fail("CSP clock document request was not queued")
+    session.prepare_css_animation_instances(CSP_CLOCK_WIDTH)
+    session
+
+fn check_scripts_denied(session: BrowserSession):
+    expect(session.csp_sandbox_policy.active).to_equal(true)
+    expect(session.csp_sandbox_policy.allow_scripts).to_equal(false)
+    expect(session.runtime_state).to_be_nil()
+    expect(session.simple_script_callback_count()).to_equal(0)
+    expect(session.current_title).to_equal("clock-safe")
+    expect(session.current_body_html.contains("timer-ran")).to_equal(false)
+    expect(session.current_body_html.contains("raf-ran")).to_equal(false)
+    match session.eval_script("document.title='bypass'"):
+        Ok(_):
+            fail("CSP sandbox admitted script execution")
+        Err(reason):
+            expect(reason).to_equal("CSP sandbox blocked script execution")
+
+fn check_clock_advanced_without_callbacks(session: BrowserSession):
+    expect(session.monotonic_time_ms).to_equal(0)
+    expect(session.advance_time(500)).to_equal(0)
+    expect(session.monotonic_time_ms).to_equal(500)
+    expect(session.simple_script_callback_count()).to_equal(0)
+
+fn check_css_frame_progressed(session: BrowserSession):
+    val html = session.render_html_document()
+    val first = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, CSP_CLOCK_WIDTH, CSP_CLOCK_HEIGHT, 0,
+            session.css_animation_instances
+        )
+    )
+    val next = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, CSP_CLOCK_WIDTH, CSP_CLOCK_HEIGHT,
+            session.monotonic_time_ms - session.animation_start_time_ms,
+            session.css_animation_instances
+        )
+    )
+    expect(first.composition.batches.len()).to_equal(1)
+    expect(next.composition.batches.len()).to_equal(1)
+    expect(first.composition.batches[0].source.source_kind).to_equal(
+        "html_ast"
+    )
+    expect(next.composition.batches[0].source.source_kind).to_equal(
+        "html_ast"
+    )
+    var first_box_count = 0
+    var next_box_count = 0
+    for command in first.composition.batches[0].commands:
+        if command.component_id == "box":
+            expect(command.x).to_equal(0)
+            expect(command.y).to_equal(0)
+            expect(command.width).to_equal(8)
+            expect(command.height).to_equal(8)
+            expect(command.color).to_equal(0xFFDC2626u32)
+            first_box_count = first_box_count + 1
+    for command in next.composition.batches[0].commands:
+        if command.component_id == "box":
+            expect(command.x).to_equal(0)
+            expect(command.y).to_equal(0)
+            expect(command.width).to_equal(8)
+            expect(command.height).to_equal(8)
+            expect(command.color).to_equal(0xFF804488u32)
+            next_box_count = next_box_count + 1
+    expect(first_box_count).to_equal(1)
+    expect(next_box_count).to_equal(1)
+    val raster = Engine2dCompositorBackend.create_named(
+        CSP_CLOCK_WIDTH, CSP_CLOCK_HEIGHT, "software"
+    )
+    val first_pixels = raster.render_draw_ir_composition(
+        first.composition, []
+    )
+    val next_pixels = raster.render_draw_ir_composition(
+        next.composition, []
+    )
+    raster.shutdown()
+    expect(first_pixels.skipped_command_count).to_equal(0)
+    expect(next_pixels.skipped_command_count).to_equal(0)
+    expect(_csp_clock_color_count(
+        first_pixels.pixels, 0xFFDC2626u32
+    )).to_equal(64)
+    expect(_csp_clock_color_count(
+        next_pixels.pixels, 0xFF804488u32
+    )).to_equal(64)
+    expect(_csp_clock_color_count(
+        next_pixels.pixels, 0xFFFFFFFFu32
+    )).to_equal(192)
+
+describe "REQ-WEB-BROWSER-003/004/005/006/012: CSP animation clock":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should advance CSS animation frames while scripts stay denied":
+        step("Commit a script-denying CSP")
+        val session = setup_csp_clock_fixture()
+        step("Advance the monotonic browser clock")
+        check_clock_advanced_without_callbacks(session)
+        step("Reject script callbacks")
+        check_scripts_denied(session)
+        step("Render the next CSS animation frame")
+        check_css_frame_progressed(session)
