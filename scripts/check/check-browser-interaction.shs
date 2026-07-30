@@ -4,6 +4,39 @@ set -eu
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
 
+provenance_guard_self_check() {
+    work=$(mktemp -d "${TMPDIR:-/tmp}/browser-interaction-provenance.XXXXXX")
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    fake_bin="$work/fake-simple"
+    printf '%s\n' '#!/bin/sh' 'exit 0' >"$fake_bin"
+    chmod +x "$fake_bin"
+    evidence_dir="$work/evidence"
+    mkdir -p "$evidence_dir"
+    printf '%s\n' "preserved-prior-evidence" >"$evidence_dir/evidence.log"
+    if SIMPLE_BIN="$fake_bin" \
+        SIMPLE_BROWSER_INTERACTION_WORK_DIR="$evidence_dir" \
+        sh "$0" >"$work/output" 2>&1; then
+        echo "browser interaction provenance self-check: fake binary accepted" >&2
+        exit 1
+    fi
+    grep -Fqx "error=unprovenanced-simple-bin:$fake_bin" \
+        "$work/output" || {
+        echo "browser interaction provenance self-check: rejection changed" >&2
+        exit 1
+    }
+    grep -Fqx "preserved-prior-evidence" "$evidence_dir/evidence.log" || {
+        echo "browser interaction provenance self-check: prior evidence erased" >&2
+        exit 1
+    }
+    echo "browser interaction provenance self-check: PASS"
+}
+
+case "${1:-}" in
+    --self-check) provenance_guard_self_check; exit 0 ;;
+    "") ;;
+    *) echo "usage: $0 [--self-check]" >&2; exit 2 ;;
+esac
+
 # Configuration
 SIMPLE_BIN="${SIMPLE_BIN:-bin/simple}"
 DRIVER="src/app/test/browser_interaction_capture.spl"
@@ -39,9 +72,6 @@ emit_file_status() {
     fi
 }
 
-mkdir -p "$WORK_DIR"
-rm -f "$EVIDENCE_LOG" "$ENV_PATH"
-
 echo "check=browser_interaction"
 echo "simple_bin=$SIMPLE_BIN"
 echo "driver=$DRIVER"
@@ -51,6 +81,29 @@ if [ ! -x "$SIMPLE_BIN" ]; then
     echo "error=missing_executable:$SIMPLE_BIN"
     exit 1
 fi
+BOOTSTRAP_STAGE3_FACADE_PATH=\
+"$ROOT_DIR/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH=\
+"$ROOT_DIR/scripts/check/lib/stage4-candidate-provenance.shs"
+export BOOTSTRAP_STAGE3_FACADE_PATH STAGE4_PROVENANCE_HELPER_PATH
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+case "$SIMPLE_BIN" in
+    /*) ;;
+    *) SIMPLE_BIN="$ROOT_DIR/$SIMPLE_BIN" ;;
+esac
+canonical_simple_bin=$(bootstrap_stage3_canonical_file "$SIMPLE_BIN") || {
+    echo "overall=fail"
+    echo "error=unprovenanced-simple-bin:$SIMPLE_BIN"
+    exit 1
+}
+SIMPLE_BIN="$canonical_simple_bin"
+stage4_verify_candidate_provenance "${SIMPLE_BIN}.provenance.env" \
+    "$SIMPLE_BIN" "$ROOT_DIR" || {
+    echo "overall=fail"
+    echo "error=unprovenanced-simple-bin:$SIMPLE_BIN"
+    exit 1
+}
 if [ ! -f "$DRIVER" ]; then
     echo "overall=fail"
     echo "error=missing_driver:$DRIVER"
@@ -61,6 +114,9 @@ if [ ! -f "$ORACLE" ]; then
     echo "error=missing_oracle:$ORACLE"
     exit 1
 fi
+
+mkdir -p "$WORK_DIR"
+rm -f "$EVIDENCE_LOG" "$ENV_PATH"
 
 all_pass=true
 {
