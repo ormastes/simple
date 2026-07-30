@@ -910,7 +910,7 @@ Exact repository HEAD:
 | `attachment_navigation_boundary` | Hosted navigation rejects attachment activation before publication across the policy/session/process boundary. | INTEGRATED `165d7b3a8c7`; STATIC/EVIDENCE-HELD |
 | `D1` | Held dispatch candidate remains on lineage through `06dc5620781`. | DO NOT MERGE |
 | `D2` | Held dispatch candidate remains on lineage through `06dc5620781`. | DO NOT MERGE |
-| `D3` | Follow-on dispatch lane is still being developed. | ACTIVE / UNCOMMITTED |
+| `D3` | Remaining production call sites are `SimpleScriptExecutor.reset` ×2 and `BrowserRuntimeState.bind_dom` ×3 in `browser_session_runtime`, plus `SimpleScriptExecutor.bind_dom(current_dom)` ×2 and `state.bind_dom`/`BrowserRuntimeState.bind_dom` ×2 in `browser_session_loading`; SSpec, manual, and final review are incomplete. Lane 4 is untouched. | STOPPED / UNCOMMITTED |
 
 Root remains merge owner and final reviewer. Batch 19 does not change existing
 inventory/scenario accounting except where the canonical HTML/CSS plan

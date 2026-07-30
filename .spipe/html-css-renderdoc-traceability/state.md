@@ -80,7 +80,12 @@ implementation-in-progress
   boundary (`165d7b3a8c7`). All three are STATIC/EVIDENCE-HELD; animation
   runtime remains unavailable. Stage-4 admission is NONE: the `807182` build
   is dirty, divergent, and has no receipt. D1 and D2 remain held on lineage
-  through `06dc5620781` and MUST NOT MERGE; D3 is active and uncommitted.
-  Existing inventory and scenario counts remain governed by the canonical
-  plans. No runtime, docgen, RenderDoc, performance, full-browser, goal, or
-  aggregate HTML/CSS PASS is claimed.
+  through `06dc5620781` and MUST NOT MERGE. D3 is STOPPED/UNCOMMITTED:
+  `browser_session_runtime` retains two `SimpleScriptExecutor.reset` and three
+  `BrowserRuntimeState.bind_dom` call sites. `browser_session_loading` retains
+  two `SimpleScriptExecutor.bind_dom(current_dom)` and two
+  `state.bind_dom`/`BrowserRuntimeState.bind_dom` call sites. SSpec, manual,
+  and final review are incomplete; Lane 4 is untouched. Existing inventory
+  and scenario counts remain governed by the canonical plans. No runtime,
+  docgen, RenderDoc, performance, full-browser, goal, or aggregate HTML/CSS
+  PASS is claimed.
