@@ -857,15 +857,43 @@ pub class HostedBrowserRendererProcess:
             self.history_index >= self.history_urls.len() or
             not browser_renderer_command_capability_valid(capability)):
             return Err("history-snapshot-unavailable")
+        var urls = self._copy_history_texts(self.history_urls)
+        if self.pending_history_index >= 0:
+            if (self.pending_history_index >= urls.len() or
+                self.pending_history_target_url == ""):
+                return Err("history-snapshot-unavailable")
+            urls[self.pending_history_index] = (
+                self.pending_history_target_url
+            )
+        self._history_snapshot_for_urls(capability, urls)
+
+    fn _history_snapshot_for_urls(
+        capability: text, urls: [text]
+    ) -> Result<text, text>:
+        if (self.history_index < 0 or
+            self.history_index >= urls.len() or
+            not browser_renderer_command_capability_valid(capability)):
+            return Err("history-snapshot-unavailable")
         browser_renderer_history_proposal_encode(
             "N",
             "O",
             "",
-            self.history_urls[self.history_index],
+            urls[self.history_index],
             capability,
             self.history_index,
-            self.history_urls
+            urls
         )
+
+    fn _history_urls_with_traversal(
+        target_index: i64, target_url: text
+    ) -> Result<[text], text>:
+        if (target_index < 0 or
+            target_index >= self.history_urls.len() or
+            _hosted_browser_canonical_history_url(target_url) != target_url):
+            return Err("history-traversal-unavailable")
+        var urls = self._copy_history_texts(self.history_urls)
+        urls[target_index] = target_url
+        Ok(urls)
 
     fn _history_back_index(url: text) -> i64:
         var index = self.history_index
@@ -961,6 +989,12 @@ pub class HostedBrowserRendererProcess:
                     "history-index-out-of-range"
                 )
             index = self.pending_history_index
+            if self.pending_history_target_url == "":
+                return self._history_candidate_reject(
+                    "history-target-unavailable"
+                )
+            urls[index] = self.pending_history_target_url
+            document_url = self.pending_history_target_url
             if self.pending_document_commit_url != "":
                 urls[index] = self.pending_document_commit_url
                 policies[index] = self.pending_document_csp_policy
@@ -2832,16 +2866,21 @@ pub class HostedBrowserRendererProcess:
         val capability = match browser_renderer_command_capability_new():
             Err(reason): return Err(reason)
             Ok(value): value
-        val history_snapshot = match self._history_snapshot_for_command(
-            capability
+        val target_index = self._history_back_index(target_url)
+        val traversal_urls = match self._history_urls_with_traversal(
+            target_index, permit.url
         ):
-            Err(reason):
-                return Err(reason)
-            Ok(value):
-                value
+            Err(reason): return Err(reason)
+            Ok(value): value
+        val upgraded_history_snapshot = match self._history_snapshot_for_urls(
+            capability, traversal_urls
+        ):
+            Err(reason): return Err(reason)
+            Ok(value): value
         val command = browser_renderer_navigation_encode_with_history(
             self.generation, self.next_request_id,
-            "back", target_url, "GET", "", "", "", history_snapshot
+            "back", permit.url, "GET", "", "", "",
+            upgraded_history_snapshot
         )
         if not command.ok:
             return Err(command.reason)
@@ -2855,10 +2894,10 @@ pub class HostedBrowserRendererProcess:
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
         self.navigation_permit = permit
-        self.pending_history_index = self._history_back_index(target_url)
-        self.pending_history_target_url = target_url
+        self.pending_history_index = target_index
+        self.pending_history_target_url = permit.url
         self.provisional_document_origin = hosted_browser_network_origin(
-            target_url
+            permit.url
         )
         self._stage_history_document_csp(self.pending_history_index)
         val started = self._begin_navigation_command(
@@ -2894,16 +2933,20 @@ pub class HostedBrowserRendererProcess:
         val capability = match browser_renderer_command_capability_new():
             Err(reason): return Err(reason)
             Ok(value): value
-        val history_snapshot = match self._history_snapshot_for_command(
-            capability
+        val target_index = self._history_forward_index(target_url)
+        val traversal_urls = match self._history_urls_with_traversal(
+            target_index, permit.url
         ):
-            Err(reason):
-                return Err(reason)
-            Ok(value):
-                value
+            Err(reason): return Err(reason)
+            Ok(value): value
+        val history_snapshot = match self._history_snapshot_for_urls(
+            capability, traversal_urls
+        ):
+            Err(reason): return Err(reason)
+            Ok(value): value
         val command = browser_renderer_navigation_encode_with_history(
             self.generation, self.next_request_id,
-            "forward", target_url, "GET", "", "", "", history_snapshot
+            "forward", permit.url, "GET", "", "", "", history_snapshot
         )
         if not command.ok:
             return Err(command.reason)
@@ -2917,10 +2960,10 @@ pub class HostedBrowserRendererProcess:
         if not self._replace_pending_navigation():
             return Err("renderer-busy")
         self.navigation_permit = permit
-        self.pending_history_index = self._history_forward_index(target_url)
-        self.pending_history_target_url = target_url
+        self.pending_history_index = target_index
+        self.pending_history_target_url = permit.url
         self.provisional_document_origin = hosted_browser_network_origin(
-            target_url
+            permit.url
         )
         self._stage_history_document_csp(self.pending_history_index)
         val started = self._begin_navigation_command(
