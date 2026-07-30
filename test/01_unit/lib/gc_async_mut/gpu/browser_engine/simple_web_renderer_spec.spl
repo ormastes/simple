@@ -228,6 +228,88 @@ fn check_abbr_cpu_pixel_parity(fixtures: [text]):
     expect(abbr_pixels).to_equal(span_pixels)
     expect(abbr_pixels).not.to_equal(block_pixels)
 
+fn setup_time_inline_fixtures() -> [text]:
+    val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}#row{font-size:16px;color:#111827}</style></head><body><div id='row'>"
+    [
+        common + "LEFT<time id='term'>MID</time>RIGHT</div></body></html>",
+        common + "LEFT<span id='term'>MID</span>RIGHT</div></body></html>",
+        common + "LEFT<span id='term' style='display:block'>MID</span>RIGHT</div></body></html>"
+    ]
+
+fn check_time_computed_inline_style(fixtures: [text]):
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[0], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[1], "term", "display"
+    )).to_equal("inline")
+    expect(simple_web_layout_debug_style_by_id(
+        fixtures[2], "term", "display"
+    )).to_equal("block")
+
+fn check_time_layout_and_draw_ir_parity(fixtures: [text]):
+    val time_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[0], 128, 48
+    ).batches[0].commands
+    val span_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[1], 128, 48
+    ).batches[0].commands
+    val block_commands = simple_web_layout_render_html_draw_ir(
+        fixtures[2], 128, 48
+    ).batches[0].commands
+    val time_term = _draw_ir_command_by_id(time_commands, "term")
+    val span_term = _draw_ir_command_by_id(span_commands, "term")
+    val block_term = _draw_ir_command_by_id(block_commands, "term")
+    val time_mid = _draw_ir_text_command(time_commands, "MID")
+    val span_mid = _draw_ir_text_command(span_commands, "MID")
+    val time_right = _draw_ir_text_command(time_commands, "RIGHT")
+    val span_right = _draw_ir_text_command(span_commands, "RIGHT")
+    val block_right = _draw_ir_text_command(block_commands, "RIGHT")
+
+    expect(_draw_ir_style_value(time_term, "tag")).to_equal("time")
+    expect(time_term.parent_id).to_equal("row")
+    expect(_draw_ir_style_value(time_term, "display")).to_equal("inline")
+    expect([
+        time_term.x, time_term.y, time_term.width, time_term.height
+    ]).to_equal([
+        span_term.x, span_term.y, span_term.width, span_term.height
+    ])
+    expect([
+        time_mid.x, time_mid.y, time_mid.width, time_mid.height
+    ]).to_equal([
+        span_mid.x, span_mid.y, span_mid.width, span_mid.height
+    ])
+    expect([
+        time_right.x, time_right.y, time_right.width, time_right.height
+    ]).to_equal([
+        span_right.x, span_right.y, span_right.width, span_right.height
+    ])
+    expect(time_mid.advance_widths).to_equal(span_mid.advance_widths)
+    expect(time_right.advance_widths).to_equal(span_right.advance_widths)
+    expect([
+        time_term.x, time_term.y, time_term.width, time_term.height
+    ]).not.to_equal([
+        block_term.x, block_term.y, block_term.width, block_term.height
+    ])
+    expect([
+        time_right.x, time_right.y, time_right.width, time_right.height
+    ]).not.to_equal([
+        block_right.x, block_right.y, block_right.width, block_right.height
+    ])
+
+fn check_time_cpu_pixel_parity(fixtures: [text]):
+    val time_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[0], 128, 48, "cpu"
+    )
+    val span_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[1], 128, 48, "cpu"
+    )
+    val block_pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+        fixtures[2], 128, 48, "cpu"
+    )
+    expect(time_pixels).to_equal(span_pixels)
+    expect(time_pixels).not.to_equal(block_pixels)
+
 fn _wm_material_section(component_id: text, image_declarations: text) -> text:
     (
         "<section id='" + component_id + "'" +
@@ -1170,6 +1252,19 @@ describe "SimpleWebRenderer":
 
         step("Match span pixels and reject block fallback")
         check_abbr_cpu_pixel_parity(fixtures)
+
+    it "keeps time in canonical inline flow":
+        step("Build time span and block-control fixtures")
+        val fixtures = setup_time_inline_fixtures()
+
+        step("Resolve time to the inline user-agent display")
+        check_time_computed_inline_style(fixtures)
+
+        step("Preserve time semantics and match canonical Draw IR geometry")
+        check_time_layout_and_draw_ir_parity(fixtures)
+
+        step("Match span pixels and reject block fallback")
+        check_time_cpu_pixel_parity(fixtures)
 
     it "lowers text-transform through Draw IR to exact uppercase pixels":
         val common = "<html><head><style>html,body{margin:0;padding:0;background:#fff}.label{color:#111827;font-size:16px}</style></head><body>"

@@ -1658,6 +1658,47 @@ equal the span pixels and to differ from the forced-block pixels.
 
 </details>
 
+#### keeps time in canonical inline flow
+
+<details>
+<summary>Executable SSpec</summary>
+
+The four-step scenario follows the existing inline-element control pattern:
+
+```simple
+step("Build time span and block-control fixtures")
+val fixtures = setup_time_inline_fixtures()
+
+step("Resolve time to the inline user-agent display")
+check_time_computed_inline_style(fixtures)
+
+step("Preserve time semantics and match canonical Draw IR geometry")
+check_time_layout_and_draw_ir_parity(fixtures)
+
+step("Match span pixels and reject block fallback")
+check_time_cpu_pixel_parity(fixtures)
+```
+
+`setup_time_inline_fixtures` builds three otherwise-identical documents:
+index 0 uses `<time id='term'>MID</time>`, index 1 uses the literal inline
+control `<span id='term'>MID</span>`, and index 2 uses the negative control
+`<span id='term' style='display:block'>MID</span>`. Each fixture preserves the
+same `LEFT`, `MID`, and `RIGHT` text-node order.
+
+`check_time_computed_inline_style` requires exact computed `display` values of
+`inline`, `inline`, and `block`, respectively.
+
+`check_time_layout_and_draw_ir_parity` requires the `time` semantic tag and
+`row` parent identity, then requires the time and span `term`, `MID`, and
+`RIGHT` Draw IR geometry arrays `[x, y, width, height]` and text advances to
+match. It also requires the time `term` and `RIGHT` geometry to differ from the
+forced-block control.
+
+`check_time_cpu_pixel_parity` requires the complete CPU Engine2D pixel array
+for time to equal the span pixels and to differ from the forced-block pixels.
+
+</details>
+
 #### lowers text-transform through Draw IR to exact uppercase pixels
 
 <details>
