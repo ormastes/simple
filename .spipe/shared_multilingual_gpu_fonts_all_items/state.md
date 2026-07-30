@@ -111,7 +111,7 @@ sealed zero-stub receipt. Canonical Stage2 attempt 24 and scoped-tool attempt 12
 were historically admitted at clean checkpoint `2a7e354c116`; their ignored
 artifacts disappeared with the old temporary worktree and cannot admit current
 source. The RV64 owner repair introduced at `39c1863426a` is source-complete.
-The current blocker is a fresh physical Stage2 attempt 28 bound to the exact
+The current blocker is a fresh physical Stage2 attempt 29 bound to the exact
 clean producer `HEAD`, followed by scoped-tool attempt 13. No ELF exists, so
 reserved RV64 attempt 26, QEMU crop calibration, exact-ten attempt 13, and the
 ten manual attempt-13 receipts have not run. Stage 3,
@@ -285,3 +285,12 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   scoped-tool attempt 13, RV64 attempt 26, exact-ten attempt 13, and manual
   attempt 13. The manual-root validator now accepts any positive attempt number
   and rejects zero; no admission or PASS is claimed.
+- stage2-attempt28-missing-seed-2026-07-30: Physical attempt 28 exited 1 before
+  Stage2 after `3:34.66` at `34,852 KiB` maximum RSS because the restored
+  worktree had no matching
+  `src/compiler_rust/target/bootstrap/{simple,libsimple_native_all.a}` tuple.
+  The retained stderr names both missing paths; no Stage2 output exists.
+  Attempt 29 is the third bounded producer and may use
+  `--full-bootstrap --stop-after-stage2` only to build the missing current-input
+  Rust authority before the same verified Stage2 stop. It must not continue
+  into Stage3/4/full CLI. Status remains FAIL.

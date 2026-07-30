@@ -71,10 +71,14 @@ Run only this scoped set:
   checkpoint `2a7e354c116`.
 - [x] Produce scoped-tool attempt 12 and pass its independent canonical
   receipt checker at the historical `2a7e354c116` checkpoint.
-- [ ] Produce and admit current-checkpoint physical Stage2 attempt 28 and
+- [ ] Produce and admit current-checkpoint physical Stage2 attempt 29 and
   matching scoped-tool attempt 13. Attempt 27 was stopped before Stage2 when
-  an unrelated full bootstrap appeared after host preflight; its immutable
-  logs are retained and it must not be reused.
+  an unrelated full bootstrap appeared after host preflight. Attempt 28 exited
+  before Stage2 because the restored worktree had no matching Rust
+  seed/runtime tuple. Both immutable logs are retained and neither path may be
+  reused. Attempt 29 may use `--full-bootstrap --stop-after-stage2` solely to
+  rebuild that missing Rust authority and must still stop after verified
+  Stage2.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
@@ -99,7 +103,7 @@ with evidence-manifest SHA-256
 and canonical checker marker `stage2_font_scoped_tools_status=pass`. Those
 ignored artifacts disappeared with the old temporary worktree and remain
 historical identity evidence only; current-checkpoint execution requires the
-fresh attempt-28/attempt-13 pair above.
+fresh attempt-29/attempt-13 pair above.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at

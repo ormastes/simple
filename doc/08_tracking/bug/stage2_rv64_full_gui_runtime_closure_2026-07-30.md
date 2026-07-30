@@ -3,7 +3,7 @@
 **ID:** stage2-rv64-full-gui-runtime-closure-2026-07-30
 **Severity:** blocker for `SIMPLEOS_STAGE2_FONT`
 **Source repair commit:** `39c1863426a8c1379ee3c5584bb6c3d3a78f9970`
-**Admission checkpoint:** exact clean `HEAD` at Stage2 attempt-28 launch
+**Admission checkpoint:** exact clean `HEAD` at Stage2 attempt-29 launch
 
 ## Result
 
@@ -38,12 +38,15 @@ misleading ELF and violate the fail-closed contract. See
 
 ## Resume
 
-After admitting physical current-checkpoint Stage2 attempt 28 and matching
+After admitting physical current-checkpoint Stage2 attempt 29 and matching
 scoped-tool attempt 13, run exactly one fresh RV64 attempt 26 with
 `SIMPLE_NO_STUB_FALLBACK=1`. Only a validated ELF unblocks QEMU crop
 calibration, exact-ten attempt 13, and manual attempt 13. Stage2 attempt 27 was
 stopped before Stage2 when a competing full bootstrap appeared; retain it and
-do not reuse its path.
+do not reuse its path. Stage2 attempt 28 exited before Stage2 because the
+restored worktree had no matching Rust seed/runtime tuple. Attempt 29 may use
+`--full-bootstrap --stop-after-stage2` only to build that missing authority and
+must not continue into Stage3/4 or full CLI.
 
 ## Owner repair prepared
 
@@ -60,5 +63,5 @@ process-syscall byte copies through validated VMM translation. The focused
 RV64 syscall ABI/provider contract passes after those fixes.
 
 This is source/focused-gate evidence only. It does not close the bug until a
-fresh clean-checkpoint Stage2 attempt 28/tool attempt 13 admission and the
+fresh clean-checkpoint Stage2 attempt 29/tool attempt 13 admission and the
 single reserved RV64 attempt 26 produce and validate the canonical ELF.

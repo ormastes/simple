@@ -1617,7 +1617,9 @@ pixels, and performance evidence remain release-blocking.
   the exact clean `HEAD` at producer launch. Historical attempt-24/tool-12
   artifacts disappeared with the old temporary worktree and are not current
   admission evidence. Stage2 attempt 27 was stopped before Stage2 after a
-  competing full bootstrap appeared; its path will not be reused. Resume with
-  Stage2 attempt 28, scoped-tool/spec/manual attempt 13, and reserved RV64
-  attempt 26. The manual attempt validator now accepts positive immutable
-  attempt numbers instead of the stale 1–3 cap. No runtime or PASS is claimed.
+  competing full bootstrap appeared; its path will not be reused. Stage2
+  attempt 28 exited before Stage2 because the restored worktree lacked its
+  matching Rust seed/runtime tuple. Resume with third and final bounded Stage2
+  attempt 29 using `--full-bootstrap --stop-after-stage2` only for the missing
+  authority, then scoped-tool/spec/manual attempt 13 and reserved RV64 attempt
+  26. No runtime or PASS is claimed.
