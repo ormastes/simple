@@ -62,3 +62,14 @@ implementation-in-progress
   bootstrap fallback was used. No executable PASS is claimed for either landed
   tranche. Overall phase remains implementation-in-progress/RED; AC-1, AC-2,
   AC-3, and AC-6 remain open.
+- reconcile: 2026-07-30 exact repository HEAD
+  `9653a09fdea118b5d502fa06989d83e12cd4fe19` contains the bounded `<small>`
+  UA lane (`b9e1a0e6707`), script MIME boundary (`2211d8ae1b5`), HSTS history
+  traversal (`416ccc6efb8`), input-button keyboard activation (`e9b50343645`),
+  DrawIR text-transform repair (`e7af94e921c`), and shape-key StringBuilder
+  optimization (`9653a09fdea`). These are static/evidence-held; the shape-key
+  performance spec is unmeasured. JS `store_kind` remains RED design only at
+  `f8b926e0dd5`. Stage-4 admission remains NONE: the active `4cdd` build is
+  dirty/stale and has no receipt. D1 `1728` is held locally and MUST NOT MERGE;
+  D2 stopped without a commit and remains pending review/unmerged. No runtime,
+  full-browser, RenderDoc, performance, or goal PASS is claimed.

@@ -1236,10 +1236,11 @@ current Stage-4 pure-Simple CLI.
 - Generation-safe GC design `ef90c16b194` remains PROPOSED/RED. No G2
   executable evidence, goal completion, or runtime PASS is admitted.
 
-## Batch 18 candidate executable evidence
+## Batch 18 final evidence boundary
 
 `test/03_system/security/browser_renderer_script_mime_boundary_spec.spl`
-adds one modern four-step SBR2 scenario for REQ-WEB-BROWSER-005/010/012/021:
+contains the integrated `2211d8ae1b5` four-step SBR2 scenario for
+REQ-WEB-BROWSER-005/010/012/021:
 
 - mixed-case, parameterized canonical JavaScript MIME admission plus classic
   non-`nosniff` compatibility;
@@ -1250,13 +1251,10 @@ adds one modern four-step SBR2 scenario for REQ-WEB-BROWSER-005/010/012/021:
 
 The paired manual is
 `doc/06_spec/03_system/security/browser_renderer_script_mime_boundary_spec.md`.
-The row remains PENDING: static guards are the only admitted checks, and no
-runtime, bootstrap, seed fallback, stale artifact, or docgen result is claimed.
-
-## Batch 19 candidate executable evidence
+The row is STATIC/EVIDENCE-HELD, not runtime PASS.
 
 `test/05_perf/web_render_chrome/web_gpu_paint_shape_key_scaling_spec.spl`
-adds one modern four-step isolated performance scenario for
+contains the integrated `9653a09fdea` four-step isolated scenario for
 NFR-WEB-BROWSER-015/016:
 
 - exact deterministic 4,096-op and 8,192-op `SceneCommand` fixtures;
@@ -1267,6 +1265,19 @@ NFR-WEB-BROWSER-015/016:
 
 The paired manual is
 `doc/06_spec/05_perf/web_render_chrome/web_gpu_paint_shape_key_scaling_spec.md`.
-The row remains PENDING/HELD because no admitted current pure-Simple runtime
-executed it. Static source checks must not be reported as a measured
+The performance row remains HELD/UNMEASURED because no admitted current
+pure-Simple runtime executed it. Static source checks are not a measured
 performance PASS.
+
+Additional integrated static/evidence-held scenarios at exact repository HEAD
+`9653a09fdea118b5d502fa06989d83e12cd4fe19` cover selected `<small>` UA
+sizing (`b9e1a0e6707`), HSTS Back/Forward traversal (`416ccc6efb8`),
+input-button keyboard activation (`e9b50343645`), and DrawIR text-transform
+parity (`e7af94e921c`). JS `store_kind` remains RED design only at
+`f8b926e0dd5`.
+
+Stage-4 admission remains NONE: the active `4cdd` build is dirty/stale and
+has no receipt. D1 `1728` is held locally and MUST NOT MERGE. D2 stopped
+without a commit and remains pending review/unmerged. Therefore this batch
+admits no runtime, docgen, 10,000-cycle, performance, full-browser, or goal
+PASS.

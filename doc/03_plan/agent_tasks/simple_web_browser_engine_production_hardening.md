@@ -874,25 +874,25 @@ No Batch-17 row supplies runtime, docgen, 10,000-cycle, or full-browser
 completion evidence. Generation-safe GC design `ef90c16b194` remains
 PROPOSED/RED; neither the G2 lane nor this addendum completes the goal.
 
-## Production browser batch 18 candidate (2026-07-30)
+## Production browser batch 18 final reconciliation (2026-07-30)
+
+Exact repository HEAD:
+`9653a09fdea118b5d502fa06989d83e12cd4fe19`.
 
 | Lane | Result | Status |
 | --- | --- | --- |
-| `script_mime_boundary` | One canonical header/media-type path normalizes parameters and case; classic scripts honor `nosniff`, while modules require selected JavaScript MIME before redirect alias/cache mutation. Rejection warns and advances without evaluating or publishing hostile response state. | CANDIDATE from exact `f156e55efe9`; modern four-step SBR2 SSpec/manual added, target execution/docgen HELD |
+| `html_small_ua` | Selected medium-UA `<small>` sizing lowers through canonical style, layout, Draw IR, and absolute pixels. | INTEGRATED `b9e1a0e6707`; STATIC/EVIDENCE-HELD |
+| `js_store_kind_design` | Heap stores are distinguished from edge semantics in the frozen reclamation design. | DESIGN `f8b926e0dd5`; RED, not implemented |
+| `script_mime_boundary` | One canonical media-type gate normalizes parameters/case and rejects invalid classic/module responses before hostile state publication. | INTEGRATED `2211d8ae1b5`; STATIC/EVIDENCE-HELD |
+| `hsts_history_traversal` | Back/Forward bind the HSTS-upgraded off-side ledger to SBR2 capability and publish only after validator acceptance. | INTEGRATED `416ccc6efb8`; STATIC/EVIDENCE-HELD |
+| `input_button_keyboard` | Enter/Space keyboard activation reaches canonical input-button default action with exact cancellation/repeat behavior. | INTEGRATED `e9b50343645`; STATIC/EVIDENCE-HELD |
+| `drawir_text_transform` | Canonical Draw IR text uses transformed/RTL visual text consistently for metrics and every text-command path. | INTEGRATED `e7af94e921c`; STATIC/EVIDENCE-HELD |
+| `gpu_paint_shape_key_scaling` | Ordered `x,y,w,h;` identity now uses the existing chunked `StringBuilder` rather than cumulative immutable-prefix concatenation. | INTEGRATED `9653a09fdea`; performance SSpec HELD/UNMEASURED |
+| `stage4_admission` | The active `4cdd` build is dirty/stale and has no provenance receipt. | NONE; no runtime/docgen/performance admission |
+| `D1` | Local candidate `1728` remains held. | DO NOT MERGE |
+| `D2` | Review lane stopped without a commit. | PENDING REVIEW / UNMERGED |
 
-Merge owner and final reviewer: root production-browser coordinator. No
-sidecar owns implementation files. Static review must confirm the module gate
-precedes every redirect alias/cache write and the rejection path applies no
-response headers. Runtime/bootstrap work is explicitly out of scope.
-
-## Production browser batch 19 candidate (2026-07-30)
-
-| Lane | Result | Status |
-| --- | --- | --- |
-| `gpu_paint_shape_key_scaling` | Exact ordered `x,y,w,h;` cache identity is preserved while the per-frame geometry key uses the existing chunked `StringBuilder` instead of cumulative immutable-prefix concatenation. | CANDIDATE from exact `416ccc6efb8`; deterministic 4,096/8,192-op, nine-sample median SSpec/manual added; performance execution HELD |
-
-Merge owner and final reviewer: root production-browser coordinator. The
-implementation owns only
-`simple_web_html_engine2d_presenter.spl`; it does not alter layout, Draw IR,
-GPU/device execution, cache keys, or eviction. Shared plan files require
-coordinator reconciliation. No runtime/bootstrap work is authorized.
+Root production-browser coordinator remains merge owner and final reviewer.
+The bounded static integrations do not supply a target-runtime, docgen,
+10,000-cycle, performance, full-browser, or goal PASS. No bootstrap or stale
+artifact may substitute for Stage-4 admission.
