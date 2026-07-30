@@ -630,3 +630,262 @@ validate the complete ledger/index against its authority and commit it
 atomically, rejecting unknown, reordered, over-budget, out-of-range, origin- or
 witness-mismatched state. Until that structural protocol exists, neighbor
 matching does not close the history/CSP row.
+
+### Proposed cascade-owner root fix
+
+Status: **PROPOSED / UNIMPLEMENTED**.
+
+The current loss is concrete: `_css_scan_rules_simple` records `Layer`
+wrappers, `_extract_css_vw_with_rule_limit` treats them as unconditional and
+then drops their identity, and `css_declaration_priority_split` turns each
+rule into parallel normal/important strings in `Rules`.
+`compute_styles_with_material` sorts matching rules and concatenates those
+strings for `apply_decls`; `presentational_attr_decls` and `nd.style_attr`
+enter through separate calls. Finally `_apply_css_animations` calls
+`apply_decls` after author-important declarations. No paint-only
+`overflow_hidden` branch can recover that discarded ordering.
+
+Retain the existing parser, selector matcher, and one cascade owner. Replace
+only the lossy handoffs with these records:
+
+```simple
+enum CssCascadeOrigin:
+    UserAgent
+    User
+    Author
+    Animation
+    Transition
+
+class CssLayerIdentity:
+    id: i32
+    parent_id: i32
+    name: text
+    order: i32
+    anonymous: bool
+    implicit_outer_band_id: i32
+    implicit_outer_order: i32
+
+class CssRuleDeclaration:
+    property: text
+    specified_value: text
+    origin: CssCascadeOrigin
+    important: bool
+    layer_id: i32       # -1 means unlayered
+    layer_order: i32    # global order assigned by CssLayerRegistry
+    layer_path: [i32]   # outermost to innermost identity
+    source_order: i64   # per declaration, not per rule
+
+class CssRule:
+    group_parts: [[text]]
+    group_specificities: [i32]
+    declarations: [CssRuleDeclaration]
+
+class CssCascadeDeclaration:
+    property: text
+    specified_value: text
+    origin: CssCascadeOrigin
+    important: bool
+    layer_id: i32
+    layer_order: i32
+    layer_path: [i32]
+    encapsulation_order: i32
+    element_attached_style: bool
+    specificity: i32
+    source_order: i64
+
+class CssCascadeBandRank:
+    id: i32
+    origin: CssCascadeOrigin
+    important: bool
+    encapsulation_order: i32
+    layer_id: i32
+    element_attached_style: bool
+    precedence_rank: i32
+
+class Rules:
+    rules: [CssRule]
+    layers: [CssLayerIdentity]
+    bands: [CssCascadeBandRank]
+```
+
+`CssRuleScan` must retain the ordered layer path for every leaf rule and admit
+ordered `@layer a, b;` statements. `CssLayerRegistry` assigns hierarchical
+identity plus one stable global order: predeclarations fix first order,
+reopened named layers reuse identity, nested names retain their parent path,
+and every anonymous layer gets a new identity. Layer registration is
+document-global and includes an `@media`/`@supports` layer only while every
+enclosing condition applies. A false conditional layer has no identity or
+order until it becomes applicable. A viewport or condition-truth change
+rebuilds the complete applicable registry, compact band ranks, selector
+buckets, and dependent computed styles before any node cascade runs.
+Element-sensitive conditional layers cannot have node-local order; the bounded
+profile rejects them conservatively until a document-global applicability
+owner exists.
+
+Every layer, including the top-level author origin, owns an implicit outer
+sublayer for declarations written directly in that layer. That implicit
+sublayer follows its named/anonymous child layers in layer order: its normal
+declarations beat its child layers, while its important declarations lose to
+important declarations in child layers. Thus unlayered rules are declarations
+in the top-level implicit outer layer, not declarations with erased layer
+identity.
+Later normal layers win, while earlier important layers win.
+
+A matched rule materializes `CssCascadeDeclaration` values using the maximum
+specificity of its matching selector groups. Element-attached inline style is
+an explicit rank above selector-matched declarations at the same
+origin/importance, not a fabricated ID specificity. Presentational hints are
+author-normal, unlayered, specificity zero, and ordered before author
+stylesheets. Tag defaults are user-agent declarations. Encapsulation context
+is part of the key because normal and important context order reverses; the
+current light-DOM profile always uses context zero and rejects shadow-scoped
+style input instead of claiming support. The `User` and `Transition` enum
+values reserve the normative rank, but this profile admits neither user
+stylesheets nor CSS transitions until those producers exist.
+
+The cascade owner parses and validates declarations once, expands supported
+shorthands before winner selection, and discards invalid declarations without
+erasing an earlier valid candidate. It groups candidates by
+origin/importance/encapsulation/layer and keeps the
+element-attached/specificity/source-order winner for each property in each
+occupied band. Each property retains that sparse, precedence-ordered
+lower-candidate stack until defaulting completes; reducing to one global winner
+early is forbidden. A single band traversal resolves all properties:
+`revert-layer` removes the current layer's declarations and exposes the next
+lower candidate in layer order. A normal declaration in the top-level implicit
+outer layer therefore exposes the last explicit layer. A non-attached
+important declaration in that implicit outer layer instead falls to the next
+origin, because important explicit layers are higher, not lower, candidates.
+Any element-attached `revert-layer` first removes only its attached tier; the
+important case therefore exposes important style-rule candidates despite
+reversed important-layer order before any origin rollback. `revert` removes
+the current origin; author-origin `revert` also removes the animation origin,
+as required by Cascade 5. `initial`, `inherit`, and `unset` then resolve
+against property metadata plus the parent computed style. Thus rollback always
+uses a real lower candidate and never reconstructs one from `Style`. These
+CSS-wide values never reach `apply_decls`. Winning ordinary values go through
+a renamed computed-value applier; it performs no cascade.
+
+Custom-property tokens likewise remain attached to their declaration until
+custom-property cascade selection; the current whole-sheet pre-substitution
+must not erase their provenance. Animation samples enter the same owner as
+`Animation` origin candidates, below every important declaration, and
+transitions use the highest transition origin. Static winners remain cached;
+an animation tick overlays only sampled properties.
+
+The final representation keeps
+`ComputedOverflowPair(x: CssOverflowMode, y: CssOverflowMode)` separate from
+`UsedOverflowState(x: CssOverflowMode, y: CssOverflowMode, clip_box,
+clip_margin_px, scroll_container, establishes_bfc)`;
+`CssOverflowMode` is `{Visible, Hidden, Clip, Scroll, Auto}`.
+Cross-axis computed-value rules run before layout: if either axis is neither
+`Visible` nor `Clip`, `Visible` on the other axis computes to `Auto` and `Clip`
+computes to `Hidden`. Computed style and used overflow state remain separate.
+The root element's computed pair propagates to the viewport. For an HTML root
+whose two computed axes are `Visible`, the first body child supplies the
+viewport pair instead; the propagation source keeps its computed values but
+uses `Visible` on the element box. At the viewport, used `Visible` becomes
+`Auto` and used `Clip` becomes `Hidden`. On a replaced element, computed
+`Hidden` remains observable as `Hidden` but its used value is `Clip`.
+
+`Clip` and `Hidden` may share a paint clip primitive, but `Clip` creates no
+scroll container and forbids programmatic scrolling; unlike the other
+non-visible modes it does not itself establish a formatting context. Its
+default overflow clip edge is the padding box with
+`overflow-clip-margin: 0px`; margin expansion occurs before Draw IR emission.
+The conformance gate separately covers root/body-to-viewport propagation,
+replaced elements, float/BFC behavior, and programmatic scrolling. Until those
+rows pass, the supported slice is light-DOM, non-root, non-replaced boxes and
+must not claim full CSS Overflow 3. Draw IR receives used layout/paint state,
+while CSSOM-facing state retains the computed pair.
+
+Preprocessing is O(CSS bytes + rules + declarations). For one node, selector
+matching plus cascade is O(candidate rules + matched declarations), worst-case
+O(rules + declarations), with no candidate sort, declaration-string
+concatenation, or declaration reparse. The applicable registry precomputes one
+compact precedence rank per band. Selector buckets retain that rank order, so
+the existing sorted-list merge streams matched candidates in band-rank order;
+the first candidate for a band appends its ID to the node's occupied-band list.
+Winner selection traverses only that list: O(occupied bands + matched
+declarations), where occupied bands <= matched declarations. It never scans
+the document's dense global layer/rank table per node. All occupied winner maps
+together are O(matched declarations). Existing rule, declaration, selector,
+and time budgets remain hard caps.
+
+Invalidate the parsed rule/layer cache on stylesheet text or applicable-wrapper
+changes; invalidate matched-node cascade state on class/id/attribute/inline or
+presentational-hint changes. Selector invalidation follows dependency shape:
+ancestor changes invalidate descendants for ancestor selectors and inherited
+values; descendant changes invalidate candidate ancestors for `:has(...)`;
+insert/remove/reorder invalidates the affected sibling/child cohort for
+structural selectors plus dependent ancestors/descendants. Viewport changes
+that change conditional truth rebuild applicable layer registration/order,
+ranked selector buckets, and affected styles; a resize that changes no
+condition retains them. A feature-profile change similarly reevaluates
+`@supports`. Animation frames invalidate sampled properties and their existing
+layout/paint classifications, not the static rule cache or whole tree.
+
+This proposal implements only the repository's bounded light-DOM author
+profile: user sheets, shadow-tree encapsulation, `@scope`, transitions, and the
+overflow root/replaced boundary remain explicit RED rows. It follows Cascade 5
+ordering for admitted inputs; it does not claim full Cascade 5.
+
+References:
+
+- [CSS Cascading and Inheritance Level 5 — cascade sorting order](https://www.w3.org/TR/css-cascade-5/#cascade-sorting)
+- [CSS Cascading and Inheritance Level 5 — defaulting keywords](https://www.w3.org/TR/css-cascade-5/#defaulting-keywords)
+- [CSS Overflow Level 3 — `overflow: clip`](https://www.w3.org/TR/css-overflow-3/#valdef-overflow-clip)
+
+<!-- codex-architecture -->
+## Bookmark title witness boundary (PROPOSED / UNIMPLEMENTED)
+
+The parent currently commits `toggle_bookmark(url, url)` in both hosted
+production paths. That discards the bounded `BrowserSession.current_title`
+already used by the in-process Favorite action, and persisted/UI bookmark
+labels become the URL after a renderer or profile restart.
+
+The existing frame contract is the only new authority needed. `SBRF8` extends
+`SBRF7` with one base64 document-title payload and encoded-length field:
+
+`SBRF8 reply cpu-count cpu-digest solid-count solid-digest next-ms diagnostics-len current-url-len back-url-len forward-url-len title-len image-count image-checksum image-len composition-revision`
+
+Payload order is diagnostics, current URL, back URL, forward URL, title, image
+records, then Draw IR. The decoded UTF-8 title is at most 512 bytes and contains
+no NUL. Before base64 decode or decoded-title allocation, admission requires a
+canonical decimal `title-len` in `0..684` and computes every payload segment end
+with checked addition. Only after those ordered ends locate a fully contained
+title slice does it scan base64 alphabet/padding without allocation and derive
+a decoded size at most 512. The encoded title bytes plus derived decoded bytes
+are charged against the existing 1 MiB frame/Draw-IR payload budget before
+allocation. Decode is accepted only when re-encoding produces the exact
+original base64 text. Truncation, trailing overlap, integer overflow, or budget
+exhaustion rejects the frame.
+
+The envelope generation, frame reply ID, and existing current-URL field form
+one title witness; the parent may retain it only after the reply and generation
+pass existing admission and that current URL equals the parent-committed
+canonical URL. A stale generation, stale reply, or URL mismatch cannot change
+title state.
+
+An honest worker maps an empty, NUL-containing, or over-512-byte page title to
+an absent title witness so hostile content cannot make every frame fail. A
+malformed nonempty `SBRF8` title remains a protocol violation. `SBRF2..SBRF7`
+stay render-decodable with `document_title_present = false`; they never inherit
+a cached title. Production Favorite may still use the canonical-URL fallback,
+so compatibility does not create stale-title authority.
+
+Bookmark title handling remains in the existing BrowserSession/profile
+capsule—no new service or storage schema. One shared validator preserves a
+trimmed, nonempty title only when its UTF-8 size is at most 512 bytes; otherwise
+the stored title is the existing empty sentinel. One shared display helper uses
+that stored title or the separately bounded canonical URL. The URL fallback is
+derived, not copied into the 512-byte title column or snapshot field. Profile
+schema version 1 therefore remains valid, old URL-as-title rows remain readable,
+and an invalid title row can fall back without granting its text authority.
+
+The parent clears ephemeral title state at navigation replacement, site-swap
+generation replacement, renderer failure, and close. A replacement renderer
+must produce a newly admitted witness; title state is never copied across the
+generation boundary. Persisted bookmarks remain profile-owned and survive
+window/host restart. The in-process path calls the same validator with
+`current_title` and must not overwrite the accepted title with `(url, url)`.

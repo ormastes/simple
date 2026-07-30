@@ -56,6 +56,12 @@ Engine2D/font create/shutdown counts, memtrack/heap/RSS, 10,000-cycle soak.
 Current executable evidence is host C only; pure-Simple runtime evidence remains
 compiler-blocked and no bootstrap/seed substitute is accepted.
 
+Proposed `SBRF8` binds a 512-byte document-title witness to generation, reply,
+and committed URL. Invalid or missing titles derive the canonical URL only at
+display time, never by copying it into bounded title storage. Its canonical
+base64 length is prebounded to 684 and charged, encoded plus decoded, to the
+existing 1 MiB frame budget before allocation.
+
 Next files:
 
 - `doc/05_design/simple_web_browser_engine_production_hardening.md`

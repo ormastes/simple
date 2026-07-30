@@ -2392,3 +2392,49 @@ implementation in progress / target evidence blocked
   fractional, zero, infinite, fill, exact-color, and checked-add work reviewed
   sound but remains unpromoted. No patch is merged, no target SSpec has
   executed, and no acceptance row is promoted by this ledger.
+- bookmark title witness design (2026-07-30): Read-only origin/main tracing
+  proved that both sandbox hosted Favorite paths persist
+  `toggle_bookmark(url, url)`, while the in-process profile reconciliation also
+  overwrites `BrowserSession.current_title` with `(url, url)`. The resulting
+  persisted and UI-access bookmark label is the URL after profile/renderer
+  restart. Architecture, detail, system-test, and agent-plan contracts now
+  propose additive `SBRF8` title evidence bound to generation/reply/committed
+  URL, a shared 512-byte UTF-8 title validator with derived URL fallback, and
+  one exact four-step 512/513-byte persistence/listing SSpec. This is
+  PROPOSED/UNIMPLEMENTED: no source/spec/manual/build/commit/push or acceptance
+  promotion exists.
+  Cycle-1 design repair adds pre-decode `title-len <= 684`, canonical base64
+  round-trip, checked payload offsets, and encoded-plus-decoded title charging
+  against the existing 1 MiB frame/Draw-IR budget before allocation. The same
+  four visible steps now require a public-action-only
+  `HostedWebContentRegistry` Favorite -> file-backed profile -> reopened
+  registry assertion, with no direct BrowserSession access, so in-process
+  `(url, url)` removal must match sandbox behavior.
+- rejected design bundles (2026-07-30): The hosted HTTPS plan is HOLD/FAIL at
+  the three-review cap because HSTS belongs to the broker, not the worker, and
+  renderer launch must unset `LD_LIBRARY_PATH`. The parent-history plan is
+  HOLD/FAIL at the same cap because `SBRHJ1` lacks one canonical
+  omitted/null/empty URL representation and an exact fragment-preserving
+  empty-string oracle. All other reviewed aspects are sound but unpromoted;
+  neither failed plan is imported, and the history design slot remains pending.
+- SimpleScript listener bundle (2026-07-30): Production, a modern SSpec, its
+  phase-2 manual (`complete 1/1`, `stubs 0/1`), and final high-capability review
+  are PASS in `/tmp/simple-simple-script-events.5IEatF`. The earlier system
+  claim was vacuous; the held repair loads `listen` declarations through
+  `BrowserSession` and dispatches only through its canonical
+  `dispatch_dom_event`, never `inject_dom_event`. Evidence covers exact UTF-8
+  target/event/action bounds `2048/2049`, `64/65`, and `4096/4097`; listener
+  capacity `256/257`, normalized duplicate identity and tombstone reuse;
+  missing-target, unsupported-action, `on*` attribute, and malformed-capture
+  rejection; capture/action/default ordering with seven callbacks and executor
+  root rebinding; one checkbox default; and canonical Draw IR/Engine2D pixels
+  changing from red `0xFFEF4444` to blue `0xFF2563EB`. This bundle is held,
+  unexecuted, and unmerged until an admitted current full pure-Simple CLI runs
+  its focused SSpec once.
+- navigation chrome state patch (2026-07-30): The bundle at
+  `/tmp/simple-browser-chrome-state.XRePMs` is HOLD/FAIL at the three-review
+  cap. `clear_chrome_pressed_controls` clears the host page owner but does not
+  send the existing renderer `begin_pointer(..., false)` cancel/up, so DOM
+  pressed state can remain stale; its SSpec checks only the integer clear. All
+  other state, paint, hit, drain, projection, partial-wire, and lifecycle work
+  reviewed sound but remains unpromoted. The patch is unexecuted and unmerged.

@@ -381,3 +381,85 @@ pure-Simple full CLI runs the applicable focused SSpec once.
 
 Root Codex remains merge owner and final reviewer. These rows do not promote a
 requirement, merge a patch, or provide executable evidence.
+
+## Cascade-owner implementation lanes (2026-07-30)
+
+Status: **PROPOSED / UNIMPLEMENTED**. Root Codex is merge owner and the final
+normal/highest-capability reviewer. Sidecars must target these frozen names:
+`CssCascadeOrigin`, `CssRuleDeclaration`, `CssRule`,
+`CssCascadeDeclaration`, `CssCascadeBandRank`, `CssLayerIdentity`,
+`CssLayerRegistry`,
+`CssOverflowMode`, `ComputedOverflowPair`, `UsedOverflowState`, and
+`cascade_provenance_overflow_clip_spec.spl`. Manual steps are `Collect
+declaration provenance`, `Select cascade winners`, `Resolve CSS-wide values`,
+and `Render overflow clip pixels`; checker names and the mandatory RED
+`fail(...)` are frozen in the system-test plan.
+
+| Lane | Bounded ownership | Handoff |
+| --- | --- | --- |
+| parser/layers | `CssRuleScan`, predeclared/reopened/nested/anonymous layer statements/paths, per-layer implicit outer sublayers, applicable document-global conditional registration, typed `Rules`, raw custom-property tokens | rebuild registry/ranks on condition-truth changes; reject element-sensitive layer order |
+| cascade inputs | tag defaults, presentational hints, matched rules, element-attached inline style, important, animation candidates | every candidate carries origin/context/layer/style-rank/specificity/source/importance; unsupported user/shadow/transition inputs reject |
+| winner/defaulting | precomputed band ranks, ranked selector-bucket merge, occupied-band-only sparse lower-candidate stacks, element-attached rollback, author-plus-animation `revert`, `initial`/`inherit`/`unset`/`revert-layer` | O(N), occupied bands <= matched declarations; never scan dense global layers; CSS-wide values never reach `apply_decls` |
+| overflow/lowering | separate computed/used per-axis `CssOverflowMode`, cross-axis computation, root/body viewport propagation, replaced hidden→clip, padding-box/zero-margin clip edge, scroll-container/BFC/programmatic-scroll distinction, canonical Draw IR/Engine2D pixels | root/replaced boundaries remain RED until their exact matrix passes |
+| selector invalidation | ancestor selectors/inheritance, descendant-to-ancestor `:has`, structural sibling/child cohorts | no whole-tree invalidation unless the dependency graph proves it necessary |
+| evidence/perf | modern RED SSpec, generated manual, counters/timing/RSS fixture | no production claim before admitted pure-Simple execution |
+
+Lower-model sidecars may inspect one bounded row only. They may not rename
+shared interfaces, add a second cascade, implement paint-only `clip`, commit,
+or push. Merge order is parser/layers → cascade inputs → winner/defaulting →
+overflow/lowering → evidence/perf, with high-capability review after each
+handoff.
+
+## Bookmark title witness lane (PROPOSED / UNIMPLEMENTED)
+
+The primary design pass freezes these shared names before implementation:
+`browser_bookmark_stored_title`,
+`browser_bookmark_title_or_url`,
+`BrowserRendererFrameDecodeResult.document_title_present`, and the four manual
+steps recorded in the system-test plan. New test helpers must be named
+`setup_hosted_bookmark_title_profile`,
+`check_bookmark_title_witness_admission`, and
+`check_restarted_bookmark_listing`. The in-process parity helper is
+`check_in_process_registry_profile_reopen` and may use only
+`HostedWebContentRegistry` actions plus its parent-owned profile snapshot;
+unfinished helpers must call `fail(...)`.
+
+| Lane | Scope | Handoff |
+|---|---|---|
+| `bookmark_title_protocol` | Add `SBRF8`, <=684 pre-decode base64/offset/budget admission, canonical round trip, legacy policy, and hostile generation/reply/URL/title fixtures | patch only; no profile/UI edits |
+| `bookmark_title_parent_profile` | Retain admitted title state, clear it on lifecycle boundaries, use empty storage sentinel and derived URL fallback in sandbox and in-process hosts | depends on protocol names |
+| `bookmark_title_sspec` | Add the exact four-step persisted 512/513-byte UI scenario, sandbox listing, and public-action-only in-process registry/profile reopen parity | depends on both implementation lanes |
+| `bookmark_title_final_review` | Review trust binding, schema compatibility, restart/site-swap behavior, and manual quality | normal/highest-capability reviewer |
+
+Lower-model sidecars are **N/A** for accepting the cross-process trust decision;
+they may only enumerate fixtures after the interfaces above are frozen. Root
+Codex is merge owner. A separate normal/highest-capability agent is final
+reviewer. No lane may commit or push independently, and no production claim is
+allowed before the focused SSpec runs once on an admitted current pure-Simple
+full CLI.
+
+## Rejected design lanes (HOLD/FAIL at three-review cap)
+
+| Lane | Exact remaining defects | Next |
+| --- | --- | --- |
+| hosted HTTPS | HSTS belongs to the broker, not the worker; renderer launch must unset `LD_LIBRARY_PATH` | discard the failed plan and repair both boundaries in a fresh design cycle |
+| parent history | `SBRHJ1` lacks one canonical omitted/null/empty URL representation and an exact fragment-preserving empty-string oracle | keep the history design slot pending and repair both protocol oracles in a fresh cycle |
+
+All other reviewed aspects are sound but unpromoted. Neither failed plan may be
+implemented, merged, or cited as production evidence.
+
+## Held SimpleScript listener bundle
+
+| Lane | Bundle | Status | Remaining gate |
+| --- | --- | --- | --- |
+| SimpleScript listeners | `/tmp/simple-simple-script-events.5IEatF` | production + modern SSpec + phase-2 manual + final high review PASS; prior vacuous system claim repaired through canonical `BrowserSession.dispatch_dom_event`, with no `inject_dom_event` path | held, unexecuted, and unmerged until an admitted current full pure-Simple CLI runs the focused SSpec once |
+| navigation chrome | `/tmp/simple-browser-chrome-state.XRePMs` | HOLD/FAIL at the three-review cap: `clear_chrome_pressed_controls` clears the host page owner but omits the existing renderer `begin_pointer(..., false)` cancel/up, leaving possible stale DOM pressed state; SSpec checks only integer clear | repair renderer cancellation and its exact oracle in a fresh cycle; do not merge |
+
+The held listener row covers exact UTF-8 target/event/action bounds
+`2048/2049`, `64/65`, `4096/4097`; capacity `256/257`, duplicate identity and
+tombstone reuse; fail-closed registration; exact listener/default ordering and
+executor-root rebinding; and red-to-blue canonical Draw IR/Engine2D pixels.
+Root Codex remains merge owner and final executable-evidence reviewer.
+
+All other navigation state, paint, hit, drain, projection, partial-wire, and
+lifecycle work reviewed sound but remains unpromoted.

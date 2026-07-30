@@ -493,3 +493,184 @@ production row remains RED until trusted provider build provenance exists.
   timestamp boundaries. The f64, negative-zero, fractional, zero, infinite,
   fill, exact-color, and checked-add work reviewed sound but remains unpromoted,
   unmerged, and unexecuted.
+
+## Cascade provenance and overflow-clip RED contract (2026-07-30)
+
+Status: **PROPOSED / UNIMPLEMENTED**.
+
+Create
+`test/03_system/feature/web_platform/css/cascade_provenance_overflow_clip_spec.spl`
+only with the frozen visible steps `Collect declaration provenance`, `Select
+cascade winners`, `Resolve CSS-wide values`, and `Render overflow clip pixels`.
+Use `_setup_cascade_provenance_document`,
+`_check_declaration_provenance`, `_check_cascade_winners`,
+`_check_css_wide_values`, and `_check_overflow_clip_pixels`; until production
+exists, each checker must call
+`fail("RED: cascade provenance and overflow clip are unimplemented")`.
+
+The four steps must prove, respectively:
+
+- admitted declarations retain user-agent/author/animation origin, importance,
+  named/anonymous/nested/reopened/predeclared layer identity and order,
+  each layer's implicit outer sublayer, applicable document-global conditional
+  registration,
+  encapsulation context, element-attached style rank, matched specificity, and
+  per-declaration source order across wrappers, presentational hints,
+  stylesheet rules, inline style, and animation samples; the reserved user and
+  transition ranks plus nonzero encapsulation contexts must be rejected as
+  unsupported in the admitted light-DOM profile;
+- normal layers, reversed important layers, unlayered declarations, inline
+  declarations, invalid tails, shorthand/longhand collisions, and animation
+  below author-important select the exact property winner. Controls prove
+  normal top-level implicit-outer `revert-layer` exposes the last explicit
+  layer, non-attached important implicit-outer `revert-layer` falls to the
+  next origin, important element-attached `revert-layer` exposes important
+  style-rule declarations, and a false conditional layer does not register;
+- inherited and non-inherited properties resolve `initial`, `inherit`, `unset`,
+  `revert`, and `revert-layer` only after cascade selection from a retained
+  lower-candidate stack, including lower layer and lower origin fallback.
+  Author `revert` must remove animation-origin candidates as well as author
+  candidates;
+- `overflow: clip` and `hidden` produce exact canonical Engine2D clip pixels,
+  while only `hidden`, `auto`, and `scroll` expose scroll-container behavior.
+  Exact controls assert `(Visible, Hidden)` computes to `(Auto, Hidden)` and
+  `(Clip, Scroll)` to `(Hidden, Scroll)`; root pair propagation and HTML-body
+  fallback preserve computed state, make the source element used pair
+  `Visible`, and map viewport used `Visible`/`Clip` to `Auto`/`Hidden`;
+  replaced computed `Hidden` has used `Clip`; default clip pixels use the
+  padding box at zero `overflow-clip-margin`; `Clip` creates neither BFC nor
+  programmatic scroll while `Hidden` does. Unsupported boundary rows stay RED
+  rather than being omitted.
+
+Fold these exact controls under the four visible steps; they are not extra
+manual steps:
+
+| Control | Required result |
+| --- | --- |
+| `@layer low { #t { overflow:hidden } } #t { overflow:revert-layer }` | computed `Hidden` from `low` |
+| direct normal `Clip` plus child-layer normal `Hidden` inside one parent layer | direct implicit-outer `Clip` wins |
+| direct important `Clip` plus child-layer important `Hidden` inside one parent layer | child-layer `Hidden` wins |
+| false conditional declares `middle`, then applicable `late` registers before `middle` reopens | `middle` registers later and wins normal precedence |
+| same sheet after viewport makes the earlier `middle` condition true | registry/ranks rebuild; `middle` registers before `late`, so `late` wins normal precedence |
+| resize leaves every document-global condition unchanged; element-sensitive wrapper contains `@layer` | registry/ranks are reused; element-sensitive layer registration rejects as unsupported |
+| unlayered style-rule `overflow:revert-layer!important` over author-normal `Hidden`, with no explicit important candidate | user-agent `Visible`, not author-normal `Hidden` |
+| inline `overflow:revert-layer!important` over style-rule `overflow:hidden!important` | style-rule `Hidden` |
+| author `overflow:revert!important` plus sampled animation `overflow:hidden` | user-agent `Visible`; animation is removed |
+| descendant toggles `.hot` under `article:has(.hot)` | the candidate `article` ancestor is invalidated and recomputed |
+| child insert/reorder changes `:first-child`/`:nth-child` and an ancestor class changes a descendant selector | affected sibling/child cohort and dependent descendants are invalidated; unrelated branch cache remains hit |
+| computed pairs `(Visible, Hidden)` and `(Clip, Scroll)` | `(Auto, Hidden)` and `(Hidden, Scroll)` |
+| HTML root pair not both `Visible`; then root pair both `Visible` with first body pair | viewport uses root in the first case and body in the second; propagation source used pair is `Visible`; viewport maps `Visible`/`Clip` to `Auto`/`Hidden` |
+| replaced `Hidden`, non-replaced `Clip`, and `Clip` with omitted clip margin | replaced computed/used are `Hidden`/`Clip`; `Clip` cannot programmatically scroll or create a BFC; exact clip edge is padding-box + `0px` |
+
+The performance row requires one realistic layered fixture to report
+stylesheet parse, matched candidates, declarations visited, occupied bands,
+cache hits/misses, invalidated nodes, elapsed time, and max RSS. Acceptance is
+O(N) cascade work, where N is candidate rules plus matched declarations, with
+precomputed band ranks, `occupied_bands <= matched_declarations`, and traversal
+of occupied bands only—no per-node dense global-layer scan, candidate sort,
+declaration-text concatenation, or per-frame static-rule reparse. A
+viewport/condition truth flip must show registry/rank rebuild; unchanged truth
+must show reuse. This design cites
+<https://www.w3.org/TR/css-cascade-5/> and
+<https://www.w3.org/TR/css-overflow-3/>; it creates no production claim.
+
+## Bookmark title persistence SSpec (PROPOSED / RED)
+
+Target the existing modern scenario at
+`test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`.
+The generated manual must expose exactly these four steps:
+
+1. `Open bounded titled documents through hosted chrome`
+2. `Commit bookmarks through the parent profile owner`
+3. `Restart the renderer generation and profile-backed window`
+4. `List persisted bookmarks with safe titles`
+
+The setup creates two canonical HTTPS documents. One title is exactly 512
+UTF-8 bytes, including a multibyte boundary; the other is 513 bytes. Step 2
+must traverse the real parent Favorite release and profile transaction, not
+call `BrowserSession.add_favorite` directly. Step 3 performs a site-swap
+generation replacement and then closes and reopens the profile-backed window.
+
+The in-process parity branch uses the existing H1 mock registry and only
+`HostedWebContentRegistry` public actions: create with a file-backed
+`BrowserBookmarkStore`, advance the window, focus/type/submit the address,
+advance to consume the mock response, release Favorite, close, then construct a
+new registry from the same profile path. It must not read or mutate
+`registry.sessions[*].browser` and must not call any BrowserSession Favorite
+method. The reopened registry's parent-owned `profile_bookmarks` is compared
+with the sandbox production snapshot inside the same four visible steps.
+
+Required assertions use built-in matchers only:
+
+- the admitted 512-byte title persists byte-for-byte beside the unchanged
+  canonical URL;
+- the 513-byte title is not persisted and its restored UI bookmark label is
+  the canonical URL fallback;
+- both restored bookmark nodes retain the correct `href`, add/remove remains
+  canonical-URL based, and no duplicate row appears;
+- an `SBRF8` title with stale generation, stale reply ID, wrong current URL,
+  NUL, or an encoded 513-byte payload cannot update the parent's latest title;
+- title lengths above 684, noncanonical base64, checked-offset overflow or
+  truncation, and encoded-plus-decoded title work exceeding the remaining
+  1 MiB frame/Draw-IR budget reject before decoded-title allocation;
+- legacy `SBRF7` renders with no title witness and cannot reuse a prior
+  generation's title.
+
+The pre-fix RED is the hosted `(url, url)` persistence call: even the valid
+512-byte document title becomes the URL in both the sandbox parent and
+`HostedWebContentRegistry` reconciliation. Source inspection or direct
+BrowserSession-only coverage cannot promote this scenario. No bootstrap or
+Rust-seed result is admissible.
+
+## Rejected plan gates (HOLD/FAIL)
+
+- Hosted HTTPS reached the three-review cap: HSTS belongs to the broker, not
+  the worker, and renderer launch must unset `LD_LIBRARY_PATH`.
+- Parent history reached the three-review cap: `SBRHJ1` lacks one canonical
+  omitted/null/empty URL representation and an exact fragment-preserving
+  empty-string oracle.
+
+All other reviewed aspects are sound but unpromoted. Neither failed design is
+an executable or production claim; the history design slot remains pending.
+
+## Held SimpleScript listener evidence
+
+Status: **STATIC/MANUAL/FINAL-REVIEW PASS; UNEXECUTED / UNMERGED**.
+
+The bundle at `/tmp/simple-simple-script-events.5IEatF` repairs the prior
+vacuous system claim by loading SimpleScript `listen` declarations through
+`BrowserSession` and invoking only canonical `dispatch_dom_event`; it does not
+use `inject_dom_event`. Its phase-2 manual is `complete 1/1`, `stubs 0/1`, with
+exactly four visible steps:
+
+1. `Register exact capture and bubble listeners`
+2. `Dispatch click capture then bubble then input and change`
+3. `Apply one checkbox default action`
+4. `Lower the mutated box through canonical Draw IR and Engine2D`
+
+Folded assertions prove target/event/action UTF-8 maxima `2048`, `64`, and
+`4096` bytes and reject `2049`, `65`, and `4097`; accept 256 live listeners,
+reject listener 257, normalize `onclick` identity without growing the set, and
+reuse a removed slot. Missing targets, unsupported actions, `on*` attribute
+actions, and malformed capture reject. Dispatch preserves pipe-bearing text
+and attribute actions, runs armed/clicked/input/change in exact order, rebinds
+executor roots after checkbox and navigation mutations, performs one checkbox
+default, and totals seven listener callbacks. Canonical rendering proves
+initial red `0xFFEF4444` present/blue `0xFF2563EB` absent, then red absent/blue
+present with changed full pixels.
+
+No executable claim exists until an admitted current full pure-Simple CLI runs
+the focused modern SSpec once.
+
+## Navigation chrome patch gate (HOLD/FAIL)
+
+`/tmp/simple-browser-chrome-state.XRePMs` reached the three-review cap with one
+remaining blocker: `clear_chrome_pressed_controls` clears the host page owner
+but does not send the existing renderer `begin_pointer(..., false)` cancel/up,
+so DOM pressed state can remain stale. The SSpec checks only the integer clear
+and therefore cannot close that behavior.
+
+All other state, paint, hit, drain, projection, partial-wire, and lifecycle
+work reviewed sound but remains unpromoted. The patch is unexecuted and
+unmerged; repair the renderer cancellation and exact DOM-state oracle in a
+fresh cycle.

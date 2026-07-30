@@ -638,3 +638,196 @@ refresh, bootstrap, or Rust-seed fallback is claimed.
 
 Both contracts are RED designs. They authorize no production or conformance
 claim until modern SSpecs and an admitted pure-Simple executable prove them.
+
+### Proposed cascade provenance detail (2026-07-30)
+
+Status: **PROPOSED / UNIMPLEMENTED**.
+
+Implementation order is deliberately narrow:
+
+1. Change `CssRuleScan` to retain ordered layer paths/statements and replace
+   `Rules` parallel declaration strings with typed `CssRule` /
+   `CssRuleDeclaration` records. Predeclared, reopened, nested, and anonymous
+   layers receive stable hierarchical identities only when their document-
+   global enclosing `@media`/`@supports` conditions apply. Give every layer a
+   separately ordered implicit outer sublayer for direct declarations. Keep
+   raw custom-property tokens. Reject element-sensitive conditional layer
+   registration until it has one document-global applicability owner.
+2. Parse each declaration once, reject invalid values, expand supported
+   shorthands, and assign per-declaration source order. Preserve origin,
+   importance, encapsulation context, layer identity/path/order,
+   element-attached style rank, and the matched selector specificity until the
+   cascade owner selects a property winner.
+3. Route tag defaults, presentational hints, matched author rules, and inline
+   declarations through that owner. Presentational hints are zero-specificity
+   author declarations before stylesheet rules; inline style retains its
+   element-attached rank. Delete priority-string concatenation only after this
+   route is complete.
+4. Resolve `initial`, `inherit`, `unset`, `revert`, and `revert-layer` in the
+   cascade owner from each property's sparse lower-candidate stack. Pass only
+   winning ordinary computed values to the style field applier; `apply_decls`
+   must no longer interpret CSS-wide values. Author `revert` removes animation
+   candidates too. Element-attached `revert-layer` removes its attached tier
+   before layer/origin fallback; this is required for important inline
+   declarations under reversed important-layer order.
+5. Route sampled animation declarations through the same owner below important
+   origins, then replace overflow booleans with per-axis
+   `CssOverflowMode`. Apply the visible/clip cross-axis computed rules. Only
+   after these gates pass may `Clip` lower to paint clipping without creating
+   scroll-container state. Retain separate computed and used pairs: viewport
+   propagation maps used `Visible` to `Auto` and `Clip` to `Hidden`; replaced
+   boxes map computed `Hidden` to used `Clip`; the default clip edge is
+   padding-box plus zero clip margin.
+
+The hot path uses one winner map per occupied cascade band. Each declaration
+updates one property winner by specificity then source order; a single
+precedence-ordered band walk handles layer reversal and CSS-wide rollback.
+Stylesheet parse/layer state is document-generation cached. Selector,
+presentational, and inline changes invalidate the affected node (and only
+selector/inheritance-dependent descendants). Descendant mutation also
+invalidates candidate `:has(...)` ancestors; insertion/removal/reorder
+invalidates structural sibling/child cohorts and their dependent
+ancestors/descendants. Viewport or support-condition truth changes rebuild the
+applicable layer registry, compact ranks, selector buckets, and affected
+styles; unchanged truth retains them. An animation tick overlays its sampled
+properties on cached static winners.
+
+Budgets are O(N) time, where N is candidate rules plus matched declarations,
+and O(declarations) memory after the existing selector candidate lookup, with
+no per-node rule sort, merged declaration string, raw declaration reparse, or
+dense global-layer scan. Registry build precomputes band ranks; ranked selector
+buckets reuse the existing sorted-list merge, and the node cascade traverses
+only first-seen occupied bands. `occupied_bands <= matched_declarations`.
+Debug receipts report parsed rules/declarations/layers, matched candidates,
+occupied bands, resolved properties, cache hit/miss, and invalidated nodes
+without logging CSS values.
+
+The admitted first profile is light DOM with user-agent tag defaults, HTML
+presentational hints, embedded author rules, inline style, and CSS animations.
+User sheets, shadow encapsulation, `@scope`, and transitions remain explicit
+unsupported inputs. Overflow promotion additionally requires separate RED
+matrix rows for cross-axis computation, root/body viewport propagation,
+replaced elements, float/BFC behavior, and hidden-versus-clip programmatic
+scrolling; the first non-root/non-replaced slice is not full Cascade 5 or
+Overflow 3 conformance.
+
+Exact rollback controls are: normal top-level implicit-outer
+`revert-layer` exposes the last explicit layer; important layer precedence is
+reversed; non-attached important implicit-outer `revert-layer` falls to the
+next origin, while important element-attached `revert-layer` exposes important
+style-rule declarations; author `revert` ignores both author and animation
+origins. Exact overflow controls are: `(Visible, Hidden)` computes to
+`(Auto, Hidden)`, `(Clip, Scroll)` computes to `(Hidden, Scroll)`, root/body
+propagation preserves source computed state while its element used state is
+`Visible`, viewport used `Visible`/`Clip` map to `Auto`/`Hidden`, replaced
+computed `Hidden` maps to used `Clip`, and default `Clip` pixels use the
+padding box with zero clip margin.
+
+The RED executable target is
+`test/03_system/feature/web_platform/css/cascade_provenance_overflow_clip_spec.spl`.
+Its exact visible steps are:
+
+1. `Collect declaration provenance`
+2. `Select cascade winners`
+3. `Resolve CSS-wide values`
+4. `Render overflow clip pixels`
+
+Frozen helpers are `_setup_cascade_provenance_document`,
+`_check_declaration_provenance`, `_check_cascade_winners`,
+`_check_css_wide_values`, and `_check_overflow_clip_pixels`. Before
+implementation every checker must fail explicitly with
+`fail("RED: cascade provenance and overflow clip are unimplemented")`; no
+placeholder pass is admissible.
+
+Normative references:
+
+- <https://www.w3.org/TR/css-cascade-5/#cascade-sorting>
+- <https://www.w3.org/TR/css-cascade-5/#defaulting-keywords>
+- <https://www.w3.org/TR/css-overflow-3/#valdef-overflow-clip>
+
+<!-- codex-design -->
+## RED detail contract: persisted bookmark titles (2026-07-30)
+
+**Status: PROPOSED / UNIMPLEMENTED.**
+
+### Shared interfaces
+
+- `browser_bookmark_stored_title(raw_title: text) -> text` trims the title and
+  returns it only when nonempty, NUL-free, and at most 512 UTF-8 bytes;
+  otherwise it returns the existing empty-title sentinel.
+- `browser_bookmark_title_or_url(stored_title: text, canonical_url: text) ->
+  text` returns the validated stored title or the canonical URL. The fallback
+  is computed for display and is not persisted in the title field.
+- `BrowserRendererFrameDecodeResult` gains
+  `document_title_present: bool` and `document_title: text`.
+- `HostedBrowserRendererProcess` retains `document_title`,
+  `document_title_url`, `document_title_generation`, and
+  `document_title_reply_to_request_id` only for the latest accepted frame.
+
+Both helpers live with the existing BrowserSession bookmark owner. All profile,
+snapshot, and frame title limits use the existing O(1) UTF-8 byte-length helper
+after trimming. No new module, database table, cache, or renderer command is
+introduced.
+
+### Wire and admission algorithm
+
+1. The worker applies `browser_bookmark_stored_title(current_title)` and emits
+   its result in the additive `SBRF8` title payload. The field length is the
+   base64 payload length; decoded text must be valid UTF-8, NUL-free, and at
+   most 512 bytes.
+2. Before decode, `title-len` must be canonical decimal in `0..684`. Checked
+   addition computes diagnostics, current/back/forward URL, title, image, and
+   Draw-IR offsets and proves each end is ordered and inside the received
+   payload.
+3. Only after the checked offsets locate the title slice, a nonallocating
+   alphabet/padding scan derives exact decoded length at most 512. Checked
+   subtraction reserves both `title-len` encoded bytes and derived decoded
+   bytes from the existing
+   `BROWSER_RENDERER_MAX_PAYLOAD_BYTES` 1 MiB frame/Draw-IR budget before title
+   decode or allocation.
+4. Decode succeeds only when `base64_encode(decoded_title)` exactly equals the
+   received title payload. Invalid UTF-8, NUL, noncanonical alphabet/padding,
+   offset overflow/truncation/overlap, or budget exhaustion rejects the frame.
+   The decoder accepts legacy `SBRF2..SBRF7` with no title witness. An empty
+   `SBRF8` title means absent and remains a valid fallback case.
+5. After existing message-generation and reply-ID admission, navigation commit,
+   and current-history URL validation, the parent accepts the title only when
+   the frame current URL exactly equals its canonical committed URL. Admission
+   updates all four retained witness fields atomically.
+6. Favorite toggle calls both shared helpers. Sandbox production uses the
+   admitted title only when all retained witness fields still match the active
+   generation, last accepted reply, and committed URL; otherwise its effective
+   label is the canonical-URL fallback and persistence stores the empty
+   sentinel. In-process production captures and validates
+   `BrowserSession.current_title` before dispatch, commits that stored title,
+   then reloads the canonical profile snapshot; it removes the current
+   `add_favorite(url, url)` reconciliation.
+7. `BrowserProfileStore` continues to store canonical URL plus a 0..512-byte
+   title. `BrowserSession.load_bookmark_snapshot` preserves the empty sentinel,
+   and UI-access bookmark nodes call `browser_bookmark_title_or_url`.
+
+### Lifecycle and compatibility
+
+- Navigation replacement clears the retained witness before a new request can
+  accept Favorite. Favorite remains blocked while the renderer is busy.
+- Site swap closes the old renderer and clears title state; the replacement
+  generation cannot inherit it. Reload may reuse a URL only after its own frame
+  reply supplies the new title.
+- Profile/window/host restart restores the persisted title or empty sentinel
+  through the existing revisioned snapshot. New and existing secondary
+  renderers consume the same snapshot.
+- Existing schema-version-1 databases require no migration. Existing
+  URL-as-title rows remain valid. On load, a valid URL with an invalid title
+  retains the bookmark with an empty title instead of exposing hostile text.
+- A 512-byte UTF-8 title is accepted exactly. A 513-byte, empty, NUL-containing,
+  stale-generation, stale-reply, or wrong-URL title cannot enter persistence;
+  the visible label falls back to the canonical URL without changing its
+  navigation target.
+
+### Error handling
+
+Protocol forgery fails the frame with the existing renderer-failure path.
+Hostile document content merely produces an absent title witness and does not
+deny rendering. Profile write/load failure preserves the prior immutable
+snapshot and reports the existing profile error. No error may partially change
+the bookmark URL, title, revision, or UI snapshot.
