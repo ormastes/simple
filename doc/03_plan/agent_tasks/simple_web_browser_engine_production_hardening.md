@@ -761,3 +761,19 @@ interpreter string-interpolation defect.
 The compiler lane used independent static review and did not start another
 bootstrap while concurrent sessions owned the shared cache and full-bootstrap
 processes. Its failed seed delegation probe is recorded as a failure, not PASS.
+
+## Production browser batch 12 (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `focus_editability_order` | The shared edit owner re-resolves the focused target and rechecks mutability after `focus`, before `beforeinput`. | INTEGRATED `8f2ae532371`; modern public-action SSpec/manual present |
+| `address_draft_revision` | A successful changed address draft advances the canonical UI-access revision; invalid and identical drafts do not. | INTEGRATED `8f2ae532371`; canonical address lookup and modern SSpec/manual present |
+| `script_cookie_partition` | Script cookie admission synchronizes the validated active document origin before deriving the partition key. | INTEGRATED `8f2ae532371`; hostile stale-origin SSpec/manual present |
+| `html_blockquote` | Native `blockquote` UA semantics lower through Web layout, Draw IR, and Engine2D exact pixels. | INTEGRATED `8f2ae532371`; bounded selected-profile SSpec and complete manual present |
+| `script_cancellation` | Existing timer, interval, animation-frame, and listener cancellation paths are bounded and covered; no distinct defect was found. | AUDIT COMPLETE / NO CHANGE |
+| `renderer_release` | Existing document replacement/close and current-frame retention owners release listeners, images, and retained render state; no distinct defect was found. | AUDIT COMPLETE / NO CHANGE |
+
+All changed lanes received independent static review. Static diff, spec-layout,
+placeholder, and direct-environment guards passed once. Target execution and
+docgen remain HELD because no source-admitted pure-Simple artifact exists at or
+after `ae4c3d56ce3`; no bootstrap or seed substitute was used.

@@ -1041,3 +1041,22 @@ Commit `ae4c3d56ce3` adds the focused self-hosted interpreter interpolation
 SSpec and manual. Static review passed, but phase-2/3 execution did not run:
 concurrent sessions owned the shared bootstrap cache and the isolated seed
 probe failed delegation before checking source. No target PASS is claimed.
+
+## Batch 12 executable evidence
+
+Commit `8f2ae532371` adds requirement-tagged behavioral coverage for:
+
+- a focus handler disabling its text input before `beforeinput`, with no value,
+  callback, revision, or pixel mutation;
+- changed, identical, and invalid address drafts through canonical textual UI
+  access and revision publication;
+- a stale hostile requester origin unable to read a partitioned cookie written
+  by the validated active document; and
+- native `blockquote` semantics, UA margins, exact Draw IR geometry, and exact
+  Engine2D pixels.
+
+Independent static review accepted all four lanes after correcting manual
+parity, scenario counts, traceability accounting, and an unsupported cascade
+claim. Static guards passed once. Qualified execution/docgen remain HELD:
+artifact audit found no pure-Simple binary with source provenance at or after
+the interpolation fix.
