@@ -243,6 +243,21 @@ pub fn rt_mem_attr_report(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Str(simple_runtime::value::heap::owner_report(n).into()))
 }
 
+/// Print the top-n per-owner report directly to stdout.
+///
+/// Mirrors the native runtime symbol of the same name (heap.rs) so the seed's
+/// tree-walk interpreter has parity with natively compiled code.
+///
+/// Callable from Simple as: `rt_mem_attr_report_print(n: i64)`
+pub fn rt_mem_attr_report_print(args: &[Value]) -> Result<Value, CompileError> {
+    let n = match args.first() {
+        Some(Value::Int(n)) => (*n).max(0) as usize,
+        _ => 16,
+    };
+    println!("{}", simple_runtime::value::heap::owner_report(n));
+    Ok(Value::Nil)
+}
+
 /// Get current memory usage in bytes
 ///
 /// Callable from Simple as: `memory_usage()`

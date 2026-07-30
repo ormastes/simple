@@ -307,6 +307,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_mem_attr_enabled", memory::rt_mem_attr_enabled);
     insert_simple!("rt_mem_attr_set_owner", memory::rt_mem_attr_set_owner);
     insert_simple!("rt_mem_attr_report", memory::rt_mem_attr_report);
+    insert_simple!("rt_mem_attr_report_print", memory::rt_mem_attr_report_print);
     insert_simple!("rt_mem_harden_check", memory::rt_mem_harden_check);
     insert_simple!("rt_mem_guard_stats", memory::rt_mem_guard_stats);
     insert_simple!(
