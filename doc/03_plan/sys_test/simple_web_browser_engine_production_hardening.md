@@ -87,7 +87,7 @@ lookup itself.
 |---|---|---|
 | NFR-WEB-BROWSER-001 startup | budget | START-WARM/COLD/FAIL |
 | NFR-WEB-BROWSER-002 first render/navigation | budget | RENDER-LOCAL/NAV/ERROR |
-| NFR-WEB-BROWSER-003 frame pacing | budget | FRAME-CHANGED/UNCHANGED/STALL |
+| NFR-WEB-BROWSER-003 frame pacing | budget | ANIMATION-CLOCK-PIXELS supporting; FRAME-P95/FPS fail-closed |
 | NFR-WEB-BROWSER-004 input latency | budget | INPUT-POINTER/KEYBOARD/SCROLL |
 | NFR-WEB-BROWSER-005 RSS | budget | RSS-WARM/60M/LIMIT |
 | NFR-WEB-BROWSER-006 soak retention | budget | SOAK-WARM/10K/PLATEAU |
@@ -446,6 +446,20 @@ scroll, and unchanged steps. The production budget scenarios keep their current
 `fail("NFR-WEB-BROWSER-001..017: ... not implemented")` until one healthy
 pure-Simple target produces changed/unchanged latency, allocation, RSS, and
 10,000-cycle receipts.
+
+Animation evidence split (2026-07-30): the budget spec now has one supporting
+modern SSpec scenario with four visible steps. It advances CSS and JavaScript
+from the same renderer timestamp, requires the rAF callback to observe exactly
+`16` ms, and requires a changed composition revision. Its Draw-IR oracle binds
+the `stage` rectangle to `(0,0)`, `32x24`, and exact red/blue colors before one
+persistent `Engine2dCompositorBackend` must produce exactly 768 corresponding
+pixels with zero skipped commands. A title-only revision cannot satisfy those
+checks. This remains a deterministic clock/Draw-IR/pixel oracle, not
+NFR-WEB-BROWSER-003 performance evidence. The adjacent p95/FPS and
+RSS/GC/10,000-cycle scenarios call the existing production fixture and budget
+helpers, then fail with requirement-specific missing-receipt errors. They
+remain RED until an admitted source-matched production artifact supplies real
+samples and provenance.
 
 Two-layer CSS checks now require both BrowserSession resources, back-to-front
 Draw-IR order, front-over-back Engine2D pixels, and atomic absence for CSP,
