@@ -18,6 +18,10 @@ function clickAt(webContents, point) {
   });
 }
 
+function pixelsDiffer(before, after) {
+  return !before.toBitmap().equals(after.toBitmap());
+}
+
 app.whenReady().then(async () => {
   const win = new BrowserWindow({ width: 800, height: 600, show: true,
     webPreferences: { sandbox: false } });
@@ -123,6 +127,81 @@ app.whenReady().then(async () => {
   if (buttonPoint) clickAt(win.webContents, buttonPoint);
   await new Promise(r => setTimeout(r, 100));
 
+  await win.webContents.executeJavaScript(`(function(){
+    function waitFrames(count, label) {
+      return new Promise((resolve, reject) => {
+        let seen = 0;
+        const timeout = setTimeout(() => reject(new Error(label + '-timeout')), 1000);
+        const tick = () => {
+          seen += 1;
+          if (seen >= count) {
+            clearTimeout(timeout);
+            resolve();
+          } else requestAnimationFrame(tick);
+        };
+        requestAnimationFrame(tick);
+      });
+    }
+    const rafProbe = document.createElement('div');
+    rafProbe.style.cssText = 'position:fixed;left:100px;top:100px;width:4px;height:4px;background:#000;opacity:0.2;z-index:2147483647';
+    document.body.appendChild(rafProbe);
+    window.__chromiumAnimationCheck = {
+      rafProbe, rafBefore: Number(getComputedStyle(rafProbe).opacity), waitFrames
+    };
+  })();`);
+  const rafBeforePixels = await win.webContents.capturePage({ x: 100, y: 100, width: 4, height: 4 });
+  await win.webContents.executeJavaScript(`(async function(){
+    const state = window.__chromiumAnimationCheck;
+    await state.waitFrames(1, 'raf-before-update');
+    state.rafProbe.style.opacity = '0.8';
+    await state.waitFrames(1, 'raf-after-update');
+  })();`);
+  const rafAfterPixels = await win.webContents.capturePage({ x: 100, y: 100, width: 4, height: 4 });
+
+  await win.webContents.executeJavaScript(`(async function(){
+    const state = window.__chromiumAnimationCheck;
+
+    const style = document.createElement('style');
+    style.textContent = '@keyframes chromium-event-check-fade { from { opacity: 0.15; } to { opacity: 0.85; } }';
+    document.head.appendChild(style);
+    const cssProbe = document.createElement('div');
+    cssProbe.style.cssText = 'position:fixed;left:106px;top:100px;width:4px;height:4px;background:#000;animation:chromium-event-check-fade 1000ms linear forwards;z-index:2147483647';
+    document.body.appendChild(cssProbe);
+    const cssAnimation = cssProbe.getAnimations()[0];
+    await Promise.race([
+      cssAnimation.ready,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('css-animation-ready-timeout')), 1000))
+    ]);
+    await state.waitFrames(1, 'css-before-capture');
+    state.cssProbe = cssProbe;
+    state.cssStyle = style;
+    state.cssBefore = Number(getComputedStyle(cssProbe).opacity);
+  })();`);
+  const cssBeforePixels = await win.webContents.capturePage({ x: 106, y: 100, width: 4, height: 4 });
+  await win.webContents.executeJavaScript(`window.__chromiumAnimationCheck.waitFrames(8, 'css-after-capture')`);
+  const cssAfterPixels = await win.webContents.capturePage({ x: 106, y: 100, width: 4, height: 4 });
+  const animation = await win.webContents.executeJavaScript(`(function(){
+    const state = window.__chromiumAnimationCheck;
+    const rafBefore = state.rafBefore;
+    const rafAfter = Number(getComputedStyle(state.rafProbe).opacity);
+    const cssBefore = Number(getComputedStyle(state.cssProbe).opacity);
+    const cssAnimation = state.cssProbe.getAnimations()[0];
+    const cssCurrentTimeMs = cssAnimation && Number(cssAnimation.currentTime);
+    const cssAfter = cssBefore;
+    state.rafProbe.remove();
+    state.cssProbe.remove();
+    state.cssStyle.remove();
+    delete window.__chromiumAnimationCheck;
+    return { raf_before_opacity: rafBefore, raf_after_opacity: rafAfter,
+      css_before_opacity: state.cssBefore, css_after_opacity: cssAfter,
+      css_current_time_ms: cssCurrentTimeMs };
+  })();`);
+  animation.raf_pixel_changed = pixelsDiffer(rafBeforePixels, rafAfterPixels);
+  animation.css_pixel_changed = pixelsDiffer(cssBeforePixels, cssAfterPixels);
+  animation.raf_property_advanced = animation.raf_after_opacity > animation.raf_before_opacity && animation.raf_pixel_changed;
+  animation.css_property_advanced = animation.css_after_opacity > animation.css_before_opacity &&
+    animation.css_pixel_changed && animation.css_current_time_ms > 0;
+
   const result = await win.webContents.executeJavaScript(`(function(){
     const out = window.__chromiumEventCheck;
     const name = document.getElementById('name');
@@ -144,7 +223,10 @@ app.whenReady().then(async () => {
       out.submit_trusted === true &&
       out.submitter_matches_button === true &&
       out.submit_default_prevented_before_cancel === false &&
-      out.submit_canceled === true;
+      out.submit_canceled === true &&
+      ${JSON.stringify(animation.raf_property_advanced)} === true &&
+      ${JSON.stringify(animation.css_property_advanced)} === true;
+    Object.assign(out, ${JSON.stringify(animation)});
     return out;
   })();`);
   await new Promise(resolve => {
@@ -152,4 +234,8 @@ app.whenReady().then(async () => {
   });
   win.destroy();
   app.exit(result.pass ? 0 : 1);
+}).catch(error => {
+  process.stdout.write('EVENT_CHECK ' + JSON.stringify({ pass: false, error: String(error) }) + '\n', () => {
+    app.exit(1);
+  });
 });
