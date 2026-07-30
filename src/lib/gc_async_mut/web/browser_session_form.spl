@@ -1,7 +1,8 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_find_path_to_id, be_dom_get_attr, be_dom_get_text_content,
-    be_dom_has_attr, be_dom_matches_identity
+    be_dom_has_attr, be_dom_matches_identity, be_dom_event_identity,
+    be_dom_route_identity, be_dom_form_owner_id
 }
 use std.gc_async_mut.web.browser_session_url.{
     browser_url_form_encode, resolve_relative_url, without_fragment
@@ -162,8 +163,23 @@ fn _browser_select_update(
 fn browser_select_update(node: BeDomNode, value: text) -> BrowserSelectUpdate:
     _browser_select_update(node, value, false, false)
 
-fn _browser_control_pairs(node: BeDomNode, submitter_id: text) -> [text]:
+fn _browser_form_control_identity(node: BeDomNode, form_id: text) -> text:
+    if form_id.starts_with("\u{0000}route-node:"):
+        return be_dom_route_identity(node)
+    be_dom_event_identity(node)
+
+fn _browser_control_pairs(
+    root: BeDomNode, node: BeDomNode, form_id: text, submitter_id: text
+) -> [text]:
     var pairs: [text] = []
+    if (
+        (node.tag_name == "input" or node.tag_name == "button" or
+         node.tag_name == "textarea" or node.tag_name == "select") and
+        be_dom_form_owner_id(
+            root, _browser_form_control_identity(node, form_id)
+        ) != form_id
+    ):
+        return pairs
     if be_dom_has_attr(node, "disabled"):
         return pairs
     val name = be_dom_get_attr(node, "name")
@@ -221,7 +237,7 @@ fn _browser_control_pairs(node: BeDomNode, submitter_id: text) -> [text]:
             pairs.push(_browser_form_pair(name, value))
         return pairs
     for child in node.children:
-        for pair in _browser_control_pairs(child, submitter_id):
+        for pair in _browser_control_pairs(root, child, form_id, submitter_id):
             pairs.push(pair)
     pairs
 
@@ -284,7 +300,7 @@ fn browser_form_submission(
             method: "", url: "", body: "", content_type: "",
             error: "unsupported form encoding: {enctype}"
         )
-    val body = _browser_control_pairs(form, submitter_id).join("&")
+    val body = _browser_control_pairs(root, root, form_id, submitter_id).join("&")
     if method == "post":
         return BrowserFormSubmission(
             method: "POST", url: action, body: body,

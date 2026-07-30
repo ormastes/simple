@@ -28,7 +28,7 @@ use std.common.web.browser_renderer_protocol.{
     BrowserRendererNetworkDecodeResult,
     browser_renderer_action_decode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
-    browser_renderer_frame_decode,
+    browser_renderer_frame_decode, browser_renderer_frame_encode,
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_fetch_request_decode,
     browser_renderer_fetch_request_encode,
@@ -1460,6 +1460,38 @@ describe "hosted browser renderer broker policy":
             "https://a.test/start#view",
             ""
         )).to_be(true)
+
+    it "rejects a forged legacy frame before committing a pending document":
+        step("Send a state-less renderer frame while a document is pending")
+        var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+        broker.document_url = "https://source.test/start"
+        broker.document_origin = "https://source.test"
+        broker.history_urls = ["https://source.test/start"]
+        broker.history_index = 0
+        broker.history_current_url = "https://source.test/start"
+        broker.pending_history_action = "push"
+        broker.pending_document_commit_url = "https://target.test/private"
+        broker.provisional_document_origin = "https://target.test"
+        broker.expected_reply_to_request_id = 2
+        val forged_wire = browser_renderer_frame_encode(
+            draw_ir_composition("", "", "", []), 1, 2
+        )
+        expect(forged_wire.ok).to_be(true)
+        val forged = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(1), forged_wire.wire
+            ).message,
+            640, 480
+        )
+        expect(forged.history_state_present).to_be(false)
+
+        step("Fail closed before the forged frame can commit the target")
+        val rejected = broker._accept_decoded_frame(forged, 1)
+        expect(rejected.ok).to_be(false)
+        expect(rejected.reason).to_equal("missing-frame-history")
+        expect(broker.state).to_equal("failed")
+        expect(broker.document_url).to_equal("")
+        expect(broker.history_urls.len()).to_equal(0)
 
     it "resolves duplicate history URLs in the requested direction":
         var back = HostedBrowserRendererProcess.create(1, 640, 480)

@@ -1259,6 +1259,90 @@ expect(
 
 </details>
 
+#### should retire cached frame resources before a site replacement is ready
+
+- Render one retained browser frame through the shared compositor
+  - Protocol capture: after_step
+  - Expected: exactly one compositor render and a 16×16 frame.
+- Route the retained generation through a cross-site replacement
+  - Protocol capture: after_step
+  - Expected: before the replacement can become ready, the old pending pixels,
+    retained images, cached resources, and cached result are all empty.
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+step("Render one retained browser frame through the shared compositor")
+var worker = HostedBrowserRendererWorkerSession.create(16, 16)
+val initial = worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 81, request_id: 2,
+    payload: "<main>lifecycle</main>"
+))
+val frame = browser_renderer_frame_decode(
+    browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(81), initial.wire
+    ).message,
+    16, 16
+)
+expect(frame.ok).to_be(true)
+var raster = Engine2dCompositorBackend.create_named(16, 16, "software")
+val rendered = raster.render_draw_ir_composition_resources_revision(
+    frame.composition, frame.image_resources, 81, frame.composition_revision
+)
+expect(rendered.pixels.len()).to_equal(16 * 16)
+expect(raster.revision_render_count).to_equal(1)
+
+step("Route the retained generation through a cross-site replacement")
+var renderer = HostedBrowserRendererProcess.create(81, 16, 16)
+renderer.state = "active"
+renderer.navigation_permit = HostedBrowserNavigationPermit(
+    active: true, url: "https://replacement.test/page", method: "GET",
+    headers: "", body: "", content_type: "", redirect_count: 0
+)
+renderer.site_lock = "https://old.test"
+renderer.site_swap_pending = true
+renderer.site_swap_site = "https://replacement.test"
+renderer.retained_image_resources = [simpleos_host_gpu_image_resource(
+    "asset://lifecycle", 1, 1, [0xFF2563EBu32]
+)]
+var entry = HostedBrowserRendererEntry.create(81, renderer, raster, 0, "")
+entry.ready = true
+entry.pending_frame = WmContentFrame(
+    window_id: "81", scene_revision: 1, content_revision: 1,
+    origin_kind: "web", width: 16, height: 16, pixels: rendered.pixels,
+    checksum: 1u64, parent_window_id: "", offset_x: 0, offset_y: 0
+)
+var registry = HostedBrowserRendererRegistry.create(
+    "/bin/true", ""
+)
+registry.entries.push(entry)
+val routed = registry._accept_polled_result(
+    0,
+    HostedBrowserRendererResult(
+        ok: false, reason: HOSTED_BROWSER_SITE_SWAP_REQUIRED,
+        next_animation_ms: -1, producer_generation: 81, composition_revision: 1,
+        composition: frame.composition, image_resources: [],
+        cpu_composited_count: 0, cpu_composited_sha256: "",
+        solid_material_count: 0, solid_material_sha256: "", diagnostics: ""
+    ),
+    "", "", 0, 0
+)
+expect(routed).to_equal("none")
+val retired = registry.entries[0]
+expect(retired.ready).to_be(false)
+expect(retired.renderer.state).to_equal("starting")
+expect(retired.renderer_closed).to_be(false)
+expect(retired.pending_frame.pixels.len()).to_equal(0)
+expect(retired.renderer.retained_image_resources.len()).to_equal(0)
+expect(retired.raster.revision_cache_resources.len()).to_equal(0)
+expect(retired.raster.revision_cache_result).to_be_nil()
+val _ = registry.close()
+worker.close()
+```
+
+</details>
+
 #### should invalidate only dirty retained browser render stages
 
 - Invalidate document and title changes conservatively

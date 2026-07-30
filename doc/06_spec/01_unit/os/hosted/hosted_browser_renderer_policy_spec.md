@@ -1618,6 +1618,60 @@ expect(broker._frame_history_state_valid(
 
 </details>
 
+#### rejects a forged legacy frame before committing a pending document
+
+A legacy `SBRF2` frame has no history state. While a broker-authorized
+document response is pending, that omission fails and tears down the broker
+before it can commit the target URL or advance history. Only a state-bearing
+renderer reply may complete the transition.
+
+- Send a state-less renderer frame while a document is pending
+   - Expected: the decoded frame has no history state
+- Fail closed before the forged frame can commit the target
+   - Expected: rejection reason equals `missing-frame-history`
+   - Expected: broker is failed and closed without committing the target
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Send a state-less renderer frame while a document is pending")
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.document_url = "https://source.test/start"
+broker.document_origin = "https://source.test"
+broker.history_urls = ["https://source.test/start"]
+broker.history_index = 0
+broker.history_current_url = "https://source.test/start"
+broker.pending_history_action = "push"
+broker.pending_document_commit_url = "https://target.test/private"
+broker.provisional_document_origin = "https://target.test"
+broker.expected_reply_to_request_id = 2
+val forged_wire = browser_renderer_frame_encode(
+    draw_ir_composition("", "", "", []), 1, 2
+)
+expect(forged_wire.ok).to_be(true)
+val forged = browser_renderer_frame_decode(
+    browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(1), forged_wire.wire
+    ).message,
+    640, 480
+)
+expect(forged.history_state_present).to_be(false)
+
+step("Fail closed before the forged frame can commit the target")
+val rejected = broker._accept_decoded_frame(forged, 1)
+expect(rejected.ok).to_be(false)
+expect(rejected.reason).to_equal("missing-frame-history")
+expect(broker.state).to_equal("failed")
+expect(broker.document_url).to_equal("")
+expect(broker.history_urls.len()).to_equal(0)
+```
+
+</details>
+
 #### resolves duplicate history URLs in the requested direction
 
 - var back = HostedBrowserRendererProcess create

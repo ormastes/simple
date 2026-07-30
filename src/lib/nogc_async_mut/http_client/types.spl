@@ -190,17 +190,60 @@ fn _url_valid_host(host: text) -> bool:
         i = i + 1
     true
 
-fn _url_valid_ipv6(inner: text) -> bool:
-    if inner.length() == 0:
+fn _url_valid_ipv4(text: text) -> bool:
+    val parts = text.split(".")
+    if parts.len() != 4:
         return false
-    var i = 0
-    while i < inner.length():
-        val c = inner.substring(i, i + 1)
-        if not (_url_is_digit(c) or c == ":" or c == "."
-                or (c >= "a" and c <= "f") or (c >= "A" and c <= "F")):
+    for part in parts:
+        if part.len() == 0 or part.len() > 3:
             return false
-        i = i + 1
+        var value = 0
+        for ch in part:
+            if not _url_is_digit(ch):
+                return false
+            value = value * 10 + (ch.char_code_at(0) - 48)
+        if value > 255:
+            return false
     true
+
+fn _url_valid_ipv6(inner: text) -> bool:
+    if inner.len() == 0 or not inner.contains(":"):
+        return false
+    val compression = inner.index_of("::")
+    if compression >= 0 and compression != inner.last_index_of("::"):
+        return false
+    val before = if compression >= 0: inner.slice(0, compression) else: inner
+    val after = if compression >= 0: inner.slice(compression + 2, inner.len()) else: ""
+    if before.ends_with(":") or after.starts_with(":"):
+        return false
+    var groups: [text] = []
+    if before != "":
+        for group in before.split(":"):
+            groups.push(group)
+    if after != "":
+        for group in after.split(":"):
+            groups.push(group)
+    var units = 0
+    var index = 0
+    while index < groups.len():
+        val group = groups[index]
+        if group.contains("."):
+            if index != groups.len() - 1 or not _url_valid_ipv4(group):
+                return false
+            units = units + 2
+        else:
+            if group.len() == 0 or group.len() > 4:
+                return false
+            for ch in group:
+                if not (_url_is_digit(ch) or
+                    (ch >= "a" and ch <= "f") or
+                    (ch >= "A" and ch <= "F")):
+                    return false
+            units = units + 1
+        index = index + 1
+    if compression >= 0:
+        return units < 8
+    units == 8
 
 fn parse_url(url: text) -> Option<UrlParts>:
     """Parse an absolute URL, fail-closed.

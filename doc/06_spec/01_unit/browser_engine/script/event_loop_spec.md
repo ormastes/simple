@@ -1,34 +1,44 @@
-"""
-# EventLoop Specification
+# EventLoop retained-work bound
 
-**Feature IDs:** #M15-EVENT-LOOP
-**Category:** Stdlib
-**Difficulty:** 3/5
-**Status:** Draft
-**Requirements:** N/A
-**Plan:** N/A
-**Design:** N/A
-**Research:** N/A
-**Artifacts:** N/A
+> **Manual status:** `docgen-pending` — this is a complete manual mirror of
+> the executable SSpec, maintained manually because the local runtime cannot
+> complete its ABI probe. Regenerate with `bin/simple spipe-docgen
+> test/01_unit/browser_engine/script/event_loop_spec.spl --output doc/06_spec
+> --no-index` when a usable pure-Simple runtime is available.
 
-## Overview
+**Traceability:** REQ-WEB-BROWSER-017, NFR-WEB-BROWSER-006.
 
-Tests for `EventLoop` in
-`src/lib/gc_async_mut/gpu/browser_engine/script/event_loop.spl` (REQ-4 / AC-3).
-All specs FAIL until that module is implemented.
+## Scope
 
-## Key Behaviors
+`EventLoop` owns the browser SimpleScript timer and animation-frame queues.
+The queues retain callback identifiers until their deadline or frame drain, so
+they must reject excess work at the owner boundary even when a caller does not
+use `SimpleScriptExecutor`.
 
-- `EventLoop.new()` creates an empty event loop with no pending timers.
-- `schedule_raf(callback_id)` registers a callback for the next rAF slot.
-- `cancel_timer(timer_id)` removes a pending macrotask timer.
-- `pending_timer_count()` returns number of pending timers.
-- `pending_raf_count()` returns number of pending rAF callbacks.
-- Timers scheduled with a future deadline are not fired before their time.
-- Timers scheduled with a past/current deadline fire on the next `tick`.
-"""
+## Security and performance contract
 
-# @req REQ-WEB-BROWSER-017 NFR-WEB-BROWSER-006
+- Each timer queue and animation-frame queue retains at most 256 entries.
+- A timer registration at capacity returns `-1` and leaves the queue unchanged.
+- An animation-frame registration at capacity is dropped; existing callbacks
+  still run and a drained frame accepts newly requested animation work.
+- Draining a queue releases its retained callback identifiers. Animation is
+  deliberately not disabled.
+
+## Executable evidence
+
+`test/01_unit/browser_engine/script/event_loop_spec.spl`
+
+| Scenario | Steps | Oracle |
+| --- | --- | --- |
+| `SEC-RAF-001` | Queue 257 frame callbacks, drain, schedule another callback | Pending count stays at 256; the drain returns 256; the next frame accepts one callback. |
+| `SEC-TIMER-001` | Queue 257 future timers | Pending count stays at 256 and the final registration returns `-1`. |
+
+These scenarios exercise the shared owner directly, which covers timer API and
+any future host caller that bypasses higher-level executor admission checks.
+
+## Complete executable mirror
+
+```simple
 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{
@@ -119,3 +129,15 @@ describe "EventLoop":
             val future_us = 10000000000
             val fired = el.expired_timer_count_before(future_us)
             expect(fired).to_equal(0)
+```
+
+The executable source's module documentation is reproduced by this manual's
+scope and contract sections; its executable code is mirrored above verbatim.
+
+## Run
+
+```sh
+bin/simple test test/01_unit/browser_engine/script/event_loop_spec.spl --mode=interpreter
+```
+
+The local deployed runtime must pass its ABI probe before this command can run.
