@@ -230,6 +230,7 @@ impl Clone for Value {
             Value::Float32(f) => Value::Float32(*f),
             Value::Bool(b) => Value::Bool(*b),
             Value::Str(s) => Value::shared_text(Arc::clone(s)),
+            Value::StrBytes(b) => Value::StrBytes(Arc::clone(b)),
             Value::Symbol(s) => Value::Symbol(s.clone()),
             Value::Array(a) => Value::Array(Arc::clone(a)),
             Value::FrozenArray(a) => Value::FrozenArray(a.clone()),
@@ -348,6 +349,10 @@ impl PartialEq for Value {
             (Value::Float32(a), Value::Int(b)) | (Value::Int(b), Value::Float32(a)) => (*a as f64) == (*b as f64),
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            // Byte-wise text equality across the raw-fragment variant.
+            (Value::StrBytes(a), Value::StrBytes(b)) => a == b,
+            (Value::Str(a), Value::StrBytes(b)) => a.as_bytes() == b.as_slice(),
+            (Value::StrBytes(a), Value::Str(b)) => a.as_slice() == b.as_bytes(),
             (Value::Symbol(a), Value::Symbol(b)) => a == b,
             (Value::Array(a), Value::Array(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => a == b,

@@ -332,6 +332,7 @@ impl Value {
             Value::Float(f) => *f != 0.0,
             Value::Float32(f) => *f != 0.0,
             Value::Str(s) => !s.is_empty(),
+            Value::StrBytes(b) => !b.is_empty(),
             Value::Symbol(_) => true,
             Value::Array(a) => !a.is_empty(),
             Value::FrozenArray(a) => !a.is_empty(),
@@ -371,9 +372,33 @@ impl Value {
         }
     }
 
+    /// Build a text value from raw bytes: valid UTF-8 collapses to `Str`;
+    /// invalid bytes are preserved as `StrBytes` so byte-indexed slicing is
+    /// BYTE-TRANSPARENT — mid-codepoint fragments survive reassembly and
+    /// re-validate on concatenation/join, matching the compiled lane
+    /// (raw-byte text). U+FFFD substitution at slice time shredded every
+    /// fragment-reassembly parser (redeploy readiness NO-GO blocker).
+    pub fn text_from_bytes(bytes: Vec<u8>) -> Value {
+        match String::from_utf8(bytes) {
+            Ok(s) => Value::text(s),
+            Err(e) => Value::StrBytes(std::sync::Arc::new(e.into_bytes())),
+        }
+    }
+
+    /// Raw bytes of a text-like value (`Str` or `StrBytes`); None otherwise.
+    pub fn text_bytes_view(&self) -> Option<&[u8]> {
+        match self {
+            Value::Str(s) => Some(s.as_bytes()),
+            Value::StrBytes(b) => Some(b.as_slice()),
+            _ => None,
+        }
+    }
+
     pub fn to_display_string(&self) -> String {
         match self {
             Value::Str(s) => s.as_ref().clone(),
+            // Display boundary: lossy render is allowed for raw fragments.
+            Value::StrBytes(b) => String::from_utf8_lossy(b).into_owned(),
             Value::Symbol(s) => format!(":{s}"),
             Value::Int(i) => i.to_string(),
             Value::UInt { value, .. } => value.to_string(),
@@ -562,6 +587,7 @@ impl Value {
             Value::Float32(_) => "f32",
             Value::Bool(_) => "bool",
             Value::Str(_) => "str",
+            Value::StrBytes(_) => "str",
             Value::Symbol(_) => "symbol",
             Value::Array(_) => "array",
             Value::FrozenArray(_) => "array",
@@ -612,6 +638,7 @@ impl Value {
             Value::Float32(_) => ValueKind::Float,
             Value::Bool(_) => ValueKind::Bool,
             Value::Str(_) => ValueKind::String,
+            Value::StrBytes(_) => ValueKind::String,
             Value::Symbol(_) => ValueKind::Symbol,
             Value::Array(_) => ValueKind::Array,
             Value::FrozenArray(_) => ValueKind::Array,

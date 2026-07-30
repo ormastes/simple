@@ -1105,6 +1105,17 @@ pub enum Value {
     Float32(f32),
     Bool(bool),
     Str(SharedText),
+    /// Text carrying raw bytes that are not valid UTF-8 on their own.
+    /// Produced ONLY by byte-indexed text slicing that splits a multi-byte
+    /// codepoint (s[i:i+1] walks). The compiled lane's text is raw bytes, so
+    /// a mid-codepoint fragment must survive reassembly: concatenation and
+    /// join re-validate and collapse back to `Str` the moment the joined
+    /// bytes form valid UTF-8. Substituting U+FFFD at slice time instead
+    /// (the previous behavior) shredded every fragment-reassembly parser —
+    /// see doc/09_report/seed_redeploy_readiness_2026-07-30.md (the NO-GO
+    /// blocker). Display/keying boundaries may render it lossily; equality
+    /// and length are byte-wise.
+    StrBytes(Arc<Vec<u8>>),
     Symbol(String),
     /// Mutable array (default for array literals)
     /// Wrapped in Arc for O(1) clone (COW via Arc::make_mut for mutations)

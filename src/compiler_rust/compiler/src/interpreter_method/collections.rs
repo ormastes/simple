@@ -246,8 +246,20 @@ pub fn handle_array_methods(
                 impl_methods,
             )?
             .to_display_string();
-            let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
-            Value::text(parts.join(&sep))
+            // Byte-aware join: text-like items contribute raw bytes so
+            // mid-codepoint slice fragments (Value::StrBytes) reassemble and
+            // re-validate instead of being lossy-rendered to U+FFFD.
+            let mut joined: Vec<u8> = Vec::new();
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 {
+                    joined.extend_from_slice(sep.as_bytes());
+                }
+                match v.text_bytes_view() {
+                    Some(b) => joined.extend_from_slice(b),
+                    None => joined.extend_from_slice(v.to_display_string().as_bytes()),
+                }
+            }
+            Value::text_from_bytes(joined)
         }
         "sum" => {
             let mut total: i64 = 0;

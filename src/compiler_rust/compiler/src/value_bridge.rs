@@ -291,6 +291,8 @@ impl From<&Value> for BridgeValue {
             Value::Float32(f) => BridgeValue::float(*f as f64),
             Value::Bool(b) => BridgeValue::bool(*b),
             Value::Str(s) => BridgeValue::string(s),
+            // FFI boundary: lossy render is allowed for raw byte fragments.
+            Value::StrBytes(bs) => BridgeValue::string(&String::from_utf8_lossy(bs).into_owned()),
             Value::Symbol(s) => BridgeValue::symbol(s),
             Value::Array(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),
             Value::FrozenArray(items) => Self::from_vec_with_tag(items, bridge_tags::ARRAY),

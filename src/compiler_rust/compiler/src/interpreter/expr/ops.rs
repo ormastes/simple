@@ -661,6 +661,14 @@ pub(super) fn eval_op_expr(
             let result = match op {
                 BinOp::Add => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::text(concat_text(a, b))),
+                    // Raw-fragment text concat: byte-concatenate and
+                    // re-validate, so mid-codepoint slice fragments collapse
+                    // back to Str the moment they form valid UTF-8.
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
+                        let mut joined = a.text_bytes_view().unwrap_or(&[]).to_vec();
+                        joined.extend_from_slice(b.text_bytes_view().unwrap_or(&[]));
+                        Ok(Value::text_from_bytes(joined))
+                    }
                     (Value::Str(a), b) => {
                         let b = b.to_display_string();
                         Ok(Value::text(concat_text(a, &b)))
@@ -951,6 +959,9 @@ pub(super) fn eval_op_expr(
                 }
                 BinOp::Lt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a < b)),
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
+                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) < b.text_bytes_view().unwrap_or(&[])))
+                    }
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -980,6 +991,9 @@ pub(super) fn eval_op_expr(
                 },
                 BinOp::Gt => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a > b)),
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
+                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) > b.text_bytes_view().unwrap_or(&[])))
+                    }
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -1009,6 +1023,9 @@ pub(super) fn eval_op_expr(
                 },
                 BinOp::LtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a <= b)),
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
+                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) <= b.text_bytes_view().unwrap_or(&[])))
+                    }
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -1038,6 +1055,9 @@ pub(super) fn eval_op_expr(
                 },
                 BinOp::GtEq => match (&left_val, &right_val) {
                     (Value::Str(a), Value::Str(b)) => Ok(Value::Bool(a >= b)),
+                    (a @ (Value::Str(_) | Value::StrBytes(_)), b @ (Value::Str(_) | Value::StrBytes(_))) => {
+                        Ok(Value::Bool(a.text_bytes_view().unwrap_or(&[]) >= b.text_bytes_view().unwrap_or(&[])))
+                    }
                     (Value::Str(_), Value::Int(n)) | (Value::Int(n), Value::Str(_)) => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)

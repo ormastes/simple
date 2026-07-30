@@ -433,15 +433,17 @@ pub(super) fn eval_collection_expr(
                             let bytes = s.as_bytes();
                             let len = bytes.len() as i64;
                             let (start_idx, end_idx) = compute_slice_indices(start, end, len, inclusive);
-                            // A range that splits a multi-byte codepoint cannot be
-                            // held in a Rust String; U+FFFD-substitute, which
-                            // prints byte-identically to the native lane's output
-                            // for such a range.
-                            let sliced: String = bytes
+                            // A range that splits a multi-byte codepoint cannot
+                            // be held in a Rust String; preserve the RAW bytes
+                            // (Value::StrBytes) so reassembly re-validates —
+                            // U+FFFD substitution here shredded every 1-unit
+                            // slice walk (json/toml tokenizers) because the
+                            // original byte was unrecoverable at concat time.
+                            let sliced: Vec<u8> = bytes
                                 .get(start_idx..end_idx.min(bytes.len()))
-                                .map(|b| String::from_utf8_lossy(b).into_owned())
+                                .map(|b| b.to_vec())
                                 .unwrap_or_default();
-                            Ok(Value::text(sliced))
+                            Ok(Value::text_from_bytes(sliced))
                         }
                         Value::Object {
                             ref class, ref fields, ..
@@ -899,10 +901,11 @@ pub(super) fn eval_collection_expr(
                     // space that corrupted every multi-byte slice (e.g.
                     // "日本語"[3:6] returned "" instead of "本"). Slicing the
                     // byte slice makes the unit match the normalization and the
-                    // native lane; U+FFFD-substitute for a range that splits a
-                    // codepoint, byte-identical to native output when printed.
+                    // native lane; a range that splits a codepoint preserves
+                    // the RAW bytes (Value::StrBytes) so reassembly
+                    // re-validates, matching the compiled lane.
                     let sliced = slice_collection(s.as_bytes(), start_idx, end_idx, step_val);
-                    Ok(Value::text(String::from_utf8_lossy(&sliced).into_owned()))
+                    Ok(Value::text_from_bytes(sliced))
                 }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),
                 Value::LabeledTuple { values, .. } => {
