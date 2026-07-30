@@ -6,8 +6,13 @@
   (post-`module_registry.spl` deletion, `src/compiler/20.hir` refactor — see *Leads*)
 - **Severity:** high — blocks **three of the five remaining showcase-matrix cells**.
   Compilation dies in the SEMANTIC phase; no codegen, no process, no window.
-- **Status:** OPEN. **Root cause under investigation, fix in flight.** The
-  reproduction below is proven and minimal; the mechanism is NOT yet proven.
+- **Status:** **RESOLVED — no longer reproduces (verified 2026-07-30).** The
+  defect described below did not survive the interim work (LLVM restore,
+  parser fix `023a60a05aa`, canonical rebuild). Re-verification is recorded
+  in the section "2026-07-30 re-test" at the end of this file; the original
+  report is preserved unchanged above it. The historical
+  reproduction was proven and minimal for its time; the mechanism was never
+  proven and now cannot be, since the symptom is gone.
 
 ## Symptom
 
@@ -177,3 +182,70 @@ reported as a windowing/Xvfb problem.
   — flat-registry name-collision class, **suspect only**.
 - `.claude/memory` `feedback_interp_struct_name_collision_global_registry` —
   same-name-in-two-modules collisions, struct counterpart.
+
+
+## 2026-07-30 re-test — RESOLVED, and the successor barrier is different
+
+Re-tested at tip with the canonical binary
+(`bin/release/x86_64-unknown-linux-gnu/simple`, sha256 `ea4af9a4498297e3…`,
+154,095,344 B, 4/4 markers, `llvm::`=617).
+
+**The co-import failure does not reproduce.** Four independent checks:
+
+1. `use common.ui.wm_app_process_contract.{wm_fs_bridge_decode}` +
+   `use std.nogc_sync_mut.ui.gui_renderer.{GuiRenderer}` → runs, prints
+   `COIMPORT_OK`. No `Cannot resolve module`.
+2. The `std.common.ui.…` spelling of the same pair → also `COIMPORT_OK`.
+   Both namespace spellings resolve, so the suspected
+   symlink/module-spelling collision is not in play.
+3. **Symbols actually USED, not merely imported** (so nothing can be pruned):
+   `wm_fs_bridge_decode(...)` is called and `GuiRenderer.create(...)` is
+   invoked — the program runs to completion and returns a value.
+4. Both `run` and `compile` paths are clean of resolution errors.
+
+**The report's key claim is now false:** `GuiRenderer.create` **is** reached.
+The original text says it "is never reached, no window is attempted"; today
+it is entered, executes its engine dispatch, and returns `nil` for a reason
+it prints itself.
+
+### What actually stops a window today (different, smaller barrier)
+
+With a valid engine (`auto`) under Xvfb, `create` reaches the dylib load and
+fails with:
+
+```
+GuiRenderer: cannot load build/sffi/libspl_winit.<dylib|so|dll> — build it first
+```
+
+That is a **missing/unstaged build artifact**, not a semantic defect. The
+library exists at `src/runtime/spl_winit/target/release/libspl_winit.so`
+(5,017,968 B, 2026-07-25) but not at the default candidate path
+`build/sffi/`. Note the host-WM evidence gate does not hit this: it builds
+`spl_winit` itself and passes the path explicitly via `SIMPLE_WM_WINIT_LIB`.
+
+### Method note (three false leads, all mine)
+
+Three intermediate "failures" during this re-test were errors in the probe,
+not in the code, and each initially looked like a defect:
+
+- `GuiRenderer.create` with **3** arguments → `unknown static method create
+  on class GuiRenderer`. The real signature takes **4**
+  (`engine, w, h, title`); an arity mismatch surfaces as "unknown static
+  method", which reads like a resolution failure.
+- `engine="software"` → `nil` via `renderer_create_failed_unknown_engine`.
+  Supported engines are `winit`, `auto`, `electron`, `""`.
+- Unused imports in the first probe, which could have been pruned before
+  resolution was exercised at all.
+
+Recorded because each one, taken at face value, would have produced a false
+"still broken" verdict on a resolved bug — the mirror image of the false
+demotion this campaign has already hit twice.
+
+### Consequence for the three host-WM cells
+
+They remain **BLOCKED**, but no longer on this defect. The remaining
+barrier for the gate is the independent stale-`simple_stage2` problem
+(embedded Rust from 2026-07-28 that rejects the operator line-continuation
+my parser fix repaired). Clearing this bug does **not** move those cells to
+GREEN, and they should not be described as nearly-green on the strength of
+it.

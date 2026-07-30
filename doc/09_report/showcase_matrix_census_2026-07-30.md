@@ -724,3 +724,41 @@ binary: `2D × headless` (landed `3b3fe52cbb7`) and `widget × headless`
 (this pass). No cell remains in CLAIMED — every remaining cell is BLOCKED
 with a named cause, and the campaign's top line is, for the first time,
 backed by artifacts produced on this host rather than by inherited reports.
+
+## Co-import defect RESOLVED — but the three host-WM cells stay BLOCKED (2026-07-30)
+
+Re-tested the blocker that the matrix records against all three host-WM
+rows (`doc/08_tracking/bug/co_import_makes_module_unresolvable_wm_contract_gui_renderer_2026-07-27.md`).
+**It no longer reproduces.** Bug doc updated to RESOLVED with the full
+re-test; original report preserved.
+
+Four checks, all clean on the canonical binary (`ea4af9a4498297e3…`):
+both namespace spellings (`common.ui.…` and `std.common.ui.…`) resolve;
+the symbols are **used, not merely imported**, so nothing can be pruned;
+and both `run` and `compile` are free of `Cannot resolve module`.
+
+The report's load-bearing claim is now false: **`GuiRenderer.create` IS
+reached.** It executes its engine dispatch and returns `nil` for a reason it
+prints itself — it is no longer dying in the semantic phase.
+
+**What stops a window today is different and smaller:** with a valid engine
+under Xvfb, `create` fails at
+`cannot load build/sffi/libspl_winit.<dylib|so|dll> — build it first`. That
+is an unstaged build artifact (the library exists at
+`src/runtime/spl_winit/target/release/libspl_winit.so`, 2026-07-25, just not
+at the default candidate path), not a semantic defect — and the evidence
+gate does not even hit it, because it builds `spl_winit` itself and passes
+`SIMPLE_WM_WINIT_LIB` explicitly.
+
+### The two barriers remain independent — cells are NOT nearly-green
+
+| Barrier | State |
+|---|---|
+| co-import semantic defect | **RESOLVED** (this pass) |
+| stale `simple_stage2` (embedded Rust from 2026-07-28 rejecting the operator line-continuation my parser fix repaired) | **OPEN**, owned by the bootstrap/redeploy lane |
+
+Clearing the first does **not** clear the second. Cells #4-#6 remain
+**BLOCKED** on the stale-stage2 problem alone; they should not be reported
+as close to GREEN on the strength of this result.
+
+**Scoreboard unchanged: 2 GREEN, 0 CLAIMED, 5 BLOCKED, 0 UNKNOWN.**
