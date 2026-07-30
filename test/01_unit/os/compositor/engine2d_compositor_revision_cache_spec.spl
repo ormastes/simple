@@ -1,0 +1,64 @@
+use std.spec.{describe, it, expect}
+use common.ui.draw_ir.{
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+fn revision_cache_fixture(color: u32):
+    val embedding = draw_ir_embedding_config(
+        "web", "body", 0, 0, 4, 4, 0, 1000, true)
+    draw_ir_composition(
+        "revision-cache", "hosted-web", "software", [
+            draw_ir_batch("body", "software", embedding, [
+                draw_ir_rect("fill", 0, 0, 4, 4, color)
+            ])
+        ])
+
+describe "Engine2D compositor producer revision cache":
+    it "reuses only an exact unsaturated producer revision tuple":
+        val composition = revision_cache_fixture(0xFF2563EBu32)
+        var raster = Engine2dCompositorBackend.create_named(
+            4, 4, "software")
+
+        val first = raster.render_draw_ir_composition_resources_revision(
+            composition, [], 7, 1)
+        val reused = raster.render_draw_ir_composition_resources_revision(
+            composition, [], 7, 1)
+        expect(first.pixels).to_equal(reused.pixels)
+        expect(raster.revision_render_count).to_equal(1)
+        expect(raster.revision_reuse_count).to_equal(1)
+
+        val changed = revision_cache_fixture(0xFFDC2626u32)
+        val changed_same_revision = (
+            raster.render_draw_ir_composition_resources_revision(
+                changed, [], 7, 1)
+        )
+        expect(changed_same_revision.pixels == first.pixels).to_equal(false)
+        expect(raster.revision_render_count).to_equal(2)
+
+        val restarted = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, 1)
+        expect(restarted.pixels).to_equal(changed_same_revision.pixels)
+        expect(raster.revision_render_count).to_equal(3)
+        expect(raster.revision_reuse_count).to_equal(1)
+
+        val legacy = raster.render_draw_ir_composition_resources(
+            changed, [])
+        expect(legacy.pixels).to_equal(changed_same_revision.pixels)
+        val after_legacy = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, 1)
+        expect(after_legacy.pixels).to_equal(changed_same_revision.pixels)
+        expect(raster.revision_render_count).to_equal(5)
+
+        val saturated = 9223372036854775806
+        val saturated_first = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, saturated)
+        val saturated_second = raster.render_draw_ir_composition_resources_revision(
+            changed, [], 8, saturated)
+        expect(saturated_first.pixels).to_equal(saturated_second.pixels)
+        expect(raster.revision_render_count).to_equal(7)
+        expect(raster.revision_reuse_count).to_equal(1)
+        raster.shutdown()

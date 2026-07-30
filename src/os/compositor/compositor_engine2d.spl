@@ -17,6 +17,16 @@ var _engine2d_compositor_override_id: i32 = 0
 var _engine2d_compositor_override_width: i32 = 0
 var _engine2d_compositor_override_height: i32 = 0
 var _engine2d_compositor_override_pixels: [u32] = []
+val _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION: i64 = 9223372036854775806
+
+fn _engine2d_compositor_gpu_backend(selected: text) -> bool:
+    selected != "software" and selected != "cpu" and selected != "cpu_simd"
+
+fn _engine2d_compositor_transfer_profile() -> text:
+    (rt_env_get("SIMPLE_ONE_CALL_UPLOAD") ?? "") + "\0" +
+    (rt_env_get("SIMPLE_BULK_UPLOAD") ?? "") + "\0" +
+    (rt_env_get("SIMPLE_SPL_GPU_TRANSFER_PATH") ?? "") + "\0" +
+    (rt_env_get("SIMPLE_ONE_CALL_READBACK") ?? "")
 
 fn _engine2d_compositor_clear_override(owner_id: i32):
     if owner_id > 0 and _engine2d_compositor_override_id != owner_id:
@@ -56,6 +66,17 @@ class Engine2dCompositorBackend:
     last_composition_id: text
     last_scene_key: text
     last_web_content_image_count: i32
+    # ponytail: one exact retained frame per compositor; add a bounded history
+    # only if alternating unchanged producer revisions are measured in practice.
+    revision_cache_producer_generation: i64 = -1
+    revision_cache_composition_revision: i64 = -1
+    revision_cache_backend: text = ""
+    revision_cache_transfer_profile: text = ""
+    revision_cache_composition: DrawIrComposition? = nil
+    revision_cache_resources: [SimpleOsHostGpuImageResource] = []
+    revision_cache_result: Engine2dDrawIrAdvResult? = nil
+    revision_reuse_count: i64 = 0
+    revision_render_count: i64 = 0
 
     static fn create(engine: Engine2D) -> Engine2dCompositorBackend:
         val id = _engine2d_compositor_next_id
@@ -103,7 +124,17 @@ class Engine2dCompositorBackend:
             return _engine2d_compositor_override_pixels
         self.engine.read_pixels()
 
+    fn invalidate_revision_cache():
+        self.revision_cache_producer_generation = -1
+        self.revision_cache_composition_revision = -1
+        self.revision_cache_backend = ""
+        self.revision_cache_transfer_profile = ""
+        self.revision_cache_composition = nil
+        self.revision_cache_resources = []
+        self.revision_cache_result = nil
+
     fn invalidate_frame_receipt():
+        self.invalidate_revision_cache()
         self.last_readback_checksum = 0
         self.last_readback_completed = false
         self.last_readback_width = 0
@@ -133,6 +164,7 @@ class Engine2dCompositorBackend:
         return its validated readback candidate to the hosted presenter."""
         _engine2d_compositor_clear_override(self.id)
         self.invalidate_frame_receipt()
+        self.revision_render_count = self.revision_render_count + 1
         var web_content_image_count = 0
         var batch_index = 0
         while batch_index < composition.batches.len():
@@ -145,7 +177,7 @@ class Engine2dCompositorBackend:
                     command_index = command_index + 1
             batch_index = batch_index + 1
         val selected = self.engine.backend_name()
-        val gpu_available = selected != "software" and selected != "cpu" and selected != "cpu_simd"
+        val gpu_available = _engine2d_compositor_gpu_backend(selected)
         val result = engine2d_draw_ir_adv_composition_with_images(self.engine, composition, gpu_available, images)
         self.last_backend = result.selected_backend
         self.last_readback_source = result.readback_source
@@ -176,6 +208,56 @@ class Engine2dCompositorBackend:
                 resource.pixels
             ))
         self.render_draw_ir_composition(composition, images)
+
+    me render_draw_ir_composition_resources_revision(
+        composition: DrawIrComposition,
+        resources: [SimpleOsHostGpuImageResource],
+        producer_generation: i64,
+        composition_revision: i64
+    ) -> Engine2dDrawIrAdvResult:
+        """Reuse one complete result for one exact producer revision tuple."""
+        val cacheable = (
+            producer_generation >= 0 and
+            composition_revision >= 0 and
+            composition_revision < _ENGINE2D_REVISION_CACHE_COMPOSITION_SATURATION
+        )
+        val selected = self.engine.backend_name()
+        val transfer_profile = _engine2d_compositor_transfer_profile()
+        if (
+            cacheable and
+            self.revision_cache_producer_generation == producer_generation and
+            self.revision_cache_composition_revision == composition_revision and
+            self.revision_cache_backend == selected and
+            self.revision_cache_transfer_profile == transfer_profile and
+            self.revision_cache_resources == resources
+        ):
+            if val Some(cached_composition) = self.revision_cache_composition:
+                if cached_composition == composition:
+                    if val Some(cached) = self.revision_cache_result:
+                        self.revision_reuse_count = self.revision_reuse_count + 1
+                        return cached
+
+        val result = self.render_draw_ir_composition_resources(
+            composition, resources)
+        val device_proven = (
+            not _engine2d_compositor_gpu_backend(selected) or
+            (result.readback_source == "device_readback" and
+             result.backend_handle > 0 and result.device_identity > 0)
+        )
+        if (
+            cacheable and not result.fallback_required and
+            result.skipped_command_count == 0 and
+            result.rendered_command_count > 0 and
+            result.pixels.len() == self.w * self.h and device_proven
+        ):
+            self.revision_cache_producer_generation = producer_generation
+            self.revision_cache_composition_revision = composition_revision
+            self.revision_cache_backend = selected
+            self.revision_cache_transfer_profile = transfer_profile
+            self.revision_cache_composition = Some(composition)
+            self.revision_cache_resources = resources
+            self.revision_cache_result = Some(result)
+        result
 
     # Honest frame provenance (greppable): for the metal lane this must say
     # source=device_readback — a cpu_mirror source means the GPU lane silently

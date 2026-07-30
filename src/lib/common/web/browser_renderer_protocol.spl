@@ -107,6 +107,7 @@ pub struct BrowserRendererFrameDecodeResult:
     reason: text
     reply_to_request_id: i64
     next_animation_ms: i64
+    composition_revision: i64
     history_state_present: bool
     history_current_url: text
     history_back_url: text
@@ -1338,6 +1339,7 @@ fn _browser_renderer_frame_reject(reason: text) -> BrowserRendererFrameDecodeRes
         reason: reason,
         reply_to_request_id: 0,
         next_animation_ms: -1,
+        composition_revision: -1,
         history_state_present: false,
         history_current_url: "",
         history_back_url: "",
@@ -1701,7 +1703,7 @@ pub fn browser_renderer_referenced_image_resources(
                 resource.image_uri
             ).len().to_i64()
             val record_bytes = (
-                SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES +
+                SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_ENTRY_HEADER_BYTES +
                 ((uri_bytes + 7) / 8) * 8 +
                 ((pixel_count * 4 + 7) / 8) * 8
             )
@@ -1751,6 +1753,7 @@ fn _browser_renderer_frame_encode_with_state_and_images(
     history_current_url: text,
     history_back_url: text,
     history_forward_url: text,
+    composition_revision: i64,
     image_resources: [SimpleOsHostGpuImageResource],
     prior_revisions: [SimpleOsHostGpuImageResourceRevision],
     retained_wire: bool
@@ -1796,7 +1799,11 @@ fn _browser_renderer_frame_encode_with_state_and_images(
                     resource.image_uri, resource.width, resource.height,
                     resource.pixels
                 ))
-    val use_retained_wire = retained_wire and has_reference
+    # SBRF7 always uses the retained record codec; it accepts both full and
+    # reference entries, so first/changed image frames decode through one path.
+    val use_retained_wire = retained_wire and (
+        has_reference or composition_revision >= 0
+    )
     val image_payload = if use_retained_wire:
         simpleos_host_gpu_image_resources_encode_retained(
             retained_entries,
@@ -1854,14 +1861,24 @@ fn _browser_renderer_frame_encode_with_state_and_images(
         "-"
     else:
         solid_material_sha256
-    val frame_version = if use_retained_wire: "SBRF6" else: "SBRF5"
+    val revision_frame = composition_revision >= 0
+    val frame_version = if revision_frame:
+        "SBRF7"
+    elif use_retained_wire:
+        "SBRF6"
+    else:
+        "SBRF5"
+    val revision_field = if revision_frame:
+        "\t{composition_revision}"
+    else:
+        ""
     val payload = (
         "{frame_version}\t{reply_to_request_id}\t{cpu_composited_count}\t{cpu_digest}" +
         "\t{solid_material_count}\t{solid_digest}\t{next_animation_ms}" +
         "\t{diagnostic_payload.len()}\t{current_payload.len()}" +
         "\t{back_payload.len()}\t{forward_payload.len()}" +
         "\t{image_payload.resource_count}\t{image_payload.checksum}" +
-        "\t{encoded_images.len()}\n" +
+        "\t{encoded_images.len()}{revision_field}\n" +
         diagnostic_payload + current_payload + back_payload +
         forward_payload + encoded_images + bytes_to_text(encoded.bytes)
     )
@@ -1888,7 +1905,7 @@ pub fn browser_renderer_frame_encode_with_state_and_images(
         next_animation_ms, cpu_composited_count, cpu_composited_sha256,
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
-        image_resources, [], false
+        -1, image_resources, [], false
     )
 
 pub fn browser_renderer_frame_encode_with_state_and_retained_images(
@@ -1905,15 +1922,20 @@ pub fn browser_renderer_frame_encode_with_state_and_retained_images(
     history_current_url: text,
     history_back_url: text,
     history_forward_url: text,
+    composition_revision: i64,
     image_resources: [SimpleOsHostGpuImageResource],
     prior_revisions: [SimpleOsHostGpuImageResourceRevision]
 ) -> BrowserRendererEncodeResult:
+    if composition_revision < 0:
+        return _browser_renderer_reject_encode(
+            "invalid-composition-revision"
+        )
     _browser_renderer_frame_encode_with_state_and_images(
         composition, generation, request_id, reply_to_request_id,
         next_animation_ms, cpu_composited_count, cpu_composited_sha256,
         solid_material_count, solid_material_sha256, diagnostics,
         history_current_url, history_back_url, history_forward_url,
-        image_resources, prior_revisions, true
+        composition_revision, image_resources, prior_revisions, true
     )
 
 pub fn browser_renderer_frame_reply_to_request_id(
@@ -1931,7 +1953,8 @@ pub fn browser_renderer_frame_reply_to_request_id(
         (fields.len() == 8 and fields[0] == "SBRF3") or
         (fields.len() == 11 and fields[0] == "SBRF4") or
         (fields.len() == 14 and
-            (fields[0] == "SBRF5" or fields[0] == "SBRF6"))):
+            (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
+        (fields.len() == 15 and fields[0] == "SBRF7")):
         return -1
     val reply_to_request_id = fields[1].to_i64() ?? -1
     if (reply_to_request_id <= 0 or
@@ -1958,20 +1981,33 @@ fn _browser_renderer_frame_decode(
     val state_frame = (
         (fields.len() == 11 and fields[0] == "SBRF4") or
         (fields.len() == 14 and
-            (fields[0] == "SBRF5" or fields[0] == "SBRF6"))
+            (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
+        (fields.len() == 15 and fields[0] == "SBRF7")
     )
-    val image_frame = fields.len() == 14 and (
-        fields[0] == "SBRF5" or fields[0] == "SBRF6"
+    val image_frame = (
+        (fields.len() == 14 and
+            (fields[0] == "SBRF5" or fields[0] == "SBRF6")) or
+        (fields.len() == 15 and fields[0] == "SBRF7")
     )
-    val retained_frame = fields.len() == 14 and fields[0] == "SBRF6"
+    val retained_frame = (
+        (fields.len() == 14 and fields[0] == "SBRF6") or
+        (fields.len() == 15 and fields[0] == "SBRF7")
+    )
     if not legacy_frame and not diagnostic_frame and not state_frame:
         return _browser_renderer_frame_reject("malformed-material-witness")
     val reply_to_request_id = _browser_renderer_positive_i64(fields[1])
     val cpu_count = fields[2].to_i64() ?? -1
     val solid_count = fields[4].to_i64() ?? -1
     val next_animation_ms = fields[6].to_i64() ?? -2
+    val composition_revision = if fields[0] == "SBRF7":
+        fields[14].to_i64() ?? -1
+    else:
+        -1
     if (reply_to_request_id < 0 or cpu_count < 0 or solid_count < 0 or
         next_animation_ms < -1 or
+        (fields[0] == "SBRF7" and
+            (composition_revision < 0 or
+             str(composition_revision) != fields[14])) or
         str(cpu_count) != fields[2] or str(solid_count) != fields[4] or
         str(next_animation_ms) != fields[6]):
         return _browser_renderer_frame_reject("malformed-material-witness")
@@ -2159,6 +2195,7 @@ fn _browser_renderer_frame_decode(
         reason: "ok",
         reply_to_request_id: reply_to_request_id,
         next_animation_ms: next_animation_ms,
+        composition_revision: composition_revision,
         history_state_present: state_frame,
         history_current_url: history_current_url,
         history_back_url: history_back_url,

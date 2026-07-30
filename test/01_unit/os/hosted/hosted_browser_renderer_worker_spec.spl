@@ -84,16 +84,37 @@ describe "hosted browser renderer worker":
 
     it "reuses an unchanged semantic frame without rerunning render stages":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)
-        expect(worker.handle(BrowserRendererMessage(
+        val initial_result = worker.handle(BrowserRendererMessage(
             kind: "init", generation: 7, request_id: 2,
             payload: "<main id='stable'>unchanged</main>"
-        )).ok).to_be(true)
+        ))
+        expect(initial_result.ok).to_be(true)
+        val initial_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), initial_result.wire
+            ).message,
+            64,
+            48
+        )
+        expect(initial_frame.ok).to_be(true)
         val before_composition_revision = (
             worker.render_session.counters.composition_revision
         )
-        expect(worker.handle(BrowserRendererMessage(
+        expect(initial_frame.composition_revision).to_equal(
+            before_composition_revision
+        )
+        val reused_result = worker.handle(BrowserRendererMessage(
             kind: "advance", generation: 7, request_id: 3, payload: "16"
-        )).ok).to_be(true)
+        ))
+        expect(reused_result.ok).to_be(true)
+        val reused_frame = browser_renderer_frame_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(7), reused_result.wire
+            ).message,
+            64,
+            48
+        )
+        expect(reused_frame.ok).to_be(true)
         val after = worker.render_session.counters
 
         expect(after.serialize_count).to_equal(1)
@@ -104,6 +125,9 @@ describe "hosted browser renderer worker":
         expect(after.paint_count).to_equal(1)
         expect(after.reuse_count).to_equal(1)
         expect(after.composition_revision).to_equal(
+            before_composition_revision
+        )
+        expect(reused_frame.composition_revision).to_equal(
             before_composition_revision
         )
         expect(worker.render_session.checksum_revision).to_equal(-1)
