@@ -72,7 +72,7 @@ pub enum FencedSubmitError {
     CompletionUnknown(VulkanError),
 }
 
-fn submit_definitely_not_accepted(error: vk::Result) -> bool {
+pub(crate) fn submit_definitely_not_accepted(error: vk::Result) -> bool {
     matches!(
         error,
         vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY
@@ -443,15 +443,37 @@ impl VulkanDevice {
     /// Wait for device to be idle
     pub fn wait_idle(&self) -> VulkanResult<()> {
         let _direct_compute = self.direct_compute_gate.lock();
-        unsafe {
-            self.device
-                .device_wait_idle()
-                .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
-        }
+        self.wait_hardware_idle()?;
         if !self.reap_direct_compute_submissions() {
             return Err(VulkanError::SyncError(
                 "direct compute descriptor recovery failed".to_string(),
             ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn wait_hardware_idle(&self) -> VulkanResult<()> {
+        let _compute_queue = self.compute_queue.lock();
+        #[cfg(feature = "vulkan")]
+        let graphics_queue = self
+            .graphics_queue
+            .as_ref()
+            .filter(|queue| !Arc::ptr_eq(queue, &self.compute_queue));
+        #[cfg(feature = "vulkan")]
+        let _graphics_queue = graphics_queue.map(|queue| queue.lock());
+        #[cfg(feature = "vulkan")]
+        let _present_queue = self
+            .present_queue
+            .as_ref()
+            .filter(|queue| {
+                !Arc::ptr_eq(queue, &self.compute_queue)
+                    && graphics_queue.is_none_or(|graphics| !Arc::ptr_eq(queue, graphics))
+            })
+            .map(|queue| queue.lock());
+        unsafe {
+            self.device
+                .device_wait_idle()
+                .map_err(|e| VulkanError::SyncError(format!("{:?}", e)))?;
         }
         Ok(())
     }

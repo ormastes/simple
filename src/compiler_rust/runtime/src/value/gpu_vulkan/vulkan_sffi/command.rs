@@ -12,6 +12,8 @@ use super::common::{
 #[cfg(feature = "vulkan")]
 use ash::vk;
 #[cfg(feature = "vulkan")]
+use crate::vulkan::device::submit_definitely_not_accepted;
+#[cfg(feature = "vulkan")]
 use parking_lot::Mutex;
 #[cfg(feature = "vulkan")]
 use std::sync::Arc;
@@ -130,8 +132,11 @@ pub extern "C" fn rt_vk_command_buffer_end(cmd: u64) -> i32 {
 pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        let registry = COMMAND_BUFFER_REGISTRY.lock();
-        match registry.get(&cmd) {
+        let state_arc = {
+            let registry = COMMAND_BUFFER_REGISTRY.lock();
+            registry.get(&cmd).cloned()
+        };
+        match state_arc {
             Some(state_arc) => {
                 let mut state = state_arc.lock();
                 if state.is_recording {
@@ -142,7 +147,6 @@ pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
                     tracing::error!("One-time command buffer was already submitted");
                     return VulkanFfiError::InvalidParameter as i32;
                 }
-
                 let cmd_buffers = [state.command_buffer];
                 let submit_info = vk::SubmitInfo::default().command_buffers(&cmd_buffers);
 
@@ -163,17 +167,7 @@ pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
                 match result {
                     Ok(()) => {
                         state.submitted_once = true;
-                        // Wait for completion
-                        let wait_failed = if let Some(queue) = state.device.graphics_queue() {
-                            let q = queue.lock();
-                            match unsafe { state.device.handle().queue_wait_idle(*q) } {
-                                Ok(()) => None,
-                                Err(error) => Some(error),
-                            }
-                        } else {
-                            None
-                        };
-                        if let Some(e) = wait_failed {
+                        if let Err(e) = state.device.wait_hardware_idle() {
                             tracing::error!("Failed to wait for command buffer completion: {:?}", e);
                             state.completion_unknown = true;
                             return VulkanFfiError::ExecutionFailed as i32;
@@ -182,6 +176,10 @@ pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
                     }
                     Err(e) => {
                         tracing::error!("Failed to submit command buffer: {:?}", e);
+                        if !submit_definitely_not_accepted(e) {
+                            state.submitted_once = true;
+                            state.completion_unknown = true;
+                        }
                         VulkanFfiError::ExecutionFailed as i32
                     }
                 }
@@ -211,9 +209,9 @@ pub extern "C" fn rt_vk_command_buffer_submit(cmd: u64) -> i32 {
 pub extern "C" fn rt_vk_command_buffer_free(cmd: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
+        let mut registry = COMMAND_BUFFER_REGISTRY.lock();
         let state_arc = {
-            let mut registry = COMMAND_BUFFER_REGISTRY.lock();
-            match registry.remove(&cmd) {
+            match registry.get(&cmd).cloned() {
                 Some(state) => state,
                 None => {
                     tracing::error!("Invalid command buffer handle: {}", cmd);
@@ -225,17 +223,15 @@ pub extern "C" fn rt_vk_command_buffer_free(cmd: u64) -> i32 {
         let mut state = state_arc.lock();
         if state.completion_unknown {
             tracing::error!("Cannot free command buffer before completion is proven");
-            drop(state);
-            COMMAND_BUFFER_REGISTRY.lock().insert(cmd, state_arc);
             return VulkanFfiError::ExecutionFailed as i32;
         }
         if let Err(e) = state.device.free_graphics_command(state.command_buffer) {
             tracing::error!("Failed to free command buffer {:?}: {:?}", state.command_buffer, e);
-            drop(state);
-            COMMAND_BUFFER_REGISTRY.lock().insert(cmd, state_arc);
             return VulkanFfiError::from(e) as i32;
         }
 
+        drop(state);
+        registry.remove(&cmd);
         tracing::debug!("Command buffer freed: handle={}", cmd);
         VulkanFfiError::Success as i32
     }

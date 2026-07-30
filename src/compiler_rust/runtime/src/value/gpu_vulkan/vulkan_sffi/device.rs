@@ -1,6 +1,8 @@
 //! Vulkan device management SFFI functions
 
-use super::common::{next_handle, VulkanFfiError, DEVICE_REGISTRY, WINDOW_SURFACES};
+use super::common::{
+    next_handle, VulkanFfiError, COMMAND_BUFFER_REGISTRY, DEVICE_REGISTRY, WINDOW_SURFACES,
+};
 
 /// Create a Vulkan device
 ///
@@ -124,7 +126,23 @@ pub extern "C" fn rt_vk_device_create_for_window(window_handle: u64) -> u64 {
 pub extern "C" fn rt_vk_device_free(device_handle: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        if DEVICE_REGISTRY.lock().remove(&device_handle).is_some() {
+        let mut devices = DEVICE_REGISTRY.lock();
+        let Some(device) = devices.get(&device_handle).cloned() else {
+            tracing::error!("Invalid device handle: {}", device_handle);
+            return VulkanFfiError::InvalidHandle as i32;
+        };
+        let commands = COMMAND_BUFFER_REGISTRY.lock();
+        if commands
+            .values()
+            .any(|command| std::sync::Arc::ptr_eq(&command.lock().device, &device))
+        {
+            tracing::error!(
+                "Cannot free Vulkan device {} while command buffers are live",
+                device_handle
+            );
+            return VulkanFfiError::ExecutionFailed as i32;
+        }
+        if devices.remove(&device_handle).is_some() {
             tracing::debug!("Vulkan device {} freed", device_handle);
             VulkanFfiError::Success as i32
         } else {
@@ -145,10 +163,27 @@ pub extern "C" fn rt_vk_device_free(device_handle: u64) -> i32 {
 pub extern "C" fn rt_vk_device_sync(device_handle: u64) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        let registry = DEVICE_REGISTRY.lock();
-        if let Some(device) = registry.get(&device_handle) {
-            match device.wait_idle() {
-                Ok(()) => VulkanFfiError::Success as i32,
+        let device = {
+            let registry = DEVICE_REGISTRY.lock();
+            registry.get(&device_handle).cloned()
+        };
+        if let Some(device) = device {
+            let registry = COMMAND_BUFFER_REGISTRY.lock();
+            let commands = registry.values().cloned().collect::<Vec<_>>();
+            let mut states = Vec::new();
+            for command in &commands {
+                let state = command.lock();
+                if std::sync::Arc::ptr_eq(&state.device, &device) {
+                    states.push(state);
+                }
+            }
+            match device.wait_hardware_idle() {
+                Ok(()) => {
+                    for state in &mut states {
+                        state.completion_unknown = false;
+                    }
+                    VulkanFfiError::Success as i32
+                }
                 Err(e) => VulkanFfiError::from(e) as i32,
             }
         } else {
