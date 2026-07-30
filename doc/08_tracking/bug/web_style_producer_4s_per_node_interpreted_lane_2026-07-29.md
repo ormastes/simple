@@ -850,6 +850,149 @@ itself, not a probe) and this doc update.
 3. Verify `font_renderer_spec.spl` cleanly (larger timeout budget or a
    lower-load window) to close the open regression-baseline item above.
 
+## Completion probe + SFFI metrics-only close-out 2026-07-30
+
+**Tree used:** all probes in this section ran from a dedicated disposable
+`git worktree` (`wt-close1`, checked out at commit `67d9d21bfd44019bbb086539183ea84f28da9424`
+via `git worktree add`), never the shared working copy -- so the
+`ot_layout_shaper.spl` uncommitted-edit corruption reported separately in
+the shared WC could not have reached this probe (a worktree only ever
+contains committed content). Confirmed clean: `ot_layout_shaper.spl` is
+present and compiles (every run below reached full module compilation with
+zero parse/syntax errors in the log; run 1 additionally reached deep into
+the style loop, which requires that module and its co-compiled shaper
+callees to have parsed correctly).
+
+### Part 1 -- completion probe at raised budget (`SIMPLE_WEB_RENDER_BUDGET_MS=240000`, `SIMPLE_TIMEOUT_SECONDS=580`)
+
+**Methodology finding (PROVED) -- buffering, not the pipeline, ate the
+first two attempts.** The `simple` binary's stdout is fully block-buffered
+when not attached to a TTY (the universal C-stdio behavior: line-buffered
+only under `isatty()`). Piping output to a file (`> log 2>&1`, this
+campaign's standard capture method) triggers full buffering; when the
+outer `SIMPLE_TIMEOUT_SECONDS` watchdog hard-kills the process, whatever
+was sitting in the unflushed buffer is lost. At the historical
+120s-budget/270s-timeout configuration this never surfaced (the ~500-line
+module-warning dump alone exceeds one buffer, so it force-flushed early,
+carrying the following `budget-break` line out with it in the same flush).
+At the raised 240s-budget/580s-timeout configuration, two independent
+capture attempts (`complete_run1.log`, `complete_run1b.log`, one launched
+detached via `nohup`+`disown`, one launched as a plain foreground redirect)
+both produced a log containing ONLY the ~490-line module-warning dump and
+a watchdog-timeout message -- zero `[web-style-producer]` lines -- looking
+exactly like the pipeline hung before ever reaching the style loop. Fix:
+force line buffering with `stdbuf -oL -eL` ahead of the binary. Repeating
+the identical run with `stdbuf -oL -eL ./bin/simple run ...` immediately
+recovered real progress output (below) -- confirming the two silent logs
+were a **capture artifact, not a pipeline hang**. This is the "buffering
+fix" landed this pass: a methodology correction (`stdbuf -oL -eL` is now
+required for reliable evidence capture on this pipeline), not a source
+change.
+
+**Runs (3 total, all from `wt-close1` @ `67d9d21bfd44019bbb086539183ea84f28da9424`,
+all with `stdbuf -oL -eL`):**
+
+| Run | Load (pgrep count / load avg at launch) | Result |
+|---|---|---|
+| 1 (`complete_run1c.log`) | moderate (load avg ~11-16 across this window) | **`budget-break at=139 of=151`** -- reached deep into the style loop, 92% of nodes styled, still short of full completion. No `status=` line -- paint/layout after styling did not complete within the remaining wall-clock budget either. |
+| 2 (`complete_run2c.log`) | elevated (load avg 16-19) | No `[web-style-producer]` line at all within 580s -- did not finish module compile + reach the first budget check in this window. Confirmed NOT a buffering loss this time (stdbuf was active); a genuine wall-clock miss under higher contention. |
+| 3 (`complete_run3c.log`) | high (pgrep 151, load avg 27.7 rising) | Same as run 2 -- no progress line within 580s. |
+
+**Reading this honestly:** 1 of 3 runs produced real signal; that one run
+(`139 of 151`, 92%) is the best evidence to date that the cache landed this
+session moves the page close to a full style-loop pass at a large-enough
+budget, but **no run reached `status=` / full completion** -- this is
+INFERRED-favorable, not PROVED-complete. The other 2 of 3 runs show that
+under the load levels this shared machine has exhibited throughout this
+session (10 to 51 load average observed across the whole campaign, with
+100-200+ concurrent `simple` processes), the 580s wall-clock ceiling itself
+becomes the binding constraint before the style loop's own 240s budget
+does -- module compile + startup alone can consume the entire wall-clock
+allowance under contention. **The default-budget gap now has a number:**
+best case 139/151 (92%) at 4x budget; worst case (2 of 3 samples) did not
+even reach the first progress checkpoint. No cell-green (`status=pass`)
+evidence was captured this pass at any budget.
+
+Tip note: all three runs above used the SAME `wt-close1` worktree (fixed
+at `67d9d21bfd44019bbb086539183ea84f28da9424`, predating the coordinator-
+flagged `53b7712523b` "perf(web): reuse unchanged hosted GPU frames"
+landing) -- so the run-to-run variance documented above is NOT explained
+by that upstream change; it tracks the load column instead.
+
+### Part 2 -- SFFI dylib metrics-only entry point (investigated, not wired)
+
+Checked whether the SFFI dylib backend (`src/lib/nogc_sync_mut/sffi/spl_fonts.spl`,
+dlsym-bound to the OWNED, non-vendored `src/compiler_rust/spl_fonts/src/lib.rs`
+-- the backend behind every `browser_default_for_family` font, i.e. every
+plain `#text` node) exposes an advance-only call `get_glyph_advance`'s
+full-rasterize fallthrough could use instead, mirroring what `ca5dac5e398`
+already did for the selected-outline-blob (sfnt) path via
+`sfnt_measure_glyph_into`.
+
+**Full exported symbol list of the dylib** (`rt_fonts_init(_verified_bytes)`,
+`rt_fonts_generation`, `rt_fonts_has_glyph`, `rt_fonts_rasterize_glyph(_native_only)`,
+`rt_fonts_glyph_pixels_ptr/_len`, `rt_fonts_glyph_free`,
+`rt_fonts_rasterize_glyph_subpixel`, `rt_fonts_glyph_metric`,
+`rt_fonts_horizontal_kern`, `rt_fonts_horizontal_line_metric`,
+`rt_fonts_layout_text`, `rt_fonts_layout_glyph_metric`,
+`rt_fonts_glyph_pixel(_subpixel)`) has **no standalone per-glyph
+advance-only entry**:
+- `rt_fonts_glyph_metric(handle, field)` needs a `handle` from a PRIOR
+  `rt_fonts_rasterize_glyph` call (matches the existing code comment at
+  the `get_glyph_advance` call site).
+- `rt_fonts_layout_text` (+ `rt_fonts_layout_glyph_metric`) IS a genuine
+  no-rasterize call (uses `fontdue::layout::Layout` -- shaping only, no
+  bitmap, confirmed by reading the Rust implementation), but its
+  `LayoutGlyphSlot` fields are `{codepoint, x, y, width, height,
+  byte_offset}` -- no `advance` field. `width`/`height` are the glyph's
+  bounding box, not the typographic advance; a correct advance would need
+  a 2-glyph-lookahead x-delta re-derivation, changing `get_glyph_advance`'s
+  per-character call shape -- not a drop-in substitution, and exactly the
+  class of layout-sensitive change this file's own 2026-07-19 comment
+  warns against attempting casually.
+- `rt_fonts_horizontal_kern`/`rt_fonts_horizontal_line_metric` are genuine
+  metrics-only calls but don't return a per-glyph advance either (kern is
+  a pair adjustment; line-metric is ascent/descent/gap).
+
+**The underlying capability exists one layer down** in the vendored
+`fontdue` crate: `Font::metrics(character, px) -> Metrics`
+(`src/compiler_rust/vendor/fontdue/src/font.rs:450`), and
+`Metrics.advance_width: f32` (`font.rs:73`) is exactly the value needed --
+genuinely metrics-only, no bitmap. `rt_fonts_rasterize_glyph` itself
+already calls `font.rasterize()` (metrics + bitmap together) as its
+fontdue fallback, tried only after `rasterize_with_freetype` (a native
+FreeType path checked first for registered/bundled fonts) -- so a correct
+`rt_fonts_glyph_advance` extern would need to mirror BOTH branches (the
+fontdue `metrics()` call for the fontdue path, plus an equivalent
+no-bitmap FreeType query for the FreeType-first path), not just one.
+
+**Conclusion (documented, not implemented this pass):** add
+`pub extern "C" fn rt_fonts_glyph_advance(codepoint: i64, font_size_px: i64) -> i64`
+to `src/compiler_rust/spl_fonts/src/lib.rs` returning
+`metrics.advance_width` (matching `rt_font_glyph_advance`'s existing
+rounding convention), preferring the FreeType path's equivalent when
+active; wire a matching `fn glyph_advance(...)` on `FontRasterizer` in
+`spl_fonts.spl` via `spl_dlsym`; call it from `get_glyph_advance`'s
+SFFI-dylib branch ahead of the `get_glyph()` fallthrough -- the exact
+`ca5dac5e398` pattern, one layer further down. This is a real, small,
+well-scoped Rust addition, but it is a change to owned (non-vendored) Rust
+source requiring a seed rebuild + bootstrap redeploy -- the "extern
+additions need bootstrap rebuild" tax -- explicitly out of scope for this
+`.spl`-only pass. Per the coordinator, this rides with the other
+seed-rebuild items already queued.
+
+**Per-miss cost before/after: not measured this pass** -- no extern was
+added, so there is no "after" number; the bounded advance cache landed
+this session still pays the full `get_glyph()` rasterize on every cache
+MISS (first occurrence of a given codepoint+size+face), unchanged from the
+prior localization pass's per-glyph figures.
+
+### Regression baselines (re-confirmed on this pass's tip, unchanged)
+- `test/01_unit/app/ui.chromium/css_spec.spl`: 12 total, 9 passed, 3 failed
+  -- same 3 pre-existing failures as every prior measurement this campaign.
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/apply_decls_merge_probe_spec.spl`:
+  20 total, 20 passed, 0 failed.
+
 ## bracket-slice (`s[i:j]`) survey gap — enumerated 2026-07-29, not fixed
 
 The original Category B survey (that found the byte/char split, see
