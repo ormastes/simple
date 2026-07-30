@@ -1142,3 +1142,42 @@ native/AOT backends that share `generate_module_init`), not a patch, and
 sits alongside gap 9's cross-file-identity question as a second, separate,
 now more clearly consequential architecture decision for whoever picks
 this up next.
+
+## 14. Correction, follow-up pass: `native-build --entry` is not "unrelated files failing to parse" — it dispatches to a different compiler entirely
+
+The follow-up investigation into "why does `native-build` fail in this
+environment" (requested after §13) found the initial impression wrong and
+filed the real result separately:
+`doc/08_tracking/bug/native_build_self_hosted_mir_infer_type_crash_2026-07-30.md`.
+Summary, since it bears directly on how to read §§1-13 above:
+
+- **`native-build`, on the deployed/self-hosted binary, dispatches to the
+  pure-Simple self-hosted compiler (`src/compiler/**.spl`), not the Rust
+  seed's `native_project` module** this document spent §§1-12 diffing
+  `run_file_jit` against. The `src/compiler/*.spl` warning noise seen in
+  earlier attempts was the self-hosted compiler itself being loaded to do
+  the compile, not unrelated files swept in by mistake. §§1-12's
+  Rust-seed-vs-Rust-seed comparison remains a valid, self-consistent
+  characterization of the Rust seed's own behavior (relevant to
+  bootstrap-stage builds the seed drives itself), but is not what an
+  ordinary `bin/simple native-build` invocation executes.
+- The actual failure is a real, reproducible, minimal-repro'd crash in the
+  self-hosted compiler's own MIR lowering (`HirTypeKind::Infer` unhandled
+  in `function_lowering.spl`) on module-level globals with a
+  binary-expression initializer — not stale cache (ruled out with
+  `--clean --no-incremental` + a fresh cache dir), not the same defect as
+  §13's.
+- **Correction to §13.3/§13.4's framing:** those sections' "shared
+  codegen backend, therefore affects AOT uniformly" claim holds for
+  `simple compile --native` (which shares the Rust seed's
+  `generate_module_init` with `run_file_jit`, both giving `X=0`), but
+  **not** for `native-build`'s actual self-hosted-compiler pipeline, which
+  handles the exact same function-call-initializer case *correctly*
+  (`X=42`) via its own, independent implementation. Two separate compiler
+  implementations, two separate (and differently-shaped) defects for two
+  different initializer forms — not one shared defect uniformly affecting
+  "AOT" as a single concept. §13's core claim — shipped binaries can
+  silently carry zeroed globals — remains true and proved for `simple
+  compile --native`; it is not established for `native-build` specifically,
+  which instead hard-crashes rather than silently zeroing, for a related
+  but distinct initializer shape.
