@@ -1252,3 +1252,21 @@ The paired manual is
 `doc/06_spec/03_system/security/browser_renderer_script_mime_boundary_spec.md`.
 The row remains PENDING: static guards are the only admitted checks, and no
 runtime, bootstrap, seed fallback, stale artifact, or docgen result is claimed.
+
+## Batch 19 candidate executable evidence
+
+`test/05_perf/web_render_chrome/web_gpu_paint_shape_key_scaling_spec.spl`
+adds one modern four-step isolated performance scenario for
+NFR-WEB-BROWSER-015/016:
+
+- exact deterministic 4,096-op and 8,192-op `SceneCommand` fixtures;
+- byte-for-byte `x,y,w,h;` ordering, repeated identity, and one-coordinate
+  inequality;
+- one warm construction plus exactly nine monotonic samples at each size;
+- median 2N construction no greater than three times median N construction.
+
+The paired manual is
+`doc/06_spec/05_perf/web_render_chrome/web_gpu_paint_shape_key_scaling_spec.md`.
+The row remains PENDING/HELD because no admitted current pure-Simple runtime
+executed it. Static source checks must not be reported as a measured
+performance PASS.

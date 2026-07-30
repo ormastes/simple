@@ -884,3 +884,15 @@ Merge owner and final reviewer: root production-browser coordinator. No
 sidecar owns implementation files. Static review must confirm the module gate
 precedes every redirect alias/cache write and the rejection path applies no
 response headers. Runtime/bootstrap work is explicitly out of scope.
+
+## Production browser batch 19 candidate (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `gpu_paint_shape_key_scaling` | Exact ordered `x,y,w,h;` cache identity is preserved while the per-frame geometry key uses the existing chunked `StringBuilder` instead of cumulative immutable-prefix concatenation. | CANDIDATE from exact `416ccc6efb8`; deterministic 4,096/8,192-op, nine-sample median SSpec/manual added; performance execution HELD |
+
+Merge owner and final reviewer: root production-browser coordinator. The
+implementation owns only
+`simple_web_html_engine2d_presenter.spl`; it does not alter layout, Draw IR,
+GPU/device execution, cache keys, or eviction. Shared plan files require
+coordinator reconciliation. No runtime/bootstrap work is authorized.
