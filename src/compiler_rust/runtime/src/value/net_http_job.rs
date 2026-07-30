@@ -54,11 +54,7 @@ fn browser_http_connect(
         format!("{host}:{port}")
     };
     let addresses = resolve_socket_addrs_with_timeout(authority, browser_http_remaining(deadline)?)?;
-    if public_only
-        && addresses
-            .iter()
-            .any(|address| !browser_http_address_is_public(address.ip()))
-    {
+    if public_only && !browser_http_resolved_addresses_are_public(&addresses) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             "browser HTTP target resolved to a non-public address",
@@ -134,6 +130,12 @@ fn browser_http_address_is_public(address: std::net::IpAddr) -> bool {
             .any(|(network, prefix)| browser_http_ipv6_in(address, *network, *prefix))
         }
     }
+}
+
+fn browser_http_resolved_addresses_are_public(addresses: &[SocketAddr]) -> bool {
+    addresses
+        .iter()
+        .all(|address| browser_http_address_is_public(address.ip()))
 }
 
 fn browser_http_extend_response(
@@ -559,6 +561,21 @@ mod browser_http_job_tests {
         for address in ["1.1.1.1", "8.8.8.8", "2606:4700:4700::1111", "2001:4860:4860::8888"] {
             assert!(browser_http_address_is_public(address.parse().unwrap()), "{address}");
         }
+    }
+
+    #[test]
+    fn public_address_policy_rejects_any_mixed_resolution_set() {
+        let address = |value: &str| value.parse::<SocketAddr>().unwrap();
+
+        assert!(browser_http_resolved_addresses_are_public(&[]));
+        assert!(browser_http_resolved_addresses_are_public(&[
+            address("1.1.1.1:443"),
+            address("[2606:4700:4700::1111]:443"),
+        ]));
+        assert!(!browser_http_resolved_addresses_are_public(&[
+            address("1.1.1.1:443"),
+            address("127.0.0.1:443"),
+        ]));
     }
 
     #[test]
