@@ -1225,3 +1225,13 @@ current Stage-4 pure-Simple CLI.
 - Stage-4 admission remains NONE at `/tmp/simple-history-h1.d3de` and for the
   active build, which remains stale-lineage. No focused runtime, docgen,
   10,000-cycle, or full-browser PASS is admitted.
+- Selected-profile `<menu>` UA spacing is pushed at `b107a4e2a9e`; its
+  rendering evidence is static/held and supplies no runtime PASS.
+- G2 reclamation implementation is BLOCKED with no commit. The operative
+  `std.js.types` contract still uses the raw-i64 ABI and does not provide the
+  required lexical-parent identity, generations, free-list state/counters,
+  typed edges, or external-root ownership; the planned symbols do not match
+  the repository contract. The repository-wide A-through-E migration must
+  precede executable implementation.
+- Generation-safe GC design `ef90c16b194` remains PROPOSED/RED. No G2
+  executable evidence, goal completion, or runtime PASS is admitted.

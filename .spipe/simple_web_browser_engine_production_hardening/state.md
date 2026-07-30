@@ -2574,3 +2574,12 @@ implementation in progress / target evidence blocked
   `/tmp/simple-history-h1.d3de` and for the active build, which remains
   stale-lineage. No focused runtime, docgen, 10,000-cycle, implementation
   completion, or full-browser PASS is admitted.
+- batch-17 final addendum (2026-07-30): selected-profile `<menu>` UA spacing is
+  pushed at `b107a4e2a9e` with static/evidence-held status. G2 reclamation
+  implementation is BLOCKED with no commit: the operative `std.js.types`
+  contract still exposes the raw-i64 ABI and lacks lexical-parent identity,
+  generations, free-list state and counters, typed edges, and external-root
+  ownership; its expected symbol contract does not match the repository.
+  Resumption requires the repository-wide A-through-E migration. The
+  `ef90c16b194` generation-safe GC design remains PROPOSED/RED. No goal
+  completion or runtime PASS is claimed.

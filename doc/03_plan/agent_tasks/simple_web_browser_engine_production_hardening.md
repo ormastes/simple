@@ -867,6 +867,9 @@ design state only; they do not claim runtime PASS or implementation completion.
 | `stage4_provenance_real_motion` | Provenance and real-motion wrappers reject stale/noncurrent evidence. | `6c76b8ac0c0` wrapper self-tests PASS; no target runtime execution |
 | `parent_history` | Parent-authoritative history is capability-bound to the production SBR2 graph. | INTEGRATED `2e188a745d9`; STATIC/EVIDENCE-HELD |
 | `stage4_admission` | Audit at `/tmp/simple-history-h1.d3de` and the active build found no provenance-qualified current full CLI. | NONE; active build remains stale-lineage |
+| `html_menu` | Selected-profile `<menu>` UA spacing lowers through the canonical Web layout path. | PUSHED `b107a4e2a9e`; STATIC/EVIDENCE-HELD |
+| `js_vm_reclamation_g2` | The operative `std.js.types` raw-i64 ABI lacks lexical-parent identity, generations, free-list state/counters, typed edges, and external-root ownership; its symbol contract mismatches the planned implementation. | BLOCKED / NO COMMIT; complete repository-wide A-through-E migration before implementation |
 
 No Batch-17 row supplies runtime, docgen, 10,000-cycle, or full-browser
-completion evidence.
+completion evidence. Generation-safe GC design `ef90c16b194` remains
+PROPOSED/RED; neither the G2 lane nor this addendum completes the goal.
