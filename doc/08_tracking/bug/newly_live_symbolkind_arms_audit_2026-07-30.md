@@ -123,3 +123,77 @@ it fires (the intended PTR1/PTR2 payoff) or is a genuine behavior change with pa
 evidence, not an "obviously wrong" arm meeting the BROKEN bar. The one candidate BROKEN signal
 (`vhdl_design_catalog_spec.spl`) could not be attributed to these arms within this lane's budget
 and is left as an open follow-up rather than guessed at.
+
+## VSL1 follow-up (2026-07-30): `value_struct_layout.spl` now has real coverage
+
+Risk item #2 above (`validate_value_struct_layouts`, previously zero test coverage anywhere in
+`test/`) was given both-direction spec coverage:
+`test/01_unit/compiler/semantics/value_struct_layout_spec.spl` (9 examples). All 9 pass, executed
+for real on this seed binary (`bin/simple test --no-session-daemon`, `Results: 9 total, 9 passed, 0
+failed`) — not merely file-loaded; each `it` asserts on the concrete `[text]` error list returned by
+`validate_value_struct_layouts`.
+
+### What the check actually guarantees (confirmed empirically, not just by reading)
+
+- **Rejects**: a struct that embeds itself directly by value (`struct A: next: A`); a 2-node mutual
+  by-value cycle (`A.b: B`, `B.a: A`); a 3-node chain cycle (`A -> B -> C -> A`). Each produces
+  exactly one `"recursive by-value struct layout: ..."` error (first-cycle-found, not exhaustive —
+  matches the function's own doc comment, "Return the first resolved direct by-value struct cycle,
+  if any").
+- **Correctly does NOT reject** (the more important direction — a false positive here hard-fails a
+  legitimate compile): self- or mutual recursion mediated by `T?` (`HirTypeKind.Optional`)
+  indirection — the standard linked-list-node / mutually-recursive-tree pattern; self-recursion
+  through an array/slice field `[T]` (`HirTypeKind.Array`/`Slice`, heap-backed collection of
+  children); a non-cyclic "diamond" where two unrelated structs both embed one common third struct
+  by value; the same by-value struct type appearing twice as sibling fields on one struct (not a
+  cycle). None of these false-positived — the walk's `target == root` check plus per-root `visited`
+  tracking is sound for these shapes.
+- **No defect found** in the core direct-cycle detection logic itself; no fix was needed or applied.
+
+### Confirmed coverage gap (false NEGATIVE, documented, not fixed — out of this lane's minimal-fix bar)
+
+`value_layout_named_symbol` (`value_struct_layout.spl:11-18`) only treats a field type as a
+struct-cycle edge when it is `HirTypeKind.Named(symbol, args)` **with `args.len() == 0`**, and
+generic struct definitions are excluded from the walk entirely (`type_params.len() > 0` at
+`value_struct_layout.spl:38`). Consequence, confirmed by the last spec in the new file
+("generic-mediated recursion"): a field typed `Box<Node>` where `Node` recursively contains
+`Box<Node>` is **invisible** to this checker — `validate_value_struct_layouts` returns `[]` for that
+shape even though, if `Box<T>` genuinely stores `T` by value (not behind indirection), it is a real
+unbounded-size cycle the checker's own stated purpose ("before MIR recursively copies values") would
+want caught. This is a real gap, not a false positive, and is explicitly the lower-priority failure
+mode per this campaign's own risk framing — left open rather than guessed at, since fixing it
+correctly requires knowing whether user-defined generic structs in this language are ever legitimately
+value-embedded (vs. always effectively boxed/monomorphized in a way that makes this moot), which is
+outside this lane's scope to determine. Filed here rather than silently left unexercised.
+
+### Harness defect found and worked around (frontend/interpreter layer, NOT `35.semantics/`)
+
+The natural test approach — drive real `struct ...:` source text through
+`parse_full_frontend` + `HirLowering.lower_module`, exactly as
+`hir_function_span_populate_spec.spl` does for functions — does not work in this environment. A
+minimal probe (`struct Probe:\n    x: i64\n`, no recursion, nothing struct_layout-specific) run
+through that same pipeline from inside a `bin/simple test`-interpreted spec fails with
+`semantic: function `Field` not found`; the identical harness parsing function-only source (no
+`struct`) succeeds. Root-caused to
+`src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl:308`, where flat struct/class field
+conversion NAMED-constructs the frontend AST `Field` struct
+(`Field(name: ..., type_: ..., ...)`, deliberately named-not-positional per that file's own comment
+at line 300 to avoid a prior SIGSEGV); under the nested interpreter context this constructor call
+resolves as an ordinary function lookup and misses, unrelated to any struct-layout logic. This blocks
+the "real source through the frontend" testing style for ANY struct-bearing source in this harness,
+not just this lane's target. Worked around here by hand-building `HirModule`/`HirStruct`/`HirField`
+directly (same technique already used by `transfer_share_semantic_spec.spl` and
+`iso_move_pipeline_spec.spl` for their own, different, pre-existing frontend gaps) — valid for this
+checker specifically because it operates purely on HIR shape, not on an emergent lowering property.
+Not fixed by this lane (frontend/bridge + interpreter constructor-call resolution, out of
+`35.semantics/` ownership); flagged here as an open item for whoever owns that layer.
+
+### Execution honesty
+
+Everything above ran for real on the seed binary this environment resolves `bin/simple` to (`bin/
+release/x86_64-unknown-linux-gnu/simple`, tree-walk interpreter per `bin/simple test`'s hard default
+— see `.claude/rules/testing.md`). No `.spl` source files in `src/compiler/35.semantics/` or
+`src/compiler/80.driver/` were modified by this lane, so there is no self-hosting-rebuild caveat to
+raise for this specific follow-up: the spec exercises the checker's `.spl` source directly via the
+interpreter, and the `Results: 9 total, 9 passed, 0 failed` line is the real outcome of that
+execution, not a stale-binary artifact.
