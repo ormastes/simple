@@ -41,6 +41,8 @@ the inventory audit:
 | `fc73115d0214` | Closed traceability gate and `property-name` exclusion | Fail-closed checker SSpec/manual | Behavioral counts remain zero without independent admission |
 | `e62e8f5e9f6c` | Deterministic CSS/JavaScript animation frame trace | Initial/intermediate/pause/resume/completed DrawIR and pixel controls | Stage2 discovery blocked by the recorded parser error |
 | `771dfb23835b` | Canonical iframe Draw IR embedding design | Reviewed architecture/detail/agent plans | Design only; no iframe implementation claim |
+| Current `<hr>` lane | Native `hr` void semantics and selected UA separator defaults | Exactly four-step SSpec covers semantic identity, UA style/geometry, exact `0`/`0px`/`none`/`hidden` border clearing, mixed-invalid/missing preservation, DrawIR, and exact Engine2D control pixels | Source/spec/manual evidence only; qualified pure-Simple execution remains required |
+| current change | Selected deterministic `fieldset`/`legend` UA defaults and authored-style rendering | Isolated semantic parentage, four-side `border:none`/`0` clearing, exact DrawIR geometry, exact Engine2D/control pixels, and handwritten draft manual | Bounded fallback only; special legend formatting/cutout, disabled propagation, admitted docgen, and qualified execution remain open |
 
 These commits correct the named source/spec/manual gaps but do not close the
 overall HTML/CSS traceability goal. The deployed pure-Simple wrapper still
@@ -50,15 +52,17 @@ runs the scenarios, both tranches remain execution-evidence-blocked.
 
 ### HTML
 
-The counts below are the pre-tranche inventory audit. The two bounded rows
-called out as inventory-only or missing were subsequently covered by
-`28f0e779b0d2`; their current status is recorded separately in the traceability
-matrix. Do not add them back to the remaining behavioral backlog.
+The source inventory began with 80 Partial rows. The bounded `hr` and
+fieldset/legend lanes reclassify those three named rows into their own fallback
+rows, leaving 77 in the undifferentiated Partial backlog. The two rows called out as
+inventory-only or missing were subsequently covered by `28f0e779b0d2`.
+No named row appears in both a bounded row and the remaining Partial count.
 
 | Classification | Count | Meaning |
 |---|---:|---|
 | Full | 12 | Direct semantic/tree plus applicable layout/DrawIR/Engine2D or hidden/fail-closed evidence |
-| Partial | 80 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof |
+| Partial remaining | 77 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof; excludes `hr`,`fieldset`,`legend` |
+| Bounded selected-profile fallback | 3 | `hr`,`fieldset`,`legend`; basic UA/cascade/DrawIR/pixel paths covered, while fieldset/legend special formatting/cutout and disabled propagation remain Partial/RED |
 | Unsupported/fail-closed | 11 | Embedded/media/native semantics are not implemented |
 | Inventory-only before landed tranche | 2 | `selectedcontent`, `slot`; bounded behavior landed |
 | Missing before landed tranche | 8 | `h1`–`h6`, `sub`, `sup`; bounded behavior landed |
@@ -114,13 +118,15 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ/NFR | Row/group | Support | Executable spec/scenario | Production owners | Required oracle | Manual/result | Status |
 |---|---|---|---|---|---|---|---|
 | REQ-002/004/019/021 | HTML Full 12: `html,head,meta,title,body,main,p,div,section,table,textarea,template` | Full by static audit | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl`; browser production-hardening spec | tokenizer/tree, BrowserSession semantic tree, HTML layout renderer, DrawIR, Engine2D | exact tag/parent/style/geometry/commands/pixels or hidden absence | canonical manuals exist; qualified execution unavailable | Evidence-blocked |
-| REQ-002/004/019/021 | HTML Partial 80 | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
+| REQ-002/004/019/021 | HTML Partial 77 remaining; `hr`,`fieldset`,`legend` split below | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
+| REQ-002/003/004/019/021 | HTML `hr` | Bounded behavior in current lane | `test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl`: `should render hr defaults and author CSS through Engine2D` | canonical tree, tag defaults, shared declaration application, Web layout, DrawIR, Engine2D | void identity, selected 8 px margins and 1 px gray border, exact `border:0`/`0px`/`none`/`hidden` clearing, mixed digit-bearing invalid/missing preservation, authored red geometry, exact component/control pixels | mirrored manual generated in current lane; qualified execution unavailable | Evidence-blocked |
 | REQ-002/019/021 | HTML embedded/media fallback 10: `area,audio,canvas,embed,map,object,picture,source,track,video` | Bounded fail-closed fallback landed in `543409eee861` | safe embedded/media fallback spec | tokenizer/tree/resource fallback, Web layout, DrawIR, Engine2D | semantic/resource exclusion plus deterministic fallback commands and pixels | canonical spec/manual; qualified execution unavailable | Evidence-blocked |
 | REQ-002/004/019/021 | HTML `iframe` | Design only | modern SSpec/manual regeneration blocked after the bounded docgen cap | canonical child Web composition to DrawIR embedding | order, clip, offsets, materials, exact pixels, deadline/rules | design `771dfb23835b`; implementation/manual absent | RED |
 | REQ-002/019/021 | Inert `head`/`template` resources | Bounded behavior landed in `b9e03cb9a487` | strengthened HTML parsing-context scenario | tokenizer/tree/resource discovery | inert descendants excluded from fetch/resource output | canonical manual; qualified execution unavailable | Evidence-blocked |
 | REQ-002/004/006/021 | Hosted checkbox interaction/rendering | Bounded behavior landed in `7b3d40761352` | hosted form interaction scenario | DOM/event/focus/style/layout/DrawIR/Engine2D | semantic parentage, state transition, geometry, exact red-to-blue pixels | canonical manual; qualified execution unavailable | Evidence-blocked |
 | REQ-002/019/021 | HTML formerly inventory-only 2: `selectedcontent,slot` | Bounded behavior landed in `28f0e779b0d2` | `html_element_traceability_spec.spl`: valid-context fail-closed `selectedcontent` plus visible inline `slot` fallback | tokenizer/tree/template/slot owners | deterministic semantic/fallback behavior, DrawIR, pixels/control | canonical manual complete; independent static PASS; runtime unavailable | Evidence-blocked |
 | REQ-002/019/021 | HTML formerly omitted 8: `h1`–`h6`,`sub`,`sup` | Bounded behavior landed in `28f0e779b0d2` | `html_element_traceability_spec.spl`: headings and inline baseline scenarios | tokenizer/tree/style/layout/DrawIR/Engine2D | UA defaults and exact geometry/pixels | canonical manual complete; independent static PASS; runtime unavailable | Evidence-blocked |
+| REQ-002/003/004/021 | HTML `fieldset`,`legend` selected profile | Bounded fallback; special legend formatting/cutout and disabled propagation remain Partial/RED | `fieldset_legend_rendering_spec.spl`: `should trace selected fieldset and legend semantics to exact pixels` | tokenizer/tree, canonical UA defaults/cascade/layout, DrawIR, Engine2D | parentage, UA defaults, four-side `border:none`/`0` clearing, authored CSS, exact geometry, exact component/control pixels | handwritten draft mirror only; admitted docgen and qualified execution unavailable | Evidence-blocked / Partial-RED boundary |
 | REQ-003/004/019/021 | CSS claimed 284 | Functional count unknown | generated-combinations spec has 38 scenarios | declaration/cascade/style/layout/paint/DrawIR/Engine2D | isolated semantic, layout, DrawIR, pixel baseline/control | retained 13 pass/25 fail; manuals stale | FAIL |
 | REQ-003/004/019/021 | CSS Grid bounded foundation | Bounded behavior landed in `b17e868199af` | `test/03_system/feature/web_platform/css/grid_foundation_wpt_spec.spl` | canonical declaration/style/layout/paint-layout, DrawIR, Engine2D | exact tracks, placement/span/implicit-row geometry and pixels; block and quota controls | canonical manual complete; independent static PASS; manifest `red-not-run`; runtime unavailable | Evidence-blocked |
 | REQ-003/004/005/006/007/017/021 | CSS/JavaScript animation frame trace | Bounded initial/intermediate/completed and pause/resume trace implemented | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl`: `should trace JavaScript pause and resume through deterministic Draw IR frames` | BrowserSession monotonic clock/DOM bridge, CSS animation instances, canonical HTML layout/DrawIR, Engine2D | exact stage geometry, Draw IR color transitions/holds, scheduler state, exact in-rectangle pixels, and zero matching-color pixels outside it | canonical generated manual complete with zero stubs; qualified Stage2 discovery is blocked by a pre-existing parse error in `browser_session.spl:1287` | Evidence-blocked |
@@ -169,6 +175,13 @@ Name presence alone satisfies none of the behavior columns.
 - `Trace HTML elements through Web semantics and Draw IR`
 - `Trace implemented CSS properties through canonical rendering`
 - `Classify unsupported CSS properties without false implementation claims`
+
+The bounded `fieldset`/`legend` scenario has exactly these four visible steps:
+
+- `Parse fieldset and legend as a semantic parent-child pair`
+- `Apply selected user-agent defaults before authored CSS`
+- `Lower authored fieldset and legend boxes to exact Draw IR geometry`
+- `Rasterize exact component pixels against an unstyled control`
 
 ## Implementation-ready first tranche
 
@@ -224,6 +237,43 @@ Current expected result: the named UA-default owners, executable source, and
 canonical manual landed in `28f0e779b0d2` and passed independent static review.
 The tranche remains evidence-blocked until qualified execution passes; it does
 not establish full HTML coverage.
+
+### HTML horizontal rule
+
+Spec:
+
+`test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl`
+
+Scenario:
+
+- `should render hr defaults and author CSS through Engine2D`
+
+Canonical production owners:
+
+- `src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`;
+- `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl`;
+- `src/os/compositor/compositor_engine2d.spl`.
+
+Frozen oracles:
+
+- `hr` remains a childless `hr` semantic node under `body`;
+- selected UA style is block with 8 px top/bottom margins and four 1 px
+  `0xFF808080` border sides;
+- default DrawIR geometry is `[0,8,64,2]`;
+- authored CSS replaces those defaults with border/margins zero and
+  `[0,0,32,4]` red geometry;
+- exact `border:0px`, `border:none`, and `border:hidden` also clear all four
+  sides, while mixed invalid `border:0 1bogus` and `border:0 url(1)` plus a
+  missing declaration preserve the selected UA sides;
+- Engine2D paints exactly 128 gray control pixels or 128 red authored pixels
+  inside the matching component rectangle and zero matching pixels outside.
+
+REQ-019 binds the retained `whatwg-html-hr` row dated `2026-07-30` with
+SHA-256 `8e210d74a27b9e386affe055a865d611fe92109862143287c75dfb7be689780a`
+and an altered-row negative. This row remains evidence-blocked until a
+source-admitted pure-Simple runner executes the scenario.
 
 ### CSS grid foundation
 

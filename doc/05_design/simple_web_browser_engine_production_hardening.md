@@ -999,3 +999,130 @@ plus one renderer remains at most 384 MiB (NFR-WEB-BROWSER-005). The histogram,
 allocation count, maximum RSS, post-warmup/final RSS, and failure/reject
 counters are retained as evidence; p99 entropy latency is report-only until a
 numeric NFR is selected.
+
+## DOM identity index detail design
+
+<!-- codex-design -->
+
+Status: **PROPOSED / UNIMPLEMENTED / RED**.
+
+### Frozen API
+
+The sole owner is
+`src/lib/gc_async_mut/gpu/browser_engine/dom_identity_index.spl`:
+
+- `dom_identity_index_build(root, generation) -> Result<DomIdentityIndex, text>`
+- `route_for_author_id(id) -> DomNodeRoute?`
+- `path_for_route(route) -> [i32]?`
+- `event_path_for_route(route) -> [DomNodeRoute]`
+- `form_owner_for_route(route) -> DomNodeRoute?`
+- `control_for_label_route(route) -> DomNodeRoute?`
+- `radio_group_for_route(route) -> DomRadioGroupKey?`
+- `radio_members(group) -> [DomNodeRoute]`
+- `contains_route(route) -> bool`
+- `dom_node_route_text(route) -> text`
+- `dom_node_route_parse(value) -> Result<DomNodeRoute, text>`
+
+Every query first compares route and index generations. `path_for_route`
+follows the route entry's parent identity chain to the root, reverses the
+collected child ordinals, and verifies the terminal `node_id`; it is O(depth)
+and stores no full per-node path. A mismatch is `stale_target`, never an
+author-ID scan or lookup in a newer index. Public input uses exactly
+`dom-route-v1:<generation>:<node_id>`. Both integers are positive canonical
+decimal. Signs, leading zeroes, overflow, NUL legacy strings, missing fields,
+and trailing data reject before lookup.
+
+### Build and publication
+
+Pass one uses iterative preorder with a stack bounded by
+`HTML_MAX_TREE_DEPTH`. It records each node once, rejects duplicate numeric
+node IDs, stores only parent route plus child ordinal, preserves the first
+nonempty author ID, and records nearest ancestor form plus unresolved explicit
+`form`/`for`. Pass two walks recorded rows, not the tree: it resolves explicit
+owners/labels and inserts radios into
+`(generation, optional form owner, name)` groups in preorder. No-owner is an
+explicit optional value, never the document-root route. Anonymous radios have
+no named group.
+
+`BrowserSession` starts generation 1. `_install_document_identity` builds the
+candidate index and only then swaps `current_dom`, generation, and index.
+Checked generation exhaustion rejects before state changes. Runtime
+membership/identity mutations are coalesced: one committed batch creates one
+generation and one immutable index. Value/style/focus/text changes that keep
+membership and association inputs reuse it.
+
+Migration ownership and order live only in
+`doc/03_plan/agent_tasks/simple_web_browser_engine_production_hardening.md`
+under `Generation-qualified DOM identity implementation lanes`. This detail
+design does not define a second phase plan. No lane may publish a mix where one
+owner compares bare IDs and another compares routes; production retains the
+current implementation until the four production lanes compile together.
+
+### Dispatch and mutation
+
+`BrowserDomDispatchFrame` captures generation, immutable index, target route,
+preorder event path, and one shared `BrowserDomDispatchBudget`. The budget
+counts path entries, listener examinations/invocations, inline actions,
+synthetic events, and default actions across reentrant dispatch. The existing
+4,096 listener limits become document-wide rather than resetting per nested
+event.
+
+Before each page callback, the current generation must match. The callback
+receives frozen target/current-target routes. After it returns, the dispatcher
+observes committed mutation and compares generations again. If an invalidating
+batch published a new generation, no old route is queried in its index:
+remaining callbacks and default work abort as `stale_target`, while host
+cleanup still runs. Only a generation-preserving mutation permits same-index
+re-resolution before edit, focus, grouping, submission, or default action.
+
+Label activation selects the nearest label in the frozen hit-event path and
+captures its control route before label handlers. It forwards only if
+generation is unchanged, the route still resolves to the same
+association, the label click was not canceled, and the click did not originate
+in an interactive descendant. Hidden inputs are not labelable; disabled
+controls receive no synthetic click. A
+`(generation, label route, control route)` guard is held only for the forwarded
+activation. Sibling listener order is `label, control`; nested order is
+`label, control, label`. Canceling the control click restores pre-activation
+checkbox/radio state.
+
+Radio selection resolves the current
+`(generation, optional form owner, name)` group once, retains the previous
+checked route for rollback, and dispatches input/change through qualified
+routes. Submission resolves form and submitter in the unchanged generation
+immediately before one serialization of post-event state.
+
+`BrowserDomCallableListener` and SimpleScript listener records bind
+`DomNodeRoute`, not author or bridge-object IDs. Add/remove/tombstone operations
+remain bounded. Dispatch freezes the ordered route path once; listener delivery
+does not scan the DOM.
+
+Focus, pending Space, selection, and dirty-edit state store routes. Each
+blur/change/focusout phase first checks generation after the previous handler;
+same-generation work may re-resolve, while an invalidating mutation stops the
+remaining phases without querying the replacement index. Runtime bridge
+objects expose immutable routes. Detached JavaScript objects may survive, but
+their current-document host mutations reject.
+
+### Downstream lifecycle
+
+`browser_session_ui_access.spl` places the canonical route in `dom_target` and
+binds snapshot revision to generation. `hosted_web_content_session.spl` and
+`hosted_browser_renderer_worker.spl` replace `pressed_target_id`,
+`last_target_id`, and focus-derived bare IDs with routes. Release clicks only
+when current hit route equals stored press route; generation change clears it.
+
+Replacement and close:
+
+1. prevent new page dispatch;
+2. clear pending Space, selection, hosted pointer, and UI snapshot routes;
+3. remove listeners/callbacks keyed by the retiring generation;
+4. publish the built candidate pair, or no document on close;
+5. unwind active host cleanup, then release the retired index.
+
+Counters expose build visits, resolved/unresolved associations, duplicate
+author IDs, stale/budget rejects, live/retired index count, index bytes, build
+time, parent-chain depth, and query time. Route membership and association-map
+lookups are expected O(1); path reconstruction, route-to-node, and event-path
+work are O(depth); radio enumeration is O(group size). They never expose
+author IDs or handler source.

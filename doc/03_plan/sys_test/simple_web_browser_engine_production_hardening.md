@@ -915,3 +915,74 @@ recorded. None of these rows is executable or merged evidence.
   promote command capabilities.
 - Shared-clock, label activation, and SimpleScript listener prototypes remain
   HOLD at their exact recorded defects and are not merged.
+
+## Generation-qualified DOM identity RED scenario
+
+<!-- codex-design -->
+
+Status: **PROPOSED / UNIMPLEMENTED / RED**. It traces
+REQ-WEB-BROWSER-007/008/017/018 and
+NFR-WEB-BROWSER-004/005/006/008/014/015/016, but cannot promote them before
+production execution.
+
+The future modern SSpec and mirrored manual expose exactly four steps:
+
+1. `Build the document identity index`
+2. `Dispatch through stable routes`
+3. `Replace the document during a handler`
+4. `Reject stale routes and release the index`
+
+Frozen helpers are `setup_dom_identity_generation_fixture`,
+`check_dom_identity_index_built`, `check_stable_route_dispatch`,
+`check_document_replacement_during_handler`, and
+`check_stale_routes_and_index_release`. Until their production owners land,
+each checker calls `fail("DOM identity index is not implemented")`; no
+placeholder PASS is permitted.
+
+Step 1 builds one document with duplicate author IDs, forward external form
+ownership, explicit and nested labels, same-name radios with distinct form
+owners, text controls, and capture/target/bubble listeners. It asserts the
+first-preorder ID winner, exact form/label/radio routes, and root-to-target
+event path. Counters show exactly two bounded passes and no recursive lookup.
+
+Step 2 exercises pointer press/release, label forwarding, radio selection,
+Space activation, text editing, focus, beforeinput/input/change/blur/focusout,
+SimpleScript/JavaScript listeners, UI access, and form serialization. Every
+receipt carries `DomNodeRoute`; interactive descendants do not forward,
+reentrant activation does not loop, label cancellation prevents forwarding,
+control cancellation rolls back pre-activation state, sibling order is
+`label,control`, nested order is `label,control,label`, a frozen path does not
+retarget after handler removal, and nested actions share one document-wide
+budget. Radio fixtures prove an explicit no-form-owner key, never a
+document-root sentinel.
+
+Step 3 replaces the document from a target handler with author and numeric IDs
+resembling the old document. The handler unwinds, but old callbacks/defaults do
+not query the new index and do not focus, click, select, edit, or submit the
+replacement. Hosted press, pending Space, selection, UI-access targets, and
+bridge listener keys clear or become stale.
+
+Step 4 submits forged old-generation routes through runtime bridge, UI access,
+pointer release, keyboard activation, edit, focus, label, radio, and form
+paths. Each returns `stale_target` without mutation/callback. Close then
+proves zero live/retired indexes and generation-owned listeners after bounded
+quiescence.
+
+Folded cases run the production fixture at `N` and `2N` routable elements.
+Visits/allocations scale within 10%, elapsed `2N/N <= 2.2`, and repeated
+author/form/label/radio queries report expected O(1) index work while
+route-to-node/event-path queries report bounded O(depth) parent-chain work and
+zero recursive/full-tree searches. The 10,000
+replacement/dispatch receipt includes build and input-to-paint p95,
+allocations, live/retired index counts/bytes, post-warmup/final/max RSS, and
+stale/budget rejects. Acceptance requires input-to-paint p95 <=50 ms, RSS
+<=384 MiB, retained bytes/final RSS within 10% of baseline, and no stale
+callback or unreleased index.
+
+Step 4 also captures canonical component-bound Draw IR and Engine2D pixels for
+the surviving current control; retired routes contribute no action or pixels.
+
+The executable spec uses built-in matchers and fail-fast placeholders until
+production exists. Its generated manual hides setup mechanics, keeps these
+four steps visible, and links typed protocol/text/performance captures. Rust
+seed, bootstrap, helper-only, and source-scan evidence are inadmissible.

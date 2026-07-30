@@ -1233,3 +1233,119 @@ lookup or relocation. They also pass
 `__imp__rt_browser_renderer_command_capability_new@0`, and
 `rt_browser_renderer_command_capability_new@0`; each fails
 `privileged-runtime-symbol-alias` before undecoration or lookup.
+
+## Generation-qualified DOM identity and index
+
+<!-- codex-design -->
+
+Status: **PROPOSED / UNIMPLEMENTED / RED**.
+
+The current author-ID-or-`node_id` strings and recursive
+`be_dom_find_path_to_id` calls are not a production identity model. They can
+retarget stale events after a reparse, make external form/radio association
+quadratic, and let label, listener, UI-access, and hosted pointer paths
+disagree. The replacement is one semantic DOM-owned index, not separate label,
+radio, or listener identity registries.
+
+`src/lib/gc_async_mut/gpu/browser_engine/dom_identity_index.spl` exclusively
+owns:
+
+- `DomDocumentGeneration`: a checked positive `i64` document incarnation;
+- `DomNodeRoute`: `{ generation: DomDocumentGeneration, node_id: i64 }`;
+- `DomRadioGroupKey`: the generation-qualified form-owner route (or no owner)
+  plus the nonempty radio name; and
+- `DomIdentityIndex`: one immutable index for the committed generation.
+
+Each route entry stores only its parent route and child ordinal in the existing
+DOM tree; it does not copy a full root-to-node path or own another node tree.
+The index also stores first-preorder nonempty author ID to route,
+form-associated node to form-owner route, label route to control route, radio
+route to group and group to preorder members. Parent entries reconstruct both
+structural and event paths in O(depth). Duplicate author IDs keep the first
+preorder route and increment a counter; a later node never silently wins.
+JavaScript `getElementById`, explicit label `for`, and external `form` use that
+same winner rule. Numeric node IDs are unique and never reused within one
+generation. Without `for`, the first labelable descendant wins.
+
+`dom_identity_index_build(root, generation)` performs two bounded preorder
+passes. Pass one assigns routes, parent identity/child ordinal entries, first
+author IDs, and unresolved associations. Pass two resolves form/label
+references and radio groups from recorded rows. Neither pass invokes a tree
+search. Duplicate `node_id`, checked-generation exhaustion, excessive depth,
+or the existing
+script-visible element/resource bound rejects before publication. Expected
+O(1) index queries cover route membership, author ID, form owner, label
+control, and radio key. Structural-path reconstruction, route-to-node, and
+event-path queries are O(depth), bounded by admitted depth; radio enumeration
+is O(group size).
+
+`BrowserSession` owns exactly one current
+`(DomDocumentGeneration, DomIdentityIndex)` pair. Navigation/document/root
+replacement and every committed mutation batch that changes membership or an
+identity/association input (`id`, `form`, `for`, radio `name`/`type`, or
+labelable structure) build the candidate index first, advance generation, and
+atomically publish DOM plus index. One batch means one build and one
+generation. Value, style, focus, and text mutations that preserve those inputs
+reuse the current pair.
+
+Dispatch freezes its event path as `DomNodeRoute` values. After each handler it
+first compares the captured and published generations. A mismatch never looks
+the old route up in the new index: the current handler unwinds, then remaining
+page callbacks, follow-on events, and default actions abort as `stale_target`.
+Only when generation is unchanged may focus, edit, label, radio, form, or
+default-action work re-resolve its route in that same index. Removal and
+identity mutation therefore cannot retarget by author ID or reused numeric ID.
+Dispatch may pin the old immutable index only until unwind; escaped bridge
+objects retain routes, never the index.
+
+The outermost dispatch owns one document-wide budget shared with reentrant
+dispatch: at most the existing 4,096 live callable listeners, 4,096 examined
+listeners/actions, and `HTML_MAX_TREE_DEPTH` event-path entries. Nested label
+activation and synthetic events consume the same budget. Label forwarding is
+suppressed for an interactive descendant, and a
+`(generation, label route, control route)` reentrancy key prevents recursive
+forwarding. Exhaustion stops page callbacks/default actions before a partial
+form submission.
+
+Label activation captures its associated control route before author handlers.
+Canceling the label prevents forwarding; canceling the synthetic control click
+rolls back its pre-activation checkbox/radio state. The observable sibling
+order is `label, control`; a control nested in its label produces
+`label, control, label` as the control click bubbles. Hidden inputs are not
+labelable and disabled controls receive no synthetic click.
+
+Radio identity is `(generation, optional form-owner route, nonempty name)`;
+the no-owner case is explicit and never represented by the document root.
+Rollback stores the prior checked route, not author ID. Form serialization
+uses the admitted post-event group once. Callable and SimpleScript listeners
+bind routes, freeze the propagation path once, and do not search the DOM per
+listener.
+
+All consumers carry `DomNodeRoute`, never author ID or bare `node_id`:
+
+- `browser_session.spl` owns generation/index, pending-Space, selection, focus,
+  and runtime-bridge route state;
+- `browser_session_runtime.spl` owns atomic publication, dispatch frames,
+  handler re-resolution, blur/change/focusout, and default actions;
+- `dom_accessors.spl` becomes an index-query shim and retires recursive
+  identity/form/radio/event-path scans;
+- `browser_session_form.spl` accepts qualified form and submitter routes;
+- `browser_session_ui_access.spl` serializes qualified targets and rejects
+  stale snapshots;
+- `hosted_web_content_session.spl` and
+  `hosted_browser_renderer_worker.spl` retain qualified press/focus routes and
+  clear them on mismatch, replacement, cancel, or close; and
+- JavaScript/SimpleScript bridge objects and listeners store routes; host
+  mutation first requires the same generation, then resolves in that index.
+
+Replacement and close clear pending Space, selection, hosted press/release,
+UI-access targets, and listener/action queues before the retired index is
+released. Production accepts no NUL-prefixed legacy route after migration.
+
+At `N` and `2N` routable elements, build visits/allocations must scale within
+10%, elapsed `2N/N <= 2.2`, and queries must report no recursive/full-tree
+searches; structural and event paths report O(depth) work. A 10,000
+replacement/dispatch cycle must release all retired indexes, remain within
+existing input-to-paint/RSS limits, and return retained bytes/RSS within 10%
+of the post-warmup baseline. These are future receipts; this design changes no
+requirement status.

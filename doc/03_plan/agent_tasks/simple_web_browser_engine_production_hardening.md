@@ -649,12 +649,50 @@ evidence remain inadmissible.
 
 | Lane | Owner | Scope | Status / gate |
 | --- | --- | --- | --- |
-| `dom_identity_core` | `dom_identity_design` | Freeze `DomDocumentGeneration`, `DomNodeRoute`, and one O(N) `DomIdentityIndex` per document generation, including duplicate IDs and mutation/navigation invalidation | DESIGN IN PROGRESS; no label/radio/listener implementation before review |
-| `dom_identity_consumers` | `label_activation` | Append label/radio/listener migration and acceptance criteria after the core names land | WAITING ON CORE; must reuse the same index |
-| `fresh_html_css_row` | `simplescript_listeners_current` | Select one uncapped Partial HTML/CSS row and implement canonical HTML/WebIR -> `DrawIrComposition` -> Engine2D behavior | TDD IN PROGRESS; exactly four modern SSpec steps, CSS application, and real frame/pixel evidence when animation applies |
+| `dom_identity_design` | `dom_identity_design` | Freeze one generation/index owner and fold label/radio/listener consumers into the canonical lanes below | PROPOSED / UNIMPLEMENTED / RED |
+| `html_hr` | `simplescript_listeners_current` | Native separator defaults plus exact authored border clearing through canonical WebIR/DrawIR/Engine2D | FINAL REVIEW PASS; integrated static evidence, execution HELD |
+| `html_fieldset_legend` | `fieldset_legend_render` | Bounded semantic/UA fallback, authored border clearing, exact DrawIR/Engine2D pixels | FINAL REVIEW PASS; integrated Partial/RED boundary, draft manual, execution HELD |
+| `animation_publication_cache` | `animation_perf_lifecycle` | Remove full-document rebuild from the real hosted animation-frame publication path | FINAL REVIEW PASS; integrated static evidence, numeric runtime evidence HELD |
+| `privileged_import_design` | `privileged_import_compiler` | Canonical physical-source compiler ownership contract | PROPOSED / UNIMPLEMENTED / RED; no active SSpec before real hooks |
+| `privileged_symbol_lookup` | `privileged_symbol_lookup` | Rust/C generic lookup denial prototype | FAIL/HOLD: duplicate loader, interpreter dispatch, raw provider/JIT bypass, and independent normalizers remain; do not merge `69a649eb307` |
+| `provider_admission` | `provider_admission` | Provider identity/digest prototype | FAIL/HOLD: caller-selected purpose/digests and public raw lookup bypass admission; do not merge `be8eb872196` |
 | `animation_runtime_evidence` | root merge owner | Admit the current pure-Simple CLI by source receipt before any focused execution | HELD: binary hash exists but no matching source/build receipt has been found |
 
 The capped fractional-animation, negative-z, label, radio, clock, and prior
 listener prototypes remain HOLD. This batch must not retry them, add a private
 paint path, or treat parsing/source inspection as rendering or animation
 evidence. Root Codex is merge owner and final reviewer; no sidecar pushes.
+
+## Generation-qualified DOM identity implementation lanes
+
+<!-- codex-design -->
+
+Status: **PROPOSED / UNIMPLEMENTED / RED**. Frozen names are
+`DomDocumentGeneration`, `DomNodeRoute`, `DomRadioGroupKey`,
+`DomIdentityIndex`; manual steps are `Build the document identity index`,
+`Dispatch through stable routes`, `Replace the document during a handler`,
+and `Reject stale routes and release the index`. Frozen helpers are
+`setup_dom_identity_generation_fixture`, `check_dom_identity_index_built`,
+`check_stable_route_dispatch`, `check_document_replacement_during_handler`,
+and `check_stale_routes_and_index_release`; each checker fails explicitly until
+production exists.
+
+| Order | Lane | Exact ownership | Acceptance / dependency |
+| --- | --- | --- | --- |
+| 1 | `dom_identity_index_owner` | Add only `src/lib/gc_async_mut/gpu/browser_engine/dom_identity_index.spl`; two-pass O(N) build, route parsing, association queries, counters | independent high review; RED SSpec first |
+| 2 | `dom_accessor_form_migration` | `dom_accessors.spl`, `browser_session_form.spl`; replace recursive identity/form/label/radio/event-path scans | depends on 1; optional no-form-owner key, first-ID rule, no parallel registry |
+| 3 | `dom_dispatch_bridge_migration` | `browser_session.spl`, `browser_session_runtime.spl`; atomic pair publication, focus/Space/edit/blur, label/radio actions, bridge/listener route keys, shared reentrant budget | depends on 1-2; stale generation aborts without new-index lookup; exact label order/cancel/rollback |
+| 4 | `dom_ui_hosted_migration` | `browser_session_ui_access.spl`, `hosted_web_content_session.spl`, `hosted_browser_renderer_worker.spl`; generation-bound snapshots and press/release/focus routes | depends on 3; stale release produces no click |
+| 5 | `dom_identity_sspec` | focused modern SSpec, mirrored manual, N/2N and 10,000-cycle production receipts | depends on 1-4 and admitted current pure-Simple CLI |
+
+Lower-model sidecars may inspect one owner per lane only after Lane 1 lands;
+they may not rename this API or add label/radio/listener identity maps. Merge
+owner is the browser-hardening coordinator. Final acceptance requires the best
+available normal/highest-capability review of the combined source/spec/manual
+diff and one admitted target-runtime execution.
+
+Migration is not piecemeal: production stays on the current route model until
+Lanes 1-4 compile together. The merge deletes NUL legacy route parsing, bare
+`pressed_target_id`/`last_target_id`, recursive hot-path lookup, and prototype
+registries. Label, radio, and SimpleScript HOLDs remain non-mergeable until
+this prerequisite lands.

@@ -15,17 +15,26 @@ Canonical plan:
 - `Trace implemented CSS properties through canonical rendering`
 - `Classify unsupported CSS properties without false implementation claims`
 
+Fieldset/legend bounded lane:
+
+- `Parse fieldset and legend as a semantic parent-child pair`
+- `Apply selected user-agent defaults before authored CSS`
+- `Lower authored fieldset and legend boxes to exact Draw IR geometry`
+- `Rasterize exact component pixels against an unstyled control`
+
 ## Completed audit and bounded implementation lanes
 
 | Lane | Result |
 |---|---|
-| HTML element traceability | RED: 12 Full, 80 Partial, 11 unsupported, 2 inventory-only, 8 checker omissions |
+| HTML element traceability | RED: 12 Full, 77 Partial remaining, bounded `hr`, 2 bounded fieldset/legend fallback rows, 11 unsupported, 2 inventory-only, 8 checker omissions; no double-count |
 | Implemented CSS traceability | RED: self-satisfying 284 count, unrecognized and metadata-only claims |
 | Unsupported CSS classification | 92 production, 23 speech/aural, 1 deprecated, 1 false scrape |
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
 | Closed checker | Landed in `fc73115d0214`; behavioral counts remain zero without independent admission |
 | Inert/media/form/caption/animation | Bounded source/spec/manual work landed; qualified execution and corpus accounting remain open |
 | Iframe | Design landed in `771dfb23835b`; TDD regeneration and implementation remain open |
+| HTML `hr` | Current bounded lane: native UA defaults plus exact `0`/`0px`/`none`/`hidden` and mixed-invalid/missing border cascade controls through semantic Web layout, DrawIR, and exact Engine2D pixels; qualified execution remains open |
+| Fieldset/legend selected profile | Current bounded lane: canonical UA defaults, four-side authored border clearing, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; special legend formatting/cutout, disabled propagation, admitted docgen, and qualified execution remain open |
 
 ## Safe parallel implementation lanes
 

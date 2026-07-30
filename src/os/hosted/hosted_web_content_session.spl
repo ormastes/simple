@@ -147,8 +147,10 @@ class HostedWebContentSession:
             network_job_fetch_request: nil
         )
 
-    fn presentation_html() -> text:
-        self.browser.current_style_html + self.browser.current_body_html
+    me _refresh_published_body_html():
+        self.published_body_html = (
+            self.browser.current_style_html + self.browser.current_body_html
+        )
 
     me _target_at(x: i32, y: i32) -> text:
         val animation_time_ms = (
@@ -373,7 +375,7 @@ class HostedWebContentSession:
             self._cancel_orphaned_network_job()
             if self.browser.current_body_html != before_body:
                 self._invalidate_retained_document()
-                self.published_body_html = self.presentation_html()
+                self._refresh_published_body_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,
@@ -454,7 +456,6 @@ class HostedWebContentSession:
         )
         val _ = self.browser.advance_time(now_ms - self.started_at_ms)
         self._pump_network_once()
-        val body_html = self.presentation_html()
         val after_revisions = self.browser.render_revisions()
         val current_animation_ms = max(
             0_i64,
@@ -473,14 +474,15 @@ class HostedWebContentSession:
                 after_revisions.resource_revision or
             before_title != self.browser.current_title
         )
-        if (
-            body_html == self.published_body_html and
-            not render_changed and not css_animation_changed
-        ):
+        if not render_changed and not css_animation_changed:
             return false
-        if body_html != self.published_body_html:
+        if (
+            before_revisions.document_revision !=
+                after_revisions.document_revision or
+            before_revisions.style_revision != after_revisions.style_revision
+        ):
             self._invalidate_retained_document()
-        self.published_body_html = body_html
+            self._refresh_published_body_html()
         self.mutation_revision = self.mutation_revision + 1
         true
 
@@ -527,7 +529,7 @@ class HostedWebContentSession:
             val changed = self.browser.current_body_html != before
             if changed:
                 self._invalidate_retained_document()
-                self.published_body_html = self.presentation_html()
+                self._refresh_published_body_html()
                 self.mutation_revision = self.mutation_revision + 1
             return HostedWebContentDispatch(
                 event_id: event_id,
@@ -555,7 +557,7 @@ class HostedWebContentSession:
         val changed = self.browser.current_body_html != before
         if changed:
             self._invalidate_retained_document()
-            self.published_body_html = self.presentation_html()
+            self._refresh_published_body_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,
@@ -631,7 +633,7 @@ class HostedWebContentSession:
         val changed = self.browser.current_body_html != before
         if changed:
             self._invalidate_retained_document()
-            self.published_body_html = self.presentation_html()
+            self._refresh_published_body_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,
@@ -728,7 +730,7 @@ class HostedWebContentSession:
         val changed = self.browser.current_body_html != before
         if changed:
             self._invalidate_retained_document()
-            self.published_body_html = self.presentation_html()
+            self._refresh_published_body_html()
             self.mutation_revision = self.mutation_revision + 1
         HostedWebContentDispatch(
             event_id: event_id,
@@ -745,7 +747,7 @@ class HostedWebContentSession:
         )
 
     fn current_body_html() -> text:
-        self.presentation_html()
+        self.published_body_html
 
     fn render_to_pixels() -> [u32]:
         self.browser.render_to_pixels(self.width, self.height).pixel_data
