@@ -1,17 +1,183 @@
 //! Built-in call expression lowering (rt_* and print/println family).
 
 use super::lowering_core::{MirLowerResult, MirLowerer};
-use crate::hir::{HirExpr, HirType, TypeId};
+use crate::hir::{BinOp, HirExpr, HirType, TypeId};
 use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
 impl<'a> MirLowerer<'a> {
+    /// Materialize `if cond_reg: then_reg else: else_reg` from already-lowered
+    /// VRegs (not `HirExpr`s). Mirrors the block/temp-local machinery of
+    /// `lower_if_expr` (temp local -> branch -> per-arm store -> merge ->
+    /// load), but deliberately does NOT re-lower `then`/`else` from source:
+    /// `lower_min_max_abs` below calls this with VRegs it already computed
+    /// once, and re-lowering the same `HirExpr` a second time would
+    /// double-evaluate any side effects the argument expression has (e.g. a
+    /// function call passed as one of `min`'s two arguments).
+    fn lower_select_from_regs(
+        &mut self,
+        cond_reg: VReg,
+        then_reg: VReg,
+        else_reg: VReg,
+        ty: TypeId,
+    ) -> MirLowerResult<VReg> {
+        use crate::mir::effects::LocalKind;
+        use crate::mir::function::MirLocal;
+
+        let temp_local_index = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$select_merge_{}", index),
+                ty,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+
+        let temp_addr = self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: temp_local_index,
+            });
+            addr
+        })?;
+
+        let (then_id, else_id, merge_id) = self.with_func(|func, current_block| {
+            let then_id = func.new_block();
+            let else_id = func.new_block();
+            let merge_id = func.new_block();
+            let block = func.block_mut(current_block).unwrap();
+            block.terminator = crate::mir::Terminator::Branch {
+                cond: cond_reg,
+                then_block: then_id,
+                else_block: else_id,
+            };
+            (then_id, else_id, merge_id)
+        })?;
+
+        self.set_current_block(then_id)?;
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Store {
+                addr: temp_addr,
+                value: then_reg,
+                ty,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(else_id)?;
+        self.with_func(|func, current_block| {
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Store {
+                addr: temp_addr,
+                value: else_reg,
+                ty,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(merge_id)?;
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Load {
+                dest,
+                addr: temp_addr,
+                ty,
+            });
+            dest
+        })
+    }
+
+    /// Lower bare `min(a, b)` / `max(a, b)` / `abs(a)` directly as
+    /// comparisons + a select, instead of a call to an external symbol
+    /// literally named "min"/"max"/"abs" (gap 6: no runtime/libc symbol by
+    /// those names exists — unlike the sibling `sqrt`/`floor`/`ceil`/`pow`
+    /// builtins in this same dispatch, which map to real libm symbols, bare
+    /// `min`/`max`/`abs` fell through to a generic external `Call` that only
+    /// ever links by accident, and never for the JIT/cranelift backend,
+    /// which has no such symbol registered at all).
+    ///
+    /// Contract matched here is the interpreter's own (PROVED by reading
+    /// `interpreter_extern/math.rs`): `min`/`max` take exactly 2 args,
+    /// `abs` exactly 1, all `i64`-typed, non-variadic — HIR lowering already
+    /// enforces this shape (`lower_utility_builtin` in
+    /// `hir/lower/expr/calls.rs` routes `abs`/`min`/`max` through
+    /// `lower_builtin_call(name, args, TypeId::I64, ctx)`), so this only
+    /// needs to special-case the exact arities the HIR side always produces
+    /// for these three names; anything else falls through to the previous
+    /// (already-broken) generic path unchanged.
+    ///
+    /// This lives at the MIR-lowering layer, upstream of every backend
+    /// (interpreter-over-MIR if any, cranelift/JIT, LLVM/native), so it is a
+    /// single fix point rather than a per-backend one — matching the same
+    /// `if a < b: a else: b` semantics `src/lib/*/runtime_wrappers.spl`
+    /// already hand-writes in pure Simple as a workaround (confirmed by
+    /// reading those files; not touched here).
+    fn lower_min_max_abs(&mut self, name: &str, args: &[HirExpr], expr_ty: TypeId) -> Option<MirLowerResult<VReg>> {
+        match (name, args.len()) {
+            ("min", 2) | ("max", 2) => Some((|| {
+                let a_reg = self.lower_expr(&args[0])?;
+                let b_reg = self.lower_expr(&args[1])?;
+                let cmp_op = if name == "min" { BinOp::Lt } else { BinOp::Gt };
+                let cond_reg = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BinOp {
+                        dest,
+                        op: cmp_op,
+                        left: a_reg,
+                        right: b_reg,
+                    });
+                    dest
+                })?;
+                // min: cond (a<b) true -> a, false -> b.
+                // max: cond (a>b) true -> a, false -> b.
+                self.lower_select_from_regs(cond_reg, a_reg, b_reg, expr_ty)
+            })()),
+            ("abs", 1) => Some((|| {
+                let a_reg = self.lower_expr(&args[0])?;
+                let (cond_reg, neg_reg) = self.with_func(|func, current_block| {
+                    let zero = func.new_vreg();
+                    let cond = func.new_vreg();
+                    let neg = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+                    block.instructions.push(MirInst::BinOp {
+                        dest: cond,
+                        op: BinOp::Lt,
+                        left: a_reg,
+                        right: zero,
+                    });
+                    block.instructions.push(MirInst::BinOp {
+                        dest: neg,
+                        op: BinOp::Sub,
+                        left: zero,
+                        right: a_reg,
+                    });
+                    (cond, neg)
+                })?;
+                // cond (a<0) true -> -a, false -> a.
+                self.lower_select_from_regs(cond_reg, neg_reg, a_reg, expr_ty)
+            })()),
+            _ => None,
+        }
+    }
+
     pub(super) fn lower_builtin_call_expr(
         &mut self,
         name: &str,
         args: &[HirExpr],
         expr_ty: TypeId,
     ) -> MirLowerResult<VReg> {
+        if let Some(result) = self.lower_min_max_abs(name, args, expr_ty) {
+            return result;
+        }
+
         // Special handling for rt_enum_payload - returns tagged RuntimeValue
         // that needs unboxing when the payload type is a native type
         if name == "rt_enum_payload" && args.len() == 1 {

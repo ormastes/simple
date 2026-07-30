@@ -1026,3 +1026,172 @@ Same reasoning as the fifth pass — cannot responsibly assess whether
 `exec_core.rs`'s force-interpret heuristic should change for this example
 until a JIT run actually completes the style loop, which gap 6 still
 blocks.
+
+
+## Seventh follow-up pass (2026-07-30) — gap 6 fixed at the compiler layer, gap 7 found (silent empty pixel readback, not an unresolved symbol)
+
+### Contract established before choosing a fix (instruction 1, PROVED)
+
+Read the interpreter's own `min`/`max`/`abs` (`interpreter_extern/math.rs`):
+`min(a, b)`/`max(a, b)` take **exactly 2** args, `abs(n)` **exactly 1**, all
+`i64`, non-variadic, registered as fixed Rust closures
+(`interpreter_extern/mod.rs`'s `insert_simple!` dispatch table) — not a
+libm/libc call. HIR lowering (`hir/lower/expr/calls.rs:507`,
+`lower_utility_builtin`) already enforces this shape: it routes
+`"abs" | "min" | "max" | "sqrt" | "floor" | "ceil" | "pow"` through the same
+`lower_builtin_call(name, args, TypeId::I64, ctx)` helper, so by the time
+MIR lowering sees a `BuiltinCall { name: "min", args }` node, arity is
+already whatever the call site wrote (not separately validated at this
+layer) but the *intended* contract for the two/one-arg call is fixed and
+`i64`-only, matching the interpreter exactly.
+
+**Dispatch-order finding (relevant to instruction 3):** `lower_call`
+(`hir/lower/expr/calls.rs`) checks `lower_utility_builtin` (which
+intercepts bare `min`/`max`/`abs`) **unconditionally on the identifier
+name**, before any user-function-symbol resolution. This means the
+compiler builtin **already** shadowed any user-defined free function named
+`min`/`max`/`abs` before this fix — pre-existing behavior, not introduced
+or changed by this pass. Confirmed by grep that
+`src/lib/{gc_async_mut,nogc_async_mut,nogc_sync_mut}/runtime_wrappers.spl`
+each define their own `fn min(a: i64, b: i64) -> i64: if a < b: a else: b`
+/ matching `max`/`abs` (a pure-Simple hand-rolled workaround, presumably
+for exactly this gap) with the **identical signature and semantics** this
+fix now gives the builtin — strong independent precedent that "trivially
+expressible as comparisons/selects" was the right read. Whether those
+`runtime_wrappers.spl` functions are themselves ever reachable as bare
+calls (given the shadowing above) was not tested further — out of scope,
+flagged only.
+
+### Fix: contained compiler fix, not a call-site rewrite (instruction 2, PROVED)
+
+Added `lower_min_max_abs`/`lower_select_from_regs` to
+`src/compiler_rust/compiler/src/mir/lower/lowering_expr_builtin.rs`,
+intercepted at the top of `lower_builtin_call_expr` before the generic
+external-call fallback. For the exact arities HIR always produces for these
+three names (`min`/`max`: 2 args, `abs`: 1 arg), it lowers each argument
+**once** to a VReg, then builds a compare (`MirInst::BinOp` with
+`BinOp::Lt`/`BinOp::Gt`) and a select using the same
+temp-local/branch/store/merge/load block machinery `lower_if_expr` already
+uses for `if`-as-expression — but built directly from the already-computed
+VRegs rather than re-lowering the argument `HirExpr`s a second time (which
+would double-evaluate any side-effecting argument, e.g. a function call
+passed as one of `min`'s two arguments). This is a single fix point at the
+MIR-lowering layer, upstream of every MIR-consuming backend
+(cranelift/JIT, LLVM/native, and any MIR interpreter), not a per-backend
+patch, and does not touch the call site
+(`simple_web_html_layout_renderer.spl:886`'s `min(current_time_ms + 16,
+end_ms)`) at all — exactly the "contained compiler fix" the brief asked to
+prefer. Anything outside the exact 2-arg/1-arg shape falls through to the
+previous (already-broken) generic external-call path, unchanged — no new
+behavior for malformed-arity calls, which were already broken before this
+pass.
+
+**Correctness, PROVED** by a standalone probe under both engines (identical
+output on both, including an edge case near `i64::MAX`):
+
+```
+min(3,7)=3  min(7,3)=3  min(-5,5)=-5  min(5,5)=5
+max(3,7)=7  max(7,3)=7  max(-5,5)=5   max(5,5)=5
+abs(5)=5  abs(-5)=5  abs(0)=0  abs(-9223372036854775807)=9223372036854775807
+```
+
+matches under `SIMPLE_EXECUTION_MODE=interpreter` and
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` bit-for-bit.
+
+### Spec landed, and a test-coverage-engine finding worth stating plainly (instruction 3)
+
+Landed `test/01_unit/lib/language/builtin_min_max_abs_spec.spl` (6
+examples, including the exact call shape from the motivating site,
+`min(current_time_ms + 16, end_ms)`). It passes 6/6 today.
+
+**It is not a true vacuity probe for gap 6, and that is itself the
+finding.** Ran it four ways against a Rust rebuild with the fix reverted
+(`git show HEAD:...` restored, rebuilt, tested, then re-restored the fix
+and rebuilt again — full before/after, not inferred):
+
+| Runner | Pre-fix result | Post-fix result |
+|---|---|---|
+| `simple test <spec>` (default engine) | **6/6 PASS** | 6/6 PASS |
+| `simple test <spec>` under `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` | **6/6 PASS** | 6/6 PASS |
+| `simple run` on an equivalent probe `.spl`, plain | n/a (interpreter path unaffected either way) | matches |
+| `simple run` on the probe under `SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` | **hard error**: `unresolved external symbol 'min'` | 6/6 correct values |
+
+`simple test` never routes the spec through the cranelift/JIT backend at
+all, **even when `SIMPLE_EXECUTION_MODE=jit` is set** — so the spec passes
+identically whether or not the MIR-lowering fix exists, because the
+interpreter's own (always-correct) `min`/`max`/`abs` handles it either way.
+The only thing that actually vacuity-probes gap 6 is `simple run` under
+`SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1` directly — captured above,
+true before/after. Same shape of lesson as the jwt_spec.spl finding two
+passes ago, for a different underlying reason: there it was an unreached
+call graph; here it's the test harness's execution engine never touching
+the code path the bug lives in, regardless of the env var that is supposed
+to select it. Worth a standing note for whoever owns the test runner.
+
+### The prize, attempted again: gap 6 confirmed gone, but gap 7 found — a silent empty-array result, not an unresolved symbol (PROVED)
+
+Machine load at capture time: `uptime` load average **37.62** (1-min) — in
+the 25-62 range flagged as partly other sessions' contention; noted, not
+controlled for.
+
+Re-ran the exact assigned repro, this time with stdout/stderr captured to
+**separate** files (a single merged stream on the previous pass looked like
+two interleaved runs and had to be re-verified cleanly):
+
+```
+SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 SHOWCASE_RESOLUTION=480x360 \
+SIMPLE_WEB_RENDER_BUDGET_MS=120000 SIMPLE_TIMEOUT_SECONDS=280 \
+simple run examples/06_io/ui/web_render_file_gui.spl
+```
+
+**Gap 6 (`min`) is gone — PROVED.** stderr contains zero `[jit-fallback]`
+markers and zero `unresolved external symbol` errors (grepped explicitly);
+compare to the immediately-prior pass, which hit exactly this error at the
+same repro. Re-ran a second time with `SIMPLE_JIT_STRICT` unset to confirm
+this isn't strict-mode-specific: identical outcome, still zero fallback/
+unresolved markers. The module now compiles and *runs to completion* under
+JIT in ~60 s wall (vs. the interpreted lane's known 40 s–8 min+ for full
+styling) — the fastest this repro has ever completed in this campaign.
+
+But it completes with a **wrong, degenerate result**:
+
+```
+web_standards_showcase status=fail reason=blank-or-uniform pixels=0 nonzero=0 checksum=0
+```
+
+**Root cause (PROVED by direct code reading, not yet fixed — out of scope
+for this pass):** `examples/06_io/ui/web_render_file_gui.spl:299-341`.
+`val pixels = initial_readback.pixels` is immutable. Line 310 checks
+`pixels.len() != RW * RH` (172800 for 480x360) and would print
+`reason=wrong-pixel-count` and return early if that check failed — it did
+**not** fire (we observed `reason=blank-or-uniform`, the *later* check at
+line 341, not the earlier one), which is only reachable if `pixels.len()`
+returned the correct `172800` at line 310. But the `while i <
+pixels.len():` loop at line 334 — re-evaluating `.len()` on the exact same
+immutable `val` a few lines later — must have iterated **zero** times
+(`varied` and `nonzero` both stay at their zero-initialized values, exactly
+matching the observed `nonzero=0`), and the final print's own
+`pixels={pixels.len()}` interpolation (line 341) reports `0`. **The same
+immutable array's `.len()` returns a different value at two call sites
+within the same function, under JIT.** This is a new instance of the
+already-catalogued native/JIT array-corruption bug family (see project
+memory: "Native Dict.get/len are broken", "list.get(i) returns
+value<<3") — not a link-time/unresolved-symbol gap, so
+`SIMPLE_JIT_STRICT` correctly has nothing to catch here (there is no
+missing symbol; the module links and runs). Not root-caused further or
+fixed — this is a different, larger bug class than "gap 6: bare min" and
+squarely out of this pass's scope.
+
+**Strategic per-node JIT timing: still NOT captured.** Gap 7 produces a
+result before the style loop can be meaningfully measured (the pixel
+readback that styling would operate on reads as empty), so no
+apples-to-apples per-node number exists yet. This is now the narrowest
+next blocker for the "prize."
+
+### Heuristic-flip question (instruction 5): still not evaluated
+
+Cannot respons­ibly assess whether `exec_core.rs`'s force-interpret
+heuristic should change for this example until a JIT run actually produces
+a *correct* (or at least non-degenerate) result — gap 7 still blocks that,
+even though gap 6 (the specific symbol-resolution blocker this pass
+targeted) is now closed.
