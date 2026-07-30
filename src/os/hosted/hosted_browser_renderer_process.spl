@@ -72,6 +72,11 @@ use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_sanitize_fetch_headers,
     hosted_browser_transport_host
 }
+use os.hosted.hosted_theme_runtime.{
+    hosted_theme_init_encode,
+    hosted_theme_wire_valid,
+    hosted_theme_ready_payload_matches
+}
 
 extern fn rt_sleep_ms(milliseconds: i64)
 extern fn rt_time_now_monotonic_ms() -> i64
@@ -299,12 +304,43 @@ pub class HostedBrowserRendererProcess:
     hsts: BrowserSession
     hsts_dirty: bool
     retained_image_resources: [SimpleOsHostGpuImageResource]
+    requires_theme_handshake: bool
+    theme_revision: i64
+    theme_wire_text: text
     state: text
 
     static fn create(
         generation: i64,
         width: i32,
         height: i32
+    ) -> HostedBrowserRendererProcess:
+        HostedBrowserRendererProcess._create(
+            generation, width, height, false, 0, ""
+        )
+
+    static fn create_with_theme(
+        generation: i64,
+        width: i32,
+        height: i32,
+        theme_revision: i64,
+        theme_wire_text: text
+    ) -> HostedBrowserRendererProcess:
+        HostedBrowserRendererProcess._create(
+            generation,
+            width,
+            height,
+            true,
+            theme_revision,
+            theme_wire_text
+        )
+
+    static fn _create(
+        generation: i64,
+        width: i32,
+        height: i32,
+        requires_theme_handshake: bool,
+        theme_revision: i64,
+        theme_wire_text: text
     ) -> HostedBrowserRendererProcess:
         HostedBrowserRendererProcess(
             pid: 0,
@@ -362,6 +398,9 @@ pub class HostedBrowserRendererProcess:
             hsts: BrowserSession.new_without_runtime(),
             hsts_dirty: false,
             retained_image_resources: [],
+            requires_theme_handshake: requires_theme_handshake,
+            theme_revision: theme_revision,
+            theme_wire_text: theme_wire_text,
             state: "new"
         )
 
@@ -967,12 +1006,29 @@ pub class HostedBrowserRendererProcess:
         if self.state != "new" or executable == "" or self.generation <= 0 or
             self.width <= 0 or self.height <= 0:
             return Err("invalid-launch")
-        self.pid = browser_renderer_spawn_sandboxed(executable, [
-            BROWSER_RENDERER_WORKER_ARG,
-            self.generation.to_text(),
-            self.width.to_text(),
-            self.height.to_text()
-        ])
+        if (self.requires_theme_handshake and not
+            hosted_theme_wire_valid(
+                self.theme_revision, self.theme_wire_text
+            )):
+            return Err("invalid-theme-projection")
+        val worker_args = if self.requires_theme_handshake:
+            [
+                BROWSER_RENDERER_WORKER_ARG,
+                self.generation.to_text(),
+                self.width.to_text(),
+                self.height.to_text(),
+                "--theme-runtime"
+            ]
+        else:
+            [
+                BROWSER_RENDERER_WORKER_ARG,
+                self.generation.to_text(),
+                self.width.to_text(),
+                self.height.to_text()
+            ]
+        self.pid = browser_renderer_spawn_sandboxed(
+            executable, worker_args
+        )
         if self.pid <= 0:
             self.pid = 0
             self.state = "failed"
@@ -984,6 +1040,20 @@ pub class HostedBrowserRendererProcess:
 
     me start(executable: text, timeout_ms: i64) -> HostedBrowserRendererResult:
         match self.begin_start(executable, timeout_ms):
+            Err(reason):
+                self.fail(reason)
+            Ok(_):
+                self._await_pending()
+
+    me start_with_theme(
+        executable: text, timeout_ms: i64
+    ) -> HostedBrowserRendererResult:
+        if not self.requires_theme_handshake:
+            return self.fail("theme-handshake-not-required")
+        val started = self.start(executable, timeout_ms)
+        if not started.ok:
+            return started
+        match self.begin_theme_init(timeout_ms):
             Err(reason):
                 self.fail(reason)
             Ok(_):
@@ -1635,7 +1705,10 @@ pub class HostedBrowserRendererProcess:
                     return Some(self.fail("expected-ready"))
                 self.command_deadline_ms = 0
                 self.pending_operation = ""
-                self.state = "await-init"
+                self.state = if self.requires_theme_handshake:
+                    "await-theme-init"
+                else:
+                    "await-init"
                 return Some(_renderer_result(
                     true, "ok", _empty_composition()
                 ))
@@ -1666,6 +1739,24 @@ pub class HostedBrowserRendererProcess:
         if decoded.status == "violation":
             return Some(self.fail(decoded.decoder.error))
         if decoded.status == "message":
+            if self.state == "await-theme-ready":
+                if (decoded.message.kind != "theme_ready" or
+                    decoded.message.request_id !=
+                        self.expected_reply_to_request_id):
+                    return Some(self.fail("expected-theme-ready"))
+                if not hosted_theme_ready_payload_matches(
+                    self.theme_revision,
+                    self.theme_wire_text,
+                    decoded.message.payload
+                ):
+                    return Some(self.fail("theme-ready-mismatch"))
+                self.command_deadline_ms = 0
+                self.pending_operation = ""
+                self.expected_reply_to_request_id = 0
+                self.state = "await-init"
+                return Some(_renderer_result(
+                    true, "theme-ready", _empty_composition()
+                ))
             if decoded.message.kind == "test_hang_ready":
                 if (self.pending_operation != "test_hang_after_ready" or
                     self.hang_acknowledged or
@@ -1825,6 +1916,30 @@ pub class HostedBrowserRendererProcess:
         self._begin_frame_request(browser_renderer_message_encode(
             "init", self.generation, self.next_request_id, payload
         ), "init", timeout_ms)
+
+    me begin_theme_init(timeout_ms: i64) -> Result<bool, text>:
+        if (not self.requires_theme_handshake or
+            self.state != "await-theme-init"):
+            return Err("invalid-renderer-state")
+        val payload = hosted_theme_init_encode(
+            self.theme_revision, self.theme_wire_text
+        )
+        val request = match payload:
+            Err(reason):
+                return Err(reason)
+            Ok(value):
+                browser_renderer_message_encode(
+                    "theme_init",
+                    self.generation,
+                    self.next_request_id,
+                    value
+                )
+        val started = self._begin_frame_request(
+            request, "theme-init", timeout_ms
+        )
+        if val Ok(_) = started:
+            self.state = "await-theme-ready"
+        started
 
     me test_crash_after_ready(
         timeout_ms: i64

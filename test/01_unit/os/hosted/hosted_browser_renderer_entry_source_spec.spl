@@ -10,6 +10,70 @@ fn executable_source_lines(source: text) -> text:
     out
 
 describe "hosted browser renderer entry isolation":
+    it "gates the production registry on exact theme readiness":
+        step("Inspect the hosted theme-before-init production route")
+        val entry = executable_source_lines(
+            rt_file_read_text("src/os/hosted/hosted_entry.spl") ?? ""
+        )
+        val registry = executable_source_lines(
+            rt_file_read_text(
+                "src/os/hosted/hosted_browser_renderer_registry.spl"
+            ) ?? ""
+        )
+        val process = executable_source_lines(
+            rt_file_read_text(
+                "src/os/hosted/hosted_browser_renderer_process.spl"
+            ) ?? ""
+        )
+        val create_pos = entry.find(
+            "HostedBrowserRendererRegistry.create_with_theme("
+        )
+        val advance_start = registry.find("me advance_window(")
+        val advance_end = registry.find(
+            "me take_pending_frame(", advance_start
+        )
+        val advance = registry.slice(advance_start, advance_end)
+        val theme_pos = advance.find(
+            "entry.renderer.begin_theme_init(2000)"
+        )
+        val init_pos = advance.find(
+            "entry.renderer.begin_init("
+        )
+        val resume_pos = advance.find(
+            "if entry.renderer.site_swap_pending:", init_pos
+        )
+        val frame_pos = advance.find(
+            "return self._store_frame(", resume_pos
+        )
+        expect(create_pos).to_be_greater_than(-1)
+        expect(registry).to_contain(
+            "simple_web_content_full_html_with_install_wire("
+        )
+        expect(registry).to_contain(
+            "HostedBrowserRendererProcess.create_with_theme("
+        )
+        expect(theme_pos).to_be_greater_than(-1)
+        expect(init_pos).to_be_greater_than(theme_pos)
+        expect(resume_pos).to_be_greater_than(init_pos)
+        expect(frame_pos).to_be_greater_than(resume_pos)
+        expect(process).to_contain("\"await-theme-ready\"")
+        expect(process).to_contain("\"theme-ready-mismatch\"")
+        expect(registry).to_contain(
+            "\"theme-parent-projection-mismatch\""
+        )
+        val swap_start = registry.find("me _begin_site_swap(")
+        val swap_end = registry.find("me _store_frame(", swap_start)
+        val swap = registry.slice(swap_start, swap_end)
+        expect(swap).to_contain(
+            "HostedBrowserRendererProcess.create_with_theme("
+        )
+        expect(swap).to_contain(
+            "simple_web_content_full_html_with_install_wire("
+        )
+        expect(swap).to_contain(
+            "entry.startup_html = restart_html"
+        )
+
     it "keeps secondary hosted navigation public and response-bounded":
         step("Inspect the secondary navigation source limits")
         val source = rt_file_read_text(
@@ -36,7 +100,10 @@ describe "hosted browser renderer entry isolation":
         expect(args_pos).to_be_greater_than(main_start)
         expect(worker_pos).to_be_greater_than(args_pos)
         expect(entry).to_contain(
-            "args.len() == 5 and args[1] == BROWSER_RENDERER_WORKER_ARG"
+            "(args.len() == 5 or args.len() == 6)"
+        )
+        expect(entry).to_contain(
+            "args[1] == BROWSER_RENDERER_WORKER_ARG"
         )
         expect(entry.contains(
             "args.contains(BROWSER_RENDERER_WORKER_ARG)"

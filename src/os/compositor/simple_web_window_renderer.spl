@@ -5,6 +5,12 @@
 
 use os.compositor.display_backend_core.{CompositorBackend}
 use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderArtifact, WebRenderRequest, web_render_full_html}
+use common.ui.theme_package_wire.{
+    ThemePackageInstallProjection,
+    theme_package_install_wire_v1_decode,
+    theme_package_install_wire_v1_within_bound
+}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
 use nogc_sync_mut.ui.theme_package.{default_theme_id, resolved_theme_css, resolve_theme_alias, theme_package_fingerprint, theme_package_material_solid_fallback_rgba, theme_package_material_text_rgba}
 use common.ui.wm_chrome_theme.{
@@ -54,9 +60,42 @@ fn _theme_text_rgba(theme: text) -> u32:
         return installed
     theme_package_material_text_rgba(theme)
 
+fn _wm_root_behavior_attrs() -> text:
+    "data-wm-motion=\"standard\" data-wm-animation-style=\"spring\" data-wm-transparency=\"standard\" data-wm-energy=\"standard\" data-wm-feedback=\"standard\" data-wm-contrast=\"comfortable\" data-wm-density=\"comfortable\" data-wm-wallpaper=\"aurora\" data-wm-backdrop-motion=\"ambient\" data-wm-backdrop-intensity=\"balanced\" data-wm-dock-magnification=\"standard\" data-wm-dock-visibility=\"shown\" data-wm-surface-depth=\"layered\" data-wm-traffic-side=\"left\" data-wm-chrome-verbosity=\"full\" data-wm-window-transition=\"mac\" data-wm-accent=\"blue\" data-wm-focus-mode=\"off\" data-wm-quiet-mode=\"off\" data-wm-icon-mask=\"circle\" data-wm-corner-radius=\"round\""
+
 fn _wm_root_data_attrs(theme_id: text) -> text:
     val canonical_theme = resolve_theme_alias(theme_id)
-    "data-wm-theme=\"{canonical_theme}\" data-wm-motion=\"standard\" data-wm-animation-style=\"spring\" data-wm-transparency=\"standard\" data-wm-energy=\"standard\" data-wm-feedback=\"standard\" data-wm-contrast=\"comfortable\" data-wm-density=\"comfortable\" data-wm-wallpaper=\"aurora\" data-wm-backdrop-motion=\"ambient\" data-wm-backdrop-intensity=\"balanced\" data-wm-dock-magnification=\"standard\" data-wm-dock-visibility=\"shown\" data-wm-surface-depth=\"layered\" data-wm-traffic-side=\"left\" data-wm-chrome-verbosity=\"full\" data-wm-window-transition=\"mac\" data-wm-accent=\"blue\" data-wm-focus-mode=\"off\" data-wm-quiet-mode=\"off\" data-wm-icon-mask=\"circle\" data-wm-corner-radius=\"round\""
+    "data-wm-theme=\"{canonical_theme}\" " + _wm_root_behavior_attrs()
+
+fn _simple_web_theme_attr_text_valid(value: text) -> bool:
+    (value != "" and not value.contains("\"") and
+        not value.contains("<") and not value.contains(">") and
+        not value.contains("\r") and not value.contains("\n") and
+        not value.contains("\0"))
+
+fn _wm_root_data_attrs_with_snapshot(
+    snapshot: ThemeRenderSnapshot, theme_revision: i64
+) -> text:
+    if (theme_revision <= 0 or
+        not _simple_web_theme_attr_text_valid(snapshot.id) or
+        not _simple_web_theme_attr_text_valid(
+            snapshot.source_manifest_sha256
+        ) or not _simple_web_theme_attr_text_valid(
+            snapshot.material_sha256
+        )):
+        return ""
+    (
+        "data-wm-theme=\"" + snapshot.id + "\" " +
+        _wm_root_behavior_attrs() +
+        " data-wm-theme-revision=\"{theme_revision}\"" +
+        " data-wm-theme-source-manifest-sha256=\"" +
+        snapshot.source_manifest_sha256 + "\"" +
+        " data-wm-theme-material-sha256=\"" +
+        snapshot.material_sha256 + "\""
+    )
+
+fn _simple_web_structural_css() -> text:
+    ".wm-app-container { min-height: 100vh; } .wm-app-titlebar { height: 24px; } .wm-app-content { min-height: calc(100vh - 24px); }"
 
 fn _simple_web_window_css(theme: text) -> text:
     # Theme aliases, package inheritance, widget CSS, and visual tokens belong
@@ -64,7 +103,139 @@ fn _simple_web_window_css(theme: text) -> text:
     # shadows, and glass effects here created a second, divergent theme owner.
     val installed_css = active_theme_composed_css(theme)
     val package_css = if installed_css != "": installed_css else: resolved_theme_css(theme)
-    package_css + "\n.wm-app-container { min-height: 100vh; } .wm-app-titlebar { height: 24px; } .wm-app-content { min-height: calc(100vh - 24px); }"
+    package_css + "\n" + _simple_web_structural_css()
+
+fn _simple_web_window_css_with_snapshot(
+    snapshot: ThemeRenderSnapshot
+) -> text:
+    snapshot.composed_css + "\n" + _simple_web_structural_css()
+
+fn _simple_web_content_render_request_from_snapshot(
+    snapshot: ThemeRenderSnapshot,
+    theme_revision: i64,
+    title: text,
+    body_html: text,
+    viewport_w: i32,
+    viewport_h: i32
+) -> WebRenderRequest:
+    val attrs = _wm_root_data_attrs_with_snapshot(
+        snapshot, theme_revision
+    )
+    if attrs == "":
+        return WebRenderRequest.html(
+            WEB_RENDER_TARGET_SIMPLE_WEB, "", "", "", "", 0, 0
+        )
+    val css = _simple_web_window_css_with_snapshot(snapshot)
+    val app_css = css + "body { margin: 0; overflow: hidden; background: var(--app-surface); color: var(--ui-fg); } #app { min-height: 100vh; padding: 0; } .wm-app-content { min-height: 100vh; color: var(--ui-fg); }"
+    val solid_css = _theme_rgb_css(
+        snapshot.material.solid_fallback_rgba
+    )
+    val text_css = _theme_rgb_css(snapshot.material.text_rgba)
+    val app_body = "<div id='wm-app-content' class='wm-app-content widget-panel' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='{solid_css}' data-wm-theme-fg='{text_css}'>" + body_html + "</div>"
+    WebRenderRequest.html(
+        WEB_RENDER_TARGET_SIMPLE_WEB,
+        title,
+        app_body,
+        app_css,
+        "",
+        viewport_w,
+        viewport_h
+    ).with_root_attrs(attrs)
+
+fn simple_web_content_render_request_with_snapshot(
+    snapshot: ThemeRenderSnapshot,
+    theme_revision: i64,
+    title: text,
+    body_html: text,
+    viewport_w: i32,
+    viewport_h: i32
+) -> WebRenderRequest:
+    """Project one accepted immutable snapshot into canonical Simple Web."""
+    _simple_web_content_render_request_from_snapshot(
+        snapshot, theme_revision, title, body_html, viewport_w, viewport_h
+    )
+
+fn _simple_web_content_full_html_with_install_projection(
+    projection: ThemePackageInstallProjection,
+    theme_revision: i64,
+    title: text,
+    body_html: text,
+    viewport_w: i32,
+    viewport_h: i32
+) -> text:
+    """Serialize canonical themed HTML from the exact accepted projection."""
+    val request = _simple_web_content_render_request_from_snapshot(
+        projection.snapshot,
+        theme_revision,
+        title,
+        body_html,
+        viewport_w,
+        viewport_h
+    )
+    if request.viewport_w <= 0 or request.viewport_h <= 0:
+        return ""
+    web_render_full_html(request)
+
+fn _simple_web_content_full_html_matches_install_projection(
+    projection: ThemePackageInstallProjection,
+    theme_revision: i64,
+    html: text
+) -> bool:
+    """Reject raw or differently themed HTML without rebuilding its body."""
+    val attrs = _wm_root_data_attrs_with_snapshot(
+        projection.snapshot, theme_revision
+    )
+    if attrs == "":
+        return false
+    val css_prefix = (
+        "<style>" + projection.snapshot.composed_css + "\n" +
+        _simple_web_structural_css()
+    )
+    html.starts_with("<!DOCTYPE html><html " + attrs + "><head>") and
+        html.contains(css_prefix) and
+        html.contains(
+            "data-wm-theme-material-mode='engine2d-cpu-composited-material-v1'"
+        )
+
+fn simple_web_content_full_html_with_install_wire(
+    install_wire: text,
+    theme_revision: i64,
+    title: text,
+    body_html: text,
+    viewport_w: i32,
+    viewport_h: i32
+) -> text:
+    """Decode the copied wire privately and serialize canonical themed HTML."""
+    if (theme_revision <= 0 or
+        not theme_package_install_wire_v1_within_bound(install_wire)):
+        return ""
+    match theme_package_install_wire_v1_decode(install_wire):
+        Err(_):
+            ""
+        Ok(projection):
+            _simple_web_content_full_html_with_install_projection(
+                projection,
+                theme_revision,
+                title,
+                body_html,
+                viewport_w,
+                viewport_h
+            )
+
+fn simple_web_content_full_html_matches_install_wire(
+    install_wire: text, theme_revision: i64, html: text
+) -> bool:
+    """Validate canonical themed HTML without exposing decoded aggregates."""
+    if (theme_revision <= 0 or
+        not theme_package_install_wire_v1_within_bound(install_wire)):
+        return false
+    match theme_package_install_wire_v1_decode(install_wire):
+        Err(_):
+            false
+        Ok(projection):
+            _simple_web_content_full_html_matches_install_projection(
+                projection, theme_revision, html
+            )
 
 # Content-only request for WM-owned windows. The shared WM executor owns the
 # outer titlebar and frame, so this request deliberately emits no nested
@@ -107,12 +278,15 @@ fn simple_web_content_full_html_with_theme(theme: text, title: text, body_html: 
 fn _simple_web_revision_mix(hash: i64, value: i64) -> i64:
     ((hash * 131 + value) % 2147483647) + 1
 
-fn simple_web_content_revision_with_theme(theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
+fn _simple_web_content_revision_with_fingerprint(
+    theme_fingerprint: text,
+    title: text,
+    body_html: text,
+    width: i32,
+    height: i32,
+    scroll_y: i32
+) -> i64:
     var hash: i64 = 17
-    # The content-addressed package fingerprint covers every package-owned
-    # source without rescanning the much larger composed CSS on each request.
-    val installed_fingerprint = active_theme_source_fingerprint(theme)
-    val theme_fingerprint = if installed_fingerprint != "": installed_fingerprint else: theme_package_fingerprint(theme)
     var i = 0
     while i < theme_fingerprint.len():
         hash = _simple_web_revision_mix(hash, theme_fingerprint.char_code_at(i) as i64)
@@ -130,6 +304,34 @@ fn simple_web_content_revision_with_theme(theme: text, title: text, body_html: t
     hash = _simple_web_revision_mix(hash, width.to_i64())
     hash = _simple_web_revision_mix(hash, height.to_i64())
     _simple_web_revision_mix(hash, _clamp_scroll_px(scroll_y).to_i64())
+
+fn simple_web_content_revision_with_theme(theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
+    # The content-addressed package fingerprint covers every package-owned
+    # source without rescanning the much larger composed CSS on each request.
+    val installed_fingerprint = active_theme_source_fingerprint(theme)
+    val theme_fingerprint = if installed_fingerprint != "": installed_fingerprint else: theme_package_fingerprint(theme)
+    _simple_web_content_revision_with_fingerprint(
+        theme_fingerprint, title, body_html, width, height, scroll_y
+    )
+
+fn simple_web_content_revision_with_theme_receipt(
+    theme_source_manifest_sha256: text,
+    title: text,
+    body_html: text,
+    width: i32,
+    height: i32,
+    scroll_y: i32
+) -> i64:
+    if theme_source_manifest_sha256.len() != 64:
+        return 0
+    _simple_web_content_revision_with_fingerprint(
+        theme_source_manifest_sha256,
+        title,
+        body_html,
+        width,
+        height,
+        scroll_y
+    )
 
 # Source-compatible default-theme entrypoint used by existing compositor
 # callers. Theme-aware callers can select the explicit variant above.
@@ -252,6 +454,97 @@ fn simple_web_external_content_frame(
         material_fallback_sha256: material.material_sha256,
         theme_id: theme,
         theme_source_manifest_sha256: theme_fingerprint
+    )
+
+fn simple_web_external_content_frame_with_theme_receipt(
+    window_id: text,
+    content_revision: i64,
+    theme: text,
+    theme_source_manifest_sha256: text,
+    theme_material_sha256: text,
+    width: i32,
+    height: i32,
+    render: Engine2dDrawIrAdvResult,
+    cpu_composited_count: i32,
+    cpu_composited_sha256: text,
+    solid_material_count: i32,
+    solid_material_sha256: text
+) -> WmContentFrame:
+    if (window_id == "" or content_revision <= 0 or theme == "" or
+        theme_source_manifest_sha256.len() != 64 or
+        theme_material_sha256.len() != 64 or width <= 0 or height <= 0 or
+        render.fallback_required or render.skipped_command_count != 0 or
+        render.rendered_command_count <= 0 or
+        render.pixels.len() != width * height):
+        return WmContentFrame(
+            window_id: window_id,
+            scene_revision: 0,
+            content_revision: content_revision,
+            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+            width: width,
+            height: height,
+            pixels: [],
+            checksum: 0u64,
+            parent_window_id: "",
+            offset_x: 0,
+            offset_y: 0
+        )
+    val witness = SimpleWebLayoutMaterialWitness(
+        cpu_composited_count: cpu_composited_count,
+        cpu_composited_sha256: cpu_composited_sha256,
+        solid_material_count: solid_material_count,
+        solid_material_sha256: solid_material_sha256
+    )
+    val material = simple_web_layout_material_provenance_after_backend_execution(
+        witness,
+        render.skipped_command_count,
+        render.pixels.len(),
+        width * height,
+        render.cpu_composited_material_count,
+        render.metal_device_glass_material_count,
+        render.glass_execution_target,
+        render.readback_source,
+        render.glass_backend_handle,
+        render.glass_device_identity
+    )
+    if material.material_sha256 != theme_material_sha256:
+        return WmContentFrame(
+            window_id: window_id,
+            scene_revision: 0,
+            content_revision: content_revision,
+            origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+            width: width,
+            height: height,
+            pixels: [],
+            checksum: 0u64,
+            parent_window_id: "",
+            offset_x: 0,
+            offset_y: 0
+        )
+    WmContentFrame(
+        window_id: window_id,
+        scene_revision: 0,
+        content_revision: content_revision,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+        width: width,
+        height: height,
+        pixels: render.pixels,
+        checksum: wm_content_frame_checksum(render.pixels),
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0,
+        engine2d_status: "engine2d_rendered",
+        engine2d_backend: render.selected_backend,
+        engine2d_reason: if render.fallback_reason == "":
+            "draw-ir-executed"
+        else:
+            render.fallback_reason,
+        material_fallback_kind: material.kind,
+        material_fallback_reason: material.reason,
+        material_fallback_sha256: material.material_sha256,
+        theme_id: theme,
+        theme_source_manifest_sha256:
+            theme_source_manifest_sha256
     )
 
 # Slices the `ch`-tall visible window starting at row `scroll_y` out of a

@@ -56,6 +56,14 @@ fn _worker_network_history_neighbor(url: text) -> text:
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
 use std.nogc_sync_mut.io.process_ops.{browser_renderer_sandbox_enter}
+use os.compositor.simple_web_window_renderer.{
+    simple_web_content_full_html_matches_install_wire
+}
+use os.hosted.hosted_theme_runtime.{
+    hosted_theme_init_revision,
+    hosted_theme_init_wire,
+    hosted_theme_ready_encode
+}
 
 extern fn rt_browser_renderer_read_stdin_some(max_bytes: i64) -> text
 extern fn rt_browser_renderer_write_protocol_some(data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
@@ -235,6 +243,10 @@ pub class HostedBrowserRendererWorkerSession:
     width: i32
     height: i32
     initialized: bool
+    theme_required: bool
+    theme_initialized: bool
+    theme_revision: i64
+    theme_wire_text: text
     animation_time_ms: i64
     expected_request_id: i64
     next_outbound_id: i64
@@ -251,6 +263,20 @@ pub class HostedBrowserRendererWorkerSession:
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
 
     static fn create(width: i32, height: i32) -> HostedBrowserRendererWorkerSession:
+        HostedBrowserRendererWorkerSession._create(
+            width, height, false
+        )
+
+    static fn create_for_theme_protocol(
+        width: i32, height: i32
+    ) -> HostedBrowserRendererWorkerSession:
+        HostedBrowserRendererWorkerSession._create(
+            width, height, true
+        )
+
+    static fn _create(
+        width: i32, height: i32, theme_required: bool
+    ) -> HostedBrowserRendererWorkerSession:
         var browser = BrowserSession.new()
         browser.broker_network_policy = true
         HostedBrowserRendererWorkerSession(
@@ -259,6 +285,10 @@ pub class HostedBrowserRendererWorkerSession:
             width: width,
             height: height,
             initialized: false,
+            theme_required: theme_required,
+            theme_initialized: not theme_required,
+            theme_revision: 0,
+            theme_wire_text: "",
             animation_time_ms: 0,
             expected_request_id: 2,
             next_outbound_id: 2,
@@ -640,11 +670,70 @@ pub class HostedBrowserRendererWorkerSession:
                 self.initialized,
                 self.animation_time_ms
             )
+        if self.theme_required and not self.theme_initialized:
+            if message.kind != "theme_init":
+                return _worker_result_reject(
+                    "expected-theme-init", false, self.animation_time_ms
+                )
+            val revision = hosted_theme_init_revision(message.payload)
+            val wire_text = hosted_theme_init_wire(message.payload)
+            val ready = hosted_theme_ready_encode(revision, wire_text)
+            if revision <= 0 or wire_text == "":
+                return _worker_result_reject(
+                    "invalid-theme-init", false, self.animation_time_ms
+                )
+            val ready_payload = match ready:
+                Err(_):
+                    return _worker_result_reject(
+                        "invalid-theme-init", false,
+                        self.animation_time_ms
+                    )
+                Ok(value):
+                    value
+            val encoded = browser_renderer_message_encode(
+                "theme_ready",
+                message.generation,
+                message.request_id,
+                ready_payload
+            )
+            if not encoded.ok:
+                return _worker_result_reject(
+                    encoded.reason, false, self.animation_time_ms
+                )
+            self.theme_initialized = true
+            self.theme_revision = revision
+            self.theme_wire_text = wire_text
+            self.expected_request_id = self.expected_request_id + 1
+            return HostedBrowserRendererWorkerResult(
+                ok: true,
+                reason: "ok",
+                initialized: false,
+                animation_time_ms: self.animation_time_ms,
+                wire: encoded.wire,
+                hit_index: nil,
+                resolved_input_view_start_byte: 0,
+                resolved_scroll_y: 0,
+                max_scroll_y: 0,
+                image_resource_revisions: []
+            )
         if not self.initialized:
             if message.kind != "init":
                 return _worker_result_reject(
                     "expected-init", false, self.animation_time_ms
                 )
+            if self.theme_required:
+                if not (
+                    simple_web_content_full_html_matches_install_wire(
+                        self.theme_wire_text,
+                        self.theme_revision,
+                        message.payload
+                    )
+                ):
+                    return _worker_result_reject(
+                        "unthemed-init-rejected",
+                        false,
+                        self.animation_time_ms
+                    )
             if val Err(reason) = self.browser.open_html(
                 "simple-renderer://document", message.payload
             ):
@@ -912,7 +1001,9 @@ fn _worker_write(wire: text) -> bool:
     true
 
 pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
-    if args.len() != 5 or args[1] != BROWSER_RENDERER_WORKER_ARG:
+    val themed = args.len() == 6 and args[5] == "--theme-runtime"
+    if ((args.len() != 5 and not themed) or
+        args[1] != BROWSER_RENDERER_WORKER_ARG):
         return 64
 
     val generation = args[2].to_i64() ?? -1
@@ -930,9 +1021,14 @@ pub fn hosted_browser_renderer_worker_main(args: [text]) -> i64:
         return 71
 
     var decoder = browser_renderer_decoder_new(generation)
-    var session = HostedBrowserRendererWorkerSession.create(
-        width_i64.to_i32(), height_i64.to_i32()
-    )
+    var session = if themed:
+        HostedBrowserRendererWorkerSession.create_for_theme_protocol(
+            width_i64.to_i32(), height_i64.to_i32()
+        )
+    else:
+        HostedBrowserRendererWorkerSession.create(
+            width_i64.to_i32(), height_i64.to_i32()
+        )
     while true:
         val chunk = rt_browser_renderer_read_stdin_some(_WORKER_READ_BYTES)
         if chunk == "":
