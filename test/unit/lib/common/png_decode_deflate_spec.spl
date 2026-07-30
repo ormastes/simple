@@ -13,7 +13,10 @@
 
 use std.spec.{describe, context, it, expect}
 use std.common.image.png_decode.{
-    decode_png_to_argb, PngImage, decompress_idat, reconstruct_scanlines, paeth_predictor}
+    decode_png_to_argb, decode_png_to_argb_bounded, PngImage,
+    decompress_idat, reconstruct_scanlines, paeth_predictor}
+use std.common.compress.gzip.{gzip_crc32}
+use std.common.hash.adler32.{adler32}
 
 # ============================================================================
 # Test Helpers — Minimal PNG Construction
@@ -31,8 +34,16 @@ fn write_u32_be(val_: u32) -> [u8]:
     out = out + [(val_ & 0xFF).to_u8()]
     out
 
+fn finish_chunk(chunk: [u8]) -> [u8]:
+    var crc_data: [u8] = []
+    var i: i32 = 4
+    while i < chunk.len().to_i32():
+        crc_data.push(chunk[i])
+        i = i + 1
+    chunk + write_u32_be(gzip_crc32(crc_data))
+
 fn make_ihdr_chunk(width: i32, height: i32, color_type: u8) -> [u8]:
-    """Build an IHDR chunk (no CRC — decoder doesn't check CRC)."""
+    """Build a valid IHDR chunk."""
     var chunk: [u8] = []
     # Length: 13
     chunk = chunk + write_u32_be(13)
@@ -48,9 +59,7 @@ fn make_ihdr_chunk(width: i32, height: i32, color_type: u8) -> [u8]:
     chunk = chunk + [color_type]
     # Compression, filter, interlace: 0, 0, 0
     chunk = chunk + [0, 0, 0]
-    # CRC (dummy — decoder doesn't validate CRC)
-    chunk = chunk + [0, 0, 0, 0]
-    chunk
+    finish_chunk(chunk)
 
 fn make_idat_chunk(data: [u8]) -> [u8]:
     """Build an IDAT chunk wrapping compressed data."""
@@ -60,9 +69,7 @@ fn make_idat_chunk(data: [u8]) -> [u8]:
     chunk = chunk + [73, 68, 65, 84]
     for b in data:
         chunk = chunk + [b]
-    # CRC (dummy)
-    chunk = chunk + [0, 0, 0, 0]
-    chunk
+    finish_chunk(chunk)
 
 fn make_iend_chunk() -> [u8]:
     """Build an IEND chunk."""
@@ -71,9 +78,7 @@ fn make_iend_chunk() -> [u8]:
     chunk = chunk + [0, 0, 0, 0]
     # Type: IEND = [73, 69, 78, 68]
     chunk = chunk + [73, 69, 78, 68]
-    # CRC (dummy)
-    chunk = chunk + [0, 0, 0, 0]
-    chunk
+    finish_chunk(chunk)
 
 fn make_zlib_stored(raw: [u8]) -> [u8]:
     """Wrap raw bytes in a zlib stored block (no compression).
@@ -94,7 +99,20 @@ fn make_zlib_stored(raw: [u8]) -> [u8]:
     # Raw data
     for b in raw:
         out = out + [b]
+    out = out + write_u32_be(adler32(raw).to_u32())
     out
+
+fn make_png_stored(width: i32, height: i32, color_type: u8, raw: [u8]) -> [u8]:
+    var png: [u8] = []
+    for b in PNG_SIG:
+        png.push(b)
+    for b in make_ihdr_chunk(width, height, color_type):
+        png.push(b)
+    for b in make_idat_chunk(make_zlib_stored(raw)):
+        png.push(b)
+    for b in make_iend_chunk():
+        png.push(b)
+    png
 
 fn make_1x1_rgb_png_stored() -> [u8]:
     """Build a minimal 1x1 RGB PNG using stored DEFLATE block.
@@ -104,35 +122,13 @@ fn make_1x1_rgb_png_stored() -> [u8]:
     """
     # Raw pixel data with filter byte: filter_none(0), R, G, B
     val raw_scanline: [u8] = [0, 255, 0, 0]
-    val compressed = make_zlib_stored(raw_scanline)
-
-    var png: [u8] = []
-    for b in PNG_SIG:
-        png = png + [b]
-    for b in make_ihdr_chunk(1, 1, 2):  # color_type=2 (RGB)
-        png = png + [b]
-    for b in make_idat_chunk(compressed):
-        png = png + [b]
-    for b in make_iend_chunk():
-        png = png + [b]
-    png
+    make_png_stored(1, 1, 2, raw_scanline)
 
 fn make_2x1_rgb_png_stored() -> [u8]:
     """Build a 2x1 RGB PNG with two pixels: red and green."""
     # Raw scanline: [filter=0, R1=255, G1=0, B1=0, R2=0, G2=255, B2=0]
     val raw_scanline: [u8] = [0, 255, 0, 0, 0, 255, 0]
-    val compressed = make_zlib_stored(raw_scanline)
-
-    var png: [u8] = []
-    for b in PNG_SIG:
-        png = png + [b]
-    for b in make_ihdr_chunk(2, 1, 2):
-        png = png + [b]
-    for b in make_idat_chunk(compressed):
-        png = png + [b]
-    for b in make_iend_chunk():
-        png = png + [b]
-    png
+    make_png_stored(2, 1, 2, raw_scanline)
 
 # ============================================================================
 # Test Group 1: DEFLATE Integration in PNG
@@ -152,7 +148,7 @@ describe "PngDecode — DEFLATE decompression":
         it "AC-1: decodes 1x1 RGB PNG with stored DEFLATE block":
             val png = make_1x1_rgb_png_stored()
             val result = decode_png_to_argb(png)
-            expect(result.error?).to_equal(false)
+            expect(result.is_err()).to_equal(false)
 
         it "AC-1: 1x1 PNG produces exactly 1 pixel":
             val png = make_1x1_rgb_png_stored()
@@ -183,6 +179,38 @@ describe "PngDecode — DEFLATE decompression":
                 Err(msg):
                     expect(msg).to_equal("")
 
+    context "untrusted input hardening":
+
+        it "rejects a caller pixel budget before decoding":
+            val png = make_2x1_rgb_png_stored()
+            expect(decode_png_to_argb_bounded(png, 1).is_err()).to_equal(true)
+            expect(decode_png_to_argb_bounded(png, 2).is_err()).to_equal(false)
+
+        it "rejects oversized dimensions and bad chunk CRC":
+            val oversized = make_png_stored(4097, 1, 2, [0, 0, 0, 0])
+            expect(decode_png_to_argb(oversized).is_err()).to_equal(true)
+            var bad_crc = make_1x1_rgb_png_stored()
+            bad_crc[29] = bad_crc[29] ^ 1
+            expect(decode_png_to_argb(bad_crc).is_err()).to_equal(true)
+
+        it "rejects truncated, over-limit, and invalid-filter scanlines":
+            expect(decode_png_to_argb(
+                make_png_stored(1, 1, 2, [0, 1, 2])).is_err()).to_equal(true)
+            expect(decode_png_to_argb(
+                make_png_stored(1, 1, 2, [0, 1, 2, 3, 4])).is_err()).to_equal(true)
+            expect(decode_png_to_argb(
+                make_png_stored(1, 1, 2, [5, 1, 2, 3])).is_err()).to_equal(true)
+
+        it "rejects a stored block with an invalid NLEN complement":
+            var zlib = make_zlib_stored([0, 255, 0, 0])
+            zlib[5] = zlib[5] ^ 1
+            var png: [u8] = []
+            for b in PNG_SIG: png.push(b)
+            for b in make_ihdr_chunk(1, 1, 2): png.push(b)
+            for b in make_idat_chunk(zlib): png.push(b)
+            for b in make_iend_chunk(): png.push(b)
+            expect(decode_png_to_argb(png).is_err()).to_equal(true)
+
 # ============================================================================
 # Test Group 2: PNG Filter Reconstruction
 # ============================================================================
@@ -206,13 +234,13 @@ describe "PngDecode — filter reconstruction":
         it "AC-1: None filter passes through raw bytes":
             # 1x1 RGB: filter=0, R=100, G=200, B=50
             val raw: [u8] = [0, 100, 200, 50]
-            val result = reconstruct_scanlines(raw, 1, 1, 3, 4)
+            val result = reconstruct_scanlines(raw, 1, 1, 3, 3)
             # After reconstruction, should be [100, 200, 50]
             expect(result.len().to_i32()).to_equal(3)
 
         it "AC-1: None filter preserves byte values":
             val raw: [u8] = [0, 100, 200, 50]
-            val result = reconstruct_scanlines(raw, 1, 1, 3, 4)
+            val result = reconstruct_scanlines(raw, 1, 1, 3, 3)
             if result.len().to_i32() >= 1:
                 expect(result[0]).to_equal(100)
             else:
@@ -226,7 +254,7 @@ describe "PngDecode — filter reconstruction":
             # R1=100, G1=50, B1=25, dR2=10, dG2=5, dB2=3
             # After Sub: R2=100+10=110, G2=50+5=55, B2=25+3=28
             val raw: [u8] = [1, 100, 50, 25, 10, 5, 3]
-            val result = reconstruct_scanlines(raw, 2, 1, 3, 7)
+            val result = reconstruct_scanlines(raw, 2, 1, 3, 6)
             # Output should be 6 bytes: [100, 50, 25, 110, 55, 28]
             expect(result.len().to_i32()).to_equal(6)
 
@@ -238,7 +266,7 @@ describe "PngDecode — filter reconstruction":
             # Row 1: filter=2, dR=10, dG=5, dB=3
             # After Up: Row1 = Row0 + delta = [110, 55, 28]
             val raw: [u8] = [0, 100, 50, 25, 2, 10, 5, 3]
-            val result = reconstruct_scanlines(raw, 1, 2, 3, 4)
+            val result = reconstruct_scanlines(raw, 1, 2, 3, 3)
             # Output: 6 bytes total (2 rows of 3 bytes)
             expect(result.len().to_i32()).to_equal(6)
 
