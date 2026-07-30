@@ -902,3 +902,16 @@ recorded. None of these rows is executable or merged evidence.
   command-entropy symbol is exported, and no causal capability claim is made.
 - Negative stacking, radio lifecycle, and JavaScript property/GC prototypes
   remain HOLD at their recorded architecture boundaries and are not merged.
+
+## Batch-7 executable and held evidence (2026-07-30)
+
+- Address input and durable Home have final static/manual review PASS. Address
+  coverage binds every hosted mutation owner to strict UTF-8/control admission
+  and state-atomic rejection; Home coverage binds profile restart and both
+  hosted owners. Focused execution remains HELD for an admitted pure-Simple
+  artifact.
+- Trusted command-entropy ownership has final architecture review PASS but is
+  still PROPOSED / UNIMPLEMENTED / RED. It does not export an entropy symbol or
+  promote command capabilities.
+- Shared-clock, label activation, and SimpleScript listener prototypes remain
+  HOLD at their exact recorded defects and are not merged.

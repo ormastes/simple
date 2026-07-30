@@ -629,3 +629,18 @@ the Rust seed are not admissible evidence.
 No batch-6 static PASS promotes full production completion. Bookmark execution,
 the SBR2 atomic migration, and the exact hosted entropy owner remain RED until
 an admitted current pure-Simple artifact supplies focused executable evidence.
+
+## Production continuation batch 7 (2026-07-30)
+
+| Lane | Result | Status / next gate |
+| --- | --- | --- |
+| `address_input_bound` | strict single-pass UTF-8/control validation, centralized 2048-byte raw bound, and validate-before-mutate behavior across BrowserSession, worker, hosted web, registry, and live entry | final high review PASS; integrated STATIC / EXECUTION HELD |
+| `durable_home` | additive profile migration, bounded atomic Home save/load, startup seeding for primary and registry owners, legacy/corrupt fallback, restart navigation, and exact Home chrome evidence | final high review PASS; integrated STATIC / EXECUTION HELD |
+| `trusted_command_entropy_owner` | independently rooted provider trust, canonical privileged-symbol alias denial across every C/Rust lookup route, relocation proof, private parent ownership, and atomic migration contract | final architecture review PASS; integrated PROPOSED / UNIMPLEMENTED / RED |
+| `animation_shared_clock` | shared JS/SimpleScript/CSS clock prototype still performs unchecked interval reschedule/refresh due arithmetic and can wrap/spin at `i64::MAX` | HOLD at three-cycle cap; do not merge `a6079d95168` |
+| `label_activation` | prototype lacks document-generation-safe routes and activation reentrancy/interactive-descendant handling; order/manual/pixel evidence remains incomplete | HOLD; do not merge `0cd983b1050` |
+| `simplescript_listeners` | prototype has attribute-name injection, stale route retargeting, missing render/JS invalidation, unbounded O(A*N) dispatch, and non-reproducible evidence | HOLD; do not merge `8da4cbc2b30` |
+
+No batch-7 row supplies fresh target-runtime PASS. The integrated source and
+design rows remain execution-held or explicitly RED; bootstrap and Rust-seed
+evidence remain inadmissible.
