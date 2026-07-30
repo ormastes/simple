@@ -77,28 +77,18 @@ but keeps the last frame; fail/close/site swap clears authority and images.
 Warm capability generation p95 is <=1 ms, total input-to-paint remains <=50 ms,
 and 10,000-cycle RSS growth remains <=10% after quiescence.
 
-Token creation is native-only and private to
-`hosted_browser_renderer_process.spl`. One fatal compiler policy binds its raw
-import to that canonical physical source path; interpreters and dynamic SFFI
-have no handler. An exact privileged-symbol metadata row—not blanket
-`HostedOnly` policy—denies generic provider, JIT/ELF, plugin/main/satellite
-`dlsym`, `spl_dlsym`, and interpreter routes before lookup. The native build
-first admits a signed/pinned release/build manifest, then opens and compares
-provider bytes/build ID/symbol manifest; an expectation derived from the
-candidate is rejected. The trusted manifest digest is embedded in the
-artifact receipt. One metadata-generated name classifier precedes every alias
-transform and lookup, rejecting underscore, import-thunk, and stdcall aliases
-of the privileged name. This includes both C `spl_dlsym` implementations and
-the Rust process-runtime resolver; closure evidence must gate or exclude every
-other OS lookup. Chained fallback cannot repair a mismatch. Static, process,
-and dynamic providers have explicit identity semantics. Existing actor
-hosted-extern fallback remains a frozen regression. Non-owner compilation and
-the canonical owner forced through an interpreter are separate hostile
-fixtures; both observe zero entropy calls, and `CURRENT_EXEC_MODULE` never
-authorizes either. Existing hosted-entry receipts bind owner, policy, closure,
-trusted manifest, provider, relocation, and artifact digests. Codec, entropy,
-parent, worker, and cleanup migrate atomically—no public entropy facade or
-mixed SBR1/SBR2 state.
+The private parent creator reuses only
+`crypto_sffi.random_hex(16)` and the common
+`browser_renderer_command_capability_valid`, rejecting the result before any
+mutation.
+Security comes from the parent-only issued tuple, full-wire disclosure, exact
+generation/root/immediate-wire correlation, and one-use retirement—not from
+preventing trusted code from formatting bytes. The common codec validates and
+frames; codec and worker do not own or import the private creator and cannot
+install or consume parent `issued_*`; the worker only echoes a complete-wire
+trailer. Common codec, parent, worker, every command/network/fetch/frame
+direction, and cleanup migrate atomically, with no downgrade flag or mixed
+SBR1/SBR2 state.
 
 Next files:
 

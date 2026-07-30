@@ -490,21 +490,14 @@ in the system-test plan; incomplete checkers must use its exact `fail(...)`.
 Exact owners are frozen: common codec
 `src/lib/common/web/browser_renderer_protocol.spl`; host staging/admission
 `src/os/hosted/hosted_browser_renderer_process.spl`; worker echo/sequencing
-`src/os/hosted/hosted_browser_renderer_worker.spl`; fatal pure-Simple owner
-policy `src/compiler/35.semantics/privileged_host_imports.spl`; mirrored
-native policy/runtime-symbol metadata
-`src/compiler_rust/common/src/runtime_symbols.rs`; native entropy
-implementation `src/compiler_rust/runtime/src/value/sffi/random.rs`.
-`crypto_sffi.spl`, both interpreter dispatch tables, and the dynamic SFFI
-registry are explicit non-owners.
+`src/os/hosted/hosted_browser_renderer_worker.spl`; and the existing entropy
+facade `src/lib/nogc_sync_mut/io/crypto_sffi.spl`. No compiler, runtime-symbol,
+provider, interpreter, dynamic-SFFI, or raw-runtime-symbol lane is added.
 
 | Lane | Bounded ownership | Handoff |
 | --- | --- | --- |
-| `command_capability_codec` | `SBR2` bounded header plus final 32-byte capability trailer, canonical lowercase-hex validation, root/immediate ID fields, fail-closed legacy policy | no broker/worker lifecycle edits |
-| `command_capability_entropy` | private zero-arg parent creator, fatal canonical-source owner gate, native-only platform CSPRNG, admitted-provider ABI, no interpreter/dynamic-SFFI handler | no facade, fallback, token logging, or runtime caller-name trust |
-| `command_capability_parent` | stage tuple on install; issue only at zero remaining bytes; fresh capability per host wire; consume before broker/frame authority; bind network response to fetch; exact lifecycle cleanup | depends on codec and entropy |
-| `command_capability_worker` | learn a hop capability only from a complete host wire; echo once; validate network-response fetch binding; retain root ID separately | depends on codec |
-| `command_capability_sspec` | focused exact-four-step RED spec, FIFO separate-read and split-write staged/issued oracles, numeric/payload maxima, lifecycle cleanup, conforming echo, 10k latency/allocation/RSS receipt | depends on implementation lanes |
+| `command_capability_atomic_activation` | in one commit promote the existing SBR2 codec; add the private parent validator over `crypto_sffi.random_hex(16)`; stage/issue/consume/retire the tuple; migrate every command, `network_response`, fetch, and frame direction; reject all legacy schemas | no partial direction, compatibility flag, fallback, or mixed SBR1/SBR2 state |
+| `command_capability_sspec` | focused exact-four-step RED spec, deterministic parent creator/conversion unchanged-state errors, FIFO separate-read and split-write staged/issued oracles, numeric/payload maxima, lifecycle cleanup, conforming echo, 10k latency/allocation/RSS receipt | depends on atomic activation |
 | `command_capability_final_review` | protocol bounds, causal binding, lifecycle cleanup, backward rejection, manual quality | normal/highest-capability reviewer |
 
 The codec foundation is opt-in only. Production remains on its current
@@ -517,72 +510,40 @@ Lower-model sidecars may enumerate malformed codec fixtures only after these
 names are frozen. They may not change entropy policy, weaken fail-closed legacy
 admission, introduce negotiation, commit, or push. Root Codex is merge owner;
 a separate normal/highest-capability agent is final reviewer. Implementation
-may be reviewed in the order codec → owner policy/entropy → parent/worker →
-SSpec/manual, but promotion is one atomic commit. No lane is accepted before
-the focused modern SSpec executes once on an admitted current full pure-Simple
-CLI.
+may be reviewed by file owner, but promotion is one atomic commit. No lane is
+accepted before the focused modern SSpec executes once on an admitted current
+full pure-Simple CLI.
 
-### Trusted capability-owner handoff
+### Hosted-parent capability handoff
 
-Frozen Simple/native interfaces:
+Frozen interfaces:
 
-- `PrivilegedHostImport`
-- `privileged_host_import_owner`
-- `privileged_host_import_allowed`
+- `crypto_sffi.random_hex`
+- `browser_renderer_command_capability_valid`
 - `browser_renderer_command_capability_new`
-- `rt_browser_renderer_command_capability_new`
 - `_require_issued_renderer_reply`
 - `_retire_renderer_command_capability`
 
 The future manual exposes exactly
 `Admit the trusted capability owner`, `Issue one fresh command token`,
-`Reject an untrusted entropy caller`, and
+`Reject an unissued command token`, and
 `Retire all capability material`. Setup/checker names are
 `setup_trusted_capability_owner_fixture`,
 `check_trusted_capability_owner_admitted`,
 `check_fresh_command_token_issued`,
-`check_untrusted_entropy_caller_rejected`, and
+`check_unissued_command_token_rejected`, and
 `check_all_capability_material_retired`. Until the atomic implementation,
 each checker uses
 `fail("RED: trusted renderer capability owner is unimplemented")`.
 
-| Lane | Work | Constraint |
-| --- | --- | --- |
-| `capability_owner_policy` | fatal pure-Simple and mirrored native canonical-path declaration/call admission | interpreter module metadata never grants authority |
-| `capability_provider_identity` | admit a signed/pinned release/build manifest before provider open; extend `RuntimeSymbolProvider` with static/process/dynamic observed identity, trusted expected content/build and symbol-manifest digests, privileged-purpose lookup, import note, fail-before-relocation validation, and link-map/artifact receipt | expectation is independently trusted, never derived from candidate; no env/path trust or chained fallback |
-| `capability_symbol_normalization` | generate one canonical classifier and policy digest for Rust/C; gate every route before underscore/alias transforms; deny leading-underscore, Mach-O/LLVM, Windows import-thunk, and stdcall aliases | generic normalization and actor fallback remain unchanged |
-| `capability_lookup_deny` | exact metadata-driven deny before pure-Simple/Rust interpreter dispatch, dynamic SFFI plugin/main/satellite search, Rust and both C `spl_dlsym` paths, runtime process resolver, JIT/ELF/`RTLD_DEFAULT`, and generic provider lookup | narrow row only; preserve actor hosted fallback; never authorize via `CURRENT_EXEC_MODULE`; closure must gate or exclude every OS lookup |
-| `capability_native_entropy` | zero-arg fallible fill, zeroize, admitted runtime-provider relocation | no crypto facade, interpreter handler, dynamic-SFFI entry, or raw lookup bridge |
-| `capability_parent_worker_atomic` | create-on-activation, SBR2 staging/issuance/echo/consume/retire across command and network wires | one commit; no mixed protocol |
-| `capability_owner_evidence` | legitimate hosted artifact; separate non-owner compile and canonical-owner-forced-interpreter fixtures; direct lookup denial; actor fallback regression; provider/link-map receipts; lifecycle and 10k perf/RSS receipts | capability values redacted; zero entropy calls on every hostile route |
-| `capability_owner_final_review` | threat model, physical-owner proof, atomicity, generated-manual quality | normal/highest-capability reviewer |
-
-Lower-model sidecars: N/A until the owner policy and exact checker names above
-exist. Codex is merge owner; a separate normal/highest-capability agent is
-final reviewer. No sidecar may add an allowlist row, facade, interpreter
-handler, dynamic-SFFI entry, raw lookup bridge, compatibility switch, commit,
-or push.
-
-Frozen implementation hooks for the owner lanes are
-`check_privileged_host_import_module`,
-`run_privileged_host_import_pass`,
-`validate_privileged_host_import_call`,
-`_driver_validate_privileged_entry_closure`,
-`emit_privileged_import_note`,
-`validate_privileged_runtime_relocations`, and
-`reject_privileged_native_only_call` in pure Simple. Rust mirrors them in
-native-project discovery/pipeline, common-backend emission, and native-project
-linking; `reject_privileged_native_only_extern`,
-`dynamic_sffi::try_call_dynamic`/`dlsym_lookup`, both `wsffi::spl_dlsym`
-implementations, all four native-loader provider implementations, provider
-construction for an expectation, and both JIT lookup paths are mandatory
-pre-lookup gates. The same rule covers `runtime_native.c::spl_dlsym`,
-`runtime_dynload.c::spl_dlsym`,
-`runtime_native.c::spl_hosted_provider_i64_probe`, and
-`runtime/src/loader/loader.rs::resolve_builtin_runtime_symbol` plus
-`resolve_process_runtime_symbol`. The trusted release/build manifest must be
-admitted before any provider-open call; the final receipt binds its digest and
-the hosted closure's complete gated-or-excluded OS-lookup inventory.
+Security evidence proves page, SimpleScript, JavaScript, common-codec, and
+worker paths cannot install or consume parent authority. Codec and worker do
+not own or import the private creator. It does not claim that trusted code
+cannot format random hexadecimal bytes. The parent-only issued tuple,
+complete-wire disclosure, exact correlation, and one-use retirement are the
+authority boundary. Deterministic evidence exercises the parent
+creator/conversion unchanged-state error path; validator-only evidence cannot
+promote the row. Production has no fallback or fault switch.
 
 ## Batch-3 held-lane status (2026-07-30)
 
@@ -622,14 +583,14 @@ the Rust seed are not admissible evidence.
 | --- | --- | --- |
 | `bookmark_title_transport` | additive bounded SBRF8 title witness, generation/reply/URL trust binding, lifecycle clears, production parent Favorite routing, atomic SQLite mutation+snapshot rollback, restart/UI parity, and forged 513-byte pre-decode rejection | final high review PASS; integrated STATIC / EXECUTION HELD |
 | `command_capability_codec` | opt-in SBR2 framing, bounds, canonical trailer, and resequencing while production SBR1 APIs/callers/wire remain byte-identical | final high review PASS; integrated foundation only; atomic parent/worker/nested migration remains RED |
-| `command_entropy_hardening` | existing `rt_random_hex` now uses portable fallible OS entropy, native/interpreter NIL parity, and guaranteed zeroization; dynamic SFFI is unchanged | final high review PASS; integrated hardening only; exact command-entropy symbol/facade remains intentionally absent |
+| `command_entropy_hardening` | existing `rt_random_hex` now uses portable fallible OS entropy, native/interpreter NIL parity, and guaranteed zeroization; dynamic SFFI is unchanged | final high review PASS; the existing `crypto_sffi.random_hex(16)` facade is the selected SBR2 entropy seam |
 | `negative_z_index` | signed/context/paint-hit prototype closes most local defects, but `revert`/`revert-layer` can retain an earlier integer and create a visible stacking regression without cascade provenance | HOLD at three-cycle cap; do not merge `b9ad3eff8f1` |
 | `radio_event_lifecycle` | external form ownership and lifecycle prototype still lacks one O(N) generation-qualified document identity index across events, edits, bridge sync/replacement, grouping, and submission | HOLD at three-cycle cap; do not merge `220355ca427` |
 | `js_property_storage_gc` | indexed property prototype leaves physical-order readers, tombstone roots, arbitrary detached graphs, omitted roots, and stale numeric-ID aliasing | HOLD; do not merge `d2d08cf2eb0`; requires full GC/generation-qualified handle architecture |
 
-No batch-6 static PASS promotes full production completion. Bookmark execution,
-the SBR2 atomic migration, and the exact hosted entropy owner remain RED until
-an admitted current pure-Simple artifact supplies focused executable evidence.
+No batch-6 static PASS promotes full production completion. Bookmark execution
+and the atomic all-direction SBR2 migration remain RED until an admitted
+current pure-Simple artifact supplies focused executable evidence.
 
 ## Production continuation batch 7 (2026-07-30)
 
@@ -637,7 +598,6 @@ an admitted current pure-Simple artifact supplies focused executable evidence.
 | --- | --- | --- |
 | `address_input_bound` | strict single-pass UTF-8/control validation, centralized 2048-byte raw bound, and validate-before-mutate behavior across BrowserSession, worker, hosted web, registry, and live entry | final high review PASS; integrated STATIC / EXECUTION HELD |
 | `durable_home` | additive profile migration, bounded atomic Home save/load, startup seeding for primary and registry owners, legacy/corrupt fallback, restart navigation, and exact Home chrome evidence | final high review PASS; integrated STATIC / EXECUTION HELD |
-| `trusted_command_entropy_owner` | independently rooted provider trust, canonical privileged-symbol alias denial across every C/Rust lookup route, relocation proof, private parent ownership, and atomic migration contract | final architecture review PASS; integrated PROPOSED / UNIMPLEMENTED / RED |
 | `animation_shared_clock` | shared JS/SimpleScript/CSS clock prototype still performs unchecked interval reschedule/refresh due arithmetic and can wrap/spin at `i64::MAX` | HOLD at three-cycle cap; do not merge `a6079d95168` |
 | `label_activation` | prototype lacks document-generation-safe routes and activation reentrancy/interactive-descendant handling; order/manual/pixel evidence remains incomplete | HOLD; do not merge `0cd983b1050` |
 | `simplescript_listeners` | prototype has attribute-name injection, stale route retargeting, missing render/JS invalidation, unbounded O(A*N) dispatch, and non-reproducible evidence | HOLD; do not merge `8da4cbc2b30` |
@@ -654,9 +614,6 @@ evidence remain inadmissible.
 | `html_hr` | `simplescript_listeners_current` | Native separator defaults plus exact authored border clearing through canonical WebIR/DrawIR/Engine2D | FINAL REVIEW PASS; integrated static evidence, execution HELD |
 | `html_fieldset_legend` | `fieldset_legend_render` | Bounded semantic/UA fallback, authored border clearing, exact DrawIR/Engine2D pixels | FINAL REVIEW PASS; integrated Partial/RED boundary, draft manual, execution HELD |
 | `animation_publication_cache` | `animation_perf_lifecycle` | Remove full-document rebuild from the real hosted animation-frame publication path | FINAL REVIEW PASS; integrated static evidence, numeric runtime evidence HELD |
-| `privileged_import_design` | `privileged_import_compiler` | Canonical physical-source compiler ownership contract | PROPOSED / UNIMPLEMENTED / RED; no active SSpec before real hooks |
-| `privileged_symbol_lookup` | `privileged_symbol_lookup` | Rust/C generic lookup denial prototype | FAIL/HOLD: duplicate loader, interpreter dispatch, raw provider/JIT bypass, and independent normalizers remain; do not merge `69a649eb307` |
-| `provider_admission` | `provider_admission` | Provider identity/digest prototype | FAIL/HOLD: caller-selected purpose/digests and public raw lookup bypass admission; do not merge `be8eb872196` |
 | `animation_runtime_evidence` | root merge owner | Admit the current pure-Simple CLI by source receipt before any focused execution | HELD: binary hash exists but no matching source/build receipt has been found |
 
 The capped fractional-animation, negative-z, label, radio, clock, and prior

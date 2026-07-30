@@ -1012,228 +1012,43 @@ owns SBR2 framing and canonical validation;
 `src/os/hosted/hosted_browser_renderer_process.spl` owns token creation,
 staging, issuance, admission, broker ordering, and retirement; and
 `src/os/hosted/hosted_browser_renderer_worker.spl` owns complete-wire decode,
-one-use echo, and network-response sequencing. The token source is not added to
-`src/lib/nogc_sync_mut/io/crypto_sffi.spl` or re-exported from any Simple
-facade. Its native-only trusted-import boundary is defined below.
+one-use echo, and network-response sequencing. The parent reuses only the
+existing `src/lib/nogc_sync_mut/io/crypto_sffi.spl` `random_hex(16)` facade;
+the common codec and worker do not own or import the private parent creator and
+cannot install or consume parent `issued_*` state. Arbitrary random hexadecimal
+text grants no authority.
 
 <!-- codex-architecture -->
-### Trusted command-token creator (PROPOSED / UNIMPLEMENTED / RED)
+### Hosted-parent command-token creator (PROPOSED / UNIMPLEMENTED / RED)
 
 The zero-argument
 `browser_renderer_command_capability_new() -> Result<BrowserRendererCommandCapability, text>`
 is a private function in
-`src/os/hosted/hosted_browser_renderer_process.spl`. It is the only Simple
-caller of
-`rt_browser_renderer_command_capability_new() -> text?`. The native import
-returns one fresh canonical 32-byte lowercase-hex token or NIL; it accepts no
-length, seed, mode, provider, or caller-supplied buffer. NIL, wrong length,
-nonhex, uppercase, or all-zero output maps to
+`src/os/hosted/hosted_browser_renderer_process.spl`. It calls the existing
+`crypto_sffi.random_hex(16)` facade once for each activated host wire, then
+validates the result with the common protocol
+`browser_renderer_command_capability_valid`. Entropy failure, NIL, wrong
+length, nonhex, uppercase, or all-zero output maps to
 `renderer-command-entropy-unavailable` before any pending-wire, deadline,
 request-ID, staged-authority, or broker state changes. There is no public
-Simple facade, export, alias, deterministic fallback, production fault switch,
-or injection hook.
+capability-minting API, raw runtime import, alternate RNG, deterministic
+fallback, production fault switch, or page/script access path.
 
-Threats in scope are hostile page/SimpleScript input, arbitrary parsed Simple,
-an untrusted module redeclaring a known runtime symbol, dynamic SFFI lookup, a
-compromised renderer forging pre-command traffic, symlink/module-name
-spoofing, and stale or mixed protocol peers. Arbitrary native-code execution
-inside the admitted parent, a compromised compiler/runtime provider, or a
-forged admitted source manifest already controls the browser process and is
-outside this token boundary; artifact admission and process sandboxing remain
-their separate controls.
+The security boundary is causal rather than nominal. Any trusted hosted module
+can format 32 hexadecimal bytes, but only `HostedBrowserRendererProcess` owns
+the issued tuple and installs it after the complete wire is written. Renderer
+authority therefore requires the live generation, root ID, immediate wire ID,
+and exact unconsumed capability. The parent consumes that tuple before broker
+or frame authority; the worker only echoes the final trailer it learned from a
+complete host wire. Deterministic evidence drives the private parent
+creator/conversion error path and proves all parent authority fields remain
+unchanged. Only parent activation state evidence is admissible.
 
-This boundary uses static owner admission, not a runtime caller-name claim.
-Native calls erase their Simple caller identity. The Rust interpreter's
-`CURRENT_EXEC_MODULE` is thread-local evaluation metadata, useful for lookup
-but not an unforgeable production principal. The pure-Simple MIR interpreter
-has only an explicit builtin table and no automatic `dlsym`, while the Rust
-interpreter seeds extern names from the runtime-symbol manifest. Therefore:
-
-- `src/compiler/35.semantics/privileged_host_imports.spl` owns the frozen
-  `PrivilegedHostImport`, `privileged_host_import_owner`, and
-  `privileged_host_import_allowed` policy. Its first row binds
-  `rt_browser_renderer_command_capability_new` to the canonical physical path
-  `src/os/hosted/hosted_browser_renderer_process.spl`. The unconditional
-  HIR/MIR pipeline rejects both declaration and call from every other module
-  with `privileged-host-import-owner`; this is a fatal semantic gate, not the
-  advisory safety pass.
-- `src/compiler_rust/common/src/runtime_symbols.rs` mirrors the same one-row
-  `PrivilegedRuntimeSymbol` metadata. Native discovery compares
-  repository-relative canonical physical paths after its existing collision
-  check, never a source-claimed module name. A missing, outside-root,
-  aliased-to-different-content, or ownerless path fails before object emission.
-- Neither `src/compiler/70.backend/backend/interpreter_calls.spl` nor
-  `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` registers a
-  handler. Parsed/interpreted Simple always receives
-  `privileged-host-import-native-only`; `CURRENT_EXEC_MODULE` cannot opt in.
-  `src/compiler_rust/runtime/src/value/sffi_registry.rs` has no dynamic method
-  entry for it.
-- `src/compiler_rust/runtime/src/value/sffi/random.rs` owns fallible
-  Linux/macOS/Windows platform fill and zeroization. The exact ABI may be
-  exported by the admitted runtime provider because the hosted artifact binds
-  runtime imports through that provider; export is not authorization. The
-  artifact receipt proves the relocation resolves to the admitted
-  provider/digest, and registry inspection proves no generic dynamic-SFFI or
-  raw-`dlsym` bridge exposes it to Simple code.
-
-The trusted production artifact remains the entry closure rooted at
-`src/os/hosted/hosted_entry.spl`; it reaches parent and worker in one
-executable. Entry closure is reachability, not authorization: every privileged
-import still passes the physical-owner check. Artifact admission reuses the
-hosted source-manifest and runtime-provider receipts, adding the canonical
-owner-source, privileged-policy, closure, and final-artifact digests. A source
-path alone is not trusted.
-
-`HostedBrowserRendererProcess` is the capability parent. Entry, registry,
-worker, common codec, BrowserSession, and crypto facade cannot mint tokens.
-The parent invokes the creator only when activating a host wire; entropy
-failure leaves that wire uninstalled. The token is staged with its
-generation/root/wire tuple, issued only after the last wire byte, consumed
-before worker output gains authority, and zeroized on consume, replacement,
-stop/cancel, timeout, network failure, renderer failure, site swap, close, and
-registry teardown. Deferred commands contain no token until activation.
-
-The production switch is one atomic codec + entropy + parent + worker change.
-It promotes the existing opt-in SBR2 codec, adds the native-only creator,
-migrates every host command/network response and worker fetch/frame echo, and
-installs every retirement path in the same commit. Partial direction changes,
-a callable entropy facade, interpreter parity, legacy negotiation, and mixed
-SBR1/SBR2 deployments are rejected.
-
-#### Privileged runtime-symbol admission (frozen Cycle 2 contract)
-
-`HostedOnly` is not an authorization class. The deny applies only to an exact
-row in privileged-symbol metadata; ordinary hosted externs, including
-`rt_actor_spawn`, `rt_actor_send`, and `rt_actor_recv`, retain their existing
-generic dynamic fallback. This actor regression is release-blocking because a
-blanket hosted deny would appear secure while breaking supported code.
-
-`src/compiler_rust/common/src/runtime_symbols.rs` owns these shared types:
-`PrivilegedRuntimeSymbol` (exact symbol, canonical owner-source digest,
-native-only flag), `RuntimeProviderKind` (`StaticImage`, `ProcessImage`, or
-`DynamicFile`), `RuntimeProviderIdentity` (kind, content/build digest and
-symbol-manifest digest), `RuntimeProviderExpectation`,
-`RuntimeSymbolLookupPurpose` (`Generic` or `PrivilegedAot`),
-`RuntimeSymbolRequest`, `ResolvedRuntimeSymbol`, and
-`RuntimeSymbolResolutionError`. It also owns
-`privileged_runtime_symbol` and `runtime_symbol_lookup_allowed`.
-`RuntimeSymbolProvider` freezes `identity() -> RuntimeProviderIdentity` and
-`resolve(request: RuntimeSymbolRequest) -> Result<ResolvedRuntimeSymbol,
-RuntimeSymbolResolutionError>`; its legacy `get_symbol` is generic-purpose
-only and must refuse privileged rows. Privileged lookup requires one provider
-whose identity exactly matches the embedded expectation; a chained provider
-cannot use first-match, process, or static fallback to repair a mismatch.
-
-The expectation is independent of the candidate provider. Before opening any
-provider, native build admits a signed release manifest under a pinned release
-key, or a build manifest whose digest is pinned by the already admitted build
-recipe. `TrustedRuntimeProviderManifest` names the required provider kind,
-content digest, build ID, symbol-manifest digest, policy digest, target, and
-release/build identity. Neither a provider scan nor an environment variable,
-path string, runtime option, caller assertion, or generated artifact may
-supply expected values. Only after manifest admission does the build open the
-provider once, derive its *observed* byte digest/build ID/symbol manifest, and
-compare every field to the trusted expectation before lookup. Native build
-embeds the expectation and trusted manifest digest in
-`.simple.runtime-provider`; the artifact receipt binds both. A static identity
-is the link-time runtime object/archive content/build digest plus its
-symbol-manifest digest. A process identity is the executable content/build
-identity plus its symbol manifest. A dynamic identity hashes the opened file
-and verifies it before loading or symbol lookup; the loader must load from
-that same admitted file handle/content identity rather than reopen a mutable
-path. Canonical paths remain diagnostics, not identity. A manifest synthesized
-from the provider being admitted is an explicit
-`self-derived-runtime-provider-expectation` failure.
-
-One canonical symbol-name classifier runs before policy *and* before every
-existing underscore strip, alias mapping, static-table lookup, provider
-lookup, `dlsym`, or `GetProcAddress`. Its source of truth is the privileged
-metadata and generated normalization vectors in
-`src/compiler_rust/common/src/runtime_symbols.rs`; the build emits the same
-policy digest and finite classifier into the C runtime header. Rust
-`canonical_runtime_symbol_name` and C
-`rt_canonical_runtime_symbol_name` are generated bindings to that one contract,
-not independent allowlists. Exact privileged spelling returns
-`PrivilegedCanonical` for purpose-aware policy. Any platform spelling whose
-undecorated key equals a privileged name—including one or more leading
-underscores, Mach-O/LLVM leading decoration, Windows `__imp_`/`__imp__`
-imports, and stdcall `@N` suffixes—returns `PrivilegedAliasDenied`. It is never
-resolved under its undecorated spelling. Case and Unicode lookalikes are not
-folded and remain unknown. Generic names retain their existing platform
-normalization, preserving actor fallback.
-
-Code generation emits `.simple.privileged-imports`, binding symbol, requester
-object, and canonical owner-source digest. Entry-closure aggregation admits
-exactly one owner object. Before final relocation,
-`validate_privileged_runtime_relocations` verifies that note and the expected
-provider, then emits a link-map receipt binding requester, symbol, provider
-identity, relocation type, and owning address range. A post-link inspection
-confirms the same mapping. No privileged request may reach generic provider
-lookup, `elf_utils`, JIT fallback, plugin-manifest lookup, main-runtime
-`dlsym`, satellite lookup, `RTLD_DEFAULT`, `spl_dlsym`, or process/static
-fallback. Hashing and path normalization occur only at compile/load admission,
-never per wire or frame.
-
-The exact pure-Simple hooks are:
-
-- `src/compiler/35.semantics/privileged_host_imports.spl`:
-  `PrivilegedHostImport`, `privileged_host_import_owner`,
-  `privileged_host_import_allowed`, and
-  `check_privileged_host_import_module`;
-- `src/compiler/80.driver/driver_hir_pipeline_passes.spl`:
-  `run_privileged_host_import_pass`, an unconditional fatal pass;
-- `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`:
-  `validate_privileged_host_import_call` inside `lower_call`;
-- `src/compiler/80.driver/driver_source_pipeline_loading.spl`:
-  `_driver_validate_privileged_entry_closure`;
-- `src/compiler/70.backend/backend/native_codegen_adapter.spl`:
-  `emit_privileged_import_note`;
-- `src/compiler/70.backend/backend/llvm_native_link.spl`:
-  `validate_privileged_runtime_relocations`; and
-- `src/compiler/70.backend/backend/interpreter_calls.spl`:
-  `reject_privileged_native_only_call` before builtin or local resolution.
-
-The mirrored Rust hooks are
-`native_project::discovery::validate_privileged_entry_closure`,
-`native_project::validate_privileged_host_imports` before parallel
-compilation, `common_backend::emit_privileged_import_note`, and
-`native_project::linker::validate_privileged_runtime_relocations`.
-`interpreter_extern::reject_privileged_native_only_extern` runs before static
-dispatch, evaluation, or dynamic fallback. `dynamic_sffi` rejects at
-`try_call_dynamic` and before every `dlsym_lookup`, so plugin, main-runtime,
-and satellite search never begin. Both interpreter and runtime
-`wsffi::spl_dlsym` reject before the OS lookup. Native-loader static, process,
-dynamic, and chained providers implement the identity contract through
-`create_runtime_provider_for_expectation`; JIT registration and import
-resolution reject the privileged row before provider, ELF, or
-`RTLD_DEFAULT` fallback. The same pre-lookup classifier and deny are mandatory
-in `src/runtime/runtime_native.c::spl_dlsym`,
-`src/runtime/runtime_dynload.c::spl_dlsym`, and
-`src/compiler_rust/runtime/src/loader/loader.rs` at both
-`resolve_builtin_runtime_symbol` (before its current `strip_prefix('_')`) and
-`resolve_process_runtime_symbol` (before `dlsym`/`GetProcAddress`).
-`runtime_native.c::spl_hosted_provider_i64_probe` also classifies its fixed
-name before `RTLD_DEFAULT`. The hosted entry-closure receipt enumerates every
-reachable OS symbol-lookup callsite and its classifier gate; an unclassified
-lookup—including another loader/settlement path—fails closure admission. A C
-runtime object omitted from the artifact instead needs a negative object/link
-closure proof; source-tree non-reachability is not enough.
-
-Two hostile fixtures are deliberately separate. A non-owner source that
-declares or calls the raw symbol must fail
-`privileged-host-import-owner` before object emission and observe zero entropy
-calls. The exact canonical owner source forced through each interpreter must
-fail `privileged-host-import-native-only` before dispatch and also observe zero
-entropy calls. The second fixture must never become allowed through
-`CURRENT_EXEC_MODULE`: execution metadata is not authority. Additional exact
-fixtures exercise `spl_dlsym`, plugin, main-runtime, satellite, generic
-static/process provider, JIT, and ELF routes; every route proves denial before
-lookup or relocation. They also pass
-`_rt_browser_renderer_command_capability_new`,
-`__imp_rt_browser_renderer_command_capability_new`,
-`__imp__rt_browser_renderer_command_capability_new@0`, and
-`rt_browser_renderer_command_capability_new@0`; each fails
-`privileged-runtime-symbol-alias` before undecoration or lookup.
+The production switch is one atomic common-codec + parent + worker migration.
+It promotes SBR2 for every command, `network_response`, fetch, and frame
+direction, installs every retirement path, and rejects SBR1 and legacy nested
+schemas on both sides. Partial direction changes, legacy negotiation,
+downgrade flags, and mixed SBR1/SBR2 deployments are forbidden.
 
 ## Generation-qualified DOM identity and index
 

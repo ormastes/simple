@@ -7,7 +7,7 @@ use std.js.types.js_types.JsObject
 use std.js.types.js_types.JsProperty
 use std.js.engine.interpreter_types.{Environment, EnvironmentStack, CallFrame, JsFunction, to_number, js_to_string, to_boolean, is_truthy, typeof_value, strict_equals, abstract_equals, RETURN_SIGNAL, _is_array_method, _is_string_method, _get_obj_id, _get_fn_id, f64_to_i64, _digit_val}
 use std.js.engine.vm_object_store.{ObjectStore}
-use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask, MAX_SCRIPT_EXECUTION_STEPS}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask, MAX_SCRIPT_EXECUTION_STEPS, js_timer_deadline_ms}
 use std.nogc_sync_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value}
 use std.nogc_sync_mut.http.types.{status_text}
 use std.js.engine.runtime.{dispatch_native, NATIVE_BLOB_TEXT, NATIVE_FETCH, NATIVE_JSON_PARSE, NATIVE_PROMISE_CATCH, NATIVE_PROMISE_FINALLY, NATIVE_PROMISE_REJECT, NATIVE_PROMISE_RESOLVE, NATIVE_PROMISE_THEN, NATIVE_RESPONSE_ARRAY_BUFFER, NATIVE_RESPONSE_BLOB, NATIVE_RESPONSE_JSON, NATIVE_RESPONSE_TEXT, NATIVE_SET_TIMEOUT, NATIVE_SET_INTERVAL, NATIVE_CLEAR_TIMEOUT, NATIVE_CLEAR_INTERVAL, NATIVE_STORAGE_GET_ITEM, NATIVE_STORAGE_SET_ITEM, NATIVE_STORAGE_REMOVE_ITEM, NATIVE_STORAGE_CLEAR, NATIVE_STORAGE_KEY}
@@ -83,9 +83,9 @@ impl JsInterpreter:
             # 4096-timer drain latency remains material after swap-pop removal.
             while i < self.pending_timer_tasks.len():
                 val task = self.pending_timer_tasks[i]
-                val due_at = task.scheduled_at_ms + task.delay_ms
+                val due_at = task.due_at_ms()
                 val better_due_task = (
-                    due_at <= current_time_ms and (
+                    task.is_due_at(current_time_ms) and (
                         selected_id < 0 or
                         (task.is_next_tick and not selected_is_next_tick) or
                         (
@@ -162,7 +162,7 @@ impl JsInterpreter:
                     self.set_object_property(selected_handle_id, "lastFiredAt", JsValue.Number(v: fired_at_ms.to_f64()))
                     if selected_is_interval and not to_boolean(self.get_object_property(selected_handle_id, "closed")):
                         self.set_object_property(selected_handle_id, "scheduledAt", JsValue.Number(v: current_time_ms.to_f64()))
-                        self.set_object_property(selected_handle_id, "dueAt", JsValue.Number(v: (current_time_ms + selected_delay_ms).to_f64()))
+                        self.set_object_property(selected_handle_id, "dueAt", JsValue.Number(v: js_timer_deadline_ms(current_time_ms, selected_delay_ms).to_f64()))
                     if not selected_is_interval:
                         self.set_object_property(selected_handle_id, "active", JsValue.Boolean(v: false))
                         self.set_object_property(selected_handle_id, "completed", JsValue.Boolean(v: true))
@@ -174,12 +174,9 @@ impl JsInterpreter:
                         var next_tick_i = 0
                         while next_tick_i < self.pending_timer_tasks.len():
                             val next_task = self.pending_timer_tasks[next_tick_i]
-                            val next_due_at = (
-                                next_task.scheduled_at_ms + next_task.delay_ms
-                            )
                             if (
                                 next_task.is_next_tick and
-                                next_due_at <= current_time_ms
+                                next_task.is_due_at(current_time_ms)
                             ):
                                 due_next_tick = true
                                 break

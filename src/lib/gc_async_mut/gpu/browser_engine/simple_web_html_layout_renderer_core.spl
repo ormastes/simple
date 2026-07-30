@@ -2349,6 +2349,52 @@ fn is_valid_selectedcontent_context(nodes: [HNode], child_index: HtmlChildIndex,
         return false
     child_index.first_child[button_index] == node_index
 
+# Resolve disclosure visibility once for the flat preorder arena. A closed
+# details exposes only its first direct summary; descendants inherit hiding.
+fn _details_content_hidden(nodes: [HNode]) -> [bool]:
+    val node_count = nodes.len()
+    var first_summary: [i32] = [-1; node_count]
+    var i = 0
+    while i < node_count:
+        val parent = nodes[i].parent
+        if (
+            nodes[i].tag == "summary" and parent >= 0 and
+            nodes[parent].tag == "details" and first_summary[parent] < 0
+        ):
+            first_summary[parent] = i
+        i = i + 1
+    var hidden: [bool] = [false; node_count]
+    i = 0
+    while i < node_count:
+        val parent = nodes[i].parent
+        if parent >= 0:
+            hidden[i] = hidden[parent]
+            if (
+                not hidden[i] and nodes[parent].tag == "details" and
+                not attr_present(nodes[parent].attrs_raw, "open")
+            ):
+                # Bounded profile: do not synthesize the UA shadow summary.
+                hidden[i] = (
+                    first_summary[parent] < 0 or
+                    first_summary[parent] != i
+                )
+        i = i + 1
+    hidden
+
+pub fn simple_web_enforce_details_visibility(
+    nodes: [HNode], styles: [Style]
+) -> [Style]:
+    val hidden = _details_content_hidden(nodes)
+    var resolved = styles
+    var i = 0
+    while i < resolved.len():
+        if hidden[i]:
+            resolved[i] = apply_decls(
+                resolved[i], "display:none", resolved[i].font_size
+            )
+        i = i + 1
+    resolved
+
 fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
     var material_entries_unused: [text] = ["", ""]
     var material_counts_unused: [i64] = [0, 0]
@@ -2385,6 +2431,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     if trace_stages:
         print "[layout-trace] style_stage=rule-specificities-ready"
     val node_count = nodes.len()
+    val details_hidden = _details_content_hidden(nodes)
     var styles: [Style] = [renderer_default_style(); node_count]
     if trace_stages:
         print "[layout-trace] style_stage=defaults-ready nodes={node_count}"
@@ -2574,6 +2621,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                     inline_important_empty_cells_decl.trim().lower() == "hide"
                 )
             st = apply_decls(st, inline_important, em_base)
+        # Disclosure state is structural and author CSS cannot reveal closed
+        # content. Apply it after the author cascade and before layout/paint.
+        if details_hidden[i]:
+            st = apply_decls(st, "display:none", em_base)
         # The customizable-select projection is not implemented yet. In its
         # one valid context, keep selectedcontent inert even when author CSS
         # tries to display it; invalid-context uses retain generic semantics.
@@ -2715,6 +2766,13 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         styles[i] = st
         if trace_stages:
             print "[layout-trace] style_stage=node-complete index={i}"
+        i = i + 1
+    # A style-budget break must not expose closed disclosure content that the
+    # outer loop did not reach. Preserve the structural hidden state for the
+    # untouched suffix without rescanning any descendants.
+    while i < node_count:
+        if details_hidden[i]:
+            styles[i] = apply_decls(styles[i], "display:none", 16)
         i = i + 1
     if material_channel_ready:
         material_counts[0] = cpu_material_entry_count

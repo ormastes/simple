@@ -47,6 +47,7 @@ the inventory audit:
 | current definition-list lane | Cross-kind omitted-end-tag repair plus selected `dl`/`dt`/`dd` UA defaults | Exactly four-step SSpec covers sibling identity, UA and authored margins, exact DrawIR geometry, and exact Engine2D component/control pixels | Source/spec/handwritten-manual evidence only; admitted docgen, qualified execution, and corpus accounting remain open |
 | current `blockquote` lane | Selected four-side UA margins through canonical layout and pixels | Exactly four-step SSpec covers semantic body parentage, selected UA margins, exact DrawIR geometry, and exact Engine2D component/control pixels | Source/spec/handwritten-manual evidence only; qualified execution remains open |
 | current `header` lane | Selected block default through canonical layout and pixels | Exactly four-step SSpec covers semantic body parentage, `display:block`, exact DrawIR geometry, and exact Engine2D component/control pixels | Source/spec/handwritten-manual evidence only; qualified execution remains open |
+| current `details`/`summary` lane | First-summary disclosure semantics and canonical click default action | Exactly four-step SSpec covers closed/open/nested state, exact geometry, DrawIR command presence/absence, and discriminating Engine2D pixels | Bounded fallback omits the synthesized shadow summary and marker glyph; qualified execution remains open |
 
 These commits correct the named source/spec/manual gaps but do not close the
 overall HTML/CSS traceability goal. The deployed pure-Simple wrapper still
@@ -57,8 +58,9 @@ runs the scenarios, both tranches remain execution-evidence-blocked.
 ### HTML
 
 The source inventory began with 80 Partial rows. The bounded `hr`,
-fieldset/legend, definition-list, `article`, blockquote, and `header` lanes reclassify
-those nine named rows into their own fallback rows, leaving 71 in the
+fieldset/legend, definition-list, `article`, blockquote, `header`, and
+`details`/`summary` lanes reclassify those eleven named rows into their own
+fallback rows, leaving 69 in the
 undifferentiated Partial backlog.
 The two rows called out as
 inventory-only or missing were subsequently covered by `28f0e779b0d2`.
@@ -67,8 +69,8 @@ No named row appears in both a bounded row and the remaining Partial count.
 | Classification | Count | Meaning |
 |---|---:|---|
 | Full | 12 | Direct semantic/tree plus applicable layout/DrawIR/Engine2D or hidden/fail-closed evidence |
-| Partial remaining | 71 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof; excludes `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header` |
-| Bounded selected-profile fallback | 9 | `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`; basic UA/cascade/DrawIR/pixel paths covered, while special formatting and aggregate conformance remain Partial/RED |
+| Partial remaining | 69 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof; excludes `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary` |
+| Bounded selected-profile fallback | 11 | `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`; basic UA/cascade/DrawIR/pixel paths covered, while special formatting and aggregate conformance remain Partial/RED |
 | Unsupported/fail-closed | 11 | Embedded/media/native semantics are not implemented |
 | Inventory-only before landed tranche | 2 | `selectedcontent`, `slot`; bounded behavior landed |
 | Missing before landed tranche | 8 | `h1`–`h6`, `sub`, `sup`; bounded behavior landed |

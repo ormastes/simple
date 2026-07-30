@@ -862,8 +862,10 @@ or UI snapshot.
 - `BrowserRendererCommandCapability` stores only canonical 32-byte lowercase
   hexadecimal text.
 - `browser_renderer_command_capability_new() ->
-  Result<BrowserRendererCommandCapability, text>` obtains exactly 16 bytes
-  from an explicit-success hosted platform CSPRNG facade.
+  Result<BrowserRendererCommandCapability, text>` is private to the hosted
+  parent, calls the existing `crypto_sffi.random_hex(16)` facade once, and
+  validates the returned text with common
+  `browser_renderer_command_capability_valid` before any parent mutation.
 - `browser_renderer_command_capability_valid(value: text) -> bool` accepts
   exactly 32 lowercase hexadecimal ASCII bytes.
 - `HostedBrowserRendererProcess` adds the staged fields
@@ -952,24 +954,24 @@ diagnostics and crash output.
 
 ### Entropy and lifecycle
 
-The existing owner `src/lib/nogc_sync_mut/io/crypto_sffi.spl` adds
-`secure_random_hex_exact(length: i64) -> Result<text, text>` and exports it
-through `src/lib/nogc_sync_mut/io/__init__.spl`. It wraps the existing
-`rt_random_hex` symbol but converts NIL, wrong length, or noncanonical output
-to explicit failure. Native platform fill remains in
-`src/compiler_rust/runtime/src/value/sffi/random.rs`; the symbol registry is
-`src/compiler_rust/common/src/runtime_symbols.rs`. It returns exactly 16 bytes
-or failure and never falls back to clock, PID, `rt_random_random`, or zeroes.
+The sole entropy facade remains the existing
+`src/lib/nogc_sync_mut/io/crypto_sffi.spl` `random_hex(16)`. No new RNG
+function, raw runtime import, re-export, or deterministic production fallback
+is added. The private parent creator maps facade failure, NIL, wrong length,
+uppercase, nonhex, or all-zero text to
+`renderer-command-entropy-unavailable` before pending bytes, IDs, deadlines,
+or network state change.
 
-A separate runtime selfcheck build substitutes a failing fill function behind
-`SIMPLE_RUNTIME_ENTROPY_SELFCHECK`; production has no fault switch. The system
-fake renderer learns a real capability only by reading a complete host wire.
-Restart evidence captures an old command tuple, replaces the renderer
-generation, and proves the old generation is rejected as `stale-generation`.
-A separately rewritten current-generation message carrying the retired old
-capability is rejected as `unissued-renderer-reply`. A conforming control
-reads the issued command, echoes its tuple, and reaches one accepted nonblank
-frame.
+Deterministic evidence exercises the private parent creator/conversion error
+path from command activation and proves pending bytes, IDs, deadlines,
+staged/issued tuples, and network state remain unchanged. Direct validation or
+validator-only assertions cannot promote this row. The fake renderer learns a
+real capability only by reading a complete host wire. Restart evidence captures
+an old command tuple, replaces the renderer generation, and proves the old
+generation is rejected as `stale-generation`. A separately rewritten
+current-generation message carrying the retired old capability is rejected as
+`unissued-renderer-reply`. A conforming control reads the issued command,
+echoes its tuple, and reaches one accepted nonblank frame.
 
 ### Ready defense in depth
 

@@ -26,12 +26,13 @@ use std.js.node.buffer_module.{buffer_byteLength, NodeBuffer}
 use std.js.node.process_module.{process_cwd, process_exit, process_platform, process_arch, process_version, process_versions_node, process_versions_v8, process_versions_uv, process_release_name, process_release_lts}
 use std.js.node.os_module.{os_platform, os_arch, os_type, os_release, os_homedir, os_tmpdir, os_endianness, os_eol}
 use std.js.node.crypto_module.{crypto_normalize_algorithm, crypto_hash_digest_text}
-use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask}
+use std.nogc_sync_mut.js.engine.interpreter.{JsInterpreter, PendingAsyncRequest, PendingPromiseTask, PromiseHandlerRecord, PromiseHandlerRegistration, PendingTimerTask, js_timer_deadline_ms}
 use std.nogc_sync_mut.js.engine.interpreter.{filter_response_headers_for_script, parse_non_negative_i64_text, text_equals_exact, _simple_fetch_state, _simple_fetch_value}
 use std.nogc_sync_mut.js.engine.interpreter_object.{JsInterpreter}
 use std.nogc_sync_mut.js.engine.interpreter_string_methods.{JsInterpreter}
 
 val JS_TIMER_TASK_LIMIT: i64 = 4096
+val JS_ANIMATION_FRAME_INTERVAL_MS: i64 = 16
 val JS_ASYNC_REQUEST_LIMIT: i64 = 1024
 val JS_HOST_EVENT_OP_LIMIT: i64 = 4096
 
@@ -8035,6 +8036,16 @@ impl JsInterpreter:
                 break
             i = i + 1
 
+    fn _animation_frame_delay_ms() -> i64:
+        """Return the delay to the next frame boundary on the document clock."""
+        var elapsed_ms = self.timer_current_time_ms - self.timer_time_origin_ms
+        if elapsed_ms < 0:
+            elapsed_ms = 0
+        val remainder_ms = elapsed_ms % JS_ANIMATION_FRAME_INTERVAL_MS
+        if remainder_ms == 0:
+            return JS_ANIMATION_FRAME_INTERVAL_MS
+        JS_ANIMATION_FRAME_INTERVAL_MS - remainder_ms
+
     me _retire_timer_handle_lookup(timer_id: i64):
         var i = 0
         while i < self.timer_handle_ids.len() and i < self.timer_handle_object_ids.len():
@@ -8060,7 +8071,7 @@ impl JsInterpreter:
         if timer_type == "immediate":
             callback_arg_start = 1
         elif timer_type == "animationFrame":
-            delay_ms = 16
+            delay_ms = self._animation_frame_delay_ms()
             callback_arg_start = 1
         elif arg_vals.len() > 1:
             delay_ms = f64_to_i64(to_number(arg_vals[1]))
@@ -8097,7 +8108,7 @@ impl JsInterpreter:
         self.set_object_property(handle_id, "delay", JsValue.Number(v: delay_ms.to_f64()))
         self.set_object_property(handle_id, "timerType", JsValue.String(v: timer_type))
         self.set_object_property(handle_id, "scheduledAt", JsValue.Number(v: self.timer_current_time_ms.to_f64()))
-        self.set_object_property(handle_id, "dueAt", JsValue.Number(v: (self.timer_current_time_ms + delay_ms).to_f64()))
+        self.set_object_property(handle_id, "dueAt", JsValue.Number(v: js_timer_deadline_ms(self.timer_current_time_ms, delay_ms).to_f64()))
         self.set_object_property(handle_id, "lastFiredAt", JsValue.Number(v: -1.0))
         self.set_object_property(handle_id, "repeat", JsValue.Boolean(v: is_interval))
         self.set_object_property(handle_id, "active", JsValue.Boolean(v: true))
@@ -8200,7 +8211,8 @@ impl JsInterpreter:
             if task.id == timer_id:
                 if task.is_animation_frame:
                     self.pending_timer_tasks[i] = PendingTimerTask.create_animation_frame(
-                        task.id, task.callback_id, task.delay_ms,
+                        task.id, task.callback_id,
+                        self._animation_frame_delay_ms(),
                         self.timer_current_time_ms
                     )
                 else:
@@ -8245,7 +8257,9 @@ impl JsInterpreter:
                         pass_dn
                 if timer_type == "animationFrame":
                     self.pending_timer_tasks.push(PendingTimerTask.create_animation_frame(
-                        timer_id, callback_id, delay_ms, self.timer_current_time_ms
+                        timer_id, callback_id,
+                        self._animation_frame_delay_ms(),
+                        self.timer_current_time_ms
                     ))
                 else:
                     self.pending_timer_tasks.push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, false))
@@ -8259,8 +8273,15 @@ impl JsInterpreter:
                 self.set_object_property(handle_id, "scheduledAt", JsValue.Number(v: self.timer_current_time_ms.to_f64()))
                 self.set_object_property(handle_id, "active", JsValue.Boolean(v: true))
                 self.set_object_property(handle_id, "completed", JsValue.Boolean(v: false))
+                match self.get_object_property(handle_id, "timerType"):
+                    JsValue.String(v):
+                        if v == "animationFrame":
+                            self.set_object_property(handle_id, "delay", JsValue.Number(v: self._animation_frame_delay_ms().to_f64()))
+                    _:
+                        pass_dn
                 match self.get_object_property(handle_id, "delay"):
-                    JsValue.Number(v): self.set_object_property(handle_id, "dueAt", JsValue.Number(v: self.timer_current_time_ms.to_f64() + v))
+                    JsValue.Number(v):
+                        self.set_object_property(handle_id, "dueAt", JsValue.Number(v: js_timer_deadline_ms(self.timer_current_time_ms, f64_to_i64(v)).to_f64()))
                     _:
                         pass_dn
         this_val

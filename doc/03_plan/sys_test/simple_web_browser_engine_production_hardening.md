@@ -701,14 +701,14 @@ mirrored generated manual must expose exactly these four steps:
 
 1. `Admit the trusted capability owner`
 2. `Issue one fresh command token`
-3. `Reject an untrusted entropy caller`
+3. `Reject an unissued command token`
 4. `Retire all capability material`
 
 Frozen setup/checker names are
 `setup_trusted_capability_owner_fixture`,
 `check_trusted_capability_owner_admitted`,
 `check_fresh_command_token_issued`,
-`check_untrusted_entropy_caller_rejected`, and
+`check_unissued_command_token_rejected`, and
 `check_all_capability_material_retired`. Until implementation, each checker
 must call
 `fail("RED: trusted renderer capability owner is unimplemented")`.
@@ -753,41 +753,13 @@ Required assertions use built-in matchers only:
   reject before state mutation;
 - legacy `SBR1` and legacy fetch/frame/network schemas reject in both hosted
   production directions;
-- a non-owner declaration/call of the raw entropy symbol fails
-  `privileged-host-import-owner` before object emission and records zero
-  entropy calls;
-- the exact canonical owner source forced through both the pure-Simple and
-  Rust interpreters fails `privileged-host-import-native-only` before dispatch,
-  records zero entropy calls, and receives no allowance from
-  `CURRENT_EXEC_MODULE`;
-- direct `spl_dlsym`, plugin-manifest, main-runtime, satellite, generic
-  static/process provider, JIT, ELF, and `RTLD_DEFAULT` routes deny the exact
-  privileged metadata row before lookup or relocation;
-- a tampered, missing, wrong-kind, or multiply matching runtime-provider
-  identity fails before relocation; a conforming link-map receipt binds the
-  owner object, raw symbol, provider content/build and symbol-manifest digests,
-  relocation type, and owning address range;
-- the signed/pinned release/build manifest is admitted before provider open;
-  candidate-derived expected values fail
-  `self-derived-runtime-provider-expectation`, while byte, build-ID,
-  symbol-manifest, policy, target, and trusted-manifest digest mismatches each
-  fail before lookup or relocation;
-- `_rt_browser_renderer_command_capability_new`,
-  `__imp_rt_browser_renderer_command_capability_new`,
-  `__imp__rt_browser_renderer_command_capability_new@0`, and
-  `rt_browser_renderer_command_capability_new@0` each fail
-  `privileged-runtime-symbol-alias` before underscore stripping, import-thunk
-  or stdcall undecoration, policy resolution, or OS lookup; case and Unicode
-  lookalikes do not fold to the privileged symbol;
-- `runtime_native.c::spl_dlsym`,
-  `runtime_dynload.c::spl_dlsym`, the runtime loader's
-  `resolve_builtin_runtime_symbol`/`resolve_process_runtime_symbol`, and
-  `runtime_native.c::spl_hosted_provider_i64_probe` each prove classifier
-  execution before `dlsym`/`GetProcAddress`; every other reachable OS lookup
-  has the same receipt, or its object has a negative hosted-closure proof;
-- `rt_actor_spawn`, `rt_actor_send`, and `rt_actor_recv` retain their existing
-  generic hosted dynamic fallback, proving the deny is not blanket
-  `HostedOnly`;
+- page, SimpleScript, JavaScript, common-codec, and worker paths cannot install,
+  replace, consume, or inspect the parent's staged or issued tuple; formatting
+  arbitrary 32-byte hexadecimal text grants no authority;
+- codec and worker do not own or import the private parent creator; deterministic
+  evidence drives the parent creator/conversion unchanged-state error path,
+  while production entropy uses only `crypto_sffi.random_hex(16)` with no
+  fallback, fault switch, alternate RNG, or raw runtime shortcut;
 - the conforming control reads the command, echoes generation/root ID/token
   and immediate reply ID, reaches `active`, renders exact nonblank pixels, and
   leaves the capability retired after frame acceptance;
@@ -796,23 +768,21 @@ Required assertions use built-in matchers only:
   both tuples and clear retained images, pending wire, deferred commands, and
   network handle.
 
-Separate admissible runtime evidence runs
-`test/01_unit/runtime/run_browser_renderer_command_entropy_test.shs`, whose C
-selfcheck is compiled with `SIMPLE_RUNTIME_ENTROPY_SELFCHECK`. It proves a
-short/unavailable entropy provider returns
-`renderer-command-entropy-unavailable` before browser pending state can be
-created. No production environment fault switch is allowed.
+The deterministic parent fixture exercises empty, short, uppercase, nonhex,
+and all-zero creator/conversion outcomes. Each maps to
+`renderer-command-entropy-unavailable` while pending bytes, IDs, deadlines,
+staged/issued tuples, network state, and counters remain unchanged. A direct
+validator-only assertion cannot satisfy this evidence, and no production fault
+switch is allowed.
 
 Owner-specific executable evidence is:
 
 Step 1 builds the real entry closure rooted at
 `src/os/hosted/hosted_entry.spl` with an admitted current pure-Simple compiler.
-The receipt binds the canonical parent-owner source digest, privileged-policy
-digest, closure digest, loaded runtime-provider digest, and final artifact
-digest. It proves the raw import has exactly one declaration/call owner and
-that the artifact relocation resolves to the admitted runtime provider while
-interpreter and dynamic-SFFI registries omit it. Source inspection alone does
-not satisfy the step.
+The receipt binds the parent, common codec, worker, crypto facade, closure, and
+final artifact digests. It proves one atomic SBR2 production graph with no
+reachable SBR1/SBRN1/legacy frame direction or downgrade flag. Source
+inspection alone does not satisfy the step.
 
 Step 2 launches that artifact through the bounded fake renderer. One complete
 host wire produces exactly one fresh token, moves it from staged to issued only
@@ -820,20 +790,14 @@ after the final byte, and accepts one correctly bound echo. The capture redacts
 the token while proving canonical length/class, issue count, root/wire
 correlation, and no parent mutation on entropy failure.
 
-Step 3 compiles a fixture whose non-owner module declares and calls
-`rt_browser_renderer_command_capability_new`; native object emission must fail
-with `privileged-host-import-owner` and the entropy-call counter must remain
-zero. A separate fixture forces the exact canonical owner source through every
-supported interpreted entry; it must fail
-`privileged-host-import-native-only` before dispatch with zero entropy calls,
-even when `CURRENT_EXEC_MODULE` names the owner. Direct dynamic-SFFI method
-lookup, `spl_dlsym`, plugin/main/satellite, provider, JIT, and ELF routes also
-deny before lookup. A forged module name, symlink to different content, absent
-current-module identity, direct raw call, private-wrapper import, and
-runtime-symbol-name coincidence all deny. There is no allow environment
-variable or test-only production symbol. A separate actor control proves
-`rt_actor_spawn`, `rt_actor_send`, and `rt_actor_recv` still use ordinary
-hosted fallback.
+Step 3 drives hostile page, SimpleScript, JavaScript, common-codec, and worker
+inputs. None can install or consume parent staged/issued state, and guessed,
+replayed, wrong-wire, wrong-root, wrong-generation, partial-write, or
+buffered-ready replies fail before broker/frame authority. A deterministic
+fixture exercises the parent creator/conversion error from normal command
+activation and proves malformed entropy leaves every parent field unchanged.
+A direct validator-only check is insufficient. A control may format identical
+bytes but cannot create the matching live issued tuple.
 
 Step 4 consumes the legitimate echo, then covers command replacement,
 stop/cancel, timeout, entropy failure, network failure, renderer failure, site
@@ -852,15 +816,14 @@ allocations, warm capability p95 <=1 ms, total input-to-paint p95 <=50 ms,
 relative command latency regression <=5%, RSS <=384 MiB, and final RSS growth
 <=10%. Entropy p99 is captured report-only.
 
-The receipt also requires zero interpreter/SFFI entropy dispatches, exactly one
-native entropy call and one transient 32-byte token allocation per installed
-host wire, zero token allocations for deferred/rejected wires, and zero token
-bytes/allocations after quiescence. Owner authorization occurs once during
-compile/load, never as a per-wire path scan, subprocess, or module-string
-parse.
+The receipt also requires exactly one `crypto_sffi.random_hex(16)` call and one
+transient 32-byte token allocation per installed host wire, zero entropy calls
+or token allocations for deferred/rejected wires, and zero token
+bytes/allocations after quiescence. Issued-tuple admission adds no subprocess,
+module-string parse, or unbounded lookup.
 
 Protocol captures pair bounded raw header bytes with decoded fields but redact
-the capability value. No source inspection, direct helper-only assertion,
+the capability value. No source inspection, direct validator-only assertion,
 Rust seed, or bootstrap result may promote the row.
 
 ## Batch-3 execution ledger (2026-07-30)
@@ -898,8 +861,9 @@ recorded. None of these rows is executable or merged evidence.
   owner and covers rollback/restart/UI parity plus forged 513-byte rejection;
   hosted execution remains HELD for an admitted artifact.
 - The opt-in SBR2 codec and portable NIL/zeroize entropy hardening are
-  integrated foundations only. Production remains on SBR1; no exact hosted
-  command-entropy symbol is exported, and no causal capability claim is made.
+  integrated foundations only. Production remains on SBR1; the selected
+  `crypto_sffi.random_hex(16)` facade is not yet wired into parent-issued
+  causal authority.
 - Negative stacking, radio lifecycle, and JavaScript property/GC prototypes
   remain HOLD at their recorded architecture boundaries and are not merged.
 
@@ -910,9 +874,9 @@ recorded. None of these rows is executable or merged evidence.
   and state-atomic rejection; Home coverage binds profile restart and both
   hosted owners. Focused execution remains HELD for an admitted pure-Simple
   artifact.
-- Trusted command-entropy ownership has final architecture review PASS but is
-  still PROPOSED / UNIMPLEMENTED / RED. It does not export an entropy symbol or
-  promote command capabilities.
+- Hosted-parent capability issuance remains PROPOSED / UNIMPLEMENTED / RED;
+  it reuses the existing crypto facade and promotes only with the atomic
+  all-direction SBR2 migration.
 - Shared-clock, label activation, and SimpleScript listener prototypes remain
   HOLD at their exact recorded defects and are not merged.
 
