@@ -6,10 +6,18 @@ fresh pristine worktree + rebuilt seed including `7935e971737`) — HIR Pass 0
 now pre-registers trait names before declaration lowering. The next blocker,
 `CastElse` (the second gap from the original assignment), is now also
 ROOT-CAUSED AND FIXED (6 real `.spl`-only fixes landed, 22/22 relevant specs
-passing). A **third**, new, not-yet-fixed gap (`Unknown variable:
-text_align_v` in `tag_defaults`) was found immediately after and is reported
-below as "what blocks next" — the JIT-enablement task is not fully complete,
-but has advanced past both originally-assigned gaps with real, verified fixes.
+passing, plus a dedicated pinning spec for the dual-engine `nil` correctness
+bug). The **third** gap (`Unknown variable: text_align_v` in `tag_defaults`)
+is now ALSO ROOT-CAUSED AND FIXED (a genuine, pre-existing, JIT-independent
+dead-code bug: an undeclared local plus a final constructor that read the
+wrong field, so `<caption>`/`<th>` centering silently never applied under
+either engine). JIT now advances to a **fourth** gap
+(`Memory safety error [W1006]` in `_take`, `ot_layout_context.spl`) —
+found, precisely reported, deliberately **not** fixed (no established
+capability-annotation syntax to safely mirror, and an unresolved
+`_take`-vs-`_take_many` discrepancy). The JIT-enablement task is not fully
+complete, but has advanced past three real gaps with verified fixes and a
+regression pin.
 **Component:** `src/compiler_rust/driver/src/exec_core.rs` (`run_file_jit`),
 `src/compiler_rust/compiler/src/module_resolver/*`,
 `src/compiler_rust/compiler/src/hir/lower/type_registration.rs` (`register_trait`),
@@ -329,9 +337,123 @@ on the six fixes above.
   typo): PROVED — each individually confirmed to clear its error via the
   real pipeline repro; existing spec suite for the touched files:
   22/22 passing, no regressions.
-- `text_align_v`/`tag_defaults` gap: found (PROVED it exists and blocks),
-  not root-caused or fixed this pass.
+- `text_align_v`/`tag_defaults` gap: ROOT-CAUSED AND FIXED this follow-up
+  pass — see below.
 - Earlier `DrawIrRenderTarget` fix/revert history (this session's own
   reverted attempt, and the architectural `ModuleResolver` finding):
   unchanged from the prior version of this doc, left intact above for
   the record.
+
+## `text_align_v` gap — ROOT-CAUSED AND FIXED (2026-07-30, second follow-up pass)
+
+Re-tested from a **fresh, rebased pristine worktree** at the new SSH tip
+(`5a6ea50b383`+, `git checkout --detach` in place of the existing worktree —
+several upstream web commits had landed) using the already-built seed
+(unaffected, since this gap and its fix are `.spl`-source-only, no Rust
+rebuild needed).
+
+**Root cause (PROVED by code reading) — none of the three candidate
+mechanisms flagged up front; a plain, contained source bug.** Not a
+module-level global/constant, not an enum/soft-keyword resolution
+difference, not import-order sensitivity. `tag_defaults` (`fn tag_defaults(st:
+Style, tag: text) -> Style:`,
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_declarations.spl:2590`)
+declares a full set of local `_v` shadow variables for every field it might
+override (`var display_v = st.display`, `var font_size_v = st.font_size`,
+… 18 of them) — **except `text_align_v`, which is never declared**, yet is
+assigned at two tag-specific branches (`elif tag == "caption": ... text_align_v
+= "center"`, `elif tag == "td" or tag == "th": ... if tag == "th": ...
+text_align_v = "center"`). **Worse: even where declared correctly for its
+siblings, the function's final `Style(...)` constructor read `text_align:
+st.text_align`** (the original, unmodified field) **instead of
+`text_align: text_align_v`** — so even had the variable been declared, its
+value was never wired into the returned `Style`. This is a genuine,
+pre-existing **dead-code / silent no-op bug independent of JIT**: `<caption>`
+and `<th>` elements have never actually received `text-align: center`
+styling under **either** engine — the interpreter tolerates the undeclared
+assignment (auto-vivifying an untracked, thrown-away local), so it never
+crashed, it just silently did nothing.
+
+**Fix (PROVED, applied and re-verified — source-only, no Rust changes):**
+
+1. Added the missing declaration alongside its siblings:
+   `var text_align_v = st.text_align`.
+2. Changed the final `Style(...)` constructor's `text_align: st.text_align`
+   (the **one** occurrence at the actual end-of-function return, distinct
+   from the unrelated early `is_non_rendered_tag` return which correctly
+   still uses `st.text_align` since no tag-specific branch has run yet) to
+   `text_align: text_align_v`.
+
+**Validation:** re-ran the exact `SIMPLE_EXECUTION_MODE=jit` web pipeline
+repro — `Unknown variable: text_align_v` is **gone** (PROVED).
+
+### What blocks NEXT — a fourth gap found, NOT fixed this pass
+
+JIT now advances to a new, different, **fourth** gap:
+
+```
+HIR lowering error: Memory safety error [W1006]: mutation without mut capability (field_0):
+  mutation requires `mut` capability on the receiver while lowering _take at 29:22
+```
+
+Located (PROVED): `src/lib/skia/feature/shaper/ot_layout_context.spl:27-30`:
+
+```
+fn _take(budget: _LayoutBudget, amount: i64) -> bool:
+    if amount < 0 or budget.remaining < amount: return false
+    budget.remaining = budget.remaining - amount
+    true
+```
+
+`budget: _LayoutBudget` (a plain `class` parameter, no `mut` annotation) has
+its field mutated at line 29 (`budget.remaining = ...`) — matching the
+error's "(field_0)" (the class's first declared field, `remaining`).
+**However, checked and confirmed this is NOT simply "this codegen path
+requires `mut` everywhere":** the structurally **identical** pattern exists,
+unfixed, unflagged, in `src/lib/skia/feature/shaper/ot_layout_gpos_data.spl:52-55`
+(`fn _take_many(budget: GposDataBudget, count: i64) -> bool: ... budget.remaining
+= budget.remaining - count`) — same shape, same missing annotation, and the
+JIT compile got **past** that file without error before reaching this one.
+Grepped the whole `src/lib/skia` tree for any precedent of a `mut`-annotated
+class parameter (`budget: mut _LayoutBudget` or similar) to find the correct
+fix syntax: **zero results** — this exact mutate-a-class-parameter-in-place
+pattern is the codebase's normal, apparently-accepted idiom throughout, with
+no established `mut`-parameter syntax to mirror.
+
+**This is reported as the next blocker, not fixed, per the standing
+constraint and this session's own "don't guess at unfamiliar
+capability-system syntax" discipline** — the discrepancy between `_take` and
+the seemingly-identical `_take_many` (one errors, one doesn't) suggests
+either a real aliasing/capability-inference difference specific to this call
+site that isn't visible from the two functions' text alone (worth a
+`SIMPLE_DEBUG`-style trace of the capability inference pass, not attempted
+this pass), or a JIT-lowering-specific false positive. **No source-side
+parenthesization-style workaround is known for this class** (unlike
+`CastElse`) — this is a `ReferenceCapability`/memory-safety-pass question,
+not a parser-precedence one, and guessing at `mut`-syntax without a working
+precedent risks introducing a worse, silently-wrong capability annotation.
+
+### Pinning spec landed for the `CastElse` dual-engine correctness bug
+
+Per instruction, added
+`test/01_unit/bugs/cast_else_swallows_outer_if_spec.spl` — 4 examples: the
+naked (buggy) form's true-branch behavior, the naked form's false-branch
+**wrong** behavior (asserted as `!= 0`, a deliberate "vacuity probe": if a
+future parser fix ever makes this equal `0`, the assertion flips and the
+spec must be updated, rather than silently staying green for the wrong
+reason), and the parenthesized workaround's both branches (asserted
+correct). **Run via the real test runner (PROVED): 4 examples, 0
+failures.**
+
+## Validation performed this follow-up pass
+
+- `text_align_v` root cause and fix: PROVED (code reading, direct
+  before/after repro against the real pipeline).
+- Fourth gap (`W1006` mutation-capability error in `_take`): PROVED to
+  exist and block; root cause NOT established (the `_take`-vs-`_take_many`
+  discrepancy is a real, unresolved puzzle, reported precisely rather than
+  guessed at).
+- Pinning spec: PROVED — 4/4 passing via the real test runner, and its
+  underlying assertions independently cross-checked against a raw
+  interpreter run showing `nil` for the naked false-branch and `0` for the
+  parenthesized one.
