@@ -1267,10 +1267,15 @@ impl BrowserSession:
             return false
         var max_age: i64? = nil
         var include_subdomains = false
+        var max_age_seen = false
+        var include_subdomains_seen = false
         for raw_part in header.split(";"):
             val part = raw_part.trim()
             val lower = part.lower()
             if lower.starts_with("max-age="):
+                if max_age_seen:
+                    return false
+                max_age_seen = true
                 val value = part.substring(8).trim()
                 if value == "":
                     return false
@@ -1282,6 +1287,9 @@ impl BrowserSession:
                     index = index + 1
                 max_age = value.parse_i64()
             elif lower == "includesubdomains":
+                if include_subdomains_seen:
+                    return false
+                include_subdomains_seen = true
                 include_subdomains = true
         if max_age == nil:
             return false
@@ -1296,10 +1304,13 @@ impl BrowserSession:
         val seconds = max_age ?? -1
         if seconds > 0 and retained.len() < 1024:
             val capped_seconds = if seconds > 315360000: 315360000 else: seconds
+            val lifetime_ms = capped_seconds * 1000
+            if self.monotonic_time_ms > 9223372036854775807 - lifetime_ms:
+                return false
             retained.push(BrowserHstsPolicy(
                 host: host,
                 received_at_ms: self.monotonic_time_ms,
-                expires_at_ms: self.monotonic_time_ms + capped_seconds * 1000,
+                expires_at_ms: self.monotonic_time_ms + lifetime_ms,
                 include_subdomains: include_subdomains
             ))
         self.hsts_policies = retained
@@ -1328,12 +1339,18 @@ impl BrowserSession:
         while index < snapshot.entries.len() and accepted < 1024:
             val entry = snapshot.entries[index]
             val host = entry.host.lower()
-            var remaining = entry.expires_at_unix_ms - wall_clock_ms
             val max_lifetime_ms: i64 = 315360000000
-            if remaining > max_lifetime_ms:
-                remaining = max_lifetime_ms
+            var remaining: i64 = 0
+            if (wall_clock_ms >= 0 and
+                entry.received_at_unix_ms >= 0 and
+                entry.expires_at_unix_ms > wall_clock_ms):
+                remaining = entry.expires_at_unix_ms - wall_clock_ms
+                if remaining > max_lifetime_ms:
+                    remaining = max_lifetime_ms
             if (
                 entry.host == entry.host.trim() and
+                entry.received_at_unix_ms <= wall_clock_ms and
+                entry.received_at_unix_ms < entry.expires_at_unix_ms and
                 network_navigation_hostname_valid(host) and
                 not is_ip_host_literal(host) and
                 not is_public_suffix(host) and remaining > 0

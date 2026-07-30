@@ -433,6 +433,20 @@ pub class HostedBrowserRendererProcess:
         val _ = self.hsts.advance_time(rt_time_now_monotonic_ms())
         self.hsts._hsts_upgrade_url(url)
 
+    me _commit_validated_https_hsts(
+        response_url: text, response_headers: text
+    ) -> bool:
+        val header = hosted_browser_response_header_value(
+            response_headers, "strict-transport-security"
+        )
+        if header == "":
+            return false
+        val _ = self.hsts.advance_time(rt_time_now_monotonic_ms())
+        if not self.hsts._apply_hsts_header(header, response_url):
+            return false
+        self.hsts_dirty = true
+        true
+
     me _document_site_swap_required(url: text) -> bool:
         val site = _hosted_browser_schemeful_site(url)
         if site == "":
@@ -1026,6 +1040,8 @@ pub class HostedBrowserRendererProcess:
         self.document_csp_ready = false
         self._clear_pending_document_csp()
         self.home_url = ""
+        self.hsts.hsts_policies = []
+        self.hsts_dirty = false
         if self.state != "failed":
             self.state = "closed"
         true
@@ -1497,14 +1513,9 @@ pub class HostedBrowserRendererProcess:
                         # its authenticated platform-TLS handshake succeeds.
                         # Generic/mock response finalization cannot seed HSTS.
                         if request.url.scheme == "https":
-                            val hsts_header = hosted_browser_response_header_value(
-                                parsed.headers, "strict-transport-security"
+                            val _ = self._commit_validated_https_hsts(
+                                request.url.to_text(), parsed.headers
                             )
-                            if (hsts_header != "" and
-                                self.hsts._apply_hsts_header(
-                                    hsts_header, request.url.to_text()
-                                )):
-                                self.hsts_dirty = true
                         response = self._finalize_network(
                             fetch.kind, request, parsed
                         )
