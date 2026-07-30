@@ -533,10 +533,22 @@ impl Lowerer {
                 self.globals.insert(ec.name.clone(), type_id);
             }
             Node::Static(s) => {
-                // Register global/static variable
-                // Resolve the type if provided, otherwise use Any for dynamic typing
+                // Register global/static variable (the explicit `static`
+                // keyword -- NOT `val`/`var` at module scope, which parses
+                // as Node::Let and is handled separately below with the
+                // identical inference fix; see that arm's comment for the
+                // bug this closes).
+                // Resolve the type if provided, otherwise infer a concrete
+                // type from the initializer when possible (mirrors the
+                // Node::Const arm below, which already does this -- see its
+                // comment citing bug stage4_imported_const_compare).
+                // Otherwise still ANY for dynamic typing.
                 let ty = if let Some(ref t) = s.ty {
                     self.resolve_type(t).unwrap_or(TypeId::ANY)
+                } else if try_const_eval(&s.value).is_some() {
+                    TypeId::I64
+                } else if matches!(&s.value, Expr::String(_) | Expr::FString { .. }) {
+                    TypeId::STRING
                 } else {
                     TypeId::ANY
                 };
@@ -656,13 +668,37 @@ impl Lowerer {
                 // Extract name from pattern, handling Pattern::Typed wrapper
                 let name = extract_pattern_name(&l.pattern);
                 if let Some(n) = name {
-                    // Resolve type: check l.ty first, then Pattern::Typed wrapper.
-                    // The parser stores type annotations in Pattern::Typed (l.ty is None)
-                    // when parsing `var name: Type = value`.
+                    // Resolve type: check l.ty first, then Pattern::Typed wrapper,
+                    // then infer a concrete type from the initializer when
+                    // possible (mirrors the Node::Const arm above, which
+                    // already does this -- see its comment citing bug
+                    // stage4_imported_const_compare). This is `val`/`var` at
+                    // MODULE scope specifically -- `val X = 100` parses as
+                    // Node::Let regardless of scope, and only this module-level
+                    // registration path (not the rarer explicit Node::Static
+                    // `static` keyword, which already mirrors Node::Const)
+                    // decides its global TypeId. An unannotated module-level
+                    // val/var left typed ANY skips the boxing rt_value_to_string
+                    // performs for concrete-typed arguments (needs_boxing checks
+                    // arg.ty against the concrete int types, `mir/lower/
+                    // lowering_expr_builtin.rs`), so the raw i64 value flows
+                    // unboxed into print()/format and gets misread through the
+                    // runtime's tagged-RuntimeValue dispatch -- see
+                    // doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md
+                    // section 9 (the read-side half of gaps 8/9/10's unified
+                    // defect; the write-side half, gap 8's function-call
+                    // initializers never storing their result, is untouched
+                    // here). The parser stores type annotations in
+                    // Pattern::Typed (l.ty is None) when parsing
+                    // `var name: Type = value`.
                     let ty = if let Some(ref t) = l.ty {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
                     } else if let Some(ref t) = extract_pattern_type(&l.pattern) {
                         self.resolve_type(t).unwrap_or(TypeId::ANY)
+                    } else if l.value.as_ref().and_then(try_const_eval).is_some() {
+                        TypeId::I64
+                    } else if matches!(&l.value, Some(Expr::String(_)) | Some(Expr::FString { .. })) {
+                        TypeId::STRING
                     } else {
                         TypeId::ANY
                     };

@@ -719,3 +719,172 @@ distinct, likely larger question from gap 8's separate write-side "why
 doesn't the function-call initializer's result reach the slot" question.
 Both are architecture/codegen questions for a dedicated pass, not this
 enumeration-and-now-unification one.
+
+## 11. Read-side defect fixed — closes gaps 9 and 10 (and one manifestation of the shared mechanism)
+
+**Scope, per instruction: read side only.** Gap 8's write-side defect
+(function-call initializers never reaching the global's storage slot) is
+untouched. Gap 8's own fixture
+(`module_global_from_fn_call_reads_zero.spl`) is expected to, and does,
+remain failing after this fix — it is a different mechanism, and mixing
+the two would muddy both the fix and its verification, exactly as
+instructed.
+
+### 11.1 Premise checked first — and found wrong on the first attempt, then re-verified
+
+The instruction was to check whether a boxing step exists and simply
+isn't called before building on that premise — the same discipline that
+caught the false `@cfg` diagnosis in §7. That discipline caught a real
+mistake here too, not just confirmed a correct guess:
+
+**First hypothesis (wrong):** `box_arg_for_any_param` (`mir/lower/
+lowering_expr_call.rs`) only inserts `MirInst::BoxInt` for an `ANY`-typed
+call argument when the HIR node is itself a literal `HirExprKind::Integer`
+— missing the case of a `Global` reference whose static type happens to be
+`ANY`. This looked promising and led to an initial fix in
+`hir/lower/module_lowering/module_pass.rs`'s `Node::Static` arm (inferring
+a concrete type from a const-evaluable initializer, mirroring the
+already-fixed `Node::Const` arm in the same file, which has its own
+comment citing an identical prior bug, `stage4_imported_const_compare`).
+
+**That fix did not change the fixtures' behavior at all.** Rather than
+conclude the theory was merely incomplete, this was checked directly:
+`print("X={X}")`/`print(X)` do **not** go through `box_arg_for_any_param`
+at all — string interpolation and `print` desugar during **HIR** lowering
+into `HirExprKind::BuiltinCall { name: "rt_value_to_string", .. }`
+(`hir/lower/expr/literals.rs`), a completely different code path from
+regular function calls. `box_arg_for_any_param` was never the relevant
+mechanism for this bug.
+
+**Instrumented directly rather than continuing to theorize.** Added a
+temporary, env-var-gated `eprintln!` at the real boxing site
+(`mir/lower/lowering_expr_builtin.rs`'s dedicated `rt_value_to_string`
+handling, which already boxes based on `arg.ty` matching a concrete
+int/float/bool type — a boxing step that DOES exist and IS called, unlike
+the first hypothesis) and at the edited `Node::Static` arm. Ran a fixture
+with the instrumented binary: the `rt_value_to_string` print fired
+(`arg.ty=TypeId(14)` = `ANY`, confirming the argument really does reach
+this call still typed `ANY`), but the `Node::Static` print **never
+fired at all**. The edited code path was not being executed for this test
+case — the first fix targeted a real bug in a real function, but not the
+one causing this symptom.
+
+**Re-checked the parser, not just the lowering, to find the actual site.**
+`val`/`var` at module scope parse to `Node::Let` (`parser/src/
+stmt_parsing/var_decl.rs`'s `parse_val`/`parse_var`, calling the shared
+`parse_let_impl`), not `Node::Static` — `Node::Static` is Simple's
+separate, rarely-used explicit `static` keyword. `module_pass.rs` has a
+**second**, independent type-inference site for `Node::Let` specifically
+when it appears as a module-level item ("Register module-level variable
+(var at module scope = global)"), and *that* site had exactly the same
+missing-inference gap the `Node::Const`/`Node::Static` sites already had
+fixed — but had never received the analogous fix.
+
+### 11.2 The fix
+
+`hir/lower/module_lowering/module_pass.rs`, the `Node::Let(l)` arm's type
+resolution (the actual site controlling a module-level `val`/`var`'s
+`self.globals` entry):
+
+```rust
+let ty = if let Some(ref t) = l.ty {
+    self.resolve_type(t).unwrap_or(TypeId::ANY)
+} else if let Some(ref t) = extract_pattern_type(&l.pattern) {
+    self.resolve_type(t).unwrap_or(TypeId::ANY)
+} else if l.value.as_ref().and_then(try_const_eval).is_some() {
+    TypeId::I64
+} else if matches!(&l.value, Some(Expr::String(_)) | Some(Expr::FString { .. })) {
+    TypeId::STRING
+} else {
+    TypeId::ANY
+};
+```
+
+The two new branches are copied from the pattern already established (and
+already working) for `Node::Const` and the explicit `Node::Static`
+keyword: infer `I64` for a const-evaluable initializer (reusing the
+existing `try_const_eval`, the same evaluator those arms already call),
+`STRING` for a string/fstring literal, otherwise still `ANY`. No new
+boxing mechanism was written — the boxing step in `rt_value_to_string`'s
+handling already correctly boxes any argument whose static type is a
+concrete int/float/bool; the bug was purely that a module-level `val`/
+`var`'s type never got resolved to one, so that already-correct boxing
+code never triggered. This is squarely a "the mechanism exists, the call
+site's input was wrong" fix, matching the shape this whole sweep has been
+finding — the surprise was which mechanism, not that one existed.
+
+The earlier (harmless, and independently correct) `Node::Static` change
+was kept — it fixes the same class of gap for the explicit `static`
+keyword construct, a distinct, real, if rare, path — with its comment
+corrected to point at the `Node::Let` arm as the fix for `val`/`var`
+specifically. The temporary debug instrumentation was removed before
+landing.
+
+### 11.3 Architecture check: independent of gap 9's unpatchable mechanism, as hoped
+
+Per instruction: if the fix needed the same cross-file global-identity
+machinery gap 9's own write-side turned out to need, that would have been
+surfaced rather than attempted. It doesn't. This fix is a **pure, local,
+per-file HIR-lowering type-inference change** — it decides the static
+`TypeId` recorded for a name in `self.globals` while lowering ONE module
+(which, for `run_file_jit`, is the single merged AST covering the entry
+file and every transitive import — see §6's discussion of that merge).
+It does not touch `declare_data`, Cranelift symbol linkage, or any notion
+of "is this global's storage the same object across two separately-
+compiled units" — the question §6 left as an open architecture decision
+for gap 9's *own*, separate, still-unfixed defect (multiple `declare_data`
+calls for the same global name colliding). This fix and that open
+question are unrelated: this fix makes the *type* of a global correct
+before codegen ever runs; §6's open question is about codegen's *symbol
+identity* for globals once their MIR is already correct. Confirmed by the
+fix landing cleanly with a small, self-contained diff and no interaction
+with the codegen files §6 discusses.
+
+### 11.4 Non-vacuous proof — before/after, via `simple run`, all six fixtures plus reverse control
+
+Built two binaries from this pass's own worktree (before: `Node::Let`
+arm unmodified; after: the fix in §11.2 applied), ran every harness
+fixture directly via `simple run` under both engines against each:
+
+| Fixture | Before (JIT) | After (JIT) |
+|---|---|---|
+| `chained_to_i64_twice` | `pw=480 ph=360` (contested, unaffected) | `pw=480 ph=360` (unaffected) |
+| `module_level_val_from_call` | `X=0` (gap 8, write-side) | `X=0` (unchanged, correctly untouched) |
+| `struct_field_compound_assign` | `n=2` (unrelated bug) | `n=2` (unaffected) |
+| `list_get_shifted` | `idx=5 get=5` (contested, unaffected) | `idx=5 get=5` (unaffected) |
+| `sentinel_basic_arithmetic` | `sum=30` (already correct) | `sum=30` (unaffected) |
+| `cross_module_global_import` | `Y_direct=<special:12> Y_via_fn=99` | **`Y_direct=99 Y_via_fn=99`** |
+| `cfg_arch_global_variants` | `PLATFORM_ID=8` | **`PLATFORM_ID=64`** |
+| `module_global_direct_read_untagged` | `X=<value:0x64>` | **`X=100`** |
+| `module_global_from_fn_call_reads_zero` | `X=0` (gap 8, write-side) | `X=0` (unchanged, correctly untouched) |
+
+Interpreter-mode output re-checked unaffected for every fixture (the
+interpreter does not go through this HIR→MIR→Cranelift path at all).
+Full harness run against the fixed binary: `known open JIT bugs
+reproduced: 3` (down from 6 before this pass's earlier work started at
+6 total non-sentinel fixtures — 2 remain the unrelated, unresolved
+cross-lane-contested pair, 1 is `struct_field_compound_assign`'s own
+distinct bug, and 2 are gap 8's write-side, correctly left alone),
+`unexpected failures (regressions): 0`.
+
+**Reverse control re-run after the fix**, per this pass's standing
+practice: corrupted `sentinel_basic_arithmetic`'s pinned expected value,
+confirmed `REGRESSION` + exit 1; restored it, confirmed exit 0. The
+harness still actually observes the fixed binary rather than reporting
+green unconditionally.
+
+The three now-fixed fixtures' `known_good` field was updated from
+`"interpret"` to `"both"` in the harness (§10's earlier framing), since a
+future JIT regression on these three is now a real regression to catch,
+not an ambiguous "did it get fixed or is the check wrong" situation.
+
+### 11.5 Summary
+
+Three of gaps 8/9/10's manifestations (the ones sharing the read-side
+tag-boxing-on-global-read mechanism unified in §9) are fixed: gap 9 itself
+(`cross_module_global_import`), the originally-misdiagnosed "gap 10"
+(`cfg_arch_global_variants`), and the cleanest general instance
+(`module_global_direct_read_untagged`). Gap 8's write-side defect remains
+open by design (out of this pass's scope). The two cross-lane-contested
+fixtures (`chained_to_i64_twice`, `list_get_shifted`) remain unresolved
+and untouched — this fix does not bear on that contradiction.
