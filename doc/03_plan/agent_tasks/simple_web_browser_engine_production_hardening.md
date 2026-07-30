@@ -301,3 +301,26 @@ The working replacement of `html_css_spec_traceability.md` is rejected because
 it deletes the authoritative RED/FAIL matrix. Restore the origin matrix before
 adding generator metadata, fail-closed merge tests, manifests, explicit WebIR
 ownership, or regenerated manuals.
+
+## Ten-lane implementation-preparation batch (2026-07-30)
+
+These lanes run in two scheduler batches and return isolated patches. A RED
+spec may be preserved but not pushed as green evidence. Production files with
+an active owner remain patch-only until merge-owner handoff.
+
+| Lane | Owner | Scope | Acceptance / dependency | Initial status |
+|---|---|---|---|---|
+| 11 | `affine_schema_policy` | Decide Draw IR affine wire compatibility | Explicit schema/version policy and hostile legacy/current fixtures | READY |
+| 12 | `affine_legacy_fixture` | Add legacy hosted payload compatibility RED coverage | Identity defaults or explicit version rejection; no ambiguous v2 decode | BLOCKED on 11 |
+| 13 | `multibatch_protocol_security` | Specify hostile multi-batch browser protocol validation | Root ownership, unique IDs, aggregate budgets, affine/singular/overflow rejection | READY |
+| 14 | `content_visibility_gpu_fix` | Repair the two GPU visibility predicates behind Lane 6 RED | Canonical ancestor-only semantics; no parallel renderer owner | PATCH-ONLY; owner handoff required |
+| 15 | `traceability_additive_repair` | Preserve origin RED matrix and append generator/WebIR work | Zero deleted authoritative rows; every new claim names evidence or stays RED | READY |
+| 16 | `spec_to_sspec_fail_closed` | Harden generator metadata and generated-region merge | Required tags, exact outside-byte preservation, duplicate/malformed rejection, idempotence | READY |
+| 17 | `spec_to_sspec_integration_manifest` | Design update-mode integration and HTML/CSS manifest evidence | Executable integration SSpec, generated manual path, drift/support manifests | BLOCKED on 16 |
+| 18 | `browser_budget_harness` | Replace perf placeholder with a realistic lifecycle RED harness | Child PID timing/RSS, warm samples, 10k plateau, close/replacement receipts | BLOCKED on checker |
+| 19 | `paint_ancestor_complexity` | Bound repeated ancestor walks before adding a cache | Depth fixture and stage timing first; root-cause-only optimization | READY |
+| 20 | `electron_exact_argb_gate` | Keep one exact external CSS/animation bitmap gate current | No silent fallback, exact proof paths/checksums, obsolete wrapper retired or repaired | BLOCKED on checker/runtime |
+
+Merge order is 11, 12, 13, 14, 15, 16, 17, then evidence lanes 18–20.
+Lanes 12–14 must be reviewed together before affine or transform production
+work proceeds.
