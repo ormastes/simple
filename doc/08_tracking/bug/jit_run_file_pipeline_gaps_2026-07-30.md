@@ -1298,3 +1298,73 @@ Landed via git plumbing (fresh SSH `ls-remote`, exact-SHA `read-tree`,
 6-file scoped commit, conflict-tree and marker guards clean) at
 `48af531ce0eca62c47787394016aa73d55294d5c`, parent
 `ef90c16b1949f393068e64be2da9a5c5661262a9`.
+
+### 16.1 Follow-on: `vector-font-evidence` -- three-pass narrowing, then a correction
+
+After 16 landed, the web showcase no longer failed at
+`reason=blank-or-uniform pixels=0` (confirmed non-vacuous: the write-side
+fix works). It advanced to a new, different, later failure:
+`reason=vector-font-evidence expected_identity=...;axes=static
+identity=...;axes=wght=100 expected_pixels=100 pixels=16`. Three
+instrumented passes against the real, working showcase pipeline (not a
+synthetic probe, per the "instrument the real pipeline" correction after
+an earlier probe hit an unrelated JIT crash) narrowed this:
+
+1. Identity mismatch traced by exact sha256 comparison against the font
+   candidate table: the renderer picked candidate #0 ("Noto Sans SC", a
+   CJK variable-weight sans face, `wght=100` default instance) instead of
+   the requested candidate #9 ("Bungee", `category=display`, the only
+   display-category candidate). `font_pixel_size=16` matched the
+   `Style` struct's hardcoded default (`font_size: 16, font_family:
+   "sans-serif"`) exactly.
+2. A level-gated trace (`SIMPLE_TRACE_FONT_STYLE`, added permanently,
+   default off, at the exact `resolve_font_metrics_with_language` call
+   site in `simple_web_html_layout_renderer_core.spl`) confirmed: all 59
+   traced `#text` nodes on the real page, including the marker
+   (`index=152 text=Simple Web 300 DPI`), read `font_family=sans-serif
+   font_size=16` -- the struct defaults, not the marker's own
+   `style='font-family:Bungee;font-size:100px'`.
+3. A second trace extension pinned this further: the marker DIV's own
+   post-cascade `font_family`/`font_size` (`index=151`, stored into
+   `styles[151]` before its child text node inherits from it) were
+   *also* the defaults -- and `attr_value(nd.attrs_raw, "style")`,
+   the same helper already working for other attributes in this file,
+   returned empty for every one of the 153 nodes on the page, including
+   the marker div. This was reported as "declarations never parsed,
+   upstream of the cascade" -- outcome 1 of three the coordinator asked
+   to distinguish.
+
+**Correction (still within the same pass): outcome 1 was itself a JIT
+read-side artifact, not the real defect.** Testing the same minimal
+input (`<div id='marker' style='font-family:Bungee;font-size:100px'>hi
+</div>`) through the pre-existing `simple_web_layout_debug_attr_by_id`
+debug entry point, side by side under both engines:
+
+```
+interpreter: style_val=[font-family:Bungee;font-size:100px] len=34   (correct)
+jit:         style_val=[] len=0                                       (wrong)
+```
+
+The HTML attribute parser is correct -- proven directly, not inferred.
+The defect is JIT's struct-field reads on `[HNode]` array elements for
+non-`#text`-tagged nodes: reading `tag`/`id_attr`/`style_attr`/
+`attrs_raw` off an element-shaped `HNode` returns empty/corrupt under
+JIT while the identical interpreter call is correct, reproduced with a
+2-line HTML input, no rendering pipeline involved (see the new
+`simple_web_layout_debug_dump_nodes` permanent debug helper).
+
+**Disposition: this is a JIT engine correctness defect (struct-field/
+array-element read reliability for this class shape), not a bounded
+browser-engine attribute-parsing fix.** It is a materially larger and
+different category than the "small, specific, falsifiable" fix the
+outcome-1 framing suggested -- consistent with several other "silently
+wrong under JIT" struct-field defects already on record this session
+(see the memory index: struct-field compound-assign, list.get shift,
+nested-array element read, etc.). Not attempted as a fix in this pass.
+The web showcase cell remains BLOCKED; scoreboard remains 2 GREEN.
+
+Evidence commits (all in this pass, `origin/main`):
+`0e3176a9810a8b9957addc14c97c3d062d204826` (first trace, #text call
+site), `86c0202b897a1ffb865844cd351c19de7d20ac4d` (second trace,
+parent-element cascade + raw attrs), `3fa408bcc3ab6ca32746700f26ac90cd20bf0697`
+(dump-nodes helper + the correcting JIT-vs-interpreter control).
