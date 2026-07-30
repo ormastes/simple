@@ -110,6 +110,7 @@ class BrowserHistoryEntry:
     url: text
     title: text
     source_html: text
+    persisted_html: text
     content_security_policy: text
 
     static fn create(url: text, title: text, source_html: text) -> BrowserHistoryEntry:
@@ -120,6 +121,7 @@ class BrowserHistoryEntry:
             url: url,
             title: title,
             source_html: source_html,
+            persisted_html: "",
             content_security_policy: policy
         )
 
@@ -156,7 +158,10 @@ fn browser_history_push_bounded(
     var retained_count = 0
     var retained_bytes: i64 = 0
     while start > 0 and retained_count < BROWSER_HISTORY_MAX_ENTRIES:
-        val size = candidates[start - 1].source_html.len()
+        val size = (
+            candidates[start - 1].source_html.len() +
+            candidates[start - 1].persisted_html.len()
+        )
         if (retained_count > 0 and
             size > BROWSER_MAX_RESOURCE_BYTES - retained_bytes):
             break
@@ -2040,6 +2045,7 @@ impl BrowserSession:
         # Keep the active document alive until a replacement commits. Starting
         # a navigation cancels only work, never the visible/runtime state that
         # Stop or a failed response must preserve.
+        self._snapshot_current_history_for_departure()
         self.active_load = nil
         self.pending_requests = []
         self.pending_request_head = 0
@@ -2997,7 +3003,7 @@ impl BrowserSession:
         self.is_loading = false
         self.address_draft = ""
         self._load_page_source(
-            pending, html, target_index, push_history
+            pending, html, html, target_index, push_history
         )
 
     me reload() -> Result<bool, text>:
@@ -3012,7 +3018,11 @@ impl BrowserSession:
         self.pending_url = ""
         self.is_loading = false
         self.stop_requested = false
-        self._load_page_source(entry.url, entry.source_html, self.current_index, false)
+        # Reload rebuilds committed source; persisted_html is traversal-only.
+        self._load_page_source(
+            entry.url, entry.source_html, entry.source_html,
+            self.current_index, false
+        )
 
     me reload_to(target_url: text) -> Result<bool, text>:
         if self.reload_target_url()? != target_url:
@@ -3029,7 +3039,14 @@ impl BrowserSession:
         self.pending_url = ""
         self.is_loading = false
         self.stop_requested = false
-        self._load_page_source(entry.url, entry.source_html, target, false)
+        self._load_page_source(
+            entry.url,
+            if entry.persisted_html != "":
+                entry.persisted_html
+            else:
+                entry.source_html,
+            entry.source_html, target, false
+        )
 
     me go_back_to(target_url: text) -> Result<bool, text>:
         if not self.can_go_back():
@@ -3048,7 +3065,14 @@ impl BrowserSession:
         self.pending_url = ""
         self.is_loading = false
         self.stop_requested = false
-        self._load_page_source(entry.url, entry.source_html, target, false)
+        self._load_page_source(
+            entry.url,
+            if entry.persisted_html != "":
+                entry.persisted_html
+            else:
+                entry.source_html,
+            entry.source_html, target, false
+        )
 
     me go_forward_to(target_url: text) -> Result<bool, text>:
         if not self.can_go_forward():

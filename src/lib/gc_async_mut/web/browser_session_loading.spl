@@ -32,7 +32,10 @@ use std.gc_async_mut.web.browser_session_modules_helpers.{
 use std.gc_async_mut.web.browser_session_context.{browser_csp_allows}
 use std.gc_async_mut.gpu.browser_engine.script.canvas_api.{canvas_get_context_simple2d, canvas_get_context_simple3d}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
-    BROWSER_MAX_DOCUMENT_SUBRESOURCES
+    BROWSER_MAX_DOCUMENT_SUBRESOURCES, BROWSER_MAX_RESOURCE_BYTES
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_serialize_html
 }
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
 use common.web.browser_renderer_protocol.{
@@ -1419,7 +1422,7 @@ impl BrowserSession:
         url
 
     me _update_history(url: text, html: text, target_index: i32, push_history: bool):
-        val entry = BrowserHistoryEntry.create_with_policy(
+        var entry = BrowserHistoryEntry.create_with_policy(
             url: self.current_url,
             title: self.current_title,
             source_html: html,
@@ -1427,6 +1430,7 @@ impl BrowserSession:
         )
 
         if target_index >= 0 and target_index < self.history.len():
+            entry.persisted_html = self.history[target_index].persisted_html
             self.history[target_index] = entry
             self.current_index = target_index
             return
@@ -1437,11 +1441,42 @@ impl BrowserSession:
             )
             self.current_index = self.history.len() - 1
 
+    fn _current_history_entry_is_committed() -> bool:
+        (
+            not self.is_loading and self.active_load == nil and
+            self.current_index >= 0 and
+            self.current_index < self.history.len() and
+            self.document_url == self.current_url and
+            self.history[self.current_index].url == self.current_url
+        )
+
     me _refresh_current_history():
-        if self.current_index >= 0 and self.current_index < self.history.len():
-            self.history[self.current_index] = BrowserHistoryEntry.create_with_policy(
+        if self._current_history_entry_is_committed():
+            val current = self.history[self.current_index]
+            var entry = BrowserHistoryEntry.create_with_policy(
                 url: self.current_url,
                 title: self.current_title,
-                source_html: self.history[self.current_index].source_html,
+                source_html: current.source_html,
                 policy: self.content_security_policy
             )
+            entry.persisted_html = current.persisted_html
+            self.history[self.current_index] = entry
+
+    me _snapshot_current_history_for_departure():
+        if self._current_history_entry_is_committed():
+            val current = self.history[self.current_index]
+            val persisted_html = be_dom_serialize_html(self.current_dom)
+            var entry = BrowserHistoryEntry.create_with_policy(
+                url: self.current_url,
+                title: self.current_title,
+                source_html: current.source_html,
+                policy: self.content_security_policy
+            )
+            if (
+                current.source_html.len() <= BROWSER_MAX_RESOURCE_BYTES and
+                persisted_html.len() <= (
+                    BROWSER_MAX_RESOURCE_BYTES - current.source_html.len()
+                )
+            ):
+                entry.persisted_html = persisted_html
+            self.history[self.current_index] = entry

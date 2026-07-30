@@ -209,6 +209,245 @@ expect(session.current_url).to_equal("https://example.com/home")
 
 </details>
 
+#### should restore edited text controls during history traversal
+
+Back/Forward restores departure state; Reload keeps rebuilding the committed source.
+
+- Commit a page and edit its live text control
+   - Expected: text, textarea, checkbox, radio, and select edits succeed
+   - Expected: session.current_url equals `https://example.com/form`
+   - Expected: session.history.len() equals `1`
+   - Expected: session.current_index equals `0`
+   - Expected: one textfield exposes `kept`
+- Commit a second page without rewriting the first history entry
+   - Expected: the same URL commits with a different scripted title and CSP
+   - Expected: session.history.len() equals `2`
+   - Expected: scripted page mutation cannot overwrite the first URL, source, or persisted state
+   - Expected: session.current_index equals `1`
+   - Expected: Back is enabled
+- Traverse Back through the textual browser control
+   - Expected: back.ok is true
+   - Expected: the committed URL is `https://example.com/form`
+   - Expected: the two-entry history ledger and index `0` are retained
+- Retain the committed page ledger and edited control value
+   - Expected: Back is disabled
+   - Expected: Forward is enabled
+   - Expected: all five control kinds expose their edited state
+   - Expected: Reload restores source defaults and the first CSP without growing history
+   - Expected: Forward restores the second page without growing history
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 201 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+"""Back/Forward restores departure state; Reload keeps rebuilding the committed source."""
+val first_url = "https://example.com/form"
+val second_url = first_url
+val first_policy = "default-src 'self'"
+val second_policy = (
+    "default-src 'self'; script-src 'unsafe-inline'"
+)
+val first_html = (
+    "<html><head><title>Form</title>" +
+    "<meta http-equiv='Content-Security-Policy' content=\"" +
+    first_policy + "\"></head><body>" +
+    "<input value='initial'>" +
+    "<input type='checkbox' value='check'>" +
+    "<input type='radio' name='tone' value='red' checked>" +
+    "<input type='radio' name='tone' value='blue'>" +
+    "<textarea>old memo</textarea>" +
+    "<select><option value='a' selected>A</option>" +
+    "<option value='b'>B</option></select></body></html>"
+)
+
+step("Commit a page and edit its live text control")
+var session = BrowserSession.new()
+expect(session.open_html(first_url, first_html).is_ok()).to_be(true)
+val text_edit = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#page_input_0",
+    action: "set_value", text_value: "kept", x: 0, y: 0
+))
+val checkbox_edit = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#page_input_1",
+    action: "click", text_value: "", x: 0, y: 0
+))
+val radio_edit = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#page_input_3",
+    action: "click", text_value: "", x: 0, y: 0
+))
+val textarea_edit = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#page_textarea_0",
+    action: "set_value", text_value: "memo", x: 0, y: 0
+))
+val initial_select = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "select", "a", 1
+)
+expect(initial_select.len()).to_equal(1)
+val select_edit = session.ui_access_act(WinTextActionRequest(
+    target_id: initial_select[0].canonical_id,
+    action: "set_value", text_value: "b", x: 0, y: 0
+))
+expect(text_edit.ok).to_be(true)
+expect(checkbox_edit.ok).to_be(true)
+expect(radio_edit.ok).to_be(true)
+expect(textarea_edit.ok).to_be(true)
+expect(select_edit.ok).to_be(true)
+expect(session.current_url).to_equal(first_url)
+expect(session.history.len()).to_equal(1)
+expect(session.current_index).to_equal(0)
+expect(ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "kept", 1
+).len()).to_equal(1)
+
+step("Commit a second page without rewriting the first history entry")
+expect(session.open_html(
+    second_url,
+    "<html><head><title>Next</title>" +
+    "<meta http-equiv='Content-Security-Policy' content=\"" +
+    second_policy + "\"></head><body>Next" +
+    "<script>document.title = 'Scripted next';" +
+    "document.body.innerHTML = '<main>Scripted next</main>';" +
+    "</script></body></html>"
+).is_ok()).to_be(true)
+val back_before = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Back", 1
+)
+expect(session.current_url).to_equal(second_url)
+expect(session.history.len()).to_equal(2)
+expect(session.history[0].url).to_equal(first_url)
+expect(session.history[0].source_html).to_equal(first_html)
+expect(session.history[0].persisted_html).to_contain(
+    "value=\"kept\""
+)
+expect(session.history[0].persisted_html.contains(
+    "Scripted next"
+)).to_be(false)
+expect(session.history[1].url).to_equal(second_url)
+expect(session.history[0].title).to_equal("Form")
+expect(session.history[1].title).to_equal("Scripted next")
+expect(session.history[0].content_security_policy).to_equal(
+    first_policy
+)
+expect(session.history[1].content_security_policy).to_equal(
+    second_policy
+)
+expect(session.current_index).to_equal(1)
+expect(back_before[0].enabled).to_be(true)
+
+step("Traverse Back through the textual browser control")
+val back = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#back", action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(back.ok).to_be(true)
+expect(session.current_url).to_equal(first_url)
+expect(session.history.len()).to_equal(2)
+expect(session.history[0].url).to_equal(first_url)
+expect(session.history[1].url).to_equal(second_url)
+expect(session.current_index).to_equal(0)
+expect(session.current_title).to_equal("Form")
+expect(session.content_security_policy).to_equal(first_policy)
+
+step("Retain the committed page ledger and edited control value")
+val back_after = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Back", 1
+)
+val forward_after = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Forward", 1
+)
+val restored = session.ui_access_snapshot()
+expect(back_after[0].enabled).to_be(false)
+expect(forward_after[0].enabled).to_be(true)
+expect(ui_access_find_nodes(
+    restored, "browser:session",
+    "textfield", "kept", 1
+).len()).to_equal(1)
+expect(ui_access_find_nodes(
+    restored, "browser:session",
+    "textfield", "memo", 1
+).len()).to_equal(1)
+val restored_checkbox = ui_access_find_nodes(
+    restored, "browser:session", "checkbox", "check", 1
+)
+val restored_red = ui_access_find_nodes(
+    restored, "browser:session", "radio", "red", 1
+)
+val restored_blue = ui_access_find_nodes(
+    restored, "browser:session", "radio", "blue", 1
+)
+expect(restored_checkbox[0].selected).to_be(true)
+expect(restored_red[0].selected).to_be(false)
+expect(restored_blue[0].selected).to_be(true)
+expect(ui_access_find_nodes(
+    restored, "browser:session", "select", "b", 1
+).len()).to_equal(1)
+
+val reload = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#reload", action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(reload.ok).to_be(true)
+val reload_request = session.take_pending_request().unwrap()
+expect(reload_request.kind).to_equal("document")
+expect(session.commit_network_response(BrowserResponse.create(
+    reload_request.id, "document", reload_request.url,
+    200, "", first_html, ""
+)).is_ok()).to_be(true)
+val reloaded = session.ui_access_snapshot()
+expect(session.history.len()).to_equal(2)
+expect(session.current_index).to_equal(0)
+expect(session.history[0].source_html).to_equal(first_html)
+expect(session.history[0].content_security_policy).to_equal(
+    first_policy
+)
+expect(session.history[1].content_security_policy).to_equal(
+    second_policy
+)
+expect(ui_access_find_nodes(
+    reloaded, "browser:session", "textfield", "initial", 1
+).len()).to_equal(1)
+expect(ui_access_find_nodes(
+    reloaded, "browser:session", "textfield", "old memo", 1
+).len()).to_equal(1)
+val default_checkbox = ui_access_find_nodes(
+    reloaded, "browser:session", "checkbox", "check", 1
+)
+val default_red = ui_access_find_nodes(
+    reloaded, "browser:session", "radio", "red", 1
+)
+val default_blue = ui_access_find_nodes(
+    reloaded, "browser:session", "radio", "blue", 1
+)
+expect(default_checkbox[0].selected).to_be(false)
+expect(default_red[0].selected).to_be(true)
+expect(default_blue[0].selected).to_be(false)
+expect(ui_access_find_nodes(
+    reloaded, "browser:session", "select", "a", 1
+).len()).to_equal(1)
+
+val forward = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#forward", action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(forward.ok).to_be(true)
+expect(session.current_url).to_equal(second_url)
+expect(session.history.len()).to_equal(2)
+expect(session.current_index).to_equal(1)
+expect(session.history[0].source_html).to_equal(first_html)
+expect(session.current_title).to_equal("Scripted next")
+expect(session.content_security_policy).to_equal(second_policy)
+```
+
+</details>
+
 #### reports favorite availability and mutation truthfully
 
 The public chrome route reports only session-local favorite mutations.
@@ -1377,8 +1616,8 @@ expect(textarea_focused).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 15 |
-| Active scenarios | 15 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
