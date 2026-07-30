@@ -9,6 +9,8 @@ use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_NETWORK_BODY_BYTES,
     BROWSER_RENDERER_MAX_NETWORK_HEADERS_BYTES,
     BrowserRendererDecoder, BrowserRendererEncodeResult,
+    BrowserRendererFrameDecodeResult,
+    BrowserRendererMessage,
     BrowserRendererNetworkDecodeResult,
     browser_renderer_advance_encode,
     browser_renderer_bookmark_snapshot_encode,
@@ -1383,6 +1385,18 @@ pub class HostedBrowserRendererProcess:
             true
         )
 
+    me _complete_pending_wire_write():
+        self.expected_reply_to_request_id = (
+            self.pending_wire_reply_to_request_id
+        )
+        self.next_request_id = (
+            self.pending_wire_reply_to_request_id + 1
+        )
+        self.pending_wire = ""
+        self.pending_wire_offset = 0
+        self.pending_wire_reply_to_request_id = 0
+        self.pending_wire_is_command = false
+
     me _flush_pending_wire_once() -> text:
         if self.pending_wire == "":
             return ""
@@ -1401,16 +1415,7 @@ pub class HostedBrowserRendererProcess:
             return ""
         self.pending_wire_offset = self.pending_wire_offset + written
         if self.pending_wire_offset >= self.pending_wire.len():
-            self.expected_reply_to_request_id = (
-                self.pending_wire_reply_to_request_id
-            )
-            self.next_request_id = (
-                self.pending_wire_reply_to_request_id + 1
-            )
-            self.pending_wire = ""
-            self.pending_wire_offset = 0
-            self.pending_wire_reply_to_request_id = 0
-            self.pending_wire_is_command = false
+            self._complete_pending_wire_write()
         ""
 
     me _poll_network_job() -> text:
@@ -1682,6 +1687,96 @@ pub class HostedBrowserRendererProcess:
                 return Some(self.fail(reason))
         nil
 
+    me _accept_theme_ready_message(
+        message: BrowserRendererMessage
+    ) -> HostedBrowserRendererResult:
+        if self.state != "await-theme-ready":
+            return self.fail("invalid-renderer-state")
+        if (message.kind != "theme_ready" or
+            message.request_id != self.expected_reply_to_request_id):
+            return self.fail("expected-theme-ready")
+        if not hosted_theme_ready_payload_matches(
+            self.theme_revision,
+            self.theme_wire_text,
+            message.payload
+        ):
+            return self.fail("theme-ready-mismatch")
+        self.command_deadline_ms = 0
+        self.pending_operation = ""
+        self.expected_reply_to_request_id = 0
+        self.state = "await-init"
+        _renderer_result(true, "theme-ready", _empty_composition())
+
+    me _accept_decoded_frame(
+        frame: BrowserRendererFrameDecodeResult,
+        producer_generation: i64
+    ) -> HostedBrowserRendererResult:
+        if not frame.ok:
+            return self.fail(frame.reason)
+        val has_trusted_document = (
+            self.document_url != "" or
+            self.pending_document_commit_url != ""
+        )
+        val unchanged_history_state = (
+            self.pending_document_commit_url == "" and
+            self.pending_history_target_url == "" and
+            self.pending_history_index < 0 and
+            frame.history_current_url == self.history_current_url and
+            frame.history_back_url == self.history_back_url and
+            frame.history_forward_url == self.history_forward_url
+        )
+        if (frame.history_state_present and has_trusted_document and
+            not unchanged_history_state and
+            not self._frame_history_state_valid(
+                frame.history_current_url,
+                frame.history_back_url,
+                frame.history_forward_url
+            )):
+            return self.fail("invalid-frame-history")
+        if self.pending_document_commit_url != "":
+            self._commit_document_url(
+                self.pending_document_commit_url
+            )
+            self.pending_document_commit_url = ""
+            self.provisional_document_origin = ""
+        if self.pending_history_index >= 0:
+            self.history_index = self.pending_history_index
+            self._restore_history_document(self.history_index)
+        if (frame.history_state_present and has_trusted_document and
+            not unchanged_history_state):
+            self._apply_frame_history_state(
+                frame.history_current_url,
+                frame.history_back_url,
+                frame.history_forward_url
+            )
+        self.pending_history_index = -1
+        self.pending_history_target_url = ""
+        if self.pending_operation == "resize":
+            self.width = self.pending_resize_width
+            self.height = self.pending_resize_height
+        self.pending_resize_width = 0
+        self.pending_resize_height = 0
+        self.next_animation_ms = frame.next_animation_ms
+        self.retained_image_resources = frame.image_resources
+        self.command_deadline_ms = 0
+        self.pending_operation = ""
+        val deferred_reason = self._activate_deferred_command()
+        if deferred_reason != "":
+            return self.fail(deferred_reason)
+        self.state = "active"
+        _renderer_frame_result(
+            frame.composition,
+            frame.image_resources,
+            frame.next_animation_ms,
+            producer_generation,
+            frame.composition_revision,
+            frame.cpu_composited_count,
+            frame.cpu_composited_sha256,
+            frame.solid_material_count,
+            frame.solid_material_sha256,
+            frame.diagnostics
+        )
+
     me poll() -> HostedBrowserRendererResult?:
         if self.command_deadline_ms <= 0:
             return nil
@@ -1740,22 +1835,8 @@ pub class HostedBrowserRendererProcess:
             return Some(self.fail(decoded.decoder.error))
         if decoded.status == "message":
             if self.state == "await-theme-ready":
-                if (decoded.message.kind != "theme_ready" or
-                    decoded.message.request_id !=
-                        self.expected_reply_to_request_id):
-                    return Some(self.fail("expected-theme-ready"))
-                if not hosted_theme_ready_payload_matches(
-                    self.theme_revision,
-                    self.theme_wire_text,
-                    decoded.message.payload
-                ):
-                    return Some(self.fail("theme-ready-mismatch"))
-                self.command_deadline_ms = 0
-                self.pending_operation = ""
-                self.expected_reply_to_request_id = 0
-                self.state = "await-init"
-                return Some(_renderer_result(
-                    true, "theme-ready", _empty_composition()
+                return Some(self._accept_theme_ready_message(
+                    decoded.message
                 ))
             if decoded.message.kind == "test_hang_ready":
                 if (self.pending_operation != "test_hang_after_ready" or
@@ -1796,70 +1877,8 @@ pub class HostedBrowserRendererProcess:
                 decoded.message, decode_width, decode_height,
                 self.retained_image_resources
             )
-            if not frame.ok:
-                return Some(self.fail(frame.reason))
-            val has_trusted_document = (
-                self.document_url != "" or
-                self.pending_document_commit_url != ""
-            )
-            val unchanged_history_state = (
-                self.pending_document_commit_url == "" and
-                self.pending_history_target_url == "" and
-                self.pending_history_index < 0 and
-                frame.history_current_url == self.history_current_url and
-                frame.history_back_url == self.history_back_url and
-                frame.history_forward_url == self.history_forward_url
-            )
-            if (frame.history_state_present and has_trusted_document and
-                not unchanged_history_state and
-                not self._frame_history_state_valid(
-                    frame.history_current_url,
-                    frame.history_back_url,
-                    frame.history_forward_url
-                )):
-                return Some(self.fail("invalid-frame-history"))
-            if self.pending_document_commit_url != "":
-                self._commit_document_url(
-                    self.pending_document_commit_url
-                )
-                self.pending_document_commit_url = ""
-                self.provisional_document_origin = ""
-            if self.pending_history_index >= 0:
-                self.history_index = self.pending_history_index
-                self._restore_history_document(self.history_index)
-            if (frame.history_state_present and has_trusted_document and
-                not unchanged_history_state):
-                self._apply_frame_history_state(
-                    frame.history_current_url,
-                    frame.history_back_url,
-                    frame.history_forward_url
-                )
-            self.pending_history_index = -1
-            self.pending_history_target_url = ""
-            if self.pending_operation == "resize":
-                self.width = self.pending_resize_width
-                self.height = self.pending_resize_height
-            self.pending_resize_width = 0
-            self.pending_resize_height = 0
-            self.next_animation_ms = frame.next_animation_ms
-            self.retained_image_resources = frame.image_resources
-            self.command_deadline_ms = 0
-            self.pending_operation = ""
-            val deferred_reason = self._activate_deferred_command()
-            if deferred_reason != "":
-                return Some(self.fail(deferred_reason))
-            self.state = "active"
-            return Some(_renderer_frame_result(
-                frame.composition,
-                frame.image_resources,
-                frame.next_animation_ms,
-                decoded.message.generation,
-                frame.composition_revision,
-                frame.cpu_composited_count,
-                frame.cpu_composited_sha256,
-                frame.solid_material_count,
-                frame.solid_material_sha256,
-                frame.diagnostics
+            return Some(self._accept_decoded_frame(
+                frame, decoded.message.generation
             ))
         if chunk == "" and not process_is_piped_alive(self.pid):
             self.pid = 0

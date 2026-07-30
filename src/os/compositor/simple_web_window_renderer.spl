@@ -142,19 +142,6 @@ fn _simple_web_content_render_request_from_snapshot(
         viewport_h
     ).with_root_attrs(attrs)
 
-fn simple_web_content_render_request_with_snapshot(
-    snapshot: ThemeRenderSnapshot,
-    theme_revision: i64,
-    title: text,
-    body_html: text,
-    viewport_w: i32,
-    viewport_h: i32
-) -> WebRenderRequest:
-    """Project one accepted immutable snapshot into canonical Simple Web."""
-    _simple_web_content_render_request_from_snapshot(
-        snapshot, theme_revision, title, body_html, viewport_w, viewport_h
-    )
-
 fn _simple_web_content_full_html_with_install_projection(
     projection: ThemePackageInstallProjection,
     theme_revision: i64,
@@ -456,9 +443,36 @@ fn simple_web_external_content_frame(
         theme_source_manifest_sha256: theme_fingerprint
     )
 
+fn _simple_web_theme_receipt_matches_install_wire(
+    theme_revision: i64,
+    acknowledged_theme_revision: i64,
+    theme_install_wire: text,
+    theme: text,
+    theme_source_manifest_sha256: text,
+    theme_material_sha256: text
+) -> bool:
+    if (theme_revision <= 0 or
+        acknowledged_theme_revision != theme_revision or
+        not theme_package_install_wire_v1_within_bound(theme_install_wire)):
+        return false
+    match theme_package_install_wire_v1_decode(theme_install_wire):
+        Err(_):
+            false
+        Ok(projection):
+            (
+                projection.snapshot.id == theme and
+                projection.snapshot.source_manifest_sha256 ==
+                    theme_source_manifest_sha256 and
+                projection.snapshot.material_sha256 ==
+                    theme_material_sha256
+            )
+
 fn simple_web_external_content_frame_with_theme_receipt(
     window_id: text,
     content_revision: i64,
+    theme_revision: i64,
+    acknowledged_theme_revision: i64,
+    theme_install_wire: text,
     theme: text,
     theme_source_manifest_sha256: text,
     theme_material_sha256: text,
@@ -470,9 +484,18 @@ fn simple_web_external_content_frame_with_theme_receipt(
     solid_material_count: i32,
     solid_material_sha256: text
 ) -> WmContentFrame:
-    if (window_id == "" or content_revision <= 0 or theme == "" or
-        theme_source_manifest_sha256.len() != 64 or
-        theme_material_sha256.len() != 64 or width <= 0 or height <= 0 or
+    val exact_theme_receipt = (
+        _simple_web_theme_receipt_matches_install_wire(
+            theme_revision,
+            acknowledged_theme_revision,
+            theme_install_wire,
+            theme,
+            theme_source_manifest_sha256,
+            theme_material_sha256
+        )
+    )
+    if (window_id == "" or content_revision <= 0 or
+        not exact_theme_receipt or width <= 0 or height <= 0 or
         render.fallback_required or render.skipped_command_count != 0 or
         render.rendered_command_count <= 0 or
         render.pixels.len() != width * height):
