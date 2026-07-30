@@ -136,20 +136,244 @@ lesson from the companion cross-lane-contradiction investigation in
 treated with the same caution, not written up as fixed without
 cross-checking).
 
-## 4. Summary
+## 4. Summary (updated after §5 — all three "unconfirmed" rows resolved)
 
 | Finding | Status |
 |---|---|
-| Cross-module global value import (val + var) | **Confirmed genuine gap, repro'd, added to harness** |
-| DI/`@inject` cross-module trait-impl registry (`lower_to_mir_with_global_trait_impls`) | Genuine gap by code reading, **not empirically repro'd this pass** (narrow scope: DI-framework users only) |
-| Global `@cfg(<arch>)` variant stripping | **Unconfirmed candidate**, not repro'd this pass |
-| Entry-file re-exported-`main` trampoline | **Unconfirmed candidate**, not repro'd this pass |
+| Cross-module global value import (val + var) | **Confirmed genuine gap (gap 9), repro'd, added to harness** |
+| Global `@cfg(<arch>)` variant stripping | **Confirmed genuine gap (gap 10), repro'd, added to harness** — see §5.2 |
+| DI/`@inject` cross-module trait-impl registry (`lower_to_mir_with_global_trait_impls`) | **DISMISSED — not a gap** — see §5.1 |
+| Entry-file re-exported-`main` trampoline | **DISMISSED — not a gap** — see §5.3 |
 | Bare-script-to-`main` wrapping | Deliberate difference (documented limitation: such files never JIT at all, always correctly interpreted) |
 | Freestanding module-global-init injection | Deliberate difference — confirmed wrong-fix trap by a894's own attempt (segfaults `val` in hosted lowering) |
 | HIR SIMD-loop rewrite | Deliberate / no-op for default SIMD mode |
 | Object cache / incremental / link / archive stages | Deliberate — no analog for in-process JIT |
 | Cross-target vs. host arch fn-cfg stripping | Deliberate — JIT always runs on host |
 
-Per instruction, none of these were fixed this pass beyond adding the one
-confirmed gap to the differential harness as standing coverage. The ranked
-list above, with reasoning per row (not just a verdict), is the deliverable.
+Two genuine, confirmed, repro'd gaps now stand in the differential harness
+(§3, §5.2). Two candidates were dismissed with a shared, coherent
+architectural reason (§5.1, §5.3). Gap 9's root cause was traced to a
+specific line (§6) but not fixed — the fix needs an explicit architecture
+decision, surfaced rather than attempted quietly, per instruction.
+
+## 5. Follow-up pass: converting the three unconfirmed items to proved or dismissed
+
+### 5.1 DI/`@inject` cross-module trait-impl registry — DISMISSED, not a gap
+
+**Reframed by reading before testing.** `dependency_graph`/
+`global_trait_impls` is not primarily a DI-resolution mechanism — its only
+consumer is `find_trait_for_method_on_receiver` (`mir/lower/
+lowering_core.rs:946-999`), which decides how to lower a trait-method call:
+if the trait has **no recorded implementation anywhere**, the call lowers
+to `DUCK_DISPATCH_UNSUPPORTED_SLOT`, and "codegen lowers the sentinel to a
+named diagnostic + trap" — a **loud** failure by design (guarding a past
+SIGSEGV, `jit_game2d_backend_method_dispatch_sigsegv_2026-07-02`), not a
+silent one. This alone changes the expected shape from "silent and
+structural" to "loud crash if triggered incorrectly" — worth correcting
+before testing, not after.
+
+More importantly, a comment at `lowering_core.rs:987-995` records that
+feeding **project-wide** `trait_impls` into `dependency_graph` was tried
+before and caused a real regression: a SimpleOS desktop framebuffer-init
+triple-fault, because cross-module impls fed into `dependency_graph` made
+statically-exact calls virtualize through a vtable that then faulted in a
+freestanding kernel. That fix intentionally scoped `dependency_graph` to
+**local, in-this-module** impls only for concrete-receiver calls.
+
+**Empirical test, three files, two implementations, a genuinely polymorphic
+`[Greeter]` array (no static devirtualization possible):**
+
+```simple
+# trait_defs.spl
+trait Greeter:
+    fn greet() -> text
+# impl_a.spl / impl_b.spl (each imports trait_defs, defines its own struct + impl)
+# main_entry.spl
+use trait_defs.{Greeter}
+use impl_a.{GreeterA}
+use impl_b.{GreeterB}
+
+fn greet_all(items: [Greeter]) -> text:
+    var out = ""
+    for g in items:
+        out = out + g.greet() + ";"
+    out
+
+fn main():
+    val items: [Greeter] = [GreeterA(msg: "x"), GreeterB(msg: "y")]
+    print("result={greet_all(items)}")
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple run main_entry.spl
+result=A:x;B:y;
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run main_entry.spl
+result=A:x;B:y;
+```
+
+Correct under both engines. **Why no equivalent is needed:** `run_file_jit`
+merges the entry file and every transitive import into **one** HIR/MIR
+compilation unit via `load_module_with_imports`, *before* lowering starts.
+By the time `MirLowerer::lower_module` runs, there is no remaining file
+boundary — every `impl Trait for Type` in the merged program is already
+"local" to the one module being lowered, so `local_trait_impls` (the
+per-module path, `lowering_core.rs:998`) already sees every impl regardless
+of which source file it came from. The `global_trait_impls` side channel
+exists specifically to bridge **separately-compiled units** in the
+whole-program path (each file compiled to its own object, needing a
+project-wide manifest to know about impls in *other* objects) — a bridge
+`run_file_jit`'s single-merged-unit architecture doesn't need in the first
+place. **Dismissed: not a gap, and the underlying mechanism has an
+independent history of being actively dangerous to feed cross-module data
+into for a different reason (the freestanding triple-fault).**
+
+### 5.2 Global `@cfg(<arch>)` variant stripping — CONFIRMED genuine gap (gap 10)
+
+**PROVED by direct `simple run` reproduction.**
+
+```simple
+@cfg(x86_64)
+val PLATFORM_ID = 64
+
+@cfg(riscv64)
+val PLATFORM_ID = 32
+
+fn main():
+    print("PLATFORM_ID={PLATFORM_ID}")
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple run probe.spl   # host is x86_64
+PLATFORM_ID=64
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run probe.spl
+PLATFORM_ID=8
+$ SIMPLE_EXECUTION_MODE=jit SIMPLE_JIT_STRICT=1 bin/simple run probe.spl
+PLATFORM_ID=8                                                 # unchanged, exit 0
+```
+
+Reproduced 3/3 runs. `PLATFORM_ID=8` is neither variant's literal value (not
+64, not 32) — both `@cfg` blocks reach the parser unstripped under
+`run_file_jit` (there is no call anywhere in `run_file_jit` analogous to
+`strip_inactive_cfg_arch_globals`, `native_project/compiler.rs:355`, which
+runs on the raw source text *before* parsing in the whole-program path) and
+the two same-named top-level `val PLATFORM_ID` declarations collide in a
+way that produces a third, wrong value rather than a parse error or either
+literal. `var PLATFORM_ID` tested too (per the gap-9 val/var caution) —
+same wrong value (`8`) for both, no val/var asymmetry observed here (unlike
+gap 9). Not root-caused further (which exact collision path in the parser/
+lowerer produces `8` specifically) — the observed behavior is enough to
+confirm the gap and pin a regression fixture; root-causing the precise
+collision mechanism is follow-up work, not required to confirm the gap
+exists.
+
+Added to the differential harness: fixture `cfg_arch_global_variants`,
+`expected: "PLATFORM_ID=64"`, `known_good: "interpret"`.
+
+### 5.3 Entry-file re-exported-`main` trampoline — DISMISSED, not a gap
+
+**Empirical test:**
+
+```simple
+# real_main_mod.spl
+fn main():
+    print("ran-from-reexported-main")
+# entry.spl (no local main)
+use real_main_mod.{main}
+```
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret bin/simple run entry.spl
+ran-from-reexported-main
+$ SIMPLE_EXECUTION_MODE=jit bin/simple run entry.spl
+ran-from-reexported-main
+```
+
+Correct under both engines, exit 0. **Same underlying reason as §5.1:** the
+whole-program path's trampoline exists to bridge the entry file's own
+separately-compiled object (which has no local `main` symbol) to the
+resolved **mangled** name of the re-exported `main` in another object, at
+link time. `run_file_jit` never splits into separate objects — the merged
+AST already contains exactly one function literally named `main` (from the
+imported file), so `has_main` finds it directly with no trampoline needed.
+**Dismissed: not a gap, same "single merged compilation unit doesn't need
+the whole-program path's cross-object bridging" reason as §5.1.**
+
+**Pattern worth naming:** two of the three unconfirmed candidates turned
+out to be dismissable for the *same* architectural reason. `run_file_jit`'s
+choice to merge all files into one compilation unit before lowering
+(rather than compiling per-file and linking) makes an entire class of
+whole-program-path mechanisms (mangling for symbol collision avoidance,
+project-wide trait-impl registries, main-symbol trampolines) unnecessary by
+construction — the merge already did that work. The one candidate that
+*did* reproduce (global `@cfg` stripping) is not in that class: it is a
+source-level, pre-parse concern orthogonal to compilation-unit granularity,
+which is exactly why merging files later doesn't paper over it.
+
+## 6. Gap 9 root-cause investigation (per instruction: prove or refute the hypothesis before fixing)
+
+**Traced to a specific line, not fixed — surfaced as an architecture
+question rather than patched quietly, per instruction.**
+
+`common_backend.rs:1531`:
+```rust
+let is_jit_module = std::any::type_name::<M>().contains("JITModule");  // :1410
+...
+let is_local = is_jit_module || local_globals.contains(name);          // :1531
+```
+
+`is_jit_module` is true for every Cranelift-JIT compile unconditionally
+(confirmed: it's a generic-type-name check against the module type
+parameter, not gated on anything file-specific). So for **every** global,
+under JIT, `is_local` is forced `true` regardless of whether
+`local_globals` (the whole-program path's per-file "is this global actually
+defined in the file I'm compiling" set) would say otherwise. This routes
+every global reference — both the real definition in `helper_mod.spl` and
+the imported reference in `main_entry.spl` — through the same branch
+(`common_backend.rs:1575-1589`, "Local global: define with Preemptible
+linkage"), which calls `self.module.declare_data(&local_symbol, ...)` and
+separately populates the data's contents from `global_init_values.get(name)`
+if present for *that lowering context*.
+
+**The plausible mechanism (traced, not proof-of-fix-tested):** if HIR
+lowering for `main_entry.spl` records `HELPER_Y` as an imported reference
+without carrying its literal initializer into *that file's own*
+`global_init_values` map (only `helper_mod.spl`'s own lowering context
+knows the literal `99`), then two `declare_data` calls for the **same
+mangled name** happen across the merged compile — one with a real
+initializer, one without — and whichever the Cranelift JIT backend's
+finalization treats as canonical for that symbol determines whether reads
+see `99` or garbage. This is consistent with every observation: the
+function-mediated read (`get_helper_y()`, compiled as part of
+`helper_mod.spl`'s own context, which has the real initializer) is correct;
+the direct read from the importing file (which may have declared the same
+symbol without an initializer) is not.
+
+**Why this was not fixed this pass.** The `is_jit_module` bypass at line
+1531 was clearly an intentional, load-bearing design choice — JIT has no
+object-file-level "Import" linkage to resolve against (there's no separate
+`.o` for the imported module to link), so treating everything as locally
+defined is the *only* option available in the current architecture, not an
+oversight to simply flip. A real fix needs one canonical `declare_data`
+call per global name across the whole merged unit — i.e. genuine cross-file
+global identity within a single compilation pass, deduplicating multiple
+lowering contexts' declarations of "the same" global into one. That is
+**not** "just call the existing mangling pass" (a894's gap-8 lesson
+applies again: the existing whole-program mechanisms are built for a
+different architecture — multiple compiled objects — and don't transplant
+cleanly). It is closer to a new pass specific to the merged-single-unit
+case: something has to walk the merged MIR and unify every declaration of
+a given global name to a single `declare_data`/init-value pair before
+codegen runs, keyed by name across all merged files' lowering output, which
+does not exist today.
+
+**Per instruction: this is surfaced as an architecture decision, not
+attempted as a patch.** The two candidate directions (deduplicate at
+`declare_data` call time by checking `global_ids` before re-declaring
+with different init-value provenance; or build an explicit cross-file
+global-identity resolution pass ahead of codegen, mirroring what
+`qualify_native_struct_layouts` does for the whole-program path but scoped
+to the single-merged-unit case) both touch the JIT codegen's global
+declaration path broadly enough that either deserves its own scoped
+investigation and review, not a same-pass patch bolted onto an enumeration
+pass. Gap 9 remains open, confirmed, and pinned in the differential harness
+(§3).
