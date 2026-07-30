@@ -1,0 +1,43 @@
+# Base capability sanity probe.
+#
+# Runs against std.editor.core.session_db directly so the feature-check row
+# reports real behavior instead of "manifest-only". Mirrors ide_mail_summary.
+#
+# Base is the IDE's database surface, so the probe exercises the real durability
+# path: append through the WAL, checkpoint into the db file, drain the log.
+
+use std.editor.core.session_db.{SessionDb}
+use std.editor.core.wal.{WalReader, wal_parse_entries}
+use app.io.mod.{dir_create_all, file_read, file_write}
+
+fn _ide_base_dir() -> text:
+    "build/test-artifacts/ide-base-probe"
+
+fn ide_base_summary() -> text:
+    val dir = _ide_base_dir()
+    val db_path = dir + "/session.sdb"
+    val wal_path = dir + "/session.wal"
+    if not dir_create_all(dir):
+        return "base: std.editor.core.session_db probe-dir=unavailable"
+    # Start from a clean log/db so the probe is deterministic across runs.
+    file_write(db_path, "")
+    file_write(wal_path, "")
+    var db = SessionDb.new(db_path, wal_path)
+    db.save_open_tab(1, "src/app/ide/main.spl", 12, 4)
+    db.save_open_tab_with_folds(2, "README.md", 0, 0, "3-7")
+    db.save_editor_state(2, "normal", 2)
+    val logged = WalReader.new(wal_path).read_entries()
+    var tabs = 0
+    var folds = false
+    for entry in logged:
+        if entry.table == "tabs":
+            tabs = tabs + 1
+        if entry.data_sdn.contains("folds=3-7"):
+            folds = true
+    val wal_rows = logged.len()
+    val ckpt = db.checkpoint()
+    val durable = wal_parse_entries(file_read(db_path)).len()
+    val drained = not WalReader.new(wal_path).has_entries()
+    val state = db.load_editor_state()
+    val mode = state.mode
+    "base: std.editor.core.session_db wal={wal_rows} tabs={tabs} folds={folds} ckpt={ckpt} durable={durable} drained={drained} mode={mode}"

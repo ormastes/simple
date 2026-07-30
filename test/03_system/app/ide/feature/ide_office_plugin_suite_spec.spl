@@ -41,6 +41,10 @@ The operator should confirm these surfaces in order:
 14. TUI preview and outline panels
 15. GUI render sanity
 16. Plugin manifest roundtrip
+17. Draw/SDD graph parse, weave, and render
+18. Designer note model and preview
+19. Base session-DB durability
+20. Math expression renderers
 
 ## Capability Table
 
@@ -49,12 +53,12 @@ The operator should confirm these surfaces in order:
 | Markdown/Writer | `std.editor.render.md_renderer` | markdown preview and generated HTML render text |
 | Impress/PPT | `app.office.slides` | slide probe, thumbnail, outline, design, and transform |
 | Calc | `app.office.sheets` | range, formats, formula evaluator, and shared number helpers |
-| Draw/SDD | `std.editor.services.sdn_graph` | plugin manifest ownership |
-| Designer | `std.common.markdown_visual_editor` | plugin manifest ownership |
-| Base | `std.editor.core.session_db` | DB admin surface and plugin manifest ownership |
-| Math | `std.common.math_repr` | plugin manifest ownership |
-| Mail | `std.hardware.soc_rtl.mailbox` | plugin manifest ownership |
-| Planner | `std.nogc_sync_mut.db.query_planner` | plugin manifest ownership |
+| Draw/SDD | `std.editor.services.sdn_graph` | graph parse, weave rewrite, canonical round-trip, HTML nodes |
+| Designer | `std.common.markdown_visual_editor` | block classification, wiki links, preview, title fallback |
+| Base | `std.editor.core.session_db` | WAL append, checkpoint durability, log drain, editor state |
+| Math | `std.common.math_repr` | LaTeX, pretty, AST, and Markdown renderers over one expression |
+| Mail | `app.office.mail` | mailbox counts, read-on-select, compose/discard transitions |
+| Planner | `app.office.planner` | task creation and view switching |
 | Agent dashboard | `app.editor.mcp_tools` | MCP/LSP/wiki dashboard registry |
 | DB admin | `std.editor.core.session_db` | editor/session DB and portal DB ownership |
 
@@ -120,6 +124,10 @@ use app.ide.launch_sanity.{ide_launch_sanity, ide_launch_sanity_summary}
 use app.ide.plugin_manifest.{ide_plugin_manifest_probe, ide_plugin_manifest_summary}
 use app.ide.gui_sanity.{ide_gui_sanity, ide_gui_sanity_summary}
 use app.ide.tui_sanity.{ide_tui_sanity, ide_tui_sanity_summary}
+use app.ide.draw_sdd_sanity.{ide_draw_sdd_summary}
+use app.ide.designer_sanity.{ide_designer_summary}
+use app.ide.base_sanity.{ide_base_summary}
+use app.ide.math_sanity.{ide_math_summary}
 use app.io.mod.{dir_create_all, file_exists, file_read, file_write}
 use std.io_runtime.{dir_exists}
 use app.office.slides.slide.{SlideElement, SlideElementKind, SlideLayout, add_slide_element, slide_layout_display_name, slide_layout_short_name, slide_with_elements}
@@ -224,6 +232,10 @@ describe "IDE office plugin suite capabilities":
         expect(tui_report).to_contain("edit-command: sheet-edit=true stale-reject=true")
         expect(tui_report).to_contain("agent-dashboard: app.editor.mcp_tools tools=")
         expect(tui_report).to_contain("modes=3")
+        # Every capability row must carry a behavioral probe. A "manifest-only"
+        # row verifies nothing about the owning subsystem.
+        assert_false(tui_report.contains("manifest-only"))
+        assert_false(gui_report.contains("manifest-only"))
 
     it "keeps the feature-check manual surface complete and ordered":
         val lines = ide_feature_check_report("tui")
@@ -424,3 +436,48 @@ describe "IDE office plugin suite capabilities":
         expect(probe.names.join(",")).to_contain("ide.planner")
         expect(probe.manifest_text).to_contain("builtin:app.office.slides")
         expect(summary).to_contain("roundtrip=11")
+
+    it "checks Draw/SDD diagrams through the shared SDN graph service":
+        # Dense source -> weave rewrite -> canonical SDN -> HTML. Each field
+        # moves if sdn_graph parsing, weaving, or rendering regresses.
+        val summary = ide_draw_sdd_summary()
+        expect(summary).to_start_with("draw-sdd: std.editor.services.sdn_graph")
+        expect(summary).to_contain("nodes=3")
+        expect(summary).to_contain("edges=2")
+        expect(summary).to_contain("async=1")
+        expect(summary).to_contain("weave=true")
+        expect(summary).to_contain("canonical=3/2")
+        expect(summary).to_contain("html-nodes=3")
+
+    it "checks Designer notes through the markdown visual editor model":
+        val summary = ide_designer_summary()
+        expect(summary).to_start_with("designer: std.common.markdown_visual_editor")
+        expect(summary).to_contain("blocks=4")
+        expect(summary).to_contain("head=1")
+        expect(summary).to_contain("bull=2")
+        expect(summary).to_contain("links=2")
+        expect(summary).to_contain("prev=4:true")
+        expect(summary).to_contain("titles=2/2")
+        expect(summary).to_contain("md-path=true")
+
+    it "checks Base durability through the editor session DB and WAL":
+        # The probe appends through the WAL, checkpoints into the db file, and
+        # drains the log; a broken write path collapses these to 0/false.
+        val summary = ide_base_summary()
+        expect(summary).to_start_with("base: std.editor.core.session_db")
+        expect(summary).to_contain("wal=3")
+        expect(summary).to_contain("tabs=2")
+        expect(summary).to_contain("folds=true")
+        expect(summary).to_contain("ckpt=true")
+        expect(summary).to_contain("durable=3")
+        expect(summary).to_contain("drained=true")
+        expect(summary).to_contain("mode=normal")
+
+    it "checks Math formulas through every math_repr renderer":
+        val summary = ide_math_summary()
+        expect(summary).to_start_with("math: std.common.math_repr")
+        expect(summary).to_contain("latex=\\frac")
+        expect(summary).to_contain("pretty=(a)/(b)")
+        expect(summary).to_contain("ast=Frac(Id(a), Id(b))")
+        expect(summary).to_contain("md=true")
+        expect(summary).to_contain("checks=4/4")
