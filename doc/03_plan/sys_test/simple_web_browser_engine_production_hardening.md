@@ -1060,3 +1060,23 @@ parity, scenario counts, traceability accounting, and an unsupported cascade
 claim. Static guards passed once. Qualified execution/docgen remain HELD:
 artifact audit found no pure-Simple binary with source provenance at or after
 the interpolation fix.
+
+## Batch 13 executable evidence
+
+Commit `9f720c62c72` adds focused modern specs and complete manuals for:
+
+- native `header` semantics through exact Web layout, Draw IR, and Engine2D
+  pixels;
+- valid/malformed padding shorthand, physical, and horizontal-LTR logical
+  source order, including ASCII-whitespace tokenization;
+- same-size clipped fractional-opacity siblings with bounded cropped surfaces,
+  plus backdrop and differing-size fail-closed cases;
+- signed seconds/milliseconds and exact consecutive animation frames;
+- timer-driven SimpleScript stylesheet replacement preserving an unchanged
+  animation epoch while publishing one style revision; and
+- Node-compatible completed timer-handle refresh admission at the shared
+  capacity, explicitly outside browser reachability.
+
+Independent adversarial reviews and one combined static guard pass succeeded.
+Target execution/docgen remain HELD pending a source-admitted pure-Simple
+artifact at or after `ae4c3d56ce3`.

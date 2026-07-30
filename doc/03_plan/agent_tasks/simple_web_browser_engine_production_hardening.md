@@ -777,3 +777,19 @@ All changed lanes received independent static review. Static diff, spec-layout,
 placeholder, and direct-environment guards passed once. Target execution and
 docgen remain HELD because no source-admitted pure-Simple artifact exists at or
 after `ae4c3d56ce3`; no bootstrap or seed substitute was used.
+
+## Production browser batch 13 (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `html_header` | Existing native header semantics now have exact Web layout, Draw IR, and Engine2D evidence. | INTEGRATED `9f720c62c72`; selected-profile count is 9 |
+| `padding_cascade` | One linear resolver honors valid shorthand, physical, and horizontal-LTR logical source order while malformed declarations cannot win. | INTEGRATED `9f720c62c72`; ASCII whitespace scan is linear |
+| `fractional_opacity_siblings` | Safe same-size clipped siblings lower to cropped, aggregate-viewport-bounded opacity batches; unsafe backdrop or differing-size cases fall back. | INTEGRATED `9f720c62c72`; single Engine2D pool preserved |
+| `signed_css_time` | Negative seconds and milliseconds retain sign, including symmetric fractional-millisecond rounding. | INTEGRATED `9f720c62c72`; exact consecutive frame evidence present |
+| `script_animation_epoch` | Unrelated SimpleScript stylesheet replacement reuses unchanged animation signatures instead of restarting their epoch. | INTEGRATED `9f720c62c72`; revision, stylesheet, Draw IR, and pixel evidence present |
+| `completed_handle_refresh` | Completed Node-compatible timer handles cannot re-enter a full shared queue; paired handle arrays remain bounded. | INTEGRATED `9f720c62c72`; truthful JS/Node unit scope, not browser reachability |
+
+Independent reviews rejected and corrected full-viewport opacity work,
+offscreen-size pool thrashing, quadratic whitespace scanning, incomplete
+mutation evidence, negative-millisecond loss, and false browser reachability.
+Static guards passed once. Qualified pure-Simple execution/docgen remain HELD.
