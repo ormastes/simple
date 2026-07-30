@@ -489,16 +489,18 @@ in the system-test plan; incomplete checkers must use its exact `fail(...)`.
 Exact owners are frozen: common codec
 `src/lib/common/web/browser_renderer_protocol.spl`; host staging/admission
 `src/os/hosted/hosted_browser_renderer_process.spl`; worker echo/sequencing
-`src/os/hosted/hosted_browser_renderer_worker.spl`; Simple entropy facade
-`src/lib/nogc_sync_mut/io/crypto_sffi.spl` plus
-`src/lib/nogc_sync_mut/io/__init__.spl`; native entropy implementation
-`src/compiler_rust/runtime/src/value/sffi/random.rs`; runtime symbol registry
-`src/compiler_rust/common/src/runtime_symbols.rs`.
+`src/os/hosted/hosted_browser_renderer_worker.spl`; fatal pure-Simple owner
+policy `src/compiler/35.semantics/privileged_host_imports.spl`; mirrored
+native policy/runtime-symbol metadata
+`src/compiler_rust/common/src/runtime_symbols.rs`; native entropy
+implementation `src/compiler_rust/runtime/src/value/sffi/random.rs`.
+`crypto_sffi.spl`, both interpreter dispatch tables, and the dynamic SFFI
+registry are explicit non-owners.
 
 | Lane | Bounded ownership | Handoff |
 | --- | --- | --- |
 | `command_capability_codec` | `SBR2` bounded header plus final 32-byte capability trailer, canonical lowercase-hex validation, root/immediate ID fields, fail-closed legacy policy | no broker/worker lifecycle edits |
-| `command_capability_entropy` | explicit-success 16-byte hosted platform-CSPRNG facade for Linux/macOS/Windows | no fallback and no token logging |
+| `command_capability_entropy` | private zero-arg parent creator, fatal canonical-source owner gate, native-only platform CSPRNG, admitted-provider ABI, no interpreter/dynamic-SFFI handler | no facade, fallback, token logging, or runtime caller-name trust |
 | `command_capability_parent` | stage tuple on install; issue only at zero remaining bytes; fresh capability per host wire; consume before broker/frame authority; bind network response to fetch; exact lifecycle cleanup | depends on codec and entropy |
 | `command_capability_worker` | learn a hop capability only from a complete host wire; echo once; validate network-response fetch binding; retain root ID separately | depends on codec |
 | `command_capability_sspec` | focused exact-four-step RED spec, FIFO separate-read and split-write staged/issued oracles, numeric/payload maxima, lifecycle cleanup, conforming echo, 10k latency/allocation/RSS receipt | depends on implementation lanes |
@@ -513,9 +515,49 @@ and no mixed-version production deployment is an accepted intermediate state.
 Lower-model sidecars may enumerate malformed codec fixtures only after these
 names are frozen. They may not change entropy policy, weaken fail-closed legacy
 admission, introduce negotiation, commit, or push. Root Codex is merge owner;
-a separate normal/highest-capability agent is final reviewer. Merge order is
-codec → entropy → parent/worker → SSpec/manual. No lane is accepted before the
-focused modern SSpec executes once on an admitted current full pure-Simple CLI.
+a separate normal/highest-capability agent is final reviewer. Implementation
+may be reviewed in the order codec → owner policy/entropy → parent/worker →
+SSpec/manual, but promotion is one atomic commit. No lane is accepted before
+the focused modern SSpec executes once on an admitted current full pure-Simple
+CLI.
+
+### Trusted capability-owner handoff
+
+Frozen Simple/native interfaces:
+
+- `PrivilegedHostImport`
+- `privileged_host_import_owner`
+- `privileged_host_import_allowed`
+- `browser_renderer_command_capability_new`
+- `rt_browser_renderer_command_capability_new`
+- `_require_issued_renderer_reply`
+- `_retire_renderer_command_capability`
+
+The future manual exposes exactly
+`Admit the trusted capability owner`, `Issue one fresh command token`,
+`Reject an untrusted entropy caller`, and
+`Retire all capability material`. Setup/checker names are
+`setup_trusted_capability_owner_fixture`,
+`check_trusted_capability_owner_admitted`,
+`check_fresh_command_token_issued`,
+`check_untrusted_entropy_caller_rejected`, and
+`check_all_capability_material_retired`. Until the atomic implementation,
+each checker uses
+`fail("RED: trusted renderer capability owner is unimplemented")`.
+
+| Lane | Work | Constraint |
+| --- | --- | --- |
+| `capability_owner_policy` | fatal pure-Simple and mirrored native canonical-path declaration/call admission | interpreter module metadata never grants authority |
+| `capability_native_entropy` | zero-arg fallible fill, zeroize, admitted runtime-provider relocation | no crypto facade, interpreter handler, dynamic-SFFI entry, or raw lookup bridge |
+| `capability_parent_worker_atomic` | create-on-activation, SBR2 staging/issuance/echo/consume/retire across command and network wires | one commit; no mixed protocol |
+| `capability_owner_evidence` | legitimate hosted artifact, hostile native compile, interpreter/SFFI denial, lifecycle and 10k perf/RSS receipts | capability values redacted |
+| `capability_owner_final_review` | threat model, physical-owner proof, atomicity, generated-manual quality | normal/highest-capability reviewer |
+
+Lower-model sidecars: N/A until the owner policy and exact checker names above
+exist. Codex is merge owner; a separate normal/highest-capability agent is
+final reviewer. No sidecar may add an allowlist row, facade, interpreter
+handler, dynamic-SFFI entry, raw lookup bridge, compatibility switch, commit,
+or push.
 
 ## Batch-3 held-lane status (2026-07-30)
 

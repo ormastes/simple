@@ -1008,14 +1008,93 @@ reply followed a completely delivered host wire.
 
 The exact owners stay narrow: `src/lib/common/web/browser_renderer_protocol.spl`
 owns SBR2 framing and canonical validation;
-`src/os/hosted/hosted_browser_renderer_process.spl` owns staging, issuance,
-admission, broker ordering, and retirement; and
+`src/os/hosted/hosted_browser_renderer_process.spl` owns token creation,
+staging, issuance, admission, broker ordering, and retirement; and
 `src/os/hosted/hosted_browser_renderer_worker.spl` owns complete-wire decode,
-one-use echo, and network-response sequencing. Hosted entropy goes through the
-existing Simple crypto facade owner
-`src/lib/nogc_sync_mut/io/crypto_sffi.spl`, re-exported by
-`src/lib/nogc_sync_mut/io/__init__.spl`; explicit failure and platform fill
-remain owned by
-`src/compiler_rust/runtime/src/value/sffi/random.rs`, with its extern admitted
-through `src/compiler_rust/common/src/runtime_symbols.rs`. Hosted browser code
-adds no private random extern or fallback.
+one-use echo, and network-response sequencing. The token source is not added to
+`src/lib/nogc_sync_mut/io/crypto_sffi.spl` or re-exported from any Simple
+facade. Its native-only trusted-import boundary is defined below.
+
+<!-- codex-architecture -->
+### Trusted command-token creator (PROPOSED / UNIMPLEMENTED / RED)
+
+The zero-argument
+`browser_renderer_command_capability_new() -> Result<BrowserRendererCommandCapability, text>`
+is a private function in
+`src/os/hosted/hosted_browser_renderer_process.spl`. It is the only Simple
+caller of
+`rt_browser_renderer_command_capability_new() -> text?`. The native import
+returns one fresh canonical 32-byte lowercase-hex token or NIL; it accepts no
+length, seed, mode, provider, or caller-supplied buffer. NIL, wrong length,
+nonhex, uppercase, or all-zero output maps to
+`renderer-command-entropy-unavailable` before any pending-wire, deadline,
+request-ID, staged-authority, or broker state changes. There is no public
+Simple facade, export, alias, deterministic fallback, production fault switch,
+or injection hook.
+
+Threats in scope are hostile page/SimpleScript input, arbitrary parsed Simple,
+an untrusted module redeclaring a known runtime symbol, dynamic SFFI lookup, a
+compromised renderer forging pre-command traffic, symlink/module-name
+spoofing, and stale or mixed protocol peers. Arbitrary native-code execution
+inside the admitted parent, a compromised compiler/runtime provider, or a
+forged admitted source manifest already controls the browser process and is
+outside this token boundary; artifact admission and process sandboxing remain
+their separate controls.
+
+This boundary uses static owner admission, not a runtime caller-name claim.
+Native calls erase their Simple caller identity. The Rust interpreter's
+`CURRENT_EXEC_MODULE` is thread-local evaluation metadata, useful for lookup
+but not an unforgeable production principal. The pure-Simple MIR interpreter
+has only an explicit builtin table and no automatic `dlsym`, while the Rust
+interpreter seeds extern names from the runtime-symbol manifest. Therefore:
+
+- `src/compiler/35.semantics/privileged_host_imports.spl` owns the frozen
+  `PrivilegedHostImport`, `privileged_host_import_owner`, and
+  `privileged_host_import_allowed` policy. Its first row binds
+  `rt_browser_renderer_command_capability_new` to the canonical physical path
+  `src/os/hosted/hosted_browser_renderer_process.spl`. The unconditional
+  HIR/MIR pipeline rejects both declaration and call from every other module
+  with `privileged-host-import-owner`; this is a fatal semantic gate, not the
+  advisory safety pass.
+- `src/compiler_rust/common/src/runtime_symbols.rs` mirrors the same one-row
+  `PrivilegedRuntimeSymbol` metadata. Native discovery compares
+  repository-relative canonical physical paths after its existing collision
+  check, never a source-claimed module name. A missing, outside-root,
+  aliased-to-different-content, or ownerless path fails before object emission.
+- Neither `src/compiler/70.backend/backend/interpreter_calls.spl` nor
+  `src/compiler_rust/compiler/src/interpreter_extern/mod.rs` registers a
+  handler. Parsed/interpreted Simple always receives
+  `privileged-host-import-native-only`; `CURRENT_EXEC_MODULE` cannot opt in.
+  `src/compiler_rust/runtime/src/value/sffi_registry.rs` has no dynamic method
+  entry for it.
+- `src/compiler_rust/runtime/src/value/sffi/random.rs` owns fallible
+  Linux/macOS/Windows platform fill and zeroization. The exact ABI may be
+  exported by the admitted runtime provider because the hosted artifact binds
+  runtime imports through that provider; export is not authorization. The
+  artifact receipt proves the relocation resolves to the admitted
+  provider/digest, and registry inspection proves no generic dynamic-SFFI or
+  raw-`dlsym` bridge exposes it to Simple code.
+
+The trusted production artifact remains the entry closure rooted at
+`src/os/hosted/hosted_entry.spl`; it reaches parent and worker in one
+executable. Entry closure is reachability, not authorization: every privileged
+import still passes the physical-owner check. Artifact admission reuses the
+hosted source-manifest and runtime-provider receipts, adding the canonical
+owner-source, privileged-policy, closure, and final-artifact digests. A source
+path alone is not trusted.
+
+`HostedBrowserRendererProcess` is the capability parent. Entry, registry,
+worker, common codec, BrowserSession, and crypto facade cannot mint tokens.
+The parent invokes the creator only when activating a host wire; entropy
+failure leaves that wire uninstalled. The token is staged with its
+generation/root/wire tuple, issued only after the last wire byte, consumed
+before worker output gains authority, and zeroized on consume, replacement,
+stop/cancel, timeout, network failure, renderer failure, site swap, close, and
+registry teardown. Deferred commands contain no token until activation.
+
+The production switch is one atomic codec + entropy + parent + worker change.
+It promotes the existing opt-in SBR2 codec, adds the native-only creator,
+migrates every host command/network response and worker fetch/frame echo, and
+installs every retirement path in the same commit. Partial direction changes,
+a callable entropy facade, interpreter parity, legacy negotiation, and mixed
+SBR1/SBR2 deployments are rejected.

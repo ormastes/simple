@@ -699,18 +699,19 @@ Target a new focused modern scenario at
 `test/03_system/security/browser_renderer_command_capability_spec.spl`. Its
 mirrored generated manual must expose exactly these four steps:
 
-1. `Queue a reply before its command capability`
-2. `Issue the trusted initialization command`
-3. `Reject the unissued reply capability`
-4. `Retire renderer resources and accept one issued reply`
+1. `Admit the trusted capability owner`
+2. `Issue one fresh command token`
+3. `Reject an untrusted entropy caller`
+4. `Retire all capability material`
 
 Frozen setup/checker names are
-`setup_renderer_command_capability_fixture`,
-`check_unissued_renderer_reply_rejected`,
-`check_renderer_capability_cleanup`, and
-`check_issued_renderer_reply_control`. Until implementation, each checker
+`setup_trusted_capability_owner_fixture`,
+`check_trusted_capability_owner_admitted`,
+`check_fresh_command_token_issued`,
+`check_untrusted_entropy_caller_rejected`, and
+`check_all_capability_material_retired`. Until implementation, each checker
 must call
-`fail("RED: renderer command capability binding is unimplemented")`.
+`fail("RED: trusted renderer capability owner is unimplemented")`.
 
 The fixture launches a bounded fake renderer through the real piped hosted
 process boundary. One mode writes `ready` and a future frame in one write for
@@ -767,6 +768,40 @@ short/unavailable entropy provider returns
 `renderer-command-entropy-unavailable` before browser pending state can be
 created. No production environment fault switch is allowed.
 
+Owner-specific executable evidence is:
+
+Step 1 builds the real entry closure rooted at
+`src/os/hosted/hosted_entry.spl` with an admitted current pure-Simple compiler.
+The receipt binds the canonical parent-owner source digest, privileged-policy
+digest, closure digest, loaded runtime-provider digest, and final artifact
+digest. It proves the raw import has exactly one declaration/call owner and
+that the artifact relocation resolves to the admitted runtime provider while
+interpreter and dynamic-SFFI registries omit it. Source inspection alone does
+not satisfy the step.
+
+Step 2 launches that artifact through the bounded fake renderer. One complete
+host wire produces exactly one fresh token, moves it from staged to issued only
+after the final byte, and accepts one correctly bound echo. The capture redacts
+the token while proving canonical length/class, issue count, root/wire
+correlation, and no parent mutation on entropy failure.
+
+Step 3 compiles a fixture whose non-owner module declares and calls
+`rt_browser_renderer_command_capability_new`; native object emission must fail
+with `privileged-host-import-owner` and the entropy-call counter must remain
+zero. The same source through every supported interpreted entry and a dynamic
+SFFI method lookup must fail with
+`privileged-host-import-native-only` before dispatch. A forged module name,
+symlink to different content, absent current-module identity, direct raw call,
+private-wrapper import, and runtime-symbol-name coincidence all deny. There is
+no allow environment variable or test-only production symbol.
+
+Step 4 consumes the legitimate echo, then covers command replacement,
+stop/cancel, timeout, entropy failure, network failure, renderer failure, site
+swap, close, and registry teardown. Every path leaves staged/issued/root/wire
+IDs and token bytes empty; deferred commands never own token bytes. Ordinary
+stop/cancel preserves the last admitted frame while terminal cleanup clears
+retained images.
+
 Fold performance evidence into step 4 without adding visible steps: 10,000
 command/fetch/frame cycles report issue/failure/staged/consumed/reject
 counters, bounded entropy-latency histogram, transient token allocation count,
@@ -776,6 +811,13 @@ transient 32-byte token allocation per host wire and zero retained token
 allocations, warm capability p95 <=1 ms, total input-to-paint p95 <=50 ms,
 relative command latency regression <=5%, RSS <=384 MiB, and final RSS growth
 <=10%. Entropy p99 is captured report-only.
+
+The receipt also requires zero interpreter/SFFI entropy dispatches, exactly one
+native entropy call and one transient 32-byte token allocation per installed
+host wire, zero token allocations for deferred/rejected wires, and zero token
+bytes/allocations after quiescence. Owner authorization occurs once during
+compile/load, never as a per-wire path scan, subprocess, or module-string
+parse.
 
 Protocol captures pair bounded raw header bytes with decoded fields but redact
 the capability value. No source inspection, direct helper-only assertion,

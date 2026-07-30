@@ -77,6 +77,14 @@ but keeps the last frame; fail/close/site swap clears authority and images.
 Warm capability generation p95 is <=1 ms, total input-to-paint remains <=50 ms,
 and 10,000-cycle RSS growth remains <=10% after quiescence.
 
+Token creation is native-only and private to
+`hosted_browser_renderer_process.spl`. One fatal compiler policy binds its raw
+import to that canonical physical source path; interpreters and dynamic SFFI
+have no handler, and the raw ABI binds only through the admitted runtime
+provider. Existing hosted-entry source/runtime receipts bind the owner, policy,
+closure, runtime, and artifact digests. Codec, entropy, parent, worker, and
+cleanup migrate atomically—no public entropy facade or mixed SBR1/SBR2 state.
+
 Next files:
 
 - `doc/05_design/simple_web_browser_engine_production_hardening.md`
