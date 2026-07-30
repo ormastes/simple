@@ -517,3 +517,84 @@ and no `.new` file was left behind.
 **Scoreboard unchanged: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN.** The
 host-WM cells remain blocked at wall 8 (stale self-hosted binary), which
 the same canonical rebuild would also address.
+
+## Deployment DONE + wall 8 resolved into a real parser defect (2026-07-30)
+
+### Deployment record
+
+| Field | Value |
+|---|---|
+| Deployed | `bin/release/x86_64-unknown-linux-gnu/simple` (the only live deploy path; `bin/release/linux-x86_64/` does not exist) |
+| Artifact | 154,094,616 bytes, sha256 `79ca755dd8e7dabf989f800b…`, built 2026-07-30 07:35 |
+| Source commit | `d05afd1276` (per the seed lane), i.e. fresher than the binary it replaced |
+| Method | forensic copy, then `.new` + `mv` (never `cp` over a running binary) |
+| Rollback | `bin/release/x86_64-unknown-linux-gnu/simple.deployed-noLLVM-2026-07-29.bak` (57,345,808 bytes, sha256 `40edbb49…`) |
+| Post-deploy provenance | all four markers PRESENT (`[jit-fallback]`=1, `SIMPLE_JIT_STRICT`=3, `rt_index_of`=5, LLVM=1); `backends: llvm::=57617 lld::=0`; smoke run exits 0 |
+
+**LLVM-regression verdict on the old binary, stated plainly: the binary
+live on this host from 2026-07-29 06:00 until 2026-07-30 09:08 had ZERO
+`llvm::` strings and no LLVM-codegen marker, versus 617/present in the
+replacement. Every measurement taken on this host in that window ran on a
+non-canonical, no-LLVM toolchain.**
+
+Scope caveat, stated so the record is not overclaimed: **the deployed
+binary is still a Rust bootstrap seed** (`lineage: HYBRID`, and its own
+version banner says "bootstrap seed only"). The prior binary was also a
+seed, so this deploy did **not** introduce a seed-vs-pure-Simple
+regression — it restored LLVM codegen within the same class. This host
+does **not** now run the pure-Simple tool.
+
+### Consequence for the host-WM gate: the deploy does not help it
+
+The gate **forbids the seed** (wall 3, `rust-seed-forbidden`), so the
+newly deployed binary cannot be its `SIMPLE_BIN` — re-confirmed by
+running it: `reason=rust-seed-forbidden` in 0s. The gate still needs a
+*pure-Simple self-hosted* binary, and the newest one on this host remains
+`build/redeploy_out/simple_stage2` (2026-07-28).
+
+### Wall 8 RE-CHARACTERIZED: not stale-binary any more — a real parser defect
+
+Re-run with stage2 + the release runtime provider: walls 1-7 pass
+(`source_provenance_status=pass`, `runtime_provider_status=pass`), the
+gate runs 26s and fails at `production-native-build-failed`. The failing
+file **moved** (origin advanced ~10 commits since my previous run):
+
+```
+failed to parse .../src/lib/common/web/browser_renderer_protocol.spl
+at 559:38 during discovery: Unexpected token: expected expression, found Newline
+```
+
+**The newly deployed, newest, LLVM-linked seed fails on the same file
+with the same error** — so unlike the previous wall-8 instance
+(`hosted_browser_renderer_process.spl`, which was genuinely stale-binary),
+this one is **NOT** a binary-age problem. It is a grammar/source
+incompatibility live at origin tip.
+
+Minimal repro (PROVED): operator line-continuation is accepted in a
+binding but rejected in an `if` condition —
+
+```simple
+val x = a +
+   b          # PARSES
+
+if a >
+   b:         # FAILS: expected expression, found Newline
+```
+
+Introduced by `ba0ce4e3c06` *"feat(web): add SBR2 command capability
+codec"* (2026-07-30). Filed as
+`doc/08_tracking/bug/if_condition_operator_line_continuation_parse_2026-07-30.md`
+with both fix options; **not** chased here and the gate was **not**
+weakened. Per CLAUDE.md the one-line workaround is deliberately not
+applied unilaterally, because it would encode the grammar inconsistency
+rather than fix it.
+
+### Cells #4-#6
+
+**BLOCKED** (not GREEN). Walls 1-7 pass; the sole barrier is now the
+parse defect above, which blocks the gate's production native-build. It
+is a one-file, two-line source form with an identified introducing commit
+— materially smaller than every previous barrier, and it blocks any lane
+that compiles `browser_renderer_protocol.spl`, not just this gate.
+
+**Scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN.**
