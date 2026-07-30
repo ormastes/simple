@@ -73,10 +73,6 @@ class SimpleWebLayoutEngine2DReadbackResult:
     vector_font_device_executed: bool
     vector_font_promotion_ready: bool
 
-struct SimpleWebVectorFontEvidence:
-    identity: text
-    pixel_size: i32
-
 class _WebDrawIrRouteState:
     key: text
     upload_samples: [i64]
@@ -150,29 +146,33 @@ fn _web_draw_ir_key(composition: DrawIrComposition, width: i32, height: i32, bac
 fn _web_draw_ir_env(key: text) -> text:
     env_get(key) ?? ""
 
-fn _simple_web_vector_font_evidence(composition: DrawIrComposition) -> SimpleWebVectorFontEvidence:
+fn _simple_web_draw_ir_last_text_font_pixel_size(
+    composition: DrawIrComposition, font_identity: text
+) -> i32:
+    if font_identity == "":
+        return 0
+    var pixel_size = 0
     for batch in composition.batches:
         for command in batch.commands:
-            if command.kind == "text" and command.text_value.contains("Simple Web 300 DPI"):
-                var identity = ""
-                var pixel_size = 0
+            if command.kind == "text":
+                var command_identity = ""
+                var command_pixel_size = 0
                 for prop in command.computed_style:
                     if prop.key == "font-identity":
-                        identity = prop.value
+                        command_identity = prop.value
                     elif prop.key == "font-size":
                         val parsed = prop.value.to_i64()
                         if parsed != nil and parsed > 0:
-                            pixel_size = parsed.to_i32()
-                return SimpleWebVectorFontEvidence(
-                    identity: identity, pixel_size: pixel_size)
-    SimpleWebVectorFontEvidence(identity: "", pixel_size: 0)
+                            command_pixel_size = parsed.to_i32()
+                if command_identity == font_identity:
+                    pixel_size = command_pixel_size
+    pixel_size
 
 fn _simple_web_layout_execute_draw_ir_composition(
     composition: DrawIrComposition, material_witness: SimpleWebLayoutMaterialWitness,
     width: i32, height: i32, backend_name: text,
     image_resources: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutEngine2DExecutionResult:
-    val vector_font = _simple_web_vector_font_evidence(composition)
     val render = _simple_web_layout_render_draw_ir_composition(
         composition, width, height, backend_name, image_resources)
     val material_fallback = simple_web_layout_material_provenance_after_backend_execution(
@@ -190,7 +190,9 @@ fn _simple_web_layout_execute_draw_ir_composition(
     SimpleWebLayoutEngine2DExecutionResult(
         render: render, material_fallback: material_fallback,
         vector_font_identity: render.font_identity,
-        vector_font_pixel_size: vector_font.pixel_size,
+        vector_font_pixel_size:
+            _simple_web_draw_ir_last_text_font_pixel_size(
+                composition, render.font_identity),
         vector_font_execution_target: render.font_execution_target,
         vector_font_batch_identity: render.font_batch_identity,
         vector_font_readback_source: render.font_readback_source,

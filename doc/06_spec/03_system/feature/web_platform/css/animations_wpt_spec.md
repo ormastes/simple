@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 8 | 8 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -20,8 +20,8 @@ Proves the supported keyframe subset at its start, midpoint, and filled end
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/feature/web_platform/css/animations_wpt_spec.spl` |
-| Updated | 2026-07-29 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-30 |
+| Generator | Manual mirror; qualified docgen pending |
 
 Proves the supported keyframe subset at its start, midpoint, and filled end
 through web semantics, layout, canonical Draw IR, and exact expected-color
@@ -109,6 +109,73 @@ expect(_animation_frame_fingerprint(
     "preserve,1000,forwards|4,4|html_ast|box:0,0,12,4|" +
     "preserve,1000ms,4280640491|-1|0|48"
 )
+```
+
+</details>
+
+#### should reuse the completed animation Draw IR after its final frame
+
+- Render the finite CSS animation through its scheduled final frame
+   - Protocol capture: completed frame schedules no later animation frame
+- Advance past the completed frame without scheduling an identical repaint
+   - Protocol capture: retained Draw IR, paint count, and checksum stay stable
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render the finite CSS animation through its scheduled final frame")
+var worker = HostedBrowserRendererWorkerSession.create(WIDTH, HEIGHT)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 7, request_id: 2,
+    payload: _animation_html()
+)).ok).to_be(true)
+val completed = worker.handle(BrowserRendererMessage(
+    kind: "advance", generation: 7, request_id: 3, payload: "1000"
+))
+expect(completed.ok).to_be(true)
+val completed_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(7), completed.wire
+)
+expect(completed_message.status).to_equal("message")
+val completed_frame = browser_renderer_frame_decode(
+    completed_message.message, WIDTH, HEIGHT
+)
+expect(completed_frame.ok).to_be(true)
+expect(completed_frame.next_animation_ms).to_equal(-1)
+expect(
+    completed_frame.composition.batches[0].commands.len()
+).to_be_greater_than(0)
+val completed_paints = worker.render_session.counters.paint_count
+val completed_checksum = worker.render_session.composition_checksum()
+
+step("Advance past the completed frame without scheduling an identical repaint")
+val later = worker.handle(BrowserRendererMessage(
+    kind: "advance", generation: 7, request_id: 4, payload: "1016"
+))
+expect(later.ok).to_be(true)
+val later_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(7), later.wire
+)
+expect(later_message.status).to_equal("message")
+val later_frame = browser_renderer_frame_decode(
+    later_message.message, WIDTH, HEIGHT
+)
+expect(later_frame.ok).to_be(true)
+expect(later_frame.next_animation_ms).to_equal(-1)
+expect(
+    later_frame.composition.batches[0].commands.len()
+).to_be_greater_than(0)
+expect(worker.render_session.counters.paint_count).to_equal(
+    completed_paints
+)
+expect(worker.render_session.composition_checksum()).to_equal(
+    completed_checksum
+)
+worker.close()
 ```
 
 </details>
@@ -249,8 +316,8 @@ expect(registry.entries.len()).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 8 |
-| Active scenarios | 8 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

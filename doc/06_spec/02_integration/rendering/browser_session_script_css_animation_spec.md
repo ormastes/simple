@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -614,6 +614,44 @@ val second = session.render_to_pixels(64, 48)
 expect(second.ok).to_equal(true)
 expect(_count_color(second.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
 expect(_pixels_equal(second.pixel_data, first.pixel_data)).to_equal(false)
+```
+
+</details>
+
+#### applies CSS from a SimpleScript animation frame through Draw IR
+
+- Render the HTML and CSS frame before the SimpleScript callback
+   - Expected: initial.command.color equals `0xFFEF4444u32`
+- Advance the production SimpleScript animation clock
+   - Expected: session.advance_time(16) equals `1`
+   - Expected: session.simple_script_callback_count() equals `1`
+   - Expected: animated.command.color equals `0xFF2563EBu32`
+   - Expected: animated.command.color == initial.command.color is false
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 19 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Render the HTML and CSS frame before the SimpleScript callback")
+var session = BrowserSession.new()
+expect(session.open_html(
+    "https://example.test/simple-script-draw-ir-animation",
+    "<!DOCTYPE html><html><head><style>#stage { width: 32px; height: 24px; background-color: #ef4444; }</style></head><body><div id='stage'></div><script type='text/simple'>callback 41|style_html '<style>#stage { width: 32px; height: 24px; background-color: #2563eb; }</style>'\nanimation_frame 41</script></body></html>"
+).is_ok()).to_equal(true)
+val initial = _browser_animation_draw_ir_trace(session, 64, 48)
+_expect_browser_animation_draw_ir_frame(initial)
+expect(initial.command.color).to_equal(0xFFEF4444u32)
+
+step("Advance the production SimpleScript animation clock")
+expect(session.advance_time(16)).to_equal(1)
+expect(session.simple_script_callback_count()).to_equal(1)
+val animated = _browser_animation_draw_ir_trace(session, 64, 48)
+_expect_browser_animation_draw_ir_frame(animated)
+expect(animated.command.color).to_equal(0xFF2563EBu32)
+expect(animated.command.color == initial.command.color).to_equal(false)
 ```
 
 </details>

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 109 | 109 | 0 | 0 |
+| 110 | 110 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -25,7 +25,7 @@ This unit spec covers the pure-Simple web renderer path used by browser, web, an
 | Research | doc/01_research/ui/draw_ir/draw_io_sdn_draw_ir.md |
 | Source | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl` |
 | Updated | 2026-07-30 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Generator | Manual synchronization; docgen execution is runtime-blocked |
 
 ## Overview
 
@@ -1487,6 +1487,29 @@ else:
 
 </details>
 
+#### does not report vector size when Draw IR has no resolved face
+
+<details>
+<summary>Executable SSpec</summary>
+
+Manual synchronization pending docgen regeneration. This executable negative
+control requires the software path to keep vector metadata empty when no Draw
+IR text command resolves to the Engine2D-selected vector face.
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val html = "<html><head><style>body{font-size:17px}</style></head><body>ordinary text</body></html>"
+val execution = simple_web_layout_render_html_readback_engine2d_result(
+    html, 96, 48, "software")
+
+expect(execution.vector_font_identity).to_equal("")
+expect(execution.vector_font_pixel_size).to_equal(0)
+```
+
+</details>
+
 #### renders aspect-ratio boxes from a definite width
 
 <details>
@@ -2926,8 +2949,8 @@ expect(_count_color(pixels, 0xFF065F46u32)).to_equal(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 109 |
-| Active scenarios | 109 |
+| Total scenarios | 110 |
+| Active scenarios | 110 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

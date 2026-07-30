@@ -5,11 +5,14 @@ Focused parser and Draw IR producer evidence for nonuniform border radii and
 ordered box-shadow layers.
 """
 
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.{
     parse_border_radius_shorthand, parse_box_shadow_layers}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
+    simple_web_render_html_to_pixels_with_cpu_draw_ir_backend}
 use common.ui.draw_ir.{DrawIrCommand}
 
 fn _draw_ir_command_by_id(
@@ -30,7 +33,31 @@ fn _draw_ir_style_value(command: DrawIrCommand, key: text) -> text:
         idx = idx + 1
     ""
 
+fn _pixel_at(pixels: [u32], width: i32, x: i32, y: i32) -> u32:
+    pixels[y * width + x]
+
 describe "SimpleWebCssBoxEffects":
+
+    # codex-system-test
+    it "should apply cascaded outline offset through Draw IR to CPU pixels":
+        step("Render a card whose outline offset is declared after the outline shorthand")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#card{display:block;margin:8px;width:10px;height:8px;" +
+            "background:#ffffff;outline:2px solid #ef4444;outline-offset:3px}" +
+            "</style></head><body><div id='card'></div></body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir(html, 32, 32)
+        val card = _draw_ir_command_by_id(composition.batches[0].commands, "card")
+        val pixels = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+            html, 32, 32, "cpu")
+
+        step("Assert the computed offset survives Draw IR and moves the painted outline")
+        expect(_draw_ir_style_value(card, "outline-width")).to_equal("2")
+        expect(_draw_ir_style_value(card, "outline-offset")).to_equal("3")
+        expect(_pixel_at(pixels, 32, 3, 3)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(pixels, 32, 8, 8)).to_equal(0xFFFFFFFFu32)
 
     it "parses integer-px border radius shorthand with CSS corner expansion":
         val two = parse_border_radius_shorthand("12px 18px")

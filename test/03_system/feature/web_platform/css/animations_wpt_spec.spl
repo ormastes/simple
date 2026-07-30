@@ -22,6 +22,13 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result_at_time
 }
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererMessage, browser_renderer_decoder_feed,
+    browser_renderer_decoder_new, browser_renderer_frame_decode
+}
 
 val WIDTH: i32 = 32
 val HEIGHT: i32 = 24
@@ -154,6 +161,59 @@ describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
             "preserve,1000,forwards|4,4|html_ast|box:0,0,12,4|" +
             "preserve,1000ms,4280640491|-1|0|48"
         )
+
+    # @manual: show
+    # @capture(protocol)
+    it "should reuse the completed animation Draw IR after its final frame":
+        step("Render the finite CSS animation through its scheduled final frame")
+        var worker = HostedBrowserRendererWorkerSession.create(WIDTH, HEIGHT)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 7, request_id: 2,
+            payload: _animation_html()
+        )).ok).to_be(true)
+        val completed = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 3, payload: "1000"
+        ))
+        expect(completed.ok).to_be(true)
+        val completed_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), completed.wire
+        )
+        expect(completed_message.status).to_equal("message")
+        val completed_frame = browser_renderer_frame_decode(
+            completed_message.message, WIDTH, HEIGHT
+        )
+        expect(completed_frame.ok).to_be(true)
+        expect(completed_frame.next_animation_ms).to_equal(-1)
+        expect(
+            completed_frame.composition.batches[0].commands.len()
+        ).to_be_greater_than(0)
+        val completed_paints = worker.render_session.counters.paint_count
+        val completed_checksum = worker.render_session.composition_checksum()
+
+        step("Advance past the completed frame without scheduling an identical repaint")
+        val later = worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 7, request_id: 4, payload: "1016"
+        ))
+        expect(later.ok).to_be(true)
+        val later_message = browser_renderer_decoder_feed(
+            browser_renderer_decoder_new(7), later.wire
+        )
+        expect(later_message.status).to_equal("message")
+        val later_frame = browser_renderer_frame_decode(
+            later_message.message, WIDTH, HEIGHT
+        )
+        expect(later_frame.ok).to_be(true)
+        expect(later_frame.next_animation_ms).to_equal(-1)
+        expect(
+            later_frame.composition.batches[0].commands.len()
+        ).to_be_greater_than(0)
+        expect(worker.render_session.counters.paint_count).to_equal(
+            completed_paints
+        )
+        expect(worker.render_session.composition_checksum()).to_equal(
+            completed_checksum
+        )
+        worker.close()
 
     # @manual: folded
     it "should retain linear length interpolation at the midpoint":
