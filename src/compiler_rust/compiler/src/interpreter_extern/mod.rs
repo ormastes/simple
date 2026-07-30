@@ -2198,6 +2198,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
         insert_simple!("rt_vk_buffer_free", gpu::rt_vk_buffer_free_fn);
         insert_simple!("rt_vk_buffer_upload", gpu::rt_vk_buffer_upload_fn);
         insert_simple!("rt_vk_device_create", gpu::rt_vk_device_create_fn);
+        insert_simple!("rt_vk_device_create_for_window", gpu::rt_vk_device_create_for_window_fn);
         insert_simple!("rt_vk_device_free", gpu::rt_vk_device_free_fn);
         insert_simple!("rt_vk_device_sync", gpu::rt_vk_device_sync_fn);
         insert_simple!("rt_vk_kernel_compile", gpu::rt_vk_kernel_compile_fn);

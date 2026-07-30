@@ -3,11 +3,15 @@
 use super::error::{VulkanError, VulkanResult};
 use super::instance::{VulkanInstance, VulkanPhysicalDevice};
 use super::sync::Fence;
+#[cfg(feature = "vulkan")]
+use super::surface::Surface;
 use ash::vk;
 use gpu_allocator::vulkan::{Allocator, AllocatorCreateDesc};
 use parking_lot::Mutex;
 use std::mem::ManuallyDrop;
 use std::sync::Arc;
+#[cfg(feature = "vulkan")]
+use std::sync::Weak;
 
 /// Vulkan logical device with queues and allocator
 pub struct VulkanDevice {
@@ -22,13 +26,15 @@ pub struct VulkanDevice {
     graphics_queue_family: Option<u32>,
     #[cfg(feature = "vulkan")]
     present_queue_family: Option<u32>,
+    #[cfg(feature = "vulkan")]
+    present_surface: Option<Weak<Surface>>,
 
     // Queues
     compute_queue: Arc<Mutex<vk::Queue>>,
     #[cfg(feature = "vulkan")]
     graphics_queue: Option<Arc<Mutex<vk::Queue>>>,
     #[cfg(feature = "vulkan")]
-    present_queue: Option<Mutex<vk::Queue>>,
+    present_queue: Option<Arc<Mutex<vk::Queue>>>,
 
     // Memory allocator (ManuallyDrop to ensure it's dropped before device destruction)
     allocator: Mutex<ManuallyDrop<Allocator>>,
@@ -72,6 +78,29 @@ impl VulkanDevice {
 
     /// Create a logical device from a physical device
     pub fn new(physical_device: VulkanPhysicalDevice) -> VulkanResult<Arc<Self>> {
+        #[cfg(feature = "vulkan")]
+        {
+            Self::new_internal(physical_device, None)
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            Self::new_internal(physical_device)
+        }
+    }
+
+    /// Create a logical device with presentation support for `surface`.
+    ///
+    /// The presentation queue family must be selected before `vkCreateDevice`;
+    /// a device created by `new_default` cannot be retrofitted later.
+    #[cfg(feature = "vulkan")]
+    pub fn new_for_surface(physical_device: VulkanPhysicalDevice, surface: &Arc<Surface>) -> VulkanResult<Arc<Self>> {
+        Self::new_internal(physical_device, Some((surface.handle(), Arc::downgrade(surface))))
+    }
+
+    fn new_internal(
+        physical_device: VulkanPhysicalDevice,
+        #[cfg(feature = "vulkan")] surface: Option<(vk::SurfaceKHR, Weak<Surface>)>,
+    ) -> VulkanResult<Arc<Self>> {
         let instance = VulkanInstance::get_or_init()?;
 
         let compute_family = physical_device
@@ -85,17 +114,29 @@ impl VulkanDevice {
         #[cfg(feature = "vulkan")]
         let graphics_family = physical_device.find_graphics_queue_family();
 
-        // Note: present_family requires a surface, will be set later via set_surface()
         #[cfg(feature = "vulkan")]
-        let present_family: Option<u32> = None;
+        if surface.is_some() && graphics_family.is_none() {
+            return Err(VulkanError::SurfaceError(
+                "No queue family supports graphics for presentation".to_string(),
+            ));
+        }
+
+        #[cfg(feature = "vulkan")]
+        let present_family = surface.as_ref().map_or(Ok(None), |(surface, _)| {
+            physical_device
+                .find_present_queue_family(&instance, *surface)
+                .map(Some)
+                .ok_or_else(|| VulkanError::SurfaceError("No queue family supports presentation".to_string()))
+        })?;
 
         #[cfg(feature = "vulkan")]
         tracing::info!(
-            "Selected device: {} (compute: {}, transfer: {}, graphics: {:?})",
+            "Selected device: {} (compute: {}, transfer: {}, graphics: {:?}, present: {:?})",
             physical_device.name(),
             compute_family,
             transfer_family,
-            graphics_family
+            graphics_family,
+            present_family
         );
 
         #[cfg(not(feature = "vulkan"))]
@@ -115,6 +156,10 @@ impl VulkanDevice {
         #[cfg(feature = "vulkan")]
         if let Some(gfx) = graphics_family {
             unique_families.insert(gfx);
+        }
+        #[cfg(feature = "vulkan")]
+        if let Some(present) = present_family {
+            unique_families.insert(present);
         }
 
         let queue_create_infos: Vec<_> = unique_families
@@ -163,6 +208,20 @@ impl VulkanDevice {
         let graphics_queue_lock = graphics_queue.map(|queue| {
             if queue == compute_queue {
                 Arc::clone(&compute_queue_lock)
+            } else {
+                Arc::new(Mutex::new(queue))
+            }
+        });
+        #[cfg(feature = "vulkan")]
+        let present_queue_lock = present_queue.map(|queue| {
+            if queue == compute_queue {
+                Arc::clone(&compute_queue_lock)
+            } else if graphics_queue == Some(queue) {
+                Arc::clone(
+                    graphics_queue_lock
+                        .as_ref()
+                        .expect("graphics queue handle must have a lock"),
+                )
             } else {
                 Arc::new(Mutex::new(queue))
             }
@@ -238,11 +297,13 @@ impl VulkanDevice {
             graphics_queue_family: graphics_family,
             #[cfg(feature = "vulkan")]
             present_queue_family: present_family,
+            #[cfg(feature = "vulkan")]
+            present_surface: surface.map(|(_, owner)| owner),
             compute_queue: compute_queue_lock,
             #[cfg(feature = "vulkan")]
             graphics_queue: graphics_queue_lock,
             #[cfg(feature = "vulkan")]
-            present_queue: present_queue.map(Mutex::new),
+            present_queue: present_queue_lock,
             allocator: Mutex::new(ManuallyDrop::new(allocator)),
             pipeline_cache,
             compute_pool: Mutex::new(compute_pool),
@@ -328,6 +389,15 @@ impl VulkanDevice {
         self.present_queue_family
     }
 
+    /// Check that this presentation device was created for this exact surface.
+    #[cfg(feature = "vulkan")]
+    pub fn supports_surface(&self, surface: &Arc<Surface>) -> bool {
+        self.present_surface
+            .as_ref()
+            .and_then(Weak::upgrade)
+            .is_some_and(|owner| Arc::ptr_eq(&owner, surface))
+    }
+
     /// Get graphics queue (if available, requires lock)
     #[cfg(feature = "vulkan")]
     pub fn graphics_queue(&self) -> Option<&Mutex<vk::Queue>> {
@@ -337,7 +407,7 @@ impl VulkanDevice {
     /// Get present queue (if available, requires lock)
     #[cfg(feature = "vulkan")]
     pub fn present_queue(&self) -> Option<&Mutex<vk::Queue>> {
-        self.present_queue.as_ref()
+        self.present_queue.as_deref()
     }
 
     /// Get swapchain loader

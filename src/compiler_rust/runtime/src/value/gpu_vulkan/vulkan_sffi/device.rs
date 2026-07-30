@@ -1,6 +1,6 @@
 //! Vulkan device management SFFI functions
 
-use super::common::{next_handle, VulkanFfiError, DEVICE_REGISTRY};
+use super::common::{next_handle, VulkanFfiError, DEVICE_REGISTRY, WINDOW_SURFACES};
 
 /// Create a Vulkan device
 ///
@@ -27,6 +27,92 @@ pub extern "C" fn rt_vk_device_create() -> u64 {
     #[cfg(not(feature = "vulkan"))]
     {
         tracing::error!("Vulkan support not compiled in");
+        0
+    }
+}
+
+/// Create a Vulkan device configured for presentation to an existing window.
+///
+/// The window must be created first so its surface participates in physical
+/// device selection and logical-device queue creation.
+#[no_mangle]
+pub extern "C" fn rt_vk_device_create_for_window(window_handle: u64) -> u64 {
+    #[cfg(feature = "vulkan")]
+    {
+        use ash::vk;
+        use crate::vulkan::{VulkanDevice, VulkanInstance};
+        use std::ffi::CStr;
+
+        let surface = match WINDOW_SURFACES.lock().get(&window_handle).cloned() {
+            Some(surface) => surface,
+            None => {
+                tracing::error!("Invalid or unavailable Vulkan window handle: {}", window_handle);
+                return 0;
+            }
+        };
+        let instance = match VulkanInstance::get_or_init() {
+            Ok(instance) => instance,
+            Err(e) => {
+                tracing::error!("Failed to initialize Vulkan instance: {:?}", e);
+                return 0;
+            }
+        };
+        let devices = match instance.enumerate_devices() {
+            Ok(devices) => devices,
+            Err(e) => {
+                tracing::error!("Failed to enumerate Vulkan devices: {:?}", e);
+                return 0;
+            }
+        };
+        let surface_handle = surface.handle();
+        let mut candidates: Vec<_> = devices
+            .into_iter()
+            .filter(|device| {
+                device.find_compute_queue_family().is_some()
+                    && device.find_graphics_queue_family().is_some()
+                    && device.find_present_queue_family(&instance, surface_handle).is_some()
+                    && device.features.shader_int64 == vk::TRUE
+                    && unsafe {
+                        instance
+                            .instance()
+                            .enumerate_device_extension_properties(device.handle)
+                            .map(|extensions| {
+                                extensions.iter().any(|extension| {
+                                    CStr::from_ptr(extension.extension_name.as_ptr()) == ash::khr::swapchain::NAME
+                                })
+                            })
+                            .unwrap_or(false)
+                    }
+            })
+            .collect();
+        candidates.sort_by_key(|device| std::cmp::Reverse(device.compute_score()));
+
+        for physical_device in candidates {
+            match VulkanDevice::new_for_surface(physical_device, &surface) {
+                Ok(device) => {
+                    let handle = next_handle();
+                    DEVICE_REGISTRY.lock().insert(handle, device);
+                    tracing::info!(
+                        "Vulkan presentation device created for window {} with handle {}",
+                        window_handle,
+                        handle
+                    );
+                    return handle;
+                }
+                Err(e) => {
+                    tracing::warn!("Skipping Vulkan presentation device after creation failure: {:?}", e);
+                }
+            }
+        }
+        tracing::error!(
+            "No Vulkan device supports compute, graphics, and presentation for window {}",
+            window_handle
+        );
+        0
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        let _ = window_handle;
         0
     }
 }

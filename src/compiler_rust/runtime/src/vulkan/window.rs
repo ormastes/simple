@@ -2,6 +2,7 @@
 
 use super::error::{VulkanError, VulkanResult};
 use super::instance::VulkanInstance;
+use super::surface::Surface;
 use ash::vk;
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -69,7 +70,7 @@ pub enum FullscreenMode {
 struct WindowState {
     handle: WindowHandle,
     window: Arc<Window>,
-    surface: vk::SurfaceKHR,
+    surface: Arc<Surface>,
     width: u32,
     height: u32,
     fullscreen_mode: FullscreenMode,
@@ -307,6 +308,7 @@ impl WindowManager {
             )
             .map_err(|e| VulkanError::SurfaceError(format!("Surface creation failed: {:?}", e)))?
         };
+        let surface = Arc::new(Surface::from_handle(Arc::clone(instance), surface));
 
         // Store window state
         let state = WindowState {
@@ -328,14 +330,9 @@ impl WindowManager {
     fn destroy_window_internal(
         handle: WindowHandle,
         windows: &Arc<Mutex<HashMap<WindowHandle, WindowState>>>,
-        instance: &Arc<VulkanInstance>,
+        _instance: &Arc<VulkanInstance>,
     ) {
-        let mut windows_lock = windows.lock();
-        if let Some(state) = windows_lock.remove(&handle) {
-            // Destroy surface
-            unsafe {
-                instance.surface_loader().destroy_surface(state.surface, None);
-            }
+        if windows.lock().remove(&handle).is_some() {
             tracing::info!("Window {} destroyed", handle);
         }
     }
@@ -515,11 +512,11 @@ impl WindowManager {
     }
 
     /// Get window surface
-    pub fn get_surface(&self, handle: WindowHandle) -> VulkanResult<vk::SurfaceKHR> {
+    pub fn get_surface(&self, handle: WindowHandle) -> VulkanResult<Arc<Surface>> {
         let windows = self.windows.lock();
         let state = windows.get(&handle).ok_or(VulkanError::InvalidHandle)?;
 
-        Ok(state.surface)
+        Ok(Arc::clone(&state.surface))
     }
 
     /// Set fullscreen mode

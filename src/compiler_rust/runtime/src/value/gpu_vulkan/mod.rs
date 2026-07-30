@@ -22,7 +22,7 @@ pub use vulkan_sffi::descriptor::{
     rt_vk_descriptor_pool_create, rt_vk_descriptor_pool_free, rt_vk_descriptor_set_allocate, rt_vk_descriptor_set_free,
     rt_vk_descriptor_set_update_buffer,
 };
-pub use vulkan_sffi::device::{rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync};
+pub use vulkan_sffi::device::{rt_vk_device_create, rt_vk_device_create_for_window, rt_vk_device_free, rt_vk_device_sync};
 pub use vulkan_sffi::kernel::{rt_vk_kernel_compile, rt_vk_kernel_free, rt_vk_kernel_launch, rt_vk_kernel_launch_1d};
 pub use vulkan_sffi::swapchain::{
     rt_vk_swapchain_acquire_next_image, rt_vk_swapchain_create, rt_vk_swapchain_destroy, rt_vk_swapchain_get_extent,

@@ -960,6 +960,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_vk_available", &[], &[I32]), // () -> available (1=yes, 0=no)
     RuntimeFuncSpec::new("rt_vk_device_create", &[], &[I64]), // () -> device_handle
+    RuntimeFuncSpec::new("rt_vk_device_create_for_window", &[I64], &[I64]), // window_handle -> device_handle
     RuntimeFuncSpec::new("rt_vk_device_free", &[I64], &[I32]), // device_handle -> status
     RuntimeFuncSpec::new("rt_vk_device_sync", &[I64], &[I32]), // device_handle -> status
     RuntimeFuncSpec::new("rt_vk_buffer_alloc", &[I64, I64], &[I64]), // device_handle, size -> buffer_handle

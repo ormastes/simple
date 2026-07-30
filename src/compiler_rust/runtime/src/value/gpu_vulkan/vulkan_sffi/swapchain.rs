@@ -35,15 +35,12 @@ pub extern "C" fn rt_vk_swapchain_create(
 ) -> i64 {
     #[cfg(feature = "vulkan")]
     {
-        let device_registry = DEVICE_REGISTRY.lock();
-        let surface_registry = WINDOW_SURFACES.lock();
+        let device = DEVICE_REGISTRY.lock().get(&device_handle).cloned();
+        let surface = WINDOW_SURFACES.lock().get(&surface_handle).cloned();
 
-        if let (Some(device), Some(surface)) = (
-            device_registry.get(&device_handle),
-            surface_registry.get(&surface_handle),
-        ) {
+        if let (Some(device), Some(surface)) = (device, surface) {
             match crate::vulkan::VulkanSwapchain::new(
-                device.clone(),
+                device,
                 surface,
                 width,
                 height,
@@ -91,18 +88,12 @@ pub extern "C" fn rt_vk_swapchain_create(
 pub extern "C" fn rt_vk_swapchain_recreate(swapchain_handle: u64, surface_handle: u64, width: u32, height: u32) -> i32 {
     #[cfg(feature = "vulkan")]
     {
-        let swapchain_registry = SWAPCHAIN_REGISTRY.lock();
-        let surface_registry = WINDOW_SURFACES.lock();
+        let swapchain = SWAPCHAIN_REGISTRY.lock().get(&swapchain_handle).cloned();
+        let surface = WINDOW_SURFACES.lock().get(&surface_handle).cloned();
 
-        if let (Some(swapchain_mutex), Some(surface)) = (
-            swapchain_registry.get(&swapchain_handle).cloned(),
-            surface_registry.get(&surface_handle).cloned(),
-        ) {
-            drop(swapchain_registry); // Release registry locks
-            drop(surface_registry);
-
+        if let (Some(swapchain_mutex), Some(surface)) = (swapchain, surface) {
             let mut swapchain = swapchain_mutex.lock();
-            match swapchain.recreate(&surface, width, height) {
+            match swapchain.recreate(surface, width, height) {
                 Ok(()) => {
                     tracing::info!("Swapchain {} recreated to {}x{}", swapchain_handle, width, height);
                     VulkanFfiError::Success as i32

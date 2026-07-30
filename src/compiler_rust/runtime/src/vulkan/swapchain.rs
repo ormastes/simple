@@ -10,6 +10,7 @@ use std::sync::Arc;
 /// Vulkan swapchain for image presentation
 pub struct VulkanSwapchain {
     device: Arc<VulkanDevice>,
+    surface: Arc<Surface>,
     swapchain: vk::SwapchainKHR,
     swapchain_loader: ash::khr::swapchain::Device,
     images: Vec<vk::Image>,
@@ -23,12 +24,17 @@ impl VulkanSwapchain {
     /// Create a new swapchain
     pub fn new(
         device: Arc<VulkanDevice>,
-        surface: &Surface,
+        surface: Arc<Surface>,
         width: u32,
         height: u32,
         prefer_hdr: bool,
         prefer_no_vsync: bool,
     ) -> VulkanResult<Arc<Self>> {
+        if !device.supports_surface(&surface) {
+            return Err(VulkanError::SurfaceError(
+                "Swapchain surface does not match the presentation device".to_string(),
+            ));
+        }
         let physical_device = device.physical_device();
 
         // Query surface capabilities
@@ -90,6 +96,7 @@ impl VulkanSwapchain {
 
         Ok(Arc::new(Self {
             device,
+            surface,
             swapchain,
             swapchain_loader,
             images,
@@ -101,7 +108,12 @@ impl VulkanSwapchain {
     }
 
     /// Recreate swapchain (e.g., on window resize)
-    pub fn recreate(&mut self, surface: &Surface, width: u32, height: u32) -> VulkanResult<()> {
+    pub fn recreate(&mut self, surface: Arc<Surface>, width: u32, height: u32) -> VulkanResult<()> {
+        if !self.device.supports_surface(&surface) {
+            return Err(VulkanError::SurfaceError(
+                "Swapchain surface does not match the presentation device".to_string(),
+            ));
+        }
         // Wait for device to be idle before recreating
         self.device.wait_idle()?;
 
@@ -161,6 +173,7 @@ impl VulkanSwapchain {
         };
 
         self.image_count = self.images.len() as u32;
+        self.surface = surface;
 
         // Create new image views
         self.image_views = Self::create_image_views(&self.device, &self.images, self.format.format)?;
@@ -187,7 +200,14 @@ impl VulkanSwapchain {
 
         // Determine queue family indices
         let graphics_family = device.graphics_queue_family().ok_or(VulkanError::NoDeviceFound)?;
-        let present_family = device.present_queue_family().unwrap_or(graphics_family);
+        let present_family = device.present_queue_family().ok_or_else(|| {
+            VulkanError::SurfaceError("Swapchain device has no presentation queue family".to_string())
+        })?;
+        if device.present_queue().is_none() {
+            return Err(VulkanError::SurfaceError(
+                "Swapchain device has no presentation queue".to_string(),
+            ));
+        }
 
         // Queue family sharing mode
         let (sharing_mode, queue_families) = if graphics_family != present_family {

@@ -1,5 +1,7 @@
 #[cfg(feature = "vulkan")]
 use super::vulkan_graphics_runtime_core::{alloc_handle, Framebuffer, VulkanSwapchain, STATE};
+#[cfg(feature = "vulkan")]
+use std::sync::Arc;
 
 // ============================================================================
 // Framebuffer
@@ -111,7 +113,7 @@ pub extern "C" fn rt_vulkan_create_swapchain(_device: i64, surface: i64, w: i64,
     };
 
     let prefer_no_vsync = vsync == 0;
-    match VulkanSwapchain::new(device, surf, w as u32, h as u32, false, prefer_no_vsync) {
+    match VulkanSwapchain::new(device, Arc::clone(surf), w as u32, h as u32, false, prefer_no_vsync) {
         Ok(sc) => {
             let handle = alloc_handle();
             state.swapchains.insert(handle, sc);

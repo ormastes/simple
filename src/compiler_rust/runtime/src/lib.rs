@@ -826,6 +826,7 @@ pub use value::{
     rt_vk_buffer_free,
     rt_vk_buffer_upload,
     rt_vk_device_create,
+    rt_vk_device_create_for_window,
     rt_vk_device_free,
     rt_vk_device_sync,
     // Kernel management

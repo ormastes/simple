@@ -1962,6 +1962,18 @@ noop_stubs!(
     rt_vk_kernel_launch_1d
 );
 
+// Keep the real one-argument Vulkan ABI in the aggregate archive.
+#[cfg(feature = "vulkan")]
+#[used]
+static RT_VK_DEVICE_CREATE_FOR_WINDOW_PROVIDER: extern "C" fn(u64) -> u64 =
+    simple_runtime::value::rt_vk_device_create_for_window;
+
+#[cfg(not(feature = "vulkan"))]
+#[no_mangle]
+pub extern "C" fn rt_vk_device_create_for_window(_window_handle: u64) -> u64 {
+    0
+}
+
 // ============================================================================
 // Test runner SFFI — allows self-hosted binaries to run tests via the Rust
 // test runner from simple-driver. Kept behind `driver-compat` so minimal

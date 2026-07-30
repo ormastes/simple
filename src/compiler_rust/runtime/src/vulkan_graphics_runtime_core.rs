@@ -108,7 +108,7 @@ pub(super) struct VulkanState {
     pub active_compute_layout: Option<vk::PipelineLayout>,
     pub semaphore_pool: Option<SemaphorePool>,
     pub window_manager: Option<WindowManager>,
-    pub surfaces: HashMap<i64, Surface>,
+    pub surfaces: HashMap<i64, Arc<Surface>>,
     pub physical_devices: Vec<VulkanPhysicalDevice>,
     pub last_error: String,
 }

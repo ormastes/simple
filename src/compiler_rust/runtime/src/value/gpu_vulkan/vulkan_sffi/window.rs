@@ -199,15 +199,14 @@ pub extern "C" fn rt_vk_window_create(
 
         match get_or_init_window_manager() {
             Ok(manager) => {
-                let mut mgr = manager.lock();
-                match mgr.create_window(width, height, &title) {
-                    Ok(handle) => {
-                        // Get surface and store it
-                        if let Ok(surface) = mgr.get_surface(handle) {
-                            let instance = crate::vulkan::VulkanInstance::get_or_init().unwrap();
-                            let surface_obj = Arc::new(crate::vulkan::Surface::from_handle(instance, surface));
-                            WINDOW_SURFACES.lock().insert(handle, surface_obj);
-                        }
+                let created = {
+                    let mgr = manager.lock();
+                    mgr.create_window(width, height, &title)
+                        .and_then(|handle| mgr.get_surface(handle).map(|surface| (handle, surface)))
+                };
+                match created {
+                    Ok((handle, surface)) => {
+                        WINDOW_SURFACES.lock().insert(handle, surface);
                         tracing::info!("Window created: handle={}, size={}x{}", handle, width, height);
                         handle as i64
                     }
@@ -255,8 +254,8 @@ pub extern "C" fn rt_vk_window_destroy(window_handle: i64) -> i32 {
 
         match get_or_init_window_manager() {
             Ok(manager) => {
-                let mut mgr = manager.lock();
-                match mgr.destroy_window(window_handle as u64) {
+                let result = manager.lock().destroy_window(window_handle as u64);
+                match result {
                     Ok(()) => {
                         // Remove surface from registry
                         WINDOW_SURFACES.lock().remove(&(window_handle as u64));

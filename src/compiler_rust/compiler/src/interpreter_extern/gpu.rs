@@ -445,8 +445,8 @@ fn get_cuda_dl() -> Option<&'static cuda_dlopen::CudaFns> {
 #[cfg(feature = "vulkan")]
 use simple_runtime::value::gpu_vulkan::{
     rt_vk_available, rt_vk_buffer_alloc, rt_vk_buffer_download, rt_vk_buffer_free, rt_vk_buffer_upload,
-    rt_vk_device_create, rt_vk_device_free, rt_vk_device_sync, rt_vk_kernel_compile, rt_vk_kernel_free,
-    rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
+    rt_vk_device_create, rt_vk_device_create_for_window, rt_vk_device_free, rt_vk_device_sync, rt_vk_kernel_compile,
+    rt_vk_kernel_free, rt_vk_kernel_launch, rt_vk_kernel_launch_1d,
 };
 
 #[cfg(feature = "cuda")]
@@ -1602,6 +1602,16 @@ pub fn rt_vk_available_fn(_args: &[Value]) -> Result<Value, CompileError> {
 pub fn rt_vk_device_create_fn(_args: &[Value]) -> Result<Value, CompileError> {
     let handle = rt_vk_device_create();
     Ok(Value::Int(handle as i64))
+}
+
+/// Create a Vulkan device with queues selected for an existing window surface.
+#[cfg(feature = "vulkan")]
+pub fn rt_vk_device_create_for_window_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let window = args
+        .first()
+        .ok_or_else(|| CompileError::semantic("rt_vk_device_create_for_window expects 1 argument".to_string()))?
+        .as_int()? as u64;
+    Ok(Value::Int(rt_vk_device_create_for_window(window) as i64))
 }
 
 /// Free Vulkan device
