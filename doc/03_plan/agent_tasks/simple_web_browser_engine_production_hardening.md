@@ -352,11 +352,11 @@ promoted without a current pure-Simple checker.
 | Lane | Held worktree | Status | Resume gate |
 | --- | --- | --- | --- |
 | `drawir_canonical_oracle` | `/tmp/simple-drawir-canonical-oracle.VBRqIv` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
-| `content_visibility_gpu_guard` | `/tmp/simple-content-visibility-gpu-guard-20260730` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `content_visibility_gpu_guard` | current change (`simple_web_renderer_spec.spl`) | O(N) shared GPU paint state + presented-pixel parity + phase-2 manual + final high review PASS; execution HELD | admitted current pure-Simple full CLI; run focused spec once |
 | `address_bound` | `/tmp/simple-address-bound.Qw0wSt/worktree` | static + phase-2 manual + high review PASS; unmerged | admitted current pure-Simple full CLI; run focused spec once |
 | `eventloop_idle_drain` | `/tmp/simple-eventloop-idle-drain` | HOLD/FAIL: vacuous future timer, no performance discriminator, stale tick wording; review/docgen cap reached | redesign evidence before any executable attempt |
 | `animation_csp_clock` | `/tmp/simple-animation-csp-clock` | production + spec + phase-2 manual + high review PASS; unexecuted/unmerged | admitted current pure-Simple full CLI; run focused spec once |
-| `table_collapse` | `/tmp/simple-table-collapse-slice` | cycle-2 production + spec + manual + high review PASS; unexecuted/unmerged | admitted current pure-Simple full CLI; run focused spec once |
+| `table_collapse` | current change (`table_formatting_spec.spl`) | bounded one-row/two-cell precedence + retained rerender + phase-2 manual + final high review PASS; execution HELD | admitted current pure-Simple full CLI; run focused spec once |
 | `object_fit_inheritance` | `/tmp/simple-object-fit-inheritance.w2dMXw` | production + spec high review PASS; generated manual FAIL on a fifth cleanup action at the three-cycle cap | repair manual in a fresh scoped cycle before execution |
 | `raf_frame_alignment` | `/tmp/simple-raf-frame-align-clean.gdkM4F` | production + spec + phase-2 manual + final high review PASS; unexecuted/unmerged | admitted current pure-Simple full CLI; run focused spec once |
 | `animation_layout_classification_cache` | `/tmp/simple-animation-layout-cache.Fh8uZo` | production + spec high review PASS; phase-2 manual FAIL on a raw inline-CSS payload bullet at the regeneration cap | repair manual in a fresh scoped cycle before execution |
@@ -381,6 +381,20 @@ pure-Simple full CLI runs the applicable focused SSpec once.
 
 Root Codex remains merge owner and final reviewer. These rows do not promote a
 requirement, merge a patch, or provide executable evidence.
+
+## Intensive HTML/CSS and animation batch 4 (2026-07-30)
+
+| Lane | Result | Status / next gate |
+| --- | --- | --- |
+| `animation_microtask_pixels` | rAF schedules a Promise microtask that mutates `#stage`; `advance_time(16)` exposes the mutation before return and exact `32x24` Draw IR/Engine2D pixels change | final high review PASS; execution HELD for an admitted current pure-Simple CLI |
+| `animation_production_evidence` | actual rAF timestamp `16`, stage-bound exact red-to-blue pixels, persistent Engine2D owner, and fail-closed p95/FPS/RSS/GC/10k gates | supporting evidence PASS; numeric NFR receipts remain RED |
+| `content_visibility_gpu_guard` | one O(N) preorder state feeds both GPU scans; content visibility, override-visible descendants, and partial-opacity fallback match CPU-presented pixels | final high review PASS; execution HELD |
+| `table_collapse` | bounded one-row/two-cell collapse retains edge styles and applies hidden/none/style/width/LTR precedence after animation in initial and retained renders | final high review PASS; execution HELD |
+| `html_css_traceability` | fractional-opacity and held-border wording repaired, but `check-html-css-full-rendering-goal-status.shs` still emits inventory-derived readiness `pass` flags | FAIL/HOLD at three-cycle cap; fix the second producer before merging traceability docs |
+| `bold_elements` | `<b>`/`<strong>` UA semantics are straightforward, but canonical FontRenderer rejects non-normal weight and has no face-weight/synthesis decision | FAIL/HOLD at three-cycle cap; design canonical FontRenderConfig/FontRenderer weight support first |
+
+No batch-4 row promotes production completion. The admitted-runtime focused
+SSpec run remains mandatory; bootstrap and the Rust seed are not admissible.
 
 ## Cascade-owner implementation lanes (2026-07-30)
 

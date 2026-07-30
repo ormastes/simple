@@ -137,7 +137,7 @@ SANDBOX production row.
 | Held patch | Location | Review state | Executable state |
 | --- | --- | --- | --- |
 | DrawIR canonical oracle | `/tmp/simple-drawir-canonical-oracle.VBRqIv` | static + phase-2 manual + high review PASS | blocked |
-| Content-visibility GPU guard | `/tmp/simple-content-visibility-gpu-guard-20260730` | static + phase-2 manual + high review PASS | blocked |
+| Content-visibility GPU guard | current change | O(N) shared-state source + exact CPU/DrawIR/Engine2D/presented-pixel evidence + final high review PASS | execution HELD |
 | Address bound | `/tmp/simple-address-bound.Qw0wSt/worktree` | static + phase-2 manual + high review PASS | blocked |
 | EventLoop idle drain | `/tmp/simple-eventloop-idle-drain` | HOLD/FAIL: vacuous future timer, no perf discriminator, stale tick wording; review/docgen cycle cap | do not merge |
 
