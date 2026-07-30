@@ -640,6 +640,23 @@ impl ExecCore {
                     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.run_file_jit(path))) {
                         Ok(Ok(exit_code)) => Ok(exit_code),
                         Ok(Err(jit_err)) => {
+                            // SIMPLE_JIT_STRICT fail-open fix: `first_unresolved_import`
+                            // in codegen/jit.rs already tags its error message with a
+                            // "SIMPLE_JIT_STRICT:" prefix specifically when the strict
+                            // env var is set, precisely so an unresolved-symbol NULL-jump
+                            // risk becomes a hard failure instead of a silent de-JIT --
+                            // but this catch site used to swallow EVERY `jit_err` (strict
+                            // or not) into the same unconditional interpreter fallback,
+                            // making SIMPLE_JIT_STRICT=1 print a "refusing to fall back"
+                            // message and then fall back anyway (exit 0). Honor the tag:
+                            // propagate as a real, printed, non-zero-exit error instead of
+                            // falling back, for this class of failure only -- every other
+                            // JIT failure reason (lambda/closure ABI mismatch, genuine
+                            // compiler bugs, etc.) still falls back leniently as before,
+                            // unchanged blast radius outside the unresolved-import family.
+                            if jit_err.contains("SIMPLE_JIT_STRICT:") {
+                                return Err(jit_err);
+                            }
                             eprintln!(
                                 "[INFO] JIT compilation failed, falling back to interpreter: {}",
                                 jit_err
