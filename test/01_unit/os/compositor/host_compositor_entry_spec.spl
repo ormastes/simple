@@ -50,6 +50,7 @@ use os.compositor.host_compositor_entry.{
     host_wm_content_renderer_name,
     host_wm_force_direct_chrome,
     host_wm_chrome_force_direct,
+    host_wm_draw_ir_local_recompose_required,
     host_metal_glass_receipts_valid,
     host_chrome_scene_html,
     host_chrome_scene_fingerprint,
@@ -68,7 +69,9 @@ use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     engine2d_draw_ir_adv_composition
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use os.compositor.host_wm_theme_bootstrap.{install_default_host_wm_theme}
+use common.ui.wm_chrome_theme.{reset_wm_chrome_theme, wm_chrome_theme}
 use common.color.convert.{int_to_hex}
 
 val HOST_COMPOSITOR_CORE_SRC = "src/os/compositor/host_compositor_core.spl"
@@ -667,6 +670,47 @@ describe "host compositor native-lowering regression contracts":
         expect(host_metal_glass_receipts_valid(
             composition, result)).to_equal(false)
         engine.shutdown()
+
+    it "recomposes a rejected host GPU material frame with canonical CPU semantics":
+        val _theme = install_default_host_wm_theme()
+        val comp = HostCompositor.new_headless(Size.wh(80, 70))
+        comp.apply_bridge_request(
+            1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 8, 8,
+            40, 52, "ready", 900, "/sys/apps/terminal"
+        )
+        var engine = Engine2D.create_with_backend(80, 70, "cpu")
+        engine.selected_backend_name = "metal"
+        val executor = Engine2dCompositorBackend.create(engine)
+        expect(comp.render_frame_engine2d(executor)).to_equal(true)
+        expect(comp.render_revision).to_equal(1)
+        expect(comp.pure_simple_pixel_buffer().len()).to_equal(80 * 70)
+        expect(executor.last_backend).to_equal("cpu")
+        expect(executor.revision_render_count).to_equal(2)
+        reset_wm_chrome_theme()
+        executor.shutdown()
+
+    it "does not duplicate an already-local CPU attempt":
+        expect(host_wm_draw_ir_local_recompose_required("cpu")).to_equal(false)
+        expect(host_wm_draw_ir_local_recompose_required("metal")).to_equal(true)
+        expect(host_wm_draw_ir_local_recompose_required("vulkan")).to_equal(true)
+
+    it "keeps requested and local host Draw IR attempts ordered and resource-identical":
+        val core = file_read(HOST_COMPOSITOR_CORE_SRC)
+        val method_start = core.index_of("me render_frame_engine2d(executor: Engine2dCompositorBackend) -> bool:")
+        val method_tail = core.substring(method_start)
+        val method_end = method_tail.index_of("    me render_frame():")
+        val method = method_tail.substring(0, method_end)
+        val requested = method.index_of("val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend")
+        val requested_attempt = method.index_of("var accepted_result = executor.render_draw_ir_composition(composition, images)")
+        val local_gate = method.index_of("host_wm_draw_ir_local_recompose_required(selected_backend)")
+        val local_composition = method.index_of("scene, taskbar_input.taskbar, frames, DRAW_IR_BACKEND_CPU,")
+        val local_attempt = method.index_of("accepted_composition, images")
+        expect(requested).to_be_greater_than(0)
+        expect(requested_attempt).to_be_greater_than(requested)
+        expect(local_gate).to_be_greater_than(requested_attempt)
+        expect(local_composition).to_be_greater_than(local_gate)
+        expect(local_attempt).to_be_greater_than(local_composition)
+        expect(method).to_not_contain("self.render_frame()")
 
     it "rejects duplicate reordered and extra Metal receipts":
         val composition = _metal_material_composition(["body", "title"])

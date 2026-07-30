@@ -13,7 +13,7 @@ use common.ui.window_scene.{
     shared_wm_scene_resolve_background
 }
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, WmSceneRevision, WmRenderMetrics, SharedWmRenderInput, SharedWmTaskbarRenderInput, wm_content_frame_checksum, wm_content_frame_origin_valid, wm_content_frame_web_provenance_valid}
-use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DrawIrComposition}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_AUTO, DRAW_IR_BACKEND_CPU, DrawIrComposition}
 use common.ui.window_scene_draw_ir.{
     SharedWmPixelBufferBackend,
     shared_wm_content_frame_image_uri,
@@ -69,6 +69,12 @@ fn host_wm_chrome_force_direct() -> bool:
     """True when render_frame() is pinned to the direct-draw chrome path."""
     _host_chrome_force_direct
 
+# A requested host target can carry different semantic material than the
+# canonical local CPU target. Recompose only after the requested composition
+# has failed; CPU is already the local contract and must not be attempted twice.
+fn host_wm_draw_ir_local_recompose_required(selected_backend: text) -> bool:
+    selected_backend != DRAW_IR_BACKEND_CPU
+
 # Validate Metal material evidence against the submitted Draw IR itself.
 # Executor counters are cross-checks only: this owner independently derives the
 # exact ordered material IDs and rejects duplicate producer IDs or any receipt
@@ -123,6 +129,16 @@ fn host_metal_glass_receipts_valid(
             return false
         index = index + 1
     true
+
+fn host_wm_draw_ir_result_valid(
+    composition: DrawIrComposition, result: Engine2dDrawIrAdvResult,
+    expected_pixel_count: i32
+) -> bool:
+    host_metal_glass_receipts_valid(composition, result) and
+    not result.fallback_required and
+    result.skipped_command_count == 0 and
+    result.rendered_command_count > 0 and
+    result.pixels.len() == expected_pixel_count
 
 enum HostBackendKind:
     Browser
@@ -1373,19 +1389,36 @@ class HostCompositor:
             images.push(engine2d_resolved_draw_ir_image(shared_wm_content_frame_image_uri(frame), frame.width, frame.height, frame.pixels))
             top_frames.push(frame)
         val composition = shared_wm_scene_draw_ir_composition_with_content(scene, taskbar_input.taskbar, frames, selected_backend, 1000, taskbar_input.clock_label, 0)
-        val result = executor.render_draw_ir_composition(composition, images)
+        var accepted_composition = composition
+        var accepted_result = executor.render_draw_ir_composition(composition, images)
         # A concrete Metal WM frame is device-only. The executor must return
         # one valid receipt for every requested glass surface, and that receipt
         # must describe the same completed readback device/handle the host is
         # about to present. Never infer success from a Metal plan or a CPU
         # fallback after malformed bounds/metadata/state.
-        if not host_metal_glass_receipts_valid(composition, result):
-            print "[hosted-wm] draw-ir-reject-detail reason=metal-glass-receipt requested={result.metal_device_glass_requested_count} executed={result.metal_device_glass_material_count} receipts={result.metal_device_glass_receipts.len()} unfulfilled={result.metal_device_glass_unfulfilled_count} readback_handle={result.backend_handle} readback_device={result.device_identity} source={result.readback_source}"
+        if (not host_wm_draw_ir_result_valid(
+            accepted_composition, accepted_result, self.width * self.height
+        ) and host_wm_draw_ir_local_recompose_required(selected_backend)):
+            # Preserve the exact validated scene, taskbar, content frames, and
+            # image resources. Only the producer's material target changes.
+            accepted_composition = shared_wm_scene_draw_ir_composition_with_content(
+                scene, taskbar_input.taskbar, frames, DRAW_IR_BACKEND_CPU,
+                1000, taskbar_input.clock_label, 0
+            )
+            accepted_result = executor.render_draw_ir_composition(
+                accepted_composition, images
+            )
+        if not host_wm_draw_ir_result_valid(
+            accepted_composition, accepted_result, self.width * self.height
+        ):
+            if not host_metal_glass_receipts_valid(
+                accepted_composition, accepted_result
+            ):
+                print "[hosted-wm] draw-ir-reject-detail reason=metal-glass-receipt requested={accepted_result.metal_device_glass_requested_count} executed={accepted_result.metal_device_glass_material_count} receipts={accepted_result.metal_device_glass_receipts.len()} unfulfilled={accepted_result.metal_device_glass_unfulfilled_count} readback_handle={accepted_result.backend_handle} readback_device={accepted_result.device_identity} source={accepted_result.readback_source}"
+            else:
+                print "[hosted-wm] draw-ir-reject-detail reason=render-result fallback_required={accepted_result.fallback_required} fallback_reason={accepted_result.fallback_reason} skipped={accepted_result.skipped_command_count} rendered={accepted_result.rendered_command_count} pixels={accepted_result.pixels.len()} expected_pixels={self.width * self.height}"
             return self._reject_engine2d_frame()
-        if result.fallback_required or result.skipped_command_count != 0 or result.rendered_command_count <= 0 or result.pixels.len() != self.width * self.height:
-            print "[hosted-wm] draw-ir-reject-detail reason=render-result fallback_required={result.fallback_required} fallback_reason={result.fallback_reason} skipped={result.skipped_command_count} rendered={result.rendered_command_count} pixels={result.pixels.len()} expected_pixels={self.width * self.height}"
-            return self._reject_engine2d_frame()
-        self.pixel_backend.blit_pixels(0, 0, self.width, self.height, result.pixels)
+        self.pixel_backend.blit_pixels(0, 0, self.width, self.height, accepted_result.pixels)
         self.pixel_backend.present()
         for frame in frames:
             print "[hosted-wm] content-presented scene_revision={self.render_revision} window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}"
