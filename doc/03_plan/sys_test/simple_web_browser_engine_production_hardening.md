@@ -119,14 +119,16 @@ replace their live assertions.
 | `sh scripts/build/build_simple_runtime_sffi.shs` | PASS | runtime TLS provider builds and stages |
 | `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::platform_trust_tests::platform_verifier_initializes' -- --exact` | PASS | platform verifier initializes |
 | `cargo test --offline -p simple-runtime --lib --features runtime-tls 'value::net::browser_http_job_tests::silent_tls_peer_respects_job_deadline_and_retires_slot' -- --exact` | PASS | TLS deadline and slot retirement |
+| `sh scripts/check/check-runtime-https-openssl.shs` | PASS | `rt_tls_client_*` address+SNI OpenSSL trusted/mismatch/untrusted/stall/reset/trickle |
 | `node scripts/check/check-web-render-backend-chromium-sandbox.js` | PASS | mocked Chromium-helper contract |
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | trusted Electron form events only |
 | `CRB_HTML="$PWD/test/09_baselines/web_html_input/vanillastyle_demo.html" timeout 60 xvfb-run -a /home/ormastes/dev/pub/simple/tools/electron-shell/node_modules/.bin/electron --no-sandbox tools/web-render-backend/chromium_event_check.js` | PASS | pinned Electron/Chromium injected-JS rAF and CSS keyframes changed captured pixels |
 | `cargo test --offline --manifest-path src/compiler_rust/runtime/Cargo.toml --lib --no-default-features public_address_policy_rejects_any_mixed_resolution_set` | PASS | mixed-resolution egress policy unit |
 
-These checks do not prove a live HTTPS certificate matrix, a Simple
-`BrowserSession`, SimpleScript, WebIR, DrawIR, Engine2D, or Chromium process
-sandboxing. They do not promote any TLS or SANDBOX production row.
+These checks do not prove a live HTTPS certificate matrix, hosted
+`rt_browser_http_job`, a live HTTPS `BrowserSession`, SimpleScript, WebIR,
+DrawIR, Engine2D, or Chromium process sandboxing. They do not promote any TLS
+or SANDBOX production row.
 
 ## False-green repairs
 

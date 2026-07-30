@@ -198,6 +198,16 @@ Host C containment/TLS checks are supporting evidence. Until the pure-Simple
 target runs the affected scenarios, do not claim a browser runtime PASS or
 substitute bootstrap/Rust-seed execution.
 
+Run the local OpenSSL client ABI gate with:
+
+```bash
+sh scripts/check/check-runtime-https-openssl.shs
+```
+
+It covers `rt_tls_client_*` address+SNI trusted, mismatch, untrusted, stall,
+reset, and trickle cases. It does not exercise hosted `rt_browser_http_job` or
+a live `BrowserSession`, and cannot promote a TLS production row.
+
 ### Event-routing proof launch
 
 Run the event proof only with a fresh Aetheric admission receipt and matching

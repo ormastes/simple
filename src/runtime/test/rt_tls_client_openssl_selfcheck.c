@@ -84,7 +84,8 @@ static void *serve_once(void *raw) {
     int client = -1;
     SSL *ssl = NULL;
     if (!ctx || SSL_CTX_use_certificate_chain_file(ctx, server->cert_path) != 1 ||
-        SSL_CTX_use_PrivateKey_file(ctx, server->key_path, SSL_FILETYPE_PEM) != 1) {
+        SSL_CTX_use_PrivateKey_file(ctx, server->key_path, SSL_FILETYPE_PEM) != 1 ||
+        SSL_CTX_check_private_key(ctx) != 1) {
         atomic_fetch_add(&failures, 1);
         goto done;
     }

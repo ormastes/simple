@@ -2312,3 +2312,9 @@ implementation in progress / target evidence blocked
   native compilation completed with zero failed files; the produced probe hit
   the existing unhealthy native-runtime segfault, so no live interaction PASS
   is claimed.
+- local TLS ABI gate restoration (2026-07-30): Missing fixtures made negative
+  cases vacuous and obscured the whole-gate failure behind trusted-path errors.
+  Restored fixtures plus file and key-pair preflight now fail closed; trusted,
+  mismatch, untrusted, stall, reset, and trickle modes pass. This proves only
+  `rt_tls_client_*` address+SNI behavior, not hosted `rt_browser_http_job`, a
+  live `BrowserSession`, or a TLS production row.
