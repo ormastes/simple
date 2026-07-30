@@ -827,7 +827,31 @@ impl Lowerer {
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
         let recv_hir = Box::new(self.lower_expr(receiver, ctx)?);
-        let elem_ty = self.get_index_element_type(recv_hir.ty).unwrap_or(TypeId::ANY);
+        // Per-INDEX element type. `get_index_element_type` has no index and
+        // returned one type for every position (element 0's type / ANY),
+        // which mis-typed every field of a HETEROGENEOUS tuple past index 0:
+        // `("x", 7).1` was typed text, so MIR's type-directed unbox tail
+        // applied a string cast to a tag-boxed int (read 56 = 7<<3, and
+        // statements consuming it were silently dropped downstream), and
+        // `(1.5, 2).1` was typed f64 (float-unboxed an int to a denormal).
+        // Homogeneous tuples were only accidentally correct. See
+        // doc/08_tracking/bug/native_mixed_tuple_field1_statement_drop_2026-07-29.md
+        let tuple_elem_ty = |tid: TypeId| -> Option<TypeId> {
+            match self.module.types.get(tid) {
+                Some(HirType::Tuple(elems)) => Some(elems.get(index).copied().unwrap_or(TypeId::ANY)),
+                Some(HirType::LabeledTuple(fields)) => {
+                    Some(fields.get(index).map(|(_, t)| *t).unwrap_or(TypeId::ANY))
+                }
+                _ => None,
+            }
+        };
+        let elem_ty = tuple_elem_ty(recv_hir.ty)
+            .or_else(|| match self.module.types.get(recv_hir.ty) {
+                Some(HirType::Pointer { inner, .. }) => tuple_elem_ty(*inner),
+                _ => None,
+            })
+            .or_else(|| self.get_index_element_type(recv_hir.ty).ok())
+            .unwrap_or(TypeId::ANY);
 
         let idx_hir = Box::new(HirExpr {
             kind: HirExprKind::Integer(index as i64),
@@ -945,6 +969,32 @@ impl Lowerer {
                             }
                         }
                     }
+                }
+            }
+        }
+
+        // Per-index element type for tuple receivers with a constant index
+        // (`m[1]` over `(text, i64)`), mirroring lower_tuple_index's fix:
+        // the index-blind element type is element 0's type, which mis-types
+        // every heterogeneous element past index 0 and mis-directs MIR's
+        // type-directed unbox. See
+        // doc/08_tracking/bug/native_mixed_tuple_field1_statement_drop_2026-07-29.md
+        let mut elem_ty = elem_ty;
+        if let HirExprKind::Integer(n) = idx_hir.kind {
+            if n >= 0 {
+                let idx = n as usize;
+                let per_index = match self.module.types.get(recv_hir.ty) {
+                    Some(HirType::Tuple(elems)) => elems.get(idx).copied(),
+                    Some(HirType::LabeledTuple(fields)) => fields.get(idx).map(|(_, t)| *t),
+                    Some(HirType::Pointer { inner, .. }) => match self.module.types.get(*inner) {
+                        Some(HirType::Tuple(elems)) => elems.get(idx).copied(),
+                        Some(HirType::LabeledTuple(fields)) => fields.get(idx).map(|(_, t)| *t),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                if let Some(t) = per_index {
+                    elem_ty = t;
                 }
             }
         }

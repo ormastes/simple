@@ -172,6 +172,17 @@ impl<'a> MirLowerer<'a> {
             .and_then(|tr| tr.get(receiver_ty))
             .is_some_and(|t| matches!(t, HirType::Tuple(_) | HirType::LabeledTuple(_)));
 
+        if std::env::var("SIMPLE_TRACE_TUPLE_FIELD").is_ok() {
+            eprintln!(
+                "[tuple-field-trace] field_index={} expr_ty={:?} receiver_ty={:?} resolved={:?} is_tuple={}",
+                field_index,
+                expr_ty,
+                receiver_ty,
+                self.type_registry.and_then(|tr| tr.get(receiver_ty)).map(|t| format!("{:?}", t).chars().take(40).collect::<String>()),
+                is_tuple
+            );
+        }
+
         if let Some(HirType::Bitfield { fields, .. }) = self.type_registry.and_then(|tr| tr.get(receiver_ty)) {
             if let Some(field) = fields.get(field_index) {
                 let mask = if field.bit_width >= 64 {
@@ -237,7 +248,7 @@ impl<'a> MirLowerer<'a> {
             })?;
 
             let target = CallTarget::from_name("rt_tuple_get");
-            self.with_func(|func, current_block| {
+            let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
                 block.instructions.push(MirInst::Call {
@@ -246,7 +257,17 @@ impl<'a> MirLowerer<'a> {
                     args: vec![receiver_reg, index_reg],
                 });
                 dest
-            })
+            })?;
+            // rt_tuple_get returns the stored tagged RuntimeValue verbatim
+            // (lower_tuple_expr BoxInt/BoxFloat/rt_value_bool-boxes every
+            // native element at construction). Returning it raw made every
+            // int-typed tuple field read a tag-boxed value (t.1 on
+            // ("x", 7) read 56 = 7<<3, and statements consuming it were
+            // silently dropped downstream) — while the equivalent t[1]
+            // index path already unboxed. Route through the SAME shared
+            // type-directed unbox helper the index/dict read paths use. See
+            // doc/08_tracking/bug/native_mixed_tuple_field1_statement_drop_2026-07-29.md
+            self.unbox_dict_read_result(raw_result, expr_ty)
         } else {
             // Struct field access — direct memory load at byte offset
             let byte_offset = (field_index as u32) * 8;

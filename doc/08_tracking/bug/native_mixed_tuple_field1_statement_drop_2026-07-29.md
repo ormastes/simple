@@ -1,8 +1,42 @@
 # Native lane: reading field 1 of a mixed (text, i64) tuple silently drops statements
 
-**Status:** open — found (and separated from the optional-extraction bug)
-while validating the Some-binding fix. Pre-existing: the deployed seed
-exhibits it MORE broadly than the patched debug seed.
+**Status:** ROOT-CAUSED and FIXED in the seed's lowering (pending seed
+redeploy). TWO stacked causes, both index-blind element typing:
+
+1. HIR: `lower_tuple_index` (numeric `.N` access) and the generic
+   `lower_index` (constant `m[N]`) resolved the element type WITHOUT the
+   index via `get_index_element_type`, i.e. every position got element
+   0's type. On a heterogeneous tuple, field 1 was typed as field 0
+   (`("x",7).1` typed text; `(1.5,2).1` typed f64), so MIR's
+   type-directed unbox tail misfired: string-cast of a tag-boxed int
+   left 56 = 7<<3 flowing into statements that then dropped silently;
+   float-unbox of an int printed denormals. Homogeneous tuples were only
+   accidentally correct. Fixed: per-index element type from
+   `HirType::Tuple`/`LabeledTuple` (through one Pointer level), falling
+   back to the legacy resolution for non-tuple receivers.
+2. MIR: `lower_field_access_expr`'s tuple branch returned the
+   `rt_tuple_get` result verbatim — construction boxes every native
+   element (`BoxInt`/`BoxFloat`/`rt_value_bool`), so reads must apply
+   the same type-directed unbox the index/dict read paths share. Fixed:
+   route through `unbox_dict_read_result` (the helper extracted so
+   tag-box fixes land in one place). This also covers labeled-tuple
+   NAMED field access, which lowers through FieldAccess.
+
+Validation (patched debug seed): repro flips (`t.1` prints 7, following
+statements execute; `val n = t.1` then `{n}` prints 7; `{t.1 + 1}`
+prints 8; `m[1]` prints 7); MQTT integration completes end-to-end
+natively — `DECODED: [cafe-accent] CONSUMED: 7` — closing the last gap
+in the packet round-trip chain; homogeneous tuple, struct field, and
+text-text tuple controls byte-identical to the deployed seed; the
+float-int tuple field now prints 2 instead of a denormal (intentional
+behavior change, construction-side BoxFloat of int-typed literals in
+tuple literals remains as designed since the literal is coerced to f64).
+The optional-Some extraction fix (same file lineage) revalidated green
+in combination.
+
+Originally: open — found (and separated from the optional-extraction
+bug) while validating the Some-binding fix. Pre-existing: the deployed
+seed exhibits it MORE broadly than the patched debug seed.
 **Severity:** silent statement drops on the DEFAULT engine — a `print`
 interpolating the i64 field of a mixed tuple simply does not execute, and
 inside an if-val then-block every statement FROM that point is skipped,
