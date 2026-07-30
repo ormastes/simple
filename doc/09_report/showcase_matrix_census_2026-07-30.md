@@ -343,3 +343,111 @@ fetch and my read. Origin `main` was fine (`ls-remote` confirmed
 `7a18961e303`, with the restore still an ancestor). **Use the sha from
 `git ls-remote` as the base, never a re-read of `FETCH_HEAD`, when landing
 from a shared clone.**
+
+## Deployment pass (2026-07-30) — wall 6 CLEARED without deploying; NO deployment performed; deployed toolchain is NON-CANONICAL
+
+### LOUD FINDING: the live compiler is a no-LLVM build (PROVED)
+
+`scripts/check/check-compiler-provenance.shs` on the live
+`bin/release/x86_64-unknown-linux-gnu/simple` (the target of the
+`bin/simple` symlink) reports **`backends: llvm::=0 lld::=0`**, the
+**"LLVM codegen linked" marker `absent`**, `lineage: HYBRID: 1 Simple
+symbol + 15161 Rust-mangled`, size **57,345,808**, mtime **2026-07-29
+06:00:33**, sha256 `40edbb4989132623…`.
+
+Earlier in this same session the identical path reported
+`backends: llvm::=51356`, marker **PRESENT**, size **145,448,208**,
+sha256 `e5c461a5f0cba9ba…`. **The good LLVM binary was replaced by a
+no-LLVM one.**
+
+The two statements the coordinator flagged as "in tension" are in fact
+consistent — there are **three** artifacts, not two:
+`doc/09_report/seed_redeploy_readiness_2026-07-30.md` compares its
+154,084,544-byte candidate against a *then*-deployed **145,448,208**-byte
+LLVM binary (markers identical), and separately **warns** that "a plain
+`cargo build --release` produces a NO-LLVM binary (57 MB, LLVM marker
+absent) — not deploy-equivalent". The artifact live right now matches that
+warning exactly. So the session has, since 2026-07-29 06:00, been
+measuring against the non-canonical no-LLVM toolchain. Canonical recipe
+per that report: `cargo build --profile bootstrap -p simple-driver
+--features llvm`.
+
+**Rollback/forensics preserved, nothing overwritten.** Both artifacts are
+saved outside the repo at
+`<scratchpad>/binforensics/simple.deployed-noLLVM-2026-07-29.bak` and
+`<scratchpad>/binforensics/simple.goodLLVM-e5c461a5.bak`. The good LLVM
+baseline still exists in-tree at `build/fable_s2/runtime/simple`
+(145,448,208 / `e5c461a5f0cba9ba`, exact match). Only **one** deploy path
+is live: `bin/release/x86_64-unknown-linux-gnu/` (with `bin/simple`
+symlinked to it); `bin/release/linux-x86_64/simple` does **not** exist.
+
+Restoring the canonical binary is a one-command shared-state change
+(`cp build/fable_s2/runtime/simple <path>.new && mv <path>.new <path>`)
+but it mutates the toolchain every parallel lane is using mid-flight, so
+it is **not** done autonomously here — flagged for an explicit decision.
+
+### No deployment was possible (PROVED)
+
+- The GO candidate path `scratchpad/cargo_target_w/bootstrap/simple` is
+  **ABSENT** (scratchpad swept); no 154,084,544-byte /
+  `28e528ccd55d642d…` artifact survives anywhere on this host.
+- Its own readiness report's headline is **"Recommendation: NO-GO — one
+  blocking, candidate-only regression"**, so even if present it was not
+  sanctioned for deployment.
+
+### Wall 6 CLEARED — and it needed no deployment at all
+
+The barrier was my own provider choice, not a missing build: I had only
+ever passed the **bootstrap** runtime `.so`. Passing the **release**
+provider instead —
+`src/compiler_rust/target/release/libsimple_runtime.so` (9,368,952 bytes,
+2026-07-30) with its attested sha256 — yields
+**`runtime_provider_status=pass`**. The gate then ran for **40s** (versus
+≤1s at every previous wall) and reached a genuinely new failure.
+
+### NEW wall 8: `production-native-build-failed` — stale-binary, PROVED not a source defect
+
+`build/linux-hosted-wm-live-window-evidence/native-build.log`:
+
+```
+Build failed: failed to parse .../src/os/hosted/hosted_browser_renderer_process.spl
+at 970:13 during discovery: Unexpected token: expected identifier, found Dot
+```
+
+Line 970 col 13 is the `.` of `self.pid = browser_renderer_spawn_sandboxed(...)`
+inside a `me begin_start(...)` method — i.e. the prefix-form receiver
+whose synthesized name is `self`.
+
+**Stale-binary, not a source bug (PROVED by differential parse):** the
+Jul-29 deployed seed compiles that same file **past** the parse phase
+(it fails later, in the *semantic* phase), while the Jul-28
+`build/redeploy_out/simple_stage2` — the newest self-hosted-lineage
+binary on this host, and the one the gate requires since it forbids the
+seed — fails **at parse**. So the gate needs a *newer pure-Simple
+self-hosted* binary.
+
+**And none exists here:** every other self-hosted-lineage build is older
+(`build/aggfix/*`, `build/coverage-bootstrap-586*/stage3`: 2026-07-27),
+so stage2 (2026-07-28 00:11) is the newest available and it is already
+too old. Wall 8 therefore resolves **only** via the bootstrap/redeploy
+lane producing a fresh self-hosted binary — the same lane whose candidate
+is currently NO-GO and missing. Not chased or worked around here, and the
+gate was not weakened.
+
+### Cells #4-#6 status
+
+**BLOCKED** — still, but the barrier moved and is now one lane away:
+walls 1-5 pass, **wall 6 passes**, wall 7 passes, and wall 8 is a stale
+self-hosted binary. Settling sequence:
+1. bootstrap/redeploy lane produces a fresh pure-Simple self-hosted
+   binary (canonical recipe above) that parses `self.field = …` in `me`
+   methods;
+2. re-run the gate in a clean worktree with `SIMPLE_BIN=<that binary>`,
+   `SIMPLE_WM_RUNTIME_LIB=src/compiler_rust/target/release/libsimple_runtime.so`
+   plus its attested sha256;
+3. expect the native-build to complete and the ~25 window/input/semantic
+   assertions to execute for the first time on this host.
+
+**Scoreboard: 0 GREEN, 2 CLAIMED, 5 BLOCKED, 0 UNKNOWN** — unchanged in
+count. Wall 6 is retired; the live-toolchain finding above is the pass's
+most consequential result.
