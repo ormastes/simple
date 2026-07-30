@@ -73,3 +73,14 @@ implementation-in-progress
   dirty/stale and has no receipt. D1 `1728` is held locally and MUST NOT MERGE;
   D2 stopped without a commit and remains pending review/unmerged. No runtime,
   full-browser, RenderDoc, performance, or goal PASS is claimed.
+- reconcile: 2026-07-30 Batch 19 exact repository HEAD
+  `165d7b3a8c799163e99321c56d0b4310c3b79fb4` contains bounded `<abbr>`
+  inline-flow behavior (`8beb64585b2`), duplicate-offset keyframe source-order
+  cascading (`2078c3dfab4`), and the hosted attachment-navigation activation
+  boundary (`165d7b3a8c7`). All three are STATIC/EVIDENCE-HELD; animation
+  runtime remains unavailable. Stage-4 admission is NONE: the `807182` build
+  is dirty, divergent, and has no receipt. D1 and D2 remain held on lineage
+  through `06dc5620781` and MUST NOT MERGE; D3 is active and uncommitted.
+  Existing inventory and scenario counts remain governed by the canonical
+  plans. No runtime, docgen, RenderDoc, performance, full-browser, goal, or
+  aggregate HTML/CSS PASS is claimed.

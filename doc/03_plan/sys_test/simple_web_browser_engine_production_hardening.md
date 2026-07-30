@@ -1281,3 +1281,25 @@ has no receipt. D1 `1728` is held locally and MUST NOT MERGE. D2 stopped
 without a commit and remains pending review/unmerged. Therefore this batch
 admits no runtime, docgen, 10,000-cycle, performance, full-browser, or goal
 PASS.
+
+## Batch 19 final evidence boundary
+
+Exact repository HEAD is
+`165d7b3a8c799163e99321c56d0b4310c3b79fb4`.
+
+- `<abbr>` inline-flow and canonical text-rendering evidence is integrated at
+  `8beb64585b2` and remains STATIC/EVIDENCE-HELD.
+- Duplicate-offset CSS keyframe cascading is integrated at `2078c3dfab4`.
+  Its unit and four-step Draw IR/Engine2D scenario/manual are static-held;
+  qualified runtime execution remains unavailable.
+- Attachment-navigation activation rejection is integrated at `165d7b3a8c7`
+  and remains STATIC/EVIDENCE-HELD.
+- Stage-4 admission is NONE. The `807182` build is dirty, divergent from
+  current source, and has no provenance receipt.
+- D1 and D2 remain held on lineage through `06dc5620781`; both are
+  **DO NOT MERGE**. D3 remains active and uncommitted.
+
+Existing evidence counts and RED/evidence-blocked classifications remain in
+force except for the explicit `<abbr>` reclassification and animation-row
+extension in the canonical HTML/CSS plan. No runtime, docgen, 10,000-cycle,
+performance, full-browser, goal, or aggregate HTML/CSS PASS is admitted.

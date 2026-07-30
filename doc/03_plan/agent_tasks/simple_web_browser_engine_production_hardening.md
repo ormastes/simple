@@ -896,3 +896,23 @@ Root production-browser coordinator remains merge owner and final reviewer.
 The bounded static integrations do not supply a target-runtime, docgen,
 10,000-cycle, performance, full-browser, or goal PASS. No bootstrap or stale
 artifact may substitute for Stage-4 admission.
+
+## Production browser batch 19 reconciliation (2026-07-30)
+
+Exact repository HEAD:
+`165d7b3a8c799163e99321c56d0b4310c3b79fb4`.
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `stage4_admission` | The `807182` full-CLI build is dirty, divergent from current source, and has no provenance receipt. | NONE; no runtime/docgen/performance admission |
+| `html_abbr_inline_flow` | Native `<abbr>` remains in inline flow and lowers through the existing text Draw IR path. | INTEGRATED `8beb64585b2`; STATIC/EVIDENCE-HELD |
+| `css_duplicate_keyframe_offset` | Equal-offset keyframes cascade once in source order, retaining distinct earlier properties while later same-property declarations win. | INTEGRATED `2078c3dfab4`; STATIC/EVIDENCE-HELD, runtime unavailable |
+| `attachment_navigation_boundary` | Hosted navigation rejects attachment activation before publication across the policy/session/process boundary. | INTEGRATED `165d7b3a8c7`; STATIC/EVIDENCE-HELD |
+| `D1` | Held dispatch candidate remains on lineage through `06dc5620781`. | DO NOT MERGE |
+| `D2` | Held dispatch candidate remains on lineage through `06dc5620781`. | DO NOT MERGE |
+| `D3` | Follow-on dispatch lane is still being developed. | ACTIVE / UNCOMMITTED |
+
+Root remains merge owner and final reviewer. Batch 19 does not change existing
+inventory/scenario accounting except where the canonical HTML/CSS plan
+explicitly reclassifies `<abbr>` and extends the animation row. No runtime,
+docgen, performance, full-browser, goal, or aggregate HTML/CSS PASS is claimed.
