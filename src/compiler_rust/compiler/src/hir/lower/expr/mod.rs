@@ -536,6 +536,81 @@ impl Lowerer {
         Err(self.unknown_wrapper_static_member_error(type_name, member))
     }
 
+    /// Classify a receiver TypeId for the text-index census.
+    fn text_index_census_class(&self, ty: TypeId) -> &'static str {
+        if ty == TypeId::STRING {
+            return "TEXT";
+        }
+        if ty == TypeId::ANY {
+            return "ANY";
+        }
+        match self.module.types.get(ty) {
+            Some(HirType::String) => "TEXT",
+            Some(HirType::Array { .. }) => "ARRAY",
+            Some(HirType::Dict { .. }) => "DICT",
+            Some(HirType::Tuple(_)) | Some(HirType::LabeledTuple(_)) => "TUPLE",
+            Some(HirType::Simd { .. }) => "SIMD",
+            Some(HirType::Any) => "ANY",
+            Some(HirType::Void) => "VOID",
+            Some(HirType::Pointer { inner, .. }) => {
+                // One pointer-strip: `T?` / `&T` text receivers are common.
+                let inner = *inner;
+                if inner == TypeId::STRING
+                    || matches!(self.module.types.get(inner), Some(HirType::String))
+                {
+                    "TEXT"
+                } else {
+                    "OTHER"
+                }
+            }
+            Some(_) => "OTHER",
+            None => "UNRESOLVED",
+        }
+    }
+
+    /// Text-index CHARACTER-alignment census (Stage 1 tooling).
+    ///
+    /// Enabled by SIMPLE_TEXT_INDEX_CENSUS=1; silent and free otherwise.
+    /// Emits one record per call site of an index-unit-sensitive primitive,
+    /// CLASSIFIED BY RECEIVER TYPE, so the migration can be sized by
+    /// text-typed sites instead of by grep -- `.len()` alone has ~122k
+    /// syntactic hits that are overwhelmingly arrays/collections, and a
+    /// measured corpus put ARRAY receivers ahead of TEXT 2.3 to 1.
+    ///
+    /// stdout, not eprint: native seed builds drop eprint, and this is a
+    /// report stream rather than a diagnostic.
+    /// See doc/03_plan/language/text_index_census_stage1_2026-07-30.md
+    fn emit_text_index_census(&self, method: &str, recv_ty: TypeId) {
+        const WATCHED: &[&str] = &[
+            "len",
+            "length",
+            "index_of",
+            "last_index_of",
+            "slice",
+            "substring",
+            "char_at",
+            "char_code_at",
+            "bytes",
+        ];
+        if !WATCHED.contains(&method) {
+            return;
+        }
+        if std::env::var("SIMPLE_TEXT_INDEX_CENSUS").is_err() {
+            return;
+        }
+        let file = self
+            .current_file
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown>".to_string());
+        println!(
+            "TEXTCENSUS\t{}\t{}\t{}",
+            self.text_index_census_class(recv_ty),
+            method,
+            file
+        );
+    }
+
     fn lower_method_call(
         &mut self,
         receiver: &Expr,
@@ -592,6 +667,11 @@ impl Lowerer {
 
         // Check for SIMD vector instance methods
         let receiver_hir = self.lower_expr(receiver, ctx)?;
+
+        // Stage 1 census hook: placed immediately after the receiver is
+        // lowered, BEFORE the builtin/string-method dispatch below
+        // early-returns, so no watched primitive escapes the count.
+        self.emit_text_index_census(method, receiver_hir.ty);
         if let Some(HirType::Simd { .. }) = self.module.types.get(receiver_hir.ty) {
             if let Some(result) = self.lower_simd_instance_method(&receiver_hir, method, args, ctx)? {
                 return Ok(result);
