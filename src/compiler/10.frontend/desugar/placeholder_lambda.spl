@@ -383,13 +383,26 @@ fn count_placeholders(eid: i64) -> i64:
         return count_placeholders(expr_left[eid])
 
     if tag == EXPR_INTERPOLATED_STRING:
-        var total = 0
+        # Bug (2026-07-30, string_template_multi_placeholder_slot_not_found):
+        # a bare (unnumbered) `_` used more than once across an interpolated
+        # string's `{...}` regions always refers to the SAME implicit bound
+        # value -- the one argument a higher-order callback such as
+        # `.map("{_.0}: {_.1}")` receives per call -- unlike an ordinary
+        # expression like `_ + _`, where each `_` is legitimately a distinct
+        # positional lambda parameter. Summing per-occurrence (as the
+        # branches above do) over-counts and makes
+        # transform_placeholder_lambda synthesize a lambda with more
+        # parameters than `.map` ever supplies, leaving the extra `__pN`
+        # unbound ("variable `__pN` not found"). Collapse to presence
+        # (0 or 1) so the whole template shares one slot; see the matching
+        # note in replace_placeholders's EXPR_INTERPOLATED_STRING arm.
         val parts = expr_args[eid]
         var i = 0
         while i < parts.len():
-            total = total + count_placeholders(parts[i])
+            if count_placeholders(parts[i]) > 0:
+                return 1
             i = i + 1
-        return total
+        return 0
 
     if tag == EXPR_MATCH:
         # Count placeholders in scrutinee only; arms are a scoping boundary.
@@ -522,12 +535,31 @@ fn replace_placeholders(eid: i64) -> i64:
         return expr_spread(new_inner, 0)
 
     if tag == EXPR_INTERPOLATED_STRING:
+        # See the matching note in count_placeholders's
+        # EXPR_INTERPOLATED_STRING arm: every bare `_` inside one
+        # interpolated string shares a SINGLE slot (reserved once from
+        # _ph_counter), instead of each occurrence grabbing its own
+        # incrementing slot.
         val old_parts = expr_args[eid]
-        var new_parts: [i64] = []
+        var has_bare = false
         var i = 0
         while i < old_parts.len():
-            new_parts.push(replace_placeholders(old_parts[i]))
+            if count_placeholders(old_parts[i]) > 0:
+                has_bare = true
             i = i + 1
+        var new_parts: [i64] = []
+        if has_bare:
+            val slot = _ph_counter
+            _ph_counter = _ph_counter + 1
+            i = 0
+            while i < old_parts.len():
+                new_parts.push(replace_placeholders_fixed_slot(old_parts[i], slot))
+                i = i + 1
+        else:
+            i = 0
+            while i < old_parts.len():
+                new_parts.push(replace_placeholders(old_parts[i]))
+                i = i + 1
         return expr_interpolated_string(new_parts, 0)
 
     if tag == EXPR_MATCH:
@@ -535,6 +567,144 @@ fn replace_placeholders(eid: i64) -> i64:
         # Arms are a scoping boundary: arm bodies and patterns are left
         # unchanged so that `case _:` wildcards are not mis-replaced.
         val new_scrutinee = replace_placeholders(expr_left[eid])
+        val arms = expr_args[eid]
+        return expr_match_expr(new_scrutinee, arms, 0)
+
+    # For any other expression type, return as-is
+    eid
+
+# ===== Replace Placeholders (shared fixed slot, for interpolated strings) =====
+
+fn replace_placeholders_fixed_slot(eid: i64, slot: i64) -> i64:
+    """Like replace_placeholders, but every bare `_` maps to the SAME fixed
+    `slot` instead of the incrementing `_ph_counter`. Used only when
+    replacing the parts of ONE interpolated string that contains a bare
+    placeholder (see the shared-slot note in replace_placeholders's
+    EXPR_INTERPOLATED_STRING arm) -- all bare `_` occurrences inside one
+    template denote the SAME bound value, not independent positional lambda
+    parameters.
+    """
+    if eid < 0 or eid >= expr_tag.len():
+        return eid
+    val tag = expr_tag[eid]
+
+    if tag == EXPR_IDENT:
+        val name = expr_s_val[eid]
+        if name == "_":
+            return expr_ident("__p{slot}", 0)
+        if _ph_has_numbered and not _ph_has_unnumbered:
+            if is_numbered_placeholder(name):
+                val num = parse_placeholder_number(name)
+                val param_idx = num - 1
+                return expr_ident("__p{param_idx}", 0)
+        return eid
+
+    if tag == EXPR_BINARY:
+        val new_left = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val new_right = replace_placeholders_fixed_slot(expr_right[eid], slot)
+        return expr_binary(expr_i_val[eid], new_left, new_right, 0)
+
+    if tag == EXPR_UNARY:
+        val new_operand = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        return expr_unary(expr_i_val[eid], new_operand, 0)
+
+    if tag == EXPR_CALL:
+        # Replace in callee, but transform nested args independently
+        val new_callee = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val old_args = expr_args[eid]
+        var new_args: [i64] = []
+        var i = 0
+        while i < old_args.len():
+            new_args.push(transform_placeholder_lambda(old_args[i]))
+            i = i + 1
+        return expr_call(new_callee, new_args, 0)
+
+    if tag == EXPR_METHOD_CALL:
+        # Replace in receiver, but transform nested args independently
+        val new_receiver = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val old_args = expr_args[eid]
+        var new_args: [i64] = []
+        var i = 0
+        while i < old_args.len():
+            new_args.push(transform_placeholder_lambda(old_args[i]))
+            i = i + 1
+        return expr_method_call(new_receiver, expr_s_val[eid], new_args, 0)
+
+    if tag == EXPR_FIELD_ACCESS:
+        val new_base = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        return expr_field_access(new_base, expr_s_val[eid], 0)
+
+    if tag == EXPR_INDEX:
+        val new_base = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val new_index = replace_placeholders_fixed_slot(expr_right[eid], slot)
+        return expr_index(new_base, new_index, 0)
+
+    if tag == EXPR_SLICE:
+        val new_base = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val new_start = replace_placeholders_fixed_slot(expr_right[eid], slot)
+        val new_end = replace_placeholders_fixed_slot(expr_extra[eid], slot)
+        return expr_slice(new_base, new_start, new_end, 0)
+
+    if tag == EXPR_IF:
+        val new_cond = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val new_then = replace_placeholders_fixed_slot(expr_right[eid], slot)
+        val new_else = replace_placeholders_fixed_slot(expr_extra[eid], slot)
+        return expr_if_expr(new_cond, new_then, new_else, 0)
+
+    if tag == EXPR_ARRAY_LIT:
+        val old_items = expr_args[eid]
+        var new_items: [i64] = []
+        var i = 0
+        while i < old_items.len():
+            new_items.push(replace_placeholders_fixed_slot(old_items[i], slot))
+            i = i + 1
+        return expr_array_lit(new_items, 0)
+
+    if tag == EXPR_TUPLE:
+        val old_items = expr_args[eid]
+        var new_items: [i64] = []
+        var i = 0
+        while i < old_items.len():
+            new_items.push(replace_placeholders_fixed_slot(old_items[i], slot))
+            i = i + 1
+        return expr_tuple(new_items, 0)
+
+    if tag == EXPR_DICT_LIT:
+        val old_keys = expr_args[eid]
+        val old_vals = expr_stmts[eid]
+        var new_keys: [i64] = []
+        var new_vals: [i64] = []
+        var i = 0
+        while i < old_keys.len():
+            new_keys.push(replace_placeholders_fixed_slot(old_keys[i], slot))
+            new_vals.push(replace_placeholders_fixed_slot(old_vals[i], slot))
+            i = i + 1
+        return expr_dict_lit(new_keys, new_vals, 0)
+
+    if tag == EXPR_NULL_COALESCE:
+        val new_left = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        val new_right = replace_placeholders_fixed_slot(expr_right[eid], slot)
+        return expr_null_coalesce(new_left, new_right, 0)
+
+    if tag == EXPR_CAST:
+        val new_val = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        return expr_cast(new_val, expr_i_val[eid], 0)
+
+    if tag == EXPR_SPREAD:
+        val new_inner = replace_placeholders_fixed_slot(expr_left[eid], slot)
+        return expr_spread(new_inner, 0)
+
+    if tag == EXPR_INTERPOLATED_STRING:
+        val old_parts = expr_args[eid]
+        var new_parts: [i64] = []
+        var i = 0
+        while i < old_parts.len():
+            new_parts.push(replace_placeholders_fixed_slot(old_parts[i], slot))
+            i = i + 1
+        return expr_interpolated_string(new_parts, 0)
+
+    if tag == EXPR_MATCH:
+        val new_scrutinee = replace_placeholders_fixed_slot(expr_left[eid], slot)
         val arms = expr_args[eid]
         return expr_match_expr(new_scrutinee, arms, 0)
 

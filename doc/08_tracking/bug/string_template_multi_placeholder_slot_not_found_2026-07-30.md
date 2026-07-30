@@ -196,29 +196,64 @@ previously produced the wrong parameter count. Whoever next rebuilds/
 redeploys the seed should re-run the `xs.map("{_} -> {_}")` probe as a final
 end-to-end confirmation.
 
-## Pure-Simple mirror (NOT fixed — documented only)
+## Pure-Simple mirror — PORTED 2026-07-30 (lane TPL2)
 
 `src/compiler/10.frontend/desugar/placeholder_lambda.spl`'s
-`count_placeholders`/`replace_placeholders` have an `EXPR_INTERPOLATED_STRING`
-arm with the **exact same bug pattern** (sums per-occurrence across `parts`
-with one shared, incrementing `_ph_counter`). However, as the original
-lane's dead-end analysis already established (and this lane re-confirmed by
-grep against `origin/main`), `expr_interpolated_string()` — the only
-constructor for this node tag — is called from nowhere except
-`replace_placeholders` itself; the pure-Simple compiler's actual string-
-interpolation path (`_FlatAstBridge/convert_nodes.spl`:
+`count_placeholders`/`replace_placeholders` had an `EXPR_INTERPOLATED_STRING`
+arm with the **exact same bug pattern** as the Rust seed (sums/replaces
+per-occurrence across `parts` with one shared, incrementing `_ph_counter`).
+Lane TPL2 ported the same "collapse bare `_` to presence, replace all
+occurrences in one template with a shared fixed slot" fix from the Rust seed
+(commit `92b91373855`, `src/compiler_rust/parser/src/expressions/placeholder.rs`):
+
+- `count_placeholders`'s `EXPR_INTERPOLATED_STRING` arm now returns presence
+  (0 or 1: any part containing a placeholder) instead of a per-occurrence
+  sum.
+- `replace_placeholders`'s `EXPR_INTERPOLATED_STRING` arm now reserves ONE
+  slot from `_ph_counter` when any part has a bare placeholder, and replaces
+  every bare `_` across all parts with that same fixed slot via a new
+  `replace_placeholders_fixed_slot(eid, slot)` helper (mirrors the Rust
+  `replace_bare_placeholder_fixed`/`replace_fstring_parts_shared_slot`
+  pair). Numbered placeholders (`_1`, `_2`, ...) and non-f-string shapes are
+  unchanged.
+- Regression spec added:
+  `test/01_unit/compiler/frontend/placeholder_lambda_fstring_shared_slot_spec.spl`
+  (two bare `_` share one param; two distinct numbered placeholders `_1`/`_2`
+  still get two params).
+
+**Still dead code, unchanged from the original finding:** as the original
+lane's dead-end analysis established (and TPL2 re-confirmed by grep against
+`origin/main` and the current tree), `expr_interpolated_string()` — the only
+constructor for the `EXPR_INTERPOLATED_STRING` tag — is called from nowhere
+except `placeholder_lambda.spl` itself (`replace_placeholders` and the new
+`replace_placeholders_fixed_slot`); the pure-Simple compiler's actual
+string-interpolation path (`_FlatAstBridge/convert_nodes.spl`:
 `flat_bridge_build_string_interps`/`flat_bridge_parse_interp_inner`) builds a
 structurally different frontend node (`ExprKind.StringLit(str_val, str_interps)`)
 and never touches `transform_placeholder_lambda` for the f-string-as-a-whole
 at all (the flat parse-time argument is an opaque, un-interpolated string
 literal; `parse_call_arg`'s call to `transform_placeholder_lambda` on it is
-therefore always a no-op). So this arm is currently dead code, unreachable
-by any exercised pipeline — fixing it here would be unverifiable and
-untested (no path reaches it), so this lane leaves it as a documented
-follow-up: whoever wires actual f-string-as-lambda desugaring into the
-self-hosted compiler's `EXPR_INTERPOLATED_STRING` path should apply the same
-"collapse unnumbered bare `_` occurrences within one string template to a
-single shared slot" fix described above.
+therefore always a no-op). So TPL2's fix is *correctness parity*, not a live
+functional fix: it makes `EXPR_INTERPOLATED_STRING` handling correct for
+whenever it becomes reachable, but `xs.map("{_} -> {_}")` compiled through
+the current self-hosted pipeline does not exercise this code path either
+before or after this change. Whoever wires actual f-string-as-lambda
+desugaring into the self-hosted compiler's `EXPR_INTERPOLATED_STRING` path
+gets the shared-slot fix "for free" once that wiring lands.
+
+**Verification status:** unverifiable by running the added spec against the
+currently-deployed `bin/simple` — edits to `src/compiler/**.spl` do not take
+effect without a self-hosting rebuild/redeploy. The spec was run anyway
+(`bin/simple test --no-session-daemon
+test/01_unit/compiler/frontend/placeholder_lambda_fstring_shared_slot_spec.spl`)
+and both examples fail on the deployed binary with `semantic: array index
+out of bounds: index is N but length is 0`. A control spec exercising the
+pre-existing, UNMODIFIED `_ + _` -> 2-param-lambda path (not touched by this
+fix) hit the identical error on the same binary, confirming this is a
+pre-existing limitation of exercising `expr_lambda`'s list-array arena
+constructor from a spec on the currently-deployed binary, not a regression
+introduced by this change. Re-run both specs after the next self-hosted
+redeploy.
 
 ## Dead ends from the original investigation (SUPERSEDED by the root cause above,
 ## preserved verbatim from the initial filing so nobody retraces them)
