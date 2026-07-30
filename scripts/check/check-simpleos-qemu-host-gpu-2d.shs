@@ -676,16 +676,45 @@ processing_selector_evidence_valid() {
     [ "$(grep -ac "^HOST_GPU_DAEMON_SELECTOR processing_backend=$selector[[:space:]]*$" "$log")" -eq 1 ]
 }
 
+new_daemon_instance() {
+    instance_root=$1
+    instance_label=$2
+    mkdir -p "$instance_root"
+    daemon_instance_dir=$(mktemp -d "$instance_root/$instance_label.XXXXXX")
+    daemon_log="$daemon_instance_dir/daemon.log"
+    daemon_identity="$daemon_instance_dir/pid"
+}
+
+daemon_process_live() {
+    daemon_process=$1
+    kill -0 "$daemon_process" 2>/dev/null || return 1
+    daemon_state=$(ps -p "$daemon_process" -o state= 2>/dev/null | awk 'NR == 1 { print $1 }')
+    case "$daemon_state" in ''|Z*) return 1 ;; esac
+}
+
+daemon_instance_matches() {
+    daemon_process=$1
+    daemon_identity=$2
+    [ "$(sed -n '1p' "$daemon_identity" 2>/dev/null || true)" = "$daemon_process" ] || return 1
+    daemon_process_live "$daemon_process"
+}
+
+daemon_ready_for_qemu() {
+    daemon_process=$1
+    daemon_log=$2
+    daemon_identity=$3
+    daemon_instance_matches "$daemon_process" "$daemon_identity" || return 1
+    grep -aq '^HOST_GPU_DAEMON_SELECTOR processing_backend=' "$daemon_log" 2>/dev/null || return 1
+    daemon_instance_matches "$daemon_process" "$daemon_identity"
+}
+
 wait_for_daemon_selector() {
     daemon_process=$1
     daemon_log=$2
-    attempts=${3:-$DAEMON_READY_ATTEMPTS}
+    daemon_identity=$3
+    attempts=${4:-$DAEMON_READY_ATTEMPTS}
     while [ "$attempts" -gt 0 ]; do
-        kill -0 "$daemon_process" 2>/dev/null || return 1
-        if grep -aq '^HOST_GPU_DAEMON_SELECTOR processing_backend=' "$daemon_log" 2>/dev/null; then
-            kill -0 "$daemon_process" 2>/dev/null && return 0
-            return 1
-        fi
+        daemon_ready_for_qemu "$daemon_process" "$daemon_log" "$daemon_identity" && return 0
         sleep 0.1
         attempts=$((attempts - 1))
     done
@@ -693,22 +722,40 @@ wait_for_daemon_selector() {
 }
 
 daemon_ready_self_test() {
-    ready_log=$(mktemp)
+    ready_root=$(mktemp -d)
+    new_daemon_instance "$ready_root" ready
+    ready_log=$daemon_log
+    ready_identity=$daemon_identity
     ready_pid=
     timeout_pid=
-    trap 'rm -f "$ready_log"; [ -z "${ready_pid:-}" ] || kill "$ready_pid" 2>/dev/null || true; [ -z "${timeout_pid:-}" ] || kill "$timeout_pid" 2>/dev/null || true' EXIT
+    stale_pid=
+    early_pid=
+    trap 'rm -rf "$ready_root"; [ -z "${ready_pid:-}" ] || kill "$ready_pid" 2>/dev/null || true; [ -z "${timeout_pid:-}" ] || kill "$timeout_pid" 2>/dev/null || true; [ -z "${stale_pid:-}" ] || kill "$stale_pid" 2>/dev/null || true; [ -z "${early_pid:-}" ] || kill "$early_pid" 2>/dev/null || true' EXIT
     (sleep 0.1; printf '%s\n' 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' >"$ready_log"; sleep 0.2) &
     ready_pid=$!
-    wait_for_daemon_selector "$ready_pid" "$ready_log" 5
+    printf '%s\n' "$ready_pid" >"$ready_identity"
+    wait_for_daemon_selector "$ready_pid" "$ready_log" "$ready_identity" 5
     wait "$ready_pid"
     ready_pid=
-    : >"$ready_log"
+    new_daemon_instance "$ready_root" stale
+    stale_log=$daemon_log
+    stale_identity=$daemon_identity
     sleep 1 &
-    timeout_pid=$!
-    ! wait_for_daemon_selector "$timeout_pid" "$ready_log" 1
-    kill "$timeout_pid" 2>/dev/null || true
-    wait "$timeout_pid" 2>/dev/null || true
-    timeout_pid=
+    stale_pid=$!
+    printf '%s\n' "$((stale_pid + 1))" >"$stale_identity"
+    printf '%s\n' 'HOST_GPU_DAEMON_SELECTOR processing_backend=vulkan' >"$stale_log"
+    ! wait_for_daemon_selector "$stale_pid" "$stale_log" "$stale_identity" 1
+    new_daemon_instance "$ready_root" early
+    early_log=$daemon_log
+    early_identity=$daemon_identity
+    (exit 0) &
+    early_pid=$!
+    printf '%s\n' "$early_pid" >"$early_identity"
+    ! wait_for_daemon_selector "$early_pid" "$early_log" "$early_identity" 2
+    wait "$stale_pid" 2>/dev/null || true
+    stale_pid=
+    wait "$early_pid" 2>/dev/null || true
+    early_pid=
     echo "simpleos_qemu_host_gpu_daemon_ready_self_test=pass"
 }
 
@@ -773,6 +820,17 @@ monitor_guest_max_rss() {
     case "$qemu_max_rss_kib" in ''|*[!0-9]*) qemu_max_rss_kib=0 ;; esac
     case "$combined_max_rss_kib" in ''|*[!0-9]*) combined_max_rss_kib=0 ;; esac
     while kill -0 "$monitored_timeout_pid" 2>/dev/null; do
+        if ! daemon_process_live "$monitored_daemon_pid"; then
+            printf '%s\n' \
+                "daemon_max_rss_kib=$daemon_max_rss_kib" \
+                "qemu_max_rss_kib=$qemu_max_rss_kib" \
+                "combined_max_rss_kib=$combined_max_rss_kib" \
+                'daemon_lifetime=failed' >"$rss_output"
+            monitored_qemu_pid=$(sed -n '1p' "$monitored_qemu_pid_file" 2>/dev/null || true)
+            case "$monitored_qemu_pid" in ''|*[!0-9]*|0) ;; *) kill -KILL "$monitored_qemu_pid" 2>/dev/null || true ;; esac
+            kill -KILL "$monitored_timeout_pid" 2>/dev/null || true
+            return 1
+        fi
         monitored_qemu_pid=$(sed -n '1p' "$monitored_qemu_pid_file" 2>/dev/null || true)
         case "$monitored_qemu_pid" in ''|*[!0-9]*|0) sampled_qemu_rss_kib=0 ;; *) sampled_qemu_rss_kib=$(process_rss_sample_kib "$monitored_qemu_pid" || true) ;; esac
         sampled_daemon_rss_kib=$(process_rss_sample_kib "$monitored_daemon_pid" || true)
@@ -785,9 +843,18 @@ monitor_guest_max_rss() {
         printf '%s\n' \
             "daemon_max_rss_kib=$daemon_max_rss_kib" \
             "qemu_max_rss_kib=$qemu_max_rss_kib" \
-            "combined_max_rss_kib=$combined_max_rss_kib" >"$rss_output"
+            "combined_max_rss_kib=$combined_max_rss_kib" \
+            'daemon_lifetime=pass' >"$rss_output"
         sleep "$RSS_SAMPLE_INTERVAL"
     done
+    if ! daemon_process_live "$monitored_daemon_pid"; then
+        printf '%s\n' \
+            "daemon_max_rss_kib=$daemon_max_rss_kib" \
+            "qemu_max_rss_kib=$qemu_max_rss_kib" \
+            "combined_max_rss_kib=$combined_max_rss_kib" \
+            'daemon_lifetime=failed' >"$rss_output"
+        return 1
+    fi
 }
 
 row_rss_evidence_valid() {
@@ -815,11 +882,13 @@ run_qemu_with_rss() {
     qemu_timeout_pid=$!
     monitor_guest_max_rss "$monitored_daemon_pid" "$qemu_timeout_pid" "$qemu_pid_file" "$rss_output" &
     rss_monitor_pid=$!
+    qemu_lifetime_status=0
     wait "$qemu_timeout_pid" 2>/dev/null || true
     qemu_timeout_pid=
-    wait "$rss_monitor_pid" 2>/dev/null || true
+    wait "$rss_monitor_pid" 2>/dev/null || qemu_lifetime_status=$?
     rss_monitor_pid=
     qemu_pid_file=
+    [ "$qemu_lifetime_status" -eq 0 ]
 }
 
 qemu_bin_for_isa() {
@@ -2250,7 +2319,7 @@ self_test_metrics() (
         exit 1
     fi
 
-    sleep 3 &
+    sleep 10 &
     metrics_daemon_pid=$!
     run_qemu_with_rss 1 "$metrics_dir/qemu-phase-1.log" "$metrics_daemon_pid" "$metrics_file" sleep 2
     first_qemu_rss=$(rss_metric_value "$metrics_file" qemu_max_rss_kib)
@@ -2264,6 +2333,16 @@ self_test_metrics() (
     row_rss_evidence_valid "$daemon_rss" "$qemu_rss" "$combined_rss"
     [ "$qemu_rss" -ge "$first_qemu_rss" ]
     [ "$combined_rss" -ge "$first_combined_rss" ]
+
+    RSS_SAMPLE_INTERVAL=0.5
+    lifetime_daemon_pid=
+    (sleep 0.05) &
+    lifetime_daemon_pid=$!
+    if run_qemu_with_rss 2 "$metrics_dir/qemu-daemon-exit.log" "$lifetime_daemon_pid" "$metrics_file" sleep 0.2; then
+        exit 1
+    fi
+    [ "$(rss_metric_value "$metrics_file" daemon_lifetime)" = failed ]
+    wait "$lifetime_daemon_pid" 2>/dev/null || true
     echo "simpleos_qemu_host_gpu_2d_metrics_self_test=pass"
 )
 
@@ -2640,10 +2719,10 @@ run_guest() {
     qemu_accel=$(qemu_accel_for_isa "$isa" "$qemu_bin")
     shm="$BUILD_DIR/$isa.shm"
     serial="$BUILD_DIR/$isa-serial.log"
-    daemon_log="$BUILD_DIR/$isa-daemon.log"
     rss_file="$BUILD_DIR/$isa-rss-metrics"
     kernel=$(kernel_for_isa "$isa")
-    rm -f "$shm" "$serial" "$daemon_log" "$rss_file"
+    new_daemon_instance "$BUILD_DIR" "$isa-daemon"
+    rm -f "$shm" "$serial" "$rss_file"
     if [ "$ACTIVE_HOST:$isa" = macos:aarch64 ]; then
         size_macos_arm64_ram_tail_file "$shm"
         set -- "--shm=$shm" "--shm-offset=$MACOS_ARM64_RAM_TAIL_OFFSET"
@@ -2657,7 +2736,8 @@ run_guest() {
     set -- "$@" --processing-verify-cpu
     "$daemon" "$@" >"$daemon_log" 2>&1 &
     daemon_pid=$!
-    if ! wait_for_daemon_selector "$daemon_pid" "$daemon_log"; then
+    printf '%s\n' "$daemon_pid" >"$daemon_identity"
+    if ! wait_for_daemon_selector "$daemon_pid" "$daemon_log" "$daemon_identity"; then
         cleanup_active_guest
         return 1
     fi
@@ -2687,9 +2767,16 @@ run_guest() {
     esac
     qemu_version=$("$qemu_bin" --version 2>&1 | sed -n '1p')
     qemu_device_args=$(encode_argv_hex "$@")
-    run_qemu_with_rss "$QEMU_TIMEOUT" "$serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
+    if ! daemon_ready_for_qemu "$daemon_pid" "$daemon_log" "$daemon_identity"; then
+        cleanup_active_guest
+        return 1
+    fi
+    probe_qemu_lifetime_valid=0
+    if run_qemu_with_rss "$QEMU_TIMEOUT" "$serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"; then
+        probe_qemu_lifetime_valid=1
+    fi
     printf '\n%s\n' "HOST_GPU_QEMU_EXECUTION argv=$qemu_device_args" >>"$serial"
-    if serial_has_pass "$serial" "$isa" "$qemu_device_args"; then probe_valid=1; else probe_valid=0; fi
+    if [ "$probe_qemu_lifetime_valid" = 1 ] && serial_has_pass "$serial" "$isa" "$qemu_device_args"; then probe_valid=1; else probe_valid=0; fi
     if [ "$probe_valid" = 1 ] &&
        processing_selector_evidence_valid "$daemon_log" "$PROCESSING_SELECTOR" &&
        processing_perf_evidence_valid "$serial" "$daemon_log" "$isa"
@@ -2700,6 +2787,7 @@ run_guest() {
     fi
     production_serial=
     production_qemu_args=
+    production_qemu_lifetime_valid=1
     if [ "$isa" = aarch64 ] && [ "$probe_valid" = 1 ]; then
         production_serial="$BUILD_DIR/aarch64-production-serial.log"
         rm -f "$production_serial"
@@ -2711,7 +2799,14 @@ run_guest() {
                 -device ramfb -device virtio-net-pci -object memory-backend-file,id=hostgpu,share=on,mem-path="$shm",size=8M -device ivshmem-plain,memdev=hostgpu
         fi
         production_qemu_args=$(encode_argv_hex "$@")
-        run_qemu_with_rss "$PRODUCTION_QEMU_TIMEOUT" "$production_serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"
+        if ! daemon_ready_for_qemu "$daemon_pid" "$daemon_log" "$daemon_identity"; then
+            cleanup_active_guest
+            return 1
+        fi
+        production_qemu_lifetime_valid=0
+        if run_qemu_with_rss "$PRODUCTION_QEMU_TIMEOUT" "$production_serial" "$daemon_pid" "$rss_file" "$qemu_bin" "$@"; then
+            production_qemu_lifetime_valid=1
+        fi
         printf '\n%s\n' "HOST_GPU_QEMU_EXECUTION argv=$production_qemu_args" >>"$production_serial"
     fi
     cleanup_active_guest
@@ -2739,11 +2834,14 @@ run_guest() {
             production_valid=1
         fi
     fi
-    if [ "$probe_valid" = 1 ] && [ "$processing_perf_valid" = 1 ] && [ "$execution_evidence_valid" = 1 ] && [ "$production_valid" = 1 ]; then
+    if [ "$probe_valid" = 1 ] && [ "$processing_perf_valid" = 1 ] && [ "$execution_evidence_valid" = 1 ] && [ "$production_valid" = 1 ] && [ "$production_qemu_lifetime_valid" = 1 ]; then
         emit_row "$host" "$isa" pass ok "$serial" "$(serial_processing_backend "$serial" "$isa")"
         emit_render_latency_evidence "$host" "$isa" "$serial" "$qemu_device_args"
         emit_processing_perf_evidence "$host" "$isa" "$serial" "$daemon_log"
         row_result=0
+    elif [ "$probe_qemu_lifetime_valid" != 1 ] || [ "$(rss_metric_value "$rss_file" daemon_lifetime || true)" = failed ]; then
+        emit_row "$host" "$isa" fail daemon-exited-during-qemu "$serial" "$(serial_processing_backend "$serial" "$isa")"
+        row_result=1
     elif [ "$probe_valid" != 1 ]; then
         emit_row "$host" "$isa" fail "$(serial_reason "$serial" "$isa")" "$serial"
         row_result=1
@@ -2755,6 +2853,9 @@ run_guest() {
         row_result=1
     elif [ "$production_args_valid" != 1 ]; then
         emit_row "$host" "$isa" fail production-execution-evidence-missing "$production_serial" "$(serial_processing_backend "$serial" "$isa")"
+        row_result=1
+    elif [ "$production_qemu_lifetime_valid" != 1 ]; then
+        emit_row "$host" "$isa" fail daemon-exited-during-qemu "$production_serial" "$(serial_processing_backend "$serial" "$isa")"
         row_result=1
     else
         emit_row "$host" "$isa" fail production-frame-evidence-missing "$production_serial" "$(serial_processing_backend "$serial" "$isa")"
