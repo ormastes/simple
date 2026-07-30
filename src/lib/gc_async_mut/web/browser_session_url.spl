@@ -12,18 +12,55 @@ extern fn rt_text_to_bytes(value: text) -> [u8]
 
 val BROWSER_ADDRESS_MAX_BYTES: i64 = 2048
 
-fn _browser_address_has_control(input: text) -> bool:
-    for byte in rt_text_to_bytes(input):
-        if byte < 32 or byte == 127:
-            return true
-    false
+fn _browser_input_error(input: text, max_bytes: i64) -> text:
+    val bytes = rt_text_to_bytes(input)
+    if max_bytes > 0 and bytes.len() > max_bytes:
+        return "address-too-long"
+    var index = 0
+    while index < bytes.len():
+        val lead = bytes[index] as i64
+        var scalar = lead
+        var width = 1
+        if lead >= 0xC2 and lead < 0xE0 and index + 1 < bytes.len():
+            scalar = (
+                ((lead & 0x1F) << 6) |
+                ((bytes[index + 1] as i64) & 0x3F)
+            )
+            width = 2
+        elif lead >= 0xE0 and lead < 0xF0 and index + 2 < bytes.len():
+            scalar = (
+                ((lead & 0x0F) << 12) |
+                (((bytes[index + 1] as i64) & 0x3F) << 6) |
+                ((bytes[index + 2] as i64) & 0x3F)
+            )
+            width = 3
+        elif lead >= 0xF0 and lead < 0xF5 and index + 3 < bytes.len():
+            scalar = (
+                ((lead & 0x07) << 18) |
+                (((bytes[index + 1] as i64) & 0x3F) << 12) |
+                (((bytes[index + 2] as i64) & 0x3F) << 6) |
+                ((bytes[index + 3] as i64) & 0x3F)
+            )
+            width = 4
+        if (
+            scalar < 32 or scalar == 127 or
+            (scalar >= 128 and scalar <= 159)
+        ):
+            return "address-invalid-control"
+        index = index + width
+    ""
 
 fn browser_address_input_error(input: text) -> text:
-    if rt_text_to_bytes(input).len() > BROWSER_ADDRESS_MAX_BYTES:
-        return "address-too-long"
-    if _browser_address_has_control(input):
-        return "address-invalid-control"
-    ""
+    _browser_input_error(input, BROWSER_ADDRESS_MAX_BYTES)
+
+fn browser_address_update(
+    current: text, value: text, replace: bool
+) -> Result<text, text>:
+    val updated = if replace: value else: current + value
+    val reason = browser_address_input_error(updated)
+    if reason != "":
+        return Err(reason)
+    Ok(updated)
 
 fn browser_url_form_encode(value: text) -> text:
     var out = ""
@@ -74,9 +111,9 @@ fn normalize_browser_url(input: text) -> text:
         return "https://{clean}"
     "https://search.example.com/?q={browser_url_form_encode(clean)}"
 
-fn normalize_network_navigation_url(input: text) -> Result<text, text>:
-    if _browser_address_has_control(input):
-        return Err("invalid control character in navigation URL")
+fn _normalize_network_navigation_url_checked(
+    input: text
+) -> Result<text, text>:
     val clean = input.trim()
     val lower = clean.lower()
     if lower == "about:blank":
@@ -98,6 +135,17 @@ fn normalize_network_navigation_url(input: text) -> Result<text, text>:
     if not network_navigation_authority_valid(authority):
         return Err("invalid navigation authority")
     Ok(normalized)
+
+fn normalize_network_navigation_url(input: text) -> Result<text, text>:
+    if _browser_input_error(input, 0) == "address-invalid-control":
+        return Err("invalid control character in navigation URL")
+    _normalize_network_navigation_url_checked(input)
+
+fn normalize_browser_address_url(input: text) -> Result<text, text>:
+    val reason = browser_address_input_error(input)
+    if reason != "":
+        return Err(reason)
+    _normalize_network_navigation_url_checked(input)
 
 fn network_navigation_port_valid(port: text) -> bool:
     if port == "" or port.len() > 5:

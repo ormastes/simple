@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 13 | 13 | 0 | 0 |
+| 14 | 14 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -244,9 +244,10 @@ expect(session.current_url).to_equal("https://example.com/target")
 
 #### bounds UTF-8 address input without partial state or pixel mutation
 
-- var session = BrowserSession new
 - Accept exactly 2048 UTF-8 bytes and project the draft accessibly
+- var session = BrowserSession new
    - Expected: BROWSER_ADDRESS_MAX_BYTES equals `2048`
+   - Expected: initial_pixels[0] equals `0xFFFF0000u32`
    - Expected: text_byte_len(exact_draft) equals `2048`
    - Expected: text_codepoint_len(exact_draft) equals `2046`
    - Expected: accepted.ok is true
@@ -260,39 +261,62 @@ expect(session.current_url).to_equal("https://example.com/target")
    - Expected: session.history.len() equals `history_before`
    - Expected: session.current_index equals `index_before`
    - Expected: session.pending_request_count() equals `pending_before`
+   - Expected: session.pending_url equals `pending_url_before`
+   - Expected: session.is_loading equals `loading_before`
    - Expected: session.ui_access_revision equals `revision_before`
 - session render to pixels
-- Reject newline control and NUL input before UI projection
+   - Expected: overflow_pixels_unchanged is true
+- Reject C0 DEL and C1 controls before UI projection
+- text value: "https://example com/" +  scalar text
+- text value: "https://example com/" +  scalar text
+- text value: "https://example com/" +  scalar text
    - Expected: leading_newline.code equals `address-invalid-control`
    - Expected: trailing_newline.code equals `address-invalid-control`
    - Expected: nul.code equals `address-invalid-control`
+   - Expected: del.code equals `address-invalid-control`
+   - Expected: c1_low.code equals `address-invalid-control`
+   - Expected: c1_high.code equals `address-invalid-control`
    - Expected: session.address_draft equals `exact_draft`
    - Expected: session.current_url equals `https://example.com/start`
+   - Expected: session.history.len() equals `history_before`
+   - Expected: session.current_index equals `index_before`
    - Expected: session.pending_request_count() equals `pending_before`
+   - Expected: session.pending_url equals `pending_url_before`
+   - Expected: session.is_loading equals `loading_before`
+   - Expected: session.ui_access_revision equals `revision_before`
+- session ui access snapshot
+- session render to pixels
+   - Expected: control_pixels_unchanged is true
 - Submit an exact 2048-byte URL and render the committed page
    - Expected: text_byte_len(exact_url) equals `2048`
    - Expected: exact_submit.ok is true
    - Expected: session.current_url equals `exact_url`
-- session render to pixels
+   - Expected: _pixels_equal(exact_pixels, initial_pixels) is false
+   - Expected: exact_pixels[0] equals `0xFF00FF00u32`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 86 lines folded for reproduction.
+Runnable source: 131 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Accept exactly 2048 UTF-8 bytes and project the draft accessibly")
 var session = BrowserSession.new()
 session.open_html(
     "https://example.com/start",
-    "<html><body style='background:#ff0000'>Start</body></html>"
+    "<html style='background:#ff0000'><body>Start</body></html>"
 )
 val exact_draft = _repeat_ascii("a", 2045) + "한"
 val initial_pixels = session.render_to_pixels(8, 8).pixels
+val initial_red_count = _count_pixel(
+    initial_pixels, 0xFFFF0000u32
+)
 
-step("Accept exactly 2048 UTF-8 bytes and project the draft accessibly")
 expect(BROWSER_ADDRESS_MAX_BYTES).to_equal(2048)
+expect(initial_red_count).to_be_greater_than(0)
+expect(initial_pixels[0]).to_equal(0xFFFF0000u32)
 expect(text_byte_len(exact_draft)).to_equal(2048)
 expect(text_codepoint_len(exact_draft)).to_equal(2046)
 val accepted = session.ui_access_act(WinTextActionRequest(
@@ -310,6 +334,8 @@ val revision_before = session.ui_access_revision
 val history_before = session.history.len()
 val index_before = session.current_index
 val pending_before = session.pending_request_count()
+val pending_url_before = session.pending_url
+val loading_before = session.is_loading
 
 step("Reject 2049 bytes before trimming and preserve browser state")
 val leading_overflow = session.ui_access_act(WinTextActionRequest(
@@ -327,12 +353,15 @@ expect(session.current_url).to_equal("https://example.com/start")
 expect(session.history.len()).to_equal(history_before)
 expect(session.current_index).to_equal(index_before)
 expect(session.pending_request_count()).to_equal(pending_before)
+expect(session.pending_url).to_equal(pending_url_before)
+expect(session.is_loading).to_equal(loading_before)
 expect(session.ui_access_revision).to_equal(revision_before)
-expect(_pixels_equal(
+val overflow_pixels_unchanged = _pixels_equal(
     session.render_to_pixels(8, 8).pixels, initial_pixels
-)).to_equal(true)
+)
+expect(overflow_pixels_unchanged).to_equal(true)
 
-step("Reject newline control and NUL input before UI projection")
+step("Reject C0 DEL and C1 controls before UI projection")
 val leading_newline = session.ui_access_act(WinTextActionRequest(
     target_id: "browser:session#address", action: "submit",
     text_value: "\nhttps://example.com/", x: 0, y: 0
@@ -345,19 +374,50 @@ val nul = session.ui_access_act(WinTextActionRequest(
     target_id: "browser:session#address", action: "set_value",
     text_value: "https://example.com/\0tail", x: 0, y: 0
 ))
+val del = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#address", action: "set_value",
+    text_value: "https://example.com/" + _scalar_text(127),
+    x: 0, y: 0
+))
+val c1_low = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#address", action: "set_value",
+    text_value: "https://example.com/" + _scalar_text(128),
+    x: 0, y: 0
+))
+val c1_high = session.ui_access_act(WinTextActionRequest(
+    target_id: "browser:session#address", action: "set_value",
+    text_value: "https://example.com/" + _scalar_text(159),
+    x: 0, y: 0
+))
 expect(leading_newline.code).to_equal("address-invalid-control")
 expect(trailing_newline.code).to_equal("address-invalid-control")
 expect(nul.code).to_equal("address-invalid-control")
+expect(del.code).to_equal("address-invalid-control")
+expect(c1_low.code).to_equal("address-invalid-control")
+expect(c1_high.code).to_equal("address-invalid-control")
 expect(session.address_draft).to_equal(exact_draft)
 expect(session.current_url).to_equal("https://example.com/start")
+expect(session.history.len()).to_equal(history_before)
+expect(session.current_index).to_equal(index_before)
 expect(session.pending_request_count()).to_equal(pending_before)
+expect(session.pending_url).to_equal(pending_url_before)
+expect(session.is_loading).to_equal(loading_before)
+expect(session.ui_access_revision).to_equal(revision_before)
+expect(ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", exact_draft, 1
+).len()).to_equal(1)
+val control_pixels_unchanged = _pixels_equal(
+    session.render_to_pixels(8, 8).pixels, initial_pixels
+)
+expect(control_pixels_unchanged).to_equal(true)
 
 step("Submit an exact 2048-byte URL and render the committed page")
 val exact_url = "https://example.com/" + _repeat_ascii("a", 2028)
 expect(text_byte_len(exact_url)).to_equal(2048)
 session.register_resource(
     exact_url,
-    "<html><body style='background:#00ff00'>Exact</body></html>"
+    "<html style='background:#00ff00'><body>Exact</body></html>"
 )
 val exact_submit = session.ui_access_act(WinTextActionRequest(
     target_id: "browser:session#address", action: "submit",
@@ -366,10 +426,200 @@ val exact_submit = session.ui_access_act(WinTextActionRequest(
 expect(exact_submit.ok).to_equal(true)
 expect(session.current_url).to_equal(exact_url)
 expect(session.current_body_html).to_contain("Exact")
-expect(_pixels_equal(
-    session.render_to_pixels(8, 8).pixels, initial_pixels
-)).to_equal(false)
+val exact_pixels = session.render_to_pixels(8, 8).pixels
+expect(_pixels_equal(exact_pixels, initial_pixels)).to_equal(false)
+val exact_green_count = _count_pixel(
+    exact_pixels, 0xFF00FF00u32
+)
+expect(exact_green_count).to_be_greater_than(0)
+expect(exact_pixels[0]).to_equal(0xFF00FF00u32)
 ```
+
+</details>
+
+<details>
+<summary>Advanced: keeps hosted worker registry and live-entry address rejection atomic</summary>
+
+#### keeps hosted worker registry and live-entry address rejection atomic
+
+- Reject C1 through the hosted semantic web editor
+   - Expected: hosted_rejected.reason equals `address-invalid-control`
+   - Expected: hosted.browser.current_url equals `hosted_url`
+   - Expected: hosted.browser.history.len() equals `hosted_history`
+   - Expected: hosted.browser.current_index equals `hosted_index`
+   - Expected: hosted.mutation_revision equals `hosted_revision`
+   - Expected: hosted.chrome_focus equals `address`
+   - Expected: hosted.address_replace_on_text is true
+- hosted browser ui access snapshot
+- hosted browser render to pixels
+   - Expected: hosted_exact.callback_count equals `1`
+   - Expected: hosted.browser.address_draft equals `exact`
+- hosted browser render to pixels
+- Reject C1 through the renderer worker without clearing focus
+- var worker = HostedBrowserRendererWorkerSession create
+- payload: "T1\t{invalid len
+   - Expected: worker.browser.current_url equals `worker_url`
+   - Expected: worker.browser.history.len() equals `worker_history`
+   - Expected: worker.browser.current_index equals `worker_index`
+   - Expected: worker.browser.ui_access_revision equals `worker_revision`
+   - Expected: worker.chrome_focus equals `address`
+   - Expected: worker.address_replace_on_text is true
+- worker browser ui access snapshot
+- worker browser render to pixels
+- payload: "T1\t{exact len
+   - Expected: worker_exact.ok is true
+   - Expected: worker.browser.address_draft equals `exact`
+- Reject C1 through the hosted parent registry wire
+   - Expected: registry.address_text(92) equals `about:blank`
+   - Expected: registry.document_url(92) equals `registry_url`
+   - Expected: registry.entries[0].address_editing is true
+   - Expected: registry.entries[0].address_replace_on_text is true
+   - Expected: registry_exact.callback_count equals `1`
+   - Expected: registry.address_text(92) equals `exact`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 131 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val invalid = "https://example.com/" + _scalar_text(128)
+val exact = _repeat_ascii("a", 2048)
+expect(browser_address_input_error("\0")).to_equal(
+    "address-invalid-control"
+)
+expect(browser_address_input_error(_scalar_text(127))).to_equal(
+    "address-invalid-control"
+)
+expect(browser_address_input_error(_scalar_text(128))).to_equal(
+    "address-invalid-control"
+)
+expect(browser_address_input_error(_scalar_text(159))).to_equal(
+    "address-invalid-control"
+)
+expect(browser_address_update(
+    "about:blank", invalid, true
+).is_err()).to_equal(true)
+expect(browser_address_update(
+    "about:blank", invalid, false
+).is_err()).to_equal(true)
+expect(browser_address_update(
+    "about:blank", exact, true
+).unwrap()).to_equal(exact)
+
+step("Reject C1 through the hosted semantic web editor")
+var hosted = HostedWebContentSession.create(
+    41, "<div style='background:#ff0000'>Start</div>", 8, 8
+)
+val _ = hosted.dispatch_chrome_pointer(1, "address", true)
+val _ = hosted.dispatch_chrome_pointer(2, "address", false)
+val hosted_url = hosted.browser.current_url
+val hosted_history = hosted.browser.history.len()
+val hosted_index = hosted.browser.current_index
+val hosted_pending = hosted.browser.pending_request_count()
+val hosted_revision = hosted.mutation_revision
+val hosted_pixels = hosted.browser.render_to_pixels(8, 8).pixels
+val hosted_rejected = hosted.dispatch_text(3, invalid)
+expect(hosted_rejected.reason).to_equal("address-invalid-control")
+expect(hosted.browser.current_url).to_equal(hosted_url)
+expect(hosted.browser.history.len()).to_equal(hosted_history)
+expect(hosted.browser.current_index).to_equal(hosted_index)
+expect(hosted.browser.pending_request_count()).to_equal(
+    hosted_pending
+)
+expect(hosted.mutation_revision).to_equal(hosted_revision)
+expect(hosted.chrome_focus).to_equal("address")
+expect(hosted.address_replace_on_text).to_equal(true)
+expect(ui_access_find_nodes(
+    hosted.browser.ui_access_snapshot(), "browser:session",
+    "textfield", hosted_url, 1
+).len()).to_equal(1)
+expect(_pixels_equal(
+    hosted.browser.render_to_pixels(8, 8).pixels, hosted_pixels
+)).to_equal(true)
+val hosted_exact = hosted.dispatch_text(4, exact)
+expect(hosted_exact.callback_count).to_equal(1)
+expect(hosted.browser.address_draft).to_equal(exact)
+expect(_pixels_equal(
+    hosted.browser.render_to_pixels(8, 8).pixels, hosted_pixels
+)).to_equal(true)
+
+step("Reject C1 through the renderer worker without clearing focus")
+var worker = HostedBrowserRendererWorkerSession.create(8, 8)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 7, request_id: 2,
+    payload: "<div style='background:#ff0000'>Start</div>"
+)).ok).to_equal(true)
+worker.chrome_focus = "address"
+worker.address_replace_on_text = true
+val worker_url = worker.browser.current_url
+val worker_history = worker.browser.history.len()
+val worker_index = worker.browser.current_index
+val worker_revision = worker.browser.ui_access_revision
+val worker_pixels = worker.browser.render_to_pixels(8, 8).pixels
+val worker_rejected = worker.handle(BrowserRendererMessage(
+    kind: "text", generation: 7, request_id: 3,
+    payload: "T1\t{invalid.len()}\n{invalid}"
+))
+expect(worker_rejected.reason).to_equal(
+    "address-invalid-control"
+)
+expect(worker.browser.current_url).to_equal(worker_url)
+expect(worker.browser.history.len()).to_equal(worker_history)
+expect(worker.browser.current_index).to_equal(worker_index)
+expect(worker.browser.ui_access_revision).to_equal(worker_revision)
+expect(worker.chrome_focus).to_equal("address")
+expect(worker.address_replace_on_text).to_equal(true)
+expect(ui_access_find_nodes(
+    worker.browser.ui_access_snapshot(), "browser:session",
+    "textfield", worker_url, 1
+).len()).to_equal(1)
+expect(_pixels_equal(
+    worker.browser.render_to_pixels(8, 8).pixels, worker_pixels
+)).to_equal(true)
+val worker_exact = worker.handle(BrowserRendererMessage(
+    kind: "text", generation: 7, request_id: 3,
+    payload: "T1\t{exact.len()}\n{exact}"
+))
+expect(worker_exact.ok).to_equal(true)
+expect(worker.browser.address_draft).to_equal(exact)
+
+step("Reject C1 through the hosted parent registry wire")
+var registry = HostedBrowserRendererRegistry.create(
+    "/bin/false", "https://example.com/"
+)
+val _ = registry.ensure(
+    92, "<div>Start</div>", 8, 8, 0, 100000
+)
+val _ = registry.dispatch_chrome_pointer(
+    1, 92, "address", true
+)
+val _ = registry.dispatch_chrome_pointer(
+    2, 92, "address", false
+)
+val registry_url = registry.document_url(92)
+val registry_revision = registry.entries[0].mutation_revision
+val registry_rejected = registry.dispatch_text(3, 92, invalid)
+expect(registry_rejected.reason).to_equal(
+    "address-invalid-control"
+)
+expect(registry.address_text(92)).to_equal("about:blank")
+expect(registry.document_url(92)).to_equal(registry_url)
+expect(registry.entries[0].mutation_revision).to_equal(
+    registry_revision
+)
+expect(registry.entries[0].address_editing).to_equal(true)
+expect(registry.entries[0].address_replace_on_text).to_equal(true)
+val registry_exact = registry.dispatch_text(4, 92, exact)
+expect(registry_exact.callback_count).to_equal(1)
+expect(registry.address_text(92)).to_equal(exact)
+val _ = registry.close()
+```
+
+</details>
+
 
 </details>
 
@@ -911,8 +1161,8 @@ expect(textarea_focused).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 13 |
-| Active scenarios | 13 |
+| Total scenarios | 14 |
+| Active scenarios | 14 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
