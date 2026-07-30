@@ -56,7 +56,7 @@ typedef struct RtEnum {
     spl_i64 payload;
 } RtEnum;
 
-#ifndef SIMPLE_FREESTANDING_RUNTIME_NO_ENTRY
+#ifndef SIMPLE_RUNTIME_NO_ENTRY
 __asm__(
     ".section .text.entry,\"ax\",@progbits\n"
     ".globl _start\n"

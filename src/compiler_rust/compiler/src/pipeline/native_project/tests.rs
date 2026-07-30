@@ -470,6 +470,29 @@ fn simpleos_freestanding_linker_script_defaults_and_overrides() {
     );
 }
 
+#[test]
+fn rv64_gui_uses_canonical_freestanding_runtime() {
+    use simple_common::target::{Target, TargetArch, TargetOS};
+
+    let target = Target::new(TargetArch::Riscv64, TargetOS::None);
+    assert_eq!(
+        NativeProjectBuilder::rv64_gui_freestanding_runtime_source(
+            Path::new("examples/09_embedded/simple_os/arch/riscv64/gui_entry_desktop.spl"),
+            target,
+        ),
+        Some(PathBuf::from("src/os/kernel/arch/riscv64/boot/freestanding_runtime.c"))
+    );
+}
+
+#[test]
+fn rv64_gui_runtime_suppresses_duplicate_entry() {
+    assert_eq!(
+        NativeProjectBuilder::freestanding_boot_c_entry_define("freestanding_runtime"),
+        Some("-DSIMPLE_RUNTIME_NO_ENTRY=1")
+    );
+    assert_eq!(NativeProjectBuilder::freestanding_boot_c_entry_define("baremetal_stubs"), None);
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn test_native_all_link_args_include_terminfo() {
@@ -6131,6 +6154,56 @@ fn test_freestanding_qualified_to_bare_alias_bridges_export_symbol() {
         vec![(
             "os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind".to_string(),
             "rt_io_tcp_bind".to_string()
+        )]
+    );
+}
+
+#[test]
+fn test_freestanding_reverse_alias_skips_runtime_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let defs_c = temp.path().join("defs.c");
+    let caller_c = temp.path().join("caller.c");
+    let defs_o = temp.path().join("defs.o");
+    let caller_o = temp.path().join("caller.o");
+
+    std::fs::write(
+        &defs_c,
+        r#"
+        long hosted__file_ops__rt_process_run(long x) { return x; }
+        long kernel__abi__syscall_shim__spl_handle_enter_user_blocking(long x) { return x; }
+        "#,
+    )
+    .unwrap();
+    std::fs::write(
+        &caller_c,
+        r#"
+        extern long rt_process_run(long);
+        extern long spl_handle_enter_user_blocking(long);
+        long use_symbols(long x) {
+            return rt_process_run(x) + spl_handle_enter_user_blocking(x);
+        }
+        "#,
+    )
+    .unwrap();
+
+    for (src, obj) in [(&defs_c, &defs_o), (&caller_c, &caller_o)] {
+        assert!(std::process::Command::new(&cc)
+            .args(["-c", "-ffunction-sections", "-fdata-sections"])
+            .arg(src)
+            .arg("-o")
+            .arg(obj)
+            .status()
+            .unwrap()
+            .success());
+    }
+
+    let aliases = NativeProjectBuilder::freestanding_bare_to_qualified_defsyms(&[defs_o, caller_o], &[]).unwrap();
+    assert_eq!(
+        aliases,
+        vec![(
+            "spl_handle_enter_user_blocking".to_string(),
+            "kernel__abi__syscall_shim__spl_handle_enter_user_blocking".to_string()
         )]
     );
 }
