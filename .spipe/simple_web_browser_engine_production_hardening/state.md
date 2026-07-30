@@ -2496,3 +2496,29 @@ implementation in progress / target evidence blocked
   face and added an empty-face negative control. Modern SSpecs and complete
   truthful manual mirrors are present; qualified pure-Simple execution and
   docgen remain pending, so no runtime PASS or full HTML/CSS claim is made.
+- production browser batch 14 (2026-07-30): commit `15b6727a5ce` integrates
+  five independently reviewed static/TDD lanes. Renderer bookmark titles now
+  use bounded canonical `SBRF8` evidence bound to generation, reply, and
+  committed URL, then survive public remove/re-add and profile/UI reopen.
+  Sandboxed renderer launch has hostile loader-environment regression coverage
+  through the real empty-environment spawn path. The canonical JS environment
+  stack validates lexical parents before allocation and bounds corrupt-chain
+  traversal; this is a reclamation prerequisite, not a GC completion claim.
+  Site swap clears active and pending pointer receipts before renderer
+  replacement, with exactly-once release accounting. Animation shorthand/time
+  parsing now preserves last-valid source order and uses saturating clock
+  arithmetic with exact fractional/zero/infinite/fill/pause DrawIR/Engine2D
+  evidence. Combined static/layout/direct-environment guards passed once.
+- batch-14 held-work audit: current main already supersedes the old
+  content-visibility GPU guard with the stronger shared O(N) paint-state owner.
+  The old SimpleScript listener bundle was reconstructed but withdrawn after
+  review: parse-local/reused DOM IDs cannot safely identify detached frozen
+  event-path nodes, no public unlisten operation reaches tombstone reuse, and
+  aggregate listener/action-byte lifecycle accounting is absent. Correct work
+  depends on the planned generation-qualified DOM identity migration; commit
+  `07d7476562a` must not merge.
+- batch-14 runtime admission: no provenance-qualified Stage-4 full
+  pure-Simple CLI exists at or after `05c9f4b8549`. Active artifacts were
+  stale-lineage, dirty/unfingerprinted, incomplete, racing, or Stage 2/3 only.
+  No browser spec/docgen/runtime PASS is claimed and no seed substitute was
+  used.

@@ -1080,3 +1080,28 @@ Commit `9f720c62c72` adds focused modern specs and complete manuals for:
 Independent adversarial reviews and one combined static guard pass succeeded.
 Target execution/docgen remain HELD pending a source-admitted pure-Simple
 artifact at or after `ae4c3d56ce3`.
+
+## Batch 14 executable evidence
+
+Commit `15b6727a5ce` adds modern executable specs and complete manuals for:
+
+- bounded renderer title transport and canonical-URL-keyed bookmark
+  persistence/reopen through the public hosted registry;
+- hostile loader variables absent after the real sandboxed renderer spawn;
+- canonical lexical parent lookup/assignment, escaped closure identity, and
+  invalid/cyclic environment rejection as a JS reclamation prerequisite;
+- chrome/page press replacement, exactly-once cancellation, and same-window
+  renderer generation swap without stale release;
+- last-valid animation shorthand/longhand selection, numeric time-token
+  classification, saturating add/subtract boundaries, and exact
+  fractional/zero/infinite/fill/paused/resumed Draw IR and Engine2D frames.
+
+Independent review rejected and withdrew the reconstructed SimpleScript
+listener bundle because current parse-local DOM IDs cannot bind a detached
+frozen event path across replacement and aggregate listener/action-byte
+lifecycle accounting is not yet canonical. The stronger existing O(N)
+content-visibility GPU guard required no duplicate change.
+
+Static guards passed once. Qualified execution/docgen remain HELD because the
+artifact audit found no clean provenance-qualified Stage-4 full CLI at or after
+the current compiler/browser commits.

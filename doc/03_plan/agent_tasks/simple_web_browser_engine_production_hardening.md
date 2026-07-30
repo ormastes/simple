@@ -794,3 +794,20 @@ Independent reviews rejected and corrected full-viewport opacity work,
 offscreen-size pool thrashing, quadratic whitespace scanning, incomplete
 mutation evidence, negative-millisecond loss, and false browser reachability.
 Static guards passed once. Qualified pure-Simple execution/docgen remain HELD.
+
+## Production browser batch 14 (2026-07-30)
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `bookmark_title_witness` | Bounded canonical `SBRF8` title evidence is generation/reply/URL-bound and persists through public remove/re-add plus profile/UI reopen. | INTEGRATED `15b6727a5ce`; static high review PASS |
+| `renderer_loader_environment` | The real sandbox spawn path starts with an empty child environment; a hostile C probe covers representative loader variables. | INTEGRATED `15b6727a5ce`; REQ-014/021 only, runtime execution HELD |
+| `js_lexical_parent` | The canonical production environment stack rejects invalid raw parents before allocation and bounds corrupt-chain traversal. | INTEGRATED `15b6727a5ce`; REQ-017 prerequisite only, GC remains RED |
+| `chrome_press_generation` | Site swap clears active/pending press ownership before replacement; immediate/retry release accounting is exactly once. | INTEGRATED `15b6727a5ce`; exact Draw IR/Engine2D evidence present |
+| `fractional_animation_boundaries` | Token-exact shorthand parsing preserves last-valid source order and animation clocks saturate at i64 bounds. | INTEGRATED `15b6727a5ce`; 11/11 modern static scenarios/manual |
+| `content_visibility_salvage` | Current shared O(N) GPU paint-state guard already supersedes the orphan candidate. | AUDIT COMPLETE / NO CHANGE |
+| `simple_script_listeners` | Reconstructed candidate lacked generation-qualified detached-node identity, public unlisten reachability, and aggregate lifecycle accounting. | WITHDRAW `07d7476562a`; depends on DOM identity lanes 1-4 |
+| `stage4_admission` | No clean provenance-qualified full CLI includes the current compiler/browser source. | HELD; no target execution/docgen |
+
+All accepted lanes received independent normal/high-capability static review.
+The combined diff/layout/placeholder/direct-environment guards passed once.
+No bootstrap, seed fallback, stale artifact, or runtime PASS was used.
