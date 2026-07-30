@@ -1240,11 +1240,17 @@ impl DesktopShell:
             if pointer_sequence > 0:
                 if _WM_TRACE: serial_println("[wm-loop-step] seq={pointer_sequence} at=before-taskbar-revision scene_revision={scene_revision}")
             val taskbar_revision = self.runtime_taskbar_revision()
-            # Button release alone has no visual state. Retain the last frame
-            # unless the remote app changed content/taskbar state; forcing a
-            # full 4K repaint here was the post-release hang.
-            val pointer_needs_render = pointer_sequence > 0 and pointer_kind_code != 2
-            val need_render = pointer_needs_render or (fullscreen_sequence > 0 and fullscreen_action != "") or scene_revision != self.last_rendered_scene_revision or taskbar_revision != self.last_rendered_taskbar_revision
+            # A button-down can focus or begin a drag, so retain its explicit
+            # repaint. A passive move (kind 3) must retain the existing frame:
+            # cycle7 repainted unchanged revision 678551287 seventeen times and
+            # leaked ~22.4 MiB per repaint. Active drag/resize changes the scene
+            # revision and therefore still renders through the state-change
+            # gate. Button release alone also retains the existing frame.
+            val state_revision_changed = scene_revision != self.last_rendered_scene_revision
+            val pointer_down_needs_render = pointer_sequence > 0 and pointer_kind_code == 1
+            val pointer_move_needs_render = pointer_sequence > 0 and pointer_kind_code == 3 and state_revision_changed
+            val pointer_needs_render = pointer_down_needs_render or pointer_move_needs_render
+            val need_render = pointer_needs_render or (fullscreen_sequence > 0 and fullscreen_action != "") or state_revision_changed or taskbar_revision != self.last_rendered_taskbar_revision
             var rendered_revision = scene_revision
             if pointer_sequence > 0:
                 val need_render_code = if need_render: 1 else: 0
