@@ -13,16 +13,19 @@ host Vulkan/Metal result.  It covers x86_64 compatibility evidence and the
 production AArch64/HVF path on macOS.  SIMD is a prerequisite, never a
 substitute for a correlated guest render.
 
-Exactly one delegated QEMU agent session owns each scoped execution: guest
-artifact construction, QEMU process/port discovery, launch, captures,
-evidence directory, shutdown, and failure report.  No sidecar may launch a
-second VM, reserve its port, alter its run directory, or rebuild its artifact.
-Ownership transfers explicitly before a different session launches QEMU.
+Exactly one delegated QEMU execution agent session owns QEMU process/port
+discovery, launch, captures, evidence directory, shutdown, and the live failure
+report. Non-launch prerequisite agents may prepare attested guest artifacts,
+focused native regressions, and source-only transport designs, but they must
+not start QEMU, open QMP, reserve a VM port, or write the live evidence root.
+Live ownership transfers explicitly before a different session launches QEMU.
 Only one bounded live run per architecture is allowed after prerequisites;
-there is no automatic retry.  Preserve and review a failure before authorizing
+there is no automatic retry. Preserve and review a failure before authorizing
 another run.
 
-- The delegated QEMU agent owns build/launch/evidence for this lane.
+- The delegated QEMU execution agent alone owns launch/runtime evidence.
+- Named prerequisite agents own only the files and bounded checks assigned in
+  the delegated-task matrix below.
 - `/root` is merge owner; this lane does not commit or push.
 - An independent high-capability reviewer must review the completed bundle,
   provenance, and fail-closed results before any PASS or promotion claim.
@@ -507,3 +510,129 @@ evidence path for each. A precise negative result is a valid outcome; a vague
 or overstated positive is not. Evidence directories and reports stay **out of
 git** (repo rule: do not add reports to git unless requested) — this plan doc
 and any `.shs`/`.spl` runner do get committed. No Bash, no Python.
+
+## 2026-07-30 delegated non-launch task matrix
+
+These assignments let multiple agents prepare independent prerequisites while
+preserving one sole live-QEMU session. None of A-GUEST, Q-NIL, Q-FONT, or
+Q-TRANSPORT may launch QEMU, open QMP, build a live evidence directory, run a
+full bootstrap, or push. `/root` owns integration, verification, and push.
+
+| Lane | Assigned agent scope | Start dependency | Required deliverable |
+|---|---|---|---|
+| A-GUEST | Incremental guest artifact construction and attestation | Host compiler/native build finished; safe disk; current admitted non-symlink pure-Simple compiler; SIMD prerequisite PASS | Artifact receipt plus required x86_64/AArch64 ELFs, disk image, and manifests |
+| Q-NIL | `FontRenderer.has_sffi_ttf` nil-receiver root cause and native regression | None; independent of VM and guest build | Focused Cranelift native regression and appended compiler bug evidence |
+| Q-FONT | Vector-font `accepted=0` and bitmap-fallback repair proof | Q-NIL PASS or conclusive receiver-channel clearance | Non-QEMU VFS/font native evidence report with positive vector identity and glyph batch |
+| Q-TRANSPORT | x86_64/RISC-V VirtIO-serial transport review and implementation decomposition | None; runs in parallel with Q-NIL | Transport bug/design report plus bounded source-only checks |
+| Q-LIVE | Sole QEMU execution, QMP/capture/physical-input handoff, cleanup, final evidence | Applicable prerequisite receipts reviewed and merged; one target row READY | One bounded correlated live evidence bundle |
+
+### A-GUEST — artifact-preparation agent
+
+The assigned artifact agent uses a clean isolated full checkout at current
+`origin/main`, a distinct cache, and one bounded attempt per command. It stops
+after receipt handoff and never starts QEMU.
+
+Prerequisite:
+
+```sh
+sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs
+```
+
+Construction:
+
+```sh
+SIMPLE_BIN=bin/release/aarch64-apple-darwin-macho/simple
+mkdir -p build/os/generated/generated build/os
+cp src/generated/simpleos_log_config.spl build/os/generated/generated/simpleos_log_config.spl
+SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on "$SIMPLE_BIN" native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log on --timeout 870 --entry-closure --entry examples/09_embedded/simple_os/arch/x86_64/host_gpu_smoke_entry.spl --target x86_64-unknown-none -o build/os/simpleos_x86_64_host_gpu_probe.elf --linker-script examples/09_embedded/simple_os/arch/x86_64/linker.ld
+env -u SIMPLE_BINARY -u SIMPLE_BIN -u SIMPLE_FRONTEND_DELEGATE -u SIMPLE_BOOTSTRAP_DRIVER SIMPLE_OS_BUILD_BACKEND=llvm SIMPLE_OS_LOG_MODE=off SIMPLE_OS_BUILD_TIMEOUT_MS=900000 "$SIMPLE_BIN" os build --scenario=x64-desktop-gui
+SIMPLE_BOOT_MINIMAL=1 SIMPLE_OS_LOG_MODE=on "$SIMPLE_BIN" native-build --source build/os/generated --source src/os --source src/lib --source examples/09_embedded/simple_os --backend cranelift --opt-level=aggressive --log on --timeout 870 --entry-closure --entry examples/09_embedded/simple_os/arch/arm64/host_gpu_file_backed_ram_tail_smoke_entry.spl --target aarch64-unknown-none -o build/os/simpleos_arm64_host_gpu_probe.elf --linker-script examples/09_embedded/simple_os/arch/arm64/linker.ld
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+```
+
+Required handoff:
+
+- `simpleos_x86_64_host_gpu_probe.elf`,
+  `simpleos_desktop_gui_x86_64.elf`, and its build stamp;
+- `simpleos_arm64_host_gpu_probe.elf`,
+  `simpleos_arm64_desktop_engine2d.elf`, `fat32-arm64-desktop.img`,
+  `make_os_disk`, build manifest, and frozen-source manifest;
+- exact revision, compiler path/version/hash, commands, sizes, and 64-hex
+  SHA-256 identities for every compiler, ELF, disk, and font input;
+- focused x86 ELF checks and current-source/manifest identity checks.
+
+Stop on the first real failure and preserve cache/logs. Artifact construction
+does not clear the x86/RISC-V `virtio-serial-unimplemented` blocker.
+
+### Q-NIL — nil-receiver agent
+
+Inputs:
+
+- `/private/tmp/simple-qemu-live-20260730/build/qemu-live/evidence/serial-vfsfix.log`
+  (SHA-256
+  `a8262af1620e0bb513ea66e8f719e0a939b8c8c40fbc849ff9173f258a98a915`);
+- retained x86 ELF
+  `/private/tmp/simple-qemu-live-20260730/build/qemu-live/out/simpleos_wm_vfsfix_final_23e6ba6.elf`;
+- `llvm-addr2line` mapping of RIP `0x086cf92a` to
+  `FontRenderer.has_sffi_ttf`;
+- `src/lib/nogc_sync_mut/text_layout/font_renderer.spl`,
+  `src/compiler/70.backend/**`, and the existing aggregate-return/font-cache
+  bug reports.
+
+Deliver one minimal native regression under `test/02_integration/rendering/`
+that stores/returns `FontRenderer` and proves its `has_sffi_ttf` receiver is
+non-nil and correctly placed. Append root cause and evidence to the existing
+compiler bug report. Run one clean current-origin Cranelift native build/run
+and at most one fix/retest cycle. Do not bootstrap or launch a VM.
+
+### Q-FONT — vector-font agent
+
+Start only after Q-NIL passes or conclusively clears the receiver channel.
+Use the same staged VFS bytes/path aliases as the failed guest, retaining the
+serial facts: zero accepted faces, a 1,708,408-byte read, then bitmap fallback.
+
+The non-QEMU native fixture must prove:
+
+- accepted candidate count is positive and every required pin is accepted;
+- selected vector identity survives registry read-back;
+- a non-empty glyph batch is produced;
+- bitmap fallback is rejected.
+
+Run the focused font-asset staging and `FontRenderer` specs once each. Write
+`doc/09_report/simpleos_qemu_font_registration_native_evidence_2026-07-30.md`
+with revision, exact command, binary/input hashes, identity/count/glyph
+receipts, and any focused repair.
+
+### Q-TRANSPORT — transport-review agent
+
+Review the wrapper transport classifier, guest ivshmem owners, WM executor,
+shared protocol, and QEMU system spec. Write
+`doc/08_tracking/bug/simpleos_qemu_virtio_serial_host_gpu_transport_2026-07-30.md`
+covering device availability, the missing framed guest adapter/host endpoint,
+framing and correlation, timeouts, interrupt/queue ownership, and an
+implementation/test decomposition.
+
+Run only:
+
+```sh
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-qemu-accel
+SIMPLE_LIB=src bin/simple test test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl --mode=interpreter
+```
+
+Do not run `--preflight`, build a guest, weaken the
+`virtio-serial-unimplemented` result, or claim AArch64 file-backed RAM covers
+x86_64/RISC-V.
+
+### Dependency and handoff
+
+```text
+Q-NIL ──> Q-FONT ─────────────┐
+A-GUEST ──────────────────────┼──> /root review ──> Q-LIVE sole executor
+Q-TRANSPORT ──> x86/RV READY ─┘
+```
+
+A-GUEST and Q-TRANSPORT may run in parallel with Q-NIL. Q-FONT waits for
+Q-NIL. Q-LIVE starts only after the applicable artifacts and blocker repairs
+are reviewed and the selected preflight row is READY. Exactly one Q-LIVE
+session owns every VM launch, port, capture, input interval, shutdown, and
+no-orphan proof.
