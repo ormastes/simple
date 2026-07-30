@@ -2,8 +2,60 @@
 
 - **Filed:** 2026-07-30
 - **Severity:** low — dead test scaffolding, not a product regression
-- **Status:** open (documented gap, out of scope for lane BCAP `backend-capability-spec-triage`)
+- **Status:** PARTIALLY RESOLVED 2026-07-30 (lane MTB1 `mir-test-builder-wiring`) —
+  the 14 Group 1/3/4 tests are implemented and wired against real backend
+  behavior; the 20 Group 2/5/6 bare-`pass` tests remain open (need real
+  assertions written from scratch, not API wiring — separate lane).
 - **Found via:** BCAP lane triage of `test/01_unit/compiler/backend/backend_capability_spec.spl`
+
+## Resolution (lane MTB1, 2026-07-30)
+
+Built `src/compiler/70.backend/mir_test_builder.spl` (module
+`compiler.backend.mir_test_builder`, resolved via the `backend -> 70.backend`
+symlink — NOT `src/compiler/70.backend/backend/`, which resolves to
+`compiler.backend.backend.*` and is a different module path) as a thin
+`MirTestBuilder`/`MirTestCase`/`BackendTarget` wrapper. `is_supported(target)`
+replays the recorded ops against REAL backend entry points instead of a
+hardcoded per-instruction table:
+
+- `BackendTarget.LLVM` → `MirToLlvm.translate_binop` / `translate_simd_horizontal`,
+  checking the emitted text (+ flushed `string_global_text`) for the real
+  `"does not support"` unsupported-panic marker.
+- `BackendTarget.Vulkan` → `VulkanBackend.compile_kernel` with a real `MirBody`
+  (GPU atomics expand into the real required `GpuSharedAlloc` +
+  `GetElementPtr` prerequisite sequence the thin `.gpu_atomic_add(dest, ptr,
+  value)` call doesn't itself model).
+- `BackendTarget.Cranelift` → a real AOT object-file compile via
+  `cranelift_compile_module_direct` (there is no lighter single-instruction
+  Cranelift entry point — its `cl_translate_*` helpers need a live builder
+  context only a real module compile creates). This succeeded and is stable
+  across repeated runs; no fallback to a hardcoded claim was needed.
+- `BackendTarget.Interpreter` → `true` unconditionally, as an architectural
+  fact (universal fallback every other backend's panic message names as the
+  alternative), not a per-instruction guess.
+
+All 14 Group 1/3/4 tests are now active. Two were adapted to a **real**
+(not the originally-scaffolded assumed) outcome: "LLVM ... supports SIMD
+operations" and "SIMD-heavy code ... prefers LLVM backend" both assumed the
+LLVM backend supports SIMD reduction. Reading the real implementation
+(`_MirToLlvm/aggregate_intrinsics.spl` `translate_simd_horizontal`) shows it
+unconditionally panics `"LLVM backend does not support SIMD operation
+{op_name}"` with no other definition overriding it — the LLVM (text) backend
+genuinely does not implement SIMD lowering yet. Both tests were renamed and
+adapted to assert that real negative outcome (`to_equal(false)`) instead of
+the fictional positive one; both also fix a scaffold bug where the vector
+register was declared as `vec_val` but referenced via the never-declared
+`vec`. "pure arithmetic code ... selects any compiled backend" is wired
+exactly as originally scaffolded (Cranelift AND LLVM both asserted true).
+
+Final: `test/01_unit/compiler/backend/backend_capability_spec.spl` —
+**Results: 20 total, 20 passed, 0 failed** (6 pre-existing + 14 newly wired),
+stable across repeated runs.
+
+Groups 2/5/6 (20 bare-`pass` tests, "Backend Error Messages"/"Backend
+Capability Matrix"/"Capability Documentation") remain commented — they have
+no assertions to wire, they need to be written from scratch. That work is
+unchanged from the original BCAP triage below and is still open.
 
 ## Symptom
 
