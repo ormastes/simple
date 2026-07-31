@@ -21,13 +21,14 @@ correction for anyone searching by the wrong path. Diff/patch:
 `src/lib/common/ui/{draw_ir_diff,draw_ir_patch}.spl`. Hit bridge:
 `src/lib/common/engine/interaction/draw_ir_hit_bridge.spl`.
 
-**Command kinds — SUPPORTED, small closed set.**
+**Command kinds — SCHEMA-ADMITTED, small closed set.**
 `draw_ir.spl:10-16`: `DRAW_IR_COMMAND_{RECT,TEXT,EDGE,PATH,IMAGE,GROUP,PORT}`.
 Edge sub-kinds `DRAW_IR_EDGE_{STRAIGHT,ORTHOGONAL,BEZIER}` (`:17-19`). No
 dedicated circle/triangle/glyph/gradient/blur *kind* — those ride as
 `computed_style` string props (key/value pairs, `draw_ir.spl:34-36`,
 `DrawIrCommand.computed_style: [DrawIrStyleProp]` `:79`) decoded downstream by
-`draw_ir_adv.spl`.
+`draw_ir_adv.spl`. The shared executor currently handles RECT, TEXT, and IMAGE;
+EDGE, PATH, GROUP, and PORT still need behavior or typed fail-closed coverage.
 
 **Batch/embedding model — SUPPORTED.** Verified directly
 (`draw_ir.spl:57-105`, read in full this session):
@@ -119,8 +120,8 @@ in the per-frame path yet (frames are still rebuilt, not patched).
 Result<DrawIrRenderTarget,text>` and `draw_ir_composite_readback(...)`
 (`draw_ir_target.spl:59-60`); used in `draw_ir_adv.spl:1809,1862,1993-1998`.
 Region readback: `_engine2d_read_pixels_region` (`draw_ir_adv.spl:1537`, per
-the campaign doc — the default backend still crops the full frame on the
-host, no true region read).
+the campaign doc) is an API seam only; the default backend reads the full frame
+and crops on the host, so device-region readback remains open.
 
 ## 2. What a 2D game renderer needs
 

@@ -4,6 +4,11 @@ Supersedes nothing; extends `unified_2d_interaction_2026-07-20.md` with the
 survey findings below and commits the missing bridges. Companion review:
 `web_wm_gpu_3d_review_2026-07-20.md`.
 
+**2026-07-31 reconciliation:** current status and remaining work are governed by
+`draw_ir_web_renderer_reconciliation_2026-07-31.md`. D1 pointer-down dispatch is
+complete but wheel dispatch is open; D2 producer parent metadata is partial;
+D9 batching must be read per backend, not as universal completion.
+
 ## Survey findings (5-lane research, 2026-07-30)
 
 1. **Interaction core is DONE but orphaned.** `src/lib/common/engine/interaction/`
@@ -105,15 +110,14 @@ survey findings below and commits the missing bridges. Companion review:
   confirmed: GUI widgets and the web renderer both emit `DrawIrComposition`
   DIRECTLY (no WebIR/GuiIR exists; `widget_draw_cmds.spl` is a dead second GUI
   IR — delete it). The contract:
-  - **DrawIR → backend is the worst hop and gets fixed first for Vulkan, then
-    CUDA/HIP/Metal:** today execution is per-command immediate mode
-    (`draw_ir_adv.spl:1222`) and Vulkan pays descriptor-set create + dispatch +
-    `submit_and_wait_fence` + destroys PER COMMAND (`sffi_vulkan.spl:599-660`);
-    CUDA `session.sync()` per op. Required: `RenderBackend.submit_batch` —
-    record the whole frame into one compute encoding with ONE fence, rect/kind
-    instances packed into an SSBO instance buffer, persistent descriptor sets,
-    reused staging buffers, device-side glass pass (drop the per-glass-rect
-    full-frame `read_pixels()` at `draw_ir_adv.spl:541`).
+  - **DrawIR → backend remains the worst hop, but status is backend-specific.**
+    Vulkan shares submissions across compatible buffered primitives, but
+    image/transition operations flush and per-primitive dispatch remains. CUDA
+    and Metal expose `RenderBackend.submit_batch` but their implementations are
+    no-ops and CUDA still synchronizes per operation.
+    Required: packed rect/kind instances, persistent descriptors/buffers,
+    reduced dispatches, and a device-side glass pass. The current full-frame
+    readback/host-crop seam is not device-region readback.
   - **Producers minimize conversion and copies:** `widget_draw_ir.spl`
     copy-in/copy-out on value-type arrays is O(N²) per frame → pass `mut cmds`;
     web path stops prepending the canvas command (O(N) rebuild at
@@ -206,7 +210,8 @@ asserting the exact pre-migration action strings (`launch_app`, `focus_window`,
 confirmed pre-existing by swapping in HEAD's unmigrated file and reproducing it,
 and is orthogonal to dispatch.
 
-Deliberately LEFT for separate reviewable steps (scope discipline, not oversight):
+**Pre-Wave A snapshot, superseded by the verified Wave A status below:**
+deliberately left for separate reviewable steps:
 `_shared_wm_content_dispatch` (window body / titlebar buttons / drag / close /
 minimize) and the command-lane dispatch are still hardcoded rect tests; no wheel
 branch was added, so `WINDOW_EVENT_WHEEL`/`POINTER_WHEEL` remain unconsumed by
@@ -232,11 +237,12 @@ lane self-report:**
 | `window_scene_spec` | 11 total / 10 passed / 1 failed (pre-existing) |
 | `window_scene_draw_ir_spec` | 12 / 9 / 3 (pre-existing, baselined) |
 
-**D1 IS NOW COMPLETE.** The WM's ENTIRE pointer-dispatch surface runs through the
-interaction core — taskbar (`_wm_taskbar_hit_slot`), window content
+**D1 POINTER-DOWN IS COMPLETE; WHEEL REMAINS OPEN.** The WM's pointer-down
+surface runs through the interaction core — taskbar (`_wm_taskbar_hit_slot`), window content
 (`_wm_content_hit_window`: body, both close regions, minimize, drag, multi-window
 z-order), and command lane (`_wm_command_lane_hit_area`). Each has an equivalence
-spec asserting the public action strings are unchanged. Two dead helpers
+spec asserting the public action strings are unchanged. `WINDOW_EVENT_WHEEL` /
+`POINTER_WHEEL` remains R2 work in the reconciliation plan. Two dead helpers
 (`_shared_wm_local_in_button`, `_shared_wm_window_contains`) were deleted; the one
 surviving mention at `window_scene.spl:976` is a comment, not a call.
 

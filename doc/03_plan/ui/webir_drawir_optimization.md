@@ -11,6 +11,12 @@ unification — orthogonal, this plan does not duplicate it). This plan is the
 concrete response to the perf regression exposed in
 `doc/08_tracking/bug/web_render_full_engine_content_frame_reroute_perf_2026-07-12.md`.
 
+**2026-07-31 reconciliation:** production cutover, persistent Engine2D
+lifecycle, compatibility-path isolation, backend capability evidence, and live
+acceptance are now ordered in
+`unified_2d_engine/draw_ir_web_renderer_reconciliation_2026-07-31.md`.
+Main parent/image lowering is implemented; iframe embedding remains red.
+
 ## 1. Current State
 
 ### 2026-07-29 implementation status
@@ -36,7 +42,8 @@ concrete response to the perf regression exposed in
 ### Ordered next backlog
 
 1. **Done in source, runtime-blocked:** retain DOM `parent_id` on main HTML
-   commands and owning-element IDs on synthetic image/input overlays; keep the
+   commands and owning-element IDs on synthetic image/input overlays; image
+   command lowering is also present. Keep the
    REQ-WEB-BROWSER-003/004 semantic composition oracle before pixels and
    round-trip it through the existing hosted SBRF/Draw IR v2 codec.
 2. Emit iframe content through the existing embedded `DrawIrBatch` mechanism.
@@ -44,9 +51,14 @@ concrete response to the perf regression exposed in
    revision sites and split the retained owner into stage-selective
    parse/style/layout/paint invalidation. Exact unchanged reuse and close
    reclamation are implemented.
-4. Run exact Path-A/Path-B corpus parity and only then route production content
-   frames through the existing persistent Engine2D owner.
-5. Consider Draw IR diff/damage only after retained-stage measurements prove
+4. Cut `ui.browser` over from its ignored composition/pixel rebuild to the
+   supplied `DrawIrComposition`, then run exact Path-A/Path-B corpus parity and
+   route production frames through one persistent Engine2D owner.
+5. Classify private bitmap text, heuristic scenes, CPU fallback, and readback
+   routes as explicit compatibility/diagnostic/recovery paths with guards.
+6. Prove web execution separately on physical CUDA, Vulkan, and Metal; Metal
+   evidence does not qualify the other backends.
+7. Consider Draw IR diff/damage only after retained-stage measurements prove
    unchanged-frame reuse is insufficient.
 
 `simple_web_html_layout_renderer_paint_layout.spl` remains a pre-existing
