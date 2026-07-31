@@ -25,7 +25,9 @@ pointer helpers instead of instantiating `SimpleOsGuiAdapter`.
 - Engine2D backend trait: `src/lib/gc_async_mut/gpu/engine2d/backend.spl`
 - Engine2D concrete backends: `backend_cpu.spl`, `backend_metal.spl`, `backend_cuda.spl`
 - SimpleOS WM service/core: `src/os/services/wm/wm_service.spl`, `src/os/compositor/wm_core.spl`
-- SimpleOS web window rendering adapter: `src/os/compositor/simple_web_window_renderer.spl`
+- SimpleOS Web assembly: `src/os/compositor/simple_web_window_renderer_core.spl`;
+  hosted adapter: `simple_web_window_renderer.spl`; RV64 target adapter:
+  `simple_web_window_renderer_software.spl`
 
 ## Boundaries
 

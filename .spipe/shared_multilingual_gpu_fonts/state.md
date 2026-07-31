@@ -1663,3 +1663,16 @@ pixels, and performance evidence remain release-blocking.
   `dom_color.spl`: suffix `.to_f32()` resolution is ambiguous between
   `f64.to_f32` and `i64.to_f32`. No ELF exists and the three-cycle cap is
   exhausted. QEMU, exact-ten, manuals, and PASS remain blocked.
+- checkpoint-693-stage2-32-pending-2026-07-31: LLVM-enabled Stage2 attempt 31
+  is retained parent evidence. RV64 attempts 29 and 30 validated the font/base
+  disk prerequisites but produced no ELF. The focused receiver-aware numeric and revised
+  RV64 entry-closure gates now pass; the freestanding route uses the canonical
+  Draw IR executor with `Riscv64DrawIrRenderTarget`,
+  `Engine2DBaremetalCore`, and the dependency-light Web core/software adapter,
+  while hosted `compositor_render.spl` remains excluded. Source implementation
+  checkpoint `693ed7d28aa` is retained. After the current
+  documentation reconciliation is committed, that clean HEAD is ready for
+  Stage2 attempt 32 once competing host builds and swap pressure clear, followed
+  by scoped-tool attempt 14 and RV64 attempt 31.
+  QEMU, exact-ten, manuals, `SIMPLEOS_STAGE2_FONT: PASS`, and overall PASS
+  remain blocked.

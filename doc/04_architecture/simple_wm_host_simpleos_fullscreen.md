@@ -11,7 +11,7 @@ Each target has one mutable authority. Host uses `HostCompositor.windows`; Simpl
 | Existing executor | `src/lib/common/ui/window_scene_draw_ir.spl` | Preserve `shared_wm_scene_render_to_backend(backend, scene, t_micros=0)`; delegate to richer executor | Modify |
 | Rich executor | same file | `shared_wm_scene_render_context_to_backend(backend, input)` using common-owned input | New API |
 | Backend trait | `src/os/compositor/display_backend.spl` | Existing implementation boundary; common executor coupling is documented legacy debt, not expanded | Existing |
-| Web artifact adapter | `src/os/compositor/simple_web_window_renderer.spl` | Convert Web results into common-owned `WmContentFrame` values | Modify |
+| Web artifact adapters | `src/os/compositor/simple_web_window_renderer_core.spl`, `simple_web_window_renderer.spl`, `simple_web_window_renderer_software.spl` | Shared request/frame assembly; hosted pixels; RV64 Draw IR target execution | Modify |
 | Host authority/state | `src/os/compositor/host_compositor_entry.spl` | Async display transition state, snapshots, renderer input | Modify |
 | Hosted adapter | `src/os/hosted/hosted_entry.spl` | F11, resize/scale/move acknowledgements, buffer reallocation, rollback | Modify |
 | Winit facade | `src/lib/nogc_sync_mut/io/window_winit.spl` | Typed fullscreen and geometry operations | Modify |
@@ -69,4 +69,3 @@ system "Production Simple WM" {
 2. Migrate host and shared-MDI callers.
 3. Replace SimpleOS fake overlay/canned content.
 4. Remove obsolete exports only after reference search and focused checks.
-

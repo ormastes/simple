@@ -157,8 +157,10 @@ depth test/write, zero-coverage discard, fenced submission, and device readback.
 Neither source path is execution evidence: promotion still requires the retained
 native oracle. Web producers lower through web semantic/layout (the current
 WebIR), and GUI producers through canonical widget/scene owners; both emit Draw
-IR. Engine2D alone lowers their text to transient `FontRenderBatch`; they must
-not consume the Engine3D adapter as a parallel rendering path. Host Web pixel
+IR. The `DrawIrRenderTarget` alone lowers their text to transient
+`FontRenderBatch`: hosted targets use Engine2D, while RV64 uses
+`Riscv64DrawIrRenderTarget` over `Engine2DBaremetalCore`. They must not consume
+the Engine3D adapter as a parallel rendering path. Host Web pixel
 and readback requests execute the HTML/WebIR composition; `ui.browser` prepares
 one `widget_tree_to_draw_ir` composition for pixels. Queue dispatch remains
 neutral until that same composition is actually submitted.

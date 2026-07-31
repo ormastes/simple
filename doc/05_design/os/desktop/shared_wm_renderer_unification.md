@@ -53,7 +53,10 @@ Adapters use the API as follows:
 - `src/app/ui.electron/backend.spl` renders Electron HTML and IPC JSON through the shared artifact builder.
 - `src/app/ui.tauri/backend.spl` renders Tauri HTML and IPC JSON through the shared artifact builder.
 - `src/app/ui.web/backend.spl`, `src/app/ui.electron/backend.spl`, and `src/app/ui.tauri/backend.spl` expose adapter helpers for common snapshot, patch, and input envelopes. Electron and Tauri standalone and async render loops now emit render IPC from common `WebRenderRequest` artifacts. `src/app/ui.ipc/async_handler.spl` preserves complete common render IPC JSON and wraps legacy raw HTML only for compatibility. `src/app/ui.web/server.spl` keeps its legacy `type:"render"` WebSocket frame shape but derives the body through `WebRenderRequest`/`web_render_body_html` and carries the `simple_web` target. `src/app/ui.web/web_runtime_adapter.spl` sends live snapshot and patch payloads through those common envelopes; the browser WebSocket boundary unwraps them before calling the retained renderer. Electron and Tauri snapshot/patch helper output is covered by behavioral equality tests against the shared web backend helpers; remaining verification is end-to-end native host WebView delivery.
-- `src/os/compositor/simple_web_window_renderer.spl` exposes WM app content through `WebRenderRequest` and blits `WebRenderArtifact.pixels`.
+- `src/os/compositor/simple_web_window_renderer_core.spl` owns shared request
+  and `WmContentFrame` assembly. Hosted WM uses
+  `simple_web_window_renderer.spl`; RV64 uses
+  `simple_web_window_renderer_software.spl` with its `DrawIrRenderTarget`.
 - `src/os/compositor/host_compositor_entry.spl` reports the shared `WEB_RENDER_TARGET_SIMPLE_WEB` target for host and SimpleOS framebuffer paths.
 - Pure Simple browser participation is verified by `test/01_unit/app/ui/web_render_backend_api_spec.spl`.
 
@@ -78,8 +81,10 @@ boundary is:
 - `create_web_window` maps to a `WebRenderRequest` with target `simple_web`,
   a stable `web_window_<id>` surface id, pixel output requested, and the same
   URL-derived body helper used by SimpleOS.
-- SimpleOS web app content uses `simple_web_window_renderer.spl` to produce the
-  same request/artifact shape before blitting pixels to `CompositorBackend`.
+- SimpleOS RV64 Web content uses `simple_web_window_renderer_core.spl` for the
+  same request/frame shape and `simple_web_window_renderer_software.spl` to
+  execute Draw IR through its canonical target. Hosted WM alone uses the cached
+  `simple_web_window_renderer.spl` pixel adapter.
 - Native host surfaces remain outside this web-render API because they are
   platform/windowing effects, not web content renderers.
 
@@ -91,7 +96,7 @@ Host native window command JSON uses `WebRenderHostWindowCommand` and `web_rende
 
 ## WM API
 
-`src/os/services/wm/wm_service.spl` and `src/os/compositor/wm_core.spl` are the shared WM authority targets. `src/os/compositor/host_compositor_entry.spl` now uses the real `WmService` as its lifecycle handle and converts host bridge messages plus pointer-driven drag/resize into shared `WmAction` lifecycle operations. `src/os/desktop/shell.spl` routes remote create, create-web, destroy, focus, resize, move, set-title, minimize, maximize, restore, and update-tree compositor mutation through `apply_wm_action_to_compositor(...)` and keeps shell-owned side effects local. `src/os/compositor/wm_action_applier.spl` owns the shared remote update-tree materialization and the lifecycle/pointer helpers used by both `HostCompositor` and the SimpleOS QEMU WM evidence path. `src/os/compositor/simple_web_window_renderer.spl` remains the richer host-capable Simple Web content renderer; `src/os/compositor/shared_mdi_framebuffer_scene.spl` is the shared framebuffer-safe chrome/layout/content renderer for host direct-draw chrome and QEMU evidence. Remaining divergence is adapter-owned: host cached web pixels and native event/process plumbing, QEMU framebuffer backend/config, and the QEMU entry's direct use of shared scene/pointer helpers instead of constructing `SimpleOsGuiAdapter`.
+`src/os/services/wm/wm_service.spl` and `src/os/compositor/wm_core.spl` are the shared WM authority targets. `src/os/compositor/host_compositor_entry.spl` now uses the real `WmService` as its lifecycle handle and converts host bridge messages plus pointer-driven drag/resize into shared `WmAction` lifecycle operations. `src/os/desktop/shell.spl` routes remote create, create-web, destroy, focus, resize, move, set-title, minimize, maximize, restore, and update-tree compositor mutation through `apply_wm_action_to_compositor(...)` and keeps shell-owned side effects local. `src/os/compositor/wm_action_applier.spl` owns the shared remote update-tree materialization and the lifecycle/pointer helpers used by both `HostCompositor` and the SimpleOS QEMU WM evidence path. `src/os/compositor/simple_web_window_renderer.spl` remains the richer hosted Simple Web content renderer. RV64 uses the shared `_core.spl` assembly plus the `_software.spl` Draw IR target adapter without host facades. `src/os/compositor/shared_mdi_framebuffer_scene.spl` is the shared framebuffer-safe chrome/layout/content renderer for host direct-draw chrome and legacy QEMU evidence. Remaining divergence is adapter-owned: host cached web pixels and native event/process plumbing, QEMU framebuffer backend/config, and the QEMU entry's direct use of shared scene/pointer helpers instead of constructing `SimpleOsGuiAdapter`.
 
 ### Resolution And DPI Contract
 

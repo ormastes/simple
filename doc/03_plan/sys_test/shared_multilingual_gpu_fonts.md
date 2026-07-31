@@ -98,7 +98,8 @@ Run only this scoped set:
   `compositor_render.spl` outside the freestanding closure.
 - [ ] Produce Stage2 attempt 32, then scoped-tool attempt 14 and RV64 attempt
   31, from the current LLVM numeric, RV64 DrawIR web-cache, and parent
-  `FontRenderer` inheritance fixes; all are unverified source work.
+  `FontRenderer` inheritance fixes. Focused numeric and closure gates pass;
+  Stage2 admission is pending.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused numeric and revised RV64 entry-closure gates pass. Attempts 26–30
   are retained. Attempt 29 passed the font-disk check

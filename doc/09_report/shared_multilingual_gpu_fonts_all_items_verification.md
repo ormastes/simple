@@ -9,60 +9,25 @@ Final done-mark owner: highest-capability `/root`
 
 `STATUS: FAIL`
 
-## 2026-07-30 restored-worktree execution status
+## 2026-07-31 current execution status
 
-The RV64 source repair was introduced at
-`39c1863426a8c1379ee3c5584bb6c3d3a78f9970`. Stage2 attempt 29 is now
-admitted at its exact clean launch checkpoint
-`fbcaa8ccd0b22cc0169f5be289f7cc801d48b637`. The old temporary worktree and its ignored
-Stage2/QEMU/spec/manual artifacts disappeared during the host Btrfs failure;
-the tracked source, plans, historical identities, and pushed branch survived.
-Filesystem allocation is usable again.
+Source implementation checkpoint `693ed7d28aa` contains the receiver-aware
+LLVM numeric lowering, the dependency-light RV64 Web/Draw IR route, and the
+separate RV64 compositor adapter. The focused numeric test passed 1/1 after
+`13m 49s`; the revised RV64
+entry-closure test passed 1/1 after `5m 08s` compilation and `3.44s` execution.
+The closure requires the RV64 target/executor/core/software-Web modules and
+excludes `compositor_render.spl`, the hosted renderer, hosted pixel backends,
+the hosted Engine2D facade, CUDA, and Vulkan.
 
-Physical Stage2 attempt 27 was stopped before Stage2 after preflight because an
-unrelated full bootstrap and two Rust builds appeared. Attempt 28 then exited
-before Stage2 because the restored worktree had no matching Rust seed/runtime
-tuple. Both immutable logs are retained and neither path will be reused. The
-attempt 29 used `--full-bootstrap --stop-after-stage2` only for the missing
-Rust authority and exited zero after verified Stage2 in `37:34.35` at
-`3,345,112 KiB` maximum RSS. Its binary SHA-256 is
-`0b65b6109ddc0c4e8f924696a3e725a3d321f1fd094e5dfdaddaff7423a22fc0`;
-provenance SHA-256 is
-`55ecaabf0ba14ad5dbcf23b433cc7a5f6f97b153487b8a5fa0d83b5c05db39b7`.
-The independent absolute-path manifest verifier exited zero. Scoped-tool
-attempt 13 and its independent checker also passed; its evidence-manifest
-SHA-256 is
-`f2a5ead296c43c2b12354fb9eb754a70084f4813d985571bbeb7a544c93e0d84`.
-The next serialized chain is reserved RV64 attempt 26, exact-ten attempt 13,
-and manual attempt 13. No PASS is claimed.
-
-RV64 attempt 26 exited 1 before codegen after the obsolete positional-entry
-form selected broad unrelated HIR inputs. Attempt 27 corrected the canonical
-source roots and explicit entry closure, then failed closed because admitted
-Stage2 attempt 29 is Cranelift-only; this repository requires LLVM for RV64
-freestanding targets. Attempt 26 took `0:28.19` at `658,208 KiB` maximum RSS;
-attempt 27 took `0:43.22` at `85,024 KiB`. Neither produced an ELF. The next
-minimal prerequisite is one LLVM-enabled current-checkpoint
-`--stop-after-stage2` producer; Stage3/4 remain excluded.
-
-That prerequisite is now admitted as Stage2 attempt 30 at source checkpoint
-`fbcaa8ccd0b`: binary SHA-256
-`c91c18017e9ffd4e5fcd0777f73c8563f1cd90ee096c26afca22d7f52a02d25a`,
-provenance SHA-256
-`3f270a6bad8b4102647c80c4fa65bf196d0ca8bcee8f43cab047dd5494474287`,
-`backend=llvm-lib`, and `seed_features=--features llvm`. The producer and
-independent manifest verifier exited zero in `39:40.05` at `3,553,108 KiB`
-maximum RSS. The third and final bounded RV64 cycle is next.
-
-RV64 attempt 28 consumed that final cycle and exited 1 in `1:36.46` at
-`278,060 KiB` maximum RSS. The canonical explicit LLVM entry closure reached
-`src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl`, where LLVM method
-resolution rejected suffix `.to_f32()` as ambiguous between `f64.to_f32` and
-`i64.to_f32`. No ELF was produced. Command/stderr/time receipt SHA-256 values
-are `4bc81f6c8dad6764c388cd32aed1aa294777f981854fd11c764e626de804674d`,
-`d4d1505d429ecf5843dc28d56a49473b6afd92f03f23c1963f146e1bce584b80`,
-and `6bc79ff953e370915e25973d708e8f98d64f4cd705d7e80ba72ab24448073ec2`.
-The three-cycle cap is exhausted; QEMU, exact-ten, and manuals remain blocked.
+Stage2 attempt 31 remains retained parent evidence only. RV64 attempts 29 and
+30 did not produce an ELF. After this documentation reconciliation is committed,
+the next serialized chain is a clean LLVM-enabled
+Stage2 attempt 32, scoped-tool attempt 14, and RV64 attempt 31, followed by
+QEMU crop calibration, exact-ten attempt 13, and manual attempt 13. Stage2-32
+has not started because unrelated host bootstrap/native-build producers have
+exhausted swap. No new Stage2 manifest, scoped-tool receipt, RV64 ELF, QEMU
+crop, exact-ten receipt, or manual receipt exists yet. Stage3/4 remain excluded.
 
 `STATUS: FAIL`
 
