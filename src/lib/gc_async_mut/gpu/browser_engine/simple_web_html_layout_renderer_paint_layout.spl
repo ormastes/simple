@@ -148,6 +148,9 @@ fn input_uses_accent_color(nd: HNode) -> bool:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
     input_type == "checkbox" or input_type == "radio"
 
+fn input_is_checked(nd: HNode) -> bool:
+    attr_present(nd.attrs_raw, "checked")
+
 fn input_paints_text(nd: HNode) -> bool:
     val input_type = attr_value(nd.attrs_raw, "type").trim().lower()
     val declared_value = attr_value(nd.attrs_raw, "value")
@@ -565,19 +568,44 @@ pub fn input_text_paint_plan_with_overlay(
         resolved_view_start_byte: resolved_view_start
     )
 
-fn fb_input_accent_control_clip(fb: [u32], fbw: i32, fbh: i32, x: i32, y: i32, w: i32, h: i32, accent_color: u32, clip: ClipRect) -> [u32]:
+fn fb_input_accent_control_clip(
+    fb: [u32], fbw: i32, fbh: i32,
+    x: i32, y: i32, w: i32, h: i32,
+    input_type: text, checked: bool, accent_color: u32, clip: ClipRect
+) -> [u32]:
     val accent = if accent_color != 0u32: accent_color else: argb(37, 99, 235)
     val control_w = if w < 14: w else: 14
     val control_h = if h < 14: h else: 14
     if control_w <= 0 or control_h <= 0:
         return fb
-    var out = fb_rect_clip(fb, fbw, fbh, x, y, control_w, control_h, argb(248, 250, 252), clip)
-    out = fb_rect_clip(out, fbw, fbh, x, y, control_w, 1, accent, clip)
-    out = fb_rect_clip(out, fbw, fbh, x, y + control_h - 1, control_w, 1, accent, clip)
-    out = fb_rect_clip(out, fbw, fbh, x, y, 1, control_h, accent, clip)
-    out = fb_rect_clip(out, fbw, fbh, x + control_w - 1, y, 1, control_h, accent, clip)
-    if control_w > 4 and control_h > 4:
-        out = fb_rect_clip(out, fbw, fbh, x + 3, y + 3, control_w - 6, control_h - 6, accent, clip)
+    val radio = input_type == "radio"
+    var out = fb
+    if radio:
+        out = fb_rounded_rect_opacity_clip(
+            out, fbw, fbh, x, y, control_w, control_h,
+            control_w / 2, accent, 100, clip
+        )
+        if control_w > 2 and control_h > 2:
+            out = fb_rounded_rect_opacity_clip(
+                out, fbw, fbh, x + 1, y + 1,
+                control_w - 2, control_h - 2,
+                (control_w - 2) / 2, argb(248, 250, 252), 100, clip
+            )
+    else:
+        out = fb_rect_clip(fb, fbw, fbh, x, y, control_w, control_h, argb(248, 250, 252), clip)
+        out = fb_rect_clip(out, fbw, fbh, x, y, control_w, 1, accent, clip)
+        out = fb_rect_clip(out, fbw, fbh, x, y + control_h - 1, control_w, 1, accent, clip)
+        out = fb_rect_clip(out, fbw, fbh, x, y, 1, control_h, accent, clip)
+        out = fb_rect_clip(out, fbw, fbh, x + control_w - 1, y, 1, control_h, accent, clip)
+    if checked and control_w > 6 and control_h > 6:
+        if radio:
+            out = fb_rounded_rect_opacity_clip(
+                out, fbw, fbh, x + 3, y + 3,
+                control_w - 6, control_h - 6,
+                (control_w - 6) / 2, accent, 100, clip
+            )
+        else:
+            out = fb_rect_clip(out, fbw, fbh, x + 3, y + 3, control_w - 6, control_h - 6, accent, clip)
     out
 
 # ---------------------------------------------------------------------------
@@ -881,7 +909,11 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
         val non_widget_mode = not widget_mode
         if non_widget_mode and visible_node and nd.tag == "input" and input_uses_accent_color(nd):
             val clip = paint_clip_at(clip_cache, i)
-            out = fb_input_accent_control_clip(out, fbw, fbh, x, y, w, h, st.caret_color, clip)
+            out = fb_input_accent_control_clip(
+                out, fbw, fbh, x, y, w, h,
+                attr_value(nd.attrs_raw, "type").trim().lower(),
+                input_is_checked(nd), st.accent_color, clip
+            )
         if non_widget_mode and visible_node and nd.tag == "img" and nd.has_widget_image_class:
             val clip = paint_clip_at(clip_cache, i)
             out = fb_widget_image_placeholder_clip(out, fbw, fbh, x, y, w, h, st.object_fit, st.object_position, clip)
@@ -1226,6 +1258,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("line-height", "{style_line_h(st)}"),
         draw_ir_style_prop("letter-spacing", "{st.letter_spacing_px}"),
         draw_ir_style_prop("caret-color", if st.caret_color != 0u32: "{st.caret_color}" else: "auto"),
+        draw_ir_style_prop("accent-color", if st.accent_color != 0u32: "{st.accent_color}" else: "auto"),
         draw_ir_style_prop("cursor", st.cursor),
         draw_ir_style_prop("hyphens", st.hyphens),
         draw_ir_style_prop("line-break", st.line_break),
@@ -1845,6 +1878,74 @@ fn _html_draw_ir_overlay_rect(
         )
     )
 
+fn _html_draw_ir_checkable_commands(
+    node: HNode, st: Style, i: i32,
+    x: i32, y: i32, width: i32, height: i32, clip: ClipRect
+) -> [DrawIrCommand]:
+    var commands: [DrawIrCommand] = []
+    val control_w = if width < 14: width else: 14
+    val control_h = if height < 14: height else: 14
+    if control_w <= 0 or control_h <= 0:
+        return commands
+    val component_id = _html_draw_ir_component_id(node, i)
+    val input_type = attr_value(node.attrs_raw, "type").trim().lower()
+    val checked = input_is_checked(node)
+    val accent = if st.accent_color != 0u32:
+        st.accent_color
+    else:
+        argb(37, 99, 235)
+    val surface = argb(248, 250, 252)
+    val radio = input_type == "radio"
+
+    var frame = _html_draw_ir_overlay_rect(
+        component_id + "_checkable_frame",
+        ClipRect(x0: x, y0: y, x1: x + control_w, y1: y + control_h),
+        surface, clip
+    )
+    frame.parent_id = component_id
+    frame.computed_style = [
+        draw_ir_style_prop("form-control-part", "frame"),
+        draw_ir_style_prop("input-type", input_type),
+        draw_ir_style_prop("checked", if checked: "true" else: "false"),
+        draw_ir_style_prop("accent-color", "{accent}"),
+        draw_ir_style_prop("border-top-width", "1"),
+        draw_ir_style_prop("border-right-width", "1"),
+        draw_ir_style_prop("border-bottom-width", "1"),
+        draw_ir_style_prop("border-left-width", "1"),
+        draw_ir_style_prop("border-top-color", "{accent}"),
+        draw_ir_style_prop("border-right-color", "{accent}"),
+        draw_ir_style_prop("border-bottom-color", "{accent}"),
+        draw_ir_style_prop("border-left-color", "{accent}")
+    ]
+    if radio:
+        frame.computed_style.push(draw_ir_style_prop(
+            "border-radius", "{control_w / 2}"
+        ))
+    commands.push(frame)
+
+    if checked and control_w > 6 and control_h > 6:
+        var indicator = _html_draw_ir_overlay_rect(
+            component_id + "_checked_indicator",
+            ClipRect(
+                x0: x + 3, y0: y + 3,
+                x1: x + control_w - 3, y1: y + control_h - 3
+            ),
+            accent, clip
+        )
+        indicator.parent_id = component_id
+        indicator.computed_style = [
+            draw_ir_style_prop("form-control-part", "checked-indicator"),
+            draw_ir_style_prop("input-type", input_type),
+            draw_ir_style_prop("checked", "true"),
+            draw_ir_style_prop("accent-color", "{accent}")
+        ]
+        if radio:
+            indicator.computed_style.push(draw_ir_style_prop(
+                "border-radius", "{(control_w - 6) / 2}"
+            ))
+        commands.push(indicator)
+    commands
+
 fn _html_draw_ir_abs_i32(value: i32) -> i64:
     if value < 0: 0 - value.to_i64() else: value.to_i64()
 
@@ -2261,6 +2362,14 @@ fn _html_draw_ir_commands(
                 image.parent_id = component_id
                 commands.push(image)
                 owner_nodes.push(i)
+            if nodes[i].tag == "input" and input_uses_accent_color(nodes[i]):
+                for control_command in _html_draw_ir_checkable_commands(
+                    nodes[i], styles[i], i,
+                    boxes.bx[i], boxes.by[i], boxes.bw[i], boxes.bh[i],
+                    node_clip
+                ):
+                    commands.push(control_command)
+                    owner_nodes.push(i)
             val overlay_target = (
                 i < target_keys.len() and
                 target_keys[i] != "" and
