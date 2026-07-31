@@ -340,6 +340,7 @@ pub class HostedBrowserRendererWorkerSession:
     input_view_start_byte: i64
     caret_blink_epoch_ms: i64
     pressed_pointer_default_prevented: bool
+    pressed_compat_mouse_suppressed: bool
     scroll_milli_y: i64
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
     active_root_command_request_id: i64
@@ -384,6 +385,7 @@ pub class HostedBrowserRendererWorkerSession:
             input_view_start_byte: 0,
             caret_blink_epoch_ms: 0,
             pressed_pointer_default_prevented: false,
+            pressed_compat_mouse_suppressed: false,
             scroll_milli_y: 0,
             image_resource_revisions: [],
             active_root_command_request_id: 0,
@@ -498,16 +500,14 @@ pub class HostedBrowserRendererWorkerSession:
         if target_id == "":
             self.pressed_target_id = ""
             self.pressed_pointer_default_prevented = false
+            self.pressed_compat_mouse_suppressed = false
             if action.pressed:
                 self._clear_page_text_focus_state()
             return ""
         if action.pressed:
             self.pressed_target_id = target_id
-            val pointer_down = self.browser.dispatch_dom_event(
-                target_id, "pointerdown", true, true
-            )
-            val mouse_down = self.browser.dispatch_dom_event(
-                target_id, "mousedown", true, true
+            val pointer_down = self.browser.dispatch_dom_primary_pointer_down(
+                target_id
             )
             val focused_id = be_dom_focused_id(self.browser.dom_root())
             val target_path = be_dom_find_path_to_id(
@@ -519,11 +519,13 @@ pub class HostedBrowserRendererWorkerSession:
                     target_path[target_path.len() - 1]
                 )
             )
-            val default_allowed = (
-                not pointer_down.event.default_prevented and
-                not mouse_down.event.default_prevented
+            val default_allowed = not pointer_down.default_prevented
+            self.pressed_pointer_default_prevented = (
+                pointer_down.default_prevented
             )
-            self.pressed_pointer_default_prevented = not default_allowed
+            self.pressed_compat_mouse_suppressed = (
+                pointer_down.suppress_compat_mouse
+            )
             if selectable and focused_id == target_id and default_allowed:
                 val target_key = be_dom_layout_target_key(
                     self.browser.dom_root(), target_id
@@ -548,18 +550,14 @@ pub class HostedBrowserRendererWorkerSession:
         val pointer_default_prevented = (
             self.pressed_pointer_default_prevented
         )
+        val suppress_compat_mouse = self.pressed_compat_mouse_suppressed
         self.pressed_target_id = ""
         self.pressed_pointer_default_prevented = false
-        val _ = self.browser.dispatch_dom_event(
-            target_id, "pointerup", true, true
+        self.pressed_compat_mouse_suppressed = false
+        self.browser.dispatch_dom_primary_pointer_up(
+            target_id, suppress_compat_mouse,
+            pressed_target_id == target_id
         )
-        val _ = self.browser.dispatch_dom_event(
-            target_id, "mouseup", true, true
-        )
-        if pressed_target_id == target_id:
-            val _ = self.browser.dispatch_dom_event(
-                target_id, "click", true, true
-            )
         if not pointer_default_prevented:
             self._reset_caret_blink()
         ""
@@ -642,6 +640,7 @@ pub class HostedBrowserRendererWorkerSession:
             return action.reason
         self.pressed_target_id = ""
         self.pressed_pointer_default_prevented = false
+        self.pressed_compat_mouse_suppressed = false
         if action.pressed:
             self._clear_page_text_focus_state()
             self.pressed_chrome_control = action.value
@@ -707,6 +706,7 @@ pub class HostedBrowserRendererWorkerSession:
                         return "navigation-target-mismatch"
         self.pressed_target_id = ""
         self.pressed_pointer_default_prevented = false
+        self.pressed_compat_mouse_suppressed = false
         self.pressed_chrome_control = ""
         self.chrome_focus = ""
         self.address_replace_on_text = false

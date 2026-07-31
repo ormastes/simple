@@ -99,6 +99,7 @@ class HostedWebContentSession:
     failure_reason: text
     last_target_id: text
     pressed_target_id: text
+    pressed_compat_mouse_suppressed: bool
     published_body_html: text
     started_at_ms: i64
     profile_enabled: bool
@@ -138,6 +139,7 @@ class HostedWebContentSession:
             failure_reason: failure_reason,
             last_target_id: "",
             pressed_target_id: "",
+            pressed_compat_mouse_suppressed: false,
             published_body_html: published_html,
             started_at_ms: -1,
             profile_enabled: false,
@@ -148,6 +150,10 @@ class HostedWebContentSession:
             network_job_request: nil,
             network_job_fetch_request: nil
         )
+
+    me clear_page_pointer_compatibility_state():
+        self.pressed_target_id = ""
+        self.pressed_compat_mouse_suppressed = false
 
     me _refresh_published_body_html():
         self.published_body_html = (
@@ -196,6 +202,8 @@ class HostedWebContentSession:
         self.render_session.document_revision = -1
 
     me _commit_network_error(request: BrowserRequest, message: text):
+        if request.kind == "document":
+            self.clear_page_pointer_compatibility_state()
         val _ = self.browser.commit_network_response(
             BrowserResponse.create(
                 request_id: request.id,
@@ -211,6 +219,8 @@ class HostedWebContentSession:
     me _commit_network_response(
         request: BrowserRequest, response: FetchResponse
     ):
+        if request.kind == "document":
+            self.clear_page_pointer_compatibility_state()
         val body = if request.kind == "wasm":
             _hosted_wasm_hex(response.body)
         else:
@@ -409,7 +419,7 @@ class HostedWebContentSession:
     me dispatch_chrome_pointer(
         event_id: i64, control: text, down: bool
     ) -> HostedWebContentDispatch:
-        self.pressed_target_id = ""
+        self.clear_page_pointer_compatibility_state()
         if down:
             self.pressed_chrome_control = control
             if control == "address":
@@ -521,7 +531,7 @@ class HostedWebContentSession:
         )
         val target_id = self._target_at(x, y)
         if target_id == "":
-            self.pressed_target_id = ""
+            self.clear_page_pointer_compatibility_state()
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
@@ -533,7 +543,7 @@ class HostedWebContentSession:
         if browser_dom_control_is_effectively_disabled(
             self.browser.dom_root(), target_id
         ):
-            self.pressed_target_id = ""
+            self.clear_page_pointer_compatibility_state()
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
@@ -546,13 +556,13 @@ class HostedWebContentSession:
         val callback_start = self.browser.dom_callback_count
         if down:
             self.pressed_target_id = target_id
-            val _ = self.browser.dispatch_dom_event(
-                target_id, "pointerdown", true, true
+            val pointer_down = self.browser.dispatch_dom_primary_pointer_down(
+                target_id
             )
-            val mouse_down = self.browser.dispatch_dom_event(
-                target_id, "mousedown", true, true
+            self.pressed_compat_mouse_suppressed = (
+                pointer_down.suppress_compat_mouse
             )
-            if mouse_down.default_action_allowed:
+            if pointer_down.mouse_default_action_allowed:
                 self.last_target_id = be_dom_focused_id(
                     self.browser.dom_root()
                 )
@@ -572,17 +582,12 @@ class HostedWebContentSession:
                 reason: if changed: "" else: "pointer-pressed"
             )
         val pressed_target_id = self.pressed_target_id
-        self.pressed_target_id = ""
-        val _ = self.browser.dispatch_dom_event(
-            target_id, "pointerup", true, true
+        val suppress_compat_mouse = self.pressed_compat_mouse_suppressed
+        self.clear_page_pointer_compatibility_state()
+        self.browser.dispatch_dom_primary_pointer_up(
+            target_id, suppress_compat_mouse,
+            pressed_target_id == target_id and pressed_target_id != ""
         )
-        val _ = self.browser.dispatch_dom_event(
-            target_id, "mouseup", true, true
-        )
-        if pressed_target_id == target_id and pressed_target_id != "":
-            val _ = self.browser.dispatch_dom_event(
-                target_id, "click", true, true
-            )
         val callback_count = self.browser.dom_callback_count - callback_start
         self._cancel_orphaned_network_job()
         self.last_target_id = be_dom_focused_id(self.browser.dom_root())
@@ -860,7 +865,7 @@ class HostedWebContentRegistry:
         while i < self.sessions.len():
             if i != retained_index:
                 var session = self.sessions[i]
-                session.pressed_target_id = ""
+                session.clear_page_pointer_compatibility_state()
                 session.pressed_chrome_control = ""
                 self.sessions[i] = session
             i = i + 1

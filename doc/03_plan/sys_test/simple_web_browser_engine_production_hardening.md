@@ -1413,3 +1413,37 @@ Cycle 3/3 pins each clipped browser window batch to embedding rectangle
 `(0,0,width,126)` with clipping enabled at widths 267, 268, 311, 312, 323,
 and 324. These exact embedding assertions complement the retained command
 suppression, command-count deltas, and literal boundary-pixel evidence.
+
+## Primary pointer compatibility suppression (2026-07-31)
+
+Canceled primary `pointerdown` owns one cross-route compatibility rule: retain
+`pointerup` and same-target `click`, but suppress the subsequent compatibility
+`mousedown` and `mouseup`. The shared semantic owner is `BrowserSession`; the
+in-process `HostedWebContentSession` and isolated
+`HostedBrowserRendererWorkerSession` retain only the one-bit press lifetime
+needed by that owner.
+
+The production call chains are:
+
+- `HostedWebContentSession.dispatch_pointer_at -> BrowserSession primary
+  pointer compatibility owner`; and
+- `HostedBrowserRendererRegistry.dispatch_pointer_at ->
+  HostedBrowserRendererProcess.begin_pointer -> browser renderer protocol ->
+  HostedBrowserRendererWorkerSession._dispatch_pointer -> BrowserSession
+  primary pointer compatibility owner`.
+
+| Requirement | Executable SSpec | Manual | Deterministic oracle |
+|---|---|---|---|
+| REQ-WEB-BROWSER-007 | `test/03_system/app/browser/feature/browser_pointer_compatibility_suppression_spec.spl` | `doc/06_spec/03_system/app/browser/feature/browser_pointer_compatibility_suppression_spec.md` | exact `pointerdown,pointerup,click,` trace; no `mousedown`/`mouseup` |
+| REQ-WEB-BROWSER-008 | same | same | hosted/worker callback parity, one click, zero navigation, cleared press state |
+
+The displayed manual uses exactly these four steps:
+
+1. `Open the same canceling button in hosted and isolated renderers`
+2. `Press the primary pointer on both buttons`
+3. `Release the primary pointer over the original targets`
+4. `Observe pointer click order and suppressed compatibility mouse events`
+
+The scenario is a STATIC candidate until an admitted pure-Simple runner and
+docgen lane execute it. This bounded implementation invokes neither runtime,
+bootstrap, nor docgen and therefore makes no runtime PASS claim.

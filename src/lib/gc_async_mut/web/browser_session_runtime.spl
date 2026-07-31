@@ -924,6 +924,11 @@ fn browser_dom_keyboard_code_from_key(key: text) -> text:
         "delete": "Delete"
         _: if key.len() == 1: key else: "Unidentified"
 
+pub class BrowserPrimaryPointerDownDispatch:
+    suppress_compat_mouse: bool
+    default_prevented: bool
+    mouse_default_action_allowed: bool
+
 impl BrowserSession:
 
     me _advance_ui_access_revision():
@@ -1309,6 +1314,49 @@ impl BrowserSession:
             target_id, event_type, bubbles, cancelable, "", "", false,
             nil, "", false
         )
+
+    me dispatch_dom_primary_pointer_down(
+        target_id: text
+    ) -> BrowserPrimaryPointerDownDispatch:
+        """Dispatch primary pointerdown and its permitted mouse compatibility.
+
+        Canceling pointerdown sets the Pointer Events PREVENT MOUSE EVENT state,
+        so mousedown is not produced and the caller must retain suppression
+        until the matching pointerup.
+        """
+        val pointer_down = self.dispatch_dom_event(
+            target_id, "pointerdown", true, true
+        )
+        if pointer_down.event.default_prevented:
+            return BrowserPrimaryPointerDownDispatch(
+                suppress_compat_mouse: true,
+                default_prevented: true,
+                mouse_default_action_allowed: false
+            )
+        val mouse_down = self.dispatch_dom_event(
+            target_id, "mousedown", true, true
+        )
+        BrowserPrimaryPointerDownDispatch(
+            suppress_compat_mouse: false,
+            default_prevented: mouse_down.event.default_prevented,
+            mouse_default_action_allowed: mouse_down.default_action_allowed
+        )
+
+    me dispatch_dom_primary_pointer_up(
+        target_id: text, suppress_compat_mouse: bool, activate_click: bool
+    ):
+        """Finish a primary pointer stream without dropping pointerup/click."""
+        val _ = self.dispatch_dom_event(
+            target_id, "pointerup", true, true
+        )
+        if not suppress_compat_mouse:
+            val _ = self.dispatch_dom_event(
+                target_id, "mouseup", true, true
+            )
+        if activate_click:
+            val _ = self.dispatch_dom_event(
+                target_id, "click", true, true
+            )
 
     me _dispatch_dom_input_event(
         target_id: text, event_type: text, bubbles: bool, cancelable: bool,
