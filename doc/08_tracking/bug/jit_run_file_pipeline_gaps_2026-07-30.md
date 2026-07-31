@@ -1722,3 +1722,105 @@ filter that reordered it.
 
 **Disposition: web showcase cell stays BLOCKED. Scoreboard: 2 GREEN.** No
 fix attempted; no fifth mask chased.
+
+## 17. Re-audit (2026-07-31): §16's write-side fix is confirmed landed on origin/main and independently re-verified; the module-level-`val` framing of the cell's blocker is STALE
+
+A separate task described the cell's primary blocker as "a module-level
+`val` whose initializer is a function call never executes, so the global
+reads as 0" (i.e. exactly §12/§16's `SHOWCASE_DIMS = showcase_resolution_dims()`
+defect) and asked to pin it down fresh, without assuming §16 already
+covered it. It does. This section records independent re-confirmation,
+not a new finding.
+
+**Pipeline established first, per instruction (PROVED, not inferred):**
+the deployed/default Rust-seed binary dispatches `bin/simple run
+<file>` (and the bare env-less invocation) to JIT — checked directly by
+running the minimal repro three ways against the same binary
+(`bin/release/x86_64-unknown-linux-gnu/simple`, sha256
+`ea4af9a4498297e3c4f31ca74082c20ebb10d7d2cc65218cea022960e15e597d`):
+`SIMPLE_EXECUTION_MODE=jit` and no env var both print `RW=0 RH=0
+product=0`; `SIMPLE_EXECUTION_MODE=interpret` prints the correct `RW=480
+RH=360 product=172800`. The no-env-var run matching the explicit-JIT run
+byte-for-byte is what proves JIT is the default, not an assumption from
+the command name. This also cross-checks against the authoritative cell
+table in `doc/09_report/showcase_matrix_census_2026-07-30.md`, which
+records cell 3 as explicitly "compiled-lane-gated" (i.e. JIT/native, not
+interpreted) for this exact reason.
+
+**Ancestry of the two named commits, checked by `git merge-base
+--is-ancestor` against a fresh SSH `ls-remote` tip, never by comparing
+dates:**
+
+```
+$ GIT_SSH_COMMAND="ssh -o BatchMode=yes -i ~/.ssh/id_ed25519_this_mac" \
+  git ls-remote git@github.com:ormastes/simple.git refs/heads/main
+cba4abb304c3735861c5ebfac2af9a41d7e9c3ca  refs/heads/main
+
+$ git merge-base --is-ancestor 26a0c4ad9ef cba4abb304c3735861c5ebfac2af9a41d7e9c3ca && echo yes
+yes
+$ git merge-base --is-ancestor 48af531ce0e cba4abb304c3735861c5ebfac2af9a41d7e9c3ca && echo yes
+yes
+$ git merge-base --is-ancestor 8ddaf9f40e1 cba4abb304c3735861c5ebfac2af9a41d7e9c3ca && echo yes
+yes
+```
+
+Both named commits (the read-side fix and §16's write-side fix), plus
+§16.2's follow-on `BeDomNode.element` overload fix, are ancestors of the
+current true origin/main tip. **PROVED.**
+
+**Does the defect still reproduce? Re-tested empirically against
+multiple binaries, not inferred from the commit being an ancestor**
+(a landed commit does not by itself prove which binary on disk contains
+it — the deployed binary is a separate artifact):
+
+| Binary | sha256 (short) | Contains §16 fix? | `RW RH product` under JIT |
+|---|---|---|---|
+| `bin/release/x86_64-unknown-linux-gnu/simple` (== `bin/simple`, currently deployed) | `ea4af9a449…` | No (pre-dates it) | `0 0 0` — reproduces |
+| `build/tmp/claude_simple_fixed` (read-side fix only, `26a0c4ad9ef`) | `dde638a7b3…` | No (built before §16 landed) | `0 0 0` — reproduces |
+| `src/compiler_rust/target/debug/simple` | (built 2026-07-31 01:38 UTC) | Yes | `480 360 172800` — correct |
+| `src/compiler_rust/target/bootstrap/simple` | (built 2026-07-31 06:28 UTC) | Yes | `480 360 172800` — correct |
+
+No cargo build was run to produce this table — all four binaries already
+existed on disk from prior sessions; the debug/bootstrap binaries were
+picked because their mtimes postdate §16.3's landing timestamp, then
+their *behavior* (not their date) was what was checked against the
+probe. This satisfies the task's "no cargo builds" constraint while
+still being a behavioral, non-vacuous check rather than an inference
+from dates.
+
+**Conclusion: the module-level-`val`-zeroed framing of the cell's
+blocker is STALE, exactly as §16 already found.** It is fixed at
+`48af531ce0e`, that commit is on origin/main, and a binary built after
+it behaves correctly on both the isolated probe and (per §16.3 item 4)
+the real `SHOWCASE_DIMS` chain in `examples/06_io/ui/web_render_file_gui.spl`.
+
+**New information this pass adds, not previously on record: a
+deployment gap, distinct from the source-level fix.** The binary at
+`bin/release/x86_64-unknown-linux-gnu/simple` — the one `bin/simple` and
+therefore any ordinary showcase invocation actually runs — is still the
+pre-fix `ea4af9a449…` build (matching the `showcase_matrix_census`
+report's "canonical binary: `ea4af9a4498297e3…`" as of 2026-07-30, still
+current as of this check). Anyone re-running the *real* showcase via
+`bin/simple run` today, without first redeploying a freshly-built
+binary, will still observe `pixels=0 nonzero=0 checksum=0` — not because
+the write-side defect is unfixed, but because the fix has not been
+redeployed to the binary the default tool resolves to. This is a
+deployment/redeploy-lane task, not a source defect, and is exactly the
+kind of gap `.claude/rules/code-style.md`'s "production wrappers should
+execute cached compiled artifacts, not raw source" warns can go stale
+silently.
+
+**Current actual blocker for the cell (unchanged from §16.6, still
+open):** with a post-fix binary and 57-file `assets/fonts`, the real
+showcase clears `blank-or-uniform` and reaches the font-identity/Draw-IR
+pairing defect — `Style` computation is proven correct at
+`compute_styles_with_material` (§16.4/16.5/16.6) but the wrong
+(Noto-Sans-SC/16px) identity is already present in the Draw-IR command's
+`computed_style` before font selection runs, localized to somewhere
+between `simple_web_html_layout_renderer.spl:1482` (correct producer)
+and `simple_web_html_layout_renderer_paint_layout.spl:1152` (consumer
+with the wrong value), with the `draw_ir_style_props_pairing` trace
+already landed and ready but not yet run to completion (§16.6's cost
+wall: the module compiles in the 48-minute-plus class). Not chased
+further here — out of scope for this pass, which was diagnosis of the
+module-level-`val` framing only, per instruction not to attempt a fix.

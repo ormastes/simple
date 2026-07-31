@@ -762,3 +762,20 @@ Clearing the first does **not** clear the second. Cells #4-#6 remain
 as close to GREEN on the strength of this result.
 
 **Scoreboard unchanged: 2 GREEN, 0 CLAIMED, 5 BLOCKED, 0 UNKNOWN.**
+
+## Pointer (2026-07-31): cell 3's `SHOWCASE_DIMS`/module-init framing is fixed and deployment-gapped, not a new gap
+
+A later re-audit re-confirmed `doc/08_tracking/bug/
+jit_run_file_pipeline_gaps_2026-07-30.md` §16-§17: the module-level-`val`
+write-side defect this table's cell-3 row does not itself name (the
+`text.from_any`/paint-budget framing above is a separate, earlier-dated
+finding) is fixed at `48af531ce0e`, confirmed an ancestor of origin/main
+tip `cba4abb304c3735861c5ebfac2af9a41d7e9c3ca` via `git merge-base
+--is-ancestor` (not dates). The **deployed** canonical binary
+(`ea4af9a4498297e3…`, same sha this report already cites) still predates
+that fix, so a plain `bin/simple run` of the showcase still prints
+`pixels=0` today — a redeploy gap, not an unfixed source defect. Cell 3's
+real current blocker, once run on a post-fix binary, is the
+font-identity/Draw-IR pairing defect at §16.6 (still open, not the
+module-init one). See §17 there for the full binary-by-binary evidence
+table.
