@@ -94,6 +94,10 @@ fn _lsp_result_panel_title_for(kind: text) -> text:
         return "Workspace Symbols"
     if kind == "rename-preview":
         return "Rename Preview"
+    if kind == "formatting-preview":
+        return "Formatting Preview"
+    if kind == "range-formatting-preview":
+        return "Range Formatting Preview"
     if kind == "inlay-hints":
         return "Inlay Hints"
     if kind == "code-lens-resolve":
@@ -132,7 +136,7 @@ fn lsp_result_title(kind: text) -> text:
 fn _lsp_result_rows_from_json(kind: text, json: text) -> [LspResultRow]:
     if kind == "code-lens" or kind == "code-lens-resolve":
         return _lsp_code_lens_rows_from_json(json)
-    if kind == "document-symbols":
+    if kind == "document-symbols" or kind == "workspace-symbols":
         return _lsp_symbol_rows_from_json(json)
     if kind == "selection-ranges":
         return _lsp_selection_range_rows_from_json(json)
@@ -186,7 +190,11 @@ fn _lsp_symbol_rows_from_json(json: text) -> [LspResultRow]:
         val name = _lsp_json_string_after(json, "\"name\"", start)
         val line = _lsp_json_i64_after(json, "\"line\"", start)
         val col = _lsp_json_i64_after(json, "\"character\"", start)
-        rows.push(LspResultRow(icon: "symbol", label: name, detail: "", path: "", line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false))
+        # WorkspaceSymbol carries `location.uri`; DocumentSymbol has no uri at
+        # all, so an empty path keeps the document-symbol rows unchanged.
+        val path = _lsp_file_uri_to_path(_lsp_json_string_after(json, "\"uri\"", start))
+        val detail = if path == "" then "" else: path + ":" + (line + 1).to_text()
+        rows.push(LspResultRow(icon: "symbol", label: name, detail: detail, path: path, line: line, col: col, command_name: "", command_payload: "", depth: 0, expanded: false))
         cursor = start + 6
     rows
 
@@ -207,7 +215,9 @@ fn _lsp_code_lens_rows_from_json(json: text) -> [LspResultRow]:
         val col = _lsp_json_i64_after(json, "\"character\"", cursor)
         val detail = command + " line " + (line + 1).to_text() + ":" + (col + 1).to_text() + if arg_detail == "" then "" else: " args " + arg_detail
         rows.push(LspResultRow(icon: "lens", label: title, detail: detail, path: "", line: line, col: col, command_name: command, command_payload: arg, depth: 0, expanded: false))
-        cursor = start + 9
+        # The Command object nests its own "command" key, so advancing by the
+        # key length alone re-enters this lens and emits a duplicate empty row.
+        cursor = _lsp_json_object_end_at(json, start + 9)
     rows
 
 fn _lsp_selection_range_rows_from_json(json: text) -> [LspResultRow]:
@@ -382,7 +392,10 @@ fn _lsp_call_hierarchy_rows_from_json(kind: text, json: text) -> [LspResultRow]:
         if name_rel < 0:
             return rows
         val start = cursor + name_rel
-        var item_start = start
+        # Roots are bare CallHierarchyItems: "name" sits *inside* the item, so
+        # scanning forward for a brace would capture the nested "range" object
+        # instead of the item itself.
+        var item_start = _lsp_json_enclosing_object_start(json, start)
         if kind == "call-hierarchy-incoming":
             item_start = _lsp_json_object_field_start(json, "\"from\"", cursor)
         if kind == "call-hierarchy-outgoing":
@@ -581,6 +594,57 @@ fn _lsp_json_balanced_object_at(json: text, start: i64) -> text:
                 return json.slice(object_start, i + 1)
         i = i + 1
     ""
+
+fn _lsp_json_object_end_at(json: text, start: i64) -> i64:
+    var i = start
+    while i < json.len() and json[i:i + 1] != "{":
+        i = i + 1
+    var depth = 0
+    var in_string = false
+    while i < json.len():
+        val ch = json[i:i + 1]
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "{":
+            depth = depth + 1
+        elif not in_string and ch == "}":
+            depth = depth - 1
+            if depth == 0:
+                return i + 1
+        i = i + 1
+    json.len()
+
+fn _lsp_json_enclosing_object_start(json: text, pos: i64) -> i64:
+    var i = 0
+    var depth = 0
+    var in_string = false
+    while i < pos and i < json.len():
+        val ch = json[i:i + 1]
+        if ch == "\"":
+            in_string = not in_string
+        elif not in_string and ch == "{":
+            depth = depth + 1
+        elif not in_string and ch == "}":
+            depth = depth - 1
+        i = i + 1
+    if depth <= 0:
+        return pos
+    var j = 0
+    var open_depth = 0
+    var quoted = false
+    var last_open = pos
+    while j < pos and j < json.len():
+        val c = json[j:j + 1]
+        if c == "\"":
+            quoted = not quoted
+        elif not quoted and c == "{":
+            open_depth = open_depth + 1
+            if open_depth == depth:
+                last_open = j
+        elif not quoted and c == "}":
+            open_depth = open_depth - 1
+        j = j + 1
+    last_open
 
 fn _lsp_json_numbers_in_array_field(json: text, key: text) -> [i64]:
     var nums: [i64] = []
