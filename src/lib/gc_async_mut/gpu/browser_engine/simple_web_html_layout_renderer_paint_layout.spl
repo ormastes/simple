@@ -982,10 +982,17 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                             if st.text_shadow_color != 0u32:
                                 out = fb_text_sparse_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, sparse_stride, sparse_space_stride, st.font_style_italic)
                             out = fb_text_sparse_range(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, sparse_stride, sparse_space_stride, st.font_style_italic)
-                            if st.text_decoration_underline:
+                            if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
                                 val underline_w = line_w
                                 val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
-                                out = fb_text_underline(out, fbw, fbh, line_text_x, ly + 8 + st.text_underline_offset_px, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
+                                # One rule primitive, three y positions. Each is
+                                # independent so combinations paint together.
+                                if st.text_decoration_underline:
+                                    out = fb_text_underline(out, fbw, fbh, line_text_x, ly + 8 + st.text_underline_offset_px, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
+                                if st.text_decoration_overline:
+                                    out = fb_text_underline(out, fbw, fbh, line_text_x, ly, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
+                                if st.text_decoration_line_through:
+                                    out = fb_text_underline(out, fbw, fbh, line_text_x, ly + 4, underline_w, st.text_decoration_thickness_px, st.text_decoration_style, underline_color)
                             line_i = line_i + 1
                             ly = ly + lh
                     else:
@@ -1008,11 +1015,16 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
                                 if st.text_shadow_color != 0u32:
                                     out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, clip)
                                 out = fb_text_thin_scaled_clip_range(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, clip)
-                                if st.text_decoration_underline:
+                                if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
                                     val underline_w = line_w
                                     val underline_y = ly + 7 * scale + st.text_underline_offset_px
                                     val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
-                                    out = fb_text_underline_clip(out, fbw, fbh, line_text_x, underline_y, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_underline:
+                                        out = fb_text_underline_clip(out, fbw, fbh, line_text_x, underline_y, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_overline:
+                                        out = fb_text_underline_clip(out, fbw, fbh, line_text_x, ly, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_line_through:
+                                        out = fb_text_underline_clip(out, fbw, fbh, line_text_x, ly + 4 * scale, underline_w, st.text_decoration_thickness_px * scale, st.text_decoration_style, underline_color, clip)
                                 line_i = line_i + 1
                                 ly = ly + lh
         i = i + 1
@@ -1101,6 +1113,22 @@ fn _html_draw_ir_wm_fallback_color(node: HNode, st: Style) -> u32:
     # Incomplete contracts still need native-safe opaque transport. They do
     # not receive a material capability or any realized witness.
     0xFF000000u32 | (st.bg & 0x00FFFFFFu32)
+
+# CSS `text-decoration-line` serialization: space-separated in canonical order,
+# or "none". Keeps the DrawIR metadata in lock-step with what the raster path
+# actually paints - the two disagreeing was the original defect here.
+fn _text_decoration_line_text(st: Style) -> text:
+    var out = ""
+    if st.text_decoration_underline:
+        out = "underline"
+    if st.text_decoration_overline:
+        out = if out == "": "overline" else: "{out} overline"
+    if st.text_decoration_line_through:
+        out = if out == "": "line-through" else: "{out} line-through"
+    if out == "":
+        return "none"
+    out
+
 
 fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     # Level-gated consumption-site trace (default off), joining the
@@ -1287,7 +1315,7 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("text-combine-upright", st.text_combine_upright),
         draw_ir_style_prop("word-spacing", "{st.word_spacing_px}"),
         draw_ir_style_prop("text-decoration-color", if st.text_decoration_color != 0u32: "{st.text_decoration_color}" else: "currentColor"),
-        draw_ir_style_prop("text-decoration-line", if st.text_decoration_underline: "underline" else: "none"),
+        draw_ir_style_prop("text-decoration-line", _text_decoration_line_text(st)),
         draw_ir_style_prop("text-indent", "{st.text_indent_px}"),
         draw_ir_style_prop("text-overflow", if st.text_overflow_ellipsis: "ellipsis" else: "clip"),
         draw_ir_style_prop("text-shadow", if st.text_shadow_color != 0u32: "{st.text_shadow_x_px}px {st.text_shadow_y_px}px {st.text_shadow_color}" else: "none"),
