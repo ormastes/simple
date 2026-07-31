@@ -68,35 +68,43 @@ fn unique<T>(list: [T]) -> [T]:
     result
 
 # Group elements by key function
-# Groups appear in first-encounter order of their key.
+# Groups appear in first-encounter order of their key; members keep input order.
 #
-# BROKEN: members are dropped. `groups[j].1.push(item)` below mutates a copy,
-# because arrays are value types, so each group keeps only the element that
-# created it. Confirmed against this exact body, so it is not a regression.
-# The O(n * distinct_keys) scan is the lesser problem and is deliberately left
-# alone until membership is fixed -- a dict swapped in here preserves the defect.
-# See doc/08_tracking/bug/group_by_drops_all_but_first_member_2026-07-31.md
+# Keys and member buckets live in two parallel arrays because an array-of-arrays
+# is mutable through index (`members[j].push(item)` reaches the stored bucket),
+# unlike a tuple field (`groups[j].1.push(item)` mutates a discarded copy, which
+# dropped every member after the first). The pairs are zipped only at the end.
+# ponytail: slot lookup is a linear scan over `keys`, O(n * distinct_keys);
+# upgrade path is a dict-slot lookup (Dict<K, i64> key -> slot index).
 fn group_by<T, K>(list: [T], key_fn: fn(T) -> K) -> [(K, [T])]:
-    var groups: [(K, [T])] = []
+    var keys: [K] = []
+    var members: [[T]] = []
     var i = 0
     while i < list.len():
         val item = list[i]
         val key = key_fn(item)
 
-        # Find or create group
+        # Find or create slot
         var found = false
         var j = 0
-        while j < groups.len():
-            if groups[j].0 == key:
-                groups[j].1.push(item)
+        while j < keys.len():
+            if keys[j] == key:
+                members[j].push(item)
                 found = true
                 break
             j = j + 1
 
         if not found:
-            groups.push((key, [item]))
+            keys.push(key)
+            members.push([item])
 
         i = i + 1
+
+    var groups: [(K, [T])] = []
+    var g = 0
+    while g < keys.len():
+        groups.push((keys[g], members[g]))
+        g = g + 1
     groups
 
 # Partition list by predicate

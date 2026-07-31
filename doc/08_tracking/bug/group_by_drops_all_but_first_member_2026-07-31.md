@@ -3,7 +3,20 @@
 **Date:** 2026-07-31
 **Component:** `src/lib/gc_async_mut/pure/collections.spl:73` (`group_by`)
 **Severity:** silent wrong results — correct group count, wrong contents
-**Status:** confirmed pre-existing, not yet fixed
+**Status:** fixed
+
+## Fix
+
+Rewritten with two parallel locals — `var keys: [K]` and `var members: [[T]]` —
+because an array-of-arrays IS mutable through index (`members[j].push(item)`
+reaches the stored bucket), unlike a tuple field. The existing linear scan over
+`keys` finds the slot; keys and members are zipped into `[(K, [T])]` at the end.
+Linear per insert — no bucket copy-back, so no O(n²)-within-a-group trade-off.
+Contract preserved: groups in first-encounter key order, members in input order.
+Spec now asserts full membership (`[(1, [1, 3]), (0, [2, 4, 6])]` and
+`[(0, [2, 8, 4])]`): 10 examples, 0 failures. The O(n * distinct_keys) slot scan
+remains, marked with a `# ponytail:` note naming dict-slot lookup as the
+upgrade path.
 
 ## Symptom
 
