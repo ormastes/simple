@@ -406,6 +406,22 @@ if let Value::Str(ref s) = recv_val {
                 None => return Ok(Value::Int(0)),
             }
         }
+        "byte_at" => {
+            // Return the raw BYTE at the given BYTE index.
+            //
+            // Deliberately NOT `char_code_at`: that one is CHARACTER-indexed and
+            // the two disagree on any non-ASCII text (`"café,".byte_at(3)` is
+            // 195, the 0xC3 lead byte, while `char_code_at(3)` is 233 for 'é').
+            // Byte-framing callers -- `browser_renderer_protocol.spl` scanning
+            // for 10 `\n` / 44 `,` and then `.to_u8()`-ing the result -- index
+            // the byte stream `text_to_bytes` produces, so a character index
+            // would desync the frame the moment a multi-byte codepoint appeared
+            // in a payload.
+            //
+            // Out-of-range yields 0, matching `char_code_at`'s convention.
+            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            return Ok(Value::Int(s.as_bytes().get(idx).map_or(0, |b| *b as i64)));
+        }
         "pad_left" | "pad_start" => {
             let width = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             let pad_char = eval_arg(args, 1, Value::text(" "), env, functions, classes, enums, impl_methods)?
