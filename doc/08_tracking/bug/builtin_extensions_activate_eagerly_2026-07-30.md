@@ -2,13 +2,33 @@
 
 - **Found:** 2026-07-30, while replacing source-text assertions in
   `test/01_unit/lib/editor/extension_discovery_contract_spec.spl`
-- **Status:** OPEN — **BLOCKED on a typed provider-handle API**, root cause
-  identified and pinned by specs (2026-07-30, lane L-C). Behavior deliberately
-  unchanged; the eager step is now a separate, documented function so the
-  eventual fix is a call-site change, not a rewrite. The CRITICAL sub-issue
-  below (self-fulfilling `bound` probe) is **FIXED 2026-07-31** — see the note
-  at the top of that section. Blocker 1 (sheets/slides registry builtins
-  permanently unreachable without a typed provider handle) is still open.
+- **Status:** FIXED 2026-07-31 (verified against `origin/main` @ `85550715f42`,
+  local WC confirmed byte-identical on every file cited below). All three
+  "Fix direction" steps landed: (1) `sheets_ext`/`slides_ext` manifests now
+  declare `onCommand:<their own command id>` alongside their original
+  registry-publish event, and `formula.spl`/`slide.spl`/`slides_app.spl` call
+  the new `extension_host_ensure_command_activated(command_id)` seam
+  (`src/lib/editor/extensions/host.spl`) before reading their process-global
+  registries — the "at minimum" alternative to a full typed provider handle,
+  not the typed-handle rewrite itself; (2) `capabilities.spl` calls
+  `host.activate_command(command_id)` before the `is_active` gate; (3) the
+  eager `_extension_host_activate_all_builtins` loop and its call site are
+  deleted outright (not just unused) from `extension_host_with_builtins()`,
+  which is now identical to `extension_host_with_builtins_indexed()`, and
+  `extension_discovery_contract_spec.spl` was updated accordingly. Re-verified
+  empirically 2026-07-31 (lane S2) with a standalone `bin/simple run` probe:
+  an unrelated `activate_language("markdown")` does NOT wake the sheets
+  builtin, while `activate_command("sheets.function.double")` /
+  `activate_command("slides.layout.titleDiagram")` — and the real call-site
+  path, `extension_host_ensure_command_activated(...)` — both do. Spec
+  `activation_hook_spec.spl` gained a new describe block asserting exactly
+  this ("fixed 2026-07-31") and passes 10/10. The CRITICAL sub-issue below
+  (self-fulfilling `bound` probe) is also **FIXED 2026-07-31** — see the note
+  at the top of that section. The historical record below (as found
+  2026-07-30) is kept for context; read the FIXED notes, not the original
+  claims, for current status. The "Adjacent, not fixed here" section
+  (keybindings sink, themes, custom editors) is unrelated scope and remains
+  open as its own, separately tracked gap.
 
 ## CRITICAL: `bound` is a self-fulfilling probe, not proof anything works
 
@@ -80,18 +100,21 @@ false-positive mechanisms stack on the same census number. Do not cite
   compat tags in `_ide_manifest_matches_tag`, so `_ide_capability_manifest_for`
   now finds `sheets-function-registry-demo` where it previously matched
   nothing and fell through to a hardcoded `declared`.
-- Honest framing: this legitimately closes a **discoverability** gap — the
-  manifest genuinely does back those file kinds now. It does **not** make
-  activation real: `sheets-function-registry-demo` is still one of the two
-  lazily-UNREACHABLE builtins from the "Blocker 1" section below (its only
-  activation event `onFunctionRegistry:sheets` is emitted nowhere in `src/`,
-  and its command id is not itself an activation event). Under genuine lazy
-  activation it could never reach `bound`. The change makes it match the same
-  cosmetic pattern as its 10 siblings instead of standing out as an outlier —
-  it does not fix the outlier's underlying problem.
+- Honest framing (as of 2026-07-30, before Blocker 1 was fixed): this
+  legitimately closed a **discoverability** gap — the manifest genuinely does
+  back those file kinds now — but did **not** make activation real at the
+  time. **Update, FIXED 2026-07-31:** `sheets-function-registry-demo` is no
+  longer lazily-unreachable — see "Blocker 1" below, now fixed. Its command
+  id (`sheets.function.double`) is itself a declared activation event, and
+  `formula.spl` activates it before consulting the registry, so `bound` is
+  now earned rather than cosmetic.
 - Office suite spec with the change: `Results: 21 total, 21 passed, 0 failed`.
 
 ## What happens
+
+**FIXED 2026-07-31** — this whole section describes the pre-fix behavior,
+kept for historical context. `extension_host_with_builtins()` no longer
+activates anything; it is now identical to `extension_host_with_builtins_indexed()`.
 
 `extension_host_with_builtins()` (`src/lib/editor/extensions/host.spl`)
 registers all 14 builtin manifests and then unconditionally activates every one.
@@ -161,6 +184,20 @@ after: active_count=3 of 14
 
 ### Blocker 1 — the two registry builtins become permanently dead
 
+**FIXED 2026-07-31.** Both manifests now additionally declare
+`"onCommand:<their own contributed command id>"` as an activation event
+(`sheets_ext.spl`: `["onFunctionRegistry:sheets", "onCommand:sheets.function.double"]`;
+`slides_ext.spl` analogous for `slides.layout.titleDiagram`), and the readers
+below now call the new singleton seam
+`extension_host_ensure_command_activated(command_id)`
+(`src/lib/editor/extensions/host.spl`) once before consulting their registry,
+instead of reading it cold. This is the doc's own "at minimum" alternative
+from the Fix direction section, not the typed-provider-handle rewrite — it
+was judged sufficient because it makes the process-global-registry reads go
+through a real `onCommand:` activation event without threading a handle
+through `formula.spl`'s ~9.7k-line evaluator. The rest of this section is the
+original (now-resolved) analysis, kept for context.
+
 `sheets-function-registry-demo` declares exactly one activation event,
 `onFunctionRegistry:sheets`; `slides-layout-registry-demo` declares
 `onLayoutRegistry:slides`. **Nothing in `src/` ever emits either event**, and
@@ -185,6 +222,11 @@ provider-handle work this bug's fix direction called for.
 
 ### Blocker 2 — `ide_capabilities_live()` gates on `is_active` and never activates
 
+**FIXED 2026-07-31.** `_ide_capability_with_live_state` now calls
+`host.activate_command(command_id)` immediately before the `is_active` gate
+(`src/app/ide/capabilities.spl:234-235` on `origin/main`). The rest of this
+section is the original analysis, kept for context.
+
 `_ide_capability_with_live_state` (`src/app/ide/capabilities.spl:211`) reads
 `if command_id != "" and host.is_active(m.name)` and never calls
 `activate_command`. Going lazy today would downgrade 10 of 11 capabilities from
@@ -194,6 +236,12 @@ false report, not a more honest one. The fix is one line in `capabilities.spl`
 lazy switch, not before it.
 
 ### Blocker 3 — a spec pins the eager behavior
+
+**FIXED 2026-07-31.** That spec now asserts the opposite (lazy) semantics —
+`is_active("sdn-graph-language") == false` until `activate_language("sdn-graph")`
+is called, which then returns `1` — with a comment noting the flip and citing
+this bug doc. The rest of this section is the original analysis, kept for
+context.
 
 `test/01_unit/lib/editor/extension_discovery_contract_spec.spl:66-73` asserts
 `is_active("sdn-graph-language") == true` on a fresh `extension_host_with_builtins()`
@@ -228,7 +276,7 @@ extension_discovery_contract 6/6, walking skeleton 5/5;
 `bin/simple run src/app/ide/main.spl --feature-check --tui` exit 0,
 `capabilities: 11`, `ide_capabilities_live()` still 10 bound / 1 declared.
 
-## Fix direction (unchanged, now scoped)
+## Fix direction (unchanged, now scoped) — ALL THREE STEPS LANDED 2026-07-31
 
 Three ordered steps, all needed together:
 
