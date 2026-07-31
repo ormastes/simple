@@ -803,28 +803,64 @@ fn shared_wm_minimize_window_by_window_id(scene: SharedWmScene, window_id: text)
         return next_scene
     shared_wm_focus_window_by_window_id(next_scene, next_focus)
 
-fn _shared_wm_local_in_button(local_x: i32, local_y: i32, button_x: i32, button_y: i32, button_size: i32) -> bool:
-    local_x >= button_x and local_x < button_x + button_size and local_y >= button_y and local_y < button_y + button_size
-
 fn _shared_wm_dispatch_result(action: text, target_id: text, app_id: text, window_id: text, scene: SharedWmScene) -> SharedWmDispatchResult:
     SharedWmDispatchResult(action: action, target_id: target_id, app_id: app_id, window_id: window_id, scene: scene)
 
 fn _shared_wm_rect_contains(rect: SharedWmRect, x: i32, y: i32) -> bool:
     x >= rect.x and y >= rect.y and x < rect.x + rect.width and y < rect.y + rect.height
 
-fn _shared_wm_window_contains(window: SharedWmWindow, x: i32, y: i32) -> bool:
-    x >= window.x and y >= window.y and x < window.x + window.width and y < window.y + window.height
-
-fn _shared_wm_command_lane_dispatch(scene: SharedWmScene, chrome: SharedWmChrome, x: i32) -> SharedWmDispatchResult:
+# Helper for command-lane hit-test: builds ephemeral DrawIrComposition for
+# icon and clock rects, lifts to hit-forest, resolves with hit_stack.
+# Returns (icon_index, is_clock) where icon_index >= 0 for icon hits,
+# is_clock=true for clock hits, both false/0 for command-lane defaults.
+fn _wm_command_lane_hit_area(scene: SharedWmScene, chrome: SharedWmChrome, x: i32, y: i32) -> (i32, bool):
     val icon_w = _shared_wm_scale_px(32, chrome.dpi_scale_milli)
     val clock_w = _shared_wm_scale_px(72, chrome.dpi_scale_milli)
     val icons_w = icon_w * chrome.right_icon_count
     val icons_start = scene.width - icons_w
-    if chrome.right_icon_count > 0 and x >= icons_start:
-        val rel = x - icons_start
-        val idx = rel / icon_w
-        return _shared_wm_dispatch_result("command_lane_icon", "right_icon_{idx}", "", "", scene)
-    if x >= icons_start - clock_w:
+    val clock_start = icons_start - clock_w
+
+    var commands: [DrawIrCommand] = []
+    var icon_ids: Dict<i64, i32> = {}
+    var clock_id: i64 = -1
+
+    # Build icon commands (right-aligned, each 32px wide)
+    var icon_idx = 0
+    while icon_idx < chrome.right_icon_count:
+        val cid = "wm-command-lane-icon-{icon_idx}"
+        val left = icons_start + (icon_idx * icon_w)
+        val right = left + icon_w
+        var cmd = draw_ir_rect(cid, left, 0, icon_w, chrome.command_lane.height, 0u32)
+        cmd.hit_rect = draw_ir_rect_bounds(left, 0, icon_w, chrome.command_lane.height)
+        commands.push(cmd)
+        icon_ids[draw_ir_node_id(cid)] = icon_idx
+        icon_idx = icon_idx + 1
+
+    # Build clock command
+    val clock_cid = "wm-command-lane-clock"
+    var clock_cmd = draw_ir_rect(clock_cid, clock_start, 0, clock_w, chrome.command_lane.height, 0u32)
+    clock_cmd.hit_rect = draw_ir_rect_bounds(clock_start, 0, clock_w, chrome.command_lane.height)
+    commands.push(clock_cmd)
+    clock_id = draw_ir_node_id(clock_cid)
+
+    # Lift to hit-forest and resolve
+    val embedding = draw_ir_embedding_config("wm-command-lane-hit", "wm-command-lane-hit", 0, 0, scene.width, chrome.command_lane.height, 0, 1000, false)
+    val batch = draw_ir_batch("wm-command-lane-hit", "", embedding, commands)
+    val comp = draw_ir_composition("wm-command-lane-hit", "", "", [batch])
+    val forest = draw_ir_hit_forest(comp)
+    val result = hit_stack(forest.proxies, forest.parents, x, y)
+
+    if icon_ids.contains_key(result.primary):
+        return (icon_ids[result.primary], false)
+    if result.primary == clock_id:
+        return (-1, true)
+    (-1, false)
+
+fn _shared_wm_command_lane_dispatch(scene: SharedWmScene, chrome: SharedWmChrome, x: i32) -> SharedWmDispatchResult:
+    val (icon_idx, is_clock) = _wm_command_lane_hit_area(scene, chrome, x, 0)
+    if icon_idx >= 0:
+        return _shared_wm_dispatch_result("command_lane_icon", "right_icon_{icon_idx}", "", "", scene)
+    if is_clock:
         return _shared_wm_dispatch_result("command_lane_clock", "clock", "", "", scene)
     _shared_wm_dispatch_result("command_lane", "command_lane", "", "", scene)
 
@@ -917,32 +953,79 @@ fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i
         return _shared_wm_dispatch_result("focus_window", running.window_id, running.app_id, running.window_id, focused_scene)
     _shared_wm_dispatch_result("taskbar_empty", "taskbar", "", "", scene)
 
-fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWmDispatchResult:
-    var best_index = -1
-    var best_z = -1
+fn _wm_content_body_command(component_id: text, window: SharedWmWindow) -> DrawIrCommand:
+    var cmd = draw_ir_rect(component_id, 0, 0, window.width, window.height, 0u32)
+    cmd.hit_rect = draw_ir_rect_bounds(0, 0, window.width, window.height)
+    cmd
+
+fn _wm_content_button_command(component_id: text, bx: i32, by: i32, size: i32) -> DrawIrCommand:
+    var cmd = draw_ir_rect(component_id, bx, by, size, size, 0u32)
+    cmd.hit_rect = draw_ir_rect_bounds(bx, by, size, size)
+    cmd
+
+# Lifts window body + titlebar close/minimize hit regions into the shared 2D
+# interaction core (D1/D2 of the 2026-07-30 unified 2D event plan): one batch
+# per visible window, embedding layer = window.z_index so the topmost window
+# wins the hit_stack sort the SAME way the old `if window.z_index > best_z`
+# scan picked a winner (WindowManager's z_index counter is strictly
+# increasing, so ties never occur -- the scan's first-wins tie-break has no
+# observable difference here). Close and minimize buttons are leaf commands
+# local to their own window's batch (batch-local hit_rect, clip=true so a
+# pathologically small window can't leak a button hit outside its own
+# bounds); a leaf always out-ranks its window's body via insertion order
+# (group pushed first, then leaves), matching _shared_wm_local_in_button's
+# per-button precedence over the body/drag fallback in the old code. Buttons
+# are only added for non-borderless windows, same guard as before. Returns
+# (window_index, kind) where kind is "close", "minimize", or "body";
+# window_index is -1 when nothing was hit (-> desktop_background).
+fn _wm_content_hit_window(scene: SharedWmScene, x: i32, y: i32) -> (i32, text):
+    var batches: [DrawIrBatch] = []
+    var body_ids: Dict<i64, i32> = {}
+    var close_ids: Dict<i64, i32> = {}
+    var minimize_ids: Dict<i64, i32> = {}
     var i = 0
     val window_count = scene.windows.len()
     while i < window_count:
         val window = scene.windows[i]
-        if not window.minimized and _shared_wm_window_contains(window, x, y):
-            if window.z_index > best_z:
-                best_index = i
-                best_z = window.z_index
+        if not window.minimized:
+            val body_cid = "wm-content-{i}-body"
+            var commands: [DrawIrCommand] = [_wm_content_body_command(body_cid, window)]
+            body_ids[draw_ir_node_id(body_cid)] = i
+            if window.chrome_kind != WM_CHROME_KIND_BORDERLESS:
+                val close_x = window.width - WM_TITLEBAR_CLOSE_X_OFFSET_FROM_RIGHT
+                val close_btn_cid = "wm-content-{i}-close-btn"
+                val close_traffic_cid = "wm-content-{i}-close-traffic"
+                val minimize_cid = "wm-content-{i}-minimize"
+                commands.push(_wm_content_button_command(close_btn_cid, close_x, WM_TITLEBAR_CLOSE_Y, WM_TITLEBAR_CLOSE_SIZE))
+                commands.push(_wm_content_button_command(close_traffic_cid, WM_TITLEBAR_TRAFFIC_RED_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
+                commands.push(_wm_content_button_command(minimize_cid, WM_TITLEBAR_TRAFFIC_YELLOW_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE))
+                close_ids[draw_ir_node_id(close_btn_cid)] = i
+                close_ids[draw_ir_node_id(close_traffic_cid)] = i
+                minimize_ids[draw_ir_node_id(minimize_cid)] = i
+            val embedding = draw_ir_embedding_config(body_cid, body_cid, window.x, window.y, window.width, window.height, window.z_index, 1000, true)
+            batches.push(draw_ir_batch(body_cid, "", embedding, commands))
         i = i + 1
-    if best_index < 0:
+    val comp = draw_ir_composition("wm-content-hit", "", "", batches)
+    val forest = draw_ir_hit_forest(comp)
+    val result = hit_stack(forest.proxies, forest.parents, x, y)
+    if close_ids.contains_key(result.primary):
+        return (close_ids[result.primary], "close")
+    if minimize_ids.contains_key(result.primary):
+        return (minimize_ids[result.primary], "minimize")
+    if body_ids.contains_key(result.primary):
+        return (body_ids[result.primary], "body")
+    (-1, "")
+
+fn _shared_wm_content_dispatch(scene: SharedWmScene, x: i32, y: i32) -> SharedWmDispatchResult:
+    val (window_index, hit_kind) = _wm_content_hit_window(scene, x, y)
+    if window_index < 0:
         return _shared_wm_dispatch_result("desktop_background", "background", "", "", scene)
-    val window = scene.windows[best_index]
+    val window = scene.windows[window_index]
     val focused_scene = shared_wm_focus_window_by_window_id(scene, window.window_id)
-    if window.chrome_kind != WM_CHROME_KIND_BORDERLESS:
-        # Titlebar buttons are hit-tested against the exact rects the Draw IR
-        # window batch emits; a drawn close button MUST dispatch as a close.
-        val local_x = x - window.x
-        val local_y = y - window.y
-        val close_x = window.width - WM_TITLEBAR_CLOSE_X_OFFSET_FROM_RIGHT
-        if _shared_wm_local_in_button(local_x, local_y, close_x, WM_TITLEBAR_CLOSE_Y, WM_TITLEBAR_CLOSE_SIZE) or _shared_wm_local_in_button(local_x, local_y, WM_TITLEBAR_TRAFFIC_RED_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE):
-            return _shared_wm_dispatch_result("close_window", window.surface_id, window.app_id, window.window_id, shared_wm_close_window_by_window_id(scene, window.window_id))
-        if _shared_wm_local_in_button(local_x, local_y, WM_TITLEBAR_TRAFFIC_YELLOW_X, WM_TITLEBAR_TRAFFIC_Y, WM_TITLEBAR_TRAFFIC_SIZE):
-            return _shared_wm_dispatch_result("minimize_window", window.surface_id, window.app_id, window.window_id, shared_wm_minimize_window_by_window_id(scene, window.window_id))
+    if hit_kind == "close":
+        return _shared_wm_dispatch_result("close_window", window.surface_id, window.app_id, window.window_id, shared_wm_close_window_by_window_id(scene, window.window_id))
+    if hit_kind == "minimize":
+        return _shared_wm_dispatch_result("minimize_window", window.surface_id, window.app_id, window.window_id, shared_wm_minimize_window_by_window_id(scene, window.window_id))
     if y < window.y + _shared_wm_scale_px(28, 1000):
         return _shared_wm_dispatch_result("begin_drag_window", window.surface_id, window.app_id, window.window_id, focused_scene)
     _shared_wm_dispatch_result("focus_window", window.window_id, window.app_id, window.window_id, focused_scene)

@@ -213,6 +213,89 @@ branch was added, so `WINDOW_EVENT_WHEEL`/`POINTER_WHEEL` remain unconsumed by
 `window_scene.spl`. Content dispatch has side effects on scene reconstruction and
 wheel needs a scroll-consumption story — both are their own changes.
 
+## Wave A (2026-07-31) — status
+
+Landed to origin earlier: commit `b955ff755292` (42 files) carrying the core,
+Panel2D, hit-query Stage A/B, D1 taskbar migration, `submit_batch`, glass region
+seam, and the scroll consolidation. Verified present on `main`.
+
+**Wave A VERIFIED — every line below re-run by the coordinator, not taken from a
+lane self-report:**
+
+| Spec | Result |
+|---|---|
+| `window_scene_taskbar_hit_migration_spec` | 6/6 |
+| `window_scene_content_hit_migration_spec` | 9/9 |
+| `window_scene_command_lane_migration_spec` | 4/4 |
+| `window_scene_draw_ir_panel2d_migration_spec` | 8/8 |
+| `panel2d_spec` | 15/15 |
+| `window_scene_spec` | 11 total / 10 passed / 1 failed (pre-existing) |
+| `window_scene_draw_ir_spec` | 12 / 9 / 3 (pre-existing, baselined) |
+
+**D1 IS NOW COMPLETE.** The WM's ENTIRE pointer-dispatch surface runs through the
+interaction core — taskbar (`_wm_taskbar_hit_slot`), window content
+(`_wm_content_hit_window`: body, both close regions, minimize, drag, multi-window
+z-order), and command lane (`_wm_command_lane_hit_area`). Each has an equivalence
+spec asserting the public action strings are unchanged. Two dead helpers
+(`_shared_wm_local_in_button`, `_shared_wm_window_contains`) were deleted; the one
+surviving mention at `window_scene.spl:976` is a comment, not a call.
+
+**D3 adoption done:** `window_scene_draw_ir.spl` derives the window embedding via
+`panel_to_draw_ir_batch(...).embedding` from a composed `Panel2D`
+(`_wm_window_panel2d`), replacing a hand-built `DrawIrEmbeddingConfig`. Note
+Panel2D stamps `panel2d-{id}` into `surface_id`, so the window's real
+`surface_id` is patched back — a gotcha for future Panel2D adopters.
+
+Pre-existing failures baselined properly (swap in origin's blob, re-run, restore,
+`cmp`-verify) rather than inferred:
+- `window_scene_spec`: `expected #5A7FB5 to equal #101418`, theme projection.
+- `window_scene_draw_ir_spec`: 3 failures — `retains readable bitmap text...`,
+  `projects the window manager chrome...`, `keeps the no-snapshot WM Draw IR
+  stream byte-compatible...` — IDENTICAL counts and names at origin.
+
+Other Wave A outcomes:
+- #5 survey → `drawir_feature_gap_2026-07-31.md` DONE, 14 ranked gaps
+- Red 1 re-split → REJECTED as lossy, see below
+- Red 2 → still running
+
+**Brief error to learn from:** the internal-window lane was told to migrate
+`simple_gui_internal_window` AND not to edit `window_scene.spl`. Those are
+contradictory — there is no separate internal-window source file; the thing lives
+inside `window_scene.spl` / `window_scene_draw_ir.spl`. Verify a target file
+EXISTS before scoping a lane around it.
+
+**Benign scare, recorded so it isn't re-investigated:** `git status` can list
+`.jjconflict-side-0/` and `.jjconflict-side-1/` paths for real files while the
+unresolved jj conflict commit sits in local history. That is a git-INDEX artifact.
+Check for actual `.jjconflict-*` DIRECTORIES on disk and for conflict markers in
+sources before concluding the tree is damaged — in this case both were clean.
+
+## TRAP: `module_split_spec` checks SIZE, not CONTENT — a lossy split passes it
+
+Red 1 (the browser declarations split) has now failed TWICE and is still open.
+
+Attempt 1 landed and was verified locally, then had to be dropped from the push:
+origin had grown the same file (147,122 → 157,873 B) and the two could not merge.
+Origin's browser campaign actively owns that file.
+
+Attempt 2 re-split against origin's current version and reported success —
+`Results: 2 total, 2 passed, 0 failed`, both halves under the cap, function count
+"preserved 30 → 30". **It had silently deleted 663 non-blank content lines
+(2,988 → 2,487 lines, 157,873 → 132,028 bytes).** All 30 function NAMES survived,
+so a name-based count check passed while function BODIES were gutted. Reverted
+byte-identical to origin; the rejected artifacts are kept at
+`lane_backup/REJECTED_decl*.spl` for post-mortem.
+
+Two lessons, both cheap to apply:
+1. **`simple_web_html_layout_renderer_module_split_spec` asserts only that files
+   are under the 128 KiB cap.** It cannot detect deleted code. A green run of it
+   is NOT evidence the split is lossless.
+2. **Function-name counts are not a content check.** Any future split MUST verify
+   line-level content preservation, e.g.
+   `comm -23 <(grep -v '^\s*$' orig | sort) <(grep -v '^\s*$' split_pair | sort)`
+   must be EMPTY, and total bytes must go UP (a split adds a header and a
+   re-export), never down.
+
 ## D6 Stage B — DONE on the CPU backend
 
 `src/lib/common/engine/interaction/hit_grid_u32.spl` (in `common/`, per D8).
@@ -288,8 +371,20 @@ conflict markers — a mid-edit WIP state), it is not this campaign's and must n
 be touched. Re-run `draw_ir_adv_spec` once that file parses again.
 
 Unowned reds still open (NOT caused by this campaign):
-- `widget_draw_ir_theme_spec` never reaches a `Results:` line. **This one is a
-  GENUINE hang, not the runner-limit phantom above — the distinction was tested,
+- `widget_draw_ir_theme_spec` — **ROOT-CAUSED 2026-07-31: a COMPILER DEFECT.**
+  Filed as `doc/08_tracking/bug/compiler_cross_tier_diamond_import_hang_2026-07-31.md`
+  with a 9-line reproducer and two passing controls, all re-verified by the
+  coordinator. Trigger requires BOTH: co-importing `common.ui.widget_draw_ir`
+  (imported and NEVER USED) alongside `nogc_sync_mut.ui.theme_package`, AND
+  actually calling `theme_package_render_snapshot`. Drop either → passes in ~1 s.
+  Suspected cause is a cross-tier diamond (common→nogc_sync_mut via
+  `font_renderer`, nogc_sync_mut→common via `theme_render_snapshot`) that cycles
+  the module/type resolver. Compiler-internals work, out of scope for a
+  `.spl`-only campaign. The dead `slow_it` conversion was reverted; the
+  reproducer is kept OUT of `test/` (it would hang the suite) at
+  `scratchpad/lane_backup/compiler_bug_repro/`.
+  Original characterisation below retained — it was correct:
+  **a GENUINE hang, not the runner-limit phantom — the distinction was tested,
   not assumed.** Evidence: the log stops at EXACTLY 1,938 lines at the default
   limit AND at `SIMPLE_TIMEOUT_SECONDS=2000` (~33 min). Identical line count
   under a 6x larger budget means it is stuck at a fixed point in module loading,

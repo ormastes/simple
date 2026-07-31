@@ -10,6 +10,7 @@ use common.ui.draw_ir.{
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
+    DrawIrEmbeddingConfig,
     DrawIrSourceInfo,
     draw_ir_batch_with_source,
     draw_ir_box_with_style,
@@ -27,6 +28,7 @@ use common.ui.draw_ir.{
 use std.common.encoding.font_registry.{simpleos_default_font_asset_candidate}
 use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
 use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.panel2d.{Panel2D, panel2d, panel_add_child, panel_to_draw_ir_batch}
 use common.ui.window_scene.{
     SharedWmScene,
     SharedWmWindow,
@@ -866,13 +868,48 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
     if _WM_TRACE: print("[wm-tbar] at=batch-build")
     draw_ir_batch_with_source("wm-taskbar-objects", backend_target, embedding, commands, _wm_draw_ir_source("wm.taskbar.objects", "wm.taskbar", dbg_revision))
 
-fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backend_target: text) -> DrawIrBatch:
-    val theme = wm_chrome_theme()
+# Panel2D projection of one window (decision D3, Lane L2 adoption): the
+# panel's rect/layer/opacity_milli/clip fields become the ONE source for
+# this window's DrawIR embedding, replacing the ad hoc shadow-inflated
+# draw_ir_embedding_config math this file used to build inline. Body/
+# titlebar/close-button (and the browser toolbar, for app_id=="browser")
+# are child panels so their hit geometry lives on the SAME tree a hit-test
+# consumer would use, instead of duplicated literals — mirrors how
+# taskbar_panel (panel2d.spl) composes the taskbar's own slots.
+fn _wm_window_panel2d(scene: SharedWmScene, window: SharedWmWindow) -> Panel2D:
     val remaining_width = scene.width - window.x - window.width
     val remaining_height = scene.height - window.y - window.height
     val shadow_width = if window.chrome_kind != WM_CHROME_KIND_BORDERLESS and remaining_width > 0: _wm_draw_ir_min_i32(WM_WINDOW_SHADOW_OFFSET_X, remaining_width) else: 0
     val shadow_height = if window.chrome_kind != WM_CHROME_KIND_BORDERLESS and remaining_height > 0: _wm_draw_ir_min_i32(WM_WINDOW_SHADOW_OFFSET_Y, remaining_height) else: 0
-    val embedding = draw_ir_embedding_config(window.surface_id, window.window_id, window.x, window.y, window.width + shadow_width, window.height + shadow_height, window.z_index + 10, _wm_draw_ir_window_opacity(window), true)
+    var p = panel2d(window.window_id, window.x, window.y, window.width + shadow_width, window.height + shadow_height)
+    p.layer = window.z_index + 10
+    p.opacity_milli = _wm_draw_ir_window_opacity(window)
+    p.clip = true
+    if window.chrome_kind != WM_CHROME_KIND_BORDERLESS:
+        p = panel_add_child(p, panel2d("{window.window_id}-body", 0, 0, window.width, window.height))
+        p = panel_add_child(p, panel2d("{window.window_id}-titlebar", 0, 0, window.width, 28))
+        p = panel_add_child(p, panel2d("{window.window_id}-close", window.width - 24, 2, 20, 20))
+        if window.app_id == "browser":
+            p = panel_add_child(p, panel2d("{window.window_id}-browser-toolbar", 4, 28, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT))
+    p
+
+# Derives the window's DrawIR embedding (x/y/w/h/layer/opacity/clip) by
+# routing through Panel2D's own projection (panel_to_draw_ir_batch), not a
+# second hand-rolled copy of the embedding math. surface_id is patched back
+# to window.surface_id afterwards: Panel2D's projection stamps
+# "panel2d-{id}" as the embedding's surface_id (its own composition-source
+# convention), which is NOT the WM's surface-registry key that content-frame
+# lookups key off (e.g. shared_wm_content_frame_image_uri's
+# "{window.surface_id}-content") -- losing it would silently break
+# content-frame binding.
+fn _wm_window_draw_ir_embedding(scene: SharedWmScene, window: SharedWmWindow) -> DrawIrEmbeddingConfig:
+    var embedding = panel_to_draw_ir_batch(_wm_window_panel2d(scene, window)).embedding
+    embedding.surface_id = window.surface_id
+    embedding
+
+fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backend_target: text) -> DrawIrBatch:
+    val theme = wm_chrome_theme()
+    val embedding = _wm_window_draw_ir_embedding(scene, window)
     if window.chrome_kind == WM_CHROME_KIND_BORDERLESS:
         return draw_ir_batch_with_source("window-{window.window_id}", backend_target, embedding, [], _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window)))
     val title_color = if window.focused: theme.title_focused else: theme.title_unfocused
