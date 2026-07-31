@@ -112,9 +112,9 @@ were historically admitted at clean checkpoint `2a7e354c116`; their ignored
 artifacts disappeared with the old temporary worktree and cannot admit current
 source. The RV64 owner repair introduced at `39c1863426a` is source-complete.
 Physical Stage2 attempt 29 is admitted at clean checkpoint `fbcaa8ccd0b`.
-Scoped-tool attempt 13 is independently admitted. The current blocker is the
-missing LLVM-enabled Stage2 authority required by RV64 freestanding. No ELF
-exists, so QEMU crop calibration, exact-ten
+Scoped-tool attempt 13 and LLVM-enabled Stage2 attempt 30 are independently
+admitted. The current blocker is the third and final bounded RV64 build cycle.
+No ELF exists, so QEMU crop calibration, exact-ten
 attempt 13, and the
 ten manual attempt-13 receipts have not run. Stage 3,
 Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
@@ -330,3 +330,12 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   Neither attempt produced an ELF. One LLVM-enabled current-checkpoint
   `--stop-after-stage2` authority is the next essential prerequisite; Stage3/4
   remain excluded and status remains FAIL.
+- llvm-stage2-attempt30-admitted-2026-07-30: Clean source checkpoint
+  `fbcaa8ccd0b` produced LLVM-enabled Stage2 attempt 30. Binary SHA-256 is
+  `c91c18017e9ffd4e5fcd0777f73c8563f1cd90ee096c26afca22d7f52a02d25a`;
+  provenance SHA-256 is
+  `3f270a6bad8b4102647c80c4fa65bf196d0ca8bcee8f43cab047dd5494474287`.
+  The manifest records `backend=llvm-lib` and `seed_features=--features llvm`.
+  Producer and independent verifier exited zero in `39:40.05` at
+  `3,553,108 KiB` maximum RSS. The final bounded RV64 cycle is next; no ELF or
+  PASS is claimed.

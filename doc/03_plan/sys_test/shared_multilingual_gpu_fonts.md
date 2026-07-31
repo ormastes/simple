@@ -81,7 +81,7 @@ Run only this scoped set:
   Stage2. Its `--jobs=1` now bounds both the private Cargo authority builds and
   the pure-Simple native build.
 - [x] Produce and independently admit matching scoped-tool attempt 13.
-- [ ] Produce and admit one LLVM-enabled current-checkpoint Stage2 compiler.
+- [x] Produce and admit one LLVM-enabled current-checkpoint Stage2 compiler.
   Attempt 26 used the obsolete positional-entry command and stopped in broad
   unrelated HIR lowering. Attempt 27 corrected the canonical source roots and
   explicit entry closure, then failed closed because attempt 29 is
@@ -139,6 +139,15 @@ closed in `0:43.22` at `85,024 KiB`: the admitted attempt-29 runtime has no
 LLVM feature. Neither produced an ELF. The repository QEMU target contract
 requires LLVM for RV64 freestanding, so one LLVM-enabled Stage2 stop is now an
 essential prerequisite rather than a Stage3/4 bootstrap.
+
+LLVM-enabled Stage2 attempt 30 is admitted at clean source checkpoint
+`fbcaa8ccd0b22cc0169f5be289f7cc801d48b637`. Its binary SHA-256 is
+`c91c18017e9ffd4e5fcd0777f73c8563f1cd90ee096c26afca22d7f52a02d25a`
+and provenance SHA-256 is
+`3f270a6bad8b4102647c80c4fa65bf196d0ca8bcee8f43cab047dd5494474287`.
+The manifest records `backend=llvm-lib` and `seed_features=--features llvm`;
+the producer and independent verifier exited zero in `39:40.05` at
+`3,553,108 KiB` maximum RSS.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at

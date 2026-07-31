@@ -45,6 +45,15 @@ attempt 27 took `0:43.22` at `85,024 KiB`. Neither produced an ELF. The next
 minimal prerequisite is one LLVM-enabled current-checkpoint
 `--stop-after-stage2` producer; Stage3/4 remain excluded.
 
+That prerequisite is now admitted as Stage2 attempt 30 at source checkpoint
+`fbcaa8ccd0b`: binary SHA-256
+`c91c18017e9ffd4e5fcd0777f73c8563f1cd90ee096c26afca22d7f52a02d25a`,
+provenance SHA-256
+`3f270a6bad8b4102647c80c4fa65bf196d0ca8bcee8f43cab047dd5494474287`,
+`backend=llvm-lib`, and `seed_features=--features llvm`. The producer and
+independent manifest verifier exited zero in `39:40.05` at `3,553,108 KiB`
+maximum RSS. The third and final bounded RV64 cycle is next.
+
 `STATUS: FAIL`
 
 ## Historical 2026-07-30 Stage2/RV64 result — checkpoint 2a7e

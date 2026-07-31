@@ -1651,3 +1651,10 @@ pixels, and performance evidence remain release-blocking.
   because Stage2 attempt 29 is Cranelift-only. RV64 freestanding requires LLVM;
   neither attempt produced an ELF. One LLVM-enabled current-checkpoint
   `--stop-after-stage2` authority is next; Stage3/4 remain excluded.
+- llvm-stage2-attempt30-admitted-2026-07-30: Clean source checkpoint
+  `fbcaa8ccd0b` produced independently verified LLVM-enabled Stage2 attempt 30.
+  Binary SHA-256 is
+  `c91c18017e9ffd4e5fcd0777f73c8563f1cd90ee096c26afca22d7f52a02d25a`;
+  provenance SHA-256 is
+  `3f270a6bad8b4102647c80c4fa65bf196d0ca8bcee8f43cab047dd5494474287`.
+  The final bounded RV64 cycle is next; no ELF or PASS is claimed.

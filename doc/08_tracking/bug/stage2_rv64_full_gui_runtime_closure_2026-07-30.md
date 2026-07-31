@@ -71,3 +71,8 @@ RV64 syscall ABI/provider contract passes after those fixes.
 This is source/focused-gate evidence plus admitted Stage2/tool evidence. It
 does not close the bug until an LLVM-enabled current-checkpoint Stage2 produces
 and validates the canonical ELF.
+
+LLVM-enabled Stage2 attempt 30 is now independently admitted: its manifest
+records `backend=llvm-lib` and `seed_features=--features llvm`. The remaining
+step is the third and final bounded RV64 build cycle with the canonical
+explicit entry closure.
