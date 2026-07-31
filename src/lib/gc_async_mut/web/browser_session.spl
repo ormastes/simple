@@ -1052,7 +1052,7 @@ class BrowserRuntimeState:
         runtime = runtime_after_location_api
         var runtime_after_history_api = runtime
         val _history_api_result = runtime_after_history_api.eval(
-            "history.pushState = function(state, title, url) { location.__simple_navigation_mode = 'pushState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; }; history.replaceState = function(state, title, url) { location.__simple_navigation_mode = 'replaceState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; };"
+            "history.pushState = function(state, title, url) { location.__simple_navigation_mode = 'pushState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; }; history.replaceState = function(state, title, url) { location.__simple_navigation_mode = 'replaceState'; location.__simple_history_url = url; location.__simple_history_state = state; location.href = location.href; }; history.back = function() { history.__simple_traversal_delta = -1; }; history.forward = function() { history.__simple_traversal_delta = 1; };"
         )
         runtime = runtime_after_history_api
         if is_guest_runtime:
@@ -1760,6 +1760,8 @@ class BrowserSession:
     history_proposal_action: text
     history_proposal_url_kind: text
     history_proposal_raw_url: text
+    pending_history_traversal_delta: i32
+    history_traversal_pump_active: bool
     is_loading: bool
     pending_url: text
     pending_navigation_target_index: i32
@@ -1835,6 +1837,8 @@ class BrowserSession:
             history_proposal_action: "",
             history_proposal_url_kind: "O",
             history_proposal_raw_url: "",
+            pending_history_traversal_delta: 0,
+            history_traversal_pump_active: false,
             is_loading: false,
             pending_url: "",
             pending_navigation_target_index: -1,
@@ -2099,6 +2103,7 @@ impl BrowserSession:
         self.pending_url = normalize_browser_url(url)
         self.pending_navigation_target_index = -1
         self.pending_navigation_push_history = true
+        self.pending_history_traversal_delta = 0
         self.is_loading = true
         self.stop_requested = false
         self.warnings = []
@@ -2120,6 +2125,7 @@ impl BrowserSession:
         self.address_draft = ""
         self.pending_navigation_target_index = -1
         self.pending_navigation_push_history = true
+        self.pending_history_traversal_delta = 0
         self.pending_requests = []
         self.pending_request_head = 0
         self.inflight_requests = []
@@ -2127,7 +2133,7 @@ impl BrowserSession:
         self.active_load = nil
         self.pending_content_security_policy = ""
         self._cancel_runtime_fetches("navigation-canceled")
-        self._flush_runtime_side_effects()
+        self._flush_runtime_side_effects_and_pump_history()
 
     me open_html(url: text, html: text) -> Result<bool, text>:
         self.begin_navigation(url)
@@ -2168,7 +2174,7 @@ impl BrowserSession:
             "document", normalized, normalized_method,
             headers, body, content_type
         ))
-        self._flush_runtime_side_effects()
+        self._flush_runtime_side_effects_and_pump_history()
         Ok(true)
 
     me begin_network_reload() -> Result<bool, text>:
@@ -2181,7 +2187,7 @@ impl BrowserSession:
             "document", normalized, entry.request_method, "",
             entry.request_body, entry.request_content_type
         ))
-        self._flush_runtime_side_effects()
+        self._flush_runtime_side_effects_and_pump_history()
         Ok(true)
 
     me reload_target_url() -> Result<text, text>:
@@ -2335,7 +2341,7 @@ impl BrowserSession:
             runtime.interpreter = interpreter
             state.runtime = runtime
             self.runtime_state = Some(state)
-            self._flush_runtime_side_effects()
+            self._flush_runtime_side_effects_and_pump_history()
 
     me _cancel_runtime_fetches(error: text):
         if val Some(state) = self.runtime_state:
@@ -2534,9 +2540,57 @@ impl BrowserSession:
                         self.runtime_state = Some(timer_state)
                         progress = true
             if val Some(final_state) = self.runtime_state:
+                var history_traversal_delta: i32 = 0
+                val history_traversal_val = final_state.runtime.get_host_property(
+                    final_state.history_id, "__simple_traversal_delta"
+                )
+                match history_traversal_val:
+                    JsValue.Number(delta):
+                        if delta == -1.0:
+                            history_traversal_delta = -1
+                        elif delta == 1.0:
+                            history_traversal_delta = 1
+                    _:
+                        pass_dn
+                final_state.runtime.set_host_property(
+                    final_state.history_id, "__simple_traversal_delta",
+                    JsValue.Number(v: 0.0)
+                )
                 self._sync_from_runtime(final_state)
                 self.runtime_state = Some(final_state)
                 self._refresh_current_history()
+                if history_traversal_delta != 0:
+                    self.pending_history_traversal_delta = (
+                        history_traversal_delta
+                    )
+
+    me _flush_runtime_side_effects_and_pump_history():
+        self._flush_runtime_side_effects()
+        self._pump_pending_history_traversal()
+
+    me _pump_pending_history_traversal():
+        if self.active_load != nil or self.history_traversal_pump_active:
+            return
+        if self.pending_history_traversal_delta == 0:
+            return
+        # Restored scripts may queue the opposite direction, but only the next
+        # outer browser operation may pump it; never recurse through history.
+        self.history_traversal_pump_active = true
+        self._consume_pending_history_traversal()
+        self.history_traversal_pump_active = false
+
+    me _consume_pending_history_traversal():
+        val delta = self.pending_history_traversal_delta
+        if delta == 0:
+            return
+        self.pending_history_traversal_delta = 0
+        if not self.csp_sandbox_policy.allow_top_navigation:
+            self._append_warning("CSP sandbox blocked history traversal")
+        elif delta < 0:
+            if self.can_go_back():
+                val _history_back = self.go_back()
+        elif self.can_go_forward():
+            val _history_forward = self.go_forward()
 
     me has_inflight_request(request: BrowserRequest) -> bool:
         for existing in self.inflight_requests:
@@ -3014,7 +3068,7 @@ impl BrowserSession:
                 runtime.interpreter = interpreter
                 state.runtime = runtime
                 self.runtime_state = Some(state)
-                self._flush_runtime_side_effects()
+                self._flush_runtime_side_effects_and_pump_history()
             if response.error != "":
                 return Err(response.error)
             return Ok(true)
