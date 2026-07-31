@@ -1,0 +1,133 @@
+# codex-system-test
+# @tag: system, structural_compute, layout
+# @req REQ-001
+# @req REQ-002
+# @req REQ-003
+# @req REQ-004
+# @req REQ-005
+# @req REQ-006
+# @req REQ-007
+# @req REQ-008
+# @evidence-display: embed_tui
+
+"""
+# Layout framework
+
+## Overview
+
+Exercises the consumer-independent layout capsule from deterministic island
+discovery through bounded scheduling, exact CPU-oracle geometry, incremental
+selection, provenance, receipts, and cost-qualified backend selection.
+
+The fixture geometry is the CPU oracle. GPU selection changes the dispatch
+receipt only; it never changes boxes. Inline text remains CPU-owned when the
+text measurement port is unavailable.
+
+**Requirements:** doc/02_requirements/feature/layout_framework.md
+**Plan:** doc/03_plan/sys_test/layout_framework.md
+**Design:** doc/05_design/layout_framework.md
+"""
+
+use std.spec.*
+use common.structural.layout.*
+
+fn layout_fixture_snapshot(profile: LayoutExecutionProfile, invalidated_ids: [i64], cap: i64) -> LayoutInputSnapshot:
+    val nodes = [
+        layout_node(1, 0, "block", true, false, layout_box(1, 0, 0, 640, 480), 0, 40, false, 1),
+        layout_node(2, 1, "block", false, false, layout_box(2, 8, 8, 624, 32), 0, 10, false, 1),
+        layout_node(3, 1, "block", true, false, layout_box(3, 8, 48, 300, 120), 1, 60, false, 1),
+        layout_node(4, 1, "block", true, false, layout_box(4, 320, 48, 312, 120), 0, 70, false, 1)
+    ]
+    layout_input(nodes, [], invalidated_ids, profile, cap)
+
+fn layout_profile(cpu_us: i64) -> LayoutExecutionProfile:
+    layout_execution_profile("hybrid_vector_gpu", cpu_us, 40, 20, 1024, 1024, 2, 10, 5)
+
+fn expect_layout_geometry(snapshot: LayoutSnapshot):
+    expect(snapshot.boxes).to_equal([
+        layout_box(1, 0, 0, 640, 480),
+        layout_box(2, 8, 8, 624, 32),
+        layout_box(3, 8, 48, 300, 120),
+        layout_box(4, 320, 48, 312, 120)
+    ])
+
+fn expect_dirty_island_receipts(snapshot: LayoutSnapshot):
+    expect(snapshot.visited_island_ids).to_equal([3])
+    expect(snapshot.mappings.len()).to_equal(1)
+    expect(snapshot.mappings[0].kind).to_equal("LayoutOf")
+    expect(snapshot.mappings[0].source_id).to_equal(3)
+    expect(snapshot.mappings[0].target_id).to_equal(3)
+    expect(snapshot.mapping_graph.edges).to_equal(snapshot.mappings)
+    expect(snapshot.receipt.visited_island_ids).to_equal([3])
+
+fn expect_bounded_fixed_point(snapshot: LayoutSnapshot):
+    expect(snapshot.fault).to_equal("")
+    expect(snapshot.receipt.converged).to_equal(true)
+    expect(snapshot.receipt.iterations).to_equal(1)
+
+describe "REQ-001..REQ-008 layout framework":
+    # @manual: show
+    it "should preserve oracle geometry through full and incremental execution":
+        val input = layout_fixture_snapshot(layout_profile(200), [3], 4)
+        val text_port = layout_text_measure_port_unavailable()
+
+        step("Discover layout islands")
+        val discovery = layout_discover_islands(input)
+        expect(discovery.fault).to_equal("")
+        expect(discovery.islands.len()).to_equal(3)
+        expect(discovery.islands[0].node_ids).to_equal([1, 2])
+        expect(discovery.islands[1].node_ids).to_equal([3])
+        expect(discovery.islands[2].node_ids).to_equal([4])
+
+        step("Schedule dirty layout waves")
+        val scheduled = layout_schedule_waves(discovery.islands, input.dependencies, input.fixed_point_cap)
+        expect(scheduled.converged).to_equal(true)
+        expect(scheduled.waves[0].island_ids).to_equal([1, 3, 4])
+
+        step("Measure and arrange profiles")
+        val full = layout_run_full(input, text_port)
+        val full_again = layout_run_full(input, text_port)
+        val incremental = layout_run_incremental(input, text_port)
+        expect_layout_geometry(full)
+        expect_layout_geometry(incremental)
+        expect(incremental.boxes).to_equal(full.boxes)
+        expect(full.backend).to_equal("hybrid_vector_gpu")
+
+        step("Verify geometry and receipts")
+        expect_bounded_fixed_point(full)
+        expect_bounded_fixed_point(incremental)
+        expect_dirty_island_receipts(incremental)
+        expect(full.receipt.input_hash).to_equal(incremental.receipt.input_hash)
+        expect(full.receipt.output_hash).to_equal(incremental.receipt.output_hash)
+        expect(full.receipt.deterministic_hash).to_equal(full_again.receipt.deterministic_hash)
+
+    # @manual: folded
+    it "should fall back for small text unsupported and non-convergent work":
+        val small = layout_fixture_snapshot(layout_profile(80), [3], 4)
+        expect(layout_run_full(small, layout_text_measure_port_unavailable()).backend).to_equal("serial_cpu")
+        expect(layout_run_full(small, layout_text_measure_port_unavailable()).receipt.fallback_reason).to_equal("gpu-cost-not-lower")
+
+        val inline_input = layout_input(
+            [layout_node(1, 0, "inline", true, false, layout_box(1, 0, 0, 80, 20), 1, 100, true, 1)],
+            [], [1], layout_profile(500), 2
+        )
+        val inline_result = layout_run_full(inline_input, layout_text_measure_port_unavailable())
+        expect(inline_result.backend).to_equal("serial_cpu")
+        expect(inline_result.receipt.fallback_reason).to_equal("text-measure-unavailable")
+
+        val cyclic_input = layout_input(
+            [
+                layout_node(1, 0, "block", true, false, layout_box(1, 0, 0, 20, 20), 1, 50, false, 3),
+                layout_node(2, 0, "block", true, false, layout_box(2, 20, 0, 20, 20), 1, 50, false, 3)
+            ],
+            [
+                layout_dependency(1, 2, "percentage", 1),
+                layout_dependency(2, 1, "intrinsic-size", 1)
+            ],
+            [1, 2], layout_profile(500), 2
+        )
+        val cyclic_result = layout_run_full(cyclic_input, layout_text_measure_port_unavailable())
+        expect(cyclic_result.backend).to_equal("serial_cpu")
+        expect(cyclic_result.fault).to_equal("non-convergent")
+        expect(cyclic_result.receipt.fallback_reason).to_equal("non-convergent")
+        expect(cyclic_result.receipt.iterations).to_equal(2)

@@ -14,7 +14,8 @@ Parent documents (authoritative for contracts and semantics):
 | # | Plan | Covers (architecture lanes) |
 |---|---|---|
 | 1 | `parser_framework_plan.md` | PARSE — ParseDialect runtime, SIMD/GPU lex, incremental parse |
-| 2 | `clang_bridge_plan.md` | CLANG-AST + LLVM — export, matchers, transformer, pass plugin |
+| 2 | `simple_compiler_offload_plan.md` | SIMPLE — compiler stage offload (§11.5 matrix), AOP QueryIR, optimizer |
+| 2b | `clang_bridge_plan.md` | CLANG-AST + LLVM — C/C++ bridge (separate from Simple compiler offload) |
 | 3 | `html_css_parser_plan.md` | HTML-DOM + CSS-STYLE parse side (WebScene W3/W4 alignment) |
 | 4 | `layout_framework_plan.md` | LAYOUT framework — islands, profiles, dependency scheduling |
 | 5 | `web_layout_manager_plan.md` | Browser incremental layout manager + GPU kernels (W5) |
@@ -50,17 +51,41 @@ versioning) that the remaining nine contract groups follow.
    silently lost; use the write-back idiom. Lint COLL019 flags the pattern.
    See `doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md`.
 
+## Variable execution configuration
+
+Offload level is **runtime/config selection, not a build variant** — one
+binary, mode chosen per stage via `ExecutionProfile` (architecture §21,
+SDN profiles in Appendix D):
+
+```text
+full offload   resident_gpu       fallback: hybrid → cpu_reference
+balanced       hybrid_vector_gpu  fallback: cpu_reference
+cpu only       cpu_reference      no GPU dependency; always available
+auto           policy selector over measured crossover curves
+```
+
+Applies to the Simple compiler, web renderer, layout, and linker alike. On the
+web side the same spectrum is expressed by the WebScene feature flags and
+fallback levels (flags off = current CPU path byte-identical; L4 document
+compatibility = full CPU render; strict profile = L0/L1 only). All modes must
+produce identical observable results; `cpu only` must work with no GPU
+present.
+
 ## Dependency order
 
 ```text
 contract freeze (arch §26 + WebScene C0)
     ├─ gpu_mmu ───────────────┐ (all resident-GPU work depends on it)
-    ├─ parser_framework ──┬─ html_css_parser ─┬─ web_layout_manager
+    ├─ parser_framework ──┬─ simple_compiler_offload
+    │                     ├─ html_css_parser ─┬─ web_layout_manager
     │                     └─ clang_bridge     │
     ├─ layout_framework ───────────────────────┘
-    ├─ link_manager
+    ├─ link_manager (simple_compiler_offload's link stage lands here)
     └─ webrender_gpu_offload (consumes parser/layout/link/mmu outputs)
 ```
 
 CPU-reference deliverables in every lane are wave-1 and do not wait on
 `gpu_mmu`; only resident-GPU tiers do.
+
+Operator guide for the generic layout lane:
+`doc/07_guide/platform/structural_compute/layout_framework.md`.

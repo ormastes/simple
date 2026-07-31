@@ -1,0 +1,213 @@
+# Pure coordinator for oracle-preserving full and incremental spatial layout.
+
+use std.common.hash.djb2.{djb2_hash_text}
+use std.common.structural.execution.contracts.{STRUCTURAL_EXECUTION_CONTRACT_VERSION, CostEstimate, LayoutExecutionProfile, StageReceipt}
+use std.common.structural.mapping.contracts.{LayoutMapping, layout_of_mapping, mapping_graph}
+use std.common.structural.layout.profile.{TextMeasurePort, layout_profile_gpu_eligible}
+use std.common.structural.layout.scheduler.{layout_discover_islands, layout_schedule_waves}
+use std.common.structural.layout.types.*
+
+fn _layout_contains(ids: [i64], id: i64) -> bool:
+    for candidate in ids:
+        if candidate == id:
+            return true
+    false
+
+fn layout_cost_estimate(profile: LayoutExecutionProfile) -> CostEstimate:
+    val transfer_bytes = profile.host_to_device_bytes + profile.device_to_host_bytes
+    val transfer_kib = (transfer_bytes + 1023) / 1024
+    CostEstimate(
+        cpu_us: profile.cpu_us,
+        gpu_kernel_us: profile.gpu_kernel_us,
+        scheduling_us: profile.scheduling_us,
+        host_to_device_bytes: profile.host_to_device_bytes,
+        device_to_host_bytes: profile.device_to_host_bytes,
+        synchronization_points: profile.synchronization_points,
+        predicted_gpu_us: profile.gpu_kernel_us + profile.scheduling_us + transfer_kib * profile.transfer_us_per_kib + profile.synchronization_points * profile.sync_us
+    )
+
+fn layout_choose_backend(islands: [LayoutIsland], profile: LayoutExecutionProfile) -> LayoutBackendDecision:
+    val gpu_us = layout_cost_estimate(profile).predicted_gpu_us
+    if profile.mode != "hybrid_vector_gpu":
+        return LayoutBackendDecision(backend: "serial_cpu", reason: "gpu-mode-disabled", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+    if islands.len() == 0:
+        return LayoutBackendDecision(backend: "serial_cpu", reason: "empty-layout", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+
+    val batch_profile = islands[0].profile_id
+    for island in islands:
+        if island.text_measure_required:
+            return LayoutBackendDecision(backend: "serial_cpu", reason: "text-measure-required", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+        if not layout_profile_gpu_eligible(island.profile_id):
+            return LayoutBackendDecision(backend: "serial_cpu", reason: "unsupported-gpu-profile", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+        if island.profile_id != batch_profile:
+            return LayoutBackendDecision(backend: "serial_cpu", reason: "heterogeneous-gpu-batch", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+    if gpu_us >= profile.cpu_us:
+        return LayoutBackendDecision(backend: "serial_cpu", reason: "gpu-cost-not-lower", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+    LayoutBackendDecision(backend: "hybrid_vector_gpu", reason: "", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+
+fn _layout_oracle_boxes(input: LayoutInputSnapshot) -> [LayoutBox]:
+    var boxes: [LayoutBox] = []
+    for node in input.nodes:
+        boxes.push(node.oracle_box)
+    boxes
+
+fn _layout_geometry_hash(boxes: [LayoutBox]) -> text:
+    var encoded = "layout-v1"
+    for box in boxes:
+        encoded = encoded + "|" + box.id.to_text() + ":" + box.x.to_text() + "," + box.y.to_text() + "," + box.width.to_text() + "," + box.height.to_text()
+    djb2_hash_text(encoded).to_text()
+
+fn _layout_oracle_fault(input: LayoutInputSnapshot) -> text:
+    for node in input.nodes:
+        if node.oracle_box.id != node.id:
+            return "oracle-id-mismatch"
+    ""
+
+fn _layout_island_for_node(islands: [LayoutIsland], node_id: i64) -> i64:
+    for island in islands:
+        if _layout_contains(island.node_ids, node_id):
+            return island.root_id
+    0
+
+fn _layout_all_island_ids(islands: [LayoutIsland]) -> [i64]:
+    var ids: [i64] = []
+    for island in islands:
+        ids.push(island.root_id)
+    ids
+
+fn _layout_dirty_island_ids(input: LayoutInputSnapshot, islands: [LayoutIsland]) -> [i64]:
+    var selected: [i64] = []
+    for island in islands:
+        var dirty = island.dirty_bits != 0
+        for invalidated_id in input.invalidated_ids:
+            if _layout_contains(island.node_ids, invalidated_id):
+                dirty = true
+        if dirty:
+            selected.push(island.root_id)
+
+    # A dirty consumer needs every transitive producer used to compute it.
+    var changed = true
+    while changed:
+        changed = false
+        for dependency in input.dependencies:
+            val producer = _layout_island_for_node(islands, dependency.producer_id)
+            val consumer = _layout_island_for_node(islands, dependency.consumer_id)
+            if consumer != 0 and producer != 0 and _layout_contains(selected, consumer) and not _layout_contains(selected, producer):
+                selected.push(producer)
+                changed = true
+    var ordered: [i64] = []
+    for island in islands:
+        if _layout_contains(selected, island.root_id):
+            ordered.push(island.root_id)
+    ordered
+
+fn _layout_selected_islands(islands: [LayoutIsland], selected_ids: [i64]) -> [LayoutIsland]:
+    var selected: [LayoutIsland] = []
+    for island in islands:
+        if _layout_contains(selected_ids, island.root_id):
+            selected.push(island)
+    selected
+
+fn _layout_selected_waves(waves: [LayoutWave], selected_ids: [i64]) -> [LayoutWave]:
+    var selected_waves: [LayoutWave] = []
+    for wave in waves:
+        var ids: [i64] = []
+        for island_id in wave.island_ids:
+            if _layout_contains(selected_ids, island_id):
+                ids.push(island_id)
+        if ids.len() > 0:
+            selected_waves.push(LayoutWave(island_ids: ids))
+    selected_waves
+
+fn _layout_mappings(islands: [LayoutIsland], selected_ids: [i64]) -> [LayoutMapping]:
+    var mappings: [LayoutMapping] = []
+    for island in islands:
+        if _layout_contains(selected_ids, island.root_id):
+            for node_id in island.node_ids:
+                mappings.push(layout_of_mapping(node_id, node_id))
+    mappings
+
+fn _layout_text_fault(islands: [LayoutIsland], text_port: TextMeasurePort) -> text:
+    for island in islands:
+        if island.text_measure_required:
+            val measured = text_port.measure("", 0, "")
+            if not measured.available:
+                if measured.reason != "":
+                    return measured.reason
+                return "text-measure-unavailable"
+    ""
+
+fn _layout_snapshot(input: LayoutInputSnapshot, text_port: TextMeasurePort, incremental: bool) -> LayoutSnapshot:
+    val discovery = layout_discover_islands(input)
+    val boxes = _layout_oracle_boxes(input)
+    val geometry_hash = _layout_geometry_hash(boxes)
+    val schedule = layout_schedule_waves(discovery.islands, input.dependencies, input.fixed_point_cap)
+    val selected_ids = if incremental: _layout_dirty_island_ids(input, discovery.islands) else: _layout_all_island_ids(discovery.islands)
+    val selected_islands = _layout_selected_islands(discovery.islands, selected_ids)
+    val backend_decision = layout_choose_backend(selected_islands, input.execution)
+
+    var fault = discovery.fault
+    if fault == "" and schedule.reason != "":
+        fault = schedule.reason
+    if fault == "":
+        fault = _layout_oracle_fault(input)
+
+    var backend = backend_decision.backend
+    var fallback_reason = backend_decision.reason
+    if fault == "":
+        val text_fault = _layout_text_fault(selected_islands, text_port)
+        if text_fault != "":
+            backend = "serial_cpu"
+            fallback_reason = text_fault
+    else:
+        backend = "serial_cpu"
+        fallback_reason = fault
+
+    val visible_waves = if incremental: _layout_selected_waves(schedule.waves, selected_ids) else: schedule.waves
+    val mappings = _layout_mappings(discovery.islands, selected_ids)
+    val fallback_count = if fallback_reason == "": 0 else: 1
+    val malformed_count = if fault == "": 0 else: 1
+    val elapsed_us = if backend == "hybrid_vector_gpu": backend_decision.gpu_us else: backend_decision.cpu_us
+    val receipt = StageReceipt(
+        contract_version: STRUCTURAL_EXECUTION_CONTRACT_VERSION,
+        stage: "layout",
+        backend: backend,
+        mode: if incremental: "incremental" else: "full",
+        input_hash: geometry_hash,
+        output_hash: geometry_hash,
+        item_count_in: input.nodes.len(),
+        item_count_out: boxes.len(),
+        bytes_read: input.execution.host_to_device_bytes,
+        bytes_written: input.execution.device_to_host_bytes,
+        fallback_count: fallback_count,
+        fallback_reason: fallback_reason,
+        malformed_count: malformed_count,
+        overflow_flags: 0,
+        elapsed_us: elapsed_us,
+        deterministic_hash: geometry_hash,
+        visited_island_ids: selected_ids,
+        converged: schedule.converged and fault != "non-convergent",
+        iterations: schedule.iterations,
+        cpu_us: backend_decision.cpu_us,
+        gpu_us: backend_decision.gpu_us
+    )
+    LayoutSnapshot(
+        contract_version: LAYOUT_CONTRACT_VERSION,
+        boxes: boxes,
+        islands: discovery.islands,
+        waves: visible_waves,
+        visited_island_ids: selected_ids,
+        mappings: mappings,
+        mapping_graph: mapping_graph(mappings),
+        receipt: receipt,
+        fault: fault,
+        backend: backend
+    )
+
+fn layout_run_full(input: LayoutInputSnapshot, text_port: TextMeasurePort) -> LayoutSnapshot:
+    _layout_snapshot(input, text_port, false)
+
+fn layout_run_incremental(input: LayoutInputSnapshot, text_port: TextMeasurePort) -> LayoutSnapshot:
+    _layout_snapshot(input, text_port, true)
+
+export layout_cost_estimate, layout_choose_backend, layout_run_full, layout_run_incremental

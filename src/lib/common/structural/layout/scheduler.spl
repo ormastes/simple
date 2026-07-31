@@ -1,0 +1,185 @@
+# Deterministic layout-island discovery and bounded dependency scheduling.
+
+use std.algorithm_utils.{quick_sort}
+use std.common.structural.invalidation.contracts.{DirtyMask, LayoutDependency}
+use std.common.structural.layout.types.{
+    LayoutDiscovery,
+    LayoutInputSnapshot,
+    LayoutIsland,
+    LayoutNodeInput,
+    LayoutSchedule,
+    LayoutWave
+}
+
+fn _contains(values: [i64], value: i64) -> bool:
+    for item in values:
+        if item == value:
+            return true
+    false
+
+fn _island_for_node(islands: [LayoutIsland], node_id: i64) -> i64:
+    var i = 0
+    while i < islands.len():
+        if _contains(islands[i].node_ids, node_id):
+            return i
+        i = i + 1
+    -1
+
+fn _add_node(island: LayoutIsland, node: LayoutNodeInput) -> LayoutIsland:
+    LayoutIsland(
+        root_id: island.root_id,
+        profile_id: island.profile_id,
+        node_ids: island.node_ids.push(node.id),
+        estimated_work: island.estimated_work + node.estimated_work,
+        dirty_bits: island.dirty_bits | node.dirty_bits,
+        dirty: DirtyMask.from_bits(island.dirty_bits | node.dirty_bits),
+        text_measure_required: island.text_measure_required or node.text_measure_required,
+        required_fixed_point_iterations: if node.required_fixed_point_iterations > island.required_fixed_point_iterations: node.required_fixed_point_iterations else: island.required_fixed_point_iterations
+    )
+
+fn _new_island(node: LayoutNodeInput) -> LayoutIsland:
+    LayoutIsland(
+        root_id: node.id,
+        profile_id: node.profile_id,
+        node_ids: [node.id],
+        estimated_work: node.estimated_work,
+        dirty_bits: node.dirty_bits,
+        dirty: node.dirty,
+        text_measure_required: node.text_measure_required,
+        required_fixed_point_iterations: node.required_fixed_point_iterations
+    )
+
+fn layout_discover_islands(input: LayoutInputSnapshot) -> LayoutDiscovery:
+    var islands: [LayoutIsland] = []
+    for node in input.nodes:
+        if node.parent_id == 0 or node.formatting_boundary or node.layout_contained:
+            islands.push(_new_island(node))
+        else:
+            val parent_island = _island_for_node(islands, node.parent_id)
+            if parent_island < 0:
+                return LayoutDiscovery(islands: [], fault: "missing-parent-island")
+            islands[parent_island] = _add_node(islands[parent_island], node)
+    LayoutDiscovery(islands: islands, fault: "")
+
+fn _valid_dependencies(islands: [LayoutIsland], dependencies: [LayoutDependency]) -> bool:
+    for dependency in dependencies:
+        if (_island_for_node(islands, dependency.producer_id) < 0 or
+            _island_for_node(islands, dependency.consumer_id) < 0):
+            return false
+    true
+
+fn _reachable(start: i64, target: i64, islands: [LayoutIsland], dependencies: [LayoutDependency]) -> bool:
+    if start == target:
+        return true
+    var visited: [i64] = [start]
+    var cursor = 0
+    while cursor < visited.len():
+        val current = visited[cursor]
+        for dependency in dependencies:
+            val producer = _island_for_node(islands, dependency.producer_id)
+            val consumer = _island_for_node(islands, dependency.consumer_id)
+            if producer == current and not _contains(visited, consumer):
+                if consumer == target:
+                    return true
+                visited.push(consumer)
+        cursor = cursor + 1
+    false
+
+fn _components(islands: [LayoutIsland], dependencies: [LayoutDependency]) -> ([[i64]], [i64]):
+    # ponytail: reachability SCCs favor a compact v1; replace with Tarjan if island counts make O(V*(V+E)) measurable.
+    var groups: [[i64]] = []
+    var group_by_island: [i64] = []
+    for island in islands:
+        group_by_island.push(-1)
+    var i = 0
+    while i < islands.len():
+        if group_by_island[i] < 0:
+            val group_index = groups.len()
+            var group: [i64] = []
+            var j = i
+            while j < islands.len():
+                if (group_by_island[j] < 0 and
+                    _reachable(i, j, islands, dependencies) and
+                    _reachable(j, i, islands, dependencies)):
+                    group.push(j)
+                    group_by_island[j] = group_index
+                j = j + 1
+            groups.push(group)
+        i = i + 1
+    (groups, group_by_island)
+
+fn _group_has_incoming(
+    group: i64,
+    active: [bool],
+    group_by_island: [i64],
+    islands: [LayoutIsland],
+    dependencies: [LayoutDependency]
+) -> bool:
+    for dependency in dependencies:
+        val producer_group = group_by_island[_island_for_node(islands, dependency.producer_id)]
+        val consumer_group = group_by_island[_island_for_node(islands, dependency.consumer_id)]
+        if producer_group != consumer_group and consumer_group == group and active[producer_group]:
+            return true
+    false
+
+fn _group_is_cyclic(group: [i64], islands: [LayoutIsland], dependencies: [LayoutDependency]) -> bool:
+    if group.len() > 1:
+        return true
+    val only = group[0]
+    for dependency in dependencies:
+        if (_island_for_node(islands, dependency.producer_id) == only and
+            _island_for_node(islands, dependency.consumer_id) == only):
+            return true
+    false
+
+fn _fixed_point_iterations(groups: [[i64]], islands: [LayoutIsland], dependencies: [LayoutDependency]) -> i64:
+    if islands.len() == 0:
+        return 0
+    var required = 1
+    for group in groups:
+        if _group_is_cyclic(group, islands, dependencies):
+            for island_index in group:
+                val candidate = islands[island_index].required_fixed_point_iterations
+                if candidate > required:
+                    required = candidate
+    required
+
+fn layout_schedule_waves(
+    islands: [LayoutIsland],
+    dependencies: [LayoutDependency],
+    fixed_point_cap: i64
+) -> LayoutSchedule:
+    if fixed_point_cap <= 0:
+        return LayoutSchedule(waves: [], converged: false, iterations: 0, reason: "invalid-fixed-point-cap")
+    if not _valid_dependencies(islands, dependencies):
+        return LayoutSchedule(waves: [], converged: false, iterations: 0, reason: "missing-dependency-endpoint")
+
+    val grouped = _components(islands, dependencies)
+    val groups = grouped.0
+    val group_by_island = grouped.1
+    var active: [bool] = []
+    for group in groups:
+        active.push(true)
+    var remaining = groups.len()
+    var waves: [LayoutWave] = []
+    while remaining > 0:
+        var ready_groups: [i64] = []
+        var group_index = 0
+        while group_index < groups.len():
+            if active[group_index] and not _group_has_incoming(group_index, active, group_by_island, islands, dependencies):
+                ready_groups.push(group_index)
+            group_index = group_index + 1
+        var island_ids: [i64] = []
+        for ready_group in ready_groups:
+            for island_index in groups[ready_group]:
+                island_ids.push(islands[island_index].root_id)
+            active[ready_group] = false
+            remaining = remaining - 1
+        waves.push(LayoutWave(island_ids: quick_sort(island_ids)))
+
+    val required = _fixed_point_iterations(groups, islands, dependencies)
+    if required > fixed_point_cap:
+        return LayoutSchedule(waves: waves, converged: false, iterations: fixed_point_cap, reason: "non-convergent")
+    LayoutSchedule(waves: waves, converged: true, iterations: required, reason: "")
+
+export layout_discover_islands, layout_schedule_waves
