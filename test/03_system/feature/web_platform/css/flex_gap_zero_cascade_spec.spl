@@ -24,16 +24,22 @@ Malformed-only and negative gaps remain outside the accepted subset.
 
 ## Exact fixture
 
-The viewport is 12 by 10 pixels. The first two 12-by-2 Flex rows reset a 4px
+The viewport is 12 by 20 pixels. The first two 12-by-2 Flex rows reset a 4px
 stylesheet gap to zero. The next two retain `gap:4px` before a malformed
-duplicate through the dispatch and full reconstruction paths. The last row
-contains only the malformed declaration and therefore keeps the initial zero.
+duplicate through the dispatch and full reconstruction paths. Further rows
+reject signed, decimal, foreign-unit, and trailing-junk values, reset
+`initial`/`unset`, stop at `inherit` without resurrecting an earlier value,
+and keep invalid-only and parent-default `inherit` controls at zero.
+
+General nonzero inherited gaps remain RED until computed parent gap state is
+available. `revert` and `revert-layer` also remain RED until origin and layer
+state is represented; this scenario does not approximate either keyword.
 
 ## Evidence boundary
 
 The SSpec asserts parsed nodes, computed gap fields, exact semantic boxes,
 canonical Draw IR rectangle geometry and color, zero skipped commands, and
-all 120 framebuffer pixels. Runtime PASS is claimed only after a qualified
+all 240 framebuffer pixels. Runtime PASS is claimed only after a qualified
 pure-Simple execution; static review alone is not runtime evidence.
 """
 
@@ -47,7 +53,7 @@ use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 
 val FLEX_GAP_ZERO_CASCADE_HTML = (
     "<style>" +
-    "html,body{margin:0;width:12px;height:10px;background:#fff}" +
+    "html,body{margin:0;width:12px;height:20px;background:#fff}" +
     ".row{display:flex;width:12px;height:2px}" +
     ".positive{gap:4px}" +
     ".red{width:4px;height:2px;background:#dc2626}" +
@@ -70,7 +76,24 @@ val FLEX_GAP_ZERO_CASCADE_HTML = (
     "<div id='duplicate-full-blue' class='blue'></div></div>" +
     "<div id='invalid-only-row' class='row' style='gap:bogus'>" +
     "<div id='invalid-only-red' class='red'></div>" +
-    "<div id='invalid-only-blue' class='blue'></div></div>"
+    "<div id='invalid-only-blue' class='blue'></div></div>" +
+    "<div id='syntax-dispatch-row' class='row' style='gap:4px;" +
+    "gap:-9px;gap:7.5px;gap:8em;gap:10pxjunk'>" +
+    "<div id='syntax-dispatch-red' class='red'></div>" +
+    "<div id='syntax-dispatch-blue' class='blue'></div></div>" +
+    "<div id='syntax-full-row' class='row' style='gap:4px;gap:-9px;" +
+    "gap:7.5px;gap:8em;gap:10pxjunk;visibility:visible'>" +
+    "<div id='syntax-full-red' class='red'></div>" +
+    "<div id='syntax-full-blue' class='blue'></div></div>" +
+    "<div id='initial-row' class='row positive' style='gap:initial'>" +
+    "<div id='initial-red' class='red'></div>" +
+    "<div id='initial-blue' class='blue'></div></div>" +
+    "<div id='unset-row' class='row positive' style='gap:unset'>" +
+    "<div id='unset-red' class='red'></div>" +
+    "<div id='unset-blue' class='blue'></div></div>" +
+    "<div id='inherit-row' class='row' style='gap:4px;gap:inherit'>" +
+    "<div id='inherit-red' class='red'></div>" +
+    "<div id='inherit-blue' class='blue'></div></div>"
 )
 
 fn _gap_zero_node_index(
@@ -100,6 +123,34 @@ fn _gap_zero_command(
     fail("missing zero-gap Draw IR command: {component_id}")
     result.composition.batches[0].commands[0]
 
+fn _expect_gap_command(
+    result: SimpleWebLayoutDrawIrResult, component_id: text,
+    x: i32, y: i32, color: u32
+):
+    val command = _gap_zero_command(result, component_id)
+    expect([
+        command.kind, command.x.to_text(), command.y.to_text(),
+        command.width.to_text(), command.height.to_text(),
+        command.color.to_text()
+    ]).to_equal([
+        "rect", x.to_text(), y.to_text(), "4", "2", color.to_text()
+    ])
+
+fn _expect_gap_row_pixels(pixels: [u32], y: i32, has_gap: bool):
+    var row_y = y
+    while row_y < y + 2:
+        var x = 0
+        while x < 12:
+            val expected = if x < 4:
+                0xFFDC2626u32
+            elif (has_gap and x >= 8) or (not has_gap and x < 8):
+                0xFF2563EBu32
+            else:
+                0xFFFFFFFFu32
+            expect(pixels[x + row_y * 12]).to_equal(expected)
+            x = x + 1
+        row_y = row_y + 1
+
 describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
     # @manual: show
     # @capture(html)
@@ -107,7 +158,7 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
     it "should reset positive Flex gaps through both declaration paths":
         step("Parse the split-cascade zero-gap fixture")
         val result = simple_web_layout_render_html_draw_ir_result(
-            FLEX_GAP_ZERO_CASCADE_HTML, 12, 10
+            FLEX_GAP_ZERO_CASCADE_HTML, 12, 20
         )
         val dispatch_row_index = _gap_zero_node_index(result, "dispatch-row")
         val full_row_index = _gap_zero_node_index(result, "full-row")
@@ -120,6 +171,13 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
         val invalid_only_index = _gap_zero_node_index(
             result, "invalid-only-row"
         )
+        val syntax_dispatch_index = _gap_zero_node_index(
+            result, "syntax-dispatch-row"
+        )
+        val syntax_full_index = _gap_zero_node_index(result, "syntax-full-row")
+        val initial_index = _gap_zero_node_index(result, "initial-row")
+        val unset_index = _gap_zero_node_index(result, "unset-row")
+        val inherit_index = _gap_zero_node_index(result, "inherit-row")
         expect(result.hit_index.nodes[dispatch_row_index].tag).to_equal("div")
         expect(result.hit_index.nodes[full_row_index].tag).to_equal("div")
         expect(result.hit_index.nodes[duplicate_dispatch_index].tag).to_equal(
@@ -127,6 +185,11 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
         )
         expect(result.hit_index.nodes[duplicate_full_index].tag).to_equal("div")
         expect(result.hit_index.nodes[invalid_only_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[syntax_dispatch_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[syntax_full_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[initial_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[unset_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[inherit_index].tag).to_equal("div")
         expect(result.composition.batches[0].source.source_kind).to_equal(
             "html_ast"
         )
@@ -139,6 +202,11 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
         )
         val duplicate_full_style = result.hit_index.styles[duplicate_full_index]
         val invalid_only_style = result.hit_index.styles[invalid_only_index]
+        val syntax_dispatch_style = result.hit_index.styles[syntax_dispatch_index]
+        val syntax_full_style = result.hit_index.styles[syntax_full_index]
+        val initial_style = result.hit_index.styles[initial_index]
+        val unset_style = result.hit_index.styles[unset_index]
+        val inherit_style = result.hit_index.styles[inherit_index]
         expect([
             dispatch_style.gap_px, dispatch_style.row_gap_px,
             dispatch_style.column_gap_px
@@ -159,6 +227,26 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
         expect([
             invalid_only_style.gap_px, invalid_only_style.row_gap_px,
             invalid_only_style.column_gap_px
+        ]).to_equal([0, 0, 0])
+        expect([
+            syntax_dispatch_style.gap_px, syntax_dispatch_style.row_gap_px,
+            syntax_dispatch_style.column_gap_px
+        ]).to_equal([4, 4, 4])
+        expect([
+            syntax_full_style.gap_px, syntax_full_style.row_gap_px,
+            syntax_full_style.column_gap_px
+        ]).to_equal([4, 4, 4])
+        expect([
+            initial_style.gap_px, initial_style.row_gap_px,
+            initial_style.column_gap_px
+        ]).to_equal([0, 0, 0])
+        expect([
+            unset_style.gap_px, unset_style.row_gap_px,
+            unset_style.column_gap_px
+        ]).to_equal([0, 0, 0])
+        expect([
+            inherit_style.gap_px, inherit_style.row_gap_px,
+            inherit_style.column_gap_px
         ]).to_equal([0, 0, 0])
         expect(_gap_zero_box(result, "dispatch-row")).to_equal([0, 0, 12, 2])
         expect(_gap_zero_box(result, "dispatch-red")).to_equal([0, 0, 4, 2])
@@ -193,6 +281,33 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
         expect(_gap_zero_box(result, "invalid-only-blue")).to_equal(
             [4, 8, 4, 2]
         )
+        expect(_gap_zero_box(result, "syntax-dispatch-row")).to_equal(
+            [0, 10, 12, 2]
+        )
+        expect(_gap_zero_box(result, "syntax-dispatch-red")).to_equal(
+            [0, 10, 4, 2]
+        )
+        expect(_gap_zero_box(result, "syntax-dispatch-blue")).to_equal(
+            [8, 10, 4, 2]
+        )
+        expect(_gap_zero_box(result, "syntax-full-row")).to_equal(
+            [0, 12, 12, 2]
+        )
+        expect(_gap_zero_box(result, "syntax-full-red")).to_equal(
+            [0, 12, 4, 2]
+        )
+        expect(_gap_zero_box(result, "syntax-full-blue")).to_equal(
+            [8, 12, 4, 2]
+        )
+        expect(_gap_zero_box(result, "initial-row")).to_equal([0, 14, 12, 2])
+        expect(_gap_zero_box(result, "initial-red")).to_equal([0, 14, 4, 2])
+        expect(_gap_zero_box(result, "initial-blue")).to_equal([4, 14, 4, 2])
+        expect(_gap_zero_box(result, "unset-row")).to_equal([0, 16, 12, 2])
+        expect(_gap_zero_box(result, "unset-red")).to_equal([0, 16, 4, 2])
+        expect(_gap_zero_box(result, "unset-blue")).to_equal([4, 16, 4, 2])
+        expect(_gap_zero_box(result, "inherit-row")).to_equal([0, 18, 12, 2])
+        expect(_gap_zero_box(result, "inherit-red")).to_equal([0, 18, 4, 2])
+        expect(_gap_zero_box(result, "inherit-blue")).to_equal([4, 18, 4, 2])
 
         step("Emit adjacent canonical Draw IR rectangles")
         val dispatch_red = _gap_zero_command(result, "dispatch-red")
@@ -268,41 +383,34 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
             0xFFDC2626u32, 0xFF2563EBu32,
             0xFFDC2626u32, 0xFF2563EBu32
         ])
+        _expect_gap_command(
+            result, "syntax-dispatch-red", 0, 10, 0xFFDC2626u32
+        )
+        _expect_gap_command(
+            result, "syntax-dispatch-blue", 8, 10, 0xFF2563EBu32
+        )
+        _expect_gap_command(result, "syntax-full-red", 0, 12, 0xFFDC2626u32)
+        _expect_gap_command(result, "syntax-full-blue", 8, 12, 0xFF2563EBu32)
+        _expect_gap_command(result, "initial-red", 0, 14, 0xFFDC2626u32)
+        _expect_gap_command(result, "initial-blue", 4, 14, 0xFF2563EBu32)
+        _expect_gap_command(result, "unset-red", 0, 16, 0xFFDC2626u32)
+        _expect_gap_command(result, "unset-blue", 4, 16, 0xFF2563EBu32)
+        _expect_gap_command(result, "inherit-red", 0, 18, 0xFFDC2626u32)
+        _expect_gap_command(result, "inherit-blue", 4, 18, 0xFF2563EBu32)
 
         step("Render exact zero-gap Engine2D pixels")
-        val raster = Engine2dCompositorBackend.create_named(12, 10, "software")
+        val raster = Engine2dCompositorBackend.create_named(12, 20, "software")
         val rendered = raster.render_draw_ir_composition(result.composition, [])
         raster.shutdown()
         expect(rendered.skipped_command_count).to_equal(0)
-        expect(rendered.pixels).to_equal([
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
-            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
-            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
-            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32
-        ])
+        expect(rendered.pixels.len()).to_equal(240)
+        _expect_gap_row_pixels(rendered.pixels, 0, false)
+        _expect_gap_row_pixels(rendered.pixels, 2, false)
+        _expect_gap_row_pixels(rendered.pixels, 4, true)
+        _expect_gap_row_pixels(rendered.pixels, 6, true)
+        _expect_gap_row_pixels(rendered.pixels, 8, false)
+        _expect_gap_row_pixels(rendered.pixels, 10, true)
+        _expect_gap_row_pixels(rendered.pixels, 12, true)
+        _expect_gap_row_pixels(rendered.pixels, 14, false)
+        _expect_gap_row_pixels(rendered.pixels, 16, false)
+        _expect_gap_row_pixels(rendered.pixels, 18, false)

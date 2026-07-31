@@ -464,22 +464,36 @@ fn _decl_tbl_resolve_writing_mode(current: text, decl_tbl: [text]) -> text:
 
 fn parse_supported_nonnegative_px(raw: text) -> i32:
     val value = raw.trim().lower()
-    if value == "0" or value == "0px":
-        return 0
-    val parsed = parse_int(value)
-    if parsed > 0:
-        return parsed
+    val digits = if value.ends_with("px"):
+        value.substring(0, value.len() - 2)
+    else:
+        value
+    if digits.len() == 0:
+        return -1
+    var digit_index = 0
+    while digit_index < digits.len():
+        val ch = digits.char_at(digit_index)
+        if ch < "0" or ch > "9":
+            return -1
+        digit_index = digit_index + 1
+    if val Some(parsed) = digits.parse_i64():
+        if parsed >= 0 and parsed <= 2147483647:
+            return parsed.to_i32()
     -1
 
 fn decl_tbl_get_last_valid_nonnegative_px(
     decl_tbl: [text], prop: text
-) -> i32?:
+) -> text?:
     var i = (decl_tbl.len() as i32) - 2
     while i >= 0:
         if decl_tbl[i] == prop:
-            val parsed = parse_supported_nonnegative_px(decl_tbl[i + 1])
-            if parsed >= 0:
-                return Some(parsed)
+            val value = decl_tbl[i + 1].trim().lower()
+            if (
+                parse_supported_nonnegative_px(value) >= 0 or
+                value == "initial" or value == "unset" or
+                value == "inherit"
+            ):
+                return Some(value)
         i = i - 2
     nil
 
@@ -614,10 +628,16 @@ fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style
     if align_items_decl.len() > 0:
         st.align_items = align_items_decl
     val gap = decl_tbl_get_last_valid_nonnegative_px(decl_tbl, "gap")
-    if val Some(gv) = gap:
-        st.gap_px = gv
-        st.row_gap_px = gv
-        st.column_gap_px = gv
+    if val Some(gap_value) = gap:
+        if gap_value == "initial" or gap_value == "unset":
+            st.gap_px = 0
+            st.row_gap_px = 0
+            st.column_gap_px = 0
+        elif gap_value != "inherit":
+            val gv = parse_supported_nonnegative_px(gap_value)
+            st.gap_px = gv
+            st.row_gap_px = gv
+            st.column_gap_px = gv
     val flex_basis_decl = decl_tbl_get(decl_tbl, "flex-basis")
     if flex_basis_decl.len() > 0:
         val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
