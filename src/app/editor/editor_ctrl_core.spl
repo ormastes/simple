@@ -1144,6 +1144,7 @@ fn ctrl_activate_active_language(ctrl: mut EditorController):
     ctrl.extension_host.activate_language(doc.language_id)
     ctrl.extension_host.emit_event("onDidOpenTextDocument", doc.path())
     ctrl.extension_host.emit_event("onLanguage:" + doc.language_id, doc.path())
+    ctrl_route_to_custom_editor(ctrl, doc.path())
     val buffer = ctrl.session.active_buffer()
     if buffer == nil:
         return
@@ -1155,6 +1156,37 @@ fn ctrl_activate_active_language(ctrl: mut EditorController):
     ctrl.file_watcher.watch(doc.path())
     ctrl.file_watcher.watch_parent_directory(doc.path())
     ctrl_poll_lsp_diagnostics(ctrl)
+
+# Route the just-opened document to a contributed custom editor when one is
+# registered for its document_kind. The document_kind is resolved the same
+# way LSP language activation already resolves a language id: through the
+# extension host's language index (`contributes_languages`), keyed by file
+# extension -- e.g. sheets_ext.spl contributes ExtensionLanguage(id:
+# "sheets", extensions: [".xlsx", ".xls", ".csv"]) alongside its
+# ExtensionCustomEditor(id: "sheets.grid", document_kind: "sheets", ...).
+# When no extension claims the extension, or no custom editor is registered
+# for the resolved kind, this is a no-op and the document keeps rendering
+# in the default text editor -- the real fallback, not a placeholder one.
+fn ctrl_route_to_custom_editor(ctrl: mut EditorController, path: text):
+    val ext = _ctrl_file_extension(path)
+    if ext == "":
+        return
+    val kind = ctrl.extension_host.find_language_for_ext(ext)
+    if kind == "":
+        return
+    if not ctrl.extension_host.custom_editor_registered(kind):
+        return
+    val entry = ctrl.extension_host.resolve_custom_editor(kind)
+    ctrl.extension_host.emit_event("onDidResolveCustomEditor:" + kind, entry.editor.id)
+
+fn _ctrl_file_extension(path: text) -> text:
+    val basename = _editor_path_basename(path)
+    var i = basename.len() - 1
+    while i >= 0:
+        if basename.char_at(i) == ".":
+            return basename.slice(i, basename.len())
+        i = i - 1
+    ""
 
 fn ctrl_configure_file_watcher_policy(ctrl: mut EditorController, poll_interval_ms: i64, ignore_globs: [text]) -> EditorAction:
     ctrl.file_watcher.configure_policy(poll_interval_ms, ignore_globs)
