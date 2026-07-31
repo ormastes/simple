@@ -383,7 +383,35 @@ enum TagMergePolicy:
     Max
     Min
     ErrorOnConflict
+
+enum TagCardinality:
+    One
+    Optional
+    Many
+
+enum TagAuthority:
+    Parser
+    Semantic
+    Analysis
+    Profile
+    External
+    Policy
 ```
+
+`TagCardinality` and `TagAuthority` were declared in `TagKey` but left
+unenumerated in the original draft; they are ratified above so no two lanes
+invent conflicting vocabularies. Both are one `u8` at a frozen `TagKey` offset,
+so extending either is a tagmap-schema minor bump that does not disturb the
+surrounding layout.
+
+- `TagCardinality` is the minimum set the §5.3 storage table actually
+  distinguishes: a dense scalar column (`One`), a sparse marker/value record
+  (`Optional`), and an offset/count small multi-value set (`Many`).
+- `TagAuthority` mirrors the producer families implied by the §5.5 namespace
+  policy: `syntax.*`/`source.*` from the parser, `semantic.*` from resolution,
+  `opt.*`/`aop.*`/`link.*` from analysis passes, `profile.*` from a profiling
+  session, `clang.*`/`llvm.*` from an external bridge, and
+  `placement.*`/`security.*` from explicit policy.
 
 ### 5.3 Storage representations
 
