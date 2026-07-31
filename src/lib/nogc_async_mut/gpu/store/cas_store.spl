@@ -16,15 +16,26 @@ class CasManifest:
     object_ids: [ArtifactId]
     byte_count: i64
 
+class CasObjectBinding:
+    object_slot: u32
+    generation: u32
+    artifact: ArtifactId
+
 class CasStore:
     """Pure in-memory CAS simulation for interface-first MMU development."""
 
     root_path: text
     records: [CasRecord]
     checkpoints: [CasManifest]
+    object_bindings: [CasObjectBinding]
 
     static fn create(root_path: text) -> CasStore:
-        CasStore(root_path: root_path, records: [], checkpoints: [])
+        CasStore(
+            root_path: root_path,
+            records: [],
+            checkpoints: [],
+            object_bindings: []
+        )
 
     static fn open(root_path: text) -> Result<CasStore, text>:
         Ok(CasStore.create(root_path))
@@ -41,6 +52,16 @@ class CasStore:
                 bytes: payload
             ))
         id
+
+    fn write_object_bytes(
+        self,
+        object: ObjectRef<AnyObject>,
+        payload: [i64],
+        manifest_root: ArtifactId
+    ) -> ArtifactId:
+        val artifact = self.write_bytes(payload, manifest_root)
+        self._bind_object_artifact(object, artifact)
+        artifact
 
     fn read_bytes(self, artifact: ArtifactId) -> [i64]?:
         val i = self._find_record_index(artifact)
@@ -79,7 +100,10 @@ class CasStore:
             RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "checkpoint-missing")
         else:
             val manifest = self.checkpoints[match_index as i64]
-            RecoveryReceipt(ok: true, root: root, recovered_objects: manifest.object_ids.len(), error: "")
+            if not _manifest_complete(self, manifest):
+                RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "checkpoint-corrupt-manifest")
+            else:
+                RecoveryReceipt(ok: true, root: root, recovered_objects: manifest.object_ids.len(), error: "")
 
     fn known_roots(self) -> [ArtifactId]:
         var result: [ArtifactId] = []
@@ -105,14 +129,50 @@ class CasStore:
             i = i + 1
         -1
 
+    me fn _find_binding_index(self, object: ObjectRef<AnyObject>) -> i32:
+        var i = 0
+        while i < self.object_bindings.len():
+            val binding = self.object_bindings[i]
+            if binding.object_slot == object.object_slot and binding.generation == object.generation:
+                return i as i32
+            i = i + 1
+        -1
+
+    me fn _bind_object_artifact(self, object: ObjectRef<AnyObject>, artifact: ArtifactId):
+        val existing = self._find_binding_index(object)
+        if existing < 0:
+            self.object_bindings.push(CasObjectBinding(
+                object_slot: object.object_slot,
+                generation: object.generation,
+                artifact: artifact
+            ))
+        else:
+            val index = existing as i64
+            self.object_bindings[index] = CasObjectBinding(
+                object_slot: object.object_slot,
+                generation: object.generation,
+                artifact: artifact
+            )
+
 fn _lookup_artifact(store: CasStore, object_ref: ObjectRef<AnyObject>) -> ArtifactId?:
     var i = 0
-    while i < store.records.len():
-        val record = store.records[i]
-        if record.byte_len > 0:
-            return Some(record.artifact)
+    while i < store.object_bindings.len():
+        val binding = store.object_bindings[i]
+        if binding.object_slot == object_ref.object_slot and binding.generation == object_ref.generation:
+            return Some(binding.artifact)
         i = i + 1
     nil
+
+fn _manifest_complete(store: CasStore, manifest: CasManifest) -> bool:
+    var i = 0
+    while i < manifest.object_ids.len():
+        val artifact = manifest.object_ids[i]
+        if not artifact_id_valid(artifact):
+            return false
+        if store._find_record_index(artifact) < 0:
+            return false
+        i = i + 1
+    true
 
 fn _artifact_ids_to_bytes(ids: [ArtifactId]) -> [i64]:
     var flat: [i64] = []
@@ -147,5 +207,5 @@ fn cas_store_root(store: CasStore) -> ArtifactId:
 fn cas_store_recover(store: CasStore, root: ArtifactId) -> RecoveryReceipt:
     store.recover(root)
 
-export CasRecord, CasManifest, CasStore
+export CasRecord, CasManifest, CasObjectBinding, CasStore
 export cas_store_digest, cas_store_root, cas_store_recover
