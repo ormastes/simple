@@ -417,3 +417,55 @@ env-propagation explanation it was implicitly compatible with is now
 directly refuted. Any fix attempt needs to target the pre-`main()`
 script-loading phase, a layer neither this doc's original mitigation nor
 its two prior candidate explanations addressed.
+
+## 2026-07-31 — the tool documents this condition itself
+
+A cell run left to go long enough finally printed the parent's own
+diagnostic, which no earlier attempt had ever seen:
+
+```
+error: native-build worker timed out after 7200s before producing a binary.
+  The interpreted worker loads the whole compiler + LLVM import graph before any
+  codegen; a large --source set (e.g. src/os + src/lib) exceeds the budget. Raise
+  --timeout, shrink --source, or use the in-process backend for cross-target builds.
+```
+
+**Honest scope of this observation.** The "after 7200s" figure is NOT
+literally true for the run that produced it: the worker was killed
+manually at roughly 30 minutes and the parent emitted its standard
+timeout message in response. So the trigger was the kill, not a genuine
+budget expiry. What is load-bearing is the message TEXT, which is the
+tool's own documentation of this failure mode.
+
+**Why nobody saw it before.** Every prior attempt was killed well short
+of the 7200s budget — the longest was 67 minutes (~4020s). The
+diagnostic only prints when the worker's wait ends, so the explanation
+was always one unbroken run away.
+
+**What it says, and why it fits.** The interpreted worker loads the whole
+compiler + LLVM import graph BEFORE any codegen, and a large `--source`
+set exceeds the budget. Every cell in this investigation used exactly
+such a set (`--source src/compiler --source src/app --source src/lib`).
+This is consistent with the observations that killed the other theories:
+the known-good baseline commit behaves the same because the load cost is
+inherent to the source-set size, not to any commit; de-symlinking and
+runtime-path changes do not move it because they do not change how much
+gets loaded; and it stalls before the worker's `main()` because the
+import graph loads first.
+
+**Remedies the message itself names:** raise `--timeout`, shrink
+`--source`, or use the in-process backend for cross-target builds.
+
+**What still stands.** Execution mode remains a genuine discriminator:
+the two interpret-mode runs recorded above terminated at ~5.5 and ~13
+minutes with REAL errors (a native module-name collision after path
+sanitization, and a `method 'len' not found on type 'str'` corrupted
+receiver) — they failed on their own faults well before any budget was
+reached, rather than running to the timeout.
+
+**NOT VERIFIED.** No run in this investigation has been allowed to reach
+7200s uninterrupted, so "the budget is genuinely the terminating
+condition for the default-mode path" is inferred from the message text
+and remains unproven. Confirming it requires one uninterrupted run to
+completion, or a run with `--timeout` raised, or a shrunken `--source`
+set that completes quickly. That is the cheapest decisive next step.
