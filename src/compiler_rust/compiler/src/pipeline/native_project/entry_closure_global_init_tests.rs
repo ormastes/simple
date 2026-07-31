@@ -118,21 +118,69 @@ fn freestanding_entry_keeps_call_initialized_global_at_module_scope() {
     assert!(has_top_level_function(&wrapped, "spl_start"));
 }
 
+/// A hosted script entry whose only reader of the call-initialized binding is
+/// the top-level script body itself. Nothing outside the synthesized `main`
+/// needs the name, so it must stay a local of `main` -- that is what keeps a
+/// script's statement order (including the initializer's side effects)
+/// exactly as written.
+const HOSTED_SCRIPT_ONLY_SOURCE: &str = "\
+fn h() -> i64:
+    return 7
+
+print(\"A\")
+
+var script_local: i64 = h()
+
+print(script_local)
+";
+
 #[test]
-fn hosted_entry_still_buries_non_const_declarations_in_synthetic_main() {
-    // Regression guard: the freestanding-only lift must not change hosted
-    // script-entry behavior (a plain CLI script with no explicit `main`
-    // still needs its top-level statements to run, in order, inside the
-    // synthesized `main` -- that IS the real hosted entry point, unlike the
-    // freestanding case).
+fn hosted_entry_buries_declarations_read_only_by_the_script_body() {
+    // Regression guard for script *ordering*: a binding nothing outside the
+    // script body reads has no reason to become a module global, and lifting
+    // it would hoist its initializer's side effects ahead of the script
+    // statements that precede it (here, ahead of `print("A")`).
+    let module = parse(HOSTED_SCRIPT_ONLY_SOURCE);
+    let wrapped = super::compiler::wrap_entry_script_as_main(module, /* is_freestanding */ false);
+
+    let names = top_level_let_names(&wrapped);
+    assert!(
+        !names.contains(&"script_local".to_string()),
+        "a call-initialized binding read only by the script body must stay \
+         buried in the synthetic `main` so script statement order is \
+         preserved; got top-level let names: {:?}",
+        names
+    );
+    assert!(
+        has_top_level_function(&wrapped, "main"),
+        "hosted entry with no explicit main must still get a synthesized main"
+    );
+}
+
+#[test]
+fn hosted_entry_lifts_call_initialized_global_read_by_a_sibling_function() {
+    // The declaration is read by `spl_start`, which stays a *sibling* of the
+    // synthesized `main`. Burying the declaration inside `main` makes it a
+    // local of `main`, so the sibling has nothing to resolve against: under
+    // `compile` that is `Undefined("undefined identifier: h_entry_thing")`,
+    // and under `native-build` there is no diagnostic at all -- the sibling
+    // silently reads an uninitialized global (observed printing
+    // 216172782176749384 instead of 7). Lifting it restores a real
+    // module-scope global, which `module_pass` then registers and initializes
+    // via `__module_init_dynamic`.
+    //
+    // This assertion replaces an earlier one that required the opposite. That
+    // one was written when only the freestanding half of this defect was
+    // understood, and it pinned the hosted half of the same bug in place.
     let module = parse(ENTRY_SOURCE);
     let wrapped = super::compiler::wrap_entry_script_as_main(module, /* is_freestanding */ false);
 
     let names = top_level_let_names(&wrapped);
     assert!(
-        !names.contains(&"h_entry_thing".to_string()),
-        "non-const declarations must still be buried in the synthetic `main` \
-         for hosted (non-freestanding) script entries; got top-level let names: {:?}",
+        names.contains(&"h_entry_thing".to_string()),
+        "a call-initialized global read by a sibling top-level function must \
+         stay at module scope even for hosted entries; got top-level let \
+         names: {:?}",
         names
     );
     // Const-initialized declarations were already lifted unconditionally
@@ -145,9 +193,50 @@ fn hosted_entry_still_buries_non_const_declarations_in_synthetic_main() {
     );
 
     assert!(has_top_level_function(&wrapped, "spl_start"));
+
+    // ENTRY_SOURCE has no top-level statements other than the two
+    // declarations, so once both are lifted the script body is empty and no
+    // `main` is synthesized -- the same outcome a pure-declaration entry file
+    // (only functions and const globals) already produced before this change.
+    // Verified equivalent on real builds: hosted `native-build` of this shape
+    // links and runs clean both before and after, printing nothing either way,
+    // because `spl_start` is not an entry point on a hosted target. The
+    // "script statements still get a synthesized main" guarantee is covered by
+    // `hosted_entry_buries_declarations_read_only_by_the_script_body`, which
+    // has a real script body.
     assert!(
-        has_top_level_function(&wrapped, "main"),
-        "hosted entry with no explicit main must still get a synthesized main"
+        !has_top_level_function(&wrapped, "main"),
+        "an entry file whose script body is empty after lifting must not gain \
+         a synthesized `main`; got top-level items: {:?}",
+        wrapped.items.iter().map(node_kind).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn hosted_entry_lifts_global_read_by_a_class_method() {
+    // Class/impl methods are siblings of the synthesized `main` too, and they
+    // reach the free-read scan only as bare `FunctionDef`s -- never as a
+    // `Node::Function` -- so they need their own walk. Without it this case
+    // would silently keep the pre-fix (broken) behavior.
+    let source = "\
+fn make() -> i64:
+    return 7
+
+var seen_by_method: i64 = make()
+
+class Reader:
+    fn read(self) -> i64:
+        return seen_by_method
+
+print(1)
+";
+    let module = parse(source);
+    let wrapped = super::compiler::wrap_entry_script_as_main(module, /* is_freestanding */ false);
+    let names = top_level_let_names(&wrapped);
+    assert!(
+        names.contains(&"seen_by_method".to_string()),
+        "a global read from a class method must stay at module scope; got: {:?}",
+        names
     );
 }
 

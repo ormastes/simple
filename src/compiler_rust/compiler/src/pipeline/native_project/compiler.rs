@@ -108,6 +108,61 @@ fn is_liftable_global_decl(node: &Node) -> bool {
     }
 }
 
+/// Name declared by a module-level `val`/`var`/`const`/`static`, if it is a
+/// plain single-name binding.
+fn module_level_decl_name(node: &Node) -> Option<String> {
+    match node {
+        Node::Const(decl) => Some(decl.name.clone()),
+        Node::Static(decl) => Some(decl.name.clone()),
+        Node::Let(decl) if is_simple_name_pattern(&decl.pattern) => pattern_root_name(&decl.pattern),
+        _ => None,
+    }
+}
+
+fn pattern_root_name(pattern: &simple_parser::Pattern) -> Option<String> {
+    match pattern {
+        simple_parser::Pattern::Identifier(name) | simple_parser::Pattern::MutIdentifier(name) => Some(name.clone()),
+        simple_parser::Pattern::Typed { pattern, .. } => pattern_root_name(pattern),
+        _ => None,
+    }
+}
+
+/// Free reads performed by top-level items that are NOT script statements --
+/// i.e. by the functions (and class/impl methods) that end up as *siblings* of
+/// the synthesized `main`, not inside it.
+///
+/// This is the whole reason the wrapper cannot simply bury every
+/// runtime-initialized module-level binding in `main`'s body: once it is a
+/// statement of `main` it is a LOCAL of `main`, and a sibling function that
+/// reads the name has nothing to resolve against. Under `compile` that
+/// surfaces as `Undefined("undefined identifier: X")`; under `native-build`
+/// there is no error at all and the sibling reads an uninitialized global,
+/// which is strictly worse. Bindings read only by the script body itself stay
+/// where they are, so a script's statement order -- including the side effects
+/// of a call initializer -- is untouched.
+fn names_read_by_sibling_items(items: &[Node]) -> std::collections::HashSet<String> {
+    use crate::hir::lower::expr::control::collect_identifiers_function;
+    let mut identifiers = std::collections::HashSet::new();
+    let mut bound: Vec<String> = Vec::new();
+    for item in items {
+        match item {
+            Node::Function(f) => collect_identifiers_function(f, &mut bound, &mut identifiers),
+            Node::Class(c) => {
+                for m in &c.methods {
+                    collect_identifiers_function(m, &mut bound, &mut identifiers);
+                }
+            }
+            Node::Impl(i) => {
+                for m in &i.methods {
+                    collect_identifiers_function(m, &mut bound, &mut identifiers);
+                }
+            }
+            _ => {}
+        }
+    }
+    identifiers
+}
+
 pub(crate) fn wrap_entry_script_as_main(
     mut module: simple_parser::ast::Module,
     is_freestanding: bool,
@@ -116,11 +171,18 @@ pub(crate) fn wrap_entry_script_as_main(
         return module;
     }
 
+    // Computed over the ORIGINAL item list, before anything is moved.
+    let sibling_reads = names_read_by_sibling_items(&module.items);
+
     let mut lifted = Vec::new();
     let mut script_body = Vec::new();
     for item in module.items {
         let is_module_level_decl = matches!(item, Node::Let(_) | Node::Const(_) | Node::Static(_));
-        if is_liftable_global_decl(&item) || (is_freestanding && is_module_level_decl) {
+        let is_read_by_sibling = is_module_level_decl
+            && module_level_decl_name(&item)
+                .map(|name| sibling_reads.contains(&name))
+                .unwrap_or(false);
+        if is_liftable_global_decl(&item) || is_read_by_sibling || (is_freestanding && is_module_level_decl) {
             lifted.push(item);
         } else if is_script_statement(&item) {
             script_body.push(item);

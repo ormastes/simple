@@ -2,7 +2,7 @@ pub mod analysis;
 pub mod arena;
 pub mod capability;
 pub mod lifetime;
-mod lower;
+pub(crate) mod lower;
 pub mod memory_model;
 mod types;
 

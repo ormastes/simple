@@ -1,7 +1,7 @@
 mod context;
 pub mod deprecation_warning;
 mod error;
-mod expr;
+pub(crate) mod expr;
 mod import_loader;
 mod lowerer;
 mod memory_check;

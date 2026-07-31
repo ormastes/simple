@@ -1398,7 +1398,7 @@ fn bind_pattern_identifiers(pattern: &Pattern, bound: &mut Vec<String>, identifi
 
 /// Walk a statement list as a lexical scope: binders introduced inside it are
 /// visible to the statements that follow, and dropped at the end of the block.
-fn collect_identifiers_block(
+pub(crate) fn collect_identifiers_block(
     stmts: &[simple_parser::ast::Node],
     bound: &mut Vec<String>,
     identifiers: &mut HashSet<String>,
@@ -1431,6 +1431,30 @@ fn collect_identifiers_defer(
         simple_parser::ast::DeferBody::Expr(e) => collect_identifiers_recursive(e, bound, identifiers),
         simple_parser::ast::DeferBody::Block(b) => collect_identifiers_block(&b.statements, bound, identifiers),
     }
+}
+
+/// Walk a function body as a lexical scope: parameter defaults are evaluated in
+/// the enclosing scope, the parameters themselves shadow it, and both are
+/// dropped again at the end. Shared with the entry-script wrapper
+/// (`pipeline::native_project::compiler`), which needs the same free-read set
+/// for class/impl methods -- those reach this only as bare `FunctionDef`s, never
+/// as a `Node::Function`.
+pub(crate) fn collect_identifiers_function(
+    f: &simple_parser::ast::FunctionDef,
+    bound: &mut Vec<String>,
+    identifiers: &mut HashSet<String>,
+) {
+    let mark = bound.len();
+    for p in &f.params {
+        if let Some(default) = &p.default {
+            collect_identifiers_recursive(default, bound, identifiers);
+        }
+    }
+    for p in &f.params {
+        bound.push(p.name.clone());
+    }
+    collect_identifiers_block(&f.body.statements, bound, identifiers);
+    bound.truncate(mark);
 }
 
 /// Walk a single statement, collecting free reads and registering its binders.
@@ -1545,19 +1569,7 @@ fn collect_identifiers_stmt(
             collect_identifiers_block(&w.body.statements, bound, identifiers);
             bound.truncate(mark);
         }
-        Node::Function(f) => {
-            let mark = bound.len();
-            for p in &f.params {
-                if let Some(default) = &p.default {
-                    collect_identifiers_recursive(default, bound, identifiers);
-                }
-            }
-            for p in &f.params {
-                bound.push(p.name.clone());
-            }
-            collect_identifiers_block(&f.body.statements, bound, identifiers);
-            bound.truncate(mark);
-        }
+        Node::Function(f) => collect_identifiers_function(f, bound, identifiers),
         // Type/module declarations and no-op statements contribute no reads.
         _ => {}
     }

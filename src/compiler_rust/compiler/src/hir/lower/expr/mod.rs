@@ -2,7 +2,7 @@ mod access;
 mod calls;
 mod collections;
 mod contracts;
-mod control;
+pub(crate) mod control;
 mod helpers;
 mod inference;
 mod literals;
