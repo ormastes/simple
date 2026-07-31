@@ -22,6 +22,7 @@ use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_bootstrap_function_at}
 use compiler.common.diagnostics.span.{Span}
+use compiler.common.attributes.{FunctionAttr}
 use compiler.blocks.value.BlockValue
 use compiler.types.type_layout.{compute_struct_layout, layoutattr_default_, FieldLayout}
 use std.array.{array_sort_by}
@@ -147,6 +148,7 @@ impl MirLowering:
             lambda_bindings: {},
             lambda_capture_snapshot: {},
             current_has_vhdl_metadata: false,
+            current_gpu_kernel_target: "",
             current_fn_returns_bool: false,
             canonical_type_symbols: {},
             next_canonical_type_symbol: 1000000000,
@@ -262,7 +264,7 @@ impl MirLowering:
                 is_mutable: false,
                 is_const: false,
                 is_extern: true,
-                func_attr: nil,
+                func_attr: FunctionAttr.default(),
                 has_export_attr: false,
                 export_attr: nil,
                 has_driver_manifest_attr: false,
@@ -274,7 +276,8 @@ impl MirLowering:
                 doc_comment: "",
                 span: Span.empty()
             )
-        for fn_ in module.functions.values():
+        for raw_fn in module.functions.values():
+            val fn_: HirFunction = raw_fn
             val fn_id = self.symbol_id_value(fn_.symbol)
             if fn_id == target_id:
                 return fn_
@@ -294,7 +297,7 @@ impl MirLowering:
             is_mutable: false,
             is_const: false,
             is_extern: true,
-            func_attr: nil,
+            func_attr: FunctionAttr.default(),
             has_export_attr: false,
             export_attr: nil,
             has_driver_manifest_attr: false,
@@ -309,7 +312,7 @@ impl MirLowering:
 
     fn hir_function_is_extern(fn_: HirFunction) -> bool:
         match fn_:
-            case HirFunction(_, _, _, _, _, _, _, _, _, _, _, _, _, _, is_extern, _, _, _, _, _, _, _, _, _, _, _):
+            case HirFunction(_, _, _, _, _, _, _, _, _, _, _, _, _, _, is_extern, _, _, _, _, _, _, _, _, _, _, _, _, _, _):
                 is_extern
 
     me bootstrap_function_signature(name: text) -> MirSignature:
@@ -557,7 +560,8 @@ impl MirLowering:
         # NVMe rv32 fw mask-361, 2026-07-24). Register every free fn's
         # declared HIR return type name-keyed (ambiguous duplicates are
         # never answered — see mir_data.spl).
-        for prescan_fn in module.functions.values():
+        for raw_prescan_fn in module.functions.values():
+            val prescan_fn: HirFunction = raw_prescan_fn
             var prescan_call_name = prescan_fn.name
             val prescan_fn_symbol = module.symbols.get_symbol_raw(prescan_fn.symbol.id)
             if prescan_fn_symbol != nil:
@@ -583,7 +587,8 @@ impl MirLowering:
         """Lower HIR module to MIR."""
         self.symbols = module.symbols
         var function_names: [text] = []
-        for func in module.functions.values():
+        for raw_func in module.functions.values():
+            val func: HirFunction = raw_func
             function_names.push(func.name)
         self.current_function_names = function_names
         # Cross-module prescans keep the first definition. The module being
@@ -801,7 +806,7 @@ impl MirLowering:
         while mfi < module_fn_values.len():
             # module.functions also contains impl methods; retain their static
             # marker for the separate static receiver lookup below.
-            val module_fn = module_fn_values[mfi]
+            val module_fn: HirFunction = module_fn_values[mfi]
             if module_fn.is_static:
                 static_method_symbol_ids[self.symbol_id_value(module_fn.symbol)] = true
             mfi = mfi + 1
@@ -950,8 +955,9 @@ impl MirLowering:
         val prescan_fn_values = module.functions.values()
         var psi = 0
         while psi < prescan_fn_values.len():
-            if not prescan_fn_values[psi].is_extern:
-                self.prescan_block_for_struct_types(prescan_fn_values[psi].body)
+            val prescan_fn: HirFunction = prescan_fn_values[psi]
+            if not prescan_fn.is_extern:
+                self.prescan_block_for_struct_types(prescan_fn.body)
             psi = psi + 1
 
         # Lower functions (skip extern declarations - they have no body)
@@ -960,7 +966,7 @@ impl MirLowering:
             print "[mir-lower] function-keys"
         var fni = 0
         while fni < fn_values.len():
-            val fn_ = fn_values[fni]
+            val fn_: HirFunction = fn_values[fni]
             if self.hir_function_is_extern(fn_):
                 fni = fni + 1
                 # skip extern functions

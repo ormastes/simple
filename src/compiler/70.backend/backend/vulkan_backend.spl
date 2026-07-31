@@ -15,6 +15,60 @@ use compiler.hir.hir_types.{MemorySpace, SymbolId}
 use compiler.common.attributes.{vhdl_hardware_metadata_default}
 use compiler.common.diagnostics.span.{Span}
 
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+fn vulkan_arg_index(kind: LocalKind) -> i64:
+    if rt_enum_discriminant(kind) != rt_enum_discriminant(LocalKind.Arg(0)):
+        return -1
+    match kind:
+        case LocalKind.Arg(index): index
+        case _: -1
+
+fn vulkan_is_arg_local(kind: LocalKind) -> bool:
+    rt_enum_discriminant(kind) == rt_enum_discriminant(LocalKind.Arg(0))
+
+fn vulkan_is_return_local(kind: LocalKind) -> bool:
+    rt_enum_discriminant(kind) == rt_enum_discriminant(LocalKind.Return)
+
+fn vulkan_validate_entry_arguments(signature: MirSignature, locals: [MirLocal]) -> Result<(), CompileError>:
+    # A shader interface is positional: every signature parameter must have
+    # exactly one Arg local with the same index and MIR type.
+    var seen: Dict<i64, bool> = {}
+    for local in locals:
+        if not vulkan_is_arg_local(local.kind):
+            continue
+        val index = vulkan_arg_index(local.kind)
+        if index < 0:
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry argument local index cannot be negative"
+            ))
+        if index >= signature.params.len():
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry argument local index is outside its signature"
+            ))
+        if seen.has(index):
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry argument local index is duplicated"
+            ))
+        if local.type_.kind != signature.params[index].kind:
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry argument local type does not match its signature parameter"
+            ))
+        seen[index] = true
+    var index = 0
+    while index < signature.params.len():
+        if not seen.has(index):
+            return Err(compileerror_backend_error(
+                BackendKind.Vulkan,
+                "Vulkan compute entry argument local is missing from its signature"
+            ))
+        index = index + 1
+    Ok(())
+
 # ============================================================================
 # Vulkan Backend
 # ============================================================================
@@ -140,35 +194,50 @@ class VulkanBackend:
                 BackendKind.Vulkan,
                 "Vulkan compute entry points must return Unit"
             ))
+        val argument_validation = vulkan_validate_entry_arguments(func.signature, func.locals)
+        match argument_validation:
+            case Err(e): return Err(e)
+            case Ok(_): ()
+        val dummy_type = MirType(kind: MirTypeKind.U32)
+        val u32_type_tag = rt_enum_discriminant(MirTypeKind.U32)
+        val ptr_type_tag = rt_enum_discriminant(MirTypeKind.Ptr(dummy_type, false))
+        val ref_type_tag = rt_enum_discriminant(MirTypeKind.Ref(dummy_type, false))
         for local in func.locals:
-            match local.kind:
-                case LocalKind.Arg(index):
-                    if index < 0 or index >= func.signature.params.len():
-                        return Err(compileerror_backend_error(
-                            BackendKind.Vulkan,
-                            "Vulkan compute entry argument local index is outside its signature"
-                        ))
-                    match local.type_.kind:
-                        case Ptr(pointee, _) | Ref(pointee, _):
-                            if pointee.kind != MirTypeKind.U32:
-                                return Err(compileerror_backend_error(
-                                    BackendKind.Vulkan,
-                                    "Vulkan StorageBuffer arguments currently require U32 pointers"
-                                ))
-                        case U32:
-                            ()
-                        case _:
-                            return Err(compileerror_backend_error(
-                                BackendKind.Vulkan,
-                                "Vulkan compute entry arguments require U32 pointers or one U32 length"
-                            ))
-                case LocalKind.Return:
+            val index = vulkan_arg_index(local.kind)
+            if index >= 0:
+                if index >= func.signature.params.len():
                     return Err(compileerror_backend_error(
                         BackendKind.Vulkan,
-                        "Vulkan Unit compute entry points cannot have a return local"
+                        "Vulkan compute entry argument local index is outside its signature"
                     ))
-                case _:
-                    ()
+                val local_type_tag = rt_enum_discriminant(local.type_.kind)
+                if local_type_tag == ptr_type_tag or local_type_tag == ref_type_tag:
+                    var pointee_is_u32 = false
+                    if local_type_tag == ptr_type_tag:
+                        match local.type_.kind:
+                            case MirTypeKind.Ptr(pointee, _):
+                                pointee_is_u32 = rt_enum_discriminant(pointee.kind) == u32_type_tag
+                            case _: ()
+                    else:
+                        match local.type_.kind:
+                            case MirTypeKind.Ref(pointee, _):
+                                pointee_is_u32 = rt_enum_discriminant(pointee.kind) == u32_type_tag
+                            case _: ()
+                    if not pointee_is_u32:
+                        return Err(compileerror_backend_error(
+                            BackendKind.Vulkan,
+                            "Vulkan StorageBuffer arguments currently require U32 pointers"
+                        ))
+                elif local_type_tag != u32_type_tag:
+                    return Err(compileerror_backend_error(
+                        BackendKind.Vulkan,
+                        "Vulkan compute entry argument {index} local {local.id.id} requires a U32 pointer or U32 length (local type tag {rt_enum_discriminant(local.type_.kind)}, signature type tag {rt_enum_discriminant(func.signature.params[index].kind)}, expected Ptr {ptr_type_tag}, Ref {ref_type_tag}, U32 {u32_type_tag})"
+                    ))
+            elif vulkan_is_return_local(local.kind):
+                return Err(compileerror_backend_error(
+                    BackendKind.Vulkan,
+                    "Vulkan Unit compute entry points cannot have a return local"
+                ))
         if func.blocks.len() == 0 or func.blocks[0].id.id != 0:
             return Err(compileerror_backend_error(
                 BackendKind.Vulkan,
@@ -179,23 +248,19 @@ class VulkanBackend:
         var push_arg_locals: Dict<i64, i64> = {}
         var next_binding = 0
         for local in func.locals:
-            match local.kind:
-                case LocalKind.Arg(index):
-                    match local.type_.kind:
-                        case Ptr(_, _) | Ref(_, _):
-                            storage_arg_bindings[local.id.id] = next_binding
-                            next_binding = next_binding + 1
-                        case U32:
-                            if push_arg_locals.keys().len() > 0:
-                                return Err(compileerror_backend_error(
-                                    BackendKind.Vulkan,
-                                    "Vulkan compute entry supports one U32 length push constant"
-                                ))
-                            push_arg_locals[local.id.id] = index
-                        case _:
-                            ()
-                case _:
-                    ()
+            val index = vulkan_arg_index(local.kind)
+            if index >= 0:
+                val local_type_tag = rt_enum_discriminant(local.type_.kind)
+                if local_type_tag == ptr_type_tag or local_type_tag == ref_type_tag:
+                    storage_arg_bindings[local.id.id] = next_binding
+                    next_binding = next_binding + 1
+                elif local_type_tag == u32_type_tag:
+                    if push_arg_locals.keys().len() > 0:
+                        return Err(compileerror_backend_error(
+                            BackendKind.Vulkan,
+                            "Vulkan compute entry supports one U32 length push constant"
+                        ))
+                    push_arg_locals[local.id.id] = index
         val uses_storage_buffers = storage_arg_bindings.keys().len() > 0
         val uses_push_constant = push_arg_locals.keys().len() > 0
         val uses_bool = self.function_uses_bool(func)
@@ -354,6 +419,19 @@ class VulkanBackend:
                             builder.emit_const_int(u32_type, size)
                     case _:
                         ()
+            match block.terminator:
+                case If(cond, _, _):
+                    match cond.kind:
+                        case Const(Bool(value), ty):
+                            if ty.kind == MirTypeKind.Bool:
+                                if value:
+                                    builder.emit_const_true(bool_type)
+                                else:
+                                    builder.emit_const_false(bool_type)
+                        case _:
+                            ()
+                case _:
+                    ()
         val shared_elem_ptr_type = if uses_shared_memory: builder.emit_type_pointer("Workgroup", u32_type) else: 0
         var shared_array_ptr_types: Dict<i64, i64> = {}
         if uses_shared_memory:
@@ -514,6 +592,22 @@ class VulkanBackend:
                 if index_upper_bounds.has(src.id):
                     index_upper_bounds[dest.id] = index_upper_bounds[src.id]
 
+            case Cast(dest, operand, target):
+                index_upper_bounds.remove(dest.id)
+                val target_type = self.int_type_id(target, u32_type, i64_type)
+                val source_type = self.operand_int_type_id(func, operand, u32_type, i64_type)
+                if target_type == 0 or source_type == 0:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan integer casts require U32 or I64 operands"))
+                if self.local_int_type_id(func, dest.id, u32_type, i64_type) != target_type:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan integer cast destination type does not match"))
+                val source = self.resolve_int_operand(builder, operand, source_type, value_ids, func, u32_type, i64_type)
+                if source.is_err():
+                    return Err(source.unwrap_err())
+                value_ids[dest.id] = if source_type == target_type:
+                    source.unwrap()
+                else:
+                    builder.emit_uconvert(target_type, source.unwrap())
+
             case BinOp(dest, op, left, right):
                 index_upper_bounds.remove(dest.id)
                 if self.local_is_bool(func, dest.id):
@@ -590,6 +684,8 @@ class VulkanBackend:
                 val storage_base_id = self.storage_buffer_operand_id(base, storage_buffer_ids)
                 if base_id == 0 and storage_base_id == 0:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP base must come from a StorageBuffer argument or GpuSharedAlloc"))
+                if storage_base_id != 0 and self.local_is_u32_ptr(func, dest.id) and not self.operand_is_mutable_u32_pointer(func, base):
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan immutable StorageBuffer base cannot produce a mutable GEP destination"))
                 val index_type = self.operand_int_type_id(func, indices[0], u32_type, i64_type)
                 if index_type != u32_type:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan U32 storage GEP index must be U32"))
@@ -1011,17 +1107,33 @@ class VulkanBackend:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V loop back-edges are not supported"))
                 if block_positions[true_target.id] >= block_positions[false_target.id]:
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V currently supports only if-without-else control flow"))
-                var true_reaches_merge = false
+                var true_exit = -1
+                var false_exit = -1
+                var false_is_empty = false
                 for block in func.blocks:
                     if block.id.id == true_target.id:
                         match block.terminator:
                             case Goto(target):
-                                true_reaches_merge = target.id == false_target.id
+                                true_exit = target.id
                             case _:
                                 ()
-                if not true_reaches_merge:
+                    elif block.id.id == false_target.id:
+                        false_is_empty = block.instructions.len() == 0
+                        match block.terminator:
+                            case Goto(target):
+                                false_exit = target.id
+                            case _:
+                                ()
+                var merge_target = false_target.id
+                if true_exit != false_target.id:
+                    if not false_is_empty or true_exit < 0 or true_exit != false_exit:
+                        return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V currently supports only if-without-else control flow"))
+                    merge_target = true_exit
+                if not block_positions.has(merge_target):
                     return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V currently supports only if-without-else control flow"))
-                builder.emit("OpSelectionMerge {builder.id_str(block_labels[false_target.id])} None")
+                if merge_target != false_target.id and block_positions[merge_target] <= block_positions[false_target.id]:
+                    return Err(compileerror_backend_error(BackendKind.Vulkan, "Vulkan SPIR-V currently supports only if-without-else control flow"))
+                builder.emit("OpSelectionMerge {builder.id_str(block_labels[merge_target])} None")
                 builder.emit_branch_conditional(cond_id.unwrap(), block_labels[true_target.id], block_labels[false_target.id])
             case Unreachable:
                 builder.emit("OpUnreachable")
@@ -1100,16 +1212,30 @@ impl GpuCodegen for VulkanBackend:
             ))
         var params: [MirType] = []
         var arg_index = 0
+        for local in mir_body.locals:
+            if vulkan_is_arg_local(local.kind):
+                val index = vulkan_arg_index(local.kind)
+                if index < 0:
+                    return Err(compileerror_backend_error(
+                        BackendKind.Vulkan,
+                        "Vulkan compute entry argument local index cannot be negative"
+                    ))
+                if index >= mir_body.arg_count:
+                    return Err(compileerror_backend_error(
+                        BackendKind.Vulkan,
+                        "Vulkan compute entry argument local index is outside its signature"
+                    ))
         while arg_index < mir_body.arg_count:
             var found = false
             for local in mir_body.locals:
-                match local.kind:
-                    case LocalKind.Arg(index):
-                        if index == arg_index:
-                            params = params.push(local.type_)
-                            found = true
-                    case _:
-                        ()
+                if vulkan_is_arg_local(local.kind) and vulkan_arg_index(local.kind) == arg_index:
+                    if found:
+                        return Err(compileerror_backend_error(
+                            BackendKind.Vulkan,
+                            "Vulkan compute entry argument local index is duplicated"
+                        ))
+                    params = params.push(local.type_)
+                    found = true
             if not found:
                 return Err(compileerror_backend_error(
                     BackendKind.Vulkan,
@@ -1117,15 +1243,12 @@ impl GpuCodegen for VulkanBackend:
                 ))
             arg_index = arg_index + 1
         for local in mir_body.locals:
-            match local.kind:
-                case LocalKind.Arg(index):
-                    if index >= mir_body.arg_count:
-                        return Err(compileerror_backend_error(
-                            BackendKind.Vulkan,
-                            "Vulkan compute entry argument locals require StorageBuffer interface lowering"
-                        ))
-                case _:
-                    ()
+            val index = vulkan_arg_index(local.kind)
+            if index >= mir_body.arg_count:
+                return Err(compileerror_backend_error(
+                    BackendKind.Vulkan,
+                    "Vulkan compute entry argument locals require StorageBuffer interface lowering"
+                ))
         val vk_sig = MirSignature(params: params, return_type: mir_body.return_ty, is_variadic: false)
         val func = MirFunction(
             symbol: SymbolId(id: 0), name: func_name, signature: vk_sig,

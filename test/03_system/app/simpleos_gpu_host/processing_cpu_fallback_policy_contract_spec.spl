@@ -14,6 +14,7 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
     HostGpuIvshmemReceipt,
     host_gpu_ivshmem_fallback_receipt_valid
 }
+use app.simpleos_gpu_host.daemon_runner.{simpleos_gpu_processing_min_offload_elements}
 
 val HOST = "src/app/simpleos_gpu_host/daemon_runner.spl"
 val PROTOCOL = "src/lib/common/gpu/simpleos_host_gpu_protocol.spl"
@@ -55,9 +56,14 @@ describe "SimpleOS processing CPU fallback policy contract":
         expect(source).to_contain("_process_request(platform, base, processing_selector, processing_fallback_cpu, processing_verify_cpu, processing_min_offload_elements, retained)")
         expect(source).to_contain("fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_selector: text, processing_fallback_cpu: bool, processing_verify_cpu: bool, processing_min_offload_elements: i64")
 
-    it "validates the calibrated offload threshold and allows zero to disable":
+    it "uses measured backend defaults and preserves explicit overrides":
         val source = file_read(HOST)
-        expect(source).to_contain("val SIMPLEOS_GPU_PROCESSING_MIN_OFFLOAD_ELEMENTS: i64 = 1048576")
+        expect(simpleos_gpu_processing_min_offload_elements("cuda", -1)).to_equal(8388608)
+        expect(simpleos_gpu_processing_min_offload_elements("vulkan", -1)).to_equal(65536)
+        expect(simpleos_gpu_processing_min_offload_elements("metal", -1)).to_equal(1048576)
+        expect(simpleos_gpu_processing_min_offload_elements("cuda", 0)).to_equal(0)
+        expect(simpleos_gpu_processing_min_offload_elements("cuda", 123)).to_equal(123)
+        expect(source).to_contain("val effective_min_offload_elements = simpleos_gpu_processing_min_offload_elements(backend, processing_min_offload_elements)")
         expect(source).to_contain("use std.common.text." + "{" + "parse_i64" + "}")
         expect(source).to_contain("parse_i64(requested_processing_min_offload_elements)")
         expect(source).to_contain("not args.contains(\"--processing-min-offload-elements=\")")
@@ -88,13 +94,13 @@ describe "SimpleOS processing CPU fallback policy contract":
 
     it "bypasses device work only for calibrated CPU fallback":
         val source = file_read(HOST)
-        val policy = source.index_of("if processing_fallback_cpu and processing_min_offload_elements > 0 and element_count < processing_min_offload_elements:")
+        val policy = source.index_of("if processing_fallback_cpu and effective_min_offload_elements > 0 and element_count < effective_min_offload_elements:")
         val device = source.index_of("val device_started = time_now_nanos()")
         expect(policy).to_be_greater_than(0)
         expect(policy).to_be_less_than(device)
         expect(source).to_contain("_processing_cpu_fallback(base, generation, SIMPLEOS_HOST_GPU_REASON_OFFLOAD_OVERHEAD")
-        expect(source).to_contain("processing_min_offload_elements > 0")
-        expect(source).to_contain("element_count < processing_min_offload_elements")
+        expect(source).to_contain("effective_min_offload_elements > 0")
+        expect(source).to_contain("element_count < effective_min_offload_elements")
 
     it "keeps executor failure and mismatch fallback behavior":
         val source = file_read(HOST)

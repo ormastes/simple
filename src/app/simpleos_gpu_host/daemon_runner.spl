@@ -28,7 +28,18 @@ use app.io.thread.{thread_sleep_ms}
 use std.common.text.{parse_i64}
 use std.nogc_sync_mut.ptr.raw.{raw_read_i32, raw_write_u32s_checksum, raw_write_fill_u32s_checksum}
 
-val SIMPLEOS_GPU_PROCESSING_MIN_OFFLOAD_ELEMENTS: i64 = 1048576
+val SIMPLEOS_GPU_CUDA_MIN_OFFLOAD_ELEMENTS: i64 = 8388608
+val SIMPLEOS_GPU_VULKAN_MIN_OFFLOAD_ELEMENTS: i64 = 65536
+val SIMPLEOS_GPU_METAL_MIN_OFFLOAD_ELEMENTS: i64 = 1048576
+
+fn simpleos_gpu_processing_min_offload_elements(backend: text, configured: i64) -> i64:
+    if configured >= 0:
+        return configured
+    if backend == "cuda":
+        return SIMPLEOS_GPU_CUDA_MIN_OFFLOAD_ELEMENTS
+    if backend == "vulkan":
+        return SIMPLEOS_GPU_VULKAN_MIN_OFFLOAD_ELEMENTS
+    SIMPLEOS_GPU_METAL_MIN_OFFLOAD_ELEMENTS
 
 # Per-connection loop state: the request-processed flag `main()` already
 # used to decide whether to sleep, plus the retained image-resource table
@@ -285,7 +296,8 @@ fn _process_request(platform: SimpleOsGpuHostPlatform, base: i64, processing_sel
         if not processing_ir_validate(ir).valid:
             _finish(base, generation, SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED, SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST, 0, 0, 0, 1, 0, 0)
             return _loop_state(1, retained)
-        if processing_fallback_cpu and processing_min_offload_elements > 0 and element_count < processing_min_offload_elements:
+        val effective_min_offload_elements = simpleos_gpu_processing_min_offload_elements(backend, processing_min_offload_elements)
+        if processing_fallback_cpu and effective_min_offload_elements > 0 and element_count < effective_min_offload_elements:
             return _loop_state(if _processing_cpu_fallback(base, generation, SIMPLEOS_HOST_GPU_REASON_OFFLOAD_OVERHEAD, ir): 1 else: 0, retained)
         var oracle: [u32] = []
         var cpu_elapsed_us: i64 = 0
@@ -460,7 +472,7 @@ fn simpleos_gpu_host_run(platform: SimpleOsGpuHostPlatform) -> i64:
     val processing_verify_cpu = args.contains("--processing-verify-cpu")
     val requested_processing_min_offload_elements = _arg_value(args, "--processing-min-offload-elements=")
     val processing_min_offload_elements = if requested_processing_min_offload_elements == "":
-        SIMPLEOS_GPU_PROCESSING_MIN_OFFLOAD_ELEMENTS
+        -1
     else:
         parse_i64(requested_processing_min_offload_elements)
     val processing_min_offload_elements_valid =
@@ -506,4 +518,4 @@ fn simpleos_gpu_host_run(platform: SimpleOsGpuHostPlatform) -> i64:
             thread_sleep_ms(1)
     0
 
-export simpleos_gpu_host_run
+export simpleos_gpu_host_run, simpleos_gpu_processing_min_offload_elements

@@ -382,7 +382,11 @@ impl HirLowering:
             if nm == "":
                 self.error("internal: failed to extract named type", lt.span)
                 return HirType(kind: HirTypeKind.Error, span: lt.span)
-            val named_kind = self.lower_named_kind(nm, self.lower_type_list(nargs), lt.span)
+            val named_kind = match nm:
+                case "i8" | "i16" | "i32" | "i64" | "u8" | "u16" | "u32" | "u64" | "f32" | "f64" | "bool" | "char" | "text" | "str" | "String" | "fn":
+                    self.lower_named_kind(nm, [], lt.span)
+                case _:
+                    self.lower_named_kind(nm, self.lower_type_list(nargs), lt.span)
             return HirType(kind: named_kind, span: lt.span)
 
         val d_tuple: i64 = hir_type_kind_disc(TypeKind.Tuple([]))
@@ -397,24 +401,20 @@ impl HirLowering:
 
         var kind: HirTypeKind = HirTypeKind.Infer(0, 0)
         if kind_disc_v == d_tuple:
-            var elems: [Type] = []
-            match lt_kind:
-                case TypeKind.Tuple(elements):
-                    elems = elements
-                case _:
-                    pass
+            val elems = parser_type_kind_tuple_elements(lt_kind)
             if elems.is_empty():
                 kind = HirTypeKind.Unit
             else:
                 kind = HirTypeKind.Tuple(self.lower_type_list(elems))
         elif kind_disc_v == d_array:
-            var elem: Type = lt
-            match lt_kind:
-                case TypeKind.Array(element, size):
-                    elem = element
-                case _:
-                    pass
-            kind = HirTypeKind.Array(self.lower_type(elem), nil)
+            val elem: Type = parser_type_kind_array_element(lt_kind, lt)
+            val elem_name = parser_type_kind_array_element_name(lt_kind)
+            val elem_args = parser_type_kind_named_args(elem.kind)
+            val lowered_elem = if elem_name != "" and elem_args.len() == 0:
+                HirType(kind: self.lower_named_kind(elem_name, [], lt.span), span: lt.span)
+            else:
+                self.lower_type(elem)
+            kind = HirTypeKind.Array(lowered_elem, nil)
         elif kind_disc_v == d_func:
             var fparams: [Type] = []
             var fret: Type = lt

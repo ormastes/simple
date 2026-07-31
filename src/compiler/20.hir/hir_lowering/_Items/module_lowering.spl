@@ -21,6 +21,7 @@ use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
+extern fn rt_enum_payload(value: StmtKind) -> Expr
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
@@ -35,17 +36,6 @@ extern fn rt_string_len(value: text) -> i64
 
 fn hir_module_env_get(key: text) -> text:
     rt_env_get(key)
-
-# Isolated single-arm extraction (the reliable seed idiom: ONE match per
-# function boundary, explicit return per arm). Used by the fn-signature
-# registration pass to capture tuple-return element types into
-# fn_tuple_returns while the HirType is freshly constructed.
-fn hir_tuple_return_elem_list(t: HirType) -> [HirType]:
-    match t.kind:
-        case HirTypeKind.Tuple(tuple_elems):
-            return tuple_elems
-        case _:
-            return []
 
 fn hir_module_phase_probe(msg: text):
     if hir_module_diag_enabled():
@@ -252,7 +242,9 @@ impl HirLowering:
     # module sees the promoted return type too, not just the callee's own
     # generated `ret` instruction.
     me infer_untyped_return_type(fn_decl: ParserFunction) -> HirType:
-        val scan = self.scan_ast_block_for_returns(fn_decl.body, fn_decl.params)
+        val fn_body: Block = fn_decl.body
+        val fn_params: [Param] = fn_decl.params
+        val scan = self.scan_ast_block_for_returns(fn_body, fn_params)
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or not scan.resolved_name.?:
@@ -295,17 +287,20 @@ impl HirLowering:
                 ()
         while first_raw_param < raw_params.len():
             val raw_param: Param = raw_params[first_raw_param]
-            param_types.push(self.lower_type(raw_param.type_))
+            val raw_param_type: Type = raw_param.type_
+            param_types.push(self.lower_type(raw_param_type))
             first_raw_param = first_raw_param + 1
 
         val return_type = if fn_decl.has_return_type:
-            self.lower_type(fn_decl.return_type)
+            val declared_return_type: Type = fn_decl.return_type
+            self.lower_type(declared_return_type)
         else:
             self.infer_untyped_return_type(fn_decl)
-        Some(HirType(
+        val callable_type = HirType(
             kind: HirTypeKind.Function(param_types, return_type, []),
             span: fn_decl.span
-        ))
+        )
+        Some(callable_type)
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0 or not callable.has_return_type:
@@ -395,9 +390,17 @@ impl HirLowering:
         acc
 
     me scan_ast_stmt_for_returns(s: Stmt, params: [Param]) -> ReturnScan:
+        # `Expr` is also a struct name. On the pure-Simple stage4 path a broad
+        # match can treat this arm as irrefutable and pass the enum's raw tuple
+        # payload to scan_ast_expr_for_returns. Dispatch by discriminant first.
+        val nil_expr = Expr(kind: ExprKind.NilLit, span: s.span)
+        val expr_stmt_disc = rt_enum_discriminant(StmtKind.Expr(nil_expr))
+        val stmt_kind = s.kind
+        val stmt_disc = rt_enum_discriminant(stmt_kind)
+        if stmt_disc >= 0 and stmt_disc == expr_stmt_disc:
+            val expr: Expr = rt_enum_payload(stmt_kind)
+            return self.scan_ast_expr_for_returns(expr, params)
         match s.kind:
-            case StmtKind.Expr(expr):
-                self.scan_ast_expr_for_returns(expr, params)
             case StmtKind.Val(_, _, init):
                 self.scan_ast_expr_for_returns(init, params)
             case StmtKind.Var(_, _, init):
@@ -1280,6 +1283,8 @@ impl HirLowering:
         if bootstrap_diag:
             eprint("[hir-lower] locals:functions:init module={module.name}")
         var functions: Dict<SymbolId, HirFunction> = {}
+        var gpu_function_targets: Dict<text, text> = {}
+        var gpu_function_backend_orders: Dict<text, text> = {}
         if bootstrap_diag:
             eprint("[hir-lower] locals:classes:init module={module.name}")
         var classes: Dict<SymbolId, HirClass> = {}
@@ -1357,6 +1362,10 @@ impl HirLowering:
                 if bootstrap_diag:
                     eprint("[hir-lower] function:start module={module.name} name={bootstrap_fn.name} idx={lower_idx}")
                 val hir_fn = self.lower_function(bootstrap_fn)
+                if hir_fn.is_gpu_kernel:
+                    gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
+                    gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
+                    self.symbols.register_gpu_function_metadata(hir_fn.name, hir_fn.gpu_target, hir_fn.gpu_backend_order)
                 val fn_key: SymbolId = SymbolId(id: lower_idx)
                 functions[fn_key] = hir_fn
                 bootstrap_hir_functions_add(hir_fn)
@@ -1371,6 +1380,10 @@ impl HirLowering:
                 hir_module_phase_probe("phase3:hir:function:start {module.name}.{name}")
                 val fn_: ParserFunction = lower_module_functions[name]
                 val hir_fn = self.lower_function(fn_)
+                if hir_fn.is_gpu_kernel:
+                    gpu_function_targets[hir_fn.name] = hir_fn.gpu_target
+                    gpu_function_backend_orders[hir_fn.name] = hir_fn.gpu_backend_order
+                    self.symbols.register_gpu_function_metadata(hir_fn.name, hir_fn.gpu_target, hir_fn.gpu_backend_order)
                 # Key the HIR functions Dict by the function's REAL SymbolId
                 # (the same id `declare_module_symbols` registered it under, and
                 # the same id `hir.symbols.lookup(name)` returns) so tooling that
@@ -1401,9 +1414,8 @@ impl HirLowering:
                 # re-indexes with the yielded key, so any distinct key preserves
                 # all entries and all consumers -- using the real symbol id is a
                 # strict improvement, not just a distinct one.
-                val fn_key: SymbolId = match self.symbols.lookup(name):
-                    case Some(real_id): real_id
-                    case nil: SymbolId(id: lower_idx)
+                val real_id = self.symbols.lookup_or_invalid(name)
+                val fn_key = if real_id.is_valid(): real_id else: SymbolId(id: lower_idx)
                 functions[fn_key] = hir_fn
                 hir_module_phase_probe("phase3:hir:function:done {module.name}.{name}")
                 lower_idx = lower_idx + 1
@@ -1512,6 +1524,8 @@ impl HirLowering:
                 domain_blocks: bootstrap_domain_blocks,
                 symbols: self.symbols,
                 functions: functions,
+                gpu_function_targets: gpu_function_targets,
+                gpu_function_backend_orders: gpu_function_backend_orders,
                 classes: classes,
                 structs: structs,
                 enums: enums,
@@ -1638,6 +1652,8 @@ impl HirLowering:
             domain_blocks: domain_blocks,
             symbols: self.symbols,
             functions: functions,
+            gpu_function_targets: gpu_function_targets,
+            gpu_function_backend_orders: gpu_function_backend_orders,
             classes: classes,
             structs: structs,
             enums: enums,
@@ -1714,8 +1730,9 @@ impl HirLowering:
         while idx < fn_keys.len():
             val name = fn_keys[idx]
             val fn_decl: ParserFunction = module_functions[name]
+            val fn_return_type: Type = fn_decl.return_type
             if (hir_module_env_get("SIMPLEOS_FOCUSED_HIR_DIAG") ?? "") == "1":
-                val return_name: text = parser_type_kind_named_name(fn_decl.return_type.kind)
+                val return_name: text = parser_type_kind_named_name(fn_return_type.kind)
                 eprint("[flat-function-roundtrip] phase=hir name={fn_decl.name} return={return_name}")
             val fn_type = self.declared_callable_type(fn_decl, nil)
             # Capture tuple-return element types by NAME while a freshly
@@ -1724,8 +1741,11 @@ impl HirLowering:
             # symbol type at destructure time yields garbage on the seed
             # interpreter). Explicit annotations only; generics skipped.
             if fn_decl.type_params.len() == 0 and fn_decl.has_return_type:
-                val fn_ret_tuple_elems = hir_tuple_return_elem_list(self.lower_type(fn_decl.return_type))
-                if fn_ret_tuple_elems.len() > 0:
+                val parser_tuple_elems = parser_type_kind_tuple_elements(fn_return_type.kind)
+                if parser_tuple_elems.len() > 0:
+                    var fn_ret_tuple_elems: [HirType] = []
+                    for parser_tuple_elem in parser_tuple_elems:
+                        fn_ret_tuple_elems.push(self.lower_type(parser_tuple_elem))
                     self.fn_tuple_returns[name] = fn_ret_tuple_elems
             self.symbols.define(name, SymbolKind.Function, fn_type, decl_span, decl_visibility, false, mod_name)
             idx = idx + 1

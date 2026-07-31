@@ -29,7 +29,7 @@ use compiler.mir.synthetic_driver_codegen.{apply_synthetic_driver_codegen}
 use compiler.frontend.core.types.{custom_primitive_underlying_type_tag_by_symbol}
 use compiler.semantics.gpu_checker.{parse_gpu_kernel_target}
 use compiler.common.attributes.{FunctionAttr}
-use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata}
+use compiler.common.gpu_target_metadata.{normalize_gpu_backend_order_metadata, normalize_gpu_target_metadata_name}
 
 extern fn rt_enum_discriminant(value: Any) -> i64
 
@@ -66,6 +66,13 @@ impl MirLowering:
         self.nil_locals = {}
 
     me lower_function(fn_: HirFunction) -> MirFunction:
+        val attr = fn_.func_attr
+        val is_gpu_kernel = attr.is_gpu_kernel or fn_.is_gpu_kernel
+        val gpu_target = if attr.gpu_target != "": attr.gpu_target else: fn_.gpu_target
+        val gpu_backend_order = if attr.gpu_backends != "": attr.gpu_backends else: fn_.gpu_backend_order
+        self.lower_function_with_gpu_metadata(fn_, is_gpu_kernel, gpu_target, gpu_backend_order)
+
+    me lower_function_with_gpu_metadata(fn_: HirFunction, is_gpu_kernel: bool, gpu_target: text, gpu_backend_order: text) -> MirFunction:
         """Lower HIR function to MIR."""
         val trace_enabled = mir_lower_trace_enabled()
         val bootstrap_trace = trace_enabled and (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1"
@@ -87,10 +94,18 @@ impl MirLowering:
             print "[mir-lower] real-lower:params {fn_.name}"
         if trace_enabled:
             print "[mir-lower] lower_function:params {fn_.name}"
+        val resolved_function_attr = fn_.func_attr
+        var gpu_kernel_target = ""
+        if is_gpu_kernel:
+            gpu_kernel_target = normalize_gpu_target_metadata_name(gpu_target)
         var params: [MirType] = []
         var pmi = 0
         while pmi < fn_.params.len():
-            params = params.push(self.lower_type(fn_.params[pmi].type_))
+            val lowered_param = if gpu_kernel_target == "vulkan":
+                self.lower_vulkan_kernel_param_type(fn_.params[pmi])
+            else:
+                self.lower_type(fn_.params[pmi].type_)
+            params = params.push(lowered_param)
             pmi = pmi + 1
 
         if trace_enabled:
@@ -216,36 +231,16 @@ impl MirLowering:
                     # element as an untyped runtime value; `.kind` then remains
                     # a raw pointer and comparisons such as `kind == "rect"`
                     # fail in native code.
-                    self.runtime_array_locals[local.id] = true
-                    self.mark_runtime_value_local(local.id)
-                    match element_type.kind:
-                        case Named(element_symbol, _):
-                            val element = self.symbols.get_symbol_raw(element_symbol.id)
-                            if element.?:
-                                self.array_element_struct_syms[local.id] = element.name
-                        case _:
-                            # Non-named element type (i64/text/bool/fixed-int/
-                            # etc.) -- no struct name to register. Bug s54/
-                            # s54c/s54d: a param array type like `[Counter]`
-                            # used to mis-resolve to a bare primitive element
-                            # type (HirTypeKind.Int(64,true)) here, because
-                            # the flat-AST bridge (10.frontend/_FlatAstBridge/
-                            # convert_nodes.spl's convert_flat_type) had
-                            # dedicated flat tags only for
-                            # `[i64]`/`[text]`/`[bool]`/`[Any]` array params
-                            # (TYPE_ARRAY_I64/TEXT/BOOL/ANY) -- any named
-                            # class/struct/enum element fell through that
-                            # dispatch and lost its name before reaching this
-                            # HirType. Root-fixed in s54d: parser.spl's `[T]`
-                            # array-type branch now registers a
-                            # TYPE_NAMED_BASE+ element tag via
-                            # array_generic_type_register (TYPE_ARRAY_GENERIC_
-                            # BASE), and convert_flat_type rebuilds the real
-                            # element Type from it -- so `[Counter]` now
-                            # arrives here as `Named(element_symbol, _)`
-                            # (the case above) and this arm only sees
-                            # genuinely non-named element types.
-                            ()
+                    if gpu_kernel_target != "vulkan":
+                        self.runtime_array_locals[local.id] = true
+                        self.mark_runtime_value_local(local.id)
+                        match element_type.kind:
+                            case Named(element_symbol, _):
+                                val element = self.symbols.get_symbol_raw(element_symbol.id)
+                                if element.?:
+                                    self.array_element_struct_syms[local.id] = element.name
+                            case _:
+                                ()
                 case Named(type_symbol, _):
                     val parameter_type = self.symbols.get_symbol_raw(type_symbol.id)
                     val is_named_struct = parameter_type != nil and self.struct_field_order.has(parameter_type.name)
@@ -326,6 +321,8 @@ impl MirLowering:
 
         val previous_has_vhdl_metadata = self.current_has_vhdl_metadata
         self.current_has_vhdl_metadata = fn_.has_vhdl_metadata
+        val previous_gpu_kernel_target = self.current_gpu_kernel_target
+        self.current_gpu_kernel_target = gpu_kernel_target
 
         # Lower body
         if trace_enabled:
@@ -360,13 +357,16 @@ impl MirLowering:
         if bootstrap_trace:
             print "[mir-lower] real-lower:body-done {fn_.name}"
         self.current_has_vhdl_metadata = previous_has_vhdl_metadata
+        self.current_gpu_kernel_target = previous_gpu_kernel_target
 
         # Return result (copy-modify-reassign for interpreter)
         if bootstrap_trace:
             print "[mir-lower] real-lower:return {fn_.name}"
         var bldr2 = self.builder
         if not bldr2.current_block_has_explicit_terminator():
-            if result.?:
+            if return_type.kind == MirTypeKind.Unit:
+                bldr2.terminate_return(nil)
+            elif result.?:
                 # Keep the coalesce out of the nested Some(call(...)) shape,
                 # but do not bind this struct optional with `if val`: compiled
                 # Stage4 can enter that arm without copying its LocalId payload.
@@ -387,11 +387,15 @@ impl MirLowering:
             print "[mir-lower] real-lower:done {fn_.name}"
 
         # Propagate function-level codegen attributes from HIR.
-        match fn_.func_attr:
-            case Some(fa):
-                fn_result = self.apply_function_attr_to_mir(fn_result, fa)
-            case None:
-                ()
+        fn_result = self.apply_function_attr_to_mir(fn_result, resolved_function_attr)
+        if is_gpu_kernel:
+            val gpu_selection = parse_gpu_kernel_target(gpu_target)
+            fn_result.is_kernel = true
+            fn_result.gpu_target = gpu_selection.normalized_target
+            fn_result.gpu_backend_order = if gpu_backend_order.len() > 0:
+                normalize_gpu_backend_order_metadata(gpu_backend_order)
+            else:
+                gpu_selection.backend_order
 
         # Propagate @export("C") from HIR export_attr
         match fn_.export_attr:
@@ -415,11 +419,45 @@ impl MirLowering:
 
         fn_result
 
+    me lower_vulkan_kernel_param_type(param: HirParam) -> MirType:
+        """Lower source array parameters to Vulkan's storage-buffer ABI."""
+        val kind = param.type_.kind
+        val kind_disc = rt_enum_discriminant(kind)
+        val array_disc = rt_enum_discriminant(HirTypeKind.Array(param.type_, nil))
+        val slice_disc = rt_enum_discriminant(HirTypeKind.Slice(param.type_))
+        val int_disc = rt_enum_discriminant(HirTypeKind.Int(32, false))
+        if kind_disc == array_disc or kind_disc == slice_disc:
+            var element = param.type_
+            if kind_disc == array_disc:
+                match kind:
+                    case HirTypeKind.Array(array_element, _): element = array_element
+                    case _: pass
+            else:
+                match kind:
+                    case HirTypeKind.Slice(slice_element): element = slice_element
+                    case _: pass
+            val element_type = self.lower_type(element)
+            if element_type.kind != MirTypeKind.U32:
+                self.error_fatal(
+                    "Vulkan storage-buffer parameters require U32 elements",
+                    Some(param.span)
+                )
+            return MirType.ptr(element_type, param.is_mutable)
+        if kind_disc == int_disc:
+            match kind:
+                case HirTypeKind.Int(32, false): return MirType(kind: MirTypeKind.U32)
+                case _: pass
+        self.error_fatal(
+            "Vulkan kernel parameters require U32 bounds or [u32] storage buffers",
+            Some(param.span)
+        )
+        self.lower_type(param.type_)
+
     fn apply_function_attr_to_mir(fn_result: MirFunction, fa: FunctionAttr) -> MirFunction:
         var result = fn_result
         if fa.is_gpu_kernel:
-            result.is_kernel = true
             val gpu_selection = parse_gpu_kernel_target(fa.gpu_target)
+            result.is_kernel = true
             result.gpu_target = gpu_selection.normalized_target
             if fa.gpu_backends.len() > 0:
                 result.gpu_backend_order = normalize_gpu_backend_order_metadata(fa.gpu_backends)
@@ -573,6 +611,9 @@ impl MirLowering:
                     return MirType(kind: MirTypeKind.F64)
                 MirType(kind: MirTypeKind.Struct(
                     self.canonical_mir_type_symbol(symbol)))
+            case Infer(id, generation):
+                self.error_fatal("unsupported MIR type kind: {type_.kind}", Some(type_.span))
+                MirType(kind: MirTypeKind.I64)
             case Never:
                 MirType(kind: MirTypeKind.Never)
             case Error:

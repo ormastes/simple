@@ -77,6 +77,32 @@ impl MirLowering:
                 return item.type_
         nil
 
+    me vulkan_u32_local(local: LocalId) -> LocalId:
+        if val type_ = self.local_mir_type_of(local):
+            if type_.kind == MirTypeKind.U32:
+                return local
+        var b = self.builder
+        var i = 0
+        while i < b.instructions.len():
+            val inst = b.instructions[i]
+            match inst.kind:
+                case MirInstKind.Const(dest, MirConstValue.Int(value), _):
+                    if dest.id == local.id and value >= 0 and value <= 4294967295:
+                        val u32_type = MirType(kind: MirTypeKind.U32)
+                        b.instructions[i] = MirInst(
+                            kind: MirInstKind.Const(dest, MirConstValue.Int(value), u32_type),
+                            span: inst.span
+                        )
+                        b.set_local_type(local, u32_type)
+                        self.builder = b
+                        return local
+                case _:
+                    ()
+            i = i + 1
+        val narrowed = b.emit_cast(mir_operand_copy(local), MirType(kind: MirTypeKind.U32))
+        self.builder = b
+        narrowed
+
     fn local_is_float(local: LocalId) -> bool:
         """True when a lowered local holds a native float value (F32/F64).
 
@@ -469,7 +495,9 @@ impl MirLowering:
                             return
                         val mir_type = match let_type:
                             case Some(type_value):
-                                self.lower_type(type_value)
+                                match type_value.kind:
+                                    case HirTypeKind.Infer(_, _): MirType.i64()
+                                    case _: self.lower_type(type_value)
                             case nil:
                                 MirType.i64()
 
@@ -541,7 +569,21 @@ impl MirLowering:
                         # feeding that garbage i64 to rt_len/rt_string_starts_with
                         # as a tagged handle (SIGSEGV). Thread unconditionally,
                         # matching str/float/bool.
-                        val effective_type = if self.local_is_runtime_array(init_local):
+                        val init_mir_type = self.local_mir_type_of(init_local)
+                        var init_mir_type_value = mir_type
+                        var vulkan_u32_initializer = false
+                        if self.current_gpu_kernel_target == "vulkan":
+                            if val found_init_mir_type = init_mir_type:
+                                if found_init_mir_type != nil:
+                                    init_mir_type_value = found_init_mir_type
+                                    match found_init_mir_type.kind:
+                                        case MirTypeKind.U32:
+                                            vulkan_u32_initializer = true
+                                        case _:
+                                            ()
+                        val effective_type = if vulkan_u32_initializer:
+                            init_mir_type_value
+                        else if self.local_is_runtime_array(init_local):
                             self.local_mir_type_of(init_local) ?? mir_type
                         else if self.local_is_runtime_dict(init_local):
                             # Bug #189 (native struct-valued Dict access
@@ -714,7 +756,9 @@ impl MirLowering:
                         # lower_type and tripping a `.kind` read on nil.
                         val mir_type = match type_:
                             case Some(type_value):
-                                self.lower_type(type_value)
+                                match type_value.kind:
+                                    case HirTypeKind.Infer(_, _): MirType.i64()
+                                    case _: self.lower_type(type_value)
                             case nil:
                                 MirType.i64()
 
@@ -1095,7 +1139,32 @@ impl MirLowering:
                     b_dset.emit_call(dict_set_op, [mir_operand_copy(receiver), mir_operand_copy(dict_key), mir_operand_copy(boxed_value)], MirType.i64())
                     self.builder = b_dset
                     return
-                val index_local = self.lower_expr(index)
+                var index_local = self.lower_expr(index)
+                if self.current_gpu_kernel_target == "vulkan":
+                    if val receiver_type = self.local_mir_type_of(receiver):
+                        match receiver_type.kind:
+                            case MirTypeKind.Ptr(element_type, mutable) | MirTypeKind.Ref(element_type, mutable):
+                                if not mutable:
+                                    self.error_fatal("cannot write through an immutable Vulkan storage buffer", Some(target.span))
+                                    return
+                                index_local = self.vulkan_u32_local(index_local)
+                                var raw_value = self.vulkan_u32_local(value_local)
+                                var b_raw = self.builder
+                                val raw_ptr = b_raw.emit_gep(
+                                    mir_operand_copy(receiver),
+                                    [mir_operand_copy(index_local)],
+                                    MirType.ptr(element_type, mutable)
+                                )
+                                if op.?:
+                                    val current = b_raw.emit_load(mir_operand_copy(raw_ptr), element_type)
+                                    self.builder = b_raw
+                                    raw_value = self.lower_compound_combine(current, op.unwrap(), raw_value, element_type)
+                                    b_raw = self.builder
+                                b_raw.emit_store(mir_operand_copy(raw_ptr), mir_operand_copy(raw_value))
+                                self.builder = b_raw
+                                return
+                            case _:
+                                ()
                 self.emit_bounds_check_for_index(base.type_, receiver, index_local)
                 var elem_value = value_local
                 if op.?:

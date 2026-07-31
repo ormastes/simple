@@ -1215,7 +1215,7 @@ impl MirLowering:
             # readers of rt_dict_get can never drift apart again.
             val dict_key = self.lower_dict_key(index)
             return self.lower_dict_runtime_get(base, base_local, dict_key)
-        val index_local = self.lower_expr(index)
+        var index_local = self.lower_expr(index)
         if val cli_arg_local = self.try_lower_bootstrap_cli_arg_index(base, index_local):
             return cli_arg_local
         # Text values are tagged runtime handles, not raw element
@@ -1248,21 +1248,33 @@ impl MirLowering:
             if val char_at_local = char_at_res:
                 return self.decode_runtime_value(char_at_local, MirType(kind: MirTypeKind.Opaque("str")))
             return base_local
-        self.emit_bounds_check_for_index(base.type_, base_local, index_local)
         var result_type = MirType.i64()
         var result_type_from_base = false
         var has_base_mir_type = false
+        var raw_pointer_base = false
         var base_mir_type = MirType.i64()
         for item in self.builder.locals:
             if item.id.id == base_local.id:
                 has_base_mir_type = true
                 base_mir_type = item.type_
+                match item.type_.kind:
+                    case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, _):
+                        raw_pointer_base = true
+                    case _:
+                        ()
+        if not raw_pointer_base or self.current_gpu_kernel_target != "vulkan":
+            self.emit_bounds_check_for_index(base.type_, base_local, index_local)
+        elif raw_pointer_base:
+            index_local = self.vulkan_u32_local(index_local)
         if has_base_mir_type:
             match base_mir_type.kind:
                 case MirTypeKind.Array(element_type, _):
                     result_type = element_type
                     result_type_from_base = true
                 case MirTypeKind.Slice(element_type):
+                    result_type = element_type
+                    result_type_from_base = true
+                case MirTypeKind.Ptr(element_type, _) | MirTypeKind.Ref(element_type, _):
                     result_type = element_type
                     result_type_from_base = true
                 case MirTypeKind.Dict(_, value_type):
@@ -2425,6 +2437,16 @@ impl MirLowering:
                         match op:
                             case Lt | LtEq | Gt | GtEq: ordered_comparison = true
                             case _: ()
+                        var vulkan_u32_numeric = false
+                        if self.current_gpu_kernel_target == "vulkan":
+                            if left_binop_type.kind == MirTypeKind.U32 or right_binop_type.kind == MirTypeKind.U32:
+                                vulkan_u32_numeric = true
+                        if vulkan_u32_numeric:
+                            left_binop = self.vulkan_u32_local(left_binop)
+                            right_binop = self.vulkan_u32_local(right_binop)
+                            b = self.builder
+                            if not comparison:
+                                result_type = MirType(kind: MirTypeKind.U32)
                         val left_float = left_f32 or left_f64
                         val right_float = right_f32 or right_f64
                         val left_int = left_i64 or left_narrow_int

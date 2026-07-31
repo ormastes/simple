@@ -49,15 +49,19 @@ pub fn lookup_impl_method_index(methods: &[Arc<FunctionDef>], class_name: &str, 
         {
             let cache_ref = cache.borrow();
             if let Some(class_cache) = cache_ref.get(class_name) {
-                return class_cache.get(method_name).copied();
+                if let Some(idx) = class_cache.get(method_name).copied() {
+                    if methods.get(idx).is_some_and(|method| method.name == method_name) {
+                        return Some(idx);
+                    }
+                }
             }
         }
-        // Cold path: first lookup for this class — allocate key and populate index
+        // Cold or stale path: rebuild from the current impl registry.
         let mut cache_mut = cache.borrow_mut();
-        let class_cache = cache_mut
-            .entry(class_name.to_string())
-            .or_insert_with(|| methods.iter().enumerate().map(|(i, m)| (m.name.clone(), i)).collect());
-        class_cache.get(method_name).copied()
+        let class_cache: HashMap<_, _> = methods.iter().enumerate().map(|(i, m)| (m.name.clone(), i)).collect();
+        let result = class_cache.get(method_name).copied();
+        cache_mut.insert(class_name.to_string(), class_cache);
+        result
     })
 }
 
@@ -271,4 +275,36 @@ pub fn exec_function_with_self_return(
     }
 
     Ok((result, updated_self))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use simple_parser::ast::Node;
+    use simple_parser::Parser;
+
+    #[test]
+    fn impl_method_index_rebuilds_when_registry_order_changes() {
+        let module = Parser::new("fn alpha():\n    1\n\nfn beta():\n    2\n")
+            .parse()
+            .expect("parse method-index fixture");
+        let mut methods: Vec<_> = module
+            .items
+            .into_iter()
+            .filter_map(|node| match node {
+                Node::Function(function) => Some(Arc::new(function)),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            lookup_impl_method_index(&methods, "MethodIndexFixture", "alpha"),
+            Some(0)
+        );
+        methods.reverse();
+        assert_eq!(
+            lookup_impl_method_index(&methods, "MethodIndexFixture", "alpha"),
+            Some(1)
+        );
+    }
 }
