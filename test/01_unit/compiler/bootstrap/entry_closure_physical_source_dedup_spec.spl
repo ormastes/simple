@@ -70,7 +70,7 @@ describe "entry-closure physical source deduplication":
         expect(_driver_text_bucket_set_has(buckets, "std.alpha")).to_be(true)
         expect(_driver_text_bucket_set_has(buckets, "std.alphabet")).to_be(true)
         expect(_driver_text_bucket_set_has(buckets, "std.alph")).to_be(false)
-        expect(loading).to_contain("use compiler.core.interpreter.hashmap.{hm_hash_text}")
+        expect(loading).to_contain(r"use compiler.core.interpreter.hashmap.{hm_hash_text}")
         expect(loading).to_contain("val raw = hm_hash_text(key) % bucket_count")
         expect(loading).to_not_contain("extern fn rt_hash_text")
         expect(loading).to_contain("bucket.starts_with(marker) or bucket.contains(\"\\n\" + marker)")
@@ -85,18 +85,31 @@ describe "entry-closure physical source deduplication":
         expect(hashmap).to_not_contain("s[i].ord()")
 
     it "registers every logical alias from one cached module result":
-        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
 
-        expect(driver).to_contain("val unique_entry_sources = _driver_unique_physical_sources(entry_sources)")
+        # The call is wrapped across two lines; assert the head only.
+        expect(driver).to_contain("val unique_entry_sources = _driver_unique_physical_sources(")
         expect(driver).to_contain("parsed_entry_paths = parsed_entry_paths.push(physical_key)")
         expect(driver).to_contain("parsed_entry_modules = parsed_entry_modules.push(entry_module)")
-        expect(driver).to_contain("entry_modules = entry_modules.set(source.module_name, parsed_entry_modules[parsed_idx])")
-        expect(driver).to_not_contain("entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]")
+        # INVERTED 2026-07-30 — deliberately. This spec used to require the
+        # fluent `entry_modules = entry_modules.set(k, v)` and forbid bracket
+        # assignment. That is backwards: `.set()` on a builtin Dict SILENTLY
+        # FAILED to insert under native codegen (keys().len() and
+        # contains_key(k) both read back empty immediately after), so the driver
+        # switched to bracket assignment on purpose. See the NOTE at
+        # driver_source_pipeline_parsing.spl:184 and
+        # doc/07_guide/language/dict_native_pitfalls.md. Satisfying the OLD
+        # assertion would have reintroduced a silent native-codegen bug, so the
+        # guard now points the other way and must not be flipped back.
+        expect(driver).to_contain("entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]")
+        # Match the real call shape, not the NOTE above line 192 which cites
+        # `entry_modules.set(k, v)` while explaining why it is NOT used.
+        expect(driver).to_not_contain("entry_modules = entry_modules.set(source.module_name")
         expect(driver).to_contain("entry_ctx.sources = unique_entry_sources")
         expect(driver).to_contain(r"phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
 
     it "uses bucket sets for every phase-one closure membership role":
-        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
         val native_build = rt_file_read_text("src/app/io/_CliCompile/compile_targets.spl") ?? ""
 
         expect(native_build).to_contain("var discovered = _driver_text_bucket_set_new(512)")
@@ -107,7 +120,7 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_not_contain("var closure_seen_mods: [text]")
 
     it "scans imports through native text operations":
-        val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\npub use public.owner.{Thing}\nexport use app.live.*\nimport third.party\nuse app.module.Func\n")
+        val imports = _driver_entry_import_module_paths("use std.real\n\"\"\"\nuse fake.block\n\"\"\"\n\"\"\"use fake.inline\"\"\"\npub use public.owner." + "{" + "Thing}\nexport use app.live.*\nimport third.party\nuse app.module.Func\n")
         val long_imports = _driver_entry_import_module_paths(("# filler\n").repeat(8192) + "use std.tail." + "{" + "Thing}\n")
         val ordinary_imports = _driver_entry_import_module_paths("val x = 1\n".repeat(4096) + "\timport app.final\n")
         val unicode_imports = _driver_entry_import_module_paths("é\n# 文\n\tuse std.unicode\n")
@@ -142,9 +155,9 @@ describe "entry-closure physical source deduplication":
         expect(imports).to_not_contain("app.test_runner_new.test_runner_main")
         expect(imports).to_not_contain("app.test_runner_new.json_wrapper")
         expect(imports).to_not_contain("compiler.tools.leak_check.main")
-        expect(cli_entry).to_contain("use lazy app.test_runner_new.test_runner_main.{run_test_cli}")
+        expect(cli_entry).to_contain(r"use lazy app.test_runner_new.test_runner_main.{run_test_cli}")
         expect(cli_entry).to_contain("use lazy app.test_runner_new.json_wrapper.{run_test_json_wrapper, test_json_requested, test_json_worker_requested}")
-        expect(cli_entry).to_contain("use lazy compiler.tools.leak_check.main.{run_leak_check}")
+        expect(cli_entry).to_contain(r"use lazy compiler.tools.leak_check.main.{run_leak_check}")
         expect(cli_entry).to_contain("return run_test_cli()")
         expect(cli_entry).to_contain("elif str_eq(first, \"leak-check\"):\n        return run_leak_check()")
         expect(json_wrapper).to_contain("return [\"run\", \"src/app/test_runner_new/main.spl\", TEST_JSON_WORKER_ARG] + test_args")
@@ -158,7 +171,7 @@ describe "entry-closure physical source deduplication":
         expect(inference).to_not_contain("call_type_args")
 
     it "keeps every explicit entry walk out of whole-workspace loading":
-        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
 
         expect(driver).to_contain("# An explicit-entry walk is a closure even when import resolution")
         expect(driver).to_contain("rt_env_set(\"SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE\", \"1\")")
@@ -169,7 +182,9 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_not_contain("closure_added")
 
     it "fails required closure load parse and HIR errors before later phases":
-        val driver = rt_file_read_text("src/compiler/80.driver/driver.spl") ?? ""
+        # driver.spl was split down to a ~128-line facade; the phase methods
+        # now live in driver_orchestration.spl.
+        val driver = rt_file_read_text("src/compiler/80.driver/driver_orchestration.spl") ?? ""
         val compile_start = driver.find("    me compile() -> CompileResult:")
         val load_start = driver.find("    me load_sources_impl() -> bool:")
         val parse_start = driver.find("    me parse_all_impl() -> bool:")
@@ -199,7 +214,7 @@ describe "entry-closure physical source deduplication":
         expect(empty_import_error).to_be_greater_than(unresolved_error)
         expect(sources_commit).to_be_greater_than(empty_import_error)
         expect(load_body.substring(sources_commit)).to_contain("self.ctx.errors.len() == 0")
-        expect(parse_body).to_contain("if par_had_error_get():\n                    self.ctx.errors.push(\"parse error in {source.path} (see [parser_error] output above)\")\n                    return false")
+        expect(parse_body).to_contain("if par_had_error_get():\n                    self.ctx.errors.push(\"parse error in " + "{" + "source.path} (see [parser_error] output above)\")\n                    return false")
         val hir_loop_start = hir_body.index_of("var source_idx = 0")
         expect(hir_loop_start).to_be_greater_than(-1)
         val hir_loop = hir_body.substring(hir_loop_start)
