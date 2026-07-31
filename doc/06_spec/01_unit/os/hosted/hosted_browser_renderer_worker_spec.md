@@ -122,14 +122,22 @@ expect(worker.render_session.counters.retained_command_count).to_equal(0)
    - Expected: viewport_after.layout_count equals `2`
    - Expected: viewport_after.paint_count equals `2`
    - Expected: viewport_after.composition_revision equals `2`
+- Reuse parsed layout work across unchanged animation frames
+- Render HTML and CSS through canonical Draw IR
 - var animation worker = HostedBrowserRendererWorkerSession create
+- payload: "<style>@keyframes unusedLayout..."
 - animation worker render session composition checksum
    - Expected: animation_after.parse_count equals `1`
    - Expected: animation_after.css_count equals `1`
    - Expected: animation_after.style_count equals `2`
-   - Expected: animation_after.layout_count equals `2`
+   - Expected: animation_after.layout_count equals `1`
    - Expected: animation_after.paint_count equals `2`
 - animation worker render session composition checksum
+   - Expected: animation_stage is greater than `-1`
+   - Expected: animation_commands[animation_stage].color equals `4287255447`
+- var animation raster = Engine2dCompositorBackend create named
+   - Expected: animation_midpoint_pixels equals `768`
+   - Expected: animation_pixels.skipped_command_count equals `0`
 - var scroll worker = HostedBrowserRendererWorkerSession create
 - scroll worker render session composition checksum
 - browser renderer decoder new
@@ -154,7 +162,7 @@ expect(worker.render_session.counters.retained_command_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 120 lines folded for reproduction.
+Runnable source: 147 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -210,10 +218,12 @@ expect(viewport_after.layout_count).to_equal(2)
 expect(viewport_after.paint_count).to_equal(2)
 expect(viewport_after.composition_revision).to_equal(2)
 
+step("Reuse parsed layout work across unchanged animation frames")
+step("Render HTML and CSS through canonical Draw IR")
 var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(animation_worker.handle(BrowserRendererMessage(
     kind: "init", generation: 7, request_id: 2,
-    payload: CSS_ANIMATION_HTML
+    payload: "<style>@keyframes unusedLayout{from{width:1px}to{width:2px}}@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;animation:pulse 1000ms linear forwards}</style><div id='stage'></div>"
 )).ok).to_be(true)
 val animation_checksum = (
     animation_worker.render_session.composition_checksum()
@@ -225,12 +235,36 @@ val animation_after = animation_worker.render_session.counters
 expect(animation_after.parse_count).to_equal(1)
 expect(animation_after.css_count).to_equal(1)
 expect(animation_after.style_count).to_equal(2)
-expect(animation_after.layout_count).to_equal(2)
+expect(animation_after.layout_count).to_equal(1)
 expect(animation_after.paint_count).to_equal(2)
 expect(
     animation_worker.render_session.composition_checksum() ==
     animation_checksum
 ).to_be(false)
+val animation_result = (
+    animation_worker.render_session.current_result.unwrap()
+)
+val animation_commands = animation_result.composition.batches[0].commands
+val animation_stage = _worker_command_index(
+    animation_commands, "stage"
+)
+expect(animation_stage).to_be_greater_than(-1)
+expect(animation_commands[animation_stage].color).to_equal(
+    0xFF8A5397u32
+)
+val animation_raster = Engine2dCompositorBackend.create_named(
+    64, 48, "software"
+)
+val animation_pixels = animation_raster.render_draw_ir_composition(
+    animation_result.composition, []
+)
+animation_raster.shutdown()
+var animation_midpoint_pixels: i64 = 0
+for pixel in animation_pixels.pixels:
+    if pixel == 0xFF8A5397u32:
+        animation_midpoint_pixels = animation_midpoint_pixels + 1
+expect(animation_midpoint_pixels).to_equal(32 * 24)
+expect(animation_pixels.skipped_command_count).to_equal(0)
 
 var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(scroll_worker.handle(BrowserRendererMessage(

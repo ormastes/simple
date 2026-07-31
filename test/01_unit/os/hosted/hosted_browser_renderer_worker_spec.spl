@@ -48,6 +48,7 @@ use os.hosted.hosted_theme_runtime.{
 use os.compositor.simple_web_window_renderer.{
     simple_web_content_full_html_with_install_wire
 }
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use common.ui.generated.aetheric_dark_theme_snapshot.{
     aetheric_dark_theme_render_snapshot
 }
@@ -486,10 +487,12 @@ describe "hosted browser renderer worker":
         expect(viewport_after.paint_count).to_equal(2)
         expect(viewport_after.composition_revision).to_equal(2)
 
+        step("Reuse parsed layout work across unchanged animation frames")
+        step("Render HTML and CSS through canonical Draw IR")
         var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
         expect(animation_worker.handle(BrowserRendererMessage(
             kind: "init", generation: 7, request_id: 2,
-            payload: CSS_ANIMATION_HTML
+            payload: "<style>@keyframes unusedLayout{from{width:1px}to{width:2px}}@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;animation:pulse 1000ms linear forwards}</style><div id='stage'></div>"
         )).ok).to_be(true)
         val animation_checksum = (
             animation_worker.render_session.composition_checksum()
@@ -501,12 +504,36 @@ describe "hosted browser renderer worker":
         expect(animation_after.parse_count).to_equal(1)
         expect(animation_after.css_count).to_equal(1)
         expect(animation_after.style_count).to_equal(2)
-        expect(animation_after.layout_count).to_equal(2)
+        expect(animation_after.layout_count).to_equal(1)
         expect(animation_after.paint_count).to_equal(2)
         expect(
             animation_worker.render_session.composition_checksum() ==
             animation_checksum
         ).to_be(false)
+        val animation_result = (
+            animation_worker.render_session.current_result.unwrap()
+        )
+        val animation_commands = animation_result.composition.batches[0].commands
+        val animation_stage = _worker_command_index(
+            animation_commands, "stage"
+        )
+        expect(animation_stage).to_be_greater_than(-1)
+        expect(animation_commands[animation_stage].color).to_equal(
+            0xFF8A5397u32
+        )
+        val animation_raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val animation_pixels = animation_raster.render_draw_ir_composition(
+            animation_result.composition, []
+        )
+        animation_raster.shutdown()
+        var animation_midpoint_pixels: i64 = 0
+        for pixel in animation_pixels.pixels:
+            if pixel == 0xFF8A5397u32:
+                animation_midpoint_pixels = animation_midpoint_pixels + 1
+        expect(animation_midpoint_pixels).to_equal(32 * 24)
+        expect(animation_pixels.skipped_command_count).to_equal(0)
 
         var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)
         expect(scroll_worker.handle(BrowserRendererMessage(
