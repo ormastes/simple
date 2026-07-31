@@ -39,7 +39,7 @@ Implement the complete PLACE-lane GPU Object VM, bounded staged residency, crash
 - Generated-manual review owner: independent system-test/manual sidecar, with final acceptance by the primary agent.
 
 ## Phase
-arch-done
+interface-done
 
 ## Log
 - dev: Created state file with 11 acceptance criteria (type: feature) and defined the broad-lane cooperative interface/review contract.
