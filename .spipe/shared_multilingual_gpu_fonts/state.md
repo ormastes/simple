@@ -1645,3 +1645,9 @@ pixels, and performance evidence remain release-blocking.
   `a8d6d69cf6bee88a60549602d5f72a2390b94dec4035b9c143f11ac8c3889328`
   and `03175603df10ae35a3aac962293098f90b2b2e8f3feed1ecd97710165e31ab21`.
   Reserved RV64 attempt 26 is next; no ELF or PASS is claimed.
+- rv64-attempt26-27-llvm-prerequisite-2026-07-30: Attempt 26 failed before
+  codegen on broad unrelated HIR inputs from its obsolete positional-entry
+  form. Attempt 27 corrected the explicit entry closure and failed closed
+  because Stage2 attempt 29 is Cranelift-only. RV64 freestanding requires LLVM;
+  neither attempt produced an ELF. One LLVM-enabled current-checkpoint
+  `--stop-after-stage2` authority is next; Stage3/4 remain excluded.

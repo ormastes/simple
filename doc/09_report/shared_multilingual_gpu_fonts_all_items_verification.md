@@ -36,6 +36,15 @@ SHA-256 is
 The next serialized chain is reserved RV64 attempt 26, exact-ten attempt 13,
 and manual attempt 13. No PASS is claimed.
 
+RV64 attempt 26 exited 1 before codegen after the obsolete positional-entry
+form selected broad unrelated HIR inputs. Attempt 27 corrected the canonical
+source roots and explicit entry closure, then failed closed because admitted
+Stage2 attempt 29 is Cranelift-only; this repository requires LLVM for RV64
+freestanding targets. Attempt 26 took `0:28.19` at `658,208 KiB` maximum RSS;
+attempt 27 took `0:43.22` at `85,024 KiB`. Neither produced an ELF. The next
+minimal prerequisite is one LLVM-enabled current-checkpoint
+`--stop-after-stage2` producer; Stage3/4 remain excluded.
+
 `STATUS: FAIL`
 
 ## Historical 2026-07-30 Stage2/RV64 result — checkpoint 2a7e

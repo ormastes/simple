@@ -81,6 +81,13 @@ Run only this scoped set:
   Stage2. Its `--jobs=1` now bounds both the private Cargo authority builds and
   the pure-Simple native build.
 - [x] Produce and independently admit matching scoped-tool attempt 13.
+- [ ] Produce and admit one LLVM-enabled current-checkpoint Stage2 compiler.
+  Attempt 26 used the obsolete positional-entry command and stopped in broad
+  unrelated HIR lowering. Attempt 27 corrected the canonical source roots and
+  explicit entry closure, then failed closed because attempt 29 is
+  Cranelift-only and RV64 freestanding requires LLVM. Use
+  `--full-bootstrap --stop-after-stage2 --backend=llvm-lib --jobs=1` only for
+  this now-proven essential backend authority; do not continue to Stage3/4.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
@@ -124,6 +131,14 @@ and docgen SHA-256 is
 `03175603df10ae35a3aac962293098f90b2b2e8f3feed1ecd97710165e31ab21`;
 the writer and independent checker both returned
 `stage2_font_scoped_tools_status=pass`.
+
+RV64 attempt 26 exited 1 in `0:28.19` at `658,208 KiB` maximum RSS before
+codegen because its obsolete positional-entry command selected broad unrelated
+HIR inputs. Attempt 27 used the canonical explicit entry closure and failed
+closed in `0:43.22` at `85,024 KiB`: the admitted attempt-29 runtime has no
+LLVM feature. Neither produced an ELF. The repository QEMU target contract
+requires LLVM for RV64 freestanding, so one LLVM-enabled Stage2 stop is now an
+essential prerequisite rather than a Stage3/4 bootstrap.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at

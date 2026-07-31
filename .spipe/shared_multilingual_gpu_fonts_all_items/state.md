@@ -113,7 +113,8 @@ artifacts disappeared with the old temporary worktree and cannot admit current
 source. The RV64 owner repair introduced at `39c1863426a` is source-complete.
 Physical Stage2 attempt 29 is admitted at clean checkpoint `fbcaa8ccd0b`.
 Scoped-tool attempt 13 is independently admitted. The current blocker is the
-reserved RV64 attempt 26. No ELF exists, so QEMU crop calibration, exact-ten
+missing LLVM-enabled Stage2 authority required by RV64 freestanding. No ELF
+exists, so QEMU crop calibration, exact-ten
 attempt 13, and the
 ten manual attempt-13 receipts have not run. Stage 3,
 Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
@@ -321,3 +322,11 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   docgen SHA-256 is
   `03175603df10ae35a3aac962293098f90b2b2e8f3feed1ecd97710165e31ab21`.
   Reserved RV64 attempt 26 is next; no ELF or PASS is claimed.
+- rv64-attempt26-27-llvm-prerequisite-2026-07-30: Attempt 26 exited 1 before
+  codegen after its obsolete positional-entry form selected broad unrelated
+  HIR inputs (`0:28.19`, `658,208 KiB`). Attempt 27 used canonical source roots
+  and explicit entry closure, then failed closed because Stage2 attempt 29 is
+  Cranelift-only (`0:43.22`, `85,024 KiB`). RV64 freestanding requires LLVM.
+  Neither attempt produced an ELF. One LLVM-enabled current-checkpoint
+  `--stop-after-stage2` authority is the next essential prerequisite; Stage3/4
+  remain excluded and status remains FAIL.

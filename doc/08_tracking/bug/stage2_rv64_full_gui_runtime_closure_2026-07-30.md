@@ -39,8 +39,14 @@ misleading ELF and violate the fail-closed contract. See
 ## Resume
 
 Physical current-checkpoint Stage2 attempt 29 and matching scoped-tool attempt
-13 are admitted. Run exactly one fresh RV64 attempt 26 with
-`SIMPLE_NO_STUB_FALLBACK=1`. Only a validated ELF unblocks QEMU crop
+13 are admitted. RV64 attempt 26 used an obsolete positional-entry command and
+failed before codegen on broad unrelated HIR inputs. Attempt 27 corrected the
+canonical explicit entry closure and failed closed because attempt 29 is
+Cranelift-only while RV64 freestanding requires LLVM. Produce one
+LLVM-enabled current-checkpoint Stage2 with
+`--full-bootstrap --stop-after-stage2 --backend=llvm-lib --jobs=1`, then run
+the final bounded RV64 build with `SIMPLE_NO_STUB_FALLBACK=1`.
+Only a validated ELF unblocks QEMU crop
 calibration, exact-ten attempt 13, and manual attempt 13. Stage2 attempt 27 was
 stopped before Stage2 when a competing full bootstrap appeared; retain it and
 do not reuse its path. Stage2 attempt 28 exited before Stage2 because the
@@ -63,5 +69,5 @@ process-syscall byte copies through validated VMM translation. The focused
 RV64 syscall ABI/provider contract passes after those fixes.
 
 This is source/focused-gate evidence plus admitted Stage2/tool evidence. It
-does not close the bug until the single reserved RV64 attempt 26 produces and
-validates the canonical ELF.
+does not close the bug until an LLVM-enabled current-checkpoint Stage2 produces
+and validates the canonical ELF.
