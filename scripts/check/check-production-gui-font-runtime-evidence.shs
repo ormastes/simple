@@ -10,6 +10,7 @@ SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE:-explicit-env}"
 SIMPLE_BIN_STATUS=pass
 SIMPLE_LIB_CONFIGURED="${SIMPLE_LIB:-src}"
 CHILD_TIMEOUT="${PRODUCTION_GUI_FONT_RUNTIME_CHILD_TIMEOUT_SECS:-240}"
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || command -v gtimeout 2>/dev/null || true)"
 ENV_PATH="$BUILD_DIR/evidence.env"
 VECTOR_SCRIPT="${PRODUCTION_GUI_FONT_RUNTIME_VECTOR_SCRIPT:-scripts/check/check-vector-font-compute-evidence.shs}"
 METAL_SCRIPT="${PRODUCTION_GUI_FONT_RUNTIME_METAL_SCRIPT:-scripts/check/check-metal-generated-2d-readback.shs}"
@@ -34,11 +35,8 @@ is_rust_seed_simple() {
     [ -n "${1:-}" ] && [ -x "$1" ] || return 1
     # Executable but unverifiable => treat as forbidden (fail closed). The seed
     # self-identifies on stderr, so 2>&1 is required.
-    if command -v timeout >/dev/null 2>&1; then
-        _irss_v="$(timeout 10 "$1" --version 2>&1)" || return 0
-    else
-        _irss_v="$("$1" --version 2>&1)" || return 0
-    fi
+    [ -n "$TIMEOUT_BIN" ] || return 0
+    _irss_v="$("$TIMEOUT_BIN" 10 "$1" --version 2>&1)" || return 0
     [ -n "$_irss_v" ] || return 0
     case "$_irss_v" in
         *"bootstrap seed only"*|*"Rust-built"*|*"debug build"*) return 0 ;;
@@ -97,6 +95,9 @@ if [ -z "${SIMPLE_BIN+x}" ] || [ "$SIMPLE_BIN" = "" ]; then
     SIMPLE_BIN=""
     SIMPLE_BIN_STATUS=missing
     SIMPLE_BIN_SOURCE="missing-self-hosted"
+elif [ -z "$TIMEOUT_BIN" ]; then
+    SIMPLE_BIN_STATUS=unverifiable
+    SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-timeout-missing"
 elif is_rust_seed_simple "$SIMPLE_BIN"; then
     SIMPLE_BIN_STATUS=forbidden
     SIMPLE_BIN_SOURCE="${SIMPLE_BIN_SOURCE}-rust-seed-forbidden"
@@ -132,11 +133,22 @@ run_child() {
     script="$2"
     case_dir="$BUILD_DIR/$name"
     mkdir -p "$case_dir"
+    rm -f "$case_dir/evidence.env" "$case_dir/exit_code" "$case_dir/stdout.env" "$case_dir/stderr.log"
     set +e
-    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" timeout "$CHILD_TIMEOUT" sh "$script" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
+    BUILD_DIR="$case_dir" REPORT_PATH="$case_dir/report.md" SIMPLE_BIN="$SIMPLE_BIN" SIMPLE_LIB="$SIMPLE_LIB_CONFIGURED" "$TIMEOUT_BIN" "$CHILD_TIMEOUT" sh "$script" >"$case_dir/stdout.env" 2>"$case_dir/stderr.log"
     code=$?
     set -e
     printf '%s\n' "$code" >"$case_dir/exit_code"
+}
+
+child_exit_code() {
+    if [ -s "$BUILD_DIR/$1/exit_code" ]; then
+        sed -n '1p' "$BUILD_DIR/$1/exit_code"
+    fi
+}
+
+child_exit_ok() {
+    [ "$(child_exit_code "$1")" = "0" ]
 }
 
 emit_missing_simple() {
@@ -222,11 +234,39 @@ readback_available() {
     esac
 }
 
+readback_font_status() {
+    backend="$1"
+    case "$backend" in
+        cuda) field_of cuda_generated_2d_readback_font_status "$BUILD_DIR/cuda/evidence.env" ;;
+        *) printf '%s\n' "" ;;
+    esac
+}
+
+readback_font_submit() {
+    backend="$1"
+    case "$backend" in
+        cuda) field_of cuda_generated_2d_readback_font_submit_attempted "$BUILD_DIR/cuda/evidence.env" ;;
+        *) printf '%s\n' "" ;;
+    esac
+}
+
+readback_font_available() {
+    backend="$1"
+    case "$backend" in
+        cuda) field_of cuda_generated_2d_readback_font_readback_available "$BUILD_DIR/cuda/evidence.env" ;;
+        *) printf '%s\n' "" ;;
+    esac
+}
+
 backend_has_readback_pass() {
     backend="$1"
-    [ "$(readback_status "$backend")" = "pass" ] \
+    child_exit_ok "$backend" \
+        && [ "$(readback_status "$backend")" = "pass" ] \
         && [ "$(readback_submit "$backend")" = "true" ] \
-        && [ "$(readback_available "$backend")" = "true" ]
+        && [ "$(readback_available "$backend")" = "true" ] \
+        && [ "$(readback_font_status "$backend")" = "pass" ] \
+        && [ "$(readback_font_submit "$backend")" = "true" ] \
+        && [ "$(readback_font_available "$backend")" = "true" ]
 }
 
 select_backend() {
@@ -282,7 +322,8 @@ selected_backend="$(select_backend "${vector_reason:-}")"
 status=unavailable
 reason=font-runtime-source-evidence-missing
 
-if [ "${vector_status:-}" = "pass" ] \
+if child_exit_ok vector \
+    && [ "${vector_status:-}" = "pass" ] \
     && [ "${vector_ready:-}" = "true" ] \
     && positive_int "${vector_attempts:-}" \
     && positive_int "${vector_glyphs:-}" \
@@ -321,6 +362,66 @@ case "$selected_backend" in
         ;;
 esac
 
+# CUDA's helper emits these only after the font kernel's recorded CUevent has
+# completed and the exact device readback has matched its CPU oracle.
+font_backend=""
+font_driver=""
+font_device_handle=""
+font_device_handle_kind=""
+font_module_or_queue_handle=""
+font_module_or_queue_handle_kind=""
+font_kernel_or_pipeline_handle=""
+font_kernel_or_pipeline_handle_kind=""
+font_fence_handle=""
+font_fence_handle_kind=""
+font_readback_checksum=""
+font_actual_checksum=""
+font_parity_status=""
+if [ "$selected_backend" = cuda ]; then
+    cuda_env="$BUILD_DIR/cuda/evidence.env"
+    source_font_backend="$(field_of cuda_generated_2d_readback_font_backend "$cuda_env")"
+    if [ "$source_font_backend" = "$selected_backend" ]; then
+        font_backend="$selected_backend"
+        font_driver="$(field_of cuda_generated_2d_readback_font_driver "$cuda_env")"
+        font_device_handle="$(field_of cuda_generated_2d_readback_font_device_handle "$cuda_env")"
+        font_device_handle_kind="$(field_of cuda_generated_2d_readback_font_device_handle_kind "$cuda_env")"
+        font_module_or_queue_handle="$(field_of cuda_generated_2d_readback_font_module_or_queue_handle "$cuda_env")"
+        font_module_or_queue_handle_kind="$(field_of cuda_generated_2d_readback_font_module_or_queue_handle_kind "$cuda_env")"
+        font_kernel_or_pipeline_handle="$(field_of cuda_generated_2d_readback_font_kernel_or_pipeline_handle "$cuda_env")"
+        font_kernel_or_pipeline_handle_kind="$(field_of cuda_generated_2d_readback_font_kernel_or_pipeline_handle_kind "$cuda_env")"
+        font_fence_handle="$(field_of cuda_generated_2d_readback_font_fence_handle "$cuda_env")"
+        font_fence_handle_kind="$(field_of cuda_generated_2d_readback_font_fence_handle_kind "$cuda_env")"
+        font_readback_checksum="$(field_of cuda_generated_2d_readback_font_readback_checksum "$cuda_env")"
+        font_actual_checksum="$(field_of cuda_generated_2d_readback_font_actual_checksum "$cuda_env")"
+        font_parity_status="$(field_of cuda_generated_2d_readback_font_parity_status "$cuda_env")"
+    fi
+fi
+
+font_runtime_provenance_valid() {
+    [ "$selected_backend" = cuda ] || return 1
+    [ "$font_backend" = "$selected_backend" ] || return 1
+    case "$font_driver" in
+        cuda-driver-*) positive_int "${font_driver#cuda-driver-}" || return 1 ;;
+        *) return 1 ;;
+    esac
+    positive_int "$font_device_handle" \
+        && [ "$font_device_handle_kind" = cucontext ] \
+        && positive_int "$font_module_or_queue_handle" \
+        && [ "$font_module_or_queue_handle_kind" = cumodule ] \
+        && positive_int "$font_kernel_or_pipeline_handle" \
+        && [ "$font_kernel_or_pipeline_handle_kind" = cufunction ] \
+        && positive_int "$font_fence_handle" \
+        && [ "$font_fence_handle_kind" = cuevent-recorded-after-font-launch ] \
+        && positive_int "$font_readback_checksum" \
+        && [ "$font_readback_checksum" = "$font_actual_checksum" ] \
+        && [ "$font_parity_status" = pass ]
+}
+
+if [ "$status" = pass ] && ! font_runtime_provenance_valid; then
+    status=unavailable
+    reason=font-runtime-provenance-invalid
+fi
+
 {
     append_env production_gui_font_runtime_status "$status"
     append_env production_gui_font_runtime_reason "$reason"
@@ -328,6 +429,11 @@ esac
     append_env production_gui_font_runtime_simple_bin_source "$SIMPLE_BIN_SOURCE"
     append_env production_gui_font_runtime_simple_bin_status "$SIMPLE_BIN_STATUS"
     append_env production_gui_font_runtime_selected_backend "$selected_backend"
+    append_env production_gui_font_runtime_vector_child_exit_code "$(child_exit_code vector)"
+    append_env production_gui_font_runtime_metal_child_exit_code "$(child_exit_code metal)"
+    append_env production_gui_font_runtime_cuda_child_exit_code "$(child_exit_code cuda)"
+    append_env production_gui_font_runtime_opencl_child_exit_code "$(child_exit_code opencl)"
+    append_env production_gui_font_runtime_selected_backend_child_exit_code "$(child_exit_code "$selected_backend")"
     append_env production_gui_font_runtime_candidates_simple "$candidates"
     append_env production_gui_font_runtime_vector_source_env "$vector_env"
     append_env production_gui_font_runtime_metal_source_env "$BUILD_DIR/metal/evidence.env"
@@ -357,6 +463,19 @@ esac
     append_env production_gui_font_runtime_opencl_status "$(readback_status opencl)"
     append_env production_gui_font_runtime_opencl_submit_attempted "$(readback_submit opencl)"
     append_env production_gui_font_runtime_opencl_readback_available "$(readback_available opencl)"
+    append_env production_gui_font_runtime_font_backend "$font_backend"
+    append_env production_gui_font_runtime_font_driver "$font_driver"
+    append_env production_gui_font_runtime_font_device_handle "$font_device_handle"
+    append_env production_gui_font_runtime_font_device_handle_kind "$font_device_handle_kind"
+    append_env production_gui_font_runtime_font_module_or_queue_handle "$font_module_or_queue_handle"
+    append_env production_gui_font_runtime_font_module_or_queue_handle_kind "$font_module_or_queue_handle_kind"
+    append_env production_gui_font_runtime_font_kernel_or_pipeline_handle "$font_kernel_or_pipeline_handle"
+    append_env production_gui_font_runtime_font_kernel_or_pipeline_handle_kind "$font_kernel_or_pipeline_handle_kind"
+    append_env production_gui_font_runtime_font_fence_handle "$font_fence_handle"
+    append_env production_gui_font_runtime_font_fence_handle_kind "$font_fence_handle_kind"
+    append_env production_gui_font_runtime_font_readback_checksum "$font_readback_checksum"
+    append_env production_gui_font_runtime_font_actual_checksum "$font_actual_checksum"
+    append_env production_gui_font_runtime_font_parity_status "$font_parity_status"
 } >/dev/null
 
 {
@@ -369,6 +488,7 @@ esac
     echo "- metal_source: $BUILD_DIR/metal/evidence.env"
     echo "- cuda_source: $BUILD_DIR/cuda/evidence.env"
     echo "- opencl_source: $BUILD_DIR/opencl/evidence.env"
+    echo "- font provenance: backend=$font_backend; fence is the CUDA event recorded after the font launch"
 } >"$REPORT_PATH"
 
 cat "$ENV_PATH"

@@ -31,7 +31,7 @@ use std.spec.*
 fn write_pass_fixtures(root: text) -> text:
     "rm -rf " + root + " && mkdir -p " + root + "/fixture && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"vector_font_compute_status=pass\\\\nvector_font_compute_reason=pass\\\\nvector_font_compute_production_offload_ready=true\\\\nvector_font_compute_production_accelerator_attempts=2\\\\nvector_font_compute_production_cuda_hits=2\\\\nvector_font_compute_production_opencl_hits=0\\\\nvector_font_compute_production_cpu_fallback_hits=0\\\\nvector_font_compute_production_gpu_returned_glyphs=2\\\\nvector_font_compute_production_gpu_returned_glyph_pixels=8\\\\nvector_font_compute_production_accelerator_unavailable_reason=cuda-vector-font-glyph-pixels-returned\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/vector.sh && " +
-    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"cuda_generated_2d_readback_status=pass\\\\ncuda_generated_2d_readback_reason=readback-pixels-matched\\\\ncuda_generated_2d_readback_submit_attempted=true\\\\ncuda_generated_2d_readback_readback_available=true\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/cuda.sh && " +
+    "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"cuda_generated_2d_readback_status=pass\\\\ncuda_generated_2d_readback_reason=readback-pixels-matched\\\\ncuda_generated_2d_readback_submit_attempted=true\\\\ncuda_generated_2d_readback_readback_available=true\\\\ncuda_generated_2d_readback_font_status=pass\\\\ncuda_generated_2d_readback_font_submit_attempted=true\\\\ncuda_generated_2d_readback_font_readback_available=true\\\\ncuda_generated_2d_readback_font_backend=cuda\\\\ncuda_generated_2d_readback_font_driver=cuda-driver-12040\\\\ncuda_generated_2d_readback_font_device_handle=101\\\\ncuda_generated_2d_readback_font_device_handle_kind=cucontext\\\\ncuda_generated_2d_readback_font_module_or_queue_handle=102\\\\ncuda_generated_2d_readback_font_module_or_queue_handle_kind=cumodule\\\\ncuda_generated_2d_readback_font_kernel_or_pipeline_handle=103\\\\ncuda_generated_2d_readback_font_kernel_or_pipeline_handle_kind=cufunction\\\\ncuda_generated_2d_readback_font_fence_handle=104\\\\ncuda_generated_2d_readback_font_fence_handle_kind=cuevent-recorded-after-font-launch\\\\ncuda_generated_2d_readback_font_actual_checksum=105\\\\ncuda_generated_2d_readback_font_readback_checksum=105\\\\ncuda_generated_2d_readback_font_parity_status=pass\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/cuda.sh && " +
     "printf '#!/bin/sh\\nmkdir -p \"$BUILD_DIR\"\\nprintf \"opencl_generated_2d_readback_status=unavailable\\\\nopencl_generated_2d_readback_reason=fixture-unused\\\\nopencl_generated_2d_readback_submit_attempted=false\\\\nopencl_generated_2d_readback_readback_available=false\\\\n\" > \"$BUILD_DIR/evidence.env\"\\n' > " + root + "/fixture/opencl.sh && " +
     "chmod +x " + root + "/fixture/vector.sh " + root + "/fixture/cuda.sh " + root + "/fixture/opencl.sh"
 
@@ -73,6 +73,12 @@ describe "Production GUI font runtime evidence":
         expect(runtime_env).to_contain("production_gui_font_runtime_candidates_simple=[\"cuda\", \"opencl\", \"cpu_simd\", \"software\", \"cpu\"]")
         expect(runtime_env).to_contain("production_gui_font_runtime_vector_gpu_returned_glyphs=2")
         expect(runtime_env).to_contain("production_gui_font_runtime_bitmap_readback_available=true")
+        expect(runtime_env).to_contain("production_gui_font_runtime_vector_child_exit_code=0")
+        expect(runtime_env).to_contain("production_gui_font_runtime_selected_backend_child_exit_code=0")
+        expect(runtime_env).to_contain("production_gui_font_runtime_font_device_handle_kind=cucontext")
+        expect(runtime_env).to_contain("production_gui_font_runtime_font_fence_handle_kind=cuevent-recorded-after-font-launch")
+        expect(runtime_env).to_contain("production_gui_font_runtime_font_readback_checksum=105")
+        expect(runtime_env).to_contain("production_gui_font_runtime_font_parity_status=pass")
 
         val font_command = "BUILD_DIR=" + root + "/font REPORT_PATH=" + root + "/font/report.md PRODUCTION_GUI_FONT_RUNTIME_EVIDENCE_ENV=" + root + "/runtime/evidence.env sh scripts/check/check-production-gui-font-offload-evidence.shs"
         val (_font_out, _font_err, font_code) = process_run("/bin/sh", ["-c", font_command])
@@ -82,6 +88,23 @@ describe "Production GUI font runtime evidence":
         expect(font_env).to_contain("production_gui_font_offload_runtime_evidence_status=pass")
         expect(font_env).to_contain("production_gui_font_offload_vector_production_ready=true")
         expect(font_env).to_contain("production_gui_font_offload_bitmap_production_ready=true")
+
+    it "clears stale backend evidence and rejects a nonzero child exit":
+        val root = "build/test-production-gui-font-runtime-stale-child"
+        val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", write_pass_fixtures(root)])
+        expect(setup_code).to_equal(0)
+
+        val (_first_out, _first_err, first_code) = process_run("/bin/sh", ["-c", runtime_command(root)])
+        expect(first_code).to_equal(0)
+        val (_replace_out, _replace_err, replace_code) = process_run("/bin/sh", ["-c", "printf '#!/bin/sh\\nexit 7\\n' > " + root + "/fixture/cuda.sh && chmod +x " + root + "/fixture/cuda.sh"])
+        expect(replace_code).to_equal(0)
+
+        val (_retry_out, _retry_err, retry_code) = process_run("/bin/sh", ["-c", runtime_command(root)])
+        expect(retry_code).to_equal(1)
+        val runtime_env = file_read(root + "/runtime/evidence.env")
+        expect(runtime_env).to_contain("production_gui_font_runtime_status=unavailable")
+        expect(runtime_env).to_contain("production_gui_font_runtime_selected_backend=")
+        expect(runtime_env).to_contain("production_gui_font_runtime_cuda_child_exit_code=7")
 
     it "fails closed when generated 2D readback is missing":
         val root = "build/test-production-gui-font-runtime-missing-readback"
@@ -96,16 +119,15 @@ describe "Production GUI font runtime evidence":
         expect(runtime_env).to_contain("production_gui_font_runtime_vector_runtime_ready=false")
         expect(runtime_env).to_contain("production_gui_font_runtime_bitmap_readback_available=false")
 
-    it "selects Metal when vector glyph pixels and Metal generated readback both pass":
+    it "rejects generic Metal readback without font-specific evidence":
         val root = "build/test-production-gui-font-runtime-metal-pass"
         val (_setup_out, _setup_err, setup_code) = process_run("/bin/sh", ["-c", write_metal_pass_fixtures(root)])
         expect(setup_code).to_equal(0)
 
         val (_runtime_out, _runtime_err, runtime_code) = process_run("/bin/sh", ["-c", runtime_command(root)])
-        expect(runtime_code).to_equal(0)
+        expect(runtime_code).to_equal(1)
         val runtime_env = file_read(root + "/runtime/evidence.env")
-        expect(runtime_env).to_contain("production_gui_font_runtime_status=pass")
-        expect(runtime_env).to_contain("production_gui_font_runtime_selected_backend=metal")
-        expect(runtime_env).to_contain("production_gui_font_runtime_candidates_simple=[\"metal\", \"cuda\", \"opencl\", \"cpu_simd\", \"software\", \"cpu\"]")
+        expect(runtime_env).to_contain("production_gui_font_runtime_status=unavailable")
+        expect(runtime_env).to_contain("production_gui_font_runtime_selected_backend=")
         expect(runtime_env).to_contain("production_gui_font_runtime_metal_status=pass")
         expect(runtime_env).to_contain("production_gui_font_runtime_metal_readback_available=true")
