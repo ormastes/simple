@@ -1099,3 +1099,39 @@ credentials split has a reviewed contract. Executable evidence is
 | Worker Reload ownership | `browser_ui_access_controls_spec.spl` and its manual reject raw worker Reload and preserve full history/index/render state. | STATIC REVIEW PASS; qualified execution HELD |
 | SimpleScript replacement cancellation | `browser_session_runtime.spl` plus `browser_session_script_css_animation_spec.spl` stop copied same-tick callbacks after document generation changes and preserve red DrawIR/Engine2D output. | STATIC REVIEW PASS; CSS animation lists/lifecycle events remain RED |
 | Iframe DrawIR tranche | `simple_web_iframe_draw_ir_embedding_spec.spl` and the shared DrawIR/Web composer embed inert `srcdoc` batches with bounded IDs/clips/order/hits and fail-closed isolation placeholders. | STATIC REVIEW PASS; legacy pixel caller migration, child runtime authority, and qualified parity remain RED |
+
+## HTTPS DNS cancellation owner (2026-07-31)
+
+Status: **RED / IMPLEMENTATION HOLD**. A canceled browser HTTP job can be
+waiting in `run_bounded_net_lookup` before it owns a socket. The current
+cancel/free boundary can therefore neither interrupt that lookup nor retire
+its detached `simple-dns` worker; repeated canceled HTTPS navigations may
+retain browser-job capacity and all eight DNS slots after the caller is gone.
+
+No existing owner is safe to reuse unchanged:
+
+- `FutureExecutor` is the shared future executor; submitting blocking DNS
+  would starve unrelated language/runtime futures and it has no per-task
+  cancellation contract.
+- `AsyncFileThreadPool` is private to file I/O, has an unbounded queue, and has
+  no cancellation or late-result retirement contract.
+- the Monoio runtime thread is a serial I/O dispatcher with no resolver or
+  cancellation request; blocking it would stop every Monoio operation.
+- Simple `CancellationToken` cannot own a Rust runtime worker, while the
+  hosted brokers already call the correct `rt_browser_http_job_cancel/free`
+  boundary and cannot reach the resolver beneath it.
+
+Freeze these RED names before implementation:
+
+| Evidence | Required contract | Status |
+|---|---|---|
+| Rust unit `browser_http_cancel_during_dns_retires_job_and_preserves_resolver_capacity` | With an injected blocked resolver, cancel and free eight HTTPS jobs; every browser job retires promptly, a ninth lookup is admitted, releasing late resolver answers cannot publish outcomes, and job/DNS counters return exactly to baseline. | RED |
+| Native check `scripts/check/check-runtime-browser-http-dns-cancel.shs` | Exercise the exported job ABI with a controlled resolver fixture; Stop/cancel is bounded independently of the five-second request timeout and leaves no live job/worker growth across 64 cycles. | RED |
+| SSpec `test/03_system/security/browser_https_dns_cancel_recovery_spec.spl` | Keep the last committed HTTPS page, stop a DNS-pending navigation, reject its late response, then start and commit a trusted HTTPS navigation without `network-timeout` or capacity failure. | RED |
+| Manual `doc/06_spec/03_system/security/browser_https_dns_cancel_recovery_spec.md` | Mirror the four observable steps and native receipt; no mock-only or static-source substitute may claim production evidence. | RED |
+
+Implementation remains held until one runtime-owned bounded resolver design
+can cancel queued work, retire active browser jobs promptly, discard late
+answers, and avoid detached or unbounded worker growth. Merely decrementing
+`NET_DNS_IN_FLIGHT` at timeout is rejected because it hides orphan threads.
+No Rust/runtime or broker source change belongs to this planning tranche.
