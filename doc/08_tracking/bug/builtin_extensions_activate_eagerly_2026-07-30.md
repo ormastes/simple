@@ -22,13 +22,31 @@ before = 11 of 11 capabilities report `bound`; after = 0 of 11 (all cap at
 builtin extension registers a real `CommandRegistry` handler on the host
 `ide_capabilities_live()` builds (the five markdown handlers in
 `editor_controller.spl` are registered on a separate, app-owned host
-instance, never on the one the census inspects). So today `bound` is honestly
-unreachable for every capability, and the census's true ceiling is
-`activatable`. `test/01_unit/app/ide/capability_truth_spec.spl` now asserts
-this directly: markdown reaches `activatable` not `bound`, and a repo-wide
-"no capability is ever `bound`" invariant guards against the self-probe
-regressing back in. The historical record of the original defect (as found
-2026-07-30) is kept below for context.
+instance, never on the one the census inspects).
+
+**Update (same day, follow-up fix): the split host is now closed, and the
+census reads 1 bound / 10 activatable.** The handler registrations moved out
+of `EditorController.new()` into
+`extension_host_with_builtin_handlers()` (`src/lib/editor/extensions/host.spl`),
+which both the editor and the census now call — so the census inspects the
+same dispatchable host the editor runs on, instead of a throwaway. markdown
+reaches `bound` through its own real handler; the other ten builtins
+contribute no handler and correctly stay `activatable`.
+
+One extra defect surfaced while wiring it: the probe only ever asked about
+`contributes_commands[0]`. markdown declares `md.preview` first (a view
+command with no handler) while its five real handlers sit on
+`markdown.toggle_bold` and friends — so index-0 probing would have reported
+the whole extension unbound purely because of manifest ordering. `bound` now
+asks whether ANY contributed command has a handler, and `feature_check`
+names the one that satisfied it.
+
+`test/01_unit/app/ide/capability_truth_spec.spl` asserts this directly:
+markdown is `bound` with `check=markdown.toggle_bold`, and the anti-self-probe
+guard is now (a) an exact bound-count of 1 — the original defect's signature
+was every capability flipping at once — and (b) the absence of the probe's own
+`"capability truth probe"` title string from the report. The historical record
+of the original defect (as found 2026-07-30) is kept below for context.
 
 Verified directly in `src/app/ide/capabilities.spl:213-215`
 (`_ide_capability_with_live_state`):

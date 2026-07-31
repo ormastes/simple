@@ -11,18 +11,27 @@
 #   declared    -> static entry only (this list), no builtin backs it yet.
 #   indexed     -> a builtin manifest (builtin_manifest_providers()) declares
 #                  a matching language/command for one of `compatible_with`.
-#   activatable -> extension_host_with_builtins() has that extension active.
+#   activatable -> extension_host_with_builtin_handlers() has that extension
+#                  active.
 #   bound       -> a real CommandRegistry handler (contributed by the
-#                  extension itself, not by this probe) is registered for the
-#                  probed command id (feature_check) and is reachable via
-#                  host.dispatch_command. Nothing here writes a handler --
-#                  see doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+#                  extension itself, not by this probe) is registered for AT
+#                  LEAST ONE of the extension's contributed commands, and is
+#                  reachable via host.dispatch_command. `feature_check` names
+#                  the command that satisfied it, not a fixed index. Nothing
+#                  here writes a handler -- see
+#                  doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
 #                  "CRITICAL" for why the old self-registering probe made
 #                  "bound" unfalsifiable, and why it was removed 2026-07-31.
+#
+# The census builds its host via extension_host_with_builtin_handlers() so it
+# inspects the same dispatchable host the editor runs on. Before 2026-07-31 it
+# built a bare extension_host_with_builtins(), while EditorController.new()
+# registered the builtin handlers on a host it kept to itself -- so the census
+# was reporting on a host nobody used.
 
 use std.editor.extensions.manifest.{ExtensionManifest}
 use std.editor.extensions.builtin.index.{builtin_manifest_providers}
-use std.editor.extensions.host.{ExtensionHost, extension_host_with_builtins}
+use std.editor.extensions.host.{ExtensionHost, extension_host_with_builtin_handlers}
 
 struct IdeCapability:
     id: text
@@ -197,6 +206,19 @@ fn _ide_capability_first_command_id(manifest: ExtensionManifest) -> text:
         return ""
     manifest.contributes_commands[0].id
 
+# First contributed command that actually has a handler on this host, or "" if
+# none does. `bound` deliberately asks about ANY contributed command rather
+# than the first one: declaration order is arbitrary, and markdown is the
+# proof -- it declares `md.preview` first (no handler, it is a view command)
+# while its five real handlers sit on `markdown.toggle_bold` and friends.
+# Probing index 0 alone would report the whole extension unbound because of
+# how its manifest happens to be ordered.
+fn _ide_capability_bound_command_id(manifest: ExtensionManifest, host: ExtensionHost) -> text:
+    for cmd in manifest.contributes_commands:
+        if host.command_handler_registered(cmd.id):
+            return cmd.id
+    ""
+
 # Synthetic probe token for capabilities with no builtin manifest yet, so
 # `feature_check` always names the id that was (unsuccessfully) probed.
 fn _ide_capability_smoke_token(id: text) -> text:
@@ -212,8 +234,10 @@ fn _ide_capability_with_live_state(cap: IdeCapability, host: ExtensionHost, mani
                 host.activate_command(command_id)
             if command_id != "" and host.is_active(m.name):
                 state = "activatable"
-                if host.command_handler_registered(command_id):
+                val bound_id = _ide_capability_bound_command_id(m, host)
+                if bound_id != "":
                     state = "bound"
+                    checked = bound_id
             IdeCapability(
                 id: cap.id,
                 label: cap.label,
@@ -238,7 +262,7 @@ fn _ide_capability_with_live_state(cap: IdeCapability, host: ExtensionHost, mani
 # extension host. Intended for probing a SINGLE (possibly fabricated)
 # capability id in tests; `ide_capabilities_live()` shares one host instead.
 fn ide_capability_live_state(cap: IdeCapability) -> IdeCapability:
-    val host = extension_host_with_builtins()
+    val host = extension_host_with_builtin_handlers()
     val manifests = builtin_manifest_providers()
     _ide_capability_with_live_state(cap, host, manifests)
 
@@ -247,7 +271,7 @@ fn ide_capability_live_state(cap: IdeCapability) -> IdeCapability:
 # call this from reports/specs, not hot paths. ide_capabilities() itself stays
 # static so callers that only need id/label/owner metadata pay nothing extra.
 fn ide_capabilities_live() -> [IdeCapability]:
-    val host = extension_host_with_builtins()
+    val host = extension_host_with_builtin_handlers()
     val manifests = builtin_manifest_providers()
     var out: [IdeCapability] = []
     for cap in ide_capabilities():

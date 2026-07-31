@@ -24,15 +24,22 @@ use app.plugin.registry.{parse_plugin_manifest_text, plugin_manifest_to_text, pl
 
 describe "capability truth: live state against the real extension kernel":
 
-    it "the markdown capability reaches 'activatable' via the real kernel, not a self-fulfilling 'bound'":
+    it "the markdown capability reaches 'bound' through a real contributed handler":
+        # markdown is the one builtin that ships actual CommandRegistry
+        # handlers (md_toggle_bold_handler and friends, registered in
+        # extension_host_with_builtin_handlers). feature_check must name the
+        # command that genuinely has the handler -- NOT md.preview, which is
+        # merely first in the manifest and has no handler at all. Asserting
+        # the specific id is what distinguishes "we found a real handler"
+        # from "we probed index 0 and got lucky".
         var markdown_state = ""
         var markdown_check = ""
         for cap in ide_capabilities_live():
             if cap.id == "markdown":
                 markdown_state = cap.state
                 markdown_check = cap.feature_check
-        expect(markdown_state).to_equal("activatable")
-        expect(markdown_check).to_equal("md.preview")
+        expect(markdown_state).to_equal("bound")
+        expect(markdown_check).to_equal("markdown.toggle_bold")
 
     it "a fabricated capability id with no builtin backing stays 'declared'":
         val fake = ide_capability_new(
@@ -59,26 +66,33 @@ describe "capability truth: live state against the real extension kernel":
         # xlsx/csv compat tags and declares its own command id as an
         # activation event, so sheets legitimately clears "indexed" and
         # "activatable". "bound" is a separate, higher bar: it requires a
-        # real CommandRegistry handler, and nothing wires one up for any
-        # builtin today (see the file header). Asserting the full-list
-        # invariant (not just sheets) is a regression guard against the
-        # self-probe bug reappearing and inflating every capability again.
+        # real CommandRegistry handler, and sheets contributes no handler --
+        # only markdown does. Counting the bound set (not just checking
+        # sheets) is the regression guard against the self-probe bug
+        # reappearing: its signature was EVERY capability reporting bound at
+        # once. A count of exactly 1 fails both if the self-probe returns and
+        # if the census loses sight of the editor's real host.
         var sheets_state = ""
-        var any_bound = false
+        var bound_count = 0
         for cap in ide_capabilities_live():
             if cap.id == "sheets":
                 sheets_state = cap.state
             if cap.state == "bound":
-                any_bound = true
+                bound_count = bound_count + 1
         expect(sheets_state).to_equal("activatable")
-        expect(any_bound).to_equal(false)
+        expect(bound_count).to_equal(1)
 
     it "the feature_report capability-truth render shows the honest ceiling, never a self-probed 'bound'":
+        # The old self-probe left its own title string ("capability truth
+        # probe: ...") in the registry it then read back. Its absence is the
+        # direct evidence that nothing here writes the handler it measures --
+        # a sharper guard than counting bound states, which a future real
+        # handler is allowed to change.
         val report = ide_capability_truth_report().join("\n")
         expect(report).to_contain("capability-truth:")
-        expect(report).to_contain("markdown: state=activatable check=md.preview")
+        expect(report).to_contain("markdown: state=bound check=markdown.toggle_bold")
         expect(report).to_contain("sheets: state=activatable")
-        expect(report).to_not_contain("state=bound")
+        expect(report).to_not_contain("capability truth probe")
 
     # Lane F5 (remaining builtin manifests): draw-sdd, designer, base, math,
     # mail, planner, agent-dashboard, and db-admin each now have a builtin
