@@ -565,19 +565,109 @@ mod comparison_continuation_tests {
         assert!(parses("fn i(a: bool, b: bool) -> bool:\n    if a or\n       b:\n        return true\n    false\n"));
     }
 
-    /// KNOWN REMAINING GAP, deliberately pinned as-is: `elif` conditions still
-    /// reject the continuation. Unlike the cases above this is NOT an
-    /// expression-level problem — after the expression fix the failure moves
-    /// from `found Newline` to `found Indent`/`found Dedent` depending on the
-    /// continuation's indentation, i.e. it lives in `elif`'s statement-level
-    /// indent bookkeeping. Fixing it means touching the statement/expression
-    /// boundary, which is out of scope for this contained parser fix. This test
-    /// documents the CURRENT behaviour; flip it to `assert!` when that is fixed.
+    /// `elif`'s own statement-level indent bookkeeping was fixed (see
+    /// `elif_condition_continuation_parses` below): `parse_if`'s `elif`/`else
+    /// if` loops in `control_flow.rs` were missing the
+    /// save-before/drain-after `deferred_dedent_count` dance that the primary
+    /// `if` block-style path already applies around `parse_block()`, so a
+    /// multi-line `elif` condition leaked a stray `Dedent` token into the
+    /// stream and broke parsing of everything after it. That is now applied
+    /// consistently across all four `elif`/`else if` call sites via
+    /// `parse_elif_or_else_if_body`.
+    ///
+    /// This specific repro is KEPT deliberately pinned as still-broken,
+    /// because it hits a DIFFERENT, deeper, and NOT elif-specific gap: the
+    /// continuation line (`b:`) here is indented *more* than the following
+    /// block body (`return 2`), which produces a DEDENT-then-INDENT pair that
+    /// neither `if` nor `elif`'s "drain after the block" strategy resolves
+    /// correctly (only `while`'s "drain immediately after the condition's
+    /// Newline" strategy does, and that in turn breaks the opposite,
+    /// shallower-continuation shape — see
+    /// doc/08_tracking/bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md).
+    /// Proof this is not elif-specific: the identical shape reproduces the
+    /// identical `found Indent` failure on a PRIMARY `if` statement, not just
+    /// `elif`. Fixing it needs a real reconciliation between INDENT/DEDENT
+    /// layout tokens and open expression continuations (a statement/expression
+    /// boundary change), which is out of scope for this contained fix. Flip
+    /// this test when that lands.
     #[test]
-    fn elif_condition_continuation_is_still_unsupported() {
+    fn elif_condition_deep_continuation_indent_ambiguity_is_still_unsupported() {
         assert!(
             !parses("fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    elif a >\n         b:\n        return 2\n    3\n"),
-            "if this now parses, the elif statement-level gap was fixed — update this test and the bug doc"
+            "if this now parses, the shared if/elif deep-continuation indent ambiguity was fixed — update this test and the bug doc"
+        );
+    }
+
+    /// The `elif`-specific fix: multi-line `elif`/`else if` conditions now
+    /// parse, for comparison, equality, and logical operators, as long as the
+    /// continuation line is NOT indented deeper than the branch body (the
+    /// shape the primary `if` block-style path already supported before this
+    /// fix — see `elif_condition_deep_continuation_indent_ambiguity_is_still_unsupported`
+    /// above for the still-open deeper-continuation shape).
+    ///
+    /// Non-vacuity: every assertion here fails with `UnexpectedToken { found:
+    /// "Dedent", .. }` on the pre-fix `control_flow.rs` (verified by
+    /// temporarily reverting the `parse_elif_or_else_if_body` call sites back
+    /// to a bare `self.parse_inline_or_block()?`).
+    #[test]
+    fn elif_condition_continuation_parses() {
+        for op in ["<", ">", "<=", ">="] {
+            assert!(
+                parses(&format!("fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    elif a {op}\n       b:\n        return 2\n    3\n")),
+                "elif-condition continuation after `{op}` must parse"
+            );
+        }
+        for op in ["==", "!="] {
+            assert!(
+                parses(&format!("fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    elif a {op}\n       b:\n        return 2\n    3\n")),
+                "elif-condition continuation after `{op}` must parse"
+            );
+        }
+        assert!(
+            parses("fn f(a: bool, b: bool) -> i64:\n    if a and b:\n        return 1\n    elif a and\n        b:\n        return 2\n    3\n"),
+            "elif-condition continuation after `and` must parse"
+        );
+        assert!(
+            parses("fn f(a: bool, b: bool) -> i64:\n    if a and b:\n        return 1\n    elif a or\n        b:\n        return 2\n    3\n"),
+            "elif-condition continuation after `or` must parse"
+        );
+        // `else if` (not the `elif` keyword) goes through a separate call site
+        // in control_flow.rs — must be covered too.
+        assert!(
+            parses("fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    else if a >\n       b:\n        return 2\n    3\n"),
+            "else-if-condition continuation must parse"
+        );
+        // A second `elif` in a chain exercises the loop re-entry, not just
+        // the first iteration.
+        assert!(
+            parses("fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    elif a == 0:\n        return 0\n    elif a >\n       b:\n        return 2\n    3\n"),
+            "second elif in a chain must parse continuation"
+        );
+    }
+
+    /// Sibling coverage for `while`, matching item 6 of the elif fix task:
+    /// comparison (pre-existing, see `while_condition_comparison_continuation_parses`
+    /// above), equality, and logical operators must all continue the
+    /// condition across lines. Uses the same (deeper-than-body) continuation
+    /// shape as the existing passing comparison test, since that is the shape
+    /// `parse_while`'s "drain immediately after Newline" strategy supports —
+    /// the opposite (shallower) shape is a separate open gap, see
+    /// doc/08_tracking/bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+    #[test]
+    fn while_condition_equality_and_logical_continuation_parses() {
+        for op in ["==", "!="] {
+            assert!(
+                parses(&format!("fn f(a: i64, b: i64) -> i64:\n    var i = 0\n    while a {op}\n          b:\n        i = i + 1\n        break\n    i\n")),
+                "while-condition continuation after `{op}` must parse"
+            );
+        }
+        assert!(
+            parses("fn f(a: bool, b: bool) -> i64:\n    var i = 0\n    while a and\n           b:\n        i = i + 1\n        break\n    i\n"),
+            "while-condition continuation after `and` must parse"
+        );
+        assert!(
+            parses("fn f(a: bool, b: bool) -> i64:\n    var i = 0\n    while a or\n           b:\n        i = i + 1\n        break\n    i\n"),
+            "while-condition continuation after `or` must parse"
         );
     }
 }

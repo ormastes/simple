@@ -133,6 +133,33 @@ impl<'a> Parser<'a> {
         self.is_inline_statement_keyword() || self.is_inline_assignment()
     }
 
+    /// Parse an `elif`/`else if` body (inline statement or indented block),
+    /// draining any DEDENT tokens deferred by that branch's own condition
+    /// spanning multiple lines via operator line continuation (e.g.
+    /// `elif a >\n     b:`).
+    ///
+    /// Mirrors the save/reset/drain dance the primary `if` block-style path
+    /// (see `parse_if` below) already applies around its own `parse_block()`
+    /// call: a multi-line condition's trailing-operator continuation consumes
+    /// an INDENT token whose matching DEDENT does not appear until after the
+    /// branch body, so it is parked in `deferred_dedent_count` by
+    /// `consume_dedents_for_method_chain` and must be explicitly drained here
+    /// — otherwise it leaks into the token stream and the next
+    /// `elif`/`else`/statement check sees a stray `Dedent`/`Indent` instead of
+    /// what it expects.
+    fn parse_elif_or_else_if_body(&mut self) -> Result<Block, ParseError> {
+        let deferred_before = self.deferred_dedent_count;
+        self.deferred_dedent_count = 0;
+
+        let block = self.parse_inline_or_block()?;
+
+        let deferred = self.deferred_dedent_count + deferred_before;
+        self.deferred_dedent_count = 0;
+        self.consume_dedents_for_method_chain(deferred);
+
+        Ok(block)
+    }
+
     pub(crate) fn parse_if(&mut self) -> Result<Node, ParseError> {
         let start_span = self.current.span;
         self.expect(&TokenKind::If)?;
@@ -177,7 +204,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                     self.expect(&TokenKind::Colon)?;
-                    let elif_block = self.parse_inline_or_block()?;
+                    let elif_block = self.parse_elif_or_else_if_body()?;
                     elif_branches.push((elif_pattern, elif_condition, elif_block));
                     if self.check(&TokenKind::Newline)
                         && (self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
@@ -197,7 +224,7 @@ impl<'a> Parser<'a> {
                         self.advance();
                         let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                         self.expect(&TokenKind::Colon)?;
-                        let elif_block = self.parse_inline_or_block()?;
+                        let elif_block = self.parse_elif_or_else_if_body()?;
                         elif_branches.push((elif_pattern, elif_condition, elif_block));
                         if self.check(&TokenKind::Newline)
                             && self.peek_through_newlines_and_indents_is(&TokenKind::Else)
@@ -341,7 +368,7 @@ impl<'a> Parser<'a> {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
-            let elif_block = self.parse_inline_or_block()?;
+            let elif_block = self.parse_elif_or_else_if_body()?;
             elif_branches.push((elif_pattern, elif_condition, elif_block));
             if self.check(&TokenKind::Newline)
                 && (self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
@@ -364,7 +391,7 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume 'if'
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
-                let elif_block = self.parse_inline_or_block()?;
+                let elif_block = self.parse_elif_or_else_if_body()?;
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 if self.check(&TokenKind::Newline) && self.peek_through_newlines_and_indents_is(&TokenKind::Else) {
