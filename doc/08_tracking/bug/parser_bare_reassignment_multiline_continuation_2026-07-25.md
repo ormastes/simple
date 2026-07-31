@@ -79,3 +79,9 @@ continuation through the current parser source. The deployed Stage2 and old
 Stage3 binaries predate that source fix. A current-source Stage3 build produced
 no progress for the bounded three-minute attempt, so target binaries remain
 blocked until a fresh pure-Simple compiler artifact is admitted.
+
+**2026-07-31 clarification:** `ab63c351d142` is pure-Simple-self-hosted-only
+(`src/compiler/10.frontend/core/*.spl`); it never touched
+`src/compiler_rust/parser`. The Rust seed parser had the same symptom as an
+independent defect, fixed in
+`doc/08_tracking/bug/seed_assignment_trailing_equals_continuation_2026-07-31.md`.

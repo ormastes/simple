@@ -79,3 +79,12 @@ blocked on compiler artifact refresh, not source grammar.
 Same day, same class of "silent wrong thing, no diagnostic":
 `doc/08_tracking/bug/env_get_nil_coalesce_dead_fallback_2026-07-25.md` (`??` applied
 to a non-optional is provably dead code and warns about nothing).
+
+**2026-07-31 clarification:** the fix referenced above (`ab63c351d142`) only
+touched the pure-Simple self-hosted lexer
+(`src/compiler/10.frontend/core/{lexer_scanners,lexer_struct,tokens}.spl`).
+The **Rust seed parser** (`src/compiler_rust/parser`) had the identical
+surface symptom as a separate, unrelated defect in a separate parser
+implementation, still present as of `92dc586924a` (2026-07-31) and fixed in
+`doc/08_tracking/bug/seed_assignment_trailing_equals_continuation_2026-07-31.md`.
+Don't assume "SOURCE FIXED" here covers the seed.

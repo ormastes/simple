@@ -27,7 +27,21 @@ impl<'a> Parser<'a> {
         if let Some(op) = assign_op {
             let span = self.current.span;
             self.advance();
+            // Trailing-`=` line continuation (`x =\n    value`). Unlike the
+            // binary operators handled in expressions/binary.rs, the RHS here
+            // is parsed by a *fresh* top-level parse_expression() call rather
+            // than mid-chain, so the operator token itself (plain `=` or a
+            // compound `+=`/`-=`/... form) must skip any Newline/Indent
+            // before that call, and the matching Dedent must be drained once
+            // the RHS is fully parsed — the same save/skip/drain shape used
+            // by expressions/binary.rs's hand-written comparison/equality
+            // parsers. See doc/08_tracking/bug/
+            // seed_assignment_trailing_equals_continuation_2026-07-31.md.
+            let indent_count = self.skip_newlines_and_indents_for_method_chain();
             let mut value = self.parse_expression()?;
+            if indent_count > 0 {
+                self.consume_dedents_for_method_chain(indent_count);
+            }
             // Support no-paren calls in assignment: x = double 5
             value = self.parse_with_no_paren_calls(value)?;
 
@@ -427,5 +441,76 @@ impl<'a> Parser<'a> {
         let value = self.parse_expression()?;
         self.no_paren_depth = prev_depth;
         Ok(Argument::new(None, value))
+    }
+}
+
+#[cfg(test)]
+mod assignment_continuation_tests {
+    /// Trailing-`=` line continuation for assignment statements
+    /// (`target =\n    value`). `parse_expression_or_assignment` consumes the
+    /// assign-op token and then calls a *fresh* top-level `parse_expression()`
+    /// for the RHS, so a Newline right after `=` hit "expected expression,
+    /// found Newline" before any expression-level continuation handling ever
+    /// ran. Blocked native-build discovery of
+    /// src/os/hosted/hosted_browser_renderer_worker.spl:1066.
+    ///
+    /// See doc/08_tracking/bug/
+    /// seed_assignment_trailing_equals_continuation_2026-07-31.md.
+    fn parses(src: &str) -> bool {
+        crate::Parser::new(src).parse().is_ok()
+    }
+
+    #[test]
+    fn plain_assign_trailing_equals_continuation_parses() {
+        // The exact real-world shape: field target, `=` at end of line,
+        // field-access RHS on the next (deeper-indented) line.
+        assert!(
+            parses(
+                "class C:\n    var x: i64 = 0\n    fn f(self, frame: C):\n        self.x =\n            frame.x\n        self.x\n"
+            ),
+            "field assignment with `=`-continuation must parse"
+        );
+        // Plain local var target.
+        assert!(
+            parses("fn f(a: i64) -> i64:\n    var x = 0\n    x =\n        a + 1\n    x\n"),
+            "local var assignment with `=`-continuation must parse"
+        );
+    }
+
+    #[test]
+    fn compound_assign_trailing_operator_continuation_parses() {
+        for (op, tok) in [
+            ("+=", "AddAssign"),
+            ("-=", "SubAssign"),
+            ("*=", "MulAssign"),
+            ("/=", "DivAssign"),
+            ("%=", "ModAssign"),
+        ] {
+            assert!(
+                parses(&format!(
+                    "fn f(a: i64) -> i64:\n    var x = a\n    x {op}\n        a\n    x\n"
+                )),
+                "compound assignment `{tok}` ({op}) with continuation must parse"
+            );
+        }
+    }
+
+    /// Guard: assignment with the value on the SAME line still parses (no
+    /// regression from the added skip-newlines-after-op call).
+    #[test]
+    fn same_line_assignment_still_parses() {
+        assert!(parses("fn f(a: i64) -> i64:\n    var x = 0\n    x = a\n    x\n"));
+        assert!(parses("fn g(a: i64) -> i64:\n    var x = 0\n    x += a\n    x\n"));
+    }
+
+    /// Sibling statement after a continued assignment must still parse —
+    /// this is the non-vacuity signal for the deferred-dedent drain: without
+    /// it, the leaked Dedent breaks whatever comes after the assignment, the
+    /// same failure shape the elif-drain fix (a7e5fbccf85) guarded against.
+    #[test]
+    fn statement_after_continued_assignment_parses() {
+        assert!(parses(
+            "fn f(a: i64, b: i64) -> i64:\n    var x = 0\n    x =\n        a + b\n    var y = x + 1\n    y\n"
+        ));
     }
 }
