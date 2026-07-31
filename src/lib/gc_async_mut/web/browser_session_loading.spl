@@ -631,15 +631,13 @@ impl BrowserSession:
                 elif simple_script:
                     self._apply_response_headers(response.headers, response.url)
                     self._execute_simple_script(response.body, Some(load))
-                else if val Some(state) = self.runtime_state:
+                else if self.runtime_state != nil:
                     self._apply_response_headers(response.headers, response.url)
-                    val eval_result = state.runtime.eval(response.body)
-                    match eval_result:
+                    match self.eval_script(response.body):
                         Ok(_):
-                            self._flush_runtime_side_effects_and_pump_history()
-                            pass_dn("script eval success has no value to consume after side-effect flush")
+                            pass_dn("script eval success has no value to consume")
                         Err(e):
-                            load.append_warning("external script error: {e.message}")
+                            load.append_warning("external script error: {e}")
             return self._advance_script_loading()
         Err("no active script load")
 
@@ -1003,7 +1001,7 @@ impl BrowserSession:
                         self._record_wasm_module(load.document_url, block.content, load)
                     else if block.script_type == "text/simple":
                         self._execute_simple_script(block.content, Some(load))
-                    else if val Some(state) = self.runtime_state:
+                    else if self.runtime_state != nil:
                         self._trace_guest("eval inline script start")
                         val script_source = block.content
                         self._trace_guest("eval inline script source-len={script_source.len()}")
@@ -1019,17 +1017,12 @@ impl BrowserSession:
                             continue
                         if self._apply_url_search_params_inline_script(script_source):
                             continue
-                        var runtime = state.runtime
-                        val eval_result = runtime.eval(script_source)
-                        state.runtime = runtime
-                        self.runtime_state = Some(state)
-                        match eval_result:
+                        match self.eval_script(script_source):
                             Ok(_):
                                 self._trace_guest("eval inline script ok")
-                                self._flush_runtime_side_effects_and_pump_history()
-                                pass_dn("inline script eval success has no value to consume after side-effect flush")
+                                pass_dn("inline script eval success has no value to consume")
                             Err(e):
-                                load.append_warning("inline script error: {e.message}")
+                                load.append_warning("inline script error: {e}")
                     continue
                 if block.kind == "external":
                     val resolved = resolve_relative_url(load.document_url, block.src)
@@ -1055,17 +1048,12 @@ impl BrowserSession:
                             self._record_wasm_module(resolved, override_body, load)
                         else if block.script_type == "text/simple":
                             self._execute_simple_script(override_body, Some(load))
-                        else if val Some(state) = self.runtime_state:
-                            var runtime = state.runtime
-                            val eval_result = runtime.eval(override_body)
-                            state.runtime = runtime
-                            self.runtime_state = Some(state)
-                            match eval_result:
+                        else if self.runtime_state != nil:
+                            match self.eval_script(override_body):
                                 Ok(_):
-                                    self._flush_runtime_side_effects_and_pump_history()
-                                    pass_dn("override script eval success has no value to consume after side-effect flush")
+                                    pass_dn("override script eval success has no value to consume")
                                 Err(e):
-                                    load.append_warning("external script error: {e.message}")
+                                    load.append_warning("external script error: {e}")
                         continue
                     if _script_type_is_wasm(block.script_type):
                         self.active_load = Some(load)
@@ -1200,20 +1188,16 @@ impl BrowserSession:
                 self.pending_requests.push(request)
                 return Ok(false)
         self.module_source_cache = upsert_pair(self.module_source_cache, module_url, source)
-        if val Some(state) = self.runtime_state:
-            var runtime = state.runtime
+        if self.runtime_state != nil:
             val transformed_source = transform_module_source(module_url, source, self.module_source_cache)
-            val eval_result = runtime.eval(transformed_source)
-            state.runtime = runtime
-            self.runtime_state = Some(state)
+            val eval_result = self.eval_script(transformed_source)
             self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
             match eval_result:
                 Ok(_):
                     self.loaded_module_urls = append_unique_text(self.loaded_module_urls, module_url)
-                    self._flush_runtime_side_effects_and_pump_history()
                     return Ok(true)
                 Err(e):
-                    return Err(e.message)
+                    return Err(e)
         self.module_eval_stack = remove_text_once(self.module_eval_stack, module_url)
         Ok(true)
 
