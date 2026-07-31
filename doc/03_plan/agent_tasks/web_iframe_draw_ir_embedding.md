@@ -1,7 +1,8 @@
 # Agent tasks: Web iframe Draw IR embedding
 
-Status: source/spec/manual tranche in review; qualified execution and legacy
-pixel parity remain required before any caller migration.
+Status: source/spec/manual tranche STATIC REVIEW PASS through `10404d86286`;
+qualified execution and legacy pixel parity remain required before any caller
+migration.
 
 Frozen names:
 

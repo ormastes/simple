@@ -1071,7 +1071,7 @@ stopped, RED, or evidence-held history.
 | `disabled_ui_dispatch` | `fbecc67eb77` rejects disabled text controls before shared dispatch. | STATIC REVIEW PASS; qualified execution HELD |
 | `animation_keyframe_perf` | `f57d9bc4600` and `782477146a9` skip unused layout keys and retain empty final keys. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list RED |
 | `hosted_form_action` | `c91fdc0e67b` binds redirects to host-owned form-action authorization and conservatively rejects unauthorized navigation. | STATIC REVIEW PASS; qualified execution HELD |
-| `cors_unsafe_header_preflight` | `bf7dfff029a` wires the direct Fetch path; the renderer-only staged lane adds `FetchCorsPreflightPlan` and one broker-owned OPTIONS-to-actual transition with no preflight side effects. | IMPLEMENTED / STATIC-REVIEW-PENDING; live execution remains RED |
+| `cors_unsafe_header_preflight` | `69839e5aac3` + `cf7fce828fd` + `259d69fc010` add `FetchCorsPreflightPlan` and one broker-owned OPTIONS-to-actual transition with no preflight side effects. | STATIC REVIEW PASS; direct `HostedWebContentSession` CORS and live execution remain RED |
 | `tls_mixed_content` | TLS and mixed-content source controls are present. | SOURCE PRESENT / LIVE EVIDENCE HELD |
 
 The reviewed gap stack `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` +
@@ -1091,3 +1091,11 @@ cross-origin-rejected until its separate BrowserSession-owned cookie and
 credentials split has a reviewed contract. Executable evidence is
 `test/03_system/security/browser_hosted_cors_preflight_spec.spl`; its manual is
 `doc/06_spec/03_system/security/browser_hosted_cors_preflight_spec.md`.
+
+### Reviewed browser batch (2026-07-31)
+
+| Lane | Evidence | Status |
+|---|---|---|
+| Worker Reload ownership | `760a77723c7` + `1083d698021` + `1488c04d53e` reject raw worker Reload and preserve full history/index/render state. | STATIC REVIEW PASS; qualified execution HELD |
+| SimpleScript replacement cancellation | `7fe6d9f68aa` stops copied same-tick callbacks after document generation changes and preserves red DrawIR/Engine2D output. | STATIC REVIEW PASS; CSS animation lists/lifecycle events remain RED |
+| Iframe DrawIR tranche | `65ac7eaefe9` + `df4fdb8c6a7` + `10404d86286` embed inert `srcdoc` batches with bounded IDs/clips/order/hits and fail-closed isolation placeholders. | STATIC REVIEW PASS; legacy pixel caller migration, child runtime authority, and qualified parity remain RED |
