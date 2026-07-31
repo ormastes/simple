@@ -1,18 +1,18 @@
 <!-- codex-architecture -->
 # Web iframe `srcdoc` through Draw IR
 
-Status: proposed; implementation blocked on executable TDD evidence
+Status: implemented static / execution and caller parity held
 
 Requirements: REQ-WEB-BROWSER-002/003/004/019/021 and
 NFR-WEB-BROWSER-012/017 from the production-hardening requirements.
 
 ## Problem
 
-The software renderer recognizes `<iframe srcdoc>`, but
-`_web_render_child_pixels` recursively creates a `[u32]` child framebuffer and
-`_web_paint_iframes` blits it into the parent. The canonical retained path,
-`_simple_web_layout_compose_retained`, emits only the parent
-`DrawIrComposition`, so Engine2D loses iframe content.
+The retained renderer now recursively composes inert `<iframe srcdoc>` and
+flattens it into the parent `DrawIrComposition`. The legacy software renderer
+still creates and blits a `[u32]` child framebuffer through five callers; that
+path remains the parity oracle until qualified pure-Simple execution permits
+caller migration.
 
 The legacy pixel helper has five callers:
 
@@ -47,12 +47,13 @@ It returns cloned child batches in original order. For each batch:
 - global origin is `(offset_x + embedding.x, offset_y + embedding.y)`;
 - dimensions, backend, source, and opacity are preserved;
 - surface/batch IDs are prefixed with the iframe's stable component ID;
-- layer is `layer_base + embedding.layer`;
-- inherited clip is translated to batch-local coordinates and intersected
-  with `[0,0,width,height]`;
+- layer is `layer_base`; flat batch-array order is the paint-order authority;
+- the visible iframe-content/ancestor intersection is translated to
+  batch-local coordinates;
 - every command clip becomes
   `intersection(command.clip_rect, inherited_local_clip)`;
-- all other command fields remain unchanged.
+- command `component_id` and nonempty `parent_id` values are prefixed, child
+  hit rectangles are cleared, and remaining command fields stay unchanged.
 
 Reuse `draw_ir_rect_translate` and `draw_ir_rect_intersection`. One private
 exact-copy helper is enough; add no hierarchical IR or command-builder family.
@@ -97,8 +98,9 @@ Extra parent rules precede the child's own extracted rules, preserving child
 override order. The owner installs the explicit deadline only for that call
 and restores the parent deadline on every return.
 
-`_simple_web_layout_compose_retained` receives depth/deadline, builds the
-existing ancestor clip cache, and invokes this owner for visible iframes.
+`_simple_web_layout_compose_retained` receives depth and builds the existing
+ancestor clip cache. Document composition scopes and restores the explicit
+deadline around child work.
 
 ### Material evidence
 
@@ -135,8 +137,9 @@ compares against the combined count/hash. No material state enters Draw IR.
 - Fractional-opacity or parent-sampling ancestor groups fail closed with the
   placeholder until Draw IR has a real group primitive. Independently applying
   opacity to flat batches is incorrect.
-- No iframe `DRAW_IR_COMMAND_IMAGE`, `[u32]` child buffer, private Engine2D
-  path, or parallel Web IR.
+- The retained Draw IR path has no iframe `DRAW_IR_COMMAND_IMAGE`, `[u32]`
+  child buffer, private Engine2D path, or parallel Web IR. The legacy pixel
+  buffer remains only as the five-caller parity oracle.
 
 ## Ancestor clip
 

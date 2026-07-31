@@ -12,7 +12,8 @@ through Engine2D.
 - Keep depth cap 3 and half-remaining-deadline admission.
 - `space=shared` prepends parent rules; default `separate` does not.
 - Keep `src`, opacity groups, navigation, JS sharing, and input routing RED.
-- Prohibit child `[u32]` buffers and iframe IMAGE shortcuts.
+- Prohibit child `[u32]` buffers and iframe IMAGE shortcuts on the retained
+  path; the old pixel path remains only as the caller-migration oracle.
 - Migrate four public pixel callers, then recursive child paint; delete old
   blit helpers only after exact parity.
 - Before enabling child behavior, use typed parent-DOM/iframe-route/child-frame

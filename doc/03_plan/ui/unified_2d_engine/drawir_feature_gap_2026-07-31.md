@@ -52,8 +52,11 @@ prior campaign notes. `layer: i32` is batch-level only (`:63`), consumed by
 `panel2d.spl:275-293`, passed straight into `embedding.layer` — Panel2D has no
 separate z-model of its own).
 
-**Transforms — ABSENT.** No rotation/scale/skew/matrix field anywhere in
-`draw_ir.spl`; only `x/y` offset + `width/height`. Only x/y placement.
+**Transforms — ABSENT in production v2; SCHEMA-ADMITTED in additive v3.**
+`draw_ir.spl` has only `x/y` offset plus `width/height`. The additive
+`draw_ir_v3.spl` has a fixed-point affine transform table, but only its
+CPU-reference emitter exists; no Web/game producer or Engine2D v3 executor
+uses it, so it does not close production transform support.
 
 **Blend modes — ABSENT at the DrawIR level.** `color.spl:74`'s `blend(src,dst)`
 is plain Porter-Duff src-over; `DrawIrRenderTarget.draw_image_blend` /
@@ -150,7 +153,9 @@ Consumers: HTML/CSS layout renderer
 (foundation/core/style/layout/decl_apply/paint_layout/paint_primitives/
 declarations) and widget path `src/lib/common/ui/widget_draw_ir.spl`, both
 emitting `DrawIrComposition` directly (no separate GUI/Web IR — confirmed by
-the prior campaign doc, D9).
+the prior campaign doc, D9). The retained inert `srcdoc` tranche now flattens
+child Draw IR batches; legacy pixel iframe callers remain only as the parity
+and migration boundary tracked by the reconciliation plan's R3.
 
 | Feature | Status | Evidence |
 |---|---|---|
@@ -176,7 +181,7 @@ GPU parity is a separate, later proof).
 | 1 | Text decoration unification (overline/strikethrough, single source of truth) | web, both indirectly (widget text) | PARTIAL / inconsistent — two paint paths disagree | S | No |
 | 2 | Radial gradients + angled linear gradients + N-stop | web (also useful to game for radial vignettes) | ABSENT (radial), PARTIAL (linear, 2-stop, no angle) | M | No |
 | 3 | Rounded-gradient clip | web | ABSENT (explicit TODO comment) | S–M | No |
-| 4 | Per-command/paint-time affine transform (rotate/scale/skew, arbitrary angle) at the DrawIR or browser-paint layer | both — game has its own `Transform2D` but it does not flow into DrawIR; web has only a layout-geometry approximation | ABSENT at DrawIR; PARTIAL (quarter-turn only) at web paint | L | No (CPU rasterizer can do affine sampling) |
+| 4 | Per-command/paint-time affine transform (rotate/scale/skew, arbitrary angle) at the DrawIR or browser-paint layer | both — game has its own `Transform2D` but it does not flow into DrawIR; web has only a layout-geometry approximation | v2 production ABSENT; v3 schema admits affine data but has no producer/executor; web paint PARTIAL | L | No (CPU rasterizer can do affine sampling) |
 | 5 | Blend-mode wiring into sprite/particle draw calls | game | PARTIAL — primitive exists (`emu_draw_rect_blend_mode`), unwired | S–M | No |
 | 6 | Tilemap real texture sampling (vs flat-color placeholder) | game | PARTIAL, explicit placeholder | S–M | No |
 | 7 | CSS filter functions beyond `opacity()` (blur/drop-shadow/grayscale/etc) | web | ABSENT | M–L | Maybe (blur can reuse existing glass-material blur primitive on CPU) |
