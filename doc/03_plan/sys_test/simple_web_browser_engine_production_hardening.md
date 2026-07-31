@@ -1468,6 +1468,42 @@ The scenario is a STATIC candidate until an admitted pure-Simple runner and
 docgen lane execute it. This bounded implementation invokes neither runtime,
 bootstrap, nor docgen and therefore makes no runtime PASS claim.
 
+## Stop partial-document focus preservation (2026-07-31)
+
+Stop terminates the current load but does not replace the admitted partial
+document. Page-owned focus, text selection, input view, and caret epoch
+therefore remain live state. Only pressed/chrome ownership and terminal
+renderer command authority are retired. Document-replacing Back, Forward,
+Reload, Home, Go, and open navigation retain their existing focus-discard
+policy.
+
+The complete production call chains are:
+
+- `HostedWebContentSession.dispatch_chrome_pointer ->
+  BrowserSession.ui_access_act -> BrowserSession.stop_loading`; and
+- `HostedBrowserRendererRegistry.dispatch_chrome_pointer ->
+  HostedBrowserRendererProcess.begin_stop -> capability-bound browser
+  renderer protocol -> HostedBrowserRendererWorkerSession._dispatch_navigation
+  -> BrowserSession.stop_loading`, followed by terminal frame admission and
+  command-capability retirement.
+
+| Requirement | Executable SSpec | Manual | Deterministic oracle |
+|---|---|---|---|
+| REQ-WEB-BROWSER-008 | `test/03_system/app/browser/feature/browser_stop_partial_focus_spec.spl` | `doc/06_spec/03_system/app/browser/feature/browser_stop_partial_focus_spec.md` | hosted/isolated focused target `draft` and byte selection `1..5` remain identical |
+| REQ-WEB-BROWSER-009 | same | same | public hosted Stop and capability-bound isolated Stop both complete once |
+| REQ-WEB-BROWSER-021 | same | same | visible partial body remains, transient chrome state clears, and isolated root/capability authority is empty |
+
+The displayed manual uses exactly these four steps:
+
+1. `Open the same partial document in hosted and isolated renderers`
+2. `Retain page selection while transient chrome state is armed`
+3. `Activate Stop through hosted chrome and isolated authority`
+4. `Observe partial focus and selection with transient state retired`
+
+The scenario is a STATIC candidate until an admitted pure-Simple runner and
+docgen lane execute it. This bounded implementation invokes neither runtime,
+bootstrap, nor docgen and therefore makes no runtime PASS claim.
+
 ## Space activation across modifier events (2026-07-31)
 
 A pending button Space press belongs to the matching Space release. An

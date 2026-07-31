@@ -1,0 +1,113 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
+"""# Stop Preserves Partial Document Focus
+
+Stop cancels the active load without replacing the last visible partial
+document. Its DOM focus and UTF-8 text selection remain page state, while
+host chrome state and isolated command authority are retired.
+"""
+
+use std.spec.*
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+use std.common.web.browser_renderer_protocol.{
+    browser_renderer_capability_bind_encoded,
+    browser_renderer_capability_decoder_feed,
+    browser_renderer_capability_decoder_new,
+    browser_renderer_navigation_encode
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
+
+val STOP_PARTIAL_HTML = (
+    "<link rel='stylesheet' " +
+    "href='https://assets.example.test/slow.css'>" +
+    "<input id='draft' value='pärtial' data-focused>" +
+    "<p id='visible'>Visible while loading</p>"
+)
+val STOP_COMMAND_CAPABILITY = "0123456789abcdef0123456789abcdef"
+
+fn expect_partial_focus(browser: BrowserSession):
+    expect(browser.current_body_html).to_contain("Visible while loading")
+    expect(be_dom_focused_id(browser.dom_root())).to_equal("draft")
+    expect(browser.text_selection_target_id).to_equal("draft")
+    expect(browser.text_selection_anchor_byte).to_equal(1)
+    expect(browser.text_selection_focus_byte).to_equal(5)
+    expect(browser.can_stop_loading()).to_be(false)
+
+describe "Stop preserves partial document focus":
+    # @manual: show
+    # @capture(protocol)
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
+    it "should retain focus and selection while retiring transient state":
+        step("Open the same partial document in hosted and isolated renderers")
+        var hosted = HostedWebContentSession.create(
+            904, STOP_PARTIAL_HTML, 160, 64
+        )
+        var worker = HostedBrowserRendererWorkerSession.create(160, 64)
+        expect(worker.browser.open_html(
+            "https://page.example.test/partial", STOP_PARTIAL_HTML
+        ).is_ok()).to_be(true)
+        worker.initialized = true
+        expect(hosted.browser.can_stop_loading()).to_be(true)
+        expect(worker.browser.can_stop_loading()).to_be(true)
+
+        step("Retain page selection while transient chrome state is armed")
+        expect(hosted.browser.set_dom_text_selection(
+            "draft", 1, 5
+        )).to_be(true)
+        expect(worker.browser.set_dom_text_selection(
+            "draft", 1, 5
+        )).to_be(true)
+        worker.pressed_target_id = "draft"
+        worker.pressed_chrome_control = "stop"
+        worker.chrome_focus = "address"
+        worker.address_replace_on_text = true
+        worker.input_view_target_key = "id:draft"
+        worker.input_view_start_byte = 1
+        worker.caret_blink_epoch_ms = 77
+
+        step("Activate Stop through hosted chrome and isolated authority")
+        val hosted_down = hosted.dispatch_chrome_pointer(1, "stop", true)
+        val hosted_up = hosted.dispatch_chrome_pointer(2, "stop", false)
+        expect(hosted_down.reason).to_equal("chrome-pressed")
+        expect(hosted_up.reason).to_equal("")
+        expect(hosted_up.callback_count).to_equal(1)
+
+        val stop = browser_renderer_navigation_encode(
+            19, 2, "stop", "", "", "", "", ""
+        )
+        expect(stop.ok).to_be(true)
+        val bound = browser_renderer_capability_bind_encoded(
+            stop, 19, 2, 2, STOP_COMMAND_CAPABILITY
+        )
+        expect(bound.ok).to_be(true)
+        val decoded = browser_renderer_capability_decoder_feed(
+            browser_renderer_capability_decoder_new(19), bound.wire
+        )
+        expect(decoded.status).to_equal("message")
+        val worker_stop = worker.handle(decoded.message)
+        expect(worker_stop.ok).to_be(true)
+
+        step("Observe partial focus and selection with transient state retired")
+        expect_partial_focus(hosted.browser)
+        expect_partial_focus(worker.browser)
+        expect(hosted.pressed_chrome_control).to_equal("")
+        expect(hosted.chrome_focus).to_equal("")
+        expect(hosted.address_replace_on_text).to_be(false)
+        expect(worker.pressed_target_id).to_equal("")
+        expect(worker.pressed_chrome_control).to_equal("")
+        expect(worker.chrome_focus).to_equal("")
+        expect(worker.address_replace_on_text).to_be(false)
+        expect(worker.input_view_target_key).to_equal("id:draft")
+        expect(worker.input_view_start_byte).to_equal(1)
+        expect(worker.caret_blink_epoch_ms).to_equal(77)
+        expect(worker.active_root_command_request_id).to_equal(0)
+        expect(worker.active_command_capability).to_equal("")
+        hosted.close()
+        worker.close()
