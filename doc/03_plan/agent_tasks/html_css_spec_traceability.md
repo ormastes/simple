@@ -54,7 +54,8 @@ Frozen helpers:
 | SSpec/manual quality | FAIL: missing plan/REQs, stale manuals/counts, no executed evidence |
 | Closed checker | Landed in `fc73115d0214`; behavioral counts remain zero without independent admission |
 | Inert/media/form/caption/animation | Bounded source/spec/manual work landed; qualified execution and corpus accounting remain open |
-| Iframe | Design landed in `771dfb23835b`; TDD regeneration and implementation remain open |
+| Iframe | Inert `srcdoc` DrawIR flattening, focused spec, and manual landed; five legacy pixel callers, exact qualified parity, and child script/network/input authority remain RED |
+| Direct-host CORS | Credentialless `omit`/cross-origin `same-origin` now stage OPTIONS→actual through FetchEngine with filtered headers and zero cookie ownership; `include`, qualified execution, and broader resource modes remain RED |
 | HTML `hr` | Current bounded lane: native UA defaults plus exact `0`/`0px`/`none`/`hidden` and mixed-invalid/missing border cascade controls through semantic Web layout, DrawIR, and exact Engine2D pixels; qualified execution remains open |
 | Fieldset/legend selected profile | Current bounded lane: canonical UA defaults, four-side authored border clearing, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; special legend formatting/cutout, disabled propagation, admitted docgen, and qualified execution remain open |
 | Definition-list selected profile | Current bounded lane: cross-kind omitted-end-tag repair, canonical `dl`/`dt`/`dd` UA defaults and authored overrides, semantic/style/exact DrawIR/pixel SSpec, and handwritten draft mirror; admitted docgen, qualified execution, and corpus accounting remain open |
@@ -96,7 +97,7 @@ Frozen helpers:
    - cannot declare executable PASS.
 
 Current next lanes are the independently admitted runner/manual workflow,
-fresh bounded iframe TDD regeneration, and per-row corpus accounting. Do not
+iframe legacy-caller parity/migration, and per-row corpus accounting. Do not
 reopen landed bounded behavior unless its focused evidence regresses.
 
 ## Batch 22/23 bounded rendering addendum (2026-07-31)

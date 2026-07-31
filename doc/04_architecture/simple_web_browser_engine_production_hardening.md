@@ -443,9 +443,12 @@ or native TLS behavior.
   parse-error, and failed-TLS paths cannot supply an authentication boolean or
   seed policy. The broker
   derives resource mode from the broker's committed origin instead of the
-  renderer's kind, and authorizes only bounded simple CORS requests until
-  preflight uses the public-only broker transport. Redirects receive one exact
-  derived successor permit with downgrade and hop-limit enforcement. Typed
+  renderer's kind. Renderer and direct-host credentialless CORS use the same
+  FetchEngine-owned Origin/preflight validation over public-only transport;
+  OPTIONS cannot mutate cookies, cache, HSTS, history, or page-visible state.
+  Direct-host `include` remains fail-closed until credentials and cookies have
+  one reviewed broker owner. Redirects receive one exact derived successor
+  permit with downgrade and hop-limit enforcement. Typed
   parent-issued open/back/forward/home/reload/stop commands now cross the
   bounded protocol; the broker owns committed URL/origin plus a 256-entry
   history and commits only after a validated renderer frame. A fail-closed
