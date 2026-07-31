@@ -27,14 +27,47 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_style_by_id,
     simple_web_layout_render_html_draw_ir_result_at_time
 }
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_find_path_to_id, be_dom_focused_id, be_dom_get_tag
+    be_dom_focused_route, be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomIdentityIndex
 }
 use common.ui.draw_ir.{DrawIrComposition}
 use std.js.types.pair.{Pair}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_file_read_text(path: text) -> text
+
+fn _hosted_dom_index(
+    session: HostedWebContentSession
+) -> DomIdentityIndex:
+    match session.browser.current_dom_identity_index():
+        Some(index): index
+        nil: fail("Expected hosted DOM identity index")
+
+fn _hosted_dom_path(
+    session: HostedWebContentSession, author_id: text
+) -> [BeDomNode]:
+    val index = _hosted_dom_index(session)
+    val route = match index.route_for_author_id(author_id):
+        Some(value): value
+        nil: fail("Expected hosted DOM route for author id {author_id}")
+    be_dom_path_for_route(session.browser.dom_root(), index, route)
+
+fn _hosted_focused_author_id(
+    session: HostedWebContentSession
+) -> text:
+    val index = _hosted_dom_index(session)
+    val route = match be_dom_focused_route(
+        session.browser.dom_root(), index
+    ):
+        Some(value): value
+        nil: fail("Expected hosted focused DOM route")
+    match index.author_id_for_route(route):
+        Some(author_id): author_id
+        nil: fail("Expected focused DOM author id")
 
 fn checksum(pixels: [u32]) -> i64:
     var out: i64 = 0
@@ -612,7 +645,7 @@ describe "hosted Web content session":
 
         val down = session.dispatch_pointer_at(3, 5, 25, true)
         expect(down.semantic_target_id).to_equal("second")
-        expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
+        expect(_hosted_focused_author_id(session)).to_equal("second")
         expect(session.last_target_id).to_equal("second")
 
         val committed = session.dispatch_text(4, "X")
@@ -623,7 +656,7 @@ describe "hosted Web content session":
 
         val canceled = session.dispatch_pointer_at(5, 5, 45, true)
         expect(canceled.semantic_target_id).to_equal("blocked")
-        expect(be_dom_focused_id(session.browser.dom_root())).to_equal("second")
+        expect(_hosted_focused_author_id(session)).to_equal("second")
         expect(session.last_target_id).to_equal("second")
 
     it "counts only an executed input listener as an application callback":
@@ -722,12 +755,8 @@ describe "hosted Web content session":
             target.unwrap().width,
             target.unwrap().height
         )
-        val form_path = be_dom_find_path_to_id(
-            session.browser.dom_root(), "preferences"
-        )
-        val input_path = be_dom_find_path_to_id(
-            session.browser.dom_root(), "accept"
-        )
+        val form_path = _hosted_dom_path(session, "preferences")
+        val input_path = _hosted_dom_path(session, "accept")
         if form_path.len() == 0 or input_path.len() < 2:
             fail("missing canonical form/input semantic path")
         expect(be_dom_get_tag(
@@ -759,7 +788,7 @@ describe "hosted Web content session":
         )
         expect(abandoned_press.reason).to_equal("")
         expect(abandoned_press.callback_count).to_equal(1)
-        expect(be_dom_focused_id(session.browser.dom_root())).to_equal("accept")
+        expect(_hosted_focused_author_id(session)).to_equal("accept")
         expect(session.current_body_html()).to_contain(
             "data-focused=\"yes\""
         )
@@ -774,7 +803,7 @@ describe "hosted Web content session":
         )
         expect(press.reason).to_equal("pointer-pressed")
         expect(press.callback_count).to_equal(0)
-        expect(be_dom_focused_id(session.browser.dom_root())).to_equal("accept")
+        expect(_hosted_focused_author_id(session)).to_equal("accept")
         val receipt = session.dispatch_pointer_at(
             21, target.unwrap().local_x, target.unwrap().local_y, false
         )
@@ -906,9 +935,7 @@ describe "hosted Web content session":
             38, 9, true, true
         )
         expect(canceled_tab.semantic_target_id).to_equal("stay")
-        expect(be_dom_focused_id(
-            payload_session.browser.dom_root()
-        )).to_equal("stay")
+        expect(_hosted_focused_author_id(payload_session)).to_equal("stay")
 
         var checkbox_session = HostedWebContentSession.create(
             12,
