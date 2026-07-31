@@ -12,8 +12,13 @@
 #   indexed     -> a builtin manifest (builtin_manifest_providers()) declares
 #                  a matching language/command for one of `compatible_with`.
 #   activatable -> extension_host_with_builtins() has that extension active.
-#   bound       -> a real CommandRegistry handler was registered for the
-#                  probed command id (feature_check) and is reachable.
+#   bound       -> a real CommandRegistry handler (contributed by the
+#                  extension itself, not by this probe) is registered for the
+#                  probed command id (feature_check) and is reachable via
+#                  host.dispatch_command. Nothing here writes a handler --
+#                  see doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+#                  "CRITICAL" for why the old self-registering probe made
+#                  "bound" unfalsifiable, and why it was removed 2026-07-31.
 
 use std.editor.extensions.manifest.{ExtensionManifest}
 use std.editor.extensions.builtin.index.{builtin_manifest_providers}
@@ -166,11 +171,6 @@ fn ide_capability_valid_count() -> i64:
 
 # ---- live capability truth (kernel-backed) --------------------------------
 
-# Trivial command probe: proves a command id CAN be bound through the real
-# CommandRegistry without depending on any particular extension's own logic.
-fn _ide_capability_probe_handler(payload: text) -> Result<text, text>:
-    Ok(payload)
-
 # True when `tag` identifies `manifest` via a contributed language id/file
 # extension, or the manifest's own name. Substring match on language id lets
 # related tags (e.g. "sdn" / "sdn-graph") line up without a hardcoded table.
@@ -212,7 +212,6 @@ fn _ide_capability_with_live_state(cap: IdeCapability, host: ExtensionHost, mani
                 host.activate_command(command_id)
             if command_id != "" and host.is_active(m.name):
                 state = "activatable"
-                host.register_command_handler(m.name, command_id, "capability truth probe: " + cap.id, _ide_capability_probe_handler)
                 if host.command_handler_registered(command_id):
                     state = "bound"
             IdeCapability(

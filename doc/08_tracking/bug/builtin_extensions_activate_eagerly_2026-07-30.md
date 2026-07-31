@@ -5,9 +5,30 @@
 - **Status:** OPEN — **BLOCKED on a typed provider-handle API**, root cause
   identified and pinned by specs (2026-07-30, lane L-C). Behavior deliberately
   unchanged; the eager step is now a separate, documented function so the
-  eventual fix is a call-site change, not a rewrite.
+  eventual fix is a call-site change, not a rewrite. The CRITICAL sub-issue
+  below (self-fulfilling `bound` probe) is **FIXED 2026-07-31** — see the note
+  at the top of that section. Blocker 1 (sheets/slides registry builtins
+  permanently unreachable without a typed provider handle) is still open.
 
 ## CRITICAL: `bound` is a self-fulfilling probe, not proof anything works
+
+**FIXED 2026-07-31.** `_ide_capability_with_live_state`
+(`src/app/ide/capabilities.spl`) no longer registers `_ide_capability_probe_handler`
+at all -- that function and the registration call are deleted. The gate is now
+a pure read: `if host.command_handler_registered(command_id): state = "bound"`.
+Measured effect on `ide_capabilities_live()`, same synced tree, same run:
+before = 11 of 11 capabilities report `bound`; after = 0 of 11 (all cap at
+`activatable`). That is the expected, correct outcome, not a regression: no
+builtin extension registers a real `CommandRegistry` handler on the host
+`ide_capabilities_live()` builds (the five markdown handlers in
+`editor_controller.spl` are registered on a separate, app-owned host
+instance, never on the one the census inspects). So today `bound` is honestly
+unreachable for every capability, and the census's true ceiling is
+`activatable`. `test/01_unit/app/ide/capability_truth_spec.spl` now asserts
+this directly: markdown reaches `activatable` not `bound`, and a repo-wide
+"no capability is ever `bound`" invariant guards against the self-probe
+regressing back in. The historical record of the original defect (as found
+2026-07-30) is kept below for context.
 
 Verified directly in `src/app/ide/capabilities.spl:213-215`
 (`_ide_capability_with_live_state`):

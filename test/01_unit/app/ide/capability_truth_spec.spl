@@ -2,10 +2,20 @@
 #
 # Proves `app.ide.capabilities` computes `state` against the REAL extension
 # kernel rather than declaring it: a capability backed by a builtin manifest
-# (markdown) reaches "bound" through actual CommandRegistry registration, a
+# (markdown) reaches "activatable" through the real lazy-activation path, a
 # fabricated capability id that no builtin backs stays at "declared", and the
 # plugin registry's SDN-backed decoder (`app.plugin.registry`) reproduces the
 # same PluginEntry shape the old hand-rolled parser produced.
+#
+# "bound" requires a real CommandRegistry handler contributed by the
+# extension itself -- this spec used to self-register a probe handler and
+# then check that the probe's own write succeeded, which made "bound"
+# unfalsifiable (see
+# doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
+# "CRITICAL"). `_ide_capability_with_live_state` no longer writes anything;
+# it only reads `host.command_handler_registered(command_id)`. No builtin
+# extension registers a real handler on the host `ide_capabilities_live()`
+# builds today, so every capability's honest ceiling is "activatable".
 
 use std.spec.{describe, it, expect}
 use app.ide.capabilities.{ide_capability_new, ide_capabilities_live, ide_capability_live_state}
@@ -14,14 +24,14 @@ use app.plugin.registry.{parse_plugin_manifest_text, plugin_manifest_to_text, pl
 
 describe "capability truth: live state against the real extension kernel":
 
-    it "the markdown capability reaches 'bound' via the real kernel":
+    it "the markdown capability reaches 'activatable' via the real kernel, not a self-fulfilling 'bound'":
         var markdown_state = ""
         var markdown_check = ""
         for cap in ide_capabilities_live():
             if cap.id == "markdown":
                 markdown_state = cap.state
                 markdown_check = cap.feature_check
-        expect(markdown_state).to_equal("bound")
+        expect(markdown_state).to_equal("activatable")
         expect(markdown_check).to_equal("md.preview")
 
     it "a fabricated capability id with no builtin backing stays 'declared'":
@@ -44,18 +54,31 @@ describe "capability truth: live state against the real extension kernel":
                 all_non_empty = false
         expect(all_non_empty).to_equal(true)
 
-    it "a capability with no matching builtin manifest stays below 'bound'":
+    it "sheets has a matching builtin manifest and reaches 'activatable', but no capability reaches 'bound'":
+        # sheets-function-registry-demo matches the "sheets" capability's
+        # xlsx/csv compat tags and declares its own command id as an
+        # activation event, so sheets legitimately clears "indexed" and
+        # "activatable". "bound" is a separate, higher bar: it requires a
+        # real CommandRegistry handler, and nothing wires one up for any
+        # builtin today (see the file header). Asserting the full-list
+        # invariant (not just sheets) is a regression guard against the
+        # self-probe bug reappearing and inflating every capability again.
         var sheets_state = ""
+        var any_bound = false
         for cap in ide_capabilities_live():
             if cap.id == "sheets":
                 sheets_state = cap.state
-        expect(sheets_state).to_equal("declared")
+            if cap.state == "bound":
+                any_bound = true
+        expect(sheets_state).to_equal("activatable")
+        expect(any_bound).to_equal(false)
 
-    it "the feature_report capability-truth render shows the higher and lower states":
+    it "the feature_report capability-truth render shows the honest ceiling, never a self-probed 'bound'":
         val report = ide_capability_truth_report().join("\n")
         expect(report).to_contain("capability-truth:")
-        expect(report).to_contain("markdown: state=bound check=md.preview")
-        expect(report).to_contain("sheets: state=declared")
+        expect(report).to_contain("markdown: state=activatable check=md.preview")
+        expect(report).to_contain("sheets: state=activatable")
+        expect(report).to_not_contain("state=bound")
 
     # Lane F5 (remaining builtin manifests): draw-sdd, designer, base, math,
     # mail, planner, agent-dashboard, and db-admin each now have a builtin

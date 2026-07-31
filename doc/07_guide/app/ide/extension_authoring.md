@@ -132,16 +132,22 @@ commands that have a real implementation behind them — `ide_capabilities_live(
 reports `declared → indexed → activatable → bound`, and a command with no
 handler stops at `activatable`, visibly.
 
-> **`bound` is weaker than it sounds.** `_ide_capability_with_live_state`
-> (`src/app/ide/capabilities.spl:213-215`) registers a probe command handler
-> and then checks whether that same handler is registered — it proves the
-> command id *can be bound*, not that any real caller invokes it or that a
-> real handler backs it in production. Combined with builtins activating
-> eagerly (see the callout in §2 above), a builtin-backed capability is nearly
-> guaranteed to report `bound`. Do not treat "`declared → activatable → bound`"
-> progressing to `bound` as proof the feature works end to end. Detail:
+> **`bound` requires a real handler — and no builtin registers one yet.**
+> `_ide_capability_with_live_state` (`src/app/ide/capabilities.spl`) used to
+> register its own probe command handler and then check whether that same
+> handler was registered — a write-then-check-your-own-write that made
+> `bound` unfalsifiable (fixed 2026-07-31, see
 > `doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md` §
-> CRITICAL.
+> CRITICAL). It now only reads `host.command_handler_registered(command_id)`
+> — a real check. Today that check is false for every builtin: none of them
+> register a `CommandRegistry` handler on the host `ide_capabilities_live()`
+> builds (the five markdown handlers in `editor_controller.spl` are
+> registered on a *different*, app-owned host). So every builtin-backed
+> capability's honest ceiling is `activatable`, not `bound`, until a builtin
+> actually wires a real handler through `register_command_handler`. Do not
+> treat "`declared → activatable → bound`" progressing to `bound` as proof
+> the feature works end to end even once one does — `bound` only proves the
+> command id resolves to *a* handler, not that it is correct.
 
 ## 6. Security model
 
