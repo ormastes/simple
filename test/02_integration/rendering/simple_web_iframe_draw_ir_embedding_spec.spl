@@ -1,14 +1,21 @@
 # @tag: integration, rendering, web, draw_ir, iframe
 """
-Canonical iframe `srcdoc` DrawIR embedding.  This exercises the Web semantic
-owner and the existing Engine2D executor; it deliberately does not migrate the
-legacy software-pixel iframe callers before parity evidence exists.
+Canonical iframe `srcdoc` DrawIR embedding. This exercises the Web semantic
+owner and existing Engine2D executor while retaining the legacy software-pixel
+path as a diagnostic oracle until qualified parity evidence exists.
 """
 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     SimpleWebLayoutDrawIrResult,
-    simple_web_layout_render_html_draw_ir_result
+    simple_web_layout_render_html_draw_ir_cpu_bitmap,
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_render_html_gpu_frame,
+    simple_web_layout_render_html_iframe_pixels_diagnostic,
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_render_html_software_pixels_at_scroll,
+    simple_web_layout_render_html_software_pixels_traced,
+    simple_web_layout_render_html_software_result
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
     simple_web_render_draw_ir_composition_with_cpu_backend
@@ -55,6 +62,30 @@ fn _iframe_has_placeholder(composition: DrawIrComposition) -> bool:
             ):
                 return true
     false
+
+fn expect_iframe_composition_parity(html: text, width: i32, height: i32):
+    val canonical = simple_web_render_draw_ir_composition_with_cpu_backend(
+        simple_web_layout_render_html_draw_ir_cpu_bitmap(html, width, height),
+        width, height
+    )
+    expect(simple_web_layout_render_html_iframe_pixels_diagnostic(
+        html, width, height
+    )).to_equal(canonical)
+    expect(simple_web_layout_render_html_software_pixels_traced(
+        html, width, height
+    )).to_equal(canonical)
+    expect(simple_web_layout_render_html_software_result(
+        html, width, height
+    ).pixels).to_equal(canonical)
+    expect(simple_web_layout_render_html_software_pixels(
+        html, width, height
+    )).to_equal(canonical)
+    expect(simple_web_layout_render_html_gpu_frame(
+        html, width, height
+    ).fb).to_equal(canonical)
+    expect(simple_web_layout_render_html_software_pixels_at_scroll(
+        html, width, height, 0
+    )).to_equal(canonical)
 
 fn _iframe_opacity_batch_count(composition: DrawIrComposition) -> i32:
     var count = 0
@@ -135,7 +166,9 @@ describe "Simple Web iframe srcdoc through DrawIR":
         expect(fractional_pixels[10 + 10 * 40]).to_equal(0xFFC3C3C3u32)
         expect(fractional_pixels[35 + 10 * 40]).to_equal(0xFFF7A1A1u32)
 
-        step("Retire legacy iframe pixel blitting after parity")
+        step("Embed the iframe composition without a pixel blit")
+        expect_iframe_composition_parity(html, 100, 60)
+        expect_iframe_composition_parity(clipped, 60, 40)
         expect(_iframe_has_image_or_material_or_hit(basic.composition)).to_equal(false)
         val inert_child = "<html><body style='margin:0'><iframe width='40' height='30' style='display:block' srcdoc=\"&lt;body style='margin:0;background-color:#22c55e'&gt;&lt;script&gt;fetch('https://invalid.example/')&lt;/script&gt;&lt;img src='https://invalid.example/x.png'&gt;&lt;input value='blocked'&gt;&lt;/body&gt;\"></iframe></body></html>"
         val inert_result = simple_web_layout_render_html_draw_ir_result(
