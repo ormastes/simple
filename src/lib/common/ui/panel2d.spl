@@ -1,0 +1,436 @@
+# panel2d.spl — Lane L2 (decision D3) of
+# doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md:
+# ONE panel abstraction = DrawIR group + HitProxy forest + optional scroll
+# model + opacity_milli + layer. Used by internal windows, the taskbar, and
+# in-game HUD objects.
+#
+# A Panel2D projects to exactly one DrawIrBatch: the panel's rect/layer/
+# opacity_milli/clip become the batch embedding, and every descendant child
+# panel becomes a DrawIrCommand with a populated `hit_rect` (batch-local
+# coordinates) and a `parent_id` chain, so the existing
+# draw_ir_hit_bridge.draw_ir_hit_forest lifts the whole panel set into the
+# interaction core's HitProxy2D forest — this module reimplements NO hit
+# logic. Scrolled content is offset through the command origin (the same
+# batch-origin trick widget_draw_ir's _build_scroll_batch uses), and scroll
+# state consolidates on the ONE blessed model: scroll_surface.ScrollModel +
+# max_scroll clamping.
+#
+# Transparency contract (D3): `opacity_milli` is RENDER-ONLY. Pointer
+# transparency is expressed solely via `pointer_policy`
+# (POINTER_POLICY_NONE = click-through); a translucent panel still hit-tests
+# by its bounds. This mirrors hit_proxy.spl's rule that rendering opacity is
+# deliberately not a HitProxy2D field.
+#
+# Value semantics: Panel2D is a struct and arrays are value types, so every
+# "mutation" helper returns the updated panel (set); callers must use the
+# returned value.
+
+use std.common.ui.draw_ir.{
+    DrawIrBatch, DrawIrComposition, DrawIrCommand,
+    draw_ir_embedding_config, draw_ir_batch, draw_ir_composition,
+    draw_ir_rect, draw_ir_rect_bounds, draw_ir_text, draw_ir_text_resolved_font,
+    DRAW_IR_BACKEND_AUTO
+}
+use std.common.text_layout.font_renderer.{FontRenderer, resolve_font_metrics_with_language}
+use std.common.ui.scroll_surface.{ScrollModel, max_scroll}
+use std.common.ui.taskbar_model.{TaskbarModel}
+use std.common.engine.interaction.hit_proxy.{
+    HitProxy2D, POINTER_POLICY_AUTO, POINTER_POLICY_NONE
+}
+use std.common.engine.interaction.draw_ir_hit_bridge.{
+    DrawIrHitForest, draw_ir_hit_forest, draw_ir_node_id
+}
+use std.common.engine.interaction.hit_test.{hit_stack}
+use std.common.engine.interaction.event_route.{EventListener2D, dispatch}
+use std.common.engine.interaction.pointer_event.{PointerEvent2D, POINTER_WHEEL}
+
+# Font selector for panel text (decision D7 -- the FontRenderer hub is the
+# ONE font API; no rasterizer is ever reached directly from Panel2D).
+# Bitmap: deterministic built-in 8x16 VGA glyphs, no file I/O, for
+# baremetal/cheap panels. Vector: routes through the hub's production
+# resolve_font_metrics_with_language path (same one widget_draw_ir's
+# _default_text uses).
+val PANEL_FONT_TIER_BITMAP: i32 = 0
+val PANEL_FONT_TIER_VECTOR: i32 = 1
+val _PANEL_TEXT_COLOR: u32 = 0xFF000000u32
+
+struct PanelRect:
+    """Panel rectangle. Top-level panel rects are absolute (surface)
+    coordinates; child panel rects are relative to their parent panel."""
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+struct Panel2D:
+    """One panel node. `scroll` is only meaningful when `has_scroll` is
+    true (a plain flag instead of an Option payload — Option-in-struct has
+    known engine-divergence landmines); `scroll_offset` is the current
+    scroll position in pixels, clamped to [0, max_scroll(scroll)].
+    `children` is a value tree — child rects are parent-relative and
+    children paint (and therefore hit-rank) above their parent. `has_text`
+    is a plain flag (not an Option payload — same Option-in-struct
+    landmine as `scroll`); when set, `text_value`/`font_tier`/`font_size`/
+    `font_family` are consulted by panel_to_draw_ir_batch to emit a
+    measured draw_text command (see panel_text_extents)."""
+    id: text
+    rect: PanelRect
+    layer: i32
+    opacity_milli: i32
+    clip: bool
+    pointer_policy: i32
+    has_scroll: bool
+    scroll: ScrollModel
+    scroll_offset: i32
+    children: [Panel2D]
+    has_text: bool
+    text_value: text
+    font_tier: i32
+    font_size: i32
+    font_family: text
+
+struct PanelTextExtents:
+    """Measured text extents from the FontRenderer hub (D7). `valid` is
+    false only when the vector tier has no font runtime available (e.g.
+    no font file registered/on disk) -- callers must NOT treat
+    width/line_height as real in that case. draw_ir_text_resolved_font
+    already refuses an invalid/zero measurement on its own and falls back
+    to a plain, unmeasured draw_text command, so an invalid extents value
+    never reaches the DrawIR layer as a fabricated measurement."""
+    valid: bool
+    width: i32
+    line_height: i32
+    advances: [i32]
+    identity: text
+
+struct PanelDispatchResult:
+    """Result of panel_dispatch_pointer. Mirrors event_route's
+    DispatchOutcome fields flat (no nested struct payload) plus the
+    possibly-scrolled panel set. Arrays are value types: the caller MUST
+    adopt `panels` and `remaining_listeners` as its new state.
+    `target_node` is -1 / `target_name` is "" when nothing was hit."""
+    fired_node_ids: [i64]
+    remaining_listeners: [EventListener2D]
+    stopped: bool
+    stopped_immediate: bool
+    default_prevented: bool
+    panels: [Panel2D]
+    target_node: i64
+    target_name: text
+    scrolled: bool
+
+fn panel_rect(x: i32, y: i32, w: i32, h: i32) -> PanelRect:
+    PanelRect(x: x, y: y, w: w, h: h)
+
+fn _no_scroll_model() -> ScrollModel:
+    ScrollModel(total_rows: 0, view_w: 0, view_h: 0)
+
+fn panel2d(id: text, x: i32, y: i32, w: i32, h: i32) -> Panel2D:
+    """Default panel: layer 0, fully opaque, no clip, Auto pointer policy,
+    no scroll, no children."""
+    Panel2D(
+        id: id,
+        rect: panel_rect(x, y, w, h),
+        layer: 0,
+        opacity_milli: 1000,
+        clip: false,
+        pointer_policy: POINTER_POLICY_AUTO,
+        has_scroll: false,
+        scroll: _no_scroll_model(),
+        scroll_offset: 0,
+        children: [],
+        has_text: false,
+        text_value: "",
+        font_tier: PANEL_FONT_TIER_BITMAP,
+        font_size: 16,
+        font_family: "sans"
+    )
+
+fn panel_add_child(p: Panel2D, child: Panel2D) -> Panel2D:
+    """Return `p` with `child` appended (value semantics)."""
+    var out = p
+    var kids = out.children
+    kids.push(child)
+    out.children = kids
+    out
+
+fn panel_with_scroll(p: Panel2D, model: ScrollModel) -> Panel2D:
+    """Return `p` marked scrollable with `model` as its ScrollModel and the
+    offset reset to 0."""
+    var out = p
+    out.has_scroll = true
+    out.scroll = model
+    out.scroll_offset = 0
+    out
+
+fn panel_scroll_by(p: Panel2D, delta: i32) -> Panel2D:
+    """Return `p` scrolled by `delta` pixels, clamped to
+    [0, max_scroll(p.scroll)] (scroll_surface's blessed clamp). A
+    non-scrollable panel is returned unchanged."""
+    if not p.has_scroll:
+        return p
+    var off = p.scroll_offset + delta
+    if off < 0:
+        off = 0
+    val ms = max_scroll(p.scroll)
+    if off > ms:
+        off = ms
+    var out = p
+    out.scroll_offset = off
+    out
+
+fn panel_with_text(p: Panel2D, text_value: text, font_tier: i32, font_size: i32) -> Panel2D:
+    """Return `p` carrying `text_value`, measured at `font_size` through
+    `font_tier` (PANEL_FONT_TIER_BITMAP or PANEL_FONT_TIER_VECTOR) at
+    panel_to_draw_ir_batch time. Vector-tier family defaults to "sans";
+    use panel_with_text_family for an explicit family."""
+    panel_with_text_family(p, text_value, font_tier, font_size, "sans")
+
+fn panel_with_text_family(p: Panel2D, text_value: text, font_tier: i32, font_size: i32, family: text) -> Panel2D:
+    """Same as panel_with_text but with an explicit vector-tier `family`
+    (ignored by the bitmap tier)."""
+    var out = p
+    out.has_text = true
+    out.text_value = text_value
+    out.font_tier = font_tier
+    out.font_size = font_size
+    out.font_family = family
+    out
+
+fn _panel_bitmap_text_extents(text_value: text, font_size: i32) -> PanelTextExtents:
+    """Bitmap tier: FontRenderer.bitmap_only() forces the hub's built-in
+    8x16 VGA glyph fallback -- no TTF, no vector toy face, no file I/O,
+    deterministic for ASCII. measure_text_advances is the hub's own
+    metrics-only path (never rasterizes pixels for this)."""
+    var renderer = FontRenderer.bitmap_only()
+    val advances = renderer.measure_text_advances(text_value, font_size)
+    var width = 0
+    for advance in advances:
+        width = width + advance
+    val scale = if font_size > 16: font_size / 16 else: 1
+    PanelTextExtents(valid: advances.len() > 0, width: width, line_height: 16 * scale, advances: advances, identity: "bitmap-8x16")
+
+fn _panel_vector_text_extents(text_value: text, font_size: i32, family: text) -> PanelTextExtents:
+    """Vector tier: the SAME hub entry point widget_draw_ir's _default_text
+    uses (resolve_font_metrics_with_language) -- production stb_truetype
+    path when a real font is registered/available, honestly `valid: false`
+    otherwise. No fourth rasterizer, no fabricated measurement."""
+    val resolved = resolve_font_metrics_with_language(family, text_value, font_size, "und")
+    PanelTextExtents(valid: resolved.valid, width: resolved.width, line_height: resolved.line_height, advances: resolved.advances, identity: resolved.identity)
+
+fn panel_text_extents(text_value: text, font_tier: i32, font_size: i32, family: text) -> PanelTextExtents:
+    """Measure `text_value` through the FontRenderer hub for the selected
+    tier. Empty text or a non-positive font_size is reported invalid
+    rather than measured."""
+    if text_value == "" or font_size <= 0:
+        return PanelTextExtents(valid: false, width: 0, line_height: 0, advances: [], identity: "")
+    if font_tier == PANEL_FONT_TIER_VECTOR:
+        return _panel_vector_text_extents(text_value, font_size, family)
+    _panel_bitmap_text_extents(text_value, font_size)
+
+fn _panel_leaf_command(id: text, cx: i32, cy: i32, w: i32, h: i32, has_text: bool, text_value: text, font_tier: i32, font_size: i32, font_family: text, parent_name: text) -> DrawIrCommand:
+    """One panel's DrawIrCommand at batch-local (cx, cy). Non-text panels
+    keep the original opaque rect + declared-size hit_rect unchanged. Text
+    panels route through panel_text_extents (the FontRenderer hub) and use
+    the MEASURED extents for both the emitted draw_text command and the
+    hit_rect, so a text panel is hit-testable at its actual measured size,
+    never a guess (falls back to the panel's declared w/h only when the
+    hub reports an invalid measurement, e.g. vector tier with no font
+    runtime available)."""
+    if not has_text:
+        var cmd = draw_ir_rect(id, cx, cy, w, h, 0)
+        cmd.hit_rect = draw_ir_rect_bounds(cx, cy, w, h)
+        cmd.parent_id = parent_name
+        return cmd
+    val extents = panel_text_extents(text_value, font_tier, font_size, font_family)
+    var cmd = if extents.valid:
+        draw_ir_text_resolved_font(id, cx, cy, text_value, _PANEL_TEXT_COLOR, font_family, extents.identity, extents.advances, extents.width, extents.line_height, font_size)
+    else:
+        draw_ir_text(id, cx, cy, text_value, _PANEL_TEXT_COLOR)
+    val hit_w = if extents.valid: extents.width else: w
+    val hit_h = if extents.valid: extents.line_height else: h
+    cmd.hit_rect = draw_ir_rect_bounds(cx, cy, hit_w, hit_h)
+    cmd.parent_id = parent_name
+    cmd
+
+fn _emit_children(children: [Panel2D], ox: i32, oy: i32, parent_name: text, mut cmds: [DrawIrCommand]):
+    """Flatten child panels into batch-local DrawIrCommands. (ox, oy) is
+    the accumulated batch-local origin of the parent (already including any
+    scroll offset). `parent_name` == "" parents the command to the batch
+    group (draw_ir_hit_bridge's default); otherwise the bridge chains it to
+    the named panel's node."""
+    var i = 0
+    val n = children.len()
+    while i < n:
+        val c = children[i]
+        val cx = ox + c.rect.x
+        val cy = oy + c.rect.y
+        cmds.push(_panel_leaf_command(c.id, cx, cy, c.rect.w, c.rect.h, c.has_text, c.text_value, c.font_tier, c.font_size, c.font_family, parent_name))
+        var child_oy = cy
+        if c.has_scroll:
+            child_oy = cy - c.scroll_offset
+        _emit_children(c.children, cx, child_oy, c.id, cmds)
+        i = i + 1
+
+fn panel_to_draw_ir_batch(p: Panel2D) -> DrawIrBatch:
+    """Project one panel to a DrawIrBatch. The embedding carries the
+    panel's x/y/w/h/layer/opacity_milli/clip; descendants become commands
+    with hit_rects in batch-local coordinates, shifted by -scroll_offset
+    when the panel scrolls (embedding re-adds the origin, exactly like
+    widget_draw_ir's scroll batches)."""
+    var cmds: [DrawIrCommand] = []
+    var oy = 0
+    if p.has_scroll:
+        oy = 0 - p.scroll_offset
+    if p.has_text:
+        # "#text" keeps this leaf's node id distinct from the batch group's
+        # (both would otherwise hash from the same p.id, and
+        # draw_ir_hit_bridge refuses to parent a leaf to itself).
+        cmds.push(_panel_leaf_command("{p.id}#text", 0, oy, p.rect.w, p.rect.h, true, p.text_value, p.font_tier, p.font_size, p.font_family, ""))
+    _emit_children(p.children, 0, oy, "", cmds)
+    val emb = draw_ir_embedding_config(
+        "panel2d-{p.id}", p.id, p.rect.x, p.rect.y, p.rect.w, p.rect.h,
+        p.layer, p.opacity_milli, p.clip
+    )
+    draw_ir_batch("panel2d-{p.id}", DRAW_IR_BACKEND_AUTO, emb, cmds)
+
+fn panels_to_composition(panels: [Panel2D]) -> DrawIrComposition:
+    """Project a panel set to a DrawIrComposition (one batch per top-level
+    panel, array order == paint order at equal layer)."""
+    var batches: [DrawIrBatch] = []
+    var i = 0
+    val n = panels.len()
+    while i < n:
+        batches.push(panel_to_draw_ir_batch(panels[i]))
+        i = i + 1
+    draw_ir_composition("panel2d-composition", "panel2d:{n}", DRAW_IR_BACKEND_AUTO, batches)
+
+fn _collect_policies(panels: [Panel2D], inherited: i32, mut ids: [i64], mut policies: [i32]):
+    """Collect (node_id, effective pointer policy) pairs for every panel
+    whose effective policy is not Auto. A panel's non-Auto policy is
+    inherited by its subtree (a click-through panel's content is
+    click-through too) unless a descendant overrides it."""
+    var i = 0
+    val n = panels.len()
+    while i < n:
+        val p = panels[i]
+        var eff = inherited
+        if p.pointer_policy != POINTER_POLICY_AUTO:
+            eff = p.pointer_policy
+        if eff != POINTER_POLICY_AUTO:
+            ids.push(draw_ir_node_id(p.id))
+            policies.push(eff)
+        _collect_policies(p.children, eff, ids, policies)
+        i = i + 1
+
+fn panel_hit_forest(panels: [Panel2D]) -> DrawIrHitForest:
+    """Lift a panel set into the interaction core's hit forest:
+    panels_to_composition -> draw_ir_hit_bridge.draw_ir_hit_forest (the ONE
+    hit source — no hit logic here), then stamp each panel's pointer_policy
+    onto its proxy (the bridge defaults every proxy to Auto; opacity_milli
+    is never consulted — render-only per D3). Proxies are rebuilt rather
+    than mutated in place so the result is engine-agnostic."""
+    val forest = draw_ir_hit_forest(panels_to_composition(panels))
+    var ids: [i64] = []
+    var policies: [i32] = []
+    _collect_policies(panels, POINTER_POLICY_AUTO, ids, policies)
+    if ids.len() == 0:
+        return forest
+    var out: [HitProxy2D] = []
+    var i = 0
+    val n = forest.proxies.len()
+    while i < n:
+        val src = forest.proxies[i]
+        var prx = HitProxy2D.create(src.node_id, src.left, src.top, src.right, src.bottom)
+        prx.stacking_context_order = src.stacking_context_order
+        prx.render_layer = src.render_layer
+        prx.z_index = src.z_index
+        prx.tree_order = src.tree_order
+        prx.insertion_sequence = src.insertion_sequence
+        prx.pointer_policy = src.pointer_policy
+        prx.enabled = src.enabled
+        prx.visible = src.visible
+        var k = 0
+        val pn = ids.len()
+        while k < pn:
+            if ids[k] == src.node_id:
+                prx.pointer_policy = policies[k]
+            k = k + 1
+        out.push(prx)
+        i = i + 1
+    DrawIrHitForest(proxies: out, parents: forest.parents, node_names: forest.node_names)
+
+fn panel_dispatch_pointer(panels: [Panel2D], event: PointerEvent2D, listeners: [EventListener2D]) -> PanelDispatchResult:
+    """Resolve `event` against the panel set's hit forest and run the full
+    capture -> target -> bubble dispatch (hit_stack + event_route — nothing
+    reimplemented). A POINTER_WHEEL event whose hit resolves inside a
+    scrollable top-level panel scrolls that panel by delta_y (clamped via
+    panel_scroll_by) unless a listener prevented default; the updated panel
+    set is returned in `panels`."""
+    val forest = panel_hit_forest(panels)
+    val hit = hit_stack(forest.proxies, forest.parents, event.x, event.y)
+    var ev = event
+    ev.target = hit.primary
+    val outcome = dispatch(ev, listeners, hit.ancestor_path)
+
+    var out_panels = panels
+    var scrolled = false
+    if event.kind == POINTER_WHEEL and hit.primary != -1 and not outcome.default_prevented:
+        # ancestor_path root is always the batch group == the top-level
+        # panel owning the hit (leaf parent chains terminate at the group).
+        val root_node = hit.ancestor_path[0]
+        var updated: [Panel2D] = []
+        var i = 0
+        val n = panels.len()
+        while i < n:
+            var p = panels[i]
+            if p.has_scroll and draw_ir_node_id(p.id) == root_node:
+                val before = p.scroll_offset
+                p = panel_scroll_by(p, event.delta_y)
+                if p.scroll_offset != before:
+                    scrolled = true
+            updated.push(p)
+            i = i + 1
+        out_panels = updated
+
+    var target_name = ""
+    if hit.primary != -1 and forest.node_names.contains_key(hit.primary):
+        target_name = forest.node_names[hit.primary]
+
+    PanelDispatchResult(
+        fired_node_ids: outcome.fired_node_ids,
+        remaining_listeners: outcome.remaining_listeners,
+        stopped: outcome.stopped,
+        stopped_immediate: outcome.stopped_immediate,
+        default_prevented: outcome.default_prevented,
+        panels: out_panels,
+        target_node: hit.primary,
+        target_name: target_name,
+        scrolled: scrolled
+    )
+
+fn taskbar_panel(model: TaskbarModel, width: i32, slot_w: i32, height: i32) -> Panel2D:
+    """Taskbar as a Panel2D: one child panel per pinned/running slot, id
+    "taskbar_slot_N" with N the global slot index (pinned first, then
+    running — the same slot order window_scene's _shared_wm_taskbar_dispatch
+    derives arithmetically). Clicks resolve slots via hit_stack instead of
+    x / slot_w division. Chrome layer 1000 keeps the bar above app panels;
+    clip keeps overflowing slots from hit-testing outside the bar."""
+    var bar = panel2d("taskbar", 0, 0, width, height)
+    bar.layer = 1000
+    bar.clip = true
+    val total = (model.pinned.len() + model.running.len()).to_i32()
+    var kids: [Panel2D] = []
+    var i = 0
+    while i < total:
+        kids.push(panel2d("taskbar_slot_{i}", i * slot_w, 0, slot_w, height))
+        i = i + 1
+    bar.children = kids
+    bar
+
+export PanelRect, Panel2D, PanelDispatchResult, PanelTextExtents
+export PANEL_FONT_TIER_BITMAP, PANEL_FONT_TIER_VECTOR
+export panel_rect, panel2d, panel_add_child, panel_with_scroll, panel_scroll_by
+export panel_with_text, panel_with_text_family, panel_text_extents
+export panel_to_draw_ir_batch, panels_to_composition, panel_hit_forest
+export panel_dispatch_pointer, taskbar_panel

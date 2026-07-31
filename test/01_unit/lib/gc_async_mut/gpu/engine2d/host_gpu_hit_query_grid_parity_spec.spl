@@ -1,0 +1,129 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl 80%
+# @tag: unit, engine2d, gpu, hit-query, parity
+#
+# Lane L4 Stage B (D6, unified_2d_event_panel_offload_2026-07-30.md): parity
+# between the Stage A CPU proxy-walk resolver
+# (`engine2d_host_gpu_hit_query_resolve_cpu`, hit_test.hit_stack) and the
+# Stage B CPU software-backend rasterizer
+# (`engine2d_host_gpu_hit_query_resolve_grid`, simple_2d_hit_grid_u32). The
+# GPU ID-buffer kernel is Stage B's on-device counterpart -- no Vulkan/CUDA
+# device is present in this sandbox, so that half is not exercised here; this
+# spec is the CPU-only parity proof the GPU kernel must reproduce once it
+# exists. Every case asserts the SAME node id (or the SAME miss sentinel)
+# from both resolvers for the same composition and point.
+
+use std.spec
+use std.gc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    ENGINE2D_HOST_GPU_HIT_QUERY_MISS,
+    engine2d_host_gpu_hit_query_packet,
+    engine2d_host_gpu_hit_query_resolve_cpu,
+    engine2d_host_gpu_hit_query_resolve_grid
+}
+use std.common.engine.interaction.hit_grid_u32.{simple_2d_hit_grid_rasterize}
+use std.common.engine.interaction.draw_ir_hit_bridge.{draw_ir_hit_forest, draw_ir_node_id}
+use std.common.ui.draw_ir.{
+    DrawIrComposition,
+    draw_ir_batch,
+    draw_ir_box_with_style,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_no_rect,
+    draw_ir_rect_bounds
+}
+
+val GRID_W = 300
+val GRID_H = 300
+
+fn _sample_composition() -> DrawIrComposition:
+    """Same fixture as host_gpu_hit_query_spec.spl: one batch embedded at
+    absolute (100,100) 200x200, one leaf command with a hit_rect at
+    batch-local (10,10,40,20) -> absolute [110,150) x [110,130)."""
+    val embedding = draw_ir_embedding_config("surface1", "panel", 100, 100, 200, 200, 0, 1000, false)
+    val leaf = draw_ir_box_with_style(
+        "panel.button", 0, 0, 40, 20, 0,
+        draw_ir_no_rect(), draw_ir_no_rect(),
+        draw_ir_rect_bounds(10, 10, 40, 20),
+        draw_ir_no_rect(), []
+    )
+    val batch = draw_ir_batch("batch1", "cpu", embedding, [leaf])
+    draw_ir_composition("comp1", "scene1", "cpu", [batch])
+
+fn _overlap_composition() -> DrawIrComposition:
+    """Two batches fully overlapping at [0,100) x [0,100): "low" on layer
+    0, "high" on layer 1, so a point inside both must resolve to "high" --
+    the same topmost-by-layer rule hit_stack applies."""
+    val low_embedding = draw_ir_embedding_config("surface1", "low", 0, 0, 100, 100, 0, 1000, false)
+    val low_leaf = draw_ir_box_with_style(
+        "low.panel", 0, 0, 100, 100, 0,
+        draw_ir_no_rect(), draw_ir_no_rect(),
+        draw_ir_rect_bounds(0, 0, 100, 100),
+        draw_ir_no_rect(), []
+    )
+    val high_embedding = draw_ir_embedding_config("surface1", "high", 0, 0, 100, 100, 1, 1000, false)
+    val high_leaf = draw_ir_box_with_style(
+        "high.panel", 0, 0, 100, 100, 0,
+        draw_ir_no_rect(), draw_ir_no_rect(),
+        draw_ir_rect_bounds(0, 0, 100, 100),
+        draw_ir_no_rect(), []
+    )
+    draw_ir_composition("comp2", "scene2", "cpu", [
+        draw_ir_batch("low_batch", "cpu", low_embedding, [low_leaf]),
+        draw_ir_batch("high_batch", "cpu", high_embedding, [high_leaf])
+    ])
+
+describe "Stage A hit_stack resolver vs Stage B grid resolver -- CPU parity":
+
+    it "agree on a hit at a known point":
+        val comp = _sample_composition()
+        val forest = draw_ir_hit_forest(comp)
+        val grid = simple_2d_hit_grid_rasterize(forest.proxies, GRID_W, GRID_H)
+        val packet = engine2d_host_gpu_hit_query_packet("evt-hit", 120, 120, 3)
+
+        val cpu_readback = engine2d_host_gpu_hit_query_resolve_cpu(packet, forest)
+        val grid_readback = engine2d_host_gpu_hit_query_resolve_grid(packet, grid)
+
+        assert_true(cpu_readback.hit)
+        assert_true(grid_readback.hit)
+        assert_equal(grid_readback.node_id, cpu_readback.node_id)
+        assert_equal(grid_readback.node_id, draw_ir_node_id("panel.button"))
+
+    it "agree on the miss sentinel when the point hits nothing":
+        val comp = _sample_composition()
+        val forest = draw_ir_hit_forest(comp)
+        val grid = simple_2d_hit_grid_rasterize(forest.proxies, GRID_W, GRID_H)
+        val packet = engine2d_host_gpu_hit_query_packet("evt-miss", 5, 5, 3)
+
+        val cpu_readback = engine2d_host_gpu_hit_query_resolve_cpu(packet, forest)
+        val grid_readback = engine2d_host_gpu_hit_query_resolve_grid(packet, grid)
+
+        assert_false(cpu_readback.hit)
+        assert_false(grid_readback.hit)
+        assert_equal(grid_readback.node_id, ENGINE2D_HOST_GPU_HIT_QUERY_MISS)
+        assert_equal(grid_readback.node_id, cpu_readback.node_id)
+
+    it "agree on the topmost-by-layer winner for overlapping proxies":
+        val comp = _overlap_composition()
+        val forest = draw_ir_hit_forest(comp)
+        val grid = simple_2d_hit_grid_rasterize(forest.proxies, GRID_W, GRID_H)
+        val packet = engine2d_host_gpu_hit_query_packet("evt-overlap", 50, 50, 1)
+
+        val cpu_readback = engine2d_host_gpu_hit_query_resolve_cpu(packet, forest)
+        val grid_readback = engine2d_host_gpu_hit_query_resolve_grid(packet, grid)
+
+        assert_true(cpu_readback.hit)
+        assert_true(grid_readback.hit)
+        assert_equal(cpu_readback.node_id, draw_ir_node_id("high.panel"))
+        assert_equal(grid_readback.node_id, cpu_readback.node_id)
+
+    it "agree on a miss point that is inside the grid but outside every proxy":
+        val comp = _overlap_composition()
+        val forest = draw_ir_hit_forest(comp)
+        val grid = simple_2d_hit_grid_rasterize(forest.proxies, GRID_W, GRID_H)
+        val packet = engine2d_host_gpu_hit_query_packet("evt-inside-grid-miss", 150, 150, 1)
+
+        val cpu_readback = engine2d_host_gpu_hit_query_resolve_cpu(packet, forest)
+        val grid_readback = engine2d_host_gpu_hit_query_resolve_grid(packet, grid)
+
+        assert_false(cpu_readback.hit)
+        assert_false(grid_readback.hit)
+        assert_equal(grid_readback.node_id, cpu_readback.node_id)

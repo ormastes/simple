@@ -1,0 +1,146 @@
+# @cover src/lib/common/ui/panel2d.spl 80%
+"""
+# Panel2D text — font hub wiring spec
+
+**Feature IDs:** N/A (Lane L5 of the unified 2D event/panel/offload campaign)
+**Category:** Stdlib / UI
+**Status:** Implemented
+**Plan:** doc/03_plan/ui/unified_2d_engine/unified_2d_event_panel_offload_2026-07-30.md
+(decision D7 — Fonts)
+
+## Overview
+
+Covers the text-carrying additions to `src/lib/common/ui/panel2d.spl`:
+`panel_with_text`/`panel_with_text_family` attach text to a panel,
+`panel_text_extents` measures it through the ONE FontRenderer hub (never a
+rasterizer directly — no fourth rasterizer per D7), and
+`panel_to_draw_ir_batch` emits a measured `draw_text` DrawIrCommand whose
+`hit_rect` is the MEASURED extent, not the panel's declared/guessed rect.
+
+Two font tiers are exercised: bitmap (deterministic built-in 8x16 VGA
+glyphs, no file I/O — `FontRenderer.bitmap_only()`) and vector (the
+production `resolve_font_metrics_with_language` hub path — the same one
+`widget_draw_ir`'s `_default_text` already uses). The vector-tier scenario
+does not fabricate a measurement: it asserts on whatever the hub honestly
+reports, valid or not, so a missing font file on disk is a real, visible
+`valid: false` rather than a shipped fake number.
+"""
+
+use std.spec.*
+use std.common.ui.panel2d.{
+    PanelTextExtents,
+    PANEL_FONT_TIER_BITMAP, PANEL_FONT_TIER_VECTOR,
+    panel2d, panel_add_child, panel_with_text, panel_with_text_family,
+    panel_text_extents, panel_to_draw_ir_batch
+}
+use std.common.ui.draw_ir.{DRAW_IR_COMMAND_TEXT}
+
+describe "panel_text_extents — bitmap tier (deterministic, no file I/O)":
+
+    it "measures ASCII text deterministically at the 8x16 base size":
+        step("measure the same ASCII text twice at font_size 16")
+        val a = panel_text_extents("Hi", PANEL_FONT_TIER_BITMAP, 16, "")
+        val b = panel_text_extents("Hi", PANEL_FONT_TIER_BITMAP, 16, "")
+        assert_true(a.valid)
+        assert_true(b.valid)
+        expect(a.advances.len()).to_equal(2)
+        expect(b.advances.len()).to_equal(2)
+        # Same input, same tier, same size -> identical measurement both times.
+        expect(a.width).to_equal(b.width)
+        expect(a.line_height).to_equal(b.line_height)
+        expect(a.advances[0]).to_equal(b.advances[0])
+        expect(a.advances[1]).to_equal(b.advances[1])
+        # Monospace built-in VGA glyph: 8px advance per char at font_size<=16.
+        expect(a.advances[0]).to_equal(8)
+        expect(a.advances[1]).to_equal(8)
+        expect(a.width).to_equal(16)
+        expect(a.line_height).to_equal(16)
+        expect(a.identity).to_equal("bitmap-8x16")
+
+    it "scales the bitmap advance and line height above the 16px base":
+        step("measure a single char at font_size 32 (2x scale)")
+        val extents = panel_text_extents("A", PANEL_FONT_TIER_BITMAP, 32, "")
+        assert_true(extents.valid)
+        expect(extents.advances.len()).to_equal(1)
+        expect(extents.advances[0]).to_equal(16)
+        expect(extents.width).to_equal(16)
+        expect(extents.line_height).to_equal(32)
+
+    it "reports an empty measurement (not a guess) for empty text":
+        step("measure empty text")
+        val extents = panel_text_extents("", PANEL_FONT_TIER_BITMAP, 16, "")
+        assert_false(extents.valid)
+        expect(extents.width).to_equal(0)
+        expect(extents.line_height).to_equal(0)
+        expect(extents.advances.len()).to_equal(0)
+
+describe "panel_text_extents — vector tier (routes through the FontRenderer hub)":
+
+    it "routes to resolve_font_metrics_with_language and never fabricates a measurement":
+        step("measure through the vector tier with no font pinned/registered by this spec")
+        val extents = panel_text_extents("Hi", PANEL_FONT_TIER_VECTOR, 16, "sans")
+        # The hub is consulted for real; this spec makes no assumption about
+        # whether a system font happens to be resolvable in the environment
+        # it runs in. Either way the result must be internally honest:
+        # invalid means a zeroed-out, unmeasured report (matching
+        # draw_ir_text_resolved_font's own guard), valid means a real,
+        # hub-sourced measurement -- never a value this spec invented.
+        if extents.valid:
+            expect(extents.advances.len()).to_equal(2)
+            assert_true(extents.width >= 0)
+            assert_true(extents.line_height >= 0)
+            # A real hub resolution carries the resolved font's own
+            # identity, never this module's bitmap-tier sentinel string.
+            assert_false(extents.identity == "bitmap-8x16")
+        else:
+            expect(extents.width).to_equal(0)
+            expect(extents.line_height).to_equal(0)
+            expect(extents.advances.len()).to_equal(0)
+
+describe "panel_to_draw_ir_batch — text command emission":
+
+    it "a bitmap-tier text panel's batch carries a measured draw_text command":
+        step("root panel carrying bitmap-tier text 'Hi' at font_size 16")
+        val root = panel_with_text(panel2d("label", 10, 20, 200, 50), "Hi", PANEL_FONT_TIER_BITMAP, 16)
+        val batch = panel_to_draw_ir_batch(root)
+        expect(batch.commands.len()).to_equal(1)
+        val cmd = batch.commands[0]
+        expect(cmd.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(cmd.text_value).to_equal("Hi")
+        expect(cmd.advance_widths.len()).to_equal(2)
+        assert_true(cmd.hit_rect.present)
+        expect(cmd.hit_rect.width).to_equal(16)
+        expect(cmd.hit_rect.height).to_equal(16)
+
+    it "a text child panel is hit-testable at its measured extents, not its declared (guessed) rect":
+        step("child declares a large 200x80 rect but carries short bitmap-tier text")
+        var root = panel2d("root", 0, 0, 300, 300)
+        val child = panel_with_text(panel2d("label", 5, 5, 200, 80), "Hi", PANEL_FONT_TIER_BITMAP, 16)
+        root = panel_add_child(root, child)
+        val batch = panel_to_draw_ir_batch(root)
+        expect(batch.commands.len()).to_equal(1)
+        val cmd = batch.commands[0]
+        expect(cmd.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        # Measured 16x16, NOT the declared 200x80 -- the hit rect follows
+        # panel_text_extents, never the panel's own rect for text panels.
+        expect(cmd.hit_rect.width).to_equal(16)
+        expect(cmd.hit_rect.height).to_equal(16)
+        expect(cmd.hit_rect.x).to_equal(5)
+        expect(cmd.hit_rect.y).to_equal(5)
+
+    it "panel_with_text_family carries an explicit vector-tier family through to the batch":
+        step("root carrying vector-tier text with an explicit family")
+        val root = panel_with_text_family(panel2d("label", 0, 0, 200, 50), "Hi", PANEL_FONT_TIER_VECTOR, 16, "serif")
+        val batch = panel_to_draw_ir_batch(root)
+        expect(batch.commands.len()).to_equal(1)
+        val cmd = batch.commands[0]
+        expect(cmd.kind).to_equal(DRAW_IR_COMMAND_TEXT)
+        expect(cmd.text_value).to_equal("Hi")
+        # Whatever the hub resolves (or honestly fails to), the command
+        # stays hit-testable: _panel_leaf_command always sets a present
+        # hit_rect, falling back to the panel's own declared rect (200x50)
+        # only when the hub reports an invalid/unmeasured extent -- never
+        # leaving the panel unhittable and never fabricating a font metric.
+        assert_true(cmd.hit_rect.present)
+        assert_true(cmd.hit_rect.width == 200 or cmd.hit_rect.width > 0)
+        assert_true(cmd.hit_rect.height == 50 or cmd.hit_rect.height > 0)

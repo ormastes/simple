@@ -15,12 +15,22 @@ use std.gc_async_mut.gpu.engine2d.backend_lane.{
     Engine2dHostGpuLaneResult
 }
 use std.diag.{dbg_stage, dbg_stage_on, dbg_event_hop, dbg_events_on, dbg_count, dbg_counter_value}
+use std.common.engine.interaction.hit_test.{hit_stack}
+use std.common.engine.interaction.draw_ir_hit_bridge.{DrawIrHitForest}
+use std.common.engine.interaction.hit_grid_u32.{HitGridU32, SIMPLE_2D_HIT_GRID_MISS, simple_2d_hit_grid_query}
 
 val ENGINE2D_HOST_GPU_RUNTIME_LANE_HOST: i64 = 1
 val ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU: i64 = 2
 val ENGINE2D_HOST_GPU_RUNTIME_PHASE_BEGIN: i64 = 1
 val ENGINE2D_HOST_GPU_RUNTIME_PHASE_END: i64 = 2
 val ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR: i64 = 1
+# Stage A GPU-offloaded hit query (D6): a new packet kind alongside
+# KIND_DRAW_IR. Stage A is CPU-authoritative -- the queue only proves the
+# packet/readback transport end to end; Stage B (a separate lane) is the
+# GPU ID-buffer kernel that would answer these on-device.
+val ENGINE2D_HOST_GPU_RUNTIME_KIND_HIT_QUERY: i64 = 2
+val ENGINE2D_HOST_GPU_HIT_QUERY_MISS: i64 = -1
+val ENGINE2D_HOST_GPU_HIT_QUERY_SCHEMA: text = "simple-hit-query-v1"
 val ENGINE2D_HOST_GPU_RUNTIME_STATUS_EMPTY: i64 = 0
 val ENGINE2D_HOST_GPU_RUNTIME_STATUS_QUEUED: i64 = 1
 val ENGINE2D_HOST_GPU_RUNTIME_STATUS_SUBMITTED: i64 = 2
@@ -133,6 +143,105 @@ struct Engine2dHostGpuPureQueueState:
 struct Engine2dHostGpuPureQueueDrainStep:
     state: Engine2dHostGpuPureQueueState
     result: Engine2dHostGpuRuntimeDrainResult
+
+# ============================================================================
+# Stage A hit query: packet + scalar readback (D6, unified_2d_event_panel_
+# offload_2026-07-30.md). CPU-authoritative, GPU-verified transport -- no
+# GPU kernel runs here. The packet carries a point and a generation counter;
+# the readback carries one node id (i64), never a framebuffer, so it lives
+# beside Engine2DReadback (pixels+checksum) rather than replacing it.
+# ============================================================================
+
+struct Engine2dHostGpuHitQueryPacket:
+    event_id: text
+    x: i64
+    y: i64
+    generation: i64
+
+struct Engine2dHostGpuHitQueryReadback:
+    event_id: text
+    generation: i64
+    node_id: i64
+    hit: bool
+    diagnostic: text
+
+fn engine2d_host_gpu_hit_query_packet(event_id: text, x: i64, y: i64, generation: i64) -> Engine2dHostGpuHitQueryPacket:
+    Engine2dHostGpuHitQueryPacket(event_id: event_id, x: x, y: y, generation: generation)
+
+fn engine2d_host_gpu_hit_query_payload_text(packet: Engine2dHostGpuHitQueryPacket) -> text:
+    """Wire encoding for a hit-query packet. Schema-tagged the same way
+    Draw IR payloads are (`schema=simple-draw-ir-v2`) so a receiver can
+    tell packet kinds apart from payload_text alone."""
+    "schema=" + ENGINE2D_HOST_GPU_HIT_QUERY_SCHEMA + ";event_id={packet.event_id};x={packet.x};y={packet.y};generation={packet.generation}"
+
+fn _engine2d_hit_query_field_value(part: text) -> text:
+    val kv = part.split("=")
+    if kv.len() < 2:
+        return ""
+    kv[1]
+
+fn engine2d_host_gpu_hit_query_packet_from_payload_text(payload_text: text) -> Engine2dHostGpuHitQueryPacket:
+    """Decode a hit-query packet from its wire payload text (round-trip
+    counterpart of engine2d_host_gpu_hit_query_payload_text). A missing
+    schema tag decodes to an empty-event_id packet -- callers check
+    event_id before trusting the fields."""
+    if not payload_text.contains("schema=" + ENGINE2D_HOST_GPU_HIT_QUERY_SCHEMA):
+        return Engine2dHostGpuHitQueryPacket(event_id: "", x: 0, y: 0, generation: 0)
+    val parts = payload_text.split(";")
+    var event_id = ""
+    var x: i64 = 0
+    var y: i64 = 0
+    var generation: i64 = 0
+    for part in parts:
+        if part.starts_with("event_id="):
+            event_id = _engine2d_hit_query_field_value(part)
+        else if part.starts_with("x="):
+            x = (_engine2d_hit_query_field_value(part).to_int() ?? 0) as i64
+        else if part.starts_with("y="):
+            y = (_engine2d_hit_query_field_value(part).to_int() ?? 0) as i64
+        else if part.starts_with("generation="):
+            generation = (_engine2d_hit_query_field_value(part).to_int() ?? 0) as i64
+    Engine2dHostGpuHitQueryPacket(event_id: event_id, x: x, y: y, generation: generation)
+
+fn engine2d_host_gpu_hit_query_readback_hit(event_id: text, generation: i64, node_id: i64) -> Engine2dHostGpuHitQueryReadback:
+    Engine2dHostGpuHitQueryReadback(event_id: event_id, generation: generation, node_id: node_id, hit: true, diagnostic: "hit")
+
+fn engine2d_host_gpu_hit_query_readback_miss(event_id: text, generation: i64) -> Engine2dHostGpuHitQueryReadback:
+    Engine2dHostGpuHitQueryReadback(event_id: event_id, generation: generation, node_id: ENGINE2D_HOST_GPU_HIT_QUERY_MISS, hit: false, diagnostic: "miss")
+
+fn engine2d_host_gpu_hit_query_apply_readback(current_generation: i64, readback: Engine2dHostGpuHitQueryReadback) -> Engine2dHostGpuHitQueryReadback:
+    """Generation guard: a readback answering a frame other than the
+    current one is discarded rather than surfaced as a hit. Stage B's GPU
+    kernel resolves asynchronously relative to host frame advance, so a
+    late readback for frame N-1 must never land on frame N."""
+    if readback.generation != current_generation:
+        return Engine2dHostGpuHitQueryReadback(event_id: readback.event_id, generation: readback.generation, node_id: ENGINE2D_HOST_GPU_HIT_QUERY_MISS, hit: false, diagnostic: "stale generation discarded")
+    readback
+
+fn engine2d_host_gpu_hit_query_resolve_cpu(packet: Engine2dHostGpuHitQueryPacket, forest: DrawIrHitForest) -> Engine2dHostGpuHitQueryReadback:
+    """Stage A behavior: answer the packet on the CPU using the existing
+    hit_test.hit_stack + draw_ir_hit_bridge forest, routed through the
+    packet/readback transport above. Stage B (separate lane) replaces this
+    body with a GPU ID-buffer texel read; the packet/readback shapes and
+    the generation guard do not change."""
+    val result = hit_stack(forest.proxies, forest.parents, packet.x as i32, packet.y as i32)
+    if result.primary == -1:
+        return engine2d_host_gpu_hit_query_readback_miss(packet.event_id, packet.generation)
+    engine2d_host_gpu_hit_query_readback_hit(packet.event_id, packet.generation, result.primary)
+
+fn engine2d_host_gpu_hit_query_resolve_grid(packet: Engine2dHostGpuHitQueryPacket, grid: HitGridU32) -> Engine2dHostGpuHitQueryReadback:
+    """Stage B behavior: answer the packet with a single grid texel read
+    (`simple_2d_hit_grid_query`) instead of `hit_stack`'s proxy walk. The
+    CPU software backend for the GPU ID-buffer kernel `simple_2d_hit_grid_u32`
+    -- callers rasterize the same DrawIrHitForest's proxies once per frame
+    with `simple_2d_hit_grid_rasterize` and then resolve every hit query
+    against that grid. Same packet/readback shapes and miss sentinel as
+    `engine2d_host_gpu_hit_query_resolve_cpu`; the parity spec
+    (host_gpu_hit_query_grid_parity_spec.spl) proves the two agree."""
+    val node_id = simple_2d_hit_grid_query(grid, packet.x as i32, packet.y as i32)
+    if node_id == SIMPLE_2D_HIT_GRID_MISS:
+        return engine2d_host_gpu_hit_query_readback_miss(packet.event_id, packet.generation)
+    engine2d_host_gpu_hit_query_readback_hit(packet.event_id, packet.generation, node_id)
 
 extern fn rt_host_gpu_queue_emit(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64) -> i64
 extern fn rt_host_gpu_queue_emit_payload(lane_code: i64, kind_code: i64, payload_size: i64, backend_handle: i64, payload_hash: i64) -> i64
@@ -438,6 +547,9 @@ export ENGINE2D_HOST_GPU_RUNTIME_LANE_GPU
 export ENGINE2D_HOST_GPU_RUNTIME_PHASE_BEGIN
 export ENGINE2D_HOST_GPU_RUNTIME_PHASE_END
 export ENGINE2D_HOST_GPU_RUNTIME_KIND_DRAW_IR
+export ENGINE2D_HOST_GPU_RUNTIME_KIND_HIT_QUERY
+export ENGINE2D_HOST_GPU_HIT_QUERY_MISS
+export ENGINE2D_HOST_GPU_HIT_QUERY_SCHEMA
 export ENGINE2D_HOST_GPU_RUNTIME_STATUS_EMPTY
 export ENGINE2D_HOST_GPU_RUNTIME_STATUS_QUEUED
 export ENGINE2D_HOST_GPU_RUNTIME_STATUS_SUBMITTED
@@ -472,3 +584,13 @@ export engine2d_host_gpu_runtime_drain_summary
 export engine2d_host_gpu_runtime_dispatch_draw_ir
 export engine2d_host_gpu_runtime_dispatch_summary
 export engine2d_host_gpu_diag_summary
+export Engine2dHostGpuHitQueryPacket
+export Engine2dHostGpuHitQueryReadback
+export engine2d_host_gpu_hit_query_packet
+export engine2d_host_gpu_hit_query_payload_text
+export engine2d_host_gpu_hit_query_packet_from_payload_text
+export engine2d_host_gpu_hit_query_readback_hit
+export engine2d_host_gpu_hit_query_readback_miss
+export engine2d_host_gpu_hit_query_apply_readback
+export engine2d_host_gpu_hit_query_resolve_cpu
+export engine2d_host_gpu_hit_query_resolve_grid

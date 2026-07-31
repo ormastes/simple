@@ -8,6 +8,18 @@ use common.ui.window.{WindowManager, ManagedWindow}
 use common.ui.window_surface_registry.{UiWindowSurfaceRegistry, UI_SURFACE_KIND_LEGACY}
 use common.ui.taskbar_model.{TaskbarModel}
 use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use common.ui.draw_ir.{
+    DrawIrBatch,
+    DrawIrComposition,
+    DrawIrCommand,
+    draw_ir_batch,
+    draw_ir_composition,
+    draw_ir_embedding_config,
+    draw_ir_rect,
+    draw_ir_rect_bounds
+}
+use common.engine.interaction.draw_ir_hit_bridge.{draw_ir_hit_forest, draw_ir_node_id}
+use common.engine.interaction.hit_test.{hit_stack}
 
 struct SharedWmWindow:
     surface_id: text
@@ -816,11 +828,59 @@ fn _shared_wm_command_lane_dispatch(scene: SharedWmScene, chrome: SharedWmChrome
         return _shared_wm_dispatch_result("command_lane_clock", "clock", "", "", scene)
     _shared_wm_dispatch_result("command_lane", "command_lane", "", "", scene)
 
-fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, button: text) -> SharedWmDispatchResult:
-    val slot_w = 56
-    val slot = x / slot_w
-    if slot >= 0 and slot < taskbar.pinned.len():
-        val app = taskbar.pinned[slot]
+# Slot geometry constant shared by the taskbar hit-forest builder below.
+# Same 56px-per-slot layout the old `x / slot_w` arithmetic used.
+val WM_TASKBAR_SLOT_WIDTH: i32 = 56
+
+fn _wm_taskbar_slot_command(component_id: text, slot_index: i32, taskbar_height: i32) -> DrawIrCommand:
+    var cmd = draw_ir_rect(component_id, slot_index * WM_TASKBAR_SLOT_WIDTH, 0, WM_TASKBAR_SLOT_WIDTH, taskbar_height, 0u32)
+    cmd.hit_rect = draw_ir_rect_bounds(slot_index * WM_TASKBAR_SLOT_WIDTH, 0, WM_TASKBAR_SLOT_WIDTH, taskbar_height)
+    cmd
+
+# Lifts the taskbar's pinned+running slot geometry into the shared 2D
+# interaction core (D1/D2 of the 2026-07-30 unified 2D event plan):
+# builds a one-batch DrawIrComposition whose commands are the slot rects,
+# runs it through draw_ir_hit_bridge.draw_ir_hit_forest, then resolves the
+# point with hit_test.hit_stack -- the SAME hit-test path draw_ir_hit_bridge
+# and panel2d already use. Slot layout (56px each, pinned then running,
+# left to right) is unchanged; only the hit-test mechanism replaces the old
+# manual `x / slot_w` arithmetic. Returns (pinned_index, running_index),
+# each -1 when not that kind; at most one is >= 0 since pinned and running
+# occupy disjoint slot columns.
+fn _wm_taskbar_hit_slot(taskbar: TaskbarModel, taskbar_rect: SharedWmRect, x: i32, y: i32) -> (i32, i32):
+    var commands: [DrawIrCommand] = []
+    var pinned_ids: Dict<i64, i32> = {}
+    var running_ids: Dict<i64, i32> = {}
+    var slot_index = 0
+    var pi = 0
+    while pi < taskbar.pinned.len():
+        val cid = "wm-taskbar-pinned-{pi}"
+        commands.push(_wm_taskbar_slot_command(cid, slot_index, taskbar_rect.height))
+        pinned_ids[draw_ir_node_id(cid)] = pi
+        slot_index = slot_index + 1
+        pi = pi + 1
+    var ri = 0
+    while ri < taskbar.running.len():
+        val cid = "wm-taskbar-running-{ri}"
+        commands.push(_wm_taskbar_slot_command(cid, slot_index, taskbar_rect.height))
+        running_ids[draw_ir_node_id(cid)] = ri
+        slot_index = slot_index + 1
+        ri = ri + 1
+    val embedding = draw_ir_embedding_config("wm-taskbar-hit", "wm-taskbar-hit", taskbar_rect.x, taskbar_rect.y, taskbar_rect.width, taskbar_rect.height, 0, 1000, false)
+    val batch = draw_ir_batch("wm-taskbar-hit", "", embedding, commands)
+    val comp = draw_ir_composition("wm-taskbar-hit", "", "", [batch])
+    val forest = draw_ir_hit_forest(comp)
+    val result = hit_stack(forest.proxies, forest.parents, x, y)
+    if pinned_ids.contains_key(result.primary):
+        return (pinned_ids[result.primary], -1)
+    if running_ids.contains_key(result.primary):
+        return (-1, running_ids[result.primary])
+    (-1, -1)
+
+fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i32, y: i32, taskbar_rect: SharedWmRect, button: text) -> SharedWmDispatchResult:
+    val (pinned_slot, running_slot) = _wm_taskbar_hit_slot(taskbar, taskbar_rect, x, y)
+    if pinned_slot >= 0:
+        val app = taskbar.pinned[pinned_slot]
         if button == "right":
             return _shared_wm_dispatch_result(
                 "unpin_app", app.app_id, app.app_id, "", scene
@@ -846,9 +906,8 @@ fn _shared_wm_taskbar_dispatch(scene: SharedWmScene, taskbar: TaskbarModel, x: i
                 running_window_id, focused_scene
             )
         return _shared_wm_dispatch_result("launch_app", app.app_id, app.app_id, "", scene)
-    val running_index = slot - taskbar.pinned.len()
-    if running_index >= 0 and running_index < taskbar.running.len():
-        val running = taskbar.running[running_index]
+    if running_slot >= 0:
+        val running = taskbar.running[running_slot]
         if button == "right":
             return _shared_wm_dispatch_result(
                 "pin_app", running.app_id, running.app_id,
@@ -931,12 +990,12 @@ fn shared_wm_dispatch_pointer(scene: SharedWmScene, taskbar: TaskbarModel, x: i3
         return _shared_wm_dispatch_result("ignored", "", "", "", scene)
     if button == "right":
         if _shared_wm_rect_contains(chrome.taskbar, x, y):
-            return _shared_wm_taskbar_dispatch(scene, taskbar, x, button)
+            return _shared_wm_taskbar_dispatch(scene, taskbar, x, y, chrome.taskbar, button)
         return _shared_wm_dispatch_result("ignored", "", "", "", scene)
     if _shared_wm_rect_contains(chrome.command_lane, x, y):
         return _shared_wm_command_lane_dispatch(scene, chrome, x)
     if _shared_wm_rect_contains(chrome.taskbar, x, y):
-        return _shared_wm_taskbar_dispatch(scene, taskbar, x, button)
+        return _shared_wm_taskbar_dispatch(scene, taskbar, x, y, chrome.taskbar, button)
     if _shared_wm_rect_contains(chrome.content_area, x, y):
         return _shared_wm_content_dispatch(scene, x, y)
     _shared_wm_dispatch_result("outside", "", "", "", scene)

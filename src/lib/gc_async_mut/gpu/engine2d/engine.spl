@@ -554,6 +554,7 @@ class Engine2D with DrawIrRenderTarget:
             # as "directx-software-emulation".
             var dx_vk = VulkanBackend.create()
             if dx_vk.init(width, height):
+                dx_vk.enable_frame_batching()
                 return Ok(Engine2D(backend: dx_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "directx-on-vulkan"))
 
         if requested_backend == "opencl":
@@ -587,6 +588,7 @@ class Engine2D with DrawIrRenderTarget:
             # Compatibility stays explicit: strict "metal" never claims this lane.
             var metal_vk = VulkanBackend.create()
             if metal_vk.init(width, height):
+                metal_vk.enable_frame_batching()
                 return Ok(Engine2D(backend: metal_vk, capability: backend_capability_default(), baremetal_backend: nil, virtio_gpu_backend: nil, font_owner: Engine2DFontOwner.new(), w: width, h: height, pacing: make_frame_pacing_counters(), selected_backend_name: "metal-on-vulkan"))
 
         if requested_backend == "rocm":
@@ -2471,6 +2473,28 @@ class Engine2D with DrawIrRenderTarget:
             self.backend = vulkan
         else:
             self.backend.present()
+
+    me submit_batch() -> bool:
+        """Flush any backend-buffered draw calls for this frame into one
+        fenced submission. No-op (returns true) on backends that dispatch
+        immediately per primitive."""
+        if val Some(vg) = self.virtio_gpu_backend:
+            return vg.submit_batch()
+        elif val Some(bm) = self.baremetal_backend:
+            return bm.submit_batch()
+        elif self.selected_backend_name == "cuda":
+            val cuda = self.cuda_backend.?
+            val ok = cuda.submit_batch()
+            self.cuda_backend = cuda
+            self.backend = cuda
+            return ok
+        elif val Some(vulkan) = self.vulkan_backend:
+            val ok = vulkan.submit_batch()
+            self.vulkan_backend = Some(vulkan)
+            self.backend = vulkan
+            return ok
+        else:
+            return self.backend.submit_batch()
 
     me read_pixels() -> [u32]:
         # Checksum-free readback: delegate straight to the backend's read_pixels
