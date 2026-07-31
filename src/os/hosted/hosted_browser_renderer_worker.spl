@@ -35,9 +35,8 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResourceRevision
 }
 use common.ui.access.{WinTextActionRequest}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity_at_element_path, be_dom_find_path_to_id,
-    be_dom_focused_id, be_dom_layout_target_key
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomNodeRoute
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     InputTextVisualMap, SimpleWebLayoutHitIndex,
@@ -95,6 +94,10 @@ pub struct HostedBrowserRendererWorkerResult:
     resolved_scroll_y: i32
     max_scroll_y: i32
     image_resource_revisions: [SimpleOsHostGpuImageResourceRevision]
+
+class _WorkerHitTarget:
+    route: DomNodeRoute
+    target_key: text
 
 fn _worker_result_reject(
     reason: text,
@@ -331,11 +334,12 @@ pub class HostedBrowserRendererWorkerSession:
     animation_time_ms: i64
     expected_request_id: i64
     next_outbound_id: i64
-    pressed_target_id: text
+    pressed_target_route: DomNodeRoute?
     pressed_chrome_control: text
     chrome_focus: text
     address_replace_on_text: bool
     last_hit_index: SimpleWebLayoutHitIndex?
+    last_hit_generation: DomDocumentGeneration?
     input_view_target_key: text
     input_view_start_byte: i64
     caret_blink_epoch_ms: i64
@@ -376,11 +380,12 @@ pub class HostedBrowserRendererWorkerSession:
             animation_time_ms: 0,
             expected_request_id: 2,
             next_outbound_id: 2,
-            pressed_target_id: "",
+            pressed_target_route: nil,
             pressed_chrome_control: "",
             chrome_focus: "",
             address_replace_on_text: false,
             last_hit_index: nil,
+            last_hit_generation: nil,
             input_view_target_key: "",
             input_view_start_byte: 0,
             caret_blink_epoch_ms: 0,
@@ -392,20 +397,21 @@ pub class HostedBrowserRendererWorkerSession:
             active_command_capability: ""
         )
 
-    me _target_at(x: i64, y: i64) -> text:
-        if self.last_hit_index == nil:
-            return ""
-        val root = self.browser.dom_root()
+    me _target_at(x: i64, y: i64) -> Result<_WorkerHitTarget, text>:
+        if self.last_hit_index == nil or self.last_hit_generation == nil:
+            return Err("no-semantic-target")
         val target_key = simple_web_layout_hit_test_index(
             self.last_hit_index.unwrap(), x.to_i32(), y.to_i32()
         )
-        if target_key.starts_with("id:"):
-            return target_key.slice(3, target_key.len())
-        if target_key.starts_with("path:"):
-            return be_dom_event_identity_at_element_path(
-                root, target_key.slice(5, target_key.len())
-            )
-        ""
+        if target_key == "":
+            return Err("no-semantic-target")
+        match self.browser.route_for_layout_target_key(
+            target_key, self.last_hit_generation.unwrap()
+        ):
+            Ok(route): Ok(_WorkerHitTarget(
+                route: route, target_key: target_key
+            ))
+            Err(reason): Err(reason)
 
     me _input_byte_at(target_key: text, x: i64) -> i64:
         if self.last_hit_index == nil:
@@ -426,18 +432,16 @@ pub class HostedBrowserRendererWorkerSession:
         self.caret_blink_epoch_ms = self.animation_time_ms
 
     me _text_overlay() -> BrowserTextInputOverlay:
-        val root = self.browser.dom_root()
-        val target_id = be_dom_focused_id(root)
-        if target_id == "":
+        val target_route = match self.browser.focused_dom_route():
+            Some(route): route
+            nil: return browser_text_input_overlay_empty()
+        if not self.browser.ensure_dom_text_selection_route(target_route):
             return browser_text_input_overlay_empty()
-        val path = be_dom_find_path_to_id(root, target_id)
-        if path.len() == 0 or
-           not dom_text_control_selectable(path[path.len() - 1]):
-            return browser_text_input_overlay_empty()
-        val _ = self.browser.ensure_dom_text_selection(target_id)
-        val target_key = be_dom_layout_target_key(root, target_id)
-        if target_key == "":
-            return browser_text_input_overlay_empty()
+        val target_key = match self.browser.layout_target_key_for_route(
+            target_route, self.browser.document_generation()
+        ):
+            Ok(value): value
+            Err(_): return browser_text_input_overlay_empty()
         if self.input_view_target_key != target_key:
             self.input_view_target_key = target_key
             self.input_view_start_byte = 0
@@ -496,29 +500,25 @@ pub class HostedBrowserRendererWorkerSession:
         self.chrome_focus = ""
         self.address_replace_on_text = false
         self.pressed_chrome_control = ""
-        val target_id = self._target_at(action.x, action.y)
-        if target_id == "":
-            self.pressed_target_id = ""
-            self.pressed_pointer_default_prevented = false
-            self.pressed_compat_mouse_suppressed = false
-            if action.pressed:
-                self._clear_page_text_focus_state()
-            return ""
+        val target = match self._target_at(action.x, action.y):
+            Ok(value): value
+            Err(reason):
+                self.pressed_target_route = nil
+                self.pressed_pointer_default_prevented = false
+                self.pressed_compat_mouse_suppressed = false
+                if action.pressed:
+                    self._clear_page_text_focus_state()
+                return if reason == "no-semantic-target": "" else: reason
         if action.pressed:
-            self.pressed_target_id = target_id
-            val pointer_down = self.browser.dispatch_dom_primary_pointer_down(
-                target_id
-            )
-            val focused_id = be_dom_focused_id(self.browser.dom_root())
-            val target_path = be_dom_find_path_to_id(
-                self.browser.dom_root(), target_id
-            )
-            val selectable = (
-                target_path.len() > 0 and
-                dom_text_control_selectable(
-                    target_path[target_path.len() - 1]
-                )
-            )
+            self.pressed_target_route = Some(target.route)
+            val pointer_down = match self.browser.dispatch_dom_primary_pointer_down(
+                target.route
+            ):
+                Ok(value): value
+                Err(reason):
+                    self.pressed_target_route = nil
+                    return reason
+            val focused_route = self.browser.focused_dom_route()
             val default_allowed = not pointer_down.default_prevented
             self.pressed_pointer_default_prevented = (
                 pointer_down.default_prevented
@@ -526,38 +526,49 @@ pub class HostedBrowserRendererWorkerSession:
             self.pressed_compat_mouse_suppressed = (
                 pointer_down.suppress_compat_mouse
             )
-            if selectable and focused_id == target_id and default_allowed:
-                val target_key = be_dom_layout_target_key(
-                    self.browser.dom_root(), target_id
+            val target_focused = match focused_route:
+                Some(route): (
+                    route.generation.value == target.route.generation.value and
+                    route.node_id == target.route.node_id
                 )
+                nil: false
+            if target_focused and default_allowed and
+               self.browser.ensure_dom_text_selection_route(target.route):
                 val source_byte = self._input_byte_at(
-                    target_key, action.x
+                    target.target_key, action.x
                 )
-                val _ = self.browser.set_dom_text_selection(
-                    target_id, source_byte, source_byte
+                val _ = self.browser.set_dom_text_selection_route(
+                    target.route, source_byte, source_byte
                 )
-                self.input_view_target_key = target_key
+                self.input_view_target_key = target.target_key
                 self._reset_caret_blink()
             elif default_allowed:
-                if focused_id == target_id:
+                if target_focused:
                     self.input_view_target_key = ""
                     self.input_view_start_byte = 0
                     self.caret_blink_epoch_ms = 0
                 else:
                     self._clear_page_text_focus_state()
             return ""
-        val pressed_target_id = self.pressed_target_id
+        val pressed_target_route = self.pressed_target_route
         val pointer_default_prevented = (
             self.pressed_pointer_default_prevented
         )
         val suppress_compat_mouse = self.pressed_compat_mouse_suppressed
-        self.pressed_target_id = ""
+        self.pressed_target_route = nil
         self.pressed_pointer_default_prevented = false
         self.pressed_compat_mouse_suppressed = false
-        self.browser.dispatch_dom_primary_pointer_up(
-            target_id, suppress_compat_mouse,
-            pressed_target_id == target_id
-        )
+        val activate_click = match pressed_target_route:
+            Some(pressed_route): (
+                pressed_route.generation.value == target.route.generation.value and
+                pressed_route.node_id == target.route.node_id
+            )
+            nil: false
+        match self.browser.dispatch_dom_primary_pointer_up(
+            target.route, suppress_compat_mouse, activate_click
+        ):
+            Err(reason): return reason
+            Ok(_): ()
         if not pointer_default_prevented:
             self._reset_caret_blink()
         ""
@@ -581,11 +592,10 @@ pub class HostedBrowserRendererWorkerSession:
                 Ok(_): ()
             self.address_replace_on_text = false
             return ""
-        val target_id = be_dom_focused_id(self.browser.dom_root())
-        if target_id != "":
-            val _ = self.browser.append_dom_text_input(
-                target_id, action.value
-            )
+        if val Some(target_route) = self.browser.focused_dom_route():
+            match self.browser.append_dom_text_input_route(target_route, action.value):
+                Err(reason): return reason
+                Ok(_): ()
         self._reset_caret_blink()
         ""
 
@@ -626,19 +636,21 @@ pub class HostedBrowserRendererWorkerSession:
                 self.address_replace_on_text = false
             return ""
         self._reset_caret_blink()
-        val target_id = be_dom_focused_id(self.browser.dom_root())
-        if target_id == "" and action.key_code != 9:
+        val target_route = self.browser.focused_dom_route()
+        if target_route == nil and action.key_code != 9:
             return ""
-        val _ = self.browser.dispatch_dom_keyboard_code_event(
-            target_id, action.key_code, action.pressed, action.shift_key
-        )
+        match self.browser.dispatch_dom_keyboard_code_event(
+            target_route, action.key_code, action.pressed, action.shift_key
+        ):
+            Err(reason): return reason
+            Ok(_): ()
         ""
 
     me _dispatch_chrome(message: BrowserRendererMessage) -> text:
         val action = browser_renderer_action_decode(message)
         if not action.ok:
             return action.reason
-        self.pressed_target_id = ""
+        self.pressed_target_route = nil
         self.pressed_pointer_default_prevented = false
         self.pressed_compat_mouse_suppressed = false
         if action.pressed:
@@ -704,7 +716,7 @@ pub class HostedBrowserRendererWorkerSession:
                 Ok(url):
                     if url != navigation.url:
                         return "navigation-target-mismatch"
-        self.pressed_target_id = ""
+        self.pressed_target_route = nil
         self.pressed_pointer_default_prevented = false
         self.pressed_compat_mouse_suppressed = false
         self.pressed_chrome_control = ""
@@ -1043,7 +1055,9 @@ pub class HostedBrowserRendererWorkerSession:
             )
         val overlay = self._text_overlay()
         val caret_due_ms = self._caret_due_ms(overlay)
+        val frame_generation = self.browser.document_generation()
         self.last_hit_index = nil
+        self.last_hit_generation = nil
         val frame = _worker_frame(
             self.browser, self.render_session,
             message, self.width, self.height,
@@ -1058,6 +1072,7 @@ pub class HostedBrowserRendererWorkerSession:
             self.active_command_capability = ""
         if frame.hit_index != nil:
             self.last_hit_index = frame.hit_index
+            self.last_hit_generation = Some(frame_generation)
             val max_scroll_milli_y = frame.max_scroll_y.to_i64() * 1000
             if self.scroll_milli_y > max_scroll_milli_y:
                 self.scroll_milli_y = max_scroll_milli_y
@@ -1069,6 +1084,7 @@ pub class HostedBrowserRendererWorkerSession:
 
     me close():
         self.last_hit_index = nil
+        self.last_hit_generation = nil
         self.image_resource_revisions = []
         self.active_root_command_request_id = 0
         self.active_command_capability = ""

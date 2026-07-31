@@ -7,8 +7,8 @@ use std.gc_async_mut.web.browser_session.{
 use std.gc_async_mut.web.browser_session_loading.*
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity_at_element_path, be_dom_focused_id
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomNodeRoute
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_animation_instances_next_ms,
@@ -80,6 +80,11 @@ fn _hosted_wasm_hex(data: [u8]) -> text:
         out.push(if piece.len() == 1: "0{piece}" else: piece)
     out.build()
 
+fn _hosted_semantic_target_id(
+    browser: BrowserSession, route: DomNodeRoute
+) -> text:
+    browser.author_id_for_route(route, route.generation) ?? ""
+
 struct HostedWebContentDispatch:
     event_id: i64
     wm_target_id: i64
@@ -97,8 +102,8 @@ class HostedWebContentSession:
     network: FetchEngine
     mutation_revision: i64
     failure_reason: text
-    last_target_id: text
-    pressed_target_id: text
+    last_target_route: DomNodeRoute?
+    pressed_target_route: DomNodeRoute?
     pressed_compat_mouse_suppressed: bool
     published_body_html: text
     started_at_ms: i64
@@ -137,8 +142,8 @@ class HostedWebContentSession:
             ),
             mutation_revision: 0,
             failure_reason: failure_reason,
-            last_target_id: "",
-            pressed_target_id: "",
+            last_target_route: nil,
+            pressed_target_route: nil,
             pressed_compat_mouse_suppressed: false,
             published_body_html: published_html,
             started_at_ms: -1,
@@ -152,7 +157,7 @@ class HostedWebContentSession:
         )
 
     me clear_page_pointer_compatibility_state():
-        self.pressed_target_id = ""
+        self.pressed_target_route = nil
         self.pressed_compat_mouse_suppressed = false
 
     me _refresh_published_body_html():
@@ -160,7 +165,17 @@ class HostedWebContentSession:
             self.browser.current_style_html + self.browser.current_body_html
         )
 
-    me _target_at(x: i32, y: i32) -> text:
+    me _finish_stale_dom_dispatch(reason: text, before_body_html: text):
+        self._cancel_orphaned_network_job()
+        self.last_target_route = nil
+        if reason == "stale_target" or
+           self.browser.current_body_html != before_body_html:
+            self._invalidate_retained_document()
+            self._refresh_published_body_html()
+            self.mutation_revision = self.mutation_revision + 1
+
+    me _target_at(x: i32, y: i32) -> Result<DomNodeRoute, text>:
+        val frame_generation = self.browser.document_generation()
         val animation_time_ms = (
             self.browser.monotonic_time_ms -
             self.browser.animation_start_time_ms
@@ -189,14 +204,11 @@ class HostedWebContentSession:
         val target_key = simple_web_layout_hit_test_index(
             layout.hit_index, x, y
         )
-        if target_key.starts_with("id:"):
-            return target_key.slice(3, target_key.len())
-        if target_key.starts_with("path:"):
-            return be_dom_event_identity_at_element_path(
-                self.browser.dom_root(),
-                target_key.slice(5, target_key.len())
-            )
-        ""
+        if target_key == "":
+            return Err("no-semantic-target")
+        self.browser.route_for_layout_target_key(
+            target_key, frame_generation
+        )
 
     me _invalidate_retained_document():
         self.render_session.document_revision = -1
@@ -204,6 +216,7 @@ class HostedWebContentSession:
     me _commit_network_error(request: BrowserRequest, message: text):
         if request.kind == "document":
             self.clear_page_pointer_compatibility_state()
+            self.last_target_route = nil
         val _ = self.browser.commit_network_response(
             BrowserResponse.create(
                 request_id: request.id,
@@ -221,6 +234,7 @@ class HostedWebContentSession:
     ):
         if request.kind == "document":
             self.clear_page_pointer_compatibility_state()
+            self.last_target_route = nil
         val body = if request.kind == "wasm":
             _hosted_wasm_hex(response.body)
         else:
@@ -529,43 +543,73 @@ class HostedWebContentSession:
                 mutation_revision: self.mutation_revision,
                 reason: self.failure_reason
         )
-        val target_id = self._target_at(x, y)
-        if target_id == "":
-            self.clear_page_pointer_compatibility_state()
-            return HostedWebContentDispatch(
-                event_id: event_id,
-                wm_target_id: self.window_id,
-                semantic_target_id: "",
-                callback_count: 0,
-                mutation_revision: self.mutation_revision,
-                reason: "no-semantic-target"
-            )
+        val before = self.browser.current_body_html
+        val target_route = match self._target_at(x, y):
+            Ok(route): route
+            Err(reason):
+                self.clear_page_pointer_compatibility_state()
+                if reason == "stale_target":
+                    self._finish_stale_dom_dispatch(reason, before)
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: reason
+                )
+        val index = match self.browser.current_dom_identity_index():
+            Some(value): value
+            nil:
+                self.clear_page_pointer_compatibility_state()
+                self._finish_stale_dom_dispatch("stale_target", before)
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: "stale_target"
+                )
         if browser_dom_control_is_effectively_disabled(
-            self.browser.dom_root(), target_id
+            self.browser.dom_root(), index, target_route
         ):
             self.clear_page_pointer_compatibility_state()
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
-                semantic_target_id: target_id,
+                semantic_target_id: _hosted_semantic_target_id(
+                    self.browser, target_route
+                ),
                 callback_count: 0,
                 mutation_revision: self.mutation_revision,
                 reason: "disabled-control"
             )
-        val before = self.browser.current_body_html
         val callback_start = self.browser.dom_callback_count
         if down:
-            self.pressed_target_id = target_id
-            val pointer_down = self.browser.dispatch_dom_primary_pointer_down(
-                target_id
-            )
+            self.pressed_target_route = Some(target_route)
+            val pointer_down = match self.browser.dispatch_dom_primary_pointer_down(
+                target_route
+            ):
+                Ok(value): value
+                Err(reason):
+                    self.clear_page_pointer_compatibility_state()
+                    self._finish_stale_dom_dispatch(reason, before)
+                    return HostedWebContentDispatch(
+                        event_id: event_id,
+                        wm_target_id: self.window_id,
+                        semantic_target_id: _hosted_semantic_target_id(
+                            self.browser, target_route
+                        ),
+                        callback_count: self.browser.dom_callback_count - callback_start,
+                        mutation_revision: self.mutation_revision,
+                        reason: reason
+                    )
             self.pressed_compat_mouse_suppressed = (
                 pointer_down.suppress_compat_mouse
             )
             if pointer_down.mouse_default_action_allowed:
-                self.last_target_id = be_dom_focused_id(
-                    self.browser.dom_root()
-                )
+                self.last_target_route = self.browser.focused_dom_route()
             val callback_count = self.browser.dom_callback_count - callback_start
             self._cancel_orphaned_network_job()
             val changed = self.browser.current_body_html != before
@@ -576,21 +620,41 @@ class HostedWebContentSession:
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
-                semantic_target_id: target_id,
+                semantic_target_id: _hosted_semantic_target_id(
+                    self.browser, target_route
+                ),
                 callback_count: callback_count,
                 mutation_revision: self.mutation_revision,
                 reason: if changed: "" else: "pointer-pressed"
             )
-        val pressed_target_id = self.pressed_target_id
+        val pressed_target_route = self.pressed_target_route
         val suppress_compat_mouse = self.pressed_compat_mouse_suppressed
         self.clear_page_pointer_compatibility_state()
-        self.browser.dispatch_dom_primary_pointer_up(
-            target_id, suppress_compat_mouse,
-            pressed_target_id == target_id and pressed_target_id != ""
-        )
+        val activate_click = match pressed_target_route:
+            Some(pressed_route): (
+                pressed_route.generation.value == target_route.generation.value and
+                pressed_route.node_id == target_route.node_id
+            )
+            nil: false
+        match self.browser.dispatch_dom_primary_pointer_up(
+            target_route, suppress_compat_mouse, activate_click
+        ):
+            Err(reason):
+                self._finish_stale_dom_dispatch(reason, before)
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: _hosted_semantic_target_id(
+                        self.browser, target_route
+                    ),
+                    callback_count: self.browser.dom_callback_count - callback_start,
+                    mutation_revision: self.mutation_revision,
+                    reason: reason
+                )
+            Ok(_): ()
         val callback_count = self.browser.dom_callback_count - callback_start
         self._cancel_orphaned_network_job()
-        self.last_target_id = be_dom_focused_id(self.browser.dom_root())
+        self.last_target_route = self.browser.focused_dom_route()
         val changed = self.browser.current_body_html != before
         if changed:
             self._invalidate_retained_document()
@@ -599,14 +663,16 @@ class HostedWebContentSession:
         HostedWebContentDispatch(
             event_id: event_id,
             wm_target_id: self.window_id,
-            semantic_target_id: target_id,
+            semantic_target_id: _hosted_semantic_target_id(
+                self.browser, target_route
+            ),
             callback_count: callback_count,
             mutation_revision: self.mutation_revision,
             reason: if changed:
                 ""
-            elif pressed_target_id == "":
+            elif pressed_target_route == nil:
                 "pointer-release-without-press"
-            elif pressed_target_id != target_id:
+            elif not activate_click:
                 "pointer-release-target-mismatch"
             else:
                 "no-application-mutation"
@@ -639,25 +705,40 @@ class HostedWebContentSession:
                 mutation_revision: self.mutation_revision,
                 reason: ""
             )
-        if self.last_target_id == "":
+        val before = self.browser.current_body_html
+        val target_route = match self.last_target_route:
+            Some(route): route
+            nil:
+                return HostedWebContentDispatch(
+                    event_id: event_id,
+                    wm_target_id: self.window_id,
+                    semantic_target_id: "",
+                    callback_count: 0,
+                    mutation_revision: self.mutation_revision,
+                    reason: "no-focused-semantic-target"
+                )
+        if target_route.generation.value != self.browser.document_generation().value:
+            self._finish_stale_dom_dispatch("stale_target", before)
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
                 semantic_target_id: "",
                 callback_count: 0,
                 mutation_revision: self.mutation_revision,
-                reason: "no-focused-semantic-target"
+                reason: "stale_target"
             )
-        val before = self.browser.current_body_html
         val callback_start = self.browser.dom_callback_count
-        val updated = self.browser.append_dom_text_input(
-            self.last_target_id, value
+        val updated = self.browser.append_dom_text_input_route(
+            target_route, value
         )
         if val Err(reason) = updated:
+            self._finish_stale_dom_dispatch(reason, before)
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
-                semantic_target_id: self.last_target_id,
+                semantic_target_id: _hosted_semantic_target_id(
+                    self.browser, target_route
+                ),
                 callback_count:
                     self.browser.dom_callback_count - callback_start,
                 mutation_revision: self.mutation_revision,
@@ -665,8 +746,8 @@ class HostedWebContentSession:
             )
         val callback_count = self.browser.dom_callback_count - callback_start
         self._cancel_orphaned_network_job()
-        val active_id = be_dom_focused_id(self.browser.dom_root())
-        self.last_target_id = active_id
+        val active_route = self.browser.focused_dom_route()
+        self.last_target_route = active_route
         val changed = self.browser.current_body_html != before
         if changed:
             self._invalidate_retained_document()
@@ -675,7 +756,9 @@ class HostedWebContentSession:
         HostedWebContentDispatch(
             event_id: event_id,
             wm_target_id: self.window_id,
-            semantic_target_id: self.last_target_id,
+            semantic_target_id: match active_route:
+                Some(route): _hosted_semantic_target_id(self.browser, route)
+                nil: "",
             callback_count: callback_count,
             mutation_revision: self.mutation_revision,
             reason: if changed: "" else: "no-application-mutation"
@@ -746,9 +829,9 @@ class HostedWebContentSession:
                 mutation_revision: self.mutation_revision,
                 reason: "key-down"
             )
-        val focused_id = be_dom_focused_id(self.browser.dom_root())
-        self.last_target_id = focused_id
-        if focused_id == "" and keycode != 9:
+        val focused_route = self.browser.focused_dom_route()
+        self.last_target_route = focused_route
+        if focused_route == nil and keycode != 9:
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
@@ -760,13 +843,16 @@ class HostedWebContentSession:
         val before = self.browser.current_body_html
         val callback_start = self.browser.dom_callback_count
         val dispatched = self.browser.dispatch_dom_keyboard_code_event(
-            focused_id, keycode, pressed, shift_key
+            focused_route, keycode, pressed, shift_key
         )
         if val Err(reason) = dispatched:
+            self._finish_stale_dom_dispatch(reason, before)
             return HostedWebContentDispatch(
                 event_id: event_id,
                 wm_target_id: self.window_id,
-                semantic_target_id: focused_id,
+                semantic_target_id: match focused_route:
+                    Some(route): _hosted_semantic_target_id(self.browser, route)
+                    nil: "",
                 callback_count:
                     self.browser.dom_callback_count - callback_start,
                 mutation_revision: self.mutation_revision,
@@ -774,8 +860,8 @@ class HostedWebContentSession:
             )
         val callback_count = self.browser.dom_callback_count - callback_start
         self._cancel_orphaned_network_job()
-        val active_id = be_dom_focused_id(self.browser.dom_root())
-        self.last_target_id = active_id
+        val active_route = self.browser.focused_dom_route()
+        self.last_target_route = active_route
         val changed = self.browser.current_body_html != before
         if changed:
             self._invalidate_retained_document()
@@ -784,7 +870,9 @@ class HostedWebContentSession:
         HostedWebContentDispatch(
             event_id: event_id,
             wm_target_id: self.window_id,
-            semantic_target_id: active_id,
+            semantic_target_id: match active_route:
+                Some(route): _hosted_semantic_target_id(self.browser, route)
+                nil: "",
             callback_count: callback_count,
             mutation_revision: self.mutation_revision,
             reason: if changed:

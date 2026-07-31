@@ -20,8 +20,12 @@ use std.gc_async_mut.web.browser_session_url.{
 }
 use std.gc_async_mut.web.browser_session_form.{browser_select_value}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute, dom_node_route_parse,
+    dom_node_route_text
+}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_find_by_tag, be_dom_find_path_to_id, be_dom_get_attr,
+    be_dom_find_by_tag, be_dom_get_attr, be_dom_path_for_route,
     be_dom_get_text_content, be_dom_has_attr
 }
 
@@ -58,12 +62,12 @@ fn _browser_control_props(control: text) -> [UiAccessProp]:
         UiAccessProp(key: "control", value: control)
     ]
 
-fn _browser_link_props(href: text, target_id: text) -> [UiAccessProp]:
+fn _browser_link_props(href: text, route: DomNodeRoute) -> [UiAccessProp]:
     [
         UiAccessProp(key: "source", value: BROWSER_SESSION_SOURCE_ID),
         UiAccessProp(key: "control", value: "link"),
         UiAccessProp(key: "href", value: href),
-        UiAccessProp(key: "dom_target", value: target_id)
+        UiAccessProp(key: "dom_target", value: dom_node_route_text(route))
     ]
 
 fn _browser_bookmark_props(href: text) -> [UiAccessProp]:
@@ -73,11 +77,13 @@ fn _browser_bookmark_props(href: text) -> [UiAccessProp]:
         UiAccessProp(key: "href", value: href)
     ]
 
-fn _browser_dom_control_props(control: text, target_id: text) -> [UiAccessProp]:
+fn _browser_dom_control_props(
+    control: text, route: DomNodeRoute
+) -> [UiAccessProp]:
     [
         UiAccessProp(key: "source", value: BROWSER_SESSION_SOURCE_ID),
         UiAccessProp(key: "control", value: control),
-        UiAccessProp(key: "dom_target", value: target_id)
+        UiAccessProp(key: "dom_target", value: dom_node_route_text(route))
     ]
 
 fn _browser_node_prop(node: UiAccessNode, key: text) -> text:
@@ -86,16 +92,16 @@ fn _browser_node_prop(node: UiAccessNode, key: text) -> text:
             return prop.value
     ""
 
-fn _browser_dom_target(node: UiAccessNode) -> text:
-    val node_id = _browser_node_prop(node, "dom_target")
-    if node_id == "":
-        return ""
-    "\u{0000}route-node:{node_id}"
+fn _browser_dom_route(node: UiAccessNode) -> Result<DomNodeRoute, text>:
+    val route_text = _browser_node_prop(node, "dom_target")
+    if route_text == "":
+        return Err("missing_dom_route")
+    dom_node_route_parse(route_text)
 
 fn _browser_dom_widget_id(
-    kind: text, ui_access_revision: i64, node: BeDomNode
+    kind: text, ui_access_revision: i64, route: DomNodeRoute
 ) -> text:
-    "{kind}_{ui_access_revision}_{node.node_id}"
+    "{kind}_{ui_access_revision}_{route.generation.value}_{route.node_id}"
 
 fn _browser_collapse_parent_segments(url: text) -> text:
     var out = url
@@ -111,7 +117,8 @@ fn _browser_collapse_parent_segments(url: text) -> text:
     out
 
 fn _browser_link_nodes(
-    dom: BeDomNode, base_url: text, ui_access_revision: i64
+    dom: BeDomNode, base_url: text, ui_access_revision: i64,
+    document_generation: DomDocumentGeneration
 ) -> [UiAccessNode]:
     val links = be_dom_find_by_tag(dom, "a")
     var nodes: [UiAccessNode] = []
@@ -121,11 +128,14 @@ fn _browser_link_nodes(
         val href = be_dom_get_attr(link, "href")
         val label = be_dom_get_text_content(link).trim()
         if href != "" and label != "":
+            val route = DomNodeRoute(
+                generation: document_generation, node_id: link.node_id
+            )
             val resolved = _browser_collapse_parent_segments(resolve_relative_url(base_url, href))
             nodes.push(_browser_node(
-                _browser_dom_widget_id("link", ui_access_revision, link),
+                _browser_dom_widget_id("link", ui_access_revision, route),
                 "link", label, true, false, ["click", "key"],
-                _browser_link_props(resolved, link.node_id.to_text())
+                _browser_link_props(resolved, route)
             ))
         index = index + 1
     nodes
@@ -208,9 +218,9 @@ fn _browser_disabled_fieldset_blocks_child(
     )
 
 fn browser_dom_control_is_effectively_disabled(
-    dom: BeDomNode, target_id: text
+    dom: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
 ) -> bool:
-    val path = be_dom_find_path_to_id(dom, target_id)
+    val path = be_dom_path_for_route(dom, index, route)
     if path.len() == 0:
         return false
     var control_index = path.len() - 1
@@ -227,18 +237,19 @@ fn browser_dom_control_is_effectively_disabled(
     val target = path[control_index]
     if be_dom_has_attr(target, "disabled"):
         return true
-    var index = 0
-    while index < control_index:
+    var path_index = 0
+    while path_index < control_index:
         if _browser_disabled_fieldset_blocks_child(
-            _browser_fieldset_disable_state(path[index]),
-            path[index + 1]
+            _browser_fieldset_disable_state(path[path_index]),
+            path[path_index + 1]
         ):
             return true
-        index = index + 1
+        path_index = path_index + 1
     false
 
 fn _browser_page_control_nodes(
-    dom: BeDomNode, ui_access_revision: i64
+    dom: BeDomNode, ui_access_revision: i64,
+    document_generation: DomDocumentGeneration
 ) -> [UiAccessNode]:
     var nodes: [UiAccessNode] = []
     val buckets = _BrowserPageControlBuckets(
@@ -250,15 +261,18 @@ fn _browser_page_control_nodes(
     while button_index < buttons.len():
         val control = buttons[button_index]
         val button = control.node
+        val route = DomNodeRoute(
+            generation: document_generation, node_id: button.node_id
+        )
         var label = be_dom_get_text_content(button).trim()
         if label == "":
             label = "Button"
         var access_node = _browser_node(
             _browser_dom_widget_id(
-                "page_button", ui_access_revision, button
+                "page_button", ui_access_revision, route
             ), "button", label,
             control.enabled, false, ["click", "key"],
-            _browser_dom_control_props("page_button", button.node_id.to_text())
+            _browser_dom_control_props("page_button", route)
         )
         access_node.focused = be_dom_has_attr(button, "data-focused")
         nodes.push(access_node)
@@ -269,6 +283,9 @@ fn _browser_page_control_nodes(
     while input_index < inputs.len():
         val control = inputs[input_index]
         val input = control.node
+        val route = DomNodeRoute(
+            generation: document_generation, node_id: input.node_id
+        )
         val declared_type = be_dom_get_attr(input, "type").lower()
         val input_type = if declared_type == "": "text" else: declared_type
         val enabled = control.enabled
@@ -277,20 +294,20 @@ fn _browser_page_control_nodes(
         elif input_type == "checkbox" or input_type == "radio":
             var access_node = _browser_node(
                 _browser_dom_widget_id(
-                    "page_input", ui_access_revision, input
+                    "page_input", ui_access_revision, route
                 ), input_type, be_dom_get_attr(input, "value"),
                 enabled, be_dom_has_attr(input, "checked"), ["click", "key"],
-                _browser_dom_control_props("page_input", input.node_id.to_text())
+                _browser_dom_control_props("page_input", route)
             )
             access_node.focused = be_dom_has_attr(input, "data-focused")
             nodes.push(access_node)
         elif input_type == "button" or input_type == "submit" or input_type == "reset":
             var access_node = _browser_node(
                 _browser_dom_widget_id(
-                    "page_input", ui_access_revision, input
+                    "page_input", ui_access_revision, route
                 ), "button", be_dom_get_attr(input, "value"),
                 enabled, false, ["click", "key"],
-                _browser_dom_control_props("page_button", input.node_id.to_text())
+                _browser_dom_control_props("page_button", route)
             )
             access_node.focused = be_dom_has_attr(input, "data-focused")
             nodes.push(access_node)
@@ -299,10 +316,10 @@ fn _browser_page_control_nodes(
             val visible_value = if input_type == "password": "" else: be_dom_get_attr(input, "value")
             var access_node = _browser_node(
                 _browser_dom_widget_id(
-                    "page_input", ui_access_revision, input
+                    "page_input", ui_access_revision, route
                 ), "textfield", visible_value,
                 editable, false, if editable: ["set_value", "blur"] else: [],
-                _browser_dom_control_props("page_input", input.node_id.to_text())
+                _browser_dom_control_props("page_input", route)
             )
             access_node.focused = be_dom_has_attr(input, "data-focused")
             nodes.push(access_node)
@@ -313,16 +330,19 @@ fn _browser_page_control_nodes(
     while textarea_index < textareas.len():
         val control = textareas[textarea_index]
         val textarea = control.node
+        val route = DomNodeRoute(
+            generation: document_generation, node_id: textarea.node_id
+        )
         val editable = control.enabled and
             not be_dom_has_attr(textarea, "readonly")
         var access_node = _browser_node(
             _browser_dom_widget_id(
-                "page_textarea", ui_access_revision, textarea
+                "page_textarea", ui_access_revision, route
             ), "textfield",
             be_dom_get_text_content(textarea), editable, false,
             if editable: ["set_value", "blur"] else: [],
             _browser_dom_control_props(
-                "page_input", textarea.node_id.to_text()
+                "page_input", route
             )
         )
         access_node.focused = be_dom_has_attr(textarea, "data-focused")
@@ -333,15 +353,18 @@ fn _browser_page_control_nodes(
     while select_index < buckets.selects.len():
         val control = buckets.selects[select_index]
         val select = control.node
+        val route = DomNodeRoute(
+            generation: document_generation, node_id: select.node_id
+        )
         val enabled = control.enabled
         var access_node = _browser_node(
             _browser_dom_widget_id(
-                "page_select", ui_access_revision, select
+                "page_select", ui_access_revision, route
             ), "select",
             browser_select_value(select), enabled, false,
             if enabled: ["set_value"] else: [],
             _browser_dom_control_props(
-                "page_select", select.node_id.to_text()
+                "page_select", route
             )
         )
         access_node.focused = be_dom_has_attr(select, "data-focused")
@@ -357,6 +380,14 @@ fn _browser_action_result(ok: bool, code: text, message: text, target_id: text, 
         source_id: BROWSER_SESSION_SOURCE_ID,
         target_id: target_id,
         action: action
+    )
+
+fn _browser_dom_action_error(
+    reason: text, target_id: text, action: text
+) -> WinTextActionResult:
+    _browser_action_result(
+        false, if reason == "stale_target": "stale_target" else: "action_failed",
+        reason, target_id, action
     )
 
 fn _browser_go_key(value: text) -> bool:
@@ -394,14 +425,16 @@ impl BrowserSession:
             app_id: "simple-browser",
             root_canonical_id: ui_access_canonical_id(BROWSER_SESSION_SURFACE_ID, "root")
         )
+        val document_generation = self.document_generation()
         val link_nodes = _browser_link_nodes(
-            self.current_dom, self.current_url, self.ui_access_revision
+            self.current_dom, self.current_url, self.ui_access_revision,
+            document_generation
         )
         val bookmark_nodes = _browser_bookmark_nodes(
             self, self.ui_access_revision
         )
         val page_control_nodes = _browser_page_control_nodes(
-            self.current_dom, self.ui_access_revision
+            self.current_dom, self.ui_access_revision, document_generation
         )
         val fixed_count = 9
         val node_count = fixed_count + bookmark_nodes.len() + link_nodes.len() + page_control_nodes.len()
@@ -505,22 +538,24 @@ impl BrowserSession:
             )
         val control = _browser_node_prop(node, "control")
         if control == "page_input" and node.kind == "textfield":
-            val dom_target = _browser_dom_target(node)
+            val route = match _browser_dom_route(node):
+                Ok(value): value
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
             if request.action == "blur":
-                match self.blur_dom_text_input(dom_target):
+                match self.blur_dom_text_input_route(route):
                     Ok(_):
                         return _browser_action_result(
                             true, "ok", "input blurred",
                             request.target_id, request.action
                         )
-                    Err(e):
-                        return _browser_action_result(
-                            false, "action_failed", e,
-                            request.target_id, request.action
-                        )
+                    Err(e): return _browser_dom_action_error(
+                        e, request.target_id, request.action
+                    )
             if request.action != "set_value":
                 return _browser_action_result(false, "unsupported_operation", "unsupported input action '{request.action}'", request.target_id, request.action)
-            match self.set_dom_text_input(dom_target, request.text_value):
+            match self.set_dom_text_input_route(route, request.text_value):
                 Ok(dispatch):
                     if dispatch.event.default_prevented:
                         return _browser_action_result(
@@ -528,8 +563,15 @@ impl BrowserSession:
                             request.target_id, request.action
                         )
                     return _browser_action_result(true, "ok", "input updated", request.target_id, request.action)
-                Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
         if control == "page_select":
+            val route = match _browser_dom_route(node):
+                Ok(value): value
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
             if not node.enabled:
                 return _browser_action_result(
                     false, "disabled", "control disabled",
@@ -541,19 +583,19 @@ impl BrowserSession:
                     "unsupported select action '{request.action}'",
                     request.target_id, request.action
                 )
-            val dom_target = _browser_dom_target(node)
-            match self.set_dom_select_value(dom_target, request.text_value):
+            match self.set_dom_select_value_route(route, request.text_value):
                 Ok(changed):
                     return _browser_action_result(
                         true, "ok",
-                        if changed: "selection updated" else: "selection unchanged",
+                        if changed:
+                            "selection updated"
+                        else:
+                            "selection unchanged",
                         request.target_id, request.action
                     )
-                Err(e):
-                    return _browser_action_result(
-                        false, "action_failed", e,
-                        request.target_id, request.action
-                    )
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
         if not node.enabled:
             return _browser_action_result(false, "disabled", "control disabled", request.target_id, request.action)
         if request.action != "click":
@@ -561,9 +603,13 @@ impl BrowserSession:
                 node.kind == "link" or node.kind == "button" or
                 node.kind == "checkbox" or node.kind == "radio"
             ):
-                val dom_target = _browser_dom_target(node)
+                val route = match _browser_dom_route(node):
+                    Ok(value): value
+                    Err(e): return _browser_dom_action_error(
+                        e, request.target_id, request.action
+                    )
                 match self.dispatch_dom_keyboard_activation(
-                    dom_target, request.text_value
+                    route, request.text_value
                 ):
                     Ok(dispatch):
                         val message = if dispatch.default_action_allowed:
@@ -574,11 +620,9 @@ impl BrowserSession:
                             true, "ok", message,
                             request.target_id, request.action
                         )
-                    Err(e):
-                        return _browser_action_result(
-                            false, "action_failed", e,
-                            request.target_id, request.action
-                        )
+                    Err(e): return _browser_dom_action_error(
+                        e, request.target_id, request.action
+                    )
             return _browser_action_result(false, "unsupported_operation", "unsupported action '{request.action}'", request.target_id, request.action)
         if node.widget_id == "back":
             match self.go_back():
@@ -612,19 +656,31 @@ impl BrowserSession:
                 Ok(_): return _browser_action_result(true, "ok", "opened bookmark", request.target_id, request.action)
                 Err(e): return _browser_action_result(false, "action_failed", e, request.target_id, request.action)
         if node.kind == "link":
-            val dom_target = _browser_dom_target(node)
-            if dom_target == "":
-                return _browser_action_result(false, "action_failed", "link missing DOM target", request.target_id, request.action)
-            val dispatch = self.dispatch_dom_event(dom_target, "click", true, true)
-            if dispatch.default_action_allowed:
-                return _browser_action_result(true, "ok", "opened link", request.target_id, request.action)
-            return _browser_action_result(true, "ok", "link event canceled", request.target_id, request.action)
+            val route = match _browser_dom_route(node):
+                Ok(value): value
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
+            match self.dispatch_dom_event_route(route, "click", true, true):
+                Ok(dispatch):
+                    if dispatch.default_action_allowed:
+                        return _browser_action_result(true, "ok", "opened link", request.target_id, request.action)
+                    return _browser_action_result(true, "ok", "link event canceled", request.target_id, request.action)
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
         if control == "page_button" or control == "page_input":
-            val dom_target = _browser_dom_target(node)
-            if dom_target == "":
-                return _browser_action_result(false, "action_failed", "control missing DOM target", request.target_id, request.action)
-            val dispatch = self.dispatch_dom_event(dom_target, "click", true, true)
-            if dispatch.default_action_allowed or dispatch.actions.len() > 0:
-                return _browser_action_result(true, "ok", "control activated", request.target_id, request.action)
-            return _browser_action_result(true, "ok", "control event dispatched", request.target_id, request.action)
+            val route = match _browser_dom_route(node):
+                Ok(value): value
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
+            match self.dispatch_dom_event_route(route, "click", true, true):
+                Ok(dispatch):
+                    if dispatch.default_action_allowed or dispatch.actions.len() > 0:
+                        return _browser_action_result(true, "ok", "control activated", request.target_id, request.action)
+                    return _browser_action_result(true, "ok", "control event dispatched", request.target_id, request.action)
+                Err(e): return _browser_dom_action_error(
+                    e, request.target_id, request.action
+                )
         _browser_action_result(false, "unsupported_operation", "unsupported browser control", request.target_id, request.action)
