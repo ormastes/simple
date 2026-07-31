@@ -1,0 +1,137 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""# CSS outline zero cascade
+
+This scenario proves that a later valid `outline:0` suppresses an earlier
+positive outline through both canonical declaration paths. A dispatch-only
+inline override and a full-reconstruction override lower through shared Web
+style/layout into canonical Draw IR and the existing Engine2D executor.
+
+CSS Outline accepts zero as a line width. The later inline shorthand wins the
+cascade. This bounded integer/px slice does not claim complete outline grammar,
+focus-ring policy, or non-pixel length support.
+
+The SSpec asserts semantic nodes, computed outline width, unchanged layout
+geometry, Draw IR style/commands, zero skipped commands, and every framebuffer
+pixel. Static review is not runtime PASS evidence.
+"""
+
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+val OUTLINE_ZERO_CASCADE_HTML = (
+    "<style>" +
+    "html,body{margin:0;width:10px;height:6px;background:#fff}" +
+    ".target{position:absolute;width:2px;height:2px;" +
+    "background:#2563eb;outline:1px solid #dc2626}" +
+    "#dispatch{left:2px;top:2px}" +
+    "#full{left:6px;top:2px}" +
+    "</style>" +
+    "<div id='dispatch' class='target' style='outline:0'></div>" +
+    "<div id='full' class='target' " +
+    "style='outline:0;visibility:visible'></div>"
+)
+
+fn _outline_zero_node_index(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> i32:
+    var index = 0
+    for node in result.hit_index.nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing outline-zero semantic node: {component_id}")
+    -1
+
+fn _outline_zero_box(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> [i32]:
+    val index = _outline_zero_node_index(result, component_id)
+    val boxes = result.hit_index.boxes
+    [boxes.bx[index], boxes.by[index], boxes.bw[index], boxes.bh[index]]
+
+fn _outline_zero_command(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> DrawIrCommand:
+    for command in result.composition.batches[0].commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing outline-zero Draw IR command: {component_id}")
+    result.composition.batches[0].commands[0]
+
+fn _outline_zero_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing outline-zero computed style: {key}")
+    ""
+
+describe "REQ-WEB-BROWSER-003/004/021: CSS outline zero cascade":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should suppress earlier outlines through both declaration paths":
+        step("Parse the split-cascade outline-zero fixture")
+        val result = simple_web_layout_render_html_draw_ir_result(
+            OUTLINE_ZERO_CASCADE_HTML, 10, 6
+        )
+        val dispatch_index = _outline_zero_node_index(result, "dispatch")
+        val full_index = _outline_zero_node_index(result, "full")
+        expect(result.hit_index.nodes[dispatch_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[full_index].tag).to_equal("div")
+        expect(result.composition.batches[0].source.source_kind).to_equal(
+            "html_ast"
+        )
+
+        step("Resolve zero-width outline Web style and geometry")
+        expect(result.hit_index.styles[dispatch_index].outline_w).to_equal(0)
+        expect(result.hit_index.styles[full_index].outline_w).to_equal(0)
+        expect(_outline_zero_box(result, "dispatch")).to_equal([2, 2, 2, 2])
+        expect(_outline_zero_box(result, "full")).to_equal([6, 2, 2, 2])
+
+        step("Emit canonical Draw IR without outline expansion")
+        val dispatch = _outline_zero_command(result, "dispatch")
+        val full = _outline_zero_command(result, "full")
+        expect([dispatch.kind, full.kind]).to_equal(["rect", "rect"])
+        expect([
+            dispatch.x, dispatch.y, dispatch.width, dispatch.height
+        ]).to_equal([2, 2, 2, 2])
+        expect([full.x, full.y, full.width, full.height]).to_equal(
+            [6, 2, 2, 2]
+        )
+        expect([dispatch.color, full.color]).to_equal([
+            0xFF2563EBu32, 0xFF2563EBu32
+        ])
+        expect(_outline_zero_style(dispatch, "outline-width")).to_equal("0")
+        expect(_outline_zero_style(full, "outline-width")).to_equal("0")
+
+        step("Render exact outline-zero Engine2D pixels")
+        val raster = Engine2dCompositorBackend.create_named(10, 6, "software")
+        val rendered = raster.render_draw_ir_composition(result.composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels).to_equal([
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32
+        ])
