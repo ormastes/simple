@@ -1059,3 +1059,22 @@ manual steps and helpers are frozen in the detail design and system-test plan.
 
 No lane may push. Runtime, docgen, bootstrap, aggregate HTML/CSS, or production
 PASS is not claimed by this design recovery.
+
+## Reviewed browser hardening reconciliation (2026-07-31)
+
+This is an additive current-state ledger. It does not alter earlier rejected,
+stopped, RED, or evidence-held history.
+
+| Lane | Reviewed result | Status |
+|---|---|---|
+| `dom_identity_generation` | The atomic generation-qualified index/route migration, rejected-eval rollback, and stale worker authority cleanup are integrated through `2155e6a31fc`. | STATIC REVIEW PASS; runtime/NFR/10,000-cycle receipt HELD |
+| `disabled_ui_dispatch` | `fbecc67eb77` rejects disabled text controls before shared dispatch. | STATIC REVIEW PASS; qualified execution HELD |
+| `animation_keyframe_perf` | `f57d9bc4600` and `782477146a9` skip unused layout keys and retain empty final keys. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list RED |
+| `hosted_form_action` | `c91fdc0e67b` binds redirects to host-owned form-action authorization and conservatively rejects unauthorized navigation. | STATIC REVIEW PASS; qualified execution HELD |
+| `cors_unsafe_header_preflight` | `bf7dfff029a` wires the Simple broker preflight path. | STATIC/EVIDENCE-HELD; non-Simple/live preflight evidence RED |
+| `tls_mixed_content` | TLS and mixed-content source controls are present. | SOURCE PRESENT / LIVE EVIDENCE HELD |
+
+The reviewed gap stack `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` +
+`ca91c19d7f8` is STATIC REVIEW PASS only for supported `N`/`Npx`, duplicate,
+`initial`, `unset`, and default-parent-inherit gap winners. Nonzero `inherit`,
+`revert-layer`, and qualified execution remain RED.

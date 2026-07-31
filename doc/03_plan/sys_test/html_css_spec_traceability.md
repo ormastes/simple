@@ -609,3 +609,12 @@ missing cancel/restart/detach controls. Iframe is DESIGN-GO only and
 implementation RED until a broker-owned frame identity/origin/capability ledger
 precedes child runtime work. No runtime, docgen, numeric performance, aggregate
 HTML/CSS, or goal PASS is admitted.
+
+## Reviewed bounded reconciliation (2026-07-31)
+
+This matrix extension preserves every prior RED/FAIL row and execution boundary.
+
+| REQ/NFR | Row/group | Support | Executable spec/scenario | Production owners | Required oracle | Manual/result | Status |
+|---|---|---|---|---|---|---|---|
+| REQ-003/004/021 | CSS gap declaration winners | `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` + `ca91c19d7f8` | `flex_gap_zero_cascade_spec.spl`: supported `N`/`Npx`, duplicate, `initial`, `unset`, and default-parent-inherit controls | canonical declaration dispatch/full owners, Style, Web layout, DrawIR, Engine2D | valid winner survives malformed duplicates; exact zero/reset geometry and pixels | reviewed manual; execution/docgen unavailable | STATIC REVIEW PASS; nonzero `inherit` and `revert-layer` RED |
+| REQ-003/004/005/006/007/017/021 | Layout keyframe admission | `f57d9bc4600` + `782477146a9` | hosted worker animation controls for unused layout keys and empty final keyframes | canonical HTML layout renderer, render session, DrawIR, Engine2D | unused keys do not invalidate layout; final empty keyframe is sampled exactly | reviewed manuals; qualified execution unavailable | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list RED |

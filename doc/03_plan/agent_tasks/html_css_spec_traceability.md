@@ -164,3 +164,16 @@ mark a behavior covered.
 - qualified execution provenance;
 - independent review;
 - rebase/file-count safety and GitHub push.
+
+## Reviewed bounded reconciliation (2026-07-31)
+
+This addendum is additive: earlier inventory, RED, FAIL, and execution-held
+rows remain authoritative outside the bounded cases below.
+
+| Lane | Reviewed result | Status |
+|---|---|---|
+| CSS gap declaration winners | `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` + `ca91c19d7f8` retain a valid `gap` winner across supported `N`/`Npx`, duplicate, `initial`, `unset`, and default-parent-inherit cases. | STATIC REVIEW PASS; nonzero `inherit` and `revert-layer` remain RED; qualified execution/docgen held |
+| Layout keyframe work | `f57d9bc4600` skips unused layout keyframes and `782477146a9` preserves an empty final keyframe. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list behavior remain RED |
+
+These rows do not promote aggregate HTML/CSS coverage or a production runtime
+claim.

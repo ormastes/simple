@@ -892,3 +892,18 @@ Ordering rationale: Each milestone builds on the previous. Floats and CSS quick 
 - W3C WGSL Candidate Recommendation Draft, 2026-05-07: https://www.w3.org/TR/WGSL/
 - MDN WebGPU API, checked 2026-05-12: secure-context only and not Baseline across all widely used browsers.
 - Chrome WebGPU overview: https://developer.chrome.com/docs/web-platform/webgpu/overview
+
+## 10. Reviewed bounded hardening state (2026-07-31)
+
+Current source review advances bounded prerequisites only: DOM identity,
+rollback, and stale-worker cleanup are integrated through `2155e6a31fc`; disabled
+UI dispatch is reviewed in `fbecc67eb77`; hosted form-action is conservatively
+host-owned in `c91fdc0e67b`; and CORS unsafe-header preflight is wired in
+`bf7dfff029a`. TLS/mixed-content source controls are present, but live evidence
+is HELD.
+
+`f57d9bc4600` + `782477146a9` pass static review for unused layout keys and an
+empty final keyframe. Animation lifecycle/multi-list stays RED. The reviewed
+gap stack `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` + `ca91c19d7f8` covers
+supported `N`/`Npx`, duplicate, `initial`, `unset`, and default-parent-inherit
+only; nonzero `inherit`, `revert-layer`, and qualified execution remain RED.

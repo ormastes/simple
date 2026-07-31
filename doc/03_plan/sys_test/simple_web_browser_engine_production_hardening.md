@@ -1693,3 +1693,22 @@ They also distinguish outer per-hop SBR2 from inner per-child `SBCP1`, and
 prove direct mode uses no wire. A validator-only check, source scan, Rust seed,
 or bootstrap result cannot promote this RED row. It remains static until one
 admitted pure-Simple focused execution and docgen produce the manual.
+
+## Reviewed browser hardening evidence reconciliation (2026-07-31)
+
+All entries are source/spec/manual review results only; prior RED/FAIL history
+and the absent admitted pure-Simple runtime receipt remain unchanged.
+
+| Requirement area | Evidence | Status |
+|---|---|---|
+| DOM generation routes and rollback | `browser_dom_identity_generation_spec.spl` and its manual, integrated through `2155e6a31fc`, cover index construction, stable dispatch, handler replacement, stale rejection, rejected-eval rollback, and stale worker cleanup. | STATIC REVIEW PASS; runtime/NFR/10,000-cycle receipt HELD |
+| Disabled text input | `fbecc67eb77` uses shared UI access before dispatch. | STATIC REVIEW PASS; execution HELD |
+| Animation layout keys | `f57d9bc4600` and `782477146a9` cover unused layout-key suppression and an empty final keyframe. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle/multi-list RED |
+| Hosted form action | `browser_form_action_authorization_spec.spl` and its manual cover `c91fdc0e67b` host-owned conservative authorization. | STATIC REVIEW PASS; execution HELD |
+| CORS unsafe headers | `browser_fetch_cors_unsafe_header_preflight_spec.spl` and its manual cover `bf7dfff029a` Simple broker OPTIONS admission and denied-policy suppression. | STATIC/EVIDENCE-HELD; non-Simple/live preflight RED |
+| TLS and mixed content | Existing TLS failure and redirect mixed-content source/spec rows remain available. | SOURCE PRESENT / LIVE EVIDENCE HELD |
+
+`be08f84be5c` + `1d16db5e149` + `dc55d6dffde` + `ca91c19d7f8` pass static
+review for supported `N`/`Npx`, duplicate, `initial`, `unset`, and
+default-parent-inherit gap cases only. Nonzero `inherit`, `revert-layer`, and
+qualified execution remain RED.
