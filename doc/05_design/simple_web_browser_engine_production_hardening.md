@@ -1038,7 +1038,7 @@ numeric NFR is selected.
 
 <!-- codex-design -->
 
-Status: **INTEGRATED STATIC CANDIDATE / TARGET EXECUTION HELD**.
+Status: **DESIGN CONTRACT PRESENT / SOURCE HOLD-RED / TARGET EXECUTION HELD**.
 
 Design-audit status: **COMBINED OWNERS/APIS PRESENT; RUNTIME/NFR EVIDENCE HELD**.
 
@@ -1188,6 +1188,12 @@ failure restores every prior component. Replacement during a callback
 discards the old-generation candidate and callbacks; direct
 `SimpleScriptExecutor.bind_dom`, `BrowserRuntimeState.bind_dom`, or
 script-private root publication after binding is forbidden.
+
+Current source is HOLD/RED until rejected evaluation restores
+`pending_script_cookie_writes` and isolated-worker stale press/release clears
+pressed/hit routes plus root-command and command-capability authority. The
+session has no stateful `ScriptHost`; the focused oracle compares actual
+session-owned runtime/SimpleScript roots and committed DOM instead.
 
 Focus, pending Space, selection, and dirty-edit state store routes. Each
 blur/change/focusout phase first checks generation after the previous handler;

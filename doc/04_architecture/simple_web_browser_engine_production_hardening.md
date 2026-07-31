@@ -1083,7 +1083,7 @@ downgrade flags, and mixed SBR1/SBR2 deployments are forbidden.
 
 <!-- codex-design -->
 
-Status: **INTEGRATED STATIC CANDIDATE / TARGET EXECUTION HELD**.
+Status: **DESIGN CONTRACT PRESENT / SOURCE HOLD-RED / TARGET EXECUTION HELD**.
 
 Design-audit status: **COMBINED OWNERS/APIS PRESENT; RUNTIME/NFR EVIDENCE HELD**.
 
@@ -1219,6 +1219,12 @@ callbacks. Handler-triggered replacement discards every old-generation
 candidate component. No script owner or `browser_session_loading.spl`
 `bind_dom` call publishes a private root/listener set ahead of the session
 pair.
+
+Current-source promotion is blocked: rejected evaluation can leak
+`pending_script_cookie_writes`, and isolated-worker stale rejection must clear
+pressed/hit routes plus root-command and command-capability authority. The
+focused SSpec records these as RED acceptance oracles. `BrowserSession` owns no
+stateful `ScriptHost`; its ScriptHost helper is a pure candidate-DOM transform.
 
 All consumers carry `DomNodeRoute`, never author ID or bare `node_id`:
 

@@ -933,7 +933,7 @@ recorded. None of these rows is executable or merged evidence.
 
 <!-- codex-design -->
 
-Status: **INTEGRATED STATIC EVIDENCE / TARGET EXECUTION HELD**. The focused
+Status: **STATIC EVIDENCE PRESENT / SOURCE HOLD-RED / TARGET EXECUTION HELD**. The focused
 executable is
 `test/03_system/app/browser/feature/browser_dom_identity_generation_spec.spl`;
 its complete mirrored manual is
@@ -942,7 +942,7 @@ It traces REQ-WEB-BROWSER-004/007/008/017/018 and
 NFR-WEB-BROWSER-004/005/006/008/014/015/016, but cannot promote them before
 production execution.
 
-Design-audit status: **COMBINED OWNERS/APIS PRESENT; EXECUTION HELD**.
+Design-audit status: **EVIDENCE CONTRACT PRESENT; SOURCE REPAIR REQUIRED**.
 
 The modern SSpec and mirrored manual expose exactly four steps:
 
@@ -961,8 +961,8 @@ direct assertions; no placeholder PASS is present.
 | --- | --- | --- |
 | REQ-WEB-BROWSER-004 | current route -> layout hit -> canonical Draw IR -> Engine2D pixels | oracle present; execution held |
 | REQ-WEB-BROWSER-007 | callable, SimpleScript, UI, label/default, value/style/focus/text routes | oracle present; execution held |
-| REQ-WEB-BROWSER-008 | hosted stale press/release cannot activate equal replacement | oracle present; execution held |
-| REQ-WEB-BROWSER-017 | atomic load/eval/index rollback and retiring callbacks | oracle present; execution held |
+| REQ-WEB-BROWSER-008 | direct/worker stale press-release cannot activate replacement; route/capability cleanup | oracle present; source HOLD/RED |
+| REQ-WEB-BROWSER-017 | atomic script-publish/load/index rollback including cookie-write queue | oracle present; source HOLD/RED |
 | REQ-WEB-BROWSER-018 | exact N/2N work plus versioned 10,000-cycle receipt schema | schema present; numeric receipt held |
 | NFR-WEB-BROWSER-004/005/006/008/014/015/016 | p95, allocations, index lifecycle/bytes, RSS, stale/budget fields | not promoted |
 
@@ -1012,23 +1012,27 @@ replacement. Hosted press, pending Space, selection, UI-access targets, and
 bridge listener keys clear or become stale.
 
 Before replacement, the fixture snapshots `BrowserRuntimeState`, its route to
-JS-heap-object map, callable callbacks, `ScriptHost` and
-`SimpleScriptExecutor` roots, both runner roots, and all route-bound listener
-sets. Replacement proves the new DOM/generation/index and every new script
+JS-heap-object map, callable callbacks, and the session-owned
+`SimpleScriptExecutor` root/runner/index/callbacks. `BrowserSession` owns no
+stateful `ScriptHost`; its ScriptHost helper is a pure candidate-DOM transform,
+covered by unchanged committed DOM. Replacement proves the new DOM/generation/index and every new script
 component publish together while all old-generation callbacks disappear. A
-separate injected index-build/script-staging failure proves every prior
+separate script-driven publish/index-staging failure proves every prior
 component remains byte-for-byte/current-route identical and no candidate root,
-listener, callback, or generation escapes.
+listener, callback, generation, or pending broker cookie write escapes.
 
-The rollback oracle first rejects malformed JavaScript and an oversized
-BrowserSession load, then rejects an injected duplicate-node candidate. All
-three retain the prior DOM, generation/index identity, bridge object map, and
-callable listener roots.
+The rollback oracle drives oversized `innerHTML` plus a cookie write through
+`eval_script` into `publish_dom_snapshot`, then rejects an oversized load and a
+duplicate-node candidate. All retain DOM, generation/index, bridge/callable and
+SimpleScript roots/callbacks, and `pending_script_cookie_writes`. The queue
+assertion is currently RED and blocks source promotion.
 
-The hosted fixture retains the old layout hit key and captured generation,
+The direct and isolated-worker fixtures retain the old layout hit key and captured generation,
 then replaces the document before release. The session
 `route_for_layout_target_key` gate returns `stale_target` without parsing or
-new-index lookup; no release click or focus/edit reaches the replacement.
+new-index lookup; no release click or focus/edit reaches the replacement. The
+worker must clear retained hit/pressed routes and root-command/capability state;
+that cleanup oracle remains source HOLD/RED.
 
 Step 4 submits forged old-generation routes through runtime bridge, UI access,
 pointer release, keyboard activation, edit, focus, label, radio, and form

@@ -647,7 +647,7 @@ started. Missing temporary worktrees are not evidence.
 
 <!-- codex-design -->
 
-Status: **INTEGRATED STATIC CANDIDATE / TARGET EXECUTION HELD**. Frozen names are
+Status: **STATIC EVIDENCE PRESENT / SOURCE HOLD-RED / TARGET EXECUTION HELD**. Frozen names are
 `DomDocumentGeneration`, `DomNodeRoute`, `DomRadioGroupKey`,
 `DomIdentityIndex`; manual steps are `Build the document identity index`,
 `Dispatch through stable routes`, `Replace the document during a handler`,
@@ -657,8 +657,8 @@ and `Reject stale routes and release the index`. Frozen helpers are
 and `check_stale_routes_and_index_release`; each checker now invokes production
 owners with direct assertions and no placeholder pass.
 
-Design-audit status: **COMBINED OWNERS/APIS AND FOCUSED SSpec/MANUAL PRESENT;
-RUNTIME/NFR RECEIPTS HELD**.
+Design-audit status: **FOCUSED SSpec/MANUAL PRESENT; COOKIE-QUEUE AND ISOLATED
+STALE-CLEANUP SOURCE REPAIRS REQUIRED; RUNTIME/NFR RECEIPTS HELD**.
 
 The integrated session surface is `document_generation`,
 `current_dom_identity_index`, `route_for_layout_target_key`,
@@ -672,8 +672,8 @@ held.
 | --- | --- | --- | --- |
 | 1 | `dom_identity_index_owner` | Add import-free `dom_limits.spl` owning only `HTML_MAX_TREE_DEPTH`/`HTML_MAX_NODES`, move `html_tree_builder.spl` to those imports, and add `dom_identity_index.spl`; two-pass O(N) build, route/layout-key parsing, association queries, counters | integrated static candidate; execution held |
 | 2 | `dom_accessor_form_migration` | `dom_accessors.spl`, `browser_session_form.spl`; replace recursive identity/form/label/radio/event-path scans | integrated static candidate; execution held |
-| 3 | `dom_dispatch_bridge_migration` | `dom.spl`, `browser_session.spl`, `browser_session_runtime.spl`, `browser_session_loading.spl`, `script/script_host.spl`, `script/simple_script.spl`, `script/event_api.spl`, and `js/dom_bridge.spl`; typed event routes, atomic DOM/index/script/listener publication, focus/Space/edit/blur, label/radio actions, and shared reentrant budget | combined source present; focused rollback/label/budget oracles present; execution held |
-| 4 | `dom_ui_hosted_migration` | `browser_session_ui_access.spl`, `hosted_web_content_session.spl`, `hosted_browser_renderer_worker.spl`; consume `route_for_layout_target_key` through the session generation gate; generation-bound snapshots and press/release/focus routes | integrated static candidate; stale-release oracle present; execution held |
+| 3 | `dom_dispatch_bridge_migration` | `dom.spl`, `browser_session.spl`, `browser_session_runtime.spl`, `browser_session_loading.spl`, `script/script_host.spl`, `script/simple_script.spl`, `script/event_api.spl`, and `js/dom_bridge.spl`; typed event routes, atomic DOM/index/script/listener publication, focus/Space/edit/blur, label/radio actions, and shared reentrant budget | HOLD/RED: rejected eval leaks pending cookie-write queue; rollback oracle present |
+| 4 | `dom_ui_hosted_migration` | `browser_session_ui_access.spl`, `hosted_web_content_session.spl`, `hosted_browser_renderer_worker.spl`; consume `route_for_layout_target_key` through the session generation gate; generation-bound snapshots and press/release/focus routes | HOLD/RED: isolated stale cleanup incomplete; parity oracle present |
 | 5 | `dom_identity_sspec` | focused modern SSpec, mirrored manual, N/2N and 10,000-cycle production receipts | SSpec/manual and held receipt schema present; numeric/runtime receipt held |
 
 Exact production ownership:

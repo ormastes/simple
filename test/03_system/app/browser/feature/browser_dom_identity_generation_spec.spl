@@ -20,6 +20,12 @@ use std.spec.*
 use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use os.hosted.hosted_browser_renderer_worker.{
+    HostedBrowserRendererWorkerSession
+}
+use std.common.web.browser_renderer_protocol.{
+    BrowserRendererCapabilityMessage
+}
 use std.gc_async_mut.web.browser_session.{BrowserSession}
 use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_ui_access.*
@@ -433,25 +439,80 @@ fn _check_atomic_load_eval_and_index_rollback():
     var session = _open_dom_identity_session(
         "https://example.test/dom-atomic-before",
         "<html><body><button id='kept'>Kept</button><script>" +
-        "var kept=document.getElementById('kept');" +
+        "<script type='text/simple'>callback 71|title \"simple-kept\"</script>" +
+        "<script>var kept=document.getElementById('kept');" +
         "kept.addEventListener('click',function(){document.title='kept';});" +
         "</script></body></html>"
     )
+    session.broker_network_policy = true
     val generation = session.document_generation()
     val index = _dom_identity_index(session)
     val kept_route = _dom_identity_route(index, "kept")
     val body_html = session.current_body_html
     val title = session.current_title
-    val object_id = match session.runtime_state:
-        Some(state): state.object_id_for_route(kept_route)
+    val runtime_state = match session.runtime_state:
+        Some(state): state
         nil: fail("Expected rollback runtime state")
-    match session.eval_script("var ="):
-        Ok(_): fail("Malformed JavaScript unexpectedly evaluated")
-        Err(_): ()
+    val runtime = runtime_state.runtime
+    val object_id = runtime_state.object_id_for_route(kept_route)
+    expect(runtime_state.dom_callable_listeners.len()).to_equal(1)
+    val callable_listener = runtime_state.dom_callable_listeners[0]
+    val simple_executor = session.simple_script_executor
+    val simple_root = simple_executor.dom_root()
+    val simple_runner_root = simple_executor._runner.dom_root
+    val simple_runner_loop = simple_executor._runner.event_loop
+    val simple_index = match simple_executor._dom_identity_index:
+        Some(current): current
+        nil: fail("Expected SimpleScript identity index")
+    val simple_sources = simple_executor._callback_sources
+    val pending_cookie_writes = session.pending_script_cookie_writes
+    val staged_body = _oversized_dom_identity_html()
+    val rejected_stage = session.eval_script(
+        "document.cookie='stage=must-not-leak';" +
+        "document.body.innerHTML='" + staged_body + "';"
+    )
+    expect(rejected_stage).to_equal(Err(
+        "resource_limit: DOM node limit exceeded (65536)"
+    ))
     expect(session.document_generation().value).to_equal(generation.value)
     expect(_dom_identity_index(session)).to_be(index)
+    expect(session.current_dom).to_be(simple_root)
     expect(session.current_body_html).to_equal(body_html)
     expect(session.current_title).to_equal(title)
+    match session.runtime_state:
+        Some(state):
+            expect(state).to_be(runtime_state)
+            expect(state.runtime).to_be(runtime)
+            expect(state.object_id_for_route(kept_route)).to_equal(object_id)
+            expect(state.dom_callable_listeners.len()).to_equal(1)
+            expect(state.dom_callable_listeners[0].target_route).to_equal(
+                callable_listener.target_route
+            )
+            expect(state.dom_callable_listeners[0].target_object_id).to_equal(
+                callable_listener.target_object_id
+            )
+            expect(state.dom_callable_listeners[0].callback).to_equal(
+                callable_listener.callback
+            )
+        nil: fail("Rejected script stage lost runtime state")
+    expect(session.simple_script_executor).to_be(simple_executor)
+    expect(session.simple_script_executor.dom_root()).to_be(simple_root)
+    expect(session.simple_script_executor._runner.dom_root).to_be(
+        simple_runner_root
+    )
+    expect(session.simple_script_executor._runner.event_loop).to_be(
+        simple_runner_loop
+    )
+    match session.simple_script_executor._dom_identity_index:
+        Some(current): expect(current).to_be(simple_index)
+        nil: fail("Rejected script stage lost SimpleScript index")
+    expect(session.simple_script_executor._callback_sources).to_equal(
+        simple_sources
+    )
+    expect(session.simple_script_executor.has_callback(71)).to_equal(true)
+    expect(session.pending_script_cookie_writes).to_equal(
+        pending_cookie_writes
+    )
     expect(session.open_html(
         "https://example.test/dom-atomic-rejected",
         _oversized_dom_identity_html()
@@ -598,6 +659,44 @@ fn _check_hosted_stale_press_release():
     expect(hosted.browser.current_title).to_equal("replaced")
     expect(hosted.browser.pending_request_count()).to_equal(0)
     hosted.close()
+
+    var worker = HostedBrowserRendererWorkerSession.create(16, 8)
+    val initialized = worker.handle(BrowserRendererCapabilityMessage(
+        kind: "init", generation: 7, request_id: 2,
+        root_command_request_id: 2,
+        command_capability: "11111111111111111111111111111111",
+        payload: DOM_IDENTITY_HOSTED_HTML
+    ))
+    expect(initialized.ok).to_equal(true)
+    val before_callbacks = worker.browser.dom_callback_count
+    val worker_down = worker.handle(BrowserRendererCapabilityMessage(
+        kind: "pointer", generation: 7, request_id: 3,
+        root_command_request_id: 3,
+        command_capability: "22222222222222222222222222222222",
+        payload: "P1\t1\t2\t2\t1"
+    ))
+    expect(worker_down.reason).to_equal("stale_target")
+    expect(worker.browser.dom_callback_count - before_callbacks).to_equal(1)
+    expect(worker.browser.current_title).to_equal("replaced")
+    expect(worker.pressed_target_route).to_be_nil()
+    expect(worker.last_hit_index).to_be_nil()
+    expect(worker.last_hit_generation).to_be_nil()
+    expect(worker.active_root_command_request_id).to_equal(0)
+    expect(worker.active_command_capability).to_equal("")
+    val worker_release = worker.handle(BrowserRendererCapabilityMessage(
+        kind: "pointer", generation: 7, request_id: 3,
+        root_command_request_id: 3,
+        command_capability: "33333333333333333333333333333333",
+        payload: "P1\t2\t2\t2\t0"
+    ))
+    expect(worker_release.ok).to_equal(true)
+    expect(worker_release.reason).to_equal("ok")
+    expect(worker.browser.dom_callback_count - before_callbacks).to_equal(1)
+    expect(worker.browser.current_title).to_equal("replaced")
+    expect(worker.pressed_target_route).to_be_nil()
+    expect(worker.active_root_command_request_id).to_equal(0)
+    expect(worker.active_command_capability).to_equal("")
+    worker.close()
 
 fn _check_surviving_control_draw_ir(
     session: BrowserSession, replacement: DomIdentityReplacementReceipt

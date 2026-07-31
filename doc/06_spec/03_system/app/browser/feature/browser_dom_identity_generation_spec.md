@@ -42,9 +42,14 @@ budget instead of executing a 4,097th action.
 
 ### Replace the document during a handler
 
-Malformed JavaScript, an oversized load, and an injected duplicate-node index
-candidate must leave the prior generation, index, DOM, runtime object map, and
-callable listener state unchanged. The primary-pointer handler then replaces
+An oversized script-driven `innerHTML` candidate is rejected at the
+`BrowserSession.publish_dom_snapshot` boundary after a broker cookie write. It
+must leave generation, index, DOM, JavaScript runtime/object map, callable
+listeners, SimpleScript root/runner/index/callbacks, and
+`pending_script_cookie_writes` unchanged. `BrowserSession` owns no stateful
+`ScriptHost`; `script_host_apply_action_to_route` is a pure DOM transform, so
+the oracle does not invent a ScriptHost root. An oversized load and an injected
+duplicate-node candidate have the same rollback obligation. The handler then replaces
 the document with a visually different button that intentionally reuses the
 old author and numeric identity. The old SimpleScript callback is retired, the
 generation advances once, and neither old nor new click default runs while the
@@ -54,9 +59,10 @@ handler unwinds.
 
 The session layout gate, reverse layout projection, author projection, DOM
 dispatch, SimpleScript bridge, and stale textual UI snapshot reject the old
-route without mutation. The hosted adapter replaces its document on press,
-clears the stored route, and releases over the equal replacement without a
-click. The surviving current route is recovered from the canonical hit index,
+route without mutation. Both the direct hosted adapter and isolated worker
+replace during press and release without a click. The worker also clears its
+pressed/stale-hit routes and root-request/command-capability authority. The
+surviving current route is recovered from the canonical hit index,
 its `replace` Draw IR command is an exact green `8x8` rectangle, and Engine2D
 produces a green inside pixel and white outside pixel. Closing the session
 advances the generation and clears the current index and script document.
@@ -77,6 +83,10 @@ defines `dom-identity-runtime-receipt-v1` with these mandatory fields:
 Every runtime-measured field remains `-1` and status remains `runtime-held` in
 this static lane. No timing, allocation, RSS, 10,000-cycle, docgen, or target
 runtime PASS is claimed.
+
+Source remains **HOLD/RED**: rejected evaluation can leak
+`pending_script_cookie_writes`, and isolated stale rejection does not yet prove
+all route/capability cleanup. These are acceptance oracles, not a source PASS.
 
 ## Traceability
 
