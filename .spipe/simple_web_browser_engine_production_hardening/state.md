@@ -2661,5 +2661,18 @@ implementation in progress / target evidence blocked
   frame authority, and frame-bound request/navigation schema before child
   runtime work. Current hidden `srcdoc` recursion has no child runtime, script,
   navigation, or input support. Stage-4 admission remains NONE; no runtime,
-  docgen, numeric
+  docgen, numeric performance, aggregate HTML/CSS, full-browser, or goal PASS
+  is claimed.
+- production browser batch 26 reconciliation (2026-07-31): source HEAD
+  `13273726363` includes two bounded browser repairs after the prior
+  composition base. Stop preserves a partial document's focused `draft` input
+  and byte selection while retiring transient chrome and isolated authority
+  (`a106bc48114`); CORS now preflights unsafe author headers and rejects an
+  ungranted cross-origin request before its actual GET (`bf7dfff029a`). Both
+  are INTEGRATED and STATIC/EVIDENCE-HELD. The admitted target runner is still
+  absent, so neither row has runtime or docgen evidence.
+- batch-26 held/rejected boundary: fixed positioning is selected next from the
+  existing HTML/CSS traceability row, but remains ACTIVE/UNCOMMITTED/RED;
+  animation lifecycle `47df593f600`, cookie authority `921fd1`, and D3 retain
+  their existing rejected or stopped classifications. No runtime, docgen,
   performance, aggregate HTML/CSS, full-browser, or goal PASS is claimed.

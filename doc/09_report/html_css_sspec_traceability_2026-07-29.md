@@ -76,3 +76,12 @@ inventory evidence only and must not be promoted to behavioral PASS.
 - html_css_sspec_traceability_unsupported_css_property_missing=
 - html_css_sspec_traceability_implemented_css_subset_spec=test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_generated_html_css_combinations_spec.spl
 - html_css_sspec_traceability_unsupported_css_inventory_spec=test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_css_inventory_traceability_spec.spl
+
+## Selected next rendering row (2026-07-31)
+
+The next existing unsupported HTML/CSS row is **CSS viewport-fixed
+positioning**, retained as RED in the canonical traceability plan. It has no
+accepted implementation and requires its already-listed canonical layout, Draw
+IR, Engine2D, pixel, and hit-testing evidence. This selection does not change
+the row's RED classification, introduce requirements, or promote runtime/docgen
+results.

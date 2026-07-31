@@ -1008,3 +1008,19 @@ control is `sid=control`; a rejected malformed name must be absent from both
 script-visible and request-header state. Root remains merge owner and final
 reviewer. Runtime, docgen, and bootstrap evidence are explicitly out of scope
 for this bounded lane.
+
+## Production browser batch 26 reconciliation (2026-07-31)
+
+Exact repository HEAD: `13273726363`.
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `stop_partial_focus` | Stop preserves the partial document's focused `draft` input and byte selection through hosted chrome and isolated authority while retiring transient chrome and capability state. | INTEGRATED `a106bc48114`; STATIC/EVIDENCE-HELD |
+| `cors_unsafe_header_preflight` | Unsafe author headers force a single OPTIONS preflight with sorted `Access-Control-Request-Headers`; denied policy prevents the actual cross-origin request. | INTEGRATED `bf7dfff029a`; STATIC/EVIDENCE-HELD |
+| `fixed_position` | Existing HTML/CSS traceability selects viewport-fixed positioning as the next unsupported rendering row; no accepted implementation exists. | ACTIVE / UNCOMMITTED / RED |
+| `stage4_admission` | No provenance-qualified current full pure-Simple CLI is admitted. | NONE; no runtime/docgen/performance claim |
+
+The Stop and CORS executable specs/manuals are source evidence only until the
+admitted pure-Simple runner and docgen lane execute them. Rejected animation
+lifecycle `47df593f600`, renewable-authority `921fd1`, and stopped D3 work are
+unchanged and must not be promoted. Root remains merge owner and final reviewer.

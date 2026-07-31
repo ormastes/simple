@@ -200,13 +200,11 @@ below and is not part of the landed set.
   activate the destination`; `Use Home Bookmark Stop and Reload`; `Observe
   canonical history controls and rendered document`.
 
-## Open RED Security Lane — CORS Unsafe Request Headers
+## CORS Unsafe Request Headers — Integrated, Evidence Held
 
-Current `origin/main` `30af808b2eeb` still lets a cross-origin safelisted
-method bypass preflight when it carries a non-safelisted author header. For
-example, requester `https://app.test` can issue
-`GET https://api.test/admin` with `X-Admin-Action: delete`; the actual request
-can reach the endpoint before response CORS validation denies reading it.
+The former cross-origin unsafe-author-header bypass is repaired in
+`bf7dfff029a`: a safelisted method carrying a non-safelisted author header is
+preflighted before the actual request is admitted.
 
 The real OPTIONS owner path already exists and must be completed rather than
 replaced by a local header rejection:
@@ -215,9 +213,8 @@ replaced by a local header rejection:
 `CorsChecker.create_preflight` -> `FetchEngine.execute_http` ->
 `CorsChecker.validate_preflight_method_with_credentials`.
 
-`CorsChecker.validate_preflight_headers` exists but is disconnected. A prior
-source/test draft was statically rejected and is not a candidate. Its four
-blocking findings are frozen:
+The shared preflight path now connects header validation. The prior rejected
+draft remains rejected; the accepted repair preserves its four frozen controls:
 
 1. preserve safelisted-method behavior without requiring an ACAM token, and
    implement ACAM `*` correctly for omitted versus included credentials;
@@ -237,7 +234,9 @@ endpoint`. Evidence must show one total request, method `OPTIONS`,
 `Authorization` permission. See
 `doc/08_tracking/bug/browser_fetch_cors_unsafe_header_preflight_bypass_2026-07-31.md`.
 
-Status is RED: no source, executable-spec, runtime, or SPipe PASS is accepted.
+Status is INTEGRATED / STATIC/EVIDENCE-HELD: source and executable-spec/manual
+artifacts are accepted, but no qualified target-runtime, docgen, or SPipe PASS
+is admitted while the pure-Simple runner remains unavailable.
 
 ## Essential Runner Lane — Stopped at Cycle 3 of 3
 
