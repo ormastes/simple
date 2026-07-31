@@ -8,7 +8,8 @@ use common.ui.draw_ir.{
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
-    DrawIrRect,
+    DrawIrEmbeddingConfig,
+    DrawIrSourceInfo,
     draw_ir_batch_with_source,
     draw_ir_composition,
     draw_ir_embed_composition,
@@ -1375,6 +1376,32 @@ fn _simple_web_layout_merge_material_witness(
         solid_material_sha256: if solid_parts.len() == 0: "" elif solid_parts.len() == 1: solid_single_hash else: sha256_text("v1\n" + solid_parts.join("\n") + "\n")
     )
 
+fn _simple_web_layout_segment_batch(
+    source: DrawIrSourceInfo, embedding: DrawIrEmbeddingConfig,
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    opacity_root: i32, opacity_root_count: i32,
+    segment_index: i32, commands: [DrawIrCommand]
+) -> DrawIrBatch:
+    if opacity_root >= 0:
+        val bounded = opacity_root_count > 1
+        val opacity_embedding = draw_ir_embedding_config(
+            "html-opacity-{opacity_root}",
+            _html_draw_ir_component_id(nodes[opacity_root], opacity_root),
+            if bounded: boxes.bx[opacity_root] else: 0,
+            if bounded: boxes.by[opacity_root] else: 0,
+            if bounded: boxes.bw[opacity_root] else: embedding.width,
+            if bounded: boxes.bh[opacity_root] else: embedding.height,
+            0, styles[opacity_root].opacity_pct * 10, true
+        )
+        return draw_ir_batch_with_source(
+            "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
+            opacity_embedding, commands, source
+        )
+    draw_ir_batch_with_source(
+        "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
+        embedding, commands, source
+    )
+
 fn _simple_web_layout_compose_retained(
     html: text,
     nodes: [HNode],
@@ -1425,10 +1452,6 @@ fn _simple_web_layout_compose_retained(
     val canvas = _html_draw_ir_canvas_command(width, height, canvas_color)
     var batches: [DrawIrBatch] = []
     var child_witnesses: [SimpleWebLayoutMaterialWitness] = []
-    var has_iframe = false
-    for node in nodes:
-        if node.tag == "iframe":
-            has_iframe = true
     val (opacity_found, opacity_command_roots, opacity_root_count) = (
         _simple_web_fractional_opacity_command_roots(
             nodes, styles, command_owner_nodes)
@@ -1469,155 +1492,123 @@ fn _simple_web_layout_compose_retained(
                     opacity_supported = false
                 admitted_root = root
             admission_index = admission_index + 1
-    if opacity_supported:
-        var run_root = -1
-        var run_commands: [DrawIrCommand] = [canvas]
-        var command_index = 0
-        while command_index < commands.len():
-            val next_root = opacity_command_roots[command_index]
-            if next_root != run_root:
-                if run_root >= 0:
-                    val bounded = opacity_root_count > 1
-                    val surface_x = if bounded: boxes.bx[run_root] else: 0
-                    val surface_y = if bounded: boxes.by[run_root] else: 0
-                    val surface_w = if bounded: boxes.bw[run_root] else: width
-                    val surface_h = if bounded: boxes.bh[run_root] else: height
-                    val opacity_embedding = draw_ir_embedding_config(
-                        "html-opacity-{run_root}",
-                        _html_draw_ir_component_id(
-                            nodes[run_root], run_root
-                        ),
-                        surface_x, surface_y, surface_w, surface_h, 0,
-                        styles[run_root].opacity_pct * 10, true
-                    )
-                    batches.push(draw_ir_batch_with_source(
-                        "html-layout-opacity", DRAW_IR_BACKEND_CPU,
-                        opacity_embedding, run_commands, source
-                    ))
-                elif run_commands.len() > 0:
-                    batches.push(draw_ir_batch_with_source(
-                        "html-layout", DRAW_IR_BACKEND_CPU, embedding,
-                        run_commands, source
-                    ))
-                run_root = next_root
-                run_commands = []
-            if run_root >= 0 and opacity_root_count > 1:
-                run_commands.push(_simple_web_draw_ir_translate_command(
-                    commands[command_index],
-                    0 - boxes.bx[run_root],
-                    0 - boxes.by[run_root]
+    # One backwards-free prepass gives each owner a single insertion point.
+    # Rechecking the remaining command suffix for every iframe made this path
+    # quadratic on pages with many independently painted replaced elements.
+    var last_command_index_by_owner: [i32] = [-1; nodes.len()]
+    var command_index = 0
+    while command_index < command_owner_nodes.len():
+        val owner = command_owner_nodes[command_index]
+        if owner >= 0 and owner < last_command_index_by_owner.len():
+            last_command_index_by_owner[owner] = command_index
+        command_index = command_index + 1
+    val clip_cache = build_ancestor_clip_cache(
+        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
+    )
+    var run_root = -1
+    var run_commands: [DrawIrCommand] = [canvas]
+    var segment_index = 0
+    command_index = 0
+    while command_index < commands.len():
+        val next_root = if opacity_supported:
+            opacity_command_roots[command_index]
+        else:
+            -1
+        if next_root != run_root:
+            if run_commands.len() > 0:
+                batches.push(_simple_web_layout_segment_batch(
+                    source, embedding, nodes, styles, boxes, run_root,
+                    opacity_root_count, segment_index, run_commands
                 ))
-            else:
-                run_commands.push(commands[command_index])
-            command_index = command_index + 1
-        if run_root >= 0:
-            val bounded = opacity_root_count > 1
-            val surface_x = if bounded: boxes.bx[run_root] else: 0
-            val surface_y = if bounded: boxes.by[run_root] else: 0
-            val surface_w = if bounded: boxes.bw[run_root] else: width
-            val surface_h = if bounded: boxes.bh[run_root] else: height
-            val opacity_embedding = draw_ir_embedding_config(
-                "html-opacity-{run_root}",
-                _html_draw_ir_component_id(nodes[run_root], run_root),
-                surface_x, surface_y, surface_w, surface_h, 0,
-                styles[run_root].opacity_pct * 10, true
+                segment_index = segment_index + 1
+            run_root = next_root
+            run_commands = []
+        val command = if run_root >= 0 and opacity_root_count > 1:
+            _simple_web_draw_ir_translate_command(
+                commands[command_index], 0 - boxes.bx[run_root],
+                0 - boxes.by[run_root]
             )
-            batches.push(draw_ir_batch_with_source(
-                "html-layout-opacity", DRAW_IR_BACKEND_CPU,
-                opacity_embedding, run_commands, source
-            ))
-        elif run_commands.len() > 0:
-            batches.push(draw_ir_batch_with_source(
-                "html-layout-after", DRAW_IR_BACKEND_CPU, embedding,
-                run_commands, source
-            ))
-    else:
-        batches.push(draw_ir_batch_with_source(
-            "html-layout", DRAW_IR_BACKEND_CPU, embedding,
-            [canvas] + commands, source
-        ))
-    # Flat batches must be inserted at the replaced element's paint position.
-    # The existing opacity partition is retained as-is until it can segment a
-    # group without changing its alpha semantics.
-    if has_iframe and not opacity_found:
-        batches = []
-        var segment: [DrawIrCommand] = [canvas]
-        val clip_cache = build_ancestor_clip_cache(
-            nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh,
-            width, height
-        )
-        var command_index = 0
-        var segment_index = 0
-        while command_index < commands.len():
-            val command = commands[command_index]
-            val owner = command_owner_nodes[command_index]
-            segment.push(command)
-            var owner_last = true
-            var lookahead = command_index + 1
-            while lookahead < commands.len():
-                if command_owner_nodes[lookahead] == owner:
-                    owner_last = false
-                lookahead = lookahead + 1
-            if (
-                owner_last and owner >= 0 and owner < nodes.len() and
-                nodes[owner].tag == "iframe"
-            ):
-                val st = styles[owner]
-                val content = draw_ir_rect_bounds(
-                    boxes.bx[owner] + st.border_l + st.pad_l,
-                    boxes.by[owner] + st.border_t + st.pad_t,
-                    if boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r > 0: boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r else: 0,
-                    if boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b > 0: boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b else: 0
+        else:
+            commands[command_index]
+        run_commands.push(command)
+        val owner = command_owner_nodes[command_index]
+        if (
+            owner >= 0 and owner < nodes.len() and
+            nodes[owner].tag == "iframe" and
+            last_command_index_by_owner[owner] == command_index
+        ):
+            val st = styles[owner]
+            val content = draw_ir_rect_bounds(
+                boxes.bx[owner] + st.border_l + st.pad_l,
+                boxes.by[owner] + st.border_t + st.pad_t,
+                if boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r > 0: boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r else: 0,
+                if boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b > 0: boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b else: 0
+            )
+            val paint_clip = paint_clip_at(clip_cache, owner)
+            val visible = draw_ir_rect_intersection(content,
+                draw_ir_rect_bounds(paint_clip.x0, paint_clip.y0,
+                    paint_clip.x1 - paint_clip.x0, paint_clip.y1 - paint_clip.y0))
+            if visible.width > 0 and visible.height > 0:
+                batches.push(_simple_web_layout_segment_batch(
+                    source, embedding, nodes, styles, boxes, run_root,
+                    opacity_root_count, segment_index, run_commands
+                ))
+                segment_index = segment_index + 1
+                run_commands = []
+                val owner_id = _html_draw_ir_component_id(nodes[owner], owner)
+                val placeholder = draw_ir_rect_clipped(
+                    "{owner_id}:iframe-placeholder", content.x, content.y,
+                    content.width, content.height, WEB_IFRAME_PLACEHOLDER,
+                    visible
                 )
-                val paint_clip = paint_clip_at(clip_cache, owner)
-                val visible = draw_ir_rect_intersection(content,
-                    draw_ir_rect_bounds(paint_clip.x0, paint_clip.y0,
-                        paint_clip.x1 - paint_clip.x0, paint_clip.y1 - paint_clip.y0))
-                if visible.width > 0 and visible.height > 0:
-                    batches.push(draw_ir_batch_with_source(
-                        "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
-                        embedding, segment, source
-                    ))
-                    segment_index = segment_index + 1
-                    segment = []
-                    val owner_id = _html_draw_ir_component_id(nodes[owner], owner)
-                    val placeholder = draw_ir_rect_clipped(
-                        "{owner_id}:iframe-placeholder", content.x, content.y,
-                        content.width, content.height, WEB_IFRAME_PLACEHOLDER,
-                        visible
-                    )
-                    val now = rt_time_now_micros()
-                    if depth + 1 > WEB_IFRAME_DEPTH_CAP or now >= _web_render_deadline_us or _simple_web_iframe_fractional_ancestor(nodes, styles, owner):
-                        segment.push(placeholder)
+                val now = rt_time_now_micros()
+                if (
+                    depth + 1 > WEB_IFRAME_DEPTH_CAP or
+                    now >= _web_render_deadline_us or
+                    _simple_web_iframe_fractional_ancestor(nodes, styles, owner)
+                ):
+                    if run_root >= 0 and opacity_root_count > 1:
+                        run_commands.push(_simple_web_draw_ir_translate_command(
+                            placeholder, 0 - boxes.bx[run_root],
+                            0 - boxes.by[run_root]
+                        ))
                     else:
-                        val save_deadline = _web_render_deadline_us
-                        val child_deadline = now + (save_deadline - now) / 2
-                        val child_html = _web_iframe_child_html(nodes[owner])
-                        val child_rules = if attr_value(nodes[owner].attrs_raw, "space").trim().lower() == "shared": rules else: _web_empty_rules()
-                        val child = _simple_web_layout_compose_document(
-                            child_html, content.width, content.height,
-                            vector_fonts, animation_time_ms, 0,
-                            browser_text_input_overlay_empty(), [], [], child_rules,
-                            depth + 1, child_deadline
-                        )
-                        _web_render_deadline_us = save_deadline
-                        if _simple_web_draw_ir_has_material_request(child.composition):
-                            segment.push(placeholder)
+                        run_commands.push(placeholder)
+                else:
+                    val save_deadline = _web_render_deadline_us
+                    val child_deadline = now + (save_deadline - now) / 2
+                    val child_html = _web_iframe_child_html(nodes[owner])
+                    val child_rules = if attr_value(nodes[owner].attrs_raw, "space").trim().lower() == "shared": rules else: _web_empty_rules()
+                    val child = _simple_web_layout_compose_document(
+                        child_html, content.width, content.height,
+                        vector_fonts, animation_time_ms, 0,
+                        browser_text_input_overlay_empty(), [], [], child_rules,
+                        depth + 1, child_deadline
+                    )
+                    _web_render_deadline_us = save_deadline
+                    if _simple_web_draw_ir_has_material_request(child.composition):
+                        if run_root >= 0 and opacity_root_count > 1:
+                            run_commands.push(_simple_web_draw_ir_translate_command(
+                                placeholder, 0 - boxes.bx[run_root],
+                                0 - boxes.by[run_root]
+                            ))
                         else:
-                            val embedded = draw_ir_embed_composition(
-                                child.composition, content.x, content.y,
-                                visible, "{owner_id}:iframe:{depth + 1}",
-                                owner_id, 0
-                            )
-                            for batch in embedded:
-                                batches.push(batch)
-                            child_witnesses.push(child.material_witness)
-            command_index = command_index + 1
-        if segment.len() > 0:
-            batches.push(draw_ir_batch_with_source(
-                "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
-                embedding, segment, source
-            ))
+                            run_commands.push(placeholder)
+                    else:
+                        val embedded = draw_ir_embed_composition(
+                            child.composition, content.x, content.y,
+                            visible, "{owner_id}:iframe:{depth + 1}",
+                            owner_id, 0
+                        )
+                        for batch in embedded:
+                            batches.push(batch)
+                        child_witnesses.push(child.material_witness)
+        command_index = command_index + 1
+    if run_commands.len() > 0:
+        batches.push(_simple_web_layout_segment_batch(
+            source, embedding, nodes, styles, boxes, run_root,
+            opacity_root_count, segment_index, run_commands
+        ))
     val composition = draw_ir_composition(
         "html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches
     )

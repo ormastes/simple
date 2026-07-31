@@ -7,10 +7,16 @@ available. The legacy iframe pixel path remains the parity oracle.
    red marker at `(5,5)`, child green at `(20,20)`, and white outside at
    `(80,50)` through `DrawIrComposition -> Engine2D`.
 2. **Preserve iframe paint order and ancestor clipping** — confirms child
-   batches occur between parent segments and child commands retain present,
-   bounded clips.
+   batches occur between parent segments, rebase to `(0,10)`, keep the common
+   layer, prefix batch/surface/command/parent IDs, clear child hits, and clip
+   a green child inside a 20x15 overflow ancestor while leaving its outside
+   white.
 3. **Bound nested iframe work and fail closed** — confirms a 40x30 nested
-   orange child and the grey depth placeholder.
+   orange child, the grey depth placeholder, and a structural grey placeholder
+   for a fractional-opacity ancestor.
 4. **Retire legacy iframe pixel blitting after parity** — asserts no child
-   image/material/hit authority and zero child scroll; it does not claim caller
-   migration before exact legacy-pixel parity.
+   image/material/hit authority even with inert child script, external image,
+   and input markup. An authored child red/green vertical pair
+   proves its deterministic initial scroll is zero; no child input or scroll
+   interaction is enabled. It does not claim caller migration before exact
+   legacy-pixel parity.
