@@ -96,6 +96,50 @@ GOOD:
 val maybe: Tr? = if d.contains_key(key): Some(d[key]) else: nil
 ```
 
+## `.set()` conversion status (census 2026-07-31)
+
+`.set()` is the write-side member of this family: it silently DROPS the insert
+under native codegen. Always write `d[k] = v`.
+
+Converted and landed: **35 sites** — `9d6527489f9d` (std.diag, 7) and
+`e46120dfdf6c` (28 across 7 files). Evidence that `d[k] = v` is correct in the
+interpreter is a sentinel probe on `diag_spec.spl`: 14/14 both before and after
+the conversion, but 13/14 (`counter bytes_sent = 0`) when one converted write was
+deliberately mis-keyed. That step matters — "green before and after" alone cannot
+distinguish a correct change from a spec that never executes the line.
+
+**The family is NOT closed. 71 verified builtin-`Dict` `.set()` sites remain**
+across 19 files (12 under `src/`, the rest test-only). Highest-priority live
+clusters: `security/types.spl` (12 — `keys`/`sessions`/`key_handles`/
+`accepted_signatures`), `security/auth/context_propagation.spl` (12, three
+concurrency-tier copies), `security/kms_provider.spl` (4),
+`app/interpreter/core/environment.spl` (2 — `Scope.bindings`, the interpreter's
+own variable define/set path).
+
+**Do not grep-and-convert blindly.** A bare `.set(` sweep is overwhelmingly false
+positives: `SdnRow` (744+ sites — its own `me set` already does `self.fields[k]=v`
+internally), the `Persistent*` map/trie/set family (~1,000+, each with its own
+`fn set`), array `[T].set(i, v)`, `Bitset`/`RowBitmap`/`FixedArray`, and a
+*custom* `Map<K,V>` struct at `src/lib/nogc_sync_mut/src/map.spl` that is not a
+builtin `Dict` at all. Resolve each receiver's declared type before touching it.
+
+Two things found during the census that are NOT this bug:
+- `src/app/ui.mcp/tools.spl:87` and `test/03_system/os/file_io_spec.spl:81` call
+  `.set()` on `SdnDocument`, which has **no `.set` method** — stale callers
+  against a refactored API.
+- `src/compiler_rust/lib/std/**` holds ~54 more sites but is **dormant** (zero
+  importers). Do not fix it; also do not delete it, as it carries unique Lean
+  formalization files.
+
+Reachability notes, so later readers don't over-rate two of the converted
+clusters: `VhdlConstraintChecker`/`TarjanSCC` in `70.backend/vhdl_constraints.spl`
+is **never constructed by the live `--backend vhdl` pipeline** — only by its own
+unit spec. And `app/interpreter/helpers/imports.spl` is **entirely orphaned**: no
+`.spl` file imports it, and its `Module__new` receiver has no `struct Module`
+anywhere in live code (the real loader is `interp.load_module` in
+`module/evaluator.spl`). Converting them was harmless, but neither was a live
+production defect.
+
 ## Background
 
 - `doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md` —
