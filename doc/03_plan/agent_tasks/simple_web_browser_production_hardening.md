@@ -1,12 +1,12 @@
 # Simple Web Browser Production Hardening Agent Plan
 
-## Final Coordination State
+## Static Coordination State
 
 Merge owner and final reviewer: `/root`.
 
 Wave 1's six implementation lanes remain landed. Wave 2 adds five pushed
 lanes. Wave 3 adds authenticated-transport HSTS ownership and the complete
-overflow/scrollbar corrective chain. The thirteen final lanes have independent
+overflow/scrollbar corrective chain. The thirteen landed static lanes have independent
 static review verdicts covering scoped diff review, interface/spec/manual
 consistency, exact evidence oracles,
 and the absence of placeholders. They do not claim runtime or SPipe execution.
@@ -24,15 +24,15 @@ and the absence of placeholders. They do not claim runtime or SPipe execution.
 | 2 | Bounded Grid stretch | `b6dbe39e8ea` | Static `ACCEPT` |
 | 2 | Animation per-frame indexing | `b35f319697c` | Static `ACCEPT` |
 | 2 | Canonical Go control | `9812bb073aa` | Static `ACCEPT` |
-| 3 | Hosted HSTS authenticated-transport ownership | `f081a28d6f4` | Static `REVIEW PASS`; dynamic held |
-| 3 | Final overflow normalization and scrollbar policy | `4d171219e88` -> `e321b86eeae` -> `d58b333df90` -> `27d116eb2b6` | Complete chain: static `REVIEW PASS`; dynamic held |
+| 3 | Hosted HSTS authenticated-transport ownership | `c9056751aea` | Static `REVIEW PASS`; dynamic held |
+| 3 | Final overflow normalization and scrollbar policy | `bac97a80902` -> `33c49d09164` -> `e19d051ccc8` -> `cc458d355a3` | Complete chain: static `REVIEW PASS`; dynamic held |
 
 No accepted lane contains `pass_todo`, unconditional placeholder assertions,
 empty scenario bodies, or fail-fast placeholders left as successful evidence.
 There are no outstanding candidate hashes or pending static review states for
-the thirteen final lanes. `e321b86eeae` and `d58b333df90` were incomplete,
-review-failed intermediate CSS tips; only the complete chain ending at
-`27d116eb2b6` is accepted. The separate essential-runner candidate was rejected
+the thirteen landed static lanes. `33c49d09164` and `e19d051ccc8` were
+intermediate CSS corrections; only the complete chain ending at
+`cc458d355a3` is accepted. The separate essential-runner candidate was rejected
 as described below and is not part of the landed set.
 
 ## Canonical Interfaces and Manual Step Vocabularies
@@ -211,7 +211,7 @@ as described below and is not part of the landed set.
   activate the destination`; `Use Home Bookmark Stop and Reload`; `Observe
   canonical history controls and rendered document`.
 
-### Hosted HSTS authenticated-transport ownership — `f081a28d6f4`
+### Hosted HSTS authenticated-transport ownership — `c9056751aea`
 
 - `HostedWebContentSession` now strips `Strict-Transport-Security` before every
   renderer/browser commit. Only completed runtime HTTPS `single` and CORS
@@ -220,13 +220,13 @@ as described below and is not part of the landed set.
 - Independent static `REVIEW PASS`; the focused SSpec remains dynamically held
   on the active full-CLI build.
 
-### Final overflow normalization and scrollbar policy — `4d171219e88` through `27d116eb2b6`
+### Final overflow normalization and scrollbar policy — `bac97a80902` through `cc458d355a3`
 
 - Final-cascade `overflow-x`/`overflow-y` winners, including the two-value
   shorthand, normalize before Draw IR clipping. `scrollbar-width:none` controls
   paint without disabling the scrollport clip and remains non-inherited.
-- `e321b86eeae` and `d58b333df90` were incomplete intermediate review failures;
-  the corrected chain ending at `27d116eb2b6` has independent static
+- `33c49d09164` and `e19d051ccc8` are intermediate corrections; the complete
+  chain ending at `cc458d355a3` has independent static
   `REVIEW PASS`. Its exact Draw IR and Engine2D SSpec remains dynamically held
   on the active full-CLI build.
 
@@ -301,7 +301,8 @@ produced admissible runtime evidence.
 Candidate `3f3e0bd59963766e320289d96803ab1d3dcae44b` was rejected and remains
 unpushed. It is not evidence for any accepted lane. No compiler edit, full
 bootstrap, deployment, target-runtime PASS, or SPipe PASS has occurred. The
-new qualified build is the sole active dynamic-evidence owner.
+the qualified phase-2 lane is not evidence until admission; other bootstrap
+recovery builds are separate and do not promote these rows.
 
 ## Evidence Boundary
 

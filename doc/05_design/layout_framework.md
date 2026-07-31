@@ -19,6 +19,8 @@
 6. Total GPU latency is kernel + scheduling + upload + readback + synchronization. Select a GPU candidate only when every island is block/flex/grid, the batch is homogeneous, text is absent, and the summed GPU total is lower than CPU.
 7. Invoke the GPU port only for that candidate. Accept it only when submission, synchronization, device readback, and exact CPU-oracle parity all succeed; otherwise execute the CPU port and record the concrete fallback reason.
 8. Pack only `LayoutNodeSemantics`, viewport values, and grid tracks for device execution. Keep `oracle_boxes` host-side for post-readback comparison. The first CUDA slice accepts positive fixed-pixel childless block/flex/grid roots with an empty box model; all other inputs pre-reject.
+   This layout-only receipt cannot close Draw IR reconciliation R7–R9; those
+   gates require canonical composition submission and device-origin pixels.
 8. Emit one `LayoutOf` mapping per visited output box and retain fragments, line boxes, and overflow from the accepted execution result.
 
 ## Public API

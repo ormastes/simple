@@ -32,6 +32,9 @@ layout_framework: {
 - `layout_choose_backend` returns a candidate only. `LayoutSnapshot.backend = hybrid_vector_gpu` requires a successful execution-port result with submission, synchronization, device readback, and exact oracle equality.
 - `LayoutNodeSemantics` carries authored topology and typed block/flex/grid constraints. CPU-oracle boxes are snapshot-level verification evidence and are never part of the packed device payload.
 - The browser-owned CUDA port currently admits exact fixed-size childless block/flex/grid islands; every wider semantic shape is rejected before submission and routed through the authoritative CPU port.
+- Its layout receipt cannot satisfy Draw IR reconciliation R7, R8, or R9;
+  those rows require canonical `DrawIrComposition -> RenderBackend.submit_batch`
+  execution and device-origin readback evidence.
 - Inline measurement sends node id, content, family, size, and language through `TextMeasurePort`; unavailable or mismatched shaping selects CPU before execution.
 - Cyclic SCCs execute iterations and compare geometry hashes. A stable hash converges; reaching the positive cap produces a non-convergence fault and CPU fallback receipt.
 - CPU algorithms remain consumer-owned. The browser CPU port adapts the current flat-array renderer; the common capsule never copies browser layout logic.
