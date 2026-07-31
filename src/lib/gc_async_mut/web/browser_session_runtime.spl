@@ -15,39 +15,37 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_reconcile_animation_instances
 }
 use std.gc_async_mut.gpu.browser_engine.dom.{
-    BeDomNode, BeDomEvent, BeDomEventDispatch, normalize_dom_event_type
+    BeDomNode, BeDomEvent, normalize_dom_event_type
 }
-use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{DomNodeRoute}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomIdentityIndex, DomNodeRoute
+}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_dispatch_event_to_id, be_dom_dispatch_keyboard_event_to_id,
-    be_dom_dispatch_input_event_to_id,
     be_dom_find_by_tag,
-    be_dom_find_path_to_id,
-    be_dom_focused_route_id, be_dom_get_attr, be_dom_get_text_content,
+    be_dom_get_attr, be_dom_get_text_content,
     be_dom_has_attr,
-    be_dom_route_identity,
     be_dom_serialize_children, be_dom_serialize_html_for_render,
     be_dom_set_children,
-    be_dom_submit_form_owner_id, be_dom_keyboard_activation_event_for_target,
-    be_dom_reset_form_owner_id,
-    be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
-    be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
-    be_dom_input_blocks_implicit_submission, be_dom_next_focus_route_id,
-    be_dom_default_action_to_id,
-    be_dom_apply_default_action_to_id_without_focus
+    be_dom_keyboard_activation_event_for_target,
+    be_dom_input_blocks_implicit_submission
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     BeDomRouteEventDispatch, be_dom_focused_route, be_dom_node_for_route,
-    be_dom_dispatch_event_to_route
+    be_dom_path_for_route, be_dom_dispatch_event_to_route,
+    be_dom_dispatch_keyboard_event_to_route,
+    be_dom_dispatch_input_event_to_route, be_dom_next_focus_route,
+    be_dom_checked_radio_route_for_target,
+    be_dom_form_owner_route, be_dom_submit_form_owner_route,
+    be_dom_reset_form_owner_route, be_dom_implicit_submit_route_result
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build, html_tree_builder_build_with_scripts
 }
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
-    script_host_apply_action_to_id
+    script_host_apply_action_to_route
 }
 use std.gc_async_mut.gpu.browser_engine.script.form_api.{
     form_capture_defaults, form_reset
@@ -750,12 +748,6 @@ fn _browser_session_checkable_default(action: text) -> bool:
     action == "input-checkbox-toggle" or
         action == "input-radio-select"
 
-fn _browser_session_dom_route_id(root: BeDomNode, target_id: text) -> text:
-    val path = be_dom_find_path_to_id(root, target_id)
-    if path.len() == 0:
-        return target_id
-    be_dom_route_identity(path[path.len() - 1])
-
 fn _browser_session_replace_dom_path(
     path: [BeDomNode], replacement: BeDomNode
 ) -> BeDomNode:
@@ -773,15 +765,11 @@ fn _browser_session_replace_dom_path(
         ancestor = ancestor - 1
     next
 
-fn _browser_session_checkable_click_action(
-    root: BeDomNode, target_id: text, event_type: text
+fn _browser_session_checkable_click_action_for_node(
+    target: BeDomNode, event_type: text
 ) -> text:
     if event_type != "click":
         return ""
-    val path = be_dom_find_path_to_id(root, target_id)
-    if path.len() == 0:
-        return ""
-    val target = path[path.len() - 1]
     if target.tag_name != "input" or be_dom_has_attr(target, "disabled"):
         return ""
     match be_dom_get_attr(target, "type").lower():
@@ -940,7 +928,32 @@ pub class BrowserPrimaryPointerDownDispatch:
     default_prevented: bool
     mouse_default_action_allowed: bool
 
+fn _browser_session_same_route(
+    left: DomNodeRoute, right: DomNodeRoute
+) -> bool:
+    left.generation.value == right.generation.value and
+        left.node_id == right.node_id
+
+fn _browser_session_optional_route_matches(
+    candidate: DomNodeRoute?, expected: DomNodeRoute
+) -> bool:
+    if val Some(route) = candidate:
+        return _browser_session_same_route(route, expected)
+    false
+
 impl BrowserSession:
+
+    fn _live_dom_index_for_route(
+        route: DomNodeRoute
+    ) -> Result<DomIdentityIndex, text>:
+        if route.generation.value != self.document_generation().value:
+            return Err("stale_target")
+        val index = match self.current_dom_identity_index():
+            Some(value): value
+            nil: return Err("invalid_document")
+        if not index.contains_route(route):
+            return Err("stale_target")
+        Ok(index)
 
     me _advance_ui_access_revision():
         self.ui_access_revision = if self.ui_access_revision >= 9223372036854775806:
@@ -975,66 +988,75 @@ impl BrowserSession:
         )
         self._advance_ui_access_revision()
 
-    me _submit_dom_form(
-        form_id: text, submitter_id: text
-    ) -> BeDomEventDispatch:
-        val submit_dispatch = self.dispatch_dom_event(
-            form_id, "submit", true, true
-        )
-        if (
-            submit_dispatch.default_action_allowed and
-            not self.csp_sandbox_policy.allow_forms
-        ):
+    me _submit_dom_form_route(
+        form_route: DomNodeRoute, submitter_route: DomNodeRoute?
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        val submit_dispatch = self.dispatch_dom_event_route(
+            form_route, "submit", true, true
+        )?
+        if not submit_dispatch.default_action_allowed:
+            return Ok(submit_dispatch)
+        if not self.csp_sandbox_policy.allow_forms:
             self._append_warning("CSP sandbox blocked form submission")
-        elif (
-            submit_dispatch.default_action_allowed and
-            not self.csp_sandbox_policy.allow_top_navigation
-        ):
+            return Ok(submit_dispatch)
+        if not self.csp_sandbox_policy.allow_top_navigation:
             self._append_warning("CSP sandbox blocked top navigation")
-        elif submit_dispatch.default_action_allowed:
-            val submission = browser_form_submission(
-                self.current_dom, form_id, submitter_id, self.document_url
-            )
-            if submission.error != "":
-                self._append_warning(submission.error)
-            elif not browser_csp_form_action_allows(
-                self.content_security_policy, self.document_url,
-                submission.url
-            ):
-                self._append_warning(
-                    "CSP blocked form submission: {submission.url}"
-                )
-            else:
-                val started = self._begin_network_navigation_with_form_action_policy(
-                    submission.url, submission.method, "",
-                    submission.body, submission.content_type,
-                    self.content_security_policy, self.document_url
-                )
-                if val Err(e) = started:
-                    self._append_warning("form navigation blocked: {e}")
-        submit_dispatch
-
-    me _reset_dom_form(form_id: text):
-        val reset_dispatch = self.dispatch_dom_event(
-            form_id, "reset", true, true
+            return Ok(submit_dispatch)
+        val index = match self._live_dom_index_for_route(form_route):
+            Ok(value): value
+            Err(_): return Ok(submit_dispatch)
+        val submission = browser_form_submission(
+            self.current_dom, index, form_route, submitter_route,
+            self.document_url
         )
+        if submission.error != "":
+            self._append_warning(submission.error)
+        elif not browser_csp_form_action_allows(
+            self.content_security_policy, self.document_url,
+            submission.url
+        ):
+            self._append_warning(
+                "CSP blocked form submission: {submission.url}"
+            )
+        else:
+            val started = self._begin_network_navigation_with_form_action_policy(
+                submission.url, submission.method, "",
+                submission.body, submission.content_type,
+                self.content_security_policy, self.document_url
+            )
+            if val Err(e) = started:
+                self._append_warning("form navigation blocked: {e}")
+        Ok(submit_dispatch)
+
+    me _reset_dom_form_route(
+        form_route: DomNodeRoute
+    ) -> Result<bool, text>:
+        val reset_dispatch = self.dispatch_dom_event_route(
+            form_route, "reset", true, true
+        )?
         if reset_dispatch.event.default_prevented:
-            return
-        val form_path = be_dom_find_path_to_id(self.current_dom, form_id)
-        if form_path.len() == 0:
-            return
+            return Ok(false)
+        val index = match self._live_dom_index_for_route(form_route):
+            Ok(value): value
+            Err(_): return Ok(false)
+        val path = be_dom_path_for_route(self.current_dom, index, form_route)
+        if path.len() == 0:
+            return Ok(false)
         self.current_dom = _browser_session_replace_dom_path(
-            form_path, form_reset(form_path[form_path.len() - 1])
+            path, form_reset(path[path.len() - 1])
         )
         self._advance_ui_access_revision()
         self._sync_runtime_body_from_dom()
+        Ok(true)
 
     me _ensure_dom_text_selection(
-        target_id: text, target: BeDomNode
+        route: DomNodeRoute, target: BeDomNode
     ) -> text:
         val value = _browser_session_text_control_value(target)
         if (
-            self.text_selection_target_id != target_id or
+            not _browser_session_optional_route_matches(
+                self.text_selection_route, route
+            ) or
             self.text_selection_anchor_byte < 0 or
             self.text_selection_focus_byte < 0 or
             self.text_selection_anchor_byte > value.len() or
@@ -1046,18 +1068,20 @@ impl BrowserSession:
                 value, self.text_selection_focus_byte
             )
         ):
-            val _ = self.set_dom_text_selection(
-                target_id, value.len(), value.len()
+            val _ = self.set_dom_text_selection_route(
+                route, value.len(), value.len()
             )
         value
 
-    me set_dom_text_selection(
-        target_id: text, anchor_byte: i64, focus_byte: i64
+    me set_dom_text_selection_route(
+        route: DomNodeRoute, anchor_byte: i64, focus_byte: i64
     ) -> bool:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if path.len() == 0:
-            return false
-        val target = path[path.len() - 1]
+        val index = match self._live_dom_index_for_route(route):
+            Ok(value): value
+            Err(_): return false
+        val target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(value): value
+            nil: return false
         if not dom_text_control_selectable(target):
             return false
         val value = _browser_session_text_control_value(target)
@@ -1068,34 +1092,29 @@ impl BrowserSession:
             not _browser_session_is_utf8_boundary(value, focus_byte)
         ):
             return false
-        self.text_selection_target_id = target_id
+        self.text_selection_route = Some(route)
         self.text_selection_anchor_byte = anchor_byte
         self.text_selection_focus_byte = focus_byte
         true
 
-    me set_dom_text_selection_route(
-        route: DomNodeRoute, anchor_byte: i64, focus_byte: i64
-    ) -> bool:
-        val target_id = match self._event_target_id_for_route(route):
-            Ok(value): value
-            Err(_): return false
-        self.set_dom_text_selection(target_id, anchor_byte, focus_byte)
-
     me clear_dom_text_selection():
-        self.text_selection_target_id = ""
+        self.text_selection_route = nil
         self.text_selection_anchor_byte = 0
         self.text_selection_focus_byte = 0
 
     me _set_dom_text_runtime_state(
-        target_id: text, value: text, anchor_byte: i64, focus_byte: i64
+        route: DomNodeRoute, value: text, anchor_byte: i64, focus_byte: i64
     ):
         if val Some(state) = self.runtime_state:
-            val path = be_dom_find_path_to_id(self.current_dom, target_id)
-            if path.len() == 0:
-                return
-            val object_id = _browser_session_object_id_for_node(
-                state, path[path.len() - 1]
-            )
+            val index = match self._live_dom_index_for_route(route):
+                Ok(value): value
+                Err(_): return
+            val target = match be_dom_node_for_route(
+                self.current_dom, index, route
+            ):
+                Some(value): value
+                nil: return
+            val object_id = _browser_session_object_id_for_node(state, target)
             if object_id < 0:
                 return
             var runtime = state.runtime
@@ -1114,15 +1133,18 @@ impl BrowserSession:
             self.runtime_state = Some(state)
 
     me _read_dom_text_runtime_selection(
-        target_id: text, value: text
+        route: DomNodeRoute, value: text
     ) -> bool:
         if val Some(state) = self.runtime_state:
-            val path = be_dom_find_path_to_id(self.current_dom, target_id)
-            if path.len() == 0:
-                return false
-            val object_id = _browser_session_object_id_for_node(
-                state, path[path.len() - 1]
-            )
+            val index = match self._live_dom_index_for_route(route):
+                Ok(value): value
+                Err(_): return false
+            val target = match be_dom_node_for_route(
+                self.current_dom, index, route
+            ):
+                Some(value): value
+                nil: return false
+            val object_id = _browser_session_object_id_for_node(state, target)
             if object_id < 0:
                 return false
             val anchor_number = match state.runtime.get_host_property(
@@ -1146,26 +1168,22 @@ impl BrowserSession:
                 not _browser_session_is_utf8_boundary(value, focus)
             ):
                 return false
-            self.text_selection_target_id = target_id
+            self.text_selection_route = Some(route)
             self.text_selection_anchor_byte = anchor
             self.text_selection_focus_byte = focus
         true
 
-    me ensure_dom_text_selection(target_id: text) -> bool:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if path.len() == 0:
-            return false
-        val target = path[path.len() - 1]
-        if not dom_text_control_selectable(target):
-            return false
-        val _ = self._ensure_dom_text_selection(target_id, target)
-        true
-
     me ensure_dom_text_selection_route(route: DomNodeRoute) -> bool:
-        val target_id = match self._event_target_id_for_route(route):
+        val index = match self._live_dom_index_for_route(route):
             Ok(value): value
             Err(_): return false
-        self.ensure_dom_text_selection(target_id)
+        val target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(value): value
+            nil: return false
+        if not dom_text_control_selectable(target):
+            return false
+        val _ = self._ensure_dom_text_selection(route, target)
+        true
 
     me _persist_storage_for_url(url: text):
         if url == "" or not self.csp_sandbox_policy.allow_same_origin:
@@ -1340,81 +1358,13 @@ impl BrowserSession:
                 self._append_dynamic_image_warning(load, warning)
             source_index = source_index + 1
 
-    me dispatch_dom_event(target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
-        self._dispatch_dom_event_with_payload(
-            target_id, event_type, bubbles, cancelable, "", "", false,
-            nil, "", false, true
-        )
-
-    fn _event_target_id_for_route(route: DomNodeRoute) -> Result<text, text>:
-        if route.generation.value != self.document_generation().value:
-            return Err("stale_target")
-        val index = match self.current_dom_identity_index():
-            Some(value): value
-            nil: return Err("invalid_document")
-        if be_dom_node_for_route(self.current_dom, index, route) == nil:
-            return Err("stale_target")
-        Err("legacy_route_bridge_removed")
-
     me dispatch_dom_event_route(
         route: DomNodeRoute, event_type: text, bubbles: bool, cancelable: bool
     ) -> Result<BeDomRouteEventDispatch, text>:
-        """Dispatch through a live typed route without text authorization."""
-        if route.generation.value != self.document_generation().value:
-            return Err("stale_target")
-        val index = match self.current_dom_identity_index():
-            Some(value): value
-            nil: return Err("invalid_document")
-        if not index.contains_route(route):
-            return Err("stale_target")
-        Ok(be_dom_dispatch_event_to_route(
-            self.current_dom, index, route, event_type, bubbles, cancelable,
-            self.csp_sandbox_policy.allow_scripts
-        ))
-
-    me dispatch_dom_primary_pointer_down_by_id(
-        target_id: text
-    ) -> BrowserPrimaryPointerDownDispatch:
-        """Dispatch primary pointerdown and its permitted mouse compatibility.
-
-        Canceling pointerdown sets the Pointer Events PREVENT MOUSE EVENT state,
-        so mousedown is not produced and the caller must retain suppression
-        until the matching pointerup.
-        """
-        val pointer_down = self.dispatch_dom_event(
-            target_id, "pointerdown", true, true
+        self._dispatch_dom_event_route_with_payload(
+            route, event_type, bubbles, cancelable, "", "", false,
+            nil, "", false, true
         )
-        if pointer_down.event.default_prevented:
-            return BrowserPrimaryPointerDownDispatch(
-                suppress_compat_mouse: true,
-                default_prevented: true,
-                mouse_default_action_allowed: false
-            )
-        val mouse_down = self.dispatch_dom_event(
-            target_id, "mousedown", true, true
-        )
-        BrowserPrimaryPointerDownDispatch(
-            suppress_compat_mouse: false,
-            default_prevented: mouse_down.event.default_prevented,
-            mouse_default_action_allowed: mouse_down.default_action_allowed
-        )
-
-    me dispatch_dom_primary_pointer_up_by_id(
-        target_id: text, suppress_compat_mouse: bool, activate_click: bool
-    ):
-        """Finish a primary pointer stream without dropping pointerup/click."""
-        val _ = self.dispatch_dom_event(
-            target_id, "pointerup", true, true
-        )
-        if not suppress_compat_mouse:
-            val _ = self.dispatch_dom_event(
-                target_id, "mouseup", true, true
-            )
-        if activate_click:
-            val _ = self._dispatch_dom_event_with_payload(
-                target_id, "click", true, true, "", "", false,
-                nil, "", false, not suppress_compat_mouse
-            )
 
     me dispatch_dom_primary_pointer_down(
         route: DomNodeRoute
@@ -1444,93 +1394,102 @@ impl BrowserSession:
         if not suppress_compat_mouse:
             val _ = self.dispatch_dom_event_route(route, "mouseup", true, true)?
         if activate_click:
-            val _ = self.dispatch_dom_event_route(route, "click", true, true)?
+            val _ = self._dispatch_dom_event_route_with_payload(
+                route, "click", true, true, "", "", false,
+                nil, "", false, not suppress_compat_mouse
+            )?
         Ok(true)
 
-    me _dispatch_dom_input_event(
-        target_id: text, event_type: text, bubbles: bool, cancelable: bool,
-        input_data: text?, input_type: text
-    ) -> BeDomEventDispatch:
-        self._dispatch_dom_event_with_payload(
-            target_id, event_type, bubbles, cancelable, "", "", false,
+    me _dispatch_dom_input_event_route(
+        route: DomNodeRoute, event_type: text, bubbles: bool,
+        cancelable: bool, input_data: text?, input_type: text
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        self._dispatch_dom_event_route_with_payload(
+            route, event_type, bubbles, cancelable, "", "", false,
             input_data, input_type, false, true
         )
 
-    me _dispatch_dom_event_with_payload(
-        target_id: text, event_type: text, bubbles: bool, cancelable: bool,
-        key: text, code: text, shift_key: bool, input_data: text?,
-        input_type: text, is_composing: bool, allow_focus_default: bool
-    ) -> BeDomEventDispatch:
-        val target_route_id = _browser_session_dom_route_id(
-            self.current_dom, target_id
+    me _dispatch_dom_keyboard_event_route(
+        route: DomNodeRoute, event_type: text, bubbles: bool,
+        cancelable: bool, key: text, code: text, shift_key: bool
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        self._dispatch_dom_event_route_with_payload(
+            route, event_type, bubbles, cancelable, key, code, shift_key,
+            nil, "", false, true
         )
-        val checkable_action = _browser_session_checkable_click_action(
-            self.current_dom, target_route_id, event_type
+
+    me _dispatch_dom_event_route_with_payload(
+        route: DomNodeRoute, event_type: text, bubbles: bool,
+        cancelable: bool, key: text, code: text, shift_key: bool,
+        input_data: text?, input_type: text, is_composing: bool,
+        allow_focus_default: bool
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        var index = self._live_dom_index_for_route(route)?
+        var target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(value): value
+            nil: return Err("stale_target")
+        val normalized_event_type = normalize_dom_event_type(event_type)
+        val checkable_action = _browser_session_checkable_click_action_for_node(
+            target, normalized_event_type
         )
         var checked_before = false
-        var checked_radio_before = ""
+        var checked_radio_before: DomNodeRoute? = nil
         if checkable_action != "":
-            val focused_id = be_dom_focused_route_id(self.current_dom)
-            if (
-                allow_focus_default and focused_id != "" and
-                focused_id != target_route_id
-            ):
-                val _ = self._blur_dom_focus(focused_id)
-            val path = be_dom_find_path_to_id(self.current_dom, target_route_id)
-            if path.len() > 0:
-                checked_before = be_dom_has_attr(
-                    path[path.len() - 1], "checked"
-                )
+            if allow_focus_default:
+                if val Some(focused) = be_dom_focused_route(
+                    self.current_dom, index
+                ):
+                    if not _browser_session_same_route(focused, route):
+                        val _ = self._blur_dom_focus_route(focused)?
+                        index = self._live_dom_index_for_route(route)?
+                        target = match be_dom_node_for_route(
+                            self.current_dom, index, route
+                        ):
+                            Some(value): value
+                            nil: return Err("stale_target")
+            checked_before = be_dom_has_attr(target, "checked")
             if checkable_action == "input-radio-select":
-                checked_radio_before = be_dom_checked_radio_id_for_target(
-                    self.current_dom, target_route_id
+                checked_radio_before = be_dom_checked_radio_route_for_target(
+                    self.current_dom, index, route
                 )
-            self.current_dom = if allow_focus_default:
-                script_host_apply_action_to_id(
-                    self.current_dom, target_route_id, checkable_action, true
-                )
-            else:
-                be_dom_apply_default_action_to_id_without_focus(
-                    self.current_dom, target_route_id, checkable_action
-                )
+            self.current_dom = script_host_apply_action_to_route(
+                self.current_dom, index, route, checkable_action, true,
+                allow_focus_default
+            )
             self._sync_runtime_body_from_dom()
-        val normalized_event_type = normalize_dom_event_type(event_type)
+
         var focus_transitioned = false
         if normalized_event_type == "focus":
-            val initial_focus_path = be_dom_find_path_to_id(
-                self.current_dom, target_route_id
-            )
-            if (
-                initial_focus_path.len() > 0 and
-                not be_dom_has_attr(
-                    initial_focus_path[initial_focus_path.len() - 1],
-                    "disabled"
-                )
-            ):
-                val focused_id = be_dom_focused_route_id(self.current_dom)
-                if focused_id != target_route_id:
-                    if focused_id != "":
-                        val _ = self._blur_dom_focus(focused_id)
-                    val current_focus_path = be_dom_find_path_to_id(
-                        self.current_dom, target_route_id
+            index = self._live_dom_index_for_route(route)?
+            target = match be_dom_node_for_route(self.current_dom, index, route):
+                Some(value): value
+                nil: return Err("stale_target")
+            if not be_dom_has_attr(target, "disabled"):
+                var should_focus = true
+                if val Some(focused) = be_dom_focused_route(
+                    self.current_dom, index
+                ):
+                    if _browser_session_same_route(focused, route):
+                        should_focus = false
+                    else:
+                        val _ = self._blur_dom_focus_route(focused)?
+                        index = self._live_dom_index_for_route(route)?
+                if should_focus:
+                    self.current_dom = script_host_apply_action_to_route(
+                        self.current_dom, index, route,
+                        "focus-element", true, true
                     )
-                    if current_focus_path.len() > 0:
-                        self.current_dom = script_host_apply_action_to_id(
-                            self.current_dom, target_route_id,
-                            "focus-element", true
-                        )
-                        self._sync_runtime_body_from_dom()
-                        focus_transitioned = true
-        val dispatch_path = be_dom_find_path_to_id(
-            self.current_dom, target_route_id
+                    self._sync_runtime_body_from_dom()
+                    focus_transitioned = true
+
+        index = self._live_dom_index_for_route(route)?
+        val dispatch_path = be_dom_path_for_route(self.current_dom, index, route)
+        if dispatch_path.len() == 0:
+            return Err("stale_target")
+        val inline_action = be_dom_get_attr(
+            dispatch_path[dispatch_path.len() - 1],
+            "on" + normalized_event_type
         )
-        val inline_action = if dispatch_path.len() > 0:
-            be_dom_get_attr(
-                dispatch_path[dispatch_path.len() - 1],
-                "on" + normalized_event_type
-            )
-        else:
-            ""
         val inline_allowed = (
             inline_action == "" or (
                 self.csp_sandbox_policy.allow_scripts and
@@ -1543,101 +1502,103 @@ impl BrowserSession:
         if inline_action != "" and not inline_allowed:
             self._append_warning(
                 "CSP blocked inline event handler: {normalized_event_type}"
-        )
+            )
         var callable_executor_used = false
         var dispatch = if input_type != "":
-            be_dom_dispatch_input_event_to_id(
-                self.current_dom, target_route_id, event_type, bubbles,
+            be_dom_dispatch_input_event_to_route(
+                self.current_dom, index, route, event_type, bubbles,
                 cancelable, input_data, input_type, is_composing,
                 inline_allowed
             )
         elif key == "" and code == "":
-            be_dom_dispatch_event_to_id(
-                self.current_dom, target_route_id, event_type, bubbles,
+            be_dom_dispatch_event_to_route(
+                self.current_dom, index, route, event_type, bubbles,
                 cancelable, inline_allowed
             )
         else:
-            be_dom_dispatch_keyboard_event_to_id(
-                self.current_dom, target_route_id, event_type, bubbles,
+            be_dom_dispatch_keyboard_event_to_route(
+                self.current_dom, index, route, event_type, bubbles,
                 cancelable, key, code, shift_key, inline_allowed
             )
         if val Some(state) = self.runtime_state:
             val _ = state.drain_dom_callable_listener_ops()
-            if dispatch_path.len() > 0:
-                val callable_root = _browser_session_callable_dispatch_root(
-                    dispatch_path, state, normalized_event_type
+            val callable_root = _browser_session_callable_dispatch_root(
+                dispatch_path, state, normalized_event_type
+            )
+            val target_object_id = _browser_session_object_id_for_node(
+                state, dispatch_path[dispatch_path.len() - 1]
+            )
+            var dispatch_active: [bool] = []
+            for listener in state.dom_callable_listeners:
+                dispatch_active.push(listener.event_type != "")
+            var executor = BrowserDomEventExecutor(
+                runtime: state.runtime,
+                listeners: state.dom_callable_listeners,
+                dispatch_active: dispatch_active,
+                node_ids: state.dom_node_ids,
+                element_ids: state.dom_element_ids,
+                window_id: state.window_id,
+                document_id: state.document_id,
+                target_object_id: target_object_id,
+                event_object_id: -1,
+                event_prevent_default_fn_id:
+                    state.event_prevent_default_fn_id,
+                event_stop_propagation_fn_id:
+                    state.event_stop_propagation_fn_id,
+                event_stop_immediate_propagation_fn_id:
+                    state.event_stop_immediate_propagation_fn_id,
+                error: ""
+            )
+            dispatch = if input_type != "":
+                be_dom_dispatch_input_event_to_route(
+                    callable_root, index, route, event_type, bubbles,
+                    cancelable, input_data, input_type, is_composing,
+                    inline_allowed,
+                    fn(event: BeDomEvent, node: BeDomNode, action: text,
+                       phase: text) -> BeDomEvent:
+                        executor.execute(event, node, action, phase)
                 )
-                val target_object_id = _browser_session_object_id_for_node(
-                    state, dispatch_path[dispatch_path.len() - 1]
+            elif key == "" and code == "":
+                be_dom_dispatch_event_to_route(
+                    callable_root, index, route, event_type, bubbles,
+                    cancelable, inline_allowed,
+                    fn(event: BeDomEvent, node: BeDomNode, action: text,
+                       phase: text) -> BeDomEvent:
+                        executor.execute(event, node, action, phase)
                 )
-                var dispatch_active: [bool] = []
-                for listener in state.dom_callable_listeners:
-                    dispatch_active.push(listener.event_type != "")
-                var executor = BrowserDomEventExecutor(
-                    runtime: state.runtime,
-                    listeners: state.dom_callable_listeners,
-                    dispatch_active: dispatch_active,
-                    node_ids: state.dom_node_ids,
-                    element_ids: state.dom_element_ids,
-                    window_id: state.window_id,
-                    document_id: state.document_id,
-                    target_object_id: target_object_id,
-                    event_object_id: -1,
-                    event_prevent_default_fn_id:
-                        state.event_prevent_default_fn_id,
-                    event_stop_propagation_fn_id:
-                        state.event_stop_propagation_fn_id,
-                    event_stop_immediate_propagation_fn_id:
-                        state.event_stop_immediate_propagation_fn_id,
-                    error: ""
+            else:
+                be_dom_dispatch_keyboard_event_to_route(
+                    callable_root, index, route, event_type, bubbles,
+                    cancelable, key, code, shift_key, inline_allowed,
+                    fn(event: BeDomEvent, node: BeDomNode, action: text,
+                       phase: text) -> BeDomEvent:
+                        executor.execute(event, node, action, phase)
                 )
-                dispatch = if input_type != "":
-                    be_dom_dispatch_input_event_to_id(
-                        callable_root, target_route_id, event_type, bubbles,
-                        cancelable, input_data, input_type, is_composing,
-                        inline_allowed,
-                        fn(event: BeDomEvent, node: BeDomNode, action: text,
-                           phase: text) -> BeDomEvent:
-                            executor.execute(event, node, action, phase)
-                    )
-                elif key == "" and code == "":
-                    be_dom_dispatch_event_to_id(
-                        callable_root, target_route_id, event_type, bubbles,
-                        cancelable, inline_allowed,
-                        fn(event: BeDomEvent, node: BeDomNode, action: text,
-                           phase: text) -> BeDomEvent:
-                            executor.execute(event, node, action, phase)
-                    )
-                else:
-                    be_dom_dispatch_keyboard_event_to_id(
-                        callable_root, target_route_id, event_type, bubbles,
-                        cancelable, key, code, shift_key, inline_allowed,
-                        fn(event: BeDomEvent, node: BeDomNode, action: text,
-                           phase: text) -> BeDomEvent:
-                            executor.execute(event, node, action, phase)
-                    )
-                executor.finish_event()
-                state.runtime = executor.runtime
-                state.dom_callable_listeners = executor.listeners
-                self.runtime_state = Some(state)
-                callable_executor_used = true
-                if executor.error != "":
-                    self._append_warning(
-                        "DOM event listener failed: {executor.error}"
-                    )
-                self._flush_runtime_side_effects_and_pump_history()
+            executor.finish_event()
+            state.runtime = executor.runtime
+            state.dom_callable_listeners = executor.listeners
+            self.runtime_state = Some(state)
+            callable_executor_used = true
+            if executor.error != "":
+                self._append_warning(
+                    "DOM event listener failed: {executor.error}"
+                )
+            self._flush_runtime_side_effects_and_pump_history()
+
         self.dom_callback_count = (
             self.dom_callback_count + dispatch.actions.len().to_i64()
         )
         var action_index = 0
         while action_index < dispatch.actions.len():
             val action = dispatch.actions[action_index]
+            val current_route = dispatch.current_targets[action_index]
+            if self._live_dom_index_for_route(current_route).is_err():
+                return Ok(dispatch)
             if _browser_session_dom_action(action):
-                self.current_dom = script_host_apply_action_to_id(
-                    self.current_dom,
-                    dispatch.current_target_route_ids[action_index],
-                    action,
-                    false
+                index = self._live_dom_index_for_route(current_route)?
+                self.current_dom = script_host_apply_action_to_route(
+                    self.current_dom, index, current_route, action,
+                    false, false
                 )
             elif (
                 _browser_session_event_control(action) == false and
@@ -1647,14 +1608,10 @@ impl BrowserSession:
                 self._sync_runtime_body_from_dom()
                 val _ = self.eval_script(action)
             action_index = action_index + 1
-        if (
-            dispatch.default_action_allowed and
-            normalized_event_type == "click"
-        ):
-            dispatch.default_action = be_dom_default_action_to_id(
-                self.current_dom, dispatch.target_route_id, event_type
-            )
-            dispatch.default_action_allowed = dispatch.default_action != ""
+
+        index = match self._live_dom_index_for_route(route):
+            Ok(value): value
+            Err(_): return Ok(dispatch)
         val live_checkable_action = if (
             dispatch.default_action_allowed and
             _browser_session_checkable_default(dispatch.default_action)
@@ -1671,252 +1628,135 @@ impl BrowserSession:
                 "set-attr:checked:checked"
             else:
                 "remove-attr:checked"
-            self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_route_id, restore_action, false
+            self.current_dom = script_host_apply_action_to_route(
+                self.current_dom, index, route, restore_action, false, false
             )
-            if (
-                checkable_action == "input-radio-select" and
-                checked_radio_before != "" and
-                checked_radio_before != target_route_id
-            ):
-                self.current_dom = script_host_apply_action_to_id(
-                    self.current_dom, checked_radio_before,
-                    "set-attr:checked:checked", false
-                )
+            if val Some(previous_radio) = checked_radio_before:
+                if not _browser_session_same_route(previous_radio, route):
+                    self.current_dom = script_host_apply_action_to_route(
+                        self.current_dom, index, previous_radio,
+                        "set-attr:checked:checked", false, false
+                    )
+
         if dispatch.default_action_allowed:
             var focus_changed = focus_transitioned
             if (
                 _browser_session_focus_default(dispatch.default_action) and
                 not focus_transitioned and allow_focus_default
             ):
-                val focused_id = be_dom_focused_route_id(self.current_dom)
-                focus_changed = focused_id != dispatch.target_route_id
-                if focused_id != "" and
-                   focused_id != dispatch.target_route_id:
-                    val _ = self._blur_dom_focus(focused_id)
+                if val Some(focused) = be_dom_focused_route(
+                    self.current_dom, index
+                ):
+                    focus_changed = not _browser_session_same_route(
+                        focused, route
+                    )
+                    if focus_changed:
+                        val _ = self._blur_dom_focus_route(focused)?
+                        index = self._live_dom_index_for_route(route)?
+                else:
+                    focus_changed = true
             if dispatch.default_action.starts_with("navigate-popup:"):
                 dispatch.default_action_allowed = false
                 if not self.csp_sandbox_policy.allow_popups:
                     self._append_warning("CSP sandbox blocked popup")
                 else:
                     self._append_warning("popup-context-unavailable")
-                return dispatch
+                return Ok(dispatch)
             if dispatch.default_action.starts_with("navigate:"):
                 if not self.csp_sandbox_policy.allow_top_navigation:
                     self._append_warning(
                         "CSP sandbox blocked top navigation"
                     )
-                    return dispatch
-                val href = dispatch.default_action.substring(9, dispatch.default_action.len())
-                val target = resolve_relative_url(self.document_url, href)
-                val started = self.begin_network_navigation(target, "GET", "", "", "")
+                    return Ok(dispatch)
+                val href = dispatch.default_action.substring(
+                    9, dispatch.default_action.len()
+                )
+                val target_url = resolve_relative_url(self.document_url, href)
+                val started = self.begin_network_navigation(
+                    target_url, "GET", "", "", ""
+                )
                 if val Err(e) = started:
                     self._append_warning("default navigation blocked: {e}")
-                return dispatch
+                return Ok(dispatch)
             if live_checkable_action == "":
-                self.current_dom = if allow_focus_default:
-                    script_host_apply_action_to_id(
-                        self.current_dom, dispatch.target_route_id,
-                        dispatch.default_action, true
-                    )
-                else:
-                    be_dom_apply_default_action_to_id_without_focus(
-                        self.current_dom, dispatch.target_route_id,
-                        dispatch.default_action
-                    )
-            else:
-                if not preactivation_matches_live:
-                    self.current_dom = if allow_focus_default:
-                        script_host_apply_action_to_id(
-                            self.current_dom, dispatch.target_route_id,
-                            live_checkable_action, true
-                        )
-                    else:
-                        be_dom_apply_default_action_to_id_without_focus(
-                            self.current_dom, dispatch.target_route_id,
-                            live_checkable_action
-                        )
+                self.current_dom = script_host_apply_action_to_route(
+                    self.current_dom, index, route,
+                    dispatch.default_action, true, allow_focus_default
+                )
+            elif not preactivation_matches_live:
+                self.current_dom = script_host_apply_action_to_route(
+                    self.current_dom, index, route,
+                    live_checkable_action, true, allow_focus_default
+                )
+            if live_checkable_action != "":
                 self._sync_body_html_from_dom()
-                val _ = self.dispatch_dom_event(
-                    dispatch.target_route_id, "input", true, false
-                )
-                val _ = self.dispatch_dom_event(
-                    dispatch.target_route_id, "change", true, false
-                )
+                val _ = self.dispatch_dom_event_route(
+                    route, "input", true, false
+                )?
+                if self._live_dom_index_for_route(route).is_err():
+                    return Ok(dispatch)
+                val _ = self.dispatch_dom_event_route(
+                    route, "change", true, false
+                )?
             if focus_changed:
                 if normalized_event_type != "focus":
-                    val _ = self.dispatch_dom_event(
-                        dispatch.target_route_id, "focus", false, false
-                    )
-                val _ = self.dispatch_dom_event(
-                    dispatch.target_route_id, "focusin", true, false
-                )
-            if event_type == "click" and dispatch.default_action == "button-activate":
-                val form_id = be_dom_submit_form_owner_id(
-                    self.current_dom, dispatch.target_route_id
-                )
-                if form_id != "":
-                    val _ = self._submit_dom_form(
-                        form_id, dispatch.target_route_id
-                    )
+                    val _ = self.dispatch_dom_event_route(
+                        route, "focus", false, false
+                    )?
+                if self._live_dom_index_for_route(route).is_err():
+                    return Ok(dispatch)
+                val _ = self.dispatch_dom_event_route(
+                    route, "focusin", true, false
+                )?
+            if event_type == "click" and
+               dispatch.default_action == "button-activate":
+                index = self._live_dom_index_for_route(route)?
+                if val Some(form_route) = be_dom_submit_form_owner_route(
+                    self.current_dom, index, route
+                ):
+                    val _ = self._submit_dom_form_route(
+                        form_route, Some(route)
+                    )?
             elif event_type == "click" and
                  dispatch.default_action == "form-reset":
-                val form_id = be_dom_reset_form_owner_id(
-                    self.current_dom, dispatch.target_route_id
-                )
-                if form_id != "":
-                    self._reset_dom_form(form_id)
+                index = self._live_dom_index_for_route(route)?
+                if val Some(form_route) = be_dom_reset_form_owner_route(
+                    self.current_dom, index, route
+                ):
+                    val _ = self._reset_dom_form_route(form_route)?
         self._sync_body_html_from_dom()
-        dispatch
-
-    me dispatch_dom_keyboard_activation(
-        target_id: text, key: text
-    ) -> Result<BeDomEventDispatch, text>:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if path.len() == 0:
-            return Err("DOM keyboard target not found")
-        val key_dispatch = self._dispatch_dom_event_with_payload(
-            target_id, "keydown", true, true, key,
-            browser_dom_keyboard_code_from_key(key), false, nil, "", false,
-            true
-        )
-        if key_dispatch.event.default_prevented:
-            return Ok(key_dispatch)
-        val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if current_path.len() == 0:
-            return Err("DOM keyboard target was removed")
-        val event_type = be_dom_keyboard_activation_event_for_target(
-            current_path[current_path.len() - 1], key
-        )
-        if event_type == "":
-            return Err("key does not activate target")
-        Ok(self.dispatch_dom_event(target_id, event_type, true, true))
-
-    me dispatch_dom_keyboard_event(
-        target_id: text, key: text, pressed: bool
-    ) -> Result<BeDomEventDispatch, text>:
-        self._dispatch_dom_keyboard_event_with_payload(
-            target_id, key, browser_dom_keyboard_code_from_key(key),
-            pressed, false
-        )
-
-    me _dispatch_dom_keyboard_event_with_payload(
-        target_id: text, key: text, code: text, pressed: bool,
-        shift_key: bool
-    ) -> Result<BeDomEventDispatch, text>:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if path.len() == 0:
-            return Err("DOM keyboard target not found")
-        val event_type = if pressed: "keydown" else: "keyup"
-        val key_dispatch = self._dispatch_dom_event_with_payload(
-            target_id, event_type, true, true, key, code, shift_key,
-            nil, "", false, true
-        )
-        if key_dispatch.event.default_prevented:
-            self.pending_space_activation_target = ""
-            return Ok(key_dispatch)
-        val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if current_path.len() == 0:
-            self.pending_space_activation_target = ""
-            return Err("DOM keyboard target was removed")
-        val target = current_path[current_path.len() - 1]
-        val normalized_key = key.trim().lower()
-        val is_space = (
-            normalized_key == "space" or normalized_key == "spacebar" or
-            key == " "
-        )
-        if pressed and (normalized_key == "backspace" or key == "8"):
-            self.pending_space_activation_target = ""
-            if (
-                (target.tag_name == "input" or target.tag_name == "textarea") and
-                not be_dom_has_attr(target, "disabled") and
-                not be_dom_has_attr(target, "readonly")
-            ):
-                val value = if target.tag_name == "input":
-                    be_dom_get_attr(target, "value")
-                else:
-                    html_to_text(be_dom_serialize_children(target))
-                if value != "":
-                    return self._apply_dom_text_edit(
-                        target_id, "", false, "deleteContentBackward"
-                    )
-            return Ok(key_dispatch)
-        if pressed and (
-            normalized_key == "enter" or normalized_key == "return"
-        ) and _browser_session_accepts_implicit_submit(target):
-            val form_id = be_dom_form_owner_id(self.current_dom, target_id)
-            val submitter_id = be_dom_default_submitter_id(
-                self.current_dom, form_id
-            )
-            if submitter_id != "":
-                return Ok(self.dispatch_dom_event(
-                    submitter_id, "click", true, true
-                ))
-            if be_dom_form_allows_direct_implicit_submit(
-                self.current_dom, form_id
-            ):
-                return Ok(self._submit_dom_form(form_id, ""))
-        val activation_event = be_dom_keyboard_activation_event_for_target(
-            target, key
-        )
-        if activation_event == "":
-            # A Space event on a non-activatable target ends stale ownership;
-            # unrelated key events do not own the pending Space press.
-            if is_space:
-                self.pending_space_activation_target = ""
-            return Ok(key_dispatch)
-        if is_space:
-            if pressed:
-                self.pending_space_activation_target = target_id
-                return Ok(key_dispatch)
-            val armed = self.pending_space_activation_target == target_id
-            self.pending_space_activation_target = ""
-            if not armed:
-                return Ok(key_dispatch)
-        elif not pressed:
-            return Ok(key_dispatch)
-        else:
-            self.pending_space_activation_target = ""
-        Ok(self.dispatch_dom_event(target_id, activation_event, true, true))
-
-    me dispatch_dom_keyboard_event_with_shift(
-        target_id: text, key: text, pressed: bool, shift_key: bool
-    ) -> Result<BeDomEventDispatch, text>:
-        self._dispatch_dom_keyboard_event_with_shift_payload(
-            target_id, key, browser_dom_keyboard_code_from_key(key),
-            pressed, shift_key
-        )
-
-    me dispatch_dom_keyboard_code_event_by_id(
-        target_id: text, key_code: i64, pressed: bool, shift_key: bool
-    ) -> Result<BeDomEventDispatch, text>:
-        self._dispatch_dom_keyboard_event_with_shift_payload(
-            target_id,
-            browser_dom_keyboard_key(key_code, shift_key),
-            browser_dom_keyboard_code(key_code),
-            pressed, shift_key
-        )
+        Ok(dispatch)
 
     me dispatch_dom_keyboard_code_event(
         focused_route: DomNodeRoute?, key_code: i64, pressed: bool,
         shift_key: bool
-    ) -> Result<BeDomEventDispatch, text>:
+    ) -> Result<BeDomRouteEventDispatch, text>:
         val key = browser_dom_keyboard_key(key_code, shift_key)
-        val target_id = match focused_route:
-            Some(route): self._event_target_id_for_route(route)?
-            nil:
-                if key.trim().lower() != "tab" and key != "9":
-                    return Err("stale_target")
-                ""
-        self._dispatch_dom_keyboard_event_with_shift_payload(
-            target_id, key, browser_dom_keyboard_code(key_code),
-            pressed, shift_key
-        )
+        val code = browser_dom_keyboard_code(key_code)
+        if val Some(route) = focused_route:
+            return self._dispatch_dom_keyboard_route_with_shift_payload(
+                route, key, code, pressed, shift_key
+            )
+        if key.trim().lower() != "tab" and key != "9":
+            return Err("stale_target")
+        val index = match self.current_dom_identity_index():
+            Some(value): value
+            nil: return Err("invalid_document")
+        val next_route = match be_dom_next_focus_route(
+            self.current_dom, index, nil, shift_key
+        ):
+            Some(value): value
+            nil: return Err("DOM has no focusable target")
+        self.dispatch_dom_event_route(next_route, "focus", false, false)
 
-    me _dispatch_dom_keyboard_event_with_shift_payload(
-        target_id: text, key: text, code: text, pressed: bool,
+    me _dispatch_dom_keyboard_route_with_shift_payload(
+        route: DomNodeRoute, key: text, code: text, pressed: bool,
         shift_key: bool
-    ) -> Result<BeDomEventDispatch, text>:
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        var index = self._live_dom_index_for_route(route)?
+        var target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(value): value
+            nil: return Err("stale_target")
         val normalized_key = key.trim().lower()
         val is_tab = normalized_key == "tab" or key == "9"
         val is_left = normalized_key == "arrowleft" or key == "37"
@@ -1925,172 +1765,260 @@ impl BrowserSession:
         val is_end = normalized_key == "end" or key == "35"
         val is_backspace = normalized_key == "backspace" or key == "8"
         val is_delete = normalized_key == "delete" or key == "127"
-        val is_edit_key = (
-            is_left or is_right or is_home or is_end or
-            is_backspace or is_delete
-        )
-        if pressed and not is_tab and is_edit_key and target_id != "":
-            val path = be_dom_find_path_to_id(self.current_dom, target_id)
-            if path.len() > 0:
-                val target = path[path.len() - 1]
-                if dom_text_control_selectable(target):
-                    val key_dispatch = self._dispatch_dom_event_with_payload(
-                        target_id, "keydown", true, true,
-                        key, code, shift_key, nil, "", false, true
-                    )
-                    if key_dispatch.event.default_prevented:
-                        return Ok(key_dispatch)
-                    val value = self._ensure_dom_text_selection(
-                        target_id, target
-                    )
-                    if is_left or is_right or is_home or is_end:
-                        var next_focus = self.text_selection_focus_byte
-                        val has_selection = (
-                            self.text_selection_anchor_byte !=
-                            self.text_selection_focus_byte
-                        )
-                        if is_left and not shift_key and has_selection:
-                            next_focus = self.text_selection_anchor_byte
-                            if self.text_selection_focus_byte < next_focus:
-                                next_focus = self.text_selection_focus_byte
-                        elif is_right and not shift_key and has_selection:
-                            next_focus = self.text_selection_anchor_byte
-                            if self.text_selection_focus_byte > next_focus:
-                                next_focus = self.text_selection_focus_byte
-                        elif is_left:
-                            next_focus = _browser_session_previous_utf8_boundary(
-                                value, next_focus
-                            )
-                        elif is_right:
-                            next_focus = _browser_session_next_utf8_boundary(
-                                value, next_focus
-                            )
-                        elif is_home:
-                            next_focus = 0
-                        else:
-                            next_focus = value.len()
-                        self.text_selection_focus_byte = next_focus
-                        if not shift_key:
-                            self.text_selection_anchor_byte = next_focus
-                        return Ok(key_dispatch)
-                    if not dom_text_control_mutable(target):
-                        return Ok(key_dispatch)
-                    var start = self.text_selection_anchor_byte
-                    var end = self.text_selection_focus_byte
-                    if start > end:
-                        val swap = start
-                        start = end
-                        end = swap
-                    if start == end and is_backspace:
-                        start = _browser_session_previous_utf8_boundary(
-                            value, start
-                        )
-                    elif start == end and is_delete:
-                        end = _browser_session_next_utf8_boundary(value, end)
-                    if start == end:
-                        return Ok(key_dispatch)
-                    val input_type = if is_backspace:
-                        "deleteContentBackward"
-                    else:
-                        "deleteContentForward"
-                    val updated = self._apply_dom_text_edit(
-                        target_id, "", false, input_type
-                    )
-                    return updated
-        if not is_tab or not pressed:
-            return self._dispatch_dom_keyboard_event_with_payload(
-                target_id, key, code, pressed, shift_key
-            )
-        self.pending_space_activation_target = ""
-        if target_id != "":
-            val current_route_id = _browser_session_dom_route_id(
-                self.current_dom, target_id
-            )
-            val key_dispatch = self._dispatch_dom_event_with_payload(
-                target_id, "keydown", true, true, key, code, shift_key,
-                nil, "", false, true
-            )
-            if key_dispatch.event.default_prevented:
+        val event_type = if pressed: "keydown" else: "keyup"
+        val key_dispatch = self._dispatch_dom_keyboard_event_route(
+            route, event_type, true, true, key, code, shift_key
+        )?
+        if key_dispatch.event.default_prevented:
+            self.pending_space_activation_route = nil
+            return Ok(key_dispatch)
+        index = match self._live_dom_index_for_route(route):
+            Ok(value): value
+            Err(_):
+                self.pending_space_activation_route = nil
                 return Ok(key_dispatch)
-            val next_id = be_dom_next_focus_route_id(
-                self.current_dom, current_route_id, shift_key
-            )
-            if next_id == "" or next_id == current_route_id:
+        target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(value): value
+            nil:
+                self.pending_space_activation_route = nil
                 return Ok(key_dispatch)
-            val _ = self._blur_dom_focus(target_id)
-            return Ok(self.dispatch_dom_event(
-                next_id, "focus", false, false
-            ))
-        val next_id = be_dom_next_focus_route_id(
-            self.current_dom, "", shift_key
-        )
-        if next_id == "":
-            return Err("DOM has no focusable target")
-        Ok(self.dispatch_dom_event(next_id, "focus", false, false))
 
-    me _apply_dom_text_edit(
-        target_id: text, insertion: text, replace_all: bool,
-        input_type: text
-    ) -> Result<BeDomEventDispatch, text>:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
+        if pressed and not is_tab and
+           (is_left or is_right or is_home or is_end or
+            is_backspace or is_delete) and
+           dom_text_control_selectable(target):
+            val value = self._ensure_dom_text_selection(route, target)
+            if is_left or is_right or is_home or is_end:
+                var next_focus = self.text_selection_focus_byte
+                val has_selection = (
+                    self.text_selection_anchor_byte !=
+                    self.text_selection_focus_byte
+                )
+                if is_left and not shift_key and has_selection:
+                    next_focus = self.text_selection_anchor_byte
+                    if self.text_selection_focus_byte < next_focus:
+                        next_focus = self.text_selection_focus_byte
+                elif is_right and not shift_key and has_selection:
+                    next_focus = self.text_selection_anchor_byte
+                    if self.text_selection_focus_byte > next_focus:
+                        next_focus = self.text_selection_focus_byte
+                elif is_left:
+                    next_focus = _browser_session_previous_utf8_boundary(
+                        value, next_focus
+                    )
+                elif is_right:
+                    next_focus = _browser_session_next_utf8_boundary(
+                        value, next_focus
+                    )
+                elif is_home:
+                    next_focus = 0
+                else:
+                    next_focus = value.len()
+                self.text_selection_focus_byte = next_focus
+                if not shift_key:
+                    self.text_selection_anchor_byte = next_focus
+                return Ok(key_dispatch)
+            if not dom_text_control_mutable(target):
+                return Ok(key_dispatch)
+            var start = self.text_selection_anchor_byte
+            var end = self.text_selection_focus_byte
+            if start > end:
+                val swap = start
+                start = end
+                end = swap
+            if start == end and is_backspace:
+                start = _browser_session_previous_utf8_boundary(value, start)
+            elif start == end and is_delete:
+                end = _browser_session_next_utf8_boundary(value, end)
+            if start == end:
+                return Ok(key_dispatch)
+            val input_type = if is_backspace:
+                "deleteContentBackward"
+            else:
+                "deleteContentForward"
+            return self._apply_dom_text_edit_route(
+                route, "", false, input_type
+            )
+
+        if is_tab:
+            self.pending_space_activation_route = nil
+            if not pressed:
+                return Ok(key_dispatch)
+            val next_route = match be_dom_next_focus_route(
+                self.current_dom, index, Some(route), shift_key
+            ):
+                Some(value): value
+                nil: return Ok(key_dispatch)
+            if _browser_session_same_route(next_route, route):
+                return Ok(key_dispatch)
+            val _ = self._blur_dom_focus_route(route)?
+            if next_route.generation.value != self.document_generation().value:
+                return Ok(key_dispatch)
+            val _ = self.dispatch_dom_event_route(
+                next_route, "focus", false, false
+            )?
+            return Ok(key_dispatch)
+
+        if pressed and (
+            normalized_key == "enter" or normalized_key == "return"
+        ) and _browser_session_accepts_implicit_submit(target):
+            if val Some(form_route) = be_dom_form_owner_route(index, route):
+                val submit = be_dom_implicit_submit_route_result(
+                    self.current_dom, index, form_route
+                )
+                if val Some(submitter) = submit.default_submitter_route:
+                    return self.dispatch_dom_event_route(
+                        submitter, "click", true, true
+                    )
+                if submit.allows_direct_submit:
+                    return self._submit_dom_form_route(form_route, nil)
+
+        val activation_event = be_dom_keyboard_activation_event_for_target(
+            target, key
+        )
+        val is_space = (
+            normalized_key == "space" or normalized_key == "spacebar" or
+            key == " "
+        )
+        if activation_event == "":
+            if is_space:
+                self.pending_space_activation_route = nil
+            return Ok(key_dispatch)
+        if is_space:
+            if pressed:
+                self.pending_space_activation_route = Some(route)
+                return Ok(key_dispatch)
+            val armed = _browser_session_optional_route_matches(
+                self.pending_space_activation_route, route
+            )
+            self.pending_space_activation_route = nil
+            if not armed:
+                return Ok(key_dispatch)
+        elif not pressed:
+            return Ok(key_dispatch)
+        else:
+            self.pending_space_activation_route = nil
+        self.dispatch_dom_event_route(
+            route, activation_event, true, true
+        )
+
+    me set_dom_select_value_route(
+        route: DomNodeRoute, value: text
+    ) -> Result<bool, text>:
+        var index = self._live_dom_index_for_route(route)?
+        var target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            nil: return Err("stale_target")
+        if target.tag_name != "select":
+            return Err("DOM target is not a select")
+        if be_dom_has_attr(target, "disabled"):
+            return Err("DOM select target is disabled")
+        if not browser_select_has_value(target, value):
+            return Err("DOM select value is unavailable")
+        if val Some(focused) = be_dom_focused_route(self.current_dom, index):
+            if not _browser_session_same_route(focused, route):
+                val _ = self._blur_dom_focus_route(focused)?
+                index = self._live_dom_index_for_route(route)?
+        if not _browser_session_optional_route_matches(
+            be_dom_focused_route(self.current_dom, index), route
+        ):
+            val _ = self.dispatch_dom_event_route(
+                route, "focus", false, false
+            )?
+            index = self._live_dom_index_for_route(route)?
+        target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            nil: return Err("stale_target")
+        if target.tag_name != "select" or be_dom_has_attr(target, "disabled"):
+            return Err("DOM select target is no longer editable")
+        val update = browser_select_update(target, value)
+        if not update.found:
+            return Err("DOM select value is no longer available")
+        if not update.changed:
+            return Ok(false)
+        val path = be_dom_path_for_route(self.current_dom, index, route)
         if path.len() == 0:
-            return Err("DOM input target not found")
-        val target = path[path.len() - 1]
+            return Err("stale_target")
+        self.current_dom = _browser_session_replace_dom_path(path, update.node)
+        self._sync_body_html_from_dom()
+        val _ = self.dispatch_dom_event_route(route, "input", true, false)?
+        if self._live_dom_index_for_route(route).is_err():
+            return Ok(true)
+        val _ = self.dispatch_dom_event_route(route, "change", true, false)?
+        Ok(true)
+
+    me set_dom_text_input_route(
+        route: DomNodeRoute, value: text
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        self._apply_dom_text_edit_route(
+            route, value, true, "insertReplacementText"
+        )
+
+    me append_dom_text_input_route(
+        route: DomNodeRoute, value: text
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        self._apply_dom_text_edit_route(route, value, false, "insertText")
+
+    me _apply_dom_text_edit_route(
+        route: DomNodeRoute, insertion: text, replace_all: bool,
+        input_type: text
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        var index = self._live_dom_index_for_route(route)?
+        var target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            nil: return Err("stale_target")
         if not dom_text_control_mutable(target):
             return Err("DOM input target is not editable")
         if not text_is_valid_utf8(insertion):
             return Err("DOM input value is not valid UTF-8")
-        val target_route_id = be_dom_route_identity(target)
-        if be_dom_focused_route_id(self.current_dom) != target_route_id:
-            val _ = self.dispatch_dom_event(
-                target_id, "focus", false, false
-            )
-        val focused_path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if focused_path.len() == 0:
-            return Err("DOM input target was removed")
-        if not dom_text_control_mutable(focused_path[focused_path.len() - 1]):
+        if not _browser_session_optional_route_matches(
+            be_dom_focused_route(self.current_dom, index), route
+        ):
+            val _ = self.dispatch_dom_event_route(
+                route, "focus", false, false
+            )?
+            index = self._live_dom_index_for_route(route)?
+        target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            nil: return Err("DOM input target was removed")
+        if not dom_text_control_mutable(target):
             return Err("DOM input target is not editable")
-        val focused_target = focused_path[focused_path.len() - 1]
-        val focused_value = self._ensure_dom_text_selection(
-            target_id, focused_target
-        )
+        val focused_value = self._ensure_dom_text_selection(route, target)
         self._set_dom_text_runtime_state(
-            target_id, focused_value, self.text_selection_anchor_byte,
+            route, focused_value, self.text_selection_anchor_byte,
             self.text_selection_focus_byte
         )
         val input_data: text? = if input_type.starts_with("delete"):
             nil
         else:
             Some(insertion)
-        val before_input = self._dispatch_dom_input_event(
-            target_id, "beforeinput", true, true, input_data, input_type
-        )
+        val before_input = self._dispatch_dom_input_event_route(
+            route, "beforeinput", true, true, input_data, input_type
+        )?
+        index = match self._live_dom_index_for_route(route):
+            Ok(value): value
+            Err(_): return Ok(before_input)
         if before_input.event.default_prevented:
-            val canceled_path = be_dom_find_path_to_id(
-                self.current_dom, target_id
-            )
-            if canceled_path.len() > 0:
+            if val Some(canceled_target) = be_dom_node_for_route(
+                self.current_dom, index, route
+            ):
                 val canceled_value = _browser_session_text_control_value(
-                    canceled_path[canceled_path.len() - 1]
+                    canceled_target
                 )
                 if text_is_valid_utf8(canceled_value):
                     val _ = self._read_dom_text_runtime_selection(
-                        target_id, canceled_value
+                        route, canceled_value
                     )
             return Ok(before_input)
-
-        val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if current_path.len() == 0:
-            return Err("DOM input target was removed")
-        val current_target = current_path[current_path.len() - 1]
-        if not dom_text_control_mutable(current_target):
+        target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            nil: return Ok(before_input)
+        if not dom_text_control_mutable(target):
             return Err("DOM input target is not editable")
-        val current_value = _browser_session_text_control_value(current_target)
+        val current_value = _browser_session_text_control_value(target)
         if not text_is_valid_utf8(current_value):
             return Err("DOM input value is not valid UTF-8")
-        if not self._read_dom_text_runtime_selection(
-            target_id, current_value
-        ):
+        if not self._read_dom_text_runtime_selection(route, current_value):
             return Err("DOM input selection is not valid UTF-8")
         var start = 0
         var end = current_value.len()
@@ -2111,7 +2039,7 @@ impl BrowserSession:
         val suffix = current_value.slice(end, current_value.len())
         var accepted_insertion = insertion
         var next_value = prefix + insertion + suffix
-        val maxlength = _browser_session_text_maxlength(current_target)
+        val maxlength = _browser_session_text_maxlength(target)
         if maxlength != nil:
             val limit = maxlength ?? 0
             if replace_all:
@@ -2137,178 +2065,96 @@ impl BrowserSession:
                 next_value = prefix + accepted_insertion + suffix
         if next_value == current_value:
             return Ok(before_input)
-
-        if current_target.tag_name == "input":
-            self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_id,
-                "set-attr:value=" + next_value, false
-            )
+        val value_action = if target.tag_name == "input":
+            "set-attr:value=" + next_value
         else:
-            self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_id, "set-text:" + next_value, false
-            )
-        self.current_dom = script_host_apply_action_to_id(
-            self.current_dom, target_id,
-            "set-attr:data-input-dirty=true", false
+            "set-text:" + next_value
+        self.current_dom = script_host_apply_action_to_route(
+            self.current_dom, index, route, value_action, false, false
+        )
+        self.current_dom = script_host_apply_action_to_route(
+            self.current_dom, index, route,
+            "set-attr:data-input-dirty=true", false, false
         )
         val caret = prefix.len() + accepted_insertion.len()
-        self.text_selection_target_id = target_id
+        self.text_selection_route = Some(route)
         self.text_selection_anchor_byte = caret
         self.text_selection_focus_byte = caret
-        self._set_dom_text_runtime_state(
-            target_id, next_value, caret, caret
-        )
+        self._set_dom_text_runtime_state(route, next_value, caret, caret)
         val accepted_data: text? = if input_type.starts_with("delete"):
             nil
         else:
             Some(accepted_insertion)
-        val input_dispatch = self._dispatch_dom_input_event(
-            target_id, "input", true, false,
-            accepted_data, input_type
-        )
-        Ok(input_dispatch)
-
-    me set_dom_select_value(
-        target_id: text, value: text
-    ) -> Result<bool, text>:
-        val initial_path = be_dom_find_path_to_id(
-            self.current_dom, target_id
-        )
-        if initial_path.len() == 0:
-            return Err("DOM select target not found")
-        val initial_target = initial_path[initial_path.len() - 1]
-        if initial_target.tag_name != "select":
-            return Err("DOM target is not a select")
-        if be_dom_has_attr(initial_target, "disabled"):
-            return Err("DOM select target is disabled")
-        if not browser_select_has_value(initial_target, value):
-            return Err("DOM select value is unavailable")
-
-        val route_id = be_dom_route_identity(initial_target)
-        val focused_id = be_dom_focused_route_id(self.current_dom)
-        if focused_id != route_id:
-            if focused_id != "":
-                val _ = self._blur_dom_focus(focused_id)
-            val _ = self.dispatch_dom_event(
-                route_id, "focus", false, false
-            )
-
-        val current_path = be_dom_find_path_to_id(
-            self.current_dom, route_id
-        )
-        if current_path.len() == 0:
-            return Err("DOM select target was removed")
-        val current_target = current_path[current_path.len() - 1]
-        if (
-            current_target.tag_name != "select" or
-            be_dom_has_attr(current_target, "disabled")
-        ):
-            return Err("DOM select target is no longer editable")
-        val update = browser_select_update(current_target, value)
-        if not update.found:
-            return Err("DOM select value is no longer available")
-        if not update.changed:
-            return Ok(false)
-
-        self.current_dom = _browser_session_replace_dom_path(
-            current_path, update.node
-        )
-        self._sync_body_html_from_dom()
-        val _ = self.dispatch_dom_event(
-            route_id, "input", true, false
-        )
-        if be_dom_find_path_to_id(self.current_dom, route_id).len() > 0:
-            val _ = self.dispatch_dom_event(
-                route_id, "change", true, false
-            )
-        Ok(true)
-
-    me set_dom_select_value_route(
-        route: DomNodeRoute, value: text
-    ) -> Result<bool, text>:
-        self.set_dom_select_value(self._event_target_id_for_route(route)?, value)
-
-    me set_dom_text_input(
-        target_id: text, value: text
-    ) -> Result<BeDomEventDispatch, text>:
-        self._apply_dom_text_edit(
-            target_id, value, true, "insertReplacementText"
+        self._dispatch_dom_input_event_route(
+            route, "input", true, false, accepted_data, input_type
         )
 
-    me set_dom_text_input_route(
-        route: DomNodeRoute, value: text
-    ) -> Result<BeDomEventDispatch, text>:
-        self.set_dom_text_input(self._event_target_id_for_route(route)?, value)
-
-    me append_dom_text_input(
-        target_id: text, value: text
-    ) -> Result<BeDomEventDispatch, text>:
-        self._apply_dom_text_edit(
-            target_id, value, false, "insertText"
-        )
-
-    me append_dom_text_input_route(
-        route: DomNodeRoute, value: text
-    ) -> Result<BeDomEventDispatch, text>:
-        self.append_dom_text_input(self._event_target_id_for_route(route)?, value)
-
-    me _blur_dom_focus(target_id: text) -> Result<BeDomEventDispatch, text>:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if path.len() == 0:
-            return Err("DOM focus target not found")
-        val target = path[path.len() - 1]
+    me _blur_dom_focus_route(
+        route: DomNodeRoute
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        var index = self._live_dom_index_for_route(route)?
+        var target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            nil: return Err("stale_target")
         if (target.tag_name == "input" or target.tag_name == "textarea") and
            be_dom_has_attr(target, "data-input-dirty"):
-            val _ = self.dispatch_dom_event(target_id, "change", true, false)
-            self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_id,
-                "remove-attr:data-input-dirty", false
+            val change_dispatch = self.dispatch_dom_event_route(
+                route, "change", true, false
+            )?
+            index = match self._live_dom_index_for_route(route):
+                Ok(value): value
+                Err(_): return Ok(change_dispatch)
+            self.current_dom = script_host_apply_action_to_route(
+                self.current_dom, index, route,
+                "remove-attr:data-input-dirty", false, false
             )
-        self.current_dom = script_host_apply_action_to_id(
-            self.current_dom, target_id, "remove-attr:data-focused", false
+        index = self._live_dom_index_for_route(route)?
+        self.current_dom = script_host_apply_action_to_route(
+            self.current_dom, index, route,
+            "remove-attr:data-focused", false, false
         )
-        val blur_dispatch = self.dispatch_dom_event(
-            target_id, "blur", false, false
-        )
-        val _ = self.dispatch_dom_event(
-            target_id, "focusout", true, false
-        )
-        if self.text_selection_target_id == target_id:
+        val blur_dispatch = self.dispatch_dom_event_route(
+            route, "blur", false, false
+        )?
+        if self._live_dom_index_for_route(route).is_err():
+            return Ok(blur_dispatch)
+        val _ = self.dispatch_dom_event_route(
+            route, "focusout", true, false
+        )?
+        if _browser_session_optional_route_matches(
+            self.text_selection_route, route
+        ):
             self.clear_dom_text_selection()
         Ok(blur_dispatch)
 
-    me blur_dom_text_input(target_id: text) -> Result<BeDomEventDispatch, text>:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if path.len() == 0:
-            return Err("DOM input target not found")
-        val target = path[path.len() - 1]
-        if target.tag_name != "input" and target.tag_name != "textarea":
-            return Err("DOM input target is not text-editable")
-        self._blur_dom_focus(target_id)
-
     me blur_dom_text_input_route(
         route: DomNodeRoute
-    ) -> Result<BeDomEventDispatch, text>:
-        self.blur_dom_text_input(self._event_target_id_for_route(route)?)
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        val index = self._live_dom_index_for_route(route)?
+        val target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            nil: return Err("stale_target")
+        if target.tag_name != "input" and target.tag_name != "textarea":
+            return Err("DOM input target is not text-editable")
+        self._blur_dom_focus_route(route)
 
     me clear_dom_focus():
-        val focused_id = be_dom_focused_route_id(self.current_dom)
-        if focused_id != "":
-            val _ = self._blur_dom_focus(focused_id)
+        if val Some(route) = self.focused_dom_route():
+            val _ = self._blur_dom_focus_route(route)
         self.clear_dom_text_selection()
 
     me discard_dom_focus_for_navigation():
-        val focused_id = be_dom_focused_route_id(self.current_dom)
-        if focused_id != "":
-            self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, focused_id,
-                "remove-attr:data-focused", false
-            )
-            self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, focused_id,
-                "remove-attr:data-input-dirty", false
-            )
-            self._sync_runtime_body_from_dom()
+        if val Some(route) = self.focused_dom_route():
+            if val Ok(index) = self._live_dom_index_for_route(route):
+                self.current_dom = script_host_apply_action_to_route(
+                    self.current_dom, index, route,
+                    "remove-attr:data-focused", false, false
+                )
+                self.current_dom = script_host_apply_action_to_route(
+                    self.current_dom, index, route,
+                    "remove-attr:data-input-dirty", false, false
+                )
+                self._sync_runtime_body_from_dom()
         self.clear_dom_text_selection()
 
     me render(width: i32, height: i32) -> BeRenderResult:
@@ -2522,8 +2368,8 @@ impl BrowserSession:
         self.wasm_modules = []
         self.image_resources = []
         self.admitted_image_sources = []
-        self.pending_space_activation_target = ""
-        self.text_selection_target_id = ""
+        self.pending_space_activation_route = nil
+        self.text_selection_route = nil
         self.text_selection_anchor_byte = 0
         self.text_selection_focus_byte = 0
         val style_sources = resource_plan.style_sources
