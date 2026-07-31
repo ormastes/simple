@@ -34,19 +34,19 @@ plan does not report those scenarios as runtime `PASS`.
 | Live `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Live shared-WM `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Renderer parity gate | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | requires explicit current-source Stage4 receipt; static admission and motion self-tests updated, live rerun pending an admitted binary |
-| GPU environment matrix | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | Linux Vulkan/CUDA/OpenCL pass; Metal/ROCm/DirectX/WebGPU native device-readback still external/partial |
-| Hosted HSTS authenticated-transport boundary | `test/03_system/app/browser/feature/browser_hosted_hsts_transport_boundary_spec.spl` | `f081a28d6f4`: independent static `REVIEW PASS`; dynamic held on active full-CLI build |
-| Final overflow normalization, Draw IR clipping, and scrollbar paint | `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl` | chain `4d171219e88` -> `e321b86eeae` -> `d58b333df90` -> `27d116eb2b6`: final independent static `REVIEW PASS`; dynamic held; intermediate `e321`/`d58` tips were incomplete |
+| GPU environment matrix | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | historical Linux Vulkan/CUDA/OpenCL receipts only; current-source R9 matrix pending, with Metal/ROCm/DirectX/WebGPU external/partial |
+| Hosted HSTS authenticated-transport boundary | `test/03_system/app/browser/feature/browser_hosted_hsts_transport_boundary_spec.spl` | `c9056751aea`: independent static `REVIEW PASS`; dynamic held on an admitted full-CLI build |
+| Final overflow normalization, Draw IR clipping, and scrollbar paint | `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl` | chain `bac97a80902` -> `33c49d09164` -> `e19d051ccc8` -> `cc458d355a3`: final independent static `REVIEW PASS`; dynamic held |
 
 ## Required Commands
 
 ```sh
-bin/simple check src/app/ui.web/server.spl src/app/ui.web/tls_serve_loop.spl src/app/ui.web/async_server.spl test/03_system/gui/simple_web_browser_production_hardening_spec.spl test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl
-bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean
-bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean
-bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
-bin/simple test test/03_system/app/browser/feature/browser_hosted_hsts_transport_boundary_spec.spl --mode=interpreter
-bin/simple test test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl --mode=interpreter
+SIMPLE_BIN=bin/release/<triple>/simple bin/release/<triple>/simple check src/app/ui.web/server.spl src/app/ui.web/tls_serve_loop.spl src/app/ui.web/async_server.spl test/03_system/gui/simple_web_browser_production_hardening_spec.spl test/01_unit/app/ui/ws_handler_spec.spl test/01_unit/app/ui/web_auth_hardening_spec.spl
+SIMPLE_BIN=bin/release/<triple>/simple bin/release/<triple>/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=bin/release/<triple>/simple bin/release/<triple>/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean
+SIMPLE_BIN=bin/release/<triple>/simple bin/release/<triple>/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
+SIMPLE_BIN=bin/release/<triple>/simple bin/release/<triple>/simple test test/03_system/app/browser/feature/browser_hosted_hsts_transport_boundary_spec.spl --mode=interpreter
+SIMPLE_BIN=bin/release/<triple>/simple bin/release/<triple>/simple test test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl --mode=interpreter
 SIMPLE_BIN=/absolute/path/to/stage4/simple sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 jj --no-pager status
 jj --no-pager log -r 'conflicts()' --no-graph --template 'change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n"'

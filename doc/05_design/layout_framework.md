@@ -20,6 +20,8 @@
 7. Invoke the GPU port only when independent oracle evidence is present for a candidate. Accept it only when submission, synchronization, device readback, and exact parity succeed; otherwise execute the CPU port and record the concrete fallback reason.
 8. Pack only `LayoutNodeSemantics`, viewport values, and grid tracks for device execution. Keep oracle geometry and artifacts host-side for post-readback comparison. The fixed CUDA slice accepts positive fixed-pixel one-level block/flex/grid roots, absolute children with pixel offsets, and vertical auto/scroll roots with an empty box model. Sticky, percentage offsets, nested descendants, and compound policies pre-reject.
 9. Run ordered geometry, absolute-offset, and overflow kernels. Read back boxes plus clip/scroll fields and accept them only under exact oracle parity.
+   This layout-only receipt cannot close Draw IR reconciliation R7–R9; those
+   gates require canonical composition submission and device-origin pixels.
 10. Emit one `LayoutOf` mapping per visited output box and retain fragments, line boxes, and overflow from the accepted execution result.
 11. The browser CPU port runs canonical root layout, emits only selected-island outputs, merges clean retained outputs, and falls back to canonical full CPU layout if adapter or framework execution faults.
 
