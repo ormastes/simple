@@ -18,16 +18,62 @@ fn planner_request_count(requests: [PlacementRequest]) -> i64:
     requests.len()
 
 fn plan_request_digest(requests: [PlacementRequest], budget: PlacementBudget) -> Hash256:
-    """Stable digest for identical planning inputs."""
-    val summary = request_signature(requests, budget)
-    Hash256(value: summary)
+    val sorted = _stable_sort_requests(requests)
+    Hash256(value: request_signature(sorted, budget))
 
 fn make_deterministic_plan(
     requests: [PlacementRequest],
     budget: PlacementBudget
 ) -> PlacementPlan:
+    val sorted = _stable_sort_requests(requests)
+    val seed = plan_request_digest(sorted, budget)
+    val estimate = _estimate_cost(sorted, budget)
+    PlacementPlan(
+        reservations: object_ref(object_slot: 0, generation: 1),
+        transfers: object_ref(object_slot: 1, generation: 1),
+        evictions: object_ref(object_slot: 2, generation: 1),
+        prefetches: object_ref(object_slot: 3, generation: 1),
+        leases: object_ref(object_slot: 4, generation: 1),
+        estimated_cost: estimate,
+        receipt_seed: seed
+    )
+
+fn request_signature(requests: [PlacementRequest], budget: PlacementBudget) -> text:
+    val sorted = _stable_sort_requests(requests)
+    var seed = budget.device_bytes.to_text()
+    seed = seed + "|" + budget.host_pinned_bytes.to_text()
+    seed = seed + "|" + budget.host_hot_bytes.to_text()
+    seed = seed + "|" + budget.staging_bytes.to_text()
+    seed = seed + "|" + budget.driver_queue_bytes.to_text()
+    seed = seed + "|" + budget.manifest_cache_bytes.to_text()
+    seed = seed + "|" + budget.runtime_base_bytes.to_text()
+    seed = seed + "|reqs=" + sorted.len().to_text()
+
+    var i = 0
+    while i < sorted.len():
+        val req = sorted[i]
+        seed = seed + "|" + req.object.object_slot.to_text()
+        seed = seed + "/"
+        seed = seed + req.object.generation.to_text()
+        seed = seed + ":"
+        seed = seed + req.expected_reuse_distance.to_text()
+        seed = seed + ":"
+        seed = seed + req.transfer_cost_hint.value.to_text()
+        i = i + 1
+    seed
+
+fn make_plan_from_requests(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
+    # Placeholder: arena-backed requests are validated as metadata-only in this phase.
+    # Implementations that consume a concrete request arena should project them to
+    # a dense array and call make_deterministic_plan.
+    make_deterministic_plan([], budget)
+
+fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
+    object_ref(object_slot: slot, generation: 1)
+
+fn _estimate_cost(requests: [PlacementRequest], budget: PlacementBudget) -> CostEstimate:
     val request_count = requests.len()
-    val estimate = CostEstimate(
+    CostEstimate(
         cpu_work: request_count as u64,
         simd_work: request_count as u64,
         gpu_work: request_count as u64,
@@ -40,44 +86,37 @@ fn make_deterministic_plan(
         confidence_milli: 500
     )
 
-    val seed = plan_request_digest(requests, budget)
-    PlacementPlan(
-        reservations: object_ref(object_slot: 0, generation: 1),
-        transfers: object_ref(object_slot: 1, generation: 1),
-        evictions: object_ref(object_slot: 2, generation: 1),
-        prefetches: object_ref(object_slot: 3, generation: 1),
-        leases: object_ref(object_slot: 4, generation: 1),
-        estimated_cost: estimate,
-        receipt_seed: seed
-    )
-
-fn request_signature(requests: [PlacementRequest], budget: PlacementBudget) -> text:
-    var seed = budget.device_bytes.to_text()
-    seed = seed + "|" + budget.host_pinned_bytes.to_text()
-    seed = seed + "|" + budget.host_hot_bytes.to_text()
-    seed = seed + "|" + budget.staging_bytes.to_text()
-    seed = seed + "|" + budget.driver_queue_bytes.to_text()
-    seed = seed + "|" + budget.runtime_base_bytes.to_text()
-
+fn _stable_sort_requests(requests: [PlacementRequest]) -> [PlacementRequest]:
+    var sorted: [PlacementRequest] = []
     var i = 0
     while i < requests.len():
         val req = requests[i]
-        seed = seed + "|"
-        seed = seed + req.object.object_slot.to_text()
-        seed = seed + "/"
-        seed = seed + req.object.generation.to_text()
-        seed = seed + ":"
-        seed = seed + req.expected_reuse_distance.value.to_text()
-        seed = seed + ":"
-        seed = seed + req.transfer_cost_hint.value.to_text()
-        i = i + 1
-    seed
+        sorted.push(req)
 
-fn make_plan_from_requests(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
-    # Placeholder: arena-backed requests are validated as metadata-only in this phase.
-    # Implementations that consume a concrete request arena should project them to
-    # a dense array and call make_deterministic_plan.
-    make_deterministic_plan([], budget)
+        var j = sorted.len() - 1
+        while j > 0:
+            val left = sorted[j - 1]
+            val next = sorted[j]
+            if _request_order_leq(left, req):
+                break
+            sorted[j] = left
+            sorted[j - 1] = req
+            j = j - 1
+        i = i + 1
+    sorted
+
+fn _request_order_leq(a: PlacementRequest, b: PlacementRequest) -> bool:
+    # Stable sort key: higher reuse first, then object slot, then generation.
+    if a.expected_reuse_distance > b.expected_reuse_distance:
+        true
+    elif a.expected_reuse_distance < b.expected_reuse_distance:
+        false
+    elif a.object.object_slot < b.object.object_slot:
+        true
+    elif a.object.object_slot > b.object.object_slot:
+        false
+    else:
+        a.object.generation <= b.object.generation
 
 export planner_request_count, plan_request_digest, make_deterministic_plan
 export request_signature, make_plan_from_requests
