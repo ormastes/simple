@@ -459,7 +459,7 @@ class CudaBackend:
             case Call(dest, callee, args):
                 if dest.?:
                     self.pointer_spaces.remove(dest.unwrap().id)
-                val call_result = self.compile_call(builder, dest, callee, args)
+                val call_result = self.compile_call(func, builder, dest, callee, args)
                 if call_result.is_err():
                     return Err(call_result.unwrap_err())
 
@@ -826,14 +826,14 @@ class CudaBackend:
         if source_has_space:
             self.pointer_spaces[dest.id] = source_space
 
-    me compile_call(builder: PtxBuilder, dest: LocalId?, callee: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
+    me compile_call(func: MirFunction, builder: PtxBuilder, dest: LocalId?, callee: MirOperand, args: [MirOperand]) -> Result<(), CompileError>:
         """Compile device function call."""
-        val arg_regs = args.map(self.operand_to_reg(builder, _))
-
         var func_name = ""
         var return_ty = PrimitiveType.I64
         var returns_value = false
         var arg_types: [PrimitiveType] = []
+        var arg_regs: [text] = []
+        var arg_i = 0
         match callee.kind:
             case Const(Str(name), ty):
                 func_name = name
@@ -842,10 +842,18 @@ class CudaBackend:
                 val sig: MirSignature = self.function_signatures[name]
                 if sig.params.len() != args.len():
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call argument count does not match its signature"))
-                for param_ty in sig.params:
+                while arg_i < args.len():
+                    val arg = args[arg_i]
+                    val param_ty = sig.params[arg_i]
+                    val arg_primitive = self.mir_type_to_primitive(self.operand_mir_type(func, arg)?)
+                    val param_primitive = self.mir_type_to_primitive(param_ty)
+                    if arg_primitive != param_primitive:
+                        return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct call argument {arg_i} type does not match its signature"))
                     if param_ty.kind == MirTypeKind.Bool:
                         return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct calls do not yet support boolean parameters"))
                     arg_types = arg_types.push(self.mir_type_to_primitive(param_ty))
+                    arg_regs = arg_regs.push(self.operand_to_reg(builder, arg))
+                    arg_i = arg_i + 1
                 returns_value = sig.return_type.kind != MirTypeKind.Unit
                 if sig.return_type.kind == MirTypeKind.Bool:
                     return Err(compileerror_backend_error(BackendKind.Cuda, "CUDA direct calls do not yet support boolean return values"))
