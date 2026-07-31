@@ -54,7 +54,11 @@ common base and **no duplication of the cheap shared logic**:
    `editor/render/md_draw_ir.spl` projects the rendered TUI lines into a
    `DrawIrComposition` of TEXT commands — the same IR the GUI dispatches to GPU
    backends — so the TUI "lane" is GPU-offloadable like the GUI without making
-   the default path heavier.
+   the default path heavier. (The later DrawIR **v3** packed encoding is a
+   no-reallocation encoding of *this same* `DrawIrComposition`, not a competing
+   display-list format — WebIR stays rejected. See
+   [`rendering/draw_ir_multibackend_design.md`](rendering/draw_ir_multibackend_design.md)
+   §11.)
 4. **CPU owns glyph rasterization; supported GPU lanes compose the atlas.**
    Legacy checksum payloads are not native rasterization evidence. CPU
    composition remains load-bearing, and transparency/alpha coverage still

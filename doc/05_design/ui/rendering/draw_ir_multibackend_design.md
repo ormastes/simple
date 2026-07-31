@@ -398,7 +398,8 @@ frame (research §6). Keep the single struct (no numbered splits); add kinds/fie
 
 The **executor stays the single dispatch point**; every new kind routes there. Default background
 `clear` should be a scene command, not the hardcoded white (engine2d_executor.spl:31), so headless
-replay is deterministic. (This gap, plus the `scene_blur_rect`-dropped-by-executor gap below, is
+replay is deterministic. **v2 remains the authoring/replay IR here; its dynamic arrays and textual
+style values are not a GPU-write format — the packed, no-reallocation successor is DrawIR v3 (§11).** (This gap, plus the `scene_blur_rect`-dropped-by-executor gap below, is
 tracked in `doc/08_tracking/bug/engine2d_facade_dead_3way_branch_and_drawir_gaps_2026-07-06.md`.)
 
 ---
@@ -441,6 +442,10 @@ stops being a special path:
   becomes an optimization detail behind the capability descriptor, not a separate correctness story.
 - `browser_engine/simple_web_layout_engine2d_fast.spl` and the HTML presenters become ordinary
   `Engine2D` clients.
+
+**This fold-in is the CPU-oracle / compatibility tier, not the end state.** The GPU-WebScene plan makes
+web a device-resident `GpuWebScene` (no per-widget submission, no readback) behind capsule ports — see
+§11.
 
 ---
 
@@ -525,9 +530,42 @@ CPU↔GPU, MEMORY 06-03), **metal readback** falling back to software silently (
 **JIT-render crash** on some winit/graphics apps (needs `SIMPLE_EXECUTION_MODE=interpret`, MEMORY
 06-06), plus the newly-filed **honesty & coherence debt** (research §9): live WebGPU dishonesty,
 Intel/OpenGL vaporware, the `cpu_simd` bare alias, orphaned fabricated-FFI files, the
-`RenderBackend` naming collision, and the dead facade branch / dual selection paths.
+`RenderBackend` naming collision, and the dead facade branch / dual selection paths. **DrawIR v3 packed
+encoding, the capacity manifest / stable paged pools, and the device-resident `GpuWebScene` (§11) are
+designed-not-built — additive over v2, tracked in the GPU-WebScene / MDSOC+ structural-compute plan.**
 
 ---
+
+## 11. DrawIR v3 packed encoding & GPU-WebScene offload (2026-07-31)
+
+The GPU-WebScene / MDSOC+ structural-compute plan
+([`doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md`](../../../03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md),
+architecture
+[`doc/04_architecture/compiler/mdsoc/mdsoc_plus_tagged_structural_compute_architecture.md`](../../../04_architecture/compiler/mdsoc/mdsoc_plus_tagged_structural_compute_architecture.md))
+layers a device-resident path **on top of** — not instead of — the design above. Invariant preserved:
+DrawIR v3 is a *packed encoding of the one shared display list* (`DrawIrComposition` = DrawIR v2), **not**
+a second display-list format (WebIR stays rejected —
+[`doc/03_plan/platform/structural_compute/webrender_gpu_offload_plan.md`](../../../03_plan/platform/structural_compute/webrender_gpu_offload_plan.md)).
+
+- **v2 stays the authoring/replay IR; v3 is the GPU-write path.** The extended §6 `SceneCommand`
+  (dynamic `stops:[(offset,color)]` arrays, `glyph_run` glyph arrays, textual style values) is **not** a
+  no-reallocation GPU-write format. Plan §6 (I1/I3) adds an *additive* fixed-width `DrawIrV3Command` plus
+  typed side tables — `GeometryTable`, `PaintTable`, `TextRunTable`, `ResourceTable`, `PathPointTable`,
+  `ClipTable`, `TransformTable`, `HitShapeTable`, `SourceProvenanceTable` — replacing runtime string
+  parsing with typed paint/text/resource IDs. New owned trees: `src/lib/common/ui/draw_ir_v3/**` and
+  `src/lib/nogc_async_mut/gpu/engine2d/draw_ir_v3/**`.
+- **Capacity manifest, no realloc after seal.** A `GpuWebCapacityManifest` drives count→scan→emit exact
+  emission (Kernels A–E) into stable paged pools (`page index + element offset`; records never move);
+  overflow is an explicit failure, and the acceptance bar is *zero allocator calls after scene/session
+  seal* (plan §6 "Capacity manifest" / "Stable paged pools", I2).
+- **GPU-MMU / Object VM residency.** WebScene device pools are Object-VM arenas
+  ([`gpu_mmu_plan.md`](../../../03_plan/platform/structural_compute/gpu_mmu_plan.md)) — no private
+  placement layer beneath the display list. §9's module map is the CPU-side layout; the arenas back it.
+- **Web-lane end state (supersedes §8's framing).** §8 folds the web path into an ordinary `Engine2D`
+  per-primitive client (the CPU-oracle / compatibility tier). The plan's target is a device-resident
+  `GpuWebScene` (GPU DOM/style/layout/text pools, GPU count/scan/emit) behind `GpuDrawIrCapsule` /
+  `GpuRenderCapsule` ports, with **no per-widget submission** and **no pixel readback** (plan §4, §9). Read
+  §8 as the compatibility tier of this larger GPU-resident pipeline, not the final boundary.
 
 ## Layering: app-level backend isolation (2026-07-06)
 
