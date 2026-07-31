@@ -88,9 +88,10 @@ reference, the write-back is a redundant self-assignment), which is why the six
 
 ## Follow-up scan: src/app, src/compiler, test (2026-07-31)
 
-11 further sites with the losing shape, all dict-value receivers — NOT yet
-fixed, deliberately: the compiler runs as a native binary, where the shape
-works, so "fix" there is churn until the semantics are declared. Sites:
+11 further sites with the losing shape, all dict-value receivers. Semantics
+settled by `doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md`
+(value semantics; write-back is the contract), after which all 11 were
+converted to write-back. Sites:
 `src/app/interpreter/module/evaluator.spl:387,423` (note: that tree is
 spec-unexercisable), `src/app/diagram/main.spl:130,167`,
 `src/compiler/35.semantics/lint/duplicate_typed_args.spl:84,124` (if the loss
@@ -98,15 +99,15 @@ applies on its engine, that lint can never see a duplicate),
 `src/compiler/99.loader/settlement/linker.spl:142`,
 `src/compiler/40.mono/monomorphize/cycle_detector.spl:91,222,281` (cycle
 detection would under-report), `src/compiler/90.tools/coupling/gap_matcher.spl:121`.
-`test/` has 0 broken sites. Decide the semantics first; then either fix these
-or lint the pattern.
+`test/` has 0 broken sites. The lint for the pattern remains open (ADR-004
+consequences).
 
 ## Caveats
 
-- Whether the in-function loss (test-runner engine) or the in-function
-  reference behaviour (run/native engines) is the intended semantic is not
-  settled here. Whichever way it lands, the losing pattern needs a lint — a
-  silently discarded mutation is not something the reader can see.
+- Semantics settled 2026-07-31 by ADR-004: value semantics; write-back is the
+  only guaranteed mutation form for dict values and indexed tuple/struct
+  fields. The lint for the losing pattern is still open — a silently discarded
+  mutation is not something the reader can see.
 
 ## Reproducer
 
