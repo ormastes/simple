@@ -38,14 +38,50 @@ Frozen displayed manual steps:
 3. `Cancel and restart the animation through the DOM bridge`
 4. `Observe ordered animation events and canonical Draw IR frames`
 
+## Mandatory identity prerequisite
+
+Current origin has no safe producer for `BrowserDomEventTargetHandle`:
+
+- `BeDomNode.node_id` is raw and is reused because the HTML tree builder starts
+  IDs at `1` on every parse, including body replacement;
+- `ui_access_revision + node_id` is a saturating UI snapshot/action stale
+  guard, not a stable document/node lifetime;
+- `dom_bridge_generation` is one bridge-wide mutation scalar, not a
+  document-qualified per-node generation;
+- `BrowserRuntimeState.dom_node_ids -> dom_element_ids` and
+  `BrowserDomCallableListener.target_object_id` are the existing canonical JS
+  target mapping, but the raw object ID has no DOM generation contract.
+
+The smallest safe reuse is the current `target_object_id` and canonical
+`BrowserSession._dispatch_dom_event_with_payload` behavior, wrapped only after
+the missing producer exists. Work must proceed in this exact order:
+
+1. **G0 DOM producer:** the DOM owner adds nonwrapping document/node
+   generations and proves same-path/same-author-`id` replacement receives a
+   distinct identity while reparenting preserves identity.
+2. **G1 handle producer:** `BrowserRuntimeState._bind_dom_node` creates
+   `BrowserDomEventTargetHandle(identity, target_object_id)` at canonical JS
+   target binding time and retains no path or subtree snapshot.
+3. **G2 handle consumer:** BrowserSession validates generations, resolves a
+   connected target, and reuses the existing listener/CSP/capture/bubble/flush
+   dispatcher; a disconnected old target is target-phase only.
+4. **G3 lifecycle consumer:** animation-list reconciliation may consume the
+   verified handle and build bounded cursors/events. It may not reconstruct
+   identity from layout paths.
+
+G1-G3 must not start from candidate `47df593f600`. If G0-G2 cannot remain
+within reviewed owner boundaries, stop and return to architecture review rather
+than hiding identity work inside the animation renderer. Source, executable
+SSpec, runtime, and acceptance status remain **RED**.
+
 ## Parallel implementation lanes
 
 | Lane | Scope and owner boundary | Depends on |
 |---|---|---|
-| A: DOM identity | DOM-owner document/node generations and minimal event-target handle; replacement, reparent, detach, and realm teardown rules | frozen contract |
+| A: DOM identity | G0 DOM-owned document/node generations; replacement, reparent, detach, and realm teardown rules | frozen contract |
 | B: exact lifecycle core | checked integer time, exact decimal iteration count, generation cursor, one-head-per-cursor fixed queue, ordering and caps | frozen contract |
-| C: animation-list reconciliation | complete slot identities and old/new generation decisions; no path transfer and no same-`innerHTML` reimplementation | A and B interfaces |
-| D: canonical event integration | extend `BeDomEvent` payload and route records through the existing BrowserSession dispatcher; target-only detached delivery and bounded continuation | A–C |
+| C: target handle + animation-list reconciliation | G1 handle production plus complete slot identities and old/new generation decisions; no path transfer and no same-`innerHTML` reimplementation | A and B interfaces |
+| D: canonical event integration | G2/G3 handle consumption, `BeDomEvent` payload, existing BrowserSession dispatcher, target-only detached delivery, and bounded continuation | A–C |
 | E: modern SSpec | unit identity/time/queue cases and the frozen integration scenario with semantic event log plus canonical Draw IR oracle | frozen helpers; final assertions depend on A–D |
 | F: manuals and traceability | docgen output, zero-stub review, REQ mapping, and explicit evidence limits | E settled |
 

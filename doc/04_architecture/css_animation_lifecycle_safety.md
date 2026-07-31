@@ -68,6 +68,71 @@ identity and the canonical JS event-target handle/listener ownership needed by
 the existing dispatcher. It must not retain a serialized path, a full detached
 subtree, or a second listener table.
 
+### Current-origin identity owner map
+
+Current source has reusable event-delivery mechanics, but no identity that can
+safely produce `BrowserDomEventTargetHandle`. The exact owners are:
+
+- `src/lib/gc_async_mut/gpu/browser_engine/dom.spl` owns
+  `BeDomNode.node_id`, but it owns no document or node generation.
+- `html_tree_builder_build_with_parse_limits` in
+  `src/lib/gc_async_mut/gpu/browser_engine/html_tree_builder.spl` initializes
+  `next_node_id` to `1` on every parse. `BrowserSession._replace_current_body_children`
+  in `src/lib/gc_async_mut/web/browser_session_runtime.spl` reparses body HTML
+  and grafts those children into the live document. A replacement can therefore
+  reuse the detached node's raw ID inside the same document.
+- `be_dom_event_identity` and `be_dom_route_identity` in
+  `src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl` expose mutable
+  author `id` or `route-node:<node_id>` text. Neither value is a lifetime
+  identity, and neither may key an animation cursor or detached event.
+- `ui_access_revision` is owned by `BrowserSession` and appears with
+  `node_id` in `browser_session_ui_access.spl`. It is a snapshot/action stale
+  guard: title and unrelated UI-visible changes advance it, and its counter
+  saturates. It is not a stable per-node generation.
+- `BrowserRuntimeState.dom_bridge_generation` mirrors one interpreter-wide
+  bridge rebuild counter. It is not document-qualified or per-node, and direct
+  `bind_dom` callers can rebuild mappings without creating the required node
+  lifetime identity.
+- `BrowserRuntimeState._bind_dom_node`, `bind_dom`, and `adopt_dom_bridge` in
+  `src/lib/gc_async_mut/web/browser_session.spl` own the current parallel
+  `dom_node_ids -> dom_element_ids` mapping. `BrowserDomCallableListener` owns
+  callbacks by raw JS `target_object_id`.
+- `_browser_session_object_id_for_node`,
+  `_browser_session_callable_dispatch_root`, `BrowserDomEventExecutor`, and
+  `BrowserSession._dispatch_dom_event_with_payload` in
+  `src/lib/gc_async_mut/web/browser_session_runtime.spl` are the canonical
+  event consumers. They already own listener lookup, CSP policy,
+  capture/bubble order, JavaScript callback execution, and side-effect flush;
+  lifecycle work must reuse them.
+- `BrowserCssAnimationInstance` and `_simple_web_animation_target_keys` still
+  identify one animation per serialized `path:<ordinal>`. They are consumers
+  of the future identity contract, never producers of DOM identity.
+
+Raw `node_id`, `ui_access_revision`, and `dom_bridge_generation`, alone or in
+an ad-hoc tuple, are explicitly forbidden as substitutes for
+`BrowserDomGenerationIdentity`.
+
+### Required producer/consumer order
+
+Implementation remains blocked until these prerequisites land in order:
+
+1. The DOM owner produces nonwrapping `document_generation` and
+   `node_generation` values at document/node creation, preserves node
+   generation across reparenting, and assigns a new generation on replacement.
+2. `BrowserRuntimeState` produces `BrowserDomEventTargetHandle` while binding
+   the canonical JS target object. The handle combines the DOM identity with
+   that exact `target_object_id`; no path lookup creates a handle later.
+3. `BrowserSession` consumes the handle through its existing event dispatcher.
+   Connected dispatch first verifies all generations and resolves the live
+   path; disconnected cancel dispatch uses the retained old target in target
+   phase only.
+4. Only then may animation-list reconciliation consume the handle and create
+   generation-qualified lifecycle cursors. Rendering continues to consume
+   animation samples and never becomes an identity or event owner.
+
+Until steps 1-3 exist with focused stale-reuse and release tests, lifecycle
+source, runtime, and acceptance status remain **RED**.
+
 ## Exact time and bounded lifecycle state
 
 Lifecycle ordering uses canonical integer ticks. No queued record contains a
