@@ -202,21 +202,49 @@ below and is not part of the landed set.
 
 ## Essential Runner Lane — Stopped at Cycle 3 of 3
 
-Stage 3 at `64585a28…` reached phase 3, then terminated with `SIGSEGV` while
-lowering `std.cli.log_modes`. It produced no candidate binary and no usable
-cache. Consequently the runner, ABI, and SPipe execution remain unproved.
+The 2026-07-31 care pass used the current pure-Simple Stage 3 at
+`c0d1ed…`. The prior `std.cli.log_modes` lowering boundary did not reproduce:
+the focused `cli_log_modes_spec` native build completed four objects, and a
+standalone minimal `parse_log_options` program ran to exit 0. Directly starting
+the standalone SSpec binary then terminated with `SIGILL`; that launch bypassed
+the canonical runner and is invalid as SSpec evidence.
+
+The full CLI remained blocked after all three bounded cycles:
+
+1. two workers timed out at 600 seconds with zero completed reusable objects;
+2. eight workers reached the 1.5 GiB memory cap and exited 134 with zero
+   completed reusable objects; and
+3. four workers compiled 1,500 objects and reached the linker, which failed on
+   missing core-C symbols.
+
+The exact retained full-CLI logs are in the isolated
+`simple-browser-go-wt` worktree:
+
+- `build/native_probe/interpret-dispatch-care/logs/baseline-build.log`;
+- `build/native_probe/interpret-dispatch-care/logs/baseline-build-cycle2.log`;
+  and
+- `build/native_probe/interpret-dispatch-care/logs/baseline-build-cycle3.log`.
+
+The last failure identifies runtime-bundle authority as a separate prerequisite,
+not a reason to edit the compiler or perform a full bootstrap in this lane.
+After that authority is repaired separately, the next runner action is a
+behavioral phase-trace SSpec with the exact steps `Compile the runner fixture`,
+`Enter interpreter mode after checks`, `Skip native monomorphization`, and
+`Run the requested SSpec`.
 
 Candidate `3f3e0bd59963766e320289d96803ab1d3dcae44b` was rejected and remains
-unpushed. It is not evidence for any accepted lane. The mandatory three-cycle
-limit is exhausted, and no full bootstrap was authorized; no further retry is
-planned in this wave.
+unpushed. It is not evidence for any accepted lane. No compiler edit, full
+bootstrap, deployment, target-runtime PASS, or SPipe PASS occurred. The
+mandatory three-cycle limit is exhausted; no further retry is planned in this
+wave.
 
 ## Evidence Boundary
 
-Runtime and SPipe execution remain explicitly unclaimed. The runner crash above
-prevents trustworthy execution of the target specs, and the bounded Grid seed
-diagnostic does not cross that boundary. Static `ACCEPT` therefore must not be
-reported as runtime `PASS`.
+Runtime and SPipe execution remain explicitly unclaimed. The invalid standalone
+SSpec launch and unresolved full-CLI runtime bundle prevent trustworthy
+execution of the target specs, and the bounded Grid seed diagnostic does not
+cross that boundary. Static `ACCEPT` therefore must not be reported as runtime
+`PASS`.
 
 The overall production-hardening goal remains incomplete because the essential
 runner/ABI/SPipe lane is unproved and external-host evidence is still pending:
