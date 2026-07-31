@@ -25,6 +25,8 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_getpid() -> i64
+extern fn rt_stdout_flush()
+extern fn rt_stderr_flush()
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
@@ -199,6 +201,109 @@ fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text,
         process_run_timeout_windows(cmd, args, timeout_ms)
     else:
         process_run_timeout_unix(cmd, args, timeout_ms)
+
+fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+    """
+    Same contract and same timeout/kill semantics as process_run_timeout_unix,
+    but relays the child's stdout/stderr to OUR stdout/stderr as they are
+    produced instead of withholding everything until the child exits.
+
+    A long-running child was previously indistinguishable from a hang:
+    nothing appeared until the whole subprocess terminated. See
+    src/app/io/process_ops.spl's process_run_timeout_live, which fixes the
+    same defect for the app-layer duplicate of this helper --
+    doc/08_tracking/bug/native_build_direct_seed_jit_hang_2026-07-30.md has
+    the eight-investigation writeup that root-caused it.
+
+    NOTE ON DEADLINE MECHANISM: unlike the app-layer copy (which shells out
+    to `timeout --kill-after` and only polls for visibility), this file's
+    process_run_timeout_unix never used `timeout` -- it enforces the
+    deadline itself via rt_process_wait()'s timeout_ms budget plus an
+    explicit rt_process_kill() when that budget is exhausted. This function
+    preserves that exact mechanism and the exact same total budget
+    (effective_timeout); it only changes the *granularity* of the wait (many
+    small polls instead of one big blocking wait) so output can be relayed
+    incrementally, and defeats the CHILD's own full-buffering (stdout/stderr
+    are not a tty here, they're redirected to a temp file) via `stdbuf -oL
+    -eL`, the same trick used by the app-layer fix.
+    """
+    if _is_windows_platform():
+        return process_run_timeout_windows(cmd, args, timeout_ms)
+
+    val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
+
+    var temp_dir = rt_env_get("TMPDIR")
+    if temp_dir == nil or temp_dir == "":
+        temp_dir = "/tmp"
+
+    val pid_str = "{rt_getpid()}"
+    val time_str = "{rt_time_now_unix_micros()}"
+    val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
+    val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
+
+    var command_parts: [text] = ["stdbuf", "-oL", "-eL"]
+    val cmd_escaped = cmd.replace("'", "'\\''")
+    command_parts.push("'{cmd_escaped}'")
+    for arg in args:
+        val arg_escaped = arg.replace("'", "'\\''")
+        command_parts.push("'{arg_escaped}'")
+    val command_line = command_parts.join(" ")
+    val redirected_cmd = "exec {command_line} > '{stdout_file}' 2> '{stderr_file}'"
+
+    proc_slot_acquire()
+    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
+    if pid <= 0:
+        proc_slot_release()
+        return ("", "\n[ERROR: failed to spawn process '{cmd}']", -1)
+
+    # Poll in small increments instead of one blocking wait, relaying newly
+    # appended bytes after every poll. The total time budget across all
+    # polls still equals `effective_timeout` -- exactly the same budget
+    # process_run_timeout_unix's single blocking rt_process_wait() call
+    # enforces -- so overall timeout behaviour is unchanged; only the
+    # granularity of observation changes.
+    val poll_quantum_ms: i64 = 500
+    var elapsed_ms: i64 = 0
+    var stdout_relayed = 0
+    var stderr_relayed = 0
+    var exit_code: i64 = -2
+    while exit_code == -2 and elapsed_ms < effective_timeout:
+        val remaining = effective_timeout - elapsed_ms
+        val quantum = if remaining < poll_quantum_ms: remaining else: poll_quantum_ms
+        exit_code = rt_process_wait(pid, quantum)
+        elapsed_ms = elapsed_ms + quantum
+        if rt_file_exists(stdout_file):
+            val current = rt_file_read_text(stdout_file)
+            if current.len() > stdout_relayed:
+                print current[stdout_relayed:current.len()]
+                rt_stdout_flush()
+                stdout_relayed = current.len()
+        if rt_file_exists(stderr_file):
+            val current_err = rt_file_read_text(stderr_file)
+            if current_err.len() > stderr_relayed:
+                eprint(current_err[stderr_relayed:current_err.len()])
+                rt_stderr_flush()
+                stderr_relayed = current_err.len()
+
+    val timed_out = exit_code == -2 or (exit_code == -1 and rt_process_is_running(pid))
+    if timed_out:
+        rt_process_kill(pid)
+    proc_slot_release()
+
+    var stdout = ""
+    var stderr = ""
+    if rt_file_exists(stdout_file):
+        stdout = rt_file_read_text(stdout_file)
+        rt_file_delete(stdout_file)
+    if rt_file_exists(stderr_file):
+        stderr = rt_file_read_text(stderr_file)
+        rt_file_delete(stderr_file)
+
+    if timed_out:
+        val timeout_secs = (effective_timeout + 999) / 1000
+        (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
+    else:
+        (stdout, stderr, exit_code)
 
 fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
     """
