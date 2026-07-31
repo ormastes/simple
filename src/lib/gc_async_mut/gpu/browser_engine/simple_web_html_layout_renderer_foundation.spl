@@ -5,6 +5,7 @@ use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_langu
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_PAYLOAD_BYTES
 }
+use std.common.animation.timing.{parse_timing_function}
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_flat_projection_with_limits
 }
@@ -1304,11 +1305,55 @@ fn transition_token_is_time(token: text) -> bool:
         t.substring(0, t.len() - unit_len)
     )
 
+val CSS_TIMING_TOKEN_MAX_BYTES: i32 = 1024
+val CSS_TIMING_TOKEN_MAX_DEPTH: i32 = 4
+val CSS_TIMING_TOKEN_MAX_COUNT: i32 = 16
+
+# Split one animation/transition shorthand on top-level ASCII whitespace.
+# Internal functional commas survive; top-level commas (lists), unbalanced or
+# excessively nested functions, and oversized token streams fail closed.
+fn css_timing_shorthand_tokens(raw: text) -> [text]:
+    var tokens: [text] = []
+    if raw.len() == 0 or raw.len() > CSS_TIMING_TOKEN_MAX_BYTES:
+        return tokens
+    val bytes = raw.bytes()
+    var depth = 0
+    var start = -1
+    var i = 0
+    while i <= bytes.len():
+        val code = if i < bytes.len(): bytes[i] else: 32
+        if i < bytes.len():
+            if code == 40:
+                depth = depth + 1
+                if depth > CSS_TIMING_TOKEN_MAX_DEPTH:
+                    return []
+            elif code == 41:
+                if depth <= 0:
+                    return []
+                depth = depth - 1
+            elif code == 44 and depth == 0:
+                # List-valued animation/transition timing is unsupported.
+                return []
+        val whitespace = (
+            code == 9 or code == 10 or code == 12 or
+            code == 13 or code == 32
+        )
+        if whitespace and depth == 0:
+            if start >= 0:
+                tokens.push(raw.substring(start, i))
+                if tokens.len() > CSS_TIMING_TOKEN_MAX_COUNT:
+                    return []
+                start = -1
+        elif start < 0:
+            start = i
+        i = i + 1
+    if depth != 0:
+        return []
+    tokens
+
 fn parse_transition_nth_time_ms(raw: text, target: i32) -> i32:
-    val normalized = raw.replace(",", " ")
-    val parts = normalized.split(" ")
     var seen = 0
-    for part in parts:
+    for part in css_timing_shorthand_tokens(raw):
         val token = part.trim()
         if transition_token_is_time(token):
             if seen == target:
@@ -1317,27 +1362,25 @@ fn parse_transition_nth_time_ms(raw: text, target: i32) -> i32:
     0
 
 fn parse_transition_property_name(raw: text) -> text:
-    val normalized = raw.replace(",", " ")
-    val parts = normalized.split(" ")
-    for part in parts:
+    for part in css_timing_shorthand_tokens(raw):
         val token = part.trim().lower()
-        if token.len() > 0 and not transition_token_is_time(token) and token != "ease" and token != "linear" and token != "ease-in" and token != "ease-out" and token != "ease-in-out":
+        if (
+            token.len() > 0 and not transition_token_is_time(token) and
+            parse_timing_function(token) == nil
+        ):
             return token
     "all"
 
 fn parse_transition_timing(raw: text) -> text:
-    for token in ws_tokens(raw.replace(",", " ").lower()):
-        if (
-            token == "ease" or token == "linear" or
-            token == "ease-in" or token == "ease-out" or
-            token == "ease-in-out"
-        ):
+    for raw_token in css_timing_shorthand_tokens(raw):
+        val token = raw_token.trim().lower()
+        if parse_timing_function(token) != nil:
             return token
     "ease"
 
 fn animation_token_is_reserved(token: text) -> bool:
     val t = token.trim().lower()
-    transition_token_is_time(t) or t == "ease" or t == "linear" or t == "ease-in" or t == "ease-out" or t == "ease-in-out" or t == "infinite" or t == "normal" or t == "reverse" or t == "alternate" or t == "alternate-reverse" or t == "none" or t == "forwards" or t == "backwards" or t == "both" or t == "running" or t == "paused"
+    transition_token_is_time(t) or parse_timing_function(t) != nil or t == "infinite" or t == "normal" or t == "reverse" or t == "alternate" or t == "alternate-reverse" or t == "none" or t == "forwards" or t == "backwards" or t == "both" or t == "running" or t == "paused"
 
 val CSS_ANIMATION_MAX_FINITE_ITERATIONS: f64 = 9223372036854774784.0
 
@@ -1429,8 +1472,7 @@ fn animation_token_looks_numeric(token: text) -> bool:
     )
 
 fn parse_animation_name(raw: text) -> text:
-    val normalized = raw.replace(",", " ")
-    val parts = normalized.split(" ")
+    val parts = css_timing_shorthand_tokens(raw)
     for part in parts:
         val token = part.trim().lower()
         if (
@@ -1450,8 +1492,7 @@ fn parse_animation_name(raw: text) -> text:
     "none"
 
 fn parse_animation_iteration_count(raw: text) -> text:
-    val normalized = raw.replace(",", " ")
-    val parts = normalized.split(" ")
+    val parts = css_timing_shorthand_tokens(raw)
     for part in parts:
         val token = part.trim().lower()
         if token == "infinite":
@@ -1465,7 +1506,7 @@ fn parse_animation_iteration_count(raw: text) -> text:
     "1"
 
 fn parse_animation_direction(raw: text) -> text:
-    for token in ws_tokens(raw.replace(",", " ").lower()):
+    for token in css_timing_shorthand_tokens(raw.lower()):
         if (
             token == "normal" or token == "reverse" or
             token == "alternate" or token == "alternate-reverse"
@@ -1474,7 +1515,7 @@ fn parse_animation_direction(raw: text) -> text:
     "normal"
 
 fn parse_animation_fill_mode(raw: text) -> text:
-    for token in ws_tokens(raw.replace(",", " ").lower()):
+    for token in css_timing_shorthand_tokens(raw.lower()):
         if (
             token == "none" or token == "forwards" or
             token == "backwards" or token == "both"
@@ -1483,7 +1524,7 @@ fn parse_animation_fill_mode(raw: text) -> text:
     "none"
 
 fn parse_animation_play_state(raw: text) -> text:
-    for token in ws_tokens(raw.replace(",", " ").lower()):
+    for token in css_timing_shorthand_tokens(raw.lower()):
         if token == "paused" or token == "running":
             return token
     "running"
@@ -1514,7 +1555,8 @@ fn animation_time_token_is_valid(raw: text, allow_negative: bool) -> bool:
     false
 
 fn animation_shorthand_is_valid(raw: text) -> bool:
-    if text_index_of(raw, ",") >= 0:
+    val parts = css_timing_shorthand_tokens(raw.trim().lower())
+    if parts.len() == 0:
         return false
     var time_count = 0
     var name_count = 0
@@ -1523,7 +1565,7 @@ fn animation_shorthand_is_valid(raw: text) -> bool:
     var direction_count = 0
     var fill_count = 0
     var play_count = 0
-    for part in ws_tokens(raw.trim().lower()):
+    for part in parts:
         if transition_token_is_time(part):
             if (
                 time_count >= 2 or
@@ -1531,10 +1573,7 @@ fn animation_shorthand_is_valid(raw: text) -> bool:
             ):
                 return false
             time_count = time_count + 1
-        elif (
-            part == "ease" or part == "linear" or part == "ease-in" or
-            part == "ease-out" or part == "ease-in-out"
-        ):
+        elif parse_timing_function(part) != nil:
             timing_count = timing_count + 1
             if timing_count > 1:
                 return false
@@ -1567,6 +1606,8 @@ fn animation_shorthand_is_valid(raw: text) -> bool:
             if play_count > 1:
                 return false
         else:
+            if part.contains("(") or part.contains(")"):
+                return false
             name_count = name_count + 1
             if name_count > 1:
                 return false
@@ -1579,9 +1620,9 @@ fn animation_declaration_value_is_valid(prop: text, raw: text) -> bool:
     if prop == "animation":
         return animation_shorthand_is_valid(value)
     if prop == "animation-name":
+        val tokens = css_timing_shorthand_tokens(value)
         return (
-            text_index_of(value, ",") < 0 and
-            ws_tokens(value).len() == 1 and
+            tokens.len() == 1 and
             not animation_token_looks_numeric(value)
         )
     if prop == "animation-duration":
@@ -1589,10 +1630,7 @@ fn animation_declaration_value_is_valid(prop: text, raw: text) -> bool:
     if prop == "animation-delay":
         return animation_time_token_is_valid(value, true)
     if prop == "animation-timing-function":
-        return (
-            value == "ease" or value == "linear" or value == "ease-in" or
-            value == "ease-out" or value == "ease-in-out"
-        )
+        return parse_timing_function(value) != nil
     if prop == "animation-iteration-count":
         return (
             value == "infinite" or
@@ -1611,6 +1649,76 @@ fn animation_declaration_value_is_valid(prop: text, raw: text) -> bool:
     if prop == "animation-play-state":
         return value == "running" or value == "paused"
     false
+
+fn transition_shorthand_is_valid(raw: text) -> bool:
+    val parts = css_timing_shorthand_tokens(raw.trim().lower())
+    if parts.len() == 0:
+        return false
+    var time_count = 0
+    var timing_count = 0
+    var property_count = 0
+    for part in parts:
+        if transition_token_is_time(part):
+            if (
+                time_count >= 2 or
+                not animation_time_token_is_valid(part, time_count == 1)
+            ):
+                return false
+            time_count = time_count + 1
+        elif parse_timing_function(part) != nil:
+            timing_count = timing_count + 1
+            if timing_count > 1:
+                return false
+        else:
+            if (
+                part.contains("(") or part.contains(")") or
+                animation_token_looks_numeric(part)
+            ):
+                return false
+            property_count = property_count + 1
+            if property_count > 1:
+                return false
+    true
+
+fn transition_declaration_value_is_valid(prop: text, raw: text) -> bool:
+    val value = raw.trim().lower()
+    if value.len() == 0:
+        return false
+    if prop == "transition":
+        return transition_shorthand_is_valid(value)
+    if prop == "transition-property":
+        val parts = css_timing_shorthand_tokens(value)
+        return (
+            parts.len() == 1 and not parts[0].contains("(") and
+            not parts[0].contains(")") and
+            not animation_token_looks_numeric(parts[0])
+        )
+    if prop == "transition-duration":
+        return animation_time_token_is_valid(value, false)
+    if prop == "transition-delay":
+        return animation_time_token_is_valid(value, true)
+    if prop == "transition-timing-function":
+        return parse_timing_function(value) != nil
+    false
+
+fn decl_tbl_last_valid_transition_index(
+    tbl: [text], prop: text
+) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if (
+            tbl[i] == prop and
+            transition_declaration_value_is_valid(prop, tbl[i + 1])
+        ):
+            return i / 2
+        i = i - 2
+    -1
+
+fn decl_tbl_get_last_valid_transition(tbl: [text], prop: text) -> text:
+    val index = decl_tbl_last_valid_transition_index(tbl, prop)
+    if index < 0:
+        return ""
+    tbl[index * 2 + 1]
 
 fn decl_tbl_last_valid_animation_index(
     tbl: [text], prop: text

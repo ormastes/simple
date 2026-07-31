@@ -88,6 +88,67 @@ fn _single_midpoint_animation_command_color(
             return command.color
     0u32
 
+fn _timing_function_html() -> text:
+    (
+        "<style>html,body{margin:0}@keyframes timing{" +
+        "from{background-color:#dc2626}to{background-color:#2563eb}}" +
+        "div{position:absolute;left:0;top:0;width:8px;height:8px;" +
+        "background-color:#dc2626}" +
+        "#cubic{animation:timing 1000ms cubic-bezier(0, 0, 1, 1) forwards}" +
+        "#jump-start{animation:timing 1000ms steps(4,jump-start) 100ms both}" +
+        "#jump-end{animation:timing 1000ms steps(4,jump-end) forwards}" +
+        "#reverse-before{animation:timing 1000ms steps(4,jump-end) 100ms " +
+        "reverse backwards}" +
+        "#reverse-after{animation:timing 1000ms steps(4,jump-start) " +
+        "reverse forwards}" +
+        "#alternate-before{animation:timing 1000ms steps(4,jump-start) " +
+        "100ms alternate backwards}" +
+        "#alternate-after{animation:timing 1000ms steps(4,jump-start) 2 " +
+        "alternate forwards}" +
+        "#alternate-reverse-before{animation:timing 1000ms " +
+        "steps(4,jump-end) 100ms alternate-reverse backwards}" +
+        "#alternate-reverse-after{animation:timing 1000ms " +
+        "steps(4,jump-end) 2 alternate-reverse forwards}" +
+        "#bad-x{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:cubic-bezier(-0.1,0,1,1)}" +
+        "#bad-finite{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:cubic-bezier(0,nan,1,1)}" +
+        "#bad-zero{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:steps(0,jump-end)}" +
+        "#bad-none{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:steps(1,jump-none)}" +
+        "#bad-list{animation:timing 1000ms linear forwards;" +
+        "animation-timing-function:linear,ease}" +
+        "#transition{transition-timing-function:linear;" +
+        "transition-timing-function:cubic-bezier(2,0,1,1)}" +
+        "#transition-shorthand{transition-timing-function:linear;" +
+        "transition:width 1000ms steps(4,jump-end);" +
+        "transition-timing-function:steps(0,jump-end)}</style>" +
+        "<div id='cubic'></div><div id='jump-start'></div>" +
+        "<div id='jump-end'></div><div id='reverse-before'></div>" +
+        "<div id='reverse-after'></div><div id='alternate-before'></div>" +
+        "<div id='alternate-after'></div>" +
+        "<div id='alternate-reverse-before'></div>" +
+        "<div id='alternate-reverse-after'></div><div id='bad-x'></div>" +
+        "<div id='bad-finite'></div><div id='bad-zero'></div>" +
+        "<div id='bad-none'></div><div id='bad-list'></div>" +
+        "<div id='transition'></div><div id='transition-shorthand'></div>"
+    )
+
+fn _timing_command_color(html: text, id: text, time_ms: i64) -> u32:
+    val instances = simple_web_layout_reconcile_animation_instances(
+        html, WIDTH, 0, 0, false, []
+    )
+    val result = (
+        simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
+            html, WIDTH, HEIGHT, time_ms, instances
+        )
+    )
+    for command in result.composition.batches[0].commands:
+        if command.component_id == id:
+            return command.color
+    0u32
+
 fn _expect_completed_animation_reuse(html: text, expected_color: u32):
     var worker = HostedBrowserRendererWorkerSession.create(WIDTH, HEIGHT)
     expect(worker.handle(BrowserRendererMessage(
@@ -346,7 +407,8 @@ fn check_saturating_animation_clock(html: text):
         paused_elapsed_ms: 0,
         duration_ms: 1000,
         delay_ms: 0,
-        iteration_count: 0.5
+        iteration_count: 0.5,
+        timing: TimingFunction.Linear
     )
     val paused_html = html.replace(
         "animation-iteration-count:-1",
@@ -366,7 +428,8 @@ fn check_saturating_animation_clock(html: text):
             paused_elapsed_ms: max_time,
             duration_ms: 1000,
             delay_ms: 0,
-            iteration_count: 0.5
+            iteration_count: 0.5,
+            timing: TimingFunction.Linear
         )]
     )
     expect(resumed.len()).to_equal(1)
@@ -379,7 +442,8 @@ fn check_saturating_animation_clock(html: text):
         paused_elapsed_ms: 0,
         duration_ms: max_time,
         delay_ms: 16,
-        iteration_count: 2.0
+        iteration_count: 2.0,
+        timing: TimingFunction.Linear
     )
     expect(simple_web_layout_animation_instances_next_ms(
         [positive_add], max_time - 10
@@ -395,7 +459,8 @@ fn check_saturating_animation_clock(html: text):
         paused_elapsed_ms: 0,
         duration_ms: 100,
         delay_ms: -16,
-        iteration_count: 1.0
+        iteration_count: 1.0,
+        timing: TimingFunction.Linear
     )
     expect(simple_web_layout_animation_instances_next_ms(
         [negative_add], min_time
@@ -416,7 +481,8 @@ fn check_bounded_animation_frame(html: text):
         paused_elapsed_ms: 0,
         duration_ms: 1000,
         delay_ms: 0,
-        iteration_count: 0.5
+        iteration_count: 0.5,
+        timing: TimingFunction.Linear
     )
     val past = BrowserCssAnimationInstance(
         target_key: baseline[0].target_key,
@@ -426,7 +492,8 @@ fn check_bounded_animation_frame(html: text):
         paused_elapsed_ms: 0,
         duration_ms: 1000,
         delay_ms: 0,
-        iteration_count: 0.5
+        iteration_count: 0.5,
+        timing: TimingFunction.Linear
     )
     val first = (
         simple_web_layout_render_html_draw_ir_result_at_time_with_animations(
@@ -530,6 +597,68 @@ fn check_bounded_animation_frame(html: text):
     )).to_equal(64)
 
 describe "REQ-WEB-BROWSER-003/004/006: CSS animation frames":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should apply bounded CSS timing functions to canonical Draw IR":
+        val html = _timing_function_html()
+        step("Resolve valid timing functions without rewriting them to ease")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "cubic", "animation_timing_function"
+        )).to_equal("cubic-bezier(0, 0, 1, 1)")
+
+        step("Sample cubic Bézier identity timing into canonical Draw IR")
+        expect(_timing_command_color(
+            html, "cubic", 500
+        )).to_equal(0xFF804488u32)
+
+        step("Sample step timing at exact jump boundaries")
+        expect(_timing_command_color(
+            html, "jump-start", 0
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "jump-start", 100
+        )).to_equal(0xFFAE3557u32)
+        expect(_timing_command_color(
+            html, "jump-end", 249
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "jump-end", 250
+        )).to_equal(0xFFAE3557u32)
+        expect(_timing_command_color(
+            html, "reverse-before", 0
+        )).to_equal(0xFF2563EBu32)
+        expect(_timing_command_color(
+            html, "reverse-after", 1000
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "alternate-before", 0
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "alternate-after", 2000
+        )).to_equal(0xFFDC2626u32)
+        expect(_timing_command_color(
+            html, "alternate-reverse-before", 0
+        )).to_equal(0xFF2563EBu32)
+        expect(_timing_command_color(
+            html, "alternate-reverse-after", 2000
+        )).to_equal(0xFF2563EBu32)
+
+        step("Ignore malformed nonfinite and out-of-range timing declarations")
+        for id in ["bad-x", "bad-finite", "bad-zero", "bad-none", "bad-list"]:
+            expect(simple_web_layout_debug_style_by_id(
+                html, id, "animation_timing_function"
+            )).to_equal("linear")
+            expect(_timing_command_color(
+                html, id, 500
+            )).to_equal(0xFF804488u32)
+        expect(simple_web_layout_debug_style_by_id(
+            html, "transition", "transition_timing_function"
+        )).to_equal("linear")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "transition-shorthand", "transition_timing_function"
+        )).to_equal("steps(4,jump-end)")
+
     # @manual: show
     # @capture(html)
     # @capture(artifact)

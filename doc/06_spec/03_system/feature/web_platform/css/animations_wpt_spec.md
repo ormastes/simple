@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 13 | 13 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -33,6 +33,63 @@ compositing and unsupported properties remain outside this bounded profile.
 ## Scenarios
 
 ### REQ-WEB-BROWSER-003/004/006: CSS animation frames
+
+#### should apply bounded CSS timing functions to canonical Draw IR
+
+- Resolve valid timing functions without rewriting them to ease
+  - The depth-aware tokenizer keeps commas inside a single functional value
+- Sample cubic Bézier identity timing into canonical Draw IR
+  - At 500 ms the exact opaque interpolated color is `0xFF804488`
+- Sample step timing at exact jump boundaries
+  - The `before` flag is set only for before+forwards or after+backwards
+  - Active `jump-start` and `jump-end` frames use exact quarter-step colors
+  - Reverse `jump-end` backwards fill is exact blue progress `1.0`
+  - Reverse `jump-start` forwards fill is exact red progress `0.0`
+  - Alternate and alternate-reverse controls prove both boundary directions
+- Ignore malformed nonfinite and out-of-range timing declarations
+  - Later invalid animation and transition declarations do not erase `linear`
+  - List-valued and keyframe-local timing remain intentionally unsupported
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val html = _timing_function_html()
+step("Resolve valid timing functions without rewriting them to ease")
+expect(simple_web_layout_debug_style_by_id(
+    html, "cubic", "animation_timing_function"
+)).to_equal("cubic-bezier(0, 0, 1, 1)")
+
+step("Sample cubic Bézier identity timing into canonical Draw IR")
+expect(_timing_command_color(html, "cubic", 500)).to_equal(0xFF804488u32)
+
+step("Sample step timing at exact jump boundaries")
+expect(_timing_command_color(html, "jump-start", 0)).to_equal(0xFFDC2626u32)
+expect(_timing_command_color(html, "jump-start", 100)).to_equal(0xFFAE3557u32)
+expect(_timing_command_color(html, "jump-end", 249)).to_equal(0xFFDC2626u32)
+expect(_timing_command_color(html, "jump-end", 250)).to_equal(0xFFAE3557u32)
+expect(_timing_command_color(html, "reverse-before", 0)).to_equal(0xFF2563EBu32)
+expect(_timing_command_color(html, "reverse-after", 1000)).to_equal(0xFFDC2626u32)
+expect(_timing_command_color(html, "alternate-before", 0)).to_equal(0xFFDC2626u32)
+expect(_timing_command_color(html, "alternate-after", 2000)).to_equal(0xFFDC2626u32)
+expect(_timing_command_color(html, "alternate-reverse-before", 0)).to_equal(0xFF2563EBu32)
+expect(_timing_command_color(html, "alternate-reverse-after", 2000)).to_equal(0xFF2563EBu32)
+
+step("Ignore malformed nonfinite and out-of-range timing declarations")
+for id in ["bad-x", "bad-finite", "bad-zero", "bad-none", "bad-list"]:
+    expect(simple_web_layout_debug_style_by_id(
+        html, id, "animation_timing_function"
+    )).to_equal("linear")
+    expect(_timing_command_color(html, id, 500)).to_equal(0xFF804488u32)
+expect(simple_web_layout_debug_style_by_id(
+    html, "transition", "transition_timing_function"
+)).to_equal("linear")
+expect(simple_web_layout_debug_style_by_id(
+    html, "transition-shorthand", "transition_timing_function"
+)).to_equal("steps(4,jump-end)")
+```
+
+</details>
 
 #### should synthesize implicit underlying endpoints for one midpoint keyframe
 
@@ -844,8 +901,8 @@ expect(registry.entries.len()).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 13 |
+| Active scenarios | 13 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

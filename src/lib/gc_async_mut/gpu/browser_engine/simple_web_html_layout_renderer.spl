@@ -22,7 +22,9 @@ use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.color.types.{from_rgba}
-use std.common.animation.timing.{evaluate_timing, parse_timing_function}
+use std.common.animation.timing.{
+    TimingFunction, evaluate_timing, parse_timing_function
+}
 use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes, KeyframeRegistry}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance, CSSDeclaration, CSSValue,
@@ -637,6 +639,15 @@ fn _animation_direction_progress(progress: f64, direction: text, iteration: i64)
         return 1.0 - progress
     progress
 
+fn _animation_direction_is_forwards(direction: text, iteration: i64) -> bool:
+    if direction == "reverse":
+        return false
+    if direction == "alternate":
+        return iteration % 2 == 0
+    if direction == "alternate-reverse":
+        return iteration % 2 != 0
+    true
+
 fn _css_animation_signature(st: Style) -> text:
     (
         st.animation_name + "\u001f" +
@@ -814,6 +825,7 @@ pub fn simple_web_layout_reconcile_animation_instances(
                             paused_elapsed_ms: paused_elapsed,
                             duration_ms: duration_ms,
                             delay_ms: delay_ms,
+                            timing: old.timing,
                             iteration_count: iteration_count
                         ))
                     elif not paused and old.paused:
@@ -827,25 +839,32 @@ pub fn simple_web_layout_reconcile_animation_instances(
                             paused_elapsed_ms: old.paused_elapsed_ms,
                             duration_ms: duration_ms,
                             delay_ms: delay_ms,
+                            timing: old.timing,
                             iteration_count: iteration_count
                         ))
                     else:
                         reconciled.push(old)
                 else:
-                    reconciled.push(BrowserCssAnimationInstance(
-                        target_key: target_key,
-                        signature: signature,
-                        start_time_ms: new_epoch_ms,
-                        paused: paused,
-                        paused_elapsed_ms: 0,
-                        duration_ms: duration_ms,
-                        delay_ms: delay_ms,
-                        iteration_count: iteration_count
-                    ))
+                    if val timing = parse_timing_function(
+                        st.animation_timing_function
+                    ):
+                        reconciled.push(BrowserCssAnimationInstance(
+                            target_key: target_key,
+                            signature: signature,
+                            start_time_ms: new_epoch_ms,
+                            paused: paused,
+                            paused_elapsed_ms: 0,
+                            duration_ms: duration_ms,
+                            delay_ms: delay_ms,
+                            timing: timing,
+                            iteration_count: iteration_count
+                        ))
         style_index = style_index + 1
     reconciled
 
-fn _animation_progress(st: Style, animation_time_ms: i64) -> f64?:
+fn _animation_progress(
+    st: Style, animation_time_ms: i64, timing: TimingFunction
+) -> f64?:
     if st.animation_name == "none" or st.animation_duration_ms <= 0:
         return nil
     val elapsed = _css_animation_sub_ms_no_wrap(
@@ -853,7 +872,15 @@ fn _animation_progress(st: Style, animation_time_ms: i64) -> f64?:
     )
     if elapsed < 0:
         if st.animation_fill_mode == "backwards" or st.animation_fill_mode == "both":
-            return Some(_animation_direction_progress(0.0, st.animation_direction, 0))
+            val directed_before = _animation_direction_progress(
+                0.0, st.animation_direction, 0
+            )
+            val current_direction_forwards = (
+                _animation_direction_is_forwards(st.animation_direction, 0)
+            )
+            return Some(evaluate_timing(
+                timing, directed_before, current_direction_forwards
+            ))
         return nil
     val iteration_count = _css_animation_iteration_count(
         st.animation_iteration_count
@@ -863,8 +890,14 @@ fn _animation_progress(st: Style, animation_time_ms: i64) -> f64?:
             st.animation_fill_mode == "forwards" or
             st.animation_fill_mode == "both"
         ):
-            return Some(_animation_direction_progress(
+            val directed_zero = _animation_direction_progress(
                 0.0, st.animation_direction, 0
+            )
+            val current_direction_forwards = (
+                _animation_direction_is_forwards(st.animation_direction, 0)
+            )
+            return Some(evaluate_timing(
+                timing, directed_zero, not current_direction_forwards
             ))
         return nil
     val duration = st.animation_duration_ms.to_i64()
@@ -888,14 +921,16 @@ fn _animation_progress(st: Style, animation_time_ms: i64) -> f64?:
         val directed_terminal = _animation_direction_progress(
             terminal_progress, st.animation_direction, terminal_iteration
         )
+        val current_direction_forwards = _animation_direction_is_forwards(
+            st.animation_direction, terminal_iteration
+        )
         return Some(evaluate_timing(
-            parse_timing_function(st.animation_timing_function),
-            directed_terminal
+            timing, directed_terminal, not current_direction_forwards
         ))
     val iteration = elapsed / duration
     val local = (elapsed % duration).to_f64() / duration.to_f64()
     val directed = _animation_direction_progress(local, st.animation_direction, iteration)
-    Some(evaluate_timing(parse_timing_function(st.animation_timing_function), directed))
+    Some(evaluate_timing(timing, directed, false))
 
 fn _animation_computed_length(value: i32) -> CSSValue:
     CSSValue.Length(v: value.to_f64(), unit: "px")
@@ -995,39 +1030,45 @@ fn _apply_css_animations(
                 0
             else:
                 animation_time_ms
-            if val Some(progress) = _animation_progress(
-                st, local_animation_time_ms
-            ):
-                val entry = registry.entries[keyframe_index]
-                var underlying: [CSSDeclaration] = []
-                for keyframe in entry.frames:
-                    for declaration in keyframe.properties:
-                        var known = false
-                        for base in underlying:
-                            if base.property == declaration.property:
-                                known = true
-                        if not known:
-                            if val Some(value) = _animation_computed_value(
-                                st, declaration.property
-                            ):
-                                underlying.push(CSSDeclaration.create(
-                                    declaration.property, value
-                                ))
-                val updates = sample_keyframes_with_underlying(
-                    style_index.to_i64(), entry.frames, progress, underlying
-                )
-                var declarations = ""
-                for update in updates:
+            val parsed_timing = if matched_index >= 0:
+                Some(animation_instances[matched_index].timing)
+            else:
+                parse_timing_function(st.animation_timing_function)
+            if val timing = parsed_timing:
+                if val Some(progress) = _animation_progress(
+                    st, local_animation_time_ms, timing
+                ):
+                    val entry = registry.entries[keyframe_index]
+                    var underlying: [CSSDeclaration] = []
+                    for keyframe in entry.frames:
+                        for declaration in keyframe.properties:
+                            var known = false
+                            for base in underlying:
+                                if base.property == declaration.property:
+                                    known = true
+                            if not known:
+                                if val Some(value) = _animation_computed_value(
+                                    st, declaration.property
+                                ):
+                                    underlying.push(CSSDeclaration.create(
+                                        declaration.property, value
+                                    ))
+                    val updates = sample_keyframes_with_underlying(
+                        style_index.to_i64(), entry.frames, progress,
+                        underlying
+                    )
+                    var declarations = ""
+                    for update in updates:
+                        if declarations.len() > 0:
+                            declarations = declarations + ";"
+                        declarations = (
+                            declarations + update.property + ":" +
+                            animation_css_value_text(update.value)
+                        )
                     if declarations.len() > 0:
-                        declarations = declarations + ";"
-                    declarations = (
-                        declarations + update.property + ":" +
-                        animation_css_value_text(update.value)
-                    )
-                if declarations.len() > 0:
-                    animated[style_index] = apply_decls(
-                        st, declarations, st.font_size
-                    )
+                        animated[style_index] = apply_decls(
+                            st, declarations, st.font_size
+                        )
         style_index = style_index + 1
     simple_web_enforce_details_visibility(nodes, animated)
 

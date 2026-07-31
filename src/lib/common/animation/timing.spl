@@ -1,6 +1,6 @@
 # CSS animation timing functions (easing functions).
-# Pure functions for evaluating standard CSS easing curves: linear, ease, ease-in,
-# ease-out, ease-in-out, cubic-bezier, and steps.
+# One timing function is accepted at a time. List-valued and keyframe-local
+# timing functions remain outside the bounded Simple Web profile.
 
 enum TimingFunction:
     """CSS timing function variants."""
@@ -12,11 +12,103 @@ enum TimingFunction:
     CubicBezier(x1: f64, y1: f64, x2: f64, y2: f64)
     Steps(steps: i64, jump_type: text)
 
-fn evaluate_timing(timing: TimingFunction, t: f64) -> f64:
-    """Evaluate a timing function at normalized progress t ∈ [0.0, 1.0].
+val CSS_TIMING_MAX_SOURCE_BYTES: i32 = 256
+val CSS_TIMING_MAX_F64: f64 = 1.7976931348623157e308
 
-    Returns the eased progress value.
-    """
+fn _timing_f64(raw: text) -> f64?:
+    if val parsed = raw.trim().parse_f64():
+        if (
+            parsed == parsed and
+            parsed >= 0.0 - CSS_TIMING_MAX_F64 and
+            parsed <= CSS_TIMING_MAX_F64
+        ):
+            return Some(parsed)
+    nil
+
+fn _timing_function_inner(value: text, name: text) -> text?:
+    val prefix = name + "("
+    if (
+        not value.starts_with(prefix) or not value.ends_with(")") or
+        value.len() <= prefix.len()
+    ):
+        return nil
+    val inner = value.substring(prefix.len(), value.len() - 1)
+    if inner.contains("(") or inner.contains(")"):
+        return nil
+    Some(inner)
+
+fn _parse_cubic_bezier(value: text) -> TimingFunction?:
+    if val inner = _timing_function_inner(value, "cubic-bezier"):
+        val parts = inner.split(",")
+        if parts.len() != 4:
+            return nil
+        if val x1 = _timing_f64(parts[0]):
+            if val y1 = _timing_f64(parts[1]):
+                if val x2 = _timing_f64(parts[2]):
+                    if val y2 = _timing_f64(parts[3]):
+                        if x1 >= 0.0 and x1 <= 1.0 and x2 >= 0.0 and x2 <= 1.0:
+                            return Some(TimingFunction.CubicBezier(
+                                x1, y1, x2, y2
+                            ))
+    nil
+
+fn _normalized_step_position(raw: text) -> text:
+    val position = raw.trim().lower()
+    if position == "start":
+        return "jump-start"
+    if position == "end" or position == "":
+        return "jump-end"
+    if (
+        position == "jump-start" or position == "jump-end" or
+        position == "jump-none" or position == "jump-both"
+    ):
+        return position
+    ""
+
+fn _parse_steps(value: text) -> TimingFunction?:
+    if value == "step-start":
+        return Some(TimingFunction.Steps(1, "jump-start"))
+    if value == "step-end":
+        return Some(TimingFunction.Steps(1, "jump-end"))
+    if val inner = _timing_function_inner(value, "steps"):
+        val parts = inner.split(",")
+        if parts.len() < 1 or parts.len() > 2:
+            return nil
+        if val steps = parts[0].trim().parse_i64():
+            val position = if parts.len() == 2:
+                _normalized_step_position(parts[1])
+            else:
+                "jump-end"
+            if (
+                steps > 0 and position != "" and
+                not (steps == 1 and position == "jump-none")
+            ):
+                return Some(TimingFunction.Steps(steps, position))
+    nil
+
+fn parse_timing_function(timing_str: text) -> TimingFunction?:
+    """Strictly parse one CSS timing function; invalid input returns nil."""
+    if timing_str.len() > CSS_TIMING_MAX_SOURCE_BYTES:
+        return nil
+    val value = timing_str.trim().lower()
+    if value == "linear":
+        return Some(TimingFunction.Linear)
+    if value == "ease":
+        return Some(TimingFunction.Ease)
+    if value == "ease-in":
+        return Some(TimingFunction.EaseIn)
+    if value == "ease-out":
+        return Some(TimingFunction.EaseOut)
+    if value == "ease-in-out":
+        return Some(TimingFunction.EaseInOut)
+    if value.starts_with("cubic-bezier("):
+        return _parse_cubic_bezier(value)
+    if value.starts_with("steps(") or value == "step-start" or value == "step-end":
+        return _parse_steps(value)
+    nil
+
+fn evaluate_timing(timing: TimingFunction, t: f64, before: bool = false) -> f64:
+    """Evaluate one parsed CSS timing function at input progress t."""
     match timing:
         TimingFunction.Linear:
             t
@@ -31,112 +123,91 @@ fn evaluate_timing(timing: TimingFunction, t: f64) -> f64:
         TimingFunction.CubicBezier(x1, y1, x2, y2):
             cubic_bezier_at(t, x1, y1, x2, y2)
         TimingFunction.Steps(steps, jump_type):
-            evaluate_steps(t, steps, jump_type)
+            evaluate_steps(t, steps, jump_type, before)
 
-fn parse_timing_function(timing_str: text) -> TimingFunction:
-    """Parse a CSS timing function string.
+fn _cubic_start_gradient(x1: f64, y1: f64, x2: f64, y2: f64) -> f64:
+    if x1 > 0.0:
+        return y1 / x1
+    if x2 > 0.0:
+        return y2 / x2
+    0.0
 
-    Recognizes:
-    - "linear"
-    - "ease", "ease-in", "ease-out", "ease-in-out"
-    - For cubic-bezier and steps, returns the best matching enum variant.
-
-    Default fallback: "ease".
-    """
-    val trimmed = timing_str.trim()
-
-    if trimmed == "linear":
-        TimingFunction.Linear
-    else if trimmed == "ease":
-        TimingFunction.Ease
-    else if trimmed == "ease-in":
-        TimingFunction.EaseIn
-    else if trimmed == "ease-out":
-        TimingFunction.EaseOut
-    else if trimmed == "ease-in-out":
-        TimingFunction.EaseInOut
-    else:
-        # Default fallback for unrecognized timing functions
-        TimingFunction.Ease
+fn _cubic_end_gradient(x1: f64, y1: f64, x2: f64, y2: f64) -> f64:
+    if x2 < 1.0:
+        return (y2 - 1.0) / (x2 - 1.0)
+    if x1 < 1.0:
+        return (y1 - 1.0) / (x1 - 1.0)
+    0.0
 
 fn cubic_bezier_at(t: f64, x1: f64, y1: f64, x2: f64, y2: f64) -> f64:
-    """Evaluate a cubic Bézier curve at normalized time t ∈ [0.0, 1.0].
-
-    Solves for x(t) = 3(1-t)²t·x1 + 3(1-t)t²·x2 + t³ using Newton's method,
-    then evaluates y at that parameter.
-
-    Control points: P0 = (0, 0), P1 = (x1, y1), P2 = (x2, y2), P3 = (1, 1).
-    """
-    # Clamp edge cases
-    if t <= 0.0:
-        return 0.0
-    if t >= 1.0:
-        return 1.0
-
-    # If linear in x (almost vertical), use direct evaluation
-    if x1 == 0.0 and x2 == 1.0:
+    """Evaluate CSS cubic-bezier with endpoint tangent extrapolation."""
+    if t < 0.0:
+        return t * _cubic_start_gradient(x1, y1, x2, y2)
+    if t > 1.0:
+        return 1.0 + (t - 1.0) * _cubic_end_gradient(x1, y1, x2, y2)
+    if t == 0.0 or t == 1.0:
         return t
 
-    # Newton's method to find parameter u such that x(u) = t
+    # The admitted x control points are monotonic. A bounded Newton/bisection
+    # hybrid avoids both a false x-only "linear" shortcut and flat-derivative
+    # early returns.
+    var low = 0.0
+    var high = 1.0
     var u = t
     var i = 0
-    while i < 8:
+    while i < 20:
         val x_u = cubic_bezier_component(u, x1, x2)
-        if (x_u - t).abs() < 1e-6:
+        val error = x_u - t
+        if error.abs() < 1e-9:
             return cubic_bezier_component(u, y1, y2)
-        val dx_du = cubic_bezier_derivative(u, x1, x2)
-        if dx_du.abs() < 1e-9:
-            return cubic_bezier_component(u, y1, y2)
-        u = u - (x_u - t) / dx_du
-        u = clamp_f64(u, 0.0, 1.0)
+        if error < 0.0:
+            low = u
+        else:
+            high = u
+        val derivative = cubic_bezier_derivative(u, x1, x2)
+        val newton = if derivative.abs() > 1e-9:
+            u - error / derivative
+        else:
+            -1.0
+        if newton > low and newton < high:
+            u = newton
+        else:
+            u = (low + high) / 2.0
         i = i + 1
-
     cubic_bezier_component(u, y1, y2)
 
 fn cubic_bezier_component(t: f64, c1: f64, c2: f64) -> f64:
-    """Evaluate cubic Bézier component: B(t) = 3(1-t)²t·c1 + 3(1-t)t²·c2 + t³."""
     val mt = 1.0 - t
     3.0 * mt * mt * t * c1 + 3.0 * mt * t * t * c2 + t * t * t
 
 fn cubic_bezier_derivative(t: f64, c1: f64, c2: f64) -> f64:
-    """Derivative of cubic Bézier component."""
     val mt = 1.0 - t
-    3.0 * (mt * mt * (c1 - 0.0) + 2.0 * mt * t * (c2 - c1) + t * t * (1.0 - c2))
+    3.0 * (
+        mt * mt * c1 + 2.0 * mt * t * (c2 - c1) +
+        t * t * (1.0 - c2)
+    )
 
-fn evaluate_steps(t: f64, steps: i64, jump_type: text) -> f64:
-    """Evaluate a steps() timing function.
-
-    jump_type interpretations:
-    - "start" / "jump-start": step at 1/n, 2/n, ..., 1.0
-    - "end" / "jump-end" (default): step at 1/n, 2/n, ..., 1.0 after reaching 1
-    - "jump-none": step at 1/n, 2/n, ..., (n-1)/n; no jump at endpoints
-    - "jump-both": n+1 steps including 0 and 1
-    """
-    if steps <= 0:
+fn evaluate_steps(
+    t: f64, steps: i64, jump_type: text, before: bool = false
+) -> f64:
+    """Evaluate the CSS Easing step algorithm, including the before flag."""
+    val jump_count = if jump_type == "jump-none":
+        steps.to_f64() - 1.0
+    elif jump_type == "jump-both":
+        steps.to_f64() + 1.0
+    else:
+        steps.to_f64()
+    if steps <= 0 or jump_count <= 0.0:
         return t
 
-    val normalized = clamp_f64(t, 0.0, 1.0)
-
-    match jump_type:
-        "start" | "jump-start":
-            val step_index = (normalized * steps.to_f64()).ceil()
-            step_index / steps.to_f64()
-        "jump-none":
-            val step_index = (normalized * steps.to_f64()).floor()
-            step_index / steps.to_f64()
-        "jump-both":
-            val step_index = (normalized * (steps + 1).to_f64()).floor()
-            step_index / (steps + 1).to_f64()
-        _:
-            # "end" and "jump-end" (default)
-            val step_index = (normalized * steps.to_f64()).floor()
-            step_index / steps.to_f64()
-
-fn clamp_f64(v: f64, min: f64, max: f64) -> f64:
-    """Clamp f64 value to [min, max]."""
-    if v < min:
-        min
-    else if v > max:
-        max
-    else:
-        v
+    val scaled = t * steps.to_f64()
+    var current_step = scaled.floor()
+    if jump_type == "jump-start" or jump_type == "jump-both":
+        current_step = current_step + 1.0
+    if before and scaled == scaled.floor():
+        current_step = current_step - 1.0
+    if t >= 0.0 and current_step < 0.0:
+        current_step = 0.0
+    if t <= 1.0 and current_step > jump_count:
+        current_step = jump_count
+    current_step / jump_count
