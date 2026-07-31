@@ -747,10 +747,16 @@ val parents = [
 ]
 
 val root = html_tree_builder_build(html)
+val identity_index = system_dom_identity_index(root)
 var index = 0
 while index < ids.len():
-    val path = be_dom_find_path_to_id(root, ids[index])
-    val parent_path = be_dom_find_path_to_id(root, parents[index])
+    val path = be_dom_path_for_route(
+        root, identity_index, system_dom_route(identity_index, ids[index])
+    )
+    val parent_path = be_dom_path_for_route(
+        root, identity_index,
+        system_dom_route(identity_index, parents[index])
+    )
     expect(path.len()).to_be_greater_than(1)
     expect(parent_path.len()).to_be_greater_than(0)
     val node = path[path.len() - 1]

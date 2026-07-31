@@ -57,7 +57,7 @@ The executable attribute oracles are exact:
   `""`; `data-input`, `data-change`, and `data-focus` are `"yes"`.
 - `submit-checkbox`: `checked` is `"checked"` and `data-input`,
   `data-change`, and `data-focus` are `"yes"`.
-- `be_dom_find_path_to_id(..., "removed-link")` has length `0`.
+- `route_for_author_id("removed-link")` is `nil` in the current identity index.
 
 `pending_request_count()` is exactly `2`. The first consumed URL is
 `https://example.test/checkbox-submit`; the second is

@@ -15,8 +15,8 @@ use std.spec.*
 use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_apply_default_action_to_id, be_dom_dispatch_event_to_id,
-    be_dom_find_path_to_id, be_dom_get_attr, be_dom_get_tag,
+    be_dom_apply_default_action_to_route, be_dom_dispatch_event_to_route,
+    be_dom_get_attr, be_dom_get_tag, be_dom_path_for_route,
     be_dom_has_attr, be_dom_serialize_html_for_render
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
@@ -27,6 +27,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_render_html_draw_ir_result_at_time
 }
+use test.system.browser_dom_identity_helpers.{system_dom_identity_index, system_dom_route}
 
 val WIDTH: i32 = 64
 val HEIGHT: i32 = 48
@@ -186,8 +187,10 @@ fn check_closed_summary_only(html: text):
         "<details><summary id='first'></summary>" +
         "<summary id='later'></summary></details>"
     )
-    val later_dispatch = be_dom_dispatch_event_to_id(
-        later_summary_root, "later", "click", true, true, true
+    val later_index = system_dom_identity_index(later_summary_root)
+    val later_dispatch = be_dom_dispatch_event_to_route(
+        later_summary_root, later_index, system_dom_route(later_index, "later"),
+        "click", true, true, true
     )
     expect(later_dispatch.default_action).to_equal("")
 
@@ -241,16 +244,22 @@ fn check_nested_disclosure_independent():
     expect(closed_pixels[21 * WIDTH + 33]).to_equal(0xFFFFFFFFu32)
 
     val root = html_tree_builder_build(html)
-    val dispatch = be_dom_dispatch_event_to_id(
-        root, "inner-label", "click", true, true, true
+    val identity_index = system_dom_identity_index(root)
+    val dispatch = be_dom_dispatch_event_to_route(
+        root, identity_index, system_dom_route(identity_index, "inner-label"),
+        "click", true, true, true
     )
     expect(dispatch.default_action).to_equal("details-toggle")
-    val opened = be_dom_apply_default_action_to_id(
-        root, dispatch.target_route_id, dispatch.default_action
+    val opened = be_dom_apply_default_action_to_route(
+        root, identity_index, dispatch.target_route, dispatch.default_action
     )
     val opened_html = be_dom_serialize_html_for_render(opened)
-    val inner_path = be_dom_find_path_to_id(opened, "inner")
-    val outer_path = be_dom_find_path_to_id(opened, "outer")
+    val inner_path = be_dom_path_for_route(
+        opened, identity_index, system_dom_route(identity_index, "inner")
+    )
+    val outer_path = be_dom_path_for_route(
+        opened, identity_index, system_dom_route(identity_index, "outer")
+    )
     expect(be_dom_has_attr(
         inner_path[inner_path.len() - 1], "open"
     )).to_equal(true)
@@ -285,8 +294,13 @@ describe "Production details and summary rendering":
 
         step("Parse the authored disclosure summary")
         val root = html_tree_builder_build(closed_html)
-        val details_path = be_dom_find_path_to_id(root, "disclosure")
-        val summary_path = be_dom_find_path_to_id(root, "summary")
+        val identity_index = system_dom_identity_index(root)
+        val details_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "disclosure")
+        )
+        val summary_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "summary")
+        )
         expect(be_dom_get_tag(
             summary_path[summary_path.len() - 1]
         )).to_equal("summary")
@@ -403,8 +417,13 @@ describe "Production details and summary rendering":
 
         step("Parse details and summary semantics")
         val root = html_tree_builder_build(html)
-        val details_path = be_dom_find_path_to_id(root, "disclosure")
-        val summary_path = be_dom_find_path_to_id(root, "summary")
+        val identity_index = system_dom_identity_index(root)
+        val details_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "disclosure")
+        )
+        val summary_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "summary")
+        )
         expect(be_dom_get_tag(
             details_path[details_path.len() - 1]
         )).to_equal("details")
@@ -420,14 +439,18 @@ describe "Production details and summary rendering":
             "<p id='before-summary'>before" +
             "<summary id='loose-summary'></summary></body>"
         )
-        val malformed_body = be_dom_find_path_to_id(
-            malformed, "malformed-body"
+        val malformed_index = system_dom_identity_index(malformed)
+        val malformed_body = be_dom_path_for_route(
+            malformed, malformed_index,
+            system_dom_route(malformed_index, "malformed-body")
         )
-        val malformed_details = be_dom_find_path_to_id(
-            malformed, "malformed-details"
+        val malformed_details = be_dom_path_for_route(
+            malformed, malformed_index,
+            system_dom_route(malformed_index, "malformed-details")
         )
-        val loose_summary = be_dom_find_path_to_id(
-            malformed, "loose-summary"
+        val loose_summary = be_dom_path_for_route(
+            malformed, malformed_index,
+            system_dom_route(malformed_index, "loose-summary")
         )
         expect(malformed_details[
             malformed_details.len() - 1
@@ -444,16 +467,21 @@ describe "Production details and summary rendering":
         check_closed_summary_only(html)
 
         step("Open the disclosure through the canonical event path")
-        val dispatch = be_dom_dispatch_event_to_id(
-            root, "summary-label", "click", true, true, true
+        val dispatch = be_dom_dispatch_event_to_route(
+            root, identity_index,
+            system_dom_route(identity_index, "summary-label"),
+            "click", true, true, true
         )
         expect(dispatch.default_action).to_equal("details-toggle")
         expect(dispatch.default_action_allowed).to_equal(true)
         expect(dispatch.actions.len()).to_equal(0)
-        val opened = be_dom_apply_default_action_to_id(
-            root, dispatch.target_route_id, dispatch.default_action
+        val opened = be_dom_apply_default_action_to_route(
+            root, identity_index, dispatch.target_route, dispatch.default_action
         )
-        val opened_path = be_dom_find_path_to_id(opened, "disclosure")
+        val opened_path = be_dom_path_for_route(
+            opened, identity_index,
+            system_dom_route(identity_index, "disclosure")
+        )
         expect(be_dom_has_attr(
             opened_path[opened_path.len() - 1], "open"
         )).to_equal(true)
@@ -465,21 +493,25 @@ describe "Production details and summary rendering":
             "<span id='cancel-target' onclick='prevent-default'></span>" +
             "</summary><div></div></details>"
         )
-        val canceled = be_dom_dispatch_event_to_id(
-            canceled_root, "cancel-target", "click", true, true, true
+        val canceled_index = system_dom_identity_index(canceled_root)
+        val canceled = be_dom_dispatch_event_to_route(
+            canceled_root, canceled_index,
+            system_dom_route(canceled_index, "cancel-target"),
+            "click", true, true, true
         )
         expect(canceled.default_action).to_equal("details-toggle")
         expect(canceled.event.default_prevented).to_equal(true)
         expect(canceled.default_action_allowed).to_equal(false)
         val canceled_after = if canceled.default_action_allowed:
-            be_dom_apply_default_action_to_id(
-                canceled_root, canceled.target_route_id,
+            be_dom_apply_default_action_to_route(
+                canceled_root, canceled_index, canceled.target_route,
                 canceled.default_action
             )
         else:
             canceled_root
-        val canceled_details = be_dom_find_path_to_id(
-            canceled_after, "canceled-details"
+        val canceled_details = be_dom_path_for_route(
+            canceled_after, canceled_index,
+            system_dom_route(canceled_index, "canceled-details")
         )
         expect(be_dom_has_attr(
             canceled_details[canceled_details.len() - 1], "open"
@@ -492,17 +524,24 @@ describe "Production details and summary rendering":
             "<span id='button-target'></span></button>" +
             "</summary><div></div></details>"
         )
-        val link_dispatch = be_dom_dispatch_event_to_id(
-            interactive_root, "link-target", "click", true, true, true
+        val interactive_index = system_dom_identity_index(interactive_root)
+        val link_dispatch = be_dom_dispatch_event_to_route(
+            interactive_root, interactive_index,
+            system_dom_route(interactive_index, "link-target"),
+            "click", true, true, true
         )
         expect(link_dispatch.default_action).to_equal("navigate:/safe")
-        val linked = be_dom_apply_default_action_to_id(
-            interactive_root, link_dispatch.target_route_id,
+        val linked = be_dom_apply_default_action_to_route(
+            interactive_root, interactive_index, link_dispatch.target_route,
             link_dispatch.default_action
         )
-        val link_path = be_dom_find_path_to_id(linked, "summary-link")
-        val linked_details = be_dom_find_path_to_id(
-            linked, "interactive-details"
+        val link_path = be_dom_path_for_route(
+            linked, interactive_index,
+            system_dom_route(interactive_index, "summary-link")
+        )
+        val linked_details = be_dom_path_for_route(
+            linked, interactive_index,
+            system_dom_route(interactive_index, "interactive-details")
         )
         expect(be_dom_get_attr(
             link_path[link_path.len() - 1], "data-navigation"
@@ -511,19 +550,23 @@ describe "Production details and summary rendering":
             linked_details[linked_details.len() - 1], "open"
         )).to_equal(false)
 
-        val button_dispatch = be_dom_dispatch_event_to_id(
-            interactive_root, "button-target", "click", true, true, true
+        val button_dispatch = be_dom_dispatch_event_to_route(
+            interactive_root, interactive_index,
+            system_dom_route(interactive_index, "button-target"),
+            "click", true, true, true
         )
         expect(button_dispatch.default_action).to_equal("button-activate")
-        val activated = be_dom_apply_default_action_to_id(
-            interactive_root, button_dispatch.target_route_id,
+        val activated = be_dom_apply_default_action_to_route(
+            interactive_root, interactive_index, button_dispatch.target_route,
             button_dispatch.default_action
         )
-        val button_path = be_dom_find_path_to_id(
-            activated, "summary-button"
+        val button_path = be_dom_path_for_route(
+            activated, interactive_index,
+            system_dom_route(interactive_index, "summary-button")
         )
-        val activated_details = be_dom_find_path_to_id(
-            activated, "interactive-details"
+        val activated_details = be_dom_path_for_route(
+            activated, interactive_index,
+            system_dom_route(interactive_index, "interactive-details")
         )
         expect(be_dom_get_attr(
             button_path[button_path.len() - 1], "data-activated"

@@ -1354,7 +1354,7 @@ expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_r
    - Expected: session.pending_request_count() equals `pending_before`
    - Expected: session.pending_url equals `pending_url_before`
    - Expected: session.is_loading equals `loading_before`
-   - Expected: be_dom_focused_id(session.dom_root()) equals `focus_before`
+   - Expected: system_dom_focused_route(...).node_id equals `focus_before.node_id`
    - Expected: session.ui_access_revision equals `revision_before`
 - Reject C0 DEL and C1 controls before UI projection
    - Expected: leading_newline.code equals `address-invalid-control`
@@ -1367,7 +1367,7 @@ expect(session.ui_access_snapshot().snapshot_revision).to_equal(after.snapshot_r
    - Expected: session.pending_request_count() equals `pending_before`
    - Expected: session.pending_url equals `pending_url_before`
    - Expected: session.is_loading equals `loading_before`
-   - Expected: be_dom_focused_id(session.dom_root()) equals `focus_before`
+   - Expected: system_dom_focused_route(...).node_id equals `focus_before.node_id`
    - Expected: session.ui_access_revision equals `revision_before`
    - Expected: _address_node_count(session, exact_draft) equals `1`
 - Submit an exact 2048-byte URL and render the committed page
@@ -1417,8 +1417,14 @@ val index_before = session.current_index
 val pending_before = session.pending_request_count()
 val pending_url_before = session.pending_url
 val loading_before = session.is_loading
-val focus_before = be_dom_focused_id(session.dom_root())
-expect(focus_before).to_equal("keep")
+val focus_root_before = session.dom_root()
+val focus_index_before = system_browser_dom_identity_index(session)
+val focus_before = system_dom_focused_route(
+    focus_root_before, focus_index_before
+)
+expect(focus_before.node_id).to_equal(
+    system_dom_route(focus_index_before, "keep").node_id
+)
 
 val leading_overflow = session.ui_access_act(WinTextActionRequest(
     target_id: "browser:session#address", action: "submit",
@@ -1437,7 +1443,11 @@ expect(session.current_index).to_equal(index_before)
 expect(session.pending_request_count()).to_equal(pending_before)
 expect(session.pending_url).to_equal(pending_url_before)
 expect(session.is_loading).to_equal(loading_before)
-expect(be_dom_focused_id(session.dom_root())).to_equal(focus_before)
+val first_rejected_root = session.dom_root()
+val first_rejected_index = system_browser_dom_identity_index(session)
+expect(system_dom_focused_route(
+    first_rejected_root, first_rejected_index
+).node_id).to_equal(focus_before.node_id)
 expect(session.ui_access_revision).to_equal(revision_before)
 expect(_address_pixels_match(
     session, initial_pixels
@@ -1474,7 +1484,11 @@ expect(session.current_index).to_equal(index_before)
 expect(session.pending_request_count()).to_equal(pending_before)
 expect(session.pending_url).to_equal(pending_url_before)
 expect(session.is_loading).to_equal(loading_before)
-expect(be_dom_focused_id(session.dom_root())).to_equal(focus_before)
+val second_rejected_root = session.dom_root()
+val second_rejected_index = system_browser_dom_identity_index(session)
+expect(system_dom_focused_route(
+    second_rejected_root, second_rejected_index
+).node_id).to_equal(focus_before.node_id)
 expect(session.ui_access_revision).to_equal(revision_before)
 expect(_address_node_count(session, exact_draft)).to_equal(1)
 expect(_address_pixels_match(

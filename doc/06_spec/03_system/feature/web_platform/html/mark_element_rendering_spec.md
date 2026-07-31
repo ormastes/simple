@@ -74,13 +74,16 @@ use std.spec.*
 use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
 use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_find_path_to_id, be_dom_get_tag
+    be_dom_get_tag, be_dom_path_for_route
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     HNode, simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{
+    system_dom_identity_index, system_dom_route
 }
 
 val WIDTH: i32 = 128
@@ -181,8 +184,13 @@ describe "Production mark element rendering":
 
         step("Parse mark with the row as its immediate parent")
         val root = html_tree_builder_build(mark_html)
-        val row_path = be_dom_find_path_to_id(root, "row")
-        val mark_path = be_dom_find_path_to_id(root, "term")
+        val identity_index = system_dom_identity_index(root)
+        val row_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "row")
+        )
+        val mark_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "term")
+        )
         expect(mark_path.len()).to_be_greater_than(1)
         expect(row_path.len()).to_be_greater_than(0)
         expect(be_dom_get_tag(mark_path[mark_path.len() - 1])).to_equal("mark")
