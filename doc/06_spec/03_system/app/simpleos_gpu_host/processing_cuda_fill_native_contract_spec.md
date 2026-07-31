@@ -11,7 +11,18 @@ through one retained `CudaSession`.
 ## Run
 
 Build `src/app/test/processing_cuda_fill_probe.spl` incrementally against the
-CUDA-enabled runtime, then run:
+CUDA-enabled runtime. Keep all three source roots: omitting `src/compiler`
+widens resolution to `src` and can load duplicate `std.*` aliases.
+
+```sh
+bin/simple native-build \
+  --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/app/test/processing_cuda_fill_probe.spl \
+  --strip \
+  --output build/simpleos_gpu_host/cuda_fill_native/processing_cuda_fill_probe
+```
+
+Then run:
 
 ```sh
 sh scripts/check/check-processing-cuda-fill-native.shs
