@@ -1,0 +1,337 @@
+# ============================================================================
+# common/structural/tagmap/tag_schema.spl — FROZEN TagSchema contract v1
+#
+# Architecture: doc/04_architecture/compiler/mdsoc/
+#   mdsoc_plus_tagged_structural_compute_architecture.md §5 (typed TagMap
+#   framework), §26 (contract freeze), §27 (ID-TAG lane owns structural/tagmap).
+#
+# TagMap is the shared extension mechanism for AOP join points, optimizer
+# points, compiler effects, Clang/LLVM classifications, DOM/CSS/style/layout
+# state, linker properties and placement policy (§5.1). Freezing the schema and
+# its encoding is what lets those nine consumer lanes proceed in parallel.
+#
+# FROZEN: enum discriminants are wire values. A discriminant is never reused and
+# never renumbered; new variants take the next free number (see the versioning
+# policy in the contract document).
+# ============================================================================
+
+use std.common.structural.identity.entity_id.{ArtifactId, EntityRef, SourceAnchor}
+
+val TAGMAP_SCHEMA_VERSION: i64 = 1
+
+# ----------------------------------------------------------------------------
+# TagValueType (§5.2) — fully specified by the architecture; frozen as given.
+# ----------------------------------------------------------------------------
+
+enum TagValueType:
+    Marker
+    Bool
+    I64
+    U64
+    F64
+    StringId
+    EntityRef
+    ArtifactId
+    SourceAnchor
+    SmallSet
+
+fn tag_value_type_to_u8(t: TagValueType) -> i64:
+    match t:
+        case TagValueType.Marker: 0
+        case TagValueType.Bool: 1
+        case TagValueType.I64: 2
+        case TagValueType.U64: 3
+        case TagValueType.F64: 4
+        case TagValueType.StringId: 5
+        case TagValueType.EntityRef: 6
+        case TagValueType.ArtifactId: 7
+        case TagValueType.SourceAnchor: 8
+        case TagValueType.SmallSet: 9
+
+val TAG_VALUE_TYPE_MAX: i64 = 9
+
+fn tag_value_type_from_u8(v: i64) -> TagValueType:
+    """Caller MUST gate on `tag_value_type_valid` first; this maps only known
+    discriminants and pins anything else to Marker so the function stays total."""
+    match v:
+        case 1: TagValueType.Bool
+        case 2: TagValueType.I64
+        case 3: TagValueType.U64
+        case 4: TagValueType.F64
+        case 5: TagValueType.StringId
+        case 6: TagValueType.EntityRef
+        case 7: TagValueType.ArtifactId
+        case 8: TagValueType.SourceAnchor
+        case 9: TagValueType.SmallSet
+        case _: TagValueType.Marker
+
+fn tag_value_type_valid(v: i64) -> bool:
+    v >= 0 and v <= TAG_VALUE_TYPE_MAX
+
+# ----------------------------------------------------------------------------
+# TagLifetime (§5.2) — fully specified; frozen as given.
+# ----------------------------------------------------------------------------
+
+enum TagLifetime:
+    Snapshot
+    Stage
+    Artifact
+    ProfileSession
+    DiagnosticOnly
+
+fn tag_lifetime_to_u8(t: TagLifetime) -> i64:
+    match t:
+        case TagLifetime.Snapshot: 0
+        case TagLifetime.Stage: 1
+        case TagLifetime.Artifact: 2
+        case TagLifetime.ProfileSession: 3
+        case TagLifetime.DiagnosticOnly: 4
+
+val TAG_LIFETIME_MAX: i64 = 4
+
+fn tag_lifetime_from_u8(v: i64) -> TagLifetime:
+    match v:
+        case 1: TagLifetime.Stage
+        case 2: TagLifetime.Artifact
+        case 3: TagLifetime.ProfileSession
+        case 4: TagLifetime.DiagnosticOnly
+        case _: TagLifetime.Snapshot
+
+fn tag_lifetime_valid(v: i64) -> bool:
+    v >= 0 and v <= TAG_LIFETIME_MAX
+
+# ----------------------------------------------------------------------------
+# TagMergePolicy (§5.2) — fully specified; frozen as given.
+#
+# §30.2 requires merge policies to be deterministic. The order below is the
+# frozen resolution order used by `tag_merge_*` helpers.
+# ----------------------------------------------------------------------------
+
+enum TagMergePolicy:
+    Replace
+    Union
+    AppendStable
+    Max
+    Min
+    ErrorOnConflict
+
+fn tag_merge_policy_to_u8(p: TagMergePolicy) -> i64:
+    match p:
+        case TagMergePolicy.Replace: 0
+        case TagMergePolicy.Union: 1
+        case TagMergePolicy.AppendStable: 2
+        case TagMergePolicy.Max: 3
+        case TagMergePolicy.Min: 4
+        case TagMergePolicy.ErrorOnConflict: 5
+
+val TAG_MERGE_POLICY_MAX: i64 = 5
+
+fn tag_merge_policy_from_u8(v: i64) -> TagMergePolicy:
+    match v:
+        case 1: TagMergePolicy.Union
+        case 2: TagMergePolicy.AppendStable
+        case 3: TagMergePolicy.Max
+        case 4: TagMergePolicy.Min
+        case 5: TagMergePolicy.ErrorOnConflict
+        case _: TagMergePolicy.Replace
+
+fn tag_merge_policy_valid(v: i64) -> bool:
+    v >= 0 and v <= TAG_MERGE_POLICY_MAX
+
+# ----------------------------------------------------------------------------
+# TagCardinality — PROVISIONAL VOCABULARY
+#
+# §5.2 lists `cardinality: TagCardinality` in TagKey but never enumerates its
+# variants, unlike TagValueType / TagLifetime / TagMergePolicy which are spelled
+# out. The wire SLOT (one u8 in TagKey, at a frozen offset) is frozen; the
+# variant NAMES below are provisional and are the open question raised back to
+# the architecture owner. They were chosen as the minimum set that the storage
+# table in §5.3 actually distinguishes: a dense scalar column (exactly one), a
+# sparse marker/value record (zero or one), and an offset/count small multi-value
+# set (many).
+#
+# Because the slot is frozen and unknown discriminants are hard-rejected,
+# renaming or extending this vocabulary is a tagmap-schema minor bump and does
+# NOT disturb the surrounding TagKey layout.
+# ----------------------------------------------------------------------------
+
+enum TagCardinality:
+    One
+    Optional
+    Many
+
+fn tag_cardinality_to_u8(c: TagCardinality) -> i64:
+    match c:
+        case TagCardinality.One: 0
+        case TagCardinality.Optional: 1
+        case TagCardinality.Many: 2
+
+val TAG_CARDINALITY_MAX: i64 = 2
+
+fn tag_cardinality_from_u8(v: i64) -> TagCardinality:
+    match v:
+        case 1: TagCardinality.Optional
+        case 2: TagCardinality.Many
+        case _: TagCardinality.One
+
+fn tag_cardinality_valid(v: i64) -> bool:
+    v >= 0 and v <= TAG_CARDINALITY_MAX
+
+# ----------------------------------------------------------------------------
+# TagAuthority — PROVISIONAL VOCABULARY
+#
+# Same situation as TagCardinality: §5.2 lists `authority: TagAuthority` without
+# enumerating it. The slot is frozen, the names are provisional. The set below
+# mirrors the producer families implied by the §5.5 namespace policy: syntax.*
+# and source.* are produced by the parser, semantic.* by resolution, opt.*/
+# aop.*/link.* by analysis passes, profile.* by a profiling session, clang.*/
+# llvm.* by an external bridge, and placement.*/security.* by explicit policy.
+# ----------------------------------------------------------------------------
+
+enum TagAuthority:
+    Parser
+    Semantic
+    Analysis
+    Profile
+    External
+    Policy
+
+fn tag_authority_to_u8(a: TagAuthority) -> i64:
+    match a:
+        case TagAuthority.Parser: 0
+        case TagAuthority.Semantic: 1
+        case TagAuthority.Analysis: 2
+        case TagAuthority.Profile: 3
+        case TagAuthority.External: 4
+        case TagAuthority.Policy: 5
+
+val TAG_AUTHORITY_MAX: i64 = 5
+
+fn tag_authority_from_u8(v: i64) -> TagAuthority:
+    match v:
+        case 1: TagAuthority.Semantic
+        case 2: TagAuthority.Analysis
+        case 3: TagAuthority.Profile
+        case 4: TagAuthority.External
+        case 5: TagAuthority.Policy
+        case _: TagAuthority.Parser
+
+fn tag_authority_valid(v: i64) -> bool:
+    v >= 0 and v <= TAG_AUTHORITY_MAX
+
+# ----------------------------------------------------------------------------
+# TagKey and TagSchema (§5.2)
+# ----------------------------------------------------------------------------
+
+struct TagKey:
+    """One declared tag. `namespace` and `name` are interned StringIds; the
+    §5.5 namespace policy (syntax.*, semantic.*, dom.*, ...) is a convention
+    over `namespace`, not a separate field."""
+    namespace: u32
+    name: u32
+    value_type: TagValueType
+    cardinality: TagCardinality
+    lifetime: TagLifetime
+    merge_policy: TagMergePolicy
+    authority: TagAuthority
+
+struct TagSchema:
+    """A versioned set of declared tag keys.
+
+    `version` is the *schema author's* version of this particular key set, and
+    is independent of TAGMAP_SCHEMA_VERSION which versions the encoding itself.
+    Both are on the wire so a reader can distinguish "I do not understand this
+    format" from "I understand the format but not this key set revision".
+    """
+    version: u32
+    keys: [TagKey]
+
+# TagKey encodes as: namespace u32 | name u32 | 5 enum u8 = 13 bytes.
+val TAG_KEY_LEN: i64 = 13
+
+fn tag_key(namespace: u32, name: u32, value_type: TagValueType,
+           cardinality: TagCardinality, lifetime: TagLifetime,
+           merge_policy: TagMergePolicy, authority: TagAuthority) -> TagKey:
+    TagKey(namespace: namespace, name: name, value_type: value_type,
+           cardinality: cardinality, lifetime: lifetime,
+           merge_policy: merge_policy, authority: authority)
+
+fn tag_schema(version: u32, keys: [TagKey]) -> TagSchema:
+    TagSchema(version: version, keys: keys)
+
+fn tag_key_equal(a: TagKey, b: TagKey) -> bool:
+    a.namespace == b.namespace
+        and a.name == b.name
+        and tag_value_type_to_u8(a.value_type) == tag_value_type_to_u8(b.value_type)
+        and tag_cardinality_to_u8(a.cardinality) == tag_cardinality_to_u8(b.cardinality)
+        and tag_lifetime_to_u8(a.lifetime) == tag_lifetime_to_u8(b.lifetime)
+        and tag_merge_policy_to_u8(a.merge_policy) == tag_merge_policy_to_u8(b.merge_policy)
+        and tag_authority_to_u8(a.authority) == tag_authority_to_u8(b.authority)
+
+fn tag_schema_equal(a: TagSchema, b: TagSchema) -> bool:
+    if a.version != b.version:
+        return false
+    if a.keys.len() != b.keys.len():
+        return false
+    var i = 0
+    while i < a.keys.len():
+        if not tag_key_equal(a.keys[i], b.keys[i]):
+            return false
+        i = i + 1
+    true
+
+# ----------------------------------------------------------------------------
+# TagValue (§5.4) — the value carried by emit/get.
+#
+# §5.4 uses `TagValue` in the TagReadPort/TagWritePort signatures but never
+# defines it. It is defined here because "tag encoding" is a frozen ID-TAG
+# deliverable and cannot be encoded without it. This is a flat carrier rather
+# than a Simple `enum` with payloads: a flat struct keeps the type usable as a
+# dense parallel column (§5.3) with no per-node allocation, which the enum form
+# would not.
+#
+# Exactly one of the payload fields is meaningful, selected by `value_type`:
+#
+#   Marker        (no payload)
+#   Bool          num != 0
+#   I64 / U64     num
+#   F64           num holds the IEEE-754 bit pattern (see note below)
+#   StringId      num (u32 range)
+#   EntityRef     ref
+#   ArtifactId    artifact
+#   SourceAnchor  anchor
+#   SmallSet      num holds offset in the low 32 bits, count in the high 32
+#
+# F64 note: `num` carries the raw IEEE-754 bit pattern, not an f64. Simple has
+# no f64 bit-level reinterpret today — the same pre-existing gap already
+# documented in src/lib/common/encoding/cbor.spl (Float16/32/64 deferred) and
+# src/lib/common/encoding/bson.spl (which asks for rt_f64_to_bits /
+# rt_f64_from_bits). The 8-byte wire slot is frozen and correct, and a Rust/C++
+# producer can populate it today; the Simple-side float conversion unblocks when
+# that already-filed runtime request lands. This mirrors the established repo
+# precedent rather than inventing a new workaround.
+# ----------------------------------------------------------------------------
+
+struct TagValue:
+    value_type: TagValueType
+    num: u64
+    ref: EntityRef
+    artifact: ArtifactId
+    anchor: SourceAnchor
+
+fn tag_small_set_pack(offset: u64, count: u64) -> u64:
+    """Pack an offset/count pair into the SmallSet payload word (§5.3
+    'offset/count into value arena').
+
+    Both parameters are declared u64 although each carries a u32-range value.
+    That is deliberate: with u32 parameters the `count << 32` shift is evaluated
+    at 32-bit width and the count is silently shifted away to zero. The golden
+    vector for SmallSet exists precisely to keep that regression caught.
+    """
+    (offset & 0xFFFFFFFF) | ((count & 0xFFFFFFFF) << 32)
+
+fn tag_small_set_offset(packed: u64) -> u64:
+    packed & 0xFFFFFFFF
+
+fn tag_small_set_count(packed: u64) -> u64:
+    (packed >> 32) & 0xFFFFFFFF

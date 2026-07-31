@@ -22,6 +22,16 @@ Parent documents (authoritative for contracts and semantics):
 | 7 | `gpu_mmu_plan.md` | PLACE — Object VM, residency tiers, SSD backends |
 | 8 | `webrender_gpu_offload_plan.md` | Remaining WebScene offload — events, script, media, DrawIR v3, backends |
 
+## Frozen contracts
+
+| Group | Lane | Contract document |
+|---|---|---|
+| `EntityRef`/`EntityKey`/`SnapshotId`, `TagSchema` + tag encoding | ID-TAG | `doc/05_design/platform/structural_compute/identity_tagmap_contract_v1.md` |
+
+The ID-TAG contract document also carries the **CONVENTIONS** section (module
+layout, naming, serializer style, golden-vector format and location, schema
+versioning) that the remaining nine contract groups follow.
+
 ## Shared rules (all lanes)
 
 1. **Contract freeze first.** No lane implements against unfrozen contracts
