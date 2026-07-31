@@ -501,6 +501,31 @@ fn request_cache_eligible(request: FetchRequest) -> bool:
     val headers = request.headers.to_lower()
     not headers.contains("authorization:") and not headers.contains("cookie:")
 
+fn redirect_location_has_absolute_scheme(location: text) -> bool:
+    """Whether `location` starts with an RFC 3986 scheme and `:`."""
+    if location.len() == 0:
+        return false
+    val first = location.char_code_at(0)
+    if not (
+        (first >= 65 and first <= 90) or
+        (first >= 97 and first <= 122)
+    ):
+        return false
+    var index = 1
+    while index < location.len():
+        val code = location.char_code_at(index)
+        if code == 58:
+            return true
+        if code == 47 or code == 63 or code == 35:
+            return false
+        val alpha = (code >= 65 and code <= 90) or
+            (code >= 97 and code <= 122)
+        val digit = code >= 48 and code <= 57
+        if not (alpha or digit or code == 43 or code == 45 or code == 46):
+            return false
+        index = index + 1
+    false
+
 # Determine whether an HTTP status code indicates a redirect.
 pub fn resolve_fetch_redirect_url(base: Url, location: text) -> Option<Url>:
     """Resolve a `Location:` header against the request URL.
@@ -511,20 +536,27 @@ pub fn resolve_fetch_redirect_url(base: Url, location: text) -> Option<Url>:
     """
     if location == "":
         return None
-    if location.contains("://"):
+    if redirect_location_has_absolute_scheme(location):
         return Url.parse(location)
     if location.starts_with("//"):
         return Url.parse("{base.scheme}:{location}")
     if base.opaque or base.host == "":
         return None
+    val origin = "{base.scheme}://{base.authority()}"
+    val base_path = if base.path == "": "/" else: base.path
     if location.starts_with("/"):
-        return Some(Url.create(base.scheme, base.host, base.port, location))
-    val base_dir = if base.path.contains("/"):
-        val last_slash = base.path.last_index_of("/")
-        base.path.substring(0, last_slash + 1)
+        return Url.parse(origin + location)
+    if location.starts_with("?"):
+        return Url.parse(origin + base_path + location)
+    if location.starts_with("#"):
+        val query = if base.query == "": "" else: "?{base.query}"
+        return Url.parse(origin + base_path + query + location)
+    val base_dir = if base_path.contains("/"):
+        val last_slash = base_path.last_index_of("/")
+        base_path.substring(0, last_slash + 1)
     else:
         "/"
-    Some(Url.create(base.scheme, base.host, base.port, "{base_dir}{location}"))
+    Url.parse(origin + base_dir + location)
 
 fn should_redirect(status: i64) -> bool:
     status == 301 or status == 302 or status == 303 or status == 307 or status == 308
