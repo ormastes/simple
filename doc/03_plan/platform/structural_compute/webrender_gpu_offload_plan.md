@@ -36,6 +36,21 @@ Everything in the GPU WebScene lane not owned by a sibling plan:
   §Decision. Table/pool implementations follow ADR-004 write-back semantics
   (`doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md`).
 
+## Variable execution config
+
+The web renderer supports the full offload spectrum as **configuration**, per
+the shared rule (README "Variable execution configuration"):
+
+```text
+cpu only       flags off — current CPU path, byte-identical (W10 gate)
+compatibility  L0–L3 accepted and reported; L4 = full CPU document render
+balanced       shadow/candidate — CPU authoritative or GPU with CPU recovery
+full offload   strict GPU profile — L0/L1 only; any L2–L5 fails the test
+```
+
+Mode selection is per session via feature flags + `ExecutionProfile`; no
+rebuild, no silent downgrade (`cpu_selected` by cost policy ≠ `gpu_fallback`).
+
 ## Ownership and ordering
 
 Owned paths, feature flags, waves (WAVE 0–5), dependency graph, and acceptance
