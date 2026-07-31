@@ -21,12 +21,15 @@ use std.gc_async_mut.web.browser_session_url.{
 use std.gc_async_mut.web.browser_session_form.{browser_select_value}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
-    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute, dom_node_route_parse,
+    DomDocumentGeneration, DomNodeRoute, dom_node_route_parse,
     dom_node_route_text
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_find_by_tag, be_dom_get_attr, be_dom_path_for_route,
-    be_dom_get_text_content, be_dom_has_attr
+    be_dom_find_by_tag, be_dom_get_attr,
+    be_dom_get_text_content, be_dom_has_attr,
+    be_dom_disabled_fieldset_state,
+    be_dom_disabled_fieldset_blocks_child,
+    be_dom_control_is_disabled_in_context
 }
 
 val BROWSER_SESSION_SURFACE_ID = "browser:session"
@@ -170,9 +173,8 @@ fn _browser_collect_page_controls(
     node: BeDomNode, buckets: _BrowserPageControlBuckets,
     disabled_by_fieldset: bool
 ):
-    val enabled = (
-        not disabled_by_fieldset and
-        not be_dom_has_attr(node, "disabled")
+    val enabled = not be_dom_control_is_disabled_in_context(
+        node, disabled_by_fieldset
     )
     val control = _BrowserPageControl(node: node, enabled: enabled)
     if node.tag_name == "button":
@@ -183,69 +185,13 @@ fn _browser_collect_page_controls(
         buckets.textareas.push(control)
     elif node.tag_name == "select":
         buckets.selects.push(control)
-    val fieldset = _browser_fieldset_disable_state(node)
+    val fieldset = be_dom_disabled_fieldset_state(node)
     for child in node.children:
         _browser_collect_page_controls(
             child, buckets,
             (disabled_by_fieldset or
-             _browser_disabled_fieldset_blocks_child(fieldset, child))
+             be_dom_disabled_fieldset_blocks_child(fieldset, child))
         )
-
-fn _browser_fieldset_first_legend_id(fieldset: BeDomNode) -> i64:
-    for child in fieldset.children:
-        if child.tag_name == "legend":
-            return child.node_id
-    -1
-
-fn _browser_fieldset_disable_state(
-    fieldset: BeDomNode
-) -> (bool, i64):
-    val disabled = (
-        fieldset.tag_name == "fieldset" and
-        be_dom_has_attr(fieldset, "disabled")
-    )
-    var first_legend_id: i64 = -1
-    if disabled:
-        first_legend_id = _browser_fieldset_first_legend_id(fieldset)
-    (disabled, first_legend_id)
-
-fn _browser_disabled_fieldset_blocks_child(
-    fieldset: (bool, i64), child: BeDomNode
-) -> bool:
-    (
-        fieldset.0 and
-        child.node_id != fieldset.1
-    )
-
-fn browser_dom_control_is_effectively_disabled(
-    dom: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
-) -> bool:
-    val path = be_dom_path_for_route(dom, index, route)
-    if path.len() == 0:
-        return false
-    var control_index = path.len() - 1
-    while (
-        control_index >= 0 and
-        path[control_index].tag_name != "button" and
-        path[control_index].tag_name != "input" and
-        path[control_index].tag_name != "select" and
-        path[control_index].tag_name != "textarea"
-    ):
-        control_index = control_index - 1
-    if control_index < 0:
-        return false
-    val target = path[control_index]
-    if be_dom_has_attr(target, "disabled"):
-        return true
-    var path_index = 0
-    while path_index < control_index:
-        if _browser_disabled_fieldset_blocks_child(
-            _browser_fieldset_disable_state(path[path_index]),
-            path[path_index + 1]
-        ):
-            return true
-        path_index = path_index + 1
-    false
 
 fn _browser_page_control_nodes(
     dom: BeDomNode, ui_access_revision: i64,

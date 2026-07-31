@@ -1733,3 +1733,16 @@ records a compiler progress/performance blocker without claiming a memory
 leak. No retry, Rust seed, or full bootstrap was used. Dynamic HTML, CSS,
 Draw IR, Engine2D, event, animation, security, and HTTPS evidence remains
 `HELD`; it is neither runtime `FAIL` nor runtime `PASS`.
+
+## Disabled-fieldset sequential-focus evidence (2026-07-31)
+
+`browser_disabled_fieldset_sequential_focus_spec.spl` covers
+REQ-WEB-BROWSER-004/007/008/021 through the production hosted keyboard route.
+It requires positive and regular controls disabled by a fieldset to be absent
+from forward, reverse, and wrapped Tab order while preserving the first legend
+exception and a non-form focusable descendant. Focus/blur receipts and live DOM
+routes precede semantic Draw IR color assertions and software Engine2D pixels.
+The mirrored manual is
+`doc/06_spec/03_system/app/browser/feature/browser_disabled_fieldset_sequential_focus_spec.md`.
+Status remains **STATIC / EXECUTION HELD** until an admitted current
+pure-Simple runner and docgen execute the scenario.
