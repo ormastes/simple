@@ -101,14 +101,35 @@ fn _same_site_is_none(cookie: Cookie) -> bool:
             return false
     return false
 
+fn _cookie_name_is_ascii_token(name: text) -> bool:
+    """RFC 6265bis cookie-name: a non-empty ASCII HTTP token."""
+    if name.len() == 0:
+        return false
+    for ch in name.chars():
+        val code = ch.code_point()
+        val alpha = (code >= 65 and code <= 90) or (
+            code >= 97 and code <= 122
+        )
+        val digit = code >= 48 and code <= 57
+        val symbol = (
+            code == 33 or code == 35 or code == 36 or code == 37 or
+            code == 38 or code == 39 or code == 42 or code == 43 or
+            code == 45 or code == 46 or code == 94 or code == 95 or
+            code == 96 or code == 124 or code == 126
+        )
+        if not alpha and not digit and not symbol:
+            return false
+    return true
+
 pub fn validate_set_cookie(cookie: Cookie, origin: Origin, now: i64) -> CookieVerdict:
     """Decide whether `origin` may set `cookie`. Deny-wins.
 
-    Rejects, in order: opaque/malformed origins, empty names, `SameSite=None`
-    without `Secure`, `Secure` from a non-secure origin, `__Host-`/`__Secure-`
-    prefix violations, a `Domain` that is a public suffix (so nothing can set a
-    cookie for `com` or `co.uk`), a `Domain` that does not cover the request
-    host, a relative path, and cookies that are already expired.
+    Rejects, in order: opaque/malformed origins, empty or non-token names,
+    `SameSite=None` without `Secure`, `Secure` from a non-secure origin,
+    `__Host-`/`__Secure-` prefix violations, a `Domain` that is a public suffix
+    (so nothing can set a cookie for `com` or `co.uk`), a `Domain` that does not
+    cover the request host, a relative path, and cookies that are already
+    expired.
     """
     if is_opaque(origin) or not is_tuple_origin(origin):
         return CookieVerdict.reject("opaque-or-malformed-origin")
@@ -116,6 +137,8 @@ pub fn validate_set_cookie(cookie: Cookie, origin: Origin, now: i64) -> CookieVe
     val name = cookie.name.trim()
     if name.len() == 0:
         return CookieVerdict.reject("empty-name")
+    if not _cookie_name_is_ascii_token(name):
+        return CookieVerdict.reject("invalid-name")
 
     if _same_site_is_none(cookie) and not cookie.secure:
         return CookieVerdict.reject("samesite-none-requires-secure")

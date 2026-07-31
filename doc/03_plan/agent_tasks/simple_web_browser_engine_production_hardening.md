@@ -995,3 +995,16 @@ Composition base:
 Root remains merge owner and final reviewer. No row changes HTML/CSS inventory
 counts or supplies target-runtime, docgen, numeric performance, aggregate
 HTML/CSS, full-browser, or goal PASS.
+
+## Cookie-name token admission (2026-07-31)
+
+| Lane | Owner | Requirement trace | Executable evidence | Manual evidence | Status |
+| --- | --- | --- | --- | --- | --- |
+| `cookie_name_token` | Lane F — broker network, TLS, cookies, and sandbox | REQ-WEB-BROWSER-011, REQ-WEB-BROWSER-013, REQ-WEB-BROWSER-021 | `test/03_system/app/browser/feature/browser_cookie_name_token_spec.spl` | `doc/06_spec/03_system/app/browser/feature/browser_cookie_name_token_spec.md` | IMPLEMENTED / STATIC-ONLY |
+
+The network and script producers must converge on one ASCII token predicate in
+`cookie_policy.validate_set_cookie`, before prefix checks. The exact protected
+control is `sid=control`; a rejected malformed name must be absent from both
+script-visible and request-header state. Root remains merge owner and final
+reviewer. Runtime, docgen, and bootstrap evidence are explicitly out of scope
+for this bounded lane.

@@ -1,0 +1,57 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-013 REQ-WEB-BROWSER-021
+"""# Cookie Name Token Authority
+
+Network and script cookie writes share one RFC token-name admission policy.
+An authenticated HTTPS response can retain a valid protected control cookie,
+but neither producer can publish a cookie whose name contains a space.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.net.cookie_store.{
+    CookieStore,
+    parse_set_cookie
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin}
+
+describe "cookie name token authority":
+
+    it "should reject one malformed name at both cookie producer boundaries":
+        step("Open the authenticated HTTPS cookie fixture")
+        var cookies = CookieStore.new()
+        val origin = Origin(
+            scheme: "https", host: "secure.example.test", port: 443
+        )
+        val now = 1000
+        expect(origin.to_text()).to_equal("https://secure.example.test")
+
+        step("Receive valid and malformed protected cookies")
+        val valid = parse_set_cookie(
+            "sid=control; Path=/; Secure; HttpOnly; SameSite=None"
+        )
+        val malformed = parse_set_cookie(
+            "bad name=poison; Path=/; Secure; SameSite=None"
+        )
+        val valid_verdict = cookies.store_from_origin(valid, origin, now)
+        val network_verdict = cookies.store_from_origin(
+            malformed, origin, now
+        )
+        expect(valid_verdict.accepted).to_be(true)
+        expect(valid_verdict.reason).to_equal("ok")
+        expect(network_verdict.accepted).to_be(false)
+        expect(network_verdict.reason).to_equal("invalid-name")
+        expect(cookies.count()).to_equal(1)
+
+        step("Attempt the same malformed cookie from script")
+        val script_verdict = cookies.store_from_script(
+            malformed, origin, now
+        )
+        expect(script_verdict.accepted).to_be(false)
+        expect(script_verdict.reason).to_equal("invalid-name")
+        expect(cookies.count()).to_equal(1)
+
+        step("Observe authoritative script and network cookie state")
+        expect(cookies.script_cookie_header(origin, "/", now)).to_equal("")
+        expect(cookies.get_header_for_origin(
+            origin, "/", Some(origin), "GET", true, now
+        )).to_equal("sid=control")
