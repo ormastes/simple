@@ -47,7 +47,7 @@ use std.gc_async_mut.gpu.browser_engine.script.script_host.{
 use std.gc_async_mut.gpu.browser_engine.script.form_api.{
     form_capture_defaults, form_reset
 }
-use std.js.engine.runtime.{JsRuntime, NATIVE_DOM_EVENT_PREVENT_DEFAULT, NATIVE_DOM_EVENT_STOP_IMMEDIATE_PROPAGATION, NATIVE_DOM_EVENT_STOP_PROPAGATION}
+use std.js.engine.runtime.{JsRuntime}
 use std.js.types.js_types.{JsValue}
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, BrowserDomCallableListener, BrowserLoadState, BrowserRequest, BrowserHistoryEntry, BrowserOriginStorage, BrowserImageSource, browser_history_push_bounded}
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
@@ -496,6 +496,9 @@ class BrowserDomEventExecutor:
     document_id: i64
     target_object_id: i64
     event_object_id: i64
+    event_prevent_default_fn_id: i64
+    event_stop_propagation_fn_id: i64
+    event_stop_immediate_propagation_fn_id: i64
     error: text
 
     me drain_listener_ops():
@@ -642,15 +645,17 @@ class BrowserDomEventExecutor:
             event_id, "immediatePropagationStopped",
             JsValue.Boolean(v: false)
         )
-        self.runtime._define_method_on(
-            event_id, "preventDefault", NATIVE_DOM_EVENT_PREVENT_DEFAULT
+        self.runtime.set_host_property(
+            event_id, "preventDefault",
+            JsValue.Function(id: self.event_prevent_default_fn_id)
         )
-        self.runtime._define_method_on(
-            event_id, "stopPropagation", NATIVE_DOM_EVENT_STOP_PROPAGATION
+        self.runtime.set_host_property(
+            event_id, "stopPropagation",
+            JsValue.Function(id: self.event_stop_propagation_fn_id)
         )
-        self.runtime._define_method_on(
+        self.runtime.set_host_property(
             event_id, "stopImmediatePropagation",
-            NATIVE_DOM_EVENT_STOP_IMMEDIATE_PROPAGATION
+            JsValue.Function(id: self.event_stop_immediate_propagation_fn_id)
         )
         var interpreter = self.runtime.interpreter
         interpreter.define_global_value(
@@ -1496,6 +1501,12 @@ impl BrowserSession:
                     document_id: state.document_id,
                     target_object_id: target_object_id,
                     event_object_id: -1,
+                    event_prevent_default_fn_id:
+                        state.event_prevent_default_fn_id,
+                    event_stop_propagation_fn_id:
+                        state.event_stop_propagation_fn_id,
+                    event_stop_immediate_propagation_fn_id:
+                        state.event_stop_immediate_propagation_fn_id,
                     error: ""
                 )
                 dispatch = if input_type != "":

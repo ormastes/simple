@@ -1,0 +1,60 @@
+"""DOM event dispatch must not duplicate stateless runtime registrations.
+
+The event objects themselves remain retained until the JS VM gains
+reachability-aware reclamation; this spec keeps that residual bug visible.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+
+describe "BrowserSession DOM event retention":
+
+    it "should reuse native controls and the event global across listener events":
+        step("Open a page whose listener deliberately retains the latest event")
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            "https://example.test/event-retention",
+            "<html><body><button id='probe'>Probe</button></body></html>"
+        ).is_ok()).to_be(true)
+        expect(session.eval_script(
+            "var retainedEvent=null;" +
+            "document.getElementById('probe').addEventListener(" +
+            "'probe',function(event){retainedEvent=event;});"
+        ).is_ok()).to_be(true)
+
+        step("Warm the event path once and record its runtime collection sizes")
+        val _warm = session.dispatch_dom_event(
+            "probe", "probe", true, true
+        )
+        val warm_state = session.runtime_state.unwrap()
+        val warm_function_count = warm_state.runtime.interpreter.functions.len()
+        val warm_native_count = warm_state.runtime.interpreter.native_id_map.len()
+        val warm_global_count = warm_state.runtime.interpreter.global_var_names.len()
+        val warm_object_count = (
+            warm_state.runtime.interpreter.object_store.obj_proto_ids.len()
+        )
+
+        step("Dispatch repeated listener events in the same document runtime")
+        var event_index = 0
+        while event_index < 8:
+            val _dispatch = session.dispatch_dom_event(
+                "probe", "probe", true, true
+            )
+            event_index = event_index + 1
+
+        step("Verify shared registrations stay flat while GC debt stays visible")
+        val final_state = session.runtime_state.unwrap()
+        expect(final_state.runtime.interpreter.functions.len()).to_equal(
+            warm_function_count
+        )
+        expect(final_state.runtime.interpreter.native_id_map.len()).to_equal(
+            warm_native_count
+        )
+        expect(final_state.runtime.interpreter.global_var_names.len()).to_equal(
+            warm_global_count
+        )
+        expect(
+            final_state.runtime.interpreter.object_store.obj_proto_ids.len()
+        ).to_be_greater_than(warm_object_count)
