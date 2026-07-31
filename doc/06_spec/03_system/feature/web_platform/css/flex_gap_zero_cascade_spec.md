@@ -55,7 +55,7 @@ html,body{margin:0;width:12px;height:20px;background:#fff}
   <div id="unset-red" class="red"></div>
   <div id="unset-blue" class="blue"></div>
 </div>
-<div id="inherit-row" class="row" style="gap:4px;gap:inherit">
+<div id="inherit-row" class="row positive" style="gap:inherit">
   <div id="inherit-red" class="red"></div>
   <div id="inherit-blue" class="blue"></div>
 </div>
@@ -74,8 +74,8 @@ The zero-reset rows expose `[gap_px,row_gap_px,column_gap_px]` as `[0,0,0]`.
 Both duplicate-declaration rows expose `[4,4,4]`; the invalid-only negative
 control exposes `[0,0,0]`. Both syntax rows retain `[4,4,4]` after rejecting
 signed, decimal, foreign-unit, and trailing-junk duplicates. `initial` and
-`unset` reset to `[0,0,0]`. The terminal `inherit` control also stays zero and
-does not resurrect its earlier `4px`; nonzero parent inheritance is not
+`unset` reset to `[0,0,0]`. The terminal parent-default `inherit` control also
+resets the positive class gap to zero; nonzero parent inheritance is not
 claimed because the current Style input has no parent computed-gap channel.
 
 | Component | Expected box `[x,y,w,h]` |
