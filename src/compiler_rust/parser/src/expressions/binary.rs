@@ -575,26 +575,28 @@ mod comparison_continuation_tests {
     /// consistently across all four `elif`/`else if` call sites via
     /// `parse_elif_or_else_if_body`.
     ///
-    /// This specific repro is KEPT deliberately pinned as still-broken,
-    /// because it hits a DIFFERENT, deeper, and NOT elif-specific gap: the
-    /// continuation line (`b:`) here is indented *more* than the following
-    /// block body (`return 2`), which produces a DEDENT-then-INDENT pair that
-    /// neither `if` nor `elif`'s "drain after the block" strategy resolves
-    /// correctly (only `while`'s "drain immediately after the condition's
-    /// Newline" strategy does, and that in turn breaks the opposite,
-    /// shallower-continuation shape — see
-    /// doc/08_tracking/bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md).
-    /// Proof this is not elif-specific: the identical shape reproduces the
-    /// identical `found Indent` failure on a PRIMARY `if` statement, not just
-    /// `elif`. Fixing it needs a real reconciliation between INDENT/DEDENT
-    /// layout tokens and open expression continuations (a statement/expression
-    /// boundary change), which is out of scope for this contained fix. Flip
-    /// this test when that lands.
+    /// FLIPPED (see doc/08_tracking/bug/
+    /// seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md):
+    /// this specific repro was previously pinned as still-broken because it
+    /// hits the DEEP continuation shape (continuation column > following
+    /// block body column), which neither `if`'s nor `elif`'s old "drain after
+    /// the block" strategy resolved correctly (only `while`'s old "drain
+    /// immediately after the condition's Newline" strategy did, and that in
+    /// turn broke the opposite, shallow shape). `parse_condition_block`
+    /// (`parser_impl/core.rs`) now drains at BOTH candidate points — before
+    /// the block's own Indent and after the block body — so both shapes
+    /// parse regardless of which one produced the compensating DEDENT. See
+    /// `condition_continuation_indent_shape_matrix` below for the full
+    /// {if, elif, else if, while, for, match} × {deep, shallow, equal} probe
+    /// matrix. Non-vacuity was verified manually by reverting
+    /// `parse_condition_block`/`drain_available_deferred_dedents` and
+    /// confirming this and the matrix's deep/shallow cells reproduce the
+    /// exact `UnexpectedToken` shapes documented in the bug writeup.
     #[test]
-    fn elif_condition_deep_continuation_indent_ambiguity_is_still_unsupported() {
+    fn elif_condition_deep_continuation_indent_ambiguity_is_now_supported() {
         assert!(
-            !parses("fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    elif a >\n         b:\n        return 2\n    3\n"),
-            "if this now parses, the shared if/elif deep-continuation indent ambiguity was fixed — update this test and the bug doc"
+            parses("fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    elif a >\n         b:\n        return 2\n    3\n"),
+            "the shared if/elif deep-continuation indent ambiguity must be fixed by parse_condition_block"
         );
     }
 
@@ -668,6 +670,75 @@ mod comparison_continuation_tests {
         assert!(
             parses("fn f(a: bool, b: bool) -> i64:\n    var i = 0\n    while a or\n           b:\n        i = i + 1\n        break\n    i\n"),
             "while-condition continuation after `or` must parse"
+        );
+    }
+
+    /// Build a probe source exercising condition-continuation dedent
+    /// handling for a given statement `keyword`, at a given continuation
+    /// column (`cont_col`, the column of the continuation line's second
+    /// operand) and block-body column (`body_col`, the column of the first
+    /// token of the following block):
+    /// - deep:    cont_col > body_col
+    /// - shallow: cont_col < body_col
+    /// - equal:   cont_col == body_col
+    fn condition_continuation_probe(keyword: &str, cont_col: usize, body_col: usize) -> String {
+        let cont = " ".repeat(cont_col);
+        let body = " ".repeat(body_col);
+        match keyword {
+            "if" => format!("fn f(a: i64, b: i64) -> i64:\n    if a >\n{cont}b:\n{body}return 2\n    3\n"),
+            "elif" => format!(
+                "fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    elif a >\n{cont}b:\n{body}return 2\n    3\n"
+            ),
+            "else if" => format!(
+                "fn f(a: i64, b: i64) -> i64:\n    if a < 0:\n        return 1\n    else if a >\n{cont}b:\n{body}return 2\n    3\n"
+            ),
+            "while" => format!(
+                "fn f(a: i64, b: i64) -> i64:\n    var i = 0\n    while a >\n{cont}b:\n{body}i = i + 1\n    i\n"
+            ),
+            "for" => format!(
+                "fn f(a: [i64], b: [i64]) -> i64:\n    var s = 0\n    for x in a +\n{cont}b:\n{body}s = s + x\n    s\n"
+            ),
+            "match" => format!(
+                "fn f(a: i64, b: i64) -> i64:\n    match a +\n{cont}b:\n{body}case 0 -> 1\n{body}case _ -> 2\n"
+            ),
+            _ => unreachable!("unknown keyword {keyword}"),
+        }
+    }
+
+    /// Full probe matrix for the unified condition-continuation dedent fix:
+    /// {if, elif, else if, while, for, match} × {deep, shallow, equal}. See
+    /// doc/08_tracking/bug/
+    /// seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md
+    /// for the mechanism and the pre-fix per-shape coverage of each site
+    /// (before this fix: `if`/`elif`/`else if` only handled shallow, `while`
+    /// only handled deep, and `for`/`match` handled neither — see individual
+    /// call sites in `control_flow.rs`). All nine cells below must parse
+    /// after `parse_condition_block`/`drain_available_deferred_dedents`.
+    ///
+    /// Column choices mirror the exact reproductions in the bug doc: deep =
+    /// (9, 8), shallow = (7, 8), equal = (8, 8) — all deeper than the
+    /// statement's own column (4), so a pseudo-INDENT is genuinely consumed
+    /// during condition parsing in every cell.
+    #[test]
+    fn condition_continuation_indent_shape_matrix() {
+        let keywords = ["if", "elif", "else if", "while", "for", "match"];
+        let shapes: [(&str, usize, usize); 3] = [("deep", 9, 8), ("shallow", 7, 8), ("equal", 8, 8)];
+
+        let mut failures = Vec::new();
+        for keyword in keywords {
+            for (shape_name, cont_col, body_col) in shapes {
+                let src = condition_continuation_probe(keyword, cont_col, body_col);
+                if !parses(&src) {
+                    failures.push(format!("{keyword} / {shape_name} (cont={cont_col}, body={body_col})"));
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "condition-continuation indent matrix has {} failing cell(s):\n{}",
+            failures.len(),
+            failures.join("\n")
         );
     }
 }

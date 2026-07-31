@@ -884,7 +884,44 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_block(&mut self) -> Result<Block, ParseError> {
         // Expect NEWLINE then INDENT
         self.expect(&TokenKind::Newline)?;
+        self.parse_block_after_newline()
+    }
 
+    /// Parse a condition's block body (`if`/`elif`/`else if`/`while`/`for`/
+    /// match subject/match-arm-guard bodies), reconciling any pending
+    /// pseudo-INDENT DEDENT(s) left by the condition's own multi-line
+    /// operator-continuation. A single "drain before Indent" or "drain after
+    /// the block" strategy alone only covers one of the two possible token
+    /// shapes (deep vs. shallow continuation column) — see
+    /// `drain_available_deferred_dedents` in `parser_helpers.rs` and
+    /// doc/08_tracking/bug/
+    /// seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md
+    /// for the full mechanism. Draining at both points is safe: whichever
+    /// point doesn't have a real DEDENT waiting is simply a no-op there.
+    pub(crate) fn parse_condition_block(&mut self) -> Result<Block, ParseError> {
+        self.expect(&TokenKind::Newline)?;
+
+        // Deep shape: the compensating DEDENT(s) appear right here, before
+        // the block's own Indent.
+        self.drain_available_deferred_dedents();
+        let deferred_before = self.deferred_dedent_count;
+        self.deferred_dedent_count = 0;
+
+        let block = self.parse_block_after_newline()?;
+
+        // Shallow shape: the compensating DEDENT(s) don't appear until after
+        // the whole block body, alongside the block's own terminating DEDENT.
+        let deferred = self.deferred_dedent_count + deferred_before;
+        self.deferred_dedent_count = 0;
+        self.consume_dedents_for_method_chain(deferred);
+
+        Ok(block)
+    }
+
+    /// Parse a block body assuming the leading NEWLINE has already been
+    /// consumed by the caller (shared by `parse_block` and
+    /// `parse_condition_block`).
+    fn parse_block_after_newline(&mut self) -> Result<Block, ParseError> {
         // Simple supports "flat body" pattern where block body appears on the
         // next line at the SAME indentation level (no indent token):
         //   if cond:
@@ -943,7 +980,7 @@ impl<'a> Parser<'a> {
 
     /// Check if the current token can start a statement.
     /// Used to detect "flat body" patterns (body at same indentation after colon).
-    fn is_statement_start(&self) -> bool {
+    pub(crate) fn is_statement_start(&self) -> bool {
         matches!(
             self.current.kind,
             TokenKind::Return

@@ -106,16 +106,34 @@ impl<'a> Parser<'a> {
 
     /// Parse an inline statement or an indented block after a colon/separator has been consumed.
     /// If the next token is NOT a newline, parses a single inline statement.
-    /// If the next token IS a newline, delegates to parse_block() for an indented block.
+    /// If the next token IS a newline, delegates to parse_condition_block() for an indented
+    /// block, reconciling any pending condition-continuation pseudo-dedent (see
+    /// `parse_condition_block` and doc/08_tracking/bug/
+    /// seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md).
+    ///
+    /// Callers that precede this with a condition expression (`if`/`elif`/`else
+    /// if`/match-arm guards/etc.) get the dedent reconciliation automatically;
+    /// callers with no pending deferred dedent see a no-op here, so this is
+    /// safe as the general-purpose "inline or block" entry point.
     pub(crate) fn parse_inline_or_block(&mut self) -> Result<Block, ParseError> {
         if !self.check(&TokenKind::Newline) {
             let stmt = self.parse_item()?;
-            Ok(Block {
+            let block = Block {
                 span: self.previous.span,
                 statements: vec![stmt],
-            })
+            };
+            // Inline bodies never introduce a competing Indent of their own,
+            // so a pending pseudo-dedent from a preceding condition's
+            // multi-line continuation can only ever show up now (there is no
+            // "deep vs. shallow" ambiguity for the inline-body shape).
+            if self.deferred_dedent_count > 0 {
+                let deferred = self.deferred_dedent_count;
+                self.deferred_dedent_count = 0;
+                self.consume_dedents_for_method_chain(deferred);
+            }
+            Ok(block)
         } else {
-            self.parse_block()
+            self.parse_condition_block()
         }
     }
 
@@ -471,6 +489,48 @@ impl<'a> Parser<'a> {
         // Track unmatched dedents for deferred consumption (e.g., after if-block body)
         if remaining > 0 {
             self.deferred_dedent_count += remaining;
+        }
+    }
+
+    /// Opportunistically drain `deferred_dedent_count` DEDENT tokens (skipping
+    /// NEWLINEs) if they are immediately available right now. Does NOT block
+    /// waiting for a DEDENT that isn't there — any other token stops the loop
+    /// immediately, leaving `deferred_dedent_count` untouched for a later
+    /// drain.
+    ///
+    /// This is one half of the unified condition-continuation dedent
+    /// reconciliation used by `if`/`elif`/`else if`/`while`/`for`/match: a
+    /// multi-line condition's trailing-operator continuation
+    /// (`skip_newlines_and_indents_for_method_chain`) consumes a pseudo
+    /// INDENT token whose matching DEDENT can land in one of two places in
+    /// the token stream depending on whether the continuation line's column
+    /// is deeper or shallower than the following block body's column:
+    ///
+    /// - Deep (continuation column > body column): the compensating DEDENT
+    ///   appears immediately after the condition's `Newline`, before the
+    ///   block's own `Indent` — this is what this method drains.
+    /// - Shallow (continuation column < body column): the compensating
+    ///   DEDENT does not appear until after the whole block body, alongside
+    ///   the block's own terminating DEDENT — callers must also drain again
+    ///   after parsing the block body (see `parse_condition_block`).
+    /// - Equal (continuation column == body column): the pseudo-level IS the
+    ///   block's own Indent level, so neither drain point finds anything and
+    ///   both are no-ops.
+    ///
+    /// See doc/08_tracking/bug/
+    /// seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+    pub(crate) fn drain_available_deferred_dedents(&mut self) {
+        while self.deferred_dedent_count > 0 {
+            match &self.current.kind {
+                TokenKind::Newline => {
+                    self.advance();
+                }
+                TokenKind::Dedent => {
+                    self.advance();
+                    self.deferred_dedent_count -= 1;
+                }
+                _ => break,
+            }
         }
     }
 

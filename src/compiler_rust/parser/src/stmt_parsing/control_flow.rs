@@ -133,31 +133,20 @@ impl<'a> Parser<'a> {
         self.is_inline_statement_keyword() || self.is_inline_assignment()
     }
 
-    /// Parse an `elif`/`else if` body (inline statement or indented block),
-    /// draining any DEDENT tokens deferred by that branch's own condition
-    /// spanning multiple lines via operator line continuation (e.g.
-    /// `elif a >\n     b:`).
+    /// Parse an `elif`/`else if` body (inline statement or indented block).
     ///
-    /// Mirrors the save/reset/drain dance the primary `if` block-style path
-    /// (see `parse_if` below) already applies around its own `parse_block()`
-    /// call: a multi-line condition's trailing-operator continuation consumes
-    /// an INDENT token whose matching DEDENT does not appear until after the
-    /// branch body, so it is parked in `deferred_dedent_count` by
-    /// `consume_dedents_for_method_chain` and must be explicitly drained here
-    /// — otherwise it leaks into the token stream and the next
-    /// `elif`/`else`/statement check sees a stray `Dedent`/`Indent` instead of
-    /// what it expects.
+    /// `parse_inline_or_block` now itself reconciles any DEDENT tokens
+    /// deferred by this branch's own condition spanning multiple lines via
+    /// operator line continuation (e.g. `elif a >\n     b:`) — for both the
+    /// inline-statement and indented-block shapes, and for both the "deep"
+    /// and "shallow" continuation-column shapes of the indented-block case
+    /// (see `parse_condition_block` in `parser_impl/core.rs` and
+    /// doc/08_tracking/bug/
+    /// seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md).
+    /// This wrapper is kept as a named call site for readability/documentation
+    /// at each of the four `elif`/`else if` locations below.
     fn parse_elif_or_else_if_body(&mut self) -> Result<Block, ParseError> {
-        let deferred_before = self.deferred_dedent_count;
-        self.deferred_dedent_count = 0;
-
-        let block = self.parse_inline_or_block()?;
-
-        let deferred = self.deferred_dedent_count + deferred_before;
-        self.deferred_dedent_count = 0;
-        self.consume_dedents_for_method_chain(deferred);
-
-        Ok(block)
+        self.parse_inline_or_block()
     }
 
     pub(crate) fn parse_if(&mut self) -> Result<Node, ParseError> {
@@ -348,20 +337,13 @@ impl<'a> Parser<'a> {
             }));
         }
 
-        // Save deferred dedent count before parsing block.
-        // Multi-line conditions (e.g., `if expr or\n   expr:`) may have consumed
-        // Indent tokens during expression parsing whose matching Dedents appear after
-        // the block body. These are tracked in `deferred_dedent_count`.
-        let deferred_before = self.deferred_dedent_count;
-        self.deferred_dedent_count = 0;
-
-        // Block-style: original behavior
-        let then_block = self.parse_block()?;
-
-        // Consume deferred Dedent tokens from multi-line expression continuation.
-        let deferred = self.deferred_dedent_count + deferred_before;
-        self.deferred_dedent_count = 0;
-        self.consume_dedents_for_method_chain(deferred);
+        // Block-style: `parse_condition_block` reconciles any DEDENT tokens
+        // deferred by a multi-line condition (e.g., `if expr or\n   expr:`),
+        // regardless of whether the compensating DEDENT lands before the
+        // block's own Indent (deep continuation) or after the block body
+        // (shallow continuation) — see doc/08_tracking/bug/
+        // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+        let then_block = self.parse_condition_block()?;
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
@@ -487,15 +469,32 @@ impl<'a> Parser<'a> {
         // Block: `for x in items:\n    body`
         // Inline: `for x in items: expr`
         if self.check(&TokenKind::Newline) {
-            // Parse block header (NEWLINE then INDENT)
+            // Parse block header (NEWLINE then INDENT), reconciling any DEDENT
+            // tokens deferred by a multi-line `iterable` expression continuation
+            // (e.g. `for x in a +\n   b:`) at both candidate points — see
+            // doc/08_tracking/bug/
+            // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
             self.expect(&TokenKind::Newline)?;
-            self.expect(&TokenKind::Indent)?;
+            self.drain_available_deferred_dedents();
+            let deferred_before = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
+            // Equal-column shape: skip the Indent expectation when the
+            // condition's continuation pseudo-indent level already coincides
+            // with the block body's column — see `parse_while_with_label`
+            // above for the full rationale.
+            if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+                self.expect(&TokenKind::Indent)?;
+            }
 
             // Parse loop invariants at the start of the block body
             let invariants = self.parse_loop_invariants()?;
 
             // Parse rest of block body
             let body = self.parse_block_body()?;
+
+            let deferred = self.deferred_dedent_count + deferred_before;
+            self.deferred_dedent_count = 0;
+            self.consume_dedents_for_method_chain(deferred);
 
             Ok(Node::For(ForStmt {
                 span: Span::new(
@@ -585,31 +584,38 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Colon)?;
 
         let (body, invariants) = if self.check(&TokenKind::Newline) {
-            // Parse block header (NEWLINE then INDENT)
+            // Parse block header (NEWLINE then INDENT), reconciling any DEDENT
+            // tokens deferred by a multi-line condition expression (e.g.
+            // `while expr and\n   expr:`) at both candidate points — the
+            // compensating DEDENT can land either immediately here (deep
+            // continuation) or only after the whole block body (shallow
+            // continuation), alongside the block's own terminating DEDENT.
+            // See doc/08_tracking/bug/
+            // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
             self.expect(&TokenKind::Newline)?;
-            // Consume deferred Dedent tokens from multi-line condition expression.
-            // When a while condition spans multiple lines (e.g., `while expr and\n   expr:`),
-            // the expression parser consumes Indent tokens for line continuation, and
-            // matching Dedents appear between Newline and the block's Indent.
-            while self.deferred_dedent_count > 0 {
-                match &self.current.kind {
-                    TokenKind::Newline => {
-                        self.advance();
-                    }
-                    TokenKind::Dedent => {
-                        self.advance();
-                        self.deferred_dedent_count -= 1;
-                    }
-                    _ => break,
-                }
+            self.drain_available_deferred_dedents();
+            let deferred_before = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
+            // Equal-column shape: the condition's continuation pseudo-indent
+            // level coincides exactly with the block body's column, so the
+            // lexer never emits a fresh Indent here at all (it's already at
+            // that level). Detect it and skip straight to body parsing —
+            // `parse_block_body` doesn't require Indent to have been
+            // physically consumed, it just loops until Dedent.
+            if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+                self.expect(&TokenKind::Indent)?;
             }
-            self.expect(&TokenKind::Indent)?;
 
             // Parse loop invariants at the start of the block body
             let invariants = self.parse_loop_invariants()?;
 
             // Parse rest of block body
             let body = self.parse_block_body()?;
+
+            let deferred = self.deferred_dedent_count + deferred_before;
+            self.deferred_dedent_count = 0;
+            self.consume_dedents_for_method_chain(deferred);
+
             (body, invariants)
         } else {
             (self.parse_inline_or_block()?, vec![])
@@ -694,7 +700,10 @@ impl<'a> Parser<'a> {
 
         let context = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
+        // `parse_condition_block` reconciles any DEDENT deferred by a
+        // multi-line `context` expression continuation — see
+        // doc/08_tracking/bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+        let body = self.parse_condition_block()?;
 
         Ok(Node::Context(ContextStmt {
             span: Span::new(
@@ -755,7 +764,10 @@ impl<'a> Parser<'a> {
         };
 
         self.expect(&TokenKind::Colon)?;
-        let body = self.parse_block()?;
+        // `parse_condition_block` reconciles any DEDENT deferred by a
+        // multi-line `resource` expression continuation — see
+        // doc/08_tracking/bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+        let body = self.parse_condition_block()?;
 
         Ok(Node::With(WithStmt {
             span: Span::new(
@@ -778,9 +790,24 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Colon)?;
 
         let arms = if self.check(&TokenKind::Newline) {
-            // Block-style match with indented case arms
+            // Block-style match with indented case arms, reconciling any
+            // DEDENT tokens deferred by a multi-line `subject` expression
+            // continuation at both candidate points — see doc/08_tracking/
+            // bug/seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
             self.advance(); // consume newline
-            self.expect(&TokenKind::Indent)?;
+            self.drain_available_deferred_dedents();
+            let deferred_before = self.deferred_dedent_count;
+            self.deferred_dedent_count = 0;
+            // Equal-column shape: the subject's continuation pseudo-indent
+            // level coincides exactly with the arms' column, so no fresh
+            // Indent appears — skip straight to the arms loop, which does
+            // not require Indent to have been physically consumed.
+            if !(deferred_before > 0
+                && !self.check(&TokenKind::Indent)
+                && (self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe)))
+            {
+                self.expect(&TokenKind::Indent)?;
+            }
 
             let mut arms = Vec::new();
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
@@ -796,6 +823,11 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Dedent) {
                 self.advance();
             }
+
+            let deferred = self.deferred_dedent_count + deferred_before;
+            self.deferred_dedent_count = 0;
+            self.consume_dedents_for_method_chain(deferred);
+
             arms
         } else {
             // Inline match: `match self: case X: expr; case Y: expr`
@@ -835,8 +867,19 @@ impl<'a> Parser<'a> {
 
         let subject = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
+        // Reconcile any DEDENT deferred by a multi-line `subject` expression
+        // continuation at both candidate points — see doc/08_tracking/bug/
+        // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
         self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
+        self.drain_available_deferred_dedents();
+        let deferred_before = self.deferred_dedent_count;
+        self.deferred_dedent_count = 0;
+        if !(deferred_before > 0
+            && !self.check(&TokenKind::Indent)
+            && (self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe)))
+        {
+            self.expect(&TokenKind::Indent)?;
+        }
 
         let mut arms = Vec::new();
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
@@ -852,6 +895,10 @@ impl<'a> Parser<'a> {
         if self.check(&TokenKind::Dedent) {
             self.advance();
         }
+
+        let deferred = self.deferred_dedent_count + deferred_before;
+        self.deferred_dedent_count = 0;
+        self.consume_dedents_for_method_chain(deferred);
 
         Ok(Node::Match(MatchStmt {
             span: Span::new(
@@ -948,14 +995,17 @@ impl<'a> Parser<'a> {
 
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
-        let then_block = self.parse_block()?;
+        // `parse_condition_block` reconciles any DEDENT deferred by a
+        // multi-line condition continuation — see doc/08_tracking/bug/
+        // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+        let then_block = self.parse_condition_block()?;
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
-            let elif_block = self.parse_block()?;
+            let elif_block = self.parse_condition_block()?;
             elif_branches.push((elif_pattern, elif_condition, elif_block));
         }
 
@@ -966,7 +1016,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
-                let elif_block = self.parse_block()?;
+                let elif_block = self.parse_condition_block()?;
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 if self.check(&TokenKind::Else) {
@@ -978,7 +1028,7 @@ impl<'a> Parser<'a> {
 
             if self.check(&TokenKind::Colon) {
                 self.expect(&TokenKind::Colon)?;
-                else_block = Some(self.parse_block()?);
+                else_block = Some(self.parse_condition_block()?);
             }
         }
 
@@ -1008,15 +1058,27 @@ impl<'a> Parser<'a> {
         let iterable = self.parse_expression()?;
         self.expect(&TokenKind::Colon)?;
 
-        // Parse block header (NEWLINE then INDENT)
+        // Parse block header (NEWLINE then INDENT), reconciling any DEDENT
+        // deferred by a multi-line `iterable` continuation at both candidate
+        // points — see doc/08_tracking/bug/
+        // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
         self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
+        self.drain_available_deferred_dedents();
+        let deferred_before = self.deferred_dedent_count;
+        self.deferred_dedent_count = 0;
+        if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+            self.expect(&TokenKind::Indent)?;
+        }
 
         // Parse loop invariants at the start of the block body
         let invariants = self.parse_loop_invariants()?;
 
         // Parse rest of block body
         let body = self.parse_block_body()?;
+
+        let deferred = self.deferred_dedent_count + deferred_before;
+        self.deferred_dedent_count = 0;
+        self.consume_dedents_for_method_chain(deferred);
 
         Ok(Node::For(ForStmt {
             span: Span::new(
@@ -1043,15 +1105,27 @@ impl<'a> Parser<'a> {
         let (let_pattern, condition) = self.parse_optional_let_pattern()?;
         self.expect(&TokenKind::Colon)?;
 
-        // Parse block header (NEWLINE then INDENT)
+        // Parse block header (NEWLINE then INDENT), reconciling any DEDENT
+        // deferred by a multi-line condition continuation at both candidate
+        // points — see doc/08_tracking/bug/
+        // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
         self.expect(&TokenKind::Newline)?;
-        self.expect(&TokenKind::Indent)?;
+        self.drain_available_deferred_dedents();
+        let deferred_before = self.deferred_dedent_count;
+        self.deferred_dedent_count = 0;
+        if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+            self.expect(&TokenKind::Indent)?;
+        }
 
         // Parse loop invariants at the start of the block body
         let invariants = self.parse_loop_invariants()?;
 
         // Parse rest of block body
         let body = self.parse_block_body()?;
+
+        let deferred = self.deferred_dedent_count + deferred_before;
+        self.deferred_dedent_count = 0;
+        self.consume_dedents_for_method_chain(deferred);
 
         Ok(Node::While(WhileStmt {
             span: Span::new(
