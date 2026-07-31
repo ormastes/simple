@@ -1,7 +1,12 @@
 use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_event_identity, be_dom_find_by_tag, be_dom_focused_id,
-    be_dom_get_attr, be_dom_layout_target_key, be_dom_serialize_children
+    be_dom_find_by_tag, be_dom_focused_route,
+    be_dom_get_attr, be_dom_serialize_children
+}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build
@@ -12,6 +17,21 @@ use std.common.encoding.utf8.{text_is_valid_utf8}
 
 extern fn rt_bytes_to_text(bytes: [u8]) -> text
 
+fn _selection_route(session: BrowserSession, author_id: text) -> DomNodeRoute:
+    val index = session.current_dom_identity_index().unwrap()
+    index.route_for_author_id(author_id).unwrap()
+
+fn _selection_focused_author_id(session: BrowserSession) -> text:
+    val index = session.current_dom_identity_index().unwrap()
+    val route = match be_dom_focused_route(session.dom_root(), index):
+        Some(value): value
+        nil: return ""
+    index.author_id_for_route(route) ?? ""
+
+fn _selection_index(root: BeDomNode) -> DomIdentityIndex:
+    val generation = DomDocumentGeneration.create(1).unwrap()
+    dom_identity_index_build(root, generation).unwrap()
+
 describe "Browser text selection":
 
     it "recomputes distinct anonymous input layout keys after sibling mutation":
@@ -19,12 +39,19 @@ describe "Browser text selection":
             "<html><body><input><input></body></html>"
         )
         val before_inputs = be_dom_find_by_tag(before, "input")
-        val before_first = be_dom_layout_target_key(
-            before, be_dom_event_identity(before_inputs[0])
-        )
-        val before_second = be_dom_layout_target_key(
-            before, be_dom_event_identity(before_inputs[1])
-        )
+        val before_index = _selection_index(before)
+        val before_first = before_index.layout_target_key_for_route(
+            DomNodeRoute(
+                generation: before_index.generation,
+                node_id: before_inputs[0].node_id
+            )
+        ).unwrap()
+        val before_second = before_index.layout_target_key_for_route(
+            DomNodeRoute(
+                generation: before_index.generation,
+                node_id: before_inputs[1].node_id
+            )
+        ).unwrap()
         expect(before_first).to_equal("path:0")
         expect(before_second).to_equal("path:1")
 
@@ -35,12 +62,15 @@ describe "Browser text selection":
                 serialized_inputs + "</body></html>"
         )
         val after_inputs = be_dom_find_by_tag(after, "input")
-        expect(be_dom_layout_target_key(
-            after, be_dom_event_identity(after_inputs[0])
-        )).to_equal("path:1")
-        expect(be_dom_layout_target_key(
-            after, be_dom_event_identity(after_inputs[1])
-        )).to_equal("path:2")
+        val after_index = _selection_index(after)
+        expect(after_index.layout_target_key_for_route(DomNodeRoute(
+            generation: after_index.generation,
+            node_id: after_inputs[0].node_id
+        )).unwrap()).to_equal("path:1")
+        expect(after_index.layout_target_key_for_route(DomNodeRoute(
+            generation: after_index.generation,
+            node_id: after_inputs[1].node_id
+        )).unwrap()).to_equal("path:2")
 
     it "accepts UTF-8 boundaries and rejects partial scalar offsets":
         var session = BrowserSession.new()
@@ -48,10 +78,11 @@ describe "Browser text selection":
             "about:utf8-selection",
             "<html><body><input id='q' value='aéz' data-focused></body></html>"
         )
-        expect(session.set_dom_text_selection("q", 1, 3)).to_be(true)
+        val route = _selection_route(session, "q")
+        expect(session.set_dom_text_selection_route(route, 1, 3)).to_be(true)
         expect(session.text_selection_anchor_byte).to_equal(1)
         expect(session.text_selection_focus_byte).to_equal(3)
-        expect(session.set_dom_text_selection("q", 2, 3)).to_be(false)
+        expect(session.set_dom_text_selection_route(route, 2, 3)).to_be(false)
         expect(session.text_selection_anchor_byte).to_equal(1)
         expect(session.text_selection_focus_byte).to_equal(3)
 
@@ -69,11 +100,12 @@ describe "Browser text selection":
             "<html><body><input id='q' value='" +
                 invalid_continuation + "' data-focused></body></html>"
         )
-        expect(invalid_session.set_dom_text_selection(
-            "q", 0, 0
+        val invalid_route = _selection_route(invalid_session, "q")
+        expect(invalid_session.set_dom_text_selection_route(
+            invalid_route, 0, 0
         )).to_be(false)
-        expect(invalid_session.append_dom_text_input(
-            "q", "X"
+        expect(invalid_session.append_dom_text_input_route(
+            invalid_route, "X"
         ).is_err()).to_be(true)
         val invalid_inputs = be_dom_find_by_tag(
             invalid_session.dom_root(), "input"
@@ -88,11 +120,12 @@ describe "Browser text selection":
             "<html><body><input id='q' value='" +
                 truncated + "' data-focused></body></html>"
         )
-        expect(truncated_session.set_dom_text_selection(
-            "q", 0, 0
+        val truncated_route = _selection_route(truncated_session, "q")
+        expect(truncated_session.set_dom_text_selection_route(
+            truncated_route, 0, 0
         )).to_be(false)
-        expect(truncated_session.set_dom_text_input(
-            "q", "repaired"
+        expect(truncated_session.set_dom_text_input_route(
+            truncated_route, "repaired"
         ).is_err()).to_be(true)
 
         var action_session = BrowserSession.new()
@@ -100,8 +133,9 @@ describe "Browser text selection":
             "about:invalid-action",
             "<html><body><input id='q' value='abc' data-focused></body></html>"
         )
-        expect(action_session.append_dom_text_input(
-            "q", invalid_continuation
+        val action_route = _selection_route(action_session, "q")
+        expect(action_session.append_dom_text_input_route(
+            action_route, invalid_continuation
         ).is_err()).to_be(true)
         val action_inputs = be_dom_find_by_tag(
             action_session.dom_root(), "input"
@@ -116,11 +150,12 @@ describe "Browser text selection":
             "about:readonly-selection",
             "<html><body><input id='q' value='abc' readonly data-focused></body></html>"
         )
-        expect(session.set_dom_text_selection("q", 0, 2)).to_be(true)
-        expect(session.append_dom_text_input("q", "X").is_err()).to_be(true)
+        val route = _selection_route(session, "q")
+        expect(session.set_dom_text_selection_route(route, 0, 2)).to_be(true)
+        expect(session.append_dom_text_input_route(route, "X").is_err()).to_be(true)
         expect(session.current_body_html).to_contain("value=\"abc\"")
-        expect(session.dispatch_dom_keyboard_event_with_shift(
-            "q", "37", true, false
+        expect(session.dispatch_dom_keyboard_code_event(
+            Some(route), 37, true, false
         ).is_ok()).to_be(true)
         expect(session.text_selection_anchor_byte).to_equal(0)
         expect(session.text_selection_focus_byte).to_equal(0)
@@ -131,9 +166,12 @@ describe "Browser text selection":
             "about:disabled-selection",
             "<html><body><input id='q' value='abc' disabled></body></html>"
         )
-        val _ = session.dispatch_dom_event("q", "mousedown", true, true)
-        expect(be_dom_focused_id(session.dom_root())).to_equal("")
-        expect(session.set_dom_text_selection("q", 0, 0)).to_be(false)
+        val route = _selection_route(session, "q")
+        val _ = session.dispatch_dom_event_route(
+            route, "mousedown", true, true
+        )
+        expect(_selection_focused_author_id(session)).to_equal("")
+        expect(session.set_dom_text_selection_route(route, 0, 0)).to_be(false)
 
     it "leaves textarea selection as an explicit unsupported lane":
         var session = BrowserSession.new()
@@ -141,7 +179,8 @@ describe "Browser text selection":
             "about:textarea-selection",
             "<html><body><textarea id='q'>abc</textarea></body></html>"
         )
-        expect(session.set_dom_text_selection("q", 0, 0)).to_be(false)
+        val route = _selection_route(session, "q")
+        expect(session.set_dom_text_selection_route(route, 0, 0)).to_be(false)
 
     it "clears selection on focus loss":
         var session = BrowserSession.new()
@@ -149,8 +188,9 @@ describe "Browser text selection":
             "about:selection-blur",
             "<html><body><input id='q' value='abc' data-focused></body></html>"
         )
-        expect(session.set_dom_text_selection("q", 1, 1)).to_be(true)
-        expect(session.blur_dom_text_input("q").is_ok()).to_be(true)
-        expect(session.text_selection_target_id).to_equal("")
+        val route = _selection_route(session, "q")
+        expect(session.set_dom_text_selection_route(route, 1, 1)).to_be(true)
+        expect(session.blur_dom_text_input_route(route).is_ok()).to_be(true)
+        expect(session.text_selection_route).to_be_nil()
         expect(session.text_selection_anchor_byte).to_equal(0)
         expect(session.text_selection_focus_byte).to_equal(0)

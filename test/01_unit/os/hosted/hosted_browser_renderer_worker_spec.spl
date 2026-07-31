@@ -58,7 +58,8 @@ use common.ui.theme_package_wire.{
 
 extern fn rt_file_read_text(path: text) -> text
 use common.ui.access.{WinTextActionRequest, ui_access_find_nodes}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_id}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_route}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{DomNodeRoute}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_hit_test_index
 }
@@ -72,6 +73,30 @@ extern fn rt_bytes_to_text(bytes: [u8]) -> text
 
 val SCRIPT_ANIMATION_HTML = "<!DOCTYPE html><html><head><style>#stage { width:32px; height:24px; background-color:#ef4444; }</style></head><body><script type='text/simple'>title \"SimpleReady\"\nbody_html '<div id=\"stage\"></div>'</script><script>requestAnimationFrame(function(frameTime){ document.body.innerHTML = '<div style=\"width:32px;height:24px;background-color:#2563eb\"></div>'; });</script></body></html>"
 val CSS_ANIMATION_HTML = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
+
+fn _worker_dom_route(
+    worker: HostedBrowserRendererWorkerSession, author_id: text
+) -> DomNodeRoute:
+    val index = worker.browser.current_dom_identity_index().unwrap()
+    index.route_for_author_id(author_id).unwrap()
+
+fn _worker_focused_author_id(
+    worker: HostedBrowserRendererWorkerSession
+) -> text:
+    val index = worker.browser.current_dom_identity_index().unwrap()
+    val route = match be_dom_focused_route(worker.browser.dom_root(), index):
+        Some(value): value
+        nil: return ""
+    index.author_id_for_route(route) ?? ""
+
+fn _worker_selection_author_id(
+    worker: HostedBrowserRendererWorkerSession
+) -> text:
+    val route = match worker.browser.text_selection_route:
+        Some(value): value
+        nil: return ""
+    val index = worker.browser.current_dom_identity_index().unwrap()
+    index.author_id_for_route(route) ?? ""
 
 fn _render(html: text, time_ms: i64):
     hosted_browser_renderer_handle_init(
@@ -1020,7 +1045,9 @@ describe "hosted browser renderer worker":
         worker.input_view_target_key = "id:field"
         worker.input_view_start_byte = 2
         worker.caret_blink_epoch_ms = 42
-        worker.browser.text_selection_target_id = "field"
+        worker.browser.text_selection_route = Some(
+            _worker_dom_route(worker, "field")
+        )
         worker.browser.text_selection_anchor_byte = 1
         worker.browser.text_selection_focus_byte = 2
         val mismatched = browser_renderer_navigation_encode(
@@ -1046,8 +1073,8 @@ describe "hosted browser renderer worker":
         expect(worker.input_view_target_key).to_equal("id:field")
         expect(worker.input_view_start_byte).to_equal(2)
         expect(worker.caret_blink_epoch_ms).to_equal(42)
-        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("field")
-        expect(worker.browser.text_selection_target_id).to_equal("field")
+        expect(_worker_focused_author_id(worker)).to_equal("field")
+        expect(_worker_selection_author_id(worker)).to_equal("field")
         expect(worker.browser.text_selection_anchor_byte).to_equal(1)
         expect(worker.browser.text_selection_focus_byte).to_equal(2)
         expect(worker.expected_request_id).to_equal(3)
@@ -1128,7 +1155,7 @@ describe "hosted browser renderer worker":
             browser_renderer_decoder_new(7), reload.wire
         ).message).ok).to_be(true)
         expect(worker.browser.is_loading).to_be(true)
-        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("")
+        expect(_worker_focused_author_id(worker)).to_equal("")
         expect(worker.browser.current_body_html.contains(
             "data-input-dirty"
         )).to_be(false)
@@ -1316,7 +1343,7 @@ describe "hosted browser renderer worker":
         expect(worker.browser.open_html(
             "https://source.test/page", html
         ).is_ok()).to_be(true)
-        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("go")
+        expect(_worker_focused_author_id(worker)).to_equal("go")
 
         val down = worker.handle(BrowserRendererMessage(
             kind: "key", generation: 7, request_id: 3,
@@ -1383,7 +1410,7 @@ describe "hosted browser renderer worker":
             kind: "key", generation: 7, request_id: 6,
             payload: "K2\t4\t9\t1\t1"
         )).ok).to_be(true)
-        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("stay")
+        expect(_worker_focused_author_id(worker)).to_equal("stay")
 
     it "fails closed when a script exceeds the cookie write batch":
         var worker = HostedBrowserRendererWorkerSession.create(64, 48)
@@ -1509,7 +1536,7 @@ describe "hosted browser renderer worker":
             kind: "init", generation: 7, request_id: 2,
             payload: "<style>html,body{margin:0}input{display:block;width:20px;height:18px}</style><input id='text' value='abc' data-focused><input id='toggle' type='checkbox'>"
         )).ok).to_be(true)
-        expect(worker.browser.text_selection_target_id).to_equal("text")
+        expect(_worker_selection_author_id(worker)).to_equal("text")
         expect(worker.input_view_target_key).not.to_equal("")
         worker.input_view_start_byte = 2
         worker.caret_blink_epoch_ms = 17
@@ -1523,8 +1550,8 @@ describe "hosted browser renderer worker":
             kind: "pointer", generation: 7, request_id: 4,
             payload: "P1\t2\t5\t25\t0"
         )).ok).to_be(true)
-        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("toggle")
-        expect(worker.browser.text_selection_target_id).to_equal("")
+        expect(_worker_focused_author_id(worker)).to_equal("toggle")
+        expect(worker.browser.text_selection_route).to_be_nil()
         expect(worker.input_view_target_key).to_equal("")
         expect(worker.input_view_start_byte).to_equal(0)
         expect(worker.caret_blink_epoch_ms).to_equal(0)
@@ -1876,7 +1903,7 @@ describe "hosted browser renderer worker":
             blurred_frame.composition.batches[0].commands,
             "q_caret"
         )).to_equal(-1)
-        expect(worker.browser.text_selection_target_id).to_equal("")
+        expect(worker.browser.text_selection_route).to_be_nil()
 
     it "preserves focused selection view and blink when pointer default is prevented":
         var worker = HostedBrowserRendererWorkerSession.create(60, 40)
@@ -1894,10 +1921,8 @@ describe "hosted browser renderer worker":
             payload: "P1\t1\t{hit.boundary_x_px[hit.boundary_x_px.len() - 1]}\t{hit.y + 1}\t1"
         ))
         expect(kept.ok).to_be(true)
-        expect(be_dom_focused_id(
-            worker.browser.dom_root()
-        )).to_equal("q")
-        expect(worker.browser.text_selection_target_id).to_equal("q")
+        expect(_worker_focused_author_id(worker)).to_equal("q")
+        expect(_worker_selection_author_id(worker)).to_equal("q")
         expect(worker.browser.text_selection_anchor_byte).to_equal(
             retained_anchor
         )
@@ -1950,8 +1975,8 @@ describe "hosted browser renderer worker":
             "q_caret"
         )).to_equal(-1)
         expect(chrome_frame.next_animation_ms).to_equal(-1)
-        expect(be_dom_focused_id(worker.browser.dom_root())).to_equal("")
-        expect(worker.browser.text_selection_target_id).to_equal("")
+        expect(_worker_focused_author_id(worker)).to_equal("")
+        expect(worker.browser.text_selection_route).to_be_nil()
         expect(worker.input_view_target_key).to_equal("")
         expect(worker.input_view_start_byte).to_equal(0)
         expect(worker.caret_blink_epoch_ms).to_equal(0)

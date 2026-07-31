@@ -34,6 +34,10 @@ use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost,
 use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptStaticFetchDispatch,
     fetch_create_request}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
+}
 
 # ===========================================================================
 # Helper functions
@@ -47,6 +51,14 @@ fn _make_div_root() -> BeDomNode:
 
 fn _make_click_event() -> BeDomEvent:
     return BeDomEvent.create("click", "", true, true)
+
+fn _install_host_document(
+    host: ScriptHost, root: BeDomNode
+) -> DomIdentityIndex:
+    val generation = DomDocumentGeneration.create(1).unwrap()
+    val index = dom_identity_index_build(root, generation).unwrap()
+    expect(host.install_document_state(root, index, generation)).to_be(true)
+    index
 
 # ===========================================================================
 # Specs
@@ -69,7 +81,7 @@ describe "ScriptHost":
         it "AC-1: execute with empty string does not crash":
             var host = _make_host()
             val root = _make_div_root()
-            host.execute("", root)
+            val _ = _install_host_document(host, root)
             val dirty = host.dom_dirty()
             expect(dirty).to_equal(false)
 
@@ -114,8 +126,15 @@ describe "ScriptHost":
     describe "AC-1: inject_dom_event — no registered listeners":
         it "AC-1: inject_dom_event does not crash when no listeners registered":
             var host = _make_host()
+            val index = _install_host_document(host, host.dom_root())
             val event = _make_click_event()
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation,
+                    node_id: host.dom_root().node_id
+                ),
+                event
+            ).unwrap()
             val dirty = host.dom_dirty()
             expect(dirty).to_equal(false)
 
@@ -123,9 +142,14 @@ describe "ScriptHost":
             var host = _make_host()
             var root = _make_div_root()
             root.add_event_listener("click", "set-text:clicked")
-            host.execute("", root)
+            val index = _install_host_document(host, root)
             val event = BeDomEvent.create("click", "", true, true)
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation, node_id: root.node_id
+                ),
+                event
+            ).unwrap()
             expect(host.dom_dirty()).to_equal(true)
             expect(host.dom_root().text_content).to_equal("clicked")
 
@@ -154,9 +178,14 @@ describe "ScriptHost":
             var root = _make_div_root()
             root.add_event_listener("click", "set-attr:data-clicked=yes")
             root.add_event_listener("click", "add-class:clicked")
-            host.execute("", root)
+            val index = _install_host_document(host, root)
             val event = BeDomEvent.create("click", "", true, true)
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation, node_id: root.node_id
+                ),
+                event
+            ).unwrap()
             expect(host.dom_root().get_attr("data-clicked")).to_equal("yes")
             expect(host.dom_root().classes).to_contain("clicked")
             expect(host.dom_dirty()).to_equal(true)
@@ -165,7 +194,7 @@ describe "ScriptHost":
         it "AC-1: dom_root after execute returns a BeDomNode":
             var host = _make_host()
             val root = _make_div_root()
-            host.execute("", root)
+            val _ = _install_host_document(host, root)
             val returned_root = host.dom_root()
             expect(returned_root.tag).to_equal("div")
 

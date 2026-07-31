@@ -2,13 +2,29 @@ use std.spec.*
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomEvent, BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_apply_default_action, be_dom_create_event, be_dom_create_pointer_event,
-    be_dom_create_pointer_event_with_modifiers, be_dom_dispatch_event,
-    be_dom_dispatch_event_actions, be_dom_dispatch_event_apply_default,
-    be_dom_dispatch_event_path, be_dom_dispatch_event_to_id,
-    be_dom_dispatch_keyboard_activation_apply_default, be_dom_find_path_to_id,
+    be_dom_apply_default_action, be_dom_apply_default_action_to_route,
+    be_dom_dispatch_event_actions, be_dom_dispatch_event_to_route,
+    be_dom_path_for_route,
     be_dom_get_attr, be_dom_get_event_listener_count, be_dom_has_attr,
     be_dom_keyboard_activation_event_for_target}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
+}
+
+fn _dom_event_index(root: BeDomNode) -> DomIdentityIndex:
+    val generation = DomDocumentGeneration.create(1).unwrap()
+    dom_identity_index_build(root, generation).unwrap()
+
+fn _dom_event_route(
+    index: DomIdentityIndex, node: BeDomNode
+) -> DomNodeRoute:
+    DomNodeRoute(generation: index.generation, node_id: node.node_id)
+
+fn _dom_event_author_id(
+    index: DomIdentityIndex, route: DomNodeRoute
+) -> text:
+    index.author_id_for_route(route) ?? ""
 
 fn _callable_listener_executor(
     event: BeDomEvent, node: BeDomNode, action: text, phase: text
@@ -69,8 +85,10 @@ describe "Browser renderer DOM event basics":
         document.add_child(button)
         window.add_child(document)
 
-        val dispatch = be_dom_dispatch_event_to_id(
-            window, "save", "click", true, true, true,
+        val index = _dom_event_index(window)
+        val route = index.route_for_author_id("save").unwrap()
+        val dispatch = be_dom_dispatch_event_to_route(
+            window, index, route, "click", true, true, true,
             _callable_listener_executor
         )
 
@@ -111,16 +129,16 @@ describe "Browser renderer DOM event basics":
         expect(change_actions.len()).to_equal(1)
         expect(change_actions[0]).to_equal("change-listener")
 
-    it "creates cancelable event objects with target and current target state":
+    it "creates cancelable event payloads without routing authority":
         var button = BeDomNode.element("button")
         button.set_attr("id", "save")
 
-        var event = be_dom_create_event(button, "onclick", true, true)
+        var event = BeDomEvent.create("onclick", "", true, true)
+        event.target_tag = button.tag_name
+        event.current_target_tag = button.tag_name
         expect(event.event_type).to_equal("click")
         expect(event.target_tag).to_equal("button")
-        expect(event.target_id).to_equal("save")
         expect(event.current_target_tag).to_equal("button")
-        expect(event.current_target_id).to_equal("save")
         expect(event.bubbles).to_equal(true)
         expect(event.cancelable).to_equal(true)
         expect(event.default_prevented).to_equal(false)
@@ -132,10 +150,20 @@ describe "Browser renderer DOM event basics":
         var button = BeDomNode.element("button")
         button.set_attr("id", "save")
 
-        val event = be_dom_create_pointer_event(button, "mousedown", true, true, 12, 34, 0, 1, 0)
+        var event = BeDomEvent.create("mousedown", "", true, true)
+        event.target_tag = button.tag_name
+        event.client_x = 12
+        event.client_y = 34
+        event.screen_x = 12
+        event.screen_y = 34
+        event.button = 0
+        event.buttons = 1
+        event.pointer_id = 1
+        event.pointer_type = "mouse"
+        event.is_primary = true
 
         expect(event.event_type).to_equal("mousedown")
-        expect(event.target_id).to_equal("save")
+        expect(event.target_tag).to_equal("button")
         expect(event.client_x).to_equal(12)
         expect(event.client_y).to_equal(34)
         expect(event.screen_x).to_equal(12)
@@ -154,10 +182,17 @@ describe "Browser renderer DOM event basics":
         var button = BeDomNode.element("button")
         button.set_attr("id", "save")
 
-        val event = be_dom_create_pointer_event_with_modifiers(button, "click", true, true, 12, 34, 0, 0, 1, true, false, true, true)
+        var event = BeDomEvent.create("click", "", true, true)
+        event.target_tag = button.tag_name
+        event.client_x = 12
+        event.client_y = 34
+        event.pointer_id = 1
+        event.alt_key = true
+        event.meta_key = true
+        event.shift_key = true
 
         expect(event.event_type).to_equal("click")
-        expect(event.target_id).to_equal("save")
+        expect(event.target_tag).to_equal("button")
         expect(event.alt_key).to_equal(true)
         expect(event.ctrl_key).to_equal(false)
         expect(event.meta_key).to_equal(true)
@@ -165,7 +200,7 @@ describe "Browser renderer DOM event basics":
 
     it "leaves non-cancelable events unprevented":
         var link = BeDomNode.element("a")
-        var event = be_dom_create_event(link, "click", true, false)
+        var event = BeDomEvent.create("click", "", true, false)
 
         event.prevent_default()
 
@@ -177,11 +212,15 @@ describe "Browser renderer DOM event basics":
         button.set_attr("onclick", "inline-click")
         button.add_event_listener("click", "listener-a")
 
-        val dispatch = be_dom_dispatch_event(button, "onclick", true, true)
+        val index = _dom_event_index(button)
+        val route = _dom_event_route(index, button)
+        val dispatch = be_dom_dispatch_event_to_route(
+            button, index, route, "onclick", true, true, true
+        )
 
         expect(dispatch.event.event_type).to_equal("click")
-        expect(dispatch.event.target_id).to_equal("save")
-        expect(dispatch.event.current_target_id).to_equal("save")
+        expect(_dom_event_author_id(index, dispatch.target_route)).to_equal("save")
+        expect(dispatch.current_targets[0]).to_equal(route)
         expect(dispatch.actions.len()).to_equal(2)
         expect(dispatch.actions[0]).to_equal("inline-click")
         expect(dispatch.actions[1]).to_equal("listener-a")
@@ -189,18 +228,31 @@ describe "Browser renderer DOM event basics":
     it "reports default actions for focused interactive element events":
         var link = BeDomNode.element("a")
         link.set_attr("href", "/next")
-        val link_dispatch = be_dom_dispatch_event(link, "click", true, true)
+        val link_index = _dom_event_index(link)
+        val link_dispatch = be_dom_dispatch_event_to_route(
+            link, link_index, _dom_event_route(link_index, link),
+            "click", true, true, true
+        )
         expect(link_dispatch.default_action).to_equal("navigate:/next")
         expect(link_dispatch.default_action_allowed).to_equal(true)
 
         var checkbox = BeDomNode.element("input")
         checkbox.set_attr("type", "checkbox")
-        val checkbox_dispatch = be_dom_dispatch_event(checkbox, "click", true, true)
+        val checkbox_index = _dom_event_index(checkbox)
+        val checkbox_dispatch = be_dom_dispatch_event_to_route(
+            checkbox, checkbox_index,
+            _dom_event_route(checkbox_index, checkbox),
+            "click", true, true, true
+        )
         expect(checkbox_dispatch.default_action).to_equal("input-checkbox-toggle")
         expect(checkbox_dispatch.default_action_allowed).to_equal(true)
 
         var form = BeDomNode.element("form")
-        val form_dispatch = be_dom_dispatch_event(form, "submit", true, true)
+        val form_index = _dom_event_index(form)
+        val form_dispatch = be_dom_dispatch_event_to_route(
+            form, form_index, _dom_event_route(form_index, form),
+            "submit", true, true, true
+        )
         expect(form_dispatch.default_action).to_equal("form-submit")
         expect(form_dispatch.default_action_allowed).to_equal(true)
 
@@ -209,7 +261,11 @@ describe "Browser renderer DOM event basics":
         link.set_attr("href", "/blocked")
         link.add_event_listener("click", "prevent-default")
 
-        val dispatch = be_dom_dispatch_event(link, "click", true, true)
+        val index = _dom_event_index(link)
+        val dispatch = be_dom_dispatch_event_to_route(
+            link, index, _dom_event_route(index, link),
+            "click", true, true, true
+        )
 
         expect(dispatch.event.default_prevented).to_equal(true)
         expect(dispatch.default_action).to_equal("navigate:/blocked")
@@ -219,7 +275,11 @@ describe "Browser renderer DOM event basics":
         var button = BeDomNode.element("button")
         button.add_event_listener("click", "prevent-default")
 
-        val dispatch = be_dom_dispatch_event(button, "click", true, false)
+        val index = _dom_event_index(button)
+        val dispatch = be_dom_dispatch_event_to_route(
+            button, index, _dom_event_route(index, button),
+            "click", true, false, true
+        )
 
         expect(dispatch.event.default_prevented).to_equal(false)
         expect(dispatch.default_action).to_equal("button-activate")
@@ -229,15 +289,41 @@ describe "Browser renderer DOM event basics":
         var checkbox = BeDomNode.element("input")
         checkbox.set_attr("type", "checkbox")
 
-        val checked = be_dom_dispatch_event_apply_default(checkbox, "click", true, true)
+        val checkbox_index = _dom_event_index(checkbox)
+        val checkbox_route = _dom_event_route(checkbox_index, checkbox)
+        val checkbox_dispatch = be_dom_dispatch_event_to_route(
+            checkbox, checkbox_index, checkbox_route,
+            "click", true, true, true
+        )
+        val checked = be_dom_apply_default_action_to_route(
+            checkbox, checkbox_index, checkbox_route,
+            checkbox_dispatch.default_action
+        )
         expect(be_dom_has_attr(checked, "checked")).to_equal(true)
 
-        val unchecked = be_dom_dispatch_event_apply_default(checked, "click", true, true)
+        val checked_index = _dom_event_index(checked)
+        val checked_route = _dom_event_route(checked_index, checked)
+        val checked_dispatch = be_dom_dispatch_event_to_route(
+            checked, checked_index, checked_route,
+            "click", true, true, true
+        )
+        val unchecked = be_dom_apply_default_action_to_route(
+            checked, checked_index, checked_route,
+            checked_dispatch.default_action
+        )
         expect(be_dom_has_attr(unchecked, "checked")).to_equal(false)
 
         var radio = BeDomNode.element("input")
         radio.set_attr("type", "radio")
-        val selected = be_dom_dispatch_event_apply_default(radio, "click", true, true)
+        val radio_index = _dom_event_index(radio)
+        val radio_route = _dom_event_route(radio_index, radio)
+        val radio_dispatch = be_dom_dispatch_event_to_route(
+            radio, radio_index, radio_route,
+            "click", true, true, true
+        )
+        val selected = be_dom_apply_default_action_to_route(
+            radio, radio_index, radio_route, radio_dispatch.default_action
+        )
         expect(be_dom_has_attr(selected, "checked")).to_equal(true)
 
     it "does not apply prevented or disabled control default actions":
@@ -245,13 +331,30 @@ describe "Browser renderer DOM event basics":
         prevented.set_attr("type", "checkbox")
         prevented.add_event_listener("click", "prevent-default")
 
-        val still_unchecked = be_dom_dispatch_event_apply_default(prevented, "click", true, true)
+        val prevented_index = _dom_event_index(prevented)
+        val prevented_route = _dom_event_route(prevented_index, prevented)
+        val prevented_dispatch = be_dom_dispatch_event_to_route(
+            prevented, prevented_index, prevented_route,
+            "click", true, true, true
+        )
+        val still_unchecked = if prevented_dispatch.default_action_allowed:
+            be_dom_apply_default_action_to_route(
+                prevented, prevented_index, prevented_route,
+                prevented_dispatch.default_action
+            )
+        else:
+            prevented
         expect(be_dom_has_attr(still_unchecked, "checked")).to_equal(false)
 
         var disabled = BeDomNode.element("button")
         disabled.set_attr("disabled", "disabled")
         disabled.add_event_listener("click", "set-attr:data-clicked=true")
-        val dispatch = be_dom_dispatch_event(disabled, "click", true, true)
+        val disabled_index = _dom_event_index(disabled)
+        val dispatch = be_dom_dispatch_event_to_route(
+            disabled, disabled_index,
+            _dom_event_route(disabled_index, disabled),
+            "click", true, true, true
+        )
         expect(dispatch.actions.len()).to_equal(0)
         expect(dispatch.default_action).to_equal("")
         expect(dispatch.default_action_allowed).to_equal(false)
@@ -301,12 +404,31 @@ describe "Browser renderer DOM event basics":
         var checkbox = BeDomNode.element("input")
         checkbox.set_attr("type", "checkbox")
 
-        val checked = be_dom_dispatch_keyboard_activation_apply_default(checkbox, "Space")
+        val checkbox_index = _dom_event_index(checkbox)
+        val checkbox_route = _dom_event_route(checkbox_index, checkbox)
+        val checkbox_dispatch = be_dom_dispatch_event_to_route(
+            checkbox, checkbox_index, checkbox_route,
+            be_dom_keyboard_activation_event_for_target(checkbox, "Space"),
+            true, true, true
+        )
+        val checked = be_dom_apply_default_action_to_route(
+            checkbox, checkbox_index, checkbox_route,
+            checkbox_dispatch.default_action
+        )
         expect(be_dom_has_attr(checked, "checked")).to_equal(true)
 
         var link = BeDomNode.element("a")
         link.set_attr("href", "/next")
-        val navigated = be_dom_dispatch_keyboard_activation_apply_default(link, "Enter")
+        val link_index = _dom_event_index(link)
+        val link_route = _dom_event_route(link_index, link)
+        val link_dispatch = be_dom_dispatch_event_to_route(
+            link, link_index, link_route,
+            be_dom_keyboard_activation_event_for_target(link, "Enter"),
+            true, true, true
+        )
+        val navigated = be_dom_apply_default_action_to_route(
+            link, link_index, link_route, link_dispatch.default_action
+        )
         expect(be_dom_get_attr(navigated, "data-navigation")).to_equal("/next")
 
     it "stops same-target listener dispatch immediately":
@@ -315,7 +437,11 @@ describe "Browser renderer DOM event basics":
         button.add_event_listener("click", "stop-immediate-propagation")
         button.add_event_listener("click", "listener-after")
 
-        val dispatch = be_dom_dispatch_event(button, "click", true, true)
+        val index = _dom_event_index(button)
+        val dispatch = be_dom_dispatch_event_to_route(
+            button, index, _dom_event_route(index, button),
+            "click", true, true, true
+        )
 
         expect(dispatch.event.propagation_stopped).to_equal(true)
         expect(dispatch.event.immediate_propagation_stopped).to_equal(true)
@@ -336,10 +462,16 @@ describe "Browser renderer DOM event basics":
         button.set_attr("id", "save")
         button.set_attr("onclick", "inline-click")
         button.add_event_listener("click", "target-listener")
+        section.add_child(button)
+        root.add_child(section)
 
-        val dispatch = be_dom_dispatch_event_path([root, section, button], "click", true, true)
+        val index = _dom_event_index(root)
+        val route = index.route_for_author_id("save").unwrap()
+        val dispatch = be_dom_dispatch_event_to_route(
+            root, index, route, "click", true, true, true
+        )
 
-        expect(dispatch.event.target_id).to_equal("save")
+        expect(_dom_event_author_id(index, dispatch.target_route)).to_equal("save")
         expect(dispatch.actions.len()).to_equal(6)
         expect(dispatch.actions[0]).to_equal("root-capture")
         expect(dispatch.phases[0]).to_equal("capture")
@@ -367,7 +499,11 @@ describe "Browser renderer DOM event basics":
         )
         button.add_event_listener("click", "bubble-third")
 
-        val dispatch = be_dom_dispatch_event(button, "click", true, true)
+        val index = _dom_event_index(button)
+        val dispatch = be_dom_dispatch_event_to_route(
+            button, index, _dom_event_route(index, button),
+            "click", true, true, true
+        )
 
         expect(dispatch.actions.len()).to_equal(5)
         expect(dispatch.actions[0]).to_equal("capture-second")
@@ -389,8 +525,14 @@ describe "Browser renderer DOM event basics":
         var button = BeDomNode.element("button")
         button.set_attr("id", "save")
         button.add_event_listener("click", "target-listener")
+        section.add_child(button)
+        root.add_child(section)
 
-        val dispatch = be_dom_dispatch_event_path([root, section, button], "click", true, true)
+        val index = _dom_event_index(root)
+        val dispatch = be_dom_dispatch_event_to_route(
+            root, index, index.route_for_author_id("save").unwrap(),
+            "click", true, true, true
+        )
 
         expect(dispatch.event.propagation_stopped).to_equal(true)
         expect(dispatch.event.immediate_propagation_stopped).to_equal(false)
@@ -405,8 +547,16 @@ describe "Browser renderer DOM event basics":
         root.add_event_listener_with_capture("click", "stop-propagation", true)
         var checkbox = BeDomNode.element("input")
         checkbox.set_attr("type", "checkbox")
+        root.add_child(checkbox)
 
-        val dispatch = be_dom_dispatch_event_path([root, checkbox], "click", true, true)
+        val index = _dom_event_index(root)
+        val dispatch = be_dom_dispatch_event_to_route(
+            root, index,
+            DomNodeRoute(
+                generation: index.generation, node_id: checkbox.node_id
+            ),
+            "click", true, true, true
+        )
 
         expect(dispatch.default_action).to_equal("input-checkbox-toggle")
         expect(dispatch.default_action_allowed).to_equal(true)
@@ -419,8 +569,13 @@ describe "Browser renderer DOM event basics":
         var input = BeDomNode.element("input")
         input.set_attr("id", "name")
         input.add_event_listener("focus", "target-focus")
+        root.add_child(input)
 
-        val dispatch = be_dom_dispatch_event_path([root, input], "focus", false, false)
+        val index = _dom_event_index(root)
+        val dispatch = be_dom_dispatch_event_to_route(
+            root, index, index.route_for_author_id("name").unwrap(),
+            "focus", false, false, true
+        )
 
         expect(dispatch.actions.len()).to_equal(2)
         expect(dispatch.actions[0]).to_equal("root-capture")
@@ -438,7 +593,10 @@ describe "Browser renderer DOM event basics":
         root.set_attr("id", "root")
         root.add_child(section)
 
-        val path = be_dom_find_path_to_id(root, "save")
+        val index = _dom_event_index(root)
+        val path = be_dom_path_for_route(
+            root, index, index.route_for_author_id("save").unwrap()
+        )
 
         expect(path.len()).to_equal(3)
         expect(path[0].id).to_equal("root")
@@ -461,9 +619,13 @@ describe "Browser renderer DOM event basics":
         root.add_event_listener("click", "root-bubble")
         root.add_child(section)
 
-        val dispatch = be_dom_dispatch_event_to_id(root, "save", "onclick", true, true, true)
+        val index = _dom_event_index(root)
+        val dispatch = be_dom_dispatch_event_to_route(
+            root, index, index.route_for_author_id("save").unwrap(),
+            "onclick", true, true, true
+        )
 
-        expect(dispatch.event.target_id).to_equal("save")
+        expect(_dom_event_author_id(index, dispatch.target_route)).to_equal("save")
         expect(dispatch.actions.len()).to_equal(6)
         expect(dispatch.actions[0]).to_equal("root-capture")
         expect(dispatch.actions[1]).to_equal("section-capture")
@@ -477,7 +639,14 @@ describe "Browser renderer DOM event basics":
         root.set_attr("id", "root")
         root.add_event_listener_with_capture("click", "root-capture", true)
 
-        val dispatch = be_dom_dispatch_event_to_id(root, "missing", "click", true, true, true)
+        val index = _dom_event_index(root)
+        val missing = DomNodeRoute(
+            generation: index.generation, node_id: 9223372036854775807
+        )
+        val dispatch = be_dom_dispatch_event_to_route(
+            root, index, missing, "click", true, true, true
+        )
 
-        expect(dispatch.event.target_id).to_equal("")
+        expect(dispatch.target_route).to_equal(missing)
+        expect(index.author_id_for_route(dispatch.target_route)).to_be_nil()
         expect(dispatch.actions.len()).to_equal(0)

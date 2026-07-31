@@ -30,13 +30,17 @@ All specs FAIL until that module is implemented.
 
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{ScriptHost,
-    script_host_apply_action_to_id, script_host_apply_event_action}
+    script_host_apply_action_to_route, script_host_apply_event_action}
 use std.gc_async_mut.gpu.browser_engine.script.script_runner.{
     ScriptRunner, run_script, run_script_file
 }
 use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptStaticFetchDispatch,
     fetch_create_request}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
+}
 
 # ===========================================================================
 # Helper functions
@@ -50,6 +54,14 @@ fn _make_div_root() -> BeDomNode:
 
 fn _make_click_event() -> BeDomEvent:
     return BeDomEvent.create("click", "", true, true)
+
+fn _install_host_document(
+    host: ScriptHost, root: BeDomNode
+) -> DomIdentityIndex:
+    val generation = DomDocumentGeneration.create(1).unwrap()
+    val index = dom_identity_index_build(root, generation).unwrap()
+    expect(host.install_document_state(root, index, generation)).to_be(true)
+    index
 
 # ===========================================================================
 # Specs
@@ -87,7 +99,7 @@ describe "ScriptHost":
         it "AC-1: execute with empty string does not crash":
             var host = _make_host()
             val root = _make_div_root()
-            host.execute("", root)
+            val _ = _install_host_document(host, root)
             val dirty = host.dom_dirty()
             expect(dirty).to_equal(false)
 
@@ -132,8 +144,15 @@ describe "ScriptHost":
     describe "AC-1: inject_dom_event — no registered listeners":
         it "AC-1: inject_dom_event does not crash when no listeners registered":
             var host = _make_host()
+            val index = _install_host_document(host, host.dom_root())
             val event = _make_click_event()
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation,
+                    node_id: host.dom_root().node_id
+                ),
+                event
+            ).unwrap()
             val dirty = host.dom_dirty()
             expect(dirty).to_equal(false)
 
@@ -141,9 +160,14 @@ describe "ScriptHost":
             var host = _make_host()
             var root = _make_div_root()
             root.add_event_listener("click", "set-text:clicked")
-            host.execute("", root)
+            val index = _install_host_document(host, root)
             val event = BeDomEvent.create("click", "", true, true)
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation, node_id: root.node_id
+                ),
+                event
+            ).unwrap()
             expect(host.dom_dirty()).to_equal(true)
             expect(host.dom_root().text_content).to_equal("clicked")
 
@@ -180,8 +204,15 @@ describe "ScriptHost":
             root.add_child(branch)
             root.add_child(second)
 
-            val updated = script_host_apply_action_to_id(
-                root, "duplicate", "set-attr:data-hit=yes", false
+            val index = dom_identity_index_build(
+                root, DomDocumentGeneration.create(1).unwrap()
+            ).unwrap()
+            val duplicate_route = index.route_for_author_id(
+                "duplicate"
+            ).unwrap()
+            val updated = script_host_apply_action_to_route(
+                root, index, duplicate_route,
+                "set-attr:data-hit=yes", false
             )
             expect(updated.children[0].children[0].get_attr(
                 "data-hit"
@@ -193,8 +224,13 @@ describe "ScriptHost":
             expect(updated.children[1].get_attr("data-slot")).to_equal(
                 "second"
             )
-            val missing = script_host_apply_action_to_id(
-                updated, "missing", "set-attr:data-hit=no", false
+            val missing_route = DomNodeRoute(
+                generation: index.generation,
+                node_id: 9223372036854775807
+            )
+            val missing = script_host_apply_action_to_route(
+                updated, index, missing_route,
+                "set-attr:data-hit=no", false
             )
             expect(missing.children[0].children[0].get_attr(
                 "data-hit"
@@ -206,9 +242,14 @@ describe "ScriptHost":
             var root = _make_div_root()
             root.add_event_listener("click", "set-attr:data-clicked=yes")
             root.add_event_listener("click", "add-class:clicked")
-            host.execute("", root)
+            val index = _install_host_document(host, root)
             val event = BeDomEvent.create("click", "", true, true)
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                DomNodeRoute(
+                    generation: index.generation, node_id: root.node_id
+                ),
+                event
+            ).unwrap()
             expect(host.dom_root().get_attr("data-clicked")).to_equal("yes")
             expect(host.dom_root().classes).to_contain("clicked")
             expect(host.dom_dirty()).to_equal(true)
@@ -222,10 +263,12 @@ describe "ScriptHost":
             var root = _make_div_root()
             root.set_attr("id", "root")
             root.add_child(checkbox)
-            host.execute("", root)
+            val index = _install_host_document(host, root)
 
             val event = BeDomEvent.create("click", "", true, true)
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                index.route_for_author_id("accept").unwrap(), event
+            ).unwrap()
 
             val updated = host.dom_root().children[0]
             expect(updated.get_attr("data-clicked")).to_equal("yes")
@@ -258,11 +301,12 @@ describe "ScriptHost":
             root.add_child(form)
             root.add_child(other_form)
             var host = _make_host()
-            host.execute("", root)
+            val index = _install_host_document(host, root)
 
-            host.inject_dom_event(BeDomEvent.create(
-                "click", "", true, true
-            ))
+            host.inject_dom_event_route(
+                index.route_for_author_id("second").unwrap(),
+                BeDomEvent.create("click", "", true, true)
+            ).unwrap()
 
             val updated = host.dom_root()
             expect(updated.children[0].children[0].has_attr("checked")).to_be(false)
@@ -287,14 +331,16 @@ describe "ScriptHost":
             root.add_child(blocked_form)
             root.add_child(allowed_form)
             var host = _make_host()
-            host.execute("", root)
+            val index = _install_host_document(host, root)
 
-            host.inject_dom_event(BeDomEvent.create(
-                "click", "", true, true
-            ))
-            host.inject_dom_event(BeDomEvent.create(
-                "click", "", true, true
-            ))
+            host.inject_dom_event_route(
+                index.route_for_author_id("blocked-submit").unwrap(),
+                BeDomEvent.create("click", "", true, true)
+            ).unwrap()
+            host.inject_dom_event_route(
+                index.route_for_author_id("allowed-submit").unwrap(),
+                BeDomEvent.create("click", "", true, true)
+            ).unwrap()
 
             val updated = host.dom_root()
             expect(updated.children[0].has_attr("data-submitted")).to_be(false)
@@ -309,10 +355,12 @@ describe "ScriptHost":
             root.set_attr("id", "root")
             root.add_event_listener_with_capture("click", "set-attr:data-captured=yes", true)
             root.add_child(checkbox)
-            host.execute("", root)
+            val index = _install_host_document(host, root)
 
             val event = BeDomEvent.create("click", "", true, true)
-            host.inject_dom_event(event)
+            host.inject_dom_event_route(
+                index.route_for_author_id("accept").unwrap(), event
+            ).unwrap()
 
             expect(host.dom_root().get_attr("data-captured")).to_equal("yes")
             expect(host.dom_root().children[0].get_attr("data-captured")).to_equal("")
@@ -321,7 +369,7 @@ describe "ScriptHost":
         it "AC-1: dom_root after execute returns a BeDomNode":
             var host = _make_host()
             val root = _make_div_root()
-            host.execute("", root)
+            val _ = _install_host_document(host, root)
             val returned_root = host.dom_root()
             expect(returned_root.tag).to_equal("div")
 
