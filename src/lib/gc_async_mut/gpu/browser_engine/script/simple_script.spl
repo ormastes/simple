@@ -12,7 +12,10 @@ browser DOM and event loop infrastructure.
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
-    DomDocumentGeneration, DomIdentityIndex
+    DomDocumentGeneration, DomNodeRoute, DomIdentityIndex
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_node_for_route, be_dom_event_identity
 }
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop,
@@ -234,6 +237,28 @@ pub class SimpleScriptExecutor:
         if actions.len() == 0:
             return
         self._dom_dirty = true
+
+    me inject_dom_event_route(
+        route: DomNodeRoute, event: BeDomEvent
+    ) -> Result<bool, text>:
+        """Reject stale routes before an event can reach retained callbacks."""
+        val generation = match self._dom_generation:
+            Some(value): value
+            nil: return Err("invalid_document")
+        if route.generation.value != generation.value:
+            return Err("stale_target")
+        val index = match self._dom_identity_index:
+            Some(value): value
+            nil: return Err("invalid_document")
+        val node = match be_dom_node_for_route(self._dom_root, index, route):
+            Some(value): value
+            nil: return Err("stale_target")
+        var next_event = event
+        val target_id = be_dom_event_identity(node)
+        next_event.target_id = target_id
+        next_event.current_target_id = target_id
+        self.inject_dom_event(next_event)
+        Ok(true)
 
     me dom_root() -> BeDomNode:
         """Return the current (possibly Simple-mutated) DOM root."""

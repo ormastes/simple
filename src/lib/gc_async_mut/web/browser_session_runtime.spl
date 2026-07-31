@@ -39,7 +39,9 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_default_action_to_id,
     be_dom_apply_default_action_to_id_without_focus
 }
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_route}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_focused_route, be_dom_node_for_route, be_dom_event_identity
+}
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build, html_tree_builder_build_with_scripts
 }
@@ -1070,6 +1072,14 @@ impl BrowserSession:
         self.text_selection_focus_byte = focus_byte
         true
 
+    me set_dom_text_selection_route(
+        route: DomNodeRoute, anchor_byte: i64, focus_byte: i64
+    ) -> bool:
+        val target_id = match self._event_target_id_for_route(route):
+            Ok(value): value
+            Err(_): return false
+        self.set_dom_text_selection(target_id, anchor_byte, focus_byte)
+
     me clear_dom_text_selection():
         self.text_selection_target_id = ""
         self.text_selection_anchor_byte = 0
@@ -1149,6 +1159,12 @@ impl BrowserSession:
             return false
         val _ = self._ensure_dom_text_selection(target_id, target)
         true
+
+    me ensure_dom_text_selection_route(route: DomNodeRoute) -> bool:
+        val target_id = match self._event_target_id_for_route(route):
+            Ok(value): value
+            Err(_): return false
+        self.ensure_dom_text_selection(target_id)
 
     me _persist_storage_for_url(url: text):
         if url == "" or not self.csp_sandbox_policy.allow_same_origin:
@@ -1329,7 +1345,29 @@ impl BrowserSession:
             nil, "", false, true
         )
 
-    me dispatch_dom_primary_pointer_down(
+    fn _event_target_id_for_route(route: DomNodeRoute) -> Result<text, text>:
+        if route.generation.value != self.document_generation().value:
+            return Err("stale_target")
+        val index = match self.current_dom_identity_index():
+            Some(value): value
+            nil: return Err("invalid_document")
+        val node = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(value): value
+            nil: return Err("stale_target")
+        # Temporary review bridge: Lane 2 keeps this projection until every
+        # legacy dispatch consumer is removed in the combined migration.
+        Ok(be_dom_event_identity(node))
+
+    me dispatch_dom_event_route(
+        route: DomNodeRoute, event_type: text, bubbles: bool, cancelable: bool
+    ) -> Result<BeDomEventDispatch, text>:
+        """Gate a typed event route before the legacy dispatcher is retired."""
+        val target_id = self._event_target_id_for_route(route)?
+        Ok(self.dispatch_dom_event(
+            target_id, event_type, bubbles, cancelable
+        ))
+
+    me dispatch_dom_primary_pointer_down_by_id(
         target_id: text
     ) -> BrowserPrimaryPointerDownDispatch:
         """Dispatch primary pointerdown and its permitted mouse compatibility.
@@ -1356,7 +1394,7 @@ impl BrowserSession:
             mouse_default_action_allowed: mouse_down.default_action_allowed
         )
 
-    me dispatch_dom_primary_pointer_up(
+    me dispatch_dom_primary_pointer_up_by_id(
         target_id: text, suppress_compat_mouse: bool, activate_click: bool
     ):
         """Finish a primary pointer stream without dropping pointerup/click."""
@@ -1372,6 +1410,21 @@ impl BrowserSession:
                 target_id, "click", true, true, "", "", false,
                 nil, "", false, not suppress_compat_mouse
             )
+
+    me dispatch_dom_primary_pointer_down(
+        route: DomNodeRoute
+    ) -> Result<BrowserPrimaryPointerDownDispatch, text>:
+        val target_id = self._event_target_id_for_route(route)?
+        Ok(self.dispatch_dom_primary_pointer_down_by_id(target_id))
+
+    me dispatch_dom_primary_pointer_up(
+        route: DomNodeRoute, suppress_compat_mouse: bool, activate_click: bool
+    ) -> Result<bool, text>:
+        val target_id = self._event_target_id_for_route(route)?
+        self.dispatch_dom_primary_pointer_up_by_id(
+            target_id, suppress_compat_mouse, activate_click
+        )
+        Ok(true)
 
     me _dispatch_dom_input_event(
         target_id: text, event_type: text, bubbles: bool, cancelable: bool,
@@ -1813,13 +1866,29 @@ impl BrowserSession:
             pressed, shift_key
         )
 
-    me dispatch_dom_keyboard_code_event(
+    me dispatch_dom_keyboard_code_event_by_id(
         target_id: text, key_code: i64, pressed: bool, shift_key: bool
     ) -> Result<BeDomEventDispatch, text>:
         self._dispatch_dom_keyboard_event_with_shift_payload(
             target_id,
             browser_dom_keyboard_key(key_code, shift_key),
             browser_dom_keyboard_code(key_code),
+            pressed, shift_key
+        )
+
+    me dispatch_dom_keyboard_code_event(
+        focused_route: DomNodeRoute?, key_code: i64, pressed: bool,
+        shift_key: bool
+    ) -> Result<BeDomEventDispatch, text>:
+        val key = browser_dom_keyboard_key(key_code, shift_key)
+        val target_id = match focused_route:
+            Some(route): self._event_target_id_for_route(route)?
+            nil:
+                if key.trim().lower() != "tab" and key != "9":
+                    return Err("stale_target")
+                ""
+        self._dispatch_dom_keyboard_event_with_shift_payload(
+            target_id, key, browser_dom_keyboard_code(key_code),
             pressed, shift_key
         )
 
@@ -2133,6 +2202,11 @@ impl BrowserSession:
             )
         Ok(true)
 
+    me set_dom_select_value_route(
+        route: DomNodeRoute, value: text
+    ) -> Result<bool, text>:
+        self.set_dom_select_value(self._event_target_id_for_route(route)?, value)
+
     me set_dom_text_input(
         target_id: text, value: text
     ) -> Result<BeDomEventDispatch, text>:
@@ -2140,12 +2214,22 @@ impl BrowserSession:
             target_id, value, true, "insertReplacementText"
         )
 
+    me set_dom_text_input_route(
+        route: DomNodeRoute, value: text
+    ) -> Result<BeDomEventDispatch, text>:
+        self.set_dom_text_input(self._event_target_id_for_route(route)?, value)
+
     me append_dom_text_input(
         target_id: text, value: text
     ) -> Result<BeDomEventDispatch, text>:
         self._apply_dom_text_edit(
             target_id, value, false, "insertText"
         )
+
+    me append_dom_text_input_route(
+        route: DomNodeRoute, value: text
+    ) -> Result<BeDomEventDispatch, text>:
+        self.append_dom_text_input(self._event_target_id_for_route(route)?, value)
 
     me _blur_dom_focus(target_id: text) -> Result<BeDomEventDispatch, text>:
         val path = be_dom_find_path_to_id(self.current_dom, target_id)
@@ -2180,6 +2264,11 @@ impl BrowserSession:
         if target.tag_name != "input" and target.tag_name != "textarea":
             return Err("DOM input target is not text-editable")
         self._blur_dom_focus(target_id)
+
+    me blur_dom_text_input_route(
+        route: DomNodeRoute
+    ) -> Result<BeDomEventDispatch, text>:
+        self.blur_dom_text_input(self._event_target_id_for_route(route)?)
 
     me clear_dom_focus():
         val focused_id = be_dom_focused_route_id(self.current_dom)
