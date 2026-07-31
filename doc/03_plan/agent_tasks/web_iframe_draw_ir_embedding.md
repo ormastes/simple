@@ -1,6 +1,6 @@
 # Agent tasks: Web iframe Draw IR embedding
 
-Status: source/spec/manual tranche STATIC REVIEW PASS through `05142a1a06f`;
+Status: source/spec/manual tranche STATIC REVIEW PASS;
 qualified execution and legacy pixel parity remain required before any caller
 migration.
 

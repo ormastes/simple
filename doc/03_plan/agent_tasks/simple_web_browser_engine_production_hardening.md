@@ -1071,7 +1071,7 @@ stopped, RED, or evidence-held history.
 | `disabled_ui_dispatch` | `fbecc67eb77` rejects disabled text controls before shared dispatch. | STATIC REVIEW PASS; qualified execution HELD |
 | `animation_keyframe_perf` | `f57d9bc4600` and `782477146a9` skip unused layout keys and retain empty final keys. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list RED |
 | `hosted_form_action` | `c91fdc0e67b` binds redirects to host-owned form-action authorization and conservatively rejects unauthorized navigation. | STATIC REVIEW PASS; qualified execution HELD |
-| `cors_unsafe_header_preflight` | `626a3f295a0` + `a9a98020108` + `cde74d01314` add `FetchCorsPreflightPlan` and one broker-owned OPTIONS-to-actual transition with no preflight side effects. | STATIC REVIEW PASS; direct `HostedWebContentSession` CORS and live execution remain RED |
+| `cors_unsafe_header_preflight` | The renderer staged-CORS source/spec stack adds `FetchCorsPreflightPlan` and one broker-owned OPTIONS-to-actual transition with no preflight side effects. | STATIC REVIEW PASS; direct `HostedWebContentSession` CORS and live execution remain RED |
 | `tls_mixed_content` | TLS and mixed-content source controls are present. | SOURCE PRESENT / LIVE EVIDENCE HELD |
 
 The reviewed gap stack `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` +
@@ -1096,6 +1096,6 @@ credentials split has a reviewed contract. Executable evidence is
 
 | Lane | Evidence | Status |
 |---|---|---|
-| Worker Reload ownership | `2b693b48f18` + `685ac758a7b` + `126135c824e` reject raw worker Reload and preserve full history/index/render state. | STATIC REVIEW PASS; qualified execution HELD |
-| SimpleScript replacement cancellation | `675d43ca87e` stops copied same-tick callbacks after document generation changes and preserves red DrawIR/Engine2D output. | STATIC REVIEW PASS; CSS animation lists/lifecycle events remain RED |
-| Iframe DrawIR tranche | `c319612224a` + `bf440a3d8f6` + `05142a1a06f` embed inert `srcdoc` batches with bounded IDs/clips/order/hits and fail-closed isolation placeholders. | STATIC REVIEW PASS; legacy pixel caller migration, child runtime authority, and qualified parity remain RED |
+| Worker Reload ownership | `browser_ui_access_controls_spec.spl` and its manual reject raw worker Reload and preserve full history/index/render state. | STATIC REVIEW PASS; qualified execution HELD |
+| SimpleScript replacement cancellation | `browser_session_runtime.spl` plus `browser_session_script_css_animation_spec.spl` stop copied same-tick callbacks after document generation changes and preserve red DrawIR/Engine2D output. | STATIC REVIEW PASS; CSS animation lists/lifecycle events remain RED |
+| Iframe DrawIR tranche | `simple_web_iframe_draw_ir_embedding_spec.spl` and the shared DrawIR/Web composer embed inert `srcdoc` batches with bounded IDs/clips/order/hits and fail-closed isolation placeholders. | STATIC REVIEW PASS; legacy pixel caller migration, child runtime authority, and qualified parity remain RED |
