@@ -34,6 +34,9 @@ use std.editor.core.session.{EditSession}
 use std.editor.extensions.host.*
 use app.editor.editor_controller.{EditorController}
 use app.editor.editor_ctrl_core.{ctrl_activate_active_language}
+use app.editor.gui_shell_core.*
+use app.editor.gui_shell_render.*
+use std.editor.backend.gui_backend.*
 
 fn _has_event(host: ExtensionHost, event: text, payload: text) -> bool:
     for record in host.event_log:
@@ -81,3 +84,35 @@ describe "document open routes to a registered contributes_custom_editors entry"
         # confirming the earlier no-event assertion is because there is
         # genuinely no kind to route on, not a bug that swallowed the event.
         expect(ctrl.extension_host.find_language_for_ext(".rs")).to_equal("")
+
+    it "a resolved custom editor is observable beyond the event log -- it changes what the GUI status bar renders":
+        # Until now, onDidResolveCustomEditor fired into a void: nothing
+        # recorded which editor won, and nothing downstream ever read it
+        # back, so a .csv document rendered byte-identically to a plain-text
+        # one. ctrl_route_to_custom_editor now stamps the resolved editor id
+        # onto EditorDocument.custom_editor_id, and gui_shell_render_frame's
+        # status bar reads it back -- so opening a document with a
+        # registered custom editor now produces a genuinely different
+        # rendered frame, not just a different event log entry.
+        var session = EditSession.new()
+        session.open_file("custom_editor_routing_fixture_budget.csv")
+        var state = gui_shell_new(session)
+        var ctrl = state.ctrl
+        ctrl.extension_host.activate("sheets-function-registry-demo")
+        ctrl_activate_active_language(ctrl)
+        state.ctrl = ctrl
+
+        expect(state.ctrl.session.active_document().custom_editor_id).to_equal("sheets.grid")
+        val frame = gui_shell_render_frame(state)
+        expect(frame.status_html.contains("custom-editor:sheets.grid")).to_equal(true)
+
+        var session_plain = EditSession.new()
+        session_plain.open_file("custom_editor_routing_fixture_notes.rs")
+        var state_plain = gui_shell_new(session_plain)
+        var ctrl_plain = state_plain.ctrl
+        ctrl_activate_active_language(ctrl_plain)
+        state_plain.ctrl = ctrl_plain
+
+        expect(state_plain.ctrl.session.active_document().custom_editor_id).to_equal("")
+        val frame_plain = gui_shell_render_frame(state_plain)
+        expect(frame_plain.status_html.contains("custom-editor:")).to_equal(false)
