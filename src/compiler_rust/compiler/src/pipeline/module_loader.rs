@@ -2989,6 +2989,43 @@ impl Wrapper:
         );
     }
 
+    #[test]
+    fn method_arity_collision_silent_for_comment_mentioning_a_different_arity() {
+        // A comment whose TEXT happens to describe a same-named method at a
+        // different arity (exactly the shape of the real explanatory comment
+        // above `element_with_id` in dom.spl, e.g. "two `static fn element`
+        // co-compiled definitions") must not be mistaken for a second
+        // definition. This is a structural AST check over `ImplBlock.methods`
+        // — comments never become AST nodes — but this test pins that
+        // guarantee explicitly so a future regression (e.g. a parser change
+        // that leaks doc-comment text into the item list) is caught here.
+        let source = r#"
+class Wrapper:
+    value: i64
+
+impl Wrapper:
+    static fn make(value: i64) -> Wrapper:
+        """Construct a Wrapper."""
+        Wrapper(value: value)
+
+    # Named distinctly from `make(value)` above rather than overloaded on
+    # arity: two `static fn make` co-compiled definitions with differing
+    # signatures (e.g. static fn make(a: i64, b: i64, c: i64)) would corrupt
+    # struct-field reads under JIT.
+    static fn make_pair(value: i64, other: i64) -> Wrapper:
+        Wrapper(value: value + other)
+"#;
+        let mut parser = simple_parser::Parser::new(source);
+        let module = parser.parse().expect("parse ok");
+
+        let findings = find_method_arity_collisions(&module);
+        assert!(
+            findings.is_empty(),
+            "a comment describing a differently-named/differently-arity method must not fire: {:?}",
+            findings
+        );
+    }
+
     /// Not a correctness test — a repo-wide census of real
     /// `compiler_impl_block_method_arity_collision` sites under `src/`.
     /// `#[ignore]`d so normal `cargo test` runs don't pay the walk cost; run
@@ -3013,6 +3050,15 @@ impl Wrapper:
 
         let mut spl_files = Vec::new();
         collect_spl_files(&src_root, &mut spl_files);
+
+        // Dedupe by canonicalized real path: symlinked mirrors of the same
+        // tree (e.g. src/std -> src/lib) must not count the same source file
+        // twice.
+        let mut seen_real_paths = std::collections::HashSet::new();
+        spl_files.retain(|p| match p.canonicalize() {
+            Ok(real) => seen_real_paths.insert(real),
+            Err(_) => true, // keep unreadable paths so read_to_string reports the failure below
+        });
         spl_files.sort();
 
         let mut parse_failures = 0usize;
