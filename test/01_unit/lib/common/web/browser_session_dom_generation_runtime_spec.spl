@@ -6,6 +6,7 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_find_by_tag, be_dom_get_attr, be_dom_get_text_content
 }
+use std.js.types.js_types.{JsValue}
 
 describe "BrowserSession generation-qualified runtime publication":
 
@@ -69,6 +70,40 @@ describe "BrowserSession generation-qualified runtime publication":
             stable_text
         )
 
+        step("Rollback evaluated runtime and metadata when publication fails")
+        var atomic = BrowserSession.new()
+        atomic.open_html(
+            "https://example.test/atomic",
+            "<html><body><p>stable</p></body></html>"
+        ).unwrap()
+        val atomic_index = atomic.current_dom_identity_index().unwrap()
+        val atomic_url = atomic.current_url
+        val atomic_title = atomic.current_title
+        val atomic_body = atomic.current_body_html
+        val atomic_history_len = atomic.history.len()
+        val atomic_cookie_count = atomic.cookies.count()
+        atomic.dom_identity_index = nil
+        match atomic.eval_script(
+            "document.title='leak';" +
+            "document.body.innerHTML='<p>leak</p>';" +
+            "history.pushState({},'', '/leak');" +
+            "sessionStorage.setItem('leak','1');" +
+            "document.cookie='leak=1'; 1"
+        ):
+            Ok(_): fail("Rejected DOM candidate must fail evaluation commit")
+            Err(error): expect(error).to_equal("invalid_document")
+        expect(atomic.current_url).to_equal(atomic_url)
+        expect(atomic.current_title).to_equal(atomic_title)
+        expect(atomic.current_body_html).to_equal(atomic_body)
+        expect(atomic.history.len()).to_equal(atomic_history_len)
+        expect(atomic.session_storage.len()).to_equal(0)
+        expect(atomic.cookies.count()).to_equal(atomic_cookie_count)
+        atomic.dom_identity_index = Some(atomic_index)
+        match atomic.eval_script("document.title"):
+            Ok(JsValue.String(title)): expect(title).to_equal(atomic_title)
+            Ok(_): fail("Expected restored runtime title")
+            Err(error): fail("Expected restored runtime: " + error)
+
         step("Forward uncanceled label activation and preserve nested budget")
         session.open_html(
             "https://example.test/label",
@@ -97,6 +132,36 @@ describe "BrowserSession generation-qualified runtime publication":
         ).unwrap()
         val inputs = be_dom_find_by_tag(session.dom_root(), "input")
         expect(be_dom_get_attr(inputs[0], "checked")).to_equal("checked")
+
+        step("Rollback preactivation after callable budget exhaustion")
+        var budgeted = BrowserSession.new()
+        budgeted.open_html(
+            "https://example.test/budgeted",
+            "<html><body><input id='choice' type='checkbox'></body></html>"
+        ).unwrap()
+        budgeted.eval_script(
+            "var c=document.getElementById('choice');" +
+            "c.addEventListener('click',function(){});" +
+            "c.addEventListener('click',function(){});" +
+            "c.addEventListener('click',function(){});"
+        ).unwrap()
+        val budgeted_index = budgeted.current_dom_identity_index().unwrap()
+        val budgeted_route = budgeted_index.route_for_author_id(
+            "choice"
+        ).unwrap()
+        budgeted.dom_dispatch_depth = 1
+        budgeted.dom_dispatch_budget_remaining = 9
+        match budgeted.dispatch_dom_event_route(
+            budgeted_route, "click", true, true
+        ):
+            Ok(_): fail("Callable listener budget must remain shared")
+            Err(error): expect(error).to_equal(
+                "DOM event dispatch budget exceeded"
+            )
+        val budgeted_inputs = be_dom_find_by_tag(
+            budgeted.dom_root(), "input"
+        )
+        expect(be_dom_get_attr(budgeted_inputs[0], "checked")).to_equal("")
 
         step("Honor cancellation and interactive-descendant suppression")
         var canceled = BrowserSession.new()

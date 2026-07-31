@@ -1405,11 +1405,34 @@ impl BrowserSession:
         if self.runtime_state == nil:
             val _ = self._ensure_runtime_state()
         if val Some(state) = self.runtime_state:
+            # Evaluation is tentative until its runtime/DOM mirrors publish as
+            # one transaction.  Preserve the externally visible pre-eval state
+            # so a rejected DOM candidate cannot leak runtime side effects.
+            val previous_runtime_state = self.runtime_state
+            val previous_pending_requests = self.pending_requests
+            val previous_pending_request_head = self.pending_request_head
+            val previous_inflight_requests = self.inflight_requests
+            val previous_next_request_seq = self.next_request_seq
+            val previous_warnings = self.warnings
+            val previous_pending_history_delta = (
+                self.pending_history_traversal_delta
+            )
             var runtime = state.runtime
             val result = runtime.eval(script)
             state.runtime = runtime
             self.runtime_state = Some(state)
-            self._flush_runtime_side_effects_and_pump_history()
+            val flushed = self._flush_runtime_side_effects_and_pump_history()
+            if val Err(error) = flushed:
+                self.runtime_state = previous_runtime_state
+                self.pending_requests = previous_pending_requests
+                self.pending_request_head = previous_pending_request_head
+                self.inflight_requests = previous_inflight_requests
+                self.next_request_seq = previous_next_request_seq
+                self.warnings = previous_warnings
+                self.pending_history_traversal_delta = (
+                    previous_pending_history_delta
+                )
+                return Err(error)
             match result:
                 Ok(value):
                     return Ok(value)
@@ -2015,7 +2038,10 @@ impl BrowserSession:
             checkable_action != "" and
             checkable_action == live_checkable_action
         )
-        if checkable_action != "" and not preactivation_matches_live:
+        if (
+            checkable_action != "" and
+            (not preactivation_matches_live or dispatch_budget_exhausted)
+        ):
             self._rollback_checkable_preactivation(
                 route, checked_before, checked_radio_before
             )?
@@ -2953,7 +2979,29 @@ impl BrowserSession:
             return nil
         self.runtime_state
 
-    me _sync_from_runtime(state: BrowserRuntimeState):
+    me _sync_from_runtime(
+        state: BrowserRuntimeState
+    ) -> Result<bool, text>:
+        # Runtime evaluation mutates a private state copy. Metadata stays
+        # rollback-capable until the DOM candidate and all mirrors publish.
+        val previous_title = self.current_title
+        val previous_url = self.current_url
+        val previous_document_url = self.document_url
+        val previous_history = self.history
+        val previous_current_index = self.current_index
+        val previous_history_action = self.history_proposal_action
+        val previous_history_url_kind = self.history_proposal_url_kind
+        val previous_history_raw_url = self.history_proposal_raw_url
+        val previous_warnings = self.warnings
+        val previous_session_storage = self.session_storage
+        val previous_local_storage = self.local_storage
+        val previous_session_storage_by_origin = (
+            self.session_storage_by_origin
+        )
+        val previous_local_storage_by_origin = self.local_storage_by_origin
+        val previous_cookies = self.cookies
+        val previous_cookie_overflow = self.script_cookie_write_overflow
+        val previous_body_html = self.current_body_html
         var title_val = state.runtime.interpreter.host_document_title_value
         if strict_equals(title_val, JsValue.Undefined):
             title_val = state.runtime.get_host_property(
@@ -3306,24 +3354,42 @@ impl BrowserSession:
             val published = self.publish_dom_snapshot(
                 candidate_dom, replace_document, Some(state)
             )
-            if published.? == true:
-                self.current_body_html = candidate_body_html
-                self._advance_ui_access_revision()
-                self._mark_css_animation_reconcile(structural_changed)
-                if (
-                    self.active_load == nil and not self.is_loading and
+            if val Err(error) = published:
+                self.current_title = previous_title
+                self.current_url = previous_url
+                self.document_url = previous_document_url
+                self.history = previous_history
+                self.current_index = previous_current_index
+                self.history_proposal_action = previous_history_action
+                self.history_proposal_url_kind = previous_history_url_kind
+                self.history_proposal_raw_url = previous_history_raw_url
+                self.warnings = previous_warnings
+                self.session_storage = previous_session_storage
+                self.local_storage = previous_local_storage
+                self.session_storage_by_origin = (
+                    previous_session_storage_by_origin
+                )
+                self.local_storage_by_origin = previous_local_storage_by_origin
+                self.cookies = previous_cookies
+                self.script_cookie_write_overflow = previous_cookie_overflow
+                self.current_body_html = previous_body_html
+                return Err(error)
+            self.current_body_html = candidate_body_html
+            self._advance_ui_access_revision()
+            self._mark_css_animation_reconcile(structural_changed)
+            if (
+                self.active_load == nil and not self.is_loading and
+                (
                     (
-                        (
-                            structural_changed and
-                            candidate_body_html.lower().contains("url(")
-                        ) or dom_sync.image_source_changed
-                    )
-                ):
-                    self._reconcile_dynamic_image_sources(nil)
-            else:
-                self._append_warning("DOM identity publication failed")
+                        structural_changed and
+                        candidate_body_html.lower().contains("url(")
+                    ) or dom_sync.image_source_changed
+                )
+            ):
+                self._reconcile_dynamic_image_sources(nil)
         else:
             self.runtime_state = Some(state)
+        Ok(true)
 
     me _push_runtime_history_entry():
         var source_html = self.source_html
