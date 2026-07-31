@@ -22,7 +22,7 @@ Implement the complete generic spatial-layout framework defined by `doc/03_plan/
 - AC-10: Focused checks, changed-file lint, duplication check, generated-spec layout guard, and working/staged direct-env runtime guards pass once; final high-capability review confirms every plan phase and acceptance row has authoritative evidence.
 
 ## Scope Exclusions
-- Browser-specific manager integration is the required consumer verification lane from `web_layout_manager_plan.md`.
+- Browser-specific manager integration remains owned by `web_layout_manager_plan.md`.
 - A new resolver profile, a second shaping engine, and approximation of text shaping are excluded.
 - GPU text layout and non-homogeneous GPU batches are excluded until independently verified.
 
@@ -91,37 +91,14 @@ layout_framework: { consumes: [mapping, invalidation, execution, text_measure], 
 - Documentation freshness: layout research, selected requirements, architecture, detail design, test/agent plans, guide, and TLDR companions updated. Workflow/tooling command/skill docs are N/A because no workflow or tool contract changed.
 
 ## Phase
-implementation-correction-in-progress
+implement-source-done
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: feature).
 - research: Found one canonical CPU oracle, one text owner, no implemented frozen contracts, and eight selected requirements.
 - arch: Designed seven owner modules, one CPU-oracle boundary, deterministic SCC waves, and cost-qualified dispatch.
-- specs: Added focused unit and system SSpec coverage at the two planned executable paths. The public `common.structural.layout` barrel exposes the designed APIs plus minimal value constructors; `layout_execution_profile` records kernel, scheduling, transfer, and synchronization inputs, while convergence is determined only by executed geometry.
+- specs: Added focused unit and system SSpec coverage at the two planned executable paths. The public `common.structural.layout` barrel is frozen around the five designed APIs plus minimal value constructors; `layout_execution_profile` records kernel, scheduling, transfer, and synchronization inputs, and `layout_node` records required fixed-point iterations.
 - specs: Coverage directly asserts constructors/versioning, deterministic islands, SCC wave order, cap exhaustion, malformed dependencies, honest backend cost, CPU fallbacks, full/incremental oracle equality, visited islands, `LayoutOf` mappings, and receipt hashes. The system manual shape is one visible four-step primary flow using exactly the frozen phrases, followed by folded edge behavior for small/text/non-convergent work.
 - specs-alignment: Reviewed every file under `src/lib/common/structural/`. The two specs match the concrete barrel's constructor signatures, v1 fields, `LayoutTextMeasureResult`, `SpatialLayoutProfile`, and `TextMeasurePort`; the primary GPU fixture is homogeneous block layout as required by the design.
 - implement: Added the five behavior APIs, eight-profile serial catalog, concrete DirtyMask/MappingGraph/ExecutionProfile/CostEstimate/StageReceipt contracts, deterministic SCC waves, bounded fixed points, exact oracle snapshots, incremental receipts, and cost-qualified homogeneous GPU dispatch.
 - verification-blocker: The current pure-Simple wrapper reports `error: unknown command 'check'`, `error: unknown command 'test'`, and `error: unknown command 'spipe-docgen'`; a separate full bootstrap is active. No mirrored manual or runtime PASS is claimed in this checkpoint.
-- consumer: Implemented the web layout manager against the real `SimpleWebLayoutDrawIrResult.raw_boxes` oracle with full/incremental framework delegation, stable invalidation, mappings, receipts, epochs, and hit regions.
-- manual: Added the operator-readable framework and web-manager evidence companions manually because `spipe-docgen` remains unavailable.
-- verify: Static placeholder/conflict/runtime-boundary checks and working/staged direct-runtime guards pass; runtime STATUS remains WARN until the canonical CLI restores `check` and `test`.
-- completion-audit: STATUS FAIL. The pushed checkpoint selected GPU by receipt without executing a port, copied oracle boxes instead of exercising CPU profiles, used global rather than per-island costs, modeled convergence with fixture counts, and lacked required profile/fragment/line/overflow evidence.
-- design-correction: Frozen `LayoutExecutionPort`, family-aware `TextMeasurePort`, per-island costs, real geometry-hash convergence, proof-qualified GPU receipts, and fragment/line/overflow outputs before continuing implementation.
-- implementation-correction: Added consumer CPU/GPU execution ports, exact per-island costs, bounded executed fixed points, full/incremental artifact parity, resolved browser text metrics, and explicit `HitRegionOf` mappings. Runtime verification remains pending.
-- gpu-boundary-audit: Honest device execution remains open in `doc/08_tracking/bug/layout_gpu_semantic_device_boundary_2026-07-31.md`; the current request lacks authored block/flex/grid constraints and the current WebGPU owner has no geometry upload/kernel/readback path. Removed fabricated GPU acceptance evidence; the proof gate now tests rejection only.
-- production-consumer: Wired the full manager into `SimpleWebRenderSession` after the completed CPU result, propagated real DOM generation, retained framework snapshot/result state, preserved adapter faults, avoided epoch changes on reused frames, and cleared state on close.
-- verification-blocker-2: A fresh pure-Simple bootstrap compiler was used only to build verification tooling. The full CLI build stopped on the unrelated existing out-of-range literal in `src/os/compositor/background_image_provider.spl`; both focused-check link modes then stopped on missing `core-c-bootstrap` runtime symbols (`rt_array_sort`, `rt_is_debug_mode_enabled`, `rt_dir_list`). The mandatory three-attempt cap is reached; no runtime PASS, commit, or push is claimed.
-- interface-correction: Moved oracle geometry out of per-node semantics; froze typed topology, lengths, box/flex/grid constraints, viewport dimensions, flat tracks, and named GPU admission bits; mapped them from canonical browser nodes/styles.
-- device-slice: Added a real CUDA semantic upload/PTX/sync/readback port and live fixed-leaf block/flex/grid proof. Child arrangement, absolute/overflow, and GPU line breaking remain explicitly pre-rejected and tracked as open work.
-- production-incremental: Retained browser snapshots now derive exact geometry frontiers; full rebuilds, incremental geometry updates, and paint-only epoch preservation are distinct. Large eligible batches become cost candidates while small pages remain CPU-owned.
-- sync: Fetched and rebased cleanly onto `main@origin` at `65cecd6f7b7d`; the unrelated conflicted `codex/nvme-goal-fix` bookmark was preserved untouched.
-- checkpoint-push: Committed and pushed `feat(layout): add semantic execution framework` as `26863fa5837e` on `main@origin`; this checkpoint explicitly does not claim the remaining web-plan phases or runtime PASS.
-- device-children: Extended the CUDA semantic kernel to one-level fixed block stacking, flex row/column placement, and fixed grid tracks/placement with direct live parity cases and fail-closed admission.
-- artifact-parity: Added exact oracle fragments, wrapped line boxes, and overflow records; incremental clean-island merge preserves them, execution requests strip them, and GPU acceptance compares all artifacts rather than boxes alone.
-- verification-blocker-3: A separately running `full-rootfix11` Stage4 attempt ended without an artifact on the unrelated existing `lib.common.ui.glass.theme` HIR error `unresolved name: theme_design_tokens`. No new build was started by this lane and the local three-attempt cap remains enforced.
-- device-expansion: Added bounded one-level block/flex/grid arrangement, absolute placement, overflow/scroll extents, and Latin line-break CUDA paths; unsupported depth, track, position, and complex-script cases reject before submission.
-- web-plan-evidence: Added WPT-derived block/flex/grid/absolute/overflow/wrapped-text parity scenarios, retained-session epoch/frontier evidence, and exact fragment/line/overflow comparison and merging.
-- cpu-production-port: Separated retained geometry from optional oracle data and routed the retained browser session through a prepared canonical CPU execution port. The current selection seam recomputes the canonical root for correctness before returning selected artifacts, so receipt scope is incremental but CPU compute reduction is not claimed.
-- production-failsafe: Adapter/execution faults fall back to canonical CPU layout for rendering; production snapshots without an independent oracle reject GPU before submission. Runtime STATUS remains WARN because no complete Stage4 self-hosted CLI is available.
-- final-static: Changed-file whitespace, conflict-marker, placeholder, oracle-leak, and direct env/runtime guards pass. Runtime STATUS remains WARN; the bounded build-attempt cap prevents another toolchain retry.
-- sync-final: Fetched and rebased cleanly onto `main@origin` at `9450c2e570e1`; upstream touched only neighboring browser style/session surfaces, with no edited-path conflict. The unrelated conflicted `codex/nvme-goal-fix` bookmark remains untouched.
