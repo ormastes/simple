@@ -7,7 +7,9 @@ supported valid value through either canonical declaration application path:
 
 `HTML/CSS -> computed Style -> Web layout -> DrawIrComposition -> Engine2D`
 
-Unsupported display keywords and CSS-wide keyword semantics are excluded.
+The existing concrete display set plus `initial`, `unset`, `inherit`, and
+author-origin `revert` are covered. `revert-layer` is excluded until the parser
+retains layer provenance.
 
 ## Executable specification and manual
 
@@ -25,9 +27,12 @@ not claimed until the qualified pure-Simple CLI is available.
 
 ## Acceptance oracles
 
-- Both `none;bogus` probes compute to `none`; both `bogus;block` controls
-  compute to `block`.
-- Hidden probes emit no command; visible controls emit exact canonical boxes.
+- Malformed later values retain the last valid declaration through dispatch
+  and full paths.
+- `initial`/`unset` compute to `block`; important `inherit` copies the parent;
+  important `revert` restores the UA tag default.
+- Hidden probes emit no command; the visible full-path control emits its exact
+  canonical box.
 - Engine2D skips zero commands and returns the exact 32-pixel framebuffer.
 
 ## Traceability

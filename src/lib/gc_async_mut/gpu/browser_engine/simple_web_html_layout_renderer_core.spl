@@ -2439,6 +2439,39 @@ fn _scrollbar_width_in_decls(decls: text) -> text:
         return ""
     decl_tbl_get(decl_table_build(decls), "scrollbar-width").trim().lower()
 
+fn _display_value_in_decls(decls: text) -> text:
+    if decls == "" or _decl_over_quota(decls):
+        return ""
+    decl_tbl_get_last_cascading_display(decl_table_build(decls))
+
+fn _final_authored_display(
+    ua_display: text, inherited_display: text, normal: text, inline_normal: text,
+    important: text,
+    inline_important: text
+) -> text:
+    var value = ""
+    val normal_value = _display_value_in_decls(normal)
+    if normal_value != "":
+        value = normal_value
+    val inline_value = _display_value_in_decls(inline_normal)
+    if inline_value != "":
+        value = inline_value
+    val important_value = _display_value_in_decls(important)
+    if important_value != "":
+        value = important_value
+    val inline_important_value = _display_value_in_decls(inline_important)
+    if inline_important_value != "":
+        value = inline_important_value
+    if value == "":
+        return ""
+    if value == "initial" or value == "unset":
+        return "block"
+    if value == "inherit":
+        return inherited_display
+    if value == "revert":
+        return ua_display
+    value
+
 fn _normalize_final_overflow_axes(
     st: Style, normal: text, inline_normal: text, important: text,
     inline_important: text
@@ -2548,6 +2581,10 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             if raw_style_attr_len > 0:
                 print "[font-inherit-trace] index={i} tag={nd.tag} parent={nd.parent} style_attr_len={style_attr_len} style_attr_has_bungee={style_attr_has_bungee} raw_attrs_style_len={raw_style_attr_len}"
         var st = renderer_default_style()
+        val inherited_display = if nd.parent >= 0:
+            styles[nd.parent].display
+        else:
+            "block"
         if nd.parent >= 0:
             val parent_style = styles[nd.parent]
             if trace_stages:
@@ -2567,6 +2604,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         if trace_stages:
             print "[layout-trace] style_stage=em-base-ready index={i} em={em_base}"
         st = tag_defaults(st, nd.tag)
+        val ua_display = st.display
         if trace_stages:
             print "[layout-trace] style_stage=tag-defaults-ready index={i} display={st.display}"
             print "[layout-trace] style_stage=attrs-ready index={i} attrs_len={nd.attrs_raw.len()}"
@@ -2709,8 +2747,13 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             logical_writing_mode, inline_important
         )
 
+        val final_display = _final_authored_display(
+            ua_display, inherited_display, combined_decls, inline_normal,
+            combined_important_decls, inline_important
+        )
+
         if combined_decls != "":
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, combined_decls, em_base, logical_writing_mode
             )
         if inline_normal != "":
@@ -2721,7 +2764,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     inline_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, inline_normal, em_base, logical_writing_mode
             )
             if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
@@ -2734,7 +2777,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     important_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, combined_important_decls, em_base, logical_writing_mode
             )
         if inline_important != "":
@@ -2745,9 +2788,14 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     inline_important_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_on_writing_mode(
+            st = apply_decls_without_display_on_writing_mode(
                 st, inline_important, em_base, logical_writing_mode
             )
+        if final_display != "":
+            if final_display == "contents":
+                st = apply_decls(st, "display:" + final_display, em_base)
+            else:
+                st.display = final_display
         st = _normalize_final_overflow_axes(
             st, combined_decls, inline_normal, combined_important_decls,
             inline_important
