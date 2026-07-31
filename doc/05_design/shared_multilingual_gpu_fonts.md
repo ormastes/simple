@@ -363,6 +363,14 @@ material, WM Draw IR family/identity, and nonblank framebuffer output for Latin
 plus one accepted non-ASCII simple-script witness. Host-repository presence is
 not guest evidence.
 
+The canonical desktop lowers `SharedWmScene` through `Engine2dWmFrameExecutor`
+to a `DrawIrRenderTarget`. Hosted x86/ARM targets use Engine2D. RV64 uses
+`Riscv64DrawIrRenderTarget` over `Engine2DBaremetalCore`, consuming the same
+staged `FontRenderer` batch. Its Web frames reuse
+`simple_web_window_renderer_core` request/frame assembly and the target-backed
+`simple_web_window_renderer_software` adapter; they do not import the hosted
+pixel backend or create another renderer/cache.
+
 The pure-Simple builders and shared LFN reader are canonical. The still-live C
 image writer mirrors the same 16 readable names and fixed short aliases for its
 existing toolchain/evidence payload callers; it does not become a second font

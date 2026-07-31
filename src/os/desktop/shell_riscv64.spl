@@ -5,25 +5,29 @@ use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, WM_CH
 use common.ui.wm_chrome_theme.{wm_chrome_theme, active_wm_theme_id}
 use os.compositor.compositor.{Compositor}
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
-use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_revision_with_theme}
+use os.compositor.simple_web_window_renderer_core.{simple_web_content_frame_from_artifact, simple_web_content_revision_with_theme}
+use os.compositor.simple_web_window_renderer_software.{simple_web_content_draw_ir_artifact_cached}
 use os.desktop.wm_runtime_bridge.{simpleos_wm_pointer_runtime_command}
 use os.desktop.wm_pointer_decode.{wm_pointer_button_from_code, wm_pointer_kind_from_code}
-use std.gc_async_mut.ui.web_render_pixel_backend.{WebRenderPixelArtifactCache}
+use common.ui.web_render_api.{WebRenderArtifact}
+use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget}
 use nogc_sync_mut.ui.theme_package.{default_theme_id}
 
 pub class Riscv64DesktopShell:
     compositor: Compositor
     last_wm_loop_marker: text
     content_cache_ids: [i64]
-    content_caches: [WebRenderPixelArtifactCache]
+    content_caches: [WebRenderArtifact]
+    draw_ir_target: DrawIrRenderTarget
 
 impl Riscv64DesktopShell:
-    static fn new(compositor: Compositor) -> Riscv64DesktopShell:
+    static fn new(compositor: Compositor, draw_ir_target: DrawIrRenderTarget) -> Riscv64DesktopShell:
         Riscv64DesktopShell(
             compositor: compositor,
             last_wm_loop_marker: "",
             content_cache_ids: [],
-            content_caches: []
+            content_caches: [],
+            draw_ir_target: draw_ir_target
         )
 
     me init_baremetal():
@@ -85,16 +89,15 @@ impl Riscv64DesktopShell:
                 var cache = if cache_index >= 0:
                     self.content_caches[cache_index]
                 else:
-                    WebRenderPixelArtifactCache.create(content_w, content_h, "software")
-                if cache.width != content_w or cache.height != content_h:
-                    cache = WebRenderPixelArtifactCache.create(content_w, content_h, "software")
+                    WebRenderArtifact.empty("simple_web", content_w, content_h)
                 val content_revision = simple_web_content_revision_with_theme(theme_id, surface.title, surface.content_html, content_w, content_h, 0)
-                frames = frames.push(simple_web_content_frame_cached(cache, "{surface.id}", scene_revision, content_revision, theme_id, surface.title, surface.content_html, content_w, content_h, 0))
+                val artifact = simple_web_content_draw_ir_artifact_cached(cache, self.draw_ir_target, theme_id, surface.title, surface.content_html, content_w, content_h, 0)
+                frames = frames.push(simple_web_content_frame_from_artifact(artifact, "{surface.id}", scene_revision, content_revision, theme_id, content_w, content_h, 0, "", 0, 0))
                 if cache_index >= 0:
-                    self.content_caches[cache_index] = cache
+                    self.content_caches[cache_index] = artifact
                 else:
                     self.content_cache_ids = self.content_cache_ids.push(surface.id.to_i64())
-                    self.content_caches = self.content_caches.push(cache)
+                    self.content_caches = self.content_caches.push(artifact)
         frames
 
     me render_baremetal_frame(executor: Engine2dWmFrameExecutor) -> i64:

@@ -1670,6 +1670,31 @@ fn test_riscv64_gui_entry_closure_excludes_full_runtime_package_manager_tls() {
     assert!(files
         .iter()
         .any(|path| same_file_path(path, &repo_root.join("src/os/services/vfs/riscv64_font_vfs.spl"))));
+    for required in [
+        "src/os/compositor/riscv64_draw_ir_render_target.spl",
+        "src/os/compositor/engine2d_wm_frame_executor.spl",
+        "src/os/compositor/simple_web_window_renderer_core.spl",
+        "src/os/compositor/simple_web_window_renderer_software.spl",
+    ] {
+        assert!(
+            files.iter().any(|path| same_file_path(path, &repo_root.join(required))),
+            "missing RV64 GUI closure file: {required}"
+        );
+    }
+    for hosted in [
+        "src/os/compositor/compositor_render.spl",
+        "src/os/compositor/simple_web_window_renderer.spl",
+        "src/lib/gc_async_mut/ui/web_render_pixel_backend.spl",
+        "src/lib/gc_async_mut/ui/web_render_pixel_software_backend.spl",
+        "src/lib/gc_async_mut/gpu/engine2d/engine.spl",
+        "src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl",
+        "src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl",
+    ] {
+        assert!(
+            !files.iter().any(|path| same_file_path(path, &repo_root.join(hosted))),
+            "hosted renderer leaked into RV64 GUI closure: {hosted}"
+        );
+    }
     assert!(!files
         .iter()
         .any(|path| same_file_path(path, &repo_root.join("src/os/apps/package_manager/package_manager.spl"))));

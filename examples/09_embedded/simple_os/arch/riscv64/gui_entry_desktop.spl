@@ -15,9 +15,8 @@ use os.kernel.arch.riscv64.display.{
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.compositor.compositor.{Compositor}
 use os.compositor.arm64_virtio_input_backend.{Arm64VirtioInputBackend}
-use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
-use os.compositor.engine2d_framebuffer_factory.{create_fb_engine_sized}
 use os.compositor.engine2d_wm_frame_executor.{Engine2dWmFrameExecutor}
+use os.compositor.riscv64_draw_ir_render_target.{create_riscv64_compositor_backend, create_riscv64_draw_ir_render_target}
 use os.compositor.simpleos_wm_theme_bootstrap.{install_generated_simpleos_wm_theme}
 use os.desktop.shell_riscv64.{Riscv64DesktopShell}
 use os.desktop.font_bootstrap_riscv64.{simpleos_desktop_register_selected_fonts_from_riscv64_virtio_fat32}
@@ -107,8 +106,8 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
     serial_println("[rv64-font-evidence] guest_path=/SYS/FONTS/NOTOSANS asset_bytes=1708408 asset_sha256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081 route=shared-wm-draw-ir component_id=taskbar-clock")
 
     var framebuffer = FramebufferDriver.from_scanout_raw(address, width, height, pitch, bpp)
-    var engine = create_fb_engine_sized(framebuffer, width.to_i32(), height.to_i32())
-    val compositor_backend = Engine2dCompositorBackend.create(engine)
+    val draw_ir_target = create_riscv64_draw_ir_render_target(framebuffer, width.to_i32(), height.to_i32())
+    val compositor_backend = create_riscv64_compositor_backend(draw_ir_target)
     var input_backend = Arm64VirtioInputBackend.create_with_poller(
         screen_w,
         screen_h,
@@ -138,17 +137,17 @@ fn boot_main(hart_id: u64, dtb_addr: u64):
         return
     compositor.focus_window(editor_id.to_i32())
 
-    var shell = Riscv64DesktopShell.new(compositor)
+    var shell = Riscv64DesktopShell.new(compositor, draw_ir_target)
     shell.init_baremetal()
 
     boot_monotonic_prepare()
     val mapped_slot = map_qemu_host_gpu_ivshmem_bar2()
     val host_gpu_base = qemu_host_gpu_ivshmem_window_base(mapped_slot)
     val negotiation_started_us = boot_monotonic_now_us()
-    var executor = Engine2dWmFrameExecutor.create(engine, framebuffer)
+    var executor = Engine2dWmFrameExecutor.create(framebuffer, draw_ir_target)
     if host_gpu_base != 0u64:
         executor = Engine2dWmFrameExecutor.create_host_gpu(
-            engine, framebuffer, host_gpu_base,
+            framebuffer, draw_ir_target, host_gpu_base,
             SIMPLEOS_HOST_GPU_ISA_RISCV64,
             SIMPLEOS_HOST_GPU_BACKEND_METAL,
             0, 0, negotiation_started_us

@@ -1,0 +1,427 @@
+"""RV64 framebuffer Draw IR target without the hosted Engine2D facade.
+
+The selected-face path intentionally consumes the canonical FontRenderer
+staging batch.  It never falls back to the compositor's bitmap text path.
+"""
+
+use common.ui.draw_ir.{DrawIrGlyphRunPayload}
+use os.compositor.display_backend_core.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.engine2d_baremetal_core.{Engine2DBaremetalCore, create_buffer_engine_core, create_fb_engine_core}
+use os.drivers.framebuffer.fb_driver.{FramebufferDriver, framebuffer_argb_to_color}
+use std.common.string_core.{char_from_code}
+use std.common.gpu.font_atlas_composite.{font_atlas_subrect_pixels}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback_with_identity}
+use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{Engine2dGlassExecutionResult, Engine2dGlassMaterialConfig, engine2d_glass_execution_unavailable}
+use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget, DrawIrTargetFontEvidence}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderer}
+use std.nogc_sync_mut.text_layout.font_types.{FontRenderConfig, font_render_config_default_for_size}
+
+pub class Riscv64DrawIrRenderTarget with DrawIrRenderTarget:
+    fb: FramebufferDriver
+    core: Engine2DBaremetalCore
+    font_renderer: FontRenderer
+    target_width: i32
+    target_height: i32
+    closed: bool
+    last_font_target: text
+    last_font_evidence: DrawIrTargetFontEvidence?
+
+    me _font_config(font_size: i32) -> FontRenderConfig:
+        # `auto` is rejected by the freestanding execution-policy equality
+        # gate; preserve the canonical defaults while choosing CPU explicitly.
+        val base = font_render_config_default_for_size(font_size)
+        FontRenderConfig(
+            family: base.family, category: base.category, language: base.language,
+            script: base.script, size: base.size, weight: base.weight,
+            style: base.style, hinting: base.hinting,
+            antialiasing: base.antialiasing, atlas_policy: base.atlas_policy,
+            execution_target: "cpu", execution_policy: base.execution_policy
+        )
+
+    me _put_argb(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.target_width or y >= self.target_height:
+            return
+        if self.core.buf.len() > 0:
+            self.core.put_pixel_argb(x, y, color)
+            return
+        self.fb.framebuffer_put_pixel_argb(x.to_u32(), y.to_u32(), color)
+
+    me _blend_argb(x: i32, y: i32, color: u32):
+        if x < 0 or y < 0 or x >= self.target_width or y >= self.target_height:
+            return
+        val alpha = ((color >> 24u32) & 0xFFu32).to_u8()
+        if alpha == 0u8:
+            return
+        if self.core.buf.len() > 0:
+            self.core.blend_pixel_argb(x, y, color)
+            return
+        self.fb.blend_pixel(x.to_u32(), y.to_u32(), framebuffer_argb_to_color(color), alpha)
+
+    me _blit(x: i32, y: i32, w: i32, h: i32, pixels: [u32], blend: bool):
+        if self.closed or w <= 0 or h <= 0 or pixels.len() != w.to_i64() * h.to_i64():
+            return
+        var row = 0
+        while row < h:
+            var col = 0
+            while col < w:
+                val color = pixels[row * w + col]
+                if blend:
+                    self._blend_argb(x + col, y + row, color)
+                else:
+                    self._put_argb(x + col, y + row, color)
+                col = col + 1
+            row = row + 1
+
+    me _draw_staged_font(x: i32, y: i32) -> bool:
+        if self.closed or not self.font_renderer.staged_valid:
+            return false
+        val batch = FontRenderBatch(
+            program_version: self.font_renderer.staged_program_version,
+            transform_identity: self.font_renderer.staged_transform_identity,
+            font_identity: self.font_renderer.staged_font_identity,
+            face_generation: self.font_renderer.staged_face_generation,
+            valid: self.font_renderer.staged_valid,
+            atlas_width: self.font_renderer.staged_atlas_width,
+            atlas_height: self.font_renderer.staged_atlas_height,
+            atlas_pixels: self.font_renderer.atlas_pixels,
+            quads: self.font_renderer.staged_quads,
+            atlas_generation: self.font_renderer.staged_atlas_generation,
+            dirty_rects: self.font_renderer.staged_dirty_rects,
+            atlas_owner_generation: self.font_renderer.staged_atlas_owner_generation,
+            render_config_identity: self.font_renderer.staged_render_config_identity,
+            execution_target: self.font_renderer.staged_execution_target,
+            execution_policy: self.font_renderer.staged_execution_policy
+        )
+        if batch.font_identity == "" or batch.quads.len() == 0:
+            return false
+        if batch.atlas_width <= 0 or batch.atlas_height <= 0:
+            return false
+        var drawn = 0
+        var i = 0
+        while i < batch.quads.len():
+            val quad = batch.quads[i]
+            val pixels = font_atlas_subrect_pixels(
+                batch.atlas_pixels, batch.atlas_width, batch.atlas_height,
+                quad.atlas_x, quad.atlas_y, quad.width, quad.height, quad.color)
+            if pixels.len() != quad.width.to_i64() * quad.height.to_i64():
+                return false
+            self._blit(x + quad.dst_x, y + quad.dst_y, quad.width, quad.height, pixels, true)
+            drawn = drawn + 1
+            i = i + 1
+        if drawn != batch.quads.len():
+            return false
+        self.last_font_target = "cpu"
+        self.last_font_evidence = Some(DrawIrTargetFontEvidence(
+            batch_identity: batch.font_identity,
+            readback_source: "framebuffer",
+            device_checksum: 0,
+            oracle_checksum: 0,
+            readback_nonblank_pixels: 0,
+            parity: false,
+            device_executed: false,
+            promotion_ready: false,
+            atlas_upload_count: 0,
+            atlas_upload_bytes: 0,
+            atlas_payload_sha256: ""
+        ))
+        true
+
+    me _draw_selected_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> bool:
+        if self.font_renderer.current_font_identity() == "" or font_size <= 0:
+            self.last_font_target = ""
+            return false
+        val config = self._font_config(font_size)
+        self.font_renderer.stage_text_configured(text_val, color, config)
+        self._draw_staged_font(x, y)
+
+    me _draw_rounded_filled(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        var r = radius
+        if r < 0:
+            r = 0
+        if r * 2 > w:
+            r = w / 2
+        if r * 2 > h:
+            r = h / 2
+        if r == 0:
+            self.core.draw_rect_filled(x, y, w, h, color)
+            return
+        # Center and side scanlines plus integer midpoint circles form the
+        # same bounded primitive family used by Engine2DBaremetalCore.
+        self.core.draw_rect_filled(x + r, y, w - r * 2, h, color)
+        self.core.draw_rect_filled(x, y + r, r, h - r * 2, color)
+        self.core.draw_rect_filled(x + w - r, y + r, r, h - r * 2, color)
+        self.core.draw_circle_filled(x + r, y + r, r, color)
+        self.core.draw_circle_filled(x + w - r - 1, y + r, r, color)
+        self.core.draw_circle_filled(x + r, y + h - r - 1, r, color)
+        self.core.draw_circle_filled(x + w - r - 1, y + h - r - 1, r, color)
+
+    me _draw_rounded_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
+        if w <= 0 or h <= 0:
+            return
+        val t = if thickness <= 0: 1 else: thickness
+        var r = radius
+        if r < 0:
+            r = 0
+        if r * 2 > w:
+            r = w / 2
+        if r * 2 > h:
+            r = h / 2
+        if r == 0:
+            self.core.draw_rect_stroked(x, y, w, h, color)
+            return
+        self.core.draw_rect_filled(x + r, y, w - r * 2, t, color)
+        self.core.draw_rect_filled(x + r, y + h - t, w - r * 2, t, color)
+        self.core.draw_rect_filled(x, y + r, t, h - r * 2, color)
+        self.core.draw_rect_filled(x + w - t, y + r, t, h - r * 2, color)
+        self.core.draw_circle_stroked(x + r, y + r, r, color)
+        self.core.draw_circle_stroked(x + w - r - 1, y + r, r, color)
+        self.core.draw_circle_stroked(x + r, y + h - r - 1, r, color)
+        self.core.draw_circle_stroked(x + w - r - 1, y + h - r - 1, r, color)
+
+    me _draw_shadow(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
+        if w <= 0 or h <= 0:
+            return
+        var blur = blur_r
+        if blur < 0:
+            blur = 0
+        if blur > 16:
+            blur = 16
+        val base_alpha = ((color >> 24u32) & 0xFFu32) as i32
+        var layer = blur
+        while layer >= 0:
+            val alpha = (base_alpha * (blur - layer + 1) / (blur + 1)) as u32
+            val layer_color = (color & 0x00FFFFFFu32) | (alpha << 24u32)
+            self.core.draw_rect_filled(
+                x + offset_x - layer, y + offset_y - layer,
+                w + layer * 2, h + layer * 2, layer_color)
+            layer = layer - 1
+
+    # DrawIrRenderTarget
+    me backend_name() -> text:
+        "riscv64-framebuffer"
+
+    me width() -> i32:
+        self.target_width
+
+    me height() -> i32:
+        self.target_height
+
+    me draw_ir_apply_glass_material(config: Engine2dGlassMaterialConfig) -> Engine2dGlassExecutionResult:
+        engine2d_glass_execution_unavailable("riscv64-framebuffer-no-glass-material")
+
+    me clear(color: u32):
+        if not self.closed:
+            self.core.clear(color)
+
+    me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if not self.closed:
+            self.core.draw_rect_filled(x, y, w, h, color)
+
+    me draw_rounded_rect(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32):
+        if not self.closed:
+            self._draw_rounded_filled(x, y, w, h, radius, color)
+
+    me draw_rounded_rect_outline(x: i32, y: i32, w: i32, h: i32, radius: i32, color: u32, thickness: i32):
+        if not self.closed:
+            self._draw_rounded_outline(x, y, w, h, radius, color, thickness)
+
+    me draw_gradient_rect(x: i32, y: i32, w: i32, h: i32, top_color: u32, bottom_color: u32):
+        if not self.closed:
+            self.core.gradient_rect(x, y, w, h, top_color, bottom_color)
+
+    me draw_shadow_rect(x: i32, y: i32, w: i32, h: i32, offset_x: i32, offset_y: i32, blur_r: i32, color: u32):
+        if not self.closed:
+            self._draw_shadow(x, y, w, h, offset_x, offset_y, blur_r, color)
+
+    me draw_text(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
+        self._draw_selected_text(x, y, text_val, color, font_size)
+
+    me draw_text_with_advances(x: i32, y: i32, text_val: text, advance_widths: [i32], color: u32, font_size: i32) -> bool:
+        if self.font_renderer.current_font_identity() == "" or font_size <= 0:
+            return false
+        val config = self._font_config(font_size)
+        self.font_renderer.stage_text_with_advances_configured(text_val, advance_widths, color, config)
+        self._draw_staged_font(x, y)
+
+    me draw_shaped_text(x: i32, y: i32, glyph_run: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> bool:
+        if self.font_renderer.current_font_identity() == "" or font_size <= 0:
+            return false
+        val config = self._font_config(font_size)
+        self.font_renderer.stage_selected_glyph_run_configured(glyph_run, color, config)
+        self._draw_staged_font(x, y)
+
+    me draw_image(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self._blit(x, y, w, h, pixels, false)
+
+    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self._blit(x, y, w, h, pixels, true)
+
+    me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        if self.closed or dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or pixels.len() != src_w.to_i64() * src_h.to_i64():
+            return
+        var dy = 0
+        while dy < dst_h:
+            var dx = 0
+            while dx < dst_w:
+                self._put_argb(dst_x + dx, dst_y + dy, pixels[(dy * src_h / dst_h) * src_w + (dx * src_w / dst_w)])
+                dx = dx + 1
+            dy = dy + 1
+
+    me draw_image_scaled_blend(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
+        if self.closed or dst_w <= 0 or dst_h <= 0 or src_w <= 0 or src_h <= 0 or pixels.len() != src_w.to_i64() * src_h.to_i64():
+            return
+        var dy = 0
+        while dy < dst_h:
+            var dx = 0
+            while dx < dst_w:
+                self._blend_argb(dst_x + dx, dst_y + dy, pixels[(dy * src_h / dst_h) * src_w + (dx * src_w / dst_w)])
+                dx = dx + 1
+            dy = dy + 1
+
+    me set_clip(x: i32, y: i32, w: i32, h: i32):
+        if not self.closed:
+            self.core.set_clip(x, y, w, h)
+
+    me clear_clip():
+        if not self.closed:
+            self.core.clear_clip()
+
+    me clear_mask():
+        # This target has no mask state; clearing the absent mask is exact.
+        if self.closed:
+            return
+
+    me select_font_identity(identity: text) -> bool:
+        if self.closed or identity == "":
+            return false
+        if self.font_renderer.current_font_identity() == identity:
+            return true
+        self.font_renderer.try_load_registered_identity(identity)
+
+    me fonts() -> FontRenderer:
+        self.font_renderer
+
+    me install_font_renderer(renderer: FontRenderer):
+        if not self.closed:
+            self.font_renderer = renderer
+            self.last_font_target = ""
+
+    fn font_execution_target() -> text:
+        self.last_font_target
+
+    fn draw_ir_font_evidence() -> DrawIrTargetFontEvidence?:
+        self.last_font_evidence
+
+    me draw_ir_create_offscreen(width: i32, height: i32) -> Result<DrawIrRenderTarget, text>:
+        val pixels = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixels <= 0 or pixels > 0x100000:
+            return Err("invalid-riscv64-offscreen-size")
+        val child_fb = FramebufferDriver.empty()
+        Ok(Riscv64DrawIrRenderTarget(
+            fb: child_fb,
+            core: create_buffer_engine_core(width, height),
+            font_renderer: self.font_renderer,
+            target_width: width,
+            target_height: height,
+            closed: false,
+            last_font_target: "",
+            last_font_evidence: nil
+        ))
+
+    me draw_ir_composite_readback(dst_x: i32, dst_y: i32, width: i32, height: i32, readback: Engine2DReadback, opacity_milli: i32) -> bool:
+        if self.closed or width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000 or readback.pixels.len() != width.to_i64() * height.to_i64():
+            return false
+        if opacity_milli == 1000:
+            self._blit(dst_x, dst_y, width, height, readback.pixels, true)
+            return true
+        var i = 0
+        var scaled: [u32] = []
+        while i < readback.pixels.len():
+            val pixel = readback.pixels[i]
+            val alpha = (((pixel >> 24u32) & 0xFFu32) as i32 * opacity_milli / 1000) as u32
+            scaled.push((pixel & 0x00FFFFFFu32) | (alpha << 24u32))
+            i = i + 1
+        self._blit(dst_x, dst_y, width, height, scaled, true)
+        true
+
+    me present():
+        if not self.closed:
+            self.fb.framebuffer_present()
+
+    me read_pixels() -> [u32]:
+        val total = self.target_width * self.target_height
+        if total <= 0:
+            return []
+        if self.core.buf.len() == total:
+            return self.core.pixels()
+        var pixels: [u32] = [0u32; total]
+        var i = 0
+        while i < total:
+            pixels[i] = self.fb.framebuffer_read_pixel_argb(
+                (i % self.target_width).to_u32(),
+                (i / self.target_width).to_u32())
+            i = i + 1
+        pixels
+
+    me read_pixels_with_source() -> Engine2DReadback:
+        engine2d_readback_with_identity(self.read_pixels(), "framebuffer", 0, 0)
+
+    me shutdown():
+        self.closed = true
+        self.last_font_target = ""
+
+pub class Riscv64CompositorBackend:
+    target: Riscv64DrawIrRenderTarget
+
+impl CompositorBackend for Riscv64CompositorBackend:
+    fn width() -> i32:
+        self.target.target_width
+
+    fn height() -> i32:
+        self.target.target_height
+
+    me clear(color: u32):
+        self.target.clear(color)
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        self.target.draw_rect_filled(x, y, w, h, color)
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        self.target.draw_rect_filled(x, y, text_str.len().to_i32() * 8, 16, bg)
+        self.target.draw_text(x, y, text_str, fg, 16)
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        self.target.draw_rect_filled(x, y, 8, 16, bg)
+        self.target.draw_text(x, y, char_from_code(ch.to_i64()), fg, 16)
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        self.target.draw_rect_filled(x, y, 1, 1, color)
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        self.target.draw_image(x, y, w, h, pixels)
+
+    me present():
+        self.target.present()
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        self.target.present()
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+pub fn create_riscv64_draw_ir_render_target(fb: FramebufferDriver, width: i32, height: i32) -> Riscv64DrawIrRenderTarget:
+    Riscv64DrawIrRenderTarget(
+        fb: fb,
+        core: create_fb_engine_core(fb.front_addr, width, height),
+        font_renderer: FontRenderer.new(),
+        target_width: width,
+        target_height: height,
+        closed: width <= 0 or height <= 0,
+        last_font_target: "",
+        last_font_evidence: nil
+    )
+
+pub fn create_riscv64_compositor_backend(target: Riscv64DrawIrRenderTarget) -> Riscv64CompositorBackend:
+    Riscv64CompositorBackend(target: target)

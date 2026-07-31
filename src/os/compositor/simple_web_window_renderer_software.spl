@@ -1,0 +1,101 @@
+"""RV64 Web -> layout Draw IR -> target-backed content artifact cache."""
+
+use common.ui.draw_ir.{draw_ir_font_advance_digest}
+use common.ui.web_render_api.{
+    WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+    WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+    WebRenderArtifact,
+    WebRenderFontProvenance,
+    WebRenderMaterialFallbackProvenance,
+    web_render_full_html
+}
+use os.compositor.simple_web_window_renderer_core.{content_paint_full_height, simple_web_content_render_request_with_theme}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_material_provenance_after_backend_execution,
+    simple_web_layout_render_html_draw_ir_result
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
+use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget}
+
+fn _simple_web_draw_ir_unavailable(request, html: text, reason: text) -> WebRenderArtifact:
+    WebRenderArtifact(
+        target: request.target, html: html, ipc_json: "", pixels: [],
+        viewport_w: request.viewport_w, viewport_h: request.viewport_h,
+        capability_summary: "", material_fallback: WebRenderMaterialFallbackProvenance.none(),
+        binary_schema: "", binary_cache_key: "", binary_cache_path: "",
+        binary_bytes: 0, binary_layout_bytes: 0, binary_command_count: 0,
+        engine2d_status: WEB_RENDER_ENGINE2D_STATUS_UNAVAILABLE,
+        engine2d_backend: "riscv64-draw-ir", engine2d_reason: reason,
+        queue_submit_status: "not_requested", queue_drain_status: "not_requested",
+        queue_packet_id: 0, queue_drained: 0, queue_backend_handle: 0,
+        queue_reason: "runtime queue not requested", queue_payload_size: 0,
+        queue_payload_hash: 0, queue_payload_text: "", queue_dispatch_status: "not_requested",
+        queue_dispatch_reason: "runtime dispatch not requested", queue_dispatch_payload_size: 0,
+        queue_dispatch_payload_hash: 0, queue_dispatch_payload_text: "",
+        readback_status: "unavailable", readback_backend: "riscv64-draw-ir",
+        readback_pixel_count: 0, readback_checksum: 0, readback_reason: reason,
+        gpu_readback_source: "unavailable", font_provenance: WebRenderFontProvenance.none())
+
+fn _simple_web_draw_ir_artifact(request, html: text, target: DrawIrRenderTarget) -> WebRenderArtifact:
+    if request.viewport_w <= 0 or request.viewport_h <= 0:
+        return _simple_web_draw_ir_unavailable(request, html, "invalid viewport")
+    val layout = simple_web_layout_render_html_draw_ir_result(html, request.viewport_w, request.viewport_h)
+    if layout.status != WEB_RENDER_ENGINE2D_STATUS_RENDERED:
+        return _simple_web_draw_ir_unavailable(request, html, layout.reason)
+    match target.draw_ir_create_offscreen(request.viewport_w, request.viewport_h):
+        Ok(offscreen):
+            offscreen.clear(0u32)
+            val render = engine2d_draw_ir_adv_composition(offscreen, layout.composition, false)
+            offscreen.shutdown()
+            if render.skipped_command_count != 0 or render.rendered_command_count <= 0 or render.pixels.len() != request.viewport_w * request.viewport_h:
+                return _simple_web_draw_ir_unavailable(request, html, "Draw IR execution incomplete")
+            val material = simple_web_layout_material_provenance_after_backend_execution(
+                layout.material_witness, render.skipped_command_count, render.pixels.len(),
+                request.viewport_w * request.viewport_h, render.cpu_composited_material_count,
+                render.metal_device_glass_material_count, render.glass_execution_target,
+                render.readback_source, render.glass_backend_handle, render.glass_device_identity)
+            val execution_digest = if render.font_composition_id == layout.composition.composition_id:
+                render.font_advance_command_digest
+            else: 0
+            WebRenderArtifact(
+                target: request.target, html: html, ipc_json: "", pixels: render.pixels,
+                viewport_w: request.viewport_w, viewport_h: request.viewport_h,
+                capability_summary: "", material_fallback: material,
+                binary_schema: "", binary_cache_key: "", binary_cache_path: "",
+                binary_bytes: 0, binary_layout_bytes: 0, binary_command_count: 0,
+                engine2d_status: WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+                engine2d_backend: target.backend_name(), engine2d_reason: layout.reason,
+                queue_submit_status: "not_requested", queue_drain_status: "not_requested",
+                queue_packet_id: 0, queue_drained: 0, queue_backend_handle: 0,
+                queue_reason: "runtime queue not requested", queue_payload_size: 0,
+                queue_payload_hash: 0, queue_payload_text: "", queue_dispatch_status: "not_requested",
+                queue_dispatch_reason: "runtime dispatch not requested", queue_dispatch_payload_size: 0,
+                queue_dispatch_payload_hash: 0, queue_dispatch_payload_text: "",
+                readback_status: "complete", readback_backend: target.backend_name(),
+                readback_pixel_count: render.pixels.len().to_i64(), readback_checksum: render.readback_checksum,
+                readback_reason: "Draw IR target readback", gpu_readback_source: render.readback_source,
+                font_provenance: WebRenderFontProvenance(
+                    identity: render.font_identity, execution_target: render.font_execution_target,
+                    layout_composition_id: layout.composition.composition_id,
+                    execution_composition_id: render.font_composition_id,
+                    layout_advance_digest: draw_ir_font_advance_digest(layout.composition),
+                    execution_advance_digest: execution_digest,
+                    batch_identity: render.font_batch_identity,
+                    ordered_text_command_count: render.font_ordered_text_command_count,
+                    vulkan_batch_count: render.font_vulkan_batch_count,
+                    vulkan_batch_digest: render.font_vulkan_batch_digest,
+                    vulkan_aggregate_valid: render.font_vulkan_aggregate_valid,
+                    vulkan_composition_id: render.font_vulkan_composition_id,
+                    vulkan_advance_digest: render.font_vulkan_advance_digest,
+                    vulkan_all_device_executed: render.font_vulkan_all_device_executed,
+                    vulkan_all_promotion_ready: render.font_vulkan_all_promotion_ready,
+                    vulkan_all_parity: render.font_vulkan_all_parity))
+        Err(reason): _simple_web_draw_ir_unavailable(request, html, reason)
+
+pub fn simple_web_content_draw_ir_artifact_cached(cache: WebRenderArtifact, target: DrawIrRenderTarget, theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> WebRenderArtifact:
+    val full_h = content_paint_full_height(height, scroll_y)
+    val request = simple_web_content_render_request_with_theme(theme, title, body_html, width, full_h).with_pixel_output()
+    val html = web_render_full_html(request)
+    if cache.html == html and cache.viewport_w == width and cache.viewport_h == full_h and cache.engine2d_status == WEB_RENDER_ENGINE2D_STATUS_RENDERED:
+        return cache
+    _simple_web_draw_ir_artifact(request, html, target)

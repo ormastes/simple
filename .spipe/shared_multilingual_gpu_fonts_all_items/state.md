@@ -111,15 +111,21 @@ sealed zero-stub receipt. Canonical Stage2 attempt 24 and scoped-tool attempt 12
 were historically admitted at clean checkpoint `2a7e354c116`; their ignored
 artifacts disappeared with the old temporary worktree and cannot admit current
 source. The RV64 owner repair introduced at `39c1863426a` is source-complete.
-Physical Stage2 attempt 29 is admitted at clean checkpoint `fbcaa8ccd0b`.
-Scoped-tool attempt 13 and LLVM-enabled Stage2 attempt 30 are independently
-admitted. The current blocker is ambiguous LLVM `.to_f32()` method resolution
-in `dom_color.spl`; the three-cycle RV64 cap is exhausted. No ELF exists, so QEMU
-crop calibration, exact-ten
-attempt 13, and the
-ten manual attempt-13 receipts have not run. Stage 3,
-Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
-deferred from this delivery scope. Current status is
+LLVM-enabled Stage2 attempt 31 passed its producer and standalone manifest
+verification from source HEAD `feb7ebf9f23`; it is parent evidence only. RV64
+attempt 29 passed the desktop-font-disk check, then failed with the base disk
+absent and 618 unexpected freestanding symbols. RV64 attempt 30 passed the
+base-disk check and reduced that surface to 502 unexpected symbols, but
+produced no ELF. The focused LLVM numeric and revised RV64 entry-closure tests
+now pass. The closure requires the RV64 Draw IR target/executor/core/software
+Web route and excludes hosted compositor/rendering dependencies. These source
+changes are not yet admitted by a new Stage2. Scoped-tool attempt 14 was
+interrupted by its no-root harness and has no sealed receipt. After the clean
+checkpoint and host build contention clear, run Stage2 attempt 32, scoped-tool
+attempt 14, and RV64 attempt 31. QEMU crop calibration, exact-ten
+attempt 13, and ten manual attempt-13 receipts have not run. Stage 3, Stage 4,
+non-SimpleOS GPU hosts, and the broader cross-platform matrix remain deferred
+from this delivery scope. Current status is
 `SIMPLEOS_STAGE2_FONT: BLOCKED`; the broader `STATUS: FAIL` is unchanged.
 
 ## Compiler-enablement boundary
@@ -347,3 +353,50 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   `i64.to_f32`. No ELF exists. The three-cycle cap is exhausted; QEMU,
   exact-ten, manuals, and PASS remain blocked pending a fresh-session typed-call
   resolution fix.
+- stage2-attempt31-rv64-attempt29-30-2026-07-31: LLVM-enabled Stage2 attempt
+  31 used source HEAD `feb7ebf9f23`; producer and standalone manifest verifier
+  exited 0. Its binary SHA-256 is
+  `725e8282c4a54372b8a1605b2524b3c963c33ec405a4ff6efc6d7cbf18f3d52b`
+  and provenance SHA-256 is
+  `a89dd9977883fc720f79a8be9d2623440330ba487fcc70c66ea036a20b19590d`.
+  Elapsed time was `44:41.97`, maximum RSS `3,535,612 KiB`. RV64 attempt 29
+  validated `/SYS/FONTS/NOTOSANS` at 1,708,408 bytes and SHA-256
+  `2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081`,
+  then exited 1 in `2:18.56` at `278,408 KiB` because the base disk was absent
+  and the freestanding link surface had 618 unexpected symbols. RV64 attempt
+  30 validated `fat32-riscv64.img` (134,217,728 bytes, SHA-256
+  `1eed641db6487706997fd9bb614d87a8d5e91671737e18ecd03b1c198d5679c2`),
+  then exited 1 in `2:09.63` at `360,192 KiB` with 502 unexpected symbols and
+  no ELF. Current LLVM numeric and RV64 runtime-facade fixes are source-only
+  and unverified. Scoped-tool attempt 14 was interrupted by its no-root harness
+  and produced no sealed receipt. Stage2 attempt 32, scoped-tool attempt 14,
+  and RV64 attempt 31 are next; QEMU, exact-ten, manuals, and PASS remain
+  blocked.
+- llvm-numeric-rv64-facade-unverified-2026-07-31: The LLVM numeric criterion
+  exhausted its three cycles in this session. Cycle 2 exposed semantic failure
+  where `abs` received `IntValue` because all-vreg slots were i64; cycle 3
+  stopped at four Rust E0308 reference-pattern compile errors. Obvious
+  dereference/guard corrections landed after those runs and are unverified; do
+  not rerun this session. RV64 DrawIR web-cache and parent `FontRenderer`
+  inheritance changes are also source-only and unverified. Fresh-session order
+  is one numeric test, one closure test, Stage2 attempt 32, scoped-tool attempt
+  14, then RV64 attempt 31. `SIMPLEOS_STAGE2_FONT: BLOCKED` and `STATUS: FAIL`
+  remain.
+- llvm-numeric-pass-closure-split-pending-2026-07-31: The focused LLVM numeric
+  test passed 1/1 with exit 0 after `13m 49s`. The separate RV64 entry-closure
+  test then failed because `compositor.spl` imported the hosted Web renderer.
+  The hosted render loop is now isolated in `compositor_render.spl`, and the
+  RV64 DrawIR target uses a separate `CompositorBackend` adapter so its
+  `width`/`height` receiver contract is unambiguous. Two read-only sidecars
+  found no remaining static blocker. The session reached its three-cycle cap;
+  one fresh-session closure rerun is next. Stage2 attempt 32 and all downstream
+  evidence remain blocked; `SIMPLEOS_STAGE2_FONT: BLOCKED` and `STATUS: FAIL`
+  remain.
+- rv64-entry-closure-pass-2026-07-31: The revised focused entry-closure test
+  passed 1/1 with exit 0 after `5m 08s` compilation and `3.44s` execution. It
+  requires the RV64 Draw IR target/executor/core/software Web route and excludes
+  `compositor_render.spl`, the hosted renderer, hosted pixel backends, Engine2D,
+  CUDA, and Vulkan. Numeric and closure gates are now green. Stage2 attempt 32
+  is next after a clean checkpoint and after competing host bootstraps finish;
+  downstream scoped-tool/RV64/QEMU/exact-ten/manual evidence remains blocked.
+  `SIMPLEOS_STAGE2_FONT: BLOCKED` and `STATUS: FAIL` remain.

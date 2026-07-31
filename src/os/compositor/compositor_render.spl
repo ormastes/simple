@@ -1,0 +1,50 @@
+"""Hosted compositor rendering kept out of freestanding entry closures."""
+
+use os.compositor.compositor.{Compositor}
+use common.ui.wm_chrome_theme.{wm_chrome_theme}
+use os.compositor.shared_mdi_framebuffer_scene.{
+    SharedMdiRenderWindow,
+    shared_mdi_render_window,
+    render_shared_mdi_desktop_chrome,
+    draw_shared_mdi_window_chrome,
+    draw_shared_mdi_taskbar
+}
+use os.compositor.simple_web_window_renderer.{render_simple_web_content}
+
+fn compositor_render_all(compositor: Compositor):
+    val theme = wm_chrome_theme()
+    render_shared_mdi_desktop_chrome(
+        compositor.backend, compositor.screen_width, compositor.screen_height, theme)
+    var shared_windows: [SharedMdiRenderWindow] = []
+    var i = 0
+    while i < compositor.surfaces.len():
+        val surface = compositor.surfaces[i]
+        val shared = shared_mdi_render_window(
+            surface.id.to_i64(), surface.title, surface.app_id, surface.content_html,
+            surface.x, surface.y, surface.width, surface.height, surface.process_id,
+            not surface.visible, i == compositor.focused_idx, 0)
+        shared_windows.push(shared)
+        if surface.visible:
+            draw_shared_mdi_window_chrome(compositor.backend, shared, theme)
+            val content_w = surface.width - 8
+            val content_h = surface.height - 36
+            if content_w > 0 and content_h > 0:
+                render_simple_web_content(
+                    compositor.backend, surface.title, surface.x + 4, surface.y + 32,
+                    content_w, content_h, surface.content_html)
+        i = i + 1
+    draw_shared_mdi_taskbar(
+        compositor.backend, shared_windows,
+        compositor.screen_width, compositor.screen_height, theme)
+    compositor.backend.fill_rect(compositor.cursor.x, compositor.cursor.y, 8, 8, 0xFFFFFFFF)
+
+fn compositor_render_frame(compositor: Compositor):
+    compositor_render_all(compositor)
+    compositor.backend.present()
+
+fn compositor_run_loop(compositor: Compositor):
+    compositor.running = true
+    while compositor.running:
+        compositor.handle_input()
+        compositor_render_frame(compositor)
+        compositor.running = false

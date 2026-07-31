@@ -87,8 +87,10 @@ Theme flow:
 3. `src/app/ui.web/html.spl::generate_css()` consumes the resolved package CSS.
    The adapter supplies structure and package-variable references, not a second
    visual authority.
-4. Simple Web app-window HTML is wrapped by
-   `src/os/compositor/simple_web_window_renderer.spl` with the same generated CSS
+4. Simple Web app-window HTML is assembled by the shared
+   `simple_web_window_renderer_core.spl`. Hosted adapters use
+   `simple_web_window_renderer.spl`; RV64 uses
+   `simple_web_window_renderer_software.spl` with its canonical Draw IR target.
 5. `src/lib/gc_async_mut/gpu/browser_engine/style_block.spl` applies embedded
    `<style>` blocks and resolves CSS variables before pixel rendering
 6. The HTML layout renderer records canonical CPU/solid material entries from

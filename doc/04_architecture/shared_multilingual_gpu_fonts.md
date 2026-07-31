@@ -37,7 +37,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | HUD/world facade and CPU fallback; an optional Vulkan adapter owns dedicated pipelines, transactional R8 atlas replacement, depth, fence, device readback, and scalar owner-fault observation without changing the shared batch. |
 | `src/lib/gc_async_mut/gpu/engine2d/backend_{cuda,metal,opencl,vulkan,rocm}*.spl` | Backend-private upload/submission state keyed by the shared atlas owner and generation. Source wiring is not native promotion evidence. |
 | `backend_vulkan_font_types.spl` plus `test/helpers/shared_multilingual_gpu_fonts_perf_evidence.spl` | Transient pipeline/composite stage observations stay with the Vulkan owner; ordered durable v5 serialization retains stage distributions and promotion facts without turning handles into reusable authority. |
-| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. Host Web uses the HTML/WebIR Draw IR owner; `ui.browser` executes one `widget_tree_to_draw_ir` composition and leaves queue dispatch neutral unless that composition is submitted. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. Canonical SimpleOS and hosted color-background frames select the Draw IR/Engine2D route. Image/motion and nested hosted content retain compatibility fallback; direct legacy `wm_entry.spl` files are compatibility-only. |
+| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; a `DrawIrRenderTarget` is the sole vector-material boundary. Hosted targets use Engine2D. RV64 uses `Riscv64DrawIrRenderTarget` over `Engine2DBaremetalCore` and the same canonical `FontRenderer` staging batch. Host Web uses the HTML/WebIR Draw IR owner; RV64 uses the dependency-light request/frame core plus target-backed software adapter. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. Image/motion and nested hosted content retain compatibility fallback; direct legacy `wm_entry.spl` files are compatibility-only. |
 
 Compatibility re-export trees continue to expose the canonical
 `nogc_sync_mut.text_layout` values. Generated copies must not acquire private
@@ -196,12 +196,13 @@ The completion topology keeps all remaining paths on existing owners:
 
 ```text
 Web semantic/layout ─┐
-Widget/GUI scene ────┼─> DrawIrComposition ─> Engine2D.draw_text
-SharedWmScene ───────┘                           │
-                                                 └─> FontRenderer/FontRenderBatch
+Widget/GUI scene ────┼─> DrawIrComposition ─> DrawIrRenderTarget.draw_text
+SharedWmScene ───────┘                              │
+                                                    └─> FontRenderer/FontRenderBatch
 
 Engine3D.draw_text_{hud,world} ─────────────────────> same FontRenderer/FontRenderBatch
-SimpleOS canonical desktop ─> Engine2dWmFrameExecutor ─> path above + staged FontAssetCandidate
+SimpleOS x86/ARM desktop ─> Engine2dWmFrameExecutor ─> hosted Engine2D target
+SimpleOS RV64 desktop ─> Engine2dWmFrameExecutor ─> Riscv64DrawIrRenderTarget ─> Engine2DBaremetalCore
 Hosted HostCompositor ─> persistent Engine2dCompositorBackend ─> path above (color/top-level content)
 Direct arch/*/wm_entry.spl invocation - - compatibility only; not a canonical target
 ```
@@ -233,6 +234,11 @@ source-wired. Retained evidence now binds and independently recomputes the
 canonical wrapper, kernel ELF, and FAT32 image hashes. Guest rendering and an
 independent host extraction established the same pinned crop hash; a current
 retained PASS bundle remains pending.
+RV64 uses the same executor contract with `Riscv64DrawIrRenderTarget` and
+`Engine2DBaremetalCore`, not the hosted Engine2D facade. The target consumes the
+canonical staged `FontRenderer` batch. `compositor_render.spl` owns the hosted
+Web loop and is intentionally outside the freestanding `compositor.spl` entry
+closure; this dependency split adds no renderer, cache, or Draw IR format.
 RV64 remains a separate fail-closed admission row. Its canonical entry already
 uses `SharedWmScene -> DrawIrComposition -> Engine2D`, but its display scenario
 does not attach the font FAT32 image and its serial-only loop does not consume

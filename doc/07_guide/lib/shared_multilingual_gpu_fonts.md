@@ -714,7 +714,11 @@ software-pixel renderer. Remaining explicitly
 compatibility-only framebuffer fixtures may still rasterize 5×7 glyphs.
 Widget/GUI and shared-WM composition builders use their canonical semantic/scene
 owners. The canonical SimpleOS desktop executes that composition through
-`Engine2dWmFrameExecutor`; canonical ARM64/x86_64 runner/readiness targets now
+`Engine2dWmFrameExecutor` and its `DrawIrRenderTarget`. Hosted x86/ARM targets
+use Engine2D. RV64 uses `Riscv64DrawIrRenderTarget` over
+`Engine2DBaremetalCore`, consuming the canonical staged `FontRenderer` batch;
+its Web path uses `simple_web_window_renderer_core` plus the target-backed
+`simple_web_window_renderer_software` adapter. Canonical ARM64/x86_64 runner/readiness targets now
 select `gui_entry_desktop.spl`. Direct legacy `wm_entry.spl` files still contain
 bitmap text but are compatibility-only, not production-route evidence. Hosted
 `_run_hosted_wm` retains one persistent `Engine2dCompositorBackend` and passes
@@ -754,7 +758,8 @@ mirrors the readable names and fixed short aliases for compatibility with its
 existing toolchain/evidence image callers.
 On AArch64 and RV64 the canonical desktop source routes attach deterministic
 VirtIO-BLK FAT32 media, reset stale VFS state, and mount and register the
-selected catalog before Engine2D creation. A failed mount clears VFS readiness
+selected catalog before render-target creation. AArch64 uses hosted Engine2D;
+RV64 creates the freestanding Draw IR target. A failed mount clears VFS readiness
 and stops RV64 desktop admission. Host image acceptance requires exact `mtools`
 extraction and fails closed when the tools are unavailable. Live RV64
 vector-font pixels remain unproved until the receipt-bound `pmemsave` crop has
@@ -773,8 +778,9 @@ Do not add another font draw path or reuse Engine3D HUD/world.
 Keep the remaining work on the frozen public seams:
 
 1. `FontRenderer` prepares metrics, shaped runs, and `FontRenderBatch`.
-2. Web/GUI/WM producers emit semantic `DrawIrComposition`; Engine2D alone
-   materializes vector glyphs and retains bitmap fallback.
+2. Web/GUI/WM producers emit semantic `DrawIrComposition`; the selected
+   `DrawIrRenderTarget` alone materializes vector glyphs and retains bitmap
+   fallback. Hosted targets use Engine2D; RV64 uses the baremetal target.
 3. Selected Latin, Han, exact Hindi, exact Arabic/Urdu, and Cyrillic fixtures must
    prove face, glyph, cluster, advance, offset, direction, language, and script
    identity before a matrix cell is accepted.

@@ -88,12 +88,23 @@ Run only this scoped set:
   Cranelift-only and RV64 freestanding requires LLVM. Use
   `--full-bootstrap --stop-after-stage2 --backend=llvm-lib --jobs=1` only for
   this now-proven essential backend authority; do not continue to Stage3/4.
+- [x] Produce LLVM-enabled Stage2 attempt 31 and pass its standalone manifest
+  verification from source HEAD `feb7ebf9f23`. This is parent evidence only.
+- [ ] Seal matching scoped-tool attempt 14. Its first no-root harness run was
+  interrupted and produced no admissible receipt.
+- [x] Focused LLVM numeric lowering test passed 1/1 with exit 0 after `13m 49s`.
+- [x] RV64 entry-closure test passed 1/1 with exit 0 after the hosted-render
+  split and separate RV64 compositor adapter; the exclusion also pins
+  `compositor_render.spl` outside the freestanding closure.
+- [ ] Produce Stage2 attempt 32, then scoped-tool attempt 14 and RV64 attempt
+  31, from the current LLVM numeric, RV64 DrawIR web-cache, and parent
+  `FontRenderer` inheritance fixes; all are unverified source work.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
-  focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
-  modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
-  logging. Attempts 26–28 are retained. The attempt-28 LLVM `to_f32` ambiguity
-  is fixed with a focused Rust regression; run the next producer only in a
-  fresh session because this session's three-producer cap remains exhausted.
+  focused numeric and revised RV64 entry-closure gates pass. Attempts 26–30
+  are retained. Attempt 29 passed the font-disk check
+  but failed with a missing base disk and 618 unexpected symbols; attempt 30
+  passed the base-disk check but failed with 502 unexpected symbols. No ELF
+  exists.
 - [ ] Independently review and pin the QEMU framebuffer crop, then run
   exact-ten attempt 13 and generate ten zero-stub manuals in manual attempt 13.
 - [ ] Run the final guards and independent evidence/manual review before
@@ -155,11 +166,28 @@ canonical explicit LLVM entry closure, then exited 1 in `1:36.46` at
 `278,060 KiB` maximum RSS because LLVM method resolution in
 `src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl` treats suffix
 `.to_f32()` as ambiguous between `f64.to_f32` and `i64.to_f32`. No ELF exists.
-The shared LLVM owner now lowers numeric `to_f32` by receiver type before
-suffix lookup. Focused Rust test
-`numeric_to_f32_uses_receiver_type_not_suffix_lookup` passes for i64 and
-tagged-f64 receivers. The three-producer cap is still exhausted; run the next
-RV64 producer in a fresh session.
+The shared LLVM owner has a receiver-type numeric lowering repair, but its
+current criterion exhausted three session cycles: cycle 2 exposed
+`abs(IntValue)` from all-vreg i64 slots and cycle 3 stopped at four Rust E0308
+reference-pattern compile errors. Obvious dereference/guard corrections were
+applied after those runs and are unverified; no further numeric rerun is allowed
+this session.
+
+LLVM-enabled Stage2 attempt 31 passed its producer and standalone manifest
+verification from source HEAD `feb7ebf9f23`. Its binary SHA-256 is
+`725e8282c4a54372b8a1605b2524b3c963c33ec405a4ff6efc6d7cbf18f3d52b` and
+provenance SHA-256 is
+`a89dd9977883fc720f79a8be9d2623440330ba487fcc70c66ea036a20b19590d`;
+elapsed time was `44:41.97` at `3,535,612 KiB` maximum RSS. It is parent
+evidence only. RV64 attempt 29 validated the desktop font disk, then failed
+with its base disk absent and 618 unexpected symbols. RV64 attempt 30 validated
+the base disk and failed with 502 unexpected symbols. Neither produced an ELF.
+Current LLVM numeric and RV64 entry-closure focused gates pass; the DrawIR Web
+cache and parent `FontRenderer` changes still require Stage2 admission. Scoped-
+tool attempt 14 was interrupted by its no-root harness and has no sealed
+receipt. After a clean checkpoint, run Stage2 attempt 32, scoped-tool attempt
+14, and RV64 attempt 31; QEMU, exact-ten, manuals, and
+`SIMPLEOS_STAGE2_FONT: PASS` remain blocked.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at
@@ -187,8 +215,8 @@ export STAGE2_PARENT=<canonical-stage2-simple>
 export STAGE2_PARENT_SHA=<sha256>
 export STAGE2_PROVENANCE_PATH=<canonical-stage2-provenance.env>
 export STAGE2_PROVENANCE_SHA=<sha256>
-export STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-13
-export STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-13
+export STAGE2_FONT_TOOL_ATTEMPT_ROOT=build/test-artifacts/shared_multilingual_gpu_fonts/stage2-scoped-tools/attempt-14
+export STAGE2_FONT_TOOL_CACHE_ROOT=build/native_probe/shared-font-stage2-scoped-tools-cache/attempt-14
 bash scripts/check/build-stage2-font-scoped-tools.shs write
 ```
 

@@ -39,12 +39,16 @@ SimpleOS reuses the full selected `FontAssetCandidate` catalog and is configured
 to stage every pinned face through each existing image-builder path before guest
 WM startup; this is a source/staging contract, not retained guest proof.
 Desktop bootstrap attempts each long VFS path, then its FAT32 8.3 fallback,
-attempts to register every readable face before Engine2D creation, and reports
+attempts to register every readable face before render-target creation, and reports
 whether the whole catalog was admitted without making partial registration
 transactional. Its canonical
-desktop already executes `SharedWmScene -> DrawIrComposition -> Engine2D` through
-`Engine2dWmFrameExecutor`, and canonical ARM64/x86_64 runner/readiness targets
-select that entry. Direct legacy `wm_entry.spl` files remain compatibility-only.
+desktop executes `SharedWmScene -> DrawIrComposition -> DrawIrRenderTarget`
+through `Engine2dWmFrameExecutor`. Hosted x86/ARM targets use Engine2D; RV64
+uses `Riscv64DrawIrRenderTarget` over `Engine2DBaremetalCore` and the canonical
+staged `FontRenderer` batch. `compositor_render.spl` owns the hosted Web loop
+and stays outside the freestanding compositor closure. Canonical ARM64/x86_64
+runner/readiness targets select that entry. Direct legacy `wm_entry.spl` files
+remain compatibility-only.
 On x86_64 and ARM64 registration of the selected catalog is attempted before
 that frame and the existing `taskbar-clock` DrawIR slot is the witness; its
 56x48 QEMU hash remains unset until retained capture evidence exists.
