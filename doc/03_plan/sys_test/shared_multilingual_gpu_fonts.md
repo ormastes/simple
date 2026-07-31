@@ -80,7 +80,7 @@ Run only this scoped set:
   rebuild that missing Rust authority and must still stop after verified
   Stage2. Its `--jobs=1` now bounds both the private Cargo authority builds and
   the pure-Simple native build.
-- [ ] Produce and independently admit matching scoped-tool attempt 13.
+- [x] Produce and independently admit matching scoped-tool attempt 13.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
@@ -113,7 +113,17 @@ Stage2 attempt 29 is admitted at clean checkpoint
 and provenance SHA-256 is
 `55ecaabf0ba14ad5dbcf23b433cc7a5f6f97b153487b8a5fa0d83b5c05db39b7`;
 the producer and independent absolute-path manifest verifier exited zero in
-`37:34.35` at `3,345,112 KiB` maximum RSS. Scoped-tool attempt 13 is next.
+`37:34.35` at `3,345,112 KiB` maximum RSS.
+
+Scoped-tool attempt 13 is independently admitted with evidence-manifest
+SHA-256
+`f2a5ead296c43c2b12354fb9eb754a70084f4813d985571bbeb7a544c93e0d84`.
+Its runner SHA-256 is
+`a8d6d69cf6bee88a60549602d5f72a2390b94dec4035b9c143f11ac8c3889328`
+and docgen SHA-256 is
+`03175603df10ae35a3aac962293098f90b2b2e8f3feed1ecd97710165e31ab21`;
+the writer and independent checker both returned
+`stage2_font_scoped_tools_status=pass`.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at

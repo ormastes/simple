@@ -1637,3 +1637,11 @@ pixels, and performance evidence remain release-blocking.
   The bounded producer and independent absolute-path manifest verifier exited
   zero in `37:34.35` at `3,345,112 KiB` maximum RSS. Scoped-tool attempt 13 is
   next; no RV64 ELF or PASS is claimed.
+- scoped-tool-attempt13-admitted-2026-07-30: The Stage2-only writer and
+  independent checker both returned `stage2_font_scoped_tools_status=pass`.
+  Evidence-manifest SHA-256 is
+  `f2a5ead296c43c2b12354fb9eb754a70084f4813d985571bbeb7a544c93e0d84`;
+  runner/docgen SHA-256 values are
+  `a8d6d69cf6bee88a60549602d5f72a2390b94dec4035b9c143f11ac8c3889328`
+  and `03175603df10ae35a3aac962293098f90b2b2e8f3feed1ecd97710165e31ab21`.
+  Reserved RV64 attempt 26 is next; no ELF or PASS is claimed.

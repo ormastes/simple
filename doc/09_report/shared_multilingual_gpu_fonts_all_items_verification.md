@@ -29,9 +29,12 @@ Rust authority and exited zero after verified Stage2 in `37:34.35` at
 `0b65b6109ddc0c4e8f924696a3e725a3d321f1fd094e5dfdaddaff7423a22fc0`;
 provenance SHA-256 is
 `55ecaabf0ba14ad5dbcf23b433cc7a5f6f97b153487b8a5fa0d83b5c05db39b7`.
-The independent absolute-path manifest verifier exited zero. The next
-serialized chain is scoped-tool attempt 13, reserved RV64 attempt 26,
-exact-ten attempt 13, and manual attempt 13. No PASS is claimed.
+The independent absolute-path manifest verifier exited zero. Scoped-tool
+attempt 13 and its independent checker also passed; its evidence-manifest
+SHA-256 is
+`f2a5ead296c43c2b12354fb9eb754a70084f4813d985571bbeb7a544c93e0d84`.
+The next serialized chain is reserved RV64 attempt 26, exact-ten attempt 13,
+and manual attempt 13. No PASS is claimed.
 
 `STATUS: FAIL`
 
