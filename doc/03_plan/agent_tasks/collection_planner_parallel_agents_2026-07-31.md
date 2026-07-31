@@ -23,8 +23,13 @@ lane against the live tree. **No lane is accepted on its own report alone.**
 
 | Lane | Owns | Result |
 |---|---|---|
-| **AF1** span plumbing | `35.semantics/lint/collection_patterns.spl` | `CollectionLintWarning` gains `span: i64`; COLL001/006/007 populate it from `stmt_get_span`. Other 11 sites pass `0`. |
-| **AF2** COLL EasyFix | `90.tools/lint/_LintMain/entry_and_fixes.spl` | `collection_easy_fix()` emits real `Replacement`s for COLL001 (Certain) and COLL007 (Likely); COLL diagnostics now report the **offending line and column** instead of the enclosing `fn` line. |
+| **AF1** span plumbing | — | **Abandoned, reverted.** Added `span: i64` to `CollectionLintWarning` fed from `stmt_get_span`/`expr_get_span`. A probe showed the AST span pool is **empty on the lint CLI path** (`e=7 espan=0 sspan=0 left=0`, `span_is_valid` false), so no span-based fix can work here. `collection_patterns.spl` is byte-identical to origin. Two traps found on the way, both worth knowing: `stmt_assign_stmt` has **zero callers** — the parser emits assignments as `STMT_EXPR` wrapping `EXPR_ASSIGN`, so every `STMT_ASSIGN` branch in that lint is dead code. |
+| **AF2** COLL EasyFix | `90.tools/lint/_LintMain/entry_and_fixes.spl` | **Landed `9feda786614a`.** `collection_easy_fix()` emits a real `Replacement` for COLL001 (`arr = arr + [x]` → `arr.push(x)`, Certain); COLL diagnostics report the **offending line** instead of the enclosing `fn` line. Location is recovered **textually**, matching `lint_cli_find_fn_line`, because of the AF1 finding. Multi-element `arr + [a, b]` warns without a fix. Verified by `test/01_unit/compiler/lint/collection_easy_fix_spec.spl` — 3 examples, 0 failures, and the spec discriminates (it reported "line 1, expected 4" against the span attempt). COLL007's `.pop()` rewrite is present but **unreachable**: the rule never fires. Filed as `doc/08_tracking/bug/coll007_does_not_fire_on_array_rebuild_2026-07-31.md`. |
+
+**Not deployed.** `bin/release/<triple>/simple` still predates this, so `simple lint --fix`
+does not yet offer the COLL001 fix. Stage 4 is blocked on two `A`-staged files from
+another session (`vulkan_backend.spl:1008` parse error,
+`cranelift_codegen_adapter.spl:305,312` dict/int type mismatch).
 
 Why only two rules: COLL002 needs a hoisted `HashSet` (blocked — the pure
 `HashSet` is text-keyed, `hashset.spl:112`), COLL003 needs a whole-loop cursor

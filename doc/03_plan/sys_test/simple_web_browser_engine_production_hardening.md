@@ -1573,3 +1573,40 @@ The displayed manual uses exactly these four steps:
 The scenario is a STATIC candidate until an admitted pure-Simple runner and
 docgen lane execute it. This bounded implementation invokes neither runtime,
 bootstrap, nor docgen and therefore makes no runtime PASS claim.
+
+## Sandboxed `srcdoc` child authority (RED, 2026-07-31)
+
+The current iframe path is renderer-only recursion, not a child `BrowserSession`
+document.  The following scenario is required before child script, request,
+navigation, or input may be enabled. It binds one
+`BrowserChildIdentity(parent_dom_generation, iframe_route,
+child_frame_generation)`. Child document URL is `about:srcdoc`; fallback and
+effective base are distinct URL fields; security identity is typed `Origin`.
+`HostedBrowserRendererProcess.generation` remains only the outer SBR2 process
+generation. The isolated trusted ledger is `HostedBrowserRendererProcess`;
+worker `BrowserSession` is a mirror. Direct `HostedWebContentSession` uses the
+shared session broker and makes no SBR2 claim.
+
+| Requirement | Executable SSpec | Manual | Deterministic oracle |
+|---|---|---|---|
+| REQ-WEB-BROWSER-003/004/014 | `test/03_system/security/browser_iframe_sandbox_contract_spec.spl` | `doc/06_spec/03_system/security/browser_iframe_sandbox_contract_spec.md` | typed identity/base/origin and iframe+CSP sandbox admission; two opaque siblings differ |
+| REQ-WEB-BROWSER-005/007/008/010/012/013 | same | same | script, fetch/navigation, cookie/storage, and input validate identity/policy before mutation and consume one permit |
+| REQ-WEB-BROWSER-018/019/021 | same | same | malformed/oversized/unknown/forged/replayed/stale cases retire cleanly; direct/isolated parity and current manual |
+
+The displayed manual uses exactly these four steps:
+
+1. `Create the sandboxed srcdoc child document`
+2. `Broker one child script operation`
+3. `Constrain child request navigation and input`
+4. `Revoke stale child authority`
+
+The frozen helpers are `setup_iframe_sandbox_contract_fixture`,
+`check_child_document_context`, `check_child_script_broker_use`,
+`check_child_request_navigation_input`, and
+`check_child_revocation_and_stale_rejection`. They require absent/empty
+sandbox, CSP intersection, malformed/oversized/unknown tokens, two opaque
+siblings, forged identity rejection-before-mutation, and hosted/isolated parity.
+They also distinguish outer per-hop SBR2 from inner per-child `SBCP1`, and
+prove direct mode uses no wire. A validator-only check, source scan, Rust seed,
+or bootstrap result cannot promote this RED row. It remains static until one
+admitted pure-Simple focused execution and docgen produce the manual.
