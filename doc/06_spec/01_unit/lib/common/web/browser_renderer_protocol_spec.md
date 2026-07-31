@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 7 | 7 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -14,6 +14,36 @@
 ## Scenarios
 
 ### isolated browser renderer protocol
+
+#### rejects NUL payloads at both renderer envelope decoders
+
+- Decode manually framed malformed renderer envelopes
+   - Expected: legacy.status equals `violation`
+   - Expected: legacy.decoder.error equals `nul-payload`
+   - Expected: bound.status equals `violation`
+   - Expected: bound.decoder.error equals `nul-payload`
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val legacy = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(7),
+    "SBR1\tinit\t7\t1\t3\nA\0B"
+)
+expect(legacy.status).to_equal("violation")
+expect(legacy.decoder.error).to_equal("nul-payload")
+
+val capability = "0123456789abcdef0123456789abcdef"
+val bound = browser_renderer_capability_decoder_feed(
+    browser_renderer_capability_decoder_new(7),
+    "SBR2\tinit\t7\t1\t1\t3\t32\nA\0B" + capability
+)
+expect(bound.status).to_equal("violation")
+expect(bound.decoder.error).to_equal("nul-payload")
+```
+
+</details>
 
 #### round-trips bounded document titles and rejects hostile SBRF8 fields
 
