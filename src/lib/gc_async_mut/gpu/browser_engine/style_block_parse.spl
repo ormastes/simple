@@ -7,7 +7,9 @@
 #   - Shorthand property expansion (flex, border, background, margin/padding, font)
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
-use std.gc_async_mut.gpu.browser_engine.dom_color.{parse_color_value}
+use std.gc_async_mut.gpu.browser_engine.dom_color.{
+    parse_color_value, parse_color_value_checked
+}
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
 use std.gc_async_mut.gpu.browser_engine.style.custom_properties.{has_var_reference, parse_var_function}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{Keyframe, CSSValue, CSSDeclaration}
@@ -143,11 +145,12 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
             while di < raw_decls.len() and css_decls.len() < 256:
                 val d = raw_decls[di]
                 di = di + 1
-                css_decls.push(CSSDeclaration(
-                    property: d.property,
-                    value: keyframe_css_value(d.property, d.value),
-                    important: false
-                ))
+                if val parsed_value = keyframe_css_value(d.property, d.value):
+                    css_decls.push(CSSDeclaration(
+                        property: d.property,
+                        value: parsed_value,
+                        important: false
+                    ))
             for offset_val in parsed_offsets:
                 frames = _insert_keyframe_by_offset(
                     frames, Keyframe.create(offset_val, css_decls)
@@ -155,17 +158,18 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
         pos = close + 1
     frames
 
-fn keyframe_css_value(property: text, raw: text) -> CSSValue:
+fn keyframe_css_value(property: text, raw: text) -> CSSValue?:
     val value = raw.trim()
     val lower_property = property.trim().lower()
     if lower_property.contains("color"):
-        val rgba = parse_color_value(value)
-        return CSSValue.Color(color: from_rgba(
-            ((rgba >> 24) & 255u32).to_i64(),
-            ((rgba >> 16) & 255u32).to_i64(),
-            ((rgba >> 8) & 255u32).to_i64(),
-            (rgba & 255u32).to_i64()
-        ))
+        if val rgba = parse_color_value_checked(value):
+            return CSSValue.Color(color: from_rgba(
+                ((rgba >> 24) & 255u32).to_i64(),
+                ((rgba >> 16) & 255u32).to_i64(),
+                ((rgba >> 8) & 255u32).to_i64(),
+                (rgba & 255u32).to_i64()
+            ))
+        return nil
     if value.ends_with("%"):
         return CSSValue.Percentage(
             v: value.slice(0, value.len() - 1).trim().to_f64()

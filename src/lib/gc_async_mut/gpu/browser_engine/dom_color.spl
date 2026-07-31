@@ -13,8 +13,15 @@ pub fn parse_color_value(s: text) -> u32:
     and decimal numbers.
     """
     val cleaned = strip_css_comments(s.trim())
+    if cleaned.starts_with("var("):
+        return 0x00000000u32
+    parse_color_value_checked(cleaned) ?? 0x000000FFu32
+
+pub fn parse_color_value_checked(s: text) -> u32?:
+    """Parse a color, returning nil when a color function has invalid alpha."""
+    val cleaned = strip_css_comments(s.trim())
     if cleaned.len() == 0:
-        return 0x000000FF
+        return nil
 
     val lower = cleaned.lower()
 
@@ -27,20 +34,26 @@ pub fn parse_color_value(s: text) -> u32:
 
     # hsl/hsla before rgb so they're matched first
     if lower.starts_with("hsla(") and cleaned.ends_with(")"):
-        return parse_hsl_func(cleaned, true)
+        return parse_hsl_func_checked(cleaned, true)
     if lower.starts_with("hsl(") and cleaned.ends_with(")"):
-        return parse_hsl_func(cleaned, false)
+        return parse_hsl_func_checked(cleaned, false)
 
     # rgba/rgb — unified parser handles both
     if lower.starts_with("rgba(") and cleaned.ends_with(")"):
         val rgba_inner = cleaned.slice(5, cleaned.len() - 1)
-        return parse_rgb_unified(rgba_inner)
+        return parse_rgb_unified_checked(rgba_inner)
     if lower.starts_with("rgb(") and cleaned.ends_with(")"):
         val rgb_inner = cleaned.slice(4, cleaned.len() - 1)
-        return parse_rgb_unified(rgb_inner)
+        return parse_rgb_unified_checked(rgb_inner)
+
+    if (
+        lower.starts_with("rgb(") or lower.starts_with("rgba(") or
+        lower.starts_with("hsl(") or lower.starts_with("hsla(")
+    ):
+        return nil
 
     if cleaned.starts_with("var("):
-        return 0x00000000
+        return nil
 
     val named = named_color_to_u32(cleaned)
     if named != nil:
@@ -51,7 +64,7 @@ pub fn parse_color_value(s: text) -> u32:
     if num != nil:
         val nval = num ?? 0
         return nval.to_u32()
-    return 0x000000FF
+    nil
 
 pub fn strip_css_comments(s: text) -> text:
     """Remove CSS comments /* ... */ from a string."""
@@ -119,10 +132,13 @@ pub fn parse_rgb_unified(inner_raw: text) -> u32:
     - Space-separated: '128 0 255' or '128 0 255 / 0.5'
     - Percentage values: '50% 0% 100%' or '50%, 0%, 100%'
     """
+    parse_rgb_unified_checked(inner_raw) ?? 0x000000FFu32
+
+pub fn parse_rgb_unified_checked(inner_raw: text) -> u32?:
     val inner_stripped = strip_css_comments(inner_raw)
     val inner = inner_stripped.trim()
     if inner.len() == 0:
-        return 0x000000FF
+        return nil
 
     # Determine separator: comma or space
     var has_comma = false
@@ -136,14 +152,18 @@ pub fn parse_rgb_unified(inner_raw: text) -> u32:
 
     var color_parts: [text] = []
     var alpha_str = ""
+    var has_slash = false
 
     if has_comma:
+        if dom_find_str(inner, "/", 0) < 999999999 or inner.ends_with(","):
+            return nil
         val comma_parts = split_comma(inner)
         color_parts = comma_parts
     else:
         # Space-separated, may have / for alpha
         val slash_pos = dom_find_str(inner, "/", 0)
         if slash_pos < 999999999:
+            has_slash = true
             val before_slash_raw = inner.slice(0, slash_pos)
             val before_slash = before_slash_raw.trim()
             val alpha_raw = inner.slice(slash_pos + 1, inner.len())
@@ -152,8 +172,12 @@ pub fn parse_rgb_unified(inner_raw: text) -> u32:
         else:
             color_parts = dom_split_ws(inner)
 
-    if color_parts.len() < 3:
-        return 0x000000FF
+    if color_parts.len() < 3 or color_parts.len() > 4:
+        return nil
+    if has_comma and color_parts.len() != 3 and color_parts.len() != 4:
+        return nil
+    if not has_comma and color_parts.len() != 3:
+        return nil
 
     val r_str = color_parts[0].trim()
     val r = parse_color_component(r_str)
@@ -163,12 +187,19 @@ pub fn parse_rgb_unified(inner_raw: text) -> u32:
     val b = parse_color_component(b_str)
 
     var a: u32 = 255
-    if alpha_str.len() > 0:
-        val a_trimmed = alpha_str.trim()
-        a = parse_alpha_component(a_trimmed)
+    if has_slash:
+        if alpha_str.len() == 0:
+            return nil
+        if val parsed_alpha = parse_alpha_component_checked(alpha_str):
+            a = parsed_alpha
+        else:
+            return nil
     elif color_parts.len() >= 4:
         val a4_str = color_parts[3].trim()
-        a = parse_alpha_component(a4_str)
+        if val parsed_alpha = parse_alpha_component_checked(a4_str):
+            a = parsed_alpha
+        else:
+            return nil
 
     return (r * 16777216) + (g * 65536) + (b * 256) + a
 
@@ -235,53 +266,93 @@ pub fn pcc_digit(ch: text) -> i64:
     return 0 - 1
 
 pub fn parse_alpha_component(s: text) -> u32:
-    """Parse an alpha component (float 0-1, percentage 0%-100%, or integer)."""
+    """Parse alpha, retaining the historical transparent fallback on invalid input."""
+    parse_alpha_component_checked(s) ?? 0u32
+
+val MAX_CSS_ALPHA_NUMBER_CHARS: i32 = 256
+
+pub fn parse_alpha_component_checked(s: text) -> u32?:
+    """Parse a complete CSS number/percentage and round it to an alpha byte."""
     val trimmed = s.trim()
-    if trimmed.ends_with("%"):
-        val pct_str = trimmed.slice(0, trimmed.len() - 1)
-        val pct_i = pcc_parse_int(pct_str)
-        var v = (pct_i * 255) / 100
-        if v < 0:
-            v = 0
-        if v > 255:
-            v = 255
-        return v.to_u32()
-    # Check if it looks like a decimal 0.0-1.0 (contains '.')
-    var has_dot = false
-    var ai = 0
-    val alen = trimmed.len()
-    while ai < alen:
-        if trimmed.char_at(ai) == ".":
-            has_dot = true
-        ai = ai + 1
-    if has_dot:
-        # Parse as integer fraction: "0.5" → 5/10 → 127
-        # Simple approach: parse the part before and after dot
-        val dot_pos = pcc_find_dot(trimmed)
-        val int_part = pcc_parse_int(trimmed.slice(0, dot_pos))
-        val frac_str = trimmed.slice(dot_pos + 1, alen)
-        val frac_val = pcc_parse_int(frac_str)
-        var divisor = 1
-        var di = 0
-        while di < frac_str.len():
-            divisor = divisor * 10
-            di = di + 1
-        # Combined value in thousandths
-        val combined = int_part * 1000 + (frac_val * 1000) / divisor
-        if combined <= 1000:
-            var v = (combined * 255) / 1000
-            if v < 0:
-                v = 0
-            if v > 255:
-                v = 255
-            return v.to_u32()
-    # Plain integer 0-255
-    val n = pcc_parse_int(trimmed)
-    if n < 0:
+    var number = trimmed
+    var is_percent = false
+    if number.ends_with("%"):
+        is_percent = true
+        number = number.slice(0, number.len() - 1)
+    if not css_alpha_number_syntax_valid(number):
+        return nil
+    if number.starts_with("-"):
         return 0
-    if n > 255:
+    if not css_alpha_mantissa_has_nonzero_digit(number):
+        return 0
+
+    val parsed = number.parse_f64()
+    if parsed == nil:
+        # A syntactically valid bounded token can fail conversion only at an
+        # extreme exponent. Negative exponents underflow; all others clamp.
+        if css_alpha_has_negative_exponent(number):
+            return 0
         return 255
-    return n.to_u32()
+
+    val value = parsed ?? 0.0
+    val limit = if is_percent: 100.0 else: 1.0
+    if value <= 0.0:
+        return 0
+    if value >= limit:
+        return 255
+    ((value * 255.0 / limit) + 0.5).to_u32()
+
+fn css_alpha_number_syntax_valid(number: text) -> bool:
+    if number.len() == 0 or number.len() > MAX_CSS_ALPHA_NUMBER_CHARS:
+        return false
+    var i = 0
+    if number.char_at(0) == "+" or number.char_at(0) == "-":
+        i = 1
+    var integer_digits = 0
+    while i < number.len() and pcc_digit(number.char_at(i)) >= 0:
+        integer_digits = integer_digits + 1
+        i = i + 1
+    var fraction_digits = 0
+    if i < number.len() and number.char_at(i) == ".":
+        i = i + 1
+        while i < number.len() and pcc_digit(number.char_at(i)) >= 0:
+            fraction_digits = fraction_digits + 1
+            i = i + 1
+        if fraction_digits == 0:
+            return false
+    if integer_digits == 0 and fraction_digits == 0:
+        return false
+    if i < number.len() and (number.char_at(i) == "e" or number.char_at(i) == "E"):
+        i = i + 1
+        if i < number.len() and (number.char_at(i) == "+" or number.char_at(i) == "-"):
+            i = i + 1
+        val exponent_start = i
+        while i < number.len() and pcc_digit(number.char_at(i)) >= 0:
+            i = i + 1
+        if i == exponent_start:
+            return false
+    i == number.len()
+
+fn css_alpha_mantissa_has_nonzero_digit(number: text) -> bool:
+    var i = 0
+    while i < number.len():
+        val ch = number.char_at(i)
+        if ch == "e" or ch == "E":
+            return false
+        val digit = pcc_digit(ch)
+        if digit > 0:
+            return true
+        i = i + 1
+    false
+
+fn css_alpha_has_negative_exponent(number: text) -> bool:
+    var i = 0
+    while i + 1 < number.len():
+        val ch = number.char_at(i)
+        if ch == "e" or ch == "E":
+            return number.char_at(i + 1) == "-"
+        i = i + 1
+    false
 
 pub fn pcc_find_dot(s: text) -> i64:
     var i = 0
@@ -406,6 +477,9 @@ pub fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
     Supports: hsl(120, 75%, 50%), hsla(120, 75%, 50%, 0.5),
     hsl(120 75% 50%), hsl(120 75% 50% / 0.5)
     """
+    parse_hsl_func_checked(s, is_hsla) ?? 0x000000FFu32
+
+pub fn parse_hsl_func_checked(s: text, is_hsla: bool) -> u32?:
     val prefix_len = if is_hsla: 5 else: 4
     val inner_raw_hsl = strip_css_comments(s.slice(prefix_len, s.len() - 1))
     val inner = inner_raw_hsl.trim()
@@ -420,12 +494,16 @@ pub fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
 
     var parts: [text] = []
     var alpha_str = ""
+    var has_slash = false
 
     if has_comma:
+        if dom_find_str(inner, "/", 0) < 999999999 or inner.ends_with(","):
+            return nil
         parts = split_comma(inner)
     else:
         val slash_pos = dom_find_str(inner, "/", 0)
         if slash_pos < 999999999:
+            has_slash = true
             val before_slash_raw_hsl = inner.slice(0, slash_pos)
             val before_slash = before_slash_raw_hsl.trim()
             val alpha_raw_hsl = inner.slice(slash_pos + 1, inner.len())
@@ -434,8 +512,12 @@ pub fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
         else:
             parts = dom_split_ws(inner)
 
-    if parts.len() < 3:
-        return 0x000000FF
+    if parts.len() < 3 or parts.len() > 4:
+        return nil
+    if has_comma and parts.len() != 3 and parts.len() != 4:
+        return nil
+    if not has_comma and parts.len() != 3:
+        return nil
 
     # Parse H (degrees), S (percentage), L (percentage)
     val h_str = parts[0].trim()
@@ -444,7 +526,7 @@ pub fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
 
     val h_val_opt = h_str.parse_f64()
     if h_val_opt == nil:
-        return 0x000000FF
+        return nil
     var h_val_unwrapped: f64 = 0.0
     if h_val_opt != nil:
         val hv = h_val_opt ?? 0.0
@@ -502,10 +584,18 @@ pub fn parse_hsl_func(s: text, is_hsla: bool) -> u32:
     if b > 255: b = 255
 
     var a: u32 = 255
-    if alpha_str.len() > 0:
-        a = parse_alpha_component(alpha_str)
+    if has_slash:
+        if alpha_str.len() == 0:
+            return nil
+        if val parsed_alpha = parse_alpha_component_checked(alpha_str):
+            a = parsed_alpha
+        else:
+            return nil
     elif parts.len() >= 4:
-        a = parse_alpha_component(parts[3].trim())
+        if val parsed_alpha = parse_alpha_component_checked(parts[3].trim()):
+            a = parsed_alpha
+        else:
+            return nil
 
     return (r.to_u32() * 16777216) + (g.to_u32() * 65536) + (b.to_u32() * 256) + a
 
