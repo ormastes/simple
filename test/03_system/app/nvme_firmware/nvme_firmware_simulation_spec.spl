@@ -22,10 +22,27 @@ evidence. Run: `bin/simple test test/03_system/app/nvme_firmware/nvme_firmware_s
 
 use std.spec.*
 use std.io_runtime.{env_get, process_run}
+use std.nogc_sync_mut.io.file_ops.{file_exists}
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
 val FW: text = "examples/09_embedded/simpleos_nvme_fw/fw"
-val SIMPLE_BINARY: text = env_get("SIMPLE_BINARY") ?? "bin/simple"
+
+# Don't trust SIMPLE_BINARY blindly: a stale or "0" value points the whole
+# suite at a binary that isn't there, and every case then fails with a
+# confusing exec error instead of an honest one. Fall back to the default.
+#
+# Deliberately NOT falling back to /proc/self/exe (an earlier version of this
+# resolver did): this spec launches `simple run`, and resolving the launcher
+# to our own executable is the self-exec recursion that caused the
+# `bin/simple run` fork bomb. A missing bin/simple should fail loudly, not
+# re-enter this process.
+fn _nvme_simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and configured != "0" and file_exists(configured):
+        return configured
+    "bin/simple"
+
+val SIMPLE_BINARY: text = _nvme_simple_binary()
 
 fn _run(file: text) -> (text, text, i64):
     process_run(SIMPLE_BINARY, ["run", file])
