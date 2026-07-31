@@ -10,6 +10,8 @@ use common.ui.theme_render_snapshot.{
 use common.ui.widget.{WidgetNode}
 use common.ui.widget_draw_ir.{widget_tree_to_draw_ir_with_theme}
 use common.ui.theme_draw_ir_material.{theme_draw_ir_surface_command_color, theme_draw_ir_surface_initializer_color}
+use common.engine.interaction.draw_ir_hit_bridge.{draw_ir_hit_forest}
+use common.engine.interaction.hit_test.{hit_stack}
 use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
 
 fn _theme_snapshot(
@@ -100,6 +102,30 @@ fn _material_request_count(composition: DrawIrComposition) -> i32:
     count
 
 describe "widget Draw IR semantic theme handoff":
+
+    it "keeps decorations parented but makes the semantic widget the hit target":
+        val root = panel("metadata-root", "", [button("metadata-button", "", "activate")])
+        val snapshot = _theme_snapshot("metadata", 0xff010203u32, 0xfff0f1f2u32, 0xff123456u32, 0xff202122u32, 0xff303132u32, 0xff404142u32, 0xff505152u32)
+        val draw = widget_tree_to_draw_ir_with_theme(root, 160, 80, DRAW_IR_BACKEND_CPU, snapshot)
+
+        var button_hit_x = -1
+        var button_hit_y = -1
+        for batch in draw.batches:
+            for command in batch.commands:
+                expect(command.parent_id.len()).to_be_greater_than(0)
+                if command.component_id == "metadata-button":
+                    expect(command.hit_rect.present).to_be(true)
+                    button_hit_x = batch.embedding.x + command.hit_rect.x + 1
+                    button_hit_y = batch.embedding.y + command.hit_rect.y + 1
+                if command.component_id == "metadata-button-label":
+                    expect(command.parent_id).to_equal("metadata-button")
+                    expect(command.hit_rect.present).to_be(false)
+
+        expect(button_hit_x).to_be_greater_than(-1)
+        expect(button_hit_y).to_be_greater_than(-1)
+        val forest = draw_ir_hit_forest(draw)
+        val hit = hit_stack(forest.proxies, forest.parents, button_hit_x, button_hit_y)
+        expect(forest.node_names[hit.primary]).to_equal("metadata-button")
 
     it "projects the selected snapshot surface and accent into the same widget tree":
         val root = panel("theme-panel", "", [button("theme-button", "", "activate")])

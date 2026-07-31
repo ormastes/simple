@@ -1,0 +1,111 @@
+# codex-system-test
+# @req AC-2
+"""Canonical pointer/wheel ancestry and Draw IR event metadata.
+
+The scenario reuses the public Panel2D interaction bridge, widget Draw IR
+producer, and shared WM scene producer. It does not construct a private hit
+hierarchy or infer targets from geometry outside those owners.
+"""
+
+use std.spec.*
+use common.ui.builder.{build_tree_with_title, button, column, label, panel}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
+use common.ui.panel2d.{
+    panel2d, panel_add_child, panel_dispatch_pointer, panel_hit_forest,
+    panel_with_scroll
+}
+use common.ui.scroll_surface.{ScrollModel}
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use common.ui.window.{WindowManager}
+use common.ui.window_scene.{shared_wm_scene_from_window_manager}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_draw_ir_composition}
+use common.ui.window_surface_registry.{
+    UI_SURFACE_KIND_SIMPLE_WEB, UiWindowSurfaceRegistry
+}
+use common.engine.interaction.draw_ir_hit_bridge.{draw_ir_hit_forest, draw_ir_node_id}
+use common.engine.interaction.hit_test.{hit_stack}
+use common.engine.interaction.pointer_event.{
+    POINTER_DOWN, POINTER_WHEEL, PointerEvent2D
+}
+
+fn _event_ancestry_taskbar() -> TaskbarModel:
+    TaskbarModel(pinned: [], running: [], tray: [])
+
+fn _event_ancestry_wm_scene():
+    val tree = build_tree_with_title(
+        column("event-window-root", [label("event-window-label", "Window")]),
+        "Window", "glass_dark")
+    var manager = WindowManager.new()
+    val _window = manager.open_window("event-surface", "Window", 10, 40, 180, 120, tree)
+    var registry = UiWindowSurfaceRegistry.new()
+    registry.bind_with_kind(
+        "win1", "event-surface", 42u64, "event.app", "Window",
+        UI_SURFACE_KIND_SIMPLE_WEB)
+    shared_wm_scene_from_window_manager(manager, registry, 320, 240)
+
+fn expect_event_ancestry():
+    val scroll = ScrollModel(total_rows: 100, view_w: 80, view_h: 80)
+    var root = panel_with_scroll(panel2d("root", 0, 0, 200, 200), scroll)
+    var inner = panel_with_scroll(panel2d("inner", 20, 20, 80, 80), scroll)
+    inner = panel_add_child(inner, panel2d("leaf", 10, 10, 20, 20))
+    root = panel_add_child(root, inner)
+
+    val forest = panel_hit_forest([root])
+    val down_hit = hit_stack(forest.proxies, forest.parents, 35, 35)
+    val wheel_hit = hit_stack(forest.proxies, forest.parents, 35, 35)
+    expect(wheel_hit.ancestor_path).to_equal(down_hit.ancestor_path)
+    expect(down_hit.ancestor_path.len()).to_equal(3)
+    expect(down_hit.ancestor_path[0]).to_equal(draw_ir_node_id("root"))
+    expect(down_hit.ancestor_path[1]).to_equal(draw_ir_node_id("inner"))
+    expect(down_hit.ancestor_path[2]).to_equal(draw_ir_node_id("leaf"))
+
+    val down = PointerEvent2D.create(1, POINTER_DOWN, 35, 35, 1, -1)
+    val down_result = panel_dispatch_pointer([root], down, [])
+    var wheel = PointerEvent2D.create(1, POINTER_WHEEL, 35, 35, 0, -1)
+    wheel.delta_y = 12
+    val wheel_result = panel_dispatch_pointer([root], wheel, [])
+    expect(down_result.target_node).to_equal(down_hit.primary)
+    expect(wheel_result.target_node).to_equal(down_result.target_node)
+    expect(down_result.target_name).to_equal("leaf")
+    expect(wheel_result.target_name).to_equal("leaf")
+    expect(wheel_result.scrolled).to_equal(true)
+    expect(wheel_result.panels[0].scroll_offset).to_equal(0)
+    expect(wheel_result.panels[0].children[0].scroll_offset).to_equal(12)
+
+    val widget = widget_tree_to_draw_ir(
+        panel("metadata-root", "", [button("metadata-button", "", "activate")]),
+        160, 80, DRAW_IR_BACKEND_CPU)
+    var widget_target_x = -1
+    var widget_target_y = -1
+    for batch in widget.batches:
+        for command in batch.commands:
+            expect(command.parent_id.len()).to_be_greater_than(0)
+            if command.component_id == "metadata-button":
+                expect(command.hit_rect.present).to_equal(true)
+                widget_target_x = batch.embedding.x + command.hit_rect.x + 1
+                widget_target_y = batch.embedding.y + command.hit_rect.y + 1
+    expect(widget_target_x).to_be_greater_than(-1)
+    expect(widget_target_y).to_be_greater_than(-1)
+    val widget_forest = draw_ir_hit_forest(widget)
+    val widget_hit = hit_stack(
+        widget_forest.proxies, widget_forest.parents,
+        widget_target_x, widget_target_y)
+    expect(widget_forest.node_names[widget_hit.primary]).to_equal(
+        "metadata-button")
+
+    val wm = shared_wm_scene_draw_ir_composition(
+        _event_ancestry_wm_scene(), _event_ancestry_taskbar(),
+        DRAW_IR_BACKEND_CPU, 1000, "09:41", 2)
+    var wm_command_count = 0
+    for batch in wm.batches:
+        for command in batch.commands:
+            wm_command_count = wm_command_count + 1
+            expect(command.parent_id.len()).to_be_greater_than(0)
+            expect(command.hit_rect.present).to_equal(true)
+    expect(wm_command_count).to_be_greater_than(0)
+
+describe "Draw IR Web renderer event ancestry":
+    it "routes pointer and wheel through one ancestry with canonical targets":
+        step("Route pointer and wheel through one ancestry")
+        expect_event_ancestry()

@@ -21,6 +21,8 @@ use app.ui.render.html_widgets.{render_html_tree}
 use app.ui.web.html.{generate_css, wm_root_data_attrs}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_html_request_to_pixel_artifact_with_backend, web_render_resolved_engine2d_backend_name}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, web_render_backend_names}
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
@@ -270,6 +272,12 @@ class BrowserBackend:
     last_render_draw_ir_dispatch_us: i64
     last_render_framebuffer_copy_us: i64
     last_render_state_store_us: i64
+    draw_ir_engine: Engine2D
+    draw_ir_engine_generation: i64
+    draw_ir_engine_init_count: i64
+    draw_ir_engine_shutdown_count: i64
+    draw_ir_submission_count: i64
+    last_draw_ir_composition_id: text
 
     static fn create(w: i32, h: i32, backend: text, web_engine: text = WEB_RENDER_ENGINE_PURE_SIMPLE) -> Result<BrowserBackend, text>:
         """Create a BrowserBackend with the specified GPU backend.
@@ -285,6 +293,7 @@ class BrowserBackend:
             return Err("BrowserBackend.create: unknown --web-engine '{web_engine}' (known: {known})")
         val resolved = resolve_gpu_backend(backend)
         val fb = Framebuffer.create(w, h)
+        val draw_ir_engine = Engine2D.create_with_backend_fast(w, h, resolved)
 
         return Ok(BrowserBackend(
             width: w,
@@ -372,7 +381,13 @@ class BrowserBackend:
             last_render_pixel_artifact_us: 0,
             last_render_draw_ir_dispatch_us: 0,
             last_render_framebuffer_copy_us: 0,
-            last_render_state_store_us: 0
+            last_render_state_store_us: 0,
+            draw_ir_engine: draw_ir_engine,
+            draw_ir_engine_generation: 1,
+            draw_ir_engine_init_count: 1,
+            draw_ir_engine_shutdown_count: 0,
+            draw_ir_submission_count: 0,
+            last_draw_ir_composition_id: ""
         ))
 
     fn render_html(state: UIState) -> text:
@@ -449,9 +464,57 @@ class BrowserBackend:
         widget_tree_to_draw_ir_with_theme(state.tree.root_node(), self.width, self.height, DRAW_IR_BACKEND_GPU, theme_snapshot)
 
     me render_frame(tree: UITree, state: UIState):
-        self.render_frame_with_composition(tree, state, self.widget_draw_ir_composition(state))
+        self.render_legacy_html_frame(tree, state, self.widget_draw_ir_composition(state))
 
-    me render_frame_with_composition(tree: UITree, state: UIState, _composition: DrawIrComposition):
+    me render_frame_with_composition(tree: UITree, state: UIState, composition: DrawIrComposition):
+        """Submit the caller-owned composition through this session's Engine2D."""
+        val dispatch_start_us = browser_backend_time_us()
+        self.draw_ir_engine.clear(0u32)
+        val result = engine2d_draw_ir_adv_composition(
+            self.draw_ir_engine, composition, true
+        )
+        self.last_render_draw_ir_dispatch_us = (
+            browser_backend_time_us() - dispatch_start_us)
+        self.draw_ir_submission_count = self.draw_ir_submission_count + 1
+        self.last_draw_ir_composition_id = composition.composition_id
+        self.reset_runtime_queue_diagnostics()
+        self.last_render_html_us = 0
+        self.last_render_pixel_artifact_us = 0
+        self.last_artifact_html = ""
+        self.last_artifact_capabilities = "DrawIrComposition"
+        self.last_artifact_pixels = result.pixels.len()
+        self.last_artifact_engine2d_backend = result.selected_backend
+        self.last_artifact_engine2d_reason = result.fallback_reason
+        self.last_artifact_readback_backend = result.selected_backend
+        self.last_artifact_readback_pixel_count = result.pixels.len().to_i64()
+        self.last_artifact_readback_checksum = result.readback_checksum
+        self.last_artifact_gpu_readback_source = result.readback_source
+        val readback_complete = (
+            result.readback_source != "not_requested" and
+            result.pixels.len() == self.width * self.height
+        )
+        self.last_artifact_readback_status = if readback_complete:
+            "readback"
+        else:
+            "unavailable"
+        self.last_artifact_readback_reason = if readback_complete:
+            result.fallback_reason
+        else:
+            "Engine2D readback unavailable: " + result.readback_source
+        if result.skipped_command_count != 0 or not readback_complete:
+            self.last_artifact_engine2d_status = "unavailable"
+            return
+        self.last_artifact_engine2d_status = "rendered"
+        val framebuffer_start_us = browser_backend_time_us()
+        self.framebuffer = framebuffer_from_argb_pixels(
+            self.width, self.height, result.pixels)
+        self.present_pixels_cache_valid = false
+        self.present_pixels_cache_theme_identity = ""
+        self.last_render_framebuffer_copy_us = (
+            browser_backend_time_us() - framebuffer_start_us)
+        self.finish_event_render_roundtrip()
+
+    me render_legacy_html_frame(tree: UITree, state: UIState, _composition: DrawIrComposition):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
         val revision = widget_store_revision()
         val theme_snapshot = theme_package_render_snapshot(state.tree.theme_name())
@@ -648,6 +711,13 @@ class BrowserBackend:
 
     me resize(w: i32, h: i32):
         """Resize the framebuffer."""
+        if self.initialized:
+            self.draw_ir_engine.shutdown()
+            self.draw_ir_engine_shutdown_count = self.draw_ir_engine_shutdown_count + 1
+            self.draw_ir_engine = Engine2D.create_with_backend_fast(
+                w, h, self.gpu_backend_name)
+            self.draw_ir_engine_generation = self.draw_ir_engine_generation + 1
+            self.draw_ir_engine_init_count = self.draw_ir_engine_init_count + 1
         self.width = w
         self.height = h
         self.framebuffer = Framebuffer.create(w, h)
@@ -661,6 +731,10 @@ class BrowserBackend:
 
     me shutdown():
         """Release resources."""
+        if not self.initialized:
+            return
+        self.draw_ir_engine.shutdown()
+        self.draw_ir_engine_shutdown_count = self.draw_ir_engine_shutdown_count + 1
         self.initialized = false
         self.event_queue = []
         self.layout_cache = []

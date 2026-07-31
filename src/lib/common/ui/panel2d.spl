@@ -360,6 +360,42 @@ fn panel_hit_forest(panels: [Panel2D]) -> DrawIrHitForest:
         i = i + 1
     DrawIrHitForest(proxies: out, parents: forest.parents, node_names: forest.node_names)
 
+fn _panel_scroll_node_present(panels: [Panel2D], node_id: i64) -> bool:
+    var i = 0
+    while i < panels.len():
+        val panel = panels[i]
+        if panel.has_scroll and draw_ir_node_id(panel.id) == node_id:
+            return true
+        if _panel_scroll_node_present(panel.children, node_id):
+            return true
+        i = i + 1
+    false
+
+fn _panel_scroll_node(panels: [Panel2D], node_id: i64, delta: i32) -> ([Panel2D], bool):
+    """Scroll exactly the named panel, preserving every sibling and child.
+    The event route identifies the nearest scrollable ancestor first, so this
+    helper only performs the value-tree update."""
+    var out: [Panel2D] = []
+    var changed = false
+    var i = 0
+    while i < panels.len():
+        var panel = panels[i]
+        if panel.has_scroll and draw_ir_node_id(panel.id) == node_id:
+            val before = panel.scroll_offset
+            panel = panel_scroll_by(panel, delta)
+            if panel.scroll_offset != before:
+                changed = true
+        else:
+            val (children, child_changed) = _panel_scroll_node(
+                panel.children, node_id, delta
+            )
+            panel.children = children
+            if child_changed:
+                changed = true
+        out.push(panel)
+        i = i + 1
+    (out, changed)
+
 fn panel_dispatch_pointer(panels: [Panel2D], event: PointerEvent2D, listeners: [EventListener2D]) -> PanelDispatchResult:
     """Resolve `event` against the panel set's hit forest and run the full
     capture -> target -> bubble dispatch (hit_stack + event_route — nothing
@@ -376,22 +412,22 @@ fn panel_dispatch_pointer(panels: [Panel2D], event: PointerEvent2D, listeners: [
     var out_panels = panels
     var scrolled = false
     if event.kind == POINTER_WHEEL and hit.primary != -1 and not outcome.default_prevented:
-        # ancestor_path root is always the batch group == the top-level
-        # panel owning the hit (leaf parent chains terminate at the group).
-        val root_node = hit.ancestor_path[0]
-        var updated: [Panel2D] = []
-        var i = 0
-        val n = panels.len()
-        while i < n:
-            var p = panels[i]
-            if p.has_scroll and draw_ir_node_id(p.id) == root_node:
-                val before = p.scroll_offset
-                p = panel_scroll_by(p, event.delta_y)
-                if p.scroll_offset != before:
-                    scrolled = true
-            updated.push(p)
-            i = i + 1
-        out_panels = updated
+        # Pointer-down and wheel share the exact hit ancestry.  Walk it from
+        # target to root so nested scroll areas consume their own wheel before
+        # an outer panel can see it.
+        var path_index = hit.ancestor_path.len() - 1
+        var scroll_node = -1i64
+        while path_index >= 0 and scroll_node == -1:
+            val candidate = hit.ancestor_path[path_index]
+            if _panel_scroll_node_present(panels, candidate):
+                scroll_node = candidate
+            path_index = path_index - 1
+        if scroll_node != -1:
+            val (updated, changed) = _panel_scroll_node(
+                panels, scroll_node, event.delta_y
+            )
+            out_panels = updated
+            scrolled = changed
 
     var target_name = ""
     if hit.primary != -1 and forest.node_names.contains_key(hit.primary):
