@@ -14,6 +14,18 @@ use compiler.driver.driver_source_loading.{
 }
 
 fn module_name_normalizer_body(source: text) -> text:
+    # KNOWN DEFECT IN THIS EXTRACTOR (measured 2026-07-31, not yet fixed):
+    # `.find()` returns a BYTE offset but `.substring()` takes a CHARACTER
+    # offset. Mixing them shifts one file's slice by 4 chars (it loses its
+    # leading `var `), so the byte-identity comparison below can fail on its own
+    # arithmetic even when all four bodies ARE identical -- verified out-of-band:
+    # extracting the four bodies with awk and canonicalizing the helper name
+    # gives four byte-identical 35-line texts. So a red here does NOT prove the
+    # sources drifted. A split()-based rewrite was attempted and returned an
+    # empty body for driver_source_loading.spl despite both markers being
+    # present exactly once, so it was reverted rather than shipped half-working.
+    # Fix this extractor before trusting this assertion either way.
+    # See doc/08_tracking/bug/text_find_native_exposure_audit_2026-07-31.md.
     val start = source.find("    var mod_path = path.replace(\"\\\\\", \"/\")")
     if start < 0:
         return ""
@@ -22,7 +34,20 @@ fn module_name_normalizer_body(source: text) -> text:
     val end = tail.find(marker)
     if end < 0:
         return ""
-    tail.substring(0, end + marker.len())
+    val body = tail.substring(0, end + marker.len())
+    # The four copies must stay behaviourally identical, but they CANNOT share
+    # one helper name: lower layers cannot import 80.driver, and same-named
+    # private helpers across modules are a known hazard
+    # (doc/08_tracking/bug/compiler_cross_module_private_symbol_collision_2026-06-16.md),
+    # so each file defines its own module-prefixed copy per the established
+    # convention (cf. _ld_hex_digit_value, _bpi_is_hex_digit). Canonicalize just
+    # that one mandated name difference; every other byte still has to match, so
+    # this keeps the tripwire's real job — catching semantic drift — intact.
+    var canonical = body.replace("_driver_text_index_of", "_TEXT_INDEX_OF_")
+    canonical = canonical.replace("_mir_text_index_of", "_TEXT_INDEX_OF_")
+    canonical = canonical.replace("_hir_text_index_of", "_TEXT_INDEX_OF_")
+    canonical = canonical.replace("_backend_text_index_of", "_TEXT_INDEX_OF_")
+    canonical
 
 describe "entry-closure physical source deduplication":
     it "normalizes aliases to one physical parse source":
@@ -182,46 +207,76 @@ describe "entry-closure physical source deduplication":
         expect(driver).to_not_contain("closure_added")
 
     it "fails required closure load parse and HIR errors before later phases":
-        # driver.spl was split down to a ~128-line facade; the phase methods
-        # now live in driver_orchestration.spl.
+        # driver.spl was split into a ~128-line facade. compile() orchestration
+        # stays in driver_orchestration.spl, but the phase bodies it calls now
+        # live in separate files: load_sources_impl in
+        # driver_source_pipeline_loading.spl, parse_all_impl in
+        # driver_source_pipeline_parsing.spl, lower_and_check_impl in
+        # driver_hir_pipeline_lowering.spl. Assert the SAME fail-fast-per-phase
+        # invariant against the current layout: (1) compile() calls the phases
+        # in order and returns early on each failure, and (2) each phase's own
+        # file still fails fast internally before committing its result.
         val driver = rt_file_read_text("src/compiler/80.driver/driver_orchestration.spl") ?? ""
         val compile_start = driver.find("    me compile() -> CompileResult:")
-        val load_start = driver.find("    me load_sources_impl() -> bool:")
-        val parse_start = driver.find("    me parse_all_impl() -> bool:")
-        val hir_start = driver.find("    me lower_and_check_impl() -> bool:")
-        val hir_end = driver.find("    fn lower_to_hir_impl() -> (CompileContext, bool):")
+        val compile_end = driver.find("    me compile_vhdl_only() -> CompileResult:")
         expect(compile_start).to_be_greater_than(-1)
-        expect(load_start).to_be_greater_than(compile_start)
-        expect(parse_start).to_be_greater_than(load_start)
-        expect(hir_start).to_be_greater_than(parse_start)
-        expect(hir_end).to_be_greater_than(hir_start)
+        expect(compile_end).to_be_greater_than(compile_start)
+        val compile_body = driver.substring(compile_start, compile_end)
 
-        val compile_body = driver.substring(compile_start, load_start)
-        val load_body = driver.substring(load_start, parse_start)
-        val parse_body = driver.substring(parse_start, hir_start)
-        val hir_body = driver.substring(hir_start, hir_end)
-        expect(compile_body).to_contain("if not self.load_sources_impl():\n            log_error(\"phase 1 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
-        expect(compile_body).to_contain("if not self.parse_all_impl():\n            log_error(\"phase 2 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
-        expect(compile_body).to_contain("if not analyze_ok:\n            log_error(\"phase 3 FAILED\")")
+        val load_call = compile_body.index_of("self.load_sources_impl()")
+        val load_fail = compile_body.index_of("if not load_ok:\n            log_error(\"phase 1 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
+        val parse_call = compile_body.index_of("self.parse_all_impl()")
+        val parse_fail = compile_body.index_of("if not parse_ok:\n            log_error(\"phase 2 FAILED\")\n            return CompileResult.ParseError(self.ctx.errors)")
+        val hir_call = compile_body.index_of("self.lower_and_check_impl()")
         val type_error_return = compile_body.index_of("return CompileResult.TypeError(self.ctx.errors)")
         val phase4_start = compile_body.index_of("phase4:monomorphize:start")
-        expect(type_error_return).to_be_greater_than(-1)
+        val mono_call = compile_body.index_of("self.monomorphize_impl()")
+        expect(load_call).to_be_greater_than(-1)
+        expect(load_fail).to_be_greater_than(load_call)
+        expect(parse_call).to_be_greater_than(load_fail)
+        expect(parse_fail).to_be_greater_than(parse_call)
+        expect(hir_call).to_be_greater_than(parse_fail)
+        expect(type_error_return).to_be_greater_than(hir_call)
         expect(phase4_start).to_be_greater_than(type_error_return)
-        val unresolved_error = load_body.index_of("self.ctx.add_error(\"unresolved import '")
-        val empty_import_error = load_body.index_of("self.ctx.add_error(\"import '")
-        val sources_commit = load_body.index_of("self.ctx.sources = all_sources")
+        expect(mono_call).to_be_greater_than(phase4_start)
+
+        # Phase 1's own fail-fast ordering (driver_source_pipeline_loading.spl):
+        # an unresolved-import error is raised before an empty-import error,
+        # both precede committing `all_sources` onto the returned context, and
+        # the phase's returned bool is derived from the post-commit error count.
+        val loading = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_loading.spl") ?? ""
+        val unresolved_error = loading.index_of("self.ctx.add_error(\"unresolved import '")
+        val empty_import_error = loading.index_of("self.ctx.add_error(\"import '")
+        val sources_commit = loading.index_of("loaded_ctx.sources = all_sources")
         expect(unresolved_error).to_be_greater_than(-1)
         expect(empty_import_error).to_be_greater_than(unresolved_error)
         expect(sources_commit).to_be_greater_than(empty_import_error)
-        expect(load_body.substring(sources_commit)).to_contain("self.ctx.errors.len() == 0")
-        expect(parse_body).to_contain("if par_had_error_get():\n                    self.ctx.errors.push(\"parse error in " + "{" + "source.path} (see [parser_error] output above)\")\n                    return false")
+        expect(loading.substring(sources_commit)).to_contain("loaded_ctx.errors.len() == 0")
+
+        # Phase 2's fail-fast (driver_source_pipeline_parsing.spl): a parse
+        # error returns immediately instead of continuing to the next source.
+        val parsing = rt_file_read_text("src/compiler/80.driver/driver_source_pipeline_parsing.spl") ?? ""
+        expect(parsing).to_contain("                if par_had_error_get():\n                    self.ctx.errors.push(\n                        \"parse error in " + "{" + "source.path} (see [parser_error] output above)\")\n                    return (self.ctx, false)")
+
+        # Phase 3's HIR error collection (driver_hir_pipeline_lowering.spl):
+        # each module's lowering errors are folded into ctx.errors inside the
+        # per-source loop before the loop advances to the next source, and the
+        # phase's returned status is derived from ctx.errors AFTER the loop
+        # completes — not decided early per-module.
+        val hir = rt_file_read_text("src/compiler/80.driver/driver_hir_pipeline_lowering.spl") ?? ""
+        val hir_impl_start = hir.find("    me lower_and_check_impl() -> (CompileContext, bool):")
+        val hir_impl_end = hir.find("    fn lower_to_hir_impl() -> (CompileContext, bool):")
+        expect(hir_impl_start).to_be_greater_than(-1)
+        expect(hir_impl_end).to_be_greater_than(hir_impl_start)
+        val hir_body = hir.substring(hir_impl_start, hir_impl_end)
         val hir_loop_start = hir_body.index_of("var source_idx = 0")
+        val hir_error_collect = hir_body.index_of("self.ctx.add_error(module_error_message)")
+        val hir_loop_advance = hir_body.index_of("source_idx = source_idx + 1")
+        val hir_final_status = hir_body.index_of("(phase_ctx, phase_ctx.errors.len() == 0)")
         expect(hir_loop_start).to_be_greater_than(-1)
-        val hir_loop = hir_body.substring(hir_loop_start)
-        val hir_error_collect = hir_loop.index_of("_driver_collect_hir_errors(self.ctx, name, lowering.errors)")
-        val hir_final_status = hir_loop.index_of("\n        self.ctx.errors.len() == 0")
-        expect(hir_error_collect).to_be_greater_than(-1)
-        expect(hir_final_status).to_be_greater_than(hir_error_collect)
+        expect(hir_error_collect).to_be_greater_than(hir_loop_start)
+        expect(hir_loop_advance).to_be_greater_than(hir_error_collect)
+        expect(hir_final_status).to_be_greater_than(hir_loop_advance)
 
     it "collects only the source roots supplied by its caller":
         val loading = rt_file_read_text("src/compiler/80.driver/driver_source_loading.spl") ?? ""
