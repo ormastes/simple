@@ -61,6 +61,8 @@ use std.gc_async_mut.web.browser_session.{
 }
 use std.gc_async_mut.web.browser_session_context.{
     browser_csp_allows, browser_csp_header_sandbox,
+    browser_csp_form_action_allows,
+    browser_csp_form_action_allows_after_redirect,
     browser_csp_policy_valid
 }
 use std.gc_async_mut.web.browser_session_html.{
@@ -765,9 +767,21 @@ pub class HostedBrowserRendererProcess:
                 value
         if actual_headers != expected_headers:
             return false
-        self.authorize_navigation(
+        val form_action_policy = self._active_document_csp_policy()
+        val form_action_document_url = self._active_renderer_document_url()
+        if not browser_csp_form_action_allows(
+            form_action_policy, form_action_document_url, request.url
+        ):
+            return false
+        if not self.authorize_navigation(
             request.url, method, "", request.body, request.content_type
+        ):
+            return false
+        self.navigation_permit.form_action_policy = form_action_policy
+        self.navigation_permit.form_action_document_url = (
+            form_action_document_url
         )
+        true
 
     me set_home_url(url: text) -> bool:
         val canonical_url = hosted_browser_canonical_navigation_url(url)
@@ -1686,6 +1700,15 @@ pub class HostedBrowserRendererProcess:
                                 0, "", "", error.message
                             ))
                         Ok(response):
+                            val raw_response = self._network_response(
+                                fetch.kind, response
+                            )
+                            if val Err(reason) = self._form_action_redirect_allowed(
+                                policy, raw_response, redirect_count
+                            ):
+                                return Some(_network_result(
+                                    0, "", "", reason
+                                ))
                             return Some(self._finalize_network(
                                 fetch.kind, prepared.request, response
                             ))
@@ -1727,6 +1750,42 @@ pub class HostedBrowserRendererProcess:
                 self.network_job_redirect_count = redirect_count
                 nil
 
+    fn _form_action_redirect_allowed(
+        policy: HostedBrowserRequestPolicy,
+        response: HostedBrowserNetworkResult,
+        redirect_count: i64
+    ) -> Result<bool, text>:
+        if (policy.form_action_document_url == "" or
+            not hosted_browser_redirect_status(response.status)):
+            return Ok(true)
+        val location = hosted_browser_response_header_value(
+            response.headers, "location"
+        )
+        if location == "" or redirect_count >= 20:
+            return Err("invalid-navigation-redirect")
+        val redirected = resolve_fetch_redirect_url(
+            Url.parse_or_opaque(policy.canonical_url), location
+        )
+        if not redirected.?:
+            return Err("invalid-navigation-redirect")
+        val original_redirected_url = hosted_browser_canonical_navigation_url(
+            redirected!.to_text()
+        )
+        val redirected_url = hosted_browser_canonical_navigation_url(
+            self._hsts_upgrade_url(original_redirected_url)
+        )
+        val base = Url.parse_or_opaque(policy.canonical_url)
+        if (redirected_url == "" or
+            (base.scheme == "https" and
+                not redirected_url.starts_with("https://"))):
+            return Err("invalid-navigation-redirect")
+        if not browser_csp_form_action_allows_after_redirect(
+            policy.form_action_policy,
+            policy.form_action_document_url, redirected_url
+        ):
+            return Err("CSP blocked form redirect: {redirected_url}")
+        Ok(true)
+
     me _record_document_response(
         request: BrowserRendererNetworkDecodeResult,
         policy: HostedBrowserRequestPolicy,
@@ -1742,6 +1801,9 @@ pub class HostedBrowserRendererProcess:
             self.provisional_document_origin = ""
             self._clear_pending_document_csp()
             return Ok(response.headers)
+        self._form_action_redirect_allowed(
+            policy, response, redirect_count
+        )?
         if not hosted_browser_redirect_status(response.status):
             if browser_header_has_attachment_disposition(response.headers):
                 return Err("document-attachment-unsupported")
@@ -1826,7 +1888,9 @@ pub class HostedBrowserRendererProcess:
             headers: next_headers,
             body: if preserve_body: request.body else: "",
             content_type: next_content_type,
-            redirect_count: redirect_count + 1
+            redirect_count: redirect_count + 1,
+            form_action_policy: policy.form_action_policy,
+            form_action_document_url: policy.form_action_document_url
         )
         if redirected_url != original_redirected_url:
             return Ok(hosted_browser_replace_response_header(
@@ -2080,13 +2144,21 @@ pub class HostedBrowserRendererProcess:
                         # Only the runtime HTTPS job reaches this branch after
                         # its authenticated platform-TLS handshake succeeds.
                         # Generic/mock response finalization cannot seed HSTS.
-                        if request.url.scheme == "https":
-                            val _ = self._commit_validated_https_hsts(
-                                request.url.to_text(), parsed.headers
-                            )
-                        response = self._finalize_network(
-                            fetch.kind, request, parsed
+                        val raw_response = self._network_response(
+                            fetch.kind, parsed
                         )
+                        if val Err(reason) = self._form_action_redirect_allowed(
+                            policy, raw_response, redirect_count
+                        ):
+                            response = _network_result(0, "", "", reason)
+                        else:
+                            if request.url.scheme == "https":
+                                val _ = self._commit_validated_https_hsts(
+                                    request.url.to_text(), parsed.headers
+                                )
+                            response = self._finalize_network(
+                                fetch.kind, request, parsed
+                            )
         self._write_network_response(
             fetch, policy, response, redirect_count
         )
@@ -2306,7 +2378,11 @@ pub class HostedBrowserRendererProcess:
                 credentials: "include",
                 canonical_url: effective_url,
                 sanitized_headers: self.navigation_permit.headers,
-                consumes_navigation: true
+                consumes_navigation: true,
+                form_action_policy: self.navigation_permit.form_action_policy,
+                form_action_document_url: (
+                    self.navigation_permit.form_action_document_url
+                )
             )
             val reason = self._queue_hsts_transport_upgrade(
                 fetch, transport_policy, -1

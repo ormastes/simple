@@ -5,7 +5,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 1 | 1 | 0 | 0 |
+| 2 | 2 | 0 | 0 |
 
 ## At a Glance
 
@@ -52,6 +52,21 @@ authorized document's canonical command and complete framebuffer to match the
 fixed oracle. Author IDs are evidence projections from generation-qualified
 dispatch routes, never dispatch authority. Any cross-origin queued request,
 document replacement, geometry or source mismatch, or pixel mismatch is FAIL.
+
+### should make hosted renderer document navigation inherit form-action
+
+1. **Bind the parent-owned policy to a renderer navigation**
+   - The hosted broker copies committed `form-action 'self'` and the source
+     document URL into its host-only permit.
+
+2. **Deny an untrusted renderer target before it becomes a permit**
+   - A renderer GET to a collector under `form-action 'none'` has no permit.
+     Untyped renderer documents intentionally constrain links with form-action
+     too, because a GET form cannot safely be distinguished from a forged link.
+
+The hosted policy companion additionally retains that host-only authority on
+an allowed redirect and rejects a denied redirect before cookies, HSTS, history,
+or a successor permit can change.
 
 ## Companion Integration Controls
 

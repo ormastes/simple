@@ -1869,6 +1869,132 @@ describe "hosted browser renderer broker policy":
             "https://allowed.test/"
         )
 
+    it "treats every renderer document as form-action constrained":
+        step("Reject forged GET and POST document requests under form-action none")
+        var denied = HostedBrowserRendererProcess.create(1, 640, 480)
+        denied.document_url = "https://account.test/profile"
+        denied.document_origin = "https://account.test"
+        denied.document_csp_policy = "form-action 'none'"
+        denied.document_csp_ready = true
+        expect(denied.authorize_renderer_navigation(request(
+            "document", "https://collector.test/capture?secret=token"
+        ))).to_be(false)
+        expect(denied.authorize_renderer_navigation(request(
+            "document", "https://collector.test/capture", "POST", "",
+            "secret=token", "application/x-www-form-urlencoded"
+        ))).to_be(false)
+        expect(denied.navigation_permit.active).to_be(false)
+
+        step("Keep same-origin forms and absent form-action links working")
+        var same_origin = HostedBrowserRendererProcess.create(1, 640, 480)
+        same_origin.document_url = "https://account.test/profile"
+        same_origin.document_origin = "https://account.test"
+        same_origin.document_csp_policy = "form-action 'self'"
+        same_origin.document_csp_ready = true
+        expect(same_origin.authorize_renderer_navigation(request(
+            "document", "https://account.test/save", "POST", "",
+            "name=Ada", "application/x-www-form-urlencoded"
+        ))).to_be(true)
+        expect(same_origin.navigation_permit.form_action_policy).to_equal(
+            "form-action 'self'"
+        )
+        expect(same_origin.navigation_permit.form_action_document_url).to_equal(
+            "https://account.test/profile"
+        )
+
+        var unrestricted = HostedBrowserRendererProcess.create(1, 640, 480)
+        unrestricted.document_url = "https://account.test/profile"
+        unrestricted.document_origin = "https://account.test"
+        unrestricted.document_csp_policy = "default-src 'none'"
+        unrestricted.document_csp_ready = true
+        expect(unrestricted.authorize_renderer_navigation(request(
+            "document", "https://destination.test/"
+        ))).to_be(true)
+
+        step("Leave parent-controlled navigation outside the renderer form gate")
+        var parent = HostedBrowserRendererProcess.create(1, 640, 480)
+        parent.document_url = "https://account.test/profile"
+        parent.document_origin = "https://account.test"
+        parent.document_csp_policy = "form-action 'none'"
+        parent.document_csp_ready = true
+        expect(parent.authorize_navigation(
+            "https://destination.test/", "GET", "", "", ""
+        )).to_be(true)
+        expect(parent.navigation_permit.form_action_policy).to_equal("")
+
+    it "binds form-action authority across redirects before side effects":
+        val source_url = "https://account.test/profile"
+        val allowed_url = "https://forms.account.test/continue"
+        val denied_url = "https://collector.test/capture"
+        val form_policy = "form-action https://forms.account.test/"
+        val navigation_policy = HostedBrowserRequestPolicy(
+            ok: true, reason: "ok", mode: RequestMode.Navigate,
+            credentials: "include", canonical_url: source_url,
+            sanitized_headers: "", consumes_navigation: true,
+            form_action_policy: form_policy,
+            form_action_document_url: source_url
+        )
+
+        step("Carry the host-owned form authority through an allowed redirect")
+        var allowed = HostedBrowserRendererProcess.create(1, 640, 480)
+        val allowed_response = allowed._network_response(
+            "document", FetchResponse(
+                status: 302, headers: "Location: {allowed_url}", body: []
+            )
+        )
+        expect(allowed._record_document_response(
+            request("document", source_url), navigation_policy,
+            allowed_response, 0
+        ).is_ok()).to_be(true)
+        expect(allowed.navigation_permit.url).to_equal(allowed_url)
+        expect(allowed.navigation_permit.form_action_policy).to_equal(
+            form_policy
+        )
+        expect(allowed.navigation_permit.form_action_document_url).to_equal(
+            source_url
+        )
+
+        step("Reject before cookies HSTS history or permits can change")
+        var denied = HostedBrowserRendererProcess.create(1, 640, 480)
+        denied.document_url = source_url
+        denied.document_origin = "https://account.test"
+        denied.history_urls = [source_url]
+        denied.history_csp_policies = [form_policy]
+        denied.history_csp_ready = [true]
+        denied.history_index = 0
+        val hsts_before = denied.hsts_snapshot(1000).entries.len()
+        val source_origin = Origin(
+            scheme: "https", host: "account.test", port: 443
+        )
+        val cookies_before = denied.network.cookie_store.get_header_for_origin(
+            source_origin, "/", Some(source_origin), "GET", false,
+            rt_time_now_unix_micros() / 1000000
+        )
+        val denied_response = denied._network_response(
+            "document", FetchResponse(
+                status: 302,
+                headers: "Location: {denied_url}\r\n" +
+                    "Set-Cookie: leaked=1; Secure; Path=/\r\n" +
+                    "Strict-Transport-Security: max-age=60",
+                body: []
+            )
+        )
+        expect(denied._form_action_redirect_allowed(
+            navigation_policy, denied_response, 0
+        ).is_err()).to_be(true)
+        expect(denied._record_document_response(
+            request("document", source_url), navigation_policy,
+            denied_response, 0
+        ).is_err()).to_be(true)
+        expect(denied.document_url).to_equal(source_url)
+        expect(denied.history_urls).to_equal([source_url])
+        expect(denied.navigation_permit.active).to_be(false)
+        expect(denied.hsts_snapshot(1000).entries.len()).to_equal(hsts_before)
+        expect(denied.network.cookie_store.get_header_for_origin(
+            source_origin, "/", Some(source_origin), "GET", false,
+            rt_time_now_unix_micros() / 1000000
+        )).to_equal(cookies_before)
+
     it "accepts exactly one matching parent navigation shape":
         val policy = hosted_browser_renderer_request_policy(
             "",
