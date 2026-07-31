@@ -15,5 +15,5 @@
 
 | Feature | Status | Difficulty | Tests | Coverage | Details |
 |---------|--------|------------|-------|----------|----------|
-| [Gpu Mmu Specification](03_system/lib/gpu/object_vm/gpu_mmu_spec.md) | Partial | N/A | 8 | 40% | 80 lines |
+| [Gpu Mmu Specification](gpu_mmu_spec.md) | Partial | N/A | 8 | 40% | 80 lines |
 
