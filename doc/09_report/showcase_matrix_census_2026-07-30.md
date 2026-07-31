@@ -779,3 +779,42 @@ real current blocker, once run on a post-fix binary, is the
 font-identity/Draw-IR pairing defect at §16.6 (still open, not the
 module-init one). See §17 there for the full binary-by-binary evidence
 table.
+
+## Cell #7 `SimpleOS-WM × QEMU` re-tested, still BLOCKED — but the recorded blocker is stale (2026-07-31)
+
+This entry's recorded blocker was the missing-vtable `ud2` trap. A triage
+pass found its source-side fix, `f2f64a137bd9518c06ea33236ecc16504a73830a`
+(2026-07-28), with no dated post-fix QEMU re-run. Verified by
+`git merge-base --is-ancestor f2f64a137bd9518c06ea33236ecc16504a73830a
+465ec1cd334` (exit 0, PROVED, not inferred from commit dates): the fix **is**
+in origin `main` (confirmed against tip `465ec1cd34345fd7be512289c14ebccc3918ffe0`,
+still an ancestor of the current tip).
+
+A fresh re-run in a detached worktree at that tip (existing pure-Simple
+`stage3` binary, sha256 `c0d1ed629b18f…`; no cargo build; 57 files present
+under `assets/fonts`, so the shared-WC sparse-checkout trap does not apply)
+via `scripts/check/check-simpleos-wm-fullscreen-evidence.shs` produced
+`status=fail reason=wm-simple-web-build-failed`. This is **neither** of the
+two previously recorded outcomes: the kernel link now fails *before* QEMU
+ever starts (`serial_log_bytes=0`), on a gate that did not exist when the
+vtable trap was last observed. `config/freestanding_fabricated_stub_baseline.sdn`
+(the fabricated-stub ratchet, armed 2026-07-29 — one day **after** the
+vtable fix) now reports 120 known/baselined fabricated symbols plus **4 new,
+unbaselined** ones for `simpleos_wm_production_desktop.elf.candidate`:
+`rt_cuda_device_identity`, `rt_raw_i64_to_string`, `rt_string_byte_at`,
+`rt_vulkan_accepted_compute_submit_count`. The ratchet correctly refuses to
+silently link nil-returning stubs for them (that exact failure mode
+previously shredded every array copy in a guest, per the ratchet's own
+commit message) — not weakened here.
+
+Full details, reproduction, and per-symbol notes:
+`doc/08_tracking/bug/simpleos_wm_freestanding_new_fabricated_symbols_2026-07-31.md`.
+Report: `doc/09_report/simpleos_wm_fullscreen_evidence_2026-07-31.md`.
+
+**Net effect on the census: cell #7 stays BLOCKED.** But the *reason*
+recorded for it was stale and is now corrected: the vtable trap is
+confirmed fixed in `main`; neither it nor the font-metrics hang could be
+re-tested this pass because a newer, earlier-stage regression (4 newly
+unbaselined freestanding symbols) now blocks the kernel link first. The
+next SimpleOS-WM attempt should start from the bug doc above, not from the
+vtable trap.
