@@ -69,7 +69,7 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
     simpleos_host_gpu_image_resource
 }
 use std.common.image.png_encode.{encode_argb_to_png}
-use common.ui.draw_ir.{DrawIrCommand}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
 use std.gc_async_mut.web.browser_session.{
     BrowserBookmarkSnapshot, BrowserSession
 }
@@ -78,7 +78,10 @@ use std.gc_async_mut.web.browser_session_ui_access.*
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     MockResponseRegistry, set_mock_registry
 }
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_find_by_tag}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH,
+    be_dom_find_by_tag, be_dom_serialize_html
+}
 use std.js.types.js_types.{JsValue}
 use std.js.types.pair.{Pair}
 use common.ui.window_scene.{WmContentFrame}
@@ -307,6 +310,28 @@ fn _expect_retained_stage_counts(
     expect(counters.paint_count).to_equal(paint_count)
     expect(counters.composition_revision).to_equal(composition_revision)
 
+fn _bounded_serialization_fixture(siblings: i32) -> text:
+    var parts: [text] = [
+        "<main id='bounded' style='width:16px;height:16px;" +
+        "background-color:#123456'>"
+    ]
+    var i = 0
+    while i < siblings:
+        parts.push("<span class='item'>x</span>")
+        i = i + 1
+    parts.push("</main>")
+    parts.join("")
+
+fn _bounded_serialization_output_length(siblings: i32) -> i64:
+    val prefix = (
+        "<html><head></head><body><main id=\"bounded\" " +
+        "style=\"width:16px;height:16px;background-color:#123456\">"
+    )
+    val item = "<span class=\"item\">x</span>"
+    val suffix = "</main></body></html>"
+    prefix.len().to_i64() + item.len().to_i64() * siblings.to_i64() +
+        suffix.len().to_i64()
+
 val SUBPROCESS_ANIMATION_HTML = (
     "<style>@keyframes Pulse{from{background-color:#ef4444}" +
     "to{background-color:#2563eb}}#stage{width:32px;height:24px;" +
@@ -445,6 +470,21 @@ fn _browser_draw_ir_style_value(
         if property.key == key:
             return property.value
     ""
+
+fn _expect_bounded_serialization_draw_ir(
+    composition: DrawIrComposition
+):
+    expect(composition.batches.len()).to_be_greater_than(0)
+    expect(composition.batches[0].source.source_kind).to_equal("html_ast")
+    val commands = composition.batches[0].commands
+    val bounded_index = _browser_draw_ir_command_index(commands, "bounded")
+    expect(bounded_index).to_be_greater_than(-1)
+    expect(commands[bounded_index].kind).to_equal("rect")
+    expect(commands[bounded_index].x).to_equal(0)
+    expect(commands[bounded_index].y).to_equal(0)
+    expect(commands[bounded_index].width).to_equal(16)
+    expect(commands[bounded_index].height).to_equal(16)
+    expect(commands[bounded_index].color).to_equal(0xFF123456u32)
 
 fn _await_browser_animation(
     renderer: HostedBrowserRendererProcess
@@ -1600,6 +1640,107 @@ describe "Production Simple browser user flow":
         ).to_equal(0)
         expect(
             navigation_worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+
+    # @manual: show
+    # @capture(protocol)
+    # @req REQ-WEB-BROWSER-018 NFR-WEB-BROWSER-008
+    it "should serialize bounded replacements with stable Draw IR":
+        step("Load the bounded browser fixture")
+        val smaller = _bounded_serialization_fixture(2048)
+        val larger = _bounded_serialization_fixture(4096)
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 91, request_id: 2, payload: smaller
+        )).ok).to_be(true)
+        val smaller_nodes = (
+            worker.render_session.counters.retained_node_count
+        )
+
+        step("Exercise repeated layout navigation or animation")
+        match worker.browser.open_html(
+            "simple-renderer://document", larger
+        ):
+            Ok(_): ()
+            Err(reason): fail("larger bounded fixture failed: {reason}")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 91, request_id: 3, payload: "16"
+        )).ok).to_be(true)
+        val retained_nodes = worker.render_session.counters.retained_node_count
+        val retained_styles = (
+            worker.render_session.counters.retained_style_count
+        )
+        val retained_boxes = worker.render_session.counters.retained_box_count
+        val retained_commands = (
+            worker.render_session.counters.retained_command_count
+        )
+        _expect_bounded_serialization_draw_ir(
+            worker.render_session.current_result.unwrap().composition
+        )
+        val serialized_output_length = be_dom_serialize_html(
+            worker.browser.current_dom
+        ).len().to_i64()
+        expect(serialized_output_length).to_equal(
+            _bounded_serialization_output_length(4096)
+        )
+        expect(serialized_output_length).to_be_less_than(
+            BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH + 1
+        )
+        match worker.browser.open_html(
+            "simple-renderer://document", larger
+        ):
+            Ok(_): ()
+            Err(reason): fail("repeated bounded fixture failed: {reason}")
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "advance", generation: 91, request_id: 4, payload: "32"
+        )).ok).to_be(true)
+
+        step("Measure retained state and work growth")
+        expect(retained_nodes).to_be_greater_than(smaller_nodes)
+        expect(retained_nodes).to_be_less_than(smaller_nodes * 3)
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(retained_nodes)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(retained_styles)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(retained_boxes)
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(retained_commands)
+        _expect_retained_stage_counts(
+            worker.render_session.counters, 3, 3, 3, 3, 3, 3, 3
+        )
+
+        step("Prove stable Draw IR output within the resource ceiling")
+        _expect_bounded_serialization_draw_ir(
+            worker.render_session.current_result.unwrap().composition
+        )
+        expect(be_dom_serialize_html(
+            worker.browser.current_dom
+        ).len().to_i64()).to_equal(serialized_output_length)
+        expect(retained_nodes).to_be_greater_than(4096)
+        expect(retained_nodes).to_be_less_than(65537)
+        expect(retained_styles).to_be_greater_than(0)
+        expect(retained_styles).to_be_less_than(65537)
+        expect(retained_boxes).to_be_greater_than(0)
+        expect(retained_boxes).to_be_less_than(65537)
+        expect(retained_commands).to_be_greater_than(0)
+        expect(retained_commands).to_be_less_than(65537)
+        worker.close()
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_command_count
         ).to_equal(0)
 
     # @manual: show

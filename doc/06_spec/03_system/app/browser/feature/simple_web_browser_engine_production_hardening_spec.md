@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ Proves the installed browser uses canonical HTML, CSS, JavaScript, DOM-event, Dr
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl` |
-| Updated | 2026-07-30 |
+| Updated | 2026-07-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -1690,6 +1690,118 @@ expect(
 expect(
     navigation_worker.render_session.counters.retained_command_count
 ).to_equal(0)
+```
+
+</details>
+
+#### should serialize bounded replacements with stable Draw IR
+
+- Load the bounded browser fixture
+   - Protocol capture: after_step
+- Exercise repeated layout navigation or animation
+   - Protocol capture: after_step
+- Measure retained state and work growth
+   - Protocol capture: after_step
+   - Expected: 4K retained nodes grow from 2K but remain below 3x
+- Prove stable Draw IR output within the resource ceiling
+   - Protocol capture: after_step
+   - Expected: repeated 4K fixture emits `html_ast` Draw IR
+   - Expected: `bounded` is an exact `(0, 0, 16, 16)` `#123456` rectangle
+   - Expected: serialized DOM length matches the pinned 4K fixture formula
+   - Expected: serialized DOM remains within the enforced 50 MiB ceiling
+   - Expected: retained stage counts replace rather than accumulate
+   - Expected: retained nodes, styles, boxes, and commands stay below 65,537
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 96 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Load the bounded browser fixture")
+val smaller = _bounded_serialization_fixture(2048)
+val larger = _bounded_serialization_fixture(4096)
+var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+expect(worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 91, request_id: 2, payload: smaller
+)).ok).to_be(true)
+val smaller_nodes = worker.render_session.counters.retained_node_count
+
+step("Exercise repeated layout navigation or animation")
+match worker.browser.open_html(
+    "simple-renderer://document", larger
+):
+    Ok(_): ()
+    Err(reason): fail("larger bounded fixture failed: {reason}")
+expect(worker.handle(BrowserRendererMessage(
+    kind: "advance", generation: 91, request_id: 3, payload: "16"
+)).ok).to_be(true)
+val retained_nodes = worker.render_session.counters.retained_node_count
+val retained_styles = worker.render_session.counters.retained_style_count
+val retained_boxes = worker.render_session.counters.retained_box_count
+val retained_commands = worker.render_session.counters.retained_command_count
+_expect_bounded_serialization_draw_ir(
+    worker.render_session.current_result.unwrap().composition
+)
+val serialized_output_length = be_dom_serialize_html(
+    worker.browser.current_dom
+).len().to_i64()
+expect(serialized_output_length).to_equal(
+    _bounded_serialization_output_length(4096)
+)
+expect(serialized_output_length).to_be_less_than(
+    BE_DOM_HTML_SERIALIZE_MAX_OUTPUT_LENGTH + 1
+)
+match worker.browser.open_html(
+    "simple-renderer://document", larger
+):
+    Ok(_): ()
+    Err(reason): fail("repeated bounded fixture failed: {reason}")
+expect(worker.handle(BrowserRendererMessage(
+    kind: "advance", generation: 91, request_id: 4, payload: "32"
+)).ok).to_be(true)
+
+step("Measure retained state and work growth")
+expect(retained_nodes).to_be_greater_than(smaller_nodes)
+expect(retained_nodes).to_be_less_than(smaller_nodes * 3)
+expect(worker.render_session.counters.retained_node_count).to_equal(
+    retained_nodes
+)
+expect(worker.render_session.counters.retained_style_count).to_equal(
+    retained_styles
+)
+expect(worker.render_session.counters.retained_box_count).to_equal(
+    retained_boxes
+)
+expect(worker.render_session.counters.retained_command_count).to_equal(
+    retained_commands
+)
+_expect_retained_stage_counts(
+    worker.render_session.counters, 3, 3, 3, 3, 3, 3, 3
+)
+
+step("Prove stable Draw IR output within the resource ceiling")
+_expect_bounded_serialization_draw_ir(
+    worker.render_session.current_result.unwrap().composition
+)
+expect(be_dom_serialize_html(
+    worker.browser.current_dom
+).len().to_i64()).to_equal(serialized_output_length)
+expect(retained_nodes).to_be_greater_than(4096)
+expect(retained_nodes).to_be_less_than(65537)
+expect(retained_styles).to_be_greater_than(0)
+expect(retained_styles).to_be_less_than(65537)
+expect(retained_boxes).to_be_greater_than(0)
+expect(retained_boxes).to_be_less_than(65537)
+expect(retained_commands).to_be_greater_than(0)
+expect(retained_commands).to_be_less_than(65537)
+worker.close()
+expect(worker.render_session.counters.retained_node_count).to_equal(0)
+expect(worker.render_session.counters.retained_style_count).to_equal(0)
+expect(worker.render_session.counters.retained_box_count).to_equal(0)
+expect(worker.render_session.counters.retained_command_count).to_equal(0)
 ```
 
 </details>
