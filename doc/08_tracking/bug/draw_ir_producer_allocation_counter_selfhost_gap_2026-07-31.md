@@ -10,8 +10,8 @@ IR producers
 Run the AC-6 producer receipt with the admitted self-hosted binary:
 
 ```sh
-SIMPLE_BIN=bin/release/<triple>/simple SIMPLE_LIB=src \
-  bin/release/<triple>/simple test \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
+  bin/simple test \
   test/05_perf/graphics_2d/draw_ir_producer_storage_receipt_spec.spl \
   --mode=interpreter --assert-ran --no-session-daemon --sequential --no-db --no-cache
 ```

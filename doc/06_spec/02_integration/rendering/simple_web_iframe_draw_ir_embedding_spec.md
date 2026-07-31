@@ -24,6 +24,8 @@ migrations remain held. The authenticated focused parity run crashed
    pixels, GPU residual, and zero-scroll. This does not claim migration or
    pixel-helper retirement before a qualified run.
    It also asserts no child image/material/hit authority even with inert child
-   script, external image, and input markup. An authored child red/green
+   script, external image, and input markup. An iframe `src` without `srcdoc`
+   is also explicitly white: it does not fetch and fallback markup remains
+   hidden. An authored child red/green
    vertical pair proves deterministic initial scroll is zero; no child input or
    scroll interaction is enabled.

@@ -81,7 +81,7 @@ evidence.
   `RenderBackend.submit_batch`.
 - Manual steps: `step("Submit the production Web composition")`,
   `step("Route pointer and wheel through one ancestry")`,
-  `step("Embed the iframe composition without a pixel blit")`,
+  `step("Retire legacy iframe pixel blitting after parity")`,
   `step("Render text through canonical Draw IR")`,
   `step("Execute or reject every Draw IR command kind")`,
   `step("Reuse producer storage across frames")`,

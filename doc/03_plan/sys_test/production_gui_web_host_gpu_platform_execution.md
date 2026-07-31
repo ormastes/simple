@@ -7,18 +7,20 @@ the current Linux host.
 
 ## Current Baseline
 
-- Linux aggregate command:
-  `SIMPLE_BIN=src/compiler_rust/target/debug/simple sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs`
-- Current Linux proof:
-  `production_gui_web_host_gpu_queue_readback_status=pass`,
-  `production_runtime_queue_integration_status=pass`,
-  `browser_frame_queue_status=pass`,
-  `same_frame_gpu_backend_readback_status=pass`.
-- Current partial matrix:
-  Vulkan GUI/web same-frame `device_readback` passes; CUDA/OpenCL child
-  readback wrappers pass; WebGPU real `device_readback` is unavailable on the
-  latest local proof and WebGPU `surface_upload` remains provenance-only; Metal
-  and ROCm/HIP are host-unavailable; DirectX remains native-pending.
+- A Rust-seed invocation is bootstrap-only and cannot be promoted as production
+  host-GPU evidence. Use a deployed/admitted pure-Simple executable.
+- The current R9 Draw IR probe is **blocked**, not passed: the admitted
+  pure-Simple stage2 executable linked with generic
+  `--runtime-bundle core-c-bootstrap` and then returned `backend unavailable:
+  vulkan` before submission. This is not sufficient-provider evidence: the
+  generic runtime exports disabled `rt_vulkan_*` stubs unless built with the
+  `vulkan` feature. Physical R9 requires the Linux host-GPU runtime bundle at
+  `build/simpleos_gpu_host/<arch>-vulkan-cuda-runtime-target/bootstrap`, built
+  with `vulkan,cuda,runtime-symbol-table`; it is absent here. See
+  `build/r9-linux-vulkan/RESULT.md`.
+- Existing generated CUDA/OpenCL/Vulkan wrapper receipts, where retained, are
+  backend-specific evidence only. They do not close the R7 batching, R8
+  device-region, or R9 live-Draw-IR matrix acceptance rows.
 
 ## Promotion Rules
 
@@ -49,16 +51,16 @@ the current Linux queue-integration gate rather than remaining matrix gaps.
 Commands:
 
 ```sh
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-vulkan-engine2d-readback.shs
 
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-cuda-generated-2d-readback.shs
 
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-opencl-generated-2d-readback.shs
 
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 ```
 
@@ -83,10 +85,10 @@ Host requirements: Darwin/macOS with Xcode command-line tools and Metal runtime.
 Commands:
 
 ```sh
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-metal-generated-2d-readback.shs
 
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 ```
 
@@ -134,10 +136,10 @@ working HSACO/kernel launch path.
 Commands:
 
 ```sh
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-rocm-generated-2d-readback.shs
 
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 ```
 
@@ -161,12 +163,12 @@ real WebGPU device and staging readback, not the default runtime stubs.
 Commands:
 
 ```sh
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
-src/compiler_rust/target/debug/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl --mode=interpreter
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
+bin/simple test test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_webgpu_spec.spl --mode=interpreter
 
 sh scripts/check/check-webgpu-real-readback.shs
 
-SIMPLE_BIN=src/compiler_rust/target/debug/simple SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
 sh scripts/check/check-production-gui-web-host-gpu-queue-readback-evidence.shs
 ```
 

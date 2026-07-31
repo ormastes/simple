@@ -6,7 +6,10 @@ use std.env.{env_get}
 use std.io.{file_exists}
 use common.ui.builder.{button, panel}
 use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
-use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
+use common.ui.widget.{WidgetNode}
+use common.ui.widget_draw_ir.{WidgetDrawIrStorage}
+use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
 use app.test.bench.bench_harness.{
     BenchResult,
     make_bench_case,
@@ -19,27 +22,48 @@ val PRODUCER_RECEIPT_WORKLOAD =
     "test/05_perf/graphics_2d/draw_ir_producer_storage_workload.spl"
 val PRODUCER_RECEIPT_OUTPUT = "build/test-results/draw-ir-producer-storage"
 
-fn _widget_producer_command_count(command_count: i32) -> i32:
+fn _widget_producer_root(command_count: i32) -> WidgetNode:
     var children = []
     var child_index = 1
     while child_index < command_count:
         children.push(button("receipt-button-{child_index}", "", ""))
         child_index = child_index + 1
-    val root = panel("receipt-root", "", children)
-    val composition = widget_tree_to_draw_ir(
-        root, 320, 240, DRAW_IR_BACKEND_CPU)
+    panel("receipt-root", "", children)
+
+fn _widget_producer_command_count(storage: WidgetDrawIrStorage, root: WidgetNode,
+    snapshot: ThemeRenderSnapshot) -> i32:
+    val composition = storage.compose_with_theme(
+        root, 320, 240, DRAW_IR_BACKEND_CPU,
+        snapshot, 1)
     var emitted = 0
     for batch in composition.batches:
         emitted = emitted + batch.commands.len()
     emitted
 
 fn _warm_frame_receipt(command_count: i32) -> BenchResult:
+    val root = _widget_producer_root(command_count)
+    val storage = WidgetDrawIrStorage.new()
+    val snapshot = theme_package_render_snapshot("")
+    expect(_widget_producer_command_count(
+        storage, root, snapshot
+    )).to_equal(command_count)
     val bench = make_bench_case(
         "draw-ir-widget-{command_count}", "interpreter", "warm", 1)
     bench_run_warm_ns(bench, \:
-        if _widget_producer_command_count(command_count) != command_count:
-            fail("widget producer emitted the wrong command count")
+        val _emitted = _widget_producer_command_count(
+            storage, root, snapshot)
     )
+
+fn _expect_retained_storage(command_count: i32):
+    val root = _widget_producer_root(command_count)
+    val storage = WidgetDrawIrStorage.new()
+    val snapshot = theme_package_render_snapshot("")
+    expect(_widget_producer_command_count(storage, root, snapshot)).to_equal(command_count)
+    expect(_widget_producer_command_count(storage, root, snapshot)).to_equal(command_count)
+    # Arrays expose neither backing-buffer identity nor capacity at this layer.
+    # These counters prove the second frame returned the retained composition.
+    expect(storage.build_count).to_equal(1)
+    expect(storage.reuse_count).to_equal(1)
 
 fn _max_rss_receipt(command_count: i32) -> BenchResult:
     val simple_bin = env_get("SIMPLE_BIN") ?? ""
@@ -64,6 +88,7 @@ fn expect_producer_allocation_budget():
         "unavailable:no-runtime-allocation-counter")
 
 fn _expect_producer_storage_receipt(command_count: i32):
+    _expect_retained_storage(command_count)
     val warm = _warm_frame_receipt(command_count)
     expect(warm.metric_name).to_equal("ns/op")
     expect(warm.value).to_be_greater_than(-1)
@@ -80,7 +105,7 @@ fn _expect_producer_storage_receipt(command_count: i32):
     bench_emit([warm, rss], report_path, table_path)
     expect(file_exists(report_path)).to_equal(true)
     expect(file_exists(table_path)).to_equal(true)
-    print("draw_ir_producer_receipt commands={command_count} frame_ns={warm.value} max_rss_kb={rss.value} allocation=unavailable:no-runtime-allocation-counter")
+    print("draw_ir_producer_receipt commands={command_count} frame_ns={warm.value} max_rss_kb={rss.value} retained_storage=true allocation=unavailable:no-runtime-allocation-counter")
 
 describe "Draw IR producer storage receipt (AC-6)":
 

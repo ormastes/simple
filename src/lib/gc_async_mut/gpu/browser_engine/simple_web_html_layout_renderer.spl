@@ -1351,6 +1351,26 @@ fn _simple_web_draw_ir_has_material_request(
                     return true
     false
 
+fn _simple_web_draw_ir_event_metadata(
+    mut commands: [DrawIrCommand], document_root: text
+) -> [DrawIrCommand]:
+    """Make root paint commands own the explicit document root and give
+    every canonical web command a hit rectangle."""
+    var index = 0
+    while index < commands.len():
+        var command = commands[index]
+        if command.parent_id == "":
+            command.parent_id = document_root
+        if not command.hit_rect.present:
+            val width = if command.width > 0: command.width else: 1
+            val height = if command.height > 0: command.height else: 1
+            command.hit_rect = draw_ir_rect_bounds(
+                command.x, command.y, width, height
+            )
+        commands[index] = command
+        index = index + 1
+    commands
+
 fn _simple_web_layout_merge_material_witness(
     witnesses: [SimpleWebLayoutMaterialWitness]
 ) -> SimpleWebLayoutMaterialWitness:
@@ -1443,14 +1463,19 @@ fn _simple_web_layout_compose_retained(
     val visible_nodes = _html_draw_ir_visible_nodes(
         nodes, styles, boxes, width, height
     )
-    val (commands, command_owner_nodes) = _html_draw_ir_commands(
+    val (raw_commands, command_owner_nodes) = _html_draw_ir_commands(
         nodes, styles, boxes, width, height, vector_fonts,
         input_hit_build.target_keys, overlay, visible_nodes, images
+    )
+    val commands = _simple_web_draw_ir_event_metadata(
+        raw_commands, "document#root"
     )
     val canvas_color = _web_canvas_background(
         nodes, styles, argb(255, 255, 255)
     )
-    val canvas = _html_draw_ir_canvas_command(width, height, canvas_color)
+    var canvas = _html_draw_ir_canvas_command(width, height, canvas_color)
+    canvas.parent_id = "document#root"
+    canvas.hit_rect = draw_ir_rect_bounds(0, 0, width, height)
     var batches: [DrawIrBatch] = []
     var child_witnesses: [SimpleWebLayoutMaterialWitness] = []
     val (opacity_found, opacity_command_roots, opacity_root_count) = (

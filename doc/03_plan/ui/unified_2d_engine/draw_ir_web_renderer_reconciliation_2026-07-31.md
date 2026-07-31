@@ -20,20 +20,20 @@ diagnostic, or recovery paths, never alternate canonical producers.
 
 | Surface | Current evidence | Status |
 |---|---|---|
-| Web semantic/layout -> Draw IR | HTML layout emits parent IDs and image commands | implemented |
-| Widget -> Draw IR | composition exists; most commands still omit `parent_id` | partial |
-| WM events | pointer-down uses the hit bridge; wheel remains excluded | partial |
-| `ui.browser` | builds a composition, then discards it and rebuilds a pixel artifact | red |
-| Web session lifecycle | public paths still create/shutdown renderers per request | red |
+| Web semantic/layout -> Draw IR | HTML layout emits explicit document-root parent and hit metadata plus image commands | source/spec ready; execution blocked |
+| Widget -> Draw IR | canonical commands carry parent/hit metadata; unchanged frames use session-owned retained composition storage | source/spec ready; execution blocked |
+| WM events | pointer-down and wheel traverse the same interaction ancestry | source/spec ready; execution blocked |
+| `ui.browser` | submits the supplied composition to `engine2d_draw_ir_adv_composition`; diagnostic pixels remain explicit recovery only | source/spec ready; execution blocked |
+| Web session lifecycle | `BrowserBackend` owns one Engine2D and retained widget storage; shutdown is idempotent | source/spec ready; execution blocked |
 | Iframes | inert `srcdoc` can flatten through `draw_ir_embed_composition`; five legacy pixel callers remain | partial |
 | Draw IR v3 | flat SoA contract and bounded CPU-reference A-E emission exist; no production producer/executor | partial, not canonical |
-| Draw IR execution | schema admits seven kinds; executor handles RECT/TEXT/IMAGE | partial |
+| Draw IR execution | RECT/TEXT/IMAGE execute; EDGE/PATH/GROUP/PORT return typed rejection | source/spec ready; execution blocked |
 | Text | canonical Draw IR reaches Engine2D shaping/batch execution | implemented |
-| Hosted GUI/Metal text | private bitmap/glyph paths remain reachable | compatibility-only, unguarded |
-| Vulkan batching | compatible buffered primitives share submissions; image/transition operations flush, and per-primitive dispatch remains | partial |
-| CUDA/Metal batching | `submit_batch` is present but currently a no-op | red |
-| Region readback | default reads the full frame and host-crops | red |
-| Web GPU proof | retained live evidence is Metal-specific | partial |
+| Hosted GUI/Metal text | private bitmap/glyph paths are compatibility-only and producer guards reject them as canonical evidence | source/spec ready; execution blocked |
+| Vulkan batching | consecutive opaque rectangles use the rect-list boundary; physical Draw IR receipt is missing | source ready; live row open |
+| CUDA/Metal batching | pending resources/primitives flush at batch boundaries; physical receipts are missing | source ready; live rows open |
+| Region readback | strict `RequireDeviceRegion` fails closed unless the backend reports device-region readback | source/spec ready; live row open |
+| Web GPU proof | no fresh complete Linux/macOS R9 matrix | blocked |
 
 ## Ordered Work
 
@@ -98,6 +98,13 @@ diagnostic, or recovery paths, never alternate canonical producers.
   medians and max RSS.
 - Adopt Draw IR diff/patch only if retained whole-frame reuse is insufficient.
 
+Current candidate state: `WidgetDrawIrStorage` retains an unchanged canonical
+composition in the browser session and rebuilds on root, viewport, backend,
+widget revision, or theme identity change. The focused receipt requires one
+build and one reuse at 64/1K/10K commands. Allocation/capacity identity and
+fresh timing/RSS artifacts remain open because the admitted self-hosted runtime
+exposes no authoritative counter and the current test runner is not admitted.
+
 ### R7. Backend capability completion
 
 | Backend | Submission work | Required evidence |
@@ -141,6 +148,29 @@ Audited bounded lanes (2026-07-31):
   exact checksum/parity, warm timing, and max RSS, not GPU identity.
 - ProcessingIR recovery TODO 649/650 is separate evidence and cannot prove Web
   or Draw IR completion.
+
+### R7–R9 audit status (2026-07-31)
+
+- **R7: open.** CUDA has retained-session/pending-resource source contracts;
+  Vulkan has the rect-list counter and batch boundary; Metal has the pending
+  primitive boundary. None has the required current-host physical receipt with
+  counters and warm latency/RSS for this Draw IR workload. Generated-compute
+  wrappers are not a substitute for an Engine2D Draw IR submission receipt.
+- **R8: open.** `RequireDeviceRegion` fails closed unless Vulkan returns
+  `device_region`; the source contract and focused probe assert that policy.
+  No live device-region receipt exists.
+- **R9: blocked, not passed.** `build/r9-linux-vulkan/RESULT.md` records that
+  the admitted pure-Simple stage2 compiler linked the focused probe with the
+  generic `--runtime-bundle core-c-bootstrap` (no Rust seed), then returned
+  `backend unavailable: vulkan` before submission. That does **not** prove this
+  bundle supplies a physical Vulkan provider: `simple-runtime` compiles
+  `rt_vulkan_*` stubs when its `vulkan` feature is absent. The canonical Linux
+  host-GPU provider lane is instead the feature-built runtime at
+  `build/simpleos_gpu_host/<arch>-vulkan-cuda-runtime-target/bootstrap`, built
+  with `vulkan,cuda,runtime-symbol-table`; it is currently absent. Device
+  inventory alone is not a receipt. Do not rerun the exhausted CUDA/Vulkan
+  attempts until that provider is linked and the factory emits a concrete
+  initialization diagnostic or a live receipt.
 
 ## Task Ownership
 

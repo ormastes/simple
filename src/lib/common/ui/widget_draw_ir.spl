@@ -362,18 +362,15 @@ fn _widget_draw_ir_root_is_surface(root: WidgetNode) -> bool:
         kind == "text" or kind == "label" or kind == "heading" or
         kind == "status_chip" or kind == "toast" or kind == "scroll")
 
-fn _widget_draw_ir_root_surface_commands(root: WidgetNode, width: i32, height: i32, backend: text, snapshot: ThemeRenderSnapshot, commands: [DrawIrCommand]) -> [DrawIrCommand]:
-    var initializer = draw_ir_rect(
-        "{root.id}-surface-initializer", 0, 0, width, height,
-        theme_draw_ir_surface_initializer_color(snapshot)
-    )
-    initializer.parent_id = root.id
-    initializer.hit_rect = draw_ir_rect_bounds(0, 0, width, height)
-    var out: [DrawIrCommand] = [initializer]
+fn _widget_draw_ir_root_surface_commands(root: WidgetNode, backend: text,
+    snapshot: ThemeRenderSnapshot, mut commands: [DrawIrCommand]
+) -> [DrawIrCommand]:
     var replaced = false
     val root_is_surface = _widget_draw_ir_root_is_surface(root)
     val raw_border = snapshot.material.border_width_px
-    for command in commands:
+    var command_index = 0
+    while command_index < commands.len():
+        val command = commands[command_index]
         if (root_is_surface and not replaced and
             command.component_id == root.id):
             val max_inset = if command.width < command.height:
@@ -405,17 +402,16 @@ fn _widget_draw_ir_root_surface_commands(root: WidgetNode, width: i32, height: i
             surface.hit_rect = draw_ir_rect_bounds(
                 command.x, command.y, command.width, command.height
             )
-            out.push(surface)
+            commands[command_index] = surface
             replaced = true
-        else:
-            out.push(command)
-    out
+        command_index = command_index + 1
+    commands
 
 # =========================================================================
 # Public API
 # =========================================================================
 
-fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: text, snapshot: ThemeRenderSnapshot) -> DrawIrComposition:
+fn _widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: text, snapshot: ThemeRenderSnapshot) -> DrawIrComposition:
     """Lay out `root` at (w, h) and project it to a Draw-IR composition.
 
     Batch 0 is the whole tree in absolute coordinates (unclipped). Each scroll
@@ -425,10 +421,16 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     """
     val theme = widget_draw_ir_theme_from_snapshot(snapshot)
     val rects = compute_layout(root, 0, 0, w, h)
-    var main_cmds: [DrawIrCommand] = []
+    var initializer = draw_ir_rect(
+        "{root.id}-surface-initializer", 0, 0, w, h,
+        theme_draw_ir_surface_initializer_color(snapshot)
+    )
+    initializer.parent_id = root.id
+    initializer.hit_rect = draw_ir_rect_bounds(0, 0, w, h)
+    var main_cmds: [DrawIrCommand] = [initializer]
     _walk_main(root, rects, main_cmds, theme, "{root.id}#root")
     main_cmds = _widget_draw_ir_root_surface_commands(
-        root, w, h, backend, snapshot, main_cmds
+        root, backend, snapshot, main_cmds
     )
     val embedding = draw_ir_embedding_config("widget-root", root.id, 0, 0, w, h, 0, 1000, false)
     val source = draw_ir_source_gui_ast(root.id, "widget-tree", "1")
@@ -437,7 +439,7 @@ fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: 
     _collect_scroll_batches(root, rects, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
-fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
+fn _widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
     val theme = _widget_draw_ir_theme_from_wm_chrome(wm_chrome_theme())
     val rects = compute_layout(root, 0, 0, w, h)
     var main_cmds: [DrawIrCommand] = []
@@ -449,8 +451,56 @@ fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> Dr
     _collect_scroll_batches(root, rects, backend, batches, theme)
     draw_ir_composition("widget-composition", "widget:{w}x{h}", backend, batches)
 
+class WidgetDrawIrStorage:
+    """Retains an unchanged widget composition for its next frame submission."""
+    cached: DrawIrComposition?
+    root_id: text
+    width: i32
+    height: i32
+    backend: text
+    revision: i64
+    theme_id: text
+    theme_source_sha256: text
+    theme_material_sha256: text
+    build_count: i64
+    reuse_count: i64
+
+    static fn new() -> WidgetDrawIrStorage:
+        WidgetDrawIrStorage(cached: nil, root_id: "", width: 0, height: 0,
+            backend: "", revision: -1, theme_id: "", theme_source_sha256: "",
+            theme_material_sha256: "", build_count: 0, reuse_count: 0)
+
+    me compose_with_theme(root: WidgetNode, w: i32, h: i32, backend: text,
+        snapshot: ThemeRenderSnapshot, revision: i64) -> DrawIrComposition:
+        if (self.cached != nil and self.root_id == root.id and
+            self.width == w and self.height == h and self.backend == backend and
+            self.revision == revision and self.theme_id == snapshot.id and
+            self.theme_source_sha256 == snapshot.source_manifest_sha256 and
+            self.theme_material_sha256 == snapshot.material_sha256):
+            self.reuse_count = self.reuse_count + 1
+            return self.cached.?
+        val composition = _widget_tree_to_draw_ir_with_theme(
+            root, w, h, backend, snapshot)
+        self.cached = composition
+        self.root_id = root.id
+        self.width = w
+        self.height = h
+        self.backend = backend
+        self.revision = revision
+        self.theme_id = snapshot.id
+        self.theme_source_sha256 = snapshot.source_manifest_sha256
+        self.theme_material_sha256 = snapshot.material_sha256
+        self.build_count = self.build_count + 1
+        composition
+
+fn widget_tree_to_draw_ir_with_theme(root: WidgetNode, w: i32, h: i32, backend: text, snapshot: ThemeRenderSnapshot) -> DrawIrComposition:
+    _widget_tree_to_draw_ir_with_theme(root, w, h, backend, snapshot)
+
+fn widget_tree_to_draw_ir(root: WidgetNode, w: i32, h: i32, backend: text) -> DrawIrComposition:
+    _widget_tree_to_draw_ir(root, w, h, backend)
+
 fn widget_tree_to_draw_ir_cpu(root: WidgetNode, w: i32, h: i32) -> DrawIrComposition:
     widget_tree_to_draw_ir(root, w, h, DRAW_IR_BACKEND_CPU)
 
-export WidgetDrawIrTheme, widget_draw_ir_theme_from_snapshot
+export WidgetDrawIrTheme, WidgetDrawIrStorage, widget_draw_ir_theme_from_snapshot
 export widget_tree_to_draw_ir, widget_tree_to_draw_ir_with_theme, widget_tree_to_draw_ir_cpu
