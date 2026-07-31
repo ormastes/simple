@@ -108,6 +108,30 @@ pub fn rt_text_to_bytes_fn(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Array(std::sync::Arc::new(bytes)))
 }
 
+/// Read the raw BYTE at a BYTE index of `text`.
+///
+/// Callable from Simple as: `rt_string_byte_at(text, index) -> i64`
+///
+/// O(1) counterpart to reading through `rt_text_to_bytes`, which materializes
+/// the entire byte array on every call and turned a
+/// `while i < s.len(): s.byte_at(i)` scan into O(n^2) -- the same quadratic
+/// trap `char_code_at` was already fixed for.
+///
+/// Semantics match the seed's `byte_at` method arm and the compiled lane
+/// exactly: byte-indexed (NOT character-indexed), and out-of-range or
+/// negative indices yield 0.
+pub fn rt_string_byte_at_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let text = match args.first() {
+        Some(Value::Str(s)) => s.as_str(),
+        _ => "",
+    };
+    let idx = args.get(1).map(|v| v.as_int().unwrap_or(0)).unwrap_or(0);
+    if idx < 0 {
+        return Ok(Value::Int(0));
+    }
+    Ok(Value::Int(text.as_bytes().get(idx as usize).map_or(0, |b| *b as i64)))
+}
+
 /// Convert a single byte value to a one-character text string.
 ///
 /// Callable from Simple as: `rt_byte_char(v: i64) -> text`

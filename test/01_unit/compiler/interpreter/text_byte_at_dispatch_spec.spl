@@ -23,10 +23,10 @@ describe "interpreter text.byte_at dispatch":
         # single byte out of a multi-byte codepoint and then UTF-8-decoding
         # it returns garbage (0xC3 alone decodes as 192, not the raw byte
         # 195) — confirmed empirically before this arm was written. byte_at
-        # must instead read through rt_text_to_bytes, the raw-byte extern
-        # already reachable from this engine.
+        # must instead read through rt_string_byte_at, the O(1) raw-byte
+        # extern registered for this engine in interpreter_extern/mod.rs.
         val source = rt_file_read_text("src/compiler/10.frontend/core/interpreter/eval_methods.spl") ?? ""
-        expect(source).to_contain("extern fn rt_text_to_bytes")
+        expect(source).to_contain("extern fn rt_string_byte_at")
 
         val char_code_at_pos = source.index_of("if method_name == \"char_code_at\":")
         expect(char_code_at_pos).to_be_greater_than(-1)
@@ -38,5 +38,9 @@ describe "interpreter text.byte_at dispatch":
         expect(next_arm_pos).to_be_greater_than(-1)
         val byte_at_body = branch.substring(0, next_arm_pos)
 
-        expect(byte_at_body).to_contain("rt_text_to_bytes(s)")
+        expect(byte_at_body).to_contain("rt_string_byte_at(s, idx)")
         expect(byte_at_body).to_not_contain("char_code_at(0)")
+        # Must NOT fall back to rt_text_to_bytes: that materializes the whole
+        # byte array per call, making a full scan O(n^2) -- the same quadratic
+        # trap char_code_at was already fixed for.
+        expect(byte_at_body).to_not_contain("rt_text_to_bytes")

@@ -1731,6 +1731,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_text_count_codepoints", simd::rt_text_count_codepoints);
     insert_simple!("rt_text_find_invalid_utf8", simd::rt_text_find_invalid_utf8);
     insert_simple!("rt_text_is_ascii", simd::rt_text_is_ascii);
+    insert_simple!("rt_string_byte_at", conversion::rt_string_byte_at_fn);
     insert_simple!("rt_text_to_bytes", conversion::rt_text_to_bytes_fn);
     insert_simple!("rt_text_to_lower_ascii", simd::rt_text_to_lower_ascii);
     insert_simple!("rt_text_to_upper_ascii", simd::rt_text_to_upper_ascii);
