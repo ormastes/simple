@@ -51,6 +51,7 @@ use os.compositor.host_compositor_entry.{
     host_wm_force_direct_chrome,
     host_wm_chrome_force_direct,
     host_wm_draw_ir_local_recompose_required,
+    host_wm_draw_ir_result_valid,
     host_metal_glass_receipts_valid,
     host_chrome_scene_html,
     host_chrome_scene_fingerprint,
@@ -168,11 +169,12 @@ fn _metal_material_result(
     receipts: [Engine2dMetalGlassReceipt],
     requested: i32,
     executed: i32,
-    unfulfilled: i32 = 0
+    unfulfilled: i32 = 0,
+    unit_id: text = "metal-frame"
 ) -> Engine2dDrawIrAdvResult:
     Engine2dDrawIrAdvResult(
         schema: "simple-draw-ir-v2",
-        unit_id: "metal-frame",
+        unit_id: unit_id,
         selected_backend: "gpu",
         fallback_required: false,
         fallback_reason: "",
@@ -604,6 +606,19 @@ describe "host compositor native-lowering regression contracts":
         expect(core).to_contain("executor_width != self.width or executor_height != self.height")
         expect(core.contains("executor.w != self.width")).to_be(false)
         expect(core.contains("executor.h != self.height")).to_be(false)
+
+    it "requires the Draw IR receipt to identify the submitted composition":
+        val core = file_read(HOST_COMPOSITOR_CORE_SRC)
+        expect(core).to_contain("result.unit_id == composition.composition_id")
+
+    it "rejects a Draw IR receipt for a different composition":
+        val composition = _metal_material_composition(["body", "title"])
+        val result = _metal_material_result(
+            [_metal_material_receipt("body"),
+             _metal_material_receipt("title")],
+            2, 2, unit_id: "other-frame"
+        )
+        expect(host_wm_draw_ir_result_valid(composition, result, 16)).to_equal(false)
 
     it "accepts an exact ordered pair of active Metal material receipts":
         val composition = _metal_material_composition(["body", "title"])

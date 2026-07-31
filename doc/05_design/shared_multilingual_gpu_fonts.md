@@ -121,10 +121,9 @@ handle/generation. Fallback resolves the snapshot after choosing its run font;
 an attached face without an exact live binding never reuses the legacy unbound
 parser blob.
 
-GSUB decoding is staged: the parser owns table-bounded Coverage 1/2 and
-SingleSubst 1/2 primitives, while the shaper stays identity until active
-Script/LangSys/Feature lookup selection is available. Unsupported or malformed
-data returns unchanged material and cannot set completion.
+Generic GSUB/GPOS implementation is not a delivery requirement. The parser's
+bounded Coverage/SingleSubst primitives support only the accepted witness
+profiles; unsupported or malformed data cannot set completion.
 
 The selector and application land together. Accepted scope covers direct Latin,
 Cyrillic, Han, and the exact Hindi `हिन्दी` witness. The Hindi path selects
@@ -372,7 +371,7 @@ Remaining completion behavior is intentionally narrow:
   changed nonempty identity clears vector state and uses bitmap behavior.
 - A selected-script run is accepted only when face generation, glyph IDs,
   clusters, advances, offsets, language, script, direction, and parallel vector
-  lengths agree. Unsupported GSUB/GPOS lookups reject the run rather than
+  lengths agree. Inputs outside the accepted witness profiles reject rather than
   returning a partial sequence.
 - Registered-only SimpleOS validates the exact registered blob, binds it to the
   existing shaper without a hosted face handle, and accepts only the pinned

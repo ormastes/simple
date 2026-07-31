@@ -223,8 +223,8 @@ method.
 For each changed spec, run native execution and generate its manual once:
 
 ```text
-SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
-bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
+SIMPLE_NO_STUB_FALLBACK=1 bin/release/<triple>/simple test <spec> --mode=native
+bin/release/<triple>/simple spipe-docgen <spec> --output doc/06_spec --no-index
 ```
 
 Run that canonical `spipe-docgen` command for every executable/manual pair and
