@@ -52,7 +52,8 @@ use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserRuntimeState, B
 use std.gc_async_mut.web.browser_session_storage.{sync_storage_runtime_state, pair_value, upsert_pair, is_storage_api_property, is_storage_internal_property, storage_public_key_from_internal, js_value_to_storage_text}
 use std.js.types.pair.{Pair}
 use std.gc_async_mut.web.browser_session_url.{
-    resolve_relative_url, browser_history_resolve_url,
+    resolve_relative_url,
+    normalize_script_navigation_reference_url,
     collapse_url_dot_segments,
     url_protocol, url_pathname, url_origin, url_host, url_search, url_hash
 }
@@ -2510,9 +2511,20 @@ impl BrowserSession:
         match href_val:
             JsValue.String(href):
                 if href.len() > 0:
-                    var next_href = resolve_relative_url(
+                    var next_href = old_url
+                    match normalize_script_navigation_reference_url(
                         active_document_url, href
-                    )
+                    ):
+                        Ok(valid_href):
+                            next_href = valid_href
+                        Err(reason):
+                            navigation_mode = ""
+                            self.history_proposal_action = ""
+                            self.history_proposal_url_kind = ""
+                            self.history_proposal_raw_url = ""
+                            self._append_warning(
+                                "script navigation blocked: {reason}"
+                            )
                     if navigation_mode == "pushState" or navigation_mode == "replaceState":
                         self.history_proposal_action = ""
                         self.history_proposal_url_kind = ""
@@ -2543,14 +2555,19 @@ impl BrowserSession:
                                     "invalid history URL blocked"
                                 )
                         if navigation_mode != "":
-                            val candidate = if history_url_kind == "O":
-                                active_document_url
-                            else:
-                                browser_history_resolve_url(
+                            var candidate = active_document_url
+                            var candidate_valid = true
+                            if history_url_kind != "O":
+                                match normalize_script_navigation_reference_url(
                                     active_document_url, history_raw_url
-                                )
+                                ):
+                                    Ok(valid_history_url):
+                                        candidate = valid_history_url
+                                    Err(_):
+                                        candidate_valid = false
                             val document_origin = url_origin(active_document_url)
                             if (
+                                candidate_valid and
                                 document_origin != "" and
                                 url_origin(candidate) == document_origin and
                                 rt_text_to_bytes(candidate).len() <= 8192

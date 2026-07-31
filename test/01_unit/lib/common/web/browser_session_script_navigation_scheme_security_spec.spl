@@ -1,0 +1,150 @@
+"""
+BrowserSession script-navigation reference security.
+
+Location and History API navigation share one strict URL-reference policy:
+trusted explicit schemes stay explicit, relative references resolve against the
+active document, and opaque or unknown schemes never mutate browser state.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.js.types.js_types.{JsValue}
+
+# codex-system-test
+describe "BrowserSession script-navigation reference security":
+    it "should share strict scheme and reference policy across location and history":
+        step("Commit stable sessions for blocked and valid controls")
+        val stable_url = "https://stable.test/dir/page"
+        val stable_html = (
+            "<html><head><title>Stable</title></head>" +
+            "<body>stable</body></html>"
+        )
+        var blocked_session = BrowserSession.new()
+        var reference_session = BrowserSession.new()
+        var history_session = BrowserSession.new()
+        expect(blocked_session.open_html(
+            stable_url, stable_html
+        ).is_ok()).to_be(true)
+        expect(reference_session.open_html(
+            stable_url, stable_html
+        ).is_ok()).to_be(true)
+        expect(history_session.open_html(
+            stable_url, stable_html
+        ).is_ok()).to_be(true)
+
+        step("Reject opaque unknown and cross-origin history targets")
+        val blocked_urls = [
+            "data:text/html,blocked",
+            "javascript:alert(1)",
+            "file:///etc/passwd",
+            "custom:payload",
+            "mailto:user@example.test",
+            "unknown://host/path"
+        ]
+        for blocked_url in blocked_urls:
+            expect(blocked_session.eval_script(
+                "location.assign('" + blocked_url + "')"
+            ).is_ok()).to_be(true)
+            expect(blocked_session.eval_script(
+                "history.pushState(1, '', '" + blocked_url + "')"
+            ).is_ok()).to_be(true)
+            expect(blocked_session.eval_script(
+                "history.replaceState(2, '', '" + blocked_url + "')"
+            ).is_ok()).to_be(true)
+        expect(blocked_session.eval_script(
+            "history.pushState(3, '', 'https://evil.test/x')"
+        ).is_ok()).to_be(true)
+        expect(blocked_session.eval_script(
+            "history.replaceState(4, '', '//evil.test/y')"
+        ).is_ok()).to_be(true)
+
+        step("Preserve state proposals runtime values and network")
+        expect(blocked_session.current_url).to_equal(stable_url)
+        expect(blocked_session.document_url).to_equal(stable_url)
+        expect(blocked_session.current_title).to_equal("Stable")
+        expect(blocked_session.current_body_html).to_contain("stable")
+        expect(blocked_session.history.len()).to_equal(1)
+        expect(blocked_session.current_index).to_equal(0)
+        expect(blocked_session.history_proposal_action).to_equal("")
+        expect(blocked_session.history_proposal_url_kind).to_equal("")
+        expect(blocked_session.history_proposal_raw_url).to_equal("")
+        match blocked_session.eval_script("location.href"):
+            Ok(JsValue.String(href)):
+                expect(href).to_equal(stable_url)
+            _:
+                fail("Expected rejected navigation to restore runtime location")
+        match blocked_session.eval_script("history.state === null"):
+            Ok(JsValue.Boolean(is_null)):
+                expect(is_null).to_be(true)
+            _:
+                fail("Expected rejected History API calls to preserve state")
+        expect(blocked_session.warnings.join("|")).to_contain(
+            "script navigation blocked: unsupported navigation scheme"
+        )
+        expect(blocked_session.warnings.join("|")).to_contain(
+            "invalid history URL blocked"
+        )
+        expect(blocked_session.has_pending_requests()).to_be(false)
+        expect(blocked_session.take_pending_request()).to_be_nil()
+        expect(blocked_session.can_stop_loading()).to_be(false)
+
+        step("Resolve valid references HTTPS history and traversal")
+        val references = [
+            "child", "next.html", "/root", "./leaf",
+            "../up", "?q=1", "#frag", "//next.test/x"
+        ]
+        val expected_urls = [
+            "https://stable.test/dir/child",
+            "https://stable.test/dir/next.html",
+            "https://stable.test/root",
+            "https://stable.test/dir/leaf",
+            "https://stable.test/up",
+            "https://stable.test/dir/page?q=1",
+            "https://stable.test/dir/page#frag",
+            "https://next.test/x"
+        ]
+        var reference_index = 0
+        while reference_index < references.len():
+            expect(reference_session.eval_script(
+                "location.assign('" + references[reference_index] + "')"
+            ).is_ok()).to_be(true)
+            expect(reference_session.current_url).to_equal(
+                expected_urls[reference_index]
+            )
+            reference_index = reference_index + 1
+        expect(reference_session.eval_script(
+            "location.assign('https://next.test/final')"
+        ).is_ok()).to_be(true)
+        expect(reference_session.current_url).to_equal(
+            "https://next.test/final"
+        )
+        expect(reference_session.history.len()).to_equal(10)
+        expect(reference_session.has_pending_requests()).to_be(false)
+
+        expect(history_session.eval_script(
+            "history.pushState(1, '', 'child')"
+        ).is_ok()).to_be(true)
+        expect(history_session.eval_script(
+            "history.pushState(2, '', '/two')"
+        ).is_ok()).to_be(true)
+        expect(history_session.eval_script(
+            "history.replaceState(3, '', '//stable.test/final')"
+        ).is_ok()).to_be(true)
+        expect(history_session.history.len()).to_equal(3)
+        expect(history_session.current_url).to_equal(
+            "https://stable.test/final"
+        )
+        expect(history_session.go_back().is_ok()).to_be(true)
+        expect(history_session.current_url).to_equal(
+            "https://stable.test/dir/child"
+        )
+        expect(history_session.go_back().is_ok()).to_be(true)
+        expect(history_session.current_url).to_equal(stable_url)
+        expect(history_session.go_forward().is_ok()).to_be(true)
+        expect(history_session.go_forward().is_ok()).to_be(true)
+        expect(history_session.current_url).to_equal(
+            "https://stable.test/final"
+        )
+        expect(history_session.history.len()).to_equal(3)
+        expect(history_session.has_pending_requests()).to_be(false)
