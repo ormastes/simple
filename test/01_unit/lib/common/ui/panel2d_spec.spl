@@ -38,6 +38,7 @@ use std.common.engine.interaction.hit_proxy.{POINTER_POLICY_NONE}
 use std.common.engine.interaction.event_route.{EventListener2D, ACTION_NONE}
 use std.common.engine.interaction.pointer_event.{PointerEvent2D, POINTER_DOWN, POINTER_WHEEL}
 use std.common.engine.interaction.draw_ir_hit_bridge.{draw_ir_node_id}
+use std.common.engine.interaction.hit_test.{hit_stack}
 use std.common.engine.interaction.window_event_adapter.{drain_pointer_events}
 
 fn handler_none(e: PointerEvent2D) -> i32:
@@ -196,6 +197,28 @@ describe "Wheel dispatch — scroll offset clamping":
         val result = panel_dispatch_pointer([root], event, [])
         assert_false(result.scrolled)
         expect(result.panels[0].scroll_offset).to_equal(0)
+
+    it "routes pointer-down and wheel through the same nested ancestry, scrolling the nearest owner":
+        val model = ScrollModel(total_rows: 100, view_w: 80, view_h: 80)
+        var root = panel_with_scroll(panel2d("root", 0, 0, 200, 200), model)
+        var inner = panel_with_scroll(panel2d("inner", 20, 20, 80, 80), model)
+        inner = panel_add_child(inner, panel2d("leaf", 10, 10, 20, 20))
+        root = panel_add_child(root, inner)
+
+        val down = PointerEvent2D.create(1, POINTER_DOWN, 35, 35, 1, -1)
+        val pointer_result = panel_dispatch_pointer([root], down, [])
+        expect(pointer_result.target_name).to_equal("leaf")
+        val forest = panel_hit_forest([root])
+        val ancestry = hit_stack(forest.proxies, forest.parents, 35, 35)
+        expect(ancestry.ancestor_path[1]).to_equal(draw_ir_node_id("inner"))
+        expect(ancestry.ancestor_path[2]).to_equal(draw_ir_node_id("leaf"))
+
+        var wheel = PointerEvent2D.create(1, POINTER_WHEEL, 35, 35, 0, -1)
+        wheel.delta_y = 12
+        val wheel_result = panel_dispatch_pointer([root], wheel, [])
+        expect(wheel_result.scrolled).to_be(true)
+        expect(wheel_result.panels[0].scroll_offset).to_equal(0)
+        expect(wheel_result.panels[0].children[0].scroll_offset).to_equal(12)
 
 describe "taskbar_panel — slot hit targeting":
 

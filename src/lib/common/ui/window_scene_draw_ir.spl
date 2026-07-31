@@ -594,6 +594,27 @@ fn _wm_draw_ir_source(source_id: text, style_key: text, style_revision: text) ->
 fn _wm_draw_ir_desktop_revision(scene: SharedWmScene) -> text:
     "wm.desktop:{scene.width}x{scene.height}:background={scene.background.kind}:{scene.background.color}"
 
+fn _wm_draw_ir_with_metadata(commands: [DrawIrCommand], parent_id: text) -> [DrawIrCommand]:
+    """Attach explicit ownership and hit geometry before a WM batch escapes.
+    Producers used to rely on DrawIR's implicit batch parent; keeping this at
+    the common batch boundary covers every WM constructor without a parallel
+    event model or a per-call fallback id."""
+    var out: [DrawIrCommand] = []
+    var i = 0
+    while i < commands.len():
+        var command = commands[i]
+        if command.parent_id == "":
+            command.parent_id = parent_id
+        if not command.hit_rect.present:
+            val width = if command.width > 0: command.width else: 1
+            val height = if command.height > 0: command.height else: 1
+            command.hit_rect = draw_ir_rect_bounds(
+                command.x, command.y, width, height
+            )
+        out.push(command)
+        i = i + 1
+    out
+
 fn _wm_draw_ir_chrome_revision(scene: SharedWmScene, taskbar: TaskbarModel, dpi_scale_milli: i32, clock_label: text, right_icon_count: i32) -> text:
     "wm.chrome:{scene.width}x{scene.height}:dpi={dpi_scale_milli}:clock={clock_label}:icons={right_icon_count}:pinned={taskbar.pinned.len()}:running={taskbar.running.len()}"
 
@@ -800,7 +821,10 @@ fn _wm_draw_ir_desktop_batch(scene: SharedWmScene, backend_target: text) -> Draw
         "wm-desktop",
         backend_target,
         embedding,
-        [draw_ir_rect("desktop-background", 0, 0, scene.width, scene.height, background_color)],
+        _wm_draw_ir_with_metadata(
+            [draw_ir_rect("desktop-background", 0, 0, scene.width, scene.height, background_color)],
+            "desktop"
+        ),
         _wm_draw_ir_source("wm.desktop", "wm.desktop", _wm_draw_ir_desktop_revision(scene))
     )
 
@@ -812,12 +836,12 @@ fn _wm_draw_ir_chrome_batch(scene: SharedWmScene, taskbar: TaskbarModel, backend
         "wm-chrome",
         backend_target,
         embedding,
-        [
+        _wm_draw_ir_with_metadata([
             draw_ir_rect("command-lane", chrome.command_lane.x, chrome.command_lane.y, chrome.command_lane.width, chrome.command_lane.height, theme.command_lane),
             draw_ir_rect("command-lane-accent", chrome.command_lane.x, chrome.command_lane.y + chrome.command_lane.height - 2, chrome.command_lane.width, 2, theme.accent),
             draw_ir_rect("taskbar", chrome.taskbar.x, chrome.taskbar.y, chrome.taskbar.width, chrome.taskbar.height, theme.taskbar),
             draw_ir_rect("taskbar-accent", chrome.taskbar.x, chrome.taskbar.y, chrome.taskbar.width, 2, theme.accent)
-        ],
+        ], "wm-chrome"),
         _wm_draw_ir_source("wm.chrome", "wm.chrome", _wm_draw_ir_chrome_revision(scene, taskbar, dpi_scale_milli, clock_label, right_icon_count))
     )
 
@@ -893,7 +917,7 @@ fn _wm_draw_ir_taskbar_objects_batch(scene: SharedWmScene, taskbar: TaskbarModel
     if _WM_TRACE: print("[wm-tbar] at=revision")
     val dbg_revision = _wm_draw_ir_chrome_revision(scene, taskbar, dpi_scale_milli, clock_label, right_icon_count)
     if _WM_TRACE: print("[wm-tbar] at=batch-build")
-    draw_ir_batch_with_source("wm-taskbar-objects", backend_target, embedding, commands, _wm_draw_ir_source("wm.taskbar.objects", "wm.taskbar", dbg_revision))
+    draw_ir_batch_with_source("wm-taskbar-objects", backend_target, embedding, _wm_draw_ir_with_metadata(commands, "taskbar"), _wm_draw_ir_source("wm.taskbar.objects", "wm.taskbar", dbg_revision))
 
 # Panel2D projection of one window (decision D3, Lane L2 adoption): the
 # panel's rect/layer/opacity_milli/clip fields become the ONE source for
@@ -1020,7 +1044,7 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
         "window-{window.window_id}",
         backend_target,
         embedding,
-        commands,
+        _wm_draw_ir_with_metadata(commands, window.window_id),
         _wm_draw_ir_source("wm.window.{window.window_id}", "wm.window", _wm_draw_ir_window_revision(window))
     )
 
@@ -1033,7 +1057,7 @@ fn _wm_draw_ir_top_content_frame_batch(window: SharedWmWindow, frame: WmContentF
         "content-{window.window_id}",
         backend_target,
         embedding,
-        [draw_ir_image_command("{window.window_id}-content-image", 0, 0, content.width, content.height, shared_wm_content_frame_image_uri(frame), [])],
+        _wm_draw_ir_with_metadata([draw_ir_image_command("{window.window_id}-content-image", 0, 0, content.width, content.height, shared_wm_content_frame_image_uri(frame), [])], window.window_id),
         _wm_draw_ir_source("wm.content.{window.window_id}", "wm.content", "rev={frame.content_revision};checksum={frame.checksum}")
     )
 
@@ -1043,7 +1067,7 @@ fn _wm_draw_ir_invalid_top_content_frame_batch(window: SharedWmWindow, content: 
         "content-{window.window_id}",
         backend_target,
         embedding,
-        [draw_ir_rect("{window.window_id}-content-invalid", 0, 0, content.width, content.height, 0xFFFF00FFu32)],
+        _wm_draw_ir_with_metadata([draw_ir_rect("{window.window_id}-content-invalid", 0, 0, content.width, content.height, 0xFFFF00FFu32)], window.window_id),
         _wm_draw_ir_source("wm.content.{window.window_id}", "wm.content", "invalid")
     )
 
@@ -1055,7 +1079,7 @@ fn _wm_draw_ir_child_content_frame_batch(frame: WmContentFrame, parent_window_id
         "content-{frame.window_id}",
         backend_target,
         embedding,
-        [image],
+        _wm_draw_ir_with_metadata([image], parent_window_id),
         _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "rev={frame.content_revision};checksum={frame.checksum}")
     )
 
@@ -1112,7 +1136,7 @@ fn _wm_draw_ir_child_content_batches_recursive(content_frames: [WmContentFrame],
                         out.push(nested)
                 else:
                     val embedding = draw_ir_embedding_config(frame.window_id, frame.window_id, visible.x, visible.y, visible.width, visible.height, 0, 1000, true)
-                    out.push(draw_ir_batch_with_source("content-{frame.window_id}", backend_target, embedding, [draw_ir_rect("{frame.window_id}-content-invalid", 0, 0, visible.width, visible.height, 0xFFFF00FFu32)], _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "invalid")))
+                    out.push(draw_ir_batch_with_source("content-{frame.window_id}", backend_target, embedding, _wm_draw_ir_with_metadata([draw_ir_rect("{frame.window_id}-content-invalid", 0, 0, visible.width, visible.height, 0xFFFF00FFu32)], parent_id), _wm_draw_ir_source("wm.content.{frame.window_id}", "wm.content", "invalid")))
     out
 
 # Content-aware sibling of shared_wm_scene_draw_ir_composition: same

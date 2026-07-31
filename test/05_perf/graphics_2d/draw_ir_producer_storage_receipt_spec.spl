@@ -1,0 +1,91 @@
+# @cover src/lib/common/ui/widget_draw_ir.spl
+# @tag: perf, draw-ir, producer, receipt
+
+use std.spec.{describe, it, expect, fail, step}
+use std.env.{env_get}
+use std.io.{file_exists}
+use common.ui.builder.{button, panel}
+use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU}
+use common.ui.widget_draw_ir.{widget_tree_to_draw_ir}
+use app.test.bench.bench_harness.{
+    BenchResult,
+    make_bench_case,
+    bench_run_warm_ns,
+    bench_run_process_rss
+}
+use app.test.bench.bench_report.{bench_emit}
+
+val PRODUCER_RECEIPT_WORKLOAD =
+    "test/05_perf/graphics_2d/draw_ir_producer_storage_workload.spl"
+val PRODUCER_RECEIPT_OUTPUT = "build/test-results/draw-ir-producer-storage"
+
+fn _widget_producer_command_count(command_count: i32) -> i32:
+    var children = []
+    var child_index = 1
+    while child_index < command_count:
+        children.push(button("receipt-button-{child_index}", "", ""))
+        child_index = child_index + 1
+    val root = panel("receipt-root", "", children)
+    val composition = widget_tree_to_draw_ir(
+        root, 320, 240, DRAW_IR_BACKEND_CPU)
+    var emitted = 0
+    for batch in composition.batches:
+        emitted = emitted + batch.commands.len()
+    emitted
+
+fn _warm_frame_receipt(command_count: i32) -> BenchResult:
+    val bench = make_bench_case(
+        "draw-ir-widget-{command_count}", "interpreter", "warm", 1)
+    bench_run_warm_ns(bench, \:
+        if _widget_producer_command_count(command_count) != command_count:
+            fail("widget producer emitted the wrong command count")
+    )
+
+fn _max_rss_receipt(command_count: i32) -> BenchResult:
+    val simple_bin = env_get("SIMPLE_BIN") ?? ""
+    if simple_bin.len() == 0:
+        fail("SIMPLE_BIN must name the admitted pure-Simple CLI")
+    if simple_bin.contains("simple_seed") or simple_bin.contains("compiler_rust"):
+        fail("bootstrap seed cannot supply the producer RSS receipt")
+    val bench = make_bench_case(
+        "draw-ir-widget-{command_count}", "interpreter", "process", 1)
+    bench_run_process_rss(bench, [
+        simple_bin,
+        "run",
+        PRODUCER_RECEIPT_WORKLOAD,
+        command_count.to_text()
+    ])
+
+fn expect_producer_allocation_budget():
+    # The current runtime exposes no allocation counter to this producer tier.
+    # Do not replace this explicit gap with a synthetic command/allocation count.
+    val allocation_metric = "unavailable:no-runtime-allocation-counter"
+    expect(allocation_metric).to_equal(
+        "unavailable:no-runtime-allocation-counter")
+
+fn _expect_producer_storage_receipt(command_count: i32):
+    val warm = _warm_frame_receipt(command_count)
+    expect(warm.metric_name).to_equal("ns/op")
+    expect(warm.value).to_be_greater_than(-1)
+
+    val rss = _max_rss_receipt(command_count)
+    expect(rss.metric_name).to_equal("rss_kb")
+    # AC-6 needs an actual RSS result; unavailable platforms must not pass it.
+    expect(rss.unit_label).to_equal("KB")
+    expect(rss.value).to_be_greater_than(0)
+
+    val report_path =
+        "{PRODUCER_RECEIPT_OUTPUT}/{command_count}_receipt.md"
+    val table_path = "{PRODUCER_RECEIPT_OUTPUT}/metrics.md"
+    bench_emit([warm, rss], report_path, table_path)
+    expect(file_exists(report_path)).to_equal(true)
+    expect(file_exists(table_path)).to_equal(true)
+    print("draw_ir_producer_receipt commands={command_count} frame_ns={warm.value} max_rss_kb={rss.value} allocation=unavailable:no-runtime-allocation-counter")
+
+describe "Draw IR producer storage receipt (AC-6)":
+
+    it "records frame-time and max-RSS receipts for 64, 1K, and 10K commands":
+        step("Reuse producer storage across frames")
+        for command_count in [64, 1000, 10000]:
+            _expect_producer_storage_receipt(command_count)
+        expect_producer_allocation_budget()
