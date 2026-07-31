@@ -1453,6 +1453,42 @@ The scenario is a STATIC candidate until an admitted pure-Simple runner and
 docgen lane execute it. This bounded implementation invokes neither runtime,
 bootstrap, nor docgen and therefore makes no runtime PASS claim.
 
+## Space activation across modifier events (2026-07-31)
+
+A pending button Space press belongs to the matching Space release. An
+intervening non-activating Shift keydown or keyup participates in normal DOM
+dispatch but must not clear that owner. The state machine remains solely in
+`BrowserSession`; hosted and isolated adapters only translate their existing
+key protocol into the shared owner.
+
+The complete production call chains are:
+
+- `HostedWebContentSession.dispatch_key_with_shift ->
+  BrowserSession.dispatch_dom_keyboard_code_event -> shared keyboard
+  activation state`; and
+- `HostedBrowserRendererRegistry.dispatch_key_with_shift ->
+  HostedBrowserRendererProcess.begin_key_with_shift -> browser renderer protocol ->
+  HostedBrowserRendererWorkerSession._dispatch_key ->
+  BrowserSession.dispatch_dom_keyboard_code_event -> shared keyboard
+  activation state`.
+
+| Requirement | Executable SSpec | Manual | Deterministic oracle |
+|---|---|---|---|
+| REQ-WEB-BROWSER-005 | `test/03_system/app/browser/feature/browser_space_modifier_activation_order_spec.spl` | `doc/06_spec/03_system/app/browser/feature/browser_space_modifier_activation_order_spec.md` | focused button stays armed from Space down through Shift down/up |
+| REQ-WEB-BROWSER-007 | same | same | exact `focus,keydown,keydown,keyup,keyup,click,` trace and one click |
+| REQ-WEB-BROWSER-008 | same | same | hosted/worker trace, focus, pending-state, callback, and default-state parity |
+
+The displayed manual uses exactly these four steps:
+
+1. `Open the same keyboard button in hosted and isolated renderers`
+2. `Focus both buttons through the host Tab route`
+3. `Hold Space while pressing and releasing Shift on both buttons`
+4. `Release Space and observe ordered activation in both renderers`
+
+The scenario is a STATIC candidate until an admitted pure-Simple runner and
+docgen lane execute it. This bounded implementation invokes neither runtime,
+bootstrap, nor docgen and therefore makes no runtime PASS claim.
+
 ## Checkable canceled-pointer focus preservation (2026-07-31)
 
 Canceled primary `pointerdown` suppresses the pointer's implicit focus default,
