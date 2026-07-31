@@ -59,6 +59,39 @@ describe "SimpleWebCssBoxEffects":
         expect(_pixel_at(pixels, 32, 3, 3)).to_equal(0xFFEF4444u32)
         expect(_pixel_at(pixels, 32, 8, 8)).to_equal(0xFFFFFFFFu32)
 
+    # codex-system-test
+    it "should preserve bordered gradient text pixels through the CPU Draw IR adapter":
+        step("Render one clipped web composition through CPU and CPU SIMD")
+        val html = (
+            "<html><head><style>" +
+            "html,body{margin:0;padding:0;background:#ffffff}" +
+            "#card{display:block;width:12px;height:12px;border:2px solid " +
+            "#ef4444;overflow:hidden;background:#ffffff}" +
+            "#gradient{display:block;width:8px;height:2px;" +
+            "background-image:linear-gradient(#22c55e,#1d4ed8)}" +
+            "#copy{display:block;width:32px;height:8px;color:#111827;" +
+            "font-size:8px;white-space:nowrap}" +
+            "</style></head><body><section id='card'><div id='gradient'></div>" +
+            "<span id='copy'>WIDE TEXT</span></section></body></html>"
+        )
+        val cpu = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+            html, 32, 24, "cpu")
+        val simd = simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(
+            html, 32, 24, "cpu_simd")
+        val composition = simple_web_layout_render_html_draw_ir(html, 32, 24)
+        val copy = _draw_ir_command_by_id(composition.batches[0].commands, "copy")
+
+        step("Keep exact shared-executor pixels after adapter shutdown")
+        expect(cpu.len()).to_equal(32 * 24)
+        expect(simd.len()).to_equal(32 * 24)
+        expect(cpu).to_equal(simd)
+        expect(_pixel_at(cpu, 32, 0, 0)).to_equal(0xFFEF4444u32)
+        expect(_pixel_at(cpu, 32, 2, 2)).to_equal(0xFF22C55Eu32)
+        expect(_pixel_at(cpu, 32, 2, 3)).to_equal(0xFF1D4ED8u32)
+        expect(cpu).to_contain(0xFF111827u32)
+        expect(copy.clip_rect.present).to_be(true)
+        expect(_pixel_at(cpu, 32, 16, 6)).to_equal(0xFFFFFFFFu32)
+
     it "parses integer-px border radius shorthand with CSS corner expansion":
         val two = parse_border_radius_shorthand("12px 18px")
         val three = parse_border_radius_shorthand("8px 12px 20px")

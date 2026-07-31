@@ -24,7 +24,7 @@ The scale wrapper is the focused evidence gate for CPU-SIMD rendering at 4K and 
 | Design | doc/04_architecture/compiler/graphics/accelerated_shared_ui_backend_architecture.md |
 | Research | doc/01_research/ui/render_path/gui_web_2d_path_assessment_2026-06-12.md |
 | Source | `test/03_system/check/cpu_simd_render_scale_contract_spec.spl` |
-| Updated | 2026-07-17 |
+| Updated | 2026-07-31 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -216,12 +216,12 @@ expect(script).to_contain("gui_perf_cpu_base_compare_native_simd_executed=")
 
 </details>
 
-#### software exporter routes the configured backend through the canonical renderer
+#### software exporter routes the configured backend through the shared Draw IR executor
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 83 lines folded for reproduction.
+Runnable source: 99 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -240,9 +240,25 @@ expect(exporter).to_contain("_render_software_pixels(html, width, height, backen
 val renderer = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_layout_engine2d_cpu.spl")
 expect(renderer).to_contain("pub fn simple_web_render_html_to_pixels_with_cpu_draw_ir_backend(html: text, width: i32, height: i32, backend_name: text) -> [u32]:")
 expect(renderer).to_contain("simple_web_layout_render_html_draw_ir_cpu_bitmap(html, width, height)")
-expect(renderer).to_contain("CpuBackend.create_simd()")
-expect(renderer).to_contain("CpuBackend.create()")
-expect(renderer.contains("use std.gc_async_mut.gpu.engine2d.engine")).to_equal(false)
+expect(renderer).to_contain("use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}")
+expect(renderer).to_contain("use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition}")
+expect(renderer).to_contain("Engine2D.create_with_backend(width, height, backend_name)")
+expect(renderer).to_contain("engine2d_draw_ir_adv_composition(engine, composition, false)")
+expect(renderer).to_contain("val pixels = result.pixels")
+expect(renderer).to_contain("engine.shutdown()")
+expect(renderer).to_contain("if backend_name == \"cpu_simd\": \"cpu_simd\" else: \"cpu\"")
+expect(renderer.contains("CpuBackend")).to_equal(false)
+expect(renderer.contains("_cpu_draw_ir_")).to_equal(false)
+expect(renderer.contains("draw_gradient_rect")).to_equal(false)
+expect(renderer.contains("draw_rounded_rect_outline")).to_equal(false)
+expect(renderer.contains("set_clip(")).to_equal(false)
+val web_renderer_spec = file_read("test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_renderer_spec.spl")
+expect(web_renderer_spec).to_contain("it \"lowers text-transform through Draw IR to exact uppercase pixels\":")
+expect(web_renderer_spec).to_contain("it \"maps logical border block and inline properties to physical edges\":")
+expect(web_renderer_spec).to_contain("it \"software-composites Aetheric gradient stops over its translucent base\":")
+expect(web_renderer_spec).to_contain("it \"clips canonical Draw IR boxes and text to an overflow hidden ancestor\":")
+val web_input_spec = file_read("test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_input_overlay_spec.spl")
+expect(web_input_spec).to_contain("it \"clips CPU Draw IR overlay pixels and restores following commands\":")
 val semantic_renderer = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl")
 expect(semantic_renderer).to_contain("compute_styles(nodes, rules, child_index, false, vector_fonts)")
 expect(semantic_renderer).to_contain("if vector_fonts and nd.tag == \"#text\"")
