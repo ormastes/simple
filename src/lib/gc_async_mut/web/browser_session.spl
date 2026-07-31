@@ -45,7 +45,7 @@ use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_get_attr, be_dom_get_text_content, be_dom_serialize_children,
-    be_dom_set_children
+    be_dom_set_children, be_dom_path_for_route
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{html_tree_builder_build}
 use std.gc_async_mut.gpu.browser_engine.style_block.{CssDecl}
@@ -743,6 +743,7 @@ impl BrowserLoadState:
 
 class BrowserDomCallableListener:
     target_object_id: i64
+    target_route: DomNodeRoute?
     event_type: text
     callback: JsValue
     capture: bool
@@ -767,7 +768,9 @@ class BrowserRuntimeState:
     chrome_id: i64
     session_storage_id: i64
     local_storage_id: i64
-    dom_node_ids: [i64]
+    dom_generation: DomDocumentGeneration?
+    document_route: DomNodeRoute?
+    dom_routes: [DomNodeRoute]
     dom_element_ids: [i64]
     dom_element_list_id: i64
     dom_style_ids: [i64]
@@ -775,8 +778,6 @@ class BrowserRuntimeState:
     dom_class_snapshots: [text]
     dom_value_snapshots: [text]
     dom_style_snapshots: [text]
-    dom_bridge_generation: i64
-    dom_mutation_generation: i64
     dom_callable_listeners: [BrowserDomCallableListener]
     event_prevent_default_fn_id: i64
     event_stop_propagation_fn_id: i64
@@ -1095,7 +1096,9 @@ class BrowserRuntimeState:
             chrome_id: chrome_id,
             session_storage_id: session_storage_id,
             local_storage_id: local_storage_id,
-            dom_node_ids: [],
+            dom_generation: nil,
+            document_route: nil,
+            dom_routes: [],
             dom_element_ids: [],
             dom_element_list_id: -1,
             dom_style_ids: [],
@@ -1103,8 +1106,6 @@ class BrowserRuntimeState:
             dom_class_snapshots: [],
             dom_value_snapshots: [],
             dom_style_snapshots: [],
-            dom_bridge_generation: 0,
-            dom_mutation_generation: 0,
             dom_callable_listeners: [],
             event_prevent_default_fn_id: event_prevent_default_fn_id,
             event_stop_propagation_fn_id: event_stop_propagation_fn_id,
@@ -1347,9 +1348,38 @@ fn _browser_dom_style_snapshot(runtime: JsRuntime, object_id: i64) -> text:
 class BrowserDomSyncResult:
     root: BeDomNode
     changed: bool
+    identity_changed: bool
     image_source_changed: bool
 
 impl BrowserRuntimeState:
+
+    fn route_for_object_id(object_id: i64) -> DomNodeRoute?:
+        if object_id == self.document_id:
+            return self.document_route
+        var index = 0
+        while index < self.dom_element_ids.len():
+            if self.dom_element_ids[index] == object_id:
+                return Some(self.dom_routes[index])
+            index = index + 1
+        nil
+
+    fn object_id_for_route(route: DomNodeRoute) -> i64:
+        if val Some(document_route) = self.document_route:
+            if (
+                document_route.generation.value == route.generation.value and
+                document_route.node_id == route.node_id
+            ):
+                return self.document_id
+        var index = 0
+        while index < self.dom_routes.len():
+            val candidate = self.dom_routes[index]
+            if (
+                candidate.generation.value == route.generation.value and
+                candidate.node_id == route.node_id
+            ):
+                return self.dom_element_ids[index]
+            index = index + 1
+        -1
 
     me _bind_event_target(runtime: JsRuntime, object_id: i64) -> JsRuntime:
         var next = runtime
@@ -1373,6 +1403,7 @@ impl BrowserRuntimeState:
         while op_index < count:
             val operation = interpreter.pending_host_event_ops[op_index]
             val target_id = interpreter.pending_host_event_target_ids[op_index]
+            val target_route = self.route_for_object_id(target_id)
             val event_type = interpreter.pending_host_event_types[op_index]
             val callback = interpreter.pending_host_event_callbacks[op_index]
             val capture = interpreter.pending_host_event_captures[op_index]
@@ -1382,9 +1413,19 @@ impl BrowserRuntimeState:
             var listener_index = 0
             while listener_index < self.dom_callable_listeners.len():
                 val listener = self.dom_callable_listeners[listener_index]
+                var same_target = false
+                if val Some(route) = target_route:
+                    if val Some(listener_route) = listener.target_route:
+                        same_target = (
+                            listener_route.generation.value ==
+                                route.generation.value and
+                            listener_route.node_id == route.node_id
+                        )
+                elif listener.target_route == nil:
+                    same_target = listener.target_object_id == target_id
                 if (
                     listener.event_type == event_type and
-                    listener.target_object_id == target_id and
+                    same_target and
                     _browser_dom_same_callable(
                         listener.callback, callback
                     ) and
@@ -1400,6 +1441,7 @@ impl BrowserRuntimeState:
             elif operation == "add" and matching < 0:
                 val added = BrowserDomCallableListener(
                     target_object_id: target_id,
+                    target_route: target_route,
                     event_type: event_type,
                     callback: callback,
                     capture: capture,
@@ -1423,12 +1465,15 @@ impl BrowserRuntimeState:
         self.runtime = runtime
         changed
 
-    me _bind_dom_node(node: BeDomNode, element_list_id: i64):
-        if self.dom_node_ids.len() >= BROWSER_DOM_BRIDGE_MAX_ELEMENTS:
+    me _bind_dom_node(
+        node: BeDomNode, element_list_id: i64,
+        generation: DomDocumentGeneration
+    ):
+        if self.dom_routes.len() >= BROWSER_DOM_BRIDGE_MAX_ELEMENTS:
             return
         if node.tag_name == "#document":
             for child in node.children:
-                self._bind_dom_node(child, element_list_id)
+                self._bind_dom_node(child, element_list_id, generation)
             return
         if node.tag_name == "#text":
             return
@@ -1460,7 +1505,6 @@ impl BrowserRuntimeState:
                         style_id, _browser_dom_css_js_name(property_name),
                         JsValue.String(v: property_value)
                     )
-        runtime.set_host_property(element_id, "__simple_node_id", JsValue.Number(v: node.node_id.to_f64()))
         runtime.set_host_property(element_id, "style", JsValue.Object(id: style_id))
         runtime.set_host_property(element_id, "tagName", JsValue.String(v: node.tag_name.upper()))
         runtime.set_host_property(element_id, "id", JsValue.String(v: author_id))
@@ -1474,7 +1518,9 @@ impl BrowserRuntimeState:
         )
         self.runtime = runtime
 
-        self.dom_node_ids.push(node.node_id)
+        self.dom_routes.push(DomNodeRoute(
+            generation: generation, node_id: node.node_id
+        ))
         self.dom_element_ids.push(element_id)
         self.dom_style_ids.push(style_id)
         self.dom_id_snapshots.push(author_id)
@@ -1485,28 +1531,37 @@ impl BrowserRuntimeState:
         )
 
         for child in node.children:
-            self._bind_dom_node(child, element_list_id)
+            self._bind_dom_node(child, element_list_id, generation)
 
-    me publish_dom(
+    me install_document_state(
         root: BeDomNode, generation: DomDocumentGeneration,
         index: DomIdentityIndex
     ) -> bool:
-        """Publish a generation-checked bridge snapshot as one owner action."""
+        """Stage one generation-checked route/object bridge snapshot."""
         if index.generation.value != generation.value:
             return false
-        self.dom_node_ids = []
+        var replaces_document = true
+        if val Some(current) = self.dom_generation:
+            replaces_document = current.value != generation.value
+        self.dom_generation = Some(generation)
+        self.document_route = Some(DomNodeRoute(
+            generation: generation, node_id: root.node_id
+        ))
+        self.dom_routes = []
         self.dom_element_ids = []
         self.dom_style_ids = []
         self.dom_id_snapshots = []
         self.dom_class_snapshots = []
         self.dom_value_snapshots = []
         self.dom_style_snapshots = []
+        if replaces_document:
+            self.dom_callable_listeners = []
 
         var runtime = self.runtime
         val element_list_id = runtime.create_host_object()
         self.dom_element_list_id = element_list_id
         self.runtime = runtime
-        self._bind_dom_node(root, element_list_id)
+        self._bind_dom_node(root, element_list_id, generation)
         runtime = self.runtime
         runtime.set_host_property(
             element_list_id, "length",
@@ -1527,49 +1582,9 @@ impl BrowserRuntimeState:
         interpreter.host_dom_class_snapshots = self.dom_class_snapshots
         interpreter.host_dom_value_snapshots = self.dom_value_snapshots
         interpreter.host_dom_style_snapshots = self.dom_style_snapshots
+        interpreter.host_dom_mutation_generation = 0
         runtime.interpreter = interpreter
         self.runtime = runtime
-        self.dom_bridge_generation = (
-            runtime.interpreter.host_dom_bridge_generation
-        )
-        self.dom_mutation_generation = (
-            runtime.interpreter.host_dom_mutation_generation
-        )
-        true
-
-    me adopt_dom_bridge(root: BeDomNode) -> bool:
-        val interpreter = self.runtime.interpreter
-        if interpreter.host_dom_bridge_generation == self.dom_bridge_generation:
-            return false
-        var stack: [BeDomNode] = [root]
-        var node_ids: [i64] = []
-        while stack.len() > 0:
-            val node = stack.pop()
-            if node.tag_name != "#document" and node.tag_name != "#text":
-                node_ids.push(node.node_id)
-            var child_index = node.children.len() - 1
-            while child_index >= 0:
-                stack.push(node.children[child_index])
-                child_index = child_index - 1
-        val element_count = interpreter.host_dom_element_ids.len()
-        if (
-            node_ids.len() != element_count or
-            interpreter.host_dom_style_ids.len() != element_count or
-            interpreter.host_dom_id_snapshots.len() != element_count or
-            interpreter.host_dom_class_snapshots.len() != element_count or
-            interpreter.host_dom_value_snapshots.len() != element_count or
-            interpreter.host_dom_style_snapshots.len() != element_count
-        ):
-            return false
-        self.dom_node_ids = node_ids
-        self.dom_element_ids = interpreter.host_dom_element_ids
-        self.dom_element_list_id = interpreter.host_dom_element_list_id
-        self.dom_style_ids = interpreter.host_dom_style_ids
-        self.dom_id_snapshots = interpreter.host_dom_id_snapshots
-        self.dom_class_snapshots = interpreter.host_dom_class_snapshots
-        self.dom_value_snapshots = interpreter.host_dom_value_snapshots
-        self.dom_style_snapshots = interpreter.host_dom_style_snapshots
-        self.dom_bridge_generation = interpreter.host_dom_bridge_generation
         true
 
     me _apply_dom_element(node: BeDomNode, index: i32) -> BeDomNode:
@@ -1618,22 +1633,14 @@ impl BrowserRuntimeState:
         self.dom_style_snapshots[index] = next_style
         next
 
-    me _apply_dom_changes(
-        node: BeDomNode, changes: Dict<i64, i32>
-    ) -> BeDomNode:
-        var next = node
-        val index = changes.get(node.node_id) ?? -1
-        if index >= 0:
-            next = self._apply_dom_element(next, index)
-        var children: [BeDomNode] = []
-        for child in next.children:
-            children.push(self._apply_dom_changes(child, changes))
-        be_dom_set_children(next, children)
-
-    me sync_dom(root: BeDomNode) -> BrowserDomSyncResult:
-        var changes: Dict<i64, i32> = {}
+    me sync_dom(
+        root: BeDomNode, identity_index: DomIdentityIndex
+    ) -> BrowserDomSyncResult:
+        var next_root = root
         var mutation_bytes: i64 = 0
         var image_source_changed = false
+        var identity_changed = false
+        var changed = false
         val document_bytes = be_dom_serialize_children(root).len()
         var index = 0
         while index < self.dom_element_ids.len():
@@ -1665,6 +1672,7 @@ impl BrowserRuntimeState:
                 next_style != self.dom_style_snapshots[index]
             )
             if element_changed:
+                val id_changed = next_id != self.dom_id_snapshots[index]
                 val element_bytes = (
                     next_id.len() + next_class.len() +
                     next_value.len() + next_style.len()
@@ -1672,7 +1680,30 @@ impl BrowserRuntimeState:
                 if browser_resource_size_allowed(
                     document_bytes + mutation_bytes + element_bytes
                 ):
-                    changes[self.dom_node_ids[index]] = index
+                    val route = self.dom_routes[index]
+                    val path = be_dom_path_for_route(
+                        next_root, identity_index, route
+                    )
+                    if path.len() > 0:
+                        val replacement = self._apply_dom_element(
+                            path[path.len() - 1], index
+                        )
+                        var next = replacement
+                        var ancestor = path.len() - 2
+                        while ancestor >= 0:
+                            val parent = path[ancestor]
+                            var children: [BeDomNode] = []
+                            for child in parent.children:
+                                if child.node_id == next.node_id:
+                                    children.push(next)
+                                else:
+                                    children.push(child)
+                            next = be_dom_set_children(parent, children)
+                            ancestor = ancestor - 1
+                        next_root = next
+                        changed = true
+                        if id_changed:
+                            identity_changed = true
                     mutation_bytes = mutation_bytes + element_bytes
                     if (
                         next_style != self.dom_style_snapshots[index] and
@@ -1680,14 +1711,10 @@ impl BrowserRuntimeState:
                     ):
                         image_source_changed = true
             index = index + 1
-        val changed = changes.keys().len() > 0
-        val next_root = if changed:
-            self._apply_dom_changes(root, changes)
-        else:
-            root
         BrowserDomSyncResult(
             root: next_root,
             changed: changed,
+            identity_changed: identity_changed,
             image_source_changed: image_source_changed
         )
 
@@ -2010,30 +2037,38 @@ impl BrowserSession:
         nil
 
     me publish_dom_snapshot(
-        next_dom: BeDomNode, replace_document: bool
+        next_dom: BeDomNode, replace_document: bool,
+        candidate_runtime_state: BrowserRuntimeState?
     ) -> Result<bool, text>:
-        """Build before publishing so a failed index never exposes partial DOM state."""
+        """Stage every DOM owner, then commit the complete candidate once."""
         val next_generation = if replace_document:
             self.dom_generation.next()?
         else:
             self.dom_generation
         val next_index = dom_identity_index_build(next_dom, next_generation)?
-        if replace_document:
-            if not self.simple_script_executor.reset_document(
+        var next_script = self.simple_script_executor
+        if not next_script.install_document_state(
+            next_dom, next_index, next_generation
+        ):
+            return Err("invalid_document")
+        var next_runtime_state = candidate_runtime_state
+        if val Some(state) = candidate_runtime_state:
+            var next_state = state
+            if not next_state.install_document_state(
                 next_dom, next_generation, next_index
             ):
                 return Err("invalid_document")
-        elif not self.simple_script_executor.publish_dom(
-            next_dom, next_generation, next_index
-        ):
-            return Err("invalid_document")
-        if val Some(state) = self.runtime_state:
-            if not state.publish_dom(next_dom, next_generation, next_index):
-                return Err("invalid_document")
-            self.runtime_state = Some(state)
+            next_runtime_state = Some(next_state)
         self.current_dom = next_dom
         self.dom_generation = next_generation
         self.dom_identity_index = Some(next_index)
+        self.simple_script_executor = next_script
+        self.runtime_state = next_runtime_state
+        if replace_document:
+            self.pending_space_activation_route = nil
+            self.text_selection_route = nil
+            self.text_selection_anchor_byte = 0
+            self.text_selection_focus_byte = 0
         Ok(true)
 
     fn _cookie_now_seconds() -> i64:
@@ -2688,7 +2723,6 @@ impl BrowserSession:
                     JsValue.Number(v: 0.0)
                 )
                 self._sync_from_runtime(final_state)
-                self.runtime_state = Some(final_state)
                 self._refresh_current_history()
                 if history_traversal_delta != 0:
                     self.pending_history_traversal_delta = (

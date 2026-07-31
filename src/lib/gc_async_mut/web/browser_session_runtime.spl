@@ -47,6 +47,11 @@ use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
 use std.gc_async_mut.gpu.browser_engine.script.script_host.{
     script_host_apply_action_to_route
 }
+use std.gc_async_mut.gpu.browser_engine.script.simple_script.{
+    SimpleScriptExecutor
+}
+use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.form_api.{
     form_capture_defaults, form_reset
 }
@@ -410,6 +415,18 @@ fn _browser_session_dom_action(action: text) -> bool:
         action.starts_with("remove-attr:") or action.starts_with("add-class:") or
         action.starts_with("remove-class:") or action.starts_with("toggle-class:")
 
+fn _browser_session_dom_action_replaces_document(action: text) -> bool:
+    if action.starts_with("set-text:"):
+        return false
+    for attribute in ["id", "form", "for", "name", "type"]:
+        if (
+            action.starts_with("set-attr:" + attribute + ":") or
+            action.starts_with("set-attr:" + attribute + "=") or
+            action == "remove-attr:" + attribute
+        ):
+            return true
+    false
+
 fn _browser_session_event_control(action: text) -> bool:
     action == "prevent-default" or action == "stop-propagation" or
         action == "stop-immediate-propagation"
@@ -430,26 +447,37 @@ fn _browser_session_object_id_for_node(
 ) -> i64:
     if node.tag_name == "window":
         return state.window_id
-    if node.tag_name == "#document":
-        return state.document_id
-    var index = 0
-    while index < state.dom_node_ids.len():
-        if state.dom_node_ids[index] == node.node_id:
-            return state.dom_element_ids[index]
-        index = index + 1
+    if val Some(generation) = state.dom_generation:
+        return state.object_id_for_route(DomNodeRoute(
+            generation: generation, node_id: node.node_id
+        ))
     -1
+
+fn _browser_session_listener_targets_node(
+    listener: BrowserDomCallableListener, state: BrowserRuntimeState,
+    node: BeDomNode
+) -> bool:
+    if node.tag_name == "window":
+        return listener.target_route == nil and
+            listener.target_object_id == state.window_id
+    val generation = match state.dom_generation:
+        Some(value): value
+        nil: return false
+    if val Some(route) = listener.target_route:
+        return route.generation.value == generation.value and
+            route.node_id == node.node_id
+    false
 
 fn _browser_session_add_callable_tokens(
     node: BeDomNode, state: BrowserRuntimeState, event_type: text
 ) -> BeDomNode:
     var next = node
-    val object_id = _browser_session_object_id_for_node(state, node)
     var index = 0
     while index < state.dom_callable_listeners.len():
         val listener = state.dom_callable_listeners[index]
         if (
             listener.event_type == event_type and
-            listener.target_object_id == object_id
+            _browser_session_listener_targets_node(listener, state, node)
         ):
             next.add_event_listener_with_capture(
                 event_type, BROWSER_DOM_CALLABLE_TOKEN + "{index}",
@@ -493,7 +521,8 @@ class BrowserDomEventExecutor:
     runtime: JsRuntime
     listeners: [BrowserDomCallableListener]
     dispatch_active: [bool]
-    node_ids: [i64]
+    document_route: DomNodeRoute?
+    routes: [DomNodeRoute]
     element_ids: [i64]
     window_id: i64
     document_id: i64
@@ -504,6 +533,16 @@ class BrowserDomEventExecutor:
     event_stop_immediate_propagation_fn_id: i64
     error: text
 
+    fn route_for_object_id(object_id: i64) -> DomNodeRoute?:
+        if object_id == self.document_id:
+            return self.document_route
+        var index = 0
+        while index < self.element_ids.len():
+            if self.element_ids[index] == object_id:
+                return Some(self.routes[index])
+            index = index + 1
+        nil
+
     me drain_listener_ops():
         var interpreter = self.runtime.interpreter
         val count = interpreter.pending_host_event_ops.len()
@@ -512,6 +551,7 @@ class BrowserDomEventExecutor:
             val operation = interpreter.pending_host_event_ops[op_index]
             val target_id =
                 interpreter.pending_host_event_target_ids[op_index]
+            val target_route = self.route_for_object_id(target_id)
             val event_type =
                 interpreter.pending_host_event_types[op_index]
             val callback =
@@ -525,9 +565,19 @@ class BrowserDomEventExecutor:
             var listener_index = 0
             while listener_index < self.listeners.len():
                 val listener = self.listeners[listener_index]
+                var same_target = false
+                if val Some(route) = target_route:
+                    if val Some(listener_route) = listener.target_route:
+                        same_target = (
+                            listener_route.generation.value ==
+                                route.generation.value and
+                            listener_route.node_id == route.node_id
+                        )
+                elif listener.target_route == nil:
+                    same_target = listener.target_object_id == target_id
                 if (
                     listener.event_type == event_type and
-                    listener.target_object_id == target_id and
+                    same_target and
                     _browser_session_same_callable(
                         listener.callback, callback
                     ) and
@@ -544,6 +594,7 @@ class BrowserDomEventExecutor:
             elif operation == "add" and matching < 0:
                 val added = BrowserDomCallableListener(
                     target_object_id: target_id,
+                    target_route: target_route,
                     event_type: event_type,
                     callback: callback,
                     capture: capture,
@@ -580,11 +631,22 @@ class BrowserDomEventExecutor:
     me object_id_for_node(node: BeDomNode) -> i64:
         if node.tag_name == "window":
             return self.window_id
-        if node.tag_name == "#document":
-            return self.document_id
+        val generation = match self.document_route:
+            Some(route): route.generation
+            nil: return -1
+        val route = DomNodeRoute(
+            generation: generation, node_id: node.node_id
+        )
+        if val Some(document) = self.document_route:
+            if document.node_id == route.node_id:
+                return self.document_id
         var index = 0
-        while index < self.node_ids.len():
-            if self.node_ids[index] == node.node_id:
+        while index < self.routes.len():
+            val candidate = self.routes[index]
+            if (
+                candidate.generation.value == route.generation.value and
+                candidate.node_id == route.node_id
+            ):
                 return self.element_ids[index]
             index = index + 1
         -1
@@ -973,20 +1035,17 @@ impl BrowserSession:
         else:
             self.resource_revision + 1
 
-    me _replace_current_body_children(body_html: text):
+    fn _dom_with_replaced_body_children(body_html: text) -> BeDomNode:
         val replacement = form_capture_defaults(html_tree_builder_build(
             "<html><body>" + body_html + "</body></html>"
         ))
         val replacement_bodies = be_dom_find_by_tag(replacement, "body")
         val current_bodies = be_dom_find_by_tag(self.current_dom, "body")
         if replacement_bodies.len() == 0 or current_bodies.len() == 0:
-            self.current_dom = replacement
-            self._advance_ui_access_revision()
-            return
-        self.current_dom = _browser_session_replace_body_children(
+            return replacement
+        _browser_session_replace_body_children(
             self.current_dom, replacement_bodies[0].children
         )
-        self._advance_ui_access_revision()
 
     me _submit_dom_form_route(
         form_route: DomNodeRoute, submitter_route: DomNodeRoute?
@@ -1278,33 +1337,45 @@ impl BrowserSession:
             return be_dom_focused_route(self.current_dom, index)
         nil
 
-    me _sync_body_html_from_dom():
-        val bodies = be_dom_find_by_tag(self.current_dom, "body")
+    fn _body_html_for_dom(root: BeDomNode) -> text:
+        var body_html = self.current_body_html
+        val bodies = be_dom_find_by_tag(root, "body")
         if bodies.len() > 0:
-            self.current_body_html = be_dom_serialize_children(bodies[0])
+            body_html = be_dom_serialize_children(bodies[0])
+        body_html
 
-    me _sync_runtime_body_from_dom():
-        self._sync_body_html_from_dom()
-        self._mark_css_animation_reconcile(false)
+    me _sync_runtime_body_from_dom(replace_document: bool = false):
+        val next_body_html = self._body_html_for_dom(self.current_dom)
+        var next_runtime_state = self.runtime_state
         if val Some(state) = self.runtime_state:
             var runtime = state.runtime
-            val body_text = html_to_text(self.current_body_html)
+            val body_text = html_to_text(next_body_html)
             runtime.set_host_property(
                 state.body_id, "innerHTML",
-                JsValue.String(v: self.current_body_html)
+                JsValue.String(v: next_body_html)
             )
             runtime.set_host_property(
                 state.body_id, "textContent",
                 JsValue.String(v: body_text)
             )
             var interpreter = runtime.interpreter
-            interpreter.host_body_inner_html_value = JsValue.String(v: self.current_body_html)
-            interpreter.host_body_text_content_value = JsValue.String(v: body_text)
+            interpreter.host_body_inner_html_value = JsValue.String(
+                v: next_body_html
+            )
+            interpreter.host_body_text_content_value = JsValue.String(
+                v: body_text
+            )
             interpreter.host_body_inner_html_dirty = false
             interpreter.host_body_text_content_dirty = false
             runtime.interpreter = interpreter
             state.runtime = runtime
-            self.runtime_state = Some(state)
+            next_runtime_state = Some(state)
+        val published = self.publish_dom_snapshot(
+            self.current_dom, replace_document, next_runtime_state
+        )
+        if published.? == true:
+            self.current_body_html = next_body_html
+            self._mark_css_animation_reconcile(false)
 
     me _append_dynamic_image_warning(
         load: BrowserLoadState?, warning: text
@@ -1535,7 +1606,8 @@ impl BrowserSession:
                 runtime: state.runtime,
                 listeners: state.dom_callable_listeners,
                 dispatch_active: dispatch_active,
-                node_ids: state.dom_node_ids,
+                document_route: state.document_route,
+                routes: state.dom_routes,
                 element_ids: state.dom_element_ids,
                 window_id: state.window_id,
                 document_id: state.document_id,
@@ -1600,6 +1672,9 @@ impl BrowserSession:
                     self.current_dom, index, current_route, action,
                     false, false
                 )
+                if _browser_session_dom_action_replaces_document(action):
+                    self._sync_runtime_body_from_dom(true)
+                    return Ok(dispatch)
             elif (
                 _browser_session_event_control(action) == false and
                 not action.starts_with(BROWSER_DOM_CALLABLE_TOKEN) and
@@ -1689,7 +1764,7 @@ impl BrowserSession:
                     live_checkable_action, true, allow_focus_default
                 )
             if live_checkable_action != "":
-                self._sync_body_html_from_dom()
+                self._sync_runtime_body_from_dom()
                 val _ = self.dispatch_dom_event_route(
                     route, "input", true, false
                 )?
@@ -1724,7 +1799,7 @@ impl BrowserSession:
                     self.current_dom, index, route
                 ):
                     val _ = self._reset_dom_form_route(form_route)?
-        self._sync_body_html_from_dom()
+        self._sync_runtime_body_from_dom()
         Ok(dispatch)
 
     me dispatch_dom_keyboard_code_event(
@@ -1940,7 +2015,7 @@ impl BrowserSession:
         if path.len() == 0:
             return Err("stale_target")
         self.current_dom = _browser_session_replace_dom_path(path, update.node)
-        self._sync_body_html_from_dom()
+        self._sync_runtime_body_from_dom()
         val _ = self.dispatch_dom_event_route(route, "input", true, false)?
         if self._live_dom_index_for_route(route).is_err():
             return Ok(true)
@@ -2081,6 +2156,7 @@ impl BrowserSession:
         self.text_selection_anchor_byte = caret
         self.text_selection_focus_byte = caret
         self._set_dom_text_runtime_state(route, next_value, caret, caret)
+        self._sync_runtime_body_from_dom()
         val accepted_data: text? = if input_type.starts_with("delete"):
             nil
         else:
@@ -2113,6 +2189,7 @@ impl BrowserSession:
             self.current_dom, index, route,
             "remove-attr:data-focused", false, false
         )
+        self._sync_runtime_body_from_dom()
         val blur_dispatch = self.dispatch_dom_event_route(
             route, "blur", false, false
         )?
@@ -2250,7 +2327,17 @@ impl BrowserSession:
         self.current_style_html = ""
         self.source_html = ""
         self.current_dom = BeDomNode.document()
-        self.simple_script_executor.reset(self.current_dom)
+        self.dom_generation = match self.dom_generation.next():
+            Ok(next): next
+            Err(_): self.dom_generation
+        self.dom_identity_index = nil
+        self.simple_script_executor = SimpleScriptExecutor.new(
+            EventLoop.new(), ConsoleBuffer.new()
+        )
+        self.pending_space_activation_route = nil
+        self.text_selection_route = nil
+        self.text_selection_anchor_byte = 0
+        self.text_selection_focus_byte = 0
         self.history = []
         self.current_index = -1
         self.warnings = []
@@ -2355,7 +2442,6 @@ impl BrowserSession:
             )
             if next_fetch_seq > self.next_request_seq:
                 self.next_request_seq = next_fetch_seq
-        self.runtime_state = nil
         self.active_load = nil
         self.pending_requests = []
         self.pending_request_head = 0
@@ -2368,10 +2454,6 @@ impl BrowserSession:
         self.wasm_modules = []
         self.image_resources = []
         self.admitted_image_sources = []
-        self.pending_space_activation_route = nil
-        self.text_selection_route = nil
-        self.text_selection_anchor_byte = 0
-        self.text_selection_focus_byte = 0
         val style_sources = resource_plan.style_sources
         if url.starts_with("https://guest.runtime/"):
             print "[BRS] style sources={style_sources.len()}"
@@ -2382,6 +2464,7 @@ impl BrowserSession:
         self.pending_content_security_policy = ""
         self._activate_storage_for_url(url)
         var native_globals_diagnostic = ""
+        var next_runtime_state: BrowserRuntimeState? = nil
         if self.runtime_enabled and admitted_script_blocks.len() > 0:
             val cookie_text = self._script_cookie_for_url(url)
             var state = BrowserRuntimeState.create(
@@ -2409,11 +2492,9 @@ impl BrowserSession:
                 Err(error):
                     native_globals_diagnostic = "browser native globals check failed: {error.message}"
             state.runtime = runtime
-            self.runtime_state = Some(state)
+            next_runtime_state = Some(state)
             if url.starts_with("https://guest.runtime/"):
                 print "[BRS] runtime state created"
-        else:
-            self.runtime_state = nil
         self.current_url = own_text(url)
         self.document_url = own_text(url)
         self.animation_start_time_ms = self.monotonic_time_ms
@@ -2426,10 +2507,13 @@ impl BrowserSession:
         self.current_body_html = body_html
         self.current_style_html = ""
         self.source_html = own_text(history_source_html)
-        self.current_dom = form_capture_defaults(visible_parse.doc)
-        val published = self.publish_dom_snapshot(self.current_dom, true)
+        val next_dom = form_capture_defaults(visible_parse.doc)
+        val published = self.publish_dom_snapshot(
+            next_dom, true, next_runtime_state
+        )
         if published.? == false:
             self._append_warning("DOM identity publication failed")
+            return Err("DOM identity publication failed")
         self._advance_ui_access_revision()
         self._advance_style_revision()
         self._advance_resource_revision()
@@ -2516,7 +2600,9 @@ impl BrowserSession:
         state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
         state.runtime.interpreter.timer_time_origin_ms = self.animation_start_time_ms
         self.runtime_state = Some(state)
-        val published = self.publish_dom_snapshot(self.current_dom, false)
+        val published = self.publish_dom_snapshot(
+            self.current_dom, false, self.runtime_state
+        )
         if published.? == false:
             self.runtime_state = nil
             return nil
@@ -2758,65 +2844,53 @@ impl BrowserSession:
                     pass_dn
 
         val body_changed = next_body_html != self.current_body_html
-        self.current_body_html = next_body_html
-        if body_changed:
-            self._replace_current_body_children(next_body_html)
-        val bridge_changed = (
-            state.runtime.interpreter.host_dom_bridge_generation !=
-            state.dom_bridge_generation
-        )
+        val bridge_changed = inner_html_dirty or text_content_dirty
         val dom_mutation_changed = (
-            state.runtime.interpreter.host_dom_mutation_generation !=
-            state.dom_mutation_generation
+            state.runtime.interpreter.host_dom_mutation_generation > 0
         )
-        if body_changed or bridge_changed:
-            if not state.adopt_dom_bridge(self.current_dom):
-                if val Some(index) = self.current_dom_identity_index():
-                    val _ = state.publish_dom(
-                        self.current_dom, self.document_generation(), index
-                    )
-        if body_changed or bridge_changed or dom_mutation_changed:
-            val dom_sync = state.sync_dom(self.current_dom)
-            if dom_sync.changed:
-                self.current_dom = dom_sync.root
-                self._advance_ui_access_revision()
-                self._sync_body_html_from_dom()
-                val synced_body_text = html_to_text(self.current_body_html)
-                state.runtime.set_host_property(
-                    state.body_id, "innerHTML",
-                    JsValue.String(v: self.current_body_html)
+        val structural_changed = body_changed or bridge_changed
+        var candidate_dom = if body_changed:
+            self._dom_with_replaced_body_children(next_body_html)
+        else:
+            self.current_dom
+        var dom_sync = BrowserDomSyncResult(
+            root: candidate_dom,
+            changed: false,
+            identity_changed: false,
+            image_source_changed: false
+        )
+        if dom_mutation_changed and not structural_changed:
+            if val Some(index) = self.current_dom_identity_index():
+                dom_sync = state.sync_dom(candidate_dom, index)
+                candidate_dom = dom_sync.root
+        val document_changed = structural_changed or dom_sync.changed
+        var candidate_body_html = next_body_html
+        if dom_sync.changed:
+            val candidate_bodies = be_dom_find_by_tag(candidate_dom, "body")
+            if candidate_bodies.len() > 0:
+                candidate_body_html = be_dom_serialize_children(
+                    candidate_bodies[0]
                 )
-                state.runtime.set_host_property(
-                    state.body_id, "textContent",
-                    JsValue.String(v: synced_body_text)
-                )
-                var synced_interpreter = state.runtime.interpreter
-                synced_interpreter.host_body_inner_html_value = JsValue.String(
-                    v: self.current_body_html
-                )
-                synced_interpreter.host_body_text_content_value = JsValue.String(
-                    v: synced_body_text
-                )
-                synced_interpreter.host_body_inner_html_dirty = false
-                synced_interpreter.host_body_text_content_dirty = false
-                state.runtime.interpreter = synced_interpreter
-            state.dom_mutation_generation = (
-                state.runtime.interpreter.host_dom_mutation_generation
+        if document_changed:
+            val synced_body_text = html_to_text(candidate_body_html)
+            state.runtime.set_host_property(
+                state.body_id, "innerHTML",
+                JsValue.String(v: candidate_body_html)
             )
-            self._mark_css_animation_reconcile(
-                body_changed or bridge_changed
+            state.runtime.set_host_property(
+                state.body_id, "textContent",
+                JsValue.String(v: synced_body_text)
             )
-            if (
-                self.active_load == nil and not self.is_loading and
-                (
-                    (
-                        (body_changed or bridge_changed) and
-                        self.current_body_html.lower().contains("url(")
-                    ) or
-                    dom_sync.image_source_changed
-                )
-            ):
-                self._reconcile_dynamic_image_sources(nil)
+            var synced_interpreter = state.runtime.interpreter
+            synced_interpreter.host_body_inner_html_value = JsValue.String(
+                v: candidate_body_html
+            )
+            synced_interpreter.host_body_text_content_value = JsValue.String(
+                v: synced_body_text
+            )
+            synced_interpreter.host_body_inner_html_dirty = false
+            synced_interpreter.host_body_text_content_dirty = false
+            state.runtime.interpreter = synced_interpreter
         if self.csp_sandbox_policy.allow_same_origin:
             self.session_storage = storage_pairs_from_object(
                 state, state.session_storage_id
@@ -2880,6 +2954,31 @@ impl BrowserSession:
             "readyState",
             JsValue.String(v: "complete")
         )
+        if document_changed:
+            val replace_document = (
+                structural_changed or dom_sync.identity_changed
+            )
+            val published = self.publish_dom_snapshot(
+                candidate_dom, replace_document, Some(state)
+            )
+            if published.? == true:
+                self.current_body_html = candidate_body_html
+                self._advance_ui_access_revision()
+                self._mark_css_animation_reconcile(structural_changed)
+                if (
+                    self.active_load == nil and not self.is_loading and
+                    (
+                        (
+                            structural_changed and
+                            candidate_body_html.lower().contains("url(")
+                        ) or dom_sync.image_source_changed
+                    )
+                ):
+                    self._reconcile_dynamic_image_sources(nil)
+            else:
+                self._append_warning("DOM identity publication failed")
+        else:
+            self.runtime_state = Some(state)
 
     me _push_runtime_history_entry():
         var source_html = self.source_html
