@@ -1,0 +1,540 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""# CSS Grid auto-size item stretch
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/grid_auto_item_stretch.md
+**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
+**Research:** doc/01_research/domain/simple_web_browser_engine_production_hardening.md
+
+## Overview
+
+This bounded scenario proves that non-replaced Grid items with an automatic
+block size stretch across one explicit pixel row when effective self-alignment
+is `normal` or `stretch` and neither block-axis margin is automatic.
+
+It covers the canonical production path:
+
+1. authored HTML and CSS;
+2. parsed semantic nodes;
+3. resolved computed `Style` values;
+4. shared layout boxes;
+5. canonical `DrawIrComposition` commands;
+6. the existing Engine2D software executor;
+7. exact framebuffer pixels.
+
+No Grid-specific Draw IR command is introduced.
+
+No private painter or backend path is introduced.
+
+The Web semantic/layout owner remains responsible for used geometry.
+
+Engine2D consumes the resulting canonical composition unchanged.
+
+## Standards contract
+
+CSS Grid item alignment uses the item's `align-self` when it is not `auto`.
+
+Otherwise, the Grid container's `align-items` value is effective.
+
+For the bounded non-replaced items covered here, `normal` behaves as stretch.
+
+Stretch applies only when the authored block size remains automatic.
+
+An authored height therefore remains authoritative.
+
+An automatic top or bottom margin owns block-axis free space and suppresses
+stretching.
+
+Physical top and bottom margins are outside the stretched border box.
+
+For `box-sizing:content-box`, physical padding and borders are deducted before
+the used CSS height is materialized.
+
+## Syntax
+
+The primary container uses:
+
+```css
+display: grid;
+grid-template-columns: 4px 4px;
+grid-template-rows: 4px;
+gap: 0;
+align-items: stretch;
+```
+
+The children intentionally have backgrounds but no authored height.
+
+The negative controls use:
+
+```css
+align-self: start;
+margin-top: auto;
+height: 2px;
+height: 0px;
+grid-column: 1 / span 2;
+```
+
+The box-model control combines one-pixel top and bottom margins, padding, and
+borders inside an eight-pixel explicit row.
+
+The nested control uses `align-items:normal` on its outer Grid and retains an
+inner `2px 2px` template after temporary height resolution.
+
+## Examples
+
+The primary fixture is exactly 8 by 4 pixels.
+
+The Grid box is `[0, 0, 8, 4]`.
+
+The red item box is `[0, 0, 4, 4]`.
+
+The blue item box is `[4, 0, 4, 4]`.
+
+Each framebuffer row contains four red pixels and four blue pixels.
+
+All four framebuffer rows are asserted literally.
+
+The expected red command color is `0xFFDC2626`.
+
+The expected blue command color is `0xFF2563EB`.
+
+The expected clip is `[0, 0, 8, 4]`.
+
+The Engine2D skipped-command count is exactly zero.
+
+## Negative controls
+
+The `align-self:start` item remains `[0, 0, 4, 1]`.
+
+The automatic-margin item remains `[4, 0, 4, 1]`.
+
+The explicitly sized item remains `[8, 0, 4, 2]`.
+
+The content-box item becomes `[12, 1, 4, 6]` inside its eight-pixel row.
+
+The authored `height:0px` item remains `[16, 0, 4, 1]`; numeric zero is not
+used as a proxy for the `auto` keyword.
+
+The split-cascade item keeps authored `height:0px` and `align-items:stretch`
+metadata after an unrelated inline `visibility` declaration forces the full
+Style reconstruction path; it remains `[12, 8, 4, 1]`.
+
+Cross-phase final writing modes map authored logical zero sizes onto physical
+height consistently: vertical `inline-size:0px` and horizontal
+`block-size:0px` both retain `height_px == 0`, `height_auto == false`, and a
+one-pixel intrinsic box.
+
+The two-column span remains `[0, 8, 8, 1]` rather than being stretched by the
+single-track rule.
+
+The explicitly stretched `video` remains `[8, 8, 4, 1]` because replaced
+elements are outside this bounded stretch implementation.
+
+The two-row span remains `[16, 8, 4, 1]` rather than being stretched by the
+single-track rule.
+
+These controls prevent a blanket rule that assigns every Grid child the row
+height.
+
+## Nested Grid control
+
+The nested Grid is an automatic-height item of a four-pixel outer row.
+
+The outer container uses `align-items:normal`.
+
+The nested Grid stretches to `[0, 0, 4, 4]`.
+
+Its own `grid-template-columns` remains `2px 2px`.
+
+Its own `grid-template-rows` remains `4px`.
+
+Its left child becomes `[0, 0, 2, 4]`.
+
+Its right child becomes `[2, 0, 2, 4]`.
+
+This catches incomplete `Style` clones that discard Grid fields while
+materializing a used height.
+
+## Normal versus explicit stretch control
+
+A non-replaced item with `width:2px;aspect-ratio:1/1` and `align-self:normal`
+keeps its derived `[0, 0, 2, 2]` size.
+
+The equivalent item with `align-self:stretch` becomes `[4, 0, 2, 4]` because
+its authored block size is still automatic.
+
+A Grid container with omitted `align-items` keeps an aspect-ratio-derived item
+at `[0, 0, 2, 2]`; the legacy stored default `stretch` is not mistaken for an
+authored explicit stretch declaration.
+
+## Claim boundary
+
+Stretching row or column spans remains outside this single-track slice.
+
+Implicit-row stretch is not claimed.
+
+Flexible and intrinsic track sizing is not claimed.
+
+Replaced-element stretch is not claimed.
+
+The fail-closed replaced classification covers `audio`, `button`, `canvas`,
+`embed`, `iframe`, `img`, `input`, `meter`, `object`, `progress`, `select`,
+`textarea`, and `video`; the executable boundary control uses `video`.
+
+Auto-margin distribution and center/end positioning are not claimed.
+
+Complete CSS Grid or WPT parity is not claimed.
+
+## Requirements
+
+The executable scenario covers REQ-WEB-BROWSER-003,
+REQ-WEB-BROWSER-004, and REQ-WEB-BROWSER-021.
+
+It provides semantic, computed-style, layout, Draw IR, and exact-pixel
+evidence for the same authored fixture.
+
+## Evidence status
+
+The SSpec contains direct assertions only.
+
+It contains no placeholder pass, boolean wrapper, or silent evidence branch.
+
+Runtime PASS is reported only from an admitted focused execution.
+"""
+
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+fn _grid_stretch_rule(selector: text, declarations: text) -> text:
+    selector + "{" + declarations + "}"
+
+val GRID_AUTO_STRETCH_HTML = (
+    "<style>" + _grid_stretch_rule(
+        "html,body", "margin:0;width:8px;height:4px;background:#fff"
+    ) + _grid_stretch_rule(
+        "#grid", "display:grid;width:8px;grid-template-columns:4px 4px;" +
+        "grid-template-rows:4px;gap:0;align-items:stretch"
+    ) + _grid_stretch_rule("#red", "background:#dc2626") +
+    _grid_stretch_rule("#blue", "background:#2563eb") + "</style>" +
+    "<main id='grid'><div id='red'></div><div id='blue'></div></main>"
+)
+
+val GRID_STRETCH_CONTROLS_HTML = (
+    "<style>" + _grid_stretch_rule(
+        "html,body", "margin:0;width:20px;height:24px"
+    ) + _grid_stretch_rule(
+        "#controls", "display:grid;width:20px;" +
+        "grid-template-columns:4px 4px 4px 4px 4px;" +
+        "grid-template-rows:8px 8px 8px;" +
+        "align-items:stretch"
+    ) + _grid_stretch_rule(
+        "#start", "align-self:start;background:#dc2626"
+    ) + _grid_stretch_rule(
+        "#auto-margin", "margin-top:auto;background:#16a34a"
+    ) + _grid_stretch_rule(
+        "#explicit", "height:2px;background:#2563eb"
+    ) + _grid_stretch_rule(
+        "#boxed", "box-sizing:content-box;margin-top:1px;margin-bottom:1px;" +
+        "padding-top:1px;padding-bottom:1px;border-top:1px solid #111827;" +
+        "border-bottom:1px solid #111827;background:#f59e0b"
+    ) + _grid_stretch_rule(
+        "#zero", "height:0px;background:#7c3aed"
+    ) + _grid_stretch_rule(
+        "#span", "grid-column:1 / span 2;grid-row:2;" +
+        "background:#0891b2"
+    ) + _grid_stretch_rule(
+        "#video", "grid-column:3;grid-row:2;align-self:stretch;" +
+        "background:#be123c"
+    ) + _grid_stretch_rule(
+        "#split-zero", "grid-column:4;grid-row:2;height:0px;" +
+        "align-items:stretch;" +
+        "background:#4f46e5"
+    ) + _grid_stretch_rule(
+        "#row-span", "grid-column:5;grid-row:2 / span 2;" +
+        "background:#0f766e"
+    ) + _grid_stretch_rule(
+        "#logical-inline-zero", "grid-column:1;grid-row:3;" +
+        "inline-size:0px;background:#9333ea"
+    ) + _grid_stretch_rule(
+        "#logical-block-zero", "grid-column:2;grid-row:3;" +
+        "block-size:0px;background:#ea580c"
+    ) + "</style>" +
+    "<main id='controls'><div id='start'></div>" +
+    "<div id='auto-margin'></div><div id='explicit'></div>" +
+    "<div id='boxed'></div><div id='zero'></div>" +
+    "<div id='span'></div><video id='video'></video>" +
+    "<div id='split-zero' style='visibility:visible'></div>" +
+    "<div id='row-span'></div>" +
+    "<div id='logical-inline-zero' " +
+    "style='writing-mode:vertical-rl'></div>" +
+    "<div id='logical-block-zero' " +
+    "style='writing-mode:horizontal-tb'></div></main>"
+)
+
+val GRID_NESTED_STRETCH_HTML = (
+    "<style>" + _grid_stretch_rule(
+        "html,body", "margin:0;width:4px;height:4px"
+    ) + _grid_stretch_rule(
+        "#host", "display:grid;width:4px;grid-template-columns:4px;" +
+        "grid-template-rows:4px;align-items:normal"
+    ) + _grid_stretch_rule(
+        "#nested", "display:grid;grid-template-columns:2px 2px;" +
+        "grid-template-rows:4px;align-items:stretch"
+    ) + _grid_stretch_rule("#left", "background:#dc2626") +
+    _grid_stretch_rule("#right", "background:#2563eb") + "</style>" +
+    "<main id='host'><div id='nested'>" +
+    "<div id='left'></div><div id='right'></div></div></main>"
+)
+
+val GRID_ALIGNMENT_MODE_HTML = (
+    "<style>" + _grid_stretch_rule(
+        "html,body", "margin:0;width:8px;height:4px"
+    ) + _grid_stretch_rule(
+        "#modes", "display:grid;width:8px;grid-template-columns:4px 4px;" +
+        "grid-template-rows:4px;align-items:normal"
+    ) + _grid_stretch_rule(
+        "#normal-ratio", "width:2px;aspect-ratio:1 / 1;align-self:normal"
+    ) + _grid_stretch_rule(
+        "#stretch-ratio", "width:2px;aspect-ratio:1 / 1;align-self:stretch"
+    ) + "</style>" +
+    "<main id='modes'><div id='normal-ratio'></div>" +
+    "<div id='stretch-ratio'></div></main>"
+)
+
+val GRID_OMITTED_ALIGNMENT_HTML = (
+    "<style>" + _grid_stretch_rule(
+        "html,body", "margin:0;width:4px;height:4px"
+    ) + _grid_stretch_rule(
+        "#omitted", "display:grid;width:4px;grid-template-columns:4px;" +
+        "grid-template-rows:4px"
+    ) + _grid_stretch_rule(
+        "#omitted-ratio", "width:2px;aspect-ratio:1 / 1"
+    ) + "</style>" +
+    "<main id='omitted'><div id='omitted-ratio'></div></main>"
+)
+
+fn _grid_stretch_node_index(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> i32:
+    var index = 0
+    for node in result.hit_index.nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing Grid semantic node: {component_id}")
+    -1
+
+fn _grid_stretch_command(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> DrawIrCommand:
+    for command in result.composition.batches[0].commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing Grid Draw IR command: {component_id}")
+    result.composition.batches[0].commands[0]
+
+fn _grid_stretch_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing Grid computed style: {key}")
+    ""
+
+fn _grid_stretch_box(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> [i32]:
+    val index = _grid_stretch_node_index(result, component_id)
+    val boxes = result.hit_index.boxes
+    [boxes.bx[index], boxes.by[index], boxes.bw[index], boxes.bh[index]]
+
+describe "REQ-WEB-BROWSER-003/004/021: CSS Grid auto-size stretch":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should stretch auto-size items through exact Engine2D pixels":
+        step("Parse the styled HTML fixture")
+        val result = simple_web_layout_render_html_draw_ir_result(
+            GRID_AUTO_STRETCH_HTML, 8, 4
+        )
+        val grid_index = _grid_stretch_node_index(result, "grid")
+        val red_index = _grid_stretch_node_index(result, "red")
+        val blue_index = _grid_stretch_node_index(result, "blue")
+        expect(result.hit_index.nodes[grid_index].tag).to_equal("main")
+        expect(result.hit_index.nodes[red_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[blue_index].tag).to_equal("div")
+        expect(result.composition.batches[0].source.source_kind).to_equal(
+            "html_ast"
+        )
+
+        step("Resolve semantic layout and computed style")
+        val grid_style = result.hit_index.styles[grid_index]
+        val red_style = result.hit_index.styles[red_index]
+        val blue_style = result.hit_index.styles[blue_index]
+        expect(grid_style.display).to_equal("grid")
+        expect(grid_style.grid_template_columns).to_equal("4px 4px")
+        expect(grid_style.grid_template_rows).to_equal("4px")
+        expect(grid_style.align_items).to_equal("stretch")
+        expect([red_style.height_px, blue_style.height_px]).to_equal([0, 0])
+        expect([red_style.height_auto, blue_style.height_auto]).to_equal(
+            [true, true]
+        )
+        expect([red_style.align_self, blue_style.align_self]).to_equal(
+            ["auto", "auto"]
+        )
+        expect(_grid_stretch_box(result, "grid")).to_equal([0, 0, 8, 4])
+        expect(_grid_stretch_box(result, "red")).to_equal([0, 0, 4, 4])
+        expect(_grid_stretch_box(result, "blue")).to_equal([4, 0, 4, 4])
+
+        val controls = simple_web_layout_render_html_draw_ir_result(
+            GRID_STRETCH_CONTROLS_HTML, 20, 24
+        )
+        expect(_grid_stretch_box(controls, "start")).to_equal([0, 0, 4, 1])
+        expect(_grid_stretch_box(controls, "auto-margin")).to_equal(
+            [4, 0, 4, 1]
+        )
+        expect(_grid_stretch_box(controls, "explicit")).to_equal(
+            [8, 0, 4, 2]
+        )
+        expect(_grid_stretch_box(controls, "boxed")).to_equal(
+            [12, 1, 4, 6]
+        )
+        expect(_grid_stretch_box(controls, "zero")).to_equal([16, 0, 4, 1])
+        expect(_grid_stretch_box(controls, "span")).to_equal([0, 8, 8, 1])
+        expect(_grid_stretch_box(controls, "video")).to_equal([8, 8, 4, 1])
+        expect(_grid_stretch_box(controls, "split-zero")).to_equal(
+            [12, 8, 4, 1]
+        )
+        expect(_grid_stretch_box(controls, "row-span")).to_equal(
+            [16, 8, 4, 1]
+        )
+        expect(_grid_stretch_box(controls, "logical-inline-zero")).to_equal(
+            [0, 16, 4, 1]
+        )
+        expect(_grid_stretch_box(controls, "logical-block-zero")).to_equal(
+            [4, 16, 4, 1]
+        )
+        val auto_margin_index = _grid_stretch_node_index(
+            controls, "auto-margin"
+        )
+        expect(controls.hit_index.styles[auto_margin_index].margin_t_auto).to_be(
+            true
+        )
+        val zero_index = _grid_stretch_node_index(controls, "zero")
+        expect(controls.hit_index.styles[zero_index].height_auto).to_be(false)
+        val split_zero_index = _grid_stretch_node_index(
+            controls, "split-zero"
+        )
+        expect(
+            controls.hit_index.styles[split_zero_index].height_auto
+        ).to_be(false)
+        expect(
+            controls.hit_index.styles[split_zero_index].align_items
+        ).to_equal("stretch")
+        expect(
+            controls.hit_index.styles[split_zero_index].align_items_authored
+        ).to_be(true)
+        val logical_inline_index = _grid_stretch_node_index(
+            controls, "logical-inline-zero"
+        )
+        val logical_block_index = _grid_stretch_node_index(
+            controls, "logical-block-zero"
+        )
+        expect([
+            controls.hit_index.styles[logical_inline_index].height_px,
+            controls.hit_index.styles[logical_block_index].height_px
+        ]).to_equal([0, 0])
+        expect([
+            controls.hit_index.styles[logical_inline_index].height_auto,
+            controls.hit_index.styles[logical_block_index].height_auto
+        ]).to_equal([false, false])
+
+        val nested = simple_web_layout_render_html_draw_ir_result(
+            GRID_NESTED_STRETCH_HTML, 4, 4
+        )
+        val nested_index = _grid_stretch_node_index(nested, "nested")
+        val host_index = _grid_stretch_node_index(nested, "host")
+        expect(nested.hit_index.styles[host_index].align_items).to_equal("normal")
+        expect(nested.hit_index.styles[nested_index].display).to_equal("grid")
+        expect(nested.hit_index.styles[nested_index].grid_template_columns).to_equal(
+            "2px 2px"
+        )
+        expect(nested.hit_index.styles[nested_index].grid_template_rows).to_equal(
+            "4px"
+        )
+        expect(_grid_stretch_box(nested, "nested")).to_equal([0, 0, 4, 4])
+        expect(_grid_stretch_box(nested, "left")).to_equal([0, 0, 2, 4])
+        expect(_grid_stretch_box(nested, "right")).to_equal([2, 0, 2, 4])
+
+        val modes = simple_web_layout_render_html_draw_ir_result(
+            GRID_ALIGNMENT_MODE_HTML, 8, 4
+        )
+        expect(_grid_stretch_box(modes, "normal-ratio")).to_equal(
+            [0, 0, 2, 2]
+        )
+        expect(_grid_stretch_box(modes, "stretch-ratio")).to_equal(
+            [4, 0, 2, 4]
+        )
+        val modes_index = _grid_stretch_node_index(modes, "modes")
+        expect(modes.hit_index.styles[modes_index].align_items_authored).to_be(
+            true
+        )
+
+        val omitted = simple_web_layout_render_html_draw_ir_result(
+            GRID_OMITTED_ALIGNMENT_HTML, 4, 4
+        )
+        val omitted_index = _grid_stretch_node_index(omitted, "omitted")
+        expect(omitted.hit_index.styles[omitted_index].align_items).to_equal(
+            "stretch"
+        )
+        expect(
+            omitted.hit_index.styles[omitted_index].align_items_authored
+        ).to_be(false)
+        expect(_grid_stretch_box(omitted, "omitted-ratio")).to_equal(
+            [0, 0, 2, 2]
+        )
+
+        step("Emit canonical Draw IR")
+        val grid = _grid_stretch_command(result, "grid")
+        val red = _grid_stretch_command(result, "red")
+        val blue = _grid_stretch_command(result, "blue")
+        expect([grid.kind, red.kind, blue.kind]).to_equal(
+            ["rect", "rect", "rect"]
+        )
+        expect([grid.x, grid.y, grid.width, grid.height]).to_equal(
+            [0, 0, 8, 4]
+        )
+        expect([red.x, red.y, red.width, red.height]).to_equal([0, 0, 4, 4])
+        expect([blue.x, blue.y, blue.width, blue.height]).to_equal([4, 0, 4, 4])
+        expect([red.color, blue.color]).to_equal(
+            [0xFFDC2626u32, 0xFF2563EBu32]
+        )
+        expect([red.parent_id, blue.parent_id]).to_equal(["grid", "grid"])
+        expect([
+            grid.clip_rect.x, grid.clip_rect.y,
+            grid.clip_rect.width, grid.clip_rect.height
+        ]).to_equal([0, 0, 8, 4])
+        expect(_grid_stretch_style(grid, "display")).to_equal("grid")
+        expect(_grid_stretch_style(grid, "grid-template-rows")).to_equal("4px")
+        expect(_grid_stretch_style(grid, "align-items")).to_equal("stretch")
+
+        step("Render exact Engine2D pixels")
+        val raster = Engine2dCompositorBackend.create_named(8, 4, "software")
+        val rendered = raster.render_draw_ir_composition(result.composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels).to_equal([
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32
+        ])
