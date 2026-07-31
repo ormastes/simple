@@ -879,6 +879,37 @@ spl_i64 __simple_rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
     return rt_string_char_code_at(value, index_value);
 }
 
+/* Return the raw BYTE at BYTE index `index`, or 0 if out of range.
+ *
+ * Deliberately NOT rt_string_char_code_at: that one is CHARACTER-indexed and
+ * the two disagree on any non-ASCII text ("café,".byte_at(3) is 195, the
+ * 0xC3 lead byte, while char_code_at(3) is 233 for 'é'). Byte-framing callers
+ * (e.g. dtb_parser.spl / fd_io.spl scanning raw bytes) index the raw UTF-8
+ * buffer directly, so a character index would desync at the first
+ * multi-byte codepoint. O(1): straight buffer read, no codepoint walk. */
+spl_i64 rt_string_byte_at(spl_i64 value, spl_i64 index_value) {
+    RtString *string = rt_as_string(value);
+    const spl_u8 *data;
+    spl_u64 len;
+    spl_i64 index = index_value;
+    if (index < 0) return 0;
+    if (string) {
+        data = (const spl_u8 *)string->data;
+        len = string->len;
+    } else {
+        data = (const spl_u8 *)(spl_u64)value;
+        if (!data) return 0;
+        len = 0;
+        while (data[len] != 0) len = len + 1;
+    }
+    if ((spl_u64)index >= len) return 0;
+    return data[index];
+}
+
+spl_i64 __simple_rt_string_byte_at(spl_i64 value, spl_i64 index_value) {
+    return rt_string_byte_at(value, index_value);
+}
+
 spl_i64 rt_string_starts_with(spl_i64 value, spl_i64 prefix_value) {
     RtString *string = rt_as_string(value);
     RtString *prefix = rt_as_string(prefix_value);
