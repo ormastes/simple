@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 16 | 16 | 0 | 0 |
+| 19 | 19 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -1488,6 +1488,79 @@ expect(radios[1].focused).to_equal(true)
 
 </details>
 
+#### should expose input reset as a button and preserve keyboard event order
+
+- Edit a form control away from its parsed default
+   - Expected: editing the text input succeeds
+- Find reset through the canonical button surface
+   - Expected: exactly one `Reset` button is exposed
+   - Expected: the button supports `click` and `key`
+- Activate reset with Enter and observe keydown click reset order
+   - Expected: keyboard activation succeeds
+   - Expected: the event order is `keydown,click,reset,`
+- Restore the dirty value and retain pointer click activation
+   - Expected: keyboard reset restores `seed`
+   - Expected: pointer activation succeeds and restores `seed`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 51 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Edit a form control away from its parsed default")
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/reset",
+    "<html><body><form onreset=\"document.title=document.title+'reset,'\"><input id='name' value='seed'><input type='reset' value='Reset' onkeydown=\"document.title=document.title+'keydown,'\" onclick=\"document.title=document.title+'click,'\"></form></body></html>"
+)
+expect(session.set_dom_text_input(
+    "name", "changed"
+).is_ok()).to_equal(true)
+
+step("Find reset through the canonical button surface")
+val reset_buttons = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Reset", 1
+)
+expect(reset_buttons.len()).to_equal(1)
+if reset_buttons.len() == 0:
+    fail("input reset was not exposed as a button")
+expect(reset_buttons[0].action_names).to_contain("click")
+expect(reset_buttons[0].action_names).to_contain("key")
+
+step("Activate reset with Enter and observe keydown click reset order")
+val keyed = session.ui_access_act(WinTextActionRequest(
+    target_id: reset_buttons[0].canonical_id, action: "key",
+    text_value: "Enter", x: 0, y: 0
+))
+expect(keyed.ok).to_equal(true)
+expect(session.current_title).to_equal("keydown,click,reset,")
+
+step("Restore the dirty value and retain pointer click activation")
+val restored = be_dom_find_by_tag(session.current_dom, "input")
+expect(be_dom_get_attr(restored[0], "value")).to_equal("seed")
+expect(session.set_dom_text_input(
+    "name", "changed-again"
+).is_ok()).to_equal(true)
+val clicked = session.ui_access_act(WinTextActionRequest(
+    target_id: reset_buttons[0].canonical_id, action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(clicked.ok).to_equal(true)
+val pointer_restored = be_dom_find_by_tag(
+    session.current_dom, "input"
+)
+expect(be_dom_get_attr(
+    pointer_restored[0], "value"
+)).to_equal("seed")
+
+```
+
+</details>
+
 #### routes duplicate author IDs by exact DOM node identity
 
 - var session = BrowserSession new
@@ -1761,8 +1834,8 @@ expect(textarea_focused).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 16 |
-| Active scenarios | 16 |
+| Total scenarios | 19 |
+| Active scenarios | 19 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
