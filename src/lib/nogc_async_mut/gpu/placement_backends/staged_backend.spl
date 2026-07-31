@@ -1,0 +1,118 @@
+"""Staged backend: canonical staged placement path for portability."""
+
+use std.common.compute.placement_contracts.backend.{
+    PlacementBackend,
+    PlacementCapabilities,
+    PlacementError,
+    PlacementPlan,
+    LeaseSet,
+    TransferReceipt,
+    CheckpointReceipt,
+    RecoveryReceipt,
+    PlacementRequestArenaRef
+}
+use std.common.compute.placement_contracts.semantic.{
+    BackendId,
+    ObjectSetView,
+    DeviceMask,
+    Hash256,
+    PlacementRequestArena
+}
+use std.common.compute.placement_contracts.planner.{PlacementBudget, CostEstimate}
+use std.common.compute.placement_contracts.handles.{ObjectRef, object_ref}
+use std.common.compute.placement_contracts.storage.{ArtifactId, artifact_id, artifact_id_valid}
+
+class StagedPlacementBackend:
+    max_inflight_bytes: i64
+    staging_budget: i64
+    ring_high_water: i64
+
+    static fn with_budget(staging_budget: i64, inflight_budget: i64) -> StagedPlacementBackend:
+        StagedPlacementBackend(
+            max_inflight_bytes: inflight_budget,
+            staging_budget: staging_budget,
+            ring_high_water: 0
+        )
+
+impl PlacementBackend for StagedPlacementBackend:
+    fn probe() -> PlacementCapabilities:
+        PlacementCapabilities(
+            backend: BackendId(value: "staged"),
+            available: true,
+            production: true,
+            supported_tiers: [],
+            device_mask: DeviceMask(value: 0),
+            reason: "portable staged path"
+        )
+
+    fn plan(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
+        # Deterministic empty placeholder; runtime-specific request arena ingestion is
+        # intentionally deferred to implementation step 3.
+        staged_plan(budget)
+
+    fn acquire(plan: PlacementPlan) -> Result<LeaseSet, PlacementError>:
+        # Stage is mandatory in this feature; we reserve no concrete buffers yet
+        # at interface-first scope.
+        Ok(LeaseSet(leases: []))
+
+    fn prefetch(plan: PlacementPlan) -> Result<TransferReceipt, PlacementError>:
+        # Returns deterministic no-op receipt for empty plans.
+        Ok(TransferReceipt(
+            artifact_id: artifact_id(digest: "", byte_len: 0),
+            backend: "staged",
+            sequence: 0,
+            ring_slot: 0,
+            bytes_transferred: 0,
+            device_address: 0,
+            checksum: "",
+            completed: true,
+            error: ""
+        ))
+
+    fn checkpoint(objects: ObjectSetView) -> CheckpointReceipt:
+        CheckpointReceipt(
+            ok: true,
+            root: artifact_id(digest: "", byte_len: 0),
+            object_count: objects.objects.len() as i64,
+            bytes_written: 0,
+            error: ""
+        )
+
+    fn release(leases: LeaseSet):
+        pass
+
+    fn recover(root: ArtifactId) -> RecoveryReceipt:
+        if artifact_id_valid(root):
+            RecoveryReceipt(ok: true, root: root, recovered_objects: 0, error: "")
+        else:
+            RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "invalid-root")
+
+fn staged_plan(budget: PlacementBudget) -> PlacementPlan:
+    PlacementPlan(
+        reservations: request_ref(0),
+        transfers: request_ref(1),
+        evictions: request_ref(2),
+        prefetches: request_ref(3),
+        leases: request_ref(4),
+        estimated_cost: budget_to_cost_estimate(budget),
+        receipt_seed: Hash256(value: "staged_empty")
+    )
+
+fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
+    object_ref(object_slot: slot, generation: 1)
+
+fn budget_to_cost_estimate(budget: PlacementBudget) -> CostEstimate:
+    CostEstimate(
+        cpu_work: 0,
+        simd_work: 0,
+        gpu_work: 0,
+        host_to_device_bytes: budget.device_bytes,
+        device_to_host_bytes: budget.host_pinned_bytes,
+        ssd_read_bytes: budget.host_hot_bytes,
+        ssd_write_bytes: budget.staging_bytes,
+        synchronization_points: 0,
+        predicted_latency_us: 0,
+        confidence_milli: 0
+    )
+
+export StagedPlacementBackend
