@@ -1,0 +1,470 @@
+# Safe Markdown rendering for validated scenario evidence manifests.
+#
+# Structured checks remain the oracle. This module only turns their typed
+# records into reviewable, inert Markdown fragments.
+
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact, ScenarioHtmlCheckResult,
+    scenario_capture_kind_name, scenario_html_check_tool_name
+}
+use std.common.spec.scenario_motion_evidence.{
+    ScenarioArtifactIntegrity, ScenarioMotionEvidence
+}
+use std.common.spec.scenario_protocol_evidence.{
+    ScenarioProtocolFieldEvidence, scenario_protocol_evidence_validate
+}
+use std.nogc_sync_mut.http.url.{url_encode}
+use std.nogc_sync_mut.io.file_ops.{
+    file_hash_sha256, file_is_regular_no_follow, file_size
+}
+use std.spec.scenario_evidence_manifest.{
+    ScenarioEvidenceManifest, validate_scenario_evidence_manifest
+}
+
+fn _unsafe_content(value: text) -> bool:
+    val lower = value.lower()
+    (value.contains(0.to_char()) or value.contains("ghp_") or
+        value.contains("npm_") or value.contains("AKIA") or
+        lower.contains("password=") or
+        lower.contains("authorization: bearer "))
+
+fn _escape_inline(value: text) -> text:
+    var result = value.replace("&", "&amp;")
+    result = result.replace("<", "&lt;")
+    result = result.replace(">", "&gt;")
+    result = result.replace("\\", "\\\\")
+    result = result.replace("|", "\\|")
+    result = result.replace("[", "\\[")
+    result = result.replace("]", "\\]")
+    result = result.replace("\r", " ")
+    result.replace("\n", " ")
+
+fn _escape_alt(value: text) -> text:
+    var result = _escape_inline(value)
+    result = result.replace("(", "\\(")
+    result.replace(")", "\\)")
+
+fn _fenced(language: text, content: text) -> text:
+    var fence = "```"
+    while content.contains(fence):
+        fence = fence + "`"
+    fence + language + "\n" + content +
+        (if content.ends_with("\n"): "" else: "\n") + fence + "\n"
+
+fn _path_has_control(path: text) -> bool:
+    var i = 0
+    while i < path.len():
+        val code = path.substring(i, i + 1).char_code()
+        if code < 32 or code == 127:
+            return true
+        i = i + 1
+    false
+
+fn _safe_repository_path(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.starts_with("\\"):
+        return false
+    if path.len() >= 2 and path.substring(1, 2) == ":":
+        return false
+    if (path.contains("\\") or path.contains("://") or path.contains("?") or
+        path.contains("#") or _path_has_control(path)):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..":
+            return false
+    true
+
+fn _safe_artifact_path(path: text) -> bool:
+    if not _safe_repository_path(path):
+        return false
+    (path.starts_with("build/test-artifacts/") or
+        path.starts_with("doc/06_spec/image/"))
+
+fn _encoded_repository_path(path: text) -> text:
+    var encoded: [text] = []
+    for part in path.split("/"):
+        encoded.push(url_encode(part))
+    encoded.join("/")
+
+fn _artifact_link(manifest: ScenarioEvidenceManifest, path: text) -> Result<text, text>:
+    if not _safe_artifact_path(path):
+        return Err("unsafe-artifact-path: " + path)
+    if not _safe_repository_path(manifest.generated_manual_path):
+        return Err("unsafe-generated-manual-path")
+    val manual_parts = manifest.generated_manual_path.split("/")
+    if manual_parts.len() < 2:
+        return Err("unsafe-generated-manual-path")
+    var prefix = ""
+    var i = 0
+    while i < manual_parts.len() - 1:
+        prefix = prefix + "../"
+        i = i + 1
+    Ok(prefix + _encoded_repository_path(path))
+
+fn _artifact_index(
+    artifacts: [ScenarioEvidenceArtifact],
+    path: text
+) -> i64:
+    var i = 0
+    while i < artifacts.len():
+        if artifacts[i].path == path:
+            return i
+        i = i + 1
+    -1
+
+fn _integrity_index(
+    entries: [ScenarioArtifactIntegrity],
+    path: text
+) -> i64:
+    var i = 0
+    while i < entries.len():
+        if entries[i].path == path:
+            return i
+        i = i + 1
+    -1
+
+fn _normalized_sha256(value: text) -> text:
+    val normalized = value.trim().lower()
+    if normalized.starts_with("sha256:"):
+        return normalized["sha256:".len():]
+    normalized
+
+fn _html_check_matches(
+    check: ScenarioHtmlCheckResult,
+    artifact: ScenarioEvidenceArtifact
+) -> bool:
+    (check.artifact.path == artifact.path and
+        check.artifact.scenario_id == artifact.scenario_id and
+        check.artifact.step_id == artifact.step_id)
+
+fn _is_embeddable_still(artifact: ScenarioEvidenceArtifact) -> bool:
+    val lower = artifact.path.lower()
+    ((artifact.mime == "image/png" and lower.ends_with(".png")) or
+        (artifact.mime == "image/webp" and lower.ends_with(".webp")))
+
+fn _render_at_a_glance(manifest: ScenarioEvidenceManifest) -> text:
+    var out = "## Evidence at a glance\n\n"
+    out = out + "| Field | Value |\n|---|---|\n"
+    out = out + "| Feature | " + _escape_inline(manifest.feature_id) + " |\n"
+    out = out + "| Status | **" + _escape_inline(manifest.showcase_status) + "** |\n"
+    out = out + "| Requirements | " +
+        _escape_inline(manifest.requirement_ids.join(", ")) + " |\n"
+    out = out + "| Target | " + _escape_inline(manifest.target) + " |\n"
+    out = out + "| Backend | " + _escape_inline(manifest.backend) + " |\n"
+    out = out + "| Source revision | `" +
+        _escape_inline(manifest.source_revision) + "` |\n"
+    out = out + "| Producer | " + _escape_inline(manifest.producer) + " " +
+        _escape_inline(manifest.producer_version) + " |\n"
+    out = out + "| Host | " + _escape_inline(manifest.host) + " |\n"
+    out = out + "| Duration | " + manifest.duration_ms.to_text() + " ms |\n"
+    if manifest.reason != "":
+        out = out + "| Reason | " + _escape_inline(manifest.reason) + " |\n"
+    if manifest.blocker_prerequisite != "":
+        out = out + "| Prerequisite | " +
+            _escape_inline(manifest.blocker_prerequisite) + " |\n"
+    if manifest.resume_command != "":
+        out = out + "| Resume | `" +
+            _escape_inline(manifest.resume_command) + "` |\n"
+    out + "\n"
+
+fn _render_artifact_inventory(
+    manifest: ScenarioEvidenceManifest
+) -> Result<text, text>:
+    var out = "## Evidence artifacts\n\n"
+    out = out + "| Title | Kind | MIME | Artifact |\n"
+    out = out + "|---|---|---|---|\n"
+    for artifact in manifest.artifacts:
+        if _unsafe_content(artifact.title) or _unsafe_content(artifact.body):
+            return Err("unsafe-evidence-content: " + artifact.title)
+        if artifact.redacted:
+            out = out + "| " + _escape_inline(artifact.title) + " | " +
+                scenario_capture_kind_name(artifact.kind) + " | `" +
+                _escape_inline(artifact.mime) + "` | **redacted** |\n"
+            continue
+        val link = _artifact_link(manifest, artifact.path)?
+        out = out + "| " + _escape_inline(artifact.title) + " | " +
+            scenario_capture_kind_name(artifact.kind) + " | `" +
+            _escape_inline(artifact.mime) + "` | [" +
+            _escape_inline(artifact.path) + "](" + link + ") |\n"
+    Ok(out + "\n")
+
+fn _render_stills(manifest: ScenarioEvidenceManifest) -> Result<text, text>:
+    var out = ""
+    for artifact in manifest.artifacts:
+        if artifact.kind != ScenarioCaptureKind.gui:
+            continue
+        val integrity_index = _integrity_index(
+            manifest.artifact_integrity, artifact.path
+        )
+        if integrity_index < 0:
+            return Err("missing-still-integrity: " + artifact.path)
+        val integrity = manifest.artifact_integrity[integrity_index]
+        if artifact.redacted:
+            return Err("redacted-still-cannot-embed: " + artifact.path)
+        val link = _artifact_link(manifest, artifact.path)?
+        if out == "":
+            out = "## Still evidence\n\n"
+        out = out + "### " + _escape_inline(artifact.title) + "\n\n"
+        out = out + "Format `" + _escape_inline(integrity.format) + "`, " +
+            integrity.width.to_text() + "×" + integrity.height.to_text() +
+            ", comparison **" +
+            _escape_inline(integrity.comparison_result.upper()) + "**. "
+        out = out + "[Open artifact](" + link + ").\n\n"
+        if _is_embeddable_still(artifact):
+            val alt = artifact.title + ": " +
+                integrity.comparison_result + " comparison on " +
+                integrity.target
+            out = out + "![" + _escape_alt(alt) + "](" + link + ")\n\n"
+        else:
+            out = out + "Presentation format is linked; use its canonical " +
+                "PNG or lossless WebP baseline for pixel review.\n\n"
+    Ok(out)
+
+fn _render_html(manifest: ScenarioEvidenceManifest) -> Result<text, text>:
+    var out = ""
+    for artifact in manifest.artifacts:
+        if artifact.kind != ScenarioCaptureKind.html:
+            continue
+        if artifact.body.len() > 65536:
+            return Err("embedded-html-too-large: " + artifact.path)
+        if artifact.redacted:
+            return Err("redacted-html-cannot-render: " + artifact.path)
+        val link = _artifact_link(manifest, artifact.path)?
+        var matching_checks = 0
+        var checks = "| Tool | Status | Summary | Messages |\n"
+        checks = checks + "|---|---|---|---|\n"
+        for check in manifest.html_checks:
+            if not _html_check_matches(check, artifact):
+                continue
+            if _unsafe_content(check.summary) or _unsafe_content(check.messages):
+                return Err("unsafe-evidence-content: HTML check")
+            matching_checks = matching_checks + 1
+            val status = if check.passed: "PASS" else: "FAIL"
+            checks = checks + "| " +
+                _escape_inline(scenario_html_check_tool_name(check.tool)) +
+                " | **" + status + "** | " +
+                _escape_inline(check.summary) + " | " +
+                _escape_inline(check.messages) + " |\n"
+        if matching_checks == 0:
+            return Err("missing-html-checks: " + artifact.path)
+        if out == "":
+            out = "## HTML evidence\n\n"
+        out = out + "### " + _escape_inline(artifact.title) + "\n\n"
+        out = out + "[Open captured source](" + link +
+            "). Captured HTML is shown inert and is never executed.\n\n"
+        out = out + "#### Structured checks\n\n" + checks + "\n"
+        out = out + "#### Inert HTML source\n\n" +
+            _fenced("html", artifact.body) + "\n"
+    Ok(out)
+
+fn _render_text_results(manifest: ScenarioEvidenceManifest) -> Result<text, text>:
+    if manifest.text_results.len() == 0:
+        return Ok("")
+    var out = "## Text verification\n\n"
+    var index = 1
+    for result in manifest.text_results:
+        if (_unsafe_content(result.raw_transcript) or
+            _unsafe_content(result.normalized_transcript) or
+            _unsafe_content(result.diagnostic)):
+            return Err("unsafe-evidence-content: text transcript")
+        val status = if result.passed: "PASS" else: "FAIL"
+        out = out + "### Transcript " + index.to_text() + ": **" +
+            status + "**\n\n"
+        out = out + _escape_inline(result.diagnostic) + "\n\n"
+        out = out + "<details>\n<summary>Normalized transcript</summary>\n\n"
+        out = out + _fenced("text", result.normalized_transcript)
+        out = out + "\n</details>\n\n"
+        out = out + "<details>\n<summary>Raw transcript</summary>\n\n"
+        out = out + _fenced("text", result.raw_transcript)
+        out = out + "\n</details>\n\n"
+        index = index + 1
+    Ok(out)
+
+fn _render_motion(manifest: ScenarioEvidenceManifest) -> Result<text, text>:
+    if manifest.motion_evidence.len() == 0:
+        return Ok("")
+    var out = "## Motion and event evidence\n\n"
+    var motion_index = 1
+    for motion in manifest.motion_evidence:
+        val transcript_link = _artifact_link(
+            manifest, motion.transcript_path
+        )?
+        val transcript_index = _artifact_index(
+            manifest.artifacts, motion.transcript_path
+        )
+        if transcript_index < 0:
+            return Err("motion references unknown transcript artifact")
+        var review_index = -1
+        var review_link = ""
+        if motion.review_media_path != "":
+            review_index = _artifact_index(
+                manifest.artifacts, motion.review_media_path
+            )
+            if review_index < 0:
+                return Err("motion references unknown review artifact")
+            review_link = _artifact_link(
+                manifest, motion.review_media_path
+            )?
+        val transcript_artifact =
+            manifest.artifacts[transcript_index]
+        if transcript_artifact.redacted:
+            return Err("redacted-motion-evidence")
+        if review_index >= 0 and manifest.artifacts[review_index].redacted:
+            return Err("redacted-motion-evidence")
+        out = out + "### Motion " + motion_index.to_text() + "\n\n"
+        out = out + "Duration " + motion.duration_ms.to_text() + " ms; " +
+            motion.events.len().to_text() + " ordered events; " +
+            motion.keyframes.len().to_text() + " verified keyframes. " +
+            "[Event transcript](" + transcript_link + ").\n\n"
+        out = out + "| Seq | Time | Event | Target | Value | Status |\n"
+        out = out + "|---:|---:|---|---|---|---|\n"
+        for event in motion.events:
+            if _unsafe_content(event.value) or _unsafe_content(event.target):
+                return Err("unsafe-evidence-content: motion event")
+            out = out + "| " + event.sequence.to_text() + " | " +
+                event.time_ms.to_text() + " ms | " +
+                _escape_inline(event.kind) + " | " +
+                _escape_inline(event.target) + " | " +
+                _escape_inline(event.value) + " | **" +
+                _escape_inline(event.status.upper()) + "** |\n"
+        out = out + "\n#### Keyframes\n\n"
+        for keyframe in motion.keyframes:
+            val artifact_index = _artifact_index(
+                manifest.artifacts, keyframe.artifact_path
+            )
+            if artifact_index < 0:
+                return Err(
+                    "motion-keyframe-unknown-artifact: " +
+                    keyframe.artifact_path
+                )
+            val artifact = manifest.artifacts[artifact_index]
+            val keyframe_link = _artifact_link(
+                manifest, keyframe.artifact_path
+            )?
+            out = out + "**" + keyframe.time_ms.to_text() + " ms — " +
+                _escape_inline(keyframe.status.upper()) + ":** " +
+                _escape_inline(keyframe.oracle) + " " +
+                "[open](" + keyframe_link + ")\n\n"
+            if _is_embeddable_still(artifact):
+                val alt = "Keyframe at " + keyframe.time_ms.to_text() +
+                    " ms: " + keyframe.oracle
+                out = out + "![" + _escape_alt(alt) + "](" +
+                    keyframe_link + ")\n\n"
+        out = out + "#### Review media\n\n"
+        if review_index < 0:
+            out = out + "No optional encoded review media was retained. " +
+                "Use the ordered event transcript and keyframes.\n\n"
+        elif (
+            manifest.artifacts[review_index].mime == "image/webp" and
+            manifest.artifacts[review_index].path.lower().ends_with(".webp")
+        ):
+            out = out + "<details>\n<summary>Animated WebP review</summary>\n\n"
+            out = out + "![Motion review; use the event transcript and " +
+                "keyframes for a text equivalent](" + review_link + ")\n\n"
+            out = out + "</details>\n\n"
+        else:
+            out = out + "[Open WebM review media](" + review_link +
+                "). Use the event transcript and keyframes when playback " +
+                "is unavailable.\n\n"
+        motion_index = motion_index + 1
+    Ok(out)
+
+fn _protocol_hex_path(manifest: ScenarioEvidenceManifest) -> text:
+    for artifact in manifest.artifacts:
+        if artifact.kind == ScenarioCaptureKind.protocol and
+           artifact.path.lower().ends_with(".hex.txt"):
+            return artifact.path
+    ""
+
+fn _render_protocol(manifest: ScenarioEvidenceManifest) -> Result<text, text>:
+    if manifest.protocol_fields.len() == 0:
+        return Ok("")
+    val validation = scenario_protocol_evidence_validate(
+        manifest.protocol_fields
+    )
+    if validation != "ok":
+        return Err("invalid-protocol-fields: " + validation)
+    val raw_path = _protocol_hex_path(manifest)
+    if raw_path == "":
+        return Err("missing-protocol-hex-view")
+    val raw_artifact =
+        manifest.artifacts[_artifact_index(manifest.artifacts, raw_path)]
+    if raw_artifact.redacted:
+        return Err("redacted-protocol-bytes")
+    val raw_link = _artifact_link(manifest, raw_path)?
+    var out = "## Protocol and crypto fields\n\n"
+    out = out + "Decoded rows link to the numbered [raw-byte view](" +
+        raw_link + "); exact bytes remain the machine oracle.\n\n"
+    out = out + "| Bytes | Bits | Mask | Endian | Field | Actual | Expected | Status | Importance | Note |\n"
+    out = out + "|---|---|---|---|---|---|---|---|---|---|\n"
+    for field in manifest.protocol_fields:
+        if (_unsafe_content(field.actual) or
+            _unsafe_content(field.expected) or
+            _unsafe_content(field.note)):
+            return Err("unsafe-evidence-content: protocol field")
+        val line = field.byte_offset / 16 + 1
+        val range_end = field.byte_offset + field.byte_length - 1
+        val byte_label = field.byte_offset.to_text() + "–" +
+            range_end.to_text()
+        val bit_label = field.bit_offset.to_text() + "/" +
+            field.bit_width.to_text()
+        out = out + "| [" + byte_label + "](" + raw_link + "#L" +
+            line.to_text() + ") | " + bit_label + " | `" +
+            _escape_inline(field.mask) + "` | " +
+            _escape_inline(field.endianness) + " | " +
+            _escape_inline(field.name) + " | `" +
+            _escape_inline(field.actual) + "` | `" +
+            _escape_inline(field.expected) + "` | **" +
+            _escape_inline(field.status.upper()) + "** | **" +
+            _escape_inline(field.importance.upper()) + "** | " +
+            _escape_inline(field.note) + " |\n"
+    Ok(out + "\n")
+
+pub fn render_evidence_manifest(
+    manifest: ScenarioEvidenceManifest
+) -> Result<text, text>:
+    val validated = validate_scenario_evidence_manifest(manifest)?
+    if (_unsafe_content(validated.command) or
+        _unsafe_content(validated.reason) or
+        _unsafe_content(validated.resume_command)):
+        return Err("unsafe-evidence-content: manifest")
+    var out = _render_at_a_glance(validated)
+    out = out + _render_artifact_inventory(validated)?
+    out = out + _render_stills(validated)?
+    out = out + _render_text_results(validated)?
+    out = out + _render_html(validated)?
+    out = out + _render_motion(validated)?
+    out = out + _render_protocol(validated)?
+    Ok(out)
+
+pub fn validate_evidence_artifact_files(
+    manifest: ScenarioEvidenceManifest
+) -> Result<ScenarioEvidenceManifest, text>:
+    val validated = validate_scenario_evidence_manifest(manifest)?
+    for artifact in validated.artifacts:
+        if not _safe_artifact_path(artifact.path):
+            return Err("unsafe-artifact-path: " + artifact.path)
+        val integrity_index = _integrity_index(
+            validated.artifact_integrity, artifact.path
+        )
+        if integrity_index < 0:
+            return Err("missing-artifact-integrity: " + artifact.path)
+        val integrity = validated.artifact_integrity[integrity_index]
+        if not file_is_regular_no_follow(artifact.path):
+            return Err("artifact-not-regular: " + artifact.path)
+        val size_before = file_size(artifact.path)
+        if size_before != integrity.byte_size:
+            return Err("artifact-size-mismatch: " + artifact.path)
+        val expected_hash = _normalized_sha256(integrity.checksum)
+        if expected_hash.len() != 64:
+            return Err("artifact-hash-invalid: " + artifact.path)
+        val actual_hash = _normalized_sha256(
+            file_hash_sha256(artifact.path)
+        )
+        if actual_hash != expected_hash:
+            return Err("artifact-hash-mismatch: " + artifact.path)
+        if (not file_is_regular_no_follow(artifact.path) or
+            file_size(artifact.path) != size_before):
+            return Err("artifact-changed-during-validation: " + artifact.path)
+    Ok(validated)
+
+export render_evidence_manifest, validate_evidence_artifact_files

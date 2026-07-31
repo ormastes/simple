@@ -12,6 +12,7 @@ FILE.md files) are allowed.
 | `FILE.md` | This manifest |
 | `CLAUDE.md` | Claude Code project instructions |
 | `README.md` | Project readme |
+| `EVIDENCE_SHOWCASE.md` | Curated, status-qualified links to feature evidence |
 | `AGENTS.md` | Agent definitions |
 | `GEMINI.md` | Gemini instructions |
 | `MCP.md` | MCP server documentation |
@@ -50,7 +51,6 @@ FILE.md files) are allowed.
 | `variants` | Module-variant-override overlays (platform/renderer seams selected by explicit `variant:` build config) |
 | `.opencode` | OpenCode tool settings |
 | `.cache` | Host cache (e.g. `cpu_config.sdn`) |
-| `assets` | Pinned licence-attested binary assets (font bundle) required by evidence gates and SimpleOS image staging — see `assets/FILE.md` |
 
 **No other files at root.**
 
@@ -68,7 +68,6 @@ FILE.md files) are allowed.
 | `examples/FILE.md` | `examples/` directory |
 | `tools/FILE.md` | `tools/` directory |
 | `variants/FILE.md` | `variants/` directory |
-| `assets/FILE.md` | `assets/` directory |
 
 ## src/
 

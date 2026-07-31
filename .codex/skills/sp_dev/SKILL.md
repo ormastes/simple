@@ -39,6 +39,12 @@ verify failures, not release cleanup. For scenario-oriented SSpec, generate the
 mirrored manual doc, read it as an operator manual, and fix step names,
 captures, `@inline`/`@prev` visibility, and helper names until the primary flow
 is understandable without opening the source spec.
+For critical features, keep `EVIDENCE_SHOWCASE.md` linked to the authoritative
+generated manual. Showcase status and artifact links must derive from a
+validated versioned evidence manifest, never hand-written PASS prose. New or
+updated scenarios use modern SSpec (`use std.spec.*`, `describe`, `it`, `step`,
+`expect`, built-in matchers), and generated manuals render accessible
+text/still/motion/inert-HTML/protocol evidence as operator pages.
 
 When `$sp_dev` creates requirement option docs, do not leave them as the final
 state. After the user selects feature and NFR options, write the final

@@ -64,6 +64,13 @@
    - shared interface/manual helper names match design, spec, manual, and
      tooling references
    - placeholder helpers fail explicitly with `assert(false)` or `fail(...)`
+   - no executable `.spl` spec exists under `doc/06_spec/`
+   - every critical `EVIDENCE_SHOWCASE.md` row links its authoritative manual
+     and derives status/artifacts from a validated versioned manifest
+   - text diagnostics are actionable, stills have alt/summary text, motion has
+     keyframes and a transcript, HTML is inert, and protocol/crypto evidence
+     includes raw bytes plus decoded fields
+   - new or updated specs use modern SSpec and direct value assertions
 11. If workflow/tooling behavior changed, verify the matching `doc/07_guide`,
     `doc/06_spec`, `.codex/skills`, `.agents/skills`, `.claude/skills`,
     `.claude/agents/spipe`, and `.gemini/commands` updates exist or are

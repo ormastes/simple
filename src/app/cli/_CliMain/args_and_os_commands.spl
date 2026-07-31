@@ -168,6 +168,10 @@ struct CoreFlags:
 struct BackendFlags:
     backend: text
 
+struct MemInfraFlags:
+    requested: [text]
+    strict: bool
+
 struct LimitFlags:
     max_recursion_depth: i64
     timeout_secs: i64
@@ -254,6 +258,31 @@ fn parse_backend_flags(args: [text]) -> BackendFlags:
 
     return BackendFlags(backend: backend)
 
+# Parse `--mem-infra=a,b,c` (or `--mem-infra a,b,c`) and `--mem-infra-strict`.
+# Pure parsing only — resolution against the capability matrix and env-var
+# application happen in `apply_mem_infra_flags` (main_and_help.spl), once the
+# effective execution backend is known.
+fn parse_mem_infra_flags(args: [text]) -> MemInfraFlags:
+    var requested: [text] = []
+    var strict = false
+
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg.starts_with("--mem-infra="):
+            val val_str = arg[12:]
+            if val_str != "":
+                requested = val_str.split(",")
+        elif arg == "--mem-infra" and i + 1 < args.len():
+            i = i + 1
+            if args[i] != "":
+                requested = args[i].split(",")
+        elif arg == "--mem-infra-strict":
+            strict = true
+        i = i + 1
+
+    return MemInfraFlags(requested: requested, strict: strict)
+
 fn parse_limit_flags(args: [text]) -> LimitFlags:
     var max_recursion_depth = 0
     var timeout_secs = 0
@@ -295,29 +324,11 @@ fn parse_global_flags(args: [text]) -> GlobalFlags:
     val core = parse_core_flags(args)
     val backend_flags = parse_backend_flags(args)
     val limits = parse_limit_flags(args)
+    val mem_infra = parse_mem_infra_flags(args)
     var backend = backend_flags.backend
     var force_interpret = core.force_interpret
     var interpreter_mode = core.interpreter_mode
     var run_config = core.run_config
-    var mem_infra_requested: [text] = []
-    var mem_infra_strict = false
-
-    var mem_index: i64 = 0
-    while mem_index < args.len():
-        val arg = args[mem_index]
-        var requested = ""
-        if arg.starts_with("--mem-infra="):
-            requested = arg[12:]
-        elif arg == "--mem-infra" and mem_index + 1 < args.len():
-            mem_index = mem_index + 1
-            requested = args[mem_index]
-        elif arg == "--mem-infra-strict":
-            mem_infra_strict = true
-        if requested != "":
-            for name in requested.split(","):
-                if name != "":
-                    mem_infra_requested.push(name)
-        mem_index = mem_index + 1
 
     # Check SIMPLE_EXECUTION_MODE env var as fallback.
     #
@@ -373,8 +384,7 @@ fn parse_global_flags(args: [text]) -> GlobalFlags:
         backend: backend, force_interpret: force_interpret,
         interpreter_mode: interpreter_mode, run_config: run_config,
         no_jit: core.no_jit, jit_threshold: core.jit_threshold,
-        mem_infra_requested: mem_infra_requested,
-        mem_infra_strict: mem_infra_strict)
+        mem_infra_requested: mem_infra.requested, mem_infra_strict: mem_infra.strict)
 
 fn apply_fault_detection(flags: GlobalFlags):
     if flags.max_recursion_depth > 0:

@@ -173,6 +173,8 @@ mod cuda_driver {
     ) -> c_int;
     type CuMemAlloc = unsafe extern "C" fn(*mut CUdeviceptr, usize) -> c_int;
     type CuMemFree = unsafe extern "C" fn(CUdeviceptr) -> c_int;
+    type CuMemAllocHost = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
+    type CuMemFreeHost = unsafe extern "C" fn(*mut c_void) -> c_int;
     type CuMemcpyHtoD = unsafe extern "C" fn(CUdeviceptr, *const c_void, usize) -> c_int;
     type CuMemcpyDtoH = unsafe extern "C" fn(*mut c_void, CUdeviceptr, usize) -> c_int;
     type CuCtxSynchronize = unsafe extern "C" fn() -> c_int;
@@ -199,6 +201,8 @@ mod cuda_driver {
         cuLaunchKernel: CuLaunchKernel,
         cuMemAlloc_v2: CuMemAlloc,
         cuMemFree_v2: CuMemFree,
+        cuMemAllocHost_v2: CuMemAllocHost,
+        cuMemFreeHost: CuMemFreeHost,
         cuMemcpyHtoD_v2: CuMemcpyHtoD,
         cuMemcpyDtoH_v2: CuMemcpyDtoH,
         cuCtxSynchronize: CuCtxSynchronize,
@@ -243,6 +247,12 @@ mod cuda_driver {
                 .map(|symbol| *symbol)
                 .map_err(|_| CudaError::SharedObjectSymbolNotFound)?
         };
+        let cu_mem_alloc_host = unsafe {
+            lib.get::<CuMemAllocHost>(b"cuMemAllocHost_v2\0")
+                .or_else(|_| lib.get::<CuMemAllocHost>(b"cuMemAllocHost\0"))
+                .map(|symbol| *symbol)
+                .map_err(|_| CudaError::SharedObjectSymbolNotFound)?
+        };
 
         Ok(CudaFns {
             cuInit: sym!(b"cuInit\0", CuInit),
@@ -261,6 +271,8 @@ mod cuda_driver {
             cuLaunchKernel: sym!(b"cuLaunchKernel\0", CuLaunchKernel),
             cuMemAlloc_v2: sym!(b"cuMemAlloc_v2\0", CuMemAlloc),
             cuMemFree_v2: sym!(b"cuMemFree_v2\0", CuMemFree),
+            cuMemAllocHost_v2: cu_mem_alloc_host,
+            cuMemFreeHost: sym!(b"cuMemFreeHost\0", CuMemFreeHost),
             cuMemcpyHtoD_v2: sym!(b"cuMemcpyHtoD_v2\0", CuMemcpyHtoD),
             cuMemcpyDtoH_v2: sym!(b"cuMemcpyDtoH_v2\0", CuMemcpyDtoH),
             cuCtxSynchronize: sym!(b"cuCtxSynchronize\0", CuCtxSynchronize),
@@ -372,6 +384,14 @@ mod cuda_driver {
 
     pub unsafe fn cuMemFree_v2(dptr: CUdeviceptr) -> c_int {
         dispatch!(cuMemFree_v2(dptr))
+    }
+
+    pub unsafe fn cuMemAllocHost_v2(pp: *mut *mut c_void, bytesize: usize) -> c_int {
+        dispatch!(cuMemAllocHost_v2(pp, bytesize))
+    }
+
+    pub unsafe fn cuMemFreeHost(ptr: *mut c_void) -> c_int {
+        dispatch!(cuMemFreeHost(ptr))
     }
 
     pub unsafe fn cuMemcpyHtoD_v2(dstDevice: CUdeviceptr, srcHost: *const c_void, ByteCount: usize) -> c_int {
@@ -1599,6 +1619,54 @@ pub extern "C" fn rt_cuda_mem_free(ptr: i64) -> i64 {
 #[no_mangle]
 #[cfg(not(feature = "cuda"))]
 pub extern "C" fn rt_cuda_mem_free(_ptr: i64) -> i64 {
+    -3
+}
+
+/// Allocate page-locked host memory through the CUDA Driver API.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_host_alloc(size: i64) -> i64 {
+    if size <= 0 {
+        return -1;
+    }
+    if let Err(err) = ensure_default_context_current() {
+        return -(err as i64);
+    }
+    unsafe {
+        let mut ptr: *mut c_void = ptr::null_mut();
+        let err = cuMemAllocHost_v2(&mut ptr, size as usize);
+        if err != 0 {
+            return -(err as i64);
+        }
+        ptr as i64
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_host_alloc(_size: i64) -> i64 {
+    -3
+}
+
+/// Free page-locked host memory allocated by `rt_cuda_host_alloc`.
+#[no_mangle]
+#[cfg(feature = "cuda")]
+pub extern "C" fn rt_cuda_host_free(ptr: i64) -> i64 {
+    if ptr <= 0 {
+        return -1;
+    }
+    unsafe {
+        let err = cuMemFreeHost(ptr as *mut c_void);
+        if err != 0 {
+            return -(err as i64);
+        }
+        0
+    }
+}
+
+#[no_mangle]
+#[cfg(not(feature = "cuda"))]
+pub extern "C" fn rt_cuda_host_free(_ptr: i64) -> i64 {
     -3
 }
 

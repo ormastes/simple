@@ -514,9 +514,7 @@ fn resolve_writing_mode_decls(current: text, decls: text) -> text:
         return current
     _decl_tbl_resolve_writing_mode(current, decl_table_build(decls))
 
-fn _apply_decls_dispatch(
-    mut st: Style, decl_tbl: [text], em_base: i32, apply_display: bool
-) -> Style:
+fn _apply_decls_dispatch(mut st: Style, decl_tbl: [text], em_base: i32) -> Style:
     # apply_decls' Style(...) reconstruction always resets these four
     # resolved-font-cache fields, unconditionally, on every successful
     # call -- not gated on which properties are present. Must match here
@@ -704,8 +702,8 @@ fn _apply_decls_dispatch(
     st.pad_r = resolved_pad_r
     st.pad_b = resolved_pad_b
     st.pad_l = resolved_pad_l
-    val display_decl = decl_tbl_get_last_valid_display(decl_tbl)
-    if apply_display and display_decl.len() > 0:
+    val display_decl = decl_tbl_get(decl_tbl, "display")
+    if display_decl.len() > 0:
         if display_decl == "none":
             st.display = "none"
         elif display_decl == "inline":
@@ -720,12 +718,12 @@ fn _apply_decls_dispatch(
             st.display = "grid"
         elif display_decl == "contents":
             st.display = "contents"
-        elif display_decl == "block":
+        else:
             st.display = "block"
     # Unconditional in the full-probe path too: it checks the FINAL
     # display_v, which can already be "contents" from inheritance even
     # when this call's decls never mention "display" at all.
-    if apply_display and st.display == "contents":
+    if st.display == "contents":
         st.bg = 0u32
         st.width_px = 0
         st.height_px = 0
@@ -840,7 +838,6 @@ fn apply_authored_style_metadata(
     # automatic sizing from an authored zero without reparsing in layout.
     st.height_auto = previous.height_auto
     st.align_items_authored = previous.align_items_authored
-    st.scrollbar_width_none = previous.scrollbar_width_none
     # Match ordinary logical sizing exactly: the cascade owner supplies the
     # already-final cross-phase writing mode. Only standalone apply_decls calls
     # resolve this phase locally from the incoming computed value.
@@ -874,9 +871,8 @@ fn apply_authored_style_metadata(
         st.align_items_authored = true
     st
 
-fn _apply_decls_on_writing_mode(
-    st: Style, decls: text, em_base: i32, logical_writing_mode: text,
-    apply_display: bool
+fn apply_decls_on_writing_mode(
+    st: Style, decls: text, em_base: i32, logical_writing_mode: text
 ) -> Style:
     # Preserve the declaration trust boundary before the Grid side path.
     if decls.len() == 0 or _decl_over_quota(decls):
@@ -891,7 +887,7 @@ fn _apply_decls_on_writing_mode(
     )
     if not has_grid_declaration:
         val ordinary = _apply_decls_without_grid(
-            st, decls, table, em_base, logical_writing_mode, apply_display
+            st, decls, table, em_base, logical_writing_mode
         )
         return apply_authored_style_metadata(
             ordinary, st, table, logical_writing_mode
@@ -901,7 +897,7 @@ fn _apply_decls_on_writing_mode(
     val column = st.grid_column
     val row = st.grid_row
     var result = _apply_decls_without_grid(
-        st, decls, table, em_base, logical_writing_mode, apply_display
+        st, decls, table, em_base, logical_writing_mode
     )
     result.grid_template_columns = columns
     result.grid_template_rows = rows
@@ -909,20 +905,6 @@ fn _apply_decls_on_writing_mode(
     result.grid_row = row
     apply_grid_decls(result, table)
     apply_authored_style_metadata(result, st, table, logical_writing_mode)
-
-fn apply_decls_on_writing_mode(
-    st: Style, decls: text, em_base: i32, logical_writing_mode: text
-) -> Style:
-    _apply_decls_on_writing_mode(
-        st, decls, em_base, logical_writing_mode, true
-    )
-
-fn apply_decls_without_display_on_writing_mode(
-    st: Style, decls: text, em_base: i32, logical_writing_mode: text
-) -> Style:
-    _apply_decls_on_writing_mode(
-        st, decls, em_base, logical_writing_mode, false
-    )
 
 fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
     apply_decls_on_writing_mode(st, decls, em_base, "")
@@ -1117,7 +1099,6 @@ fn tag_defaults(st: Style, tag: text) -> Style:
     val out = _tag_defaults_without_metadata(st, tag)
     out.height_auto = st.height_auto
     out.align_items_authored = st.align_items_authored
-    out.scrollbar_width_none = st.scrollbar_width_none
     out
 
 # ---------------------------------------------------------------------------

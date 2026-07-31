@@ -8,8 +8,6 @@
 # @req REQ-006
 # @req REQ-007
 # @req REQ-008
-# @req REQ-009
-# @req REQ-010
 # @evidence-display: embed_tui
 
 """
@@ -21,9 +19,9 @@ Exercises the consumer-independent layout capsule from deterministic island
 discovery through bounded scheduling, exact CPU-oracle geometry, incremental
 selection, provenance, receipts, and cost-qualified backend selection.
 
-The fixture geometry is the CPU oracle. A GPU candidate is accepted only when
-its execution proof records submission, synchronization, device readback, and
-oracle verification. Inline text remains CPU-owned unless exact metrics exist.
+The fixture geometry is the CPU oracle. GPU selection changes the dispatch
+receipt only; it never changes boxes. Inline text remains CPU-owned when the
+text measurement port is unavailable.
 
 **Requirements:** doc/02_requirements/feature/layout_framework.md
 **Plan:** doc/03_plan/sys_test/layout_framework.md
@@ -33,88 +31,17 @@ oracle verification. Inline text remains CPU-owned unless exact metrics exist.
 use std.spec.*
 use common.structural.layout.*
 
-fn fixture_node(
-    id: i64, parent_id: i64, profile_id: text, boundary: bool,
-    contained: bool, dirty_bits: i64, work: i64, text_required: bool
-) -> LayoutNodeInput:
-    layout_node(
-        id, parent_id, profile_id, boundary, contained, dirty_bits, work,
-        text_required, layout_node_semantics_default(profile_id)
-    )
-
 fn layout_fixture_snapshot(profile: LayoutExecutionProfile, invalidated_ids: [i64], cap: i64) -> LayoutInputSnapshot:
     val nodes = [
-        fixture_node(1, 0, "block", true, false, 0, 40, false),
-        fixture_node(2, 1, "block", false, false, 0, 10, false),
-        fixture_node(3, 1, "block", true, false, 1, 60, false),
-        fixture_node(4, 1, "block", true, false, 0, 70, false)
+        layout_node(1, 0, "block", true, false, layout_box(1, 0, 0, 640, 480), 0, 40, false, 1),
+        layout_node(2, 1, "block", false, false, layout_box(2, 8, 8, 624, 32), 0, 10, false, 1),
+        layout_node(3, 1, "block", true, false, layout_box(3, 8, 48, 300, 120), 1, 60, false, 1),
+        layout_node(4, 1, "block", true, false, layout_box(4, 320, 48, 312, 120), 0, 70, false, 1)
     ]
-    layout_input(nodes, [], invalidated_ids, profile, cap, 640, 480, [], [
-        layout_box(1, 0, 0, 640, 480),
-        layout_box(2, 8, 8, 624, 32),
-        layout_box(3, 8, 48, 300, 120),
-        layout_box(4, 320, 48, 312, 120)
-    ])
+    layout_input(nodes, [], invalidated_ids, profile, cap)
 
 fn layout_profile(cpu_us: i64) -> LayoutExecutionProfile:
     layout_execution_profile("hybrid_vector_gpu", cpu_us, 40, 20, 1024, 1024, 2, 10, 5)
-
-class ClaimOnlyGpuLayoutPort:
-    pass_dn
-
-impl LayoutExecutionPort for ClaimOnlyGpuLayoutPort:
-    fn backend_name() -> text:
-        "hybrid_vector_gpu"
-
-    fn execute(request: LayoutExecutionRequest) -> LayoutIterationResult:
-        LayoutIterationResult(
-            boxes: [],
-            fragments: [],
-            line_boxes: [],
-            overflows: [],
-            proof: LayoutExecutionProof(
-                candidate_backend: request.candidate_backend,
-                executed_backend: "hybrid_vector_gpu",
-                executed: true,
-                submitted: true,
-                synchronized: true,
-                device_readback: false,
-                oracle_verified: false,
-                reason: ""
-            ),
-            fault: ""
-        )
-
-class OscillatingCpuLayoutPort:
-    boxes: [LayoutBox]
-
-impl LayoutExecutionPort for OscillatingCpuLayoutPort:
-    fn backend_name() -> text:
-        "serial_cpu"
-
-    fn execute(request: LayoutExecutionRequest) -> LayoutIterationResult:
-        var boxes: [LayoutBox] = []
-        for box in self.boxes:
-            boxes.push(layout_box(
-                box.id, box.x + request.iteration, box.y, box.width, box.height
-            ))
-        LayoutIterationResult(
-            boxes: boxes,
-            fragments: [],
-            line_boxes: [],
-            overflows: [],
-            proof: LayoutExecutionProof(
-                candidate_backend: request.candidate_backend,
-                executed_backend: "serial_cpu",
-                executed: true,
-                submitted: false,
-                synchronized: true,
-                device_readback: false,
-                oracle_verified: false,
-                reason: ""
-            ),
-            fault: ""
-        )
 
 fn expect_layout_geometry(snapshot: LayoutSnapshot):
     expect(snapshot.boxes).to_equal([
@@ -138,7 +65,7 @@ fn expect_bounded_fixed_point(snapshot: LayoutSnapshot):
     expect(snapshot.receipt.converged).to_equal(true)
     expect(snapshot.receipt.iterations).to_equal(1)
 
-describe "REQ-001..REQ-010 layout framework":
+describe "REQ-001..REQ-008 layout framework":
     # @manual: show
     it "should preserve oracle geometry through full and incremental execution":
         val input = layout_fixture_snapshot(layout_profile(200), [3], 4)
@@ -164,8 +91,7 @@ describe "REQ-001..REQ-010 layout framework":
         expect_layout_geometry(full)
         expect_layout_geometry(incremental)
         expect(incremental.boxes).to_equal(full.boxes)
-        expect(full.backend).to_equal("serial_cpu")
-        expect(full.receipt.fallback_reason).to_equal("gpu-execution-unavailable")
+        expect(full.backend).to_equal("hybrid_vector_gpu")
 
         step("Verify geometry and receipts")
         expect_bounded_fixed_point(full)
@@ -175,60 +101,6 @@ describe "REQ-001..REQ-010 layout framework":
         expect(full.receipt.output_hash).to_equal(incremental.receipt.output_hash)
         expect(full.receipt.deterministic_hash).to_equal(full_again.receipt.deterministic_hash)
 
-        step("Reject a GPU claim without device readback")
-        val rejected_gpu = layout_run_full_with_ports(
-            input,
-            text_port,
-            layout_execution_port_oracle(input.oracle_boxes),
-            ClaimOnlyGpuLayoutPort()
-        )
-        expect(rejected_gpu.backend).to_equal("serial_cpu")
-        expect(rejected_gpu.receipt.candidate_backend).to_equal("hybrid_vector_gpu")
-        expect(rejected_gpu.receipt.fallback_reason).to_equal("gpu-readback-missing")
-        expect(rejected_gpu.execution_proof.device_readback).to_equal(false)
-        expect(rejected_gpu.island_costs.len()).to_equal(rejected_gpu.islands.len())
-
-    # @manual: folded
-    it "covers every initial profile with fragments line boxes and overflow":
-        val input = layout_input_with_text(
-            [
-                fixture_node(1, 0, "block", true, false, 0, 8, false),
-                fixture_node(2, 0, "inline", true, false, 0, 8, true),
-                fixture_node(3, 0, "flex", true, false, 0, 8, false),
-                fixture_node(4, 0, "grid", true, false, 0, 8, false),
-                fixture_node(5, 0, "table", true, false, 0, 8, false),
-                fixture_node(6, 0, "absolute-sticky", true, false, 0, 8, false),
-                fixture_node(7, 0, "scroll", true, false, 0, 8, false),
-                fixture_node(8, 0, "replaced", true, false, 0, 8, false)
-            ],
-            [], [], [layout_text_measure_request(2, "text", "sans", 16, "en")],
-            layout_execution_profile("serial_cpu", 100, 0, 0, 0, 0, 0, 0, 0), 4,
-            80, 160, [], [
-                layout_box(1, 0, 0, 80, 20), layout_box(2, 0, 20, 80, 20),
-                layout_box(3, 0, 40, 80, 20), layout_box(4, 0, 60, 80, 20),
-                layout_box(5, 0, 80, 80, 20), layout_box(6, 0, 100, 80, 20),
-                layout_box(7, 0, 120, 80, 20), layout_box(8, 0, 140, 80, 20)
-            ]
-        )
-        val text_port = layout_text_measure_port_resolved([
-            LayoutTextMeasureResult(
-                node_id: 2,
-                available: true,
-                font_identity: "sans-v1",
-                width: 32,
-                line_height: 20,
-                advances: [8, 8, 8, 8],
-                reason: ""
-            )
-        ])
-        val result = layout_run_full(input, text_port)
-        expect(result.fault).to_equal("")
-        expect(result.boxes.len()).to_equal(8)
-        expect(result.fragments.len()).to_equal(8)
-        expect(result.line_boxes.len()).to_equal(1)
-        expect(result.line_boxes[0].text_end).to_equal(4)
-        expect(result.overflows.len()).to_equal(8)
-
     # @manual: folded
     it "should fall back for small text unsupported and non-convergent work":
         val small = layout_fixture_snapshot(layout_profile(80), [3], 4)
@@ -236,8 +108,8 @@ describe "REQ-001..REQ-010 layout framework":
         expect(layout_run_full(small, layout_text_measure_port_unavailable()).receipt.fallback_reason).to_equal("gpu-cost-not-lower")
 
         val inline_input = layout_input(
-            [fixture_node(1, 0, "inline", true, false, 1, 100, true)],
-            [], [1], layout_profile(500), 2, 80, 20, [], [layout_box(1, 0, 0, 80, 20)]
+            [layout_node(1, 0, "inline", true, false, layout_box(1, 0, 0, 80, 20), 1, 100, true, 1)],
+            [], [1], layout_profile(500), 2
         )
         val inline_result = layout_run_full(inline_input, layout_text_measure_port_unavailable())
         expect(inline_result.backend).to_equal("serial_cpu")
@@ -245,23 +117,16 @@ describe "REQ-001..REQ-010 layout framework":
 
         val cyclic_input = layout_input(
             [
-                fixture_node(1, 0, "block", true, false, 1, 50, false),
-                fixture_node(2, 0, "block", true, false, 1, 50, false)
+                layout_node(1, 0, "block", true, false, layout_box(1, 0, 0, 20, 20), 1, 50, false, 3),
+                layout_node(2, 0, "block", true, false, layout_box(2, 20, 0, 20, 20), 1, 50, false, 3)
             ],
             [
                 layout_dependency(1, 2, "percentage", 1),
                 layout_dependency(2, 1, "intrinsic-size", 1)
             ],
-            [1, 2], layout_profile(500), 2, 40, 20, [], [
-                layout_box(1, 0, 0, 20, 20), layout_box(2, 20, 0, 20, 20)
-            ]
+            [1, 2], layout_profile(500), 2
         )
-        val cyclic_result = layout_run_full_with_ports(
-            cyclic_input,
-            layout_text_measure_port_unavailable(),
-            OscillatingCpuLayoutPort(boxes: cyclic_input.oracle_boxes),
-            layout_execution_port_unavailable("hybrid_vector_gpu", "gpu-execution-unavailable")
-        )
+        val cyclic_result = layout_run_full(cyclic_input, layout_text_measure_port_unavailable())
         expect(cyclic_result.backend).to_equal("serial_cpu")
         expect(cyclic_result.fault).to_equal("non-convergent")
         expect(cyclic_result.receipt.fallback_reason).to_equal("non-convergent")

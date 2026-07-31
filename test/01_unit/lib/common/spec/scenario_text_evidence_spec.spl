@@ -1,0 +1,127 @@
+use std.spec.*
+use std.common.spec.scenario_text_evidence.{
+    ScenarioTextMask,
+    scenario_text_evidence_policy,
+    scenario_text_match,
+    scenario_text_normalize
+}
+
+describe "scenario text evidence":
+    it "normalizes ANSI CRLF and horizontal whitespace without losing lines":
+        step("Normalize a colored boot transcript")
+        val policy = scenario_text_evidence_policy(true, true, [], 0)
+        val actual = "\x1b[32mbooting\x1b[0m\r\nlogin:\t   root\r\n"
+        val normalized = scenario_text_normalize(actual, policy)
+        expect(normalized).to_equal("booting\nlogin: root\n")
+
+    it "keeps trim-only horizontal spacing when collapse is disabled":
+        step("Apply trim-only policy")
+        val policy = scenario_text_evidence_policy(true, false, [], 0)
+        val normalized = scenario_text_normalize("  boot   ready  ", policy)
+        expect(normalized).to_equal("boot   ready")
+
+    it "applies only explicitly selected typed masks":
+        step("Mask declared volatile fields")
+        val policy = scenario_text_evidence_policy(
+            true,
+            true,
+            [
+                ScenarioTextMask.date,
+                ScenarioTextMask.version,
+                ScenarioTextMask.address,
+                ScenarioTextMask.duration,
+                ScenarioTextMask.build_id
+            ],
+            0
+        )
+        val normalized = scenario_text_normalize(
+            "2026-07-30 v1.2.3 0x7fff 42ms build-id=abc123",
+            policy
+        )
+        expect(normalized).to_equal(
+            "<date> <version> <address> <duration> <build-id>"
+        )
+
+    it "does not mask volatile-looking values when no mask is declared":
+        step("Keep undeclared values exact")
+        val policy = scenario_text_evidence_policy(true, true, [], 0)
+        val normalized = scenario_text_normalize(
+            "2026-07-30 v1.2.3 0x7fff 42ms build-id=abc123",
+            policy
+        )
+        expect(normalized).to_equal(
+            "2026-07-30 v1.2.3 0x7fff 42ms build-id=abc123"
+        )
+
+    it "matches required normalized lines in order within bounded gaps":
+        step("Verify ordered boot and login milestones")
+        val policy = scenario_text_evidence_policy(
+            true,
+            true,
+            [ScenarioTextMask.version],
+            1
+        )
+        val result = scenario_text_match(
+            "Linux   v6.8.1\r\nready\nlogin:\troot\nshell ready",
+            ["Linux <version>", "login: root", "shell ready"],
+            policy
+        )
+        expect(result.passed).to_equal(true)
+        expect(result.diagnostic).to_equal("ok")
+        expect(result.raw_transcript).to_contain("\r\n")
+        expect(result.normalized_transcript).to_contain("Linux <version>")
+
+    it "reports the first out-of-order required line":
+        step("Diagnose reversed login milestones")
+        val policy = scenario_text_evidence_policy(true, true, [], 4)
+        val result = scenario_text_match(
+            "boot\nshell ready\nlogin: root",
+            ["boot", "login: root", "shell ready"],
+            policy
+        )
+        expect(result.passed).to_equal(false)
+        expect(result.first_expected_index).to_equal(2)
+        expect(result.first_actual_index).to_equal(1)
+        expect(result.diagnostic).to_start_with(
+            "out-of-order expected[2] `shell ready`"
+        )
+
+    it "reports a bounded gap and nearby actual lines":
+        step("Reject a milestone beyond the declared gap")
+        val policy = scenario_text_evidence_policy(true, true, [], 1)
+        val result = scenario_text_match(
+            "boot\nnoise one\nnoise two\nlogin:",
+            ["boot", "login:"],
+            policy
+        )
+        expect(result.passed).to_equal(false)
+        expect(result.first_expected_index).to_equal(1)
+        expect(result.first_actual_index).to_equal(3)
+        expect(result.diagnostic).to_start_with(
+            "bounded-gap-exceeded expected[1] `login:`"
+        )
+        expect(result.diagnostic).to_contain("nearby=3: login:")
+
+    it "reports the first missing line and active normalization policy":
+        step("Diagnose a missing shell prompt")
+        val policy = scenario_text_evidence_policy(
+            true,
+            false,
+            [ScenarioTextMask.date],
+            3
+        )
+        val result = scenario_text_match(
+            "boot\nlogin:",
+            ["boot", "shell ready"],
+            policy
+        )
+        expect(result.passed).to_equal(false)
+        expect(result.first_expected_index).to_equal(1)
+        expect(result.first_actual_index).to_equal(1)
+        expect(result.diagnostic).to_start_with(
+            "missing expected[1] `shell ready`"
+        )
+        expect(result.diagnostic).to_contain(
+            "collapse_horizontal_whitespace=false"
+        )
+        expect(result.diagnostic).to_contain("masks=date")

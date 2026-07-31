@@ -104,14 +104,6 @@ ID. Duplicate, unknown, or late replies are rejected.
 9. Update broker cookie jar.
 10. Send only permitted response fields to renderer.
 
-The direct hosted adapter enables cross-origin page `fetch` only for exact
-`omit` or cross-origin `same-origin` credentials. It uses one aggregate
-deadline and one staged OPTIONS/actual job owner, preserves FetchEngine's
-canonical Origin, exposes only CORS-permitted response headers, and leaves both
-cookie stores empty. `include`, opaque initiators, module/WASM, mixed content,
-and CSP denials remain fail-closed; same-origin traffic keeps BrowserSession as
-its sole cookie owner.
-
 Hosted TLS applies one five-second budget across bounded DNS, resolved numeric
 connect attempts, the authenticated handshake, writes, and reads. The original
 hostname remains the SNI/service identity. Linux/FreeBSD use the optional

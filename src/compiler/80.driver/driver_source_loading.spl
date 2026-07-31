@@ -468,27 +468,18 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
             result = result.push(module_path)
     result
 
+var _driver_entry_import_module_paths_cache: Dict<text, [text]> = {}
+
 pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     """Dotted module paths of the use/pub-use/export-use/import declarations in a
     source text. `use lazy` imports are dynamic-by-design and skipped.
-    Docstring bodies are skipped via a triple-quote toggle.
-    PERF (doc/08_tracking/bug/native_build_entry_closure_slow_2026-07-31.md):
-    this used to memoize by the full content string in a process-local
-    Dict<text, [text]>. Every caller (the --entry-closure BFS in
-    compile_targets.spl, and the phase1:load_sources closure scan in
-    driver_source_pipeline_loading.spl) already dedups by file path before
-    calling here, so each distinct content string is looked up at most once
-    per call site -- the cache measurably never hit on the profiled BFS path
-    (confirmed via SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING), leaving only
-    the cost of hashing the whole (up to 64 KB+) content string twice
-    (contains_key + insert) on every call, scaling with file size for zero
-    payoff. Dropped rather than rekeyed: the only way to key it cheaply
-    (by path) would require every caller to pass a path, but
-    _driver_entry_import_module_paths(content) is a fixed single-arg call
-    form exercised directly (content-only, no backing file) by
-    test/01_unit/compiler/bootstrap/entry_closure_physical_source_dedup_spec.spl
-    and test/01_unit/compiler/driver/native_entry_closure_gate_source_spec.spl."""
-    _driver_entry_import_module_paths_text_fallback(content)
+    Docstring bodies are skipped via a triple-quote toggle."""
+    if _driver_entry_import_module_paths_cache.contains_key(content):
+        return _driver_entry_import_module_paths_cache[content]
+    val module_paths = _driver_entry_import_module_paths_text_fallback(content)
+    # ponytail: process-local cache; add eviction if a long-lived compiler daemon grows it unboundedly.
+    _driver_entry_import_module_paths_cache[content] = module_paths
+    module_paths
 
 fn _driver_entry_sibling_path(line: text) -> text:
     if line.starts_with("mod "):
@@ -593,21 +584,6 @@ fn _driver_resolve_numbered_compiler_import(module_path: text, entry_dir: text) 
     # Compiler imports dominate Stage4's entry closure. Resolve their canonical
     # numbered layout before probing every generic stdlib family.
     # The exact compatibility facade is intentionally owned by src/lib.
-    # PERF NOTE (doc/08_tracking/bug/native_build_entry_closure_slow_2026-07-31.md):
-    # measured via a temporary rt_file_exists probe counter that this
-    # function is a complete no-op (0 probes, `is_numbered` always false)
-    # when called from the --entry-closure BFS in compile_targets.spl
-    # (_native_build_entry_closure -> _nb_resolve_segs -> _driver_resolve_entry_import).
-    # That caller builds module_path via `_nb_join_segments` (slash-joined,
-    # e.g. "compiler/driver/foo"), never the dotted form ("compiler.driver.foo")
-    # this function's `is_numbered` gate checks for -- so the up-to-18-candidate
-    # cascade below never runs a single rt_file_exists on that path; the BFS's
-    # numbered-directory resolution actually happens earlier, in
-    # _nb_resolve_under_root via _nb_resolve_segs's own fallback loop. This
-    # function is real (and does pay the full candidate-then-rt_file_exists
-    # cost) only for dotted-module_path callers elsewhere in the driver, e.g.
-    # the phase1:load_sources closure scan in driver_source_pipeline_loading.spl.
-    # Confirmed with 31/31 sampled BFS calls at 0 probes; not the BFS bottleneck.
     if module_path == "compiler.mir_opt":
         return ""
     val is_numbered = module_path.starts_with("compiler.") or module_path == "monomorphize" or module_path.starts_with("monomorphize.") or module_path == "linker" or module_path.starts_with("linker.")

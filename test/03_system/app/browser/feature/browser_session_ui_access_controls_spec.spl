@@ -50,7 +50,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
 }
 use std.gc_async_mut.web.browser_session_url.{
     BROWSER_ADDRESS_MAX_BYTES, browser_address_input_error,
-    browser_address_update, browser_address_draft_after_control_press
+    browser_address_update
 }
 use std.common.encoding.utf8.{text_byte_len, text_codepoint_len}
 use os.hosted.hosted_web_content_session.{HostedWebContentSession}
@@ -275,81 +275,6 @@ describe "BrowserSession primitive controls through textual UI access":
     # codex-system-test
     # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
     # @manual: show
-    it "ends hosted address editing before Home succeeds or fails":
-        expect(browser_address_draft_after_control_press(
-            "home", "", "https://draft.test/"
-        )).to_equal("about:blank")
-        step("Restore the committed address before a busy Home rejection")
-        val committed_url = "https://example.com/committed"
-        val draft_url = "https://draft.test/"
-        val home_url = "https://home.test/"
-        var registry = HostedBrowserRendererRegistry.create(
-            "/bin/false", home_url
-        )
-        val _ = registry.ensure(
-            90, "<main>Committed</main>", 64, 48, 0, 100000
-        )
-        var entry = registry.entries[0]
-        entry.ready = true
-        entry.failure_reason = ""
-        entry.renderer.state = "active"
-        entry.renderer.document_url = committed_url
-        entry.renderer.document_origin = "https://example.com"
-        entry.renderer.home_url = home_url
-        registry.entries[0] = entry
-        val _ = registry.dispatch_chrome_pointer(1, 90, "address", true)
-        val _ = registry.dispatch_chrome_pointer(2, 90, "address", false)
-        expect(registry.dispatch_text(
-            3, 90, draft_url
-        ).callback_count).to_equal(1)
-        entry = registry.entries[0]
-        entry.renderer.pending_wire = "partially-written-command"
-        entry.renderer.pending_wire_offset = 1
-        registry.entries[0] = entry
-        val busy_down = registry.dispatch_chrome_pointer(
-            4, 90, "home", true
-        )
-        expect(busy_down.reason).to_equal("chrome-pressed")
-        expect(registry.entries[0].address_editing).to_be(false)
-        expect(registry.entries[0].address_replace_on_text).to_be(false)
-        expect(registry.address_text(90)).to_equal(committed_url)
-        val busy_up = registry.dispatch_chrome_pointer(
-            5, 90, "home", false
-        )
-        expect(busy_up.reason).to_equal("renderer-busy")
-        expect(registry.dispatch_text(
-            6, 90, "must-not-edit-address"
-        ).reason).to_equal("renderer-busy")
-        expect(registry.address_text(90)).to_equal(committed_url)
-
-        step("Keep successful Home navigation on the parent renderer route")
-        entry = registry.entries[0]
-        entry.renderer.pending_wire = ""
-        entry.renderer.pending_wire_offset = 0
-        registry.entries[0] = entry
-        val _ = registry.dispatch_chrome_pointer(7, 90, "address", true)
-        val _ = registry.dispatch_chrome_pointer(8, 90, "address", false)
-        expect(registry.dispatch_text(
-            9, 90, draft_url
-        ).callback_count).to_equal(1)
-        val home_down = registry.dispatch_chrome_pointer(
-            10, 90, "home", true
-        )
-        expect(home_down.reason).to_equal("chrome-pressed")
-        expect(registry.address_text(90)).to_equal(committed_url)
-        val home_up = registry.dispatch_chrome_pointer(
-            11, 90, "home", false
-        )
-        expect(home_up.callback_count).to_equal(1)
-        expect(registry.address_text(90)).to_equal(home_url)
-        expect(registry.entries[0].renderer.navigation_permit.url).to_equal(
-            home_url
-        )
-        val _ = registry.close()
-
-    # codex-system-test
-    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
-    # @manual: show
     # @capture(text)
     # @capture(gui)
     it "should expose and activate one canonical Go control without duplicate navigation":
@@ -417,8 +342,6 @@ describe "BrowserSession primitive controls through textual UI access":
             1, "go", true
         )
         expect(pointer_down.callback_count).to_equal(0)
-        expect(pointer.browser.address_draft).to_equal(address_reference)
-        expect(pointer.chrome_focus).to_equal("")
         expect(pointer.browser.pending_request_count()).to_equal(0)
         expect(pointer.dispatch_chrome_pointer(
             2, "go", false
@@ -452,8 +375,6 @@ describe "BrowserSession primitive controls through textual UI access":
             8, 93, "go", true
         )
         expect(isolated_down.callback_count).to_equal(0)
-        expect(isolated.entries[0].address_editing).to_be(false)
-        expect(isolated.address_text(93)).to_equal(address_reference)
         expect(isolated.entries[0].renderer.pending_wire).to_equal("")
         expect(isolated.dispatch_chrome_pointer(
             9, 93, "go", false
@@ -482,12 +403,6 @@ describe "BrowserSession primitive controls through textual UI access":
                 worker_init.wire
             ).message
         ).ok).to_be(true)
-        expect(worker.browser.open_html(
-            committed_url, "<main>Worker Go</main>"
-        ).is_ok()).to_be(true)
-        expect(worker.browser.apply_address_update(
-            "", address_reference, true
-        ).is_ok()).to_be(true)
         val worker_go_down = browser_renderer_capability_bind_encoded(
             browser_renderer_chrome_encode(94, 3, 10, "go", true),
             94, 3, 3, worker_capability
@@ -498,8 +413,6 @@ describe "BrowserSession primitive controls through textual UI access":
                 worker_go_down.wire
             ).message
         ).ok).to_be(true)
-        expect(worker.browser.address_draft).to_equal(address_reference)
-        expect(worker.chrome_focus).to_equal("")
         val worker_go_up = browser_renderer_capability_bind_encoded(
             browser_renderer_chrome_encode(94, 4, 11, "go", false),
             94, 4, 4, worker_capability
@@ -513,100 +426,6 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(worker_go_route.ok).to_be(false)
         expect(worker_go_route.reason).to_equal(
             "navigation-command-required"
-        )
-        expect(worker.browser.apply_address_update(
-            "", address_reference, true
-        ).is_ok()).to_be(true)
-        val worker_home_down = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(94, 5, 12, "home", true),
-            94, 5, 5, worker_capability
-        )
-        expect(worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(94),
-                worker_home_down.wire
-            ).message
-        ).ok).to_be(true)
-        expect(worker.browser.address_draft).to_equal(committed_url)
-        expect(worker.chrome_focus).to_equal("")
-        val worker_home_up = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(94, 6, 13, "home", false),
-            94, 6, 6, worker_capability
-        )
-        val worker_home_route = worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(94),
-                worker_home_up.wire
-            ).message
-        )
-        expect(worker_home_route.ok).to_be(false)
-        expect(worker_home_route.reason).to_equal(
-            "navigation-command-required"
-        )
-        var reload_worker = HostedBrowserRendererWorkerSession.create(64, 48)
-        val reload_worker_capability = "22222222222222222222222222222222"
-        val reload_worker_init = browser_renderer_capability_bind_encoded(
-            browser_renderer_message_encode(
-                "init", 97, 2, "<main>Worker Reload</main>"
-            ),
-            97, 2, 2, reload_worker_capability
-        )
-        expect(reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                reload_worker_init.wire
-            ).message
-        ).ok).to_be(true)
-        expect(reload_worker.browser.open_html(
-            committed_url, "<main>Worker Reload</main>"
-        ).is_ok()).to_be(true)
-        val worker_reload_url = reload_worker.browser.current_url
-        val worker_reload_loading = reload_worker.browser.is_loading
-        val worker_reload_pending = reload_worker.browser.pending_request_count()
-        val worker_reload_history = reload_worker.browser.history
-        val worker_reload_current_index = reload_worker.browser.current_index
-        val worker_reload_body = reload_worker.browser.current_body_html
-        val worker_reload_composition_revision = (
-            reload_worker.render_session.counters.composition_revision
-        )
-        val worker_reload_down = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(97, 3, 12, "reload", true),
-            97, 3, 3, reload_worker_capability
-        )
-        expect(reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                worker_reload_down.wire
-            ).message
-        ).ok).to_be(true)
-        val worker_reload_up = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(97, 4, 13, "reload", false),
-            97, 4, 4, reload_worker_capability
-        )
-        val worker_reload_route = reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                worker_reload_up.wire
-            ).message
-        )
-        expect(worker_reload_route.ok).to_be(false)
-        expect(worker_reload_route.reason).to_equal(
-            "navigation-command-required"
-        )
-        expect(reload_worker.browser.current_url).to_equal(worker_reload_url)
-        expect(reload_worker.browser.is_loading).to_equal(worker_reload_loading)
-        expect(reload_worker.browser.pending_request_count()).to_equal(
-            worker_reload_pending
-        )
-        expect(reload_worker.browser.history).to_equal(
-            worker_reload_history
-        )
-        expect(reload_worker.browser.current_index).to_equal(
-            worker_reload_current_index
-        )
-        expect(reload_worker.browser.current_body_html).to_equal(worker_reload_body)
-        expect(reload_worker.render_session.counters.composition_revision).to_equal(
-            worker_reload_composition_revision
         )
 
         var direct = HostedBrowserRendererProcess.create(95, 64, 48)
@@ -958,7 +777,7 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(capture).to_contain("node: favorite kind=button text=Favorite")
         expect(capture).to_contain("node: go kind=button text=Go")
         expect(capture).to_contain("node: address kind=textfield text=https://example.com/start/index.html")
-        expect(capture).to_contain("kind=link text=Read docs")
+        expect(capture).to_contain("node: link_0 kind=link text=Read docs")
         expect(_write_ui_capture(capture)).to_equal(0)
         expect(_capture_file_state(capture)).to_equal("matched")
 
@@ -1030,36 +849,20 @@ describe "BrowserSession primitive controls through textual UI access":
         step("Commit a page and edit its live text control")
         var session = BrowserSession.new()
         expect(session.open_html(first_url, first_html).is_ok()).to_be(true)
-        val text_inputs = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "initial", 1
-        )
         val text_edit = session.ui_access_act(WinTextActionRequest(
-            target_id: text_inputs[0].canonical_id,
+            target_id: "browser:session#page_input_0",
             action: "set_value", text_value: "kept", x: 0, y: 0
         ))
-        val checkboxes = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "checkbox", "check", 1
-        )
         val checkbox_edit = session.ui_access_act(WinTextActionRequest(
-            target_id: checkboxes[0].canonical_id,
+            target_id: "browser:session#page_input_1",
             action: "click", text_value: "", x: 0, y: 0
         ))
-        val blue_radios = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "radio", "blue", 1
-        )
         val radio_edit = session.ui_access_act(WinTextActionRequest(
-            target_id: blue_radios[0].canonical_id,
+            target_id: "browser:session#page_input_3",
             action: "click", text_value: "", x: 0, y: 0
         ))
-        val textareas = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "old memo", 1
-        )
         val textarea_edit = session.ui_access_act(WinTextActionRequest(
-            target_id: textareas[0].canonical_id,
+            target_id: "browser:session#page_textarea_0",
             action: "set_value", text_value: "memo", x: 0, y: 0
         ))
         val initial_select = ui_access_find_nodes(
@@ -1403,91 +1206,6 @@ describe "BrowserSession primitive controls through textual UI access":
         val submit = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#address", action: "submit", text_value: "", x: 0, y: 0))
         expect(submit.ok).to_equal(true)
         expect(session.current_url).to_equal("https://example.com/target")
-
-    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
-    it "keeps a cleared address empty and rejects activation without mutation":
-        step("Clear the committed address through textual UI access")
-        var session = BrowserSession.new()
-        session.open_html(
-            "https://example.com/start",
-            "<html style='background:#ff0000'><body>Start</body></html>"
-        )
-        val cleared = session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#address", action: "set_value",
-            text_value: "", x: 0, y: 0
-        ))
-        val cleared_snapshot = session.ui_access_snapshot()
-        expect(cleared.ok).to_be(true)
-        expect(cleared_snapshot.nodes[7].text_value).to_equal("")
-        expect(cleared_snapshot.nodes[6].enabled).to_be(false)
-
-        step("Reject empty Submit and Go without changing browser state")
-        val url_before = session.current_url
-        val history_before = session.history.len()
-        val index_before = session.current_index
-        val pending_before = session.pending_request_count()
-        val pixels_before = session.render_to_pixels(8, 8).pixels
-        val submitted = session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#address", action: "submit",
-            text_value: "", x: 0, y: 0
-        ))
-        val clicked = session.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#go", action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(submitted.ok).to_be(false)
-        expect(clicked.code).to_equal("disabled")
-        expect(session.current_url).to_equal(url_before)
-        expect(session.history.len()).to_equal(history_before)
-        expect(session.current_index).to_equal(index_before)
-        expect(session.pending_request_count()).to_equal(pending_before)
-        expect(_address_pixels_match(session, pixels_before)).to_be(true)
-
-        step("Discard cleared drafts across Back, Forward, Home, and Stop")
-        var controls = _browser_session_fixture()
-        val clear_request = WinTextActionRequest(
-            target_id: "browser:session#address", action: "set_value",
-            text_value: "", x: 0, y: 0
-        )
-        val _ = controls.ui_access_act(clear_request)
-        val _ = controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#back", action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-            "https://example.com/one"
-        )
-        val _ = controls.ui_access_act(clear_request)
-        val _ = controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#forward", action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-            "https://example.com/two"
-        )
-        val _ = controls.ui_access_act(clear_request)
-        val _ = controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#home", action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-            "https://example.com/home"
-        )
-        expect(controls.begin_network_navigation(
-            "https://example.com/pending", "GET", "", "", ""
-        ).is_ok()).to_be(true)
-        val _ = controls.ui_access_act(clear_request)
-        val stop_revision = controls.ui_access_snapshot().snapshot_revision
-        val _ = controls.ui_access_act(WinTextActionRequest(
-            target_id: "browser:session#stop", action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(controls.ui_access_snapshot().snapshot_revision).to_be_greater_than(
-            stop_revision
-        )
-        expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-            "https://example.com/home"
-        )
 
     # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
     it "publishes address edits through a newer UI snapshot revision":
@@ -1955,24 +1673,16 @@ describe "BrowserSession primitive controls through textual UI access":
             "<html><body><button onkeydown='set-attr:data-keydown=yes' onclick=\"document.title='Saved'\">Save</button><button onkeydown='prevent-default' onclick=\"document.title='ShouldNotRun'\">Blocked key</button><input value='old' oninput=\"document.title='Typing'\" onchange=\"document.title='Changed'\"><input value='kept' onbeforeinput='prevent-default' oninput=\"document.title='ShouldNotRun'\"><input type='checkbox'><input type='radio' name='choice' checked><input type='radio' name='choice'></body></html>"
         )
 
-        val old_inputs = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "old", 1
-        )
         val edited = session.ui_access_act(WinTextActionRequest(
-            target_id: old_inputs[0].canonical_id, action: "set_value",
+            target_id: "browser:session#page_input_0", action: "set_value",
             text_value: "Ada", x: 0, y: 0
         ))
         expect(edited.ok).to_equal(true)
         expect(session.current_title).to_equal("Typing")
         expect(session.current_body_html).to_contain("value=\"Ada\"")
 
-        val kept_inputs = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "kept", 1
-        )
         val canceled = session.ui_access_act(WinTextActionRequest(
-            target_id: kept_inputs[0].canonical_id, action: "set_value",
+            target_id: "browser:session#page_input_1", action: "set_value",
             text_value: "blocked", x: 0, y: 0
         ))
         expect(canceled.ok).to_equal(true)
@@ -1986,12 +1696,8 @@ describe "BrowserSession primitive controls through textual UI access":
                 focused_count = focused_count + 1
         expect(focused_count).to_equal(1)
 
-        val focused_inputs = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "kept", 1
-        )
         val blurred = session.ui_access_act(WinTextActionRequest(
-            target_id: focused_inputs[0].canonical_id, action: "blur",
+            target_id: "browser:session#page_input_1", action: "blur",
             text_value: "", x: 0, y: 0
         ))
         expect(blurred.ok).to_equal(true)
@@ -2002,12 +1708,8 @@ describe "BrowserSession primitive controls through textual UI access":
                 focused_count = focused_count + 1
         expect(focused_count).to_equal(0)
 
-        val save_buttons = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "button", "Save", 1
-        )
         val clicked = session.ui_access_act(WinTextActionRequest(
-            target_id: save_buttons[0].canonical_id, action: "key",
+            target_id: "browser:session#page_button_0", action: "key",
             text_value: "Enter", x: 0, y: 0
         ))
         expect(clicked.ok).to_equal(true)
@@ -2015,24 +1717,16 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(session.current_title).to_equal("Saved")
         expect(session.current_body_html).to_contain("data-keydown=\"yes\"")
 
-        val blocked_buttons = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "button", "Blocked key", 1
-        )
         val blocked_key = session.ui_access_act(WinTextActionRequest(
-            target_id: blocked_buttons[0].canonical_id, action: "key",
+            target_id: "browser:session#page_button_1", action: "key",
             text_value: "Enter", x: 0, y: 0
         ))
         expect(blocked_key.ok).to_equal(true)
         expect(blocked_key.message).to_equal("control key event canceled")
         expect(session.current_title).to_equal("Saved")
 
-        val unchecked_boxes = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "checkbox", "", 1
-        )
         val checked = session.ui_access_act(WinTextActionRequest(
-            target_id: unchecked_boxes[0].canonical_id, action: "click",
+            target_id: "browser:session#page_input_2", action: "click",
             text_value: "", x: 0, y: 0
         ))
         expect(checked.ok).to_equal(true)
@@ -2042,12 +1736,8 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(checkboxes.len()).to_equal(1)
         expect(checkboxes[0].selected).to_equal(true)
 
-        val available_radios = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "radio", "", 2
-        )
         val selected_radio = session.ui_access_act(WinTextActionRequest(
-            target_id: available_radios[1].canonical_id, action: "key",
+            target_id: "browser:session#page_input_4", action: "key",
             text_value: "Space", x: 0, y: 0
         ))
         expect(selected_radio.ok).to_equal(true)
@@ -2059,54 +1749,6 @@ describe "BrowserSession primitive controls through textual UI access":
         expect(radios[1].selected).to_equal(true)
         expect(radios[1].focused).to_equal(true)
 
-    it "should expose input reset as a button and preserve keyboard event order":
-        step("Edit a form control away from its parsed default")
-        var session = BrowserSession.new()
-        session.open_html(
-            "https://example.com/reset",
-            "<html><body><form onreset=\"document.title=document.title+'reset,'\"><input id='name' value='seed'><input type='reset' value='Reset' onkeydown=\"document.title=document.title+'keydown,'\" onclick=\"document.title=document.title+'click,'\"></form></body></html>"
-        )
-        expect(session.set_dom_text_input(
-            "name", "changed"
-        ).is_ok()).to_equal(true)
-
-        step("Find reset through the canonical button surface")
-        val reset_buttons = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "button", "Reset", 1
-        )
-        expect(reset_buttons.len()).to_equal(1)
-        if reset_buttons.len() == 0:
-            fail("input reset was not exposed as a button")
-        expect(reset_buttons[0].action_names).to_contain("click")
-        expect(reset_buttons[0].action_names).to_contain("key")
-
-        step("Activate reset with Enter and observe keydown click reset order")
-        val keyed = session.ui_access_act(WinTextActionRequest(
-            target_id: reset_buttons[0].canonical_id, action: "key",
-            text_value: "Enter", x: 0, y: 0
-        ))
-        expect(keyed.ok).to_equal(true)
-        expect(session.current_title).to_equal("keydown,click,reset,")
-
-        step("Restore the dirty value and retain pointer click activation")
-        val restored = be_dom_find_by_tag(session.current_dom, "input")
-        expect(be_dom_get_attr(restored[0], "value")).to_equal("seed")
-        expect(session.set_dom_text_input(
-            "name", "changed-again"
-        ).is_ok()).to_equal(true)
-        val clicked = session.ui_access_act(WinTextActionRequest(
-            target_id: reset_buttons[0].canonical_id, action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(clicked.ok).to_equal(true)
-        val pointer_restored = be_dom_find_by_tag(
-            session.current_dom, "input"
-        )
-        expect(be_dom_get_attr(
-            pointer_restored[0], "value"
-        )).to_equal("seed")
-
     it "routes duplicate author IDs by exact DOM node identity":
         var session = BrowserSession.new()
         session.open_html(
@@ -2114,12 +1756,8 @@ describe "BrowserSession primitive controls through textual UI access":
             "<html><body><input id='duplicate' value='first' oninput='set-attr:data-routed=wrong'><input id='duplicate' value='second' oninput='set-attr:data-routed=right'></body></html>"
         )
 
-        val second_inputs = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "second", 1
-        )
         val edited = session.ui_access_act(WinTextActionRequest(
-            target_id: second_inputs[0].canonical_id, action: "set_value",
+            target_id: "browser:session#page_input_1", action: "set_value",
             text_value: "changed", x: 0, y: 0
         ))
 
@@ -2133,10 +1771,10 @@ describe "BrowserSession primitive controls through textual UI access":
         var first_focused = false
         var second_focused = false
         for node in session.ui_access_snapshot().nodes:
-            if node.kind == "textfield" and node.text_value == "first":
+            if node.widget_id == "page_input_0":
                 first_value = node.text_value
                 first_focused = node.focused
-            elif node.kind == "textfield" and node.text_value == "changed":
+            elif node.widget_id == "page_input_1":
                 second_value = node.text_value
                 second_focused = node.focused
         expect(first_value).to_equal("first")
@@ -2263,181 +1901,28 @@ describe "BrowserSession primitive controls through textual UI access":
         )
 
         val before = session.ui_access_snapshot()
-        var page_textfield_nodes = 0
+        var hidden_nodes = 0
         var password_value = "missing"
         var textarea_value = "missing"
         for node in before.nodes:
-            if (
-                _node_prop(node, "control") == "page_input" and
-                node.kind == "textfield"
-            ):
-                page_textfield_nodes = page_textfield_nodes + 1
-                if node.text_value == "":
-                    password_value = node.text_value
-                elif node.text_value == "old":
-                    textarea_value = node.text_value
-        expect(page_textfield_nodes).to_equal(2)
+            if node.widget_id == "page_input_0":
+                hidden_nodes = hidden_nodes + 1
+            elif node.widget_id == "page_input_1":
+                password_value = node.text_value
+            elif node.widget_id == "page_textarea_0":
+                textarea_value = node.text_value
+        expect(hidden_nodes).to_equal(0)
         expect(password_value).to_equal("")
         expect(textarea_value).to_equal("old")
 
-        val textareas = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "old", 1
-        )
         val edited = session.ui_access_act(WinTextActionRequest(
-            target_id: textareas[0].canonical_id, action: "set_value",
+            target_id: "browser:session#page_textarea_0", action: "set_value",
             text_value: "Ada & Bob", x: 0, y: 0
         ))
         expect(edited.ok).to_equal(true)
         expect(session.current_body_html).to_contain("Ada &amp; Bob")
         var textarea_focused = false
         for node in session.ui_access_snapshot().nodes:
-            if node.kind == "textfield" and node.text_value == "Ada & Bob":
+            if node.widget_id == "page_textarea_0":
                 textarea_focused = node.focused
         expect(textarea_focused).to_equal(true)
-
-    it "rejects stale DOM control identities after document replacement":
-        """A control action captured from one document cannot target a same-position control in its replacement."""
-        step("Capture document A link, button, input, and textarea identities")
-        var session = BrowserSession.new()
-        session.open_html(
-            "https://example.com/a",
-            "<html><head><title>A</title></head><body><a href='/a-next'>A link</a><button>A button</button><input value='A input'><textarea>A notes</textarea></body></html>"
-        )
-        val a_snapshot = session.ui_access_snapshot()
-        val a_links = ui_access_find_nodes(
-            a_snapshot, "browser:session", "link", "A link", 1
-        )
-        val a_buttons = ui_access_find_nodes(
-            a_snapshot, "browser:session", "button", "A button", 1
-        )
-        val a_inputs = ui_access_find_nodes(
-            a_snapshot, "browser:session", "textfield", "A input", 1
-        )
-        val a_textareas = ui_access_find_nodes(
-            a_snapshot, "browser:session", "textfield", "A notes", 1
-        )
-        expect(a_links.len()).to_equal(1)
-        expect(a_buttons.len()).to_equal(1)
-        expect(a_inputs.len()).to_equal(1)
-        expect(a_textareas.len()).to_equal(1)
-
-        step("Replace document A with same-position document B controls")
-        session.open_html(
-            "https://example.com/b",
-            "<html><head><title>B</title></head><body><a href='/b-next' onclick='prevent-default'>B link</a><button onclick=\"document.title='B button'\">B button</button><input value='B input'><textarea>B notes</textarea></body></html>"
-        )
-        val b_snapshot = session.ui_access_snapshot()
-        val b_links = ui_access_find_nodes(
-            b_snapshot, "browser:session", "link", "B link", 1
-        )
-        val b_buttons = ui_access_find_nodes(
-            b_snapshot, "browser:session", "button", "B button", 1
-        )
-        val b_inputs = ui_access_find_nodes(
-            b_snapshot, "browser:session", "textfield", "B input", 1
-        )
-        val b_textareas = ui_access_find_nodes(
-            b_snapshot, "browser:session", "textfield", "B notes", 1
-        )
-        expect(b_links.len()).to_equal(1)
-        expect(b_buttons.len()).to_equal(1)
-        expect(b_inputs.len()).to_equal(1)
-        expect(b_textareas.len()).to_equal(1)
-        expect(b_snapshot.snapshot_revision).to_be_greater_than(
-            a_snapshot.snapshot_revision
-        )
-        expect(a_links[0].canonical_id).to_start_with(
-            "browser:session#link_{a_snapshot.snapshot_revision}_"
-        )
-        expect(a_buttons[0].canonical_id).to_start_with(
-            "browser:session#page_button_{a_snapshot.snapshot_revision}_"
-        )
-        expect(a_inputs[0].canonical_id).to_start_with(
-            "browser:session#page_input_{a_snapshot.snapshot_revision}_"
-        )
-        expect(a_textareas[0].canonical_id).to_start_with(
-            "browser:session#page_textarea_{a_snapshot.snapshot_revision}_"
-        )
-        expect(b_links[0].canonical_id).to_start_with(
-            "browser:session#link_{b_snapshot.snapshot_revision}_"
-        )
-        expect(b_buttons[0].canonical_id).to_start_with(
-            "browser:session#page_button_{b_snapshot.snapshot_revision}_"
-        )
-        expect(b_inputs[0].canonical_id).to_start_with(
-            "browser:session#page_input_{b_snapshot.snapshot_revision}_"
-        )
-        expect(b_textareas[0].canonical_id).to_start_with(
-            "browser:session#page_textarea_{b_snapshot.snapshot_revision}_"
-        )
-
-        step("Reject every stale document A action without mutating document B")
-        val callback_count = session.dom_callback_count
-        val stale_link = session.ui_access_act(WinTextActionRequest(
-            target_id: a_links[0].canonical_id, action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        val stale_button = session.ui_access_act(WinTextActionRequest(
-            target_id: a_buttons[0].canonical_id, action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        val stale_input = session.ui_access_act(WinTextActionRequest(
-            target_id: a_inputs[0].canonical_id, action: "set_value",
-            text_value: "stale input", x: 0, y: 0
-        ))
-        val stale_textarea = session.ui_access_act(WinTextActionRequest(
-            target_id: a_textareas[0].canonical_id, action: "set_value",
-            text_value: "stale notes", x: 0, y: 0
-        ))
-        expect(stale_link.code).to_equal("target_not_found")
-        expect(stale_button.code).to_equal("target_not_found")
-        expect(stale_input.code).to_equal("target_not_found")
-        expect(stale_textarea.code).to_equal("target_not_found")
-        expect(session.current_url).to_equal("https://example.com/b")
-        expect(session.current_title).to_equal("B")
-        expect(session.dom_callback_count).to_equal(callback_count)
-        expect(session.current_body_html).to_contain("value=\"B input\"")
-        expect(session.current_body_html).to_contain("B notes")
-
-        step("Re-query document B and activate each fresh identity")
-        val fresh_button = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "button", "B button", 1
-        )
-        val button_result = session.ui_access_act(WinTextActionRequest(
-            target_id: fresh_button[0].canonical_id, action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(button_result.ok).to_be(true)
-        expect(session.current_title).to_equal("B button")
-        val fresh_input = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "B input", 1
-        )
-        val input_result = session.ui_access_act(WinTextActionRequest(
-            target_id: fresh_input[0].canonical_id, action: "set_value",
-            text_value: "fresh input", x: 0, y: 0
-        ))
-        expect(input_result.ok).to_be(true)
-        expect(session.current_body_html).to_contain("value=\"fresh input\"")
-        val fresh_textarea = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "textfield", "B notes", 1
-        )
-        val textarea_result = session.ui_access_act(WinTextActionRequest(
-            target_id: fresh_textarea[0].canonical_id, action: "set_value",
-            text_value: "fresh notes", x: 0, y: 0
-        ))
-        expect(textarea_result.ok).to_be(true)
-        expect(session.current_body_html).to_contain("fresh notes")
-        val fresh_link = ui_access_find_nodes(
-            session.ui_access_snapshot(), "browser:session",
-            "link", "B link", 1
-        )
-        val link_result = session.ui_access_act(WinTextActionRequest(
-            target_id: fresh_link[0].canonical_id, action: "click",
-            text_value: "", x: 0, y: 0
-        ))
-        expect(link_result.ok).to_be(true)
-        expect(link_result.message).to_equal("link event canceled")

@@ -878,6 +878,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_cuda_get_error_string", gpu::rt_cuda_get_error_string_fn);
     insert_simple!("rt_cuda_init", gpu::rt_cuda_init_fn);
     insert_simple!("rt_cuda_launch_kernel", gpu::rt_cuda_launch_kernel_fn);
+    insert_simple!("rt_cuda_host_alloc", gpu::rt_cuda_host_alloc_fn);
+    insert_simple!("rt_cuda_host_free", gpu::rt_cuda_host_free_fn);
     insert_simple!("rt_cuda_mem_alloc", gpu::rt_cuda_mem_alloc_fn);
     insert_simple!("rt_cuda_memcpy_dtod", gpu::rt_cuda_memcpy_dtod_fn);
     insert_simple!("rt_cuda_memcpy_dtoh", gpu::rt_cuda_memcpy_dtoh_fn);
@@ -1508,6 +1510,7 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_ps_torch_tensor_zeros", torch::rt_ps_torch_tensor_zeros);
     insert_simple!("rt_ptr_read_i32", memory::rt_ptr_read_i32);
     insert_simple!("rt_ptr_read_i64", memory::rt_ptr_read_i64);
+    insert_simple!("rt_ptr_read_u8", memory::rt_ptr_read_u8);
     insert_simple!("rt_ptr_write_i32", memory::rt_ptr_write_i32);
     insert_simple!("rt_ptr_write_i64", memory::rt_ptr_write_i64);
     insert_simple!("rt_ptr_write_u8", memory::rt_ptr_write_u8);

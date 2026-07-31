@@ -33,6 +33,9 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    - For broad cooperative lanes, use the shared interface and manual
      setup/checker helper names from `## Cooperative Review`; unresolved
      placeholders must fail explicitly with `assert(false)` or `fail(...)`.
+   - New or updated scenarios use `use std.spec.*`, `describe`, `it`, `step`,
+     `expect`, built-in matchers, and direct value assertions. Do not add
+     Given/When/Then flows or boolean-wrapper assertions.
 4. **Write scenarios** using those steps — each `it` block is a manual scenario
 5. **Add manual metadata:**
    - `# @inline` for reusable setup (not shown as standalone sections)
@@ -41,10 +44,15 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    - `# @manual: folded` for edge cases, `# @manual: skip` for internal checks
    - `# @manual-file: folded` at file level for edge-case-heavy files
 6. Create spec files at `test/` paths mirroring the architecture's module paths
+   — never under `doc/06_spec/`.
 7. Use ONLY built-in SPipe matchers (see below)
 8. Every spec MUST fail right now — the code does not exist yet
 9. Run `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index` for each
    changed spec and require complete documentation with `0 stubs`
+   For critical features, validate the versioned evidence manifest and ensure
+   `EVIDENCE_SHOWCASE.md` links the authoritative generated manual. Status and
+   artifact truth must come from the manifest. Review text/still/motion,
+   inert-HTML, and protocol evidence as an operator page.
    Interpreter diagnostics must reuse `build_interpreter_result_wrapper`; never
    trust outer PASS/exit without executed-count and spec-exit counters. Focused
    native font evidence uses `src/app/test/font_evidence_runner.spl` and

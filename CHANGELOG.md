@@ -39,6 +39,8 @@ All notable changes to Simple Language will be documented in this file.
   existing rendered-payload routes.
 
 ### Fixed
+- **Evidence scenario manuals** — add concise overview, operator examples, and
+  research-to-design traceability to the nine generated showcase sources.
 - **SPipe docgen nested string dispatch** — normalize paths and imports through
   typed intermediate values so the self-hosted generator no longer fails on
   chained `replace(...).split(...)` calls.

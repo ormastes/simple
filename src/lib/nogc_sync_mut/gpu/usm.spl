@@ -12,17 +12,13 @@ On GpuBackend.None_ (and whenever no native runtime binding is available)
 all three kinds are backed by deterministic host byte storage, so specs run
 without GPU hardware and behave identically across machines.
 
-TODO(W1.2-native): bind device/shared kinds to rt_cuda_malloc_managed /
-rt_cuda_host_alloc (new seed externs) and rt_oneapi_malloc_shared once the
-seed bootstrap redeploy lands; the API here is final.
+TODO(W1.2-native): bind shared kind to rt_cuda_malloc_managed and
+rt_oneapi_malloc_shared once those runtime owners land; the API here is final.
 """
 
 use std.common.gpu.device.{Gpu, GpuBackend}
-
-# Native CUDA runtime exports (same ABI as src/lib/nogc_sync_mut/cuda/sffi.spl).
-extern fn rt_cuda_available() -> i64
-extern fn rt_cuda_mem_alloc(size: i64) -> i64
-extern fn rt_cuda_mem_free(ptr: i64) -> i64
+use std.nogc_sync_mut.cuda.sffi.{rt_cuda_available, rt_cuda_mem_alloc, rt_cuda_mem_free, rt_cuda_host_alloc, rt_cuda_host_free}
+use std.nogc_sync_mut.ptr.raw.{raw_read_u8, raw_write_u8}
 
 fn usm_cuda_available() -> i64:
     rt_cuda_available()
@@ -32,6 +28,12 @@ fn usm_cuda_mem_alloc(size: i64) -> i64:
 
 fn usm_cuda_mem_free(ptr: i64) -> i64:
     rt_cuda_mem_free(ptr)
+
+fn usm_cuda_host_alloc(size: i64) -> i64:
+    rt_cuda_host_alloc(size)
+
+fn usm_cuda_host_free(ptr: i64) -> i64:
+    rt_cuda_host_free(ptr)
 
 fn _is_cuda(gpu: Gpu) -> bool:
     match gpu.backend:
@@ -64,6 +66,10 @@ class UsmBuffer:
             return self.ptr == 0
         true
 
+    fn native_pinned() -> bool:
+        """True only when host kind is backed by CUDA page-locked memory."""
+        self.kind == "host" and self.ptr > 0
+
     me write_u8(offset: i64, value: i64) -> bool:
         if not self.valid or offset < 0 or offset >= self.bytes:
             return false
@@ -71,6 +77,9 @@ class UsmBuffer:
             return false
         if not self.host_visible():
             return false
+        if self.native_pinned():
+            raw_write_u8(self.ptr, offset, value)
+            return true
         self.storage[offset] = value as u8
         true
 
@@ -80,6 +89,8 @@ class UsmBuffer:
             return -1
         if not self.host_visible():
             return -1
+        if self.native_pinned():
+            return raw_read_u8(self.ptr, offset)
         self.storage[offset] as i64
 
     me copy_from(src: UsmBuffer, count: i64) -> bool:
@@ -96,15 +107,19 @@ class UsmBuffer:
             return false
         var i = 0
         while i < count:
-            self.storage[i] = src.storage[i]
+            if not self.write_u8(i, src.read_u8(i)):
+                return false
             i = i + 1
         true
 
     me free() -> bool:
         if not self.valid:
             return false
-        if self.ptr != 0:
-            usm_cuda_mem_free(self.ptr)
+        if self.ptr > 0:
+            if self.kind == "host":
+                usm_cuda_host_free(self.ptr)
+            else:
+                usm_cuda_mem_free(self.ptr)
             self.ptr = 0
         self.valid = false
         self.storage = []
@@ -135,12 +150,16 @@ fn usm_malloc_device(gpu: Gpu, bytes: i64) -> UsmBuffer:
     """
     if bytes > 0 and _is_cuda(gpu) and usm_cuda_available() == 1:
         val ptr = usm_cuda_mem_alloc(bytes)
-        if ptr != 0:
+        if ptr > 0:
             return UsmBuffer(kind: "device", device_id: gpu.device_id, ptr: ptr, bytes: bytes, storage: [], valid: true)
     _usm_alloc("device", gpu.device_id, bytes)
 
 fn usm_malloc_host(bytes: i64) -> UsmBuffer:
-    """Allocate host memory accessible to devices (SYCL malloc_host)."""
+    """Allocate CUDA-pinned host memory when available, else host fallback."""
+    if bytes > 0 and usm_cuda_available() == 1:
+        val ptr = usm_cuda_host_alloc(bytes)
+        if ptr > 0:
+            return UsmBuffer(kind: "host", device_id: -1, ptr: ptr, bytes: bytes, storage: [], valid: true)
     _usm_alloc("host", -1, bytes)
 
 fn usm_malloc_shared(gpu: Gpu, bytes: i64) -> UsmBuffer:

@@ -583,6 +583,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_free", &[I64], &[]),
     RuntimeFuncSpec::new("rt_ptr_to_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_ptr", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ptr_read_u8", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_ptr_write_u8", &[I64, I64, I64], &[]),
     RuntimeFuncSpec::new("rt_dyn_torch_tensor_from_bits_1d", &[I64, I64], &[I64]),
     // =========================================================================
     // Port I/O (baremetal x86 — classified as Core by tier_of fallthrough)
@@ -1631,6 +1633,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_cuda_ctx_destroy", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_mem_alloc", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_mem_free", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_host_alloc", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cuda_host_free", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memset", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_memcpy_dtoh", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_module_load_data", &[I64, I64], &[I64]), // ptx_ptr, ptx_len -> module

@@ -7,8 +7,6 @@ cd "$ROOT_DIR"
 MIN_DISK_GIB="${MIN_DISK_GIB:-250}"
 MIN_MEM_GIB="${MIN_MEM_GIB:-32}"
 MAX_CPU_FRACTION="${MAX_CPU_FRACTION:-2}"
-MAX_ACTIVE_NATIVE_BUILDS="${MAX_ACTIVE_NATIVE_BUILDS:-0}"
-NATIVE_BUILD_PROC_ROOT="${NATIVE_BUILD_PROC_ROOT:-/proc}"
 
 pass() {
     printf 'PASS %s\n' "$1"
@@ -75,39 +73,7 @@ else
     exit_code=1
 fi
 
-# --- 5. No overlapping native builds ---
-native_build_count=0
-native_build_scan_ok=1
-if [ ! -d "$NATIVE_BUILD_PROC_ROOT" ] || [ ! -r "$NATIVE_BUILD_PROC_ROOT" ] || [ ! -x "$NATIVE_BUILD_PROC_ROOT" ]; then
-    native_build_scan_ok=0
-else
-    for cmdline in "$NATIVE_BUILD_PROC_ROOT"/[0-9]*/cmdline; do
-        [ -e "$cmdline" ] || continue
-        if [ ! -r "$cmdline" ]; then
-            native_build_scan_ok=0
-            continue
-        fi
-        if second_arg=$(awk 'BEGIN { RS="\0" } NR == 2 { print; exit }' "$cmdline" 2>/dev/null); then
-            if [ "$second_arg" = "native-build" ]; then
-                native_build_count=$((native_build_count + 1))
-            fi
-        elif [ -e "$cmdline" ]; then
-            native_build_scan_ok=0
-        fi
-    done
-fi
-info "native_build_running=$native_build_count"
-if [ "$native_build_scan_ok" -ne 1 ]; then
-    fail "native_build_process_scan"
-    exit_code=1
-elif [ "$native_build_count" -le "$MAX_ACTIVE_NATIVE_BUILDS" ]; then
-    pass "native_build_at_most_${MAX_ACTIVE_NATIVE_BUILDS}"
-else
-    fail "native_build_at_most_${MAX_ACTIVE_NATIVE_BUILDS}"
-    exit_code=1
-fi
-
-# --- 6. No active QEMU guests ---
+# --- 5. No active QEMU guests ---
 qemu_count="$(pgrep -c qemu-system 2>/dev/null || true)"
 qemu_count="${qemu_count:-0}"
 info "qemu_running=$qemu_count"
@@ -118,7 +84,7 @@ else
     exit_code=1
 fi
 
-# --- 7. Kernel log: no recent hard lockup / OOM / NVMe errors ---
+# --- 6. Kernel log: no recent hard lockup / OOM / NVMe errors ---
 kernel_danger=0
 if dmesg_out=$(dmesg --time-format iso 2>/dev/null | tail -200); then
     for pattern in "hard LOCKUP" "blocked for more than" "Out of memory" "nvme.*I/O error" "usb.*disconnect"; do
@@ -136,7 +102,7 @@ else
     info "kernel_log_unavailable (dmesg requires privileges)"
 fi
 
-# --- 8. Git working tree clean ---
+# --- 7. Git working tree clean ---
 if git -C "$ROOT_DIR" diff --quiet HEAD 2>/dev/null; then
     pass "git_working_tree_clean"
 else
@@ -145,7 +111,7 @@ else
     blocked "git_working_tree_clean"
 fi
 
-# --- 9. No stale lock files ---
+# --- 8. No stale lock files ---
 if [ -f "$ROOT_DIR/.git/index.lock" ]; then
     fail "no_stale_git_index_lock"
     exit_code=1

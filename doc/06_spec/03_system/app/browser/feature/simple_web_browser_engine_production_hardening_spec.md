@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 23 | 23 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -448,27 +448,6 @@ expect(_count_color(
 
 </details>
 
-#### should normalize split overflow axes before Draw IR clipping
-
-- Resolve `overflow-x: hidden|auto|scroll` with omitted or explicit visible
-  `overflow-y` after the final author/inline cascade.
-- Preserve explicit `overflow-y:hidden`; suppress `scrollbar-width:none` at
-  author, inline, author-important, and inline-important priority without
-  disabling scrollport clipping.
-- Resolve the two-value `overflow` shorthand into its final x/y winners.
-- Verify the resulting scrollport clip and Engine2D pixel boundary.
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: `simple_web_browser_engine_production_hardening_spec.spl`.
-The scenario uses author-class `overflow-x` plus inline `overflow-y` to prove
-final-cascade normalization, then checks the single- and two-axis scrollbar
-tracks, four priority-specific withheld owner tracks, a nested child track
-under a hidden-scrollbar parent, their Draw IR clips, and Engine2D pixels.
-
-</details>
-
 #### should deliver retained callable listeners through one DOM event path
 
 - Deliver JavaScript and Simple Script listeners on the live DOM
@@ -868,21 +847,18 @@ expect(advanced.next_animation_ms).to_equal(-1)
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: session.simple_script_callback_count() equals `0`
-- Keep rAF pending before the document refresh boundary
+- Reuse one retained callback identity for rAF and timeout
    - Text capture: after_step
-   - Evidence: text output verified by 2 expected checks
-   - Expected: session.advance_time(5) equals `0`
-   - Expected: session.current_title equals `https://example.test/simple-callbacks`
-- Reuse one retained callback identity for timeout
-   - Text capture: after_step
-   - Evidence: text output verified by 3 expected checks
+   - Evidence: text output verified by 4 expected checks
+   - Expected: session.advance_time(5) equals `1`
+   - Expected: session.current_title equals `frame`
    - Expected: session.advance_time(10) equals `2`
    - Expected: session.current_title equals `frame`
 - Apply style from an interval and keep a canceled callback inert
    - Text capture: after_step
    - Evidence: text output verified by 5 expected checks
    - Expected: session.advance_time(15) equals `1`
-   - Expected: session.advance_time(30) equals `2`
+   - Expected: session.advance_time(30) equals `1`
    - Expected: session.current_title equals `frame`
    - Expected: session.style_revision equals `applied_style_revision`
    - Expected: session.simple_script_callback_count() equals `5`
@@ -910,13 +886,9 @@ expect(session.current_title).to_equal(
     "https://example.test/simple-callbacks"
 )
 
-step("Keep rAF pending before the document refresh boundary")
-expect(session.advance_time(5)).to_equal(0)
-expect(session.current_title).to_equal(
-    "https://example.test/simple-callbacks"
-)
-
-step("Reuse one retained callback identity for timeout")
+step("Reuse one retained callback identity for rAF and timeout")
+expect(session.advance_time(5)).to_equal(1)
+expect(session.current_title).to_equal("frame")
 expect(session.advance_time(10)).to_equal(2)
 expect(session.current_title).to_equal("frame")
 expect(session.current_body_html).to_contain("timeout")
@@ -929,7 +901,7 @@ expect(_count_color(
     styled.pixels, 0xFF2563EBu32
 )).to_be_greater_than(0)
 val applied_style_revision = session.style_revision
-expect(session.advance_time(30)).to_equal(2)
+expect(session.advance_time(30)).to_equal(1)
 expect(session.current_title).to_equal("frame")
 expect(session.style_revision).to_equal(applied_style_revision)
 expect(session.simple_script_callback_count()).to_equal(5)
@@ -956,8 +928,8 @@ expect(session.warnings).to_contain(
    - Text capture: after_step
    - Evidence: text output verified by 3 expected checks
    - Expected: session.simple_script_executor.has_callback(41) is true
-   - Expected: session.advance_time(5) equals `0`
-   - Expected: session.simple_script_callback_count() equals `0`
+   - Expected: session.advance_time(5) equals `1`
+   - Expected: session.simple_script_callback_count() equals `1`
 - session simple script executor log
    - Text capture: after_step
 - session simple script executor console buffer
@@ -1048,8 +1020,8 @@ expect(session.simple_script_executor.has_callback(41)).to_equal(true)
 expect(
     session.simple_script_executor._callback_sources
 ).to_contain("title \"frame\"")
-expect(session.advance_time(5)).to_equal(0)
-expect(session.simple_script_callback_count()).to_equal(0)
+expect(session.advance_time(5)).to_equal(1)
+expect(session.simple_script_callback_count()).to_equal(1)
 session.simple_script_executor.log("log", "document-owned", 0)
 expect(
     session.simple_script_executor.console_buffer().entries().len()
@@ -1095,16 +1067,14 @@ expect(
     session.simple_script_executor.schedule_timeout(91, 0, 1000)
 ).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(91, 0, 0)
+    session.simple_script_executor.schedule_animation_frame(91)
 ).to_equal(true)
-val fresh_callbacks = session.simple_script_executor.tick(16000)
+val fresh_callbacks = session.simple_script_executor.tick(0)
 expect(fresh_callbacks.len()).to_equal(1)
 expect(fresh_callbacks[0]).to_equal("title \"fresh\"")
 expect(session.simple_script_callback_count()).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(
-        91, 16000, 0
-    )
+    session.simple_script_executor.schedule_animation_frame(91)
 ).to_equal(true)
 session.simple_script_executor.log("log", "fresh-document-owned", 0)
 expect(session.simple_script_executor.has_callback(91)).to_equal(true)

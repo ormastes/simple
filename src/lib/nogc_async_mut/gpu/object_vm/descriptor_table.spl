@@ -1,0 +1,380 @@
+"""GPU Object VM descriptor table and CPU simulation.
+
+One descriptor owns one arena or shard. Persistent references contain no raw
+address; a synthetic CPU address is exposed only through an active lease.
+"""
+
+use std.common.compute.placement_contracts.{AnyObject, ObjectRef, EntityRef, ResidentView, ArenaResidency, ResidencyTier}
+
+struct ObjectDescriptor:
+    generation: i64
+    next_free: i64
+    state: i64
+    next_lease_epoch: i64
+    byte_len: i64
+
+struct ActiveLease:
+    descriptor_index: i64
+    generation: i64
+    epoch: i64
+
+struct VmResult:
+    ok: bool
+    status: text
+
+struct VmResolveResult:
+    ok: bool
+    status: text
+    residency: ResidencyTier
+    byte_len: i64
+    entity_count: i64
+
+struct VmByteResult:
+    ok: bool
+    status: text
+    value: u8
+
+fn _result(ok: bool, status: text) -> VmResult:
+    VmResult(ok: ok, status: status)
+
+fn _not_resident(tier: ResidencyTier) -> bool:
+    tier != ResidencyTier.DeviceLocal and tier != ResidencyTier.DeviceShared
+
+fn _residency_code(tier: ResidencyTier) -> i64:
+    match tier:
+        case ResidencyTier.DeviceLocal: 0
+        case ResidencyTier.DeviceShared: 1
+        case ResidencyTier.HostPinned: 2
+        case ResidencyTier.HostHot: 3
+        case ResidencyTier.HostCold: 4
+        case ResidencyTier.SsdCas: 5
+        case ResidencyTier.Recomputable: 6
+
+fn _residency(state: i64) -> ResidencyTier:
+    match state & 7:
+        case 0: ResidencyTier.DeviceLocal
+        case 1: ResidencyTier.DeviceShared
+        case 2: ResidencyTier.HostPinned
+        case 3: ResidencyTier.HostHot
+        case 4: ResidencyTier.HostCold
+        case 5: ResidencyTier.SsdCas
+        case _: ResidencyTier.Recomputable
+
+fn _state(tier: ResidencyTier, live: bool, miss_pending: bool, protected: bool) -> i64:
+    _residency_code(tier) + (if live: 8 else: 0) +
+        (if miss_pending: 16 else: 0) + (if protected: 32 else: 0)
+
+fn _state_flag(state: i64, mask: i64) -> bool:
+    (state & mask) != 0
+
+fn _with_flag(state: i64, mask: i64, enabled: bool) -> i64:
+    val present = _state_flag(state, mask)
+    if enabled and not present: return state + mask
+    if not enabled and present: return state - mask
+    state
+
+fn _with_residency(state: i64, tier: ResidencyTier) -> i64:
+    state - (state & 7) + _residency_code(tier)
+
+class DescriptorTable:
+    descriptors: [ObjectDescriptor]
+    payloads: [[u8]]
+    entity_counts: [i64]
+    pin_counts: [i64]
+    in_flight_counts: [i64]
+    leases: [ActiveLease]
+    free_head: i64
+    live_count_value: i64
+    coalesced_miss_count_value: i64
+    eviction_count_value: i64
+
+    static fn create() -> DescriptorTable:
+        DescriptorTable(
+            descriptors: [],
+            payloads: [],
+            entity_counts: [],
+            pin_counts: [],
+            in_flight_counts: [],
+            leases: [],
+            free_head: -1,
+            live_count_value: 0,
+            coalesced_miss_count_value: 0,
+            eviction_count_value: 0
+        )
+
+    fn _handle_status(object_ref: ObjectRef<AnyObject>) -> text:
+        val index = object_ref.object_slot as i64
+        if index < 0 or index >= self.descriptors.len():
+            return "invalid-slot"
+        val descriptor = self.descriptors[index]
+        if not _state_flag(descriptor.state, 8):
+            return "stale-handle"
+        if descriptor.generation != (object_ref.generation as i64):
+            return "stale-handle"
+        "ok"
+
+    fn _has_active_lease(index: i64, generation: i64) -> bool:
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if lease.descriptor_index == index and lease.generation == generation:
+                return true
+            i = i + 1
+        false
+
+    fn _lease_active(view: ResidentView<u8>) -> bool:
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if lease.descriptor_index == (view.object_slot as i64) and lease.epoch == (view.lease_epoch as i64):
+                if lease.descriptor_index < 0 or lease.descriptor_index >= self.descriptors.len():
+                    return false
+                val descriptor = self.descriptors[lease.descriptor_index]
+                return (_state_flag(descriptor.state, 8) and
+                    descriptor.generation == lease.generation)
+            i = i + 1
+        false
+
+    me create_arena(bytes: [u8], entity_count: i64, residency: ResidencyTier) -> ObjectRef<AnyObject>:
+        var count = entity_count
+        if count < 0:
+            count = 0
+        if self.free_head >= 0:
+            val index = self.free_head
+            val previous = self.descriptors[index]
+            self.free_head = previous.next_free
+            self.descriptors[index] = ObjectDescriptor(
+                generation: previous.generation,
+                next_free: -2, state: _state(residency, true, false, false),
+                next_lease_epoch: previous.next_lease_epoch, byte_len: bytes.len()
+            )
+            self.payloads[index] = bytes
+            self.entity_counts[index] = count
+            self.pin_counts[index] = 0
+            self.in_flight_counts[index] = 0
+            self.live_count_value = self.live_count_value + 1
+            return ObjectRef(object_slot: index as u32, generation: previous.generation as u32)
+
+        val index = self.descriptors.len()
+        self.descriptors.push(ObjectDescriptor(
+            generation: 1, next_free: -2,
+            state: _state(residency, true, false, false),
+            next_lease_epoch: 1, byte_len: bytes.len()
+        ))
+        self.payloads.push(bytes)
+        self.entity_counts.push(count)
+        self.pin_counts.push(0)
+        self.in_flight_counts.push(0)
+        self.live_count_value = self.live_count_value + 1
+        ObjectRef(object_slot: index as u32, generation: 1u32)
+
+    fn resolve(object_ref: ObjectRef<AnyObject>) -> VmResolveResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return VmResolveResult(ok: false, status: status,
+                residency: ResidencyTier.HostCold, byte_len: 0, entity_count: 0)
+        val index = object_ref.object_slot as i64
+        val descriptor = self.descriptors[index]
+        VmResolveResult(ok: true, status: "ok", residency: _residency(descriptor.state),
+            byte_len: descriptor.byte_len,
+            entity_count: self.entity_counts[index])
+
+    fn arena_residency(object_ref: ObjectRef<AnyObject>) -> ArenaResidency<AnyObject>?:
+        val resolved = self.resolve(object_ref)
+        if not resolved.ok:
+            return nil
+        Some(ArenaResidency(object: object_ref,
+            entity_count: resolved.entity_count as u64,
+            byte_len: resolved.byte_len as u64))
+
+    fn entity_ref(object_ref: ObjectRef<AnyObject>, entity_index: i64) -> EntityRef?:
+        val resolved = self.resolve(object_ref)
+        if not resolved.ok or entity_index < 0 or entity_index >= resolved.entity_count:
+            return nil
+        Some(EntityRef(object_slot: object_ref.object_slot, local_index: entity_index as u32))
+
+    fn resolve_entity(object_ref: ObjectRef<AnyObject>, entity_ref: EntityRef) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = entity_ref.object_slot as i64
+        if entity_ref.object_slot != object_ref.object_slot:
+            return _result(false, "entity-object-mismatch")
+        if (entity_ref.local_index as i64) >= self.entity_counts[index]:
+            return _result(false, "entity-out-of-range")
+        _result(true, "ok")
+
+    me acquire(object_ref: ObjectRef<AnyObject>) -> ResidentView<u8>?:
+        if self._handle_status(object_ref) != "ok":
+            return nil
+        val index = object_ref.object_slot as i64
+        val descriptor = self.descriptors[index]
+        if _not_resident(_residency(descriptor.state)):
+            return nil
+        val epoch = descriptor.next_lease_epoch
+        if epoch > 4294967295:
+            return nil
+        self.descriptors[index] = ObjectDescriptor(
+            generation: descriptor.generation, next_free: descriptor.next_free, state: descriptor.state,
+            next_lease_epoch: epoch + 1, byte_len: descriptor.byte_len
+        )
+        self.leases.push(ActiveLease(
+            descriptor_index: index, generation: object_ref.generation as i64,
+            epoch: epoch
+        ))
+        Some(ResidentView(
+            # CPU-only nonzero token. It is lease-bound and never persisted.
+            device_address: (index + 1) as u64,
+            length: descriptor.byte_len as u64,
+            object_slot: object_ref.object_slot,
+            lease_epoch: epoch as u32
+        ))
+
+    fn view_status(view: ResidentView<u8>) -> text:
+        val index = view.object_slot as i64
+        if index < 0 or index >= self.descriptors.len():
+            return "invalid-slot"
+        val descriptor = self.descriptors[index]
+        if _not_resident(_residency(descriptor.state)):
+            return "stale-lease"
+        if not self._lease_active(view):
+            return "stale-lease"
+        "ok"
+
+    fn read_byte(view: ResidentView<u8>, offset: i64) -> VmByteResult:
+        val status = self.view_status(view)
+        if status != "ok":
+            return VmByteResult(ok: false, status: status, value: 0u8)
+        val bytes = self.payloads[view.object_slot as i64]
+        if offset < 0 or offset >= bytes.len():
+            return VmByteResult(ok: false, status: "byte-out-of-range", value: 0u8)
+        VmByteResult(ok: true, status: "ok", value: bytes[offset])
+
+    me release(view: ResidentView<u8>) -> VmResult:
+        val index = view.object_slot as i64
+        if index < 0 or index >= self.descriptors.len():
+            return _result(false, "invalid-slot")
+        if not self._lease_active(view):
+            return _result(false, "stale-lease")
+        var i = 0
+        while i < self.leases.len():
+            val lease = self.leases[i]
+            if lease.descriptor_index == index and lease.epoch == (view.lease_epoch as i64):
+                self.leases.remove(i)
+                return _result(true, "ok")
+            i = i + 1
+        _result(false, "stale-lease")
+
+    me pin(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        self.pin_counts[index] = self.pin_counts[index] + 1
+        self.descriptors[index].state = _with_flag(self.descriptors[index].state, 32, true)
+        _result(true, "ok")
+
+    me unpin(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        if self.pin_counts[index] <= 0:
+            return _result(false, "not-pinned")
+        self.pin_counts[index] = self.pin_counts[index] - 1
+        val protected = self.pin_counts[index] > 0 or self.in_flight_counts[index] > 0
+        self.descriptors[index].state = _with_flag(self.descriptors[index].state, 32, protected)
+        _result(true, "ok")
+
+    me begin_in_flight(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        self.in_flight_counts[index] = self.in_flight_counts[index] + 1
+        self.descriptors[index].state = _with_flag(self.descriptors[index].state, 32, true)
+        _result(true, "ok")
+
+    me end_in_flight(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        if self.in_flight_counts[index] <= 0:
+            return _result(false, "not-in-flight")
+        self.in_flight_counts[index] = self.in_flight_counts[index] - 1
+        val protected = self.pin_counts[index] > 0 or self.in_flight_counts[index] > 0
+        self.descriptors[index].state = _with_flag(self.descriptors[index].state, 32, protected)
+        _result(true, "ok")
+
+    me evict(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        val descriptor = self.descriptors[index]
+        if (_state_flag(descriptor.state, 32) or
+            self._has_active_lease(index, object_ref.generation as i64)):
+            return _result(false, "protected")
+        self.descriptors[index].state = _with_residency(descriptor.state, ResidencyTier.SsdCas)
+        self.descriptors[index].state = _with_flag(self.descriptors[index].state, 16, false)
+        self.eviction_count_value = self.eviction_count_value + 1
+        _result(true, "ok")
+
+    me request_residency(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        val descriptor = self.descriptors[index]
+        if not _not_resident(_residency(descriptor.state)):
+            return _result(true, "resident")
+        if _state_flag(descriptor.state, 16):
+            self.coalesced_miss_count_value = self.coalesced_miss_count_value + 1
+            return _result(true, "miss-coalesced")
+        self.descriptors[index].state = _with_flag(descriptor.state, 16, true)
+        _result(true, "miss-started")
+
+    me complete_residency(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        val descriptor = self.descriptors[index]
+        if not _state_flag(descriptor.state, 16):
+            return _result(false, "no-pending-miss")
+        self.descriptors[index].state = _with_residency(descriptor.state, ResidencyTier.DeviceLocal)
+        self.descriptors[index].state = _with_flag(self.descriptors[index].state, 16, false)
+        _result(true, "ok")
+
+    me destroy(object_ref: ObjectRef<AnyObject>) -> VmResult:
+        val status = self._handle_status(object_ref)
+        if status != "ok":
+            return _result(false, status)
+        val index = object_ref.object_slot as i64
+        val descriptor = self.descriptors[index]
+        if (_state_flag(descriptor.state, 32) or
+            self._has_active_lease(index, object_ref.generation as i64)):
+            return _result(false, "protected")
+        self.descriptors[index].state = _state(ResidencyTier.HostCold, false, false, false)
+        if descriptor.generation >= 4294967295:
+            self.descriptors[index].next_free = -3
+        else:
+            self.descriptors[index].generation = descriptor.generation + 1
+            self.descriptors[index].next_free = self.free_head
+            self.free_head = index
+        self.descriptors[index].byte_len = 0
+        self.payloads[index] = []
+        self.entity_counts[index] = 0
+        self.pin_counts[index] = 0
+        self.in_flight_counts[index] = 0
+        self.live_count_value = self.live_count_value - 1
+        _result(true, "ok")
+
+    fn live_count() -> i64: self.live_count_value
+    fn coalesced_miss_count() -> i64: self.coalesced_miss_count_value
+    fn eviction_count() -> i64: self.eviction_count_value
+    # ObjectDescriptor is five i64 words; payload and counters are cold side arrays.
+    fn descriptor_metadata_bytes() -> i64: 5 * 8
+
+type CpuObjectVm = DescriptorTable

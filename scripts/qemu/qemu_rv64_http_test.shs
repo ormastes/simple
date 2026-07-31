@@ -26,6 +26,7 @@ HTTPS_PORT="${HTTPS_PORT:-8443}"
 BOOT_TIMEOUT="${BOOT_TIMEOUT:-60}"
 SERIAL_LOG="${SERIAL_LOG:-build/qemu-rv64-serial.log}"
 DB_QUERY_LOG="${DB_QUERY_LOG:-$(dirname "$SERIAL_LOG")/db_query.log}"
+DB_PAGE_LOG="${DB_PAGE_LOG:-$(dirname "$SERIAL_LOG")/db_page.log}"
 EXPECT_DEFERRED=false
 EXPECT_HTTP_ONLY=false
 WITH_DISPLAY=false
@@ -71,7 +72,7 @@ while [ "$#" -gt 0 ]; do
       echo "  --expect-http-only  Pass the live HTTP gate while HTTPS/TLS remains blocked"
       echo "  --with-display      Expose a virtio-gpu PCI device and require display readiness"
       echo "  --with-storage      Expose a virtio-blk PCI device and require sector-read readiness"
-      echo "  --with-db           Exercise the guest Simple DB service through POST /db"
+      echo "  --with-db           Exercise GET /db plus POST create/insert/select and refreshed HTML"
       echo "  --allow-prebuilt-artifact"
       echo "                      Permit smoke-only evidence from an ELF without a current-source build stamp"
       exit 0
@@ -146,7 +147,9 @@ mkdir -p "$(dirname "$SERIAL_LOG")"
 rm -f "$SERIAL_LOG"
 if [ "$WITH_DB" = "true" ]; then
   mkdir -p "$(dirname "$DB_QUERY_LOG")"
+  mkdir -p "$(dirname "$DB_PAGE_LOG")"
   rm -f "$DB_QUERY_LOG"
+  rm -f "$DB_PAGE_LOG"
 fi
 QEMU_PID=""
 if [ "$WITH_STORAGE" = "true" ]; then
@@ -423,12 +426,27 @@ else
 fi
 
 if [ "$WITH_DB" = "true" ]; then
-  printf '%s' "  DB CREATE/INSERT/SELECT... "
+  printf '%s' "  DB dynamic GET/CREATE/INSERT/SELECT/refreshed GET... "
+  DB_PAGE_BEFORE=$(http_response GET /db)
   DB_RESPONSE=$(db_query_response)
+  DB_PAGE_AFTER=$(http_response GET /db)
   printf '%s\n' "$DB_RESPONSE" > "$DB_QUERY_LOG"
-  if echo "$DB_RESPONSE" | grep -q 'OK CREATE' &&
+  {
+    printf '%s\n' '--- before insert ---'
+    printf '%s\n' "$DB_PAGE_BEFORE"
+    printf '%s\n' '--- after insert ---'
+    printf '%s\n' "$DB_PAGE_AFTER"
+  } > "$DB_PAGE_LOG"
+  if echo "$DB_PAGE_BEFORE" | grep -q 'HTTP/1.1 200 OK' &&
+    echo "$DB_PAGE_BEFORE" | grep -qi 'Content-Type: text/html' &&
+    ! echo "$DB_PAGE_BEFORE" | grep -q 'codex-41' &&
+    echo "$DB_RESPONSE" | grep -q 'OK CREATE' &&
     echo "$DB_RESPONSE" | grep -q 'OK INSERT' &&
-    echo "$DB_RESPONSE" | grep -q 'codex-41'; then
+    echo "$DB_RESPONSE" | grep -q 'codex-41' &&
+    echo "$DB_PAGE_AFTER" | grep -q '<table>' &&
+    echo "$DB_PAGE_AFTER" | grep -q '<td>codex</td>' &&
+    echo "$DB_PAGE_AFTER" | grep -q '<td>answer</td>' &&
+    echo "$DB_PAGE_AFTER" | grep -q '<td>codex-41</td>'; then
     echo "PASS (codex-41)"
     PASS=$((PASS + 1))
   else

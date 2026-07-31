@@ -31,7 +31,17 @@ Codex excels at systematic test generation with full requirement traceability. U
 ## Phase 2: Step-Based SSpec Test Generation
 
 Generate executable SSpec `.spl` scenarios using the canonical matcher set.
-SPipe runs those scenarios and generates mirrored manual docs.
+SPipe runs those scenarios and generates mirrored manual docs. New or updated
+scenarios use modern SSpec only: `use std.spec.*`, `describe`, `it`, `step`,
+`expect`, built-in matchers, and direct value assertions. Do not add
+Given/When/Then helper flows, boolean-wrapper assertions, placeholder passes,
+or silent missing-evidence branches.
+
+Critical feature specs produce a validated versioned evidence manifest and
+link their authoritative generated manual from `EVIDENCE_SHOWCASE.md`.
+Manifest truth controls status, provenance, freshness, integrity, and artifact
+links. Generated operator pages render accessible text/still/motion,
+inert-HTML, and raw-plus-decoded protocol evidence.
 Executable specs belong under `test/...`; `doc/06_spec/...` is reserved for
 generated/manual scenario documentation derived from those specs.
 
@@ -408,6 +418,7 @@ Any REQ with 0 test cases is a **FAIL** — must be addressed.
 
 - Executable SSpec tests live under `test/`; generated/manual SPipe docs live under
   `doc/06_spec/`.
+- Never place executable `.spl` specs under `doc/06_spec/`.
 - `doc/06_spec` must not contain executable `.spl` specs. Run
   `find doc/06_spec -name '*_spec.spl' | wc -l` before completion and require
   `0`.

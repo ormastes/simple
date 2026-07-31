@@ -35,6 +35,9 @@ from verify; release must not repair stale `doc/07_guide`, `doc/06_spec`,
 `.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`,
 or `.gemini/commands` instructions. Before proceeding, confirm
 `find doc/06_spec -name '*_spec.spl' | wc -l` returns `0`.
+For critical features, verify must already have accepted the generated
+`EVIDENCE_SHOWCASE.md` row, its authoritative manual link, and validated
+manifest-derived status/artifacts. Release does not regenerate or hand-edit it.
 
 ### Step 1 — Determine new version
 

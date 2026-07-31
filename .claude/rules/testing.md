@@ -26,15 +26,18 @@ alwaysApply: false
 
 Write specs manual-first so `spipe-docgen` generates a scenario manual, not a
 test log: user-voice `"""..."""` docstrings, outcome-named `it` blocks,
-imperative `step("...")` calls (or `@step`-named helpers), capture evidence
-(tui_grid, gui_image, protocol_json/binary, bit_table, statistics, or
-user-registered kinds), `@manual_section` groupings, and `# @req REQ-*`
+`use std.spec.*`, imperative `step("...")` calls, direct value assertions,
+capture evidence (text, still, motion, inert HTML, or raw-plus-decoded
+protocol fields), `@manual_section` groupings, and `# @req REQ-*`
 traceability comments (parsed via grep convention until FR-6 lands native
 parsing). See glossary: [SSpec (Modern SSpec)](../../doc/glossary.md),
 anti-patterns: `doc/07_guide/infra/sspec_antipatterns.md`, example manuals:
 `doc/07_guide/app/spipe/scenario_manual_example.md` +
 `doc/07_guide/app/spipe/manual_examples/`, requirements:
 `doc/02_requirements/feature/sspec_scenario_manual.md`.
+Critical features link their generated operator manual from
+`EVIDENCE_SHOWCASE.md`; validated manifests, not prose, own status and
+artifacts. Never place executable specs under `doc/06_spec/`.
 
 ## Commands
 ```bash

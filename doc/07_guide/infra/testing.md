@@ -34,7 +34,7 @@ SPipe is a BDD (Behavior-Driven Development) testing framework for Simple, inspi
 ### Quick Start
 
 ```simple
-use std.spec
+use std.spec.*
 
 describe "Calculator":
     context "addition":
@@ -133,6 +133,12 @@ describe "Feature":
 
 Embed markdown documentation in test files using triple-quoted strings. The `simple spipe-docgen` command extracts these blocks and generates markdown documentation in `doc/06_spec/`.
 
+New or updated scenario specs use modern SSpec only:
+`use std.spec.*`, `describe`, `it`, `step`, `expect`, and built-in matchers.
+Use direct value assertions; do not add Given/When/Then helper flows,
+boolean-wrapper assertions, placeholder passes, or silent missing-evidence
+branches.
+
 Optional metadata fields `**Artifacts:**`, `**Screenshots:**`, `**TUI Captures:**`, and `**Logs:**` let a spec publish evidence links into the generated markdown. List multiple items inline with `;` or `,`, or place them on bullet lines directly below the field.
 UI-facing specs must capture visible state when practical: GUI screenshots or rendered-image captures go under `doc/06_spec/image/<spec-relative-path>/`; TUI text/ANSI captures, logs, JSON summaries, and other non-image artifacts go under `build/test-artifacts/<spec-relative-path>/`.
 Interactive GUI specs must also use actual GUI access when available. Prefer `ui_access_snapshot`, `ui_access_surface`, `ui_access_find`, `ui_access_act`, `ui_access_history`, `ui_access_observe`, `ui_access_state`, or adapter wrappers such as `simple play wm-text-*` and `play_wm_text_*` to locate a real surface, perform the action, and assert the resulting state. Screenshots prove visual evidence; they do not replace interaction coverage.
@@ -140,6 +146,14 @@ SGTTI evidence is test/debug-only. Production entrypoints must not import `std.u
 After adding or moving a UI-facing app feature spec, run `test/03_system/app/testing/feature/ui_sspec_evidence_audit_spec.spl`. That audit verifies the critical UI SSPEC lane has executable specs, mirrored generated manuals under `doc/06_spec/03_system/app/...`, and concrete UI evidence markers.
 The generated Evidence section renders a compact category summary plus per-category tables. Image paths in `**Screenshots:**` and `**TUI Captures:**` are embedded as Markdown images, and text TUI captures are embedded in details blocks when the file exists.
 For CI/publication, use `simple spipe-docgen ... --output doc/06_spec` so generated specification docs stay in the numbered documentation tree required by `FILE.md`. The `simple test --doc` flow writes summary pages to `doc/08_tracking/test/test-spec.md` and `doc/08_tracking/test/test-spec.html`, and also regenerates SPipe docs under `doc/06_spec/` for the specs that were executed. Evidence roots stay separate: screenshots under `doc/06_spec/image/` and non-image evidence under `build/test-artifacts/`.
+
+Evidence-producing scenarios persist a validated versioned manifest at
+`build/test-artifacts/<spec-relative-path>/evidence.sdn`. The manifest owns
+status, freshness, provenance, integrity, and artifact links. Generated
+manuals may embed bounded text, still, motion, inert HTML, and decoded
+protocol evidence, but they must preserve accessible summaries and must never
+derive `live-pass` from prose or an unvalidated artifact. See
+[`Evidence Showcase`](../app/spipe/evidence_showcase.md).
 
 ```simple
 """

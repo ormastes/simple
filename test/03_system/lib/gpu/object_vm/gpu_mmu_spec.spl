@@ -1,0 +1,461 @@
+"""GPU MMU operator scenario.
+
+This portable scenario proves explicit arena handles, lease safety, bounded
+staging, durable CAS recovery, deterministic planning, and honest optional
+capability gates. Direct hardware absence remains `unsupported`. The Linux RSS
+row is measured in isolated subprocesses; hosts without `/proc` do not pass it.
+"""
+
+# codex-system-test
+# @req REQ-001 REQ-002 REQ-003 REQ-004 REQ-005 REQ-006 REQ-007 REQ-008 REQ-009
+# @req NFR-001 NFR-002 NFR-003 NFR-004 NFR-005 NFR-006 NFR-007
+use std.spec.*
+use common.compute.placement_contracts.{
+    AccessPattern, AffinityGroupId, AnyObject, ArenaResidency, ArtifactId,
+    CostUnit, DeviceMask, ObjectRef, PersistencePolicy, PlacementBudget,
+    PlacementRequest, ResidentView, ResidencyTier, ResidencyTierSet, StageEpoch,
+    TransferReceipt, artifact_id, hash128, object_ref
+}
+use common.structural.identity.entity_id.{entity_ref}
+use compiler.mdsoc.feature.parsing.app.parser_input_port.{ParserInputPort}
+use compiler.mdsoc.feature.parsing.app.parser_output_port.{ParserOutputPort}
+use compiler.mdsoc.feature.linking.app.linker_input_port.{LinkerInputPort}
+use compiler.mdsoc.feature.linking.app.linker_output_port.{LinkerOutputPort}
+use common.structural.execution.contracts.{layout_execution_profile}
+use common.structural.layout.types.{LayoutArena, layout_input_with_residency}
+use common.ui.draw_ir_v3.{DrawIrV3Scene}
+use common.ui.draw_ir_v3_emit.{draw_ir_v3_emit, draw_ir_v3_empty_request, draw_ir_v3_plan_emission}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    LayoutResult, Style, simple_web_layout_bind_arena_residency,
+    simple_web_layout_render_html_draw_ir_result
+}
+use std.nogc_async_mut.gpu.object_vm.{DescriptorTable}
+use std.nogc_async_mut.gpu.store.{CasBlobId, GpuCasStore}
+use std.nogc_sync_mut.cuda.mod.{cuda_mem_alloc, cuda_mem_free}
+use std.gpu.placement_backends.{
+    PlacementObjectState, PlacementParity, PlacementPlanResult,
+    StagedPlacementBackend, placement_backend_parity, placement_backend_route,
+    placement_calibration, placement_host_rss_limit,
+    placement_modeled_peak_host_rss, placement_object_state,
+    placement_plan_states
+}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_append, file_write_bytes}
+use app.io.mod.{env_get, process_run_timeout}
+
+val RSS_PROBE = "test/03_system/lib/gpu/object_vm/gpu_mmu_rss_probe.spl"
+
+class RssProbeEvidence:
+    status: text
+    corpus_count: i64
+    runtime_base_bytes: i64
+    peak_host_rss_bytes: i64
+    staging_high_water: i64
+    staging_budget_bytes: i64
+    driver_queue_budget_bytes: i64
+    manifest_cache_bytes: i64
+    elapsed_us: i64
+    reason: text
+
+fn _field(record: text, name: text) -> text:
+    val prefix = "{name}="
+    for part in record.split(" "):
+        if part.starts_with(prefix): return part.slice(prefix.len(), part.len())
+    ""
+
+fn _rss_evidence(stdout: text) -> RssProbeEvidence:
+    var record = ""
+    for line in stdout.split("\n"):
+        if line.starts_with("gpu-mmu-rss/v1 "): record = line
+    RssProbeEvidence(
+        status: _field(record, "status"),
+        corpus_count: _field(record, "corpus_count").to_i64() ?? 0,
+        runtime_base_bytes: _field(record, "runtime_base_bytes").to_i64() ?? 0,
+        peak_host_rss_bytes: _field(record, "peak_host_rss_bytes").to_i64() ?? 0,
+        staging_high_water: _field(record, "staging_high_water").to_i64() ?? 0,
+        staging_budget_bytes: _field(record, "staging_budget_bytes").to_i64() ?? 0,
+        driver_queue_budget_bytes: _field(record, "driver_queue_budget_bytes").to_i64() ?? 0,
+        manifest_cache_bytes: _field(record, "manifest_cache_bytes").to_i64() ?? 0,
+        elapsed_us: _field(record, "elapsed_us").to_i64() ?? 0,
+        reason: _field(record, "reason")
+    )
+
+fn _run_rss_probe(corpus_count: i64) -> RssProbeEvidence:
+    val simple_binary = env_get("SIMPLE_BINARY")
+    if simple_binary == "": fail("SIMPLE_BINARY must name an admitted pure-Simple full CLI")
+    val result = process_run_timeout(simple_binary, ["run", RSS_PROBE, "{corpus_count}"], 120000)
+    expect(result.2).to_equal(0)
+    _rss_evidence(result.0)
+
+fn setup_gpu_mmu_fixture() -> DescriptorTable:
+    DescriptorTable.create()
+
+fn setup_gpu_mmu_store_fixture(name: text) -> (text, GpuCasStore):
+    val root = "/tmp/simple_gpu_mmu_system_{name}"
+    dir_remove_all(root)
+    val store = match GpuCasStore.create(root):
+        case Ok(value): value
+        case Err(message): fail(message)
+    (root, store)
+
+fn expect_stale_access_fault(vm: DescriptorTable, view: ResidentView<u8>):
+    expect(vm.view_status(view)).to_equal("stale-lease")
+
+fn expect_protected_object_resident(vm: DescriptorTable, object: ObjectRef<AnyObject>):
+    expect(vm.evict(object).status).to_equal("protected")
+
+fn expect_recovery_result(root: text):
+    match GpuCasStore.open(root):
+        case Ok(_): fail("corrupt GPU MMU store opened")
+        case Err(message): expect(message).to_start_with("gpu_cas:")
+
+fn expect_cas_blob_id(id: CasBlobId, byte_len: i64):
+    expect(id.digest.len()).to_equal(64)
+    expect(id.byte_len).to_equal(byte_len)
+
+fn expect_stage_receipt(receipt: TransferReceipt, sequence: i64, ring_slot: i64, checksum: text):
+    expect(receipt.completed).to_be(true)
+    expect(receipt.sequence).to_equal(sequence)
+    expect(receipt.ring_slot).to_equal(ring_slot)
+    expect(receipt.bytes_transferred).to_equal(4)
+    expect(receipt.checksum).to_equal(checksum)
+
+fn _budget() -> PlacementBudget:
+    PlacementBudget(
+        device_bytes: 8, host_pinned_bytes: 16, host_hot_bytes: 8,
+        staging_bytes: 16, driver_queue_bytes: 32, manifest_cache_bytes: 16,
+        runtime_base_bytes: 64
+    )
+
+fn _placement_request(object_slot: u32, recompute_cost: u64, transfer_cost: u64, reuse_distance: u32) -> PlacementRequest:
+    PlacementRequest(
+        object: object_ref<AnyObject>(object_slot, 1u32),
+        access: AccessPattern.ReadMostly,
+        required_tiers: ResidencyTierSet(tiers: []),
+        preferred_tiers: [ResidencyTier.DeviceLocal],
+        device_mask: DeviceMask(bits: 1u64),
+        expected_first_use: StageEpoch(value: 0u64),
+        expected_last_use: StageEpoch(value: 10u64),
+        expected_reuse_distance: reuse_distance,
+        recompute_cost: CostUnit(value: recompute_cost),
+        transfer_cost_hint: CostUnit(value: transfer_cost),
+        persistence: PersistencePolicy.Recomputable,
+        affinity_group: AffinityGroupId(value: 7u64),
+        deadline: nil
+    )
+
+fn _placement_states() -> [PlacementObjectState]:
+    [
+        placement_object_state(_placement_request(1u32, 100u64, 10u64, 1u32), 8, false, false),
+        placement_object_state(_placement_request(2u32, 5u64, 20u64, 50u32), 8, false, false)
+    ]
+
+fn _placement_result() -> PlacementPlanResult:
+    placement_plan_states(_placement_states(), _budget())
+
+fn expect_placement_plan(first: PlacementPlanResult, second: PlacementPlanResult):
+    expect(first.ok).to_be(true)
+    expect(first.operations.reservations.len()).to_equal(1)
+    expect(first.operations.reservations[0].object.object_slot).to_equal(1u32)
+    expect(first.operations.reservations[0].tier).to_equal(ResidencyTier.DeviceLocal)
+    expect(first.operations.reservations[0].bytes).to_equal(8)
+    expect(first.operations.transfers.len()).to_equal(1)
+    expect(first.operations.transfers[0].receipt_sequence).to_equal(0)
+    expect(first.operations.evictions.len()).to_equal(1)
+    expect(first.operations.evictions[0].object.object_slot).to_equal(2u32)
+    expect(first.operations.prefetches.len()).to_equal(1)
+    expect(first.operations.leases.len()).to_equal(1)
+    expect(first.plan.estimated_cost.host_to_device_bytes).to_equal(8u64)
+    expect(first.plan.estimated_cost.ssd_read_bytes).to_equal(8u64)
+    expect(first.plan.estimated_cost.synchronization_points).to_equal(1u32)
+    expect(first.plan.estimated_cost.predicted_latency_us).to_equal(15u64)
+    expect(first.plan.receipt_seed.value.len()).to_equal(64)
+    expect(first.plan.receipt_seed.value).to_equal(second.plan.receipt_seed.value)
+    expect(first.plan.estimated_cost.predicted_latency_us).to_equal(second.plan.estimated_cost.predicted_latency_us)
+
+fn expect_backend_byte_parity(parity: PlacementParity):
+    expect(parity.status).to_equal("simulated")
+    expect(parity.reason).to_equal("cpu-payload-parity-only")
+    expect(parity.byte_identical).to_be(true)
+    expect(parity.staged_receipt.checksum).to_equal("4:100:300")
+    expect(parity.direct_receipt.checksum).to_equal("4:100:300")
+
+fn expect_host_rss_budget(evidence: RssProbeEvidence):
+    expect(evidence.status).to_equal("pass")
+    expect(evidence.staging_high_water).to_be_less_than(evidence.staging_budget_bytes + 1)
+    val limit = evidence.runtime_base_bytes + evidence.staging_budget_bytes + evidence.driver_queue_budget_bytes + evidence.manifest_cache_bytes
+    expect(evidence.peak_host_rss_bytes).to_be_less_than(limit + 1)
+
+describe "GPU MMU explicit residency and placement":
+    # @req REQ-001 REQ-002
+    it "should resolve an arena and expose bytes only through an active lease":
+        step("Create arena handles and acquire a lease")
+        var vm = setup_gpu_mmu_fixture()
+        val object = vm.create_arena([11u8, 22u8, 33u8], 2, ResidencyTier.DeviceLocal)
+        val resolved = vm.resolve(object)
+        expect(resolved.status).to_equal("ok")
+        expect(resolved.byte_len).to_equal(3)
+        expect(resolved.entity_count).to_equal(2)
+        val entity = match vm.entity_ref(object, 1):
+            case Some(value): value
+            case nil: fail("entity handle unavailable")
+        expect(vm.resolve_entity(object, entity).status).to_equal("ok")
+        val view = match vm.acquire(object):
+            case Some(value): value
+            case nil: fail("resident lease unavailable")
+        expect(view.device_address).to_be_greater_than(0)
+        expect(vm.read_byte(view, 1).value).to_equal(22u8)
+
+    # @req REQ-009
+    # @manual: folded
+    it "should carry persistent arena residency through every frozen consumer boundary":
+        step("Create arena handles and acquire a lease")
+        val parser_input_residency = ArenaResidency(
+            object: object_ref<AnyObject>(101u32, 2u32),
+            entity_count: 2u64, byte_len: 64u64
+        )
+        val parser_input = ParserInputPort(
+            token_tags: [1, 2], token_texts: ["val", "x"],
+            token_lines: [1, 1], token_cols: [1, 5], token_count: 2,
+            source_text: "val x", token_residency: parser_input_residency
+        )
+        val parser_output = ParserOutputPort(
+            expr_count: 1, stmt_count: 1, decl_count: 1,
+            root_decls: [entity_ref(102u32, 0u32)], errors: [], error_count: 0,
+            syntax_residency: ArenaResidency(
+                object: object_ref<AnyObject>(102u32, 3u32),
+                entity_count: 1u64, byte_len: 48u64
+            )
+        )
+        expect(parser_input.token_residency.object.object_slot).to_equal(101u32)
+        expect(parser_input.token_residency.object.generation).to_equal(2u32)
+        expect(parser_output.root_decls[0].object_slot).to_equal(102u32)
+        expect(parser_output.syntax_residency.entity_count).to_equal(1u64)
+
+        val linker_input = LinkerInputPort(
+            object_file_count: 1, library_count: 0, output_type: "executable",
+            output_path: "build/gpu-mmu-consumer",
+            input_residency: ArenaResidency(
+                object: object_ref<AnyObject>(103u32, 4u32),
+                entity_count: 1u64, byte_len: 128u64
+            )
+        )
+        val linker_output = LinkerOutputPort(
+            output_path: "build/gpu-mmu-consumer", output_size_bytes: 256,
+            success: true, error_message: "",
+            output_residency: ArenaResidency(
+                object: object_ref<AnyObject>(104u32, 5u32),
+                entity_count: 1u64, byte_len: 256u64
+            )
+        )
+        expect(linker_input.input_residency.object.object_slot).to_equal(103u32)
+        expect(linker_output.output_residency.object.generation).to_equal(5u32)
+        expect(linker_output.output_residency.byte_len).to_equal(256u64)
+
+        val layout_residency = ArenaResidency(
+            object: object_ref<LayoutArena>(105u32, 6u32),
+            entity_count: 0u64, byte_len: 0u64
+        )
+        val layout_input = layout_input_with_residency(
+            [], [], [], layout_execution_profile(
+                "serial_cpu", 0, 0, 0, 0, 0, 0, 0, 0
+            ), 1, layout_residency
+        )
+        match layout_input.arena_residency:
+            case Some(actual): expect(actual.object.object_slot).to_equal(105u32)
+            case nil: fail("layout input dropped arena residency")
+
+        val web_result = simple_web_layout_render_html_draw_ir_result(
+            "<main>resident</main>", 64, 32
+        )
+        val resident_web = simple_web_layout_bind_arena_residency(
+            web_result,
+            ArenaResidency(
+                object: object_ref<Style>(106u32, 7u32),
+                entity_count: web_result.base_styles.len() as u64,
+                byte_len: 1024u64
+            ),
+            ArenaResidency(
+                object: object_ref<LayoutResult>(107u32, 8u32),
+                entity_count: web_result.raw_boxes.bx.len() as u64,
+                byte_len: 512u64
+            )
+        )
+        match resident_web.style_residency:
+            case Some(actual): expect(actual.object.object_slot).to_equal(106u32)
+            case nil: fail("style result dropped arena residency")
+        match resident_web.layout_residency:
+            case Some(actual): expect(actual.object.object_slot).to_equal(107u32)
+            case nil: fail("web layout result dropped arena residency")
+
+        val scene_request = draw_ir_v3_empty_request()
+        val scene_plan = draw_ir_v3_plan_emission(scene_request)
+        val scene_result = draw_ir_v3_emit(
+            scene_request, scene_plan, 108u32, 9u32,
+            ArenaResidency(
+                object: object_ref<DrawIrV3Scene>(108u32, 9u32),
+                entity_count: 0u64, byte_len: 0u64
+            )
+        )
+        match scene_result.scene_residency:
+            case Some(actual):
+                expect(actual.object.object_slot).to_equal(108u32)
+                expect(actual.object.generation).to_equal(9u32)
+            case nil: fail("WebScene result dropped arena residency")
+
+    # @req REQ-002 REQ-003
+    it "should reject stale access and coalesce duplicate residency misses":
+        step("Reject stale handles and protected eviction")
+        var vm = setup_gpu_mmu_fixture()
+        val object = vm.create_arena([44u8], 1, ResidencyTier.DeviceLocal)
+        val view = match vm.acquire(object):
+            case Some(value): value
+            case nil: fail("resident lease unavailable")
+        expect_protected_object_resident(vm, object)
+        expect(vm.release(view).status).to_equal("ok")
+        expect_stale_access_fault(vm, view)
+        expect(vm.pin(object).status).to_equal("ok")
+        expect_protected_object_resident(vm, object)
+        expect(vm.unpin(object).status).to_equal("ok")
+        expect(vm.destroy(object).status).to_equal("ok")
+        expect(vm.resolve(object).status).to_equal("stale-handle")
+        val cold = vm.create_arena([55u8], 1, ResidencyTier.SsdCas)
+        expect(vm.request_residency(cold).status).to_equal("miss-started")
+        expect(vm.request_residency(cold).status).to_equal("miss-coalesced")
+        expect(vm.complete_residency(cold).status).to_equal("ok")
+        expect(vm.coalesced_miss_count()).to_equal(1)
+
+    # @req REQ-004 NFR-001
+    it "should retain only the fixed staged-ring capacity":
+        step("Stage an artifact through the bounded pinned ring")
+        var backend = StagedPlacementBackend.create(2, 4, 8)
+        val capability = backend.backend_probe()
+        expect(backend.retained_bytes()).to_equal(8)
+        expect(backend.high_water_bytes()).to_equal(8)
+        expect(capability.available).to_be(true)
+        val artifact = artifact_id(hash128(1u64, 4u64), 1u32)
+        if capability.production:
+            expect(capability.backend.value).to_equal("staged_cuda")
+            expect(capability.reason).to_equal("")
+            val device_address = cuda_mem_alloc(4)
+            expect(device_address).to_be_greater_than(0)
+            val receipt = backend.stage_transfer(
+                artifact, [1u8, 2u8, 3u8, 4u8], device_address
+            )
+            expect_stage_receipt(receipt, 0, 0, "4:10:30")
+            expect(receipt.backend).to_equal("staged_cuda")
+            expect(receipt.device_address).to_equal(device_address)
+            cuda_mem_free(device_address)
+        else:
+            expect(capability.backend.value).to_equal("staged_simulation")
+            expect(capability.reason).to_equal("usm-malloc-host-is-heap-backed")
+            val first = backend.stage_transfer(artifact, [1u8, 2u8, 3u8, 4u8], 4096)
+            val second = backend.stage_transfer(artifact, [5u8, 6u8, 7u8, 8u8], 8192)
+            val third = backend.stage_transfer(artifact, [9u8, 10u8, 11u8, 12u8], 12288)
+            expect_stage_receipt(first, 0, 0, "4:10:30")
+            expect_stage_receipt(second, 1, 1, "4:26:70")
+            expect_stage_receipt(third, 2, 0, "4:42:110")
+            expect(backend.readback_bytes(third)).to_equal([9u8, 10u8, 11u8, 12u8])
+
+    # @req REQ-005 NFR-004
+    it "should recover committed content and fail closed on damaged state":
+        step("Recover the CAS after interrupted or corrupt writes")
+        val committed = setup_gpu_mmu_store_fixture("committed")
+        var store = committed.1
+        val id = match store.put_blob([71u8, 80u8, 85u8]):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect_cas_blob_id(id, 3)
+        match store.bind("arena/main", id):
+            case Ok(_): ()
+            case Err(message): fail(message)
+        val reopened = match GpuCasStore.open(committed.0):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(reopened.recovery.replayed_entries).to_equal(1)
+        val loaded = match reopened.get_blob(id):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect(loaded).to_equal([71u8, 80u8, 85u8])
+        dir_remove_all(committed.0)
+
+        val partial = setup_gpu_mmu_store_fixture("partial")
+        expect(file_append("{partial.0}/journal", "1|BIND|arena|partial")).to_be(true)
+        expect_recovery_result(partial.0)
+        dir_remove_all(partial.0)
+
+        val corrupt = setup_gpu_mmu_store_fixture("corrupt")
+        var corrupt_store = corrupt.1
+        val corrupt_id = match corrupt_store.put_blob([1u8, 2u8, 3u8, 4u8]):
+            case Ok(value): value
+            case Err(message): fail(message)
+        expect_cas_blob_id(corrupt_id, 4)
+        match corrupt_store.bind("arena/corrupt", corrupt_id):
+            case Ok(_): ()
+            case Err(message): fail(message)
+        expect(file_write_bytes("{corrupt.0}/blobs/{corrupt_id.digest}", [0u8, 0u8, 0u8, 0u8])).to_be(true)
+        expect_recovery_result(corrupt.0)
+        dir_remove_all(corrupt.0)
+
+    # @req REQ-006 NFR-003
+    it "should make the same plan for the same liveness and budget inputs":
+        step("Plan placement from liveness cost and budgets")
+        val first = _placement_result()
+        val second = _placement_result()
+        expect_placement_plan(first, second)
+
+    # @req REQ-007 NFR-006
+    it "should distinguish byte parity from unavailable direct hardware":
+        step("Compare staged and direct backend bytes")
+        val artifact = artifact_id(hash128(2u64, 4u64), 1u32)
+        val available = placement_backend_parity(artifact, [10u8, 20u8, 30u8, 40u8], 4096, true)
+        expect_backend_byte_parity(available)
+        val unavailable = placement_backend_parity(artifact, [10u8, 20u8, 30u8, 40u8], 4096, false)
+        expect(unavailable.status).to_equal("unsupported")
+        expect(unavailable.reason).to_equal("direct-hardware-unavailable")
+        expect(unavailable.byte_identical).to_be(false)
+
+    # @req REQ-008 NFR-006
+    it "should require both the experimental flag and device capability":
+        step("Keep device-initiated placement behind its gate")
+        val disabled = placement_backend_route("device_initiated", true, true, false)
+        expect(disabled.backend.value).to_equal("device_initiated")
+        expect(disabled.available).to_be(false)
+        expect(disabled.production).to_be(false)
+        expect(disabled.reason).to_equal("experimental-gate-disabled")
+        val staged = placement_backend_route("staged", true, true, true)
+        expect(staged.available).to_be(true)
+        if staged.production:
+            expect(staged.backend.value).to_equal("staged_cuda")
+            expect(staged.reason).to_equal("")
+        else:
+            expect(staged.backend.value).to_equal("staged_simulation")
+            expect(staged.reason).to_equal("usm-malloc-host-is-heap-backed")
+
+    # @req NFR-001 NFR-002 NFR-005 NFR-007
+    it "should keep measured host peak metadata and calibration within fixed bounds":
+        step("Measure the fixed host RSS bound")
+        # @capture(exec)
+        val one_x = _run_rss_probe(4)
+        val ten_x = _run_rss_probe(40)
+        expect_host_rss_budget(one_x)
+        expect_host_rss_budget(ten_x)
+        expect(one_x.corpus_count).to_equal(4)
+        expect(ten_x.corpus_count).to_equal(40)
+        expect(ten_x.staging_high_water).to_equal(ten_x.staging_budget_bytes)
+        expect(ten_x.peak_host_rss_bytes - ten_x.runtime_base_bytes).to_be_less_than(ten_x.staging_budget_bytes + ten_x.driver_queue_budget_bytes + ten_x.manifest_cache_bytes + 1)
+        var vm = setup_gpu_mmu_fixture()
+        expect(vm.descriptor_metadata_bytes()).to_equal(40)
+        val model = _budget()
+        expect(placement_host_rss_limit(model)).to_equal(128)
+        expect(placement_modeled_peak_host_rss(model, 1)).to_equal(128)
+        expect(placement_modeled_peak_host_rss(model, 10)).to_equal(128)
+        expect(ten_x.elapsed_us).to_be_greater_than(0)
+        val calibration = placement_calibration(_placement_result().plan.estimated_cost.predicted_latency_us as i64, ten_x.elapsed_us, 1000000)
+        expect(calibration.estimated_us).to_equal(15)
+        expect(calibration.observed_us).to_equal(ten_x.elapsed_us)
+        expect(calibration.confidence_bound_ppm).to_equal(1000000)
+        expect(calibration.within_confidence).to_be(true)
+        val rejected = placement_calibration(1, ten_x.elapsed_us, 1000)
+        expect(rejected.confidence_bound_ppm).to_equal(1000)
+        expect(rejected.within_confidence).to_be(false)

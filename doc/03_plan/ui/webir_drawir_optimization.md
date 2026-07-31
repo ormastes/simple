@@ -1,8 +1,8 @@
 # Web Semantic/Layout + DrawIR Pipeline — Optimization & Refactoring Plan
 
 Status: active, partially implemented. Source anchors below were refreshed on
-2026-07-31 after the stage split. Inert `srcdoc` DrawIR flattening is
-implemented; five legacy pixel callers and qualified parity remain RED. Scope:
+2026-07-31 after the stage split. **RED:** iframe rendering still uses the
+legacy private pixel blit; it is not a completed DrawIR migration. Scope:
 the private web semantic/layout stages and their relationship to the existing Draw IR layer
 (`src/lib/common/ui/draw_ir*.spl`, `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`).
 
@@ -15,8 +15,7 @@ concrete response to the perf regression exposed in
 lifecycle, compatibility-path isolation, backend capability evidence, and live
 acceptance are now ordered in
 `unified_2d_engine/draw_ir_web_renderer_reconciliation_2026-07-31.md`.
-Main parent/image lowering and inert `srcdoc` embedding are implemented;
-legacy caller migration and exact parity remain red.
+Main parent/image lowering is implemented; iframe embedding remains red.
 
 ## 1. Current State
 
@@ -33,9 +32,9 @@ legacy caller migration and exact parity remain red.
   existing semantic/layout/Draw IR result. Stage-selective mutation,
   viewport, animation, scroll, and resource invalidation remain open. No
   whole-HTML pixel cache was added.
-- External `<img>` and CSS background lowering cover part of Phase 2. Static
-  inert `srcdoc` batch embedding is implemented, while exact Path-A/Path-B
-  parity and the five legacy pixel caller migrations remain open.
+- External `<img>` and CSS background lowering cover part of Phase 2. Iframe
+  embedding and exact Path-A/Path-B parity remain open; the legacy iframe
+  pixel blit stays RED until its embedded-batch replacement has parity.
 - The CPU benchmark adapter no longer owns a private painter. It constructs
   the requested `cpu`/`cpu_simd` `Engine2D` and executes the composition only
   through `engine2d_draw_ir_adv_composition(..., false)`.
@@ -47,9 +46,7 @@ legacy caller migration and exact parity remain red.
    command lowering is also present. Keep the
    REQ-WEB-BROWSER-003/004 semantic composition oracle before pixels and
    round-trip it through the existing hosted SBRF/Draw IR v2 codec.
-2. **Done in source, execution/parity held:** emit inert `srcdoc` through
-   flattened `DrawIrBatch` values; migrate five legacy pixel callers only
-   after their exact parity gates.
+2. Emit iframe content through the existing embedded `DrawIrBatch` mechanism.
 3. **Partial, runtime-blocked:** finish authoritative mutation/style/resource
    revision sites and split the retained owner into stage-selective
    parse/style/layout/paint invalidation. Exact unchanged reuse and close
@@ -80,8 +77,7 @@ are split by owner, not line number:
 | **Path A: direct pixels** | `_paint_layout.spl`, `_paint_primitives.spl`, facade software entry points | compatibility/reference path |
 | **Path B: DrawIR** | `_paint_layout.spl` (`_html_draw_ir_style_props`, `_html_draw_ir_command`, `_html_draw_ir_commands`), facade DrawIR entry points | canonical shared display list |
 | CPU benchmark adapter | `simple_web_layout_engine2d_cpu.spl` | `Engine2D` + shared DrawIR executor only |
-| Iframe Draw IR | facade recursive composition + `draw_ir_embed_composition` | **partial: inert `srcdoc` source tranche implemented** |
-| Iframe pixel oracle | `_paint_layout.spl` (`_web_render_child_pixels`, `_web_blit_child`, `_web_paint_iframes`) | **RED: five callers await parity/migration** |
+| Iframe pixels | `_paint_layout.spl` (`_web_render_child_pixels`, `_web_blit_child`, `_web_paint_iframes`) | **RED: legacy Path-A-only blit** |
 
 The active content-frame cache is `ui/web_render_pixel_backend.spl` backed by
 `SimpleWebEngine2DStaticPixelCache` in `simple_web_engine2d_renderer.spl`.
@@ -104,10 +100,7 @@ node-level DrawIR-diff cache.
 - The window content-frame path in `simple_web_window_renderer.spl` calls `WebRenderPixelArtifactCache.request_to_pixel_artifact[_at_time]`; that cache routes static frames through the retained Engine2D DrawIR result. Dynamic regions retain their explicit fallback branch and require separate evidence.
 - `draw_ir_diff_compositions` has **zero production render-loop callers** — its only caller outside its own spec is `src/app/ui.test_api/handler.spl` (a test API), not any paint path.
 - `SimpleWebEngine2DStaticPixelCache` still caches whole-document identity, so one changed character invalidates the frame; no node-level invalidation exists.
-- Main DrawIR commands retain parent IDs and image lowering. The bounded inert
-  `srcdoc` embedded-batch source tranche is implemented; legacy pixel blitting
-  remains the oracle and stays RED until qualified exact parity permits caller
-  migration.
+- Main DrawIR commands now retain parent IDs and image lowering. **RED:** iframe child content still bypasses DrawIR through `_web_render_child_pixels` + `_web_blit_child`; no embedded child batch reaches the shared executor yet.
 - `DrawIrComposition`/`DrawIrEmbeddingConfig` carry no DPI field; `dpi_scale_milli` is passed by the scene owner and baked into pixel coordinates before DrawIR is built.
 - **Open correctness bug that blocks any pixel-parity gate**: `doc/08_tracking/bug/web_render_full_engine_call_order_nondeterminism_2026-07-12.md` — the full engine produces different checksums for byte-identical input depending on call order/count within a process (suspected process-lifetime cache/arena state).
 
@@ -192,14 +185,15 @@ sequences. Do not expose or name a new IR type.
 *Acceptance:* existing spec suite (`simple_web_renderer_spec.spl` and friends,
 ~800 lines) green, byte-identical output — no behavior change.
 
-**Phase 2 — Close web semantic/layout→DrawIR coverage gaps (source tranche
-implemented; execution/parity held).** `parent_id`, `<img>` lowering, and inert
-`srcdoc` flattening through `draw_ir_embed_composition` are present. Do not
-model iframe content as an IMAGE or a nested executor. *Acceptance:* the
-existing static spec/manual plus a qualified pixel-parity run — Path B (via
+**Phase 2 — Close web semantic/layout→DrawIR coverage gaps.**
+Set `parent_id` from `HNode.parent`; emit `<img>` as `DRAW_IR_COMMAND_IMAGE`;
+emit iframe content as a nested embedded `DrawIrBatch` (reuse the depth-3
+embedded-surface mechanism already in `draw_ir_adv.spl:336`
+`_engine2d_draw_ir_render_batch_embedded`) instead of leaving iframes
+unimplemented in Path B. *Acceptance:* new pixel-parity spec — Path B (via
 `engine2d_draw_ir_adv_composition`) byte-matches Path A
 (`simple_web_layout_render_html_software_pixels`) over a corpus that includes
-images and iframes — before migrating each legacy caller.
+images and iframes (currently untested since Path B silently drops both).
 
 **Phase 3 — Route content-frame rendering through the fast path, flag-gated.**
 Add `WebRenderPixelArtifactCache.request_to_pixel_artifact_via_draw_ir`

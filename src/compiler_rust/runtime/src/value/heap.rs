@@ -165,8 +165,8 @@ impl HeapHeader {
 
 use super::core::RuntimeValue;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, RwLock};
 
 const MIN_VALID_HEAP_ADDR: usize = 4096;
 
@@ -557,32 +557,132 @@ pub fn mem_attr_enable() {
     let _ = ATTR_ENABLED.set(true);
 }
 
-#[derive(Default)]
-struct AttrState {
-    ids: std::collections::HashMap<String, u32>,
-    names: Vec<String>,
-    live: Vec<i64>,
-    peak: Vec<i64>,
-    allocs: Vec<u64>,
-    by_ptr: std::collections::HashMap<usize, u32>,
+// Per-owner counters live behind an `RwLock<AttrRegistry>`, but the hot
+// alloc/free path now avoids taking that lock at all (see M2 note below) —
+// it only exists for the rare "brand-new owner name" write and for
+// `owner_report`'s read. Registration takes the write lock; everything else
+// resolves through per-thread caches into stable-address atomics.
+//
+// M2 (this lane): a prior revision took a `read()` lock on *every*
+// alloc/free to index `counters`, plus a second, independent `Mutex` lock
+// for the by-ptr map — 4 lock ops per alloc+free pair. Measured ON overhead
+// was ~80-120%, WORSE than the original M1 single-mutex design's 36.6%,
+// because splitting counters and by-ptr into two separately-locked
+// structures *increased* the total number of synchronization operations in
+// the single-thread/uncontended case (which is what the alloc-heavy probe
+// exercises) — RwLock::read() is not free just because it's shared.
+//
+// Fix: `counters` is `Vec<Box<OwnerCounters>>` so each owner's counters have
+// a STABLE heap address for the lifetime of the process (the Vec's own
+// backing buffer may move on growth, but the boxed `OwnerCounters` it points
+// to never does — same reasoning as Rust's own `Box`-stability guarantee).
+// `set_current_owner` (called on module/owner switch, not per-allocation)
+// resolves the owner id AND caches a raw `*const OwnerCounters` address in a
+// thread-local. `note_attr_alloc` then updates counters via that cached
+// pointer with zero locks. `note_attr_free` stores the SAME resolved
+// counters address (not just an owner id) in the by-ptr map, so freeing
+// also never touches `ATTR_REGISTRY` — only the by-ptr shard mutex remains,
+// which is unavoidable (the freeing thread has no other way to learn which
+// owner allocated a given pointer).
+struct OwnerCounters {
+    live: AtomicI64,
+    peak: AtomicI64,
+    allocs: AtomicU64,
 }
 
-static ATTR_STATE: OnceLock<Mutex<AttrState>> = OnceLock::new();
+impl OwnerCounters {
+    fn new() -> Self {
+        Self { live: AtomicI64::new(0), peak: AtomicI64::new(0), allocs: AtomicU64::new(0) }
+    }
+}
+
+struct AttrRegistry {
+    ids: std::collections::HashMap<String, u32>,
+    names: Vec<String>,
+    // Boxed so each entry's address is stable across `Vec` growth — raw
+    // pointers to these are cached in thread-locals and in the by-ptr map.
+    counters: Vec<Box<OwnerCounters>>,
+}
+
+static ATTR_REGISTRY: OnceLock<RwLock<AttrRegistry>> = OnceLock::new();
+
+const BY_PTR_SHARDS: usize = 16;
+
+/// Fast, non-cryptographic hasher for `usize` heap-pointer keys. The by-ptr
+/// map is an internal profiling structure never exposed to untrusted input,
+/// so SipHash's DoS resistance is pure overhead here; one multiply spreads
+/// alignment-clustered heap addresses across buckets well enough.
+#[derive(Default)]
+struct PtrHasher(u64);
+
+impl std::hash::Hasher for PtrHasher {
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        // HashMap<usize, _> always calls write_usize; this fallback only
+        // fires if that internal detail ever changes, so keep it correct
+        // (fold the bytes) rather than merely present.
+        let mut acc = self.0;
+        for &b in bytes {
+            acc = (acc ^ b as u64).wrapping_mul(0x100000001B3);
+        }
+        self.0 = acc;
+    }
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0 = (i as u64 >> 3).wrapping_mul(0x9E3779B97F4A7C15);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type PtrHashBuilder = std::hash::BuildHasherDefault<PtrHasher>;
+/// by-ptr map value: the resolved owner's `*const OwnerCounters` address (0
+/// is never a valid heap allocation, so it's unused as a sentinel here —
+/// every insert stores a real, already-resolved counters pointer).
+type PtrOwnerMap = std::collections::HashMap<usize, usize, PtrHashBuilder>;
+
+static ATTR_BY_PTR: OnceLock<Vec<Mutex<PtrOwnerMap>>> = OnceLock::new();
 
 thread_local! {
     static ATTR_CURRENT_OWNER: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    // Cached `*const OwnerCounters as usize` for `ATTR_CURRENT_OWNER`. 0
+    // means "not yet resolved on this thread" (never a valid address) —
+    // resolved lazily on first use so a thread that never calls
+    // `set_current_owner` still attributes to the default "<unattributed>"
+    // owner instead of silently dropping the count.
+    static ATTR_CURRENT_COUNTERS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn attr_state() -> &'static Mutex<AttrState> {
-    ATTR_STATE.get_or_init(|| {
-        let mut s = AttrState::default();
-        s.ids.insert("<unattributed>".to_string(), 0);
-        s.names.push("<unattributed>".to_string());
-        s.live.push(0);
-        s.peak.push(0);
-        s.allocs.push(0);
-        Mutex::new(s)
+fn attr_registry() -> &'static RwLock<AttrRegistry> {
+    ATTR_REGISTRY.get_or_init(|| {
+        let mut ids = std::collections::HashMap::new();
+        ids.insert("<unattributed>".to_string(), 0u32);
+        RwLock::new(AttrRegistry {
+            ids,
+            names: vec!["<unattributed>".to_string()],
+            counters: vec![Box::new(OwnerCounters::new())],
+        })
     })
+}
+
+#[inline]
+fn counters_addr(reg: &AttrRegistry, id: u32) -> usize {
+    reg.counters.get(id as usize).map(|b| &**b as *const OwnerCounters as usize).unwrap_or(0)
+}
+
+fn attr_by_ptr_shards() -> &'static Vec<Mutex<PtrOwnerMap>> {
+    ATTR_BY_PTR.get_or_init(|| (0..BY_PTR_SHARDS).map(|_| Mutex::new(PtrOwnerMap::default())).collect())
+}
+
+#[inline]
+fn attr_by_ptr_shard(ptr: usize) -> &'static Mutex<PtrOwnerMap> {
+    // Heap pointers are alignment-clustered (low bits mostly constant), so
+    // mix before taking the top bits to spread shards evenly.
+    let mixed = (ptr as u64 >> 4).wrapping_mul(0x9E3779B97F4A7C15);
+    let idx = (mixed >> 60) as usize % BY_PTR_SHARDS;
+    &attr_by_ptr_shards()[idx]
 }
 
 /// Set the attribution owner for subsequent allocations on this thread.
@@ -593,21 +693,31 @@ pub fn set_current_owner(name: &str) {
         return;
     }
     let name = if name.is_empty() { "<entry>" } else { name };
-    let id = {
-        let Ok(mut s) = attr_state().lock() else { return };
-        if let Some(&id) = s.ids.get(name) {
-            id
+    let reg = attr_registry();
+    if let Ok(r) = reg.read() {
+        if let Some(&id) = r.ids.get(name) {
+            let addr = counters_addr(&r, id);
+            ATTR_CURRENT_OWNER.with(|c| c.set(id));
+            ATTR_CURRENT_COUNTERS.with(|c| c.set(addr));
+            return;
+        }
+    }
+    let (id, addr) = {
+        let Ok(mut w) = reg.write() else { return };
+        if let Some(&id) = w.ids.get(name) {
+            let addr = counters_addr(&w, id);
+            (id, addr)
         } else {
-            let id = s.names.len() as u32;
-            s.ids.insert(name.to_string(), id);
-            s.names.push(name.to_string());
-            s.live.push(0);
-            s.peak.push(0);
-            s.allocs.push(0);
-            id
+            let id = w.names.len() as u32;
+            w.ids.insert(name.to_string(), id);
+            w.names.push(name.to_string());
+            w.counters.push(Box::new(OwnerCounters::new()));
+            let addr = counters_addr(&w, id);
+            (id, addr)
         }
     };
     ATTR_CURRENT_OWNER.with(|c| c.set(id));
+    ATTR_CURRENT_COUNTERS.with(|c| c.set(addr));
 }
 
 #[inline]
@@ -615,19 +725,40 @@ pub fn current_owner_id() -> u32 {
     ATTR_CURRENT_OWNER.with(|c| c.get())
 }
 
+/// Resolve (and cache) this thread's current owner counters address without
+/// requiring a prior `set_current_owner` call. Cold path: runs at most once
+/// per thread (until the owner changes), guarded by the `!= 0` cache check.
+#[cold]
+fn resolve_current_counters_cold() -> usize {
+    let id = ATTR_CURRENT_OWNER.with(|c| c.get());
+    let addr = attr_registry().read().ok().map(|r| counters_addr(&r, id)).unwrap_or(0);
+    if addr != 0 {
+        ATTR_CURRENT_COUNTERS.with(|c| c.set(addr));
+    }
+    addr
+}
+
 #[inline]
 fn note_attr_alloc(ptr: usize, bytes: u64) {
     if !mem_attr_enabled() {
         return;
     }
-    let owner = ATTR_CURRENT_OWNER.with(|c| c.get()) as usize;
-    if let Ok(mut s) = attr_state().lock() {
-        if owner < s.live.len() {
-            s.by_ptr.insert(ptr, owner as u32);
-            s.live[owner] += bytes as i64;
-            s.peak[owner] = s.peak[owner].max(s.live[owner]);
-            s.allocs[owner] += 1;
-        }
+    let addr = ATTR_CURRENT_COUNTERS.with(|c| {
+        let v = c.get();
+        if v != 0 { v } else { resolve_current_counters_cold() }
+    });
+    if addr != 0 {
+        // SAFETY: `addr` came from a live `Box<OwnerCounters>` inside
+        // `ATTR_REGISTRY.counters`, which only ever grows (never removes or
+        // moves its elements — see the M2 comment above), so the pointee
+        // stays valid for the rest of the process.
+        let counters = unsafe { &*(addr as *const OwnerCounters) };
+        let live = counters.live.fetch_add(bytes as i64, Ordering::Relaxed) + bytes as i64;
+        counters.peak.fetch_max(live, Ordering::Relaxed);
+        counters.allocs.fetch_add(1, Ordering::Relaxed);
+    }
+    if let Ok(mut m) = attr_by_ptr_shard(ptr).lock() {
+        m.insert(ptr, addr);
     }
 }
 
@@ -636,26 +767,38 @@ fn note_attr_free(ptr: usize, bytes: u64) {
     if !mem_attr_enabled() {
         return;
     }
-    if let Ok(mut s) = attr_state().lock() {
-        if let Some(owner) = s.by_ptr.remove(&ptr) {
-            let owner = owner as usize;
-            if owner < s.live.len() {
-                s.live[owner] -= bytes as i64;
-            }
-        }
+    let addr = {
+        let Ok(mut m) = attr_by_ptr_shard(ptr).lock() else { return };
+        m.remove(&ptr)
+    };
+    let Some(addr) = addr else { return };
+    if addr != 0 {
+        // SAFETY: same as `note_attr_alloc` — `addr` was resolved from the
+        // registry at alloc time and the pointee is never moved or freed.
+        let counters = unsafe { &*(addr as *const OwnerCounters) };
+        counters.live.fetch_sub(bytes as i64, Ordering::Relaxed);
     }
 }
 
 /// Top-`n` owners by live bytes as "name\tlive\tpeak\tallocs" rows.
 pub fn owner_report(n: usize) -> String {
-    let Ok(s) = attr_state().lock() else {
+    let Ok(r) = attr_registry().read() else {
         return String::new();
     };
-    let mut idx: Vec<usize> = (0..s.names.len()).collect();
-    idx.sort_by_key(|&i| -s.live[i]);
+    let mut idx: Vec<usize> = (0..r.names.len()).collect();
+    idx.sort_by_key(|&i| -r.counters[i].live.load(Ordering::Relaxed));
     idx.iter()
         .take(n)
-        .map(|&i| format!("{}\t{}\t{}\t{}", s.names[i], s.live[i], s.peak[i], s.allocs[i]))
+        .map(|&i| {
+            let c = &r.counters[i];
+            format!(
+                "{}\t{}\t{}\t{}",
+                r.names[i],
+                c.live.load(Ordering::Relaxed),
+                c.peak.load(Ordering::Relaxed),
+                c.allocs.load(Ordering::Relaxed)
+            )
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -708,9 +851,135 @@ mod attr_tests {
         assert!(a < b, "10MB owner must rank above 1MB owner:\n{report}");
 
         note_attr_free(0xA110C, 10_000_000);
-        let s = attr_state().lock().unwrap();
-        let id = s.ids["attr_test_mod_a"] as usize;
-        assert_eq!(s.live[id], 0, "live returns to zero after free");
-        assert_eq!(s.peak[id], 10_000_000, "peak survives the free");
+        let r = attr_registry().read().unwrap();
+        let id = r.ids["attr_test_mod_a"] as usize;
+        assert_eq!(r.counters[id].live.load(Ordering::Relaxed), 0, "live returns to zero after free");
+        assert_eq!(r.counters[id].peak.load(Ordering::Relaxed), 10_000_000, "peak survives the free");
+    }
+
+    #[test]
+    fn owner_attribution_survives_concurrent_alloc_free_across_threads() {
+        // Regression guard for the reverted sharding attempt: peak-per-owner
+        // must be the exact single-threaded-equivalent value, not a sum or
+        // max of per-shard partials, and by_ptr sharding must never let a
+        // free land on the wrong owner's counters.
+        mem_attr_enable();
+        set_current_owner("attr_test_concurrent");
+        let owner = current_owner_id();
+        assert_ne!(owner, 0);
+
+        let base: usize = 0xC0FFEE_0000;
+        let per_thread = 64usize;
+        let threads = 8usize;
+        let bytes_each: u64 = 1_000;
+        // Barrier forces every thread to finish its allocs before any thread
+        // starts freeing, so the true peak (all bytes live at once) is
+        // deterministically reached instead of racing frees against allocs.
+        let barrier = std::sync::Barrier::new(threads);
+
+        std::thread::scope(|scope| {
+            for t in 0..threads {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    set_current_owner("attr_test_concurrent");
+                    for i in 0..per_thread {
+                        let ptr = base + (t * per_thread + i) * 8;
+                        note_attr_alloc(ptr, bytes_each);
+                    }
+                    barrier.wait();
+                    for i in 0..per_thread {
+                        let ptr = base + (t * per_thread + i) * 8;
+                        note_attr_free(ptr, bytes_each);
+                    }
+                });
+            }
+        });
+
+        let r = attr_registry().read().unwrap();
+        let id = r.ids["attr_test_concurrent"] as usize;
+        assert_eq!(r.counters[id].live.load(Ordering::Relaxed), 0, "all allocs freed: live must settle to 0");
+        assert_eq!(
+            r.counters[id].peak.load(Ordering::Relaxed),
+            (threads * per_thread) as i64 * bytes_each as i64,
+            "peak must equal the true global high-water mark, not a per-shard approximation"
+        );
+        assert_eq!(r.counters[id].allocs.load(Ordering::Relaxed), (threads * per_thread) as u64);
+    }
+
+    // Manual overhead probe (`#[ignore]`d so normal `cargo test` never runs
+    // it — it must run alone in its own process to get a clean ATTR_ENABLED
+    // latch). Invoke directly:
+    //   cargo test --release -p simple-runtime --lib \
+    //     heap::attr_tests::bench_off_overhead -- --ignored --nocapture
+    //   SIMPLE_MEM_ATTR=1 cargo test --release -p simple-runtime --lib \
+    //     heap::attr_tests::bench_on_overhead -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_off_overhead() {
+        assert!(!mem_attr_enabled(), "run this probe with SIMPLE_MEM_ATTR unset");
+        let n = 1_000_000usize;
+        let start = std::time::Instant::now();
+        for i in 0..n {
+            note_attr_alloc(0x1000 + i, 64);
+            note_attr_free(0x1000 + i, 64);
+        }
+        let elapsed = start.elapsed();
+        eprintln!("OFF: {n} alloc+free pairs in {elapsed:?} ({:.1} ns/pair)", elapsed.as_nanos() as f64 / n as f64);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_on_overhead() {
+        mem_attr_enable();
+        assert!(mem_attr_enabled(), "run this probe with SIMPLE_MEM_ATTR=1");
+        set_current_owner("bench_owner");
+        let n = 1_000_000usize;
+        let start = std::time::Instant::now();
+        for i in 0..n {
+            note_attr_alloc(0x1000 + i, 64);
+            note_attr_free(0x1000 + i, 64);
+        }
+        let elapsed = start.elapsed();
+        eprintln!("ON: {n} alloc+free pairs in {elapsed:?} ({:.1} ns/pair)", elapsed.as_nanos() as f64 / n as f64);
+    }
+
+    // Same shape as the M1 "alloc-heavy probe" this lane targets: drives
+    // real heap-registered allocations (malloc + HEAP_ALLOCATION_REGISTRY
+    // mutex + note_heap_alloc/free) through register/unregister_heap_ptr, so
+    // the reported percentage is ON-vs-OFF over the *whole* alloc/free path,
+    // not just the attribution call in isolation.
+    //   cargo test --release -p simple-runtime --lib \
+    //     heap::attr_tests::bench_alloc_heavy_off -- --ignored --nocapture
+    //   SIMPLE_MEM_ATTR=1 cargo test --release -p simple-runtime --lib \
+    //     heap::attr_tests::bench_alloc_heavy_on -- --ignored --nocapture
+    fn alloc_heavy_loop(n: usize) -> std::time::Duration {
+        let start = std::time::Instant::now();
+        for _ in 0..n {
+            let ptr = Box::into_raw(Box::new(HeapHeader::new(HeapObjectType::Object, 64)));
+            register_heap_ptr(ptr);
+            unregister_heap_ptr(ptr);
+            unsafe { drop(Box::from_raw(ptr)) };
+        }
+        start.elapsed()
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_alloc_heavy_off() {
+        assert!(!mem_attr_enabled(), "run this probe with SIMPLE_MEM_ATTR unset");
+        let n = 1_000_000usize;
+        let elapsed = alloc_heavy_loop(n);
+        eprintln!("ALLOC-HEAVY OFF: {n} alloc+free in {elapsed:?} ({:.1} ns/pair)", elapsed.as_nanos() as f64 / n as f64);
+    }
+
+    #[test]
+    #[ignore]
+    fn bench_alloc_heavy_on() {
+        mem_attr_enable();
+        assert!(mem_attr_enabled(), "run this probe with SIMPLE_MEM_ATTR=1");
+        set_current_owner("bench_owner");
+        let n = 1_000_000usize;
+        let elapsed = alloc_heavy_loop(n);
+        eprintln!("ALLOC-HEAVY ON: {n} alloc+free in {elapsed:?} ({:.1} ns/pair)", elapsed.as_nanos() as f64 / n as f64);
     }
 }

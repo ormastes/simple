@@ -1,16 +1,18 @@
 """Small in-memory command core for the SimpleOS database service."""
 
+use std.common.web.html_escape.{html_escape_core}
+
 pub val SIMPLE_DB_MAX_COMMAND_BYTES: i64 = 256
 pub val SIMPLE_DB_MAX_HTTP_BYTES: i64 = 1024
 pub val SIMPLE_DB_MAX_TABLES: i64 = 16
 pub val SIMPLE_DB_MAX_ROWS: i64 = 128
 
 pub fn simple_db_http_request(request: text) -> bool:
-    request.starts_with("POST /db ")
+    request.starts_with("POST /db ") or request.starts_with("GET /db ")
 
-fn _simple_db_http_response(status: text, body: text) -> text:
+fn _simple_db_http_response(status: text, content_type: text, body: text) -> text:
     # Connection-close framing avoids the broken RV64 native text.len() path.
-    "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n{body}"
+    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nConnection: close\r\n\r\n{body}"
 
 struct SimpleDbRow:
     table: text
@@ -42,6 +44,14 @@ class SimpleDbService:
             if row.table == table and row.key == key:
                 return true
         false
+
+    me render_html() -> text:
+        var body = "<!doctype html><html><head><title>SimpleOS DB</title></head><body><h1>SimpleOS DB</h1><table><thead><tr><th>Table</th><th>Key</th><th>Value</th></tr></thead><tbody>"
+        for row in self.rows:
+            body = body + "<tr><td>" + html_escape_core(row.table) +
+                "</td><td>" + html_escape_core(row.key) +
+                "</td><td>" + html_escape_core(row.value) + "</td></tr>"
+        body + "</tbody></table></body></html>"
 
     me execute(command: text) -> text:
         if command.len() == 0:
@@ -90,19 +100,21 @@ class SimpleDbService:
 
     me execute_http_request(request: text) -> text:
         if request.len() > SIMPLE_DB_MAX_HTTP_BYTES:
-            return _simple_db_http_response("413 Payload Too Large", "ERR request too long")
+            return _simple_db_http_response("413 Payload Too Large", "text/plain", "ERR request too long")
         if not simple_db_http_request(request):
-            return _simple_db_http_response("404 Not Found", "ERR route not found")
+            return _simple_db_http_response("404 Not Found", "text/plain", "ERR route not found")
+        if request.starts_with("GET /db "):
+            return _simple_db_http_response("200 OK", "text/html; charset=utf-8", self.render_html())
         val separator = request.find("\r\n\r\n")
         if separator < 0:
-            return _simple_db_http_response("400 Bad Request", "ERR missing body")
+            return _simple_db_http_response("400 Bad Request", "text/plain", "ERR missing body")
         # The boot listener reads at most this cap and slice clamps its end, so
         # no broken RV64 native text.len() result is needed here.
         val body = request.slice(separator + 4, SIMPLE_DB_MAX_HTTP_BYTES)
         val result = self.execute(body.trim())
         if result.starts_with("ERR"):
-            return _simple_db_http_response("400 Bad Request", result)
-        _simple_db_http_response("200 OK", result)
+            return _simple_db_http_response("400 Bad Request", "text/plain", result)
+        _simple_db_http_response("200 OK", "text/plain", result)
 
 # The boot HTTP service is single-threaded and needs one database lifetime across
 # accepted connections. Keeping that owner at module scope also avoids copying a

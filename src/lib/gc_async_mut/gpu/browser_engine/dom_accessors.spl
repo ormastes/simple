@@ -585,8 +585,8 @@ fn _be_dom_is_focusable_node(node: BeDomNode) -> bool:
     )
     val raw_tab_index = be_dom_get_attr(node, "tabindex").trim()
     if raw_tab_index != "":
-        if val Some(_) = raw_tab_index.to_i64():
-            focusable = true
+        if val Some(parsed_tab_index) = raw_tab_index.to_i64():
+            focusable = parsed_tab_index >= 0
     focusable
 
 fn be_dom_input_blocks_implicit_submission(node: BeDomNode) -> bool:
@@ -959,70 +959,6 @@ fn be_dom_focused_route(
 ) -> DomNodeRoute?:
     _be_dom_focused_route(root, index)
 
-fn _be_dom_is_form_control(node: BeDomNode) -> bool:
-    (
-        node.tag_name == "button" or node.tag_name == "input" or
-        node.tag_name == "select" or node.tag_name == "textarea"
-    )
-
-fn _be_dom_fieldset_first_legend_id(fieldset: BeDomNode) -> i64:
-    for child in fieldset.children:
-        if child.tag_name == "legend":
-            return child.node_id
-    -1
-
-fn be_dom_disabled_fieldset_state(fieldset: BeDomNode) -> (bool, i64):
-    val disabled = (
-        fieldset.tag_name == "fieldset" and
-        be_dom_has_attr(fieldset, "disabled")
-    )
-    var first_legend_id: i64 = -1
-    if disabled:
-        first_legend_id = _be_dom_fieldset_first_legend_id(fieldset)
-    (disabled, first_legend_id)
-
-fn be_dom_disabled_fieldset_blocks_child(
-    fieldset: (bool, i64), child: BeDomNode
-) -> bool:
-    fieldset.0 and child.node_id != fieldset.1
-
-fn be_dom_control_is_disabled_in_context(
-    node: BeDomNode, disabled_by_fieldset: bool
-) -> bool:
-    (
-        _be_dom_is_form_control(node) and
-        (disabled_by_fieldset or be_dom_has_attr(node, "disabled"))
-    )
-
-fn be_dom_control_is_effectively_disabled(
-    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
-) -> bool:
-    val path = be_dom_path_for_route(root, index, route)
-    if path.len() == 0:
-        return false
-    var control_index = path.len() - 1
-    while (
-        control_index >= 0 and
-        not _be_dom_is_form_control(path[control_index])
-    ):
-        control_index = control_index - 1
-    if control_index < 0:
-        return false
-    var disabled_by_fieldset = false
-    var path_index = 0
-    while path_index < control_index:
-        disabled_by_fieldset = (
-            disabled_by_fieldset or
-            be_dom_disabled_fieldset_blocks_child(
-                be_dom_disabled_fieldset_state(path[path_index]),
-                path[path_index + 1]
-            )
-        )
-        path_index = path_index + 1
-    be_dom_control_is_disabled_in_context(
-        path[control_index], disabled_by_fieldset
-    )
-
 fn _be_dom_same_route(left: DomNodeRoute, right: DomNodeRoute) -> bool:
     left.generation.value == right.generation.value and
         left.node_id == right.node_id
@@ -1031,55 +967,34 @@ class _BeDomFocusRouteOrder:
     positive_routes: [DomNodeRoute]
     positive_tab_indexes: [i64]
     regular_routes: [DomNodeRoute]
-    dom_routes: [DomNodeRoute]
 
 fn _be_dom_collect_focus_route_order(
-    node: BeDomNode, index: DomIdentityIndex, order: _BeDomFocusRouteOrder,
-    current_route: DomNodeRoute?, disabled_by_fieldset: bool
+    node: BeDomNode, index: DomIdentityIndex, order: _BeDomFocusRouteOrder
 ):
     if be_dom_has_attr(node, "hidden") or be_dom_get_display(node) == "none":
         return
     val route = DomNodeRoute(
         generation: index.generation, node_id: node.node_id
     )
-    if (
-        index.contains_route(route) and _be_dom_is_focusable_node(node) and
-        not be_dom_control_is_disabled_in_context(
-            node, disabled_by_fieldset
-        )
-    ):
+    if index.contains_route(route) and _be_dom_is_focusable_node(node):
         var tab_index: i64 = 0
-        var sequential = true
         val raw_tab_index = be_dom_get_attr(node, "tabindex").trim()
         if raw_tab_index != "":
             if val Some(parsed_tab_index) = raw_tab_index.to_i64():
                 tab_index = parsed_tab_index
-                sequential = parsed_tab_index >= 0
-        var in_dom_order = sequential
-        if not sequential:
-            if val Some(current) = current_route:
-                in_dom_order = _be_dom_same_route(route, current)
-        if in_dom_order:
-            order.dom_routes.push(route)
-        if sequential:
-            if tab_index > 0:
-                var insert_at = 0
-                while (
-                    insert_at < order.positive_tab_indexes.len() and
-                    order.positive_tab_indexes[insert_at] <= tab_index
-                ):
-                    insert_at = insert_at + 1
-                order.positive_routes.insert(insert_at, route)
-                order.positive_tab_indexes.insert(insert_at, tab_index)
-            else:
-                order.regular_routes.push(route)
-    val fieldset = be_dom_disabled_fieldset_state(node)
+        if tab_index > 0:
+            var insert_at = 0
+            while (
+                insert_at < order.positive_tab_indexes.len() and
+                order.positive_tab_indexes[insert_at] <= tab_index
+            ):
+                insert_at = insert_at + 1
+            order.positive_routes.insert(insert_at, route)
+            order.positive_tab_indexes.insert(insert_at, tab_index)
+        else:
+            order.regular_routes.push(route)
     for child in node.children:
-        _be_dom_collect_focus_route_order(
-            child, index, order, current_route,
-            (disabled_by_fieldset or
-             be_dom_disabled_fieldset_blocks_child(fieldset, child))
-        )
+        _be_dom_collect_focus_route_order(child, index, order)
 
 fn be_dom_next_focus_route(
     root: BeDomNode, index: DomIdentityIndex,
@@ -1089,12 +1004,9 @@ fn be_dom_next_focus_route(
         if not index.contains_route(current):
             return nil
     val order = _BeDomFocusRouteOrder(
-        positive_routes: [], positive_tab_indexes: [], regular_routes: [],
-        dom_routes: []
+        positive_routes: [], positive_tab_indexes: [], regular_routes: []
     )
-    _be_dom_collect_focus_route_order(
-        root, index, order, current_route, false
-    )
+    _be_dom_collect_focus_route_order(root, index, order)
     var routes = order.positive_routes
     for route in order.regular_routes:
         routes.push(route)
@@ -1108,14 +1020,6 @@ fn be_dom_next_focus_route(
                 current_index = index_value
                 break
             index_value = index_value + 1
-        if current_index < 0:
-            index_value = 0
-            while index_value < order.dom_routes.len():
-                if _be_dom_same_route(order.dom_routes[index_value], current):
-                    routes = order.dom_routes
-                    current_index = index_value
-                    break
-                index_value = index_value + 1
     if reverse:
         if current_index <= 0:
             return Some(routes[routes.len() - 1])
@@ -1375,10 +1279,6 @@ export be_dom_dispatch_keyboard_event_to_route
 export be_dom_dispatch_input_event_to_route
 export be_dom_focused_route
 export be_dom_next_focus_route
-export be_dom_disabled_fieldset_state
-export be_dom_disabled_fieldset_blocks_child
-export be_dom_control_is_disabled_in_context
-export be_dom_control_is_effectively_disabled
 export be_dom_form_owner_route, be_dom_submit_form_owner_route
 export be_dom_reset_form_owner_route
 export BeDomImplicitSubmitRouteResult, be_dom_implicit_submit_route_result

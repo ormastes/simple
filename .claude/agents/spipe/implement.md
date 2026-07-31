@@ -22,6 +22,9 @@
      manual setup/checker helpers, implement those names exactly or leave
      unresolved placeholders failing explicitly with `assert(false)` or
      `fail(...)`. Do not replace them with silent no-op passes.
+   - New or updated specs remain modern SSpec with direct value assertions.
+   - For critical features, validate the evidence manifest before refreshing
+     `EVIDENCE_SHOWCASE.md`; never hand-author PASS or artifact truth.
 2. For each failing spec file (max 5 fix-test iterations per file; if still failing after 5, document in state file and move on):
    a. Read the spec file to understand what must pass
    b. Identify or create the target source file in `src/**/<feature>.spl`

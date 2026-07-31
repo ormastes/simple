@@ -1694,15 +1694,6 @@ prove direct mode uses no wire. A validator-only check, source scan, Rust seed,
 or bootstrap result cannot promote this RED row. It remains static until one
 admitted pure-Simple focused execution and docgen produce the manual.
 
-## Reviewed hosted/rendering batch (2026-07-31)
-
-| Requirement area | Evidence | Status |
-|---|---|---|
-| Worker Reload broker ownership | Raw worker Reload evidence in `browser_ui_access_controls_spec.spl` rejects before mutation and preserves URL/loading/pending/full history/index/body/DrawIR. | STATIC REVIEW PASS; qualified execution HELD |
-| Same-tick SimpleScript replacement | The BrowserSession animation integration evidence stops callbacks copied from the old generation after body replacement, with red DrawIR/Engine2D retained. | STATIC REVIEW PASS; animation lists/lifecycle events RED |
-| Renderer staged CORS | `browser_hosted_cors_preflight_spec.spl`; public-only OPTIONS validates before the actual job under one terminal owner/deadline and no preflight side effects. | STATIC SECURITY REVIEW PASS; direct-host CORS/live execution RED |
-| Inert iframe DrawIR | `simple_web_iframe_draw_ir_embedding_spec.spl`; child batches preserve order/clip/IDs/materials and clear child hit authority, with grouped fail-closed placeholders. | STATIC REVIEW PASS; legacy pixel parity/caller migration/child runtime authority RED |
-
 ## Reviewed browser hardening evidence reconciliation (2026-07-31)
 
 All entries are source/spec/manual review results only; prior RED/FAIL history
@@ -1721,28 +1712,3 @@ and the absent admitted pure-Simple runtime receipt remain unchanged.
 review for supported `N`/`Npx`, duplicate, `initial`, `unset`, and
 default-parent-inherit gap cases only. Nonzero `inherit`, `revert-layer`, and
 qualified execution remain RED.
-
-## Qualified full-CLI evidence hold (2026-07-31)
-
-One source-scoped full-CLI native-build was attempted with the pure-Simple
-phase-2 `stage2-runtime-authority`, stub fallback disabled, two threads, and
-the cache preserved. It was stopped after about 75 minutes of continuous
-approximately 99.8% CPU use and stable approximately 2.4--2.5 GiB RSS. It had
-emitted dependency warnings but no output artifact and zero cache files. This
-records a compiler progress/performance blocker without claiming a memory
-leak. No retry, Rust seed, or full bootstrap was used. Dynamic HTML, CSS,
-Draw IR, Engine2D, event, animation, security, and HTTPS evidence remains
-`HELD`; it is neither runtime `FAIL` nor runtime `PASS`.
-
-## Disabled-fieldset sequential-focus evidence (2026-07-31)
-
-`browser_disabled_fieldset_sequential_focus_spec.spl` covers
-REQ-WEB-BROWSER-004/007/008/021 through the production hosted keyboard route.
-It requires positive and regular controls disabled by a fieldset to be absent
-from forward, reverse, and wrapped Tab order while preserving the first legend
-exception and a non-form focusable descendant. Focus/blur receipts and live DOM
-routes precede semantic Draw IR color assertions and software Engine2D pixels.
-The mirrored manual is
-`doc/06_spec/03_system/app/browser/feature/browser_disabled_fieldset_sequential_focus_spec.md`.
-Status remains **STATIC / EXECUTION HELD** until an admitted current
-pure-Simple runner and docgen execute the scenario.

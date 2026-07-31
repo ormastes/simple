@@ -152,7 +152,6 @@ pub struct BrowserRenderRevisions:
     resource_revision: i64
 
 pub struct BrowserRenderSnapshot:
-    document_generation: i64
     revisions: BrowserRenderRevisions
     document_html: text?
     resources_changed: bool
@@ -2096,7 +2095,6 @@ class BrowserSession:
     home_url: text
     favorite_links: [Pair<text, text>]
     address_draft: text
-    address_draft_active: bool
     content_security_policy: text
     pending_content_security_policy: text
     csp_sandbox_policy: BrowserCspSandboxPolicy
@@ -2117,7 +2115,6 @@ class BrowserSession:
     css_animation_viewport_width: i32
     hsts_policies: [BrowserHstsPolicy]
     broker_network_policy: bool
-    direct_hosted_cors_fetch_policy: bool
     pending_script_cookie_writes: [text]
     script_cookie_write_overflow: bool
     dom_dispatch_depth: i32
@@ -2206,7 +2203,6 @@ class BrowserSession:
             home_url: "about:blank",
             favorite_links: [],
             address_draft: "",
-            address_draft_active: false,
             content_security_policy: "",
             pending_content_security_policy: "",
             csp_sandbox_policy: BrowserCspSandboxPolicy.unrestricted(),
@@ -2227,7 +2223,6 @@ class BrowserSession:
             css_animation_viewport_width: -1,
             hsts_policies: [],
             broker_network_policy: false,
-            direct_hosted_cors_fetch_policy: false,
             pending_script_cookie_writes: [],
             script_cookie_write_overflow: false,
             dom_dispatch_depth: 0,
@@ -2511,13 +2506,6 @@ impl BrowserSession:
             applied = true
         applied
 
-    me _clear_address_draft():
-        val changed = self.address_draft_active or self.address_draft != ""
-        self.address_draft = ""
-        self.address_draft_active = false
-        if changed:
-            self._advance_ui_access_revision()
-
     me begin_navigation(url: text):
         # Keep the active document alive until a replacement commits. Starting
         # a navigation cancels only work, never the visible/runtime state that
@@ -2531,7 +2519,6 @@ impl BrowserSession:
         self.subresource_request_count = 0
         self.pending_space_activation_route = nil
         self.pending_content_security_policy = ""
-        self._clear_address_draft()
         self.pending_url = normalize_browser_url(url)
         self.pending_navigation_target_index = -1
         self.pending_navigation_push_history = true
@@ -2554,7 +2541,7 @@ impl BrowserSession:
         self.stop_requested = true
         self.is_loading = false
         self.pending_url = ""
-        self._clear_address_draft()
+        self.address_draft = ""
         self.pending_navigation_target_index = -1
         self.pending_navigation_push_history = true
         self.pending_history_traversal_delta = 0
@@ -2766,25 +2753,15 @@ impl BrowserSession:
                 ))
             elif (req.kind == "fetch" and
                 url_origin(req.url) != url_origin(self.document_url) and
-                not self.broker_network_policy and
-                not self._direct_hosted_cors_fetch_allowed(
-                    req.initiator_origin, req.credentials
-                )):
-                # Default sessions remain same-origin; the audited hosted
-                # adapter explicitly enables credentialless CORS staging.
+                not self.broker_network_policy):
+                # ponytail: same-origin fetch only until BrowserRequest carries
+                # request mode and response CORS metadata.
                 self._append_warning("cross-origin fetch blocked: {req.url}")
                 self._reject_runtime_fetch(req.id, req.url, "cross-origin:{req.url}")
             else:
                 self.inflight_requests.push(req)
                 return Some(req)
         nil
-
-    me _direct_hosted_cors_fetch_allowed(
-        initiator_origin: text, credentials: text
-    ) -> bool:
-        self.direct_hosted_cors_fetch_policy and
-            initiator_origin != "" and initiator_origin != "null" and
-            (credentials == "omit" or credentials == "same-origin")
 
     me _reject_runtime_fetch(request_id: text, url: text, error: text):
         if val Some(state) = self.runtime_state:
@@ -2865,17 +2842,6 @@ impl BrowserSession:
                         match runtime.get_host_property(req_obj_id, "content_type"):
                             JsValue.String(v): content_type = v
                             _: pass_dn("async request keeps empty content type when absent")
-                        var credentials = "same-origin"
-                        match runtime.get_host_property(req_obj_id, "credentials"):
-                            JsValue.String(v): credentials = v.lower()
-                            _: pass_dn("async request defaults credentials to same-origin")
-                        val initiator_origin = if (
-                            self.csp_sandbox_policy.active and
-                            not self.csp_sandbox_policy.allow_same_origin
-                        ):
-                            "null"
-                        else:
-                            url_origin(self.document_url)
                         val is_mixed_content = (kind == "fetch" and
                             browser_session_is_secure_context(self.document_url) and
                             url.starts_with("http://") and
@@ -2926,12 +2892,9 @@ impl BrowserSession:
                             drained = true
                         elif (is_cross_origin_fetch and
                             not self.broker_network_policy and
-                            not self._direct_hosted_cors_fetch_allowed(
-                                initiator_origin, credentials
-                            ) and
                             not already_emitted):
-                            # Default sessions remain same-origin; the audited
-                            # hosted adapter explicitly enables CORS staging.
+                            # ponytail: same-origin fetch only until BrowserRequest
+                            # carries request mode and validated CORS response metadata.
                             seen_request_ids = seen_request_ids + [request_id]
                             self._append_warning("cross-origin fetch blocked: {url}")
                             val _ = interpreter.resolve_async_fetch_response(
@@ -2951,6 +2914,10 @@ impl BrowserSession:
                             seen_request_ids = seen_request_ids + [request_id]
                             # Strip any caller-supplied or raw Cookie lines, then attach
                             # only the sanitized session cookie for this request URL.
+                            var credentials = "same-origin"
+                            match runtime.get_host_property(req_obj_id, "credentials"):
+                                JsValue.String(v): credentials = v.lower()
+                                _: pass_dn("async request defaults credentials to same-origin")
                             val drained_req = self._build_request(
                                 kind, url, method, headers, body,
                                 content_type, credentials
@@ -3508,10 +3475,7 @@ impl BrowserSession:
                         return Ok(true)
                     if (url_origin(next_url) !=
                         url_origin(self.document_url) and
-                        not self.broker_network_policy and
-                        not self._direct_hosted_cors_fetch_allowed(
-                            orig_initiator_origin, orig_credentials
-                        )):
+                        not self.broker_network_policy):
                         self._reject_runtime_fetch(
                             response.request_id, next_url,
                             "cross-origin:{next_url}"
@@ -3653,7 +3617,7 @@ impl BrowserSession:
         self.pending_navigation_target_index = -1
         self.pending_navigation_push_history = true
         self.is_loading = false
-        self._clear_address_draft()
+        self.address_draft = ""
         self._load_page_source(
             pending, html, html, target_index, push_history,
             request_method, request_body, request_content_type
@@ -3780,7 +3744,6 @@ impl BrowserSession:
         self.current_index = index.to_i32()
         self.current_url = urls[index]
         self.document_url = urls[index]
-        self._clear_address_draft()
         true
 
     me set_home_url(url: text):

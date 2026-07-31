@@ -1,7 +1,7 @@
 # Lightweight entrypoint for `simple native-build`.
 
 use app.io.env_ops.{env_get, env_set, cwd}
-use app.io.process_ops.{process_run_timeout, process_run_timeout_live}
+use app.io.process_ops.{process_run_timeout}
 
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_exists(path: text) -> bool
@@ -165,6 +165,18 @@ fn native_build_should_use_worker(args: [text]) -> bool:
         return true
     native_build_has_timeout(args)
 
+fn print_bounded(output: text):
+    if output.len() == 0:
+        return
+    if output.len() <= OUTPUT_LIMIT:
+        print output
+        return
+    val head_len = OUTPUT_LIMIT / 2
+    val tail_len = OUTPUT_LIMIT - head_len
+    print output[0:head_len]
+    print "[stdout truncated by native-build entry]"
+    print output[output.len() - tail_len:output.len()]
+
 # Best-effort extraction of the `-o`/`--output` path from the raw native-build
 # args, so the parent can verify the worker actually produced a binary instead
 # of trusting a bare exit code of 0 (see
@@ -216,15 +228,9 @@ fn run_native_build_worker(args: [text]) -> i64:
     env_set("SIMPLE_BINARY", simple_bin)
     val old_worker_marker = env_get("SIMPLE_NATIVE_BUILD_WORKER") ?? ""
     env_set("SIMPLE_NATIVE_BUILD_WORKER", "1")
-    # process_run_timeout_live relays the worker's stdout/stderr to ours AS
-    # THEY ARE PRODUCED (see process_ops.spl), so a slow-but-progressing
-    # multi-minute worker no longer reads as a silent hang. stdout/stderr
-    # below are still the full captured text, used only for the
-    # output-path/failure-hint checks that follow -- no separate
-    # print_bounded(stdout) recap here, since that would just reprint what
-    # was already streamed live.
-    val (stdout, stderr, code) = process_run_timeout_live(simple_bin, worker_args, native_build_timeout_ms(args))
+    val (stdout, stderr, code) = process_run_timeout(simple_bin, worker_args, native_build_timeout_ms(args))
     env_set("SIMPLE_NATIVE_BUILD_WORKER", old_worker_marker)
+    print_bounded(stdout)
     val output_path = output_path_arg(args)
     if code == 0 and output_path != "" and not rt_file_exists(output_path):
         # Parent-side belt-and-suspenders: never trust a bare exit code 0. If the
@@ -265,14 +271,13 @@ fn native_build_has_help(args: [text]) -> bool:
 # worker only runs under a forced tree-walking interpreter
 # (`run_native_build_worker` always sets `SIMPLE_EXECUTION_MODE=interpret`
 # when unset) and must first interpret its own large `compiler.driver`-
-# touching module graph before that check's first line ever executes. So an
+# touching module graph before that check's first line ever executes --
+# plus the parent captures the worker's entire stdout/stderr and only
+# prints it once the whole subprocess exits (`print_bounded(stdout)` /
+# `eprint_bounded(stderr)` after `process_run_timeout` returns). So an
 # invocation that is DESTINED to fail this check still pays the full,
 # multi-minute interpreter-bootstrap cost before the (correct) error ever
-# reaches the user. (Previously this was also indistinguishable in practice
-# from a silent hang, because the parent captured the worker's entire
-# stdout/stderr and only printed it once the whole subprocess exited --
-# `process_run_timeout_live` now relays output live as it's produced; see
-# doc/08_tracking/bug/native_build_direct_seed_jit_hang_2026-07-30.md.)
+# reaches the user -- indistinguishable in practice from a silent hang.
 # This is a cheap, purely-syntactic pre-check in the always-fast wrapper
 # (this file's own header: "Lightweight entrypoint for `simple
 # native-build`") that mirrors the worker's OWN entry-detection rule

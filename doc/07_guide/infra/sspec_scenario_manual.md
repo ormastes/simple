@@ -65,7 +65,7 @@ when maintaining older specs. New scenario manuals should prefer explicit
 
 ## Derived Step Labels
 
-Older specs may still use helper/checker methods with human step text:
+Use `@step` only when an existing action helper needs clearer human text:
 
 ```simple
 @step "User opens the app"
@@ -76,19 +76,18 @@ fn open_app():
 fn enter_login(name: text, password: text):
     ...
 
-@step "Then login succeeds"
-fn Then_login_succeeds():
-    expect(session.status).to_equal("signed-in")
 ```
 
-Legacy scenario flow:
+Modern scenario flow keeps the assertion direct:
 
 ```simple
 @capture
 it "user logs in":
+    step("User opens the app")
     user.open_app()
+    step("User enters login demo")
     user.enter_login("demo", "pass")
-    Then_login_succeeds()
+    expect(session.status).to_equal("signed-in")
 ```
 
 Generated docs should render the step prose and captures first. Runnable code
@@ -98,11 +97,10 @@ Current docgen derives starter manual steps from call-like scenario lines and
 keeps assertion mechanics in the folded executable block. For example,
 `user.open_app()` renders as a visible `User open app` step, while
 `expect(...)` and control-flow lines such as `if user.needs_login():` remain
-executable detail. Nested call-like actions inside control flow can still render
-as visible manual steps. Checker-style calls such as `Then_login_succeeds()`
-render as `Then login succeeds` for compatibility with older specs. In new
-scenario manuals, prefer `step("Login succeeds")` over `Given_*`, `When_*`, or
-`Then_*` helper names.
+executable detail. Nested call-like actions inside control flow can still
+render as visible manual steps. Given/When/Then helper names remain
+parser-compatible for old specs but must not be introduced in new or updated
+scenarios.
 
 Use comment-form `# @step: Text` or `# @step("Text")` before a call or
 executable setup line when the derived label is not good enough:
@@ -177,6 +175,43 @@ Top-level evidence rendering is selectable:
 - `# @evidence-display: embed_all` embeds image evidence where practical.
 
 The same policy can be written in a doc block as `**Evidence Display:** ...`.
+
+## Evidence Manifests and the Showcase
+
+An evidence-producing scenario writes a versioned
+`ScenarioEvidenceManifest` under
+`build/test-artifacts/<spec-relative-path>/evidence.sdn`. The validated
+manifest, not hand-written Markdown, owns result, provenance, freshness,
+artifact integrity, and showcase status. `EVIDENCE_SHOWCASE.md` aggregates
+critical generated manuals and important subproject showcases; it must not
+copy artifacts or let prose override manifest truth.
+
+Critical showcase rows use exactly `live-pass`, `historical-pass`,
+`contract-only`, `blocked`, `unsupported`, or `planned`. Only a current,
+provenance-bound validated manifest may produce `live-pass`. An unavailable
+target remains visible with its prerequisite, exact resume command, owner, and
+reviewer.
+
+Evidence artifacts follow these review rules:
+
+- Text evidence preserves bounded raw and normalized transcripts. Ordered
+  matching may normalize spacing and mask declared dates or versions, but a
+  failure identifies the first missing or out-of-order line and active masks.
+- Still evidence uses SVG or AVIF when suitable and always includes alt text
+  or a summary. A screenshot supports visual review; it does not replace a
+  semantic assertion.
+- Motion evidence uses bounded WebP or WebM review media, at least two
+  keyframes, an event transcript, and a text fallback. Event assertions remain
+  executable.
+- HTML evidence is rendered inertly as source or a sandboxed artifact plus
+  structured checks. Generated manuals never execute captured scripts.
+- Protocol and crypto evidence includes raw bytes and a decoded offset/bitfield
+  table. Important fields may be highlighted, but the same meaning must also
+  be present in text.
+
+Retained PASS media belongs under
+`doc/06_spec/image/<spec-relative-path>/`; ephemeral and failure detail remains
+under `build/test-artifacts/<spec-relative-path>/`.
 
 ## Inline and Previous Scenarios
 
@@ -292,6 +327,9 @@ Supported capture kinds:
 
 - `tui`
 - `gui`
+- `still`
+- `motion`
+- `html`
 - `text`
 - `api`
 - `protocol`
@@ -426,13 +464,15 @@ diagram manually using the `<!-- sdn-diagram:id=... -->` format. See
 After writing or changing a scenario:
 
 1. Generate the doc with `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`.
-2. Run `bin/simple md-diagram-update` to render diagram placeholders.
-3. Read the generated doc as if it were a hand-written manual.
-4. Check that the summary card (title, overview, diagram, stats) is readable
+2. Confirm any evidence manifest validates and that displayed status and links
+   derive from it.
+3. Run `bin/simple md-diagram-update` to render diagram placeholders.
+4. Read the generated doc as if it were a hand-written operator manual.
+5. Check that the summary card (title, overview, diagram, stats) is readable
    at a glance and the full manual is folded below.
-5. If it reads like code or test plumbing, improve `@step`, helper names,
+6. If it reads like code or test plumbing, improve `@step`, helper names,
    visibility, capture kind, or checker/capture output.
-6. Repeat until the manual is useful without opening the source test.
+7. Repeat until the manual is useful without opening the source test.
 
 Every named setup or checker helper used by a displayed scenario must be
 understandable from the manual itself: show it as a visible step or include its

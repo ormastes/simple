@@ -16,13 +16,16 @@
 
 1. Generate SPipe BDD tests: `test/03_system/app/<app_name>/feature/<feature>_spec.spl`
 2. Follow SPipe rules:
-   - New non-shared specs import `use std.spec` for `describe`, `it`, and
-     `expect`; only `test/shared` cross-platform specs stay import-free.
+   - New or updated non-shared specs import `use std.spec.*` and use
+     `describe`, `it`, `step`, `expect`, built-in matchers, and direct value
+     assertions; only `test/shared` cross-platform specs stay import-free.
    - One assertion concept per test
    - Clear names: `it "adds two positive numbers":` not `it "works":`
    - `"""..."""` docstrings for generated docs
 3. Matchers (built-in only): `to_equal`, `to_be`, `to_be_nil`, `to_contain`, `to_start_with`, `to_end_with`, `to_be_greater_than`, `to_be_less_than`
 4. Verify every REQ-NNN has at least one test
+   For critical features, define the authoritative generated manual and
+   validated evidence manifest that drives its `EVIDENCE_SHOWCASE.md` row.
 5. Test plan: `doc/03_plan/<domain>/<topic>/<feature>.md`
    - For broad lanes, list lower-model sidecar lanes or `N/A`, such as Codex
      Spark, Claude Haiku, or Claude Sonnet, plus merge owner and final

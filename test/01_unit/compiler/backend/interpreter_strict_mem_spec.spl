@@ -11,49 +11,38 @@
 The Rust seed's tree-walking interpreter has a strict mode
 (`SIMPLE_STRICT_MEM=1`, see `src/compiler_rust/compiler/src/value.rs`
 `strict_mem_enabled()` / `CowEnv::mark_uninit`) that traps a read of an
-initializer-less `let`/`var` binding because it operates on the raw AST,
-where `let_stmt.value: Option<Expr>` still distinguishes "no initializer"
-from an explicit `= nil`. This spec drives the equivalent gate added to the
-pure-Simple tree-walking interpreter (`InterpreterBackendImpl`/
-`Environment`, `src/compiler/70.backend/backend/`):
+initializer-less `let`/`var` binding with a clear diagnostic instead of
+silently falling through. This spec drives the equivalent gate now added to
+the pure-Simple tree-walking interpreter
+(`InterpreterBackendImpl`/`Environment`, `src/compiler/70.backend/backend/`):
 
 - default OFF (`SIMPLE_STRICT_MEM` unset / not `"1"`): reading an
   initializer-less `var` binding returns the placeholder `Value.Nil`, exactly
-  as before this change.
-- ON (`ctx.strict_mem == true`): the same read instead returns an
-  `Err(BackendError.runtime_error(...))` naming the variable and saying it is
-  uninitialized.
-- a subsequent real write clears the trap so later reads succeed again.
+  as it did before this change -- no behavior difference.
+- ON (`ctx.strict_mem == true`, set directly here rather than through the
+  process-wide env var -- see note below): the same read instead returns an
+  `Err(BackendError.runtime_error(...))` whose message names the variable and
+  says it is uninitialized.
+- a subsequent real assignment clears the trap so later reads succeed again.
 
-## A note on how this spec builds its fixtures
+Both cases build the `HirStmt`/`HirExpr` nodes by hand and call
+`InterpreterBackendImpl.exec_stmt`/`.eval_expr` directly (the same idiom
+`interpreter_backend_spec.spl` already uses for `eval_binop`), instead of
+routing through `parse_full_frontend` + `HirLowering`, to keep this spec's
+import graph -- and compile time -- small.
 
-This spec seeds `Environment.scopes` and calls `Environment.mark_uninit` /
-`clear_uninit` directly, and drives `InterpreterBackendImpl.eval_expr`
-directly (the same "call backend methods directly" idiom
-`interpreter_backend_spec.spl` already uses for `eval_binop`) rather than
-going through `InterpreterBackendImpl.exec_stmt` on a hand-built
-`HirStmtKind.Let`/`Assign` node. That is a deliberate workaround, not a
-style choice: `Environment.define`/`assign` (env.spl) both write through a
-CHAINED double index (`self.scopes[last_idx][name] = value`), and the
-`bin/simple test` execution engine that runs THIS spec file is itself the
-seed's tree-walk interpreter (`doc/07_guide/infra/testing.md`: "`bin/simple
-test` hard-defaults to the tree-walk interpreter"). That engine has a known,
-already-filed, pre-existing gap rejecting exactly that shape of
-lvalue --
-`doc/08_tracking/bug/pure_simple_divergence_domains_2026-07-29.md`, row
-`p10a_nested_index_assign`: "rejects `grid[0][1] = 99` outright ... feature
-gap" (single-index assignment on a plain identifier or a field access is
-unaffected and is used freely below). It is unrelated to this change and
-predates it by a day; `interpreter_backend_spec.spl`'s own passing tests
-already avoid `exec_stmt`/`env.define()` for the same reason (its closure
-test builds `env.scopes = [outer_scope, inner_scope]` directly instead).
-The `HirStmtKind.Let`/`Assign` -> `mark_uninit`/`clear_uninit` call sites
-added in `interpreter.spl` are one-line, directly-inspectable hookups onto
-the independently-tested primitives below.
+Note on env-var plumbing: `EvalContext.strict_mem` is read ONCE from
+`SIMPLE_STRICT_MEM` inside `process_module()` (the real entry point used by
+`bin/simple run`/`test`), not per-check -- see `interp_strict_mem_enabled()`
+in `interpreter.spl`. This spec calls `exec_stmt`/`eval_expr` directly and so
+builds `EvalContext` by hand, setting `strict_mem` explicitly to exercise
+both the on and off path deterministically without depending on the host
+process's environment (avoiding the documented `bin/simple test`
+session-daemon env-scrubbing landmine for env-var-dependent specs).
 """
 
 use std.spec
-use compiler.backend.backend.interpreter.{InterpreterBackendImpl, interp_is_uninit_marker_init}
+use compiler.backend.backend.interpreter.{InterpreterBackendImpl}
 use compiler.backend.backend.env.{Environment, EvalContext}
 use compiler.backend.backend_types.*
 use compiler.hir.hir.*
@@ -62,49 +51,27 @@ use compiler.common.diagnostics.span.{Span}
 fn make_module() -> HirModule:
     HirModule(name: "strict_mem_fixture", path: "strict_mem_fixture.spl", symbols: SymbolTable.new())
 
+fn make_ctx(backend: InterpreterBackendImpl, strict_mem: bool) -> EvalContext:
+    var names: Dict<i64, text> = {}
+    names[1] = "x"
+    EvalContext(env: Environment.new(), module: make_module(), backend: backend, names: names, fn_by_name: {}, has_fn_index: false, strict_mem: strict_mem)
+
+fn uninit_let_stmt() -> HirStmt:
+    # Mirrors what hir_lowering/statements.spl synthesizes for `var x: i64`
+    # (no initializer): a bare NilLit init expression.
+    val sp = Span.default()
+    val init = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: sp)
+    HirStmt(kind: HirStmtKind.Let(SymbolId.new(1), nil, init), span: sp)
+
 fn read_x_expr() -> HirExpr:
     val sp = Span.default()
     HirExpr(kind: HirExprKind.Var(SymbolId.new(1)), type_: nil, span: sp)
 
-describe "interp_is_uninit_marker_init classifies a Let init expression":
-    it "true for a bare NilLit (what an initializer-less var lowers to)":
-        val sp = Span.default()
-        val nil_init = HirExpr(kind: HirExprKind.NilLit, type_: nil, span: sp)
-        expect(interp_is_uninit_marker_init(nil_init)).to_equal(true)
-
-    it "false for a real value":
-        val sp = Span.default()
-        val int_init = HirExpr(kind: HirExprKind.IntLit(42, nil), type_: nil, span: sp)
-        expect(interp_is_uninit_marker_init(int_init)).to_equal(false)
-
-describe "Environment strict-mem uninit tracking (mark_uninit/is_uninit/clear_uninit)":
-    it "a name is not uninit until marked":
-        var env = Environment.new()
-        expect(env.is_uninit("x")).to_equal(false)
-
-    it "mark_uninit makes is_uninit true":
-        var env = Environment.new()
-        env.mark_uninit("x")
-        expect(env.is_uninit("x")).to_equal(true)
-
-    it "clear_uninit undoes mark_uninit":
-        var env = Environment.new()
-        env.mark_uninit("x")
-        env.clear_uninit("x")
-        expect(env.is_uninit("x")).to_equal(false)
-
 describe "Pure-Simple interpreter strict-mem (SIMPLE_STRICT_MEM parity)":
     it "default OFF: reading an uninitialized var returns Value.Nil, unchanged":
         val backend = InterpreterBackendImpl.new()
-        var names: Dict<i64, text> = {}
-        names[1] = "x"
-        var scope: Dict<text, Value> = {}
-        scope["x"] = Value.Nil
-        var env = Environment.new()
-        env.scopes = [scope]
-        val ctx = EvalContext(env: env, module: make_module(), backend: backend, names: names, fn_by_name: {}, has_fn_index: false, strict_mem: false)
-        # OFF mode: strict_mem is never checked, so an unmarked (or even a
-        # marked) uninit name never traps -- matches "byte-for-byte unchanged".
+        val ctx = make_ctx(backend, false)
+        val _ = backend.exec_stmt(uninit_let_stmt(), ctx)
         val result = backend.eval_expr(read_x_expr(), ctx)
         var got_nil = false
         match result:
@@ -116,14 +83,8 @@ describe "Pure-Simple interpreter strict-mem (SIMPLE_STRICT_MEM parity)":
 
     it "ON: reading an uninitialized var traps with a clear diagnostic":
         val backend = InterpreterBackendImpl.new()
-        var names: Dict<i64, text> = {}
-        names[1] = "x"
-        var scope: Dict<text, Value> = {}
-        scope["x"] = Value.Nil
-        var env = Environment.new()
-        env.scopes = [scope]
-        env.mark_uninit("x")
-        val ctx = EvalContext(env: env, module: make_module(), backend: backend, names: names, fn_by_name: {}, has_fn_index: false, strict_mem: true)
+        val ctx = make_ctx(backend, true)
+        val _ = backend.exec_stmt(uninit_let_stmt(), ctx)
         val result = backend.eval_expr(read_x_expr(), ctx)
         var trapped = false
         match result:
@@ -133,23 +94,13 @@ describe "Pure-Simple interpreter strict-mem (SIMPLE_STRICT_MEM parity)":
                 trapped = false
         expect(trapped).to_equal(true)
 
-    it "ON: a cleared-uninit binding with a real value reads normally (not trapped)":
-        # `mark_uninit` then `clear_uninit` -- exactly the sequence
-        # `HirStmtKind.Let` then a later `HirStmtKind.Assign` arm drives in
-        # interpreter.spl -- leaves `is_uninit("x")` false (independently
-        # proven in the "Environment strict-mem uninit tracking" describe
-        # block above), so a read of the real value bound to `x` must
-        # succeed rather than trap.
+    it "ON: a real assignment clears the trap so a later read succeeds":
         val backend = InterpreterBackendImpl.new()
-        var names: Dict<i64, text> = {}
-        names[1] = "x"
-        var scope: Dict<text, Value> = {}
-        scope["x"] = Value.Int(7)
-        var env = Environment.new()
-        env.scopes = [scope]
-        env.mark_uninit("x")
-        env.clear_uninit("x")
-        val ctx = EvalContext(env: env, module: make_module(), backend: backend, names: names, fn_by_name: {}, has_fn_index: false, strict_mem: true)
+        val ctx = make_ctx(backend, true)
+        val _ = backend.exec_stmt(uninit_let_stmt(), ctx)
+        val sp = Span.default()
+        val assign_stmt = HirStmt(kind: HirStmtKind.Assign(read_x_expr(), nil, HirExpr(kind: HirExprKind.IntLit(7, nil), type_: nil, span: sp)), span: sp)
+        val _ = backend.exec_stmt(assign_stmt, ctx)
         val result = backend.eval_expr(read_x_expr(), ctx)
         var got_seven = false
         match result:
@@ -159,15 +110,12 @@ describe "Pure-Simple interpreter strict-mem (SIMPLE_STRICT_MEM parity)":
                 got_seven = false
         expect(got_seven).to_equal(true)
 
-    it "ON: a genuinely-initialized var (never marked) is never trapped":
+    it "ON: a genuinely-initialized var is never trapped":
         val backend = InterpreterBackendImpl.new()
-        var names: Dict<i64, text> = {}
-        names[1] = "x"
-        var scope: Dict<text, Value> = {}
-        scope["x"] = Value.Int(42)
-        var env = Environment.new()
-        env.scopes = [scope]
-        val ctx = EvalContext(env: env, module: make_module(), backend: backend, names: names, fn_by_name: {}, has_fn_index: false, strict_mem: true)
+        val ctx = make_ctx(backend, true)
+        val sp = Span.default()
+        val let_stmt = HirStmt(kind: HirStmtKind.Let(SymbolId.new(1), nil, HirExpr(kind: HirExprKind.IntLit(42, nil), type_: nil, span: sp)), span: sp)
+        val _ = backend.exec_stmt(let_stmt, ctx)
         val result = backend.eval_expr(read_x_expr(), ctx)
         var got_42 = false
         match result:

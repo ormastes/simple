@@ -1,6 +1,100 @@
 <!-- codex-design -->
 # Shared Multilingual GPU Fonts System Test Plan
 
+## Active scope override — SimpleOS fonts with Stage 2
+
+This is the active completion plan. It supersedes the broader cross-platform
+GPU plan below for the current delivery, while retaining that material as
+future work.
+
+### Goal
+
+Complete pinned multilingual font loading, shaping, Draw IR materialization,
+and visible SimpleOS desktop rendering using a provenance-recorded pure-Simple
+Stage 2 compiler plus standalone runner/docgen artifacts. Do not wait for a
+Stage 3/Stage 4 full CLI or unavailable non-SimpleOS GPU hosts.
+
+The resulting done mark is `SIMPLEOS_STAGE2_FONT: PASS`; it must not be
+presented as completion of the deferred cross-platform native-GPU matrix.
+
+### Active items and estimate
+
+| Item | Required result | Estimate |
+|---|---|---:|
+| Stage 2 runner | Build a fresh core-C capsule, link `font_evidence_runner`, and pass deliberate-red plus zero-example calibration | 1–2 h |
+| Font assets | Verify pinned bytes, licenses, notices, hashes, sizes, and SimpleOS image paths | 1–2 h |
+| Registered-only shaping | Shape the accepted Hindi, Arabic, and Urdu witnesses from registered bytes without host font ABI/filesystem access | 1–3 h |
+| SimpleOS material path | Preserve a handle-free glyph run through Draw IR and prepare a nonempty batch through the existing `FontRenderer` | 1–2 h |
+| QEMU proof | Boot the canonical desktop, verify guest font identity, retain an independent framebuffer crop, and correlate keyboard/pointer input with the rendered frame | 2–6 h |
+| Evidence handoff | Generate zero-stub manuals, record exact commands/hashes, review the scoped matrix, then commit/push | 1–2 h |
+
+Expected duration: 8–12 hours when the runner and QEMU paths are healthy;
+allow 1–2 days for bounded repair of runner-link or guest-boot failures.
+
+### Focused executable set
+
+Run only this scoped set:
+
+- `test/03_system/app/simple_2d/feature/shared_font_manifest_spec.spl`
+- `test/03_system/app/simple_2d/feature/shared_font_shaping_acceptance_spec.spl`
+- `test/01_unit/lib/skia/selected_devanagari_spec.spl`
+- `test/01_unit/lib/skia/selected_arabic_spec.spl`
+- `test/01_unit/os/port/simpleos_font_bundle_spec.spl`
+- `test/02_integration/os/port/simpleos_font_asset_staging_spec.spl`
+- `test/01_unit/os/gui_entry_desktop_production_render_contract_spec.spl`
+- `test/01_unit/os/drivers/framebuffer/simpleos_wm_qemu_evidence_contract_spec.spl`
+- `test/03_system/os/wm/simpleos_wm_fullscreen_spec.spl`
+- `test/03_system/os/wm/rv64_simpleos_wm_font_input_spec.spl`
+
+### Execution order
+
+1. Record the Stage 2 binary path/SHA-256 and build a core-C capsule containing
+   every runner symbol, including `rt_file_create_excl`.
+2. Build the standalone `src/app/test/font_evidence_runner.spl`; require the
+   deliberate-red and zero-example fixtures to exit 1 with their exact markers.
+3. Run the manifest, shaping, and asset-staging specs with nonzero examples and
+   zero failures.
+4. Build the SimpleOS image with the exact pinned font bytes and notices.
+5. Boot the canonical SimpleOS desktop and retain guest path/length/hash,
+   registered-only shaping, Draw IR/batch identity, QMP framebuffer crop, and
+   input/frame correlation evidence.
+6. Generate the ten scoped manuals with the standalone Stage 2 docgen and
+   require `0 stubs`.
+7. Record `SIMPLEOS_STAGE2_FONT: PASS` only after independent review of all
+   scoped evidence.
+
+### Non-blocking warnings and deferred work
+
+The following do not block this scoped goal:
+
+- docgen length, prose, capitalization, metadata, or other presentation
+  warnings when the manual has `0 stubs` and exposes the required steps and
+  evidence;
+- unrelated compiler warnings or cleanup that does not affect the Stage 2
+  runner, selected font bytes, SimpleOS build, or QEMU execution;
+- Stage 3/Stage 4 full-CLI admission;
+- Web/hosted desktop, Engine3D, CUDA, ROCm/HIP, Metal, DirectX, and
+  cross-platform native-GPU promotion;
+- the deferred cross-platform performance NFR matrix.
+
+Crashes, timeouts, zero executed examples, missing font bytes, hash/length
+mismatch, host-font access after registered-only mode, an empty glyph batch,
+missing QEMU pixels, or an uncorrelated input/frame receipt remain blocking.
+Software or source-only evidence cannot replace the SimpleOS QEMU framebuffer
+oracle.
+
+### Scoped pass criteria
+
+Pass requires all ten focused specs to execute with real assertions, the runner
+calibration to fail exactly as designed, guest font identity to match the
+pinned manifest, accepted Hindi/Arabic/Urdu shaping to produce nonempty
+handle-free material, the canonical SimpleOS desktop to render those pixels,
+the independent crop and input/frame receipts to agree, and all ten manuals to
+report `0 stubs`.
+
+Everything below this section is deferred reference for the original
+cross-platform GPU goal and is not part of `SIMPLEOS_STAGE2_FONT: PASS`.
+
 ## Scope
 
 Twelve executable/manual pairs comprise seven system SSpecs for manifest/assets,

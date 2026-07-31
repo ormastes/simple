@@ -47,6 +47,13 @@ Skip if exist. See `design` skill for details.
   implementation is considered ready: generate the doc, read it as a manual,
   improve steps/captures/visibility/helper names, and regenerate until the
   primary flow is manual-quality.
+- For critical features, persist and validate the versioned evidence manifest
+  before refreshing `EVIDENCE_SHOWCASE.md`. Do not hand-author PASS, freshness,
+  provenance, or artifact links. Generated operator pages must render
+  accessible text/still/motion, inert-HTML, and raw-plus-decoded protocol
+  evidence from the manifest.
+- New or updated scenarios use `use std.spec.*`, `describe`, `it`, `step`,
+  `expect`, built-in matchers, and direct value assertions only.
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.

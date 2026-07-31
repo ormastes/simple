@@ -295,13 +295,14 @@ and [`manual_examples/`](../../doc/07_guide/app/spipe/manual_examples/)):
 11. Internal tags leaking into user output (`(slow)` on every scenario).
 12. No step vocabulary at all — neither `Given_/When_/Then_` nor `step()`.
 
-**Capture kinds (target feature set, FR-1..FR-6 — see requirements doc):**
-`tui_grid`, `gui_image`, `protocol_json`/`protocol_binary`, `bit_table` (8/16/32),
-`statistics`, and user-defined kinds via a capture registry. Design:
-[`doc/05_design/sspec_capture_extension.md`](../../doc/05_design/sspec_capture_extension.md);
-impl plan: [`doc/03_plan/sspec_modernization_plan.md`](../../doc/03_plan/sspec_modernization_plan.md);
-authoritative feature set today:
-[`doc/02_requirements/feature/sspec_scenario_manual.md`](../../doc/02_requirements/feature/sspec_scenario_manual.md).
+**Evidence showcase contract:** Critical `EVIDENCE_SHOWCASE.md` rows link the
+authoritative generated manual. A validated versioned evidence manifest, not
+editable Markdown, owns status, provenance, freshness, integrity, and artifact
+links. Generated operator pages render actionable normalized text, stills with
+alt/summary text, bounded motion with keyframes and an event transcript, inert
+HTML, and protocol/crypto raw bytes plus decoded fields. Reuse the existing
+capture owners; do not add a parallel registry or reporting stack. See
+[`Evidence Showcase`](../../doc/07_guide/app/spipe/evidence_showcase.md).
 
 ## Test API Imports
 

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 9 | 9 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -34,9 +34,8 @@ tokenizer/tree builder feeds Web semantics, computed style, layout,
 `DrawIrComposition`, and Engine2D.
 
 It covers context-sensitive tree repair, inert template handling, generated
-document structure, bounded projection, video poster rendering, and the safe
-generic fallback used by embedded and media tags that do not yet have dedicated
-resource execution.
+document structure, bounded projection, and the safe generic fallback used by
+embedded and media tags that do not yet have dedicated resource execution.
 
 **Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
 
@@ -118,9 +117,8 @@ The renderer must not invent `display:none` for these generic elements.
 Every selected element must retain the authored background, nonzero geometry,
 and a component command in canonical Draw IR.
 
-External-looking `href`, `src`, `srcset`, and `data` attributes are semantic
-attributes only in this fallback profile. A `video` poster is deliberately
-covered by the dedicated poster scenario below.
+External-looking `href`, `src`, `srcset`, `data`, and `poster` attributes are
+semantic attributes only in this fallback profile.
 
 `browser_document_resource_plan` must report zero scripts, zero images, and
 zero warnings while retaining the one authored inline stylesheet.
@@ -169,8 +167,7 @@ A resource discovered under an inert template is a fail-open planning error.
 
 A hidden generic embedded tag is an overbroad suppression error.
 
-A media URL becoming a Draw IR image is an unauthorized resource escape; the
-dedicated `video[poster]` image path is the only selected exception.
+A media attribute becoming a Draw IR image is an unauthorized resource escape.
 
 A correct semantic node without the expected layout or component command is a
 Web projection failure.
@@ -186,7 +183,7 @@ It does not claim complete WHATWG parsing, media playback, Canvas scripting,
 image candidate selection, image maps, plugin execution, native controls,
 iframe security, or complete HTML/CSS conformance.
 
-The posterless embedded-media fallback is intentionally resource-inactive.
+The embedded-media fallback is intentionally resource-inactive.
 
 Dedicated capabilities must add their own resource, security, lifecycle,
 layout, Draw IR, and Engine2D evidence before promotion.
@@ -729,7 +726,8 @@ val html = (
     "<source id='source-row' class='fallback' " +
     "srcset='https://invalid.example/picture 1x'></picture>" +
     "<video id='video-row' class='fallback' " +
-    "src='https://invalid.example/video'>" +
+    "src='https://invalid.example/video' " +
+    "poster='https://invalid.example/poster'>" +
     "<track id='track-row' class='fallback' " +
     "src='https://invalid.example/track'></video></body>"
 )
@@ -808,119 +806,6 @@ expect(_pixels(
 
 </details>
 
-#### should render an admitted video poster without fetching media
-
-- Plan only the poster through the bounded image resource path
-   - HTML capture: after_step
-   - Expected: plan.image_sources.len() equals `1`
-   - Expected: plan.image_sources[0].authored_src equals `/poster.png`
-   - Expected: plan.image_sources[0].resolved_url equals `https://safe.test/poster.png`
-- Bind the admitted poster to its video node
-   - HTML capture: after_step
-   - Expected: allowed.image_resources.len() equals `1`
-   - Expected: allowed.admitted_image_sources.len() equals `1`
-   - Expected: render HTML contains the admitted poster key while media URLs remain authored
-- Lower the poster through canonical Draw IR and Engine2D
-   - HTML capture: after_step
-   - Expected: `stage_image` is an image command with the admitted resource key
-   - Expected: the 4 by 4 Engine2D readback contains the poster color
-- Block the same poster under img-src without painting an alias
-   - HTML capture: after_step
-   - Expected: blocked.image_resources.len() equals `0`
-   - Expected: warnings contain the blocked poster URL
-   - Expected: no `stage_image` command or poster-colored pixel survives
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 79 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val poster_color = 0xFF14B8A6u32
-val html = (
-    "<html><head></head><body style='margin:0'>" +
-    "<video id='stage' style='display:block;width:4px;height:4px' " +
-    "poster='/poster.png' src='/movie.mp4'>" +
-    "<source src='/movie.webm' type='video/webm'>" +
-    "<track src='/captions.vtt' kind='captions'>" +
-    "</video></body></html>"
-)
-
-step("Plan only the poster through the bounded image resource path")
-val plan = browser_document_resource_plan(
-    html, "https://safe.test/watch", ""
-)
-expect(plan.image_sources.len()).to_equal(1)
-expect(plan.image_sources[0].authored_src).to_equal("/poster.png")
-expect(plan.image_sources[0].resolved_url).to_equal(
-    "https://safe.test/poster.png"
-)
-
-step("Bind the admitted poster to its video node")
-var allowed = BrowserSession.new()
-allowed.register_resource(
-    "https://safe.test/poster.png", _poster_png_hex(poster_color)
-)
-expect(allowed.open_html(
-    "https://safe.test/watch", html
-).is_ok()).to_equal(true)
-expect(allowed.image_resources.len()).to_equal(1)
-expect(allowed.admitted_image_sources.len()).to_equal(1)
-val render_html = allowed.render_html_document()
-expect(render_html).to_contain(
-    "poster=\"" + allowed.image_resources[0].image_uri + "\""
-)
-expect(render_html).to_contain("src=\"/movie.mp4\"")
-expect(render_html).to_contain("src=\"/movie.webm\"")
-expect(render_html).to_contain("src=\"/captions.vtt\"")
-
-step("Lower the poster through canonical Draw IR and Engine2D")
-val composition = simple_web_layout_render_html_draw_ir_with_images(
-    render_html, 4, 4, allowed.image_resources
-)
-val command = _command_by_id(composition, "stage_image")
-expect(command.kind).to_equal("image")
-expect(command.image_uri).to_equal(
-    allowed.image_resources[0].image_uri
-)
-val pixels = allowed.render_to_pixels(4, 4).pixel_data
-expect(pixels.len()).to_equal(16)
-expect(pixels.contains(poster_color)).to_equal(true)
-
-step("Block the same poster under img-src without painting an alias")
-var blocked = BrowserSession.new()
-blocked.register_resource(
-    "https://safe.test/poster.png", _poster_png_hex(poster_color)
-)
-expect(blocked.open_html(
-    "https://safe.test/watch",
-    "<html><head><meta http-equiv='content-security-policy' " +
-    "content=\"img-src 'none'\"></head><body style='margin:0'>" +
-    "<video id='stage' style='display:block;width:4px;height:4px' " +
-    "poster='/poster.png'></video></body></html>"
-).is_ok()).to_equal(true)
-expect(blocked.image_resources.len()).to_equal(0)
-expect(blocked.warnings.join("|")).to_contain(
-    "CSP blocked image: https://safe.test/poster.png"
-)
-val blocked_composition =
-    simple_web_layout_render_html_draw_ir_with_images(
-        blocked.render_html_document(), 4, 4,
-        blocked.image_resources
-    )
-expect(_has_command(
-    blocked_composition, "stage_image"
-)).to_equal(false)
-expect(blocked.render_to_pixels(
-    4, 4
-).pixel_data.contains(poster_color)).to_equal(false)
-
-```
-
-</details>
-
 <details>
 <summary>Advanced: should preserve component order and bounded projection caps</summary>
 
@@ -967,8 +852,8 @@ expect(simple_web_layout_debug_capped_node_count(
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 9 |
-| Active scenarios | 9 |
+| Total scenarios | 8 |
+| Active scenarios | 8 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

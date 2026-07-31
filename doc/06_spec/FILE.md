@@ -13,6 +13,7 @@ Specification documentation. Contains both **generated** and **manually written*
 
 **Generators:**
 - `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index` — canonical scenario SSpec manual generator; accept only complete output with 0 stubs, followed by manual-quality review
+- `bin/simple spipe-docgen --showcase` — refreshes generated truth in the root `EVIDENCE_SHOWCASE.md` from curated rows and validated evidence manifests
 - `bin/simple spec-gen [path]` — legacy doc-comment extractor (`src/app/spec_gen/main.spl`)
 - Test runner — `feature.md`, `pending_feature.md` regenerated every test run
 - `src/app/doc/gen_spec_docs.spl` — README, SPEC_CATALOG, MIXIN_FEATURES
@@ -57,6 +58,10 @@ Specification documentation. Contains both **generated** and **manually written*
 ## Rules
 
 - Do not hand-edit a generated file; determine ownership from the documented generating workflow/command or explicit `Generator` metadata, because suffix/header alone is insufficient
-- Scenario SSpec manuals require complete generation with 0 stubs and a rendered manual-quality review
+- Scenario SSpec manuals require complete generation with 0 stubs and review as operator pages without opening the source spec
+- Generated evidence status, provenance, freshness, integrity, and artifact links derive from validated versioned manifests; prose cannot override them
+- Retained text, SVG, and manifests remain normal Git files; retained binary still/motion review media follows repository Git LFS policy under `image/<spec-relative-path>/`
+- Text evidence includes raw/normalized diagnostics; stills include alt/summary text; motion includes keyframes and a transcript; HTML is inert; protocol/crypto evidence includes raw bytes and decoded fields
+- Never place executable `.spl` specs anywhere under `doc/06_spec/`
 - Manual specs use non-`_spec.md` names or live in dirs without a corresponding test
 - Spec path mirrors test path: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/01_unit/compiler/parser/x_spec.md`

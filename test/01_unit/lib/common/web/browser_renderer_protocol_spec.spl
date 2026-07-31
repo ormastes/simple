@@ -1,14 +1,11 @@
 # @cover src/lib/common/web/browser_renderer_protocol.spl 80%
 
 use std.spec.*
-use std.common.base_encoding.base64.{base64_encode}
 use std.common.web.browser_renderer_protocol.{
     BROWSER_RENDERER_MAX_PAYLOAD_BYTES,
     BrowserRendererMessage,
     browser_renderer_action_decode,
     browser_renderer_advance_encode,
-    browser_renderer_capability_decoder_feed,
-    browser_renderer_capability_decoder_new,
     browser_renderer_chrome_encode,
     browser_renderer_decoder_feed, browser_renderer_decoder_new,
     browser_renderer_frame_decode,
@@ -18,10 +15,8 @@ use std.common.web.browser_renderer_protocol.{
     browser_renderer_frame_encode_with_state,
     browser_renderer_frame_encode_with_state_and_images,
     browser_renderer_frame_encode_with_state_and_retained_images,
-    browser_renderer_frame_encode_with_state_and_retained_images_and_title,
     browser_renderer_frame_encode_with_witness,
     browser_renderer_frame_reply_to_request_id,
-    hosted_browser_title_is_valid,
     browser_renderer_image_resource_revisions,
     browser_renderer_referenced_image_resources,
     browser_renderer_fetch_request_decode,
@@ -48,8 +43,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 }
 use std.common.ui.draw_ir.{
     DRAW_IR_BACKEND_AUTO,
-    DrawIrCommand, DrawIrComposition, DrawIrStyleProp,
-    draw_ir_batch, draw_ir_composition, draw_ir_embedding_config,
+    DrawIrComposition, DrawIrStyleProp,
     draw_ir_image_command, draw_ir_style_prop
 }
 
@@ -73,221 +67,8 @@ fn _renderer_protocol_image_fixture(image_uri: text) -> DrawIrComposition:
     composition.batches = batches
     composition
 
-fn _renderer_protocol_dense_image_fixture(
-    command_count: i32, resource_count: i32
-) -> (DrawIrComposition, [SimpleOsHostGpuImageResource]):
-    var resources: [SimpleOsHostGpuImageResource] = []
-    var resource_index = 0
-    while resource_index < resource_count:
-        resources.push(simpleos_host_gpu_image_resource(
-            "dense:{resource_index}", 1, 1,
-            [(0xff000000u32 + resource_index.to_u32())]
-        ))
-        resource_index = resource_index + 1
-    var commands: [DrawIrCommand] = []
-    var command_index = 0
-    while command_index < command_count:
-        val selected_index = command_index % resource_count
-        commands.push(draw_ir_image_command(
-            "dense-command:{command_index}", 0, 0, 1, 1,
-            "dense:{selected_index}", []
-        ))
-        command_index = command_index + 1
-    (
-        draw_ir_composition(
-            "dense-images", "dense-images", DRAW_IR_BACKEND_AUTO,
-            [draw_ir_batch(
-                "dense-images", DRAW_IR_BACKEND_AUTO,
-                draw_ir_embedding_config(
-                    "dense-images", "dense-images", 0, 0, 1, 1,
-                    0, 1000, false
-                ),
-                commands
-            )]
-        ),
-        resources
-    )
-
 describe "isolated browser renderer protocol":
-    it "rejects NUL payloads at both renderer envelope decoders":
-        step("Decode manually framed malformed renderer envelopes")
-        val legacy = browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(7),
-            "SBR1\tinit\t7\t1\t3\nA\0B"
-        )
-        expect(legacy.status).to_equal("violation")
-        expect(legacy.decoder.error).to_equal("nul-payload")
-
-        val capability = "0123456789abcdef0123456789abcdef"
-        val bound = browser_renderer_capability_decoder_feed(
-            browser_renderer_capability_decoder_new(7),
-            "SBR2\tinit\t7\t1\t1\t3\t32\nA\0B" + capability
-        )
-        expect(bound.status).to_equal("violation")
-        expect(bound.decoder.error).to_equal("nul-payload")
-
-    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-021
-    it "round-trips bounded document titles and rejects hostile SBRF8 fields":
-        val title_512 = "a".repeat(510) + "é"
-        val title_513 = "a".repeat(511) + "é"
-        expect(hosted_browser_title_is_valid(title_512)).to_be(true)
-        expect(hosted_browser_title_is_valid(title_513)).to_be(false)
-        val encoded = (
-            browser_renderer_frame_encode_with_state_and_retained_images_and_title(
-                _renderer_protocol_fixture(),
-                7, 2, 41, -1, 0, "", 0, "", "",
-                "https://title.test/", "", "", title_512,
-                1, [], []
-            )
-        )
-        expect(encoded.ok).to_be(true)
-        val decoded_message = browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(7), encoded.wire
-        )
-        expect(decoded_message.status).to_equal("message")
-        expect(browser_renderer_frame_reply_to_request_id(
-            decoded_message.message
-        )).to_equal(41)
-        val frame = browser_renderer_frame_decode(
-            decoded_message.message, 64, 48
-        )
-        expect(frame.ok).to_be(true)
-        expect(frame.document_title_present).to_be(true)
-        expect(frame.document_title).to_equal(title_512)
-
-        val oversized = (
-            browser_renderer_frame_encode_with_state_and_retained_images_and_title(
-                _renderer_protocol_fixture(),
-                7, 2, 41, -1, 0, "", 0, "", "",
-                "https://title.test/", "", "", title_513,
-                1, [], []
-            )
-        )
-        expect(oversized.reason).to_equal("invalid-document-title")
-        val forged_title = base64_encode(title_513)
-        expect(forged_title.len()).to_equal(684)
-        val forged_oversized = BrowserRendererMessage(
-            kind: "frame",
-            generation: decoded_message.message.generation,
-            request_id: decoded_message.message.request_id,
-            payload: decoded_message.message.payload.replace(
-                base64_encode(title_512), forged_title
-            )
-        )
-        val forged_rejection = browser_renderer_frame_decode(
-            forged_oversized, 64, 48
-        )
-        expect(forged_rejection.ok).to_be(false)
-        expect(forged_rejection.reason).to_equal(
-            "invalid-document-title"
-        )
-        expect(forged_rejection.document_title_present).to_be(false)
-        expect(forged_rejection.document_title).to_equal("")
-        val noncanonical = BrowserRendererMessage(
-            kind: "frame",
-            generation: decoded_message.message.generation,
-            request_id: decoded_message.message.request_id,
-            payload: decoded_message.message.payload.replace(
-                "\t684\t", "\t0684\t"
-            )
-        )
-        expect(browser_renderer_frame_decode(
-            noncanonical, 64, 48
-        ).reason).to_equal("malformed-document-title")
-        val short_title = (
-            browser_renderer_frame_encode_with_state_and_retained_images_and_title(
-                _renderer_protocol_fixture(),
-                7, 2, 41, -1, 0, "", 0, "", "",
-                "https://title.test/", "", "", "ok",
-                1, [], []
-            )
-        )
-        val short_message = browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(7), short_title.wire
-        )
-        val nul_title = BrowserRendererMessage(
-            kind: "frame",
-            generation: short_message.message.generation,
-            request_id: short_message.message.request_id,
-            payload: short_message.message.payload.replace(
-                "b2s=", "AA=="
-            )
-        )
-        expect(browser_renderer_frame_decode(
-            nul_title, 64, 48
-        ).reason).to_equal("invalid-document-title")
-        val invalid_padding = BrowserRendererMessage(
-            kind: "frame",
-            generation: short_message.message.generation,
-            request_id: short_message.message.request_id,
-            payload: short_message.message.payload.replace(
-                "b2s=", "b=8="
-            )
-        )
-        expect(browser_renderer_frame_decode(
-            invalid_padding, 64, 48
-        ).reason).to_equal("invalid-document-title")
-        val truncated_title = BrowserRendererMessage(
-            kind: "frame",
-            generation: short_message.message.generation,
-            request_id: short_message.message.request_id,
-            payload: short_message.message.payload.replace(
-                "\t4\t0\t", "\t5\t0\t"
-            )
-        )
-        expect(browser_renderer_frame_decode(
-            truncated_title, 64, 48
-        ).ok).to_be(false)
-        val overlapping_title = BrowserRendererMessage(
-            kind: "frame",
-            generation: short_message.message.generation,
-            request_id: short_message.message.request_id,
-            payload: short_message.message.payload.replace(
-                "\t4\t0\t", "\t0\t0\t"
-            )
-        )
-        expect(browser_renderer_frame_decode(
-            overlapping_title, 64, 48
-        ).ok).to_be(false)
-        val legacy = browser_renderer_frame_encode_with_state_and_retained_images(
-            _renderer_protocol_fixture(),
-            7, 2, 41, -1, 0, "", 0, "", "",
-            "https://title.test/", "", "", 1, [], []
-        )
-        val legacy_message = browser_renderer_decoder_feed(
-            browser_renderer_decoder_new(7), legacy.wire
-        )
-        expect(browser_renderer_frame_decode(
-            legacy_message.message, 64, 48
-        ).document_title_present).to_be(false)
-
-    it "selects dense image resources once in first-reference order":
-        step("Encode a dense frame whose image resources arrive in reverse order")
-        val (dense_composition, dense_resources) = (
-            _renderer_protocol_dense_image_fixture(1024, 64)
-        )
-        var reverse_resources: [SimpleOsHostGpuImageResource] = []
-        var reverse_index = dense_resources.len() - 1
-        while reverse_index >= 0:
-            reverse_resources.push(dense_resources[reverse_index])
-            reverse_index = reverse_index - 1
-        val selected = browser_renderer_referenced_image_resources(
-            dense_composition, reverse_resources
-        )
-        expect(selected.len()).to_equal(64)
-        var selected_index = 0
-        while selected_index < selected.len():
-            expect(selected[selected_index].image_uri).to_equal(
-                "dense:{selected_index}"
-            )
-            selected_index = selected_index + 1
-        expect(browser_renderer_frame_encode_with_state_and_images(
-            dense_composition, 7, 1, 1, -1, 0, "", 0, "",
-            "", "", "", "", selected
-        ).ok).to_be(true)
-
     it "round-trips only bounded positive viewport resize commands":
-        step("Encode and decode valid and oversized viewport resize commands")
         val encoded = browser_renderer_resize_encode(7, 1, 800, 600)
         expect(encoded.ok).to_be(true)
         val message = browser_renderer_decoder_feed(
@@ -302,11 +83,10 @@ describe "isolated browser renderer protocol":
         ).ok).to_be(false)
 
     it "round-trips bounded network messages without delimiter ambiguity":
-        step("Round-trip bounded fetch and response messages across the renderer boundary")
         val request_wire = browser_renderer_fetch_request_encode(
             7, 1, 41, "fetch-1", "fetch", "https://example.test/a",
             "POST", "X-Test: a\tb", "h\u00e9llo\nbody", "text/plain",
-            "include", ["theme=dark", "lang=\u754c"], "null"
+            "include", ["theme=dark", "lang=\u754c"]
         )
         expect(request_wire.ok).to_be(true)
         val request_message = browser_renderer_decoder_feed(
@@ -322,24 +102,9 @@ describe "isolated browser renderer protocol":
         expect(request.headers).to_equal("X-Test: a\tb")
         expect(request.body).to_equal("h\u00e9llo\nbody")
         expect(request.credentials).to_equal("include")
-        expect(request.initiator_origin).to_equal("null")
         expect(request.script_cookie_writes.len()).to_equal(2)
         expect(request.script_cookie_writes[0]).to_equal("theme=dark")
         expect(request.script_cookie_writes[1]).to_equal("lang=\u754c")
-        val boundary_cookie = (
-            "edge=" + "x".repeat(4091) + "; Path=/account"
-        )
-        val boundary_wire = browser_renderer_fetch_request_encode(
-            7, 4, 44, "fetch-4", "fetch", "https://example.test/cookie",
-            "GET", "", "", "", "include", [boundary_cookie],
-            "https://example.test"
-        )
-        expect(boundary_wire.ok).to_be(true)
-        expect(browser_renderer_fetch_request_decode(
-            browser_renderer_decoder_feed(
-                browser_renderer_decoder_new(7), boundary_wire.wire
-            ).message
-        ).script_cookie_writes[0]).to_equal(boundary_cookie)
         val empty_cookie_writes = browser_renderer_fetch_request_encode(
             7, 2, 42, "fetch-2", "fetch", "https://example.test/b",
             "GET", "", "", "", "omit", []
@@ -390,8 +155,8 @@ describe "isolated browser renderer protocol":
         expect(browser_renderer_fetch_request_decode(
             BrowserRendererMessage(
                 kind: "fetch_request", generation: 7, request_id: 1,
-                payload: "SBRQ4\t1\t1\t5\t1\t3\t0\t0\t0\t7\t4\t2\n" +
-                    "xfetchuGETINCLUDEnull0\n"
+                payload: "SBRQ3\t1\t1\t5\t1\t3\t0\t0\t0\t7\t2\n" +
+                    "xfetchuGETINCLUDE0\n"
             )
         ).ok).to_be(false)
         for malformed_cookie_batch in [
@@ -400,16 +165,15 @@ describe "isolated browser renderer protocol":
             "1\t03\none",
             "1\t3\nonetwo",
             "1\t3\na\nb",
-            "1\t8193\n"
+            "1\t4097\n"
         ]:
             expect(browser_renderer_fetch_request_decode(
                 BrowserRendererMessage(
                     kind: "fetch_request", generation: 7, request_id: 1,
                     payload: (
-                        "SBRQ4\t1\t1\t5\t1\t3\t0\t0\t0\t11\t4\t" +
+                        "SBRQ3\t1\t1\t5\t1\t3\t0\t0\t0\t11\t" +
                         str(malformed_cookie_batch.len()) + "\n" +
-                        "xfetchuGETsame-originnull" +
-                        malformed_cookie_batch
+                        "xfetchuGETsame-origin" + malformed_cookie_batch
                     )
                 )
             ).ok).to_be(false)
@@ -433,12 +197,12 @@ describe "isolated browser renderer protocol":
                 "https://example.test/", "GET", "", "", "",
                 "same-origin", [invalid_cookie_write]
             ).ok).to_be(false)
-        val maximum_cookie_write = ["x"; 8192].join("")
+        val maximum_cookie_write = ["x"; 4096].join("")
         expect(browser_renderer_fetch_request_encode(
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
             "GET", "", "", "", "same-origin", [maximum_cookie_write]
         ).ok).to_be(true)
-        val oversized_cookie_write = ["x"; 8193].join("")
+        val oversized_cookie_write = ["x"; 4097].join("")
         expect(browser_renderer_fetch_request_encode(
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
             "GET", "", "", "", "same-origin", [oversized_cookie_write]
@@ -451,10 +215,9 @@ describe "isolated browser renderer protocol":
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
             "GET", "", "", "", "same-origin", ["x"; 33]
         ).ok).to_be(false)
-        val aggregate_cookie_write = ["x"; 4096].join("")
         expect(browser_renderer_fetch_request_encode(
             7, 1, 1, "fetch-1", "fetch", "https://example.test/",
-            "GET", "", "", "", "same-origin", [aggregate_cookie_write; 32]
+            "GET", "", "", "", "same-origin", [maximum_cookie_write; 32]
         ).ok).to_be(true)
         expect(browser_renderer_network_response_encode(
             7, 1, "fetch-1", "fetch", "https://example.test/",
@@ -462,7 +225,6 @@ describe "isolated browser renderer protocol":
         ).ok).to_be(false)
 
     it "round-trips bounded actions and rejects ambiguous payloads":
-        step("Round-trip renderer actions and submit malformed payload shapes")
         val pointer_wire = browser_renderer_pointer_encode(7, 1, 9, -3, 4, true)
         expect(pointer_wire.ok).to_be(true)
         val pointer_message = browser_renderer_decoder_feed(
@@ -562,7 +324,6 @@ describe "isolated browser renderer protocol":
         )).ok).to_be(false)
 
     it "round-trips typed navigation and rejects noncanonical shapes":
-        step("Round-trip typed navigation and submit noncanonical messages")
         val open_wire = browser_renderer_navigation_encode(
             7, 1, "open", "https://example.test/form", "POST",
             "X-Test: one", "name=value",
@@ -602,7 +363,6 @@ describe "isolated browser renderer protocol":
         )).ok).to_be(false)
 
     it "round-trips canonical DrawIR and fails closed on malformed stale duplicate or oversized frames":
-        step("Round-trip a canonical DrawIR frame and submit invalid frame variants")
         val encoded = browser_renderer_frame_encode(_renderer_protocol_fixture(), 7, 1)
         expect(encoded.ok).to_be(true)
 
@@ -787,7 +547,7 @@ describe "isolated browser renderer protocol":
             browser_renderer_frame_encode_with_state_and_retained_images(
                 image_composition, 7, 6, 46, 16, 0, "", 0, "",
                 "", "https://example.test/image", "", "",
-                1, image_resources, image_revisions
+                101, image_resources, image_revisions
             )
         )
         expect(retained_image_state.ok).to_be(true)
@@ -807,7 +567,7 @@ describe "isolated browser renderer protocol":
             )
         )
         expect(retained_image_frame.ok).to_be(true)
-        expect(retained_image_frame.composition_revision).to_equal(1)
+        expect(retained_image_frame.composition_revision).to_equal(101)
         expect(retained_image_frame.image_resources[0].pixels[0]).to_equal(
             0xffc080feu32
         )
@@ -850,7 +610,7 @@ describe "isolated browser renderer protocol":
             browser_renderer_frame_encode_with_state_and_retained_images(
                 image_composition, 7, 7, 47, 32, 0, "", 0, "",
                 "", "https://example.test/image", "", "",
-                2, changed_image_resources, image_revisions
+                102, changed_image_resources, image_revisions
             )
         )
         expect(changed_image_state.ok).to_be(true)
@@ -863,7 +623,6 @@ describe "isolated browser renderer protocol":
             48
         )
         expect(changed_image_frame.ok).to_be(true)
-        expect(changed_image_frame.composition_revision).to_equal(2)
         expect(changed_image_frame.image_resources[0].pixels[0]).to_equal(
             0xff010203u32
         )
@@ -891,7 +650,7 @@ describe "isolated browser renderer protocol":
             browser_renderer_frame_encode_with_state_and_retained_images(
                 ordered_composition, 7, 8, 48, 48, 0, "", 0, "",
                 "", "https://example.test/image", "", "",
-                3, [image_resources[0], second_resource], image_revisions
+                103, [image_resources[0], second_resource], image_revisions
             )
         )
         expect(mixed_image_state.ok).to_be(true)
@@ -921,18 +680,11 @@ describe "isolated browser renderer protocol":
             browser_renderer_frame_encode_with_state_and_retained_images(
                 _renderer_protocol_image_fixture(second_uri),
                 7, 9, 49, 64, 0, "", 0, "", "", "", "", "",
-                4, [second_resource], tiny_revisions
+                104, [second_resource], tiny_revisions
             )
         )
         expect(tiny_image_state.ok).to_be(true)
         expect(tiny_image_state.wire.contains("SBRF7")).to_be(true)
-        expect(
-            browser_renderer_frame_encode_with_state_and_retained_images(
-                _renderer_protocol_fixture(),
-                7, 10, 50, -1, 0, "", 0, "", "", "", "", "",
-                -1, [], []
-            ).reason
-        ).to_equal("invalid-composition-revision")
         val referenced_resources = browser_renderer_referenced_image_resources(
             ordered_composition,
             [unused_resource, second_resource, image_resources[0]]

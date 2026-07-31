@@ -1,21 +1,21 @@
 # Architecture: Rendering Inside Rendering (2D / Web / GUI-WM / 3D)
 
-Status: partially implemented (static inert Web DrawIR embedding landed;
-legacy caller migration, child authority, GPU render-to-texture, and input
-routing remain follow-ups)
+Status: implemented (Lanes A–E landed; GPU render-to-texture and input routing remain follow-ups)
 Research: `doc/01_research/domain/rendering_inside_rendering.md`
 SPipe state: `.spipe/rendering-inside-rendering/state.md`
 
 ## Goal
-A coherent nested-render capability across the pure-Simple rendering stack:
-2D embedded render targets, Web `srcdoc` DrawIR flattening, GUI panel-in-panel
-plus web panels inside GUI windows/objects, and minimal 3D object nesting.
+A uniform nested-render-surface capability across the pure-Simple rendering
+stack: 2D embedded render targets, web-in-web embedding (iframe-like, private
+feature), GUI panel-in-panel plus web panels inside GUI windows/objects, and
+minimal 3D object-in-object nesting — with WM interfaces updated coherently.
 
 ## Core decisions
-1. **No new cross-layer type.** GUI/WM pixel surfaces keep their existing
-   offscreen composition. Web semantic/layout flattens inert child
-   `DrawIrComposition` batches into its parent, and Engine2D executes the one
-   composition; it does not rasterize iframe content before lowering.
+1. **One conceptual RenderSurface pattern, no new cross-layer type.** Every
+   layer already reduces content to a flat `[u32]` ARGB buffer
+   (`WmContentFrame`, `WebRenderArtifact`, Engine2D `read_pixels`). Nesting is
+   therefore realized per layer as: render child into an offscreen `[u32]`
+   surface, composite into the parent with position/clip/opacity.
 2. **Pixel path and input path are separate concerns** (Flutter texture-layer
    lesson). This arc changes the pixel path; input routing into embedded
    surfaces is a recorded follow-up.
@@ -57,14 +57,11 @@ plus web panels inside GUI windows/objects, and minimal 3D object nesting.
 - `iframe` handled as a replaced element (like `img`) in
   `simple_web_html_layout_renderer.spl`: children never lay out in the parent,
   box sized by `width`/`height` attrs or CSS (default 300x150).
-- Inert child content comes only from `srcdoc`; a recursive semantic/layout
-  pass emits a child composition, then `draw_ir_embed_composition` prefixes
-  identities, clears child hit targets, rebases geometry/clips, and inserts
-  flat batches at the iframe paint position.
+- Child document from `srcdoc` (primary) or local `src`; painted by a
+  recursive call into the same pipeline producing an offscreen `[u32]` buffer,
+  blitted at the box origin clipped to the box.
 - `space` attribute per decision 3; depth cap 3; child gets a fraction of the
   remaining render budget.
-- Child script, network, navigation, and input authority are disabled. The
-  legacy `[u32]` renderer remains only as the five-caller exact-parity oracle.
 
 ### GUI / WM (Lane C)
 - `WmContentFrame` gains `parent_window_id` (empty = top-level) and

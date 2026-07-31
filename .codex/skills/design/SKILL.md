@@ -32,6 +32,8 @@ description: "Codex design skill (Step 4 in cooperative pipeline). Architecture 
   - GUI specs should capture screenshots/goldens/diffs under `doc/06_spec/image/<spec-relative-path>/`.
   - Generated `doc/06_spec/...` docs must embed these paths through
     `**Screenshots:**` or `**TUI Captures:**` metadata.
+  - Event behavior uses bounded motion plus keyframes and a transcript; stills
+    include alt/summary text.
 - Skip if feature has no UI component
 
 ## Phase 2: Architecture Evaluation
@@ -63,9 +65,14 @@ Output: `doc/04_architecture/<feature>.md`
 - For TUI/GUI behavior, include visible-state capture assertions or capture
   artifact generation so the generated SSPEC doc shows the interface state.
 - Capture is typed evidence, not just screenshots. Use or plan the appropriate
-  kind: `tui`, `gui`, `text`, `api`, `protocol`, `exec`, `binary`, `log`, or
-  `artifact`. Built-in/root capture default is off; bare `@capture` means
+  kind: `tui`, `gui`, `still`, `motion`, `html`, `text`, `api`, `protocol`,
+  `exec`, `binary`, `log`, or `artifact`. HTML stays inert; protocol/crypto
+  evidence pairs raw bytes with decoded fields. Built-in/root capture default
+  is off; bare `@capture` means
   after-step capture with default kind `tui`.
+- For critical features, design the `EVIDENCE_SHOWCASE.md` row and authoritative
+  manual link. Its status, provenance, freshness, and artifacts derive from a
+  validated versioned manifest rather than editable Markdown.
 
 Output:
 - Test specs: `test/<mirrored-test-path>/<feature>_spec.spl`
@@ -99,7 +106,7 @@ to_be_less_than(val)      # Numeric comparison
 ### SPipe Test Template
 
 ```simple
-use std.spec
+use std.spec.*
 
 describe "<Feature>":
     describe "REQ-001: <requirement name>":

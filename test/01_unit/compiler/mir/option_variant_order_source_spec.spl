@@ -92,6 +92,34 @@ describe "MIR Option variant order":
         expect(calls).to_contain("case MirTypeKind.F32:")
         expect(calls).to_contain("val wide = b.emit_bitcast(mir_operand_copy(raw), MirType.f64())")
 
+    it "keeps exists-check presence, raw payload, and struct if-val ordering explicit":
+        val dispatch = rt_file_read_text("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl") ?? ""
+        val statements = rt_file_read_text("src/compiler/50.mir/mir_lowering_stmts.spl") ?? ""
+        val exists_pos = dispatch.index_of("case ExistsCheck(base):")
+        val presence_pos = dispatch.index_of("MirConstValue.Str(\"rt_is_some\")", exists_pos)
+        val payload_pos = dispatch.index_of("val some_value = self.option_payload_or_self(base_local)", exists_pos)
+        val decode_pos = dispatch.index_of("decode_runtime_value(some_value, result_type)", exists_pos)
+
+        expect(exists_pos).to_be_greater_than(-1)
+        expect(presence_pos).to_be_greater_than(exists_pos)
+        expect(payload_pos).to_be_greater_than(presence_pos)
+        expect(decode_pos).to_be_greater_than(payload_pos)
+        expect(dispatch).to_contain("var result_type = MirType.i64()")
+        expect(dispatch).to_contain("b_else.emit_const(result_local, MirConstValue.Int(3), result_type)")
+        expect(dispatch.contains("decode_runtime_value(base_local, result_type)")).to_equal(false)
+
+        # `if val` must bind the payload using its semantic type.  The raw
+        # I64 check is only the storage representation for float options; a
+        # struct optional must not be made unreachable by an I64-only guard.
+        val if_binding_pos = statements.index_of("var if_val_payload_type = MirType.i64()")
+        val semantic_pos = statements.index_of("if val semantic_type = self.find_local_hir_type(candidate.id)", if_binding_pos)
+        val decode_if_pos = statements.index_of("val decoded_if_val = self.enum_payload_value(if_val_raw_local, if_val_payload_type)", if_binding_pos)
+        expect(if_binding_pos).to_be_greater_than(-1)
+        expect(semantic_pos).to_be_greater_than(if_binding_pos)
+        expect(decode_if_pos).to_be_greater_than(semantic_pos)
+        expect(statements).to_contain("self.lower_type(semantic_type)")
+        expect(statements.contains("if val semantic_type = self.find_local_hir_type(candidate.id) and found_candidate_type.kind == MirTypeKind.I64")).to_equal(false)
+
     it "registers struct-name provenance on a null-coalesce (??) result too":
         # `.?`/ExistsCheck and `??`/NullCoalesce share the exact same
         # option_payload_or_self/decode_runtime_value/enum_payload_value

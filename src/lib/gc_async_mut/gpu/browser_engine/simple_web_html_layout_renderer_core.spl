@@ -2396,117 +2396,6 @@ pub fn simple_web_enforce_details_visibility(
         i = i + 1
     resolved
 
-fn _final_overflow_axis_in_decls(decls: text, axis: text) -> text:
-    if decls == "":
-        return ""
-    val table = decl_table_build(decls)
-    val shorthand_at = decl_tbl_last_index(table, "overflow")
-    val axis_at = decl_tbl_last_index(table, axis)
-    if axis_at > shorthand_at:
-        return decl_tbl_get(table, axis).trim().lower()
-    if shorthand_at >= 0:
-        val raw = decl_tbl_get(table, "overflow").trim().lower()
-        var parts: [text] = []
-        for part in raw.split(" "):
-            if part != "":
-                parts.push(part)
-        if parts.len() >= 2:
-            if axis == "overflow-x":
-                return parts[0]
-            return parts[1]
-        return raw
-    ""
-
-fn _final_overflow_axis(
-    normal: text, inline_normal: text, important: text,
-    inline_important: text, axis: text
-) -> text:
-    val inline_important_value = _final_overflow_axis_in_decls(
-        inline_important, axis
-    )
-    if inline_important_value != "":
-        return inline_important_value
-    val important_value = _final_overflow_axis_in_decls(important, axis)
-    if important_value != "":
-        return important_value
-    val inline_value = _final_overflow_axis_in_decls(inline_normal, axis)
-    if inline_value != "":
-        return inline_value
-    _final_overflow_axis_in_decls(normal, axis)
-
-fn _scrollbar_width_in_decls(decls: text) -> text:
-    if decls == "":
-        return ""
-    decl_tbl_get(decl_table_build(decls), "scrollbar-width").trim().lower()
-
-fn _display_value_in_decls(decls: text) -> text:
-    if decls == "" or _decl_over_quota(decls):
-        return ""
-    decl_tbl_get_last_cascading_display(decl_table_build(decls))
-
-fn _final_authored_display(
-    ua_display: text, inherited_display: text, normal: text, inline_normal: text,
-    important: text,
-    inline_important: text
-) -> text:
-    var value = ""
-    val normal_value = _display_value_in_decls(normal)
-    if normal_value != "":
-        value = normal_value
-    val inline_value = _display_value_in_decls(inline_normal)
-    if inline_value != "":
-        value = inline_value
-    val important_value = _display_value_in_decls(important)
-    if important_value != "":
-        value = important_value
-    val inline_important_value = _display_value_in_decls(inline_important)
-    if inline_important_value != "":
-        value = inline_important_value
-    if value == "":
-        return ""
-    if value == "initial" or value == "unset":
-        return "inline"
-    if value == "inherit":
-        return inherited_display
-    if value == "revert":
-        return ua_display
-    value
-
-fn _normalize_final_overflow_axes(
-    st: Style, normal: text, inline_normal: text, important: text,
-    inline_important: text
-) -> Style:
-    val x_raw = _final_overflow_axis(
-        normal, inline_normal, important, inline_important, "overflow-x"
-    )
-    val y_raw = _final_overflow_axis(
-        normal, inline_normal, important, inline_important, "overflow-y"
-    )
-    val x = if x_raw == "": "visible" else: x_raw
-    val y = if y_raw == "": "visible" else: y_raw
-    var scrollbar_width = _scrollbar_width_in_decls(normal)
-    val inline_width = _scrollbar_width_in_decls(inline_normal)
-    if inline_width != "":
-        scrollbar_width = inline_width
-    val important_width = _scrollbar_width_in_decls(important)
-    if important_width != "":
-        scrollbar_width = important_width
-    val inline_important_width = _scrollbar_width_in_decls(inline_important)
-    if inline_important_width != "":
-        scrollbar_width = inline_important_width
-    var normalized = st
-    if scrollbar_width != "":
-        normalized.scrollbar_width_none = scrollbar_width == "none"
-    # CSS computes a visible axis to auto when the other axis is non-visible.
-    # Do this after all cascade origins so split rules cannot leak overflow.
-    if (
-        (x == "hidden" or x == "auto" or x == "scroll") and
-        y == "visible"
-    ):
-        normalized.overflow_auto_y = true
-        normalized.overflow_scroll_y = false
-    normalized
-
 fn compute_styles(nodes: [HNode], rules: Rules, child_index: HtmlChildIndex, trace_stages: bool = false, vector_fonts: bool = true) -> [Style]:
     var material_entries_unused: [text] = ["", ""]
     var material_counts_unused: [i64] = [0, 0]
@@ -2581,10 +2470,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             if raw_style_attr_len > 0:
                 print "[font-inherit-trace] index={i} tag={nd.tag} parent={nd.parent} style_attr_len={style_attr_len} style_attr_has_bungee={style_attr_has_bungee} raw_attrs_style_len={raw_style_attr_len}"
         var st = renderer_default_style()
-        val inherited_display = if nd.parent >= 0:
-            styles[nd.parent].display
-        else:
-            "block"
         if nd.parent >= 0:
             val parent_style = styles[nd.parent]
             if trace_stages:
@@ -2604,7 +2489,6 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         if trace_stages:
             print "[layout-trace] style_stage=em-base-ready index={i} em={em_base}"
         st = tag_defaults(st, nd.tag)
-        val ua_display = st.display
         if trace_stages:
             print "[layout-trace] style_stage=tag-defaults-ready index={i} display={st.display}"
             print "[layout-trace] style_stage=attrs-ready index={i} attrs_len={nd.attrs_raw.len()}"
@@ -2747,13 +2631,8 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             logical_writing_mode, inline_important
         )
 
-        val final_display = _final_authored_display(
-            ua_display, inherited_display, combined_decls, inline_normal,
-            combined_important_decls, inline_important
-        )
-
         if combined_decls != "":
-            st = apply_decls_without_display_on_writing_mode(
+            st = apply_decls_on_writing_mode(
                 st, combined_decls, em_base, logical_writing_mode
             )
         if inline_normal != "":
@@ -2764,7 +2643,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     inline_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_without_display_on_writing_mode(
+            st = apply_decls_on_writing_mode(
                 st, inline_normal, em_base, logical_writing_mode
             )
             if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
@@ -2777,7 +2656,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     important_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_without_display_on_writing_mode(
+            st = apply_decls_on_writing_mode(
                 st, combined_important_decls, em_base, logical_writing_mode
             )
         if inline_important != "":
@@ -2788,18 +2667,9 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 empty_cells_hide = (
                     inline_important_empty_cells_decl.trim().lower() == "hide"
                 )
-            st = apply_decls_without_display_on_writing_mode(
+            st = apply_decls_on_writing_mode(
                 st, inline_important, em_base, logical_writing_mode
             )
-        if final_display != "":
-            if final_display == "contents":
-                st = apply_decls(st, "display:" + final_display, em_base)
-            else:
-                st.display = final_display
-        st = _normalize_final_overflow_axes(
-            st, combined_decls, inline_normal, combined_important_decls,
-            inline_important
-        )
         # Disclosure state is structural and author CSS cannot reveal closed
         # content. Apply it after the author cascade and before layout/paint.
         if details_hidden[i]:

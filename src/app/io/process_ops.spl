@@ -23,8 +23,6 @@ extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_getpid() -> i64
-extern fn rt_stdout_flush()
-extern fn rt_stderr_flush()
 
 # Platform detection - inlined to avoid bootstrap runtime limitations
 fn _is_windows_platform() -> bool:
@@ -144,104 +142,6 @@ fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text,
         process_run_timeout_windows(cmd, args, timeout_ms)
     else:
         process_run_timeout_unix(cmd, args, timeout_ms)
-
-fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
-    # Same contract and same timeout/kill semantics as process_run_timeout,
-    # but relays the child's stdout/stderr to OUR stdout as they are
-    # produced instead of withholding everything until the child exits.
-    #
-    # A long-running worker (e.g. the native-build interpreted worker, which
-    # can legitimately run 20+ minutes) was previously indistinguishable
-    # from a hang: nothing appeared until the whole subprocess terminated.
-    # See doc/08_tracking/bug/native_build_direct_seed_jit_hang_2026-07-30.md
-    # -- eight separate investigations concluded native-build was hanging
-    # when it was in fact progressing and terminated deterministically; the
-    # manual repro that proved this ran the worker directly under
-    # `stdbuf -oL -eL` to defeat exactly the buffering this function fixes.
-    #
-    # Two independent buffering layers had to be defeated:
-    #   1. The CHILD's own stdio fully-buffers once stdout/stderr are not a
-    #      tty (here, redirected to a temp file below) -- worked around by
-    #      running the child under `stdbuf -oL -eL`, forcing line
-    #      buffering, the same trick the bug report's manual repro used.
-    #   2. The PARENT (this function, before this fix) issued a single
-    #      blocking wait and read the temp files once at the very end --
-    #      fixed below by polling in small increments and relaying the
-    #      newly-appended bytes after every poll.
-    #
-    # Only used by callers that want live progress visibility (currently
-    # native-build); process_run_timeout itself is untouched so its other
-    # callers keep their existing silent-capture behavior.
-    if _is_windows_platform():
-        return process_run_timeout_windows(cmd, args, timeout_ms)
-
-    val timeout_secs = if timeout_ms <= 0:
-        120
-    else:
-        val secs = timeout_ms / 1000
-        if secs < 1: 1 else: secs
-
-    var temp_dir = rt_env_get("TMPDIR")
-    if temp_dir == "" or temp_dir == nil:
-        temp_dir = "/tmp"
-
-    val pid_str = "{rt_getpid()}"
-    val time_str = "{rt_time_now_unix_micros()}"
-    val stdout_file = "{temp_dir}/simple_out_{pid_str}_{time_str}.txt"
-    val stderr_file = "{temp_dir}/simple_err_{pid_str}_{time_str}.txt"
-
-    var quoted_parts: [text] = ["timeout", "--kill-after=10s", "{timeout_secs}s", "stdbuf", "-oL", "-eL"]
-    val cmd_escaped = cmd.replace("'", "'\\''")
-    quoted_parts.push("'{cmd_escaped}'")
-    for arg in args:
-        val arg_escaped = arg.replace("'", "'\\''")
-        quoted_parts.push("'{arg_escaped}'")
-    val cmd_line = quoted_parts.join(" ")
-    val redirected_cmd = "exec {cmd_line} > '{stdout_file}' 2> '{stderr_file}'"
-
-    proc_slot_acquire()
-    val pid = rt_process_spawn_async("/bin/sh", ["-c", redirected_cmd])
-    if pid <= 0:
-        proc_slot_release()
-        return ("", "\n[ERROR: failed to spawn process '{cmd}']", -1)
-
-    # Poll in small increments instead of one blocking wait, relaying newly
-    # appended bytes after every poll. `timeout` inside the shell command
-    # above still owns the actual deadline/kill enforcement -- this loop
-    # only controls how often we look, not how long the child is allowed to
-    # run, so overall timeout behaviour is unchanged.
-    var stdout_relayed = 0
-    var stderr_relayed = 0
-    var wrapper_code: i64 = -2
-    while wrapper_code == -2:
-        wrapper_code = rt_process_wait(pid, 500)
-        if rt_file_exists(stdout_file):
-            val current = rt_file_read_text(stdout_file)
-            if current.len() > stdout_relayed:
-                print current[stdout_relayed:current.len()]
-                rt_stdout_flush()
-                stdout_relayed = current.len()
-        if rt_file_exists(stderr_file):
-            val current_err = rt_file_read_text(stderr_file)
-            if current_err.len() > stderr_relayed:
-                eprint(current_err[stderr_relayed:current_err.len()])
-                rt_stderr_flush()
-                stderr_relayed = current_err.len()
-    proc_slot_release()
-
-    var stdout = ""
-    var stderr = ""
-    if rt_file_exists(stdout_file):
-        stdout = rt_file_read_text(stdout_file)
-        rt_file_delete(stdout_file)
-    if rt_file_exists(stderr_file):
-        stderr = rt_file_read_text(stderr_file)
-        rt_file_delete(stderr_file)
-
-    if wrapper_code == 124:
-        (stdout, stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]", -1)
-    else:
-        (stdout, stderr, wrapper_code)
 
 fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
     # Execute a process with resource limits enforced via ulimit.

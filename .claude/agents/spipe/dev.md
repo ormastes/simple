@@ -22,6 +22,10 @@ This agent CREATES the initial state file. All subsequent agents read and append
      `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and
      `.gemini/commands/` docs are updated and generated SSpec docs read as
      operator manuals.
+   - If the feature is critical, include ACs for an authoritative generated
+     manual linked from `EVIDENCE_SHOWCASE.md` and manifest-derived status,
+     provenance, freshness, integrity, and artifacts.
+   - New or updated scenarios must use modern SSpec and direct value assertions.
 6. Add `## Cooperative Review`: for broad lanes, list lower-model sidecars
    (Codex Spark, Claude Haiku, or Claude Sonnet), merge owner, final
    normal/highest-capability reviewer, shared interface names, manual

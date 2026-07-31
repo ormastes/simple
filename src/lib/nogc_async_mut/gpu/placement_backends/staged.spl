@@ -1,0 +1,167 @@
+"""Mandatory bounded staged simulation over the existing USM host facade."""
+
+use common.compute.placement_contracts.residency.{ResidencyTier}
+use common.compute.placement_contracts.storage.{ArtifactId, artifact_id_valid, artifact_id, hash128}
+use common.compute.placement_contracts.semantic.{BackendId, DeviceMask, PlacementRequestArenaRef, ObjectSetView}
+use common.compute.placement_contracts.planner.{PlacementBudget, PlacementPlan}
+use common.compute.placement_contracts.backend.{TransferReceipt, PlacementCapabilities, LeaseSet, CheckpointReceipt, RecoveryReceipt, PlacementError, PlacementBackend}
+use std.gpu.usm.{UsmBuffer, usm_malloc_host}
+use std.nogc_sync_mut.cuda.mod.{cuda_mem_alloc, cuda_mem_free, cuda_memcpy_htod, cuda_memcpy_dtoh, cuda_ctx_synchronize}
+use std.gpu.placement_backends.planner.{PlacementObjectState, placement_plan_states, placement_empty_plan}
+
+fn placement_payload_checksum(payload: [u8]) -> text:
+    var sum: i64 = 0
+    var weighted: i64 = 0
+    var index: i64 = 1
+    for byte in payload:
+        val value = byte.to_i64()
+        sum = (sum + value) % 1000000007
+        weighted = (weighted + value * index) % 1000000007
+        index = index + 1
+    "{payload.len()}:{sum}:{weighted}"
+
+fn _empty_artifact() -> ArtifactId:
+    artifact_id(hash128(0u64, 0u64), 1u32)
+
+class StagedRingSlot:
+    sequence: i64
+    valid_bytes: i64
+    artifact: ArtifactId
+    checksum: text
+    buffer: UsmBuffer
+
+class PlacementRequestArenaBinding:
+    arena: PlacementRequestArenaRef
+    states: [PlacementObjectState]
+
+class StagedPlacementBackend:
+    slot_count: i64
+    slot_bytes: i64
+    staging_budget_bytes: i64
+    _sequence: i64
+    _slots: [StagedRingSlot]
+    _request_arenas: [PlacementRequestArenaBinding]
+    _valid: bool
+    _native_pinned: bool
+
+    static fn create(slot_count: i64, slot_bytes: i64, staging_budget_bytes: i64) -> StagedPlacementBackend:
+        val valid = slot_count > 0 and slot_bytes > 0 and slot_count * slot_bytes <= staging_budget_bytes
+        var slots: [StagedRingSlot] = []
+        var native_pinned = valid
+        var index: i64 = 0
+        while valid and index < slot_count:
+            val buffer = usm_malloc_host(slot_bytes)
+            if not buffer.valid or buffer.ptr == 0: native_pinned = false
+            slots.push(StagedRingSlot(sequence: -1, valid_bytes: 0, artifact: _empty_artifact(), checksum: "", buffer: buffer))
+            index = index + 1
+        StagedPlacementBackend(slot_count: slot_count, slot_bytes: slot_bytes, staging_budget_bytes: staging_budget_bytes, _sequence: 0, _slots: slots, _request_arenas: [], _valid: valid and slots.len() == slot_count, _native_pinned: native_pinned)
+
+    me register_request_arena(arena: PlacementRequestArenaRef, states: [PlacementObjectState]):
+        self._request_arenas.push(PlacementRequestArenaBinding(arena: arena, states: states))
+
+    fn backend_probe() -> PlacementCapabilities:
+        if not self._valid:
+            return PlacementCapabilities(backend: BackendId(value: "staged"), available: false, production: false, supported_tiers: [], device_mask: DeviceMask(bits: 0u64), reason: "invalid-bounded-ring")
+        if not self._native_pinned:
+            return PlacementCapabilities(backend: BackendId(value: "staged_simulation"), available: true, production: false, supported_tiers: [ResidencyTier.HostHot], device_mask: DeviceMask(bits: 0u64), reason: "usm-malloc-host-is-heap-backed")
+        PlacementCapabilities(backend: BackendId(value: "staged_cuda"), available: true, production: true, supported_tiers: [ResidencyTier.HostPinned, ResidencyTier.DeviceLocal], device_mask: DeviceMask(bits: 1u64), reason: "")
+
+    fn retained_bytes() -> i64:
+        if not self._valid: return 0
+        self.slot_count * self.slot_bytes
+
+    fn high_water_bytes() -> i64:
+        self.retained_bytes()
+
+    me stage_transfer(artifact: ArtifactId, payload: [u8], requested_device_address: i64) -> TransferReceipt:
+        val capability = self.backend_probe()
+        if not capability.available:
+            return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: self._sequence, ring_slot: -1, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: capability.reason)
+        if not artifact_id_valid(artifact):
+            return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: self._sequence, ring_slot: -1, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: "invalid-artifact")
+        if payload.len() > self.slot_bytes:
+            return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: self._sequence, ring_slot: -1, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: "staging-slot-budget-exceeded")
+        val sequence = self._sequence
+        val slot_index = sequence % self.slot_count
+        var slot = self._slots[slot_index]
+        var index: i64 = 0
+        while index < payload.len():
+            if not slot.buffer.write_u8(index, payload[index].to_i64()):
+                return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: sequence, ring_slot: slot_index, bytes_transferred: index, device_address: 0, checksum: "", completed: false, error: "staging-buffer-write-failed")
+            index = index + 1
+        if capability.production:
+            if requested_device_address <= 0:
+                return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: sequence, ring_slot: slot_index, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: "device-address-required")
+            if cuda_memcpy_htod(requested_device_address, slot.buffer.ptr, payload.len()) != 0 or cuda_ctx_synchronize() != 0:
+                return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: sequence, ring_slot: slot_index, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: "host-to-device-copy-failed")
+            # Round-trip through the device before issuing a production receipt.
+            if cuda_memcpy_dtoh(slot.buffer.ptr, requested_device_address, payload.len()) != 0 or cuda_ctx_synchronize() != 0:
+                return TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: sequence, ring_slot: slot_index, bytes_transferred: 0, device_address: 0, checksum: "", completed: false, error: "device-to-host-verification-failed")
+        slot.sequence = sequence
+        slot.valid_bytes = payload.len()
+        slot.artifact = artifact
+        slot.checksum = placement_payload_checksum(payload)
+        self._slots[slot_index] = slot
+        self._sequence = sequence + 1
+        TransferReceipt(artifact_id: artifact, backend: capability.backend.value, sequence: sequence, ring_slot: slot_index, bytes_transferred: payload.len(), device_address: if capability.production: requested_device_address else: 0, checksum: slot.checksum, completed: true, error: "")
+
+    fn readback_bytes(receipt: TransferReceipt) -> [u8]:
+        if not receipt.completed or receipt.ring_slot < 0 or receipt.ring_slot >= self._slots.len(): return []
+        val slot = self._slots[receipt.ring_slot]
+        if slot.sequence != receipt.sequence or slot.checksum != receipt.checksum: return []
+        var output: [u8] = []
+        var index: i64 = 0
+        while index < slot.valid_bytes:
+            val value = slot.buffer.read_u8(index)
+            if value < 0: return []
+            output.push(value as u8)
+            index = index + 1
+        output
+
+impl PlacementBackend for StagedPlacementBackend:
+    fn probe() -> PlacementCapabilities: self.backend_probe()
+    fn plan(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
+        for binding in self._request_arenas:
+            if binding.arena.object.object_slot == requests.object.object_slot and binding.arena.object.generation == requests.object.generation:
+                return placement_plan_states(binding.states, budget).plan
+        placement_empty_plan()
+    fn acquire(plan: PlacementPlan) -> Result<LeaseSet, PlacementError>: Err(PlacementError.Unsupported)
+    fn prefetch(plan: PlacementPlan) -> Result<TransferReceipt, PlacementError>: Err(PlacementError.Unsupported)
+    fn checkpoint(objects: ObjectSetView) -> CheckpointReceipt:
+        CheckpointReceipt(ok: false, root: _empty_artifact(), object_count: objects.objects.len(), bytes_written: 0, error: "cas-store-owner-required")
+    fn release(leases: LeaseSet):
+        ()
+    fn recover(root: ArtifactId) -> RecoveryReceipt:
+        RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "cas-store-owner-required")
+
+class StagedCorpusExercise:
+    attempted_chunks: i64
+    completed_chunks: i64
+    chunk_bytes: i64
+    high_water_bytes: i64
+    retained_bytes: i64
+    bound_bytes: i64
+    bounded: bool
+    production: bool
+    error: text
+
+fn staged_exercise_corpus(slot_count: i64, slot_bytes: i64, staging_budget_bytes: i64, chunk: [u8], corpus_count: i64) -> StagedCorpusExercise:
+    var backend = StagedPlacementBackend.create(slot_count, slot_bytes, staging_budget_bytes)
+    val attempts = if corpus_count < 0: 0 else: corpus_count
+    val artifact = artifact_id(hash128(1u64, chunk.len().to_u64()), 1u32)
+    var completed: i64 = 0
+    var error = ""
+    val bound = slot_count * slot_bytes
+    val capability = backend.backend_probe()
+    val device_address = if capability.production: cuda_mem_alloc(chunk.len()) else: 0
+    while completed < attempts:
+        val receipt = backend.stage_transfer(artifact, chunk, device_address)
+        if not receipt.completed:
+            error = receipt.error
+            break
+        completed = completed + 1
+    if device_address > 0: cuda_mem_free(device_address)
+    StagedCorpusExercise(attempted_chunks: attempts, completed_chunks: completed, chunk_bytes: chunk.len(), high_water_bytes: backend.high_water_bytes(), retained_bytes: backend.retained_bytes(), bound_bytes: bound, bounded: error == "" and backend.high_water_bytes() <= bound, production: capability.production, error: error)
+
+export StagedRingSlot, PlacementRequestArenaBinding, StagedPlacementBackend, StagedCorpusExercise
+export placement_payload_checksum, staged_exercise_corpus

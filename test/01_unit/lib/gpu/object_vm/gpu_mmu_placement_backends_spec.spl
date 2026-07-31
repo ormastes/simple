@@ -1,0 +1,73 @@
+# @tag: gpu, object-vm, placement
+# @cover src/lib/nogc_async_mut/gpu/placement_backends 80%
+
+use std.spec.*
+use common.compute.placement_contracts.storage.{ArtifactId, artifact_id, hash128}
+use std.gpu.placement_backends.production_gap.{staged_production_gap}
+use std.gpu.placement_backends.staged.{StagedPlacementBackend, staged_exercise_corpus}
+use std.gpu.placement_backends.capability.{placement_backend_route, placement_backend_parity}
+use std.nogc_sync_mut.cuda.mod.{cuda_mem_alloc, cuda_mem_free}
+
+fn _artifact(seed: i64, bytes: i64) -> ArtifactId:
+    artifact_id(hash128(seed.to_u64(), bytes.to_u64()), 1u32)
+
+describe "GPU MMU bounded placement backends":
+    it "cycles a bounded pinned ring and invalidates overwritten receipts":
+        var backend = StagedPlacementBackend.create(2, 4, 8)
+        val address = if backend.backend_probe().production: cuda_mem_alloc(4) else: 0
+        val a = backend.stage_transfer(_artifact(1, 4), [1, 2, 3, 4], address)
+        backend.stage_transfer(_artifact(2, 4), [5, 6, 7, 8], address)
+        val c = backend.stage_transfer(_artifact(3, 4), [9, 10, 11, 12], address)
+        expect(a.ring_slot).to_equal(0)
+        expect(c.ring_slot).to_equal(0)
+        expect(backend.readback_bytes(a).len()).to_equal(0)
+        expect(backend.readback_bytes(c)[0]).to_equal(9)
+        expect(backend.retained_bytes()).to_equal(8)
+        if address > 0: cuda_mem_free(address)
+
+    it "fails closed when one transfer exceeds its ring slot":
+        var backend = StagedPlacementBackend.create(2, 4, 8)
+        val receipt = backend.stage_transfer(_artifact(4, 5), [1, 2, 3, 4, 5], 100)
+        expect(receipt.completed).to_be(false)
+        expect(receipt.error).to_equal("staging-slot-budget-exceeded")
+
+    it "stages an arbitrary corpus through one fixed ring allocation":
+        val one_x = staged_exercise_corpus(2, 4, 8, [1, 2, 3, 4], 10)
+        val ten_x = staged_exercise_corpus(2, 4, 8, [1, 2, 3, 4], 100)
+        expect(one_x.completed_chunks).to_equal(10)
+        expect(ten_x.completed_chunks).to_equal(100)
+        expect(one_x.high_water_bytes).to_equal(8)
+        expect(ten_x.high_water_bytes).to_equal(one_x.high_water_bytes)
+        expect(ten_x.bounded).to_be(true)
+
+    it "reports direct parity or unsupported hardware without a false pass":
+        val artifact = _artifact(5, 4)
+        val pass = placement_backend_parity(artifact, [7, 8, 9, 10], 512, true)
+        val unsupported = placement_backend_parity(artifact, [7, 8, 9, 10], 512, false)
+        expect(pass.status).to_equal("simulated")
+        expect(pass.byte_identical).to_be(true)
+        expect(pass.reason).to_equal("cpu-payload-parity-only")
+        expect(unsupported.status).to_equal("unsupported")
+        expect(unsupported.byte_identical).to_be(false)
+
+    it "keeps device initiated placement behind both explicit gates":
+        val disabled = placement_backend_route("device_initiated", true, true, false)
+        val unavailable = placement_backend_route("device_initiated", true, false, true)
+        val enabled = placement_backend_route("device_initiated", false, true, true)
+        val default_route = placement_backend_route("", true, true, true)
+        expect(disabled.reason).to_equal("experimental-gate-disabled")
+        expect(unavailable.reason).to_equal("device-initiated-capability-unavailable")
+        expect(enabled.available).to_be(true)
+        expect(enabled.production).to_be(false)
+        expect(default_route.available).to_be(true)
+        if default_route.production:
+            expect(default_route.backend.value).to_equal("staged_cuda")
+            expect(default_route.reason).to_equal("")
+        else:
+            expect(default_route.backend.value).to_equal("staged_simulation")
+            expect(default_route.reason).to_equal("usm-malloc-host-is-heap-backed")
+
+    it "records the exact facade gate for production staging":
+        val gap = staged_production_gap()
+        expect(gap.facade_checked).to_contain("usm_malloc_host")
+        expect(gap.missing_primitive).to_contain("device-address/lease owner")

@@ -311,6 +311,8 @@ pub const PRELUDE_EXTERN_FUNCTIONS: &[&str] = &[
     "rt_cuda_ctx_set_current",
     "rt_cuda_ctx_destroy",
     "rt_cuda_ctx_synchronize",
+    "rt_cuda_host_alloc",
+    "rt_cuda_host_free",
     "rt_cuda_mem_alloc",
     "rt_cuda_mem_free",
     "rt_cuda_memcpy_htod",

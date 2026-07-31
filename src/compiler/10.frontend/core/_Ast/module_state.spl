@@ -51,7 +51,7 @@ fn ast_reset_seq_get() -> i64:
 # section 4). Gate: SIMPLE_AST_GEN_HARDEN=1 (the design's dedicated arena-gen
 # knob; independent of L6's own SIMPLE_AST_GEN_CHECK diagnostic and of the
 # shared SIMPLE_MEM_HARDEN quarantine/poison knob used by the malloc-backed
-# allocators). Off by default -> zero cost (one cached slot read).
+# allocators). Off by default.
 #
 # WHAT THIS DOES: `decl_tag` and `module_decl_slots` are append-only,
 # whole-arena-reset pools (decl_alloc/module_add_decl always append; there is
@@ -77,24 +77,11 @@ fn ast_reset_seq_get() -> i64:
 # is evicted and lookups report -1 ("outside the window"), same as today.
 const AST_ARENA_SLOT_POISON: i64 = -777
 
-var ast_gen_harden_slot: [i64] = []
 var ast_harden_retired_gens: [i64] = []
 var ast_harden_retired_decl_tag: [[i64]] = []
 var ast_harden_retired_module_decl_slots: [[i64]] = []
 
-fn ast_gen_harden_refresh():
-    # Cached read, refreshed once per ast_reset() cycle (same pattern as
-    # ast_decl_mode_slots_refresh/expr_mode_slots_refresh) — a hot-path check
-    # is then a slot read, not a per-call env syscall.
-    if ast_gen_harden_slot == nil or ast_gen_harden_slot.len() == 0:
-        ast_gen_harden_slot = [0]
-    ast_gen_harden_slot[0] = rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0)
-
 fn ast_gen_harden_enabled() -> bool:
-    if ast_gen_harden_slot != nil and ast_gen_harden_slot.len() > 0:
-        return ast_gen_harden_slot[0] == 1
-    # Interpreter module vars may not persist between calls (same
-    # compatibility fallback as the other *_enabled() gates in this family).
     rt_env_get_i64("SIMPLE_AST_GEN_HARDEN", 0) == 1
 
 fn _ast_harden_delay_slots() -> i64:
@@ -456,9 +443,6 @@ fn ast_reset():
     # read then reports one "stale generation" line (see _AstExpr/nodes.spl,
     # ast_gen_check_index) instead of cascading OOB/missing-tag diagnostics.
     ast_generation_bump()
-    # Refresh the harden gate once per reset cycle (see the "Arena Harden"
-    # section above) before it is consulted below.
-    ast_gen_harden_refresh()
     # DIAGNOSTIC (2026-07-12, flat_bridge_type_index_across_ast_reset): trace
     # every reset with the pre-reset arena sizes so an interleaved reset that
     # clobbers a still-in-flight conversion can be pinpointed. Guarded by an

@@ -7243,6 +7243,10 @@ int64_t rt_ptr_read_i64(int64_t addr, int64_t offset) {
     return *ptr;
 }
 
+int64_t rt_ptr_read_u8(int64_t addr, int64_t offset) {
+    return (int64_t)*(uint8_t*)((char*)(uintptr_t)addr + offset);
+}
+
 void rt_ptr_write_u8(int64_t addr, int64_t offset, int64_t value) {
     uint8_t* ptr = (uint8_t*)((char*)(uintptr_t)addr + offset);
     *ptr = (uint8_t)value;

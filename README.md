@@ -9,7 +9,7 @@ Simple is a self-hosted language and toolchain that combines a readable Python-l
 
 The repo is unusually broad: language, compiler, interpreter, loader, test runner, doc generation, traceability tooling, SDN-backed project databases, editor tooling, and hardware-oriented test flows all live together.
 
-**Quick Navigation:** [Distinctive Features](#distinctive-features) | [Feature Status](#feature-status-highlights) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Examples](#examples) | [Editor Plugins](#editor-plugins) | [Documentation](#documentation)
+**Quick Navigation:** [Evidence Showcase](EVIDENCE_SHOWCASE.md) | [Distinctive Features](#distinctive-features) | [Feature Status](#feature-status-highlights) | [Quick Start](#quick-start) | [Language Basics](#language-basics) | [Examples](#examples) | [Editor Plugins](#editor-plugins) | [Documentation](#documentation)
 
 ---
 
@@ -27,6 +27,9 @@ The repo is unusually broad: language, compiler, interpreter, loader, test runne
 - **Shared UI contract across supported surfaces**: one HTTP-based test protocol (Protocol V1) with `UITestClient` drives both the web backend and the TUI-web proxy through a shared `handle_test_request` handler, verified by a cross-surface contract suite. Contract: [doc/04_architecture/shared_ui_contract.md](doc/04_architecture/shared_ui_contract.md)
 
 ## Feature Status Highlights
+
+For reviewable proof, current limitations, and links to subsystem evidence, see
+the [Evidence Showcase](EVIDENCE_SHOWCASE.md).
 
 Implemented and safe to advertise:
 - SSpec tests, SPipe runner/docgen, SDoctest, coverage, traceability checks, and generated spec docs

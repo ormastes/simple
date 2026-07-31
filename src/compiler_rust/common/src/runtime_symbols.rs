@@ -591,6 +591,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Raw pointer operations
     "rt_ptr_read_i32",
     "rt_ptr_read_i64",
+    "rt_ptr_read_u8",
     "rt_ptr_write_u8",
     "rt_ptr_write_i32",
     "rt_ptr_write_i64",
@@ -915,6 +916,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_write_text",
     "rt_file_fsync",
     "rt_file_fsync_cached",
+    "rt_file_sync",
+    "rt_file_create_excl",
     "rt_file_copy",
     "rt_file_remove",
     "rt_file_size",
@@ -1188,6 +1191,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_cuda_ctx_destroy",
     "rt_cuda_mem_alloc",
     "rt_cuda_mem_free",
+    "rt_cuda_host_alloc",
+    "rt_cuda_host_free",
     "rt_cuda_memset",
     "rt_cuda_memcpy_dtoh",
     "rt_cuda_module_load_data",
@@ -2160,6 +2165,13 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_value_println"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"SCOPE_LEVELS_dot_has"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"stdin_read_char"));
+    }
+
+    #[test]
+    fn test_cuda_host_pinned_symbols_are_registered() {
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_cuda_host_alloc"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_cuda_host_free"));
+        assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_ptr_read_u8"));
     }
 
     #[test]

@@ -1,0 +1,86 @@
+# Typed protocol/crypto field evidence.
+#
+# Raw-byte equality remains the primary oracle. These rows make its decoded
+# fields reviewable without introducing a packet-inspector or matcher DSL.
+
+use std.string_core.{char_code}
+
+pub struct ScenarioProtocolFieldEvidence:
+    byte_offset: i64
+    byte_length: i64
+    bit_offset: i64
+    bit_width: i64
+    mask: text
+    endianness: text
+    name: text
+    actual: text
+    expected: text
+    status: text
+    importance: text
+    note: text
+
+fn _is_hex_digit(value: text) -> bool:
+    val code = char_code(value)
+    ((code >= 48 and code <= 57) or
+        (code >= 97 and code <= 102) or
+        (code >= 65 and code <= 70))
+
+fn _is_hex_mask(mask: text) -> bool:
+    if mask.len() <= 2 or not mask.starts_with("0x"):
+        return false
+    var i = 2
+    while i < mask.len():
+        if not _is_hex_digit(mask[i:i + 1]):
+            return false
+        i = i + 1
+    true
+
+pub fn scenario_protocol_field_evidence_validate(
+    field: ScenarioProtocolFieldEvidence
+) -> text:
+    if field.byte_offset < 0:
+        return "negative_byte_offset"
+    if field.byte_length <= 0:
+        return "invalid_byte_range"
+    if field.bit_offset < 0 or field.bit_offset > 7:
+        return "invalid_bit_offset"
+    if field.bit_width <= 0 or field.bit_offset + field.bit_width > field.byte_length * 8:
+        return "invalid_bit_width"
+    if not _is_hex_mask(field.mask):
+        return "invalid_mask"
+    if field.endianness != "little" and field.endianness != "big" and field.endianness != "network":
+        return "invalid_endianness"
+    if field.name == "":
+        return "missing_field_name"
+    if field.actual == "" or field.expected == "":
+        return "missing_value"
+    if field.status != "pass" and field.status != "fail":
+        return "invalid_status"
+    if field.importance != "critical" and field.importance != "important" and field.importance != "supporting":
+        return "invalid_importance"
+    if field.status == "pass" and field.actual != field.expected:
+        return "passing_value_mismatch"
+    "ok"
+
+pub fn scenario_protocol_evidence_validate(
+    fields: [ScenarioProtocolFieldEvidence]
+) -> text:
+    var i = 0
+    while i < fields.len():
+        val field_result = scenario_protocol_field_evidence_validate(fields[i])
+        if field_result != "ok":
+            return field_result
+
+        val field_start = fields[i].byte_offset * 8 + fields[i].bit_offset
+        val field_end = field_start + fields[i].bit_width
+        var j = i + 1
+        while j < fields.len():
+            val other_start = fields[j].byte_offset * 8 + fields[j].bit_offset
+            val other_end = other_start + fields[j].bit_width
+            if other_start < field_start:
+                return "fields_not_sorted"
+            if field_start < other_end and other_start < field_end:
+                return "overlapping_fields"
+            j = j + 1
+        i = i + 1
+    "ok"

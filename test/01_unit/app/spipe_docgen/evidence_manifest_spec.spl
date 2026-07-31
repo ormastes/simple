@@ -1,0 +1,401 @@
+use std.spec.*
+use app.spipe_docgen.spipe_docgen.evidence_manifest.{
+    render_evidence_manifest, validate_evidence_artifact_files
+}
+use std.nogc_sync_mut.io.file_ops.{
+    file_delete, file_hash_sha256, file_size, file_write
+}
+use std.common.spec.scenario_evidence.{
+    ScenarioCaptureKind, ScenarioEvidenceArtifact, ScenarioHtmlCheckTool,
+    ScenarioHtmlCheckResult
+}
+use std.common.spec.scenario_text_evidence.{ScenarioTextMatchResult}
+use std.common.spec.scenario_motion_evidence.{
+    ScenarioArtifactIntegrity, ScenarioMotionEvent, ScenarioMotionKeyframe,
+    ScenarioMotionEvidence
+}
+use std.common.spec.scenario_protocol_evidence.{
+    ScenarioProtocolFieldEvidence
+}
+use std.spec.scenario_evidence_manifest.{
+    ScenarioEvidenceManifest
+}
+
+fn artifact(
+    kind: ScenarioCaptureKind,
+    title: text,
+    mime: text,
+    path: text,
+    body: text = ""
+) -> ScenarioEvidenceArtifact:
+    ScenarioEvidenceArtifact(
+        kind: kind,
+        title: title,
+        mime: mime,
+        path: path,
+        body: body,
+        scenario_id: "review-flow",
+        step_id: "review",
+        redacted: false
+    )
+
+fn integrity(
+    path: text,
+    format: text,
+    mime: text,
+    width: i64 = 0,
+    height: i64 = 0,
+    baseline: text = "",
+    comparison: text = "pass",
+    byte_size: i64 = 128,
+    checksum: text = "sha256:0123456789abcdef"
+) -> ScenarioArtifactIntegrity:
+    ScenarioArtifactIntegrity(
+        path: path,
+        format: format,
+        mime: mime,
+        width: width,
+        height: height,
+        byte_size: byte_size,
+        checksum: checksum,
+        producer: "simple-test",
+        producer_version: "1",
+        source_revision: "abc123",
+        host: "linux-x86_64",
+        target: "qemu-riscv64",
+        capture_ready: true,
+        baseline_identity: baseline,
+        comparison_result: comparison,
+        required: true
+    )
+
+fn live_manifest() -> ScenarioEvidenceManifest:
+    val html = artifact(
+        ScenarioCaptureKind.html,
+        "Dynamic page",
+        "text/html",
+        "build/test-artifacts/review/page.html",
+        "<main><pre>```</pre><p>row 7</p></main>"
+    )
+    val first_frame = artifact(
+        ScenarioCaptureKind.gui,
+        "Before insert",
+        "image/png",
+        "doc/06_spec/image/review/frame one.png"
+    )
+    val second_frame = artifact(
+        ScenarioCaptureKind.gui,
+        "After insert",
+        "image/png",
+        "doc/06_spec/image/review/frame-two.png"
+    )
+    val motion = artifact(
+        ScenarioCaptureKind.motion,
+        "Insert interaction",
+        "video/webm",
+        "doc/06_spec/image/review/insert.webm"
+    )
+    val transcript = artifact(
+        ScenarioCaptureKind.artifact,
+        "Event transcript",
+        "text/plain",
+        "build/test-artifacts/review/events.txt"
+    )
+    val raw_bytes = artifact(
+        ScenarioCaptureKind.protocol,
+        "Raw packet",
+        "application/octet-stream",
+        "build/test-artifacts/review/packet.bin"
+    )
+    val hex_view = artifact(
+        ScenarioCaptureKind.protocol,
+        "Numbered packet bytes",
+        "text/plain",
+        "build/test-artifacts/review/packet.hex.txt"
+    )
+    ScenarioEvidenceManifest(
+        schema_major: 1,
+        schema_minor: 0,
+        feature_id: "simpleos.web-db.review",
+        requirement_ids: ["REQ-EVS-010", "REQ-EVS-011"],
+        spec_path: "test/03_system/demo/evidence_manifest_spec.spl",
+        generated_manual_path:
+            "doc/06_spec/03_system/demo/evidence_manifest_spec.md",
+        scenario_id: "review-flow",
+        step_id: "review",
+        required: true,
+        result: "PASS",
+        showcase_status: "live-pass",
+        reason: "",
+        source_revision: "abc123",
+        source_digest: "sha256:source",
+        command: "bin/simple test test/03_system/demo/evidence_manifest_spec.spl",
+        producer: "simple-test",
+        producer_version: "1",
+        host: "linux-x86_64",
+        target: "qemu-riscv64",
+        backend: "qemu",
+        start_time: 1000,
+        duration_ms: 600,
+        artifacts: [
+            html, first_frame, second_frame, motion, transcript, raw_bytes,
+            hex_view
+        ],
+        artifact_integrity: [
+            integrity(html.path, "html", html.mime),
+            integrity(
+                first_frame.path, "png", first_frame.mime,
+                640, 480, "before-v1"
+            ),
+            integrity(
+                second_frame.path, "png", second_frame.mime,
+                640, 480, "after-v1"
+            ),
+            integrity(motion.path, "webm", motion.mime),
+            integrity(transcript.path, "txt", transcript.mime),
+            integrity(raw_bytes.path, "bin", raw_bytes.mime),
+            integrity(hex_view.path, "txt", hex_view.mime)
+        ],
+        text_results: [ScenarioTextMatchResult(
+            passed: true,
+            first_expected_index: -1,
+            first_actual_index: -1,
+            diagnostic: "ordered lines matched with collapsed horizontal whitespace",
+            raw_transcript: "SimpleOS   login\nshell ready\n",
+            normalized_transcript: "SimpleOS login\nshell ready\n"
+        )],
+        motion_evidence: [ScenarioMotionEvidence(
+            duration_ms: 600,
+            events: [
+                ScenarioMotionEvent(
+                    sequence: 1, time_ms: 100, kind: "click",
+                    target: "insert", value: "row 7", status: "pass"
+                ),
+                ScenarioMotionEvent(
+                    sequence: 2, time_ms: 500, kind: "refresh",
+                    target: "table", value: "row 7 visible", status: "pass"
+                )
+            ],
+            keyframes: [
+                ScenarioMotionKeyframe(
+                    time_ms: 0, artifact_path: first_frame.path,
+                    oracle: "table is empty", status: "pass"
+                ),
+                ScenarioMotionKeyframe(
+                    time_ms: 600, artifact_path: second_frame.path,
+                    oracle: "row 7 is visible", status: "pass"
+                )
+            ],
+            transcript_path: transcript.path,
+            review_media_path: motion.path
+        )],
+        protocol_fields: [ScenarioProtocolFieldEvidence(
+            byte_offset: 0,
+            byte_length: 1,
+            bit_offset: 0,
+            bit_width: 4,
+            mask: "0x0f",
+            endianness: "little",
+            name: "opcode",
+            actual: "0x03",
+            expected: "0x03",
+            status: "pass",
+            importance: "critical",
+            note: "insert request"
+        )],
+        html_checks: [ScenarioHtmlCheckResult(
+            tool: ScenarioHtmlCheckTool.playwright_locator,
+            passed: true,
+            summary: "main contains row 7",
+            messages: "selector main p matched",
+            artifact: html
+        )],
+        blocker_prerequisite: "",
+        resume_command:
+            "bin/simple test test/03_system/demo/evidence_manifest_spec.spl",
+        owner: "spipe",
+        final_reviewer: "verification"
+    )
+
+fn with_artifacts(
+    base: ScenarioEvidenceManifest,
+    artifacts: [ScenarioEvidenceArtifact],
+    integrities: [ScenarioArtifactIntegrity]
+) -> ScenarioEvidenceManifest:
+    ScenarioEvidenceManifest(
+        schema_major: base.schema_major,
+        schema_minor: base.schema_minor,
+        feature_id: base.feature_id,
+        requirement_ids: base.requirement_ids,
+        spec_path: base.spec_path,
+        generated_manual_path: base.generated_manual_path,
+        scenario_id: base.scenario_id,
+        step_id: base.step_id,
+        required: base.required,
+        result: base.result,
+        showcase_status: base.showcase_status,
+        reason: base.reason,
+        source_revision: base.source_revision,
+        source_digest: base.source_digest,
+        command: base.command,
+        producer: base.producer,
+        producer_version: base.producer_version,
+        host: base.host,
+        target: base.target,
+        backend: base.backend,
+        start_time: base.start_time,
+        duration_ms: base.duration_ms,
+        artifacts: artifacts,
+        artifact_integrity: integrities,
+        text_results: base.text_results,
+        motion_evidence: base.motion_evidence,
+        protocol_fields: base.protocol_fields,
+        html_checks: base.html_checks,
+        blocker_prerequisite: base.blocker_prerequisite,
+        resume_command: base.resume_command,
+        owner: base.owner,
+        final_reviewer: base.final_reviewer
+    )
+
+fn file_manifest(
+    path: text,
+    byte_size: i64,
+    checksum: text
+) -> ScenarioEvidenceManifest:
+    val retained = artifact(
+        ScenarioCaptureKind.artifact,
+        "Retained transcript",
+        "text/plain",
+        path
+    )
+    ScenarioEvidenceManifest(
+        schema_major: 1,
+        schema_minor: 0,
+        feature_id: "spipe.file-integrity",
+        requirement_ids: ["NFR-EVS-003"],
+        spec_path: "test/01_unit/app/spipe_docgen/evidence_manifest_spec.spl",
+        generated_manual_path:
+            "doc/06_spec/01_unit/app/spipe_docgen/evidence_manifest_spec.md",
+        scenario_id: "file-integrity",
+        step_id: "validate",
+        required: true,
+        result: "historical-pass",
+        showcase_status: "historical-pass",
+        reason: "",
+        source_revision: "abc123",
+        source_digest: "sha256:source",
+        command: "bin/simple test evidence_manifest_spec.spl",
+        producer: "simple-test",
+        producer_version: "1",
+        host: "linux-x86_64",
+        target: "hosted",
+        backend: "interpreter",
+        start_time: 1000,
+        duration_ms: 1,
+        artifacts: [retained],
+        artifact_integrity: [integrity(
+            path, "txt", "text/plain", 0, 0, "", "not-compared",
+            byte_size, checksum
+        )],
+        text_results: [],
+        motion_evidence: [],
+        protocol_fields: [],
+        html_checks: [],
+        blocker_prerequisite: "",
+        resume_command: "bin/simple test evidence_manifest_spec.spl",
+        owner: "spipe",
+        final_reviewer: "verification"
+    )
+
+describe "evidence manifest Markdown rendering":
+    it "renders safe accessible still motion HTML and protocol evidence":
+        step("Render one validated typed evidence manifest")
+        match render_evidence_manifest(live_manifest()):
+            case Ok(markdown):
+                expect(markdown).to_contain("## Evidence at a glance")
+                expect(markdown).to_contain("**live-pass**")
+                expect(markdown).to_contain("frame%20one.png")
+                expect(markdown).to_contain("````html")
+                expect(markdown).to_contain("Captured HTML is shown inert")
+                expect(markdown.contains("Animated WebP review")).to_equal(false)
+                expect(markdown).to_contain("Open WebM review media")
+                expect(markdown).to_contain("row 7 is visible")
+                expect(markdown).to_contain("#L1")
+                expect(markdown).to_contain("**CRITICAL**")
+                expect(markdown).to_contain("**PASS**")
+            case Err(error):
+                expect(error).to_equal("")
+
+    it "fails closed before linking a traversal path":
+        step("Replace the first artifact with a path outside its evidence root")
+        val base = live_manifest()
+        val unsafe = artifact(
+            ScenarioCaptureKind.html,
+            "Dynamic page",
+            "text/html",
+            "build/test-artifacts/../secret.html",
+            "<main>row 7</main>"
+        )
+        val changed = with_artifacts(
+            base,
+            [
+                unsafe, base.artifacts[1], base.artifacts[2],
+                base.artifacts[3], base.artifacts[4], base.artifacts[5],
+                base.artifacts[6]
+            ],
+            base.artifact_integrity
+        )
+        match render_evidence_manifest(changed):
+            case Ok(markdown):
+                expect(markdown).to_equal("")
+            case Err(error):
+                expect(error).to_contain("invalid artifact path")
+
+    it "fails closed instead of embedding secret-like captured content":
+        step("Place a secret-like value in otherwise valid inert HTML")
+        val base = live_manifest()
+        val unsafe = artifact(
+            ScenarioCaptureKind.html,
+            "Dynamic page",
+            "text/html",
+            base.artifacts[0].path,
+            "<main>ghp_example_secret</main>"
+        )
+        val changed = with_artifacts(
+            base,
+            [
+                unsafe, base.artifacts[1], base.artifacts[2],
+                base.artifacts[3], base.artifacts[4], base.artifacts[5],
+                base.artifacts[6]
+            ],
+            base.artifact_integrity
+        )
+        match render_evidence_manifest(changed):
+            case Ok(markdown):
+                expect(markdown).to_equal("")
+            case Err(error):
+                expect(error).to_contain("unsafe-evidence-content")
+
+    it "validates retained files without following or trusting stale metadata":
+        step("Bind one retained file to its exact size and SHA-256")
+        val path = "build/test-artifacts/evidence_manifest_io_check.txt"
+        expect(file_write(path, "trusted")).to_equal(true)
+        val manifest = file_manifest(
+            path,
+            file_size(path),
+            "sha256:" + file_hash_sha256(path)
+        )
+        match validate_evidence_artifact_files(manifest):
+            case Ok(validated):
+                expect(validated.artifacts[0].path).to_equal(path)
+            case Err(error):
+                expect(error).to_equal("")
+
+        step("Reject same-size content changed after the receipt")
+        expect(file_write(path, "altered")).to_equal(true)
+        match validate_evidence_artifact_files(manifest):
+            case Ok(_):
+                expect("accepted stale hash").to_equal("rejected stale hash")
+            case Err(error):
+                expect(error).to_contain("artifact-hash-mismatch")
+        expect(file_delete(path)).to_equal(true)

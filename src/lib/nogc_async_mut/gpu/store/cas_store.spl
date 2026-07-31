@@ -1,0 +1,291 @@
+"""
+Crash-safe content-addressed storage for GPU Object VM artifacts.
+
+Blobs are immutable SHA-256 objects. Manifest changes are journaled before the
+materialized manifest is replaced. Recovery accepts only complete, checksummed,
+strictly sequenced metadata and validates every referenced blob.
+"""
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_sync_mut.io.dir_ops.{dir_create}
+use std.nogc_sync_mut.io.file_ops.{
+    file_append_durable, file_atomic_write_bytes_durable, file_atomic_write_text_durable,
+    file_delete, file_exists, file_is_regular_no_follow, file_read, file_read_bytes
+}
+
+val CAS_CHECKPOINT_MAGIC = "GPU_CAS_CHECKPOINT_V1"
+val CAS_MANIFEST_MAGIC = "GPU_CAS_MANIFEST_V1"
+
+struct CasBlobId:
+    digest: text
+    byte_len: i64
+
+fn cas_blob_id(digest: text, byte_len: i64) -> CasBlobId:
+    CasBlobId(digest: digest, byte_len: byte_len)
+
+fn cas_blob_id_valid(id: CasBlobId) -> bool:
+    if id.digest.len() != 64 or id.byte_len < 0:
+        return false
+    for index in 0..id.digest.len():
+        val code = id.digest.char_code_at(index)
+        val digit = code >= 48 and code <= 57
+        val lower_hex = code >= 97 and code <= 102
+        if not digit and not lower_hex:
+            return false
+    true
+
+struct CasManifestEntry:
+    name: text
+    artifact: CasBlobId
+
+struct CasRecoveryReport:
+    checkpoint_entries: i64
+    replayed_entries: i64
+    last_sequence: i64
+
+class GpuCasStore:
+    root: text
+    entries: [CasManifestEntry]
+    last_sequence: i64
+    recovery: CasRecoveryReport
+
+    static fn create(root: text) -> Result<GpuCasStore, text>:
+        if root == "":
+            return Err("gpu_cas: empty root")
+        if (file_exists("{root}/checkpoint") or file_exists("{root}/manifest") or
+            file_exists("{root}/journal")):
+            return Err("gpu_cas: store already exists")
+        if not dir_create(root, true) or not dir_create("{root}/blobs", true):
+            return Err("gpu_cas: cannot create store directories")
+        if not file_atomic_write_text_durable("{root}/checkpoint", _snapshot_text(CAS_CHECKPOINT_MAGIC, 0, [])):
+            return Err("gpu_cas: cannot create checkpoint")
+        if not file_atomic_write_text_durable("{root}/manifest", _snapshot_text(CAS_MANIFEST_MAGIC, 0, [])):
+            return Err("gpu_cas: cannot create manifest")
+        if not file_atomic_write_text_durable("{root}/journal", ""):
+            return Err("gpu_cas: cannot create journal")
+        Ok(GpuCasStore(
+            root: root,
+            entries: [],
+            last_sequence: 0,
+            recovery: CasRecoveryReport(checkpoint_entries: 0, replayed_entries: 0, last_sequence: 0)
+        ))
+
+    static fn open(root: text) -> Result<GpuCasStore, text>:
+        val checkpoint_path = "{root}/checkpoint"
+        val journal_path = "{root}/journal"
+        val manifest_path = "{root}/manifest"
+        if not file_is_regular_no_follow(checkpoint_path):
+            return Err("gpu_cas: checkpoint missing or unsafe")
+        if not file_is_regular_no_follow(journal_path):
+            return Err("gpu_cas: journal missing or unsafe")
+        if not file_is_regular_no_follow(manifest_path):
+            return Err("gpu_cas: manifest missing or unsafe")
+
+        val checkpoint = _parse_snapshot(file_read(checkpoint_path), CAS_CHECKPOINT_MAGIC)?
+        val replay = _replay_journal(file_read(journal_path), checkpoint.0, checkpoint.1)?
+        for entry in replay.1:
+            _validate_blob(root, entry.artifact)?
+        # The checkpoint+journal pair is authoritative. A crash can leave the
+        # materialized manifest stale, so rebuild it only after strict replay
+        # and blob validation have succeeded.
+        if not file_atomic_write_text_durable(manifest_path, _snapshot_text(CAS_MANIFEST_MAGIC, replay.0, replay.1)):
+            return Err("gpu_cas: cannot materialize recovered manifest")
+        Ok(GpuCasStore(
+            root: root,
+            entries: replay.1,
+            last_sequence: replay.0,
+            recovery: CasRecoveryReport(
+                checkpoint_entries: checkpoint.1.len(),
+                replayed_entries: replay.2,
+                last_sequence: replay.0
+            )
+        ))
+
+    me put_blob(bytes: [u8]) -> Result<CasBlobId, text>:
+        val id = cas_blob_id(sha256_u8_hex(bytes), bytes.len())
+        val path = _blob_path(self.root, id)
+        if file_exists(path):
+            _validate_blob(self.root, id)?
+            return Ok(id)
+        if not file_atomic_write_bytes_durable(path, bytes):
+            return Err("gpu_cas: blob publication failed")
+        match _validate_blob(self.root, id):
+            case Ok(_): Ok(id)
+            case Err(message):
+                file_delete(path)
+                Err(message)
+
+    me bind(name: text, id: CasBlobId) -> Result<(), text>:
+        if not _valid_name(name):
+            return Err("gpu_cas: invalid manifest name")
+        _validate_blob(self.root, id)?
+        val next_entries = _replace_entry(self.entries, CasManifestEntry(name: name, artifact: id))
+        val next_sequence = self.last_sequence + 1
+        val payload = "{next_sequence}|BIND|{name}|{id.digest}|{id.byte_len}"
+        val record = "{payload}|{sha256_text(payload)}\n"
+        if not file_append_durable("{self.root}/journal", record):
+            return Err("gpu_cas: journal append failed")
+        if not file_atomic_write_text_durable("{self.root}/manifest", _snapshot_text(CAS_MANIFEST_MAGIC, next_sequence, next_entries)):
+            return Err("gpu_cas: manifest write failed")
+        self.entries = next_entries
+        self.last_sequence = next_sequence
+        Ok(())
+
+    fn resolve(name: text) -> CasBlobId?:
+        for entry in self.entries:
+            if entry.name == name:
+                return Some(entry.artifact)
+        nil
+
+    fn get_blob(id: CasBlobId) -> Result<[u8], text>:
+        _validate_blob(self.root, id)?
+        Ok(_read_u8(_blob_path(self.root, id)))
+
+    me checkpoint() -> Result<(), text>:
+        if not file_atomic_write_text_durable(
+            "{self.root}/checkpoint",
+            _snapshot_text(CAS_CHECKPOINT_MAGIC, self.last_sequence, self.entries)
+        ):
+            return Err("gpu_cas: checkpoint write failed")
+        if not file_atomic_write_text_durable("{self.root}/journal", ""):
+            return Err("gpu_cas: journal reset failed")
+        self.recovery = CasRecoveryReport(
+            checkpoint_entries: self.entries.len(),
+            replayed_entries: 0,
+            last_sequence: self.last_sequence
+        )
+        Ok(())
+
+fn _blob_path(root: text, id: CasBlobId) -> text:
+    "{root}/blobs/{id.digest}"
+
+fn _valid_name(name: text) -> bool:
+    name != "" and not name.contains("|") and not name.contains("\n") and not name.contains("\r")
+
+fn _read_u8(path: text) -> [u8]:
+    var result: [u8] = []
+    val raw = file_read_bytes(path)
+    for byte in raw:
+        result.push((byte & 255).to_u8())
+    result
+
+fn _validate_blob(root: text, id: CasBlobId) -> Result<(), text>:
+    if not cas_blob_id_valid(id):
+        return Err("gpu_cas: invalid artifact id")
+    val path = _blob_path(root, id)
+    if not file_is_regular_no_follow(path):
+        return Err("gpu_cas: referenced blob missing or unsafe")
+    val bytes = _read_u8(path)
+    if bytes.len() != id.byte_len:
+        return Err("gpu_cas: corrupt blob length")
+    if sha256_u8_hex(bytes) != id.digest:
+        return Err("gpu_cas: corrupt blob digest")
+    Ok(())
+
+fn _replace_entry(entries: [CasManifestEntry], replacement: CasManifestEntry) -> [CasManifestEntry]:
+    var result: [CasManifestEntry] = []
+    var replaced = false
+    for entry in entries:
+        if entry.name == replacement.name:
+            result.push(replacement)
+            replaced = true
+        else:
+            result.push(entry)
+    if not replaced:
+        result.push(replacement)
+    result
+
+fn _contains_name(entries: [CasManifestEntry], name: text) -> bool:
+    for entry in entries:
+        if entry.name == name:
+            return true
+    false
+
+fn _snapshot_text(magic: text, sequence: i64, entries: [CasManifestEntry]) -> text:
+    var body = "{magic}|{sequence}\n"
+    for entry in entries:
+        body = body + "{entry.name}|{entry.artifact.digest}|{entry.artifact.byte_len}\n"
+    body + "CHECKSUM|{sha256_text(body)}\n"
+
+fn _parse_snapshot(content: text, magic: text) -> Result<(i64, [CasManifestEntry]), text>:
+    if content == "" or not content.ends_with("\n"):
+        return Err("gpu_cas: partial snapshot")
+    val lines = content.split("\n")
+    if lines.len() < 3 or lines[lines.len() - 1] != "":
+        return Err("gpu_cas: malformed snapshot")
+    val header = lines[0].split("|")
+    if header.len() != 2 or header[0] != magic:
+        return Err("gpu_cas: bad snapshot header")
+    val sequence_opt = header[1].to_int()
+    if not sequence_opt.?:
+        return Err("gpu_cas: bad snapshot sequence")
+    val sequence = sequence_opt ?? -1
+    if sequence < 0:
+        return Err("gpu_cas: bad snapshot sequence")
+    var body = lines[0] + "\n"
+    var entries: [CasManifestEntry] = []
+    var i = 1
+    while i < lines.len() - 2:
+        val parts = lines[i].split("|")
+        if parts.len() != 3 or not _valid_name(parts[0]) or _contains_name(entries, parts[0]):
+            return Err("gpu_cas: malformed snapshot entry")
+        val byte_len_opt = parts[2].to_int()
+        if not byte_len_opt.?:
+            return Err("gpu_cas: malformed snapshot length")
+        val byte_len = byte_len_opt ?? -1
+        val id = cas_blob_id(parts[1], byte_len)
+        if not cas_blob_id_valid(id):
+            return Err("gpu_cas: malformed snapshot length")
+        entries = _replace_entry(entries, CasManifestEntry(
+            name: parts[0],
+            artifact: id
+        ))
+        body = body + lines[i] + "\n"
+        i = i + 1
+    val footer = lines[lines.len() - 2].split("|")
+    if footer.len() != 2 or footer[0] != "CHECKSUM" or footer[1] != sha256_text(body):
+        return Err("gpu_cas: snapshot checksum mismatch")
+    Ok((sequence, entries))
+
+fn _replay_journal(content: text, checkpoint_sequence: i64, checkpoint_entries: [CasManifestEntry]) -> Result<(i64, [CasManifestEntry], i64), text>:
+    if content == "":
+        return Ok((checkpoint_sequence, checkpoint_entries, 0))
+    if not content.ends_with("\n"):
+        return Err("gpu_cas: partial journal")
+    val lines = content.split("\n")
+    var entries = checkpoint_entries
+    var expected = checkpoint_sequence + 1
+    var replayed: i64 = 0
+    var previous_sequence: i64 = -1
+    var i = 0
+    while i < lines.len() - 1:
+        val parts = lines[i].split("|")
+        if parts.len() != 6 or parts[1] != "BIND":
+            return Err("gpu_cas: malformed journal record")
+        val sequence_opt = parts[0].to_int()
+        val byte_len_opt = parts[4].to_int()
+        if not sequence_opt.? or not byte_len_opt.?:
+            return Err("gpu_cas: malformed journal number")
+        val sequence = sequence_opt ?? -1
+        val byte_len = byte_len_opt ?? -1
+        val payload = "{parts[0]}|{parts[1]}|{parts[2]}|{parts[3]}|{parts[4]}"
+        val id = cas_blob_id(parts[3], byte_len)
+        if (sequence <= 0 or (previous_sequence >= 0 and sequence != previous_sequence + 1) or
+            not _valid_name(parts[2]) or not cas_blob_id_valid(id) or
+            parts[5] != sha256_text(payload)):
+            return Err("gpu_cas: invalid journal record")
+        if sequence > checkpoint_sequence:
+            if sequence != expected:
+                return Err("gpu_cas: journal sequence gap")
+            entries = _replace_entry(entries, CasManifestEntry(
+                name: parts[2],
+                artifact: id
+            ))
+            expected = expected + 1
+            replayed = replayed + 1
+        previous_sequence = sequence
+        i = i + 1
+    Ok((expected - 1, entries, replayed))
+
+export CasBlobId, cas_blob_id, cas_blob_id_valid
+export CasManifestEntry, CasRecoveryReport, GpuCasStore

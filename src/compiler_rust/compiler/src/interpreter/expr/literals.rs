@@ -262,6 +262,21 @@ pub(super) fn eval_literal_expr(
             if name == OptionVariant::None.as_str() {
                 return Ok(Some(Value::none()));
             }
+            // strict-mem (plan M5 §2): trap a read of a name bound by an
+            // initializer-less `let` before it ever received a first
+            // assignment. Must run before the fallback cascade below, which
+            // would otherwise silently resolve to an unrelated enclosing
+            // scope/global/function binding sharing the same name (a
+            // shadow-miss dressed as "it worked").
+            if crate::value::strict_mem_enabled() && env.is_uninit(name) {
+                let ctx = ErrorContext::new()
+                    .with_code(codes::UNDEFINED_VARIABLE)
+                    .with_help("assign a value to this binding before reading it");
+                return Err(CompileError::semantic_with_context(
+                    format!("strict-mem: read of uninitialized {}", name),
+                    ctx,
+                ));
+            }
             // Check if this variable has been moved (unique pointer move semantics)
             let is_moved = MOVED_VARS.with(|cell| cell.borrow().contains(name));
             if is_moved {

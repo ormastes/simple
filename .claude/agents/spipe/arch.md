@@ -16,7 +16,11 @@ Read the existing state file. Append your architecture doc. Do not modify earlie
 3. Define the dependency map between modules (no circular deps allowed)
 4. Make explicit architecture decisions (ADR-style: context, decision, consequences)
 5. Specify file paths for every new or modified file
-6. Append your architecture to the state file
+6. For critical features, define the authoritative generated manual and
+   validated evidence-manifest boundary used by `EVIDENCE_SHOWCASE.md`.
+   Reuse existing capture owners and cover accessible text/still/motion,
+   inert-HTML, and raw-plus-decoded protocol evidence as applicable.
+7. Append your architecture to the state file
 
 ## Entry Criteria
 

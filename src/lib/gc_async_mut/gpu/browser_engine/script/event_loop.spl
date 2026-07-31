@@ -8,14 +8,6 @@ Macrotask queue with rAF scheduling for the browser engine script host (M15 / RE
 
 pub val EVENT_LOOP_MAX_PENDING_TASKS: i32 = 256
 
-pub fn event_loop_clock_micros(time_ms: i64) -> i64:
-    """Convert the browser clock without wrapping its microsecond deadline."""
-    if time_ms <= 0:
-        return 0
-    if time_ms > 9223372036854775:
-        return 9223372036854775807
-    time_ms * 1000
-
 class MacroTask:
     """A pending macrotask timer entry."""
     timer_id: i64
@@ -29,20 +21,15 @@ pub class EventLoop:
     Fields:
         _timers      - pending macrotask timer entries
         _raf_slots   - pending requestAnimationFrame callback ids
-        _raf_deadline_micros - shared document-clock refresh deadline
         _next_id     - next timer id to assign
     """
     _timers: [MacroTask]
     _raf_slots: [i64]
-    _raf_deadline_micros: i64
     _next_id: i64
 
     static fn new() -> EventLoop:
         """Create an empty event loop."""
-        EventLoop(
-            _timers: [], _raf_slots: [], _raf_deadline_micros: -1,
-            _next_id: 1
-        )
+        EventLoop(_timers: [], _raf_slots: [], _next_id: 1)
 
     me pending_timer_count() -> i32:
         """Return the number of pending macrotask timers."""
@@ -53,37 +40,19 @@ pub class EventLoop:
         self._raf_slots.len()
 
     fn next_due_micros() -> i64:
-        """Return the earliest queued timer or animation-frame deadline."""
-        var earliest: i64 = -1
+        """Return the earliest queued deadline, or zero for pending rAF."""
         if self._raf_slots.len() > 0:
-            earliest = self._raf_deadline_micros
+            return 0
+        var earliest: i64 = -1
         for timer in self._timers:
-            if (
-                timer.deadline_micros >= 0 and
-                (earliest < 0 or timer.deadline_micros < earliest)
-            ):
+            if earliest < 0 or timer.deadline_micros < earliest:
                 earliest = timer.deadline_micros
         earliest
 
-    me schedule_raf(
-        callback_id: i64, now_micros: i64, origin_micros: i64
-    ):
-        """Register a callback at the next 16ms document-clock boundary."""
+    me schedule_raf(callback_id: i64):
+        """Register a callback for the next rAF slot when capacity permits."""
         if self._raf_slots.len() >= EVENT_LOOP_MAX_PENDING_TASKS:
             return
-        if self._raf_slots.len() == 0:
-            val elapsed = if now_micros > origin_micros:
-                now_micros - origin_micros
-            else:
-                0
-            val remainder = elapsed % 16000
-            val delay = if remainder == 0: 16000 else: 16000 - remainder
-            self._raf_deadline_micros = if (
-                now_micros > 9223372036854775807 - delay
-            ):
-                -1
-            else:
-                now_micros + delay
         self._raf_slots.push(callback_id)
 
     me cancel_timer(timer_id: i64):
@@ -146,15 +115,8 @@ pub class EventLoop:
         self._timers = keep
         fired
 
-    me drain_raf(now_micros: i64) -> [i64]:
-        """Drain callbacks only once their shared frame deadline is due."""
-        if (
-            self._raf_slots.len() == 0 or
-            self._raf_deadline_micros < 0 or
-            now_micros < self._raf_deadline_micros
-        ):
-            return []
+    me drain_raf() -> [i64]:
+        """Remove and return all pending rAF callback ids."""
         val slots = self._raf_slots
         self._raf_slots = []
-        self._raf_deadline_micros = -1
         slots

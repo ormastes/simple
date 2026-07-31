@@ -527,7 +527,7 @@ impl MirLowering:
                 val bits = b.emit_bitcast(mir_operand_copy(promoted), MirType.i64())
                 val box_fn = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_value_float"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                 ))
                 val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(bits)], MirType.i64())
                 boxed_opt ?? bits
@@ -543,10 +543,23 @@ impl MirLowering:
                 val bits = b.emit_bitcast(mir_operand_copy(local), MirType.i64())
                 val box_fn = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_value_float"),
-                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
                 ))
                 val boxed_opt = b.emit_call(box_fn, [mir_operand_copy(bits)], MirType.i64())
                 boxed_opt ?? bits
+            case MirTypeKind.Tuple(_) | MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Ptr(_, _):
+                # Bug #8 hardening: these are already heap-pointer-shaped
+                # runtime values (constructed/returned tagged by their own
+                # constructor/call site) -- NOT the unresolved-return i64
+                # default from resolved_call_return_type, which is caught by
+                # the I8..U64/Char arm above and boxed as a plain int, same as
+                # every other unresolved-but-integer-shaped call result.
+                # Named explicitly (rather than folded into the catch-all
+                # below) so a genuinely un-typed/i64-defaulted aggregate
+                # result -- which resolved_call_return_type can no longer
+                # produce for a Tuple/Struct/Enum kind once its type is known
+                # -- is never silently re-boxed as if it were a raw integer.
+                local
             case _:
                 local
         self.builder = b
@@ -1104,6 +1117,28 @@ impl MirLowering:
                     return self.bootstrap_text_type()
                 case _:
                     return self.lower_type(found_type)
+        # Bug #8/#9 hardening: every declared-return-type source above
+        # (fn_return_types, the cross-module name registry, and the raw
+        # symbol's own Function type) missed, so the callee's real return
+        # type is genuinely unknown here. Falling straight to MirType.i64()
+        # is the structural analog of the seed's "missing result-type entry
+        # -> ANY -> no boxing" bug (#8): a bool-returning method whose type
+        # went unresolved got tag-boxed/printed as a raw int instead of
+        # true/false (#9). A blind i64 default is directionally fine for a
+        # genuinely numeric callee, but is a known-wrong guess for the
+        # is_*/has_*/contains*-style boolean-method naming convention this
+        # codebase already leans on elsewhere (this used to be papered over
+        # by a print-side method-name allow-list, print_arg_is_bool_method_call
+        # in switch_operators_calls.spl, now removed) -- so check the
+        # callee's own declared name for that convention BEFORE guessing i64,
+        # fixing the type at its source instead of downstream at print time.
+        val fallback_sym = self.symbols.get_symbol_raw(symbol.id)
+        if val found_fallback_sym = fallback_sym:
+            val fallback_name = found_fallback_sym.name
+            if fallback_name.starts_with("is_") or fallback_name.starts_with("has_"):
+                return MirType.bool()
+            if fallback_name == "contains" or fallback_name == "contains_key" or fallback_name == "starts_with" or fallback_name == "ends_with" or fallback_name == "exists":
+                return MirType.bool()
         MirType.i64()
 
     me bitfield_field_mask(bit_width: i64) -> i64:
@@ -2823,7 +2858,7 @@ impl MirLowering:
                 self.lower_while(cond, body)
 
             case For(var_, iter, body, _):
-                self.lower_for(var_, iter, body, expr_value.span)
+                self.lower_for(var_, iter, body)
 
             case Return(value):
                 self.lower_return_expr(value)

@@ -116,13 +116,6 @@ impl JsInterpreter:
         self.object_store = object_store
 
     me get_object_property(obj_id: i64, key: text) -> JsValue:
-        if key == "bodyUsed":
-            match self._get_internal_object_property(
-                obj_id, "__simple_internal_response_body_consumed"
-            ):
-                JsValue.Boolean(v): return JsValue.Boolean(v: v)
-                _:
-                    pass_dn("non-response object has no body consumption slot")
         val store = self.object_store
         var i = store.prop_keys.len() - 1
         while i >= 0:
@@ -152,9 +145,10 @@ impl JsInterpreter:
     me set_object_property_direct(obj_id: i64, key: text, value: JsValue):
         self.set_object_property(obj_id, key, value)
 
-    me _set_internal_object_property(
-        obj_id: i64, key: text, value: JsValue
-    ):
+    me _mark_object_frozen(obj_id: i64):
+        if self._is_object_frozen(obj_id):
+            return
+
         var object_store = self.object_store
         var prop_obj_ids: [i64] = object_store.prop_obj_ids
         var prop_keys: [text] = object_store.prop_keys
@@ -163,20 +157,9 @@ impl JsInterpreter:
         var prop_ref_ids: [text] = object_store.prop_ref_ids
         var prop_enumerables: [bool] = object_store.prop_enumerables
         var prop_configurables: [bool] = object_store.prop_configurables
-        var i = prop_keys.len() - 1
-        while i >= 0:
-            if (
-                prop_obj_ids[i] == obj_id and prop_keys[i] == key and
-                not prop_enumerables[i] and not prop_configurables[i]
-            ):
-                prop_values[i] = value
-                object_store.prop_values = prop_values
-                self.object_store = object_store
-                return
-            i = i - 1
         prop_obj_ids.push(obj_id)
-        prop_keys.push(key)
-        prop_values.push(value)
+        prop_keys.push("__simple_frozen")
+        prop_values.push(JsValue.Boolean(v: true))
         prop_ref_tags.push("")
         prop_ref_ids.push("")
         prop_enumerables.push(false)
@@ -190,33 +173,8 @@ impl JsInterpreter:
         object_store.prop_configurables = prop_configurables
         self.object_store = object_store
 
-    fn _get_internal_object_property(obj_id: i64, key: text) -> JsValue:
-        val object_store = self.object_store
-        var i = object_store.prop_keys.len() - 1
-        while i >= 0:
-            if (
-                object_store.prop_obj_ids[i] == obj_id and
-                object_store.prop_keys[i] == key and
-                not object_store.prop_enumerables[i] and
-                not object_store.prop_configurables[i]
-            ):
-                match object_store.prop_values[i]:
-                    JsValue.Undefined:
-                        pass_dn("public delete tombstone cannot remove internal state")
-                    value:
-                        return value
-            i = i - 1
-        JsValue.Undefined
-
-    me _mark_object_frozen(obj_id: i64):
-        if self._is_object_frozen(obj_id):
-            return
-        self._set_internal_object_property(
-            obj_id, "__simple_frozen", JsValue.Boolean(v: true)
-        )
-
     me _is_object_frozen(obj_id: i64) -> bool:
-        match self._get_internal_object_property(obj_id, "__simple_frozen"):
+        match self.get_object_property(obj_id, "__simple_frozen"):
             JsValue.Boolean(v): v
             _:
                 false

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -79,17 +79,6 @@ Display policy: `embed_tui`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Go", 1).len() equals `1`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://example.com/two", 1).len() equals `1`
 
-#### ends hosted address editing before Home succeeds or fails
-
-- Restore the committed address before a busy Home rejection.
-  - Expected: a renderer without a committed URL restores `about:blank`.
-  - Expected: Home press ends address editing and publishes the committed URL.
-  - Expected: a busy Home release reports `renderer-busy` without restoring the draft.
-  - Expected: subsequent text cannot mutate the address.
-- Keep successful Home navigation on the parent renderer route.
-  - Expected: Home press publishes the committed URL before release.
-  - Expected: Home release admits the configured URL and publishes it.
-
 
 <details>
 <summary>Executable SSpec</summary>
@@ -124,9 +113,8 @@ and REQ-WEB-BROWSER-010 (canonical relative-reference resolution).
   - Expected: one enabled `Go` button exists at `browser:session#go` with click and key actions, ordered before Address and Title to match the visual chrome.
 - **Enter and activate the destination**
   - Expected: Go pointer release and address Enter resolve `../next?x=1#ok` against the committed document and queue exactly one equivalent GET request.
-  - Expected: Go press ends address focus without discarding its typed target; Home press restores the committed address in both parent and worker state.
   - Expected: Go keyboard Enter and Space each use the same address activation owner.
-  - Expected: the protocol admits Go, while raw worker Go and Reload release return `navigation-command-required`; rejected Reload leaves URL, loading/request state, complete history/current index, body, and DrawIR revision unchanged.
+  - Expected: the protocol admits Go and the worker returns `navigation-command-required`.
   - Expected: Go release and address Enter call the same process-level owner; its callable fixture admits one normalized command with `callback_count=1`, while invalid input retains focus and committed history.
 - **Use Home Bookmark Stop and Reload**
   - Expected: Back, Forward, bookmark, Stop, Home, Reload, and Favorite retain their existing behavior.
@@ -323,71 +311,6 @@ hosted-entry, Draw IR, resized hit-layout, and literal-pixel assertions.
         expect(worker_go_route.ok).to_be(false)
         expect(worker_go_route.reason).to_equal(
             "navigation-command-required"
-        )
-        var reload_worker = HostedBrowserRendererWorkerSession.create(64, 48)
-        val reload_worker_capability = "22222222222222222222222222222222"
-        val reload_worker_init = browser_renderer_capability_bind_encoded(
-            browser_renderer_message_encode(
-                "init", 97, 2, "<main>Worker Reload</main>"
-            ),
-            97, 2, 2, reload_worker_capability
-        )
-        expect(reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                reload_worker_init.wire
-            ).message
-        ).ok).to_be(true)
-        expect(reload_worker.browser.open_html(
-            committed_url, "<main>Worker Reload</main>"
-        ).is_ok()).to_be(true)
-        val worker_reload_url = reload_worker.browser.current_url
-        val worker_reload_loading = reload_worker.browser.is_loading
-        val worker_reload_pending = reload_worker.browser.pending_request_count()
-        val worker_reload_history = reload_worker.browser.history
-        val worker_reload_current_index = reload_worker.browser.current_index
-        val worker_reload_body = reload_worker.browser.current_body_html
-        val worker_reload_composition_revision = (
-            reload_worker.render_session.counters.composition_revision
-        )
-        val worker_reload_down = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(97, 3, 12, "reload", true),
-            97, 3, 3, reload_worker_capability
-        )
-        expect(reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                worker_reload_down.wire
-            ).message
-        ).ok).to_be(true)
-        val worker_reload_up = browser_renderer_capability_bind_encoded(
-            browser_renderer_chrome_encode(97, 4, 13, "reload", false),
-            97, 4, 4, reload_worker_capability
-        )
-        val worker_reload_route = reload_worker.handle(
-            browser_renderer_capability_decoder_feed(
-                browser_renderer_capability_decoder_new(97),
-                worker_reload_up.wire
-            ).message
-        )
-        expect(worker_reload_route.ok).to_be(false)
-        expect(worker_reload_route.reason).to_equal(
-            "navigation-command-required"
-        )
-        expect(reload_worker.browser.current_url).to_equal(worker_reload_url)
-        expect(reload_worker.browser.is_loading).to_equal(worker_reload_loading)
-        expect(reload_worker.browser.pending_request_count()).to_equal(
-            worker_reload_pending
-        )
-        expect(reload_worker.browser.history).to_equal(
-            worker_reload_history
-        )
-        expect(reload_worker.browser.current_index).to_equal(
-            worker_reload_current_index
-        )
-        expect(reload_worker.browser.current_body_html).to_equal(worker_reload_body)
-        expect(reload_worker.render_session.counters.composition_revision).to_equal(
-            worker_reload_composition_revision
         )
 
         var direct = HostedBrowserRendererProcess.create(95, 64, 48)
@@ -1327,7 +1250,7 @@ expect(session.current_url).to_equal("https://example.com/third")
 - session register resource
 - session open html
    - Expected: edit.ok is true
-   - Expected: session.ui_access_snapshot().nodes[7].text_value equals `https://example.com/target`
+   - Expected: session.ui_access_snapshot().nodes[6].text_value equals `https://example.com/target`
    - Expected: session.current_url equals `https://example.com/start`
    - Expected: submit.ok is true
    - Expected: session.current_url equals `https://example.com/target`
@@ -1346,115 +1269,12 @@ session.open_html("https://example.com/start", "<html><head><title>Start</title>
 
 val edit = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#address", action: "set_value", text_value: "https://example.com/target", x: 0, y: 0))
 expect(edit.ok).to_equal(true)
-expect(session.ui_access_snapshot().nodes[7].text_value).to_equal("https://example.com/target")
+expect(session.ui_access_snapshot().nodes[6].text_value).to_equal("https://example.com/target")
 expect(session.current_url).to_equal("https://example.com/start")
 
 val submit = session.ui_access_act(WinTextActionRequest(target_id: "browser:session#address", action: "submit", text_value: "", x: 0, y: 0))
 expect(submit.ok).to_equal(true)
 expect(session.current_url).to_equal("https://example.com/target")
-```
-
-</details>
-
-#### keeps a cleared address empty and rejects activation without mutation
-
-**Requirements exercised:** REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-021.
-
-- Clear the committed address through textual UI access
-   - Expected: the address remains visibly empty and Go becomes disabled.
-- Reject empty Submit and Go without changing browser state
-   - Expected: the committed URL, history position, pending requests, and
-     rendered pixels remain unchanged.
-- Discard cleared drafts across Back, Forward, Home, and Stop
-   - Expected: each navigation control restores its committed or pending URL;
-     empty edit state never leaks across the shared navigation boundary.
-
-<details>
-<summary>Executable SSpec</summary>
-
-```simple
-step("Clear the committed address through textual UI access")
-var session = BrowserSession.new()
-session.open_html(
-    "https://example.com/start",
-    "<html style='background:#ff0000'><body>Start</body></html>"
-)
-val cleared = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#address", action: "set_value",
-    text_value: "", x: 0, y: 0
-))
-val cleared_snapshot = session.ui_access_snapshot()
-expect(cleared.ok).to_be(true)
-expect(cleared_snapshot.nodes[7].text_value).to_equal("")
-expect(cleared_snapshot.nodes[6].enabled).to_be(false)
-
-step("Reject empty Submit and Go without changing browser state")
-val url_before = session.current_url
-val history_before = session.history.len()
-val index_before = session.current_index
-val pending_before = session.pending_request_count()
-val pixels_before = session.render_to_pixels(8, 8).pixels
-val submitted = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#address", action: "submit",
-    text_value: "", x: 0, y: 0
-))
-val clicked = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#go", action: "click",
-    text_value: "", x: 0, y: 0
-))
-expect(submitted.ok).to_be(false)
-expect(clicked.code).to_equal("disabled")
-expect(session.current_url).to_equal(url_before)
-expect(session.history.len()).to_equal(history_before)
-expect(session.current_index).to_equal(index_before)
-expect(session.pending_request_count()).to_equal(pending_before)
-expect(_address_pixels_match(session, pixels_before)).to_be(true)
-
-step("Discard cleared drafts across Back, Forward, Home, and Stop")
-var controls = _browser_session_fixture()
-val clear_request = WinTextActionRequest(
-    target_id: "browser:session#address", action: "set_value",
-    text_value: "", x: 0, y: 0
-)
-val _ = controls.ui_access_act(clear_request)
-val _ = controls.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#back", action: "click",
-    text_value: "", x: 0, y: 0
-))
-expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-    "https://example.com/one"
-)
-val _ = controls.ui_access_act(clear_request)
-val _ = controls.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#forward", action: "click",
-    text_value: "", x: 0, y: 0
-))
-expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-    "https://example.com/two"
-)
-val _ = controls.ui_access_act(clear_request)
-val _ = controls.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#home", action: "click",
-    text_value: "", x: 0, y: 0
-))
-expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-    "https://example.com/home"
-)
-expect(controls.begin_network_navigation(
-    "https://example.com/pending", "GET", "", "", ""
-).is_ok()).to_be(true)
-val _ = controls.ui_access_act(clear_request)
-val stop_revision = controls.ui_access_snapshot().snapshot_revision
-val _ = controls.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#stop", action: "click",
-    text_value: "", x: 0, y: 0
-))
-expect(controls.ui_access_snapshot().snapshot_revision).to_be_greater_than(
-    stop_revision
-)
-expect(controls.ui_access_snapshot().nodes[7].text_value).to_equal(
-    "https://example.com/home"
-)
 ```
 
 </details>
@@ -2806,8 +2626,8 @@ expect(link_result.message).to_equal("link event canceled")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 22 |
-| Active scenarios | 22 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

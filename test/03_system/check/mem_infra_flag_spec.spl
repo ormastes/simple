@@ -73,63 +73,12 @@ fn contract_binary() -> text:
 # explicit `--backend` is given). Force `cranelift` here so these
 # "default (cranelift) run" cases exercise the engine they claim to, not
 # whatever engine happens to be running the spec suite.
-fn run_with_binary(bin: text, fixture: text, mem_infra_args: [text]) -> (text, text, i64):
+fn run_via_dispatch_probe(fixture: text, mem_infra_args: [text]) -> (text, text, i64):
     val _ = env_set("SIMPLE_EXECUTION_MODE", "cranelift")
-    # The probe spawns the inner target itself; point it at the same binary,
-    # otherwise it defaults to the deployed bin/simple and the choice we make
-    # here only applies to the outer process.
-    val _b = env_set("SIMPLE_TEST_BINARY", bin)
     var argv: [text] = [DISPATCH_PROBE, "run", fixture]
     for a in mem_infra_args:
         argv.push(a)
-    process_run(bin, argv)
-
-# Pick a binary that can actually answer the question, once, by CAPABILITY --
-# not by matching an error string. The DEPLOYED bin/simple can predate the
-# rt_mem_attr_* extern registration, in which case the child reports enabled=0
-# no matter how correctly the flag was applied, and this spec goes red for a
-# deployment-staleness reason unrelated to the flag wiring under test. (An
-# earlier attempt here sniffed the child's stderr for "unknown extern function"
-# and did NOT work: that diagnostic is emitted on the parent's tracing stream,
-# so it never appears in the captured stderr.)
-#
-# The probe asks the outcome directly: run the attr fixture with --mem-infra=attr
-# and keep the first binary that reports enabled=1. This cannot mask a real
-# regression -- if the flag wiring is broken, NO candidate reports enabled=1 and
-# the spec still fails on the deployed binary. It only decides which binary is
-# asked, never whether the question is asked. Once a bootstrap redeploy refreshes
-# bin/simple, the deployed binary wins on the first try and the ladder is inert.
-val ATTR_CAPABLE_CANDIDATES = ["src/compiler_rust/target/release/simple",
-                               "src/compiler_rust/target/debug/simple"]
-
-# Memoized: the probe below spawns a full compiler per candidate, and seed
-# startup is tens of seconds. Resolving per `it` block instead of once ran ~12
-# subprocesses and blew the spec's timeout.
-var ATTR_BIN_CACHE: text = ""
-
-fn attr_capable_binary() -> text:
-    if ATTR_BIN_CACHE != "":
-        return ATTR_BIN_CACHE
-    ATTR_BIN_CACHE = attr_capable_binary_uncached()
-    ATTR_BIN_CACHE
-
-fn attr_capable_binary_uncached() -> text:
-    val deployed = contract_binary()
-    val (out, _e, _c) = run_with_binary(deployed, FIXTURE, ["--mem-infra=attr"])
-    if out.contains("enabled=1"):
-        return deployed
-    for candidate in ATTR_CAPABLE_CANDIDATES:
-        val (exists, _pe, _pc) = process_run("/bin/sh",
-            ["-c", "test -x {candidate} && echo yes || echo no"])
-        if exists.trim() != "yes":
-            continue
-        val (cand_out, _ce, _cc) = run_with_binary(candidate, FIXTURE, ["--mem-infra=attr"])
-        if cand_out.contains("enabled=1"):
-            return candidate
-    deployed
-
-fn run_via_dispatch_probe(fixture: text, mem_infra_args: [text]) -> (text, text, i64):
-    run_with_binary(attr_capable_binary(), fixture, mem_infra_args)
+    process_run(contract_binary(), argv)
 
 describe "--mem-infra= CLI flag":
 

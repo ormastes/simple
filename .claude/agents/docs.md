@@ -33,6 +33,9 @@ RULES → enforced by CI + review
 - Executable specifications MUST be SPipe test files under `test/` (`*_spec.spl`)
 - `doc/06_spec/` is for generated/manual markdown mirrors and evidence assets; never put executable `.spl` specs there
 - Before commit or release, `find doc/06_spec -name '*_spec.spl' | wc -l` must print `0`
+- `EVIDENCE_SHOWCASE.md` links critical generated manuals; validated versioned
+  manifests, not prose, own status/provenance/artifact truth. Review generated
+  text/still/motion/inert-HTML/protocol evidence as accessible operator pages.
 - Research goes in `doc/01_research/`, NOT mixed with specs
 - Reports use format: `doc/09_report/<topic>_<date>.md`
 - DO NOT add reports to git unless requested

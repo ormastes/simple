@@ -7,12 +7,16 @@ use std.gc_async_mut.gpu.browser_engine.browser_renderer.{
     render_html_to_pixels_with_viewport
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    LayoutResult,
+    Style,
+    simple_web_layout_bind_arena_residency,
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_render_html_draw_ir_result,
     simple_web_layout_debug_capped_node_count,
     simple_web_layout_debug_capped_input_node_count,
     simple_web_layout_debug_capped_css_rule_count
 }
+use common.compute.placement_contracts.handles.{ArenaResidency, object_ref}
 
 val WEB_W: i32 = 64
 val WEB_H: i32 = 32
@@ -21,6 +25,26 @@ fn _expect_draw_web_html() -> text:
     "<!doctype html><html><head><title>Expect Draw Web</title><style>body { margin: 0; background-color: #123456; color: #f8fafc; }</style></head><body style=\"background-color: #123456\"><main class=\"expect-draw\"><h1>Render Ready</h1><p>Visible HTML text before pixels.</p></main></body></html>"
 
 describe "BrowserRenderer HTML/CSS expect-draw evidence":
+    it "binds style and layout arenas at the retained result boundary":
+        val result = simple_web_layout_render_html_draw_ir_result(
+            "<main>resident</main>", 64, 32
+        )
+        val style_residency = ArenaResidency(
+            object: object_ref<Style>(10u32, 1u32),
+            entity_count: result.base_styles.len() as u64,
+            byte_len: 1024u64
+        )
+        val layout_residency = ArenaResidency(
+            object: object_ref<LayoutResult>(11u32, 1u32),
+            entity_count: result.raw_boxes.bx.len() as u64,
+            byte_len: 512u64
+        )
+        val resident = simple_web_layout_bind_arena_residency(
+            result, style_residency, layout_residency
+        )
+        expect(resident.style_residency != nil).to_equal(true)
+        expect(resident.layout_residency != nil).to_equal(true)
+
     it "bounds the direct-render node arena at its exact limit":
         step("Render a small document with exact and roomy node limits")
         val html = "<div>one</div><p>two</p>"

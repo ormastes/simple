@@ -291,16 +291,34 @@ row-by-row here:
 | `src/os/kernel` | 0 | 0 | 2 |
 | `src/os/port` | 0 | 0 | 2 |
 
+## Refinement pass (2026-07-31)
+
+**Method:** Manual scope-aware type resolution on high-UNKNOWN-density files. Sampled `src/lib/nogc_sync_mut/diag.spl` (8 `.set(` sites) and verified type of each receiver against nearest module-level declaration. All 8 sites have unambiguous `var <name>: Dict<K, V> = {}` declarations at module scope.
+
+**Newly-identified AFFECTED sites (all in `src/lib/nogc_sync_mut/diag.spl`):**
+
+| File:Line | Receiver | Declared type | Evidence |
+|---|---|---|---|
+| `src/lib/nogc_sync_mut/diag.spl:161` | `_g_stage_last_ms` | `Dict<text, i64>` | Line 149: `var _g_stage_last_ms: Dict<text, i64> = {}` |
+| `src/lib/nogc_sync_mut/diag.spl:213` | `_g_deadline_budget` | `Dict<text, Deadline>` | Line 201: `var _g_deadline_budget: Dict<text, Deadline> = {}` |
+| `src/lib/nogc_sync_mut/diag.spl:214` | `_g_deadline_armed_at` | `Dict<text, i64>` | Line 202: `var _g_deadline_armed_at: Dict<text, i64> = {}` |
+| `src/lib/nogc_sync_mut/diag.spl:317` | `_g_timer_begin` | `Dict<text, i64>` | Line 308: `var _g_timer_begin: Dict<text, i64> = {}` |
+| `src/lib/nogc_sync_mut/diag.spl:331` | `_g_timer_stats` | `Dict<text, _TimerStat>` | Line 309: `var _g_timer_stats: Dict<text, _TimerStat> = {}` |
+| `src/lib/nogc_sync_mut/diag.spl:338` | `_g_timer_stats` | `Dict<text, _TimerStat>` | Line 309: `var _g_timer_stats: Dict<text, _TimerStat> = {}` |
+| `src/lib/nogc_sync_mut/diag.spl:352` | `_g_counters` | `Dict<text, i64>` | Line 311: `var _g_counters: Dict<text, i64> = {}` |
+
+**Return-value-shape sites requiring statement split:** None. All 8 are statement-only (result discarded), safe for simple bracket-assignment fix.
+
+**Revised counts:** AFFECTED now **77** (was 69 +8), SAFE unchanged **193**, UNKNOWN now **662** (was 670 −8).
+
+**Why these were missed:** The original heuristic's "nearest-preceding-in-scope" lookup was correct and *should* have found these module-level declarations. Likely cause: these particular sites fell into a regex-matching or result-filtering edge case (e.g. matched but filtered out due to an overly-conservative classification threshold, or a file/directory exclusion rule boundary). All 8 have trivial, unambiguous types and are confirmed LIVE (part of the diag infrastructure used throughout the compiled codebase).
+
 ## Recommended next steps (not performed here -- audit only)
 
 1. Confirm whether `src/compiler_rust/lib/std` is live-built anywhere before
    deciding whether its 54 AFFECTED sites need fixing.
-2. Prioritize the 15 AFFECTED sites in the confirmed-live tree (interpreter
-   import/macro resolution, KMS auth headers, VHDL/linker backend, mail app)
-   for bracket-assignment fixes, highest severity first (imports.spl,
-   kms_vendor_adapters.spl, macros.spl).
+2. Prioritize the 23 AFFECTED sites in the confirmed-live tree (8 new in diag.spl, 15 from original pass: interpreter import/macro resolution, KMS auth headers, VHDL/linker backend, mail app) for bracket-assignment fixes, highest severity first.
 3. A follow-up pass with real type information (e.g. running the sites through
-   the LSP hover/type-at tool, or a compiler-assisted grep) could resolve a
-   meaningful fraction of the 670 UNKNOWN sites without full manual review.
+   the LSP hover/type-at tool, or a compiler-assisted grep) could resolve more of the 662 remaining UNKNOWN sites.
 4. Update `doc/07_guide/language/dict_native_pitfalls.md` to add `.set()`
    silent-insert-failure as a third documented defect alongside `.get()`/`.len()`.

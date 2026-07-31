@@ -43,6 +43,7 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
 - Every REQ-NNN has at least one test
 - Every required SPipe generated/manual spec exists under `doc/06_spec/` at the
   path mirrored from the executable `test/...` spec
+- No executable `.spl` spec exists under `doc/06_spec/`.
 - For changed specs, `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
   reports complete documentation with `0 stubs`; a generated manual marked as a
   stub is a FAIL even when the `.md` file exists. Run docgen only through the
@@ -53,6 +54,17 @@ release must not create, rewrite, or weaken SPipe evidence after verification.
   visible first, `@inline`/`@prev` setup expands without redundant metadata,
   executable SPipe is folded by default, and advanced/edge/matrix/stress
   scenarios are folded or skipped according to policy.
+- Every critical `EVIDENCE_SHOWCASE.md` row links its authoritative generated
+  manual. Its status, provenance, freshness, integrity, and artifact links
+  derive from a validated versioned manifest; only current provenance-bound
+  evidence may be `live-pass`.
+- Evidence rendering is reviewable and accessible: normalized text keeps
+  actionable diagnostics, stills have alt/summary text, motion has keyframes
+  and a transcript, HTML is inert, and protocol/crypto evidence includes raw
+  bytes plus decoded fields.
+- New or updated scenarios use modern SSpec and direct value assertions; reject
+  new Given/When/Then flows, boolean wrappers, placeholders, and silent
+  missing-evidence branches.
 - Shared interface names and manual-facing setup/checker helper names match the
   accepted architecture/design/spec/manual references.
 - Every named setup/checker helper used by a displayed scenario is visible as

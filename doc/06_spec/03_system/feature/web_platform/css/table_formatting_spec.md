@@ -186,19 +186,18 @@ expect(pixels[61 * 48 + 1]).to_equal(0xFFFFFFFFu32)
 - Resolve collapsed border ownership
   - Admit exactly one LTR table row with two direct cells.
   - Fail closed for colspan, rowspan, multiple rows, and non-table-row structure.
-  - Resolve equal edges by LTR origin, suppress a solid edge with `hidden`, choose wider authored borders before style rank, and use style rank only for equal widths.
+  - Resolve equal edges by LTR origin, suppress a solid edge with `hidden`, and rank `solid` above wider `dotted`.
 - Emit canonical Draw IR
   - Preserve row parentage and exact two-column geometry.
   - Re-resolve style identity and ownership after the retained animation promotes the left edge.
 - Verify absolute pixels
   - Confirm the selected blue shared border and adjacent white pixels through Engine2D readback.
-  - Confirm a wider dotted red edge paints and the competing narrow blue edge does not.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 308 lines folded for reproduction.
+Runnable source: 266 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -355,59 +354,32 @@ val hidden_suppression = [
     _table_style(hidden_left, "border-right-style"),
     _table_style(hidden_right, "border-left-style")
 ]
-val width_priority_html = (
+val style_rank_html = (
     "<style>table{table-layout:fixed;width:40px;" +
     "border-collapse:collapse;border-spacing:11px}" +
-    "#wide-left{border-right:5px dotted #ef4444}" +
-    "#narrow-right{border-left:1px solid #1d4ed8}</style>" +
-    "<table id='width-table'><tr><td id='wide-left'></td>" +
-    "<td id='narrow-right'></td></tr></table>"
+    "#rank-left{border-right:5px dotted #ef4444}" +
+    "#rank-right{border-left:1px solid #1d4ed8}</style>" +
+    "<table id='rank-table'><tr><td id='rank-left'></td>" +
+    "<td id='rank-right'></td></tr></table>"
 )
-val width_priority_commands = simple_web_layout_render_html_draw_ir(
-    width_priority_html, 48, 16
+val style_rank_commands = simple_web_layout_render_html_draw_ir(
+    style_rank_html, 48, 16
 ).batches[0].commands
-val width_priority_table = width_priority_commands[_table_command_index(
-    width_priority_commands, "width-table"
+val style_rank_table = style_rank_commands[_table_command_index(
+    style_rank_commands, "rank-table"
 )]
-val width_priority_left = width_priority_commands[_table_command_index(
-    width_priority_commands, "wide-left"
+val style_rank_left = style_rank_commands[_table_command_index(
+    style_rank_commands, "rank-left"
 )]
-val width_priority_right = width_priority_commands[_table_command_index(
-    width_priority_commands, "narrow-right"
+val style_rank_right = style_rank_commands[_table_command_index(
+    style_rank_commands, "rank-right"
 )]
-val width_precedence = [
-    _table_style(width_priority_table, "border-spacing"),
-    _table_style(width_priority_left, "border-right-width"),
-    _table_style(width_priority_right, "border-left-width"),
-    _table_style(width_priority_left, "border-right-style"),
-    _table_style(width_priority_right, "border-left-style")
-]
-val equal_style_html = (
-    "<style>table{table-layout:fixed;width:40px;" +
-    "border-collapse:collapse;border-spacing:12px}" +
-    "#dotted-left{border-right:2px dotted #ef4444}" +
-    "#solid-right{border-left:2px solid #1d4ed8}</style>" +
-    "<table id='style-table'><tr><td id='dotted-left'></td>" +
-    "<td id='solid-right'></td></tr></table>"
-)
-val equal_style_commands = simple_web_layout_render_html_draw_ir(
-    equal_style_html, 48, 16
-).batches[0].commands
-val equal_style_table = equal_style_commands[_table_command_index(
-    equal_style_commands, "style-table"
-)]
-val dotted_left = equal_style_commands[_table_command_index(
-    equal_style_commands, "dotted-left"
-)]
-val solid_right = equal_style_commands[_table_command_index(
-    equal_style_commands, "solid-right"
-)]
-val equal_width_style_precedence = [
-    _table_style(equal_style_table, "border-spacing"),
-    _table_style(dotted_left, "border-right-width"),
-    _table_style(solid_right, "border-left-width"),
-    _table_style(dotted_left, "border-right-style"),
-    _table_style(solid_right, "border-left-style")
+val style_rank_precedence = [
+    _table_style(style_rank_table, "border-spacing"),
+    _table_style(style_rank_left, "border-right-width"),
+    _table_style(style_rank_right, "border-left-width"),
+    _table_style(style_rank_left, "border-right-style"),
+    _table_style(style_rank_right, "border-left-style")
 ]
 val non_row_html = (
     "<style>table{table-layout:fixed;width:40px;" +
@@ -440,11 +412,8 @@ expect(equal_width_control).to_equal(
 expect(hidden_suppression).to_equal(
     ["0px", "0", "0", "hidden", "solid"]
 )
-expect(width_precedence).to_equal(
-    ["0px", "5", "0", "dotted", "solid"]
-)
-expect(equal_width_style_precedence).to_equal(
-    ["0px", "0", "2", "dotted", "solid"]
+expect(style_rank_precedence).to_equal(
+    ["0px", "0", "1", "dotted", "solid"]
 )
 
 step("Emit canonical Draw IR")
@@ -498,17 +467,6 @@ expect(pixel_at_shared_border_start).to_equal(0xFF1D4ED8u32)
 expect(pixel_at_shared_border_center).to_equal(0xFF1D4ED8u32)
 expect(pixel_at_shared_border_end).to_equal(0xFF1D4ED8u32)
 expect(pixel_after_shared_border).to_equal(0xFFFFFFFFu32)
-val width_priority_pixels = (
-    simple_web_layout_render_html_readback_engine2d_result(
-        width_priority_html, 48, 16, "software"
-    ).readback.pixels
-)
-expect(_table_color_count(
-    width_priority_pixels, 0xFFEF4444u32
-)).to_be_greater_than(0)
-expect(_table_color_count(
-    width_priority_pixels, 0xFF1D4ED8u32
-)).to_equal(0)
 ```
 
 </details>

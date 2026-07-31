@@ -531,6 +531,8 @@ bootstrap_stage_sanity() (
   sanity_home=$3
   sanity_tmpdir=$4
   sanity_path=$5
+  expected_version=$(tr -d '[:space:]' <"${repo_root}/VERSION")
+  [ -n "${expected_version}" ] || return 1
   for sanity_env_name in $(env | sed 's/=.*//'); do
     unset "${sanity_env_name}"
   done
@@ -560,7 +562,7 @@ bootstrap_stage_sanity() (
   candidate_sha_after=$(bootstrap_stage3_hash_file "${candidate}") || return 1
   sanity_status=fail
   if [ "${version_status}" -eq 0 ] &&
-    [ "${version}" = "simple-bootstrap 1.0.0-beta" ] &&
+    [ "${version}" = "simple-bootstrap ${expected_version}" ] &&
     [ "${unsupported_status}" -eq 1 ] &&
     case "${unsupported}" in *"unknown command 'run'"*) true ;; *) false ;; esac &&
     [ "${frontend_status}" -eq 0 ] &&
@@ -1232,10 +1234,13 @@ else
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
+      --source src/compiler --source src/app --source src/lib \
+      --entry-closure \
       --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       --runtime-path "${stage_runtime_absolute}" \
-      -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
+      --entry src/app/cli/bootstrap_main.spl \
+      -o "${stage3_bin}"
   )
   rm -f "${stage2_bin}" "${stage3_bin}"
   bootstrap_stage3_directory_snapshot \
@@ -1359,12 +1364,14 @@ else
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
+    --source src/compiler --source src/app --source src/lib \
+    --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --runtime-path "${stage_runtime_absolute}" \
-    -o "${stage3_bin}" \
-    src/app/cli/bootstrap_main.spl
+    --entry src/app/cli/bootstrap_main.spl \
+    -o "${stage3_bin}"
   stage3_status=$?
   set -e
   if [ "${stage2_admitted_sha_before_stage3}" != absent ]; then

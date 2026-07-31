@@ -1,6 +1,6 @@
 # Spatial Layout Framework Plan (LAYOUT lane — framework half)
 
-**Date:** 2026-07-31 · **Status:** Implemented; runtime verification blocked
+**Date:** 2026-07-31 · **Status:** Proposed
 **Parent:** architecture doc Part VI (§17). Browser-side manager:
 `web_layout_manager_plan.md`.
 
@@ -48,16 +48,8 @@ test/01_unit/lib/structural/layout/
    `hybrid_vector_gpu` dispatches only above measured crossover (parallel
    layout research: scheduling overhead beats the win on small pages).
 4. **GPU batch profiles (Wave 8).** Homogeneous block/flex/grid measure/
-   arrange kernels; a bounded Latin line-break path is available, while
-   shaping and unsupported scripts stay on CPU.
-
-The current CPU execution port preserves canonical layout correctness by
-recomputing the selected root and filtering its result. Receipts and retained
-merging are island-scoped, but CPU compute reduction remains future work.
-
-The implementation and static evidence are present. The acceptance commands
-remain blocked until a complete Stage4 self-hosted CLI is available; the Rust
-bootstrap seed is not accepted as verification evidence.
+   arrange kernels; inline stays CPU (sequential shaping/breaking) until a
+   verified GPU text path exists.
 
 ## Acceptance
 

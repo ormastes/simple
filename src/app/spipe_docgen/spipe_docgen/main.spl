@@ -16,6 +16,17 @@ use std.cli.cli_util (get_cli_args)
 use app.spipe_docgen.common.*
 use app.spipe_docgen.parser.{parse_spipe_file, extract_metadata, validate_spec}
 use app.spipe_docgen.generator.*
+use app.spipe_docgen.showcase.{generate_evidence_showcases}
+use app.spipe_docgen.evidence_manifest.{
+    render_evidence_manifest,
+    validate_evidence_artifact_files
+}
+use std.spec.scenario_evidence_manifest.{
+    scenario_evidence_manifest_from_sdn
+}
+use std.spec.scenario_evidence_manifest_io.{
+    scenario_evidence_manifest_path_for_spec
+}
 
 # ============================================================================
 # MAIN ENTRY POINT
@@ -51,10 +62,34 @@ fn print_summary(stats: DocStats):
 
     print "============================================================"
 
+fn append_evidence_manifest(
+    spec_path: text,
+    manual_path: text
+) -> Result<bool, text>:
+    val manifest_path = scenario_evidence_manifest_path_for_spec(spec_path)
+    if not native_fs_exists(manifest_path):
+        return Ok(false)
+    val manifest = validate_evidence_artifact_files(
+        scenario_evidence_manifest_from_sdn(
+            native_fs_read_string(manifest_path)
+        )?
+    )?
+    if manifest.spec_path != spec_path:
+        return Err("evidence manifest spec_path mismatch: " + manifest_path)
+    if manifest.generated_manual_path != manual_path:
+        return Err("evidence manifest manual path mismatch: " + manifest_path)
+    val rendered = render_evidence_manifest(manifest)?
+    val merged = native_fs_read_string(manual_path).trim_end() +
+        "\n\n---\n\n" + rendered
+    if not native_fs_write_string(manual_path, merged):
+        return Err("failed to write evidence manual: " + manual_path)
+    Ok(true)
+
 fn print_usage():
     print "SPipe Documentation Generator"
     print ""
     print "Usage: spipe-docgen <spec_file>... [--output <dir>]"
+    print "       spipe-docgen --showcase [--inventory <path>]"
     print ""
     print "Arguments:"
     print "  <spec_file>...    One or more spipe files (*_spec.spl)"
@@ -63,6 +98,8 @@ fn print_usage():
     print "  --output <dir>    Output directory (default: doc/06_spec)"
     print "  -o <dir>          Short form of --output"
     print "  --no-index        Do not regenerate INDEX.md"
+    print "  --showcase        Generate root and subproject evidence status regions"
+    print "  --inventory PATH  Showcase inventory (default: config/evidence_showcase.sdn)"
     print "  --help, -h        Show this help message"
     print ""
     print "Features:"
@@ -77,6 +114,38 @@ fn print_usage():
     print "Example:"
     print "  spipe-docgen tests/system/*_spec.spl"
     print "  spipe-docgen tests/specs/*.spl --output doc/06_spec"
+    print "  spipe-docgen --showcase"
+
+fn run_showcase_generation(args: [text]) -> i64:
+    var inventory_path = "config/evidence_showcase.sdn"
+    var seen_showcase = false
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "spipe-docgen" or arg == "spipe_docgen":
+            i = i + 1
+        elif arg == "--showcase":
+            if seen_showcase:
+                spipe_err("--showcase may be provided only once")
+                return 2
+            seen_showcase = true
+            i = i + 1
+        elif arg == "--inventory":
+            if i + 1 >= args.len() or args[i + 1].starts_with("-"):
+                spipe_err("--inventory requires a path")
+                return 2
+            inventory_path = args[i + 1]
+            i = i + 2
+        else:
+            spipe_err("--showcase cannot be combined with spec generation option: {arg}")
+            return 2
+    match generate_evidence_showcases(inventory_path):
+        case Ok(written):
+            print "DONE Generated {written} evidence showcase page(s)"
+            0
+        case Err(message):
+            spipe_err("Evidence showcase generation failed: {message}")
+            1
 
 fn run_spipe_docgen(args: [text]) -> i64:
     # Parse arguments
@@ -102,6 +171,13 @@ fn run_spipe_docgen(args: [text]) -> i64:
             return 2
         print_usage()
         return 0
+
+    var showcase_count = 0
+    for arg in args:
+        if arg == "--showcase":
+            showcase_count = showcase_count + 1
+    if showcase_count > 0:
+        return run_showcase_generation(args)
 
     # Extract output directory
     var output_dir = "doc/06_spec"
@@ -203,8 +279,13 @@ fn run_spipe_docgen(args: [text]) -> i64:
                         spipe_warn("Failed to generate doc for {file_path}: {e}")
                         had_error = true
                     case Ok(path):
-                        docs_written = docs_written + 1
-                        output_filename = relative_path_from_output(output_dir, path)
+                        match append_evidence_manifest(file_path, path):
+                            case Err(e):
+                                spipe_warn("Failed to render evidence for {file_path}: {e}")
+                                had_error = true
+                            case Ok(_):
+                                docs_written = docs_written + 1
+                                output_filename = relative_path_from_output(output_dir, path)
 
                 # Create feature entry for INDEX
                 var title = humanize_filename(file_name)

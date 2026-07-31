@@ -3,12 +3,6 @@
 
 const BROWSER_HTTP_JOB_LIMIT: usize = 64;
 const BROWSER_HTTP_RAW_LIMIT: usize = 50 * 1024 * 1024 + 64 * 1024;
-const BROWSER_HTTP_NETWORK_ERROR: &str = "network: Network request failed";
-const BROWSER_HTTP_NETWORK_TIMEOUT: &str = "network-timeout: Network request timed out";
-const BROWSER_HTTP_TLS_CERTIFICATE: &str = "tls-certificate: TLS certificate validation failed";
-const BROWSER_HTTP_TLS_HOSTNAME: &str = "tls-hostname: TLS certificate identity validation failed";
-const BROWSER_HTTP_TLS_PROTOCOL: &str = "tls-protocol: TLS protocol negotiation failed";
-const BROWSER_HTTP_TLS_TIMEOUT: &str = "tls-timeout: TLS connection timed out";
 
 struct BrowserHttpJob {
     canceled: std::sync::atomic::AtomicBool,
@@ -44,35 +38,6 @@ fn browser_http_canceled(job: &BrowserHttpJob) -> std::io::Result<()> {
         ))
     } else {
         Ok(())
-    }
-}
-
-fn browser_http_network_error(error: &std::io::Error) -> String {
-    if error.kind() == std::io::ErrorKind::TimedOut || error.kind() == std::io::ErrorKind::WouldBlock {
-        BROWSER_HTTP_NETWORK_TIMEOUT.to_owned()
-    } else {
-        BROWSER_HTTP_NETWORK_ERROR.to_owned()
-    }
-}
-
-#[cfg(feature = "runtime-tls")]
-fn browser_http_tls_error(error: &std::io::Error) -> String {
-    if error.kind() == std::io::ErrorKind::TimedOut || error.kind() == std::io::ErrorKind::WouldBlock {
-        return BROWSER_HTTP_TLS_TIMEOUT.to_owned();
-    }
-    if error.kind() == std::io::ErrorKind::Interrupted || error.kind() == std::io::ErrorKind::OutOfMemory {
-        return BROWSER_HTTP_NETWORK_ERROR.to_owned();
-    }
-    match error
-        .get_ref()
-        .and_then(|source| source.downcast_ref::<rustls::Error>())
-    {
-        Some(rustls::Error::InvalidCertificate(
-            rustls::CertificateError::NotValidForName | rustls::CertificateError::NotValidForNameContext { .. },
-        )) => BROWSER_HTTP_TLS_HOSTNAME.to_owned(),
-        Some(rustls::Error::InvalidCertificate(_)) => BROWSER_HTTP_TLS_CERTIFICATE.to_owned(),
-        Some(_) => BROWSER_HTTP_TLS_PROTOCOL.to_owned(),
-        None => BROWSER_HTTP_NETWORK_ERROR.to_owned(),
     }
 }
 
@@ -261,34 +226,29 @@ fn browser_http_tls(
     deadline: std::time::Instant,
     job: &BrowserHttpJob,
     max_response_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    let server_name =
-        rustls::pki_types::ServerName::try_from(host.to_owned()).map_err(|_| BROWSER_HTTP_TLS_HOSTNAME.to_owned())?;
-    let config = platform_tls_client_config().map_err(|_| BROWSER_HTTP_TLS_PROTOCOL.to_owned())?;
-    let connection =
-        rustls::ClientConnection::new(config, server_name).map_err(|_| BROWSER_HTTP_TLS_PROTOCOL.to_owned())?;
+) -> std::io::Result<Vec<u8>> {
+    let server_name = rustls::pki_types::ServerName::try_from(host.to_owned())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid TLS server name"))?;
+    let config = platform_tls_client_config().map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
+    let connection = rustls::ClientConnection::new(config, server_name)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::Other, error))?;
     let mut tls = rustls::StreamOwned::new(connection, BrowserHttpDeadlineStream::new(stream, deadline));
-    browser_http_canceled(job).map_err(|error| browser_http_tls_error(&error))?;
-    tls.sock
-        .refresh_timeouts()
-        .map_err(|error| browser_http_tls_error(&error))?;
-    tls.write_all(request).map_err(|error| browser_http_tls_error(&error))?;
-    tls.sock
-        .refresh_timeouts()
-        .map_err(|error| browser_http_tls_error(&error))?;
-    tls.flush().map_err(|error| browser_http_tls_error(&error))?;
+    browser_http_canceled(job)?;
+    tls.sock.refresh_timeouts()?;
+    tls.write_all(request)?;
+    tls.sock.refresh_timeouts()?;
+    tls.flush()?;
 
     let mut response = Vec::new();
     let mut chunk = [0u8; 8192];
     loop {
-        browser_http_canceled(job).map_err(|error| browser_http_tls_error(&error))?;
+        browser_http_canceled(job)?;
         match tls.read(&mut chunk) {
             Ok(0) => return Ok(response),
             Ok(count) => {
-                browser_http_extend_response(&mut response, &chunk[..count], max_response_bytes, "HTTPS")
-                    .map_err(|error| browser_http_tls_error(&error))?;
+                browser_http_extend_response(&mut response, &chunk[..count], max_response_bytes, "HTTPS")?;
             }
-            Err(error) => return Err(browser_http_tls_error(&error)),
+            Err(error) => return Err(error),
         }
     }
 }
@@ -301,8 +261,11 @@ fn browser_http_tls(
     _deadline: std::time::Instant,
     _job: &BrowserHttpJob,
     _max_response_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    Err(BROWSER_HTTP_TLS_PROTOCOL.to_owned())
+) -> std::io::Result<Vec<u8>> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "browser HTTPS requires runtime TLS",
+    ))
 }
 
 fn browser_http_perform(
@@ -328,66 +291,17 @@ fn browser_http_perform(
     let deadline = std::time::Instant::now()
         .checked_add(Duration::from_millis(timeout_ms as u64))
         .ok_or_else(|| "invalid browser HTTP deadline".to_owned())?;
-    let mut stream = browser_http_connect(host, port, deadline, job, public_only)
-        .map_err(|error| browser_http_network_error(&error))?;
+    let mut stream = browser_http_connect(host, port, deadline, job, public_only).map_err(|e| e.to_string())?;
     if scheme == "https" {
-        return browser_http_tls(host, stream, request, deadline, job, max_response_bytes);
+        return browser_http_tls(host, stream, request, deadline, job, max_response_bytes).map_err(|e| e.to_string());
     }
-    browser_http_canceled(job).map_err(|error| browser_http_network_error(&error))?;
+    browser_http_canceled(job).map_err(|e| e.to_string())?;
     stream
-        .set_write_timeout(Some(
-            browser_http_remaining(deadline).map_err(|error| browser_http_network_error(&error))?,
-        ))
-        .map_err(|error| browser_http_network_error(&error))?;
-    stream
-        .write_all(request)
-        .map_err(|error| browser_http_network_error(&error))?;
-    stream.flush().map_err(|error| browser_http_network_error(&error))?;
-    browser_http_read_plain(&mut stream, deadline, job, max_response_bytes)
-        .map_err(|error| browser_http_network_error(&error))
-}
-
-#[cfg(all(test, feature = "runtime-tls"))]
-mod browser_http_failure_tests {
-    use super::*;
-
-    #[test]
-    fn classifies_tls_failures_without_platform_detail() {
-        let hostname = std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName),
-        );
-        let certificate = std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            rustls::Error::InvalidCertificate(rustls::CertificateError::Expired),
-        );
-        let protocol = std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            rustls::Error::General("private platform detail".to_owned()),
-        );
-        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "private timeout detail");
-        let unix_timeout = std::io::Error::new(std::io::ErrorKind::WouldBlock, "private timeout detail");
-        let response_limit =
-            std::io::Error::new(std::io::ErrorKind::InvalidData, "browser HTTPS response exceeds limit");
-
-        assert_eq!(browser_http_tls_error(&hostname), BROWSER_HTTP_TLS_HOSTNAME);
-        assert_eq!(browser_http_tls_error(&certificate), BROWSER_HTTP_TLS_CERTIFICATE);
-        assert_eq!(browser_http_tls_error(&protocol), BROWSER_HTTP_TLS_PROTOCOL);
-        assert_eq!(browser_http_tls_error(&timeout), BROWSER_HTTP_TLS_TIMEOUT);
-        assert_eq!(browser_http_tls_error(&unix_timeout), BROWSER_HTTP_TLS_TIMEOUT);
-        assert_eq!(browser_http_tls_error(&response_limit), BROWSER_HTTP_NETWORK_ERROR);
-    }
-
-    #[test]
-    fn classifies_network_failures_without_platform_detail() {
-        let failed = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "private address detail");
-        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "private timeout detail");
-        let unix_timeout = std::io::Error::new(std::io::ErrorKind::WouldBlock, "private timeout detail");
-
-        assert_eq!(browser_http_network_error(&failed), BROWSER_HTTP_NETWORK_ERROR);
-        assert_eq!(browser_http_network_error(&timeout), BROWSER_HTTP_NETWORK_TIMEOUT);
-        assert_eq!(browser_http_network_error(&unix_timeout), BROWSER_HTTP_NETWORK_TIMEOUT);
-    }
+        .set_write_timeout(Some(browser_http_remaining(deadline).map_err(|e| e.to_string())?))
+        .map_err(|e| e.to_string())?;
+    stream.write_all(request).map_err(|e| e.to_string())?;
+    stream.flush().map_err(|e| e.to_string())?;
+    browser_http_read_plain(&mut stream, deadline, job, max_response_bytes).map_err(|e| e.to_string())
 }
 
 fn browser_http_job_start(

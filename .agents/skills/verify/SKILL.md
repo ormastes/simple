@@ -24,6 +24,7 @@ not create, rewrite, or weaken SPipe after verification.
 - Every REQ-NNN has test coverage
 - Required executable SPipe specs exist under `test/...`; generated/manual
   scenario docs exist under the mirrored `doc/06_spec/.../*_spec.md` path
+- No executable `.spl` spec exists under `doc/06_spec/`.
 - For changed specs, `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
   reports complete documentation with `0 stubs`; a generated manual marked as a
   stub is a FAIL even when the `.md` file exists.
@@ -37,6 +38,14 @@ not create, rewrite, or weaken SPipe after verification.
 - Scenario-oriented generated docs read as manuals: primary steps visible,
   inline/previous setup expanded, executable SPipe folded by default, detailed
   edge/matrix/stress/helper cases folded or skipped by policy.
+- Every critical `EVIDENCE_SHOWCASE.md` row links its authoritative generated
+  manual and derives status/artifacts from a validated versioned manifest.
+  Only current provenance-bound evidence may be `live-pass`.
+- Text diagnostics are actionable, stills have alt/summary text, motion has
+  keyframes and a transcript, HTML is inert, and protocol/crypto evidence
+  includes raw bytes plus decoded fields.
+- Reject new legacy Given/When/Then flows, boolean wrappers, placeholders, or
+  silent missing-evidence branches; new and updated specs use modern SSpec.
 - UI-facing specs include visible-state evidence when practical: TUI captures
   under `build/test-artifacts/<spec-relative-path>/`, GUI screenshots/goldens
   under `doc/06_spec/image/<spec-relative-path>/`, and embedded generated-doc

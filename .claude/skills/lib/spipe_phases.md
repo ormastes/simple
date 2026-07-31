@@ -115,6 +115,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
    names explicit and fail-fast until implemented
 5. **Write scenarios** using `step("...")`, setup/checker helpers, `@inline`/`@prev`
    chains, and `@capture` evidence
+   New or updated scenarios use `use std.spec.*` and direct value assertions.
 6. Create SPipe test file(s) following `.claude/templates/spipe_template.spl`
 7. Add `# @cover src/path/to/impl.spl` coverage markers
 8. Tests should be runnable but FAILING (red phase of TDD)
@@ -126,6 +127,8 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - **`step("...")` text reads as manual sentences** — setup/checker helper calls stay named and visible
 - **Manual visibility assigned:** `@manual: show/folded/skip` on every scenario group
 - **Capture kinds match spec type** (tui/exec/protocol/api/log/binary)
+- Critical feature state names the authoritative generated manual and validated
+  evidence manifest that drives its `EVIDENCE_SHOWCASE.md` row
 - **Inline/prev chains** connect setup to dependent scenarios
 - Tests reference implementation files that will be created in Phase 5
 - Coverage markers present
@@ -225,6 +228,9 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 6. **Read generated docs** as scenario manuals — if they read like test plumbing,
    note which step helpers or visibility annotations need improvement and
    require the generator to report `0 stubs`
+   For critical features, validate manifest-derived showcase status/artifacts
+   and review accessible text/still/motion, inert-HTML, and decoded protocol
+   evidence.
 7. Verify the cooperative review plan is complete or explicitly `N/A`: lower-model
    sidecars were merged/reviewed when used, and the normal/highest-capability
    reviewer accepted broad findings, generated-manual quality, coverage claims,
@@ -239,6 +245,7 @@ Reference for all 8 SPipe phases. Each phase has: role, focus, entry criteria, e
 - **Generated docs reviewed:** run `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`
   and verify output reads like a hand-written manual (not test plumbing) with
   `0 stubs`
+- No executable `.spl` spec exists under `doc/06_spec/`
 - **Diagram presence:** each phase doc (research, arch, refactor) has ≥1 SDN diagram
 - **Prose concision:** each phase doc ≤30 lines of prose (tables/diagrams excluded)
 - Cooperative sidecar review is complete or explicitly `N/A`; incomplete

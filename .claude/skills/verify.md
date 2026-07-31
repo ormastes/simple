@@ -50,6 +50,16 @@ For each `*_spec.spl` in scope:
      must read as a manual: primary steps visible, setup expanded through
      `@prev`/`@inline`, executable SPipe folded by default, and edge/matrix
      detail folded or skipped by policy
+   - No executable `.spl` spec may exist under `doc/06_spec/`
+   - Every critical `EVIDENCE_SHOWCASE.md` row links its authoritative manual
+     and derives status/artifacts from a validated versioned manifest; only
+     current provenance-bound evidence may be `live-pass`
+   - Text diagnostics are actionable, stills have alt/summary text, motion has
+     keyframes and a transcript, HTML is inert, and protocol/crypto evidence
+     includes raw bytes plus decoded fields
+   - New or updated scenarios use modern SSpec and direct value assertions;
+     reject legacy Given/When/Then flows, boolean wrappers, placeholders, and
+     silent missing-evidence branches
    - For broad SPipe lanes, the recorded cooperative review plan is complete
      or explicitly `N/A`: lower-model sidecars such as Codex Spark, Claude
      Haiku, or Claude Sonnet were merged/reviewed when used, and a

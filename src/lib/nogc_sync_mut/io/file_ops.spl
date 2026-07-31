@@ -24,6 +24,10 @@ extern fn rt_file_is_regular_no_follow(path: text) -> bool
 extern fn rt_file_delete(path: text) -> bool
 extern fn rt_file_copy(src: text, dst: text) -> bool
 extern fn rt_file_atomic_write(path: text, content: text) -> bool
+extern fn rt_file_create_excl(path: text, content: text) -> bool
+extern fn rt_file_rename(src: text, dst: text) -> bool
+extern fn rt_file_sync(path: text) -> bool
+extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_file_size(path: text) -> i64
 extern fn rt_file_stat(path: text) -> i64
 
@@ -95,6 +99,73 @@ fn file_delete(path: text) -> bool:
 fn file_atomic_write(path: text, content: text) -> bool:
     rt_file_atomic_write(path, content)
 
+fn _file_parent_dir(path: text) -> text:
+    val slash = path.rfind("/")
+    if slash < 0:
+        return "."
+    if slash == 0:
+        return "/"
+    path[:slash]
+
+fn _file_bytes_equal(path: text, expected: [u8]) -> bool:
+    if rt_file_size(path) != expected.len():
+        return false
+    val actual = rt_file_read_bytes(path)
+    if actual.len() != expected.len():
+        return false
+    for i in 0..expected.len():
+        if actual[i] != expected[i] as i64:
+            return false
+    true
+
+fn file_sync(path: text) -> bool:
+    rt_file_sync(path)
+
+fn file_sync_directory(path: text) -> bool:
+    rt_file_sync(path)
+
+fn file_atomic_write_bytes_durable(path: text, data: [u8]) -> bool:
+    # Reserve a unique same-directory name so concurrent publishers cannot
+    # overwrite each other's staging files.
+    val pid = _getpid()
+    val stamp = _time_now_unix_micros()
+    for attempt in 0..16:
+        val temp = "{path}.tmp.{pid}.{stamp}.{attempt}"
+        if not rt_file_create_excl(temp, ""):
+            continue
+        if not rt_file_write_bytes(temp, data):
+            rt_file_delete(temp)
+            return false
+        if not rt_file_sync(temp):
+            rt_file_delete(temp)
+            return false
+        if not _file_bytes_equal(temp, data):
+            rt_file_delete(temp)
+            return false
+        if not rt_file_rename(temp, path):
+            rt_file_delete(temp)
+            return false
+        # Once renamed, a sync failure is reported without deleting the final
+        # file: publication succeeded, but crash durability is not proven.
+        return rt_file_sync(_file_parent_dir(path))
+    false
+
+fn file_atomic_write_text_durable(path: text, content: text) -> bool:
+    file_atomic_write_bytes_durable(path, rt_text_to_bytes(content))
+
+fn file_append_durable(path: text, content: text) -> bool:
+    val existed = rt_file_exists(path)
+    val current_size = rt_file_size(path)
+    val offset = if current_size > 0: current_size else: 0
+    val expected = rt_text_to_bytes(content).len()
+    if rt_file_write_text_at(path, offset, content) != expected:
+        return false
+    if not rt_file_sync(path):
+        return false
+    if not existed:
+        return rt_file_sync(_file_parent_dir(path))
+    true
+
 fn _timestamp_str() -> text:
     val micros = _time_now_unix_micros()
     "{micros}"
@@ -164,11 +235,9 @@ fn file_write_text_at(path: text, offset: i64, data: text) -> i64:
     rt_file_write_text_at(path, offset, data)
 
 fn file_fsync(path: text) -> bool:
-    # Portable fallback: hosted backends may provide real durability elsewhere.
-    rt_file_exists(path)
+    rt_file_sync(path)
 
 fn file_fsync_cached(path: text) -> bool:
-    # Portable fallback mirrors file_fsync without forcing hosted file SFFI.
     file_fsync(path)
 
 # --- Memory-Mapped File I/O ---
@@ -192,13 +261,6 @@ fn file_madvise(addr: i64, size: i64, advice: i64) -> bool:
 fn file_msync(addr: i64, size: i64) -> bool:
     # Synchronize mapped memory with file on disk.
     rt_msync(addr, size)
-
-# --- Additional File Functions ---
-
-# reason positional io file_ops API
-fn rt_file_rename(src: text, dst: text) -> bool:
-    val (out, err, code) = _file_shell("mv '{src}' '{dst}'")
-    code == 0
 
 # --- Internal helpers (need extern fns) ---
 

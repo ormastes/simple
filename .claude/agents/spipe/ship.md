@@ -43,6 +43,9 @@
    `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
    `.claude/agents/spipe/`, and `.gemini/commands/` instructions, or the state
    file records `N/A`.
+   For critical features, verify must already have accepted the generated
+   `EVIDENCE_SHOWCASE.md` row, authoritative manual link, and validated
+   manifest-derived status/artifacts. Ship must not regenerate or edit them.
 8. Run numbered artifact guard:
    `sh scripts/audit/numbered-artifact-guard.shs --working`
    `sh scripts/audit/numbered-artifact-guard.shs --staged`

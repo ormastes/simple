@@ -1,6 +1,6 @@
-# Simpleos Physical Board Render Evidence Specification
+# SimpleOS Physical Board Render Evidence
 
-> <details>
+> Defines the portable board qualification record and prevents QEMU, static catalog, stale firmware, or incomplete transcripts from becoming board PASS.
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
@@ -9,7 +9,40 @@
 <details>
 <summary>Full Scenario Manual</summary>
 
-# Simpleos Physical Board Render Evidence Specification
+# SimpleOS Physical Board Render Evidence
+
+Defines the portable board qualification record and prevents QEMU, static catalog, stale firmware, or incomplete transcripts from becoming board PASS.
+
+## At a Glance
+
+| Field | Value |
+|-------|-------|
+| Category | Hardware & OS |
+| Status | Active |
+| Requirements | doc/02_requirements/feature/evidence_showcase.md |
+| Plan | doc/03_plan/sys_test/evidence_showcase.md |
+| Design | doc/05_design/evidence_showcase.md |
+| Research | doc/01_research/local/evidence_showcase.md |
+| Source | `test/03_system/os/simpleos_physical_board_render_evidence_spec.spl` |
+| Updated | 2026-07-30 |
+| Generator | `simple spipe-docgen` (Simple) |
+
+## Overview
+
+Defines the portable board qualification record and prevents QEMU, static
+catalog, stale firmware, or incomplete transcripts from becoming board PASS.
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+**Research:** doc/01_research/local/evidence_showcase.md
+
+## Examples
+
+Run this spec to review the current fail-closed board qualification contract.
+Promotion requires a canonical physical ARM runner joining board identity,
+flashed-image hash, boot receipt, in-guest Clang filesystem execution, and UART
+transcript; until then the scenario reports the implementation resume action.
 
 ## Scenarios
 
@@ -17,30 +50,44 @@
 
 #### should correlate board identity firmware boot receipt and exact capture
 
-- Prepare a real board and flashed SimpleOS image
+- Capture the feature evidence
    - Artifact capture: after_step
-- Boot and capture the guest render receipt
+- Verify the structured evidence
    - Artifact capture: after_step
-- Capture the matching physical display or framebuffer
+   - Evidence: artifact verified by 1 expected check
+   - Expected: capture.status equals `blocked`
+- Render the evidence for review
    - Artifact capture: after_step
-- Verify exact pixels and transcript identity
+- Publish the showcase link
    - Artifact capture: after_step
-- require live physical board evidence
-   - Artifact capture: after_step
+   - Evidence: artifact verified by 1 expected check
+   - Expected: "blocked-unpublished" equals `blocked-unpublished`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("Prepare a real board and flashed SimpleOS image")
-step("Boot and capture the guest render receipt")
-step("Capture the matching physical display or framebuffer")
-step("Verify exact pixels and transcript identity")
-require_live_physical_board_evidence()
+step("Capture the feature evidence")
+val capture = capture_physical_arm_board_evidence()
+
+step("Verify the structured evidence")
+expect(capture.status).to_equal("blocked")
+expect(capture.reason).to_equal(
+    "missing-canonical-arm-physical-board-runner-and-receipt:" +
+    "board-identity,flash,boot,guest-clang-fs-run,uart"
+)
+
+step("Render the evidence for review")
+expect(capture.resume_action).to_contain(
+    "in-guest Clang filesystem execution"
+)
+
+step("Publish the showcase link")
+expect("blocked-unpublished").to_equal("blocked-unpublished")
 ```
 
 </details>
@@ -129,21 +176,6 @@ expect(simpleos_render_target_status(evidence)).to_equal("qemu-verified")
 
 </details>
 
-## At a Glance
-
-| Field | Value |
-|-------|-------|
-| Category | Hardware & OS |
-| Status | Active |
-| Source | `test/03_system/os/simpleos_physical_board_render_evidence_spec.spl` |
-| Updated | 2026-07-27 |
-| Generator | `simple spipe-docgen` (Simple) |
-
-## Overview
-
-Tests covering:
-- SimpleOS physical-board rendering
-
 ## Scenario Summary
 
 | Metric | Count |
@@ -153,6 +185,14 @@ Tests covering:
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
+
+
+## Related Documentation
+
+- **Requirements:** `doc/02_requirements/feature/evidence_showcase.md`
+- **Plan:** `doc/03_plan/sys_test/evidence_showcase.md`
+- **Design:** `doc/05_design/evidence_showcase.md`
+- **Research:** `doc/01_research/local/evidence_showcase.md`
 
 
 </details>

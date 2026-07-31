@@ -50,6 +50,13 @@ description: Create architecture, UI design, system tests, and detail design for
 - Environmental specs should capture meaningful typed evidence (`api`,
   `protocol`, `exec`, `binary`, `text`, `log`, or `artifact`) when screenshots
   are not the right evidence.
+- Critical features need an `EVIDENCE_SHOWCASE.md` row linked to the
+  authoritative generated manual. Design a validated versioned manifest as the
+  sole source of status, provenance, freshness, integrity, and artifact links.
+  Include accessible text/still/motion, inert-HTML, and raw-plus-decoded
+  protocol evidence where applicable.
+- New or updated scenarios use modern SSpec (`use std.spec.*`, `describe`, `it`,
+  `step`, `expect`, built-in matchers) and direct value assertions only.
 
 ## Phase 4: Detail Design
 

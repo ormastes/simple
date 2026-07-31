@@ -1532,6 +1532,76 @@ fn parse_filter_opacity_pct(raw: text) -> i32:
         value_end = t.len()
     parse_opacity_pct(t.substring(value_start, value_end))
 
+# `filter: grayscale(N%)` -- returns -1 when the function is absent, else a
+# 0-100 clamped percentage. GAP-2 (drawir_feature_gap_2026-07-31.md #7):
+# only `opacity()` was recognized under `filter:`; this and
+# `parse_filter_brightness_pct` add the next two cheapest, most common filter
+# functions.
+fn parse_filter_grayscale_pct(raw: text) -> i32:
+    val t = raw.trim().lower()
+    val start = text_index_of(t, "grayscale(")
+    if start < 0:
+        return -1
+    val value_start = start + 10
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    parse_opacity_pct(t.substring(value_start, value_end))
+
+# `filter: brightness(N%)` -- returns -1 when the function is absent, else a
+# percentage with no upper clamp (CSS allows >100% to over-brighten; the
+# color-channel math in `apply_filter_grayscale_brightness` clamps the final
+# channel values instead). Only the `N%` form is supported, not the bare
+# fractional form (`brightness(1.5)`) -- narrower scope, cheapest common case.
+fn parse_filter_brightness_pct(raw: text) -> i32:
+    val t = raw.trim().lower()
+    val start = text_index_of(t, "brightness(")
+    if start < 0:
+        return -1
+    val value_start = start + 11
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    val pct = parse_int(t.substring(value_start, value_end).trim())
+    if pct < 0:
+        return 0
+    pct
+
+# Applies `filter: grayscale()` then `filter: brightness()` to a single ARGB
+# color, preserving the original alpha channel. grayscale_pct <= 0 and
+# brightness_pct == 100 is a no-op fast path (the common case: no filter).
+fn apply_filter_grayscale_brightness(color: u32, grayscale_pct: i32, brightness_pct: i32) -> u32:
+    if grayscale_pct <= 0 and brightness_pct == 100:
+        return color
+    val a = color & 0xFF000000u32
+    var r = (((color >> 16) & 255u32) as i32)
+    var g = (((color >> 8) & 255u32) as i32)
+    var b = ((color & 255u32) as i32)
+    if grayscale_pct > 0:
+        val gp = if grayscale_pct > 100: 100 else: grayscale_pct
+        val luma = (r * 299 + g * 587 + b * 114) / 1000
+        r = (r * (100 - gp) + luma * gp) / 100
+        g = (g * (100 - gp) + luma * gp) / 100
+        b = (b * (100 - gp) + luma * gp) / 100
+    if brightness_pct != 100:
+        val bp = if brightness_pct < 0: 0 else: brightness_pct
+        r = (r * bp) / 100
+        g = (g * bp) / 100
+        b = (b * bp) / 100
+    if r < 0:
+        r = 0
+    if r > 255:
+        r = 255
+    if g < 0:
+        g = 0
+    if g > 255:
+        g = 255
+    if b < 0:
+        b = 0
+    if b > 255:
+        b = 255
+    a | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
+
 fn parse_css_time_ms(raw: text) -> i32:
     val t = raw.trim().lower()
     if t.len() == 0:
@@ -2197,41 +2267,6 @@ fn decl_tbl_get(tbl: [text], prop: text) -> text:
     while i >= 0:
         if tbl[i] == prop:
             return tbl[i + 1]
-        i = i - 2
-    ""
-
-# Invalid declarations do not participate in the cascade. Walk backwards so a
-# malformed later value cannot displace the last display keyword we implement.
-fn is_supported_display_keyword(value: text) -> bool:
-    (
-        value == "block" or value == "none" or value == "inline" or
-        value == "inline-block" or value == "list-item" or
-        value == "flex" or value == "grid" or value == "contents"
-    )
-
-fn decl_tbl_get_last_valid_display(tbl: [text]) -> text:
-    var i = (tbl.len() as i32) - 2
-    while i >= 0:
-        if tbl[i] == "display":
-            val value = tbl[i + 1].trim().lower()
-            if is_supported_display_keyword(value):
-                return value
-        i = i - 2
-    ""
-
-# CSS-wide values need cascade provenance and are resolved by compute_styles,
-# not by the declaration applier. `revert-layer` stays excluded because the
-# current parser flattens @layer and cannot identify the previous layer.
-fn decl_tbl_get_last_cascading_display(tbl: [text]) -> text:
-    var i = (tbl.len() as i32) - 2
-    while i >= 0:
-        if tbl[i] == "display":
-            val value = tbl[i + 1].trim().lower()
-            if (
-                is_supported_display_keyword(value) or value == "initial" or
-                value == "unset" or value == "inherit" or value == "revert"
-            ):
-                return value
         i = i - 2
     ""
 

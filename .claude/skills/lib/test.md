@@ -55,14 +55,22 @@ Accept an SSpec manual only when generation completes with 0 stubs, then review
 the rendered manual for operator-flow quality. Generated specs preserve source
 path hierarchy and normally end with `_spec.md`; the suffix alone does not say
 which generator owns the file.
+Critical features also link their authoritative manual from
+`EVIDENCE_SHOWCASE.md`. Status, provenance, freshness, integrity, and artifact
+links derive from a validated versioned manifest. Review text/still/motion,
+inert-HTML, and raw-plus-decoded protocol evidence as an operator page.
 Path mapping: `test/01_unit/compiler/parser/x_spec.spl` -> `doc/06_spec/01_unit/compiler/parser/x_spec.md`
 See `doc/06_spec/FILE.md` for generated-vs-manual rules.
 
 ## Writing BDD Tests
 
-Tests in `test/` directory, use `*_spec.spl` naming. Use docstring markdown, NOT println().
+Tests live under `test/`, use `*_spec.spl` naming, and import
+`use std.spec.*` when new or updated. Use direct value assertions and docstring
+Markdown, not println(). Never put executable specs under `doc/06_spec/`.
 
 ```simple
+use std.spec.*
+
 describe "Feature":
     """
     # Feature Module -- overview, usage examples.

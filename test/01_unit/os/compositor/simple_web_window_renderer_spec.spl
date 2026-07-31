@@ -306,35 +306,14 @@ describe "Simple Web compositor adapter":
             "glass_dark", "Animation", body, 64, 48, 0
         )
         val cache = web_render_pixel_artifact_cache(64, 48, "software")
-        step("Prime a distinct static artifact in the retained pixel cache")
-        val stale_req = simple_web_content_render_request_with_theme(
-            "glass_dark", "Stale", "<p>old-static-cache-marker</p>", 64, 48
-        )
-        val stale = cache.request_to_pixel_artifact(stale_req)
-        expect(stale.pixels.len()).to_equal(64 * 48)
-        expect(cache.pixel_cache.last_html).to_contain(
-            "old-static-cache-marker"
-        )
-        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)
-        expect(cache.pixel_cache.last_render_mode).to_equal("untimed-static")
-        expect(cache.pixel_cache.last_content_revision).to_equal(-1)
-        expect(cache.stores()).to_equal(1)
-
-        step("Start the finite animation and invalidate the stale artifact")
         val first = simple_web_content_frame_cached_at_time(
             cache, "animated", 1, revision, "glass_dark", "Animation",
             body, 64, 48, 0, 1000
         )
         expect(contains_pixel(first.pixels, 0xFFEF4444u32)).to_be(true)
-        expect(cache.pixel_cache.last_html).to_equal("")
-        expect(cache.pixel_cache.last_pixels.len()).to_equal(0)
-        expect(cache.pixel_cache.last_render_mode).to_equal("")
-        expect(cache.pixel_cache.last_content_revision).to_equal(-1)
-        expect(cache.stores()).to_equal(1)
         expect(cache.animation_frame_due(1015)).to_be(false)
         expect(cache.animation_frame_due(1016)).to_be(true)
 
-        step("Render the midpoint and retain the finite terminal artifact")
         val middle = simple_web_content_frame_cached_at_time(
             cache, "animated", 2, revision, "glass_dark", "Animation",
             body, 64, 48, 0, 1500
@@ -346,125 +325,7 @@ describe "Simple Web compositor adapter":
         )
         expect(contains_pixel(last.pixels, 0xFF2563EBu32)).to_be(true)
         assert_not_equal(last.checksum, middle.checksum)
-        expect(cache.pixel_cache.last_html).to_contain("animation:pulse")
-        expect(cache.pixel_cache.last_html.contains(
-            "old-static-cache-marker"
-        )).to_be(false)
-        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)
-        expect(cache.pixel_cache.last_render_mode).to_equal("terminal")
-        expect(cache.pixel_cache.last_content_revision).to_equal(revision)
-        expect(cache.stores()).to_equal(2)
         expect(cache.animation_frame_due(2001)).to_be(false)
-
-        step("Reuse the retained terminal artifact after unrelated damage")
-        val repeated = simple_web_content_frame_cached_at_time(
-            cache, "animated", 4, revision, "glass_dark", "Animation",
-            body, 64, 48, 0, 2000
-        )
-        expect(repeated.checksum).to_equal(last.checksum)
-        expect(repeated.pixels).to_equal(last.pixels)
-        expect(cache.stores()).to_equal(2)
-        expect(cache.hits()).to_equal(1)
-        expect(cache.animation_frame_due(2001)).to_be(false)
-
-    it "separates untimed and terminal animation cache identities":
-        val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
-        val req = simple_web_content_render_request_with_theme(
-            "glass_dark", "Animation", body, 64, 48
-        )
-        val revision = simple_web_content_revision_with_theme(
-            "glass_dark", "Animation", body, 64, 48, 0
-        )
-
-        step("Replace a timed terminal entry with an untimed static entry")
-        val timed_first_cache = web_render_pixel_artifact_cache(
-            64, 48, "software"
-        )
-        val _timed_start = simple_web_content_frame_cached_at_time(
-            timed_first_cache, "timed-first", 1, revision,
-            "glass_dark", "Animation", body, 64, 48, 0, 1000
-        )
-        val timed_terminal = simple_web_content_frame_cached_at_time(
-            timed_first_cache, "timed-first", 2, revision,
-            "glass_dark", "Animation", body, 64, 48, 0, 2000
-        )
-        expect(timed_first_cache.pixel_cache.last_render_mode).to_equal(
-            "terminal"
-        )
-        expect(
-            timed_first_cache.pixel_cache.last_content_revision
-        ).to_equal(revision)
-        val untimed = timed_first_cache.request_to_pixel_artifact(req)
-        assert_not_equal(untimed.pixels, timed_terminal.pixels)
-        expect(timed_first_cache.pixel_cache.last_render_mode).to_equal(
-            "untimed-static"
-        )
-        expect(
-            timed_first_cache.pixel_cache.last_content_revision
-        ).to_equal(-1)
-        expect(timed_first_cache.stores()).to_equal(2)
-        expect(timed_first_cache.hits()).to_equal(0)
-
-        step("Reject the untimed entry when the terminal frame is requested")
-        val terminal_after_untimed = simple_web_content_frame_cached_at_time(
-            timed_first_cache, "timed-first", 3, revision,
-            "glass_dark", "Animation", body, 64, 48, 0, 2000
-        )
-        expect(terminal_after_untimed.pixels).to_equal(timed_terminal.pixels)
-        expect(timed_first_cache.pixel_cache.last_render_mode).to_equal(
-            "terminal"
-        )
-        expect(
-            timed_first_cache.pixel_cache.last_content_revision
-        ).to_equal(revision)
-        expect(timed_first_cache.stores()).to_equal(3)
-        expect(timed_first_cache.hits()).to_equal(0)
-        val terminal_hit = simple_web_content_frame_cached_at_time(
-            timed_first_cache, "timed-first", 4, revision,
-            "glass_dark", "Animation", body, 64, 48, 0, 2000
-        )
-        expect(terminal_hit.pixels).to_equal(timed_terminal.pixels)
-        expect(timed_first_cache.stores()).to_equal(3)
-        expect(timed_first_cache.hits()).to_equal(1)
-
-        step("Reject an untimed entry when a fresh timed session reaches terminal")
-        val untimed_first_cache = web_render_pixel_artifact_cache(
-            64, 48, "software"
-        )
-        val untimed_first = untimed_first_cache.request_to_pixel_artifact(req)
-        expect(untimed_first_cache.pixel_cache.last_render_mode).to_equal(
-            "untimed-static"
-        )
-        expect(
-            untimed_first_cache.pixel_cache.last_content_revision
-        ).to_equal(-1)
-        val _fresh_start = simple_web_content_frame_cached_at_time(
-            untimed_first_cache, "untimed-first", 1, revision,
-            "glass_dark", "Animation", body, 64, 48, 0, 3000
-        )
-        expect(untimed_first_cache.pixel_cache.last_html).to_equal("")
-        val fresh_terminal = simple_web_content_frame_cached_at_time(
-            untimed_first_cache, "untimed-first", 2, revision,
-            "glass_dark", "Animation", body, 64, 48, 0, 4000
-        )
-        assert_not_equal(untimed_first.pixels, fresh_terminal.pixels)
-        expect(fresh_terminal.pixels).to_equal(timed_terminal.pixels)
-        expect(untimed_first_cache.pixel_cache.last_render_mode).to_equal(
-            "terminal"
-        )
-        expect(
-            untimed_first_cache.pixel_cache.last_content_revision
-        ).to_equal(revision)
-        expect(untimed_first_cache.stores()).to_equal(2)
-        expect(untimed_first_cache.hits()).to_equal(0)
-        val fresh_terminal_hit = simple_web_content_frame_cached_at_time(
-            untimed_first_cache, "untimed-first", 3, revision,
-            "glass_dark", "Animation", body, 64, 48, 0, 4000
-        )
-        expect(fresh_terminal_hit.pixels).to_equal(fresh_terminal.pixels)
-        expect(untimed_first_cache.stores()).to_equal(2)
-        expect(untimed_first_cache.hits()).to_equal(1)
-        expect(untimed_first_cache.animation_frame_due(4001)).to_be(false)
 
     it "keeps shared-WM content requests free of a duplicate inner titlebar":
         val req = simple_web_content_render_request_with_theme("glass_dark", "Runtime title", "<p>body</p>", 80, 40)

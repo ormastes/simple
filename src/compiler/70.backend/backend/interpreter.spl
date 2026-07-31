@@ -32,6 +32,29 @@ fn itrace(msg: text) -> ():
 fn interp_strict_mem_enabled() -> bool:
     (rt_env_get("SIMPLE_STRICT_MEM") ?? "") == "1"
 
+# True when `init` is the bare `HirExprKind.NilLit` node that HIR lowering
+# (hir_lowering/statements.spl, `StmtKind.Var` arm) synthesizes for an
+# initializer-less `var x: T` declaration. NOTE (known, documented fidelity
+# gap -- see doc/08_tracking/bug/
+# pure_simple_strict_mem_nil_init_ambiguity_2026-07-30.md): HIR lowering
+# produces the IDENTICAL node for an explicit `= nil` initializer (verified by
+# reading hir_lowering/expressions.spl:939, `HirExpr(kind: kind, type_: nil,
+# span: e.span)` for every expression kind including a real `nil` literal), so
+# this is an over-approximation shared by both cases. The Rust seed avoids the
+# ambiguity because it strict-checks at the AST level, where "no initializer"
+# is `let_stmt.value == None` -- a distinction pure-Simple's HIR does not
+# retain. Strict mode therefore never MISSES a genuinely uninitialized read,
+# but can also flag a deliberate `= nil` -- acceptable for an opt-in debug
+# gate that is OFF by default.
+fn interp_is_uninit_marker_init(init: HirExpr) -> bool:
+    if init == nil:
+        return false
+    match init.kind:
+        case HirExprKind.NilLit:
+            true
+        case _:
+            false
+
 # Resolve a SymbolId to its stable variable name (bug doc iteration 21, target
 # (a)). The environment is name-keyed; a `Let` carries only a SymbolId, so we
 # map its (define-fresh, readable) `.id` back to the name via ctx.names. Falls
@@ -1095,39 +1118,6 @@ impl InterpreterBackendImpl:
                     case _: false
             case _:
                 false
-
-# True when `init` is the bare `HirExprKind.NilLit` node that HIR lowering
-# (hir_lowering/statements.spl, `StmtKind.Var` arm) synthesizes for an
-# initializer-less `var x: T` declaration. NOTE (known, documented fidelity
-# gap -- see doc/08_tracking/bug/
-# pure_simple_strict_mem_nil_init_ambiguity_2026-07-30.md): HIR lowering
-# produces the IDENTICAL node for an explicit `= nil` initializer (verified by
-# reading hir_lowering/expressions.spl:939, `HirExpr(kind: kind, type_: nil,
-# span: e.span)` for every expression kind including a real `nil` literal), so
-# this is an over-approximation shared by both cases. The Rust seed avoids the
-# ambiguity because it strict-checks at the AST level, where "no initializer"
-# is `let_stmt.value == None` -- a distinction pure-Simple's HIR does not
-# retain. Strict mode therefore never MISSES a genuinely uninitialized read,
-# but can also flag a deliberate `= nil` -- acceptable for an opt-in debug
-# gate that is OFF by default.
-#
-# Placed here (module tail, not near the top) deliberately: an earlier
-# version defined this beside `interp_strict_mem_enabled()` near the top of
-# the file, but its own `case HirExprKind.NilLit:` arm textually preceded
-# `eval_expr`'s real `case HirExprKind.Call(callee, args, _):` arm, which
-# broke `interpreter_backend_spec.spl`'s "uses runtime enum discriminants for
-# struct-shadowed variants" ordering check (`index_of("case
-# HirExprKind.NilLit:") > index_of("case HirExprKind.Call(...)")`) --  that
-# check guards a real stage4 struct-shadowing hazard on `eval_expr`'s OWN
-# match, and shouldn't be tripped by an unrelated helper's textual position.
-fn interp_is_uninit_marker_init(init: HirExpr) -> bool:
-    if init == nil:
-        return false
-    match init.kind:
-        case HirExprKind.NilLit:
-            true
-        case _:
-            false
 
 # ============================================================================
 # Exports

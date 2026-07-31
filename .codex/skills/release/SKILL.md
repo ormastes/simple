@@ -42,6 +42,10 @@ Workflow/tooling/evidence/spec/verification contract docs must already be fresh
 from verify; release must not repair stale `doc/07_guide`, `doc/06_spec`,
 `.codex/skills`, `.agents/skills`, `.claude/skills`, `.claude/agents/spipe`,
 or `.gemini/commands` instructions.
+For critical features, verify must also have accepted the generated
+`EVIDENCE_SHOWCASE.md` row, its authoritative manual link, and the validated
+manifest-derived status/artifacts. Release must not regenerate or hand-edit
+that evidence.
 
 ## Steps
 

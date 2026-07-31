@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 9 | 9 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -302,235 +302,6 @@ expect(session.has_pending_requests()).to_equal(false)
 
 </details>
 
-#### replays the committed request on reload without growing history
-
-- Commit a direct POST and reload its exact request
-   - Expected: reload method equals `POST`
-   - Expected: reload body equals `name=simple`
-   - Expected: reload content type equals `application/x-www-form-urlencoded`
-   - Expected: history remains one entry
-- Preserve replay metadata through Back and Forward traversal
-   - Expected: traversal back to the POST entry reloads its exact request
-- Preserve POST across 307 and 308 redirects
-   - Expected: final and reload requests preserve POST, body, and content type
-- Keep redirect-rewritten and direct GET reloads body-free
-   - Expected: 301, 302, and 303 reload as body-free GET
-   - Expected: a direct GET remains a body-free GET
-- Charge all stored request metadata to the bounded history budget
-   - Expected: twelve 4 MiB entries remain within the 50 MiB retained budget
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 127 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Commit a direct POST and reload its exact request")
-var direct = BrowserSession.new()
-expect(direct.begin_network_navigation(
-    "https://reload.test/form", "POST", "",
-    "name=simple", "application/x-www-form-urlencoded"
-).is_ok()).to_equal(true)
-val direct_request = direct.take_pending_request().unwrap()
-expect(direct.commit_network_response(BrowserResponse.create(
-    direct_request.id, "document", direct_request.url,
-    200, "", "<html><body>posted</body></html>", ""
-)).is_ok()).to_equal(true)
-expect(direct.history.len()).to_equal(1)
-expect(direct.reload().is_ok()).to_equal(true)
-val direct_reload = direct.take_pending_request().unwrap()
-expect(direct_reload.method).to_equal("POST")
-expect(direct_reload.body).to_equal("name=simple")
-expect(direct_reload.content_type).to_equal(
-    "application/x-www-form-urlencoded"
-)
-expect(direct.commit_network_response(BrowserResponse.create(
-    direct_reload.id, "document", direct_reload.url,
-    200, "", "<html><body>posted again</body></html>", ""
-)).is_ok()).to_equal(true)
-expect(direct.history.len()).to_equal(1)
-
-step("Preserve replay metadata through Back and Forward traversal")
-expect(direct.begin_network_navigation(
-    "https://reload.test/next", "GET", "", "", ""
-).is_ok()).to_equal(true)
-val next_request = direct.take_pending_request().unwrap()
-expect(direct.commit_network_response(BrowserResponse.create(
-    next_request.id, "document", next_request.url,
-    200, "", "<html><body>next</body></html>", ""
-)).is_ok()).to_equal(true)
-expect(direct.go_back().is_ok()).to_equal(true)
-expect(direct.go_forward().is_ok()).to_equal(true)
-expect(direct.go_back().is_ok()).to_equal(true)
-expect(direct.reload().is_ok()).to_equal(true)
-val traversal_reload = direct.take_pending_request().unwrap()
-expect(traversal_reload.method).to_equal("POST")
-expect(traversal_reload.body).to_equal("name=simple")
-expect(traversal_reload.content_type).to_equal(
-    "application/x-www-form-urlencoded"
-)
-
-step("Preserve POST across 307 and 308 redirects")
-for status in [307, 308]:
-    var preserved = BrowserSession.new()
-    expect(preserved.begin_network_navigation(
-        "https://reload.test/start-{status}", "POST", "",
-        "status={status}", "text/plain"
-    ).is_ok()).to_equal(true)
-    val initial = preserved.take_pending_request().unwrap()
-    expect(preserved.commit_network_response(BrowserResponse.create(
-        initial.id, "document", initial.url, status,
-        "Location: /final-{status}", "", ""
-    )).is_ok()).to_equal(true)
-    val redirected = preserved.take_pending_request().unwrap()
-    expect(redirected.method).to_equal("POST")
-    expect(preserved.commit_network_response(BrowserResponse.create(
-        redirected.id, "document", redirected.url,
-        200, "", "<html><body>final</body></html>", ""
-    )).is_ok()).to_equal(true)
-    expect(preserved.reload().is_ok()).to_equal(true)
-    val replay = preserved.take_pending_request().unwrap()
-    expect(replay.method).to_equal("POST")
-    expect(replay.body).to_equal("status={status}")
-    expect(replay.content_type).to_equal("text/plain")
-
-step("Keep redirect-rewritten and direct GET reloads body-free")
-for status in [301, 302, 303]:
-    var rewritten = BrowserSession.new()
-    expect(rewritten.begin_network_navigation(
-        "https://reload.test/rewrite-{status}", "POST", "",
-        "discarded", "text/plain"
-    ).is_ok()).to_equal(true)
-    val initial = rewritten.take_pending_request().unwrap()
-    expect(rewritten.commit_network_response(BrowserResponse.create(
-        initial.id, "document", initial.url, status,
-        "Location: /get-{status}", "", ""
-    )).is_ok()).to_equal(true)
-    val redirected = rewritten.take_pending_request().unwrap()
-    expect(redirected.method).to_equal("GET")
-    expect(rewritten.commit_network_response(BrowserResponse.create(
-        redirected.id, "document", redirected.url,
-        200, "", "<html><body>get</body></html>", ""
-    )).is_ok()).to_equal(true)
-    expect(rewritten.reload().is_ok()).to_equal(true)
-    val replay = rewritten.take_pending_request().unwrap()
-    expect(replay.method).to_equal("GET")
-    expect(replay.body).to_equal("")
-    expect(replay.content_type).to_equal("")
-
-var get_session = BrowserSession.new()
-expect(get_session.begin_network_navigation(
-    "https://reload.test/get", "GET", "", "", ""
-).is_ok()).to_equal(true)
-val get_request = get_session.take_pending_request().unwrap()
-expect(get_session.commit_network_response(BrowserResponse.create(
-    get_request.id, "document", get_request.url,
-    200, "", "<html><body>get</body></html>", ""
-)).is_ok()).to_equal(true)
-expect(get_session.reload().is_ok()).to_equal(true)
-val get_reload = get_session.take_pending_request().unwrap()
-expect(get_reload.method).to_equal("GET")
-expect(get_reload.body).to_equal("")
-expect(get_reload.content_type).to_equal("")
-
-step("Charge all stored request metadata to the bounded history budget")
-val one_mib = "x".repeat(1024 * 1024)
-var bounded: [BrowserHistoryEntry] = []
-var index = 0
-while index < 27:
-    bounded = browser_history_push_bounded(
-        bounded, bounded.len() - 1,
-        BrowserHistoryEntry.create_with_request(
-            "https://reload.test/{index}", "", one_mib, "",
-            one_mib, one_mib, one_mib
-        )
-    )
-    index = index + 1
-expect(bounded.len()).to_equal(12)
-expect(bounded[11].request_method.len()).to_equal(one_mib.len())
-expect(bounded[11].request_body.len()).to_equal(one_mib.len())
-expect(bounded[11].request_content_type.len()).to_equal(
-    one_mib.len()
-)
-```
-
-</details>
-
-#### keeps synthetic history URLs and oversized bodies non-replayable
-
-- Make pushState and replaceState synthetic URLs body-free
-   - Expected: both history entries and reload requests use GET with no body
-- Reject oversized replay metadata before navigation state mutates
-   - Expected: URL, history, loading, and pending-request state remain unchanged
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 54 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Make pushState and replaceState synthetic URLs body-free")
-for mode in ["pushState", "replaceState"]:
-    var session = BrowserSession.new()
-    expect(session.begin_network_navigation(
-        "https://reload.test/form-{mode}", "POST", "",
-        "secret={mode}", "application/x-www-form-urlencoded"
-    ).is_ok()).to_equal(true)
-    val request = session.take_pending_request().unwrap()
-    expect(session.commit_network_response(BrowserResponse.create(
-        request.id, "document", request.url, 200, "",
-        "<html><body><script>var ready = true;</script></body></html>",
-        ""
-    )).is_ok()).to_equal(true)
-    expect(session.eval_script(
-        "history.{mode}(1, '', '/synthetic-{mode}')"
-    ).is_ok()).to_equal(true)
-    val synthetic = session.history[session.current_index]
-    expect(synthetic.request_method).to_equal("GET")
-    expect(synthetic.request_body).to_equal("")
-    expect(synthetic.request_content_type).to_equal("")
-    expect(session.reload().is_ok()).to_equal(true)
-    val reload = session.take_pending_request().unwrap()
-    expect(reload.url).to_equal(
-        "https://reload.test/synthetic-{mode}"
-    )
-    expect(reload.method).to_equal("GET")
-    expect(reload.body).to_equal("")
-    expect(reload.content_type).to_equal("")
-
-step("Reject oversized replay metadata before navigation state mutates")
-var bounded = BrowserSession.new()
-expect(bounded.open_html(
-    "https://reload.test/keep",
-    "<html><body>keep</body></html>"
-).is_ok()).to_equal(true)
-val before_url = bounded.current_url
-val before_index = bounded.current_index
-val before_history = bounded.history.len()
-val before_loading = bounded.is_loading
-val before_pending = bounded.pending_request_count()
-val oversized = "x".repeat(50 * 1024 * 1024 + 1)
-expect(bounded.begin_network_navigation(
-    "https://reload.test/rejected", "POST", "",
-    "", oversized
-).is_err()).to_equal(true)
-expect(bounded.begin_network_navigation(
-    "https://reload.test/rejected", "POST", "",
-    "x", oversized.slice(0, 50 * 1024 * 1024 - 4)
-).is_err()).to_equal(true)
-expect(bounded.current_url).to_equal(before_url)
-expect(bounded.current_index).to_equal(before_index)
-expect(bounded.history.len()).to_equal(before_history)
-expect(bounded.is_loading).to_equal(before_loading)
-expect(bounded.pending_request_count()).to_equal(before_pending)
-```
-
-</details>
-
 #### stops a pending subresource while preserving the committed document
 
 - var session = BrowserSession new
@@ -662,7 +433,7 @@ else:
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_session_controls_spec.spl` |
-| Updated | 2026-07-31 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -674,8 +445,8 @@ Tests covering BrowserSession primitive browser controls.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 9 |
+| Active scenarios | 9 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

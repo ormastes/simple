@@ -50,6 +50,11 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   output like a manual, then revise steps/captures/visibility until primary
   flows are manual-quality, noisy details are folded or skipped, and the
   generator reports `0 stubs`.
+- For critical features, validate the versioned evidence manifest before
+  refreshing `EVIDENCE_SHOWCASE.md`; never hand-author PASS, freshness,
+  provenance, or artifact links. Generated operator pages render accessible
+  text/still/motion, inert-HTML, and raw-plus-decoded protocol evidence.
+- New or updated scenarios use modern SSpec and direct value assertions only.
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.

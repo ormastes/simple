@@ -67,15 +67,17 @@ aligned with the current workspace compiler/runtime changes.
 
 ## Writing Tests
 
-Tests use the built-in SSpec BDD framework. Unit-style specs can import
-`use std.spec` for `describe`, `it`, and `expect`. SSpec scenario manuals should
-prefer `use std.spec.*` so the `step("...")` manual helper is visible next to
-the BDD surface. SPipe is the runner/docgen process around these `.spl` specs.
+Tests use the built-in SSpec BDD framework. New or updated specs import
+`use std.spec.*` so `describe`, `it`, `step`, `expect`, and built-in matchers
+share one modern surface. Use direct value assertions; do not add legacy
+Given/When/Then flows, boolean-wrapper assertions, placeholder passes, or
+silent missing-evidence branches. SPipe is the runner/docgen process around
+these `.spl` specs.
 
 ```simple
 # test/01_unit/std/example_spec.spl
 
-use std.spec
+use std.spec.*
 use std.my_module.{my_function}
 
 describe "std.my_module":
@@ -106,7 +108,7 @@ environmental behavior, author it as an executable scenario manual:
 - Use `@capture` only where manual evidence is useful. Capture is off by
   default; bare `@capture` means after-step capture with default kind `tui`.
 - Use typed capture kinds for non-UI evidence: `api`, `protocol`, `exec`,
-  `binary`, `html`, `text`, `log`, or `artifact`.
+  `binary`, `html`, `text`, `still`, `motion`, `log`, or `artifact`.
 - For Simple Web or other HTML-backed GUI surfaces, prefer HTML/visible-text
   capture and checks; keep screenshot GUI capture as fallback evidence.
 - Use `# @evidence-display: embed_tui`, `links`, or `embed_all` when the
@@ -115,6 +117,13 @@ environmental behavior, author it as an executable scenario manual:
 - Fold or skip very detailed edge, matrix, stress, generated, and helper-only
   scenarios with manual visibility policy instead of forcing them into the main
   manual.
+- Evidence-producing scenarios write a validated versioned manifest under
+  `build/test-artifacts/<spec-relative-path>/evidence.sdn`. Generated status,
+  freshness, provenance, integrity, and artifact links come from that
+  manifest, never from hand-written Markdown.
+- Text evidence retains bounded raw and normalized transcripts; still evidence
+  has alt/summary text; motion has keyframes and an event transcript; HTML is
+  inert; protocol/crypto evidence includes raw bytes and a decoded field table.
 
 Primary scenario-manual example:
 
@@ -136,6 +145,8 @@ describe "Dashboard actions":
 After writing or changing such a spec, generate the doc and read it like a
 hand-written manual. If it still reads like test plumbing, improve the steps,
 captures, visibility, or helper/checker names before calling the spec done.
+Critical generated manuals may be linked from `EVIDENCE_SHOWCASE.md`; review
+each as an operator page without opening the source spec.
 
 ### Available Matchers
 

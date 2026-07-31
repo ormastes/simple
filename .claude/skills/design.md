@@ -31,6 +31,11 @@ start, the primary/best model defines the shared interface names, manual
 fail-fast helpers (`assert(false)` or `fail(...)`) that sidecars must target.
 The final normal/highest-capability reviewer must accept the merged sidecar
 design and generated-manual quality before implementation handoff.
+Critical features must design an `EVIDENCE_SHOWCASE.md` row linked to the
+authoritative generated manual and a validated versioned manifest as the sole
+source of status/provenance/artifacts. Plan accessible text/still/motion,
+inert-HTML, and raw-plus-decoded protocol evidence. New or updated scenarios
+use modern SSpec and direct value assertions.
 If design changes workflow/tooling,
 evidence wrappers, generated spec shape, or verification contracts, update the
 matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`, `.agents/skills/`,

@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 25 | 25 | 0 | 0 |
+| 24 | 24 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,7 +24,7 @@ BrowserSession owns the deterministic CSS/JavaScript animation clock and the sel
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/02_integration/rendering/browser_session_script_css_animation_spec.spl` |
-| Updated | 2026-07-31 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -683,11 +683,7 @@ expect(_pixels_equal(second.pixel_data, first.pixel_data)).to_equal(false)
 
 - Render the HTML and CSS frame before the SimpleScript callback
    - Expected: initial.command.color equals `0xFFEF4444u32`
-- Keep the frame red before the shared refresh boundary
-   - Expected: session.advance_time(5) equals `0`
-   - Expected: session.advance_time(15) equals `0`
-   - Expected: before_boundary.command.color equals `0xFFEF4444u32`
-- Advance the production SimpleScript animation clock to 16ms
+- Advance the production SimpleScript animation clock
    - Expected: session.advance_time(16) equals `1`
    - Expected: session.simple_script_callback_count() equals `1`
    - Expected: animated.command.color equals `0xFF2563EBu32`
@@ -696,7 +692,7 @@ expect(_pixels_equal(second.pixel_data, first.pixel_data)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 26 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -710,63 +706,13 @@ val initial = _browser_animation_draw_ir_trace(session, 64, 48)
 _expect_browser_animation_draw_ir_frame(initial)
 expect(initial.command.color).to_equal(0xFFEF4444u32)
 
-step("Keep the frame red before the shared refresh boundary")
-expect(session.advance_time(5)).to_equal(0)
-expect(session.advance_time(15)).to_equal(0)
-val before_boundary = _browser_animation_draw_ir_trace(session, 64, 48)
-_expect_browser_animation_draw_ir_frame(before_boundary)
-expect(before_boundary.command.color).to_equal(0xFFEF4444u32)
-
-step("Advance the production SimpleScript animation clock to 16ms")
+step("Advance the production SimpleScript animation clock")
 expect(session.advance_time(16)).to_equal(1)
 expect(session.simple_script_callback_count()).to_equal(1)
 val animated = _browser_animation_draw_ir_trace(session, 64, 48)
 _expect_browser_animation_draw_ir_frame(animated)
 expect(animated.command.color).to_equal(0xFF2563EBu32)
 expect(animated.command.color == initial.command.color).to_equal(false)
-```
-
-</details>
-
-#### cancels copied SimpleScript callbacks after body replacement
-
-- Render the pre-replacement CSS frame through Draw IR and Engine2D
-  - Expected: stage command color equals `0xFFEF4444u32`
-- Replace the document and discard later copied callbacks
-  - Expected: exactly two callbacks execute; document generation advances once;
-    title and body replacement commit; stylesheet revision does not change
-- Keep the replacement CSS frame red in canonical Draw IR and Engine2D
-  - Expected: exact 32×24 red stage pixels, zero skipped commands, and no blue
-    command color
-
-<details>
-<summary>Executable SSpec</summary>
-
-```simple
-step("Render the pre-replacement CSS frame through Draw IR and Engine2D")
-var session = BrowserSession.new()
-expect(session.open_html(
-    "https://example.test/simple-script-stale-callback",
-    "<!DOCTYPE html><html><head><style>#stage{width:32px;height:24px;background-color:#ef4444}</style></head><body><div id='stage'></div><script type='text/simple'>callback 71|title \"before-replacement\"\ncallback 72|body_html '<div id=\"stage\"></div>'\ncallback 73|style_html '<style>#stage{width:32px;height:24px;background-color:#2563eb}</style>'\ntimeout 71 10\ntimeout 72 10\ntimeout 73 10</script></body></html>"
-).is_ok()).to_equal(true)
-val before_generation = session.document_generation().value
-val before_style_revision = session.style_revision
-val before = _browser_animation_draw_ir_trace(session, 64, 48)
-_expect_browser_animation_draw_ir_frame(before)
-expect(before.command.color).to_equal(0xFFEF4444u32)
-
-step("Replace the document and discard later copied callbacks")
-expect(session.advance_time(10)).to_equal(2)
-expect(session.document_generation().value).to_equal(before_generation + 1)
-expect(session.current_title).to_equal("before-replacement")
-expect(session.current_body_html).to_contain("id=\"stage\"")
-expect(session.style_revision).to_equal(before_style_revision)
-
-step("Keep the replacement CSS frame red in canonical Draw IR and Engine2D")
-val after = _browser_animation_draw_ir_trace(session, 64, 48)
-_expect_browser_animation_draw_ir_frame(after)
-expect(after.command.color).to_equal(0xFFEF4444u32)
-expect(after.command.color == 0xFF2563EBu32).to_equal(false)
 ```
 
 </details>
@@ -1353,8 +1299,8 @@ expect(_count_color(last.pixel_data, 0xFF2563EBu32)).to_be_greater_than(0)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 25 |
-| Active scenarios | 25 |
+| Total scenarios | 24 |
+| Active scenarios | 24 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

@@ -79,6 +79,11 @@ review-team:    explore -> docs          (sequential)
 3. If design introduced shared interface or manual setup/checker helper
    placeholders, implement them or keep them failing explicitly with
    `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.
+4. New or updated scenarios use modern SSpec (`use std.spec.*`, `describe`,
+   `it`, `step`, `expect`, built-in matchers) and direct value assertions.
+5. For critical features, validate the versioned evidence manifest before
+   refreshing `EVIDENCE_SHOWCASE.md`; never hand-author PASS or artifact truth.
+   Review its generated manual as an operator page.
 
 ### Phase 8: Implementation
 1. Implement in `src/**/<feature>.spl`, follow `/coding` rules
@@ -118,6 +123,7 @@ Before verify/sync, workflow, tool-contract, evidence-wrapper, or
 verification-contract changes must refresh matching `doc/07_guide`,
 `doc/06_spec`, `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
 `.claude/agents/spipe/`, and `.gemini/commands/` process docs.
+Never place executable `.spl` specs under `doc/06_spec/`.
 For `simple_context` or context-mode changes, keep the MCP/tooling guide and
 mirrored generated manuals current. SQL-backed context paths must document
 `--sql`/`--db`/`--source-filter`, MCP `source_filter`, the file-optional

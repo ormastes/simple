@@ -7,13 +7,12 @@ Origin: May 25 host hard-lockup during parallel QEMU/build/agent work.
 
 ## Implemented
 
-- `scripts/check/check-heavy-work-preflight.shs` — 9-check preflight gate:
+- `scripts/check/check-heavy-work-preflight.shs` — 8-check preflight gate:
   disk space, available memory, swap overcommit, CPU headroom, QEMU guest
-  count, active native-build count, kernel log danger patterns, git working
-  tree cleanliness, stale lock files.
+  count, kernel log danger patterns, git working tree cleanliness, stale
+  lock files.
 - `test/03_system/infrastructure/infra/heavy_work_preflight_spec.spl` — structure verification.
-- Env overrides: `MIN_DISK_GIB`, `MIN_MEM_GIB`, `MAX_CPU_FRACTION`,
-  `MAX_ACTIVE_NATIVE_BUILDS`, `NATIVE_BUILD_PROC_ROOT` (test fixture only).
+- Env overrides: `MIN_DISK_GIB`, `MIN_MEM_GIB`, `MAX_CPU_FRACTION`.
 - Outputs `PASS/FAIL/INFO/BLOCKED` lines and `preflight=READY|BLOCKED` summary.
 
 ## Usage

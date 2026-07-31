@@ -276,11 +276,14 @@ mod cuda_dlopen {
     type CuDeviceGet = unsafe extern "C" fn(*mut i32, i32) -> i32;
     type CuDeviceGetUuid = unsafe extern "C" fn(*mut CudaUuid, i32) -> i32;
     type CuCtxCreate = unsafe extern "C" fn(*mut *mut c_void, u32, i32) -> i32;
+    type CuCtxGetCurrent = unsafe extern "C" fn(*mut *mut c_void) -> i32;
     type CuCtxSetCurrent = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxDestroy = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuCtxSynchronize = unsafe extern "C" fn() -> i32;
     type CuMemAlloc = unsafe extern "C" fn(*mut u64, usize) -> i32;
     type CuMemFree = unsafe extern "C" fn(u64) -> i32;
+    type CuMemAllocHost = unsafe extern "C" fn(*mut *mut c_void, usize) -> i32;
+    type CuMemFreeHost = unsafe extern "C" fn(*mut c_void) -> i32;
     type CuMemsetD32 = unsafe extern "C" fn(u64, u32, usize) -> i32;
     type CuMemsetD8 = unsafe extern "C" fn(u64, u8, usize) -> i32;
     type CuMemcpyHtoD = unsafe extern "C" fn(u64, *const c_void, usize) -> i32;
@@ -309,11 +312,14 @@ mod cuda_dlopen {
         pub device_get_uuid: CuDeviceGetUuid,
         pub device_get_count: CuDeviceGetCount,
         pub ctx_create: CuCtxCreate,
+        pub ctx_get_current: CuCtxGetCurrent,
         pub ctx_set_current: CuCtxSetCurrent,
         pub ctx_destroy: CuCtxDestroy,
         pub ctx_synchronize: CuCtxSynchronize,
         pub mem_alloc: CuMemAlloc,
         pub mem_free: CuMemFree,
+        pub mem_alloc_host: CuMemAllocHost,
+        pub mem_free_host: CuMemFreeHost,
         pub memset_d32: CuMemsetD32,
         pub memset_d8: CuMemsetD8,
         pub memcpy_htod: CuMemcpyHtoD,
@@ -416,11 +422,14 @@ mod cuda_dlopen {
             device_get_uuid: sym_alt!("cuDeviceGetUuid_v2", "cuDeviceGetUuid"),
             device_get_count: sym!("cuDeviceGetCount"),
             ctx_create: sym!("cuCtxCreate_v2"),
+            ctx_get_current: sym!("cuCtxGetCurrent"),
             ctx_set_current: sym!("cuCtxSetCurrent"),
             ctx_destroy: sym!("cuCtxDestroy_v2"),
             ctx_synchronize: sym!("cuCtxSynchronize"),
             mem_alloc: sym!("cuMemAlloc_v2"),
             mem_free: sym!("cuMemFree_v2"),
+            mem_alloc_host: sym_alt!("cuMemAllocHost_v2", "cuMemAllocHost"),
+            mem_free_host: sym!("cuMemFreeHost"),
             memset_d32: sym!("cuMemsetD32_v2"),
             memset_d8: sym!("cuMemsetD8_v2"),
             memcpy_htod: sym!("cuMemcpyHtoD_v2"),
@@ -437,8 +446,46 @@ mod cuda_dlopen {
 static CUDA_DL: OnceLock<Option<cuda_dlopen::CudaFns>> = OnceLock::new();
 
 #[cfg(not(feature = "cuda"))]
+static CUDA_DL_DEFAULT_CONTEXT: OnceLock<Result<usize, i32>> = OnceLock::new();
+
+#[cfg(not(feature = "cuda"))]
 fn get_cuda_dl() -> Option<&'static cuda_dlopen::CudaFns> {
     CUDA_DL.get_or_init(|| cuda_dlopen::load_cuda()).as_ref()
+}
+
+#[cfg(not(feature = "cuda"))]
+fn ensure_cuda_dl_context(fns: &cuda_dlopen::CudaFns) -> Result<(), i32> {
+    let result = unsafe { (fns.init)(0) };
+    if result != 0 {
+        return Err(result);
+    }
+    let mut current: *mut std::os::raw::c_void = std::ptr::null_mut();
+    let result = unsafe { (fns.ctx_get_current)(&mut current) };
+    if result != 0 {
+        return Err(result);
+    }
+    if !current.is_null() {
+        return Ok(());
+    }
+    let stored = CUDA_DL_DEFAULT_CONTEXT.get_or_init(|| {
+        let mut device = 0;
+        let result = unsafe { (fns.device_get)(&mut device, 0) };
+        if result != 0 {
+            return Err(result);
+        }
+        let mut context: *mut std::os::raw::c_void = std::ptr::null_mut();
+        let result = unsafe { (fns.ctx_create)(&mut context, 0, device) };
+        if result != 0 {
+            return Err(result);
+        }
+        Ok(context as usize)
+    });
+    let context = match stored {
+        Ok(context) => *context as *mut std::os::raw::c_void,
+        Err(result) => return Err(*result),
+    };
+    let result = unsafe { (fns.ctx_set_current)(context) };
+    if result == 0 { Ok(()) } else { Err(result) }
 }
 
 // Import Vulkan SFFI functions when feature is enabled
@@ -455,8 +502,9 @@ use simple_runtime::cuda_runtime::{
     rt_cuda_device_compute_capability, rt_cuda_device_count, rt_cuda_device_get, rt_cuda_device_identity,
     rt_cuda_device_name, rt_cuda_f64_binary_op, rt_cuda_f64_minmax, rt_cuda_f64_scalar_div, rt_cuda_f64_slice_1d,
     rt_cuda_f64_slice_2d, rt_cuda_f64_sum, rt_cuda_f64_sum_axis, rt_cuda_get_error_string, rt_cuda_init,
-    rt_cuda_launch_kernel, rt_cuda_mem_alloc, rt_cuda_mem_free, rt_cuda_memcpy_dtoh, rt_cuda_memcpy_dtod,
-    rt_cuda_memcpy_htod, rt_cuda_memset, rt_cuda_module_get_function, rt_cuda_module_load, rt_cuda_module_load_data,
+    rt_cuda_host_alloc, rt_cuda_host_free, rt_cuda_launch_kernel, rt_cuda_mem_alloc, rt_cuda_mem_free,
+    rt_cuda_memcpy_dtoh, rt_cuda_memcpy_dtod, rt_cuda_memcpy_htod, rt_cuda_memset,
+    rt_cuda_module_get_function, rt_cuda_module_load, rt_cuda_module_load_data,
     rt_cuda_module_unload, rt_cuda_sync,
 };
 
@@ -1229,6 +1277,48 @@ pub fn rt_cuda_mem_free_fn(args: &[Value]) -> Result<Value, CompileError> {
             note_device_free(ptr as u64);
             let r = unsafe { (fns.mem_free)(ptr as u64) };
             return Ok(Value::Int(r as i64));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_host_alloc_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let size = arg_i64(args, 0, "rt_cuda_host_alloc", 1)?;
+    if size <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_host_alloc(size)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            if let Err(result) = ensure_cuda_dl_context(fns) {
+                return Ok(Value::Int(-(result as i64)));
+            }
+            let mut ptr: *mut std::os::raw::c_void = std::ptr::null_mut();
+            let result = unsafe { (fns.mem_alloc_host)(&mut ptr, size as usize) };
+            return Ok(Value::Int(if result == 0 { ptr as i64 } else { -(result as i64) }));
+        }
+        Ok(Value::Int(-3))
+    }
+}
+
+pub fn rt_cuda_host_free_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let ptr = arg_i64(args, 0, "rt_cuda_host_free", 1)?;
+    if ptr <= 0 {
+        return Ok(Value::Int(-1));
+    }
+    #[cfg(feature = "cuda")]
+    {
+        return Ok(Value::Int(rt_cuda_host_free(ptr)));
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        if let Some(fns) = get_cuda_dl() {
+            let result = unsafe { (fns.mem_free_host)(ptr as *mut std::os::raw::c_void) };
+            return Ok(Value::Int(if result == 0 { 0 } else { -(result as i64) }));
         }
         Ok(Value::Int(-3))
     }

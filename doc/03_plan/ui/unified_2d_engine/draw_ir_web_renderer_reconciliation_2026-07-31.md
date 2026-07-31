@@ -1,11 +1,9 @@
 <!-- codex-design -->
 # Draw IR + Web/GUI Engine2D Reconciliation Plan (2026-07-31)
 
-Status: active. Production still uses `simple-draw-ir-v2`; the additive
-`simple-draw-ir-v3` flat SoA contract and CPU-reference A-E emitter exist, but
-have no production producer or Engine2D executor. This plan reconciles those
-schemas, Web/GUI producers, Engine2D execution, and GPU backend evidence. It
-supersedes completion claims in older plans where this file is more specific.
+Status: active. This plan reconciles the current `simple-draw-ir-v2` schema,
+Web/GUI producers, Engine2D execution, and GPU backend evidence. It supersedes
+completion claims in older plans where this file is more specific.
 
 ## Invariant
 
@@ -25,8 +23,7 @@ diagnostic, or recovery paths, never alternate canonical producers.
 | WM events | pointer-down uses the hit bridge; wheel remains excluded | partial |
 | `ui.browser` | builds a composition, then discards it and rebuilds a pixel artifact | red |
 | Web session lifecycle | public paths still create/shutdown renderers per request | red |
-| Iframes | inert `srcdoc` can flatten through `draw_ir_embed_composition`; five legacy pixel callers remain | partial |
-| Draw IR v3 | flat SoA contract and bounded CPU-reference A-E emission exist; no production producer/executor | partial, not canonical |
+| Iframes | child pixels are rendered and blitted outside embedded Draw IR batches | red |
 | Draw IR execution | schema admits seven kinds; executor handles RECT/TEXT/IMAGE | partial |
 | Text | canonical Draw IR reaches Engine2D shaping/batch execution | implemented |
 | Hosted GUI/Metal text | private bitmap/glyph paths remain reachable | compatibility-only, unguarded |
@@ -60,15 +57,12 @@ diagnostic, or recovery paths, never alternate canonical producers.
 
 ### R3. Iframe embedding
 
-- Keep the implemented inert `srcdoc` batch flattening and migrate the five
-  remaining child pixel render/blit callers to it after exact parity.
+- Replace child pixel render/blit with child `DrawIrBatch` embedding and
+  inherited clip/opacity/layer metadata.
 - Preserve the pixel path only as a parity oracle until exact corpus parity
   passes, then make it diagnostic-only.
-- Existing static spec/manual evidence proves nested batches, clipping, parent
-  IDs, ordering, and fail-closed admission. Acceptance still requires a
-  qualified pure-Simple execution plus exact CPU-reference parity for each
-  migrated caller; child script/network/input authority remains a separate RED
-  security lane.
+- Acceptance: executable system spec plus manual proves nested iframe batches,
+  clipping, parent IDs, and exact CPU reference pixels.
 
 ### R4. Canonical text enforcement
 
@@ -86,9 +80,6 @@ diagnostic, or recovery paths, never alternate canonical producers.
 - Add shared-executor behavior or typed fail-closed rejection for EDGE, PATH,
   GROUP, and PORT. Do not count schema constants as rendering.
 - Add command-kind coverage to software first, then GPU parity where meaningful.
-- Keep v2 as the production oracle until a typed v2/v3 adapter, the shared
-  Engine2D v3 executor, and exact parity evidence all land. The v3 contract and
-  CPU emitter alone do not authorize producer cutover.
 
 ### R6. Producer allocation work
 
@@ -106,21 +97,6 @@ diagnostic, or recovery paths, never alternate canonical producers.
 | CUDA | real `submit_batch`, retained allocations/module/session, no per-op sync | physical exact readback, stable identity, counters, warm latency/RSS |
 | Metal | real command-buffer batch and retained buffers/pipelines | macOS exact readback, registry ID, counters, warm latency/RSS |
 | Software/CPU-SIMD | executable oracle, not strict-GPU fallback | exact parity and explicit provenance |
-
-Audited bounded lanes (2026-07-31):
-
-- CUDA already retains its session/module/framebuffer and launches ordinary
-  primitives asynchronously. Queue image source allocations until
-  `submit_batch`, synchronize once, then release; prove two images have zero
-  pre-submit and one post-submit sync with exact device readback. Apply the same
-  pending-resource model to vector-font quads; R7 remains open while either
-  image or font submission synchronizes per operation.
-- Vulkan: pack consecutive opaque filled-rectangle records into one SSBO
-  dispatch; retain current IMAGE/font/mask/fallback flush boundaries. Prove
-  clear plus two rectangles drops from three accepted dispatches to two.
-- Metal: retain primitive command encoding until `submit_batch`; flush before
-  image, text, auxiliary, readback, and shutdown paths. Host-independent source
-  contracts precede the macOS registry-ID/counter/parity receipt.
 
 ### R8. Device-region readback and fallback policy
 

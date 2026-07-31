@@ -1,0 +1,30 @@
+# @tag: unit, gpu, vulkan, offload, readback
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_device_count}
+
+describe "Vulkan GPU offload round trip":
+    it "selects a device, submits clear and rect work, and reads back from that device":
+        val bg = 0xFF102030u32
+        val fg = 0xFFE0C040u32
+        var backend = VulkanBackend.create()
+        if not backend.init(4, 4):
+            expect(vulkan_sffi_device_count()).to_equal(0)
+            return
+
+        expect(backend.session.selected_device_index > -1).to_equal(true)
+        expect(backend.session.device > 0).to_equal(true)
+        backend.clear(bg)
+        backend.draw_rect_filled(1, 1, 2, 2, fg)
+        val readback = backend.read_pixels_with_source()
+
+        expect(backend.cpu_fallback_used).to_be(false)
+        expect(readback.source).to_equal("device_readback")
+        expect(readback.backend_handle > 0).to_equal(true)
+        expect(readback.device_identity > 0).to_equal(true)
+        expect(readback.pixel_count).to_equal(16)
+        expect(readback.pixels[0]).to_equal(bg)
+        expect(readback.pixels[5]).to_equal(fg)
+        expect(readback.pixels[15]).to_equal(bg)
+        backend.shutdown()

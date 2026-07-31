@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+if [ "${1:-}" = --self-test ]; then
+    work=$(mktemp -d "${TMPDIR:-/tmp}/release-perf-baseline.XXXXXX")
+    trap 'rm -rf "$work"' EXIT HUP INT TERM
+    printf 'elapsed_seconds=10\nmax_rss_kb=100\n' >"$work/current"
+    sh "$0" "$work/current" "$work/baseline" 10 >/dev/null
+    sh "$0" "$work/current" "$work/baseline" 10 >/dev/null
+    printf 'elapsed_seconds=12\nmax_rss_kb=100\n' >"$work/current"
+    if sh "$0" "$work/current" "$work/baseline" 10 >/dev/null 2>&1; then
+        exit 1
+    fi
+    echo "release_perf_baseline_self_test=pass"
+    exit 0
+fi
+
+current=${1:?current metrics file required}
+baseline=${2:?baseline metrics file required}
+percent=${3:?regression percent required}
+
+read_metric() {
+    value=$(sed -n "s/^$1=//p" "$2")
+    [ -n "$value" ] && printf '%s\n' "$value"
+}
+
+current_elapsed=$(read_metric elapsed_seconds "$current")
+current_rss=$(read_metric max_rss_kb "$current")
+printf '%s\n' "$current_elapsed" | grep -Eq '^[0-9]+([.][0-9]+)?$' &&
+    printf '%s\n' "$current_rss" | grep -Eq '^[0-9]+$' &&
+    printf '%s\n' "$percent" | grep -Eq '^[0-9]+$' ||
+    { echo "invalid release performance metric" >&2; exit 2; }
+
+if [ ! -f "$baseline" ]; then
+    mkdir -p "$(dirname "$baseline")"
+    cp "$current" "$baseline"
+    echo "release_perf_baseline=established"
+    exit 0
+fi
+
+baseline_elapsed=$(read_metric elapsed_seconds "$baseline")
+baseline_rss=$(read_metric max_rss_kb "$baseline")
+printf '%s\n' "$baseline_elapsed" | grep -Eq '^[0-9]+([.][0-9]+)?$' &&
+    printf '%s\n' "$baseline_rss" | grep -Eq '^[0-9]+$' ||
+    { echo "invalid release performance baseline" >&2; exit 2; }
+awk -v c="$current_elapsed" -v b="$baseline_elapsed" -v p="$percent" \
+    'BEGIN { exit !(c <= b * (100 + p) / 100) }' ||
+    { echo "elapsed regression: $current_elapsed > ${baseline_elapsed}+${percent}%" >&2; exit 1; }
+awk -v c="$current_rss" -v b="$baseline_rss" -v p="$percent" \
+    'BEGIN { exit !(c <= b * (100 + p) / 100) }' ||
+    { echo "RSS regression: $current_rss > ${baseline_rss}+${percent}%" >&2; exit 1; }
+echo "release_perf_baseline=pass"

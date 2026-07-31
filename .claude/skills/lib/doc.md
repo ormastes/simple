@@ -70,6 +70,11 @@ Scenario SSpec generation must complete with 0 stubs. Review the rendered
 manual for complete, readable operator flow before accepting it; a successful
 command alone is not manual-quality approval. The `_spec.md` suffix does not
 imply that `spec-gen` owns every such file.
+For critical features, `EVIDENCE_SHOWCASE.md` links the authoritative generated
+manual. Its status and artifacts derive from a validated versioned evidence
+manifest. Generated pages keep HTML inert and provide accessible summaries for
+text, still, motion, and protocol evidence. Executable `.spl` files are
+forbidden under `doc/06_spec/`.
 
 See `doc/06_spec/FILE.md` for full manifest.
 

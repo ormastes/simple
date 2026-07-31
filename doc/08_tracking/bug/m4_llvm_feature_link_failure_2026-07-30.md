@@ -1,28 +1,7 @@
 # Bug: `--features llvm` build — RESOLVED (was a compile-time visibility error, not a link failure)
 
 - **Date:** 2026-07-30
-- **Status:** **not reproducible** — the `--features llvm` build of the seed
-  succeeds on current origin.
-
-> **Correction (parent session, 2026-07-30).** Two independent lanes checked
-> this. The `pub(crate)` visibility on `process_c_runtime_arg_indices`
-> (`codegen/instr/calls.rs:2550`) was **already on origin** before either lane
-> started — `git show <origin>:…` confirms it — so no fix "landed in this
-> lane"; the E0603 diagnosis was against a stale tree. The second lane made
-> zero edits and both builds passed: `cargo build --release -p simple-driver
-> --features llvm` and the same command without the feature, exit 0 each.
->
-> **Scope caveat — two different LLVM problems, do not conflate them:**
-> this doc covers the *seed's* cargo `llvm` feature build, which works. The
-> long-standing "62 undefined symbols" note in `.claude/rules/bootstrap.md`
-> is a *different* failure — the LLVM **stage-2 link** of the pure-Simple
-> compiler, tracked in
-> `seed_stage2_llvm_method_symbol_lowering_2026-07-17.md`. M4 was previously
-> described as blocked on "62 undefined LLVM symbols"; that framing was wrong.
-> The seed builds with LLVM; what remains unproven for M4 is the stage-2 LLVM
-> link path, and Cranelift remains the working stage-2/3 backend.
-
-- **Original status line (superseded):** fixed — one-line visibility fix landed in this lane
+- **Status:** **fixed** — one-line visibility fix landed in this lane
 - **Severity:** blocker for M4 (LLVM-backend memory instrumentation / `--mem-infra`)
   before the fix; the feature is now buildable.
 - **Binary under test:** Rust seed `src/compiler_rust/target/release/simple`

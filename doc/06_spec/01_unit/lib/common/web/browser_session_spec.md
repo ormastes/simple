@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 89 | 89 | 0 | 0 |
+| 86 | 86 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -2865,190 +2865,6 @@ expect(session.current_title).to_end_with(
 
 </details>
 
-#### retires target capture and bubble once listeners after one dispatch
-
-- Open a target for capture and bubble listeners
-- Register target capture and bubble listeners as once
-- Dispatch once through both target listener phases
-   - Expected: first.actions.len() equals `2`
-   - Expected: session.current_title equals `capture,bubble,`
-- Dispatch again without invoking retired listeners
-   - Expected: second.actions.len() equals `0`
-   - Expected: session.current_title equals `capture,bubble,`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 31 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Open a target for capture and bubble listeners")
-var session = BrowserSession.new()
-expect(session.open_html(
-    "https://example.test/once-target",
-    "<html><body><button id='run'>Run</button></body></html>"
-).is_ok()).to_be(true)
-
-step("Register target capture and bubble listeners as once")
-expect(session.eval_script(
-    "document.title='';var run=document.getElementById('run');" +
-    "window.capture=true;window.once=true;" +
-    "run.addEventListener('probe',function(event){" +
-    "document.title=document.title+'capture,';},window);" +
-    "window.capture=false;" +
-    "run.addEventListener('probe',function(event){" +
-    "document.title=document.title+'bubble,';},window);"
-).is_ok()).to_be(true)
-
-step("Dispatch once through both target listener phases")
-val first = session.dispatch_dom_event(
-    "run", "probe", true, true
-)
-expect(first.actions.len()).to_equal(2)
-expect(session.current_title).to_equal("capture,bubble,")
-
-step("Dispatch again without invoking retired listeners")
-val second = session.dispatch_dom_event(
-    "run", "probe", true, true
-)
-expect(second.actions.len()).to_equal(0)
-expect(session.current_title).to_equal("capture,bubble,")
-```
-
-</details>
-
-#### retires a once listener before its callback attempts reentrant dispatch
-
-- Open a target for a reentrant dispatch attempt
-- Register one callback that attempts synchronous redispatch
-- Dispatch once and keep the nested attempt fail closed
-   - Expected: first.actions.len() equals `1`
-   - Expected: _display_js(value) equals `1:false`
-   - Expected: session.warnings.join("|") contains `synchronous script dispatchEvent is unsupported`
-- Dispatch again without invoking the retired callback
-   - Expected: second.actions.len() equals `0`
-   - Expected: _display_js(value) equals `1`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 41 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Open a target for a reentrant dispatch attempt")
-var session = BrowserSession.new()
-expect(session.open_html(
-    "https://example.test/once-reentrant",
-    "<html><body><button id='run'>Run</button></body></html>"
-).is_ok()).to_be(true)
-
-step("Register one callback that attempts synchronous redispatch")
-expect(session.eval_script(
-    "var calls=0;var redispatch=true;" +
-    "var run=document.getElementById('run');" +
-    "window.capture=false;window.once=true;" +
-    "run.addEventListener('probe',function(event){" +
-    "calls=calls+1;redispatch=run.dispatchEvent(event);" +
-    "},window);"
-).is_ok()).to_be(true)
-
-step("Dispatch once and keep the nested attempt fail closed")
-val first = session.dispatch_dom_event(
-    "run", "probe", true, true
-)
-expect(first.actions.len()).to_equal(1)
-match session.eval_script("calls+':'+redispatch"):
-    Ok(value):
-        expect(_display_js(value)).to_equal("1:false")
-    Err(e):
-        fail("Expected the reentrant once-listener result: {e}")
-expect(session.warnings.join("|")).to_contain(
-    "synchronous script dispatchEvent is unsupported"
-)
-
-step("Dispatch again without invoking the retired callback")
-val second = session.dispatch_dom_event(
-    "run", "probe", true, true
-)
-expect(second.actions.len()).to_equal(0)
-match session.eval_script("calls"):
-    Ok(value):
-        expect(_display_js(value)).to_equal("1")
-    Err(e):
-        fail("Expected one callback invocation after redispatch: {e}")
-```
-
-</details>
-
-#### keeps duplicate and removal identity independent of once
-
-- Open a target for listener identity checks
-- Register duplicates and remove through different once options
-- Dispatch only the first registered duplicate
-   - Expected: first.actions.len() equals `1`
-   - Expected: _display_js(value) equals `1:0`
-- Dispatch again after the retained duplicate retires
-   - Expected: second.actions.len() equals `0`
-   - Expected: _display_js(value) equals `1:0`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 42 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-step("Open a target for listener identity checks")
-var session = BrowserSession.new()
-expect(session.open_html(
-    "https://example.test/once-identity",
-    "<html><body><button id='run'>Run</button></body></html>"
-).is_ok()).to_be(true)
-
-step("Register duplicates and remove through different once options")
-expect(session.eval_script(
-    "var duplicateCalls=0;var removedCalls=0;" +
-    "var run=document.getElementById('run');" +
-    "var duplicate=function(event){duplicateCalls=duplicateCalls+1;};" +
-    "var removed=function(event){removedCalls=removedCalls+1;};" +
-    "window.capture=false;window.once=true;" +
-    "run.addEventListener('probe',duplicate,window);" +
-    "run.addEventListener('probe',removed,window);" +
-    "window.once=false;" +
-    "run.addEventListener('probe',duplicate,window);" +
-    "run.removeEventListener('probe',removed,window);"
-).is_ok()).to_be(true)
-
-step("Dispatch only the first registered duplicate")
-val first = session.dispatch_dom_event(
-    "run", "probe", true, true
-)
-expect(first.actions.len()).to_equal(1)
-match session.eval_script("duplicateCalls+':'+removedCalls"):
-    Ok(value):
-        expect(_display_js(value)).to_equal("1:0")
-    Err(e):
-        fail("Expected once-independent listener identity: {e}")
-
-step("Dispatch again after the retained duplicate retires")
-val second = session.dispatch_dom_event(
-    "run", "probe", true, true
-)
-expect(second.actions.len()).to_equal(0)
-match session.eval_script("duplicateCalls+':'+removedCalls"):
-    Ok(value):
-        expect(_display_js(value)).to_equal("1:0")
-    Err(e):
-        fail("Expected the duplicate once listener to stay retired: {e}")
-```
-
-</details>
-
 #### fails closed for synchronous JavaScript-originated dispatchEvent
 
 - var session = BrowserSession new
@@ -4446,8 +4262,8 @@ Tests covering BrowserSession lifecycle, BrowserSession page loading, BrowserSes
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 89 |
-| Active scenarios | 89 |
+| Total scenarios | 86 |
+| Active scenarios | 86 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

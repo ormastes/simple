@@ -2,8 +2,11 @@
 # Migrated from: scripts/migrate_spec_to_spl.py
 # Purpose: Convert doc/06_spec/*.md to tests/specs/*_spec.spl
 
-use fs.{read_text, write_text}
+use fs.{exist, read_text, write_text}
 use regex.{captures, find_all, replace_all}
+
+val GENERATED_START = "# spec-to-sspec:generated:start"
+val GENERATED_END = "# spec-to-sspec:generated:end"
 
 # Migration statistics
 struct SpecMigrationStats:
@@ -41,11 +44,21 @@ struct SpecMetadata:
     keywords: text
     last_updated: text
     topics: text
+    evidence: text
+    spec_revision: text
 
 impl SpecMetadata:
     # Create empty metadata
     static fn new() -> SpecMetadata:
-        SpecMetadata(status: "Draft", feature_ids: "", keywords: "", last_updated: "", topics: "")
+        SpecMetadata(
+            status: "Draft",
+            feature_ids: "",
+            keywords: "",
+            last_updated: "",
+            topics: "",
+            evidence: "semantic",
+            spec_revision: "unversioned"
+        )
 
 # Code example from markdown
 struct CodeExample:
@@ -109,6 +122,16 @@ fn extract_metadata(md_content: text) -> SpecMetadata:
     val topics_caps = captures(r"\*\*Topics:\*\*\s*([^\n]+)", md_content)
     if topics_caps.len() > 1:
         metadata.topics = topics_caps[1].trim()
+
+    # Evidence is semantic, rendering, or non-rendering. Rendering and
+    # non-rendering tests still exercise the same parser/WebIR libraries.
+    val evidence_caps = captures(r"\*\*Evidence:\*\*\s*([^\n]+)", md_content)
+    if evidence_caps.len() > 1:
+        metadata.evidence = evidence_caps[1].trim()
+
+    val revision_caps = captures(r"\*\*Spec Revision:\*\*\s*([^\n]+)", md_content)
+    if revision_caps.len() > 1:
+        metadata.spec_revision = revision_caps[1].trim()
 
     metadata
 
@@ -198,9 +221,15 @@ fn extract_code_examples(md_content: text) -> List<CodeExample>:
 fn generate_spec_spl(md_path: text, spl_path: text, metadata: SpecMetadata, title: text, overview: text, examples: List<CodeExample>) -> text:
     var parts: [text] = []
 
+    parts.push("{GENERATED_START}\n")
     # Header comment with metadata
     parts.push("# {title}\n")
     parts.push("# Migrated from: {md_path}\n")
+    parts.push("# @tag: generated, spec-to-sspec, {metadata.evidence}\n")
+    parts.push("# @feature: {metadata.feature_ids}\n")
+    parts.push("# @evidence: {metadata.evidence}\n")
+    parts.push("# @spec-revision: {metadata.spec_revision}\n")
+    parts.push("# @coverage: generated\n")
     parts.push("#\n")
     parts.push("# Status: {metadata.status}\n")
     if not metadata.feature_ids.is_empty():
@@ -212,7 +241,7 @@ fn generate_spec_spl(md_path: text, spl_path: text, metadata: SpecMetadata, titl
     parts.push("\n")
 
     # Import SPipe framework
-    parts.push("use spec.{describe, context, it, expect, skip}\n\n")
+    parts.push("use std.spec.*\n\n")
 
     # Main describe block
     parts.push("describe \"{title}\":\n")
@@ -243,21 +272,37 @@ fn generate_spec_spl(md_path: text, spl_path: text, metadata: SpecMetadata, titl
                     example.context
 
                 parts.push("        it \"{example_name}\":\n")
-                parts.push("            # Code from markdown:\n")
-                for line in example.code.split("\n"):
-                    parts.push("            # {line}\n")
-                parts.push("            skip \"Migrated from markdown - needs test implementation\"\n\n")
+                if example.code.contains("expect(") or example.code.contains("assert("):
+                    for line in example.code.split("\n"):
+                        parts.push("            {line}\n")
+                else:
+                    parts.push("            pending(\"Generated example has no executable oracle; add a semantic or rendering assertion\")\n")
+                parts.push("\n")
 
     # If no examples, add a placeholder
     if examples.is_empty():
         parts.push("    context \"Specification\":\n")
         parts.push("        it \"follows the specification\":\n")
-        parts.push("            skip \"TODO: Add test implementation\"\n")
+        parts.push("            pending(\"Specification has no executable examples\")\n")
 
+    parts.push("{GENERATED_END}\n")
     parts.join("")
 
+# Preserve manual tests and replace only the region owned by this generator.
+pub fn merge_generated_spec(existing: text, generated: text) -> text:
+    if existing.trim().is_empty():
+        return generated
+
+    val start = existing.index_of(GENERATED_START)
+    val end = existing.index_of(GENERATED_END)
+    if start < 0 or end < start:
+        return existing + "\n\n" + generated
+
+    val suffix_start = end + GENERATED_END.len()
+    existing.slice(0, start) + generated + existing.slice(suffix_start, existing.len())
+
 # Migrate single spec file
-fn migrate_spec_file(md_path: text, spl_path: text) -> Result<u64, text>:
+fn migrate_spec_file(md_path: text, spl_path: text, dry_run: bool) -> Result<u64, text>:
     # Read markdown file
     match read_text(md_path):
         Ok(md_content):
@@ -279,8 +324,18 @@ fn migrate_spec_file(md_path: text, spl_path: text) -> Result<u64, text>:
                 examples
             )
 
-            # Write to output file
-            match write_text(spl_path, spl_content):
+            val output = if exist(spl_path):
+                match read_text(spl_path):
+                    Ok(existing): merge_generated_spec(existing, spl_content)
+                    Err(e): return Err("Failed to read existing spec file: {e}")
+            else:
+                spl_content
+
+            if dry_run:
+                return Ok(examples.len() as u64)
+
+            # Write the merged output without deleting manual tests.
+            match write_text(spl_path, output):
                 Ok(_):
                     Ok(examples.len() as u64)
                 Err(e):
@@ -289,7 +344,7 @@ fn migrate_spec_file(md_path: text, spl_path: text) -> Result<u64, text>:
             Err("Failed to read markdown file: {e}")
 
 # Migrate all Category A files
-fn migrate_all_category_a() -> SpecMigrationStats:
+fn migrate_all_category_a(dry_run: bool) -> SpecMigrationStats:
     var stats = SpecMigrationStats.new()
 
     # Get Category A files
@@ -305,7 +360,7 @@ fn migrate_all_category_a() -> SpecMigrationStats:
         val md_path = "doc/06_spec/{file.md_file}"
         val spl_path = "tests/specs/{file.spl_file}"
 
-        match migrate_spec_file(md_path, spl_path):
+        match migrate_spec_file(md_path, spl_path, dry_run):
             Ok(examples_count):
                 stats.add_migrated(examples_count)
                 print "Migrated: {file.md_file} -> {file.spl_file} ({examples_count} examples)"
@@ -421,7 +476,7 @@ fn main_migrate_spec_to_spl(args: List<text>) -> Result<(), text>:
         if options.dry_run:
             print "=== Dry Run Mode - No files will be written ===\n"
 
-        val stats = migrate_all_category_a()
+        val stats = migrate_all_category_a(options.dry_run)
 
         # Print summary
         print stats.summary()
@@ -437,7 +492,7 @@ fn main_migrate_spec_to_spl(args: List<text>) -> Result<(), text>:
                 if options.dry_run:
                     print "=== Dry Run Mode - No files will be written ===\n"
 
-                match migrate_spec_file(md, spl):
+                match migrate_spec_file(md, spl, options.dry_run):
                     Ok(examples_count):
                         print "\n=== Migration Complete ==="
                         print "Examples extracted: {examples_count}"

@@ -123,13 +123,6 @@ fn browser_address_backspace(
         return Err(reason)
     Ok(if replace: "" else: text_without_last_codepoint(current))
 
-fn browser_address_draft_after_control_press(
-    control: text, document_url: text, draft: text
-) -> text:
-    if control == "address" or control == "go":
-        return draft
-    if document_url != "": document_url else: "about:blank"
-
 fn browser_url_form_encode(value: text) -> text:
     var out = ""
     for byte in rt_text_to_bytes(value):
@@ -212,6 +205,12 @@ fn normalize_network_navigation_url(input: text) -> Result<text, text>:
         return Err("invalid control character in navigation URL")
     _normalize_network_navigation_url_checked(input)
 
+fn normalize_browser_address_url(input: text) -> Result<text, text>:
+    val reason = browser_address_input_error(input)
+    if reason != "":
+        return Err(reason)
+    _normalize_network_navigation_url_checked(input)
+
 fn network_navigation_port_valid(port: text) -> bool:
     if port == "" or port.len() > 5:
         return false
@@ -288,7 +287,7 @@ fn resolve_relative_url(base_url: text, href: text) -> text:
     if href.starts_with("http://") or href.starts_with("https://") or href.starts_with("file://") or href.starts_with("about:"):
         return href
     if href.starts_with("//"):
-        return url_protocol(base_url) + href
+        return url_protocol(base_url).slice(0, url_protocol(base_url).len() - 1) + href
     if href.starts_with("#"):
         return without_fragment(base_url) + href
     if href.starts_with("?"):
@@ -323,87 +322,6 @@ fn collapse_url_dot_segments(url: text) -> text:
     val path = rest.slice(0, cut)
     val tail = rest.slice(cut, rest.len())
     origin + remove_dot_segments(path) + tail
-
-fn normalize_browser_address_reference_url(
-    base_url: text, input: text
-) -> Result<text, text>:
-    val reason = browser_address_input_error(input)
-    if reason != "":
-        return Err(reason)
-    val clean = input.trim()
-    val is_reference = (
-        clean == "." or clean == ".." or
-        clean.starts_with("/") or
-        clean.starts_with("./") or clean.starts_with("../") or
-        clean.starts_with("?") or clean.starts_with("#")
-    )
-    val candidate = if is_reference:
-        collapse_url_dot_segments(
-            browser_history_resolve_url(base_url, clean)
-        )
-    else:
-        clean
-    _normalize_network_navigation_url_checked(candidate)
-
-fn normalize_script_navigation_reference_url(
-    base_url: text, input: text
-) -> Result<text, text>:
-    val reason = _browser_input_error(input, 0)
-    if reason == "address-invalid-utf8":
-        return Err("invalid UTF-8 in navigation URL")
-    if reason == "address-invalid-control":
-        return Err("invalid control character in navigation URL")
-    val clean = input.trim()
-    var scheme_end: i64 = -1
-    var scan: i64 = 0
-    var scheme_candidate = clean.len() > 0
-    while scan < clean.len() and scheme_end < 0 and scheme_candidate:
-        val ch = clean.slice(scan, scan + 1)
-        if ch == ":":
-            if scan > 0:
-                scheme_end = scan
-            scheme_candidate = false
-        elif ch == "/" or ch == "?" or ch == "#":
-            scheme_candidate = false
-        else:
-            val code = clean.char_code_at(scan)
-            val alpha = (
-                (code >= 65 and code <= 90) or
-                (code >= 97 and code <= 122)
-            )
-            val digit = code >= 48 and code <= 57
-            val valid = if scan == 0:
-                alpha
-            else:
-                alpha or digit or ch == "+" or ch == "-" or ch == "."
-            if valid:
-                scan = scan + 1
-            else:
-                scheme_candidate = false
-    if scheme_end >= 0:
-        val scheme = clean.slice(0, scheme_end).lower()
-        if scheme == "about" and clean.lower() == "about:blank":
-            return Ok("about:blank")
-        if scheme != "http" and scheme != "https":
-            return Err("unsupported navigation scheme")
-        if (
-            (scheme == "http" and
-             not clean.lower().starts_with("http://")) or
-            (scheme == "https" and
-             not clean.lower().starts_with("https://"))
-        ):
-            return Err("invalid navigation authority")
-        return _normalize_network_navigation_url_checked(clean)
-    val resolved = collapse_url_dot_segments(
-        resolve_relative_url(base_url, clean)
-    )
-    if (
-        not resolved.lower().starts_with("http://") and
-        not resolved.lower().starts_with("https://") and
-        resolved.lower() != "about:blank"
-    ):
-        return Err("unsupported navigation scheme")
-    _normalize_network_navigation_url_checked(resolved)
 
 # RFC 3986 §5.2.4 remove_dot_segments operating on a path string.
 fn remove_dot_segments(path: text) -> text:

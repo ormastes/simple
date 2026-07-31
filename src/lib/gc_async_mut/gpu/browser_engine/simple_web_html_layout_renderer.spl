@@ -8,15 +8,9 @@ use common.ui.draw_ir.{
     DrawIrBatch,
     DrawIrCommand,
     DrawIrComposition,
-    DrawIrEmbeddingConfig,
-    DrawIrSourceInfo,
     draw_ir_batch_with_source,
     draw_ir_composition,
-    draw_ir_embed_composition,
     draw_ir_embedding_config,
-    draw_ir_rect_bounds,
-    draw_ir_rect_intersection,
-    draw_ir_rect_clipped,
     draw_ir_rect_translate,
     draw_ir_source_html_ast
 }
@@ -25,6 +19,7 @@ use std.common.web.browser_renderer_protocol.{
 }
 use common.render_scene.scene.{SceneCommand, scene_fill_rect}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
+use common.compute.placement_contracts.handles.{ArenaResidency}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 use std.common.crypto.sha256.{sha256_text}
 use std.common.color.types.{from_rgba}
@@ -327,6 +322,17 @@ class SimpleWebLayoutDrawIrResult:
     material_counts: [i64]
     cpu_material_nodes: [i32]
     solid_material_nodes: [i32]
+    style_residency: ArenaResidency<Style>?
+    layout_residency: ArenaResidency<LayoutResult>?
+
+pub fn simple_web_layout_bind_arena_residency(
+    mut result: SimpleWebLayoutDrawIrResult,
+    style_residency: ArenaResidency<Style>,
+    layout_residency: ArenaResidency<LayoutResult>
+) -> SimpleWebLayoutDrawIrResult:
+    result.style_residency = style_residency
+    result.layout_residency = layout_residency
+    result
 
 fn _simple_web_root_sticky_admitted(
     nodes: [HNode], node_index: i32
@@ -1331,77 +1337,6 @@ fn _simple_web_draw_ir_translate_command(
     )
     translated
 
-fn _simple_web_iframe_fractional_ancestor(
-    nodes: [HNode], styles: [Style], node_index: i32
-) -> bool:
-    var current = node_index
-    while current >= 0 and current < styles.len():
-        if styles[current].opacity_pct < 100:
-            return true
-        current = nodes[current].parent
-    false
-
-fn _simple_web_draw_ir_has_material_request(
-    composition: DrawIrComposition
-) -> bool:
-    for batch in composition.batches:
-        for command in batch.commands:
-            for prop in command.computed_style:
-                if prop.key == "wm-material-request":
-                    return true
-    false
-
-fn _simple_web_layout_merge_material_witness(
-    witnesses: [SimpleWebLayoutMaterialWitness]
-) -> SimpleWebLayoutMaterialWitness:
-    var cpu_count = 0
-    var solid_count = 0
-    var cpu_parts: [text] = []
-    var solid_parts: [text] = []
-    var cpu_single_hash = ""
-    var solid_single_hash = ""
-    for witness in witnesses:
-        if witness.cpu_composited_count > 0:
-            cpu_count = cpu_count + witness.cpu_composited_count
-            cpu_parts.push("{witness.cpu_composited_count}:{witness.cpu_composited_sha256}")
-            cpu_single_hash = witness.cpu_composited_sha256
-        if witness.solid_material_count > 0:
-            solid_count = solid_count + witness.solid_material_count
-            solid_parts.push("{witness.solid_material_count}:{witness.solid_material_sha256}")
-            solid_single_hash = witness.solid_material_sha256
-    SimpleWebLayoutMaterialWitness(
-        cpu_composited_count: cpu_count,
-        cpu_composited_sha256: if cpu_parts.len() == 0: "" elif cpu_parts.len() == 1: cpu_single_hash else: sha256_text("v1\n" + cpu_parts.join("\n") + "\n"),
-        solid_material_count: solid_count,
-        solid_material_sha256: if solid_parts.len() == 0: "" elif solid_parts.len() == 1: solid_single_hash else: sha256_text("v1\n" + solid_parts.join("\n") + "\n")
-    )
-
-fn _simple_web_layout_segment_batch(
-    source: DrawIrSourceInfo, embedding: DrawIrEmbeddingConfig,
-    nodes: [HNode], styles: [Style], boxes: LayoutResult,
-    opacity_root: i32, opacity_root_count: i32,
-    segment_index: i32, commands: [DrawIrCommand]
-) -> DrawIrBatch:
-    if opacity_root >= 0:
-        val bounded = opacity_root_count > 1
-        val opacity_embedding = draw_ir_embedding_config(
-            "html-opacity-{opacity_root}",
-            _html_draw_ir_component_id(nodes[opacity_root], opacity_root),
-            if bounded: boxes.bx[opacity_root] else: 0,
-            if bounded: boxes.by[opacity_root] else: 0,
-            if bounded: boxes.bw[opacity_root] else: embedding.width,
-            if bounded: boxes.bh[opacity_root] else: embedding.height,
-            0, styles[opacity_root].opacity_pct * 10, true
-        )
-        return draw_ir_batch_with_source(
-            "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
-            opacity_embedding, commands, source
-        )
-    draw_ir_batch_with_source(
-        "html-layout-{segment_index}", DRAW_IR_BACKEND_CPU,
-        embedding, commands, source
-    )
-
 fn _simple_web_layout_compose_retained(
     html: text,
     nodes: [HNode],
@@ -1422,8 +1357,7 @@ fn _simple_web_layout_compose_retained(
     vector_fonts: bool,
     scroll_y: i32,
     overlay: BrowserTextInputOverlay,
-    images: [SimpleOsHostGpuImageResource],
-    depth: i32
+    images: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutDrawIrResult:
     val scrolled = _simple_web_scrolled_layout(
         nodes, styles, raw_boxes, width, height, scroll_y
@@ -1451,7 +1385,6 @@ fn _simple_web_layout_compose_retained(
     )
     val canvas = _html_draw_ir_canvas_command(width, height, canvas_color)
     var batches: [DrawIrBatch] = []
-    var child_witnesses: [SimpleWebLayoutMaterialWitness] = []
     val (opacity_found, opacity_command_roots, opacity_root_count) = (
         _simple_web_fractional_opacity_command_roots(
             nodes, styles, command_owner_nodes)
@@ -1492,134 +1425,79 @@ fn _simple_web_layout_compose_retained(
                     opacity_supported = false
                 admitted_root = root
             admission_index = admission_index + 1
-    # One backwards-free prepass gives each owner a single insertion point.
-    # Rechecking the remaining command suffix for every iframe made this path
-    # quadratic on pages with many independently painted replaced elements.
-    var last_command_index_by_owner: [i32] = [-1; nodes.len()]
-    var command_index = 0
-    while command_index < command_owner_nodes.len():
-        val owner = command_owner_nodes[command_index]
-        if owner >= 0 and owner < last_command_index_by_owner.len():
-            last_command_index_by_owner[owner] = command_index
-        command_index = command_index + 1
-    val clip_cache = build_ancestor_clip_cache(
-        nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, width, height
-    )
-    var run_root = -1
-    var run_commands: [DrawIrCommand] = [canvas]
-    var segment_index = 0
-    command_index = 0
-    while command_index < commands.len():
-        val next_root = if opacity_supported:
-            opacity_command_roots[command_index]
-        else:
-            -1
-        if next_root != run_root:
-            if run_commands.len() > 0:
-                batches.push(_simple_web_layout_segment_batch(
-                    source, embedding, nodes, styles, boxes, run_root,
-                    opacity_root_count, segment_index, run_commands
-                ))
-                segment_index = segment_index + 1
-            run_root = next_root
-            run_commands = []
-        val command = if run_root >= 0 and opacity_root_count > 1:
-            _simple_web_draw_ir_translate_command(
-                commands[command_index], 0 - boxes.bx[run_root],
-                0 - boxes.by[run_root]
-            )
-        else:
-            commands[command_index]
-        run_commands.push(command)
-        val owner = command_owner_nodes[command_index]
-        if (
-            owner >= 0 and owner < nodes.len() and
-            nodes[owner].tag == "iframe" and
-            last_command_index_by_owner[owner] == command_index
-        ):
-            val st = styles[owner]
-            val content = draw_ir_rect_bounds(
-                boxes.bx[owner] + st.border_l + st.pad_l,
-                boxes.by[owner] + st.border_t + st.pad_t,
-                if boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r > 0: boxes.bw[owner] - st.border_l - st.border_r - st.pad_l - st.pad_r else: 0,
-                if boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b > 0: boxes.bh[owner] - st.border_t - st.border_b - st.pad_t - st.pad_b else: 0
-            )
-            val paint_clip = paint_clip_at(clip_cache, owner)
-            val visible = draw_ir_rect_intersection(content,
-                draw_ir_rect_bounds(paint_clip.x0, paint_clip.y0,
-                    paint_clip.x1 - paint_clip.x0, paint_clip.y1 - paint_clip.y0))
-            if visible.width > 0 and visible.height > 0:
-                val owner_id = _html_draw_ir_component_id(nodes[owner], owner)
-                val placeholder = draw_ir_rect_clipped(
-                    "{owner_id}:iframe-placeholder", content.x, content.y,
-                    content.width, content.height, WEB_IFRAME_PLACEHOLDER,
-                    visible
-                )
-                val now = rt_time_now_micros()
-                if (
-                    depth + 1 > WEB_IFRAME_DEPTH_CAP or
-                    now >= _web_render_deadline_us or
-                    _simple_web_iframe_fractional_ancestor(nodes, styles, owner)
-                ):
-                    if run_root >= 0 and opacity_root_count > 1:
-                        run_commands.push(_simple_web_draw_ir_translate_command(
-                            placeholder, 0 - boxes.bx[run_root],
-                            0 - boxes.by[run_root]
-                        ))
-                    else:
-                        run_commands.push(placeholder)
-                else:
-                    val save_deadline = _web_render_deadline_us
-                    val child_deadline = now + (save_deadline - now) / 2
-                    val child_html = _web_iframe_child_html(nodes[owner])
-                    val child_rules = if attr_value(nodes[owner].attrs_raw, "space").trim().lower() == "shared": rules else: _web_empty_rules()
-                    val child = _simple_web_layout_compose_document(
-                        child_html, content.width, content.height,
-                        vector_fonts, animation_time_ms, 0,
-                        browser_text_input_overlay_empty(), [], [], child_rules,
-                        depth + 1, child_deadline
+    if opacity_supported:
+        var run_root = -1
+        var run_commands: [DrawIrCommand] = [canvas]
+        var command_index = 0
+        while command_index < commands.len():
+            val next_root = opacity_command_roots[command_index]
+            if next_root != run_root:
+                if run_root >= 0:
+                    val bounded = opacity_root_count > 1
+                    val surface_x = if bounded: boxes.bx[run_root] else: 0
+                    val surface_y = if bounded: boxes.by[run_root] else: 0
+                    val surface_w = if bounded: boxes.bw[run_root] else: width
+                    val surface_h = if bounded: boxes.bh[run_root] else: height
+                    val opacity_embedding = draw_ir_embedding_config(
+                        "html-opacity-{run_root}",
+                        _html_draw_ir_component_id(
+                            nodes[run_root], run_root
+                        ),
+                        surface_x, surface_y, surface_w, surface_h, 0,
+                        styles[run_root].opacity_pct * 10, true
                     )
-                    _web_render_deadline_us = save_deadline
-                    if _simple_web_draw_ir_has_material_request(child.composition):
-                        if run_root >= 0 and opacity_root_count > 1:
-                            run_commands.push(_simple_web_draw_ir_translate_command(
-                                placeholder, 0 - boxes.bx[run_root],
-                                0 - boxes.by[run_root]
-                            ))
-                        else:
-                            run_commands.push(placeholder)
-                    else:
-                        # An admitted child is the only case that needs a new
-                        # flat batch boundary. Denials stay in this group.
-                        batches.push(_simple_web_layout_segment_batch(
-                            source, embedding, nodes, styles, boxes, run_root,
-                            opacity_root_count, segment_index, run_commands
-                        ))
-                        segment_index = segment_index + 1
-                        run_commands = []
-                        val embedded = draw_ir_embed_composition(
-                            child.composition, content.x, content.y,
-                            visible, "{owner_id}:iframe:{depth + 1}",
-                            owner_id, 0
-                        )
-                        for batch in embedded:
-                            batches.push(batch)
-                        child_witnesses.push(child.material_witness)
-        command_index = command_index + 1
-    if run_commands.len() > 0:
-        batches.push(_simple_web_layout_segment_batch(
-            source, embedding, nodes, styles, boxes, run_root,
-            opacity_root_count, segment_index, run_commands
+                    batches.push(draw_ir_batch_with_source(
+                        "html-layout-opacity", DRAW_IR_BACKEND_CPU,
+                        opacity_embedding, run_commands, source
+                    ))
+                elif run_commands.len() > 0:
+                    batches.push(draw_ir_batch_with_source(
+                        "html-layout", DRAW_IR_BACKEND_CPU, embedding,
+                        run_commands, source
+                    ))
+                run_root = next_root
+                run_commands = []
+            if run_root >= 0 and opacity_root_count > 1:
+                run_commands.push(_simple_web_draw_ir_translate_command(
+                    commands[command_index],
+                    0 - boxes.bx[run_root],
+                    0 - boxes.by[run_root]
+                ))
+            else:
+                run_commands.push(commands[command_index])
+            command_index = command_index + 1
+        if run_root >= 0:
+            val bounded = opacity_root_count > 1
+            val surface_x = if bounded: boxes.bx[run_root] else: 0
+            val surface_y = if bounded: boxes.by[run_root] else: 0
+            val surface_w = if bounded: boxes.bw[run_root] else: width
+            val surface_h = if bounded: boxes.bh[run_root] else: height
+            val opacity_embedding = draw_ir_embedding_config(
+                "html-opacity-{run_root}",
+                _html_draw_ir_component_id(nodes[run_root], run_root),
+                surface_x, surface_y, surface_w, surface_h, 0,
+                styles[run_root].opacity_pct * 10, true
+            )
+            batches.push(draw_ir_batch_with_source(
+                "html-layout-opacity", DRAW_IR_BACKEND_CPU,
+                opacity_embedding, run_commands, source
+            ))
+        elif run_commands.len() > 0:
+            batches.push(draw_ir_batch_with_source(
+                "html-layout-after", DRAW_IR_BACKEND_CPU, embedding,
+                run_commands, source
+            ))
+    else:
+        batches.push(draw_ir_batch_with_source(
+            "html-layout", DRAW_IR_BACKEND_CPU, embedding,
+            [canvas] + commands, source
         ))
     val composition = draw_ir_composition(
         "html-layout", "simple-web-html-layout", DRAW_IR_BACKEND_CPU, batches
     )
-    val parent_material_witness = _simple_web_visible_material_witness(
+    val material_witness = _simple_web_visible_material_witness(
         material_entries, cpu_material_nodes, solid_material_nodes,
         visible_nodes
-    )
-    val material_witness = _simple_web_layout_merge_material_witness(
-        [parent_material_witness] + child_witnesses
     )
     SimpleWebLayoutDrawIrResult(
         composition: composition,
@@ -1651,38 +1529,33 @@ fn _simple_web_layout_compose_retained(
         material_entries: material_entries,
         material_counts: material_counts,
         cpu_material_nodes: cpu_material_nodes,
-        solid_material_nodes: solid_material_nodes
+        solid_material_nodes: solid_material_nodes,
+        style_residency: nil,
+        layout_residency: nil
     )
 
-fn _simple_web_layout_compose_document(
+fn _simple_web_layout_render_html_draw_ir_result_at_time(
     html: text, width: i32, height: i32, vector_fonts: bool,
     animation_time_ms: i64, scroll_y: i32,
     overlay: BrowserTextInputOverlay,
     animation_instances: [BrowserCssAnimationInstance],
-    images: [SimpleOsHostGpuImageResource],
-    extra_rules: Rules, depth: i32, deadline_us: i64
+    images: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutDrawIrResult:
     val render_start_us = rt_time_now_micros()
     val _phase_on = _web_phase_trace_enabled()
-    if deadline_us > 0:
-        _web_render_deadline_us = deadline_us
-    val budget_us = if _web_render_deadline_us > render_start_us:
-        _web_render_deadline_us - render_start_us
-    else:
-        1
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
+    val resolved_budget_ms = if env_override > 0: env_override else: default_budget_ms
+    _web_budget_begin(resolved_budget_ms)
+    val budget_us = resolved_budget_ms * 1000
     val nodes = parse_html(html)
     # Pass every parameter explicitly. An omitted trailing default was
     # observed taking a non-default value in the freestanding SimpleOS kernel
     # build (the `trace_stages` receipt fired from this call site even though
     # the only trace-enabled caller never ran), so this render path does not
     # rely on default-argument materialization.
-    val own_rules = extract_css_vw(html, width, false)
-    val rules = Rules(
-        group_parts: extra_rules.group_parts + own_rules.group_parts,
-        group_specificities: extra_rules.group_specificities + own_rules.group_specificities,
-        decls: extra_rules.decls + own_rules.decls,
-        important_decls: extra_rules.important_decls + own_rules.important_decls
-    )
+    val rules = extract_css_vw(html, width, false)
     # A document that tokenizes but yields no element nodes is always a defect,
     # never honest content: every downstream stage (style, layout, material
     # provenance) then degrades silently while the frame still reports
@@ -1815,7 +1688,7 @@ fn _simple_web_layout_compose_document(
         animation_registry, animation_schedule, animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, vector_fonts, scroll_y,
-        overlay, images, depth
+        overlay, images
     )
     if _phase_on:
         # "compose_shaping" -- _simple_web_layout_compose_retained builds the
@@ -1825,127 +1698,6 @@ fn _simple_web_layout_compose_document(
         # SECOND font-metric resolution per #text node distinct from style's.
         print "[web-phase] phase=compose_shaping elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
     _phase_composed
-
-pub class SimpleWebRetainedLayoutPreparation:
-    html: text
-    nodes: [HNode]
-    rules: Rules
-    child_index: HtmlChildIndex
-    base_styles: [Style]
-    styles: [Style]
-    animation_registry: KeyframeRegistry
-    animation_schedule: _SimpleWebAnimationSchedule
-    animation_property_work_count: i64
-    material_entries: [text]
-    material_counts: [i64]
-    cpu_material_nodes: [i32]
-    solid_material_nodes: [i32]
-    width: i32
-    height: i32
-    vector_fonts: bool
-    scroll_y: i32
-    overlay: BrowserTextInputOverlay
-    images: [SimpleOsHostGpuImageResource]
-
-pub fn simple_web_layout_prepare_retained(
-    html: text, width: i32, height: i32, vector_fonts: bool,
-    animation_time_ms: i64, scroll_y: i32,
-    overlay: BrowserTextInputOverlay,
-    animation_instances: [BrowserCssAnimationInstance],
-    images: [SimpleOsHostGpuImageResource]
-) -> SimpleWebRetainedLayoutPreparation:
-    val env_override = _web_render_budget_ms_env_override()
-    val area_floor_ms = (width as i64) * (height as i64) / 16
-    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
-    _web_budget_begin(if env_override > 0: env_override else: default_budget_ms)
-    val nodes = parse_html(html)
-    val rules = extract_css_vw(html, width, false)
-    val child_index = build_child_index(nodes)
-    var material_entries: [text] = ["", ""]
-    var material_counts: [i64] = [0, 0]
-    var cpu_material_nodes: [i32] = []
-    var solid_material_nodes: [i32] = []
-    val base_styles = compute_styles_with_material(
-        nodes, rules, child_index, false, vector_fonts,
-        material_entries, material_counts,
-        cpu_material_nodes, solid_material_nodes
-    )
-    var styles = base_styles
-    val animation_registry = _simple_web_extract_keyframes(html)
-    var animation_schedule = _SimpleWebAnimationSchedule(
-        animation_end_ms: -1, animation_next_ms: -1
-    )
-    var animation_property_work_count: i64 = 0
-    if animation_registry.entries.len() > 0:
-        val animation_frame_index = _simple_web_animation_frame_index(
-            styles, nodes, child_index, animation_registry,
-            animation_instances, false
-        )
-        animation_schedule = _simple_web_layout_animation_schedule(
-            styles, animation_time_ms, animation_instances,
-            animation_frame_index
-        )
-        if animation_time_ms >= 0:
-            val animation_apply = _apply_css_animations(
-                nodes, styles, animation_registry, animation_time_ms,
-                animation_instances, animation_frame_index
-            )
-            styles = animation_apply.styles
-            animation_property_work_count = animation_apply.property_work_count
-    styles = simple_web_resolve_collapsed_table_borders(
-        nodes, child_index, styles
-    )
-    SimpleWebRetainedLayoutPreparation(
-        html: html, nodes: nodes, rules: rules, child_index: child_index,
-        base_styles: base_styles, styles: styles,
-        animation_registry: animation_registry,
-        animation_schedule: animation_schedule,
-        animation_property_work_count: animation_property_work_count,
-        material_entries: material_entries, material_counts: material_counts,
-        cpu_material_nodes: cpu_material_nodes,
-        solid_material_nodes: solid_material_nodes,
-        width: width, height: height, vector_fonts: vector_fonts,
-        scroll_y: scroll_y, overlay: overlay, images: images
-    )
-
-pub fn simple_web_layout_empty_retained() -> LayoutResult:
-    LayoutResult(
-        bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [],
-        intrinsic_widths: [], height: 0
-    )
-
-pub fn simple_web_layout_compose_prepared(
-    prepared: SimpleWebRetainedLayoutPreparation,
-    raw_boxes: LayoutResult
-) -> SimpleWebLayoutDrawIrResult:
-    _simple_web_layout_compose_retained(
-        prepared.html, prepared.nodes, prepared.rules, prepared.child_index,
-        prepared.base_styles, prepared.styles, raw_boxes,
-        prepared.animation_registry, prepared.animation_schedule,
-        prepared.animation_property_work_count,
-        prepared.material_entries, prepared.material_counts,
-        prepared.cpu_material_nodes, prepared.solid_material_nodes,
-        prepared.width, prepared.height, prepared.vector_fonts,
-        prepared.scroll_y, prepared.overlay, prepared.images, 0
-    )
-
-fn _simple_web_layout_render_html_draw_ir_result_at_time(
-    html: text, width: i32, height: i32, vector_fonts: bool,
-    animation_time_ms: i64, scroll_y: i32,
-    overlay: BrowserTextInputOverlay,
-    animation_instances: [BrowserCssAnimationInstance],
-    images: [SimpleOsHostGpuImageResource]
-) -> SimpleWebLayoutDrawIrResult:
-    val env_override = _web_render_budget_ms_env_override()
-    val area_floor_ms = (width as i64) * (height as i64) / 16
-    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
-    val resolved_budget_ms = if env_override > 0: env_override else: default_budget_ms
-    _web_budget_begin(resolved_budget_ms)
-    _simple_web_layout_compose_document(
-        html, width, height, vector_fonts, animation_time_ms, scroll_y,
-        overlay, animation_instances, images, _web_empty_rules(), 0,
-        _web_render_deadline_us
-    )
 
 fn _simple_web_layout_render_html_draw_ir_result(html: text, width: i32, height: i32, vector_fonts: bool) -> SimpleWebLayoutDrawIrResult:
     _simple_web_layout_render_html_draw_ir_result_at_time(
@@ -2068,7 +1820,7 @@ pub fn simple_web_layout_rerender_retained(
         raw_boxes, prior.animation_registry, animation_schedule,
         animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
-        solid_material_nodes, width, height, true, scroll_y, overlay, images, 0
+        solid_material_nodes, width, height, true, scroll_y, overlay, images
     )
 
 pub fn simple_web_layout_render_html_draw_ir(html: text, width: i32, height: i32) -> DrawIrComposition:
