@@ -1452,3 +1452,37 @@ The displayed manual uses exactly these four steps:
 The scenario is a STATIC candidate until an admitted pure-Simple runner and
 docgen lane execute it. This bounded implementation invokes neither runtime,
 bootstrap, nor docgen and therefore makes no runtime PASS claim.
+
+## Checkable canceled-pointer focus preservation (2026-07-31)
+
+Canceled primary `pointerdown` suppresses the pointer's implicit focus default,
+not the same-target `click` or a checkbox's pre-activation/input/change
+defaults. The shared `BrowserSession` click dispatcher therefore selects a
+focus-preserving DOM default-action policy only while completing that canceled
+primary-pointer stream. Existing programmatic and keyboard click callers keep
+their prior focus policy.
+
+The complete production call chains are:
+
+- `HostedWebContentSession.dispatch_pointer_at -> BrowserSession primary
+  pointer completion -> focus-preserving DOM default action`; and
+- `HostedBrowserRendererRegistry.dispatch_pointer_at ->
+  HostedBrowserRendererProcess.begin_pointer -> browser renderer protocol ->
+  HostedBrowserRendererWorkerSession._dispatch_pointer -> BrowserSession
+  primary pointer completion -> focus-preserving DOM default action`.
+
+| Requirement | Executable SSpec | Manual | Deterministic oracle |
+|---|---|---|---|
+| REQ-WEB-BROWSER-007 | `test/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.spl` | `doc/06_spec/03_system/app/browser/feature/browser_checkable_canceled_pointer_focus_spec.md` | exact `focus,pointerdown,click,input,change,` trace; no blur/focusout |
+| REQ-WEB-BROWSER-008 | same | same | hosted/worker focused target `keep`, checked checkbox, and five callbacks |
+
+The displayed manual uses exactly these four steps:
+
+1. `Open the same text input and checkbox in hosted and isolated renderers`
+2. `Focus both text inputs through the primary pointer`
+3. `Activate both checkboxes after canceling their pointerdown events`
+4. `Observe checkable order and preserved text focus`
+
+The scenario is a STATIC candidate until an admitted pure-Simple runner and
+docgen lane execute it. This bounded implementation invokes neither runtime,
+bootstrap, nor docgen and therefore makes no runtime PASS claim.

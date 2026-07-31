@@ -35,7 +35,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_checked_radio_id_for_target, be_dom_form_owner_id,
     be_dom_default_submitter_id, be_dom_form_allows_direct_implicit_submit,
     be_dom_input_blocks_implicit_submission, be_dom_next_focus_route_id,
-    be_dom_default_action_to_id
+    be_dom_default_action_to_id,
+    be_dom_apply_default_action_to_id_without_focus
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build, html_tree_builder_build_with_scripts
@@ -1312,7 +1313,7 @@ impl BrowserSession:
     me dispatch_dom_event(target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
         self._dispatch_dom_event_with_payload(
             target_id, event_type, bubbles, cancelable, "", "", false,
-            nil, "", false
+            nil, "", false, true
         )
 
     me dispatch_dom_primary_pointer_down(
@@ -1354,8 +1355,9 @@ impl BrowserSession:
                 target_id, "mouseup", true, true
             )
         if activate_click:
-            val _ = self.dispatch_dom_event(
-                target_id, "click", true, true
+            val _ = self._dispatch_dom_event_with_payload(
+                target_id, "click", true, true, "", "", false,
+                nil, "", false, not suppress_compat_mouse
             )
 
     me _dispatch_dom_input_event(
@@ -1364,13 +1366,13 @@ impl BrowserSession:
     ) -> BeDomEventDispatch:
         self._dispatch_dom_event_with_payload(
             target_id, event_type, bubbles, cancelable, "", "", false,
-            input_data, input_type, false
+            input_data, input_type, false, true
         )
 
     me _dispatch_dom_event_with_payload(
         target_id: text, event_type: text, bubbles: bool, cancelable: bool,
         key: text, code: text, shift_key: bool, input_data: text?,
-        input_type: text, is_composing: bool
+        input_type: text, is_composing: bool, allow_focus_default: bool
     ) -> BeDomEventDispatch:
         val target_route_id = _browser_session_dom_route_id(
             self.current_dom, target_id
@@ -1382,7 +1384,10 @@ impl BrowserSession:
         var checked_radio_before = ""
         if checkable_action != "":
             val focused_id = be_dom_focused_route_id(self.current_dom)
-            if focused_id != "" and focused_id != target_route_id:
+            if (
+                allow_focus_default and focused_id != "" and
+                focused_id != target_route_id
+            ):
                 val _ = self._blur_dom_focus(focused_id)
             val path = be_dom_find_path_to_id(self.current_dom, target_route_id)
             if path.len() > 0:
@@ -1393,9 +1398,14 @@ impl BrowserSession:
                 checked_radio_before = be_dom_checked_radio_id_for_target(
                     self.current_dom, target_route_id
                 )
-            self.current_dom = script_host_apply_action_to_id(
-                self.current_dom, target_route_id, checkable_action, true
-            )
+            self.current_dom = if allow_focus_default:
+                script_host_apply_action_to_id(
+                    self.current_dom, target_route_id, checkable_action, true
+                )
+            else:
+                be_dom_apply_default_action_to_id_without_focus(
+                    self.current_dom, target_route_id, checkable_action
+                )
             self._sync_runtime_body_from_dom()
         val normalized_event_type = normalize_dom_event_type(event_type)
         var focus_transitioned = false
@@ -1584,7 +1594,7 @@ impl BrowserSession:
             var focus_changed = focus_transitioned
             if (
                 _browser_session_focus_default(dispatch.default_action) and
-                not focus_transitioned
+                not focus_transitioned and allow_focus_default
             ):
                 val focused_id = be_dom_focused_route_id(self.current_dom)
                 focus_changed = focused_id != dispatch.target_route_id
@@ -1611,16 +1621,28 @@ impl BrowserSession:
                     self._append_warning("default navigation blocked: {e}")
                 return dispatch
             if live_checkable_action == "":
-                self.current_dom = script_host_apply_action_to_id(
-                    self.current_dom, dispatch.target_route_id,
-                    dispatch.default_action, true
-                )
+                self.current_dom = if allow_focus_default:
+                    script_host_apply_action_to_id(
+                        self.current_dom, dispatch.target_route_id,
+                        dispatch.default_action, true
+                    )
+                else:
+                    be_dom_apply_default_action_to_id_without_focus(
+                        self.current_dom, dispatch.target_route_id,
+                        dispatch.default_action
+                    )
             else:
                 if not preactivation_matches_live:
-                    self.current_dom = script_host_apply_action_to_id(
-                        self.current_dom, dispatch.target_route_id,
-                        live_checkable_action, true
-                    )
+                    self.current_dom = if allow_focus_default:
+                        script_host_apply_action_to_id(
+                            self.current_dom, dispatch.target_route_id,
+                            live_checkable_action, true
+                        )
+                    else:
+                        be_dom_apply_default_action_to_id_without_focus(
+                            self.current_dom, dispatch.target_route_id,
+                            live_checkable_action
+                        )
                 self._sync_body_html_from_dom()
                 val _ = self.dispatch_dom_event(
                     dispatch.target_route_id, "input", true, false
@@ -1662,7 +1684,8 @@ impl BrowserSession:
             return Err("DOM keyboard target not found")
         val key_dispatch = self._dispatch_dom_event_with_payload(
             target_id, "keydown", true, true, key,
-            browser_dom_keyboard_code_from_key(key), false, nil, "", false
+            browser_dom_keyboard_code_from_key(key), false, nil, "", false,
+            true
         )
         if key_dispatch.event.default_prevented:
             return Ok(key_dispatch)
@@ -1694,7 +1717,7 @@ impl BrowserSession:
         val event_type = if pressed: "keydown" else: "keyup"
         val key_dispatch = self._dispatch_dom_event_with_payload(
             target_id, event_type, true, true, key, code, shift_key,
-            nil, "", false
+            nil, "", false, true
         )
         if key_dispatch.event.default_prevented:
             self.pending_space_activation_target = ""
@@ -1801,7 +1824,7 @@ impl BrowserSession:
                 if dom_text_control_selectable(target):
                     val key_dispatch = self._dispatch_dom_event_with_payload(
                         target_id, "keydown", true, true,
-                        key, code, shift_key, nil, "", false
+                        key, code, shift_key, nil, "", false, true
                     )
                     if key_dispatch.event.default_prevented:
                         return Ok(key_dispatch)
@@ -1873,7 +1896,7 @@ impl BrowserSession:
             )
             val key_dispatch = self._dispatch_dom_event_with_payload(
                 target_id, "keydown", true, true, key, code, shift_key,
-                nil, "", false
+                nil, "", false, true
             )
             if key_dispatch.event.default_prevented:
                 return Ok(key_dispatch)
