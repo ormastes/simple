@@ -1,0 +1,83 @@
+"""Deterministic helpers for request planning and seed generation."""
+
+use std.common.compute.placement_contracts.semantic.{
+    Hash256,
+    ObjectSetView,
+    PlacementRequestArenaRef
+}
+use std.common.compute.placement_contracts.planner.{
+    PlacementBudget,
+    PlacementRequest,
+    CostEstimate,
+    PlacementPlan
+}
+use std.common.compute.placement_contracts.handles.{ObjectRef, object_ref}
+use std.common.compute.placement_contracts.semantic.{ReservationArena, TransferArena, EvictionArena, PrefetchArena, LeaseArena}
+
+fn planner_request_count(requests: [PlacementRequest]) -> i64:
+    requests.len()
+
+fn plan_request_digest(requests: [PlacementRequest], budget: PlacementBudget) -> Hash256:
+    """Stable digest for identical planning inputs."""
+    val summary = request_signature(requests, budget)
+    Hash256(value: summary)
+
+fn make_deterministic_plan(
+    requests: [PlacementRequest],
+    budget: PlacementBudget
+) -> PlacementPlan:
+    val request_count = requests.len()
+    val estimate = CostEstimate(
+        cpu_work: request_count as u64,
+        simd_work: request_count as u64,
+        gpu_work: request_count as u64,
+        host_to_device_bytes: budget.staging_bytes,
+        device_to_host_bytes: budget.host_pinned_bytes,
+        ssd_read_bytes: budget.driver_queue_bytes,
+        ssd_write_bytes: budget.manifest_cache_bytes,
+        synchronization_points: 1,
+        predicted_latency_us: if request_count == 0: 0 else: (request_count * 17) as u64,
+        confidence_milli: 500
+    )
+
+    val seed = plan_request_digest(requests, budget)
+    PlacementPlan(
+        reservations: object_ref(object_slot: 0, generation: 1),
+        transfers: object_ref(object_slot: 1, generation: 1),
+        evictions: object_ref(object_slot: 2, generation: 1),
+        prefetches: object_ref(object_slot: 3, generation: 1),
+        leases: object_ref(object_slot: 4, generation: 1),
+        estimated_cost: estimate,
+        receipt_seed: seed
+    )
+
+fn request_signature(requests: [PlacementRequest], budget: PlacementBudget) -> text:
+    var seed = budget.device_bytes.to_text()
+    seed = seed + "|" + budget.host_pinned_bytes.to_text()
+    seed = seed + "|" + budget.host_hot_bytes.to_text()
+    seed = seed + "|" + budget.staging_bytes.to_text()
+    seed = seed + "|" + budget.driver_queue_bytes.to_text()
+    seed = seed + "|" + budget.runtime_base_bytes.to_text()
+
+    var i = 0
+    while i < requests.len():
+        val req = requests[i]
+        seed = seed + "|"
+        seed = seed + req.object.object_slot.to_text()
+        seed = seed + "/"
+        seed = seed + req.object.generation.to_text()
+        seed = seed + ":"
+        seed = seed + req.expected_reuse_distance.value.to_text()
+        seed = seed + ":"
+        seed = seed + req.transfer_cost_hint.value.to_text()
+        i = i + 1
+    seed
+
+fn make_plan_from_requests(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
+    # Placeholder: arena-backed requests are validated as metadata-only in this phase.
+    # Implementations that consume a concrete request arena should project them to
+    # a dense array and call make_deterministic_plan.
+    make_deterministic_plan([], budget)
+
+export planner_request_count, plan_request_digest, make_deterministic_plan
+export request_signature, make_plan_from_requests

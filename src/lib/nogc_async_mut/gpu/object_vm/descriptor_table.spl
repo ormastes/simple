@@ -1,0 +1,240 @@
+"""Object VM descriptors and lease contracts for GPU MMU residency simulation."""
+
+use std.common.compute.placement_contracts.handles.{ObjectRef, ResidentView, object_ref}
+use std.common.compute.placement_contracts.semantic.{
+    AnyObject,
+    ResidencyTier,
+    PersistencePolicy
+}
+use std.common.compute.placement_contracts.storage.{ArtifactId, artifact_id, artifact_id_valid}
+use std.common.compute.placement_contracts.backend.{PlacementError}
+
+class ObjectDescriptor:
+    """Per-arena descriptor for object residency state."""
+
+    object_slot: u32
+    generation: u32
+    size_bytes: u64
+    residency_tier: ResidencyTier
+    persistence: PersistencePolicy
+    artifact_id: ArtifactId
+    lease_epoch: u32
+    active_leases: i64
+    pin_count: i64
+    in_flight_transfers: i64
+    dirty: bool
+
+class DescriptorTable:
+    """Arena/shard descriptor table.
+
+    One descriptor per arena slot; generation and lease epoch are explicit.
+    """
+
+    descriptors: [ObjectDescriptor]
+    next_generation: u32
+
+    static fn new() -> DescriptorTable:
+        DescriptorTable(descriptors: [], next_generation: 1)
+
+    me fn size() -> i64:
+        self.descriptors.len()
+
+    me fn allocate(
+        bytes_len: u64,
+        tier: ResidencyTier,
+        persistence: PersistencePolicy,
+        artifact: ArtifactId
+    ) -> ObjectRef<AnyObject>:
+        """Create a descriptor and return the typed object reference."""
+        val slot = self.descriptors.len() as u32
+        val generation = self.next_generation
+        self.next_generation = self.next_generation + 1
+        self.descriptors.push(ObjectDescriptor(
+            object_slot: slot,
+            generation: generation,
+            size_bytes: bytes_len,
+            residency_tier: tier,
+            persistence: persistence,
+            artifact_id: artifact,
+            lease_epoch: 0,
+            active_leases: 0,
+            pin_count: 0,
+            in_flight_transfers: 0,
+            dirty: false
+        ))
+        object_ref(object_slot: slot, generation: generation)
+
+    me fn release(self, object: ObjectRef<AnyObject>) -> bool:
+        """Logical free: removes slot by tombstoning descriptor metadata only."""
+        val index = _descriptor_index(self, object)
+        if index < 0:
+            false
+        else:
+            val idx = index as i64
+            val row = self.descriptors[idx]
+            self.descriptors[idx] = ObjectDescriptor(
+                object_slot: row.object_slot,
+                generation: row.generation + 1,
+                size_bytes: 0,
+                residency_tier: row.residency_tier,
+                persistence: row.persistence,
+                artifact_id: artifact_id(digest: "", byte_len: 0),
+                lease_epoch: 0,
+                active_leases: 0,
+                pin_count: 0,
+                in_flight_transfers: 0,
+                dirty: false
+            )
+            true
+
+    fn descriptor(self, object: ObjectRef<AnyObject>) -> ObjectDescriptor?:
+        val index = _descriptor_index(self, object)
+        if index < 0:
+            nil
+        else:
+            Some(self.descriptors[index as i64])
+
+    fn descriptor_mut(self, object: ObjectRef<AnyObject>) -> ObjectDescriptor?:
+        # Mirrors descriptor() so callers can read-before-write using caller side updates.
+        self.descriptor(object)
+
+    me fn acquire_lease<T>(self, object: ObjectRef<T>) -> Result<ResidentView<T>, PlacementError>:
+        val index = _descriptor_index(self, object)
+        if index < 0:
+            return Result.Err(PlacementError.StaleHandle)
+
+        val idx = index as i64
+        val d = self.descriptors[idx]
+        if d.generation != object.generation:
+            return Result.Err(PlacementError.StaleHandle)
+        if not artifact_id_valid(d.artifact_id):
+            return Result.Err(PlacementError.CorruptArtifact)
+
+        val new_epoch = d.lease_epoch + 1
+        self.descriptors[idx] = ObjectDescriptor(
+            object_slot: d.object_slot,
+            generation: d.generation,
+            size_bytes: d.size_bytes,
+            residency_tier: d.residency_tier,
+            persistence: d.persistence,
+            artifact_id: d.artifact_id,
+            lease_epoch: new_epoch,
+            active_leases: d.active_leases + 1,
+            pin_count: d.pin_count,
+            in_flight_transfers: d.in_flight_transfers,
+            dirty: d.dirty
+        )
+
+        Result.Ok(ResidentView(
+            device_address: descriptor_table_epoch_key(d.object_slot, new_epoch),
+            length: d.size_bytes,
+            object_slot: d.object_slot,
+            lease_epoch: new_epoch
+        ))
+
+    me fn release_lease<T>(self, view: ResidentView<T>) -> bool:
+        val object = object_ref(object_slot: view.object_slot, generation: self._current_generation(view.object_slot))
+        val index = _descriptor_index(self, object)
+        if index < 0:
+            false
+        else:
+            val idx = index as i64
+            val d = self.descriptors[idx]
+            if d.lease_epoch != view.lease_epoch or d.object_slot != view.object_slot:
+                return false
+            if d.active_leases > 0:
+                self.descriptors[idx] = ObjectDescriptor(
+                    object_slot: d.object_slot,
+                    generation: d.generation,
+                    size_bytes: d.size_bytes,
+                    residency_tier: d.residency_tier,
+                    persistence: d.persistence,
+                    artifact_id: d.artifact_id,
+                    lease_epoch: d.lease_epoch,
+                    active_leases: d.active_leases - 1,
+                    pin_count: d.pin_count,
+                    in_flight_transfers: d.in_flight_transfers,
+                    dirty: d.dirty
+                )
+            true
+
+    me fn pin(self, object: ObjectRef<AnyObject>, delta: i64) -> bool:
+        val index = _descriptor_index(self, object)
+        if index < 0:
+            false
+        else:
+            val idx = index as i64
+            val d = self.descriptors[idx]
+            val next = d.pin_count + delta
+            self.descriptors[idx] = ObjectDescriptor(
+                object_slot: d.object_slot,
+                generation: d.generation,
+                size_bytes: d.size_bytes,
+                residency_tier: d.residency_tier,
+                persistence: d.persistence,
+                artifact_id: d.artifact_id,
+                lease_epoch: d.lease_epoch,
+                active_leases: d.active_leases,
+                pin_count: next,
+                in_flight_transfers: d.in_flight_transfers,
+                dirty: d.dirty
+            )
+            true
+
+    me fn touch(self, object: ObjectRef<AnyObject>, active_transfer_delta: i64) -> bool:
+        val index = _descriptor_index(self, object)
+        if index < 0:
+            false
+        else:
+            val idx = index as i64
+            val d = self.descriptors[idx]
+            val next = d.in_flight_transfers + active_transfer_delta
+            self.descriptors[idx] = ObjectDescriptor(
+                object_slot: d.object_slot,
+                generation: d.generation,
+                size_bytes: d.size_bytes,
+                residency_tier: d.residency_tier,
+                persistence: d.persistence,
+                artifact_id: d.artifact_id,
+                lease_epoch: d.lease_epoch,
+                active_leases: d.active_leases,
+                pin_count: d.pin_count,
+                in_flight_transfers: next,
+                dirty: d.dirty
+            )
+            true
+
+    me fn is_protected(self, object: ObjectRef<AnyObject>) -> bool:
+        val row_opt = self.descriptor(object)
+        match row_opt:
+            Some(d):
+                d.pin_count > 0 or d.in_flight_transfers > 0 or d.active_leases > 0
+            nil:
+                false
+
+    me fn _current_generation(self, slot: u32) -> u32:
+        if slot >= self.descriptors.len() as u32:
+            0
+        else:
+            self.descriptors[slot as i64].generation
+
+fn _descriptor_index(table: DescriptorTable, object: ObjectRef<AnyObject>) -> i32:
+    if object.object_slot >= table.descriptors.len() as u32:
+        -1
+    else:
+        val idx = object.object_slot as i64
+        val row = table.descriptors[idx]
+        if row.generation == object.generation:
+            idx as i32
+        else:
+            -1
+
+fn descriptor_table_epoch_key(slot: u32, lease_epoch: u32) -> u64:
+    """Deterministic opaque address token keyed by slot and lease epoch."""
+    (slot as u64 << 32) + lease_epoch as u64
+
+fn descriptor_table_is_stale(ref_a: ObjectRef<AnyObject>, ref_b: ObjectRef<AnyObject>) -> bool:
+    ref_a.object_slot != ref_b.object_slot or ref_a.generation != ref_b.generation
+
+export ObjectDescriptor, DescriptorTable
+export descriptor_table_epoch_key, descriptor_table_is_stale
