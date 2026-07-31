@@ -60,9 +60,22 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
             continue
         val base_level = if warning.code == "COLL001" or warning.code == "COLL006": LintLevel.Deny else: LintLevel.Warn
         val level = apply_config_level(config, warning.code, base_level)
-        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+        var lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
             .with_fix(warning.hint)
-        results.push(LintResult.new(path, lint_cli_find_fn_line(lines, warning.item_name), 0, lint))
+        # Locate the offending line textually; the AST span pool is empty on
+        # this path (verified: expr/stmt spans all read 0 and span_is_valid is
+        # false), so line recovery here works the same way lint_cli_find_fn_line
+        # already does.
+        val hit = collection_fix_line(lines, warning.code)
+        var coll_line = lint_cli_find_fn_line(lines, warning.item_name)
+        if hit >= 0:
+            coll_line = hit + 1
+            match collection_easy_fix(path, lines, warning.code, hit):
+                case Some(fix):
+                    lint = lint.with_easy_fix(fix)
+                case nil:
+                    val _ = 0
+        results.push(LintResult.new(path, coll_line, 0, lint))
     for warning in check_stub_impl(decls):
         # STUB003 remains the generic source lint so one placeholder emits once.
         if warning.code != "STUB001" and warning.code != "STUB002":
@@ -111,6 +124,105 @@ fn lint_cli_find_fn_line(lines: [text], fn_name: text) -> i64:
                 return i + 1
         i = i + 1
     0
+
+# ---------------------------------------------------------------------------
+# Machine-applicable fixes for the collection-efficiency lints (COLL0xx).
+#
+# Only rules with a deterministic, statement-local rewrite get an EasyFix.
+# The structural rules stay hint-only on purpose:
+#   COLL002 needs a hoisted HashSet (blocked on a generic HashMap<K,V> —
+#           today's pure HashSet is text-keyed only)
+#   COLL003 needs an index cursor rewrite of the whole loop
+#   COLL005 needs predicate merging across two closures
+#   COLL006 needs a builder declared outside the loop
+# Those land with the CollectionPlan planner. See
+# doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md
+# ---------------------------------------------------------------------------
+
+# Split `lhs = rhs` on a source line, returning ("", "") when the line is not a
+# plain assignment to a simple lvalue path. A target carrying a call, index or
+# space is not safely reconstructible from source text, so it is rejected here.
+fn collection_split_assign(line: text) -> (text, text):
+    if line.trim().starts_with("#"):
+        return ("", "")
+    val eq = line.index_of(" = ")
+    if eq <= 0:
+        return ("", "")
+    val lhs = line.slice(0, eq).trim()
+    val rhs = line.slice(eq + 3, line.len()).trim()
+    if lhs == "" or lhs.contains(" ") or lhs.contains("(") or lhs.contains("["):
+        return ("", "")
+    (lhs, rhs)
+
+# The rewritten form for one COLL rule, or "" when the line does not match the
+# exact shape the rule fixes.
+fn collection_rewrite_for(code: text, lhs: text, rhs: text) -> text:
+    if code == "COLL001":
+        # arr = arr + [x]  ->  arr.push(x)
+        val prefix = "{lhs} + ["
+        if not rhs.starts_with(prefix) or not rhs.ends_with("]"):
+            return ""
+        val inner = rhs.slice(prefix.len(), rhs.len() - 1).trim()
+        # A multi-element literal needs one push per element; leave it alone.
+        if inner == "" or inner.contains(","):
+            return ""
+        return "{lhs}.push({inner})"
+    if code == "COLL007":
+        # arr = arr[0..arr.len()-1]  ->  arr.pop()
+        if rhs.replace(" ", "") != "{lhs}[0..{lhs}.len()-1]":
+            return ""
+        return "{lhs}.pop()"
+    ""
+
+# Index of the single line this rule can rewrite, or -1.
+#
+# ponytail: requires a file-unique match rather than tracking fn scope. Two
+# identical concat lines in one file yield no fix (the warning still fires).
+# Scope tracking becomes worthwhile once the AST span pool is populated on this
+# path — see doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md
+fn collection_fix_line(lines: [text], code: text) -> i64:
+    var found = -1
+    var i = 0
+    while i < lines.len():
+        val parts = collection_split_assign(lines[i])
+        if parts.0 != "" and collection_rewrite_for(code, parts.0, parts.1) != "":
+            if found >= 0:
+                return -1
+            found = i
+        i = i + 1
+    found
+
+fn collection_easy_fix(file_path: text, lines: [text], code: text, line_idx: i64) -> EasyFix?:
+    if line_idx < 0 or line_idx >= lines.len():
+        return nil
+    val line = lines[line_idx]
+    val parts = collection_split_assign(line)
+    val replacement_text = collection_rewrite_for(code, parts.0, parts.1)
+    if replacement_text == "":
+        return nil
+
+    # Byte range of this line, preserving its original indentation.
+    var start = 0
+    var i = 0
+    while i < line_idx:
+        start = start + lines[i].len() + 1
+        i = i + 1
+    # Byte offsets, not character offsets: `.len()` is bytes and the fix
+    # pipeline slices the source by byte, so index_of on the trimmed text gives
+    # the indent width consistently even on a non-ASCII line.
+    val trimmed = line.trim()
+    val indent = line.index_of(trimmed)
+    val text_start = start + indent
+    val text_end = text_start + trimmed.len()
+
+    # COLL007 changes a rebind into a discarding `.pop()` call, so it is Likely
+    # rather than Certain: correct, but worth a human glance.
+    val confidence = if code == "COLL001": FixConfidence.Certain else: FixConfidence.Likely
+    var fix = EasyFix.create(code, "replace `{trimmed}` with `{replacement_text}`", confidence)
+    fix.add_replacement(Replacement.create(
+        file_path, text_start, text_end, line_idx + 1, indent, replacement_text
+    ))
+    Some(fix)
 
 fn main() -> Int:
     val args = get_args()
