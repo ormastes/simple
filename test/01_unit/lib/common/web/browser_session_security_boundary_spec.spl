@@ -311,6 +311,36 @@ describe "BrowserSession production security boundary":
             "cross-origin fetch blocked: https://api.test/private"
         )
 
+    it "preserves native fetch credentials through the BrowserSession queue":
+        step("Enable the broker boundary so every credential mode is observable")
+        var session = BrowserSession.new()
+        session.broker_network_policy = true
+        expect(session.open_html(
+            "https://safe.test/app", "<html><body>safe</body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Queue omit same-origin and include without downgrading")
+        for credentials in ["omit", "same-origin", "include"]:
+            expect(session.eval_script(
+                "fetch('https://api.test/{credentials}', " +
+                "{{credentials:'{credentials}'}})"
+            ).is_ok()).to_be(true)
+            match session.take_pending_request():
+                nil:
+                    fail("Expected native {credentials} fetch request")
+                Some(request):
+                    expect(request.credentials).to_equal(credentials)
+
+        step("Normalize an unsupported credential token to the current default")
+        expect(session.eval_script(
+            "fetch('https://api.test/default', {credentials:'invalid'})"
+        ).is_ok()).to_be(true)
+        match session.take_pending_request():
+            nil:
+                fail("Expected default-credential fetch request")
+            Some(request):
+                expect(request.credentials).to_equal("same-origin")
+
     it "bounds and deduplicates retained browser warnings":
         step("Append duplicate, excessive, and oversized browser warnings")
         var session = BrowserSession.new()
