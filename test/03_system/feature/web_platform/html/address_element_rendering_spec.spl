@@ -1,0 +1,217 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003
+# @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""# HTML address element rendering
+
+This bounded scenario proves the selected HTML user-agent profile for
+`address`: block layout and italic typography. Standalone
+`font-style:normal` exercises the direct declaration path; adding
+`visibility:visible` forces full Style reconstruction.
+
+All variants lower through canonical Web semantics/style/layout and WebIR into
+DrawIrComposition and Engine2D. Explicit italic and normal `div` controls make
+the raster oracle independent of private font paths. Static review is not
+runtime PASS evidence.
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_path_to_id, be_dom_get_tag
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+
+val ADDRESS_WIDTH: i32 = 80
+val ADDRESS_HEIGHT: i32 = 20
+val ADDRESS_SAMPLE: text = "iiiiWWWW"
+
+fn _address_fixture(tag: text, declarations: text) -> text:
+    val style = if declarations == "":
+        ""
+    else:
+        " style='" + declarations + "'"
+    (
+        "<style>html,body{margin:0;width:80px;height:20px;background:#fff}" +
+        "#target{width:80px;height:16px;background:#fef3c7}</style>" +
+        "<body id='body'><" + tag + " id='target'" + style + ">" +
+        ADDRESS_SAMPLE + "</" + tag + "></body>"
+    )
+
+fn _address_node_index(nodes: [HNode], component_id: text) -> i32:
+    var index = 0
+    for node in nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing address Web semantic node: {component_id}")
+    -1
+
+fn _address_command(
+    composition: DrawIrComposition, component_id: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command
+    fail("missing address Draw IR command: {component_id}")
+    composition.batches[0].commands[0]
+
+fn _address_text_command(composition: DrawIrComposition) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == "text" and command.text_value == ADDRESS_SAMPLE:
+                return command
+    fail("missing address Draw IR text command")
+    composition.batches[0].commands[0]
+
+fn _address_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing address Draw IR style: {key}")
+    ""
+
+fn _address_geometry(result: SimpleWebLayoutDrawIrResult) -> [i32]:
+    val index = _address_node_index(result.hit_index.nodes, "target")
+    [
+        result.hit_index.boxes.bx[index], result.hit_index.boxes.by[index],
+        result.hit_index.boxes.bw[index], result.hit_index.boxes.bh[index]
+    ]
+
+fn _address_pixels(result: SimpleWebLayoutDrawIrResult) -> [u32]:
+    val raster = Engine2dCompositorBackend.create_named(
+        ADDRESS_WIDTH, ADDRESS_HEIGHT, "software"
+    )
+    val frame = raster.render_draw_ir_composition(result.composition, [])
+    raster.shutdown()
+    expect(frame.skipped_command_count).to_equal(0)
+    expect(frame.pixels.len()).to_equal(ADDRESS_WIDTH * ADDRESS_HEIGHT)
+    frame.pixels
+
+fn _address_pixel_difference_count(left: [u32], right: [u32]) -> i32:
+    if left.len() != right.len():
+        fail("address pixel frames must have equal dimensions")
+    var count = 0
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            count = count + 1
+        index = index + 1
+    count
+
+describe "Production address element rendering":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should lower address UA typography and both overrides to pixels":
+        step("Parse address as a semantic body child")
+        val semantic = html_tree_builder_build(
+            "<body id='body'><address id='target'>A</address></body>"
+        )
+        val body_path = be_dom_find_path_to_id(semantic, "body")
+        val address_path = be_dom_find_path_to_id(semantic, "target")
+        expect(address_path.len()).to_be_greater_than(1)
+        expect(be_dom_get_tag(address_path[address_path.len() - 1])).to_equal(
+            "address"
+        )
+        expect(address_path[address_path.len() - 2].node_id).to_equal(
+            body_path[body_path.len() - 1].node_id
+        )
+
+        step("Resolve address UA typography through both style paths")
+        val selected = simple_web_layout_render_html_draw_ir_result(
+            _address_fixture("address", ""), ADDRESS_WIDTH, ADDRESS_HEIGHT
+        )
+        val italic = simple_web_layout_render_html_draw_ir_result(
+            _address_fixture("div", "font-style:italic"),
+            ADDRESS_WIDTH, ADDRESS_HEIGHT
+        )
+        val dispatch = simple_web_layout_render_html_draw_ir_result(
+            _address_fixture("address", "font-style:normal"),
+            ADDRESS_WIDTH, ADDRESS_HEIGHT
+        )
+        val full = simple_web_layout_render_html_draw_ir_result(
+            _address_fixture(
+                "address", "font-style:normal;visibility:visible"
+            ),
+            ADDRESS_WIDTH, ADDRESS_HEIGHT
+        )
+        val normal = simple_web_layout_render_html_draw_ir_result(
+            _address_fixture("div", "font-style:normal"),
+            ADDRESS_WIDTH, ADDRESS_HEIGHT
+        )
+        val selected_index = _address_node_index(
+            selected.hit_index.nodes, "target"
+        )
+        val dispatch_index = _address_node_index(
+            dispatch.hit_index.nodes, "target"
+        )
+        val full_index = _address_node_index(full.hit_index.nodes, "target")
+        expect(selected.hit_index.styles[selected_index].display).to_equal(
+            "block"
+        )
+        expect(
+            selected.hit_index.styles[selected_index].font_style_italic
+        ).to_be(true)
+        expect(
+            dispatch.hit_index.styles[dispatch_index].font_style_italic
+        ).to_be(false)
+        expect(full.hit_index.styles[full_index].font_style_italic).to_be(false)
+        expect(_address_geometry(selected)).to_equal([0, 0, 80, 16])
+        expect(_address_geometry(dispatch)).to_equal([0, 0, 80, 16])
+        expect(_address_geometry(full)).to_equal([0, 0, 80, 16])
+
+        step("Emit absolute address Draw IR geometry")
+        val selected_box = _address_command(selected.composition, "target")
+        val dispatch_box = _address_command(dispatch.composition, "target")
+        val full_box = _address_command(full.composition, "target")
+        expect([
+            selected_box.x, selected_box.y,
+            selected_box.width, selected_box.height
+        ]).to_equal([0, 0, 80, 16])
+        expect(selected_box.kind).to_equal("rect")
+        expect(selected_box.color).to_equal(0xFFFEF3C7u32)
+        expect(_address_style(selected_box, "tag")).to_equal("address")
+        expect(_address_style(selected_box, "display")).to_equal("block")
+        expect(_address_style(selected_box, "font-style")).to_equal("italic")
+        expect(_address_style(dispatch_box, "font-style")).to_equal("normal")
+        expect(_address_style(full_box, "font-style")).to_equal("normal")
+        val selected_text = _address_text_command(selected.composition)
+        val dispatch_text = _address_text_command(dispatch.composition)
+        val full_text = _address_text_command(full.composition)
+        expect([selected_text.x, selected_text.y]).to_equal([0, 0])
+        expect(_address_style(selected_text, "font-style")).to_equal("italic")
+        expect(_address_style(dispatch_text, "font-style")).to_equal("normal")
+        expect(_address_style(full_text, "font-style")).to_equal("normal")
+
+        step("Rasterize address typography with exact pixel controls")
+        val selected_pixels = _address_pixels(selected)
+        val italic_pixels = _address_pixels(italic)
+        val dispatch_pixels = _address_pixels(dispatch)
+        val full_pixels = _address_pixels(full)
+        val normal_pixels = _address_pixels(normal)
+        expect(selected_pixels[15 * ADDRESS_WIDTH + 79]).to_equal(
+            0xFFFEF3C7u32
+        )
+        expect(selected_pixels[18 * ADDRESS_WIDTH + 1]).to_equal(
+            0xFFFFFFFFu32
+        )
+        expect(_address_pixel_difference_count(
+            selected_pixels, italic_pixels
+        )).to_equal(0)
+        expect(_address_pixel_difference_count(
+            dispatch_pixels, normal_pixels
+        )).to_equal(0)
+        expect(_address_pixel_difference_count(
+            full_pixels, normal_pixels
+        )).to_equal(0)
+        expect(_address_pixel_difference_count(
+            selected_pixels, dispatch_pixels
+        )).to_be_greater_than(0)
