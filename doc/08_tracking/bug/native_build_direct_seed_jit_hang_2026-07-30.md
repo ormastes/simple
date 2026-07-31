@@ -469,3 +469,49 @@ condition for the default-mode path" is inferred from the message text
 and remains unproven. Confirming it requires one uninterrupted run to
 completion, or a run with `--timeout` raised, or a shrunken `--source`
 set that completes quickly. That is the cheapest decisive next step.
+
+## 2026-07-31 — MEASURED: not a hang, and the diagnostic's mechanism is WRONG
+
+The section above took the parent's error message at face value. A direct
+measurement refutes its mechanism and the "hang" framing together.
+
+**Method that finally worked:** run the worker DIRECTLY
+(`native_build_worker.spl`, `SIMPLE_NATIVE_BUILD_WORKER=1`, `--timeout 3000`,
+`stdbuf -oL -eL`, `SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1 --verbose`) to get live
+streaming output instead of the parent's exit-buffered capture.
+
+**IT TERMINATES.** 1341s (~22.4 min), deterministically, with a real semantic
+compile error (`method 'len' not found on type 'str'`) — not a timeout, not a
+hang, and far under the 7200s budget.
+
+**Breakdown:**
+- ~18 of the 22 min is the `--entry-closure` BFS import-resolution walk
+  (`_native_build_entry_closure`) crawling 484 files — about **2.2 s/file** for
+  what is documented as a cheap, purely syntactic scan.
+- Only then does `Driver start: inputs=484` fire; the driver parsed ~5 modules
+  (~4 min) before hitting the semantic error.
+
+**Three corrections to the message's own text:**
+1. **"Loading the whole compiler + LLVM import graph" is NOT the slow part.** An
+   import-graph-only probe (`use app.io._CliCompile.compile_targets.{cli_native_build}`
+   with no build call) loaded that entire graph in **24 s**.
+2. **`--entry-closure` DOES narrow the input set** — 484 files, not the
+   multi-thousand-file tree. It works as designed.
+3. **Raising `--timeout` does not yield a successful build.** A separate real
+   semantic bug blocks success regardless of timeout or source-set size.
+
+**WHY EIGHT INVESTIGATIONS CALLED IT A HANG — the root cause of the confusion.**
+`native_build_main.spl`'s `process_run_timeout` **buffers the worker's stdout
+until process exit**. An observer watching that stream sees nothing for 20+
+minutes, so a slow-but-progressing run is **indistinguishable from a hang by
+design**. Every prior attempt (5-67 min, "no completion") was almost certainly
+this same ~22 min run killed early. The fix for the *observation* problem is to
+run the worker directly with `stdbuf -oL -eL`, as above.
+
+**Supersedes:** the "budget exceeded" reading in the section above. That section's
+own NOT VERIFIED caveat was correct to doubt it — the budget was never the
+terminating condition.
+
+**Real defects this leaves, both worth their own work:**
+- `_native_build_entry_closure` at ~2.2 s/file for a syntactic scan.
+- The `method 'len' not found on type 'str'` semantic error at ~5 modules in.
