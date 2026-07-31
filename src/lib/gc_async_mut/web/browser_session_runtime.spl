@@ -17,6 +17,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
 use std.gc_async_mut.gpu.browser_engine.dom.{
     BeDomNode, BeDomEvent, BeDomEventDispatch, normalize_dom_event_type
 }
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{DomNodeRoute}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
     browser_resource_size_allowed, BROWSER_MAX_DOCUMENT_SUBRESOURCES
 }
@@ -38,6 +39,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_default_action_to_id,
     be_dom_apply_default_action_to_id_without_focus
 }
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_focused_route}
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build, html_tree_builder_build_with_scripts
 }
@@ -1234,6 +1236,12 @@ impl BrowserSession:
 
     me dom_root() -> BeDomNode:
         self.current_dom
+
+    fn focused_dom_route() -> DomNodeRoute?:
+        """Return a live focus route; never project a legacy node identity."""
+        if val Some(index) = self.current_dom_identity_index():
+            return be_dom_focused_route(self.current_dom, index)
+        nil
 
     me _sync_body_html_from_dom():
         val bodies = be_dom_find_by_tag(self.current_dom, "body")
@@ -2463,14 +2471,12 @@ impl BrowserSession:
         self.current_style_html = ""
         self.source_html = own_text(history_source_html)
         self.current_dom = form_capture_defaults(visible_parse.doc)
-        self.simple_script_executor.reset(self.current_dom)
+        val published = self.publish_dom_snapshot(self.current_dom, true)
+        if published.? == false:
+            self._append_warning("DOM identity publication failed")
         self._advance_ui_access_revision()
         self._advance_style_revision()
         self._advance_resource_revision()
-        if val Some(state) = self.runtime_state:
-            state.bind_dom(self.current_dom)
-            self.runtime_state = Some(state)
-
         var image_sources = resource_plan.image_sources
         val _ = _bind_body_image_source_nodes(
             self.current_dom, url, image_sources, 0, 0
@@ -2553,9 +2559,12 @@ impl BrowserSession:
         state.runtime.interpreter.next_async_request_seq = self.next_request_seq
         state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
         state.runtime.interpreter.timer_time_origin_ms = self.animation_start_time_ms
-        state.bind_dom(self.current_dom)
         self.runtime_state = Some(state)
-        Some(state)
+        val published = self.publish_dom_snapshot(self.current_dom, false)
+        if published.? == false:
+            self.runtime_state = nil
+            return nil
+        self.runtime_state
 
     me _sync_from_runtime(state: BrowserRuntimeState):
         var title_val = state.runtime.interpreter.host_document_title_value
@@ -2806,7 +2815,10 @@ impl BrowserSession:
         )
         if body_changed or bridge_changed:
             if not state.adopt_dom_bridge(self.current_dom):
-                state.bind_dom(self.current_dom)
+                if val Some(index) = self.current_dom_identity_index():
+                    val _ = state.publish_dom(
+                        self.current_dom, self.document_generation(), index
+                    )
         if body_changed or bridge_changed or dom_mutation_changed:
             val dom_sync = state.sync_dom(self.current_dom)
             if dom_sync.changed:

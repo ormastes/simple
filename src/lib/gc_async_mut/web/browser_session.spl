@@ -34,6 +34,10 @@ use std.common.gpu.simpleos_host_gpu_protocol.{
 }
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomNodeRoute, DomIdentityIndex,
+    dom_identity_index_build
+}
 use std.gc_async_mut.gpu.browser_engine.script.simple_script.{
     SimpleScriptExecutor
 }
@@ -1483,7 +1487,13 @@ impl BrowserRuntimeState:
         for child in node.children:
             self._bind_dom_node(child, element_list_id)
 
-    me bind_dom(root: BeDomNode):
+    me publish_dom(
+        root: BeDomNode, generation: DomDocumentGeneration,
+        index: DomIdentityIndex
+    ) -> bool:
+        """Publish a generation-checked bridge snapshot as one owner action."""
+        if index.generation.value != generation.value:
+            return false
         self.dom_node_ids = []
         self.dom_element_ids = []
         self.dom_style_ids = []
@@ -1525,6 +1535,7 @@ impl BrowserRuntimeState:
         self.dom_mutation_generation = (
             runtime.interpreter.host_dom_mutation_generation
         )
+        true
 
     me adopt_dom_bridge(root: BeDomNode) -> bool:
         val interpreter = self.runtime.interpreter
@@ -1780,6 +1791,8 @@ class BrowserSession:
     current_style_html: text
     source_html: text
     current_dom: BeDomNode
+    dom_generation: DomDocumentGeneration
+    dom_identity_index: DomIdentityIndex?
     runtime_enabled: bool
     history: [BrowserHistoryEntry]
     current_index: i32
@@ -1849,6 +1862,11 @@ class BrowserSession:
         BrowserSession._create(false)
 
     static fn _create(runtime_enabled: bool) -> BrowserSession:
+        val initial_dom = BeDomNode.document()
+        val initial_generation = DomDocumentGeneration.create(1).unwrap()
+        val initial_index = dom_identity_index_build(
+            initial_dom, initial_generation
+        ).unwrap()
         BrowserSession(
             current_url: "about:blank",
             document_url: "about:blank",
@@ -1856,7 +1874,9 @@ class BrowserSession:
             current_body_html: "",
             current_style_html: "",
             source_html: blank_page_html(),
-            current_dom: BeDomNode.document(),
+            current_dom: initial_dom,
+            dom_generation: initial_generation,
+            dom_identity_index: Some(initial_index),
             runtime_enabled: runtime_enabled,
             history: [],
             current_index: -1,
@@ -1942,6 +1962,66 @@ impl BrowserSession:
         self.warnings = []
         for warning in warnings:
             self._append_warning(warning)
+
+    fn document_generation() -> DomDocumentGeneration:
+        """Return the generation captured with this document publication."""
+        self.dom_generation
+
+    fn current_dom_identity_index() -> DomIdentityIndex?:
+        """Return the index paired atomically with the current document."""
+        self.dom_identity_index
+
+    fn route_for_layout_target_key(
+        target_key: text, expected_generation: DomDocumentGeneration
+    ) -> Result<DomNodeRoute, text>:
+        """Resolve a renderer key once, rejecting a stale frame first."""
+        if expected_generation.value != self.dom_generation.value:
+            return Err("stale_target")
+        if val Some(index) = self.dom_identity_index:
+            return index.route_for_layout_target_key(target_key)
+        Err("invalid_document")
+
+    fn layout_target_key_for_route(
+        route: DomNodeRoute, expected_generation: DomDocumentGeneration
+    ) -> Result<text, text>:
+        """Project one current route for rendering, never for authorization."""
+        if (
+            expected_generation.value != self.dom_generation.value or
+            route.generation.value != self.dom_generation.value
+        ):
+            return Err("stale_target")
+        if val Some(index) = self.dom_identity_index:
+            match index.layout_target_key_for_route(route):
+                Some(key): return Ok(key)
+                nil: return Err("target_not_found")
+        Err("invalid_document")
+
+    me publish_dom_snapshot(
+        next_dom: BeDomNode, replace_document: bool
+    ) -> Result<bool, text>:
+        """Build before publishing so a failed index never exposes partial DOM state."""
+        val next_generation = if replace_document:
+            self.dom_generation.next()?
+        else:
+            self.dom_generation
+        val next_index = dom_identity_index_build(next_dom, next_generation)?
+        if replace_document:
+            if not self.simple_script_executor.reset_document(
+                next_dom, next_generation, next_index
+            ):
+                return Err("invalid_document")
+        elif not self.simple_script_executor.publish_dom(
+            next_dom, next_generation, next_index
+        ):
+            return Err("invalid_document")
+        if val Some(state) = self.runtime_state:
+            if not state.publish_dom(next_dom, next_generation, next_index):
+                return Err("invalid_document")
+            self.runtime_state = Some(state)
+        self.current_dom = next_dom
+        self.dom_generation = next_generation
+        self.dom_identity_index = Some(next_index)
+        Ok(true)
 
     fn _cookie_now_seconds() -> i64:
         time_now_unix_micros() / 1000000

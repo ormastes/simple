@@ -11,6 +11,9 @@ browser DOM and event loop infrastructure.
 #![allow(REQC001)]
 
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex
+}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop,
     EVENT_LOOP_MAX_PENDING_TASKS}
@@ -37,6 +40,8 @@ pub class SimpleScriptExecutor:
         _runner         - canonical browser Simple/JavaScript runner
     """
     _dom_root: BeDomNode
+    _dom_generation: DomDocumentGeneration?
+    _dom_identity_index: DomIdentityIndex?
     _event_loop: EventLoop
     _console_buf: ConsoleBuffer
     _dom_dirty: bool
@@ -50,6 +55,8 @@ pub class SimpleScriptExecutor:
         """Create a SimpleScriptExecutor with empty DOM root."""
         SimpleScriptExecutor(
             _dom_root: BeDomNode.element("div"),
+            _dom_generation: nil,
+            _dom_identity_index: nil,
             _event_loop: event_loop,
             _console_buf: console_buf,
             _dom_dirty: false,
@@ -73,9 +80,29 @@ pub class SimpleScriptExecutor:
         self._callback_count = 0
         self._dom_dirty = false
 
-    me bind_dom(dom_root: BeDomNode):
-        """Update the live DOM binding without discarding retained callbacks."""
+    me publish_dom(
+        dom_root: BeDomNode, generation: DomDocumentGeneration,
+        index: DomIdentityIndex
+    ) -> bool:
+        """Publish a DOM snapshot only when its index has the same generation."""
+        if index.generation.value != generation.value:
+            return false
         self._dom_root = dom_root
+        self._dom_generation = Some(generation)
+        self._dom_identity_index = Some(index)
+        true
+
+    me reset_document(
+        dom_root: BeDomNode, generation: DomDocumentGeneration,
+        index: DomIdentityIndex
+    ) -> bool:
+        """Replace a document and retire all callbacks from its predecessor."""
+        if index.generation.value != generation.value:
+            return false
+        self.reset(dom_root)
+        self._dom_generation = Some(generation)
+        self._dom_identity_index = Some(index)
+        true
 
     me register_callback(callback_id: i64, source: text) -> bool:
         """Retain one bounded command body under a stable callback identity."""
