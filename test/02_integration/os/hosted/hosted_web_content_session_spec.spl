@@ -497,6 +497,67 @@ describe "hosted Web content session":
         )).to_equal(1)
         set_mock_registry(MockResponseRegistry.create())
 
+    it "runs allowed direct-host preflight before the actual request":
+        step("Serve OPTIONS policy and the PUT response from the mock transport")
+        var registry = MockResponseRegistry.create()
+        registry.register_with_headers(
+            "https://api.test/update", 200,
+            [
+                Pair("Access-Control-Allow-Origin", "https://example.test"),
+                Pair("Access-Control-Allow-Methods", "PUT"),
+                Pair("Access-Control-Allow-Headers", "x-mode"),
+                Pair("Access-Control-Expose-Headers", "X-Visible"),
+                Pair("X-Visible", "yes"),
+                Pair("X-Hidden", "no"),
+                Pair("Set-Cookie", "stolen=yes; Path=/")
+            ],
+            "updated"
+        )
+        set_mock_registry(registry)
+        var session = HostedWebContentSession.create(
+            84, "<div>prior</div>", 120, 60
+        )
+        expect(session.browser.open_html(
+            "https://example.test/page",
+            "<html><body><script>var putHeaders=''; " +
+            "var putBody=''; var putError=''; " +
+            "fetch('https://api.test/update', {method:'PUT', " +
+            "headers:{'X-Mode':'write'}, credentials:'omit'})" +
+            ".then(function(r) { putHeaders = r.headersText; " +
+            "return r.text(); }).then(function(t) { putBody = t; })" +
+            ".catch(function(e) { putError = e; });" +
+            "</script></body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Observe one OPTIONS followed by one PUT and a filtered result")
+        val _ = session.advance_at(2150)
+        expect(observed_mock_request_count(
+            "https://api.test/update", "OPTIONS"
+        )).to_equal(1)
+        expect(observed_mock_request_count(
+            "https://api.test/update", "PUT"
+        )).to_equal(1)
+        match session.browser.eval_script(
+            "putBody + '|' + putHeaders + '|' + putError"
+        ):
+            Ok(JsValue.String(value)):
+                expect(value).to_contain("updated|")
+                expect(value.to_lower()).to_contain("x-visible: yes")
+                expect(value.to_lower().contains("x-hidden:")).to_be(false)
+                expect(value.to_lower().contains("set-cookie:")).to_be(false)
+            _:
+                fail("Expected successful staged CORS response")
+        expect(session.browser.cookie_header_for_request(
+            "https://api.test/next"
+        )).to_equal("")
+        expect(session.network.cookie_store.count()).to_equal(0)
+        expect(session.network_job_handle).to_equal(0)
+        expect(session.network_job_phase).to_equal("")
+        expect(session.network_job_actual_request).to_be_nil()
+        expect(session.network_job_deadline_ms).to_equal(0)
+        expect(session.browser.has_pending_requests()).to_be(false)
+        set_mock_registry(MockResponseRegistry.create())
+
     it "does not issue the actual direct-host request after denied preflight":
         step("Serve a preflight response without the requested method")
         var registry = MockResponseRegistry.create()
