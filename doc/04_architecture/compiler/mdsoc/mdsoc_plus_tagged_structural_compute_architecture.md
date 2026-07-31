@@ -282,6 +282,30 @@ struct EntityKey:
 
 `ArtifactId` is content-addressed and includes the relevant parser/compiler/layout schema version. `local_identity` may be a node index, symbol ID, rule ID, section ID, or stable generated ordinal.
 
+`ArtifactId` and `Hash128` were referenced throughout this section but never
+given a definition; both are ratified here so producers cannot disagree on
+width or field order:
+
+```simple
+struct Hash128:
+    hi: u64
+    lo: u64
+
+struct ArtifactId:
+    content_hash: Hash128
+    schema_version: u32
+```
+
+`hi` is the more significant half. Both halves are u64 bit patterns carried in
+i64, so a hash with the top bit set appears negative; that is expected and
+round-trips exactly. `schema_version` is the parser/compiler/layout schema the
+artifact was produced under, which is what lets a durable key resolve only
+against a compatible producer (§30.1).
+
+`EntitySchemaId` above is a `u32`. Every scalar in this section is a fixed-width
+unsigned integer of the declared width, encoded little-endian, and writers mask
+to that width so an out-of-range value cannot silently widen a record.
+
 A durable source-level declaration may also include a semantic key:
 
 ```simple
@@ -443,6 +467,39 @@ interface TagWritePort:
     fn remove(entity: EntityRef, key: TagKeyId)
     fn finish() -> TagShardRef
 ```
+
+`TagValue` appears throughout these signatures but was never defined. It is
+ratified as a discriminated payload — `value_type` selects which field carries
+the value, and the other fields are unused for that variant:
+
+```simple
+struct TagValue:
+    value_type: TagValueType
+    num: u64
+    ref: EntityRef
+    artifact: ArtifactId
+    anchor: SourceAnchor
+```
+
+| `value_type` | payload field |
+|---|---|
+| `Marker` | none |
+| `Bool`, `I64`, `U64`, `F64`, `StringId` | `num` |
+| `EntityRef` | `ref` |
+| `ArtifactId` | `artifact` |
+| `SourceAnchor` | `anchor` |
+| `SmallSet` | `num` — arena offset in the low 32 bits, count in the high 32 |
+
+Two consequences worth stating so producers do not each rediscover them:
+
+- For `F64`, `num` carries the raw IEEE-754 bit pattern, not an `f64`. Simple
+  has no f64 bit-level reinterpret today — the same pre-existing gap already
+  recorded in `src/lib/common/encoding/cbor.spl` and `bson.spl`. The 8-byte wire
+  slot is frozen and correct and a Rust/C++ producer can populate it now; the
+  Simple-side conversion unblocks when that already-filed runtime request lands.
+- The `SmallSet` offset/count pair must be packed at 64-bit width. Packing it
+  from `u32` operands evaluates `count << 32` at 32-bit width and silently
+  discards the count.
 
 ### 5.5 Namespace policy
 
