@@ -90,3 +90,51 @@ inspection.
 - Final independent review reports no blocking omission.
 
 Until every condition holds, overall status remains RED.
+
+## 2026-07-31 bounded first-tranche audit
+
+Audit base: `af193d5e02b6ed35c4f553d2c1dfb6b873b19337`, including the
+generation-safe contract from `ef90c16b194` and the store-kind clarification
+from `f8b926e0dd5`.
+
+Result: **RED — no independently safe A-through-E implementation tranche fits
+the three-production-file limit.** The earliest safe repository-wide tranche
+remains Lane A as one atomic ABI migration. It must not be split into a
+generation-array-only or handle-definition-only production phase.
+
+Evidence from the selected owner surface:
+
+- object identity and prototypes are raw `i64` slots in
+  `vm_object_store.spl`;
+- function identity and `closure_env` are raw `i64` values in
+  `interpreter_types.spl` and the interpreter function table;
+- environment parents are raw `i64` values in `interpreter_types.spl`;
+- raw object/function/environment identities cross at least fifteen current
+  engine/browser production files, including evaluation, native calls, async
+  records, runtime returns, DOM state, listeners, and event dispatch;
+- `JsValue.Object` and `JsValue.Function` still expose raw IDs, so introducing
+  generation-qualified handles in one store would create the forbidden mixed
+  identity mode at every untouched boundary.
+
+The apparent smaller slices are not independently safe:
+
+1. Adding generations/free lists without migrating consumers permits stale raw
+   IDs to alias a reused occupant. Keeping reuse disabled adds no reclamation
+   behavior and creates a second dormant identity ABI.
+2. External-owner refcounts cannot precede Lane A because exact keys require a
+   generation-qualified `JsHeapHandle`; raw-slot keys cannot reject stale or
+   foreign releases.
+3. Typed mark edges cannot precede Lane A or be inferred from property names.
+   Their target store is selected by `handle.store_kind`, and all listed edge
+   owners must migrate before tracing can be complete.
+4. Store-kind separation necessarily spans object values/prototypes, function
+   values/closures, environment parents/bindings, and their runtime/browser
+   boundaries; it is not an isolated object-store edit.
+5. Lane E is evidence for A-D behavior and cannot be promoted while the frozen
+   helper remains fail-fast RED.
+
+Next admissible implementation is therefore a reviewed Lane A change with no
+slot reuse or reclamation enabled until the raw reusable-ID inventory is zero.
+Only after A lands may B and C proceed against one handle ABI, followed by D
+safe points and E executable evidence. Retained browser event objects remain
+unreclaimed throughout this audit.
