@@ -1434,6 +1434,56 @@ Cycle 3/3 pins each clipped browser window batch to embedding rectangle
 and 324. These exact embedding assertions complement the retained command
 suppression, command-count deltas, and literal boundary-pixel evidence.
 
+## Fixed-position recovery evidence design (2026-07-31)
+
+<!-- codex-design -->
+
+Rejected candidate `c3cb635fca2` supplies no evidence. The future executable
+path remains
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/fixed_position_rendering_spec.spl`;
+its only manual path is
+`doc/06_spec/01_unit/lib/gc_async_mut/gpu/browser_engine/fixed_position_rendering_spec.md`.
+The manual exposes exactly one scenario with these four steps:
+
+1. `Build fixed-position formatting-context controls`
+2. `Exclude fixed children from table and grid consumption`
+3. `Resolve viewport and transformed fixed geometry and clips`
+4. `Match Draw IR paint order with reverse hit traversal`
+
+The frozen setup/checker names are
+`setup_fixed_position_context_fixture`,
+`check_fixed_children_out_of_flow`,
+`check_fixed_containing_blocks_and_clips`, and
+`check_fixed_draw_ir_hit_order`. Checkers use `expect(...).to_equal(...)`,
+`to_contain`, and numeric comparisons directly; boolean-wrapper assertions,
+custom matchers, empty helpers, and placeholder passes are forbidden.
+
+| Requirement | Required deterministic oracle |
+| --- | --- |
+| one positioned-child owner | block/flex/grid/table fixtures show each fixed child laid out once; grid track and table cell/row geometry equal controls without the fixed child |
+| fixed containing block | viewport coordinates survive scroll; nearest ancestor transform wins; transformed border-box `(40,30)` with `3px` borders yields padding-CB origin `(43,33)` and `left:5; top:6` yields `(48,39)` |
+| inset used values | `20x10; right:12px; bottom:14px` resolves to `(288,216)` in `320x240`; `32x16; left:auto; right:10%; top:25%; bottom:auto` resolves to `(256,60)` while computed evidence retains auto/percent units |
+| own transform | `40x20; left:20px; top:30px; translate(7px,9px)` keeps inset origin `(20,30)`, produces Draw IR/hit origin `(27,39)`, uses the viewport rather than self as fixed CB, and establishes the transformed padding CB for a nested fixed child |
+| fixed clipping | viewport-fixed ignores ordinary ancestor overflow; transform-contained fixed uses that normal clip chain; nested overflow produces one admitted and one clipped Draw IR/pixel/hit point |
+| stacking distinctions | negative, static with authored z, positioned auto, explicit zero, and positive controls have stable forward order; auto does not create the explicit-zero trap and zero does |
+| Draw IR/hit parity | structured `DrawIrComposition` owner order is the sole forward order; reverse traversal selects its last eligible clipped owner at every overlap point |
+
+The scenario asserts semantic style/geometry and structured Draw IR before
+Engine2D readback pixels, then asserts target keys at the same inside/outside
+points. Table/grid non-consumption, transformed padding geometry, nested
+clip/hit behavior, right/bottom and auto/percent used coordinates, independent
+own-transform geometry, and static/auto/zero controls are release-blocking; a
+viewport-only happy path is insufficient. Step three's existing
+`check_fixed_containing_blocks_and_clips` owns all exact inset and transform
+coordinates; step four proves the resulting matrix geometry participates in
+the one Draw IR/reverse-hit order.
+
+No `.spl` or generated manual is created in this docs-only recovery. Once
+implemented, run the affected spec and standalone docgen exactly once with the
+admitted pure-Simple runtime, require `0 stubs`, review the four-step manual,
+run the direct-environment guards, and require zero executable specs under
+`doc/06_spec`. Until then, fixed positioning remains RED.
+
 ## Primary pointer compatibility suppression (2026-07-31)
 
 Canceled primary `pointerdown` owns one cross-route compatibility rule: retain

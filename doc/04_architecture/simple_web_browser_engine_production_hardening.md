@@ -1265,3 +1265,68 @@ replacement/dispatch cycle must release all retired indexes, remain within
 existing input-to-paint/RSS limits, and return retained bytes/RSS within 10%
 of the post-warmup baseline. These are future receipts; this design changes no
 requirement status.
+
+## Fixed-position layout, stacking, and hit ownership (2026-07-31)
+
+<!-- codex-design -->
+
+Rejected candidate `c3cb635fca2` is not an implementation base. It adds a
+second whole-document fixed-layout pass and leaves formatting-context dispatch,
+paint order, and hit order as separate authorities. Recovery keeps the existing
+Web layout -> `DrawIrComposition` -> Engine2D route and freezes these owners:
+
+- `simple_web_is_out_of_flow_positioned(style)` is the one classification used
+  by block, flex, grid, and table measurement. Those formatters only exclude
+  such children from normal-flow consumption; they never lay them out. When an
+  auto/auto axis needs a static fallback, the formatter records that candidate
+  origin without advancing tracks, rows, lines, or sibling flow.
+- `layout_with_style` wraps `_layout_formatting_context`, then invokes
+  `layout_out_of_flow_positioned_children` exactly once for the parent's direct
+  absolute/fixed children. Recursive child layout repeats that wrapper rule, so
+  no formatting context owns a private positioned-child branch or a document
+  rescan.
+- `PositionedContainingBlock` carries padding-box origin/size, fixed clip root,
+  and viewport-fixed state. `_fixed_containing_block` selects the nearest
+  admitted non-`none` transform ancestor, otherwise `(0, 0, viewport width,
+  viewport height)`. A transformed containing block is its padding box:
+  border-box origin plus border widths, with border widths removed from its
+  size. Positioned offsets and percentages resolve against that box.
+- Computed style retains mutually exclusive `position_fixed`, the independent
+  `transform_containing_block` bit, and `z_index_auto`. Four
+  `CssCoordinateValue` insets preserve `auto`, pixels, and percentages until
+  containing-block used-value resolution; `right`/`bottom` are not integer
+  sentinels and percentages are not prematurely converted. An independent
+  `Transform2DSpec` resolves, after the untransformed border box exists, to one
+  `UsedTransform2D` affine matrix. Transform parsing never writes `left`/`top`,
+  width/height, or `position_relative`, and explicit `z-index: 0` never
+  collapses into `auto`.
+
+Viewport-fixed boxes and their ordinary descendants ignore root scroll, do not
+extend scrollable content, and begin with the viewport clip rather than an
+ordinary ancestor overflow clip. Fixed boxes whose containing block is a
+transform move with that ancestor and use its normal ancestor clip chain.
+Overflow clips inside either fixed subtree continue to intersect normally.
+The same resolved clip cache gates visibility, Draw IR lowering, raster
+evidence, and hit eligibility.
+
+Fixed containing-block search begins at the node's parent. A node's own
+transform therefore applies only after its inset layout and cannot make the
+node its own containing block; that transform may establish the padding-box
+containing block for fixed descendants. The resolved affine matrix is the sole
+visual transform consumed by Draw IR geometry, clipping, and hit traversal.
+Hit testing uses its inverse rather than a separately shifted layout box.
+
+`simple_web_stacking_paint_order(nodes, styles) -> [i32]`, in the neutral
+renderer core, is the sole stacking result. It keeps nested contexts atomic and
+orders explicit negative contexts by ascending z/source order, then normal-flow
+nodes, then one stable tree-order zero phase interleaving positioned `auto` and
+explicit-zero contexts without collapsing their distinct context ownership,
+then positive contexts by ascending z/source order. An ordinary static
+non-flex/grid box ignores an authored z-index. Fixed boxes establish a context
+even at `auto`; other positioned `auto` boxes remain in their parent context.
+Draw IR traverses this array forward. Hit testing
+traverses the identical array in reverse and accepts the first visible,
+clipped, pointer-eligible owner; it performs no independent z-index comparison.
+
+No private WebIR, Draw IR, hit-order, transform, clip, or font path is admitted
+by this design. Implementation and runtime evidence remain RED.

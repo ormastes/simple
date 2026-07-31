@@ -1017,10 +1017,36 @@ Exact repository HEAD: `13273726363`.
 | --- | --- | --- |
 | `stop_partial_focus` | Stop preserves the partial document's focused `draft` input and byte selection through hosted chrome and isolated authority while retiring transient chrome and capability state. | INTEGRATED `a106bc48114`; STATIC/EVIDENCE-HELD |
 | `cors_unsafe_header_preflight` | Unsafe author headers force a single OPTIONS preflight with sorted `Access-Control-Request-Headers`; denied policy prevents the actual cross-origin request. | INTEGRATED `bf7dfff029a`; STATIC/EVIDENCE-HELD |
-| `fixed_position` | Existing HTML/CSS traceability selects viewport-fixed positioning as the next unsupported rendering row; no accepted implementation exists. | ACTIVE / UNCOMMITTED / RED |
+| `fixed_position` | Shared out-of-flow dispatcher, transformed padding containing block, clip ownership, and one forward Draw IR/reverse-hit order are frozen below; rejected `c3cb635fca2` is not a base. | DESIGN FROZEN / IMPLEMENTATION RED |
 | `stage4_admission` | No provenance-qualified current full pure-Simple CLI is admitted. | NONE; no runtime/docgen/performance claim |
 
 The Stop and CORS executable specs/manuals are source evidence only until the
 admitted pure-Simple runner and docgen lane execute them. Rejected animation
 lifecycle `47df593f600`, renewable-authority `921fd1`, and stopped D3 work are
 unchanged and must not be promoted. Root remains merge owner and final reviewer.
+
+## Fixed-position recovery lanes (2026-07-31)
+
+<!-- codex-design -->
+
+Shared names are frozen before sidecars: `Style.position_fixed`,
+`Style.transform_containing_block`, `Style.z_index_auto`,
+`CssCoordinateValue`, `Transform2DSpec`, `UsedTransform2D`,
+`simple_web_is_out_of_flow_positioned`, `_layout_formatting_context`,
+`layout_out_of_flow_positioned_children`, `PositionedContainingBlock`,
+`_fixed_containing_block`, `resolve_positioned_used_box`, and
+`simple_web_stacking_paint_order`. Transform parsing may not mutate insets,
+size, or `position_relative`; containing-block search starts at the parent and
+the node's own transform resolves only after inset layout. The four
+manual steps and helpers are frozen in the detail design and system-test plan.
+
+| Lane | Owner/boundary | Deliverable | Status |
+| --- | --- | --- | --- |
+| FP-A formatting audit | Codex Spark if exposed, otherwise a small available sidecar; read-only | Enumerate every block/flex/grid/table consumption site and every duplicate positioned-child branch against the shared predicate/dispatcher | READY |
+| FP-B order/clip audit | Codex Spark if exposed, otherwise a small available sidecar; read-only | Enumerate Draw IR, hit, scroll, transform-CB, inset-unit, and clip consumers; report any folded transform/inset or private order/clip derivation | READY |
+| FP-C implementation | One normal-capability owner in an isolated current-origin worktree | Minimal source change using only the frozen owners; no second document pass or private painter | BLOCKED ON FP-A/FP-B REVIEW |
+| FP-D SSpec/manual | Separate small sidecar after FP-C compiles | One modern four-step spec plus exact mirrored manual; fail-fast helpers until real geometry/Draw IR/pixel/hit assertions exist | BLOCKED ON FP-C |
+| Merge and acceptance | Root merge owner; best available normal/highest-capability final reviewer | Review source semantics and generated-manual quality, then run each admitted pure-Simple gate once | RED |
+
+No lane may push. Runtime, docgen, bootstrap, aggregate HTML/CSS, or production
+PASS is not claimed by this design recovery.

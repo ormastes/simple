@@ -1286,3 +1286,125 @@ time, parent-chain depth, and query time. Route membership and association-map
 lookups are expected O(1); path reconstruction, route-to-node, and event-path
 work are O(depth); radio enumeration is O(group size). They never expose
 author IDs or handler source.
+
+## Fixed-position recovery detail design (2026-07-31)
+
+<!-- codex-design -->
+
+### Frozen surface
+
+The implementation candidate must introduce only the state needed to preserve
+CSS distinctions: `Style.position_fixed`, `Style.transform_containing_block`,
+and `Style.z_index_auto`; `Style.inset_left/right/top/bottom` are
+`CssCoordinateValue(kind, value)` where kind is `auto`, `px`, or `percent`.
+Position parsing clears all other position-kind bits but does not turn `auto`
+or a percentage into an integer sentinel. `Transform2DSpec` stores admitted
+translate length/percentage, scale, quarter-turn, and origin independently.
+After layout, `UsedTransform2D` is the one resolved affine matrix. An admitted
+non-`none` transform sets the containing-block bit, but parsing never folds
+translate into `left`/`top`, scale into width/height, or any transform into
+`position_relative`.
+
+`layout_with_style` becomes the common wrapper around
+`_layout_formatting_context` and
+`layout_out_of_flow_positioned_children`. Every block/inline, row/column/wrapped
+flex, explicit/auto grid, and table/row/cell measurement
+uses `simple_web_is_out_of_flow_positioned` to skip consumption. Grid placement
+does not allocate a track slot to a skipped child; table/cell height and span
+measurement do not include it. The shared dispatcher resolves and lays out each
+direct positioned child once after the in-flow result exists. A skipped child's
+existing `LayoutResult.bx/by` slots may carry its zero-consumption static
+fallback; no second anchor table or layout pass is introduced.
+
+For fixed children, `_fixed_containing_block` walks ancestors to the nearest
+`transform_containing_block`. With none, it returns the viewport. With one, it
+returns:
+
+```
+x = ancestor border-box x + border-left
+y = ancestor border-box y + border-top
+w = ancestor border-box width - border-left - border-right
+h = ancestor border-box height - border-top - border-bottom
+```
+
+That is the ancestor padding box, including padding and excluding borders.
+`resolve_positioned_used_box` receives all four authored inset values plus the
+untransformed size and static-position fallback. It resolves horizontal
+percentages against containing-block width and vertical percentages against
+height. A definite `left`/`top` anchors from the padding-box origin; when that
+side is `auto`, a definite `right`/`bottom` anchors the far edge; when both sides
+of an axis are `auto`, the saved static-position coordinate wins. Stretch and
+over-constraint rules run only after unit preservation, using the existing CSS
+direction policy. Viewport-fixed geometry is restored after document scroll
+for the full fixed subtree and is excluded from scroll extent.
+Transform-contained fixed geometry scrolls with its containing block.
+
+`_fixed_containing_block` starts at `nodes[node].parent`, never at the node.
+The node's own transform is resolved from its finished untransformed border box
+and transform origin, then applied to Draw IR/clip geometry. The inverse of the
+same `UsedTransform2D` maps hit points; layout insets remain unchanged. That
+node may be the nearest transform containing block for a nested fixed child.
+
+Clip construction marks the selected fixed clip root. A viewport-fixed node
+starts at the viewport clip and does not inherit ordinary DOM-parent overflow;
+its descendants still intersect overflow clips created inside the fixed
+subtree. A transform-contained fixed node keeps the normal clip chain through
+the transform containing block, including that block and nested overflow
+clips. Draw IR visibility and hit testing consume the same cached rectangles.
+
+### One order, two traversal directions
+
+`simple_web_stacking_paint_order` returns every renderer node once in forward
+paint order. Internal classification preserves non-positioned, positioned
+`auto`, explicit negative, explicit zero, and explicit positive states. Static
+`z-index: 999` ordinary block remains normal flow. Positioned `auto` and
+explicit zero share stable tree order but retain different context ownership:
+an auto parent does not trap a positive child; an explicit-zero parent does.
+Nested contexts are emitted atomically. `_html_draw_ir_commands` consumes the result forward and
+`_simple_web_hit_target_key` consumes it backward, with no second sort or
+`best_z` state.
+
+### Deterministic fixture
+
+The single fixture uses a `320x240` viewport and proves:
+
+- a fixed direct grid child consumes no track and a fixed descendant of a
+  table cell contributes neither cell nor row height;
+- a viewport-fixed box stays at the same coordinates after scroll;
+- a transformed ancestor at `(40,30)` with `3px` borders and padding begins its
+  fixed padding containing block at `(43,33)`, so `left:5px; top:6px` places the
+  child at `(48,39)`;
+- a `20x10` viewport-fixed box with `right:12px; bottom:14px` has untransformed
+  origin `(288,216)`, while `left:auto; right:10%; top:25%; bottom:auto` on a
+  `32x16` box resolves to `(256,60)` without losing either `auto` or percent;
+- a `40x20` fixed box with `left:20px; top:30px` and
+  `translate(7px,9px)` retains inset-layout origin `(20,30)`, has visual/hit
+  origin `(27,39)`, selects the viewport rather than itself as containing
+  block, and becomes the transform containing block for its nested fixed child;
+- nested overflow admits the inside point and rejects the clipped point for
+  both Draw IR visibility/readback and hit testing; and
+- overlapping negative, static-with-authored-z, positioned-auto, explicit-zero,
+  and positive controls satisfy the forward order, while every overlap hit is
+  exactly the last eligible forward-order owner. The auto parent's positive
+  child escapes; the zero parent's positive child remains trapped.
+
+The future executable scenario and mirrored manual use exactly these four
+steps and helper names:
+
+1. `step("Build fixed-position formatting-context controls")` ->
+   `setup_fixed_position_context_fixture`
+2. `step("Exclude fixed children from table and grid consumption")` ->
+   `check_fixed_children_out_of_flow`
+3. `step("Resolve viewport and transformed fixed geometry and clips")` ->
+   `check_fixed_containing_blocks_and_clips`
+4. `step("Match Draw IR paint order with reverse hit traversal")` ->
+   `check_fixed_draw_ir_hit_order`
+
+`check_fixed_containing_blocks_and_clips` asserts the exact padding-CB,
+right/bottom, auto/percent, untransformed-own-transform, resolved-matrix, nested
+CB, clip, and inverse-hit coordinates above. `check_fixed_draw_ir_hit_order`
+asserts those transformed owners in the same forward/reverse order. Checkers
+make direct canonical-matcher assertions over geometry, structured Draw IR
+owner order, Engine2D pixels, clip rectangles, and target keys; they do not
+return a boolean wrapper. Runtime/bootstrap work is outside this docs-only
+recovery and remains RED.
