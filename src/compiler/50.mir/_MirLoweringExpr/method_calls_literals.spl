@@ -1112,6 +1112,123 @@ impl MirLowering:
             if found_receiver_type != nil:
                 receiver_type = self.lower_type(found_receiver_type)
 
+        # Primitive methods may arrive with a positive MethodResolution whose
+        # symbol is only a type-table marker (`str.byte_at`, `f64.round`,
+        # `i32.to_f32`), not a linkable function. Recover the primitive owner
+        # from the receiver itself before generic resolved dispatch can emit
+        # that dotted marker as an external symbol.
+        val primitive_method_shape = (
+            (method == "byte_at" and args.len() == 1) or
+            (method == "round" and args.len() == 0) or
+            (method == "to_f32" and args.len() == 0)
+        )
+        if primitive_method_shape and not has_prelowered_method_receiver:
+            prelowered_method_receiver = self.lower_expr(receiver)
+            has_prelowered_method_receiver = true
+
+        var primitive_receiver_is_text = false
+        var primitive_receiver_is_f64 = false
+        var primitive_receiver_is_numeric = false
+        if primitive_method_shape:
+            if val primitive_declared_type = receiver.type_:
+                match primitive_declared_type.kind:
+                    case HirTypeKind.Str: primitive_receiver_is_text = true
+                    case HirTypeKind.Float(64):
+                        primitive_receiver_is_f64 = true
+                        primitive_receiver_is_numeric = true
+                    case HirTypeKind.Float(_): primitive_receiver_is_numeric = true
+                    case HirTypeKind.Int(_, _): primitive_receiver_is_numeric = true
+                    case _: ()
+            if has_prelowered_method_receiver:
+                if self.local_is_str(prelowered_method_receiver):
+                    primitive_receiver_is_text = true
+                if self.find_local_hir_type(prelowered_method_receiver.id) != nil:
+                    val primitive_local_hir_type = self.find_local_hir_type(prelowered_method_receiver.id) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                    match primitive_local_hir_type.kind:
+                        case HirTypeKind.Str: primitive_receiver_is_text = true
+                        case HirTypeKind.Float(64):
+                            primitive_receiver_is_f64 = true
+                            primitive_receiver_is_numeric = true
+                        case HirTypeKind.Float(_): primitive_receiver_is_numeric = true
+                        case HirTypeKind.Int(_, _): primitive_receiver_is_numeric = true
+                        case _: ()
+
+        # byte_at is byte-indexed, unlike char_code_at. Keep it entirely in
+        # MIR: normalize tagged/raw text, check bounds, then byte-offset/load.
+        if method == "byte_at" and args.len() == 1 and primitive_receiver_is_text:
+            val byte_receiver = prelowered_method_receiver
+            val byte_index_raw = self.lower_expr(args[0].value)
+            var byte_index_builder = self.builder
+            # Normalize every sized signed/unsigned integer index through the
+            # existing signedness-aware MIR cast before comparing with zero.
+            val byte_index = byte_index_builder.emit_cast(mir_operand_copy(byte_index_raw), MirType.i64())
+            self.builder = byte_index_builder
+            val byte_raw_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_interp_cstr"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.Opaque("str")), is_variadic: false)))
+            ))
+            val byte_len_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_string_len"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var byte_builder = self.builder
+            val byte_raw = byte_builder.emit_call(byte_raw_op, [mir_operand_copy(byte_receiver)], MirType(kind: MirTypeKind.Opaque("str"))) ?? byte_receiver
+            val byte_len = byte_builder.emit_call(byte_len_op, [mir_operand_copy(byte_receiver)], MirType.i64()) ?? byte_builder.emit_const_int(0)
+            val byte_zero = byte_builder.emit_const_int(0)
+            val byte_nonnegative = byte_builder.emit_binop(MirBinOp.Ge, mir_operand_copy(byte_index), mir_operand_copy(byte_zero), MirType.bool())
+            val byte_below_len = byte_builder.emit_binop(MirBinOp.Lt, mir_operand_copy(byte_index), mir_operand_copy(byte_len), MirType.bool())
+            val byte_in_bounds = byte_builder.emit_binop(MirBinOp.And, mir_operand_copy(byte_nonnegative), mir_operand_copy(byte_below_len), MirType.bool())
+            val byte_result = byte_builder.new_temp(MirType.i64())
+            byte_builder.emit_const(byte_result, MirConstValue.Int(0), MirType.i64())
+            val byte_load_block = byte_builder.new_block(Some("text_byte_at_load"))
+            val byte_miss_block = byte_builder.new_block(Some("text_byte_at_miss"))
+            val byte_merge_block = byte_builder.new_block(Some("text_byte_at_merge"))
+            byte_builder.terminate_if(mir_operand_copy(byte_in_bounds), byte_load_block, byte_miss_block)
+            self.builder = byte_builder
+
+            var byte_load_builder = self.builder
+            byte_load_builder.switch_to_block(byte_load_block)
+            val byte_ptr = byte_load_builder.emit_binop(
+                MirBinOp.Offset,
+                mir_operand_copy(byte_raw),
+                mir_operand_copy(byte_index),
+                MirType.ptr(MirType(kind: MirTypeKind.U8), false)
+            )
+            val byte_value = byte_load_builder.emit_load(mir_operand_copy(byte_ptr), MirType(kind: MirTypeKind.U8))
+            val byte_wide = byte_load_builder.emit_cast(mir_operand_copy(byte_value), MirType.i64())
+            val byte_mask = byte_load_builder.emit_const_int(255)
+            val byte_unsigned = byte_load_builder.emit_binop(MirBinOp.And, mir_operand_copy(byte_wide), mir_operand_copy(byte_mask), MirType.i64())
+            byte_load_builder.emit_copy(byte_result, byte_unsigned)
+            byte_load_builder.terminate_goto(byte_merge_block)
+            self.builder = byte_load_builder
+
+            var byte_miss_builder = self.builder
+            byte_miss_builder.switch_to_block(byte_miss_block)
+            byte_miss_builder.terminate_goto(byte_merge_block)
+            self.builder = byte_miss_builder
+
+            var byte_merge_builder = self.builder
+            byte_merge_builder.switch_to_block(byte_merge_block)
+            self.builder = byte_merge_builder
+            return byte_result
+
+        if method == "to_f32" and args.len() == 0 and primitive_receiver_is_numeric:
+            var to_f32_builder = self.builder
+            val to_f32_result = to_f32_builder.emit_cast(mir_operand_copy(prelowered_method_receiver), MirType.f32())
+            self.builder = to_f32_builder
+            return to_f32_result
+
+        # The freestanding runtime owns Simple's half-away-from-zero and
+        # signed-zero behavior. Call that ABI directly; never link the dotted
+        # primitive-table marker `f64.round`.
+        if method == "round" and args.len() == 0 and primitive_receiver_is_f64:
+            val round_receiver = prelowered_method_receiver
+            val round_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("round"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.f64()], return_type: MirType.f64(), is_variadic: false)))
+            ))
+            return self.emit_resolved_direct_call(round_op, [mir_operand_copy(round_receiver)], MirType.f64())
+
         # Bug #138: `resolution == Unresolved` (no method-resolution info for
         # this receiver -- HIR type inference never populated receiver.type_)
         # is the actual condition the untyped string-method fallbacks below

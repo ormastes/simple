@@ -1637,7 +1637,7 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         let init_o = self.generate_init_caller(temp_dir, object_paths, Some(&mut symbol_cache))?;
         let cc = find_c_compiler();
 
-        let compiler_rt_builtins = find_compiler_rt_builtins(triple);
+        let compiler_rt_builtins = find_compiler_rt_builtins(triple, march, mabi);
         let simpleos_user_runtime = Self::simpleos_user_runtime_paths(cross_target);
         let effective_linker_script = Self::resolve_freestanding_linker_script(
             self.config.linker_script.as_deref(),

@@ -664,18 +664,8 @@ pub(crate) fn find_runtime_library() -> Option<PathBuf> {
     None
 }
 
-/// Find the compiler-rt builtins archive for a freestanding target.
-///
-/// Clang reports this through `-print-libgcc-file-name`; on Apple toolchains
-/// the returned RISC-V path is a compiler-rt archive under the clang resource
-/// directory, while ELF cross toolchains may report libgcc instead.
-pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
-    let cc = find_c_compiler();
-    let output = std::process::Command::new(&cc)
-        .arg(format!("--target={triple}"))
-        .arg("-print-libgcc-file-name")
-        .output()
-        .ok()?;
+fn existing_builtin_archive(compiler: &str, args: &[String]) -> Option<PathBuf> {
+    let output = std::process::Command::new(compiler).args(args).output().ok()?;
     if !output.status.success() {
         return None;
     }
@@ -689,6 +679,58 @@ pub(crate) fn find_compiler_rt_builtins(triple: &str) -> Option<PathBuf> {
     } else {
         None
     }
+}
+
+pub(crate) fn freestanding_builtin_primary_query(
+    triple: &str,
+    march: &str,
+    mabi: &str,
+) -> Vec<String> {
+    let mut args = vec![format!("--target={triple}")];
+    if !march.is_empty() {
+        args.push(march.to_string());
+    }
+    if !mabi.is_empty() {
+        args.push(mabi.to_string());
+    }
+    args.push("-print-libgcc-file-name".to_string());
+    args
+}
+
+pub(crate) fn freestanding_builtin_fallback_query(
+    triple: &str,
+    march: &str,
+    mabi: &str,
+) -> Option<(&'static str, Vec<String>)> {
+    (triple == "riscv64-unknown-elf").then(|| {
+        (
+            "riscv64-unknown-elf-gcc",
+            vec![
+                march.to_string(),
+                mabi.to_string(),
+                "-print-libgcc-file-name".to_string(),
+            ],
+        )
+    })
+}
+
+/// Find the compiler-rt/libgcc builtins archive for a freestanding target.
+///
+/// Clang reports this through `-print-libgcc-file-name`; on Apple toolchains
+/// the returned RISC-V path is a compiler-rt archive under the clang resource
+/// directory. Linux clang may instead return the bare, non-existent `libgcc.a`;
+/// in that case ask the matching RISC-V GCC multilib for its real archive.
+pub(crate) fn find_compiler_rt_builtins(
+    triple: &str,
+    march: &str,
+    mabi: &str,
+) -> Option<PathBuf> {
+    let cc = find_c_compiler();
+    let clang_args = freestanding_builtin_primary_query(triple, march, mabi);
+    existing_builtin_archive(&cc, &clang_args).or_else(|| {
+        let (gcc, args) = freestanding_builtin_fallback_query(triple, march, mabi)?;
+        existing_builtin_archive(gcc, &args)
+    })
 }
 
 /// Find an objcopy tool that can handle the host object format.

@@ -17,9 +17,9 @@ use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_measure_glyph_into, sfnt_render_glyph_into}
+use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_exists, sfnt_measure_glyph_into, sfnt_render_glyph_into}
 use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted}
-use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
 use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
 
@@ -30,10 +30,10 @@ use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlo
 # behavior here; it produced a Rust-seed heap object that read as non-nil but
 # corrupted on first real use, so it was removed in favor of matching the
 # freestanding path's always-lazy, single-core-safe initialization.
-use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
+use std.skia.entity.font.{SkTypeface, sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
-use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_with_language, shaper_with_ot_face, shaper_with_selected_ot_font}
+use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_new, shaper_shape_selected_with_language, shaper_shape_with_language, shaper_with_ot_face, shaper_with_selected_ot_font}
 use std.skia.feature.shaper.script_detect.{Script, script_of}
 export use std.nogc_sync_mut.text_layout.font_types.{
     CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
@@ -243,6 +243,15 @@ fn font_renderer_use_registered_selected_bytes_only():
     _resolved_font_metric_cursor = 0
     _resolved_font_metric_lock_release(metric_lock)
 
+fn font_renderer_use_registered_selected_bytes_only_static():
+    """Select startup-only registered mode without retaining hosted cleanup."""
+    _registered_selected_fonts_only = true
+    _browser_default_font_families = []
+    _browser_default_font_renderers = []
+    _resolved_font_metric_keys = []
+    _resolved_font_metric_values = []
+    _resolved_font_metric_cursor = 0
+
 fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     """Register exact pinned bytes for producer metrics and executor loading."""
     # Path-based identity instead of `candidate.?` + field access: unwrapping
@@ -266,6 +275,22 @@ fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
     _registered_selected_font_paths = _registered_selected_font_paths.push(path)
     _registered_selected_font_blobs = _registered_selected_font_blobs.push(blob)
     _browser_default_font_lock_release(active_lock)
+    true
+
+fn font_renderer_register_selected_bytes_static(path: text, blob: [u8]) -> bool:
+    val expected_identity: text = selected_font_asset_identity_for_path(path)
+    if expected_identity == "":
+        return false
+    var renderer = FontRenderer.new()
+    if not renderer.try_load_selected_bytes_registered(path, blob):
+        return false
+    if renderer.current_registered_font_identity() != expected_identity:
+        return false
+    for registered_path in _registered_selected_font_paths:
+        if registered_path == path:
+            return true
+    _registered_selected_font_paths = _registered_selected_font_paths.push(path)
+    _registered_selected_font_blobs = _registered_selected_font_blobs.push(blob)
     true
 
 fn _browser_default_for_family_cached(family: text) -> (FontRenderer, bool):
@@ -629,6 +654,19 @@ class FontRenderer:
                     return renderer
         FontRenderer.new()
 
+    static fn browser_registered_for_family(family: text) -> FontRenderer:
+        val normalized = family.trim().lower()
+        val category = _resolved_font_category(family)
+        for candidate in selected_font_asset_candidates():
+            if candidate.family.lower() != normalized and (category == "" or candidate.category != category):
+                continue
+            val registered = _registered_selected_font_bytes(candidate.local_path)
+            if registered.1:
+                var renderer = FontRenderer.new()
+                if renderer.try_load_selected_bytes_registered(candidate.local_path, registered.0):
+                    return renderer
+        FontRenderer.new()
+
     fn has_ttf() -> bool:
         self.ttf_handle > 0
 
@@ -694,6 +732,18 @@ class FontRenderer:
             self.selected_outline_blob = blob
         installed
 
+    me try_load_selected_bytes_registered(ttf_path: text, blob: [u8]) -> bool:
+        val rasterizer = FontRasterizer.load_selected_bytes(ttf_path, blob)
+        if rasterizer.loaded_generation <= 0:
+            return false
+        self.ttf_rasterizer = rasterizer
+        self.selected_outline_blob = blob
+        var cache = self.cache
+        cache.invalidate()
+        self.cache = cache
+        self.atlas_face_generation = -1
+        true
+
     me try_load_registered_identity(identity: text) -> bool:
         # Path-based helper instead of `candidate.?.local_path`: Option-unwrap
         # field access faults on baremetal (cr2=0x0 class, 2026-07-18).
@@ -702,6 +752,13 @@ class FontRenderer:
             return false
         val registered = _registered_selected_font_bytes(local_path)
         registered.1 and self.try_load_selected_bytes(local_path, registered.0)
+
+    me try_load_registered_identity_static(identity: text) -> bool:
+        val local_path: text = selected_font_asset_local_path_for_identity(identity)
+        if local_path == "":
+            return false
+        val registered = _registered_selected_font_bytes(local_path)
+        registered.1 and self.try_load_selected_bytes_registered(local_path, registered.0)
 
     me clear_ttf():
         val rast = self.ttf_rasterizer
@@ -730,6 +787,12 @@ class FontRenderer:
         cache.sync_face_identity(face_generation, face_identity)
         self.cache = cache
         face_identity
+
+    fn current_registered_font_identity() -> text:
+        val rasterizer = self.ttf_rasterizer
+        if rasterizer == nil or rasterizer.loaded_generation <= 0 or self.selected_outline_blob.len() == 0:
+            return ""
+        rasterizer.font_cache_identity
 
     me reset_cache_stats():
         var cache = self.cache
@@ -1149,6 +1212,48 @@ class FontRenderer:
         self.cache = cache
         glyph
 
+    me get_registered_glyph(codepoint: i32, font_size: i32) -> CachedGlyph:
+        var cache = self.cache
+        if (codepoint < 0 or codepoint > 1114111 or font_size <= 0 or font_size > 512 or
+            self.selected_outline_blob.len() == 0):
+            return CachedGlyph.empty(codepoint, font_size)
+        val active = self.ttf_rasterizer
+        if active == nil or not sfnt_blob_glyph_exists(self.selected_outline_blob, codepoint.to_i64()):
+            return CachedGlyph.empty(codepoint, font_size)
+        val generation = active.loaded_generation
+        val identity = active.font_cache_identity
+        cache.sync_face_identity(generation, identity)
+        val cached = cache.lookup(codepoint, font_size)
+        if cached != nil:
+            self.cache = cache
+            return cached
+        cache.record_rasterization()
+        var meta: [i64] = [0; 20]
+        sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+            codepoint.to_i64(), font_size.to_i64(), meta)
+        val count = meta[5]
+        if meta[7] != 310031 or count < 0 or count > 16777216:
+            self.cache = cache
+            return CachedGlyph.empty(codepoint, font_size)
+        var pixels: [u8] = [0u8; count]
+        sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+            codepoint.to_i64(), font_size.to_i64(), meta, pixels)
+        if meta[8] != 310032 or (count > 0 and meta[9] <= 0):
+            self.cache = cache
+            return CachedGlyph.empty(codepoint, font_size)
+        val width = meta[0].to_i32()
+        val height = meta[1].to_i32()
+        val raw_advance = meta[2].to_i32()
+        val glyph = CachedGlyph(
+            codepoint: codepoint, face_id: 0, face_generation: generation, glyph_index: -1,
+            font_size: font_size, width: width, height: height,
+            advance: if raw_advance > 0: raw_advance else: width + 1,
+            bearing_x: meta[3].to_i32(), bearing_y: meta[4].to_i32(), pixels: pixels)
+        if glyph.advance > 0 and pixels.len() == width.to_i64() * height.to_i64():
+            cache.insert(glyph)
+        self.cache = cache
+        glyph
+
     # Same single-aggregate-return shape as get_glyph above (was
     # `glyph_index_with_cache(...) -> (CachedGlyph, GlyphCache)`).
     me get_glyph_index(face_id: i64, face_generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
@@ -1207,6 +1312,14 @@ class FontRenderer:
             advances = advances.push(advance)
             prev_cp = cp
             ci = ci + 1
+        advances
+
+    me measure_registered_text_advances(content: text, font_size: i32) -> [i32]:
+        var advances: [i32] = []
+        val codepoints = text_codepoints(content)
+        for codepoint in codepoints:
+            val glyph = self.get_registered_glyph(codepoint.to_i32(), font_size)
+            advances = advances.push(if glyph.advance > 0: glyph.advance else: font_size * 55 / 100)
         advances
 
     # -----------------------------------------------------------------------
@@ -1442,6 +1555,78 @@ class FontRenderer:
         self._apply_staged_config(config)
         staged
 
+    me _ensure_registered_render_config_face(config: FontRenderConfig) -> bool:
+        if _font_render_config_default_selection(config):
+            return self.current_registered_font_identity() != ""
+        val selected = _font_render_config_candidate(config)
+        if selected == nil:
+            return false
+        val expected_identity = selected_font_asset_identity(selected.?)
+        if self.current_registered_font_identity() == expected_identity:
+            return true
+        self.try_load_registered_identity_static(expected_identity)
+
+    me stage_text_registered_configured(content: text, color: u32, config: FontRenderConfig) -> i64:
+        if not font_render_config_selection_supported(config) or not self._ensure_registered_render_config_face(config):
+            return self._stage_invalid_config(config)
+        self._activate_render_config(config)
+        val staged = self._stage_text_registered_active(content, color, config.size)
+        self._apply_staged_config(config)
+        staged
+
+    me _stage_text_registered_active(content: text, color: u32, font_size: i32) -> i64:
+        val active = self.ttf_rasterizer
+        if active == nil:
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        val generation = active.loaded_generation
+        val identity = active.font_cache_identity
+        if font_size <= 0 or font_size > 512 or identity == "":
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        if content == "":
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        if self.atlas_face_generation != generation or self.atlas_font_identity != identity:
+            self._reset_font_atlas(generation, identity)
+        var attempt = 0
+        while attempt < 2:
+            var quads: [FontRenderQuad] = []
+            var dirty: [FontRenderQuad] = []
+            var overflow = false
+            var pen_x = 0
+            val codepoints = text_codepoints(content)
+            var byte_offset: i64 = 0
+            var ci: i64 = 0
+            while ci < codepoints.len():
+                val codepoint = codepoints[ci].to_i32()
+                val glyph = self.get_registered_glyph(codepoint, font_size)
+                if glyph.width > 0 and glyph.height > 0:
+                    var atlas_index = self._font_atlas_entry_index(0, generation, -1, codepoint, font_size)
+                    var inserted = false
+                    if atlas_index < 0:
+                        atlas_index = self._insert_font_atlas_glyph(glyph)
+                        inserted = atlas_index >= 0
+                    if atlas_index < 0:
+                        overflow = true
+                    else:
+                        val quad = FontRenderQuad(
+                            codepoint: codepoint, byte_offset: byte_offset,
+                            dst_x: pen_x + glyph.bearing_x, dst_y: 0,
+                            width: self.atlas_widths[atlas_index], height: self.atlas_heights[atlas_index],
+                            atlas_x: self.atlas_xs[atlas_index], atlas_y: self.atlas_ys[atlas_index], color: color)
+                        quads = quads.push(quad)
+                        if inserted:
+                            dirty = dirty.push(quad)
+                pen_x = pen_x + glyph.advance
+                byte_offset = byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
+                ci = ci + 1
+            if not overflow:
+                if dirty.len() > 0:
+                    self.atlas_generation = _next_font_atlas_dependency_generation()
+                self.quad_phase_local_nonempty = quads.len() > 0
+                return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: quads.len() > 0, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
+            self._reset_font_atlas(generation, identity)
+            attempt = attempt + 1
+        self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+
     me _stage_text_active(content: text, color: u32, font_size: i32) -> i64:
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 24:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
@@ -1663,6 +1848,19 @@ class FontRenderer:
         self._apply_staged_config(config)
         self.staged_quads.len()
 
+    me stage_text_with_advances_registered_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> i64:
+        if not font_render_config_selection_supported(config) or not self._ensure_registered_render_config_face(config):
+            return self._stage_invalid_config(config)
+        self._activate_render_config(config)
+        val natural_advances = self.measure_registered_text_advances(content, config.size)
+        self._stage_text_registered_active(content, color, config.size)
+        var quads = self.staged_quads
+        if not font_batch_apply_advances(content, natural_advances, advance_widths, quads):
+            self.staged_valid = false
+        self.staged_quads = quads
+        self._apply_staged_config(config)
+        self.staged_quads.len()
+
     # Single-aggregate return (was `(CachedGlyph, GlyphCache)`); the cache half
     # now updates `self.cache` in place — see get_glyph above for the channel
     # rationale.
@@ -1713,16 +1911,59 @@ class FontRenderer:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
-        val staged = self._stage_selected_glyph_run_active(payload, color, config.size)
+        val staged = self._stage_selected_glyph_run_hosted_active(payload, color, config.size)
         self._apply_staged_config(config)
         staged
 
-    me _stage_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> i64:
+    me stage_selected_glyph_run_registered_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> i64:
+        if not font_render_config_selection_supported(config) or not self._ensure_registered_render_config_face(config):
+            return self._stage_invalid_config(config)
+        self._activate_render_config(config)
+        val staged = self._stage_selected_glyph_run_registered_active(payload, color, config.size)
+        self._apply_staged_config(config)
+        staged
+
+    me _stage_selected_glyph_run_hosted_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> i64:
         val active = self.ttf_rasterizer
         if active == nil:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         val generation = active.cache_identity_generation()
         val identity = active.cache_identity()
+        var ascent = self.horizontal_line_metric(font_size, 0)
+        if self.selected_outline_blob.len() > 0 and payload.glyph_ids.len() > 0:
+            var ascent_meta: [i64] = [0; 20]
+            sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+                payload.glyph_ids[0].to_i64(), font_size.to_i64(), ascent_meta)
+            if ascent_meta[7] == 310031:
+                ascent = ascent_meta[17].to_i32()
+        val staged = self._stage_selected_glyph_run_for_identity(payload, color, font_size, generation, identity, ascent)
+        val after_generation = active.cache_identity_generation()
+        val after_identity = active.cache_identity()
+        if after_generation != generation or after_identity != identity:
+            self._reset_font_atlas(after_generation, after_identity)
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: after_identity, face_generation: after_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        staged
+
+    me _stage_selected_glyph_run_registered_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> i64:
+        val active = self.ttf_rasterizer
+        if active == nil:
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        val generation = active.loaded_generation
+        val identity = active.font_cache_identity
+        var ascent = 0
+        if payload.glyph_ids.len() > 0:
+            var ascent_meta: [i64] = [0; 20]
+            sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+                payload.glyph_ids[0].to_i64(), font_size.to_i64(), ascent_meta)
+            if ascent_meta[7] == 310031:
+                ascent = ascent_meta[17].to_i32()
+        val staged = self._stage_selected_glyph_run_for_identity(payload, color, font_size, generation, identity, ascent)
+        if active.loaded_generation != generation or active.font_cache_identity != identity:
+            self._reset_font_atlas(active.loaded_generation, active.font_cache_identity)
+            return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: active.font_cache_identity, face_generation: active.loaded_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        staged
+
+    me _stage_selected_glyph_run_for_identity(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32, generation: i64, identity: text, ascent: i32) -> i64:
         val lengths_match = payload.glyph_ids.len() == payload.xs.len() and payload.glyph_ids.len() == payload.ys.len() and payload.glyph_ids.len() == payload.clusters.len()
         if (not payload.valid or not lengths_match or payload.glyph_ids.len() == 0 or
             generation <= 0 or identity == "" or font_size <= 0 or font_size > 512):
@@ -1732,13 +1973,6 @@ class FontRenderer:
         self.cache = cache
         if self.atlas_face_generation != generation or self.atlas_font_identity != identity:
             self._reset_font_atlas(generation, identity)
-        var ascent = self.horizontal_line_metric(font_size, 0)
-        if self.selected_outline_blob.len() > 0:
-            var ascent_meta: [i64] = [0; 20]
-            sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
-                payload.glyph_ids[0].to_i64(), font_size.to_i64(), ascent_meta)
-            if ascent_meta[7] == 310031:
-                ascent = ascent_meta[17].to_i32()
         if ascent <= 0:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
         var attempt = 0
@@ -1781,11 +2015,6 @@ class FontRenderer:
                         self._reset_font_atlas(generation, identity)
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: 0, dirty_rects: []))
                     self.atlas_generation = dependency_generation
-                val after_generation = active.cache_identity_generation()
-                val after_identity = active.cache_identity()
-                if after_generation != generation or after_identity != identity:
-                    self._reset_font_atlas(after_generation, after_identity)
-                    return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: after_identity, face_generation: after_generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: [], quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                 return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: true, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: quads, atlas_generation: self.atlas_generation, dirty_rects: dirty))
             self._reset_font_atlas(generation, identity)
             attempt = attempt + 1
@@ -2002,6 +2231,62 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
     _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
 
+fn _resolve_registered_shaped_glyph_run(candidate: FontAssetCandidate, content: text, font_size: i32, language: text) -> _ResolvedShapedGlyphRun:
+    if not selected_font_simple_tuple_accepted(candidate.family, language):
+        return _resolved_font_empty_shaped()
+    val decoded = text_codepoints(content)
+    if decoded.len() == 0:
+        return _resolved_font_empty_shaped()
+    var codepoints: [u32] = []
+    for codepoint in decoded:
+        if codepoint < 0 or codepoint > 1114111:
+            return _resolved_font_empty_shaped()
+        codepoints = codepoints.push(codepoint as u32)
+    val registered = _registered_selected_font_bytes(candidate.local_path)
+    if not registered.1:
+        return _resolved_font_empty_shaped()
+    val parsed = parse_offset_table(registered.0)
+    if parsed == nil:
+        return _resolved_font_empty_shaped()
+    val style = sk_font_style_normal()
+    val typeface = SkTypeface(family_name: candidate.family, style: style,
+        font_path: candidate.local_path, font_handle: 0, font_generation: 0)
+    val font = sk_font_new(typeface, font_size.to_f64())
+    val shaper = shaper_with_selected_ot_font(shaper_new(fallback_chain_new(font)), parsed.?, candidate.local_path)
+    val runs = shaper_shape_selected_with_language(shaper, codepoints, font, 0.0, 0.0, language)
+    var glyph_ids: [u32] = []
+    var xs: [i32] = []
+    var ys: [i32] = []
+    var clusters: [i64] = []
+    var advances: [i32] = [0; codepoints.len()]
+    var total_advance = 0.0
+    var valid = runs.len() > 0
+    for run in runs:
+        val material = shaped_run_to_font_glyph_run(run)
+        if not material.valid or material.face_id != 0 or material.face_generation != 0:
+            valid = false
+        var i: i64 = 0
+        while i < material.glyph_ids.len() and i < run.glyphs.len():
+            glyph_ids = glyph_ids.push(material.glyph_ids[i])
+            xs = xs.push(material.xs[i])
+            ys = ys.push(material.ys[i])
+            clusters = clusters.push(material.clusters[i])
+            val cluster = material.clusters[i]
+            val before = total_advance.to_i32()
+            total_advance = total_advance + run.glyphs[i].x_advance
+            val after = total_advance.to_i32()
+            if cluster < 0 or cluster >= advances.len():
+                valid = false
+            else:
+                advances[cluster] = advances[cluster] + after - before
+            i = i + 1
+        if i != material.glyph_ids.len() or i != run.glyphs.len():
+            valid = false
+    val width = total_advance.to_i32()
+    val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
+    _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload,
+        advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
+
 fn _resolve_font_metrics_with_language_config(family: text, content: text, font_size: i32,
                                               language: text, render_config_identity: text) -> ResolvedFontMetrics:
     if family.trim() == "" or font_size <= 0 or font_size > 512:
@@ -2094,11 +2379,70 @@ fn _resolve_font_metrics_with_language_config(family: text, content: text, font_
         _resolved_font_metric_store(cache_key, resolved)
     resolved
 
+fn _resolve_registered_font_metrics_with_language_config(family: text, content: text, font_size: i32,
+                                                         language: text, render_config_identity: text) -> ResolvedFontMetrics:
+    if family.trim() == "" or font_size <= 0 or font_size > 512:
+        return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "invalid-font-request", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)
+    val normalized_language = _resolved_font_language(language)
+    val codepoints = text_codepoints(content)
+    val complex_script = _resolved_font_complex_script(codepoints)
+    val category = _resolved_font_category(family)
+    val selected_candidate = if normalized_language != "und" and category != "":
+        selected_font_asset_for_language_category(normalized_language, category)
+    else:
+        nil
+    val resolved_family = if selected_candidate != nil: selected_candidate.?.family else: family
+    val expected_identity = if selected_candidate != nil: selected_font_asset_identity(selected_candidate.?) else: ""
+    val cacheable = _resolved_font_metrics_cacheable(resolved_family, content)
+    if cacheable and expected_identity != "":
+        val expected_key = _resolved_font_metric_language_config_key(
+            resolved_family, content, font_size, expected_identity, normalized_language, render_config_identity)
+        if val cached = _resolved_font_metric_cached(expected_key):
+            return cached
+    val shaped = if complex_script != 0 and selected_candidate != nil:
+        _resolve_registered_shaped_glyph_run(selected_candidate.?, content, font_size, normalized_language)
+    else:
+        _resolved_font_empty_shaped()
+    var renderer = FontRenderer.browser_registered_for_family(resolved_family)
+    val identity = renderer.current_registered_font_identity()
+    if identity == "":
+        return ResolvedFontMetrics(valid: false, family: resolved_family, identity: "", advances: [], width: 0, line_height: 0, reason: "font-runtime-unavailable", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: complex_script != 0)
+    val cache_key = if cacheable:
+        _resolved_font_metric_language_config_key(
+            resolved_family, content, font_size, identity, normalized_language, render_config_identity)
+    else:
+        ""
+    if cacheable:
+        if val cached = _resolved_font_metric_cached(cache_key):
+            return cached
+    val advances = if shaped.valid: shaped.advances else: renderer.measure_registered_text_advances(content, font_size)
+    var width = 0
+    if shaped.valid:
+        width = shaped.width
+    else:
+        for advance in advances:
+            width = width + advance
+    val valid = identity != "" and advances.len() == codepoints.len()
+    val resolved = ResolvedFontMetrics(
+        valid: valid, family: resolved_family, identity: identity,
+        advances: if valid: advances else: [], width: if valid: width else: 0,
+        line_height: if valid: font_size else: 0,
+        reason: if valid and (complex_script == 0 or shaped.valid): "resolved" else if valid: "font-shaping-unavailable" else: "font-identity-unavailable",
+        glyph_run: shaped.payload, shaping_required: complex_script != 0)
+    if resolved.valid and cacheable:
+        _resolved_font_metric_store(cache_key, resolved)
+    resolved
+
 fn resolve_font_metrics_with_language(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
     val config = font_render_config_default_for_size(font_size)
     val config_identity = font_render_config_identity(config)
     val resolved = _resolve_font_metrics_with_language_config(family, content, font_size, language, config_identity)
     resolved
+
+fn resolve_font_metrics_with_language_registered(family: text, content: text, font_size: i32, language: text) -> ResolvedFontMetrics:
+    val config = font_render_config_default_for_size(font_size)
+    _resolve_registered_font_metrics_with_language_config(
+        family, content, font_size, language, font_render_config_identity(config))
 
 fn resolve_font_metrics_configured(config: FontRenderConfig, content: text) -> ResolvedFontMetrics:
     if not font_render_config_valid(config):

@@ -15,6 +15,49 @@ use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCp
 use super::*;
 
 #[test]
+fn freestanding_builtin_queries_preserve_target_multilib_and_fallback_boundary() {
+    assert_eq!(
+        freestanding_builtin_primary_query(
+            "riscv64-unknown-elf",
+            "-march=rv64imac",
+            "-mabi=lp64",
+        ),
+        vec![
+            "--target=riscv64-unknown-elf".to_string(),
+            "-march=rv64imac".to_string(),
+            "-mabi=lp64".to_string(),
+            "-print-libgcc-file-name".to_string(),
+        ],
+    );
+    assert_eq!(
+        freestanding_builtin_fallback_query(
+            "riscv64-unknown-elf",
+            "-march=rv64imac",
+            "-mabi=lp64",
+        ),
+        Some((
+            "riscv64-unknown-elf-gcc",
+            vec![
+                "-march=rv64imac".to_string(),
+                "-mabi=lp64".to_string(),
+                "-print-libgcc-file-name".to_string(),
+            ],
+        )),
+    );
+    assert_eq!(
+        freestanding_builtin_fallback_query("aarch64-none-elf", "", ""),
+        None,
+    );
+    assert_eq!(
+        freestanding_builtin_primary_query("aarch64-none-elf", "", ""),
+        vec![
+            "--target=aarch64-none-elf".to_string(),
+            "-print-libgcc-file-name".to_string(),
+        ],
+    );
+}
+
+#[test]
 fn pure_simple_lambda_inline_helper_has_both_callers() {
     let lowering = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl");
     let methods = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl");

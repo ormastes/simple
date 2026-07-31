@@ -1,0 +1,82 @@
+use std.spec.*
+use app.io.mod.{file_read}
+use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
+
+fn _source_block(source: text, start_marker: text, end_marker: text) -> text:
+    val start = source.index_of(start_marker)
+    if start < 0:
+        return ""
+    val tail = source.substring(start, source.len())
+    val end = tail.index_of(end_marker)
+    if end < 0:
+        return tail
+    tail.substring(0, end)
+
+describe "registered-only font source contract":
+    it "keeps Unicode advances codepoint-aligned with UTF-8 quad offsets":
+        val codepoints = text_codepoints("Aé中😀")
+        expect(codepoints.len()).to_equal(4)
+        var offsets: [i64] = []
+        var offset: i64 = 0
+        for codepoint in codepoints:
+            offsets = offsets.push(offset)
+            offset = offset + utf8_codepoint_byte_len(codepoint)
+        expect(offsets).to_equal([0, 1, 3, 6])
+        expect(offset).to_equal(10)
+
+        val renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
+        val stage = _source_block(renderer, "    me _stage_text_registered_active", "    me _stage_text_active")
+        val metrics = _source_block(renderer, "fn _resolve_registered_font_metrics_with_language_config", "fn resolve_font_metrics_with_language")
+        expect(stage).to_contain("val codepoints = text_codepoints(content)")
+        expect(stage).to_contain("byte_offset = byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())")
+        expect(metrics).to_contain("advances.len() == codepoints.len()")
+        expect(stage.contains("content.char_code_at")).to_be(false)
+
+    it "isolates hosted lifecycle and host ABI symbols from the RV64 static route":
+        val renderer = file_read("src/lib/nogc_sync_mut/text_layout/font_renderer.spl")
+        val hosted_mode = _source_block(renderer, "fn font_renderer_use_registered_selected_bytes_only():", "fn font_renderer_use_registered_selected_bytes_only_static")
+        val static_mode = _source_block(renderer, "fn font_renderer_use_registered_selected_bytes_only_static", "fn font_renderer_register_selected_bytes")
+        val registered_stage = _source_block(renderer, "    me _stage_text_registered_active", "    me _stage_text_active")
+        val registered_shape = _source_block(renderer, "    me _stage_selected_glyph_run_registered_active", "    me _stage_selected_glyph_run_for_identity")
+        val hosted_shape = _source_block(renderer, "    me _stage_selected_glyph_run_hosted_active", "    me _stage_selected_glyph_run_registered_active")
+        val registered_metrics = _source_block(renderer, "fn _resolve_registered_font_metrics_with_language_config", "fn resolve_font_metrics_with_language")
+        expect(hosted_mode).to_contain("renderer.clear_ttf()")
+        expect(static_mode.contains("clear_ttf")).to_be(false)
+        expect(registered_stage.contains("rasterize_ttf")).to_be(false)
+        expect(registered_stage.contains("try_load_runtime_ttf")).to_be(false)
+        expect(registered_shape.contains("cache_identity_generation")).to_be(false)
+        expect(registered_shape.contains("cache_identity()")).to_be(false)
+        expect(registered_shape.contains("horizontal_line_metric")).to_be(false)
+        expect(hosted_shape).to_contain("active.cache_identity_generation()")
+        expect(hosted_shape).to_contain("active.cache_identity()")
+        expect(registered_metrics.contains("file_read_bytes")).to_be(false)
+        expect(registered_metrics.contains("load_font(")).to_be(false)
+        expect(registered_metrics.contains("spl_dlopen")).to_be(false)
+        expect(registered_metrics.contains("spl_wffi_call_i64")).to_be(false)
+
+        val web = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl")
+        val foundation = file_read("src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl")
+        val software = file_read("src/os/compositor/simple_web_window_renderer_software.spl")
+        val target = file_read("src/os/compositor/riscv64_draw_ir_render_target.spl")
+        expect(foundation).to_contain("var _simple_web_font_metrics_resolver: SimpleWebFontMetricsResolver = resolve_font_metrics_with_language_registered")
+        expect(web).to_contain("simple_web_layout_render_html_draw_ir_result_registered")
+        expect(web).to_contain("_simple_web_use_registered_font_metrics()")
+        expect(web).to_contain("simple_web_layout_animation_end_ms")
+        val animation = _source_block(web, "pub fn simple_web_layout_animation_end_ms", "fn _simple_web_layout_render_html_draw_ir_result_at_time")
+        expect(animation).to_contain("_simple_web_use_hosted_font_metrics()")
+        val hit_index = _source_block(web, "pub fn simple_web_layout_hit_test_index", "class SimpleWebLayoutDrawIrResult")
+        val provenance = _source_block(web, "pub fn simple_web_layout_material_provenance_after_execution", "fn _simple_web_material_witness_from_sidecar")
+        val fallback = _source_block(web, "pub fn simple_web_material_fallback_realized", "fn _simple_web_material_witness_from_sidecar")
+        expect(hit_index.contains("_simple_web_use_hosted_font_metrics")).to_be(false)
+        expect(provenance.contains("_simple_web_use_hosted_font_metrics")).to_be(false)
+        expect(fallback.contains("_simple_web_use_hosted_font_metrics")).to_be(false)
+        expect(software).to_contain("simple_web_layout_render_html_draw_ir_result_registered")
+        expect(target).to_contain("stage_text_registered_configured")
+        expect(target).to_contain("stage_text_with_advances_registered_configured")
+        expect(target).to_contain("stage_selected_glyph_run_registered_configured")
+        expect(target.contains("stage_text_configured(text_val")).to_be(false)
+
+        val shaper = file_read("src/lib/skia/feature/shaper/shaper.spl")
+        val selected = _source_block(shaper, "fn shaper_shape_selected_with_language", "fn shaper_shape(shaper")
+        expect(selected.contains("font_face_is_live")).to_be(false)
+        expect(selected.contains("fallback_chain_font_for_run")).to_be(false)

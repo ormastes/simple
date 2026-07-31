@@ -7,6 +7,7 @@
 typedef long long spl_i64;
 typedef unsigned long long spl_u64;
 typedef unsigned int spl_u32;
+typedef signed int spl_i32;
 typedef unsigned short spl_u16;
 typedef unsigned char spl_u8;
 
@@ -22,7 +23,10 @@ typedef unsigned char spl_u8;
 #define RT_HEAP_TUPLE 0x04U
 #define RT_HEAP_DICT 0x06U
 #define RT_HEAP_ENUM 0x07U
+#define RT_HEAP_MUTEX 0x09U
 #define RT_VALUE_HEAP_FLOAT 0x464C5431U
+#define RT_FREESTANDING_HEAP_BASE 0x87000000ULL
+#define RT_DECIMAL_EXPONENT_LIMIT 400ULL
 
 typedef struct RtHeapHeader {
     spl_u8 object_type;
@@ -73,6 +77,12 @@ typedef struct RtEnum {
     spl_i64 payload;
 } RtEnum;
 
+typedef struct RtMutex {
+    RtHeapHeader header;
+    signed char locked;
+    spl_i64 value;
+} RtMutex;
+
 #include "freestanding_float_value.h"
 
 #ifndef SIMPLE_RUNTIME_NO_ENTRY
@@ -107,7 +117,7 @@ __asm__(
 
 extern spl_i64 kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(spl_i64 size) __attribute__((weak));
 
-static spl_u64 g_freestanding_heap_next = 0x87000000ULL;
+static spl_u64 g_freestanding_heap_next = RT_FREESTANDING_HEAP_BASE;
 static spl_u64 g_freestanding_heap_limit = 0x90000000ULL;
 
 static spl_u64 rt_align8(spl_u64 value) {
@@ -166,6 +176,11 @@ void *rt_memset(void *dst, signed char val, spl_i64 n) {
     return dst;
 }
 
+/* LLVM may lower aggregate initialization directly to memset. */
+void *memset(void *dst, int val, spl_u64 n) {
+    return rt_memset(dst, (signed char)val, (spl_i64)n);
+}
+
 double spl_bits_to_f64(spl_i64 bits) {
     union {
         spl_u64 bits;
@@ -208,11 +223,18 @@ spl_i64 rt_native_eq(spl_i64 lhs, spl_i64 rhs);
 
 static RtHeapHeader *rt_as_heap(spl_i64 value, spl_u8 kind) {
     spl_u64 raw = (spl_u64)value;
+    spl_u64 address;
     RtHeapHeader *header;
     if ((raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) {
         return (RtHeapHeader *)0;
     }
-    header = (RtHeapHeader *)(raw & ~RT_VALUE_TAG_MASK);
+    address = raw & ~RT_VALUE_TAG_MASK;
+    if (address < RT_FREESTANDING_HEAP_BASE ||
+        address > g_freestanding_heap_next ||
+        g_freestanding_heap_next - address < sizeof(RtHeapHeader)) {
+        return (RtHeapHeader *)0;
+    }
+    header = (RtHeapHeader *)address;
     if (!header || header->object_type != kind) {
         return (RtHeapHeader *)0;
     }
@@ -237,6 +259,10 @@ static RtTuple *rt_as_tuple(spl_i64 value) {
 
 static RtEnum *rt_as_enum(spl_i64 value) {
     return (RtEnum *)rt_as_heap(value, RT_HEAP_ENUM);
+}
+
+static RtMutex *rt_as_mutex(spl_i64 value) {
+    return (RtMutex *)rt_as_heap(value, RT_HEAP_MUTEX);
 }
 
 static spl_i64 rt_index_arg(spl_i64 value) {
@@ -539,6 +565,51 @@ double rt_math_pow(double base, double exponent) {
     return out;
 }
 
+double ceil(double value) {
+    if (value == 0.0 || value != value ||
+        value >= 9223372036854775808.0 || value <= -9223372036854775808.0) {
+        return value;
+    }
+    spl_i64 truncated = (spl_i64)value;
+    if (value > 0.0 && value != (double)truncated) {
+        return (double)(truncated + 1);
+    }
+    return (double)truncated;
+}
+
+double floor(double value) {
+    if (value == 0.0 || value != value ||
+        value >= 9223372036854775808.0 || value <= -9223372036854775808.0) {
+        return value;
+    }
+    spl_i64 truncated = (spl_i64)value;
+    if (value < 0.0 && value != (double)truncated) {
+        return (double)(truncated - 1);
+    }
+    return (double)truncated;
+}
+
+double round(double value) {
+    spl_i64 truncated;
+    double fraction;
+    if (value == 0.0 || value != value ||
+        value >= 9223372036854775808.0 || value <= -9223372036854775808.0) {
+        return value;
+    }
+    truncated = (spl_i64)value;
+    fraction = value - (double)truncated;
+    if (fraction >= 0.5) {
+        return (double)(truncated + 1);
+    }
+    if (fraction <= -0.5) {
+        return (double)(truncated - 1);
+    }
+    if (value < 0.0 && truncated == 0) {
+        return -0.0;
+    }
+    return (double)truncated;
+}
+
 spl_i64 rt_len(spl_i64 value) {
     RtString *s = rt_as_string(value);
     RtArray *a;
@@ -582,6 +653,15 @@ spl_i64 rt_array_new(spl_i64 capacity_value) {
 spl_i64 rt_array_len(spl_i64 array_value) {
     RtArray *array = rt_as_array(array_value);
     return array ? (spl_i64)array->len : -1;
+}
+
+signed char rt_array_clear(spl_i64 array_value) {
+    RtArray *array = rt_as_array(array_value);
+    if (!array) {
+        return 0;
+    }
+    array->len = 0;
+    return 1;
 }
 
 spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value) {
@@ -1091,6 +1171,73 @@ spl_i64 rt_enum_payload(spl_i64 value) {
     return enum_value ? enum_value->payload : rt_nil();
 }
 
+spl_i64 rt_enum_id(spl_i64 value) {
+    RtEnum *enum_value = rt_as_enum(value);
+    return enum_value ? (spl_i64)enum_value->enum_id : -1;
+}
+
+spl_i64 rt_enum_discriminant(spl_i64 value) {
+    RtEnum *enum_value = rt_as_enum(value);
+    return enum_value ? (spl_i64)enum_value->discriminant : -1;
+}
+
+spl_i64 rt_unwrap_or_self(spl_i64 value) {
+    return rt_enum_discriminant(value) >= 0 ? rt_enum_payload(value) : value;
+}
+
+signed char rt_is_none(spl_i64 value) {
+    return value == rt_nil() ||
+        (rt_enum_id(value) == 1 && rt_enum_discriminant(value) == 1);
+}
+
+signed char rt_is_some(spl_i64 value) {
+    return rt_is_none(value) ? 0 : 1;
+}
+
+spl_i64 rt_value_bool(spl_i64 value) {
+    return rt_special(value ? RT_VALUE_SPECIAL_TRUE : RT_VALUE_SPECIAL_FALSE);
+}
+
+void rt_ptr_write_i32(spl_i64 address, spl_i64 offset, spl_i32 value) {
+    spl_i32 *slot = (spl_i32 *)((spl_u8 *)(spl_u64)address + offset);
+    *slot = value;
+}
+
+/* ponytail: this freestanding target is single-core; use atomics when RV64
+ * enables concurrent cores. The state still catches nested/unbalanced use. */
+spl_i64 rt_mutex_new(spl_i64 initial) {
+    RtMutex *mutex = (RtMutex *)rt_alloc((spl_i64)sizeof(RtMutex));
+    if (!mutex) {
+        return rt_nil();
+    }
+    mutex->header.object_type = RT_HEAP_MUTEX;
+    mutex->header.gc_flags = 0;
+    mutex->header.reserved = 0;
+    mutex->header.size = (spl_u32)sizeof(RtMutex);
+    mutex->locked = 0;
+    mutex->value = initial;
+    return rt_heap(mutex);
+}
+
+spl_i64 rt_mutex_lock(spl_i64 handle) {
+    RtMutex *mutex = rt_as_mutex(handle);
+    if (!mutex || mutex->locked) {
+        return rt_nil();
+    }
+    mutex->locked = 1;
+    return mutex->value;
+}
+
+spl_i64 rt_mutex_unlock(spl_i64 handle, spl_i64 value) {
+    RtMutex *mutex = rt_as_mutex(handle);
+    if (!mutex || !mutex->locked) {
+        return 0;
+    }
+    mutex->value = value;
+    mutex->locked = 0;
+    return 1;
+}
+
 spl_i64 rt_enum_check_discriminant(spl_i64 value, spl_i64 expected) {
     RtEnum *enum_value = rt_as_enum(value);
     return enum_value && enum_value->discriminant == (spl_u32)expected ? 1 : 0;
@@ -1273,6 +1420,148 @@ spl_i64 rt_string_find(spl_i64 value, spl_i64 needle_value) {
         }
     }
     return -1;
+}
+
+spl_i64 rt_string_contains(spl_i64 value, spl_i64 needle_value) {
+    return rt_string_find(value, needle_value) >= 0 ? 1 : 0;
+}
+
+spl_i64 rt_string_rfind(spl_i64 value, spl_i64 needle_value) {
+    RtString *string = rt_as_string(value);
+    RtString *needle = rt_as_string(needle_value);
+    if (!string || !needle) {
+        return -1;
+    }
+    if (needle->len == 0) {
+        return (spl_i64)string->len;
+    }
+    if (needle->len > string->len) {
+        return -1;
+    }
+    for (spl_u64 i = string->len - needle->len + 1; i > 0; i = i - 1) {
+        spl_u64 start = i - 1;
+        spl_u64 j = 0;
+        while (j < needle->len && string->data[start + j] == needle->data[j]) {
+            j = j + 1;
+        }
+        if (j == needle->len) {
+            return (spl_i64)start;
+        }
+    }
+    return -1;
+}
+
+static int rt_ascii_space(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v';
+}
+
+/* libc-free strtod subset: decimal and scientific notation, with the same
+ * whole-string whitespace rule as the hosted runtime. */
+spl_i64 rt_string_to_float(spl_i64 value) {
+    RtString *string = rt_as_string(value);
+    spl_u64 i = 0;
+    spl_u64 exponent = 0;
+    spl_u64 exponent_limit;
+    spl_i64 decimal_shift = 0;
+    spl_i64 net_scale;
+    int significant_digits = 0;
+    int negative = 0;
+    int exponent_negative = 0;
+    int any_digit = 0;
+    double parsed = 0.0;
+    if (!string || string->len == 0) {
+        return rt_nil();
+    }
+    while (i < string->len && rt_ascii_space(string->data[i])) {
+        i = i + 1;
+    }
+    if (i < string->len && (string->data[i] == '-' || string->data[i] == '+')) {
+        negative = string->data[i] == '-';
+        i = i + 1;
+    }
+    while (i < string->len && string->data[i] >= '0' && string->data[i] <= '9') {
+        int digit = string->data[i] - '0';
+        if (significant_digits > 0 || digit != 0) {
+            if (significant_digits < 17) {
+                parsed = parsed * 10.0 + (double)digit;
+                significant_digits = significant_digits + 1;
+            } else {
+                decimal_shift = decimal_shift + 1;
+            }
+        }
+        any_digit = 1;
+        i = i + 1;
+    }
+    if (i < string->len && string->data[i] == '.') {
+        i = i + 1;
+        while (i < string->len && string->data[i] >= '0' && string->data[i] <= '9') {
+            int digit = string->data[i] - '0';
+            if (significant_digits == 0 && digit == 0) {
+                decimal_shift = decimal_shift - 1;
+            } else if (significant_digits < 17) {
+                parsed = parsed * 10.0 + (double)digit;
+                significant_digits = significant_digits + 1;
+                decimal_shift = decimal_shift - 1;
+            }
+            any_digit = 1;
+            i = i + 1;
+        }
+    }
+    if (!any_digit) {
+        return rt_nil();
+    }
+    if (i < string->len && (string->data[i] == 'e' || string->data[i] == 'E')) {
+        spl_u64 exponent_start = i;
+        int exponent_digits = 0;
+        exponent_limit = string->len + RT_DECIMAL_EXPONENT_LIMIT;
+        i = i + 1;
+        if (i < string->len && (string->data[i] == '-' || string->data[i] == '+')) {
+            exponent_negative = string->data[i] == '-';
+            i = i + 1;
+        }
+        while (i < string->len && string->data[i] >= '0' && string->data[i] <= '9') {
+            if (exponent < exponent_limit) {
+                exponent = exponent * 10ULL + (spl_u64)(string->data[i] - '0');
+                if (exponent > exponent_limit) {
+                    exponent = exponent_limit;
+                }
+            }
+            exponent_digits = 1;
+            i = i + 1;
+        }
+        if (!exponent_digits) {
+            i = exponent_start;
+        }
+    }
+    while (i < string->len && rt_ascii_space(string->data[i])) {
+        i = i + 1;
+    }
+    if (i != string->len) {
+        return rt_nil();
+    }
+    net_scale = decimal_shift + (exponent_negative ? -(spl_i64)exponent : (spl_i64)exponent);
+    if (net_scale > (spl_i64)RT_DECIMAL_EXPONENT_LIMIT) {
+        net_scale = (spl_i64)RT_DECIMAL_EXPONENT_LIMIT;
+    } else if (net_scale < -(spl_i64)RT_DECIMAL_EXPONENT_LIMIT) {
+        net_scale = -(spl_i64)RT_DECIMAL_EXPONENT_LIMIT;
+    }
+    while (net_scale >= 8) {
+        parsed = parsed * 100000000.0;
+        net_scale = net_scale - 8;
+    }
+    while (net_scale <= -8) {
+        parsed = parsed / 100000000.0;
+        net_scale = net_scale + 8;
+    }
+    while (net_scale > 0) {
+        parsed = parsed * 10.0;
+        net_scale = net_scale - 1;
+    }
+    while (net_scale < 0) {
+        parsed = parsed / 10.0;
+        net_scale = net_scale + 1;
+    }
+    return rt_value_float(negative ? -parsed : parsed);
 }
 
 spl_i64 rt_string_replace(spl_i64 value, spl_i64 old_value, spl_i64 new_value) {
@@ -4835,6 +5124,27 @@ spl_i64 rt_string_to_upper(spl_i64 value) {
         char c = out->data[i];
         if (c >= 'a' && c <= 'z') {
             out->data[i] = (char)(c - ('a' - 'A'));
+        }
+    }
+    return out_value;
+}
+
+spl_i64 rt_string_to_lower(spl_i64 value) {
+    RtString *s = rt_as_string(value);
+    spl_i64 out_value;
+    RtString *out;
+    if (!s) {
+        return rt_nil();
+    }
+    out_value = rt_string_new((spl_i64)(spl_u64)s->data, (spl_i64)s->len);
+    out = rt_as_string(out_value);
+    if (!out) {
+        return out_value;
+    }
+    for (spl_u64 i = 0; i < out->len; i = i + 1) {
+        char c = out->data[i];
+        if (c >= 'A' && c <= 'Z') {
+            out->data[i] = (char)(c + ('a' - 'A'));
         }
     }
     return out_value;

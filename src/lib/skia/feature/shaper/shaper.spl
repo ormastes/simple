@@ -700,6 +700,41 @@ fn _build_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script, language
         is_rtl: rtl, glyphs: shaped_glyphs
     )
 
+fn _build_selected_run(codepoints: [u32], start: i64, end_idx: i64, scr: Script,
+                       language: text, font: SkFont, ot_font: Option<OtFont>,
+                       features: [OpenTypeFeature], start_x: f64, start_y: f64) -> ShapedRun:
+    val selected = _selected_memory_face_matches(font, ot_font, -1, 0)
+    val canonical = match ot_font:
+        case Some(parsed):
+            if selected and _script_layout_tag(scr) != 0u32:
+                resolve_canonical_layout_run(parsed, _script_layout_tag(scr), language, codepoints,
+                    start, end_idx, _canonical_features(features), ppem: font.size.round() as i64)
+            else:
+                None
+        case None:
+            None
+    val shaped_glyphs = match canonical:
+        case Some(value): canonical_shaped(value, scr, codepoints, font.size)
+        case None: []
+    var glyph_ids: [u32] = []
+    var positions: [SkPoint] = []
+    var x_cursor: f64 = start_x
+    for glyph in shaped_glyphs:
+        glyph_ids = glyph_ids.push(glyph.glyph_id)
+        positions = positions.push(SkPoint(x: x_cursor + glyph.x_offset, y: start_y - glyph.y_offset))
+        x_cursor = x_cursor + glyph.x_advance
+    val substitution_complete = match canonical:
+        case Some(value): value.substitution_complete
+        case None: false
+    val positioning_complete = match canonical:
+        case Some(value): value.positioning_complete
+        case None: false
+    ShapedRun(script: scr, language: language, glyph_ids: glyph_ids, positions: positions,
+        font_handle: 0, font_generation: 0,
+        glyph_indices_valid: selected and canonical != None,
+        substitution_complete: substitution_complete, positioning_complete: positioning_complete,
+        is_rtl: script_is_rtl(scr), glyphs: shaped_glyphs)
+
 fn shaped_run_to_font_glyph_run(run: ShapedRun) -> FontGlyphRun:
     var xs: [i32] = []
     var ys: [i32] = []
@@ -784,6 +819,34 @@ fn shaper_shape_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, s
     val last_bound = _shaper_ot_face(shaper, last_font)
     val last_run = _build_run(codepoints, start: run_start, end_idx: n, scr: run_script, language: run_language, font: last_font, ot_font: last_bound.0, ot_font_handle: last_bound.1, ot_font_generation: last_bound.2, gsub_lookups: _get_gsub_lookups(last_bound.0), features: shaper.features_enabled, start_x: run_x, start_y: start_y, normalized_coords: normalized_coords, language_system_tag: language_system_tag)
     runs.push(last_run)
+    runs
+
+fn shaper_shape_selected_with_language(shaper: Shaper, codepoints: [u32], font: SkFont, start_x: f64, start_y: f64, language: text) -> [ShapedRun]:
+    """Shape one already-validated selected face without hosted fallback."""
+    val n = codepoints.len()
+    var runs: [ShapedRun] = []
+    if n == 0:
+        return runs
+    val trimmed_language = language.trim()
+    val run_language = if trimmed_language == "": "und" else: trimmed_language
+    val scripts = _resolved_scripts(codepoints)
+    var run_start: i64 = 0
+    var run_script = scripts[0]
+    var run_x = start_x
+    var i: i64 = 1
+    while i < n:
+        if scripts[i] != run_script:
+            val run = _build_selected_run(codepoints, start: run_start, end_idx: i, scr: run_script,
+                language: run_language, font: font, ot_font: shaper.ot_font,
+                features: shaper.features_enabled, start_x: run_x, start_y: start_y)
+            runs = runs.push(run)
+            run_x = run_x + _run_advance(run)
+            run_start = i
+            run_script = scripts[i]
+        i = i + 1
+    runs.push(_build_selected_run(codepoints, start: run_start, end_idx: n, scr: run_script,
+        language: run_language, font: font, ot_font: shaper.ot_font,
+        features: shaper.features_enabled, start_x: run_x, start_y: start_y))
     runs
 
 fn shaper_shape(shaper: Shaper, codepoints: [u32], font: SkFont, start_x: f64, start_y: f64) -> [ShapedRun]:
