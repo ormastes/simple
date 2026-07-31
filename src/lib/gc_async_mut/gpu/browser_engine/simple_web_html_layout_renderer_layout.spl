@@ -168,6 +168,26 @@ fn offset_layout_subtree(child_index: HtmlChildIndex, node_index: i32, dx: i32, 
         child = child_index.next_sibling[child]
     PositionOffsetResult(bx: out_bx, by: out_by)
 
+fn rtl_row_flex_item_offset(
+    child_index: HtmlChildIndex, node_index: i32,
+    content_x: i32, content_w: i32,
+    margin_l: i32, margin_r: i32,
+    st: Style, bx: [i32], by: [i32], bw: [i32]
+) -> PositionOffsetResult:
+    # Row layout is measured once in logical order from the left. For RTL,
+    # reflect each occupied margin box around the content box, then translate
+    # the complete item subtree. Physical left/right margins remain physical;
+    # DOM/order sorting is deliberately unchanged.
+    val relative_x = if st.position_relative: st.left_px else: 0
+    val normal_x = bx[node_index] - relative_x
+    val mirrored_x = (
+        content_x + content_w - (normal_x - content_x) - bw[node_index] +
+        margin_l - margin_r + relative_x
+    )
+    offset_layout_subtree(
+        child_index, node_index, mirrored_x - bx[node_index], 0, bx, by
+    )
+
 class InlineLineAlignment:
     bx: [i32]
     by: [i32]
@@ -339,6 +359,46 @@ fn flex_ordered_children(styles: [Style], child_index: HtmlChildIndex, parent_i:
     if sorted:
         return out
     _sort_style_order_indices(out, out_len, styles)
+
+class RowFlexDistribution:
+    start_offset: i32
+    gap_extra: i32
+    auto_margin: i32
+
+fn row_flex_distribution(
+    free_space: i32, item_count: i32, auto_margin_count: i32,
+    justify_content: text
+) -> RowFlexDistribution:
+    var start_offset = 0
+    var gap_extra = 0
+    var auto_margin = 0
+    if free_space > 0 and auto_margin_count > 0:
+        auto_margin = free_space / auto_margin_count
+    elif free_space > 0:
+        if justify_content == "space-between" and item_count > 1:
+            gap_extra = free_space / (item_count - 1)
+        elif justify_content == "space-around" and item_count > 0:
+            start_offset = free_space / (item_count * 2)
+            gap_extra = free_space / item_count
+        elif justify_content == "space-evenly" and item_count > 0:
+            start_offset = free_space / (item_count + 1)
+            gap_extra = free_space / (item_count + 1)
+        elif (
+            justify_content == "center" or
+            justify_content == "safe-center" or
+            justify_content == "unsafe-center"
+        ):
+            start_offset = free_space / 2
+        elif justify_content == "flex-end" or justify_content == "end":
+            start_offset = free_space
+    RowFlexDistribution(
+        start_offset: start_offset,
+        gap_extra: gap_extra,
+        auto_margin: auto_margin
+    )
+
+fn row_flex_main_reversed(st: Style) -> bool:
+    st.direction_rtl != (st.flex_direction == "row-reverse")
 
 fn flex_item_outer_height(node: HNode, st: Style) -> i32:
     val legacy_widget_box = node.has_widget_class or node.has_icon_image_class
@@ -1362,19 +1422,30 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
             out_wrap_starts, out_wrap_ends, out_intrinsic_widths,
             grid_height
         )
-    if st.display == "flex" and st.flex_direction != "column":
+    if (
+        st.display == "flex" and
+        st.flex_direction != "column" and
+        st.flex_direction != "column-reverse"
+    ):
         val children_for_i_count = child_index.child_count[i]
+        val ordered_row_children = flex_ordered_children(styles, child_index, i)
+        val ordered_row_child_count = ordered_row_children.len()
         if st.flex_wrap != "nowrap":
             val row_wrap_column_gap = st.column_gap_px
             val row_wrap_row_gap = st.row_gap_px
             var line_heights: [i32] = [0; children_for_i_count]
+            var line_widths: [i32] = [0; children_for_i_count]
+            var line_item_counts: [i32] = [0; children_for_i_count]
+            var line_auto_margin_counts: [i32] = [0; children_for_i_count]
             var line_count = 0
             var total_line_h = 0
             var cx_measure = 0
             var line_h_measure = 0
             var child_count_measure = 0
-            var fm = child_index.first_child[i]
-            while fm >= 0:
+            var auto_margin_count_measure = 0
+            var fm_i = 0
+            while fm_i < ordered_row_child_count:
+                val fm = ordered_row_children[fm_i]
                 val cst = styles[fm]
                 if not cst.position_absolute:
                     val child_height_px = resolve_percent_height_px(cst.height_px, content_height_limit)
@@ -1385,14 +1456,24 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fm].has_widget_class or nodes[fm].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
-                    val item_outer_w = cml + base_w_wrap + cmr
+                    val measured_ml = if cst.margin_l_auto: 0 else: cml
+                    val measured_mr = if cst.margin_r_auto: 0 else: cmr
+                    val item_auto_margins = (
+                        (if cst.margin_l_auto: 1 else: 0) +
+                        (if cst.margin_r_auto: 1 else: 0)
+                    )
+                    val item_outer_w = measured_ml + base_w_wrap + measured_mr
                     if child_count_measure > 0 and cx_measure + row_wrap_column_gap + item_outer_w > iw:
                         line_heights[line_count] = line_h_measure
+                        line_widths[line_count] = cx_measure
+                        line_item_counts[line_count] = child_count_measure
+                        line_auto_margin_counts[line_count] = auto_margin_count_measure
                         line_count = line_count + 1
                         total_line_h = total_line_h + line_h_measure
                         cx_measure = 0
                         line_h_measure = 0
                         child_count_measure = 0
+                        auto_margin_count_measure = 0
                     if child_count_measure > 0:
                         cx_measure = cx_measure + row_wrap_column_gap
                     cx_measure = cx_measure + item_outer_w
@@ -1400,9 +1481,15 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     if used_h > line_h_measure:
                         line_h_measure = used_h
                     child_count_measure = child_count_measure + 1
-                fm = child_index.next_sibling[fm]
+                    auto_margin_count_measure = (
+                        auto_margin_count_measure + item_auto_margins
+                    )
+                fm_i = fm_i + 1
             if child_count_measure > 0:
                 line_heights[line_count] = line_h_measure
+                line_widths[line_count] = cx_measure
+                line_item_counts[line_count] = child_count_measure
+                line_auto_margin_counts[line_count] = auto_margin_count_measure
                 line_count = line_count + 1
                 total_line_h = total_line_h + line_h_measure
             if line_count > 1:
@@ -1431,16 +1518,26 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 align_content_line_extra = (explicit_content_h - total_line_h) / line_count
                 total_line_h_with_align = total_line_h + align_content_line_extra * line_count
             val reverse_wrap = st.flex_wrap == "wrap-reverse"
-            var cx_wrap = ix
+            var line_distribution = if line_count > 0:
+                row_flex_distribution(
+                    iw - line_widths[0], line_item_counts[0],
+                    line_auto_margin_counts[0], st.justify_content
+                )
+            else:
+                RowFlexDistribution(
+                    start_offset: 0, gap_extra: 0, auto_margin: 0
+                )
+            var cx_wrap = ix + line_distribution.start_offset
             var cy_wrap = if reverse_wrap:
                 y + st.border_t + st.pad_t + align_content_offset + total_line_h_with_align - (if line_count > 0: line_heights[0] + align_content_line_extra else: 0)
             else:
                 y + st.border_t + st.pad_t + align_content_offset
             var line_h_wrap = 0
             var line_index_wrap = 0
-            var fc_wrap = child_index.first_child[i]
             var flex_child_count_wrap = 0
-            while fc_wrap >= 0:
+            var fc_wrap_i = 0
+            while fc_wrap_i < ordered_row_child_count:
+                val fc_wrap = ordered_row_children[fc_wrap_i]
                 val cst = styles[fc_wrap]
                 if cst.position_absolute:
                     val absolute_containing_h = content_height_limit + st.pad_t + st.pad_b
@@ -1464,10 +1561,21 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         cst
                     val cml = resolve_horizontal_margin_px(cst.margin_l, iw)
                     val cmr = resolve_horizontal_margin_px(cst.margin_r, iw)
+                    var effective_cml = if cst.margin_l_auto:
+                        line_distribution.auto_margin
+                    else:
+                        cml
+                    var effective_cmr = if cst.margin_r_auto:
+                        line_distribution.auto_margin
+                    else:
+                        cmr
                     val base_w_wrap = if cst.flex_basis_px > 0: cst.flex_basis_px else: if cst.width_px > 0: if nodes[fc_wrap].has_widget_class or nodes[fc_wrap].has_icon_image_class or cst.border_box: cst.width_px else: cst.width_px + cst.pad_l + cst.pad_r + cst.border_l + cst.border_r else: if cst.width_px < 0: iw else: iw
-                    val item_outer_w = cml + base_w_wrap + cmr
-                    if flex_child_count_wrap > 0 and cx_wrap - ix + row_wrap_column_gap + item_outer_w > iw:
-                        cx_wrap = ix
+                    if (
+                        flex_child_count_wrap > 0 and
+                        line_index_wrap < line_count and
+                        flex_child_count_wrap >=
+                        line_item_counts[line_index_wrap]
+                    ):
                         if reverse_wrap:
                             cy_wrap = cy_wrap - ((if line_index_wrap + 1 < line_count: line_heights[line_index_wrap + 1] + align_content_line_extra else: 0) + row_wrap_row_gap + align_content_gap_extra)
                         else:
@@ -1475,11 +1583,35 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                         line_index_wrap = line_index_wrap + 1
                         line_h_wrap = if line_index_wrap < line_count: line_heights[line_index_wrap] + align_content_line_extra else: 0
                         flex_child_count_wrap = 0
+                        line_distribution = if line_index_wrap < line_count:
+                            row_flex_distribution(
+                                iw - line_widths[line_index_wrap],
+                                line_item_counts[line_index_wrap],
+                                line_auto_margin_counts[line_index_wrap],
+                                st.justify_content
+                            )
+                        else:
+                            RowFlexDistribution(
+                                start_offset: 0, gap_extra: 0,
+                                auto_margin: 0
+                            )
+                        cx_wrap = ix + line_distribution.start_offset
+                        effective_cml = if cst.margin_l_auto:
+                            line_distribution.auto_margin
+                        else:
+                            cml
+                        effective_cmr = if cst.margin_r_auto:
+                            line_distribution.auto_margin
+                        else:
+                            cmr
                     if flex_child_count_wrap == 0 and line_index_wrap < line_count:
                         line_h_wrap = line_heights[line_index_wrap] + align_content_line_extra
                     if flex_child_count_wrap > 0:
-                        cx_wrap = cx_wrap + row_wrap_column_gap
-                    cx_wrap = cx_wrap + cml
+                        cx_wrap = (
+                            cx_wrap + row_wrap_column_gap +
+                            line_distribution.gap_extra
+                        )
+                    cx_wrap = cx_wrap + effective_cml
                     var remaining_w = base_w_wrap
                     if remaining_w < 1:
                         remaining_w = 1
@@ -1491,9 +1623,17 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                     out_wrap_starts = child.wrap_starts
                     out_wrap_ends = child.wrap_ends
                     out_intrinsic_widths = child.intrinsic_widths
-                    cx_wrap = cx_wrap + out_bw[fc_wrap] + cmr
+                    if row_flex_main_reversed(st):
+                        val shifted = rtl_row_flex_item_offset(
+                            child_index, fc_wrap, ix, iw,
+                            effective_cml, effective_cmr,
+                            resolved_cst, out_bx, out_by, out_bw
+                        )
+                        out_bx = shifted.bx
+                        out_by = shifted.by
+                    cx_wrap = cx_wrap + out_bw[fc_wrap] + effective_cmr
                     flex_child_count_wrap = flex_child_count_wrap + 1
-                fc_wrap = child_index.next_sibling[fc_wrap]
+                fc_wrap_i = fc_wrap_i + 1
             var flex_h_wrap = if st.height_px > 0:
                 if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
             else:
@@ -1506,7 +1646,7 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         # explicit width (px or %) take it; the leftover space is shared by flex-grow
         # weight using left-to-right cumulative rounding so integer remainders stay
         # stable against Chromium for small fixtures.
-        val ordered_flex_children = flex_ordered_children(styles, child_index, i)
+        val ordered_flex_children = ordered_row_children
         val ordered_flex_child_count = ordered_flex_children.len()
         var sum_explicit = 0
         var auto_weight = 0
@@ -1561,27 +1701,20 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
         var auto_avail = iw - sum_explicit - gaps_total
         if auto_avail < auto_weight:
             auto_avail = auto_weight
-        val auto_main_margin_px = if shrink_deficit == 0 and auto_weight == 0 and auto_main_margin_count > 0 and main_free_space > 0:
-            main_free_space / auto_main_margin_count
+        val distributable_space = if (
+            shrink_deficit == 0 and auto_weight == 0 and main_free_space > 0
+        ):
+            main_free_space
         else:
             0
-        val positive_free_space = if shrink_deficit == 0 and auto_weight == 0 and auto_main_margin_count == 0 and iw > sum_explicit + gaps_total: iw - sum_explicit - gaps_total else: 0
-        var justify_start_offset = 0
-        var justify_gap_extra = 0
-        if positive_free_space > 0:
-            if st.justify_content == "space-between" and nonabs_count > 1:
-                justify_gap_extra = positive_free_space / (nonabs_count - 1)
-            elif st.justify_content == "space-around" and nonabs_count > 0:
-                justify_start_offset = positive_free_space / (nonabs_count * 2)
-                justify_gap_extra = positive_free_space / nonabs_count
-            elif st.justify_content == "space-evenly" and nonabs_count > 0:
-                justify_start_offset = positive_free_space / (nonabs_count + 1)
-                justify_gap_extra = positive_free_space / (nonabs_count + 1)
-            elif st.justify_content == "center" or st.justify_content == "safe-center" or st.justify_content == "unsafe-center":
-                justify_start_offset = positive_free_space / 2
-            elif st.justify_content == "flex-end" or st.justify_content == "end":
-                justify_start_offset = positive_free_space
-        elif main_free_space < 0 and st.justify_content == "unsafe-center" and shrink_scaled_total == 0:
+        val main_distribution = row_flex_distribution(
+            distributable_space, nonabs_count,
+            auto_main_margin_count, st.justify_content
+        )
+        val auto_main_margin_px = main_distribution.auto_margin
+        var justify_start_offset = main_distribution.start_offset
+        val justify_gap_extra = main_distribution.gap_extra
+        if main_free_space < 0 and st.justify_content == "unsafe-center" and shrink_scaled_total == 0:
             justify_start_offset = main_free_space / 2
         var cx = ix + justify_start_offset
         var max_child_h = 0
@@ -1769,6 +1902,22 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
                 out_intrinsic_widths = child.intrinsic_widths
                 if force_used_w:
                     out_bw[fc] = remaining_w
+                if row_flex_main_reversed(st):
+                    val effective_margin_l = if cst.margin_l_auto:
+                        auto_main_margin_px
+                    else:
+                        cml
+                    val effective_margin_r = if cst.margin_r_auto:
+                        auto_main_margin_px
+                    else:
+                        cmr
+                    val shifted = rtl_row_flex_item_offset(
+                        child_index, fc, ix, iw,
+                        effective_margin_l, effective_margin_r,
+                        resolved_cst, out_bx, out_by, out_bw
+                    )
+                    out_bx = shifted.bx
+                    out_by = shifted.by
                 val used_h = cst.margin_t + child.height + cst.margin_b
                 if used_h > max_child_h:
                     max_child_h = used_h
