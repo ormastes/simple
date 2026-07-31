@@ -521,6 +521,29 @@ fn ctrl_dispatch_normal_key(ctrl: mut EditorController, key: text, rects: [Split
     if ctrl.focus_panel == "file_tree":
         return ctrl_dispatch_file_tree_key(ctrl, key)
 
+    # An extension-contributed keybinding (contributes_keybindings in its
+    # manifest, bound via ExtensionHost._register_contributions) is checked
+    # separately from the built-in vim/IDE defaults in keybinding_manager.config
+    # -- contributed_keybinding_command only ever matches an activated
+    # extension's own binding, so it can never shadow "j"/"h"/"K"/etc, whose
+    # resolution stays in the hardcoded chain above and ctrl_handle_normal_key
+    # below. A resolved command with no registered handler (only markdown
+    # ships handlers today) reports that fact in status_msg instead of
+    # crashing or silently doing nothing; it does not fall through to vim
+    # keys, since the extension explicitly claimed this key.
+    val contributed_command = ctrl.extension_host.contributed_keybinding_command(key, "normal")
+    if contributed_command != "":
+        if ctrl.extension_host.command_handler_registered(contributed_command):
+            val dispatch = ctrl.extension_host.dispatch_command(contributed_command, "")
+            match dispatch:
+                case Ok(payload):
+                    ctrl.status_msg = payload
+                case Err(reason):
+                    ctrl.status_msg = reason
+        else:
+            ctrl.status_msg = "no handler registered for command '" + contributed_command + "'"
+        return EditorAction(redraw: true, quit: not ctrl.running, status_msg: ctrl.status_msg)
+
     var buffer = ctrl.session.active_buffer()
     if buffer == nil:
         if key == ":":
