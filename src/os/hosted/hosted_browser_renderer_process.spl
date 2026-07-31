@@ -76,6 +76,7 @@ use os.hosted.hosted_browser_renderer_policy.{
     HostedBrowserNavigationPermit,
     HostedBrowserRequestPolicy,
     hosted_browser_canonical_http_url,
+    hosted_browser_canonical_navigation_url,
     hosted_browser_cors_response_headers,
     hosted_browser_empty_navigation_permit,
     hosted_browser_hsts_upgrade_valid,
@@ -112,16 +113,7 @@ extern fn rt_browser_http_job_cancel(handle: i64) -> bool
 extern fn rt_browser_http_job_free(handle: i64) -> bool
 
 fn _hosted_browser_canonical_history_url(raw: text) -> text:
-    if (raw == "" or raw != raw.trim() or raw.contains("\0") or
-        raw.contains("\r") or raw.contains("\n") or
-        rt_text_to_bytes(raw).len() > 8192):
-        return ""
-    val fragment_at = raw.index_of("#")
-    val transport = if fragment_at >= 0:
-        raw.slice(0, fragment_at)
-    else:
-        raw
-    if hosted_browser_canonical_http_url(transport) != transport:
+    if hosted_browser_canonical_navigation_url(raw) != raw:
         return ""
     raw
 
@@ -623,7 +615,7 @@ pub class HostedBrowserRendererProcess:
         body: text,
         content_type: text
     ) -> HostedBrowserNavigationPermit?:
-        val canonical_url = hosted_browser_canonical_http_url(
+        val canonical_url = hosted_browser_canonical_navigation_url(
             self._hsts_upgrade_url(url)
         )
         val canonical_method = method.to_upper()
@@ -775,7 +767,7 @@ pub class HostedBrowserRendererProcess:
         )
 
     me set_home_url(url: text) -> bool:
-        val canonical_url = hosted_browser_canonical_http_url(url)
+        val canonical_url = hosted_browser_canonical_navigation_url(url)
         if canonical_url == "":
             return false
         self.home_url = canonical_url
@@ -1649,8 +1641,11 @@ pub class HostedBrowserRendererProcess:
         policy: HostedBrowserRequestPolicy,
         redirect_count: i64
     ) -> HostedBrowserNetworkResult?:
+        val transport_url = hosted_browser_canonical_http_url(
+            policy.canonical_url
+        )
         val request = FetchRequest(
-            url: Url.parse_or_opaque(policy.canonical_url),
+            url: Url.parse_or_opaque(transport_url),
             method: fetch.method,
             headers: policy.sanitized_headers,
             body: rt_text_to_bytes(fetch.body),
@@ -1781,10 +1776,10 @@ pub class HostedBrowserRendererProcess:
         val redirected = resolve_fetch_redirect_url(base, location)
         if not redirected.?:
             return Err("invalid-navigation-redirect")
-        val original_redirected_url = hosted_browser_canonical_http_url(
+        val original_redirected_url = hosted_browser_canonical_navigation_url(
             redirected!.to_text()
         )
-        val redirected_url = hosted_browser_canonical_http_url(
+        val redirected_url = hosted_browser_canonical_navigation_url(
             self._hsts_upgrade_url(original_redirected_url)
         )
         if (redirected_url == "" or
@@ -1885,7 +1880,7 @@ pub class HostedBrowserRendererProcess:
                 val redirected = resolve_fetch_redirect_url(
                     Url.parse_or_opaque(policy.canonical_url), location
                 )
-                val redirect_url = hosted_browser_canonical_http_url(
+                val redirect_url = hosted_browser_canonical_navigation_url(
                     redirected.to_text()
                 )
                 val effective_redirect_url = self._hsts_upgrade_url(
