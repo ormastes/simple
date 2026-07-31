@@ -1303,3 +1303,88 @@ Existing evidence counts and RED/evidence-blocked classifications remain in
 force except for the explicit `<abbr>` reclassification and animation-row
 extension in the canonical HTML/CSS plan. No runtime, docgen, 10,000-cycle,
 performance, full-browser, goal, or aggregate HTML/CSS PASS is admitted.
+
+## Batch 22/23 final evidence boundary
+
+Exact repository HEAD is
+`8372ca9607fb6f6ee8fda40c19ff3f573350bbe4`.
+
+The following integrated pairs provide source and manual evidence only:
+
+- `test/01_unit/lib/common/web/browser_session_redirect_scheme_security_spec.spl`
+  and its `doc/06_spec` mirror cover trusted request-scheme downgrade checks
+  (`4a141af30d5`) and mixed-content rechecking after loopback redirects
+  (`59cbfff9857`);
+- `test/03_system/app/browser/feature/browser_address_selection_backspace_spec.spl`
+  and its mirror cover selected-address Backspace (`5f0758db126`);
+- `test/02_integration/rendering/simple_web_layout_child_index_spec.spl` and
+  its mirror cover column-gap-sensitive flex wrapping (`d620217fb0c`);
+- `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl` and its
+  mirror cover finite terminal animation artifact retention and static/timed
+  cache separation (`1671c187b9f`);
+- `test/03_system/app/browser/feature/browser_input_event_payload_spec.spl`
+  and its mirror cover exact input payload/type dispatch through Draw IR
+  (`c2013e78545`); and
+- `test/03_system/app/browser/feature/browser_address_url_reference_spec.spl`
+  and its mirror cover URL-reference resolution and absolute worker-wire
+  publication (`8372ca9607f`).
+
+All seven rows are STATIC/EVIDENCE-HELD. Intervening compiler, GPU, and
+documentation commits are concurrent ancestry only and are neither reviewed
+nor claimed here. Animation candidate `47df593f600` is REJECTED and is not in
+`origin/main`; cookie authority `921fd1` remains REJECTED/P0; the distinct
+cookie-authority protocol lane and D3 are STOPPED/UNCOMMITTED. The iframe
+sandbox-origin/capability contract remains an architecture RED gap. Stage-4
+admission is NONE, so no focused runtime, docgen, performance, 10,000-cycle,
+aggregate HTML/CSS, full-browser, or goal PASS is admitted.
+
+## Batch 24/25 final evidence boundary
+
+Composition base is
+`745e12de62dded9dab51e023e316649df2c1394f`.
+
+The following integrated source/spec/manual pairs remain evidence-held:
+
+- `test/03_system/feature/web_platform/css/table_formatting_spec.spl` and its
+  mirror cover collapsed-border width-before-style precedence
+  (`d01ff82c92a`);
+- `test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl`
+  and its mirror cover reset input discovery plus keyboard/pointer activation
+  (`8ce17d741ca`);
+- the canonical
+  `doc/06_spec/01_unit/os/compositor/simple_web_window_renderer_spec.md` is
+  reconciled at `df30337b6b1`; this manual-only change adds no execution;
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl`,
+  `test/03_system/os/simpleos_host_gpu_image_execution_contract_spec.spl`, and
+  their mirrors cover cached opaque/translucent image classification and exact
+  blend controls (`7fa1a11ff3c`);
+- `test/03_system/app/browser/feature/browser_home_pending_address_spec.spl`
+  and its mirror cover admitted pending Home address publication
+  (`764bc1bdfa6`);
+- `test/03_system/security/browser_tls_failure_preservation_spec.spl` and its
+  mirror cover stable TLS errors and committed-state preservation
+  (`25b8f352e72`);
+- `test/03_system/app/browser/feature/browser_eval_error_side_effects_spec.spl`
+  and its mirror cover origin-partitioned writes before JavaScript errors
+  (`f44a0122b91`);
+- `test/03_system/app/browser/feature/browser_live_default_action_spec.spl` and
+  its mirror cover fail-closed unsupported link targets (`f0a222d8695`);
+- `test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl`,
+  `test/03_system/app/browser/feature/browser_focus_editability_order_spec.spl`,
+  and their mirrors cover revision-qualified DOM UI identities
+  (`93e8716bcd5`); and
+- `test/01_unit/lib/common/web/browser_session_async_spec.spl` and its mirror
+  cover one-consumer Fetch response bodies (`7574cd2e1a8`).
+
+Fixed positioning is ACTIVE/UNCOMMITTED/RED after rejection of `98ec2f997eb`.
+Animation lifecycle `47df593f600` is REJECTED/DO-NOT-MERGE for unsafe identity,
+list, time, retention, and lifecycle-control behavior. Cookie authority
+`921fd1` remains REJECTED/P0 and the distinct protocol repair remains
+STOPPED/UNCOMMITTED. D3 is STOPPED/UNCOMMITTED and current-origin unsafe because
+its typed dispatcher omits newer InputEvent payload routing and overlaps a
+Lane-2 owner. Iframe is DESIGN-GO only and implementation RED until the broker
+owns trusted frame identity, origin, and one-use capability state before any
+child runtime.
+Stage-4 admission is NONE. Therefore no target-runtime, docgen, numeric
+performance, 10,000-cycle, aggregate HTML/CSS, full-browser, or goal PASS is
+admitted.

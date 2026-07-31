@@ -162,7 +162,7 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ-003/004/021 | CSS `text-transform` DrawIR route | Bounded canonical visual-text repair landed in `e7af94e921c` | `simple_web_renderer_spec.spl`: `lowers text-transform through Draw IR to exact uppercase pixels` | computed style, canonical DrawIR text owner, font metrics, CPU DrawIR executor | exact `uppercase` style, `MIX-WIDE` command value, literal-uppercase geometry/family/identity/advances, full-frame pixel equality, lowercase control inequality | complete mirror; static evidence held, qualified execution unavailable | Evidence-blocked |
 | REQ-003/004/019/021 | CSS claimed but unrecognized, 36 source diagnostics | False implemented claim | checker regression records exact source diagnostic; behavioral scenarios missing | canonical declaration dispatch and downstream owners | valid/invalid/inherited style plus discriminating render | checker manual current; behavior evidence missing | FAIL |
 | REQ-003/004/019/021 | CSS `caption-side` | Bounded behavior landed in `ec39dc4ef85d` | focused table caption scenario | canonical declaration/style/table layout/DrawIR/Engine2D | top/bottom geometry and exact pixels with control | canonical manual; independent static PASS; qualified execution unavailable | Evidence-blocked |
-| REQ-003/004/019/021 | CSS `border-spacing` | Bounded separated-border implementation in current change; `border-collapse` remains excluded | focused fixed/automatic table scenario plus zero-spacing control in `table_formatting_spec.spl` | canonical declaration/style/table layout/DrawIR/Engine2D | one/two nonnegative pixel values, CSS-wide handling, exact gap geometry and pixels | canonical manual current; Stage2 build passed but runtime segfaulted before assertions | Evidence-blocked |
+| REQ-003/004/019/021 | CSS `border-spacing` | Bounded separated-border implementation in current change; collapsed-border behavior is tracked separately below | focused fixed/automatic table scenario plus zero-spacing control in `table_formatting_spec.spl` | canonical declaration/style/table layout/DrawIR/Engine2D | one/two nonnegative pixel values, CSS-wide handling, exact gap geometry and pixels | canonical manual current; Stage2 build passed but runtime segfaulted before assertions | Evidence-blocked |
 | REQ-003/004/019/021 | CSS unsupported production 92 | Unsupported backlog | inventory spec is name-only | owners named by lane below | executable fail-closed or full four-oracle chain | manual stale; no behavior PASS | RED |
 | REQ-003/019/021 | CSS speech/aural 23 | Explicit scope exclusion | fail-closed/nonvisual scenario missing | future TTS/accessibility owner | no false visual support claim | missing | RED |
 | REQ-003/019/021 | Deprecated `glyph-orientation-vertical` | Unsupported/alias candidate | missing | declaration alias owner if selected | audited equality with `text-orientation` | missing | RED |
@@ -561,3 +561,38 @@ semantic/layout layer, not a second drawing IR.
 | GEN-WEB-003 retained manifest | The 38 generated scenarios, 50 fixture cases, and element/property rows are not joined by one retained per-case manifest with qualified execution receipts | Retain a versioned manifest that maps each case to requirements, source/manual hashes, oracle class, runner SHA, and result | RED |
 | GEN-WEB-004 canonical WebIR ownership | Generated-combination pixels do not alone prove the canonical Web semantic/style/layout to `DrawIrComposition` to Engine2D route | Add producer identity, semantic/style/layout, exact Draw IR, discriminating pixel, and negative-control assertions without adding a parallel WebIR | RED |
 | GEN-WEB-005 canonical manuals | The canonical generated-combinations manual is stale and a duplicate legacy mirror remains under `doc/06_spec/test/` | Regenerate the canonical manual only after executable rows settle; prove current source hash and zero stubs before deleting the duplicate mirror | RED |
+
+## Batch 22/23 bounded traceability addendum (2026-07-31)
+
+These rows are additive bounded evidence and do not change any HTML/CSS
+inventory count or prior RED/FAIL classification.
+
+| REQ/NFR | Row/group | Support | Executable spec/scenario | Production owners | Required oracle | Manual/result | Status |
+|---|---|---|---|---|---|---|---|
+| REQ-003/004/021 | CSS flex column-gap wrapping | Bounded behavior landed in `d620217fb0c` | `test/02_integration/rendering/simple_web_layout_child_index_spec.spl`: exact three-item row/column-gap wrapping | canonical flex layout, Draw IR, Engine2D | wrap threshold includes column gap; exact item rectangles, Draw IR, and discriminating pixels | current mirror; qualified execution/docgen unavailable | Evidence-blocked |
+| REQ-003/004/005/006/007/017/021 | Finite animation terminal cache | Bounded behavior landed in `1671c187b9f` | `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl`: finite midpoint/terminal retention, reuse after damage, and timed/static negative controls | Web render-session cache, canonical Draw IR renderer, Engine2D pixel backend | exact terminal artifact identity and pixels; no untimed/timed cross-admission; stable reuse after unrelated damage | current mirror; qualified execution/docgen/performance unavailable | Evidence-blocked |
+
+The existing animation trace row remains evidence-blocked; this addendum
+extends it only with finite terminal artifact retention and reuse. The iframe
+row remains RED: current Draw IR embedding design leaves child script sharing,
+navigation, and input unsupported and defines no sandbox-origin or
+broker-capability contract. Animation lifecycle candidate `47df593f600` is
+REJECTED and not in `origin/main`; none of its traceability edits are admitted.
+
+## Batch 24/25 bounded traceability addendum (2026-07-31)
+
+These rows are additive evidence only and do not change HTML/CSS inventory
+counts or prior RED/FAIL classifications.
+
+| REQ/NFR | Row/group | Support | Executable spec/scenario | Production owners | Required oracle | Manual/result | Status |
+|---|---|---|---|---|---|---|---|
+| REQ-003/004/019/021 | CSS collapsed-border width precedence | Bounded repair landed in `d01ff82c92a` | `test/03_system/feature/web_platform/css/table_formatting_spec.spl`: wider-vs-stronger-style and equal-width style controls | canonical table layout and Draw IR/Engine2D paint | width wins before style; exact edge commands and discriminating pixels | canonical manual current; qualified execution unavailable | Evidence-blocked |
+| REQ-004/019/021 / NFR-004 | Resolved image opacity cache | Bounded shared-resource repair landed in `7fa1a11ff3c` | `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_adv_spec.spl` plus `test/03_system/os/simpleos_host_gpu_image_execution_contract_spec.spl` | shared Draw IR image resolver and Engine2D backend | opaque/translucent classification, repeated blend pixel parity, malformed resource rejection, fresh-device preflight | canonical manuals current; no qualified numeric runtime evidence | Evidence-blocked |
+| REQ-003/004/019/021 | CSS viewport-fixed positioning | No accepted implementation; replacement lane active and uncommitted | future canonical layout/Draw IR/Engine2D scenario after style-owner repair | shared style, block/flex/grid/table layout dispatch, paint/hit partition | viewport anchoring under scroll, transformed ancestor behavior, auto/zero z-order distinction, exact pixels/hits | predecessor `98ec2f997eb` rejected | RED |
+
+Animation lifecycle remains RED: candidate `47df593f600` is rejected for stale
+path identity, scalar list handling, time precision, unbounded lazy tasks, and
+missing cancel/restart/detach controls. Iframe is DESIGN-GO only and
+implementation RED until a broker-owned frame identity/origin/capability ledger
+precedes child runtime work. No runtime, docgen, numeric performance, aggregate
+HTML/CSS, or goal PASS is admitted.

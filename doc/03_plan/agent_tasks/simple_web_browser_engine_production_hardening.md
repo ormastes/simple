@@ -941,3 +941,57 @@ Exact repository HEAD:
 Root remains merge owner and final reviewer. These static integrations do not
 supply a target-runtime, docgen, performance, aggregate HTML/CSS, full-browser,
 or goal PASS.
+
+## Production browser batch 22/23 reconciliation (2026-07-31)
+
+Exact repository HEAD:
+`8372ca9607fb6f6ee8fda40c19ff3f573350bbe4`.
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `trusted_request_redirect_scheme` | Redirect downgrade checks use the trusted request scheme rather than response-controlled scheme text. | INTEGRATED `4a141af30d5`; STATIC/EVIDENCE-HELD |
+| `address_selection_backspace` | Backspace clears a fully selected address through each hosted chrome route without disturbing the committed page. | INTEGRATED `5f0758db126`; STATIC/EVIDENCE-HELD |
+| `flex_column_gap_wrap` | Flex row wrapping includes column gap before admitting the next item. | INTEGRATED `d620217fb0c`; STATIC/EVIDENCE-HELD |
+| `redirect_mixed_content_recheck` | A trustworthy loopback redirect is rechecked before following an ordinary HTTP target. | INTEGRATED `59cbfff9857`; STATIC/EVIDENCE-HELD |
+| `finite_animation_terminal_cache` | Finite terminal animation artifacts remain timed, reusable, and distinct from untimed static cache entries. | INTEGRATED `1671c187b9f`; STATIC/EVIDENCE-HELD |
+| `input_event_payload` | Input listeners receive exact insertion/deletion payloads and input types before canonical Draw IR publication. | INTEGRATED `c2013e78545`; STATIC/EVIDENCE-HELD |
+| `address_url_reference` | URL-reference address forms resolve against the committed document before the absolute URL crosses the worker wire. | INTEGRATED `8372ca9607f`; STATIC/EVIDENCE-HELD |
+| `animation_lifecycle_47df` | The lifecycle-event candidate is outside current origin and is not accepted evidence. | REJECTED `47df593f600`; NOT IN `origin/main` |
+| `cookie_authority_921fd1` | Renewable renderer authority violates one-use consumption. | REJECTED / P0; not pending or accepted |
+| `cookie_authority_protocol` | The distinct protocol repair did not converge. | STOPPED / UNCOMMITTED |
+| `D3` | Generation-qualified DOM dispatch remains incomplete. | HELD / STOPPED / UNCOMMITTED |
+| `iframe_sandbox_boundary` | Current iframe Draw IR design has no child sandbox-origin or broker-capability contract and leaves script sharing, navigation, and input unsupported. | ARCHITECTURE GAP / RED |
+| `stage4_admission` | No provenance-qualified current full pure-Simple CLI is admitted. | NONE; no runtime/docgen/performance claim |
+
+Intervening compiler, GPU, and documentation commits are concurrent ancestry
+only and are neither reviewed nor claimed by this browser reconciliation.
+Root remains merge owner and final reviewer. No inventory count, runtime,
+docgen, performance, aggregate HTML/CSS, full-browser, or goal PASS changes.
+
+## Production browser batch 24/25 reconciliation (2026-07-31)
+
+Composition base:
+`745e12de62dded9dab51e023e316649df2c1394f`.
+
+| Lane | Result | Status |
+| --- | --- | --- |
+| `table_collapsed_border_width` | Collapsed-border conflicts prefer width before style. | INTEGRATED `d01ff82c92a`; STATIC/EVIDENCE-HELD |
+| `input_reset_ui_access` | Reset inputs are discoverable and activatable through canonical pointer and keyboard UI access. | INTEGRATED `8ce17d741ca`; STATIC/EVIDENCE-HELD |
+| `renderer_manual_reconciliation` | The canonical window-renderer scenario manual mirrors the executable spec. | DOC/MANUAL CURRENT `df30337b6b1`; no execution evidence |
+| `resolved_image_opacity_cache` | One resolved-resource opacity classification preserves opaque and repeated translucent image pixels. | INTEGRATED `7fa1a11ff3c`; STATIC/PERF-EVIDENCE-HELD |
+| `home_pending_address` | An admitted Home action publishes the pending Home address instead of an abandoned draft. | INTEGRATED `764bc1bdfa6`; STATIC/EVIDENCE-HELD |
+| `tls_failure_classification` | Stable TLS failure classes preserve committed browser state and avoid platform-detail leakage. | SOURCE/SPEC/MANUAL INTEGRATED `25b8f352e72`; deployed target unverified |
+| `eval_error_side_effects` | Storage and cookie writes before a JavaScript error remain committed and origin-partitioned. | INTEGRATED `f44a0122b91`; STATIC/EVIDENCE-HELD |
+| `unsupported_link_target` | Unsupported popup/new-context targets fail closed without coercing navigation into the current document. | INTEGRATED `f0a222d8695`; STATIC/EVIDENCE-HELD |
+| `revision_qualified_ui_ids` | Replaced documents reject stale link, button, input, and textarea UI identities. | INTEGRATED `93e8716bcd5`; STATIC/EVIDENCE-HELD |
+| `fetch_body_single_consumer` | Fetch response text, JSON, blob, and array-buffer readers share one immutable consumed bit. | INTEGRATED `7574cd2e1a8`; STATIC/EVIDENCE-HELD |
+| `fixed_position` | Replacement work is active on exact base `9aad7768ebe`; rejected `98ec2f997eb` conflates style state, duplicates layout dispatch, and collapses auto/zero z-index paint semantics. | ACTIVE / UNCOMMITTED / RED |
+| `animation_lifecycle` | `47df593f600` transfers identity by path, cannot represent animation lists, loses time precision, can retain unbounded stale tasks, and lacks cancel/restart/detach controls. | REJECTED / DO NOT MERGE / RED |
+| `cookie_authority` | Renewable renderer authority violates one-use consumption; the distinct protocol repair did not converge. | `921fd1` REJECTED/P0; protocol STOPPED/UNCOMMITTED |
+| `D3` | Held DOM-route work omits current InputEvent payload routing, crosses a Lane-2 owner, and requires ABI-aware replay rather than a local type edit. | STOPPED / UNCOMMITTED / current-origin unsafe |
+| `iframe_sandbox_boundary` | Design requires document base/origin/frame generation, broker-owned frame authority, and frame-bound request/navigation schema; hidden `srcdoc` recursion has no child runtime, scripts, navigation, or input. | DESIGN GO ONLY / IMPLEMENTATION RED |
+| `stage4_admission` | No provenance-qualified current full pure-Simple CLI is admitted. | NONE; no runtime/docgen/performance claim |
+
+Root remains merge owner and final reviewer. No row changes HTML/CSS inventory
+counts or supplies target-runtime, docgen, numeric performance, aggregate
+HTML/CSS, full-browser, or goal PASS.

@@ -2607,3 +2607,59 @@ implementation in progress / target evidence blocked
   or PASS. Security candidate `921fd1` is REJECTED/P0 because renderer
   authority is renewable rather than one-use; it is not pending or accepted.
   Stage-4 admission remains NONE and no runtime claim is made.
+- production browser batch 22/23 reconciliation (2026-07-31): exact source
+  HEAD `8372ca9607fb6f6ee8fda40c19ff3f573350bbe4` contains seven further
+  bounded web repairs. Redirect downgrade checks trust the request scheme
+  instead of response-controlled text (`4a141af30d5`); selected address text
+  clears on Backspace across every hosted route (`5f0758db126`); flex wrapping
+  includes column gap in the wrap threshold (`d620217fb0c`); mixed content is
+  rechecked after a trustworthy loopback redirect (`59cbfff9857`); finite
+  animation terminal artifacts remain reusable without becoming untimed cache
+  entries (`1671c187b9f`); exact `InputEvent` data and input type survive
+  dispatch (`c2013e78545`); and address URL references resolve against the
+  committed document before crossing the worker boundary (`8372ca9607f`).
+  All seven are INTEGRATED but STATIC/EVIDENCE-HELD. Intervening compiler, GPU,
+  and documentation commits are concurrent ancestry only; this browser
+  reconciliation neither reviews nor claims them.
+- batch-22/23 rejected and stopped work: animation lifecycle candidate
+  `47df593f600` is REJECTED and is not in `origin/main`; its traceability edits
+  must not be imported. Cookie authority candidate `921fd1` remains
+  REJECTED/P0, while the distinct cookie-authority protocol repair is
+  STOPPED/UNCOMMITTED. D3 generation-qualified DOM dispatch remains
+  HELD/STOPPED/UNCOMMITTED. Iframe sandboxing remains an architecture RED gap:
+  the current Draw IR embedding design leaves child script sharing,
+  navigation, and input unsupported and defines no child sandbox-origin or
+  broker-capability contract. Stage-4 admission remains NONE. No runtime,
+  docgen, performance, aggregate HTML/CSS, full-browser, or goal PASS is
+  claimed.
+- production browser batch 24/25 reconciliation (2026-07-31): composition base
+  `745e12de62dded9dab51e023e316649df2c1394f` contains ten accepted bounded
+  repairs or evidence updates after the batch-22/23 source head. Collapsed
+  table borders prefer width before style (`d01ff82c92a`); reset inputs are
+  exposed through canonical UI access (`8ce17d741ca`); the canonical window
+  renderer manual is reconciled (`df30337b6b1`); resolved image opacity is
+  cached without changing opaque/translucent pixels (`7fa1a11ff3c`); Home
+  publishes its admitted pending address (`764bc1bdfa6`); TLS failures are
+  classified without leaking platform detail or replacing committed state
+  (`25b8f352e72`); JavaScript writes before an error remain committed
+  (`f44a0122b91`); unsupported link targets fail closed (`f0a222d8695`);
+  document UI identities are revision-qualified (`93e8716bcd5`); and response
+  bodies reject a second consumer (`7574cd2e1a8`). All source/spec/manual rows
+  remain STATIC/EVIDENCE-HELD; the manual-only row adds no execution evidence.
+- batch-24/25 active RED boundary: fixed positioning is ACTIVE/UNCOMMITTED on
+  the exact `9aad7768ebe` base; rejected predecessor `98ec2f997eb` conflates
+  fixed/static and transform/relative state, duplicates absolute dispatch, and
+  collapses `z-index:auto` with zero. Animation lifecycle candidate
+  `47df593f600` remains REJECTED/DO-NOT-MERGE because path-only identity,
+  scalar animation state, lossy time arithmetic, unbounded stale tasks, and
+  missing cancel/restart/detach controls make it unsafe. Cookie authority
+  `921fd1` remains REJECTED/P0 and its distinct protocol repair is
+  STOPPED/UNCOMMITTED. D3 is STOPPED/UNCOMMITTED for current origin: its held
+  typed dispatcher omits newer InputEvent payload routing, crosses a Lane-2
+  owner, and needs an ABI-aware replay. Iframe implementation remains RED;
+  design-only GO requires document base/origin/frame generation, a broker-owned
+  frame authority, and frame-bound request/navigation schema before child
+  runtime work. Current hidden `srcdoc` recursion has no child runtime, script,
+  navigation, or input support. Stage-4 admission remains NONE; no runtime,
+  docgen, numeric
+  performance, aggregate HTML/CSS, full-browser, or goal PASS is claimed.
