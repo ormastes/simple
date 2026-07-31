@@ -160,14 +160,14 @@ fn md_table_next_cell(content: text, cursor_line: i64, cursor_col: i64) -> MdMot
     val starts = md_table_cell_start_columns(lines[cursor_line])
     val current = md_table_column_at(lines[cursor_line], cursor_col)
     if current + 1 < starts.len():
-        return MdMotionResult(found: true, line: cursor_line, col: starts[current + 1], message: "next table cell")
+        return MdMotionResult(found: true, line: cursor_line, col: starts[current + 1], message: "table cell next")
     var i = cursor_line + 1
     while i < lines.len():
         if md_table_is_row(lines[i]):
             if not md_table_is_separator_row(lines[i]):
                 val next_starts = md_table_cell_start_columns(lines[i])
                 if next_starts.len() > 0:
-                    return MdMotionResult(found: true, line: i, col: next_starts[0], message: "next table cell")
+                    return MdMotionResult(found: true, line: i, col: next_starts[0], message: "table cell next")
         elif lines[i].trim() != "":
             return MdMotionResult(found: false, line: cursor_line, col: cursor_col, message: "last table cell")
         i = i + 1
@@ -180,14 +180,14 @@ fn md_table_prev_cell(content: text, cursor_line: i64, cursor_col: i64) -> MdMot
     val starts = md_table_cell_start_columns(lines[cursor_line])
     val current = md_table_column_at(lines[cursor_line], cursor_col)
     if current > 0:
-        return MdMotionResult(found: true, line: cursor_line, col: starts[current - 1], message: "previous table cell")
+        return MdMotionResult(found: true, line: cursor_line, col: starts[current - 1], message: "table cell previous")
     var i = cursor_line - 1
     while i >= 0:
         if md_table_is_row(lines[i]):
             if not md_table_is_separator_row(lines[i]):
                 val prev_starts = md_table_cell_start_columns(lines[i])
                 if prev_starts.len() > 0:
-                    return MdMotionResult(found: true, line: i, col: prev_starts[prev_starts.len() - 1], message: "previous table cell")
+                    return MdMotionResult(found: true, line: i, col: prev_starts[prev_starts.len() - 1], message: "table cell previous")
         elif lines[i].trim() != "":
             return MdMotionResult(found: false, line: cursor_line, col: cursor_col, message: "first table cell")
         i = i - 1
@@ -594,14 +594,28 @@ fn md_vim_open_link_under_cursor(content: text, cursor_line: i64, cursor_col: i6
         return ""
     _md_link_target_at(lines[cursor_line], cursor_col)
 
+fn _md_find_from(line: text, needle: text, start: i64) -> i64:
+    """index_of restricted to the suffix beginning at start; -1 when absent."""
+    if start < 0 or start > line.len():
+        return -1
+    val found = line.slice(start, line.len()).index_of(needle)
+    if found < 0:
+        return -1
+    start + found
+
 fn _md_link_target_at(line: text, cursor_col: i64) -> text:
-    val wiki_start = line.index_of("[[")
-    if wiki_start >= 0:
-        val wiki_end = line.index_of("]]")
-        if wiki_end > wiki_start and cursor_col >= wiki_start and cursor_col <= wiki_end + 1:
+    # A line can carry several links; scan every one of them, not just the
+    # first, and return the link the cursor actually sits inside.
+    var wiki_start = line.index_of("[[")
+    while wiki_start >= 0:
+        val wiki_end = _md_find_from(line, "]]", wiki_start + 2)
+        if wiki_end < 0:
+            break
+        if cursor_col >= wiki_start and cursor_col <= wiki_end + 1:
             return line.slice(wiki_start + 2, wiki_end)
-    val close_label = line.index_of("](")
-    if close_label >= 0:
+        wiki_start = _md_find_from(line, "[[", wiki_end + 2)
+    var close_label = line.index_of("](")
+    while close_label >= 0:
         var open_label = close_label
         while open_label >= 0 and line[open_label:open_label + 1] != "[":
             open_label = open_label - 1
@@ -610,6 +624,7 @@ fn _md_link_target_at(line: text, cursor_col: i64) -> text:
             close_target = close_target + 1
         if open_label >= 0 and close_target < line.len() and cursor_col >= open_label and cursor_col <= close_target:
             return line.slice(close_label + 2, close_target)
+        close_label = _md_find_from(line, "](", close_label + 2)
     ""
 
 fn _md_document_stats_message(content: text) -> text:
