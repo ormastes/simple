@@ -1698,10 +1698,10 @@ admitted pure-Simple focused execution and docgen produce the manual.
 
 | Requirement area | Evidence | Status |
 |---|---|---|
-| Worker Reload broker ownership | `658864c8457` + `be8bdd5a811` + `5004bc64a7c`; raw worker Reload rejects before mutation and preserves URL/loading/pending/full history/index/body/DrawIR. | STATIC REVIEW PASS; qualified execution HELD |
-| Same-tick SimpleScript replacement | `cee0b93d4c0`; callbacks copied from the old generation stop after body replacement, with red DrawIR/Engine2D retained. | STATIC REVIEW PASS; animation lists/lifecycle events RED |
-| Renderer staged CORS | `402a77cdab6` + `8799b69fdbb` + `63fe2bacd9e`; public-only OPTIONS validates before the actual job under one terminal owner/deadline and no preflight side effects. | STATIC SECURITY REVIEW PASS; direct-host CORS/live execution RED |
-| Inert iframe DrawIR | `2c291afb28a` + `4a1158d964e` + `ccfeb2e54ba`; child batches preserve order/clip/IDs/materials and clear child hit authority, with grouped fail-closed placeholders. | STATIC REVIEW PASS; legacy pixel parity/caller migration/child runtime authority RED |
+| Worker Reload broker ownership | `2b693b48f18` + `685ac758a7b` + `126135c824e`; raw worker Reload rejects before mutation and preserves URL/loading/pending/full history/index/body/DrawIR. | STATIC REVIEW PASS; qualified execution HELD |
+| Same-tick SimpleScript replacement | `675d43ca87e`; callbacks copied from the old generation stop after body replacement, with red DrawIR/Engine2D retained. | STATIC REVIEW PASS; animation lists/lifecycle events RED |
+| Renderer staged CORS | `626a3f295a0` + `a9a98020108` + `cde74d01314`; public-only OPTIONS validates before the actual job under one terminal owner/deadline and no preflight side effects. | STATIC SECURITY REVIEW PASS; direct-host CORS/live execution RED |
+| Inert iframe DrawIR | `c319612224a` + `bf440a3d8f6` + `05142a1a06f`; child batches preserve order/clip/IDs/materials and clear child hit authority, with grouped fail-closed placeholders. | STATIC REVIEW PASS; legacy pixel parity/caller migration/child runtime authority RED |
 
 ## Reviewed browser hardening evidence reconciliation (2026-07-31)
 
