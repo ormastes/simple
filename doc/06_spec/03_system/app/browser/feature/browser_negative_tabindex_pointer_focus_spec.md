@@ -14,9 +14,9 @@ REQ-WEB-BROWSER-008
 
 ### 1. Open a pointer-focusable control outside sequential Tab order
 
-Open a hosted text control with `tabindex="-1"`, a normal button, and focused
-state styling. The control starts red; `[data-focused]` turns it blue. An
-inline Simple action and a JavaScript listener independently record focus.
+Open a hosted text control with `tabindex="-1"` between two normal buttons and
+focused state styling. The control starts red; `[data-focused]` turns it blue.
+An inline Simple action and a JavaScript listener independently record focus.
 
 ### 2. Press the control and observe focus before pointer release
 
@@ -34,8 +34,9 @@ skip no command and produce blue pixels.
 ### 4. Release the pointer and move sequential focus with Tab
 
 Release on the same control, then send Tab through the hosted keyboard route.
-The negative-tabindex route must be excluded from sequential order and the
-normal `next` button must become the exact focused route.
+The negative-tabindex route must be excluded from sequential order. Tab must
+focus the following `next` button rather than restart at the first control;
+after pointer-refocusing the input, Shift+Tab must focus `previous`.
 
 <details>
 <summary>Executable SSpec</summary>
