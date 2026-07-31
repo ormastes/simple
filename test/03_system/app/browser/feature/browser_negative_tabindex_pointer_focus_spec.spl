@@ -1,0 +1,101 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
+"""# Hosted negative-tabindex pointer focus
+
+A negative tabindex keeps a control pointer-focusable while excluding it from
+sequential Tab navigation. The scenario follows the production hosted pointer,
+DOM event, Draw IR, and Engine2D routes.
+"""
+
+use std.spec.*
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use test.system.browser_dom_identity_helpers.{
+    system_browser_dom_identity_index, system_dom_focused_route,
+    system_dom_route
+}
+
+fn negative_tabindex_color_count(pixels: [u32], color: u32) -> i64:
+    var count: i64 = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+describe "Hosted negative-tabindex pointer focus":
+
+    # @manual: show
+    # @capture(html)
+    # @capture(draw_ir)
+    it "should pointer-focus a negative tabindex control and skip it on Tab":
+        step("Open a pointer-focusable control outside sequential Tab order")
+        val html = (
+            "<style>body{margin:0}input,button{display:block;margin:0;" +
+            "padding:0;border:0;width:48px;height:20px;" +
+            "background-color:#ef4444}" +
+            "#pointer-only[data-focused]{background-color:#2563eb}</style>" +
+            "<input id='pointer-only' tabindex='-1' " +
+            "onfocus='set-attr:data-simple-focus=yes'>" +
+            "<button id='next'>Next</button><script>" +
+            "document.getElementById('pointer-only').addEventListener(" +
+            "'focus',function(event){document.title='js-'+event.type;});" +
+            "</script>"
+        )
+        var session = HostedWebContentSession.create(811, html, 64, 48)
+
+        step("Press the control and observe focus before pointer release")
+        val down = session.dispatch_pointer_at(1, 4, 4, true)
+        expect(down.semantic_target_id).to_equal("pointer-only")
+        val down_root = session.browser.dom_root()
+        val down_index = system_browser_dom_identity_index(session.browser)
+        expect(system_dom_focused_route(
+            down_root, down_index
+        ).node_id).to_equal(system_dom_route(
+            down_index, "pointer-only"
+        ).node_id)
+        expect(session.current_body_html()).to_contain(
+            "data-focused=\"true\""
+        )
+        expect(session.current_body_html()).to_contain(
+            "data-simple-focus=\"yes\""
+        )
+        expect(session.browser.current_title).to_equal("js-focus")
+
+        step("Lower focused state through Draw IR and Engine2D")
+        val composition = WebRenderBackend.create(
+            "pure_simple", 64, 48
+        ).render_html_to_draw_ir(session.browser.render_html_document())
+        var focus_command_found = false
+        var focus_color = 0u32
+        for batch in composition.batches:
+            for command in batch.commands:
+                if command.component_id == "pointer-only":
+                    focus_command_found = true
+                    focus_color = command.color
+        expect(focus_command_found).to_be(true)
+        expect(focus_color).to_equal(0xFF2563EBu32)
+
+        val engine = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val rendered = engine.render_draw_ir_composition_resources(
+            composition, session.browser.image_resources
+        )
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(negative_tabindex_color_count(
+            rendered.pixels, 0xFF2563EBu32
+        )).to_be_greater_than(0)
+        engine.shutdown()
+
+        step("Release the pointer and move sequential focus with Tab")
+        val up = session.dispatch_pointer_at(2, 4, 4, false)
+        expect(up.semantic_target_id).to_equal("pointer-only")
+        val tab = session.dispatch_key_with_shift(3, 9, true, false)
+        expect(tab.semantic_target_id).to_equal("next")
+        val tab_root = session.browser.dom_root()
+        val tab_index = system_browser_dom_identity_index(session.browser)
+        expect(system_dom_focused_route(
+            tab_root, tab_index
+        ).node_id).to_equal(system_dom_route(tab_index, "next").node_id)
+        session.close()
