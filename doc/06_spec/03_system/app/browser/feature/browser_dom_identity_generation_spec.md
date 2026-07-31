@@ -65,7 +65,7 @@ pressed/stale-hit routes and root-request/command-capability authority. The
 release oracle replaces the document between a valid press and capability-
 bound release, then proves no callback, body, title, URL, history, or pending-
 navigation mutation through rejection and same-request retry.
-surviving current route is recovered from the canonical hit index,
+The surviving current route is recovered from the canonical hit index,
 its `replace` Draw IR command is an exact green `8x8` rectangle, and Engine2D
 produces a green inside pixel and white outside pixel. Closing the session
 advances the generation and clears the current index and script document.
