@@ -1,0 +1,183 @@
+"""
+# Abrupt Empty HTML Comment Specification
+
+This scenario pins the WHATWG recovery boundary for `<!-->` and `<!--->`.
+Both forms emit one empty comment and resume data parsing. `<!--!>` and an
+unterminated comment remain open through EOF. The same admitted suffix must
+survive semantic parsing, layout, Draw IR lowering, and final pixel rendering.
+
+The scope is deliberately limited to abrupt empty comments. It does not claim
+full HTML comment-state conformance.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.html_tokenizer.{
+    HtmlToken, HtmlTokenKind, html_tokenizer_new,
+    html_tokenizer_tokenize, html_tokenizer_tokenize_with_limit
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_attr_by_id,
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_render_html_draw_ir
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels
+}
+use common.ui.draw_ir.{DrawIrCommand}
+
+fn _tokenize(html: text) -> [HtmlToken]:
+    html_tokenizer_tokenize(html_tokenizer_new(html))
+
+fn _draw_command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    for command in commands:
+        if command.component_id == component_id:
+            return command
+    commands[0]
+
+fn _control_html() -> text:
+    (
+        "<html><body style='margin:0;background:#ffffff'>" +
+        "<div id='proof' data-state='visible' style='" +
+        "width:16px;height:12px;background:#22c55e'>OK</div>" +
+        "</body></html>"
+    )
+
+describe "HTML tokenizer abrupt empty comments":
+    it "should emit empty comments and resume after both abrupt closers":
+        step("Tokenize both abrupt empty-comment spellings")
+        val direct = _tokenize("<!--><p>x</p>")
+        val dashed = _tokenize("<!---><p>y</p>")
+
+        expect(direct.len()).to_equal(5)
+        expect(direct[0].token_kind).to_equal(HtmlTokenKind.Comment)
+        expect(direct[0].data).to_equal("")
+        expect(direct[1].token_kind).to_equal(HtmlTokenKind.StartTag)
+        expect(direct[1].tag_name).to_equal("p")
+        expect(direct[2].token_kind).to_equal(HtmlTokenKind.Character)
+        expect(direct[2].data).to_equal("x")
+        expect(direct[3].token_kind).to_equal(HtmlTokenKind.EndTag)
+        expect(direct[3].tag_name).to_equal("p")
+        expect(direct[4].token_kind).to_equal(HtmlTokenKind.Eof)
+
+        expect(dashed.len()).to_equal(5)
+        expect(dashed[0].token_kind).to_equal(HtmlTokenKind.Comment)
+        expect(dashed[0].data).to_equal("")
+        expect(dashed[1].token_kind).to_equal(HtmlTokenKind.StartTag)
+        expect(dashed[1].tag_name).to_equal("p")
+        expect(dashed[2].token_kind).to_equal(HtmlTokenKind.Character)
+        expect(dashed[2].data).to_equal("y")
+        expect(dashed[3].token_kind).to_equal(HtmlTokenKind.EndTag)
+        expect(dashed[3].tag_name).to_equal("p")
+        expect(dashed[4].token_kind).to_equal(HtmlTokenKind.Eof)
+
+    it "should keep bang and unterminated forms open through EOF":
+        step("Tokenize non-closing comment controls")
+        val bang = _tokenize("<!--!><p>x</p>")
+        val unterminated = _tokenize("<!--abc<p>y</p>")
+
+        expect(bang.len()).to_equal(2)
+        expect(bang[0].token_kind).to_equal(HtmlTokenKind.Comment)
+        expect(bang[0].data).to_equal("!><p>x</p>")
+        expect(bang[1].token_kind).to_equal(HtmlTokenKind.Eof)
+
+        expect(unterminated.len()).to_equal(2)
+        expect(unterminated[0].token_kind).to_equal(HtmlTokenKind.Comment)
+        expect(unterminated[0].data).to_equal("abc<p>y</p>")
+        expect(unterminated[1].token_kind).to_equal(HtmlTokenKind.Eof)
+
+    it "should count abrupt comments within the retained-token quota":
+        step("Apply a one-token quota to closing and unterminated comments")
+        val abrupt = html_tokenizer_tokenize_with_limit(
+            html_tokenizer_new("<!--><p>x</p>"), 1
+        )
+        val unterminated = html_tokenizer_tokenize_with_limit(
+            html_tokenizer_new("<!--abc"), 1
+        )
+
+        expect(abrupt.truncated).to_equal(true)
+        expect(abrupt.tokens.len()).to_equal(2)
+        expect(abrupt.tokens[0].token_kind).to_equal(HtmlTokenKind.Comment)
+        expect(abrupt.tokens[0].data).to_equal("")
+        expect(abrupt.tokens[1].token_kind).to_equal(HtmlTokenKind.Eof)
+
+        expect(unterminated.truncated).to_equal(false)
+        expect(unterminated.tokens.len()).to_equal(2)
+        expect(
+            unterminated.tokens[0].token_kind
+        ).to_equal(HtmlTokenKind.Comment)
+        expect(unterminated.tokens[0].data).to_equal("abc")
+        expect(unterminated.tokens[1].token_kind).to_equal(HtmlTokenKind.Eof)
+
+    it "should preserve an abrupt-comment suffix through every render phase":
+        val control = _control_html()
+        val direct = "<!-->" + control
+        val dashed = "<!--->" + control
+
+        step("Compare semantic attributes after tokenization and tree building")
+        expect(
+            simple_web_layout_debug_attr_by_id(direct, "proof", "data-state")
+        ).to_equal(
+            simple_web_layout_debug_attr_by_id(control, "proof", "data-state")
+        )
+        expect(
+            simple_web_layout_debug_attr_by_id(dashed, "proof", "data-state")
+        ).to_equal("visible")
+
+        step("Compare computed layout geometry")
+        for field in ["x", "y", "w", "h"]:
+            val expected = simple_web_layout_debug_layout_by_id(
+                control, 48, 32, "proof", field
+            )
+            expect(simple_web_layout_debug_layout_by_id(
+                direct, 48, 32, "proof", field
+            )).to_equal(expected)
+            expect(simple_web_layout_debug_layout_by_id(
+                dashed, 48, 32, "proof", field
+            )).to_equal(expected)
+
+        step("Compare canonical Draw IR commands")
+        val expected_draw = _draw_command_by_id(
+            simple_web_layout_render_html_draw_ir(
+                control, 48, 32
+            ).batches[0].commands,
+            "proof"
+        )
+        val direct_draw = _draw_command_by_id(
+            simple_web_layout_render_html_draw_ir(
+                direct, 48, 32
+            ).batches[0].commands,
+            "proof"
+        )
+        val dashed_draw = _draw_command_by_id(
+            simple_web_layout_render_html_draw_ir(
+                dashed, 48, 32
+            ).batches[0].commands,
+            "proof"
+        )
+        expect(direct_draw.kind).to_equal(expected_draw.kind)
+        expect(direct_draw.component_id).to_equal(expected_draw.component_id)
+        expect(direct_draw.x).to_equal(expected_draw.x)
+        expect(direct_draw.y).to_equal(expected_draw.y)
+        expect(direct_draw.width).to_equal(expected_draw.width)
+        expect(direct_draw.height).to_equal(expected_draw.height)
+        expect(direct_draw.color).to_equal(expected_draw.color)
+        expect(dashed_draw.kind).to_equal(expected_draw.kind)
+        expect(dashed_draw.component_id).to_equal(expected_draw.component_id)
+        expect(dashed_draw.x).to_equal(expected_draw.x)
+        expect(dashed_draw.y).to_equal(expected_draw.y)
+        expect(dashed_draw.width).to_equal(expected_draw.width)
+        expect(dashed_draw.height).to_equal(expected_draw.height)
+        expect(dashed_draw.color).to_equal(expected_draw.color)
+
+        step("Compare final rendered pixels")
+        val expected_pixels = simple_web_render_html_to_pixels(
+            control, 48, 32
+        )
+        expect(simple_web_render_html_to_pixels(
+            direct, 48, 32
+        )).to_equal(expected_pixels)
+        expect(simple_web_render_html_to_pixels(
+            dashed, 48, 32
+        )).to_equal(expected_pixels)
