@@ -312,6 +312,71 @@ hosted-entry, Draw IR, resized hit-layout, and literal-pixel assertions.
         expect(worker_go_route.reason).to_equal(
             "navigation-command-required"
         )
+        var reload_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val reload_worker_capability = "22222222222222222222222222222222"
+        val reload_worker_init = browser_renderer_capability_bind_encoded(
+            browser_renderer_message_encode(
+                "init", 97, 2, "<main>Worker Reload</main>"
+            ),
+            97, 2, 2, reload_worker_capability
+        )
+        expect(reload_worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(97),
+                reload_worker_init.wire
+            ).message
+        ).ok).to_be(true)
+        expect(reload_worker.browser.open_html(
+            committed_url, "<main>Worker Reload</main>"
+        ).is_ok()).to_be(true)
+        val worker_reload_url = reload_worker.browser.current_url
+        val worker_reload_loading = reload_worker.browser.is_loading
+        val worker_reload_pending = reload_worker.browser.pending_request_count()
+        val worker_reload_history = reload_worker.browser.history
+        val worker_reload_current_index = reload_worker.browser.current_index
+        val worker_reload_body = reload_worker.browser.current_body_html
+        val worker_reload_composition_revision = (
+            reload_worker.render_session.counters.composition_revision
+        )
+        val worker_reload_down = browser_renderer_capability_bind_encoded(
+            browser_renderer_chrome_encode(97, 3, 12, "reload", true),
+            97, 3, 3, reload_worker_capability
+        )
+        expect(reload_worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(97),
+                worker_reload_down.wire
+            ).message
+        ).ok).to_be(true)
+        val worker_reload_up = browser_renderer_capability_bind_encoded(
+            browser_renderer_chrome_encode(97, 4, 13, "reload", false),
+            97, 4, 4, reload_worker_capability
+        )
+        val worker_reload_route = reload_worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(97),
+                worker_reload_up.wire
+            ).message
+        )
+        expect(worker_reload_route.ok).to_be(false)
+        expect(worker_reload_route.reason).to_equal(
+            "navigation-command-required"
+        )
+        expect(reload_worker.browser.current_url).to_equal(worker_reload_url)
+        expect(reload_worker.browser.is_loading).to_equal(worker_reload_loading)
+        expect(reload_worker.browser.pending_request_count()).to_equal(
+            worker_reload_pending
+        )
+        expect(reload_worker.browser.history).to_equal(
+            worker_reload_history
+        )
+        expect(reload_worker.browser.current_index).to_equal(
+            worker_reload_current_index
+        )
+        expect(reload_worker.browser.current_body_html).to_equal(worker_reload_body)
+        expect(reload_worker.render_session.counters.composition_revision).to_equal(
+            worker_reload_composition_revision
+        )
 
         var direct = HostedBrowserRendererProcess.create(95, 64, 48)
         direct.state = "active"
