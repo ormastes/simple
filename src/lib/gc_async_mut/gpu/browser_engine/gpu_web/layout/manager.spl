@@ -2,9 +2,11 @@
 
 use std.common.structural.layout.{
     LayoutMapping,
+    LayoutExecutionPort,
     LayoutSnapshot,
     layout_input,
-    layout_execution_port_oracle,
+    layout_execution_port_oracle_with_artifacts,
+    layout_oracle_artifacts,
     layout_run_full,
     layout_run_full_with_ports,
     layout_run_incremental_with_ports,
@@ -19,6 +21,9 @@ use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.adapter.{
 use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.contracts.*
 use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cuda_execution_port.{
     web_cuda_layout_execution_port
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.text.cuda_line_break.{
+    web_cuda_line_break
 }
 
 val WEB_LAYOUT_MAX_EPOCH: i64 = 9223372036854775807
@@ -37,7 +42,8 @@ fn _web_layout_fault_step(
     manager: WebLayoutManager,
     snapshot: WebLayoutSnapshot,
     stale: bool,
-    fault: text
+    fault: text,
+    gpu_line_break: WebGpuLineBreakProof = web_gpu_line_break_proof_unavailable("layout-not-run")
 ) -> WebLayoutManagerStep:
     WebLayoutManagerStep(
         manager: manager,
@@ -47,6 +53,7 @@ fn _web_layout_fault_step(
             layout: _web_layout_empty_layout(snapshot),
             hit_regions: [],
             hit_mappings: [],
+            gpu_line_break: gpu_line_break,
             stale: stale,
             fault: fault
         )
@@ -90,7 +97,9 @@ fn _web_layout_run(
     manager: WebLayoutManager,
     snapshot: WebLayoutSnapshot,
     frontier: WebLayoutFrontier,
-    incremental: bool
+    incremental: bool,
+    cpu_port: LayoutExecutionPort,
+    gpu_port: LayoutExecutionPort
 ) -> WebLayoutManagerStep:
     if snapshot.generation != manager.generation:
         return _web_layout_fault_step(manager, snapshot, true, "stale-dom-generation")
@@ -103,9 +112,8 @@ fn _web_layout_run(
         return _web_layout_fault_step(manager, snapshot, false, "epoch-exhausted")
 
     val input = web_layout_framework_input(snapshot, frontier)
+    val gpu_line_break = web_cuda_line_break(snapshot)
     val text_port = layout_text_measure_port_resolved(snapshot.text_results)
-    val cpu_port = layout_execution_port_oracle(snapshot.oracle_boxes)
-    val gpu_port = web_cuda_layout_execution_port(snapshot.oracle_boxes)
     val layout = if incremental:
         layout_run_incremental_with_ports(
             input, text_port, cpu_port, gpu_port
@@ -113,7 +121,9 @@ fn _web_layout_run(
     else:
         layout_run_full_with_ports(input, text_port, cpu_port, gpu_port)
     if layout.fault != "":
-        return _web_layout_fault_step(manager, snapshot, false, layout.fault)
+        return _web_layout_fault_step(
+            manager, snapshot, false, layout.fault, gpu_line_break
+        )
 
     val next_epoch = manager.epoch + 1
     val next_manager = WebLayoutManager(generation: manager.generation, epoch: next_epoch)
@@ -125,6 +135,7 @@ fn _web_layout_run(
             layout: layout,
             hit_regions: _web_layout_hit_regions(snapshot, layout, next_epoch),
             hit_mappings: _web_layout_hit_mappings(snapshot, layout),
+            gpu_line_break: gpu_line_break,
             stale: false,
             fault: ""
         )
@@ -135,14 +146,51 @@ fn web_layout_run_full(
     snapshot: WebLayoutSnapshot,
     frontier: WebLayoutFrontier
 ) -> WebLayoutManagerStep:
-    _web_layout_run(manager, snapshot, frontier, false)
+    _web_layout_run(
+        manager, snapshot, frontier, false,
+        layout_execution_port_oracle_with_artifacts(
+            snapshot.oracle_boxes,
+            layout_oracle_artifacts(
+                snapshot.oracle_fragments,
+                snapshot.oracle_line_boxes,
+                snapshot.oracle_overflows
+            )
+        ),
+        web_cuda_layout_execution_port(snapshot.oracle_boxes)
+    )
 
 fn web_layout_run_incremental(
     manager: WebLayoutManager,
     snapshot: WebLayoutSnapshot,
     frontier: WebLayoutFrontier
 ) -> WebLayoutManagerStep:
-    _web_layout_run(manager, snapshot, frontier, true)
+    _web_layout_run(
+        manager, snapshot, frontier, true,
+        layout_execution_port_oracle_with_artifacts(
+            snapshot.oracle_boxes,
+            layout_oracle_artifacts(
+                snapshot.oracle_fragments,
+                snapshot.oracle_line_boxes,
+                snapshot.oracle_overflows
+            )
+        ),
+        web_cuda_layout_execution_port(snapshot.oracle_boxes)
+    )
+
+fn web_layout_manager_run_full_with_ports(
+    manager: WebLayoutManager, snapshot: WebLayoutSnapshot,
+    frontier: WebLayoutFrontier, cpu_port: LayoutExecutionPort,
+    gpu_port: LayoutExecutionPort
+) -> WebLayoutManagerStep:
+    _web_layout_run(manager, snapshot, frontier, false, cpu_port, gpu_port)
+
+fn web_layout_manager_run_incremental_with_ports(
+    manager: WebLayoutManager, snapshot: WebLayoutSnapshot,
+    frontier: WebLayoutFrontier, cpu_port: LayoutExecutionPort,
+    gpu_port: LayoutExecutionPort
+) -> WebLayoutManagerStep:
+    _web_layout_run(manager, snapshot, frontier, true, cpu_port, gpu_port)
 
 export WEB_LAYOUT_MAX_EPOCH, WebLayoutManagerStep
 export web_layout_run_full, web_layout_run_incremental
+export web_layout_manager_run_full_with_ports, web_layout_manager_run_incremental_with_ports

@@ -102,8 +102,8 @@ fn layout_choose_backend(islands: [LayoutIsland], profile: LayoutExecutionProfil
         return LayoutBackendDecision(backend: "serial_cpu", reason: "gpu-cost-not-lower", cpu_us: profile.cpu_us, gpu_us: gpu_us)
     LayoutBackendDecision(backend: "hybrid_vector_gpu", reason: "", cpu_us: profile.cpu_us, gpu_us: gpu_us)
 
-fn _layout_oracle_boxes(input: LayoutInputSnapshot) -> [LayoutBox]:
-    input.oracle_boxes
+fn _layout_retained_boxes(input: LayoutInputSnapshot) -> [LayoutBox]:
+    if input.retained_boxes.len() > 0: input.retained_boxes else: input.oracle_boxes
 
 fn _layout_oracle_box(input: LayoutInputSnapshot, node_id: i64) -> LayoutBox:
     for box in input.oracle_boxes:
@@ -117,6 +117,10 @@ fn _layout_geometry_hash(boxes: [LayoutBox]) -> text:
         encoded = encoded + "|" + box.id.to_text() + ":" + box.x.to_text() + "," + box.y.to_text() + "," + box.width.to_text() + "," + box.height.to_text()
     djb2_hash_text(encoded).to_text()
 
+fn _layout_box_equal(left: LayoutBox, right: LayoutBox) -> bool:
+    (left.id == right.id and left.x == right.x and left.y == right.y and
+        left.width == right.width and left.height == right.height)
+
 fn _layout_boxes_equal(actual: [LayoutBox], oracle: [LayoutBox]) -> bool:
     if actual.len() != oracle.len():
         return false
@@ -124,19 +128,32 @@ fn _layout_boxes_equal(actual: [LayoutBox], oracle: [LayoutBox]) -> bool:
     while index < actual.len():
         val left = actual[index]
         val right = oracle[index]
-        if (left.id != right.id or left.x != right.x or left.y != right.y or
-            left.width != right.width or left.height != right.height):
+        if not _layout_box_equal(left, right):
             return false
         index = index + 1
     true
 
 fn _layout_oracle_fault(input: LayoutInputSnapshot) -> text:
+    if input.oracle_boxes.len() == 0:
+        return ""
     if input.oracle_boxes.len() != input.nodes.len():
         return "oracle-shape-mismatch"
     var index: i64 = 0
     while index < input.nodes.len():
         if input.oracle_boxes[index].id != input.nodes[index].id:
             return "oracle-id-mismatch"
+        index = index + 1
+    ""
+
+fn _layout_retained_fault(input: LayoutInputSnapshot, incremental: bool) -> text:
+    if not incremental or input.retained_boxes.len() == 0:
+        return ""
+    if input.retained_boxes.len() != input.nodes.len():
+        return "retained-layout-shape-mismatch"
+    var index: i64 = 0
+    while index < input.nodes.len():
+        if input.retained_boxes[index].id != input.nodes[index].id:
+            return "retained-layout-id-mismatch"
         index = index + 1
     ""
 
@@ -184,11 +201,32 @@ fn _layout_selected_islands(islands: [LayoutIsland], selected_ids: [i64]) -> [La
     selected
 
 fn _layout_selected_boxes(input: LayoutInputSnapshot, islands: [LayoutIsland], selected_ids: [i64]) -> [LayoutBox]:
+    if input.oracle_boxes.len() == 0:
+        return []
     var boxes: [LayoutBox] = []
     for node in input.nodes:
         if _layout_contains(selected_ids, _layout_island_for_node(islands, node.id)):
             boxes.push(_layout_oracle_box(input, node.id))
     boxes
+
+fn _layout_selected_oracle_artifacts(
+    input: LayoutInputSnapshot,
+    islands: [LayoutIsland],
+    selected_ids: [i64]
+) -> LayoutOracleArtifacts:
+    var fragments: [LayoutFragment] = []
+    var line_boxes: [LayoutLineBox] = []
+    var overflows: [LayoutOverflow] = []
+    for fragment in input.oracle_artifacts.fragments:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, fragment.node_id)):
+            fragments.push(fragment)
+    for line_box in input.oracle_artifacts.line_boxes:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, line_box.node_id)):
+            line_boxes.push(line_box)
+    for overflow in input.oracle_artifacts.overflows:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, overflow.node_id)):
+            overflows.push(overflow)
+    layout_oracle_artifacts(fragments, line_boxes, overflows)
 
 fn _layout_selected_waves(waves: [LayoutWave], selected_ids: [i64]) -> [LayoutWave]:
     var selected_waves: [LayoutWave] = []
@@ -215,6 +253,16 @@ fn _layout_text_end(input: LayoutInputSnapshot, node_id: i64) -> i64:
             return request.content.len()
     0
 
+fn _layout_has_exact_oracle_artifacts(input: LayoutInputSnapshot) -> bool:
+    (input.oracle_artifacts.fragments.len() > 0 or
+        input.oracle_artifacts.line_boxes.len() > 0 or
+        input.oracle_artifacts.overflows.len() > 0)
+
+fn _layout_has_retained_artifacts(input: LayoutInputSnapshot) -> bool:
+    (input.retained_artifacts.fragments.len() > 0 or
+        input.retained_artifacts.line_boxes.len() > 0 or
+        input.retained_artifacts.overflows.len() > 0)
+
 fn _layout_merge_fragments(
     input: LayoutInputSnapshot,
     islands: [LayoutIsland],
@@ -225,6 +273,10 @@ fn _layout_merge_fragments(
     for node in input.nodes:
         if _layout_contains(selected_ids, _layout_island_for_node(islands, node.id)):
             for fragment in selected:
+                if fragment.node_id == node.id:
+                    merged.push(fragment)
+        elif _layout_has_retained_artifacts(input):
+            for fragment in input.retained_artifacts.fragments:
                 if fragment.node_id == node.id:
                     merged.push(fragment)
         else:
@@ -244,6 +296,10 @@ fn _layout_merge_line_boxes(
             for line_box in selected:
                 if line_box.node_id == node.id:
                     merged.push(line_box)
+        elif _layout_has_retained_artifacts(input):
+            for line_box in input.retained_artifacts.line_boxes:
+                if line_box.node_id == node.id:
+                    merged.push(line_box)
         elif node.profile_id == "inline":
             merged.push(layout_line_box(node.id, 0, _layout_oracle_box(input, node.id), 0, _layout_text_end(input, node.id)))
     merged
@@ -258,6 +314,10 @@ fn _layout_merge_overflows(
     for node in input.nodes:
         if _layout_contains(selected_ids, _layout_island_for_node(islands, node.id)):
             for overflow in selected:
+                if overflow.node_id == node.id:
+                    merged.push(overflow)
+        elif _layout_has_retained_artifacts(input):
+            for overflow in input.retained_artifacts.overflows:
                 if overflow.node_id == node.id:
                     merged.push(overflow)
         else:
@@ -344,7 +404,10 @@ fn _layout_run_port(
             viewport_width: input.viewport_width,
             viewport_height: input.viewport_height,
             grid_tracks: input.grid_tracks,
+            retained_boxes: input.retained_boxes,
+            retained_artifacts: input.retained_artifacts,
             oracle_boxes: [],
+            oracle_artifacts: layout_oracle_artifacts([], [], []),
             execution: input.execution,
             fixed_point_cap: input.fixed_point_cap
         )
@@ -365,7 +428,60 @@ fn _layout_run_port(
         previous = final_result.boxes
     _LayoutPortRun(result: final_result, converged: false, iterations: iteration, reason: "non-convergent")
 
-fn _layout_gpu_rejection(run: _LayoutPortRun, candidate_backend: text, oracle: [LayoutBox]) -> text:
+fn _layout_fragments_equal(actual: [LayoutFragment], oracle: [LayoutFragment]) -> bool:
+    if actual.len() != oracle.len(): return false
+    var index: i64 = 0
+    while index < actual.len():
+        val left = actual[index]
+        val right = oracle[index]
+        if (left.id != right.id or left.node_id != right.node_id or
+            left.kind != right.kind or left.fragment_index != right.fragment_index or
+            not _layout_box_equal(left.box, right.box)):
+            return false
+        index = index + 1
+    true
+
+fn _layout_line_boxes_equal(actual: [LayoutLineBox], oracle: [LayoutLineBox]) -> bool:
+    if actual.len() != oracle.len(): return false
+    var index: i64 = 0
+    while index < actual.len():
+        val left = actual[index]
+        val right = oracle[index]
+        if (left.node_id != right.node_id or left.line_index != right.line_index or
+            left.text_start != right.text_start or left.text_end != right.text_end or
+            not _layout_box_equal(left.box, right.box)):
+            return false
+        index = index + 1
+    true
+
+fn _layout_overflows_equal(actual: [LayoutOverflow], oracle: [LayoutOverflow]) -> bool:
+    if actual.len() != oracle.len(): return false
+    var index: i64 = 0
+    while index < actual.len():
+        val left = actual[index]
+        val right = oracle[index]
+        if (left.node_id != right.node_id or left.scroll_width != right.scroll_width or
+            left.scroll_height != right.scroll_height or
+            not _layout_box_equal(left.clip_box, right.clip_box)):
+            return false
+        index = index + 1
+    true
+
+fn _layout_result_artifacts_equal(
+    result: LayoutIterationResult,
+    oracle: LayoutOracleArtifacts
+) -> bool:
+    (_layout_fragments_equal(result.fragments, oracle.fragments) and
+        _layout_line_boxes_equal(result.line_boxes, oracle.line_boxes) and
+        _layout_overflows_equal(result.overflows, oracle.overflows))
+
+fn _layout_gpu_rejection(
+    run: _LayoutPortRun,
+    candidate_backend: text,
+    oracle: [LayoutBox],
+    oracle_artifacts: LayoutOracleArtifacts,
+    require_exact_artifacts: bool
+) -> text:
     if run.reason != "": return run.reason
     val proof = run.result.proof
     if not run.converged: return "non-convergent"
@@ -374,17 +490,31 @@ fn _layout_gpu_rejection(run: _LayoutPortRun, candidate_backend: text, oracle: [
     if not proof.submitted: return "gpu-not-submitted"
     if not proof.synchronized: return "gpu-not-synchronized"
     if not proof.device_readback: return "gpu-readback-missing"
-    if not proof.oracle_verified or not _layout_boxes_equal(run.result.boxes, oracle): return "gpu-oracle-mismatch"
+    if not proof.oracle_verified or not _layout_boxes_equal(run.result.boxes, oracle):
+        return "gpu-oracle-mismatch"
+    if require_exact_artifacts and not _layout_result_artifacts_equal(run.result, oracle_artifacts):
+        return "gpu-oracle-mismatch"
     ""
 
-fn _layout_cpu_rejection(run: _LayoutPortRun, oracle: [LayoutBox]) -> text:
+fn _layout_cpu_rejection(
+    run: _LayoutPortRun,
+    oracle: [LayoutBox],
+    oracle_artifacts: LayoutOracleArtifacts,
+    require_exact_artifacts: bool
+) -> text:
     if run.reason != "": return run.reason
     if not run.converged: return "non-convergent"
     if not run.result.proof.executed: return "cpu-not-executed"
-    if not _layout_boxes_equal(run.result.boxes, oracle): return "cpu-oracle-mismatch"
+    if oracle.len() > 0 and not _layout_boxes_equal(run.result.boxes, oracle): return "cpu-oracle-mismatch"
+    if oracle.len() > 0 and require_exact_artifacts and not _layout_result_artifacts_equal(
+        run.result, oracle_artifacts
+    ):
+        return "cpu-oracle-artifact-mismatch"
     ""
 
 fn _layout_merge_boxes(oracle: [LayoutBox], selected: [LayoutBox]) -> [LayoutBox]:
+    if oracle.len() == 0:
+        return selected
     var merged: [LayoutBox] = []
     for oracle_box in oracle:
         var replacement = oracle_box
@@ -406,7 +536,10 @@ fn _layout_snapshot_with_ports(
     val selected_ids = if incremental: _layout_dirty_island_ids(input, discovery.islands) else: _layout_all_island_ids(discovery.islands)
     val selected_islands = _layout_selected_islands(discovery.islands, selected_ids)
     val selected_oracle = _layout_selected_boxes(input, discovery.islands, selected_ids)
-    val all_oracle = _layout_oracle_boxes(input)
+    val selected_oracle_artifacts = _layout_selected_oracle_artifacts(
+        input, discovery.islands, selected_ids
+    )
+    val retained = _layout_retained_boxes(input)
     val visible_waves = if incremental: _layout_selected_waves(schedule.waves, selected_ids) else: schedule.waves
     val decision = layout_choose_backend(selected_islands, input.execution)
     val cyclic = _layout_has_selected_cycle(schedule.cyclic_island_ids, selected_ids)
@@ -414,6 +547,7 @@ fn _layout_snapshot_with_ports(
     var fault = discovery.fault
     if fault == "" and schedule.reason != "": fault = schedule.reason
     if fault == "": fault = _layout_oracle_fault(input)
+    if fault == "": fault = _layout_retained_fault(input, incremental)
     val measured = if fault == "": _layout_measure_text(input, discovery.islands, selected_ids, text_port) else: _LayoutMeasured(results: [], reason: "")
 
     var fallback_reason = decision.reason
@@ -426,9 +560,20 @@ fn _layout_snapshot_with_ports(
         reason: fault
     )
     var backend = "serial_cpu"
-    if fault == "" and decision.backend == "hybrid_vector_gpu" and measured.reason == "":
+    if (
+        fault == "" and decision.backend == "hybrid_vector_gpu" and
+        measured.reason == "" and input.oracle_boxes.len() == 0
+    ):
+        fallback_reason = "gpu-oracle-unavailable"
+    elif fault == "" and decision.backend == "hybrid_vector_gpu" and measured.reason == "":
         val gpu_run = _layout_run_port(gpu_port, input, discovery.islands, visible_waves, selected_ids, measured.results, decision.backend, cyclic)
-        val gpu_rejection = _layout_gpu_rejection(gpu_run, decision.backend, selected_oracle)
+        val gpu_rejection = _layout_gpu_rejection(
+            gpu_run,
+            decision.backend,
+            selected_oracle,
+            selected_oracle_artifacts,
+            _layout_has_exact_oracle_artifacts(input)
+        )
         if gpu_rejection == "":
             run = gpu_run
             backend = decision.backend
@@ -437,18 +582,26 @@ fn _layout_snapshot_with_ports(
             fallback_reason = gpu_rejection
     if fault == "" and backend != "hybrid_vector_gpu":
         run = _layout_run_port(cpu_port, input, discovery.islands, visible_waves, selected_ids, measured.results, decision.backend, cyclic)
-        val cpu_rejection = _layout_cpu_rejection(run, selected_oracle)
+        val cpu_rejection = _layout_cpu_rejection(
+            run,
+            selected_oracle,
+            selected_oracle_artifacts,
+            _layout_has_exact_oracle_artifacts(input)
+        )
         if cpu_rejection != "":
             fault = cpu_rejection
             fallback_reason = cpu_rejection
 
-    val boxes = if fault == "": _layout_merge_boxes(all_oracle, run.result.boxes) else: all_oracle
+    val boxes = if fault == "": _layout_merge_boxes(retained, run.result.boxes) else: retained
     val fragments = if fault == "": _layout_merge_fragments(input, discovery.islands, selected_ids, run.result.fragments) else: []
     val line_boxes = if fault == "": _layout_merge_line_boxes(input, discovery.islands, selected_ids, run.result.line_boxes) else: []
     val overflows = if fault == "": _layout_merge_overflows(input, discovery.islands, selected_ids, run.result.overflows) else: []
     val output_hash = _layout_geometry_hash(boxes)
-    val input_hash = _layout_geometry_hash(all_oracle)
-    val actual_oracle_verified = fault == "" and _layout_boxes_equal(run.result.boxes, selected_oracle)
+    val input_hash = _layout_geometry_hash(retained)
+    val actual_oracle_verified = (
+        fault == "" and selected_oracle.len() > 0 and
+        _layout_boxes_equal(run.result.boxes, selected_oracle)
+    )
     val proof = LayoutExecutionProof(
         candidate_backend: decision.backend,
         executed_backend: if run.result.proof.executed_backend == "": backend else: run.result.proof.executed_backend,

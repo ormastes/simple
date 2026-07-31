@@ -33,6 +33,27 @@ fn system_change(node_id: i64, context_id: i64) -> WebLayoutChange:
     )
 
 describe "REQ-WLM-001..REQ-WLM-007 web layout manager":
+    it "pre-rejects complex-script GPU line breaking before submission":
+        val browser = simple_web_layout_render_html_draw_ir_result(
+            "<div style='width:48px'>مرحبا بالعالم</div>", 320, 240
+        )
+        val execution = layout_execution_profile(
+            "serial_cpu", 50, 0, 0, 0, 0, 0, 0, 0
+        )
+        val adapted = web_layout_adapt_cpu_oracle(browser, 6, execution, 4)
+        expect(adapted.fault).to_equal("")
+        val run = web_layout_run_full(
+            web_layout_manager(6), adapted.snapshot,
+            web_layout_dirty_frontier([])
+        )
+        expect(run.result.fault).to_equal("")
+        expect(run.result.gpu_line_break.attempted).to_equal(true)
+        expect(run.result.gpu_line_break.admitted).to_equal(false)
+        expect(run.result.gpu_line_break.submitted).to_equal(false)
+        expect(run.result.gpu_line_break.reason).to_equal(
+            "cuda-line-break-complex-script"
+        )
+
     # @manual: show
     it "preserves the browser oracle through incremental framework execution":
         step("Capture the CPU layout oracle")
@@ -81,6 +102,9 @@ describe "REQ-WLM-001..REQ-WLM-007 web layout manager":
         )
         expect(full.result.fault).to_equal("")
         expect(incremental.result.fault).to_equal("")
+        expect(full.result.layout.fragments).to_equal(adapted.snapshot.oracle_fragments)
+        expect(full.result.layout.line_boxes).to_equal(adapted.snapshot.oracle_line_boxes)
+        expect(full.result.layout.overflows).to_equal(adapted.snapshot.oracle_overflows)
         expect(incremental.result.layout.boxes).to_equal(full.result.layout.boxes)
         expect(incremental.result.layout.fragments).to_equal(full.result.layout.fragments)
         expect(incremental.result.layout.line_boxes).to_equal(full.result.layout.line_boxes)
@@ -162,3 +186,56 @@ describe "REQ-WLM-001..REQ-WLM-007 web layout manager":
             web_layout_dirty_frontier([])
         )
         expect(exhausted.result.fault).to_equal("epoch-exhausted")
+
+    # @manual: show
+    it "preserves wrapped lines fragments and overflow extents exactly":
+        step("Capture wrapped text and clipped overflow from the CPU oracle")
+        val browser = simple_web_layout_render_html_draw_ir_result(
+            "<div style='width:48px;overflow:hidden'>alpha beta gamma delta</div>" +
+            "<div style='width:40px;overflow:hidden'><div style='width:120px;height:12px'></div></div>",
+            320,
+            240
+        )
+        val execution = layout_execution_profile(
+            "serial_cpu", 50, 0, 0, 0, 0, 0, 0, 0
+        )
+        val adapted = web_layout_adapt_cpu_oracle(browser, 11, execution, 4)
+        expect(adapted.fault).to_equal("")
+
+        var wrapped_node_id: i64 = 0
+        var wrapped_line_count: i64 = 0
+        for node in adapted.snapshot.nodes:
+            if node.tag == "#text":
+                var node_line_count: i64 = 0
+                for line in adapted.snapshot.oracle_line_boxes:
+                    if line.node_id == node.id:
+                        node_line_count = node_line_count + 1
+                        var exact_width: i64 = 0
+                        var advance_index = line.text_start
+                        while advance_index < line.text_end:
+                            exact_width = exact_width + node.text_metrics.advances[advance_index]
+                            advance_index = advance_index + 1
+                        expect(line.box.width).to_equal(exact_width)
+                if node_line_count > 1:
+                    wrapped_node_id = node.id
+                    wrapped_line_count = node_line_count
+        expect(wrapped_node_id).to_be_greater_than(0)
+        expect(wrapped_line_count).to_be_greater_than(1)
+
+        var clipped_overflow_found = false
+        for overflow in adapted.snapshot.oracle_overflows:
+            if (overflow.scroll_width > overflow.clip_box.width or
+                overflow.scroll_height > overflow.clip_box.height):
+                clipped_overflow_found = true
+        expect(clipped_overflow_found).to_equal(true)
+
+        step("Run the framework with the exact oracle artifacts")
+        val full = web_layout_run_full(
+            web_layout_manager(11),
+            adapted.snapshot,
+            web_layout_dirty_frontier([])
+        )
+        expect(full.result.fault).to_equal("")
+        expect(full.result.layout.fragments).to_equal(adapted.snapshot.oracle_fragments)
+        expect(full.result.layout.line_boxes).to_equal(adapted.snapshot.oracle_line_boxes)
+        expect(full.result.layout.overflows).to_equal(adapted.snapshot.oracle_overflows)

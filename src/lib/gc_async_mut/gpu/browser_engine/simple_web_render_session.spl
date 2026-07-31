@@ -7,7 +7,9 @@ use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     SimpleWebLayoutDrawIrResult,
     simple_web_layout_animation_needs_layout,
-    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images,
+    simple_web_layout_compose_prepared,
+    simple_web_layout_empty_retained,
+    simple_web_layout_prepare_retained,
     simple_web_layout_rerender_retained
 }
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
@@ -27,11 +29,18 @@ use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.{
     WebLayoutNodeSnapshot,
     WebLayoutRunResult,
     WebLayoutSnapshot,
-    web_layout_adapt_cpu_oracle,
+    web_layout_adapt_prepared,
     web_layout_classify_style,
     web_layout_manager,
-    web_layout_run_full,
-    web_layout_run_incremental
+    web_layout_manager_run_full_with_ports,
+    web_layout_manager_run_incremental_with_ports
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cpu_execution_port.{
+    browser_cpu_layout_execution_port, browser_cpu_layout_full,
+    browser_cpu_layout_reconstruct
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cuda_execution_port.{
+    web_cuda_layout_execution_port
 }
 use std.gc_async_mut.web.browser_session.{BrowserRenderSnapshot}
 use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn}
@@ -77,17 +86,22 @@ fn _simple_web_layout_style_dirty_bits(
             # not yet represented by the narrower change hashes.
             DIRTY_LAYOUT | DIRTY_HIT_TEST
 
-fn _simple_web_layout_geometry_frontier(
+fn _simple_web_layout_pre_frontier(
     prior: WebLayoutSnapshot,
     current: WebLayoutSnapshot,
     style_changed: bool,
-    resource_changed: bool
+    resource_changed: bool,
+    viewport_changed: bool
 ) -> WebLayoutFrontier:
     var dirty_nodes: [WebLayoutDirtyNode] = []
     var invalidated_ids: [i64] = []
     for node in current.nodes:
         if val Some(previous) = _simple_web_layout_prior_node(prior, node.id):
-            if previous.style.geometry_hash == node.style.geometry_hash:
+            if (
+                previous.style.geometry_hash == node.style.geometry_hash and
+                not viewport_changed and
+                not (resource_changed and node.text_measure_required)
+            ):
                 continue
             var dirty_bits = DIRTY_LAYOUT | DIRTY_HIT_TEST
             if resource_changed:
@@ -281,41 +295,27 @@ pub class SimpleWebRenderSession:
                 "animation-paint"
         else:
             "paint"
-        val result = if dirty_stage == "full":
-            simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time_with_animations_with_images(
-                self.document_html,
-                width,
-                height,
-                animation_time_ms,
-                scroll_y,
-                overlay,
-                animation_instances,
-                images
-            )
-        else:
-            simple_web_layout_rerender_retained(
-                self.current_result.unwrap(), dirty_stage, width, height,
-                animation_time_ms, scroll_y, overlay, animation_instances,
-                images
-            )
-        val needs_framework_full = (
-            self.current_web_layout_snapshot == nil or
-            generation_changed or document_changed
+        val layout_changed = (
+            dirty_stage == "full" or dirty_stage == "css" or
+            dirty_stage == "style"
         )
-        val needs_framework_incremental = (
-            not needs_framework_full and
-            (
-                viewport_changed or style_changed or resource_changed or
-                dirty_stage == "style"
+        val result = if layout_changed:
+            val prepared = simple_web_layout_prepare_retained(
+                self.document_html, width, height, true,
+                animation_time_ms, scroll_y, overlay,
+                animation_instances, images
             )
-        )
-        if needs_framework_full or needs_framework_incremental:
-            val adapted = web_layout_adapt_cpu_oracle(
-                result,
-                snapshot.document_generation,
-                _simple_web_layout_execution_profile(
-                    result.hit_index.nodes.len()
-                ),
+            val retained = if (
+                self.current_result != nil and not document_changed and
+                not generation_changed and
+                self.current_web_layout_snapshot != nil
+            ):
+                self.current_result.unwrap().raw_boxes
+            else:
+                simple_web_layout_empty_retained()
+            val adapted = web_layout_adapt_prepared(
+                prepared, retained, snapshot.document_generation,
+                _simple_web_layout_execution_profile(prepared.nodes.len()),
                 SIMPLE_WEB_LAYOUT_FIXED_POINT_CAP
             )
             val manager = match self.web_layout_manager_state:
@@ -330,26 +330,46 @@ pub class SimpleWebRenderSession:
                 invalidated_ids: [],
                 fault: adapted.fault
             )
-            if needs_framework_incremental and adapted.fault == "":
-                frontier = _simple_web_layout_geometry_frontier(
+            val needs_framework_full = (
+                self.current_web_layout_snapshot == nil or
+                generation_changed or document_changed
+            )
+            if not needs_framework_full and adapted.fault == "":
+                frontier = _simple_web_layout_pre_frontier(
                     self.current_web_layout_snapshot.unwrap(),
                     adapted.snapshot,
                     style_changed or dirty_stage == "style",
-                    resource_changed
+                    resource_changed,
+                    viewport_changed
                 )
-            if (
-                needs_framework_full or frontier.fault != "" or
-                frontier.invalidated_ids.len() > 0
-            ):
-                val manager_step = if needs_framework_full:
-                    web_layout_run_full(manager, adapted.snapshot, frontier)
-                else:
-                    web_layout_run_incremental(
-                        manager, adapted.snapshot, frontier
-                    )
-                self.web_layout_manager_state = Some(manager_step.manager)
-                self.current_web_layout_run = Some(manager_step.result)
-            self.current_web_layout_snapshot = Some(adapted.snapshot)
+            val cpu_port = browser_cpu_layout_execution_port(prepared, retained)
+            val gpu_port = web_cuda_layout_execution_port([])
+            val manager_step = if needs_framework_full:
+                web_layout_manager_run_full_with_ports(
+                    manager, adapted.snapshot, frontier, cpu_port, gpu_port
+                )
+            else:
+                web_layout_manager_run_incremental_with_ports(
+                    manager, adapted.snapshot, frontier, cpu_port, gpu_port
+                )
+            self.web_layout_manager_state = Some(manager_step.manager)
+            self.current_web_layout_run = Some(manager_step.result)
+            val raw_layout = if manager_step.result.fault != "":
+                browser_cpu_layout_full(prepared, retained)
+            else:
+                self.current_web_layout_snapshot = Some(adapted.snapshot)
+                browser_cpu_layout_reconstruct(
+                    prepared, retained, manager_step.result.layout
+                )
+            simple_web_layout_compose_prepared(
+                prepared, raw_layout
+            )
+        else:
+            simple_web_layout_rerender_retained(
+                self.current_result.unwrap(), dirty_stage, width, height,
+                animation_time_ms, scroll_y, overlay, animation_instances,
+                images
+            )
         self.document_revision = revisions.document_revision
         self.style_revision = revisions.style_revision
         self.resource_revision = revisions.resource_revision

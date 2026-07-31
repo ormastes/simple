@@ -7,10 +7,15 @@ use std.common.structural.layout.{
     LayoutBoxConstraints,
     LayoutFlexConstraints,
     LayoutGridConstraints,
+    LayoutOverflowPolicy,
+    LayoutPositionConstraints,
     LayoutInputSnapshot,
+    LayoutFragment,
     LayoutLength,
+    LayoutLineBox,
     LayoutNodeInput,
     LayoutNodeSemantics,
+    LayoutOverflow,
     LAYOUT_GPU_ADMISSION_CONTENT_HIDDEN,
     LAYOUT_GPU_ADMISSION_INLINE_FLOW,
     LAYOUT_GPU_ADMISSION_LEGACY_WIDGET_BOX,
@@ -20,17 +25,32 @@ use std.common.structural.layout.{
     LAYOUT_GPU_ADMISSION_TEXT,
     LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK,
     LAYOUT_GPU_ADMISSION_VIEWPORT_FILL,
+    LAYOUT_OVERFLOW_AUTO,
+    LAYOUT_OVERFLOW_HIDDEN,
+    LAYOUT_OVERFLOW_SCROLL,
+    LAYOUT_OVERFLOW_VISIBLE,
+    LAYOUT_POSITION_ABSOLUTE,
+    LAYOUT_POSITION_RELATIVE,
+    LAYOUT_POSITION_STATIC,
+    LAYOUT_POSITION_STICKY,
     layout_edges,
+    layout_fragment,
     layout_length_auto,
     layout_length_percent,
     layout_length_px,
     layout_length_viewport_height,
     layout_box,
+    layout_line_box,
+    layout_oracle_artifacts,
+    layout_overflow,
     layout_input_with_text,
     layout_node,
     layout_profile_supported
 }
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{SimpleWebLayoutDrawIrResult}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, HtmlChildIndex, LayoutResult, SimpleWebLayoutDrawIrResult,
+    SimpleWebRetainedLayoutPreparation, Style
+}
 use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.contracts.*
 
 struct WebLayoutAdapterResult:
@@ -70,6 +90,23 @@ fn _web_layout_horizontal_margin(value: i32) -> LayoutLength:
 fn _web_layout_vertical_margin(value: i32) -> LayoutLength:
     if value <= -1000: return layout_length_viewport_height(((0 - value) - 1000) as i64)
     layout_length_px(if value < 0: 0 else: value as i64)
+
+fn _web_layout_position_offset(value: i32, available: bool) -> LayoutLength:
+    if available: layout_length_px(value as i64) else: layout_length_auto()
+
+fn _web_layout_position_kind(relative: bool, absolute: bool, sticky: bool) -> text:
+    if absolute: return LAYOUT_POSITION_ABSOLUTE
+    if sticky: return LAYOUT_POSITION_STICKY
+    if relative: return LAYOUT_POSITION_RELATIVE
+    LAYOUT_POSITION_STATIC
+
+fn _web_layout_overflow_policy(hidden: bool, auto_y: bool, scroll_y: bool) -> LayoutOverflowPolicy:
+    if hidden:
+        return LayoutOverflowPolicy(x: LAYOUT_OVERFLOW_HIDDEN, y: LAYOUT_OVERFLOW_HIDDEN)
+    LayoutOverflowPolicy(
+        x: LAYOUT_OVERFLOW_VISIBLE,
+        y: if scroll_y: LAYOUT_OVERFLOW_SCROLL elif auto_y: LAYOUT_OVERFLOW_AUTO else: LAYOUT_OVERFLOW_VISIBLE
+    )
 
 fn _web_layout_append_tracks(existing: [i64], raw: text) -> _WebLayoutTrackAppend:
     val start = existing.len()
@@ -122,19 +159,22 @@ fn _web_layout_empty_snapshot(
 ) -> WebLayoutSnapshot:
     web_layout_snapshot(generation, viewport_fingerprint, [], [], execution, fixed_point_cap)
 
-fn web_layout_adapt_cpu_oracle(
-    result: SimpleWebLayoutDrawIrResult,
+fn _web_layout_adapt_state(
+    nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
+    viewport_width: i32, viewport_height: i32, boxes: LayoutResult,
+    include_oracle: bool,
     generation: i64,
     execution: LayoutExecutionProfile,
     fixed_point_cap: i64
 ) -> WebLayoutAdapterResult:
-    val nodes = result.hit_index.nodes
-    val styles = result.hit_index.styles
-    val boxes = result.raw_boxes
-    val viewport = result.hit_index.width.to_text() + "x" + result.hit_index.height.to_text()
-    if (nodes.len() != styles.len() or nodes.len() != boxes.bx.len() or
-        nodes.len() != boxes.by.len() or nodes.len() != boxes.bw.len() or
-        nodes.len() != boxes.bh.len()):
+    val viewport = viewport_width.to_text() + "x" + viewport_height.to_text()
+    val has_boxes = (
+        nodes.len() == boxes.bx.len() and nodes.len() == boxes.by.len() and
+        nodes.len() == boxes.bw.len() and nodes.len() == boxes.bh.len() and
+        nodes.len() == boxes.wrap_starts.len() and
+        nodes.len() == boxes.wrap_ends.len()
+    )
+    if nodes.len() != styles.len() or (include_oracle and not has_boxes):
         return WebLayoutAdapterResult(
             snapshot: _web_layout_empty_snapshot(generation, viewport, execution, fixed_point_cap),
             fault: "browser-oracle-shape-mismatch"
@@ -144,6 +184,32 @@ fn web_layout_adapt_cpu_oracle(
     var dependencies: [LayoutDependency] = []
     var grid_tracks: [i64] = []
     var oracle_boxes: [LayoutBox] = []
+    var oracle_fragments: [LayoutFragment] = []
+    var oracle_line_boxes: [LayoutLineBox] = []
+    var oracle_overflows: [LayoutOverflow] = []
+    var right_extents: [i64] = []
+    var bottom_extents: [i64] = []
+    var extent_index: i64 = 0
+    while has_boxes and extent_index < nodes.len():
+        right_extents.push(
+            (boxes.bx[extent_index] as i64) + (boxes.bw[extent_index] as i64)
+        )
+        bottom_extents.push(
+            (boxes.by[extent_index] as i64) + (boxes.bh[extent_index] as i64)
+        )
+        extent_index = extent_index + 1
+    extent_index = nodes.len() - 1
+    while has_boxes and extent_index >= 0:
+        val parent = nodes[extent_index].parent as i64
+        val clips = (styles[extent_index].overflow_hidden or
+            styles[extent_index].overflow_auto_y or
+            styles[extent_index].overflow_scroll_y)
+        if parent >= 0 and not clips:
+            if right_extents[extent_index] > right_extents[parent]:
+                right_extents[parent] = right_extents[extent_index]
+            if bottom_extents[extent_index] > bottom_extents[parent]:
+                bottom_extents[parent] = bottom_extents[extent_index]
+        extent_index = extent_index - 1
     var index: i64 = 0
     while index < nodes.len():
         val node = nodes[index]
@@ -164,14 +230,64 @@ fn web_layout_adapt_cpu_oracle(
 
         val id = index + 1
         val parent_id = if node.parent < 0: 0 else: node.parent + 1
-        val oracle_box = layout_box(
-            id,
-            boxes.bx[index] as i64,
-            boxes.by[index] as i64,
-            boxes.bw[index] as i64,
-            boxes.bh[index] as i64
-        )
-        oracle_boxes.push(oracle_box)
+        val oracle_box = if has_boxes:
+            layout_box(
+                id, boxes.bx[index] as i64, boxes.by[index] as i64,
+                boxes.bw[index] as i64, boxes.bh[index] as i64
+            )
+        else:
+            layout_box(id, 0, 0, 0, 0)
+        if has_boxes:
+            oracle_boxes.push(oracle_box)
+        if include_oracle:
+            oracle_fragments.push(layout_fragment(id, id, oracle_box, "principal", 0))
+        val starts = if has_boxes: boxes.wrap_starts[index] else: []
+        val ends = if has_boxes: boxes.wrap_ends[index] else: []
+        if include_oracle and starts.len() != ends.len():
+            return WebLayoutAdapterResult(
+                snapshot: _web_layout_empty_snapshot(generation, viewport, execution, fixed_point_cap),
+                fault: "browser-oracle-line-shape-mismatch"
+            )
+        var line_index: i64 = 0
+        while include_oracle and line_index < starts.len():
+            val start = starts[line_index] as i64
+            val endv = ends[line_index] as i64
+            if (start < 0 or endv < start or
+                endv > style.resolved_font_advances.len() or
+                style.resolved_font_line_height <= 0):
+                return WebLayoutAdapterResult(
+                    snapshot: _web_layout_empty_snapshot(generation, viewport, execution, fixed_point_cap),
+                    fault: "browser-oracle-line-metrics-mismatch"
+                )
+            var line_width: i64 = 0
+            var advance_index = start
+            while advance_index < endv:
+                line_width = line_width + (style.resolved_font_advances[advance_index] as i64)
+                advance_index = advance_index + 1
+            val line_geometry = layout_box(
+                id,
+                oracle_box.x,
+                oracle_box.y + line_index * (style.resolved_font_line_height as i64),
+                line_width,
+                style.resolved_font_line_height as i64
+            )
+            oracle_line_boxes.push(layout_line_box(id, line_index, line_geometry, start, endv))
+            oracle_fragments.push(layout_fragment(id, id, line_geometry, "line", line_index + 1))
+            line_index = line_index + 1
+        val scroll_width = if has_boxes and right_extents[index] > oracle_box.x:
+            right_extents[index] - oracle_box.x
+        else:
+            oracle_box.width
+        val scroll_height = if has_boxes and bottom_extents[index] > oracle_box.y:
+            bottom_extents[index] - oracle_box.y
+        else:
+            oracle_box.height
+        if include_oracle:
+            oracle_overflows.push(layout_overflow(
+                id, oracle_box,
+                if scroll_width > oracle_box.width: scroll_width else: oracle_box.width,
+                if scroll_height > oracle_box.height: scroll_height else: oracle_box.height
+            ))
         val column_tracks = _web_layout_append_tracks(grid_tracks, style.grid_template_columns)
         grid_tracks = column_tracks.tracks
         val row_tracks = _web_layout_append_tracks(grid_tracks, style.grid_template_rows)
@@ -189,10 +305,8 @@ fn web_layout_adapt_cpu_oracle(
             admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_LEGACY_WIDGET_BOX
         if style.flex_fill or style.min_height_vh or node.has_widget_panel_class:
             admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_VIEWPORT_FILL
-        if style.position_relative or style.position_absolute or style.position_sticky:
+        if style.position_relative or style.position_sticky:
             admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_POSITIONED
-        if style.overflow_hidden or style.overflow_auto_y or style.overflow_scroll_y:
-            admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_SCROLLING
         if style.content_visibility_hidden:
             admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_CONTENT_HIDDEN
         if (style.display != "block" and style.display != "list-item" and
@@ -201,12 +315,12 @@ fn web_layout_adapt_cpu_oracle(
         if (style.display == "grid" and
             (not column_tracks.supported or column_tracks.count == 0 or not row_tracks.supported)):
             admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK
-        val first_child = result.hit_index.child_index.first_child[index]
-        val next_sibling = result.hit_index.child_index.next_sibling[index]
+        val first_child = child_index.first_child[index]
+        val next_sibling = child_index.next_sibling[index]
         val semantics = LayoutNodeSemantics(
             first_child_id: if first_child < 0: 0 else: (first_child as i64) + 1,
             next_sibling_id: if next_sibling < 0: 0 else: (next_sibling as i64) + 1,
-            child_count: result.hit_index.child_index.child_count[index] as i64,
+            child_count: child_index.child_count[index] as i64,
             node_kind: if node.tag == "#root": "root" elif node.tag == "#text": "text" elif replaced: "replaced" else: "normal",
             display: style.display,
             box: LayoutBoxConstraints(
@@ -252,6 +366,26 @@ fn web_layout_adapt_cpu_oracle(
                 row_span: _web_layout_grid_span(style.grid_row),
                 align_items_authored: style.align_items_authored
             ),
+            position: LayoutPositionConstraints(
+                kind: _web_layout_position_kind(
+                    style.position_relative,
+                    style.position_absolute,
+                    style.position_sticky
+                ),
+                left: _web_layout_position_offset(
+                    style.left_px, style.position_absolute or style.position_relative or style.position_sticky
+                ),
+                top: _web_layout_position_offset(
+                    style.top_px, style.position_absolute or style.position_relative or style.position_sticky
+                ),
+                right: _web_layout_position_offset(style.right_px, style.right_px >= 0),
+                bottom: _web_layout_position_offset(style.bottom_px, style.bottom_px >= 0)
+            ),
+            overflow: _web_layout_overflow_policy(
+                style.overflow_hidden,
+                style.overflow_auto_y,
+                style.overflow_scroll_y
+            ),
             gpu_admission_flags: admission_flags
         )
         val fingerprint = web_layout_style_fingerprint(
@@ -260,11 +394,30 @@ fn web_layout_adapt_cpu_oracle(
             _web_layout_hash([style.opacity_pct.to_text(), style.will_change]),
             _web_layout_hash([style.font_family, style.font_size.to_text(), style.resolved_font_identity]),
             _web_layout_hash([style.width_px.to_text(), style.height_px.to_text(), style.display]),
-            _web_layout_hash([style.display, _web_layout_bool(style.position_absolute), _web_layout_bool(style.position_sticky)]),
-            _web_layout_hash([admission.profile_id, _web_layout_bool(style.overflow_auto_y), _web_layout_bool(style.overflow_scroll_y)]),
             _web_layout_hash([
-                oracle_box.x.to_text(), oracle_box.y.to_text(),
-                oracle_box.width.to_text(), oracle_box.height.to_text()
+                style.display,
+                _web_layout_bool(style.position_relative),
+                _web_layout_bool(style.position_absolute),
+                _web_layout_bool(style.position_sticky),
+                style.left_px.to_text(), style.top_px.to_text(),
+                style.right_px.to_text(), style.bottom_px.to_text()
+            ]),
+            _web_layout_hash([
+                admission.profile_id,
+                _web_layout_bool(style.overflow_hidden),
+                _web_layout_bool(style.overflow_auto_y),
+                _web_layout_bool(style.overflow_scroll_y)
+            ]),
+            _web_layout_hash([
+                style.width_px.to_text(), style.height_px.to_text(),
+                style.min_width_px.to_text(), style.max_width_px.to_text(),
+                style.min_height_px.to_text(), style.max_height_px.to_text(),
+                style.margin_l.to_text(), style.margin_t.to_text(),
+                style.margin_r.to_text(), style.margin_b.to_text(),
+                style.pad_l.to_text(), style.pad_t.to_text(),
+                style.pad_r.to_text(), style.pad_b.to_text(),
+                style.gap_px.to_text(), style.row_gap_px.to_text(),
+                style.column_gap_px.to_text()
             ])
         )
         adapted_nodes.push(WebLayoutNodeSnapshot(
@@ -289,7 +442,7 @@ fn web_layout_adapt_cpu_oracle(
                 line_height: style.resolved_font_line_height as i64
             ),
             semantics: semantics,
-            estimated_work: (result.hit_index.child_index.child_count[index] as i64) + 1,
+            estimated_work: (child_index.child_count[index] as i64) + 1,
             text_measure_required: node.tag == "#text"
         ))
         if parent_id != 0:
@@ -304,12 +457,45 @@ fn web_layout_adapt_cpu_oracle(
             dependencies,
             execution,
             fixed_point_cap,
-            result.hit_index.width as i64,
-            result.hit_index.height as i64,
+            viewport_width as i64,
+            viewport_height as i64,
             grid_tracks,
-            oracle_boxes
+            if include_oracle: oracle_boxes else: [],
+            if include_oracle: oracle_fragments else: [],
+            if include_oracle: oracle_line_boxes else: [],
+            if include_oracle: oracle_overflows else: [],
+            if include_oracle: [] else: oracle_boxes,
+            if include_oracle: [] else: oracle_fragments,
+            if include_oracle: [] else: oracle_line_boxes,
+            if include_oracle: [] else: oracle_overflows
         ),
         fault: ""
+    )
+
+fn web_layout_adapt_cpu_oracle(
+    result: SimpleWebLayoutDrawIrResult,
+    generation: i64,
+    execution: LayoutExecutionProfile,
+    fixed_point_cap: i64
+) -> WebLayoutAdapterResult:
+    _web_layout_adapt_state(
+        result.hit_index.nodes, result.hit_index.styles,
+        result.hit_index.child_index, result.hit_index.width,
+        result.hit_index.height, result.raw_boxes, true,
+        generation, execution, fixed_point_cap
+    )
+
+fn web_layout_adapt_prepared(
+    prepared: SimpleWebRetainedLayoutPreparation,
+    retained: LayoutResult,
+    generation: i64,
+    execution: LayoutExecutionProfile,
+    fixed_point_cap: i64
+) -> WebLayoutAdapterResult:
+    _web_layout_adapt_state(
+        prepared.nodes, prepared.styles, prepared.child_index,
+        prepared.width, prepared.height, retained, false,
+        generation, execution, fixed_point_cap
     )
 
 fn _web_layout_dirty_bits(frontier: WebLayoutFrontier, id: i64) -> i64:
@@ -361,8 +547,19 @@ fn web_layout_framework_input(
         snapshot.viewport_width,
         snapshot.viewport_height,
         snapshot.grid_tracks,
-        snapshot.oracle_boxes
+        snapshot.oracle_boxes,
+        layout_oracle_artifacts(
+            snapshot.oracle_fragments,
+            snapshot.oracle_line_boxes,
+            snapshot.oracle_overflows
+        ),
+        snapshot.retained_boxes,
+        layout_oracle_artifacts(
+            snapshot.retained_fragments,
+            snapshot.retained_line_boxes,
+            snapshot.retained_overflows
+        )
     )
 
-export WebLayoutAdapterResult, web_layout_adapt_cpu_oracle
+export WebLayoutAdapterResult, web_layout_adapt_cpu_oracle, web_layout_adapt_prepared
 export web_layout_validate_snapshot, web_layout_framework_input

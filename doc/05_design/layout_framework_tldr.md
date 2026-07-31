@@ -5,7 +5,10 @@
 - SCCs become deterministic waves whose executed geometry hashes prove convergence.
 - Incremental runs name every visited island.
 - GPU choice includes transfer/sync and becomes execution only after device readback parity.
-- Initial device packing is limited to fixed childless block/flex/grid roots.
+- Device packing covers fixed roots, one-level block/flex/grid children,
+  bounded absolute/overflow semantics, and Latin line-break evidence.
+- The browser CPU port filters selected results after canonical root layout;
+  CPU compute reduction is not yet claimed.
 
 <!-- sdn-diagram:id=layout-framework-design-tldr -->
 ```sdn

@@ -1826,6 +1826,109 @@ fn _simple_web_layout_compose_document(
         print "[web-phase] phase=compose_shaping elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
     _phase_composed
 
+pub class SimpleWebRetainedLayoutPreparation:
+    html: text
+    nodes: [HNode]
+    rules: Rules
+    child_index: HtmlChildIndex
+    base_styles: [Style]
+    styles: [Style]
+    animation_registry: KeyframeRegistry
+    animation_schedule: _SimpleWebAnimationSchedule
+    animation_property_work_count: i64
+    material_entries: [text]
+    material_counts: [i64]
+    cpu_material_nodes: [i32]
+    solid_material_nodes: [i32]
+    width: i32
+    height: i32
+    vector_fonts: bool
+    scroll_y: i32
+    overlay: BrowserTextInputOverlay
+    images: [SimpleOsHostGpuImageResource]
+
+pub fn simple_web_layout_prepare_retained(
+    html: text, width: i32, height: i32, vector_fonts: bool,
+    animation_time_ms: i64, scroll_y: i32,
+    overlay: BrowserTextInputOverlay,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource]
+) -> SimpleWebRetainedLayoutPreparation:
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
+    _web_budget_begin(if env_override > 0: env_override else: default_budget_ms)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    var material_entries: [text] = ["", ""]
+    var material_counts: [i64] = [0, 0]
+    var cpu_material_nodes: [i32] = []
+    var solid_material_nodes: [i32] = []
+    val base_styles = compute_styles_with_material(
+        nodes, rules, child_index, false, vector_fonts,
+        material_entries, material_counts,
+        cpu_material_nodes, solid_material_nodes
+    )
+    var styles = base_styles
+    val animation_registry = _simple_web_extract_keyframes(html)
+    var animation_schedule = _SimpleWebAnimationSchedule(
+        animation_end_ms: -1, animation_next_ms: -1
+    )
+    var animation_property_work_count: i64 = 0
+    if animation_registry.entries.len() > 0:
+        val animation_frame_index = _simple_web_animation_frame_index(
+            styles, nodes, child_index, animation_registry,
+            animation_instances, false
+        )
+        animation_schedule = _simple_web_layout_animation_schedule(
+            styles, animation_time_ms, animation_instances,
+            animation_frame_index
+        )
+        if animation_time_ms >= 0:
+            val animation_apply = _apply_css_animations(
+                nodes, styles, animation_registry, animation_time_ms,
+                animation_instances, animation_frame_index
+            )
+            styles = animation_apply.styles
+            animation_property_work_count = animation_apply.property_work_count
+    styles = simple_web_resolve_collapsed_table_borders(
+        nodes, child_index, styles
+    )
+    SimpleWebRetainedLayoutPreparation(
+        html: html, nodes: nodes, rules: rules, child_index: child_index,
+        base_styles: base_styles, styles: styles,
+        animation_registry: animation_registry,
+        animation_schedule: animation_schedule,
+        animation_property_work_count: animation_property_work_count,
+        material_entries: material_entries, material_counts: material_counts,
+        cpu_material_nodes: cpu_material_nodes,
+        solid_material_nodes: solid_material_nodes,
+        width: width, height: height, vector_fonts: vector_fonts,
+        scroll_y: scroll_y, overlay: overlay, images: images
+    )
+
+pub fn simple_web_layout_empty_retained() -> LayoutResult:
+    LayoutResult(
+        bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [],
+        intrinsic_widths: [], height: 0
+    )
+
+pub fn simple_web_layout_compose_prepared(
+    prepared: SimpleWebRetainedLayoutPreparation,
+    raw_boxes: LayoutResult
+) -> SimpleWebLayoutDrawIrResult:
+    _simple_web_layout_compose_retained(
+        prepared.html, prepared.nodes, prepared.rules, prepared.child_index,
+        prepared.base_styles, prepared.styles, raw_boxes,
+        prepared.animation_registry, prepared.animation_schedule,
+        prepared.animation_property_work_count,
+        prepared.material_entries, prepared.material_counts,
+        prepared.cpu_material_nodes, prepared.solid_material_nodes,
+        prepared.width, prepared.height, prepared.vector_fonts,
+        prepared.scroll_y, prepared.overlay, prepared.images, 0
+    )
+
 fn _simple_web_layout_render_html_draw_ir_result_at_time(
     html: text, width: i32, height: i32, vector_fonts: bool,
     animation_time_ms: i64, scroll_y: i32,
