@@ -7,11 +7,38 @@ to obtain fresh Darwin evidence; it does not claim that Metal has run here.
 The companion system spec is
 `test/03_system/gpu/metal_backend_mac_host_spec.spl`.
 
+Linux substitution research and LLM guidance:
+
+- `doc/01_research/domain/linux_metal_emulation_2026-07-30.md`
+- `doc/00_llm_process/feature_expert/metal_linux_evidence/skill.md`
+
+## Linux evidence completed before postponement
+
+| Evidence | Check | Status |
+|---|---|---|
+| Canonical MSL entries and bindings | `metal_msl_pipeline_spec.spl` | implemented |
+| Portable Metal emitter shape | `gpu_portable_compute_spec.spl` | implemented |
+| Typed Linux Metal rejection | `metal_strict_spec.spl` | implemented |
+| Shared strict backend matrix | `native_shader_backend_readback_matrix_spec.spl` | implemented |
+| Linux GPU semantic substitute | Vulkan device readback plus CPU oracle checks | implemented |
+| SPIR-V to MSL translation | optional SPIRV-Cross diagnostic | tool unavailable on current host; not required |
+| Darling Metal loading | optional experimental smoke | tool unavailable on current host; not required |
+
+None of these rows may be relabelled as native Metal execution. The only
+remaining Metal evidence class is `macos-metal-live`.
+
 ## Exact macOS commands
 
-Run from the repository root on a prepared macOS host:
+Run from the repository root on a prepared macOS host. These commands assume
+the accepted self-hosted compiler is already present at `bin/simple` and that
+the trusted-build manifest exists; this lane does not bootstrap or build it.
+The preflight is intentionally fail-closed:
 
 ```sh
+test "$(uname -s)" = Darwin
+test -x bin/simple
+test -f build/macos_gpu_2d_live_native/metal/trusted-build.env
+
 xcrun --find metal
 xcrun --find metallib
 system_profiler SPDisplaysDataType
@@ -20,7 +47,7 @@ system_profiler SPDisplaysDataType
 # build/macos_gpu_2d_live_native/metal/trusted-build.env. The checker creates
 # or verifies its generated-source/metallib toolchain manifest itself via
 # scripts/check/check-portable-compute-toolchains.shs.
-SIMPLE_LIB=src \
+SIMPLE_BIN=bin/simple SIMPLE_LIB=src \
   BUILD_DIR=build/metal_backend_mac_host \
   REPORT_PATH=build/metal_backend_mac_host/report.md \
   sh scripts/check/check-metal-generated-2d-readback.shs
@@ -135,5 +162,8 @@ SIMPLE_HOSTED_REVISION_CACHE_BACKEND=vulkan SIMPLE_LIB=src bin/simple test \
 - Postponed because this workspace is Linux and cannot produce Darwin Metal
   device evidence. The current task also forbids bootstrap/full builds; resume
   on a prepared macOS host with an accepted self-hosted `bin/simple` artifact.
+- Running the pending system spec or any host-gated wrapper on Linux is only a
+  capability check/skip and does not satisfy this lane or produce hardware
+  evidence; the TODO remains open until the Darwin receipts above exist.
 - Do not close the GPU backend goal or convert this lane to PASS from source
   markers, cached artifacts, or a non-macOS unavailable result.
