@@ -108,8 +108,12 @@ impl CompilerDriver:
                 driver_inputs = driver_inputs + [self.ctx.options.bootstrap_input_5]
         else:
             driver_inputs = self.ctx.options.input_files
-        if driver_inputs.len() == 0:
-            val native_entry_input = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val closure_source_roots = driver_inputs
+        val native_entry_input = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val native_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        if native_entry_input != "" and not native_entry_closure_pre:
+            driver_inputs = [native_entry_input]
+        elif driver_inputs.len() == 0:
             if native_entry_input != "":
                 driver_inputs = [native_entry_input]
         val input_len = driver_inputs.len()
@@ -161,20 +165,9 @@ impl CompilerDriver:
         val nb_entry_env = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
         val nb_entry_closure_pre = (rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
         if nb_entry_env != "" and not nb_entry_closure_pre:
-            # BUG FIX (CLI --source loss): explicit --source roots are already
-            # scanned into all_sources by the loop above (driver_inputs), but
-            # under their own path-derived module names -- which do not
-            # necessarily match the dotted import name a caller's entry file
-            # uses to `use` them (e.g. a --source dir reached via "../" is
-            # named by its relative path, not by the bare module the entry
-            # imports). Build a lookup of module names already loaded so the
-            # closure walk below doesn't (a) misreport an already-satisfied
-            # import as "unresolved" just because it isn't reachable through
-            # the cwd/src/entry-dir fallback roots, and (b) so those explicit
-            # --source contents still make it through the parse_all_impl
-            # entry-only filter, which otherwise requires this block to flip
-            # SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE before anything but the exact
-            # entry file is parsed.
+            # Explicit --source roots are resolver fallbacks, not closure seeds.
+            # This preserves custom source layouts without parsing every file in
+            # each root before the entry's transitive imports are known.
             var closure_loaded_mods = _driver_text_bucket_set_new(512)
             var closure_preidx = 0
             while closure_preidx < all_sources.len():
@@ -212,7 +205,12 @@ impl CompilerDriver:
                         # Already satisfied by an explicit --source root (or an
                         # earlier closure step): nothing to resolve, not an error.
                         continue
-                    val closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
+                    var closure_file = _driver_resolve_entry_import(closure_mp, closure_dir)
+                    if closure_file == "":
+                        for closure_source_root in closure_source_roots:
+                            closure_file = _driver_resolve_entry_import(closure_mp, closure_source_root)
+                            if closure_file != "":
+                                break
                     if closure_file == "":
                         # LOUD error naming the module path. Single-segment
                         # unresolved names are skipped: they are more likely
