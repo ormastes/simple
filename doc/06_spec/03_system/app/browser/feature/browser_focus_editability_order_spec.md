@@ -30,8 +30,12 @@ it "should stop beforeinput when focus makes a text field disabled":
     val pixels_before = session.render_to_pixels(16, 16).pixels
 
     step("Request text mutation through the public UI action")
+    val inputs = ui_access_find_nodes(
+        session.ui_access_snapshot(), "browser:session",
+        "textfield", "old", 1
+    )
     val result = session.ui_access_act(WinTextActionRequest(
-        target_id: "browser:session#page_input_0", action: "set_value",
+        target_id: inputs[0].canonical_id, action: "set_value",
         text_value: "new", x: 0, y: 0
     ))
 

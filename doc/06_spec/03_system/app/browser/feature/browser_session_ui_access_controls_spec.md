@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 19 | 19 | 0 | 0 |
+| 20 | 20 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -126,7 +126,7 @@ expect(capture).to_contain("node: back kind=button text=Back")
 expect(capture).to_contain("node: reload kind=button text=Reload")
 expect(capture).to_contain("node: favorite kind=button text=Favorite")
 expect(capture).to_contain("node: address kind=textfield text=https://example.com/start/index.html")
-expect(capture).to_contain("node: link_0 kind=link text=Read docs")
+expect(capture).to_contain("kind=link text=Read docs")
 expect(_write_ui_capture(capture)).to_equal(0)
 expect(_capture_file_state(capture)).to_equal("matched")
 ```
@@ -266,20 +266,36 @@ val first_html = (
 step("Commit a page and edit its live text control")
 var session = BrowserSession.new()
 expect(session.open_html(first_url, first_html).is_ok()).to_be(true)
+val text_inputs = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "initial", 1
+)
 val text_edit = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_0",
+    target_id: text_inputs[0].canonical_id,
     action: "set_value", text_value: "kept", x: 0, y: 0
 ))
+val checkboxes = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "checkbox", "check", 1
+)
 val checkbox_edit = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_1",
+    target_id: checkboxes[0].canonical_id,
     action: "click", text_value: "", x: 0, y: 0
 ))
+val blue_radios = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "radio", "blue", 1
+)
 val radio_edit = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_3",
+    target_id: blue_radios[0].canonical_id,
     action: "click", text_value: "", x: 0, y: 0
 ))
+val textareas = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "old memo", 1
+)
 val textarea_edit = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_textarea_0",
+    target_id: textareas[0].canonical_id,
     action: "set_value", text_value: "memo", x: 0, y: 0
 ))
 val initial_select = ui_access_find_nodes(
@@ -1409,16 +1425,24 @@ session.open_html(
     "<html><body><button onkeydown='set-attr:data-keydown=yes' onclick=\"document.title='Saved'\">Save</button><button onkeydown='prevent-default' onclick=\"document.title='ShouldNotRun'\">Blocked key</button><input value='old' oninput=\"document.title='Typing'\" onchange=\"document.title='Changed'\"><input value='kept' onbeforeinput='prevent-default' oninput=\"document.title='ShouldNotRun'\"><input type='checkbox'><input type='radio' name='choice' checked><input type='radio' name='choice'></body></html>"
 )
 
+val old_inputs = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "old", 1
+)
 val edited = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_0", action: "set_value",
+    target_id: old_inputs[0].canonical_id, action: "set_value",
     text_value: "Ada", x: 0, y: 0
 ))
 expect(edited.ok).to_equal(true)
 expect(session.current_title).to_equal("Typing")
 expect(session.current_body_html).to_contain("value=\"Ada\"")
 
+val kept_inputs = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "kept", 1
+)
 val canceled = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_1", action: "set_value",
+    target_id: kept_inputs[0].canonical_id, action: "set_value",
     text_value: "blocked", x: 0, y: 0
 ))
 expect(canceled.ok).to_equal(true)
@@ -1432,8 +1456,12 @@ for node in session.ui_access_snapshot().nodes:
         focused_count = focused_count + 1
 expect(focused_count).to_equal(1)
 
+val focused_inputs = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "kept", 1
+)
 val blurred = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_1", action: "blur",
+    target_id: focused_inputs[0].canonical_id, action: "blur",
     text_value: "", x: 0, y: 0
 ))
 expect(blurred.ok).to_equal(true)
@@ -1444,8 +1472,12 @@ for node in session.ui_access_snapshot().nodes:
         focused_count = focused_count + 1
 expect(focused_count).to_equal(0)
 
+val save_buttons = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Save", 1
+)
 val clicked = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_button_0", action: "key",
+    target_id: save_buttons[0].canonical_id, action: "key",
     text_value: "Enter", x: 0, y: 0
 ))
 expect(clicked.ok).to_equal(true)
@@ -1453,16 +1485,24 @@ expect(clicked.message).to_equal("control key activated")
 expect(session.current_title).to_equal("Saved")
 expect(session.current_body_html).to_contain("data-keydown=\"yes\"")
 
+val blocked_buttons = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "Blocked key", 1
+)
 val blocked_key = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_button_1", action: "key",
+    target_id: blocked_buttons[0].canonical_id, action: "key",
     text_value: "Enter", x: 0, y: 0
 ))
 expect(blocked_key.ok).to_equal(true)
 expect(blocked_key.message).to_equal("control key event canceled")
 expect(session.current_title).to_equal("Saved")
 
+val unchecked_boxes = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "checkbox", "", 1
+)
 val checked = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_2", action: "click",
+    target_id: unchecked_boxes[0].canonical_id, action: "click",
     text_value: "", x: 0, y: 0
 ))
 expect(checked.ok).to_equal(true)
@@ -1472,8 +1512,12 @@ val checkboxes = ui_access_find_nodes(
 expect(checkboxes.len()).to_equal(1)
 expect(checkboxes[0].selected).to_equal(true)
 
+val available_radios = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "radio", "", 2
+)
 val selected_radio = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_4", action: "key",
+    target_id: available_radios[1].canonical_id, action: "key",
     text_value: "Space", x: 0, y: 0
 ))
 expect(selected_radio.ok).to_equal(true)
@@ -1587,8 +1631,12 @@ session.open_html(
     "<html><body><input id='duplicate' value='first' oninput='set-attr:data-routed=wrong'><input id='duplicate' value='second' oninput='set-attr:data-routed=right'></body></html>"
 )
 
+val second_inputs = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "second", 1
+)
 val edited = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_input_1", action: "set_value",
+    target_id: second_inputs[0].canonical_id, action: "set_value",
     text_value: "changed", x: 0, y: 0
 ))
 
@@ -1602,10 +1650,10 @@ var second_value = ""
 var first_focused = false
 var second_focused = false
 for node in session.ui_access_snapshot().nodes:
-    if node.widget_id == "page_input_0":
+    if node.kind == "textfield" and node.text_value == "first":
         first_value = node.text_value
         first_focused = node.focused
-    elif node.widget_id == "page_input_1":
+    elif node.kind == "textfield" and node.text_value == "changed":
         second_value = node.text_value
         second_focused = node.focused
 expect(first_value).to_equal("first")
@@ -1780,7 +1828,7 @@ expect(focus_after[0].text_value).to_equal("old")
 #### hides secret form state and edits textarea through one focused route
 
 - var session = BrowserSession new
-   - Expected: hidden_nodes equals `0`
+   - Expected: page_textfield_nodes equals `2`
    - Expected: password_value equals ``
    - Expected: textarea_value equals `old`
    - Expected: edited.ok is true
@@ -1790,7 +1838,7 @@ expect(focus_after[0].text_value).to_equal("old")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 32 lines folded for reproduction.
+Runnable source folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -1801,31 +1849,207 @@ session.open_html(
 )
 
 val before = session.ui_access_snapshot()
-var hidden_nodes = 0
+var page_textfield_nodes = 0
 var password_value = "missing"
 var textarea_value = "missing"
 for node in before.nodes:
-    if node.widget_id == "page_input_0":
-        hidden_nodes = hidden_nodes + 1
-    elif node.widget_id == "page_input_1":
-        password_value = node.text_value
-    elif node.widget_id == "page_textarea_0":
-        textarea_value = node.text_value
-expect(hidden_nodes).to_equal(0)
+    if (
+        _node_prop(node, "control") == "page_input" and
+        node.kind == "textfield"
+    ):
+        page_textfield_nodes = page_textfield_nodes + 1
+        if node.text_value == "":
+            password_value = node.text_value
+        elif node.text_value == "old":
+            textarea_value = node.text_value
+expect(page_textfield_nodes).to_equal(2)
 expect(password_value).to_equal("")
 expect(textarea_value).to_equal("old")
 
+val textareas = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "old", 1
+)
 val edited = session.ui_access_act(WinTextActionRequest(
-    target_id: "browser:session#page_textarea_0", action: "set_value",
+    target_id: textareas[0].canonical_id, action: "set_value",
     text_value: "Ada & Bob", x: 0, y: 0
 ))
 expect(edited.ok).to_equal(true)
 expect(session.current_body_html).to_contain("Ada &amp; Bob")
 var textarea_focused = false
 for node in session.ui_access_snapshot().nodes:
-    if node.widget_id == "page_textarea_0":
+    if node.kind == "textfield" and node.text_value == "Ada & Bob":
         textarea_focused = node.focused
 expect(textarea_focused).to_equal(true)
+```
+
+</details>
+
+#### rejects stale DOM control identities after document replacement
+
+A control action captured from one document cannot target a same-position control in its replacement.
+
+1. Capture document A link, button, input, and textarea identities.
+2. Replace document A with same-position document B controls.
+3. Reject every stale document A action without mutating document B.
+4. Re-query document B and activate each fresh identity.
+
+Expected results:
+
+- Every DOM-derived canonical ID carries its snapshot revision and DOM node ID.
+- All four stale actions return `target_not_found`.
+- Document B keeps its URL, title, callback count, and values after stale actions.
+- Re-queried document B controls accept their intended actions.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: complete four-step regression scenario folded for reproduction.
+
+```simple
+step("Capture document A link, button, input, and textarea identities")
+var session = BrowserSession.new()
+session.open_html(
+    "https://example.com/a",
+    "<html><head><title>A</title></head><body><a href='/a-next'>A link</a><button>A button</button><input value='A input'><textarea>A notes</textarea></body></html>"
+)
+val a_snapshot = session.ui_access_snapshot()
+val a_links = ui_access_find_nodes(
+    a_snapshot, "browser:session", "link", "A link", 1
+)
+val a_buttons = ui_access_find_nodes(
+    a_snapshot, "browser:session", "button", "A button", 1
+)
+val a_inputs = ui_access_find_nodes(
+    a_snapshot, "browser:session", "textfield", "A input", 1
+)
+val a_textareas = ui_access_find_nodes(
+    a_snapshot, "browser:session", "textfield", "A notes", 1
+)
+expect(a_links.len()).to_equal(1)
+expect(a_buttons.len()).to_equal(1)
+expect(a_inputs.len()).to_equal(1)
+expect(a_textareas.len()).to_equal(1)
+
+step("Replace document A with same-position document B controls")
+session.open_html(
+    "https://example.com/b",
+    "<html><head><title>B</title></head><body><a href='/b-next' onclick='prevent-default'>B link</a><button onclick=\"document.title='B button'\">B button</button><input value='B input'><textarea>B notes</textarea></body></html>"
+)
+val b_snapshot = session.ui_access_snapshot()
+val b_links = ui_access_find_nodes(
+    b_snapshot, "browser:session", "link", "B link", 1
+)
+val b_buttons = ui_access_find_nodes(
+    b_snapshot, "browser:session", "button", "B button", 1
+)
+val b_inputs = ui_access_find_nodes(
+    b_snapshot, "browser:session", "textfield", "B input", 1
+)
+val b_textareas = ui_access_find_nodes(
+    b_snapshot, "browser:session", "textfield", "B notes", 1
+)
+expect(b_links.len()).to_equal(1)
+expect(b_buttons.len()).to_equal(1)
+expect(b_inputs.len()).to_equal(1)
+expect(b_textareas.len()).to_equal(1)
+expect(b_snapshot.snapshot_revision).to_be_greater_than(
+    a_snapshot.snapshot_revision
+)
+expect(a_links[0].canonical_id).to_start_with(
+    "browser:session#link_{a_snapshot.snapshot_revision}_"
+)
+expect(a_buttons[0].canonical_id).to_start_with(
+    "browser:session#page_button_{a_snapshot.snapshot_revision}_"
+)
+expect(a_inputs[0].canonical_id).to_start_with(
+    "browser:session#page_input_{a_snapshot.snapshot_revision}_"
+)
+expect(a_textareas[0].canonical_id).to_start_with(
+    "browser:session#page_textarea_{a_snapshot.snapshot_revision}_"
+)
+expect(b_links[0].canonical_id).to_start_with(
+    "browser:session#link_{b_snapshot.snapshot_revision}_"
+)
+expect(b_buttons[0].canonical_id).to_start_with(
+    "browser:session#page_button_{b_snapshot.snapshot_revision}_"
+)
+expect(b_inputs[0].canonical_id).to_start_with(
+    "browser:session#page_input_{b_snapshot.snapshot_revision}_"
+)
+expect(b_textareas[0].canonical_id).to_start_with(
+    "browser:session#page_textarea_{b_snapshot.snapshot_revision}_"
+)
+
+step("Reject every stale document A action without mutating document B")
+val callback_count = session.dom_callback_count
+val stale_link = session.ui_access_act(WinTextActionRequest(
+    target_id: a_links[0].canonical_id, action: "click",
+    text_value: "", x: 0, y: 0
+))
+val stale_button = session.ui_access_act(WinTextActionRequest(
+    target_id: a_buttons[0].canonical_id, action: "click",
+    text_value: "", x: 0, y: 0
+))
+val stale_input = session.ui_access_act(WinTextActionRequest(
+    target_id: a_inputs[0].canonical_id, action: "set_value",
+    text_value: "stale input", x: 0, y: 0
+))
+val stale_textarea = session.ui_access_act(WinTextActionRequest(
+    target_id: a_textareas[0].canonical_id, action: "set_value",
+    text_value: "stale notes", x: 0, y: 0
+))
+expect(stale_link.code).to_equal("target_not_found")
+expect(stale_button.code).to_equal("target_not_found")
+expect(stale_input.code).to_equal("target_not_found")
+expect(stale_textarea.code).to_equal("target_not_found")
+expect(session.current_url).to_equal("https://example.com/b")
+expect(session.current_title).to_equal("B")
+expect(session.dom_callback_count).to_equal(callback_count)
+expect(session.current_body_html).to_contain("value=\"B input\"")
+expect(session.current_body_html).to_contain("B notes")
+
+step("Re-query document B and activate each fresh identity")
+val fresh_button = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "button", "B button", 1
+)
+val button_result = session.ui_access_act(WinTextActionRequest(
+    target_id: fresh_button[0].canonical_id, action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(button_result.ok).to_be(true)
+expect(session.current_title).to_equal("B button")
+val fresh_input = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "B input", 1
+)
+val input_result = session.ui_access_act(WinTextActionRequest(
+    target_id: fresh_input[0].canonical_id, action: "set_value",
+    text_value: "fresh input", x: 0, y: 0
+))
+expect(input_result.ok).to_be(true)
+expect(session.current_body_html).to_contain("value=\"fresh input\"")
+val fresh_textarea = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "textfield", "B notes", 1
+)
+val textarea_result = session.ui_access_act(WinTextActionRequest(
+    target_id: fresh_textarea[0].canonical_id, action: "set_value",
+    text_value: "fresh notes", x: 0, y: 0
+))
+expect(textarea_result.ok).to_be(true)
+expect(session.current_body_html).to_contain("fresh notes")
+val fresh_link = ui_access_find_nodes(
+    session.ui_access_snapshot(), "browser:session",
+    "link", "B link", 1
+)
+val link_result = session.ui_access_act(WinTextActionRequest(
+    target_id: fresh_link[0].canonical_id, action: "click",
+    text_value: "", x: 0, y: 0
+))
+expect(link_result.ok).to_be(true)
+expect(link_result.message).to_equal("link event canceled")
 ```
 
 </details>
@@ -1834,8 +2058,8 @@ expect(textarea_focused).to_equal(true)
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 19 |
-| Active scenarios | 19 |
+| Total scenarios | 20 |
+| Active scenarios | 20 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

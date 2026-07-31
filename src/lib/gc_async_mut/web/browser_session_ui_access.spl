@@ -92,6 +92,11 @@ fn _browser_dom_target(node: UiAccessNode) -> text:
         return ""
     "\u{0000}route-node:{node_id}"
 
+fn _browser_dom_widget_id(
+    kind: text, ui_access_revision: i64, node: BeDomNode
+) -> text:
+    "{kind}_{ui_access_revision}_{node.node_id}"
+
 fn _browser_collapse_parent_segments(url: text) -> text:
     var out = url
     while out.contains("/../"):
@@ -105,7 +110,9 @@ fn _browser_collapse_parent_segments(url: text) -> text:
         out = out.slice(0, previous_slash) + out.slice(marker + 3, out.len())
     out
 
-fn _browser_link_nodes(dom: BeDomNode, base_url: text) -> [UiAccessNode]:
+fn _browser_link_nodes(
+    dom: BeDomNode, base_url: text, ui_access_revision: i64
+) -> [UiAccessNode]:
     val links = be_dom_find_by_tag(dom, "a")
     var nodes: [UiAccessNode] = []
     var index = 0
@@ -116,7 +123,8 @@ fn _browser_link_nodes(dom: BeDomNode, base_url: text) -> [UiAccessNode]:
         if href != "" and label != "":
             val resolved = _browser_collapse_parent_segments(resolve_relative_url(base_url, href))
             nodes.push(_browser_node(
-                "link_{index}", "link", label, true, false, ["click", "key"],
+                _browser_dom_widget_id("link", ui_access_revision, link),
+                "link", label, true, false, ["click", "key"],
                 _browser_link_props(resolved, link.node_id.to_text())
             ))
         index = index + 1
@@ -246,7 +254,9 @@ fn _browser_page_control_nodes(
         if label == "":
             label = "Button"
         var access_node = _browser_node(
-            "page_button_{button_index}", "button", label,
+            _browser_dom_widget_id(
+                "page_button", ui_access_revision, button
+            ), "button", label,
             control.enabled, false, ["click", "key"],
             _browser_dom_control_props("page_button", button.node_id.to_text())
         )
@@ -266,7 +276,9 @@ fn _browser_page_control_nodes(
             pass_dn("hidden form state is not an interactive UI node")
         elif input_type == "checkbox" or input_type == "radio":
             var access_node = _browser_node(
-                "page_input_{input_index}", input_type, be_dom_get_attr(input, "value"),
+                _browser_dom_widget_id(
+                    "page_input", ui_access_revision, input
+                ), input_type, be_dom_get_attr(input, "value"),
                 enabled, be_dom_has_attr(input, "checked"), ["click", "key"],
                 _browser_dom_control_props("page_input", input.node_id.to_text())
             )
@@ -274,7 +286,9 @@ fn _browser_page_control_nodes(
             nodes.push(access_node)
         elif input_type == "button" or input_type == "submit" or input_type == "reset":
             var access_node = _browser_node(
-                "page_input_{input_index}", "button", be_dom_get_attr(input, "value"),
+                _browser_dom_widget_id(
+                    "page_input", ui_access_revision, input
+                ), "button", be_dom_get_attr(input, "value"),
                 enabled, false, ["click", "key"],
                 _browser_dom_control_props("page_button", input.node_id.to_text())
             )
@@ -284,7 +298,9 @@ fn _browser_page_control_nodes(
             val editable = enabled and not be_dom_has_attr(input, "readonly")
             val visible_value = if input_type == "password": "" else: be_dom_get_attr(input, "value")
             var access_node = _browser_node(
-                "page_input_{input_index}", "textfield", visible_value,
+                _browser_dom_widget_id(
+                    "page_input", ui_access_revision, input
+                ), "textfield", visible_value,
                 editable, false, if editable: ["set_value", "blur"] else: [],
                 _browser_dom_control_props("page_input", input.node_id.to_text())
             )
@@ -300,7 +316,9 @@ fn _browser_page_control_nodes(
         val editable = control.enabled and
             not be_dom_has_attr(textarea, "readonly")
         var access_node = _browser_node(
-            "page_textarea_{textarea_index}", "textfield",
+            _browser_dom_widget_id(
+                "page_textarea", ui_access_revision, textarea
+            ), "textfield",
             be_dom_get_text_content(textarea), editable, false,
             if editable: ["set_value", "blur"] else: [],
             _browser_dom_control_props(
@@ -317,7 +335,9 @@ fn _browser_page_control_nodes(
         val select = control.node
         val enabled = control.enabled
         var access_node = _browser_node(
-            "page_select_{ui_access_revision}_{select.node_id}", "select",
+            _browser_dom_widget_id(
+                "page_select", ui_access_revision, select
+            ), "select",
             browser_select_value(select), enabled, false,
             if enabled: ["set_value"] else: [],
             _browser_dom_control_props(
@@ -361,7 +381,9 @@ impl BrowserSession:
             app_id: "simple-browser",
             root_canonical_id: ui_access_canonical_id(BROWSER_SESSION_SURFACE_ID, "root")
         )
-        val link_nodes = _browser_link_nodes(self.current_dom, self.current_url)
+        val link_nodes = _browser_link_nodes(
+            self.current_dom, self.current_url, self.ui_access_revision
+        )
         val bookmark_nodes = _browser_bookmark_nodes(
             self, self.ui_access_revision
         )
