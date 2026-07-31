@@ -175,3 +175,13 @@ remains FAIL/BLOCKED. R0 calibration itself cannot promote REQ-001–015 or
 NFR-001–008. Merge owner is `/root`; each lane hands off only its listed paths.
 The final normal/highest-capability reviewer independently checks all retained
 artifacts, generated manuals, and requirement traces before any `STATUS: PASS`.
+
+R0 bootstrap handoff (2026-07-31): three bounded Stage4 attempts using the
+attempt-35 Stage2 compiler all stopped in that compiler's HIR import pass at
+`std.nogc_sync_mut.io`; the last reached 16.2 GiB RSS without advancing the
+phase marker. Commits `51e2e0b976a` and `0890acd748d` fix the self-glob and
+`lib.*`/`std.*` alias cycle in compiler source, but a Stage2 process cannot use
+fixes that exist only in the Stage4 output it is trying to produce. The next
+bootstrap session must incrementally rebuild Stage2/Stage3 with those commits,
+admit that compiler, and only then run the full Stage4 command. Do not repeat
+the attempt-35-to-Stage4 command unchanged.
