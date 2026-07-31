@@ -1705,7 +1705,7 @@ and the absent admitted pure-Simple runtime receipt remain unchanged.
 | Disabled text input | `fbecc67eb77` uses shared UI access before dispatch. | STATIC REVIEW PASS; execution HELD |
 | Animation layout keys | `f57d9bc4600` and `782477146a9` cover unused layout-key suppression and an empty final keyframe. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle/multi-list RED |
 | Hosted form action | `browser_form_action_authorization_spec.spl` and its manual cover `c91fdc0e67b` host-owned conservative authorization. | STATIC REVIEW PASS; execution HELD |
-| CORS unsafe headers | `browser_fetch_cors_unsafe_header_preflight_spec.spl` and its manual cover `bf7dfff029a` Simple broker OPTIONS admission and denied-policy suppression. | STATIC/EVIDENCE-HELD; non-Simple/live preflight RED |
+| CORS unsafe headers | `browser_fetch_cors_unsafe_header_preflight_spec.spl` and its manual cover `bf7dfff029a` direct Simple broker OPTIONS admission and denied-policy suppression. | STATIC/EVIDENCE-HELD; hosted non-simple/live preflight RED |
 | TLS and mixed content | Existing TLS failure and redirect mixed-content source/spec rows remain available. | SOURCE PRESENT / LIVE EVIDENCE HELD |
 
 `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` + `ca91c19d7f8` pass static

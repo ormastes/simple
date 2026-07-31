@@ -1071,7 +1071,7 @@ stopped, RED, or evidence-held history.
 | `disabled_ui_dispatch` | `fbecc67eb77` rejects disabled text controls before shared dispatch. | STATIC REVIEW PASS; qualified execution HELD |
 | `animation_keyframe_perf` | `f57d9bc4600` and `782477146a9` skip unused layout keys and retain empty final keys. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list RED |
 | `hosted_form_action` | `c91fdc0e67b` binds redirects to host-owned form-action authorization and conservatively rejects unauthorized navigation. | STATIC REVIEW PASS; qualified execution HELD |
-| `cors_unsafe_header_preflight` | `bf7dfff029a` wires the Simple broker preflight path. | STATIC/EVIDENCE-HELD; non-Simple/live preflight evidence RED |
+| `cors_unsafe_header_preflight` | `bf7dfff029a` wires the direct Simple broker preflight path. | STATIC/EVIDENCE-HELD; hosted non-simple/live preflight remains RED |
 | `tls_mixed_content` | TLS and mixed-content source controls are present. | SOURCE PRESENT / LIVE EVIDENCE HELD |
 
 The reviewed gap stack `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` +
