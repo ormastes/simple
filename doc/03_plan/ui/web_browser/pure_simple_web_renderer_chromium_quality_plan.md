@@ -342,3 +342,34 @@ safe sync sequence is:
 The existing graphical equality plan records a prior sync failure:
 `git@github.com: Permission denied (publickey)`. Treat that as unresolved until
 `jj git fetch` and a non-mutating remote check succeed.
+
+## IR and GPU-offload alignment (2026-07-31)
+
+This plan's CPU renderer remains the authoritative correctness oracle. Two new
+documents change what sits around it, additively:
+
+- `doc/04_architecture/compiler/mdsoc/mdsoc_plus_tagged_structural_compute_architecture.md`
+  — canonical SoA DOM/CSS arenas, CSS selectors compiled to QueryIR, DOM/CSSOM
+  mutation as MutationIR transactions, and exact selector-feature invalidation
+  (`DirtyMask` + `StyleDifference`) replacing the broad "DOM changed → rerun
+  parse/style/layout/paint" behavior. Incremental results must equal this plan's
+  full-recompute path for the same snapshot.
+- `doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md` — experimental
+  GPU-resident WebScene lane and the packed, no-reallocation **DrawIR v3**
+  (typed tables, no strings in render-hot structures). DrawIR v2 and this
+  renderer are unchanged; v2/v3 compatibility adapters and semantic checksums
+  are owned by that plan's Program 2.
+
+Consequences for this plan:
+
+1. New corpus fixtures should also record DrawIR v3 semantic checksums once the
+   v3 contract lands, so the Chromium-parity corpus doubles as the GPU-lane
+   parity corpus.
+2. The comparison harness gains a shadow mode: CPU render authoritative, GPU
+   WebScene compared by receipt/IR/pixel — never the reverse until that plan's
+   promotion gates pass.
+3. Style/layout invalidation work in this plan should target the
+   selector-feature model rather than extending the current whole-pipeline
+   dirty flag; full recomputation stays as the test oracle.
+
+Per-lane parallel plans: `doc/03_plan/platform/structural_compute/`.
