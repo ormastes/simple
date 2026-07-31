@@ -29,8 +29,10 @@ not claimed until the qualified pure-Simple CLI is available.
 
 - Malformed later values retain the last valid declaration through dispatch
   and full paths.
-- `initial`/`unset` compute to `block`; important `inherit` copies the parent;
+- `initial`/`unset` compute to `inline`; important `inherit` copies the parent;
   important `revert` restores the UA tag default.
+- Hidden-parent ordinary/revert children retain UA `block`; explicit inherit
+  copies parent `none`; ancestor suppression keeps every child out of Draw IR.
 - Hidden probes emit no command; the visible full-path control emits its exact
   canonical box.
 - Engine2D skips zero commands and returns the exact 32-pixel framebuffer.

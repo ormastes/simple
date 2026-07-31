@@ -10,17 +10,22 @@ REQ-WEB-BROWSER-021.
 ## Resolve duplicate display declarations through both style paths
 
 Dispatch-only declarations prove that `display:none;display:bogus` retains
-`none` and `display:none;display:initial` resolves to the renderer initial
-`block`. Full-reconstruction declarations prove malformed-value skipping and
-that an important `unset` resolves to `block`. Important `inherit` copies the
+`none` and `display:none;display:initial` resolves to the CSS initial `inline`.
+Full-reconstruction declarations prove malformed-value skipping and that an
+important `unset` also resolves to `inline`. Important `inherit` copies the
 parent's computed `inline`; important author-origin `revert` restores the UA
 `inline` default for `span`.
 
+Inside a `display:none` parent, an ordinary `div` and a `display:revert` div
+both retain their UA computed `block`; ancestor suppression, not inherited
+display poisoning, keeps them invisible. An explicit `display:inherit` child
+computes to its parent's `none`.
+
 ## Keep hidden nodes out of canonical Draw IR
 
-Neither hidden probe has a Draw IR command. The visible full-path control
-remains a canonical `rect` command at `[6,1,2,2]`; no private rendering path is
-introduced.
+Neither hidden probe nor any hidden-parent child has a Draw IR command. The
+visible full-path control remains a canonical `rect` command at `[6,1,2,2]`;
+no private rendering path is introduced.
 
 ## Render exact visible-control Engine2D pixels
 
