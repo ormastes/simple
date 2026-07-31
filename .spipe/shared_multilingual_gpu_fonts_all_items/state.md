@@ -111,8 +111,8 @@ sealed zero-stub receipt. Canonical Stage2 attempt 24 and scoped-tool attempt 12
 were historically admitted at clean checkpoint `2a7e354c116`; their ignored
 artifacts disappeared with the old temporary worktree and cannot admit current
 source. The RV64 owner repair introduced at `39c1863426a` is source-complete.
-The current blocker is a fresh physical Stage2 attempt 29 bound to the exact
-clean producer `HEAD`, followed by scoped-tool attempt 13. No ELF exists, so
+Physical Stage2 attempt 29 is admitted at clean checkpoint `fbcaa8ccd0b`.
+The current blocker is scoped-tool attempt 13. No ELF exists, so
 reserved RV64 attempt 26, QEMU crop calibration, exact-ten attempt 13, and the
 ten manual attempt-13 receipts have not run. Stage 3,
 Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
@@ -303,3 +303,11 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   Independent review also removed the helper's redundant Windows `--target`;
   all four callers already supply the canonical target. No producer or PASS is
   claimed.
+- stage2-attempt29-admitted-2026-07-30: Clean checkpoint `fbcaa8ccd0b` produced
+  verified Stage2 attempt 29 with binary SHA-256
+  `0b65b6109ddc0c4e8f924696a3e725a3d321f1fd094e5dfdaddaff7423a22fc0`
+  and provenance SHA-256
+  `55ecaabf0ba14ad5dbcf23b433cc7a5f6f97b153487b8a5fa0d83b5c05db39b7`.
+  The bounded producer and independent absolute-path manifest verifier exited
+  zero; elapsed time was `37:34.35` and maximum RSS `3,345,112 KiB`.
+  Scoped-tool attempt 13 is next; no ELF or PASS is claimed.

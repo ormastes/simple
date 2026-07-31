@@ -38,8 +38,8 @@ misleading ELF and violate the fail-closed contract. See
 
 ## Resume
 
-After admitting physical current-checkpoint Stage2 attempt 29 and matching
-scoped-tool attempt 13, run exactly one fresh RV64 attempt 26 with
+Physical current-checkpoint Stage2 attempt 29 is admitted. After admitting
+matching scoped-tool attempt 13, run exactly one fresh RV64 attempt 26 with
 `SIMPLE_NO_STUB_FALLBACK=1`. Only a validated ELF unblocks QEMU crop
 calibration, exact-ten attempt 13, and manual attempt 13. Stage2 attempt 27 was
 stopped before Stage2 when a competing full bootstrap appeared; retain it and
@@ -62,6 +62,6 @@ Final P0 review also corrected tagged heap-handle address extraction and routed
 process-syscall byte copies through validated VMM translation. The focused
 RV64 syscall ABI/provider contract passes after those fixes.
 
-This is source/focused-gate evidence only. It does not close the bug until a
-fresh clean-checkpoint Stage2 attempt 29/tool attempt 13 admission and the
-single reserved RV64 attempt 26 produce and validate the canonical ELF.
+This is source/focused-gate evidence plus admitted Stage2 evidence. It does not
+close the bug until scoped-tool attempt 13 is admitted and the single reserved
+RV64 attempt 26 produces and validates the canonical ELF.

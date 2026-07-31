@@ -71,8 +71,8 @@ Run only this scoped set:
   checkpoint `2a7e354c116`.
 - [x] Produce scoped-tool attempt 12 and pass its independent canonical
   receipt checker at the historical `2a7e354c116` checkpoint.
-- [ ] Produce and admit current-checkpoint physical Stage2 attempt 29 and
-  matching scoped-tool attempt 13. Attempt 27 was stopped before Stage2 when
+- [x] Produce and admit current-checkpoint physical Stage2 attempt 29.
+  Attempt 27 was stopped before Stage2 when
   an unrelated full bootstrap appeared after host preflight. Attempt 28 exited
   before Stage2 because the restored worktree had no matching Rust
   seed/runtime tuple. Both immutable logs are retained and neither path may be
@@ -80,6 +80,7 @@ Run only this scoped set:
   rebuild that missing Rust authority and must still stop after verified
   Stage2. Its `--jobs=1` now bounds both the private Cargo authority builds and
   the pure-Simple native build.
+- [ ] Produce and independently admit matching scoped-tool attempt 13.
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
@@ -105,6 +106,14 @@ and canonical checker marker `stage2_font_scoped_tools_status=pass`. Those
 ignored artifacts disappeared with the old temporary worktree and remain
 historical identity evidence only; current-checkpoint execution requires the
 fresh attempt-29/attempt-13 pair above.
+
+Stage2 attempt 29 is admitted at clean checkpoint
+`fbcaa8ccd0b22cc0169f5be289f7cc801d48b637`. Its binary SHA-256 is
+`0b65b6109ddc0c4e8f924696a3e725a3d321f1fd094e5dfdaddaff7423a22fc0`
+and provenance SHA-256 is
+`55ecaabf0ba14ad5dbcf23b433cc7a5f6f97b153487b8a5fa0d83b5c05db39b7`;
+the producer and independent absolute-path manifest verifier exited zero in
+`37:34.35` at `3,345,112 KiB` maximum RSS. Scoped-tool attempt 13 is next.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at

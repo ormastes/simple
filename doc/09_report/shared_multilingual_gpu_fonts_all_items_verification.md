@@ -12,9 +12,9 @@ Final done-mark owner: highest-capability `/root`
 ## 2026-07-30 restored-worktree execution status
 
 The RV64 source repair was introduced at
-`39c1863426a8c1379ee3c5584bb6c3d3a78f9970`. Stage2 attempt 29 and every
-downstream receipt must instead bind the exact clean `HEAD` observed when its
-producer starts. The old temporary worktree and its ignored
+`39c1863426a8c1379ee3c5584bb6c3d3a78f9970`. Stage2 attempt 29 is now
+admitted at its exact clean launch checkpoint
+`fbcaa8ccd0b22cc0169f5be289f7cc801d48b637`. The old temporary worktree and its ignored
 Stage2/QEMU/spec/manual artifacts disappeared during the host Btrfs failure;
 the tracked source, plans, historical identities, and pushed branch survived.
 Filesystem allocation is usable again.
@@ -23,10 +23,15 @@ Physical Stage2 attempt 27 was stopped before Stage2 after preflight because an
 unrelated full bootstrap and two Rust builds appeared. Attempt 28 then exited
 before Stage2 because the restored worktree had no matching Rust seed/runtime
 tuple. Both immutable logs are retained and neither path will be reused. The
-next serialized chain is Stage2 attempt 29 with
-`--full-bootstrap --stop-after-stage2` only for the missing Rust authority,
-scoped-tool attempt 13, reserved RV64 attempt 26, exact-ten attempt 13, and
-manual attempt 13. No new admission or PASS is claimed.
+attempt 29 used `--full-bootstrap --stop-after-stage2` only for the missing
+Rust authority and exited zero after verified Stage2 in `37:34.35` at
+`3,345,112 KiB` maximum RSS. Its binary SHA-256 is
+`0b65b6109ddc0c4e8f924696a3e725a3d321f1fd094e5dfdaddaff7423a22fc0`;
+provenance SHA-256 is
+`55ecaabf0ba14ad5dbcf23b433cc7a5f6f97b153487b8a5fa0d83b5c05db39b7`.
+The independent absolute-path manifest verifier exited zero. The next
+serialized chain is scoped-tool attempt 13, reserved RV64 attempt 26,
+exact-ten attempt 13, and manual attempt 13. No PASS is claimed.
 
 `STATUS: FAIL`
 

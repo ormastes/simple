@@ -1629,3 +1629,11 @@ pixels, and performance evidence remain release-blocking.
   Cargo. The redundant Windows helper `--target` was removed because all four
   authority callers already supply it. Focused shell/job/help checks pass; no
   Stage2 admission is claimed.
+- stage2-attempt29-admitted-2026-07-30: Clean checkpoint `fbcaa8ccd0b` produced
+  verified Stage2 attempt 29 with binary SHA-256
+  `0b65b6109ddc0c4e8f924696a3e725a3d321f1fd094e5dfdaddaff7423a22fc0`
+  and provenance SHA-256
+  `55ecaabf0ba14ad5dbcf23b433cc7a5f6f97b153487b8a5fa0d83b5c05db39b7`.
+  The bounded producer and independent absolute-path manifest verifier exited
+  zero in `37:34.35` at `3,345,112 KiB` maximum RSS. Scoped-tool attempt 13 is
+  next; no RV64 ELF or PASS is claimed.
