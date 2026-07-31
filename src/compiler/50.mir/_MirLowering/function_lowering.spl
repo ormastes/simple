@@ -103,6 +103,8 @@ impl MirLowering:
         while pmi < fn_.params.len():
             val lowered_param = if gpu_kernel_target == "vulkan":
                 self.lower_vulkan_kernel_param_type(fn_.params[pmi])
+            elif gpu_kernel_target == "cuda":
+                self.lower_cuda_kernel_param_type(fn_.params[pmi])
             else:
                 self.lower_type(fn_.params[pmi].type_)
             params = params.push(lowered_param)
@@ -231,7 +233,7 @@ impl MirLowering:
                     # element as an untyped runtime value; `.kind` then remains
                     # a raw pointer and comparisons such as `kind == "rect"`
                     # fail in native code.
-                    if gpu_kernel_target != "vulkan":
+                    if gpu_kernel_target != "vulkan" and gpu_kernel_target != "cuda":
                         self.runtime_array_locals[local.id] = true
                         self.mark_runtime_value_local(local.id)
                         match element_type.kind:
@@ -451,6 +453,25 @@ impl MirLowering:
             "Vulkan kernel parameters require U32 bounds or [u32] storage buffers",
             Some(param.span)
         )
+        self.lower_type(param.type_)
+
+    me lower_cuda_kernel_param_type(param: HirParam) -> MirType:
+        """Lower source array parameters to CUDA's global-pointer ABI."""
+        val kind = param.type_.kind
+        val kind_disc = rt_enum_discriminant(kind)
+        val array_disc = rt_enum_discriminant(HirTypeKind.Array(param.type_, nil))
+        val slice_disc = rt_enum_discriminant(HirTypeKind.Slice(param.type_))
+        if kind_disc == array_disc or kind_disc == slice_disc:
+            var element = param.type_
+            if kind_disc == array_disc:
+                match kind:
+                    case HirTypeKind.Array(array_element, _): element = array_element
+                    case _: pass
+            else:
+                match kind:
+                    case HirTypeKind.Slice(slice_element): element = slice_element
+                    case _: pass
+            return MirType.ptr(self.lower_type(element), param.is_mutable)
         self.lower_type(param.type_)
 
     fn apply_function_attr_to_mir(fn_result: MirFunction, fa: FunctionAttr) -> MirFunction:

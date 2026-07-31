@@ -1,0 +1,77 @@
+# @cover src/compiler/50.mir/_MirLowering/function_lowering.spl 5%
+# @cover src/compiler/70.backend/backend/cuda_backend.spl 5%
+# @tag: unit, compiler, backend, gpu, cuda, source-abi
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.backend.backend.cuda_backend.{CudaBackend}
+
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+describe "source CUDA global-pointer ABI":
+    it "lowers a bounded u32 fill kernel to global pointer PTX":
+        val source = "@gpu(\"cuda\")\n" +
+            "fn fill(mut output: [u32], n: u32) -> ():\n" +
+            "    val i = gpu_global_id(0)\n" +
+            "    if i < n:\n" +
+            "        output[i] = 42u32\n"
+        val parsed = parse_full_frontend(source, "cuda_global_pointer.spl", "cuda_global_pointer", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("cuda_global_pointer.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        val function = mir.functions.values()[0]
+        val ptr_disc = 422722806
+        val u32_disc = 1163175990
+        expect(function.is_kernel).to_equal(true)
+        expect(function.gpu_target).to_equal("cuda")
+        expect(rt_enum_discriminant(function.signature.params[0].kind)).to_equal(ptr_disc)
+        expect(rt_enum_discriminant(function.signature.params[1].kind)).to_equal(u32_disc)
+
+        val result = CudaBackend.create((8, 6)).compile(mir)
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain(".visible .entry fill")
+        expect(ptx).to_contain(".param .u64 param_0")
+        expect(ptx).to_contain("st.global.u32")
+
+    it "rejects writes through immutable CUDA global buffers":
+        val source = "@gpu(\"cuda\")\n" +
+            "fn fill(output: [u32], n: u32) -> ():\n" +
+            "    output[gpu_global_id(0)] = n\n"
+        val parsed = parse_full_frontend(source, "cuda_global_pointer_immutable.spl", "cuda_global_pointer_immutable", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("cuda_global_pointer_immutable.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_be_greater_than(0)
+        expect(mir_lowering.errors[0].message).to_equal("cannot write through an immutable CUDA global buffer")
+
+    it "loads CUDA global pointers directly without host array calls":
+        val source = "@gpu(\"cuda\")\n" +
+            "fn read(input: [u32], n: u32) -> ():\n" +
+            "    val i = gpu_global_id(0)\n" +
+            "    if i < n:\n" +
+            "        val x = input[i]\n"
+        val parsed = parse_full_frontend(source, "cuda_global_pointer_read.spl", "cuda_global_pointer_read", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("cuda_global_pointer_read.spl")
+        val hir = hir_lowering.lower_module(parsed)
+        expect(hir_lowering.errors.len()).to_equal(0)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        expect(mir_lowering.errors.len()).to_equal(0)
+        val result = CudaBackend.create((8, 6)).compile(mir)
+        expect(result.is_ok()).to_equal(true)
+        val ptx = result.unwrap().ptx
+        expect(ptx).to_contain("ld.global.u32")
+        expect(ptx).to_not_contain("rt_array_get")
+        expect(ptx).to_not_contain("rt_array_len")
+        expect(ptx).to_not_contain("rt_array_set")
