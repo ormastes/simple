@@ -29,7 +29,9 @@ use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.database.sql.types.{DbError}
 use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use os.hosted.hosted_browser_renderer_policy.{
-    hosted_browser_network_error, hosted_browser_transport_host
+    hosted_browser_cors_response_headers, hosted_browser_network_error,
+    hosted_browser_network_origin, hosted_browser_redirect_status,
+    hosted_browser_response_header_value, hosted_browser_transport_host
 }
 use std.common.web.browser_renderer_protocol.{
     browser_text_input_overlay_empty
@@ -50,12 +52,18 @@ extern fn rt_browser_http_job_take_response(handle: i64) -> [u8]
 extern fn rt_browser_http_job_take_error(handle: i64) -> text
 extern fn rt_browser_http_job_cancel(handle: i64) -> bool
 extern fn rt_browser_http_job_free(handle: i64) -> bool
+extern fn rt_time_now_monotonic_ms() -> i64
 
-fn _hosted_fetch_mode(kind: text) -> RequestMode:
-    if kind == "document":
+fn _hosted_fetch_mode(
+    request: BrowserRequest, requester_origin: text
+) -> RequestMode:
+    if request.kind == "document":
         return RequestMode.Navigate
-    if kind == "style" or kind == "script":
+    if request.kind == "style" or request.kind == "script":
         return RequestMode.NoCors
+    if (request.kind == "fetch" and requester_origin != "" and
+        hosted_browser_network_origin(request.url) != requester_origin):
+        return RequestMode.Cors
     RequestMode.SameOrigin
 
 fn _hosted_fetch_headers(request: BrowserRequest) -> text:
@@ -71,6 +79,15 @@ fn _hosted_fetch_headers(request: BrowserRequest) -> text:
     if request.content_type != "" and not has_content_type:
         lines.push("Content-Type: {request.content_type}")
     lines.join("\r\n")
+
+fn _hosted_has_cookie_header(headers: text) -> bool:
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if (colon > 0 and
+            line.slice(0, colon).trim().to_lower() == "cookie"):
+            return true
+    false
 
 fn _hosted_wasm_hex(data: [u8]) -> text:
     var out = StringBuilder.new()
@@ -114,9 +131,13 @@ class HostedWebContentSession:
     network_job_handle: i64
     network_job_request: BrowserRequest?
     network_job_fetch_request: FetchRequest?
+    network_job_phase: text
+    network_job_actual_request: FetchRequest?
+    network_job_deadline_ms: i64
 
     static fn create(window_id: i64, body_html: text, width: i32, height: i32) -> HostedWebContentSession:
         var browser = BrowserSession.new()
+        browser.direct_hosted_cors_fetch_policy = true
         val initial_url = if body_html.starts_with("about:"):
             body_html
         else:
@@ -153,7 +174,10 @@ class HostedWebContentSession:
             address_replace_on_text: false,
             network_job_handle: 0,
             network_job_request: nil,
-            network_job_fetch_request: nil
+            network_job_fetch_request: nil,
+            network_job_phase: "",
+            network_job_actual_request: nil,
+            network_job_deadline_ms: 0
         )
 
     me clear_page_pointer_compatibility_state():
@@ -214,6 +238,7 @@ class HostedWebContentSession:
         self.render_session.document_revision = -1
 
     me _commit_network_error(request: BrowserRequest, message: text):
+        self.network_job_deadline_ms = 0
         if request.kind == "document":
             self.clear_page_pointer_compatibility_state()
             self.last_target_route = nil
@@ -232,6 +257,7 @@ class HostedWebContentSession:
     me _commit_network_response(
         request: BrowserRequest, response: FetchResponse
     ):
+        self.network_job_deadline_ms = 0
         if request.kind == "document":
             self.clear_page_pointer_compatibility_state()
             self.last_target_route = nil
@@ -261,6 +287,139 @@ class HostedWebContentSession:
             Err(error):
                 self._commit_network_error(request, error.message)
 
+    fn _filtered_cors_response(
+        response: FetchResponse, credentials: text
+    ) -> FetchResponse:
+        FetchResponse(
+            status: response.status,
+            headers: hosted_browser_cors_response_headers(
+                response.headers,
+                hosted_browser_redirect_status(response.status.to_i32()),
+                credentials
+            ),
+            body: response.body
+        )
+
+    me _commit_cached_cors_response(
+        request: BrowserRequest, response: FetchResponse
+    ):
+        self._commit_network_response(
+            request,
+            self._filtered_cors_response(response, request.credentials)
+        )
+
+    me _finalize_direct_cors_response(
+        request: BrowserRequest, fetch_request: FetchRequest,
+        response: FetchResponse, authenticated_runtime_https: bool
+    ):
+        if authenticated_runtime_https:
+            val hsts_header = hosted_browser_response_header_value(
+                response.headers, "strict-transport-security"
+            )
+            if hsts_header != "":
+                val _ = self.browser._apply_hsts_header(
+                    hsts_header, fetch_request.url.to_text()
+                )
+        match self.network.finalize_single_hop(fetch_request, response):
+            Ok(finalized):
+                self._commit_cached_cors_response(request, finalized)
+            Err(error):
+                self._commit_network_error(request, error.message)
+
+    me _start_runtime_network_job(
+        request: BrowserRequest, fetch_request: FetchRequest,
+        phase: text, actual_request: FetchRequest?
+    ):
+        val remaining_ms = (
+            self.network_job_deadline_ms - rt_time_now_monotonic_ms()
+        )
+        if remaining_ms <= 0:
+            self._commit_network_error(
+                request, "network-timeout: Network request timed out"
+            )
+            return
+        val url = fetch_request.url
+        val port = if url.port > 0:
+            url.port
+        elif url.scheme == "https":
+            443
+        else:
+            80
+        val handle = rt_browser_http_job_start_public_limited(
+            url.scheme,
+            hosted_browser_transport_host(url.host),
+            port,
+            rt_text_to_bytes(build_request_bytes(fetch_request)),
+            remaining_ms,
+            if phase == "preflight": 65536 else: 589824
+        )
+        if handle < 0:
+            self._commit_network_error(
+                request, "network: Network request failed"
+            )
+            return
+        self.network_job_handle = handle
+        self.network_job_request = Some(request)
+        self.network_job_fetch_request = Some(fetch_request)
+        self.network_job_phase = phase
+        self.network_job_actual_request = actual_request
+
+    me _start_direct_cors_actual(
+        request: BrowserRequest, actual_request: FetchRequest
+    ):
+        match self.network.prepare_single_hop_after_cors_preflight(
+            actual_request
+        ):
+            Err(error):
+                self._commit_network_error(request, error.message)
+            Ok(prepared):
+                if val Some(response) = prepared.response:
+                    self._commit_cached_cors_response(request, response)
+                    return
+                if val Some(mock_result) = h1_mock_response(prepared.request):
+                    match mock_result:
+                        Ok(response):
+                            self._finalize_direct_cors_response(
+                                request, prepared.request, response, false
+                            )
+                        Err(error):
+                            self._commit_network_error(request, error.message)
+                    return
+                self._start_runtime_network_job(
+                    request, prepared.request, "actual", nil
+                )
+
+    me _start_direct_cors(
+        request: BrowserRequest, fetch_request: FetchRequest
+    ):
+        val plan = self.network.build_cors_preflight(fetch_request)
+        if val Some(preflight_request) = plan.preflight_request:
+            if val Some(mock_result) = h1_mock_response(preflight_request):
+                match mock_result:
+                    Err(error):
+                        self._commit_network_error(request, error.message)
+                    Ok(response):
+                        val allowed = match self.network.validate_cors_preflight(
+                            plan.actual_request, response
+                        ):
+                            Err(_): false
+                            Ok(value): value
+                        if not allowed:
+                            self._commit_network_error(
+                                request, "network: CORS preflight denied"
+                            )
+                        else:
+                            self._start_direct_cors_actual(
+                                request, plan.actual_request
+                            )
+                return
+            self._start_runtime_network_job(
+                request, preflight_request, "preflight",
+                Some(plan.actual_request)
+            )
+            return
+        self._start_direct_cors_actual(request, plan.actual_request)
+
     me cancel_network():
         if self.network_job_handle > 0:
             val _ = rt_browser_http_job_cancel(self.network_job_handle)
@@ -268,6 +427,9 @@ class HostedWebContentSession:
         self.network_job_handle = 0
         self.network_job_request = nil
         self.network_job_fetch_request = nil
+        self.network_job_phase = ""
+        self.network_job_actual_request = nil
+        self.network_job_deadline_ms = 0
 
     me _cancel_orphaned_network_job():
         if self.network_job_handle <= 0:
@@ -286,6 +448,13 @@ class HostedWebContentSession:
             return
         val request = self.network_job_request.unwrap()
         val fetch_request = self.network_job_fetch_request.unwrap()
+        val phase = self.network_job_phase
+        val actual_request = self.network_job_actual_request
+        if ((phase != "single" and phase != "preflight" and
+            phase != "actual") or
+            (phase == "preflight" and actual_request == nil)):
+            self.cancel_network()
+            return
         self._cancel_orphaned_network_job()
         if self.network_job_handle <= 0:
             return
@@ -296,6 +465,8 @@ class HostedWebContentSession:
         self.network_job_handle = 0
         self.network_job_request = nil
         self.network_job_fetch_request = nil
+        self.network_job_phase = ""
+        self.network_job_actual_request = nil
         if state < 0:
             val _ = rt_browser_http_job_free(handle)
             self._commit_network_error(
@@ -315,9 +486,28 @@ class HostedWebContentSession:
             return
         match parse_http_response_bytes(raw_response):
             Ok(response):
-                self._finalize_network_response(
-                    request, fetch_request, response
-                )
+                if phase == "preflight":
+                    val actual = actual_request.unwrap()
+                    val allowed = match self.network.validate_cors_preflight(
+                        actual, response
+                    ):
+                        Err(_): false
+                        Ok(value): value
+                    if not allowed:
+                        self._commit_network_error(
+                            request, "network: CORS preflight denied"
+                        )
+                    else:
+                        self._start_direct_cors_actual(request, actual)
+                elif phase == "actual":
+                    self._finalize_direct_cors_response(
+                        request, fetch_request, response,
+                        fetch_request.url.scheme == "https"
+                    )
+                else:
+                    self._finalize_network_response(
+                        request, fetch_request, response
+                    )
             Err(parse_error):
                 self._commit_network_error(
                     request,
@@ -341,16 +531,32 @@ class HostedWebContentSession:
             self.network.set_requester_origin(
                 requester_origin
             )
+            val mode = _hosted_fetch_mode(request, requester_origin)
             val fetch_request = FetchRequest(
                 url: Url.parse_or_opaque(request.url),
                 method: request.method,
                 headers: _hosted_fetch_headers(request),
                 body: rt_text_to_bytes(request.body),
-                mode: _hosted_fetch_mode(request.kind),
+                mode: mode,
                 # BrowserSession owns the cookie jar and already attached the
                 # sanitized Cookie header for this exact request URL.
-                credentials: "omit"
+                credentials: if mode == RequestMode.Cors:
+                    request.credentials
+                else:
+                    "omit"
             )
+            self.network_job_deadline_ms = rt_time_now_monotonic_ms() + 5000
+            if mode == RequestMode.Cors:
+                if ((request.credentials != "omit" and
+                    request.credentials != "same-origin") or
+                    _hosted_has_cookie_header(fetch_request.headers)):
+                    self._commit_network_error(
+                        request, "network: Invalid direct CORS request"
+                    )
+                    self.network_job_deadline_ms = 0
+                    return
+                self._start_direct_cors(request, fetch_request)
+                return
             match self.network.prepare_single_hop(fetch_request):
                 Err(error):
                     self._commit_network_error(request, error.message)
@@ -369,28 +575,9 @@ class HostedWebContentSession:
                                     request, error.message
                                 )
                         return
-                    val url = prepared.request.url
-                    val port = if url.port > 0:
-                        url.port
-                    elif url.scheme == "https":
-                        443
-                    else:
-                        80
-                    val handle = rt_browser_http_job_start_public_limited(
-                        url.scheme,
-                        hosted_browser_transport_host(url.host),
-                        port,
-                        rt_text_to_bytes(build_request_bytes(prepared.request)),
-                        5000, 589824
+                    self._start_runtime_network_job(
+                        request, prepared.request, "single", nil
                     )
-                    if handle < 0:
-                        self._commit_network_error(
-                            request, "network: Network request failed"
-                        )
-                        return
-                    self.network_job_handle = handle
-                    self.network_job_request = Some(request)
-                    self.network_job_fetch_request = Some(prepared.request)
 
     fn address_text() -> text:
         if (

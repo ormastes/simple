@@ -277,6 +277,40 @@ describe "BrowserSession production security boundary":
             Err(e):
                 fail("Expected blocked cross-origin fetch to reject: {e}")
 
+    it "admits only credentialless direct-host CORS fetches":
+        step("Enable the audited direct-host CORS policy for an HTTPS page")
+        var session = BrowserSession.new()
+        session.direct_hosted_cors_fetch_policy = true
+        expect(session.open_html(
+            "https://safe.test/app",
+            "<html><body><script>" +
+            "fetch('https://api.test/data', {credentials:'omit'})" +
+            "</script></body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Observe one cookie-free cross-origin request")
+        match session.take_pending_request():
+            nil:
+                fail("Expected credentialless direct-host CORS request")
+            Some(request):
+                expect(request.kind).to_equal("fetch")
+                expect(request.initiator_origin).to_equal(
+                    "https://safe.test"
+                )
+                expect(request.credentials).to_equal("omit")
+                expect(request.headers.to_lower().contains(
+                    "cookie:"
+                )).to_be(false)
+
+        step("Keep credentialed cross-origin fetches blocked")
+        expect(session.eval_script(
+            "fetch('https://api.test/private', {credentials:'include'})"
+        ).is_ok()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.warnings).to_contain(
+            "cross-origin fetch blocked: https://api.test/private"
+        )
+
     it "bounds and deduplicates retained browser warnings":
         step("Append duplicate, excessive, and oversized browser warnings")
         var session = BrowserSession.new()

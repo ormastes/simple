@@ -21,7 +21,7 @@ use os.compositor.simple_web_window_renderer.{
     simple_web_content_revision_with_theme
 }
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
-    MockResponseRegistry, set_mock_registry
+    MockResponseRegistry, observed_mock_request_count, set_mock_registry
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_style_by_id,
@@ -36,6 +36,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
 }
 use common.ui.draw_ir.{DrawIrComposition}
 use std.js.types.pair.{Pair}
+use std.js.types.js_types.{JsValue}
 
 extern fn rt_text_to_bytes(value: text) -> [u8]
 extern fn rt_file_read_text(path: text) -> text
@@ -446,6 +447,100 @@ describe "hosted Web content session":
         expect(session.browser.has_pending_requests()).to_be(false)
         set_mock_registry(MockResponseRegistry.create())
 
+    it "filters credentialless direct-host CORS responses before script exposure":
+        step("Serve an allowed CORS response with visible and forbidden headers")
+        var registry = MockResponseRegistry.create()
+        registry.register_with_headers(
+            "https://api.test/data", 200,
+            [
+                Pair("Access-Control-Allow-Origin", "https://example.test"),
+                Pair("Access-Control-Expose-Headers", "X-Visible"),
+                Pair("X-Visible", "yes"),
+                Pair("X-Hidden", "no"),
+                Pair("Set-Cookie", "stolen=yes; Path=/")
+            ],
+            "ok"
+        )
+        set_mock_registry(registry)
+        var session = HostedWebContentSession.create(
+            82, "<div>prior</div>", 120, 60
+        )
+        expect(session.browser.open_html(
+            "https://example.test/page",
+            "<html><body><script>var corsHeaders=''; " +
+            "var corsBody=''; var corsError=''; " +
+            "fetch('https://api.test/data', {credentials:'omit'})" +
+            ".then(function(r) { corsHeaders = r.headersText; " +
+            "return r.text(); }).then(function(t) { corsBody = t; })" +
+            ".catch(function(e) { corsError = e; });" +
+            "</script></body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Commit the actual response through the direct hosted adapter")
+        val _ = session.advance_at(2100)
+        match session.browser.eval_script(
+            "corsBody + '|' + corsHeaders + '|' + corsError"
+        ):
+            Ok(JsValue.String(value)):
+                expect(value).to_contain("ok|")
+                expect(value.to_lower()).to_contain("x-visible: yes")
+                expect(value.to_lower().contains("x-hidden:")).to_be(false)
+                expect(value.to_lower().contains("set-cookie:")).to_be(false)
+            _:
+                fail("Expected script-visible filtered CORS response")
+        expect(session.browser.cookie_header_for_request(
+            "https://api.test/next"
+        )).to_equal("")
+        expect(session.network.cookie_store.count()).to_equal(0)
+        expect(observed_mock_request_count(
+            "https://api.test/data", "GET"
+        )).to_equal(1)
+        set_mock_registry(MockResponseRegistry.create())
+
+    it "does not issue the actual direct-host request after denied preflight":
+        step("Serve a preflight response without the requested method")
+        var registry = MockResponseRegistry.create()
+        registry.register_with_headers(
+            "https://api.test/update", 204,
+            [
+                Pair("Access-Control-Allow-Origin", "https://example.test"),
+                Pair("Access-Control-Allow-Headers", "x-mode")
+            ],
+            ""
+        )
+        set_mock_registry(registry)
+        var session = HostedWebContentSession.create(
+            83, "<div>prior</div>", 120, 60
+        )
+        expect(session.browser.open_html(
+            "https://example.test/page",
+            "<html><body><script>var denied='pending'; " +
+            "fetch('https://api.test/update', {method:'PUT', " +
+            "headers:{'X-Mode':'write'}, credentials:'omit'})" +
+            ".then(function() { denied='allowed'; })" +
+            ".catch(function(e) { denied=e; });" +
+            "</script></body></html>"
+        ).is_ok()).to_be(true)
+
+        step("Reject after OPTIONS without starting PUT")
+        val _ = session.advance_at(2200)
+        expect(observed_mock_request_count(
+            "https://api.test/update", "OPTIONS"
+        )).to_equal(1)
+        expect(observed_mock_request_count(
+            "https://api.test/update", "PUT"
+        )).to_equal(0)
+        expect(session.network_job_handle).to_equal(0)
+        expect(session.network_job_phase).to_equal("")
+        expect(session.network_job_actual_request).to_be_nil()
+        expect(session.browser.has_pending_requests()).to_be(false)
+        match session.browser.eval_script("denied"):
+            Ok(JsValue.String(value)):
+                expect(value).to_contain("CORS preflight denied")
+            _:
+                fail("Expected denied preflight rejection")
+        set_mock_registry(MockResponseRegistry.create())
+
     it "cancels the native job immediately when browser chrome stops loading":
         var session = HostedWebContentSession.create(
             81, "<div id='prior'>Prior</div>", 120, 60
@@ -469,6 +564,8 @@ describe "hosted Web content session":
             Some(request):
                 session.network_job_handle = 424242
                 session.network_job_request = Some(request)
+                session.network_job_phase = "actual"
+                session.network_job_deadline_ms = 5000
             None:
                 expect(false).to_be(true)
 
@@ -478,6 +575,9 @@ describe "hosted Web content session":
         expect(down.reason).to_equal("chrome-pressed")
         expect(up.callback_count).to_equal(1)
         expect(session.network_job_handle).to_equal(0)
+        expect(session.network_job_phase).to_equal("")
+        expect(session.network_job_actual_request).to_be_nil()
+        expect(session.network_job_deadline_ms).to_equal(0)
         expect(session.browser.can_stop_loading()).to_equal(false)
         expect(session.current_body_html()).to_contain("prior")
         expect(session.address_text()).to_equal(prior_url)
