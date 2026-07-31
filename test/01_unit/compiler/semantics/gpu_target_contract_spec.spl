@@ -35,7 +35,9 @@ describe "GPU target contract":
         expect(auto_target.backend_order).to_equal("vulkan,metal,cuda,hip,opencl")
 
     it "normalizes Metal and WebGPU target metadata without claiming codegen emission":
-        val metal = parse_gpu_kernel_target("msl")
+        val metal = parse_gpu_kernel_target("metal")
+        val msl = parse_gpu_kernel_target("msl")
+        val metal_shading_language = parse_gpu_kernel_target("metal-shading-language")
         val webgpu = parse_gpu_kernel_target("wgsl")
         val wgpu = parse_gpu_kernel_target("wgpu")
 
@@ -43,6 +45,10 @@ describe "GPU target contract":
         expect(metal.normalized_target).to_equal("metal")
         expect(metal.backend_order).to_equal("metal")
         expect(metal.reason).to_equal("portable-source-target")
+        expect(msl.normalized_target).to_equal(metal.normalized_target)
+        expect(msl.backend_order).to_equal(metal.backend_order)
+        expect(metal_shading_language.normalized_target).to_equal(metal.normalized_target)
+        expect(metal_shading_language.backend_order).to_equal(metal.backend_order)
         expect(webgpu.valid).to_equal(true)
         expect(webgpu.normalized_target).to_equal("webgpu")
         expect(webgpu.backend_order).to_equal("webgpu")
@@ -50,12 +56,26 @@ describe "GPU target contract":
         expect(wgpu.normalized_target).to_equal("webgpu")
         expect(normalize_gpu_target_metadata_name("webgpu-wgsl")).to_equal("webgpu")
 
+    it "keeps VHDL aliases outside GPU kernel target selection":
+        val vhdl = parse_gpu_kernel_target("vhdl")
+        val fpga = parse_gpu_kernel_target("fpga")
+
+        expect(vhdl.valid).to_equal(false)
+        expect(vhdl.normalized_target).to_equal("vhdl")
+        expect(vhdl.backend_order).to_equal("")
+        expect(vhdl.reason).to_equal("unsupported-gpu-target")
+        expect(fpga.valid).to_equal(false)
+        expect(fpga.normalized_target).to_equal("vhdl")
+
     it "rejects unsupported GPU targets with explicit diagnostics":
         val err = check_gpu_kernel_target("directx")
+        var has_error = false
+        if val _ = err:
+            has_error = true
         var checker = GpuKernelChecker.create("bad_kernel")
         checker.check_target("directx", 7)
 
-        expect(err != nil).to_equal(true)
+        expect(has_error).to_equal(true)
         expect(checker.has_errors()).to_equal(true)
         expect(checker.error_count()).to_equal(1)
 
@@ -63,7 +83,10 @@ describe "GPU target contract":
         val ok = validate_gpu_backend_order("vulkan,metal,cuda,hip,webgpu")
         val rocm_ok = validate_gpu_backend_order("rocm,opencl,cuda")
         val bad = validate_gpu_backend_order("cuda,directx")
+        var has_bad_backend = false
+        if val _ = bad:
+            has_bad_backend = true
 
         expect(ok).to_be_nil()
         expect(rocm_ok).to_be_nil()
-        expect(bad != nil).to_equal(true)
+        expect(has_bad_backend).to_equal(true)
