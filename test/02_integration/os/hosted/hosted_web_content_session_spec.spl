@@ -1361,6 +1361,38 @@ describe "hosted Web content session":
         expect(pixels[90 * 420 + 300]).to_equal(0xFFFFFFFFu32)
         raster.shutdown()
 
+    it "publishes style-only history changes immediately through chrome":
+        var session = HostedWebContentSession.create(
+            82,
+            "<style>body{background:#dc2626}</style>" +
+            "<div id='same'>Same</div>",
+            120, 60
+        )
+        val red_body = session.browser.current_body_html
+        session.browser.register_resource(
+            "https://example.test/blue",
+            "<html><head><style>body{background:#2563eb}</style></head>" +
+            "<body><div id='same'>Same</div></body></html>"
+        )
+
+        val _ = session.dispatch_chrome_pointer(1, "address", true)
+        val _ = session.dispatch_chrome_pointer(2, "address", false)
+        val _ = session.dispatch_text(3, "https://example.test/blue")
+        expect(session.dispatch_key(4, 13, true).callback_count).to_equal(1)
+        expect(session.browser.current_body_html).to_equal(red_body)
+        expect(session.current_body_html()).to_contain("#2563eb")
+        expect(session.current_body_html().contains("#dc2626")).to_be(false)
+
+        session.render_session.document_revision = 42
+        val _ = session.dispatch_chrome_pointer(5, "back", true)
+        expect(
+            session.dispatch_chrome_pointer(6, "back", false).callback_count
+        ).to_equal(1)
+        expect(session.browser.current_body_html).to_equal(red_body)
+        expect(session.current_body_html()).to_contain("#dc2626")
+        expect(session.current_body_html().contains("#2563eb")).to_be(false)
+        expect(session.render_session.document_revision).to_equal(-1)
+
     # @req REQ-WEB-BROWSER-008 REQ-WEB-BROWSER-009
     it "isolates address history and page state between browser windows":
         var registry = HostedWebContentRegistry.create()
