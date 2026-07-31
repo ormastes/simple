@@ -1,5 +1,5 @@
 use std.spec.{describe, it, expect}
-use std.io_runtime.{read_file}
+use std.io_runtime.{read_file, process_run}
 
 extern fn rt_file_exists(path: text) -> bool
 
@@ -28,6 +28,33 @@ describe "heavy work preflight script":
         val src = read_file("scripts/check/check-heavy-work-preflight.shs")
         expect(src.contains("CPU headroom")).to_equal(true)
         expect(src.contains("cpu_load_below_half")).to_equal(true)
+
+    it "rejects overlapping native builds":
+        val src = read_file("scripts/check/check-heavy-work-preflight.shs")
+        expect(src.contains("No overlapping native builds")).to_equal(true)
+        expect(src.contains("MAX_ACTIVE_NATIVE_BUILDS")).to_equal(true)
+        expect(src.contains("NATIVE_BUILD_PROC_ROOT")).to_equal(true)
+        expect(src.contains("native_build_running=")).to_equal(true)
+        expect(src.contains("native_build_at_most_")).to_equal(true)
+        expect(src.contains("native_build_process_scan")).to_equal(true)
+
+    it "counts an exact native-build argv without counting its wrapper":
+        val command = "root=$(mktemp -d); mkdir -p $root/1 $root/2; printf 'simple\\000native-build\\000' > $root/1/cmdline; printf 'timeout\\000simple\\000native-build\\000' > $root/2/cmdline; NATIVE_BUILD_PROC_ROOT=$root MAX_ACTIVE_NATIVE_BUILDS=0 sh scripts/check/check-heavy-work-preflight.shs; code=$?; rm -rf $root; exit $code"
+        val (stdout, _, code) = process_run("sh", ["-c", command])
+        expect(stdout).to_contain("INFO native_build_running=1")
+        expect(stdout).to_contain("FAIL native_build_at_most_0")
+        expect(code).to_equal(1)
+
+    it "fails closed when process inspection is unavailable":
+        val missing_command = "NATIVE_BUILD_PROC_ROOT=/missing/simple-preflight-proc sh scripts/check/check-heavy-work-preflight.shs"
+        val (missing_stdout, _, missing_code) = process_run("sh", ["-c", missing_command])
+        expect(missing_stdout).to_contain("FAIL native_build_process_scan")
+        expect(missing_code).to_equal(1)
+
+        val unreadable_command = "root=$(mktemp -d); chmod 000 $root; NATIVE_BUILD_PROC_ROOT=$root sh scripts/check/check-heavy-work-preflight.shs; code=$?; chmod 700 $root; rmdir $root; exit $code"
+        val (unreadable_stdout, _, unreadable_code) = process_run("sh", ["-c", unreadable_command])
+        expect(unreadable_stdout).to_contain("FAIL native_build_process_scan")
+        expect(unreadable_code).to_equal(1)
 
     it "checks qemu guest count":
         val src = read_file("scripts/check/check-heavy-work-preflight.shs")
