@@ -1036,7 +1036,41 @@ fn parse_color_alpha(raw: text) -> u32:
                 return (a255.to_u32() << 24) | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
     parse_color_any(raw)
 
+# True for a bare CSS angle token ("45deg", "-90deg", "0.5turn", "200grad",
+# "1rad"). `parse_linear_gradient_color` and `parse_gradient_angle_deg` both
+# need this to tell an angle apart from a color stop — a numeric angle has no
+# color meaning and must never reach `parse_color_any`.
+fn is_gradient_angle_token(s: text) -> bool:
+    val n = s.len()
+    if n == 0:
+        return false
+    var i = 0
+    if s.char_at(0) == "-" or s.char_at(0) == "+":
+        i = 1
+    var saw_digit = false
+    while i < n:
+        val c = s.char_at(i)
+        val d = dec_val(c)
+        if d < 10:
+            saw_digit = true
+            i = i + 1
+        elif c == ".":
+            i = i + 1
+        else:
+            break
+    if not saw_digit:
+        return false
+    val suffix = s.substring(i, n)
+    suffix == "deg" or suffix == "grad" or suffix == "rad" or suffix == "turn"
+
 fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
+    # BUG (fixed here): a numeric angle token ("45deg", ...) used to fall
+    # through to `elif item_index == target: return parse_color_any(part)`
+    # exactly like a real color stop, because only the `to <side>` keyword
+    # form was recognized as a direction token. That shifted every stop
+    # index by one whenever the gradient carried an explicit angle: target=0
+    # returned the (non-color) angle text as 0u32 instead of the first stop,
+    # and target=1 returned the first stop instead of the second.
     val lower = raw.lower()
     val start = text_index_of(lower, "linear-gradient(")
     if start < 0:
@@ -1053,7 +1087,7 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
         val comma = find_from(inner, ",", pos)
         val end = if comma >= 0: comma else: inner_len
         val part = inner.substring(pos, end).trim()
-        if part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right":
+        if part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part):
             item_index = item_index - 1
         elif item_index == target:
             return parse_color_any(part)
@@ -1062,6 +1096,239 @@ fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
         item_index = item_index + 1
         pos = comma + 1
     0u32
+
+# ============================================================================
+# N-stop / angled / radial gradient upgrade (GAP-2)
+#
+# `parse_linear_gradient_color` above stays as the legacy 2-stop (from/to)
+# accessor consumed by the existing DrawIR pipeline. The functions below are
+# additive: a full stop list (N>=1, explicit or evenly-spaced positions),
+# the gradient angle in degrees, and radial-vs-linear detection. Paired
+# raster primitives that consume a stop list live in
+# `std.gc_async_mut.gpu.engine2d.backend_emu` (`emu_draw_linear_gradient_stops`,
+# `emu_draw_radial_gradient_stops`) so the paint side has no dependency on
+# CSS string parsing.
+# ============================================================================
+
+struct GradientStopSpec:
+    color: u32
+    pos_permille: i32
+
+# Split `s` on top-level commas only (parens — e.g. `rgba(0,0,0,0.5)` —
+# nest depth so their internal commas are not stop separators).
+fn split_top_level_commas_paren_aware(s: text) -> [text]:
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.char_at(i)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        elif c == "," and depth == 0:
+            parts.push(s.substring(start, i).trim())
+            start = i + 1
+        i = i + 1
+    parts.push(s.substring(start, n).trim())
+    parts
+
+# Text inside the outer `linear-gradient(...)`/`radial-gradient(...)` parens,
+# or "" if neither prefix is present.
+fn gradient_inner(raw: text) -> text:
+    val lower = raw.lower()
+    var start = text_index_of(lower, "linear-gradient(")
+    var open_len = "linear-gradient(".len()
+    if start < 0:
+        start = text_index_of(lower, "radial-gradient(")
+        open_len = "radial-gradient(".len()
+    if start < 0:
+        return ""
+    val lp = start + open_len - 1
+    val rp = find_from(raw, ")", lp + 1)
+    if rp <= lp:
+        return ""
+    raw.substring(lp + 1, rp)
+
+fn is_radial_gradient(raw: text) -> bool:
+    text_index_of(raw.lower(), "radial-gradient(") >= 0
+
+fn is_gradient_shape_or_position_token(s: text) -> bool:
+    val lower = s.lower()
+    (
+        lower.starts_with("circle") or lower.starts_with("ellipse") or
+        text_index_of(lower, "at ") >= 0 or lower == "closest-side" or
+        lower == "closest-corner" or lower == "farthest-side" or
+        lower == "farthest-corner"
+    )
+
+fn find_last_top_level_space(s: text) -> i32:
+    var last: i32 = -1
+    var depth = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.char_at(i)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        elif c == " " and depth == 0:
+            last = i
+        i = i + 1
+    last
+
+# "37%" / "12.5%" -> permille (0..1000). Returns -1 when `s` is not a
+# percentage (no explicit stop position given).
+fn parse_percent_permille(s: text) -> i32:
+    val n = s.len()
+    if n == 0 or s.char_at(n - 1) != "%":
+        return -1
+    var i = 0
+    var int_part = 0
+    var frac_num = 0
+    var frac_den = 1
+    var seen_digit = false
+    var in_frac = false
+    while i < n - 1:
+        val c = s.char_at(i)
+        val d = dec_val(c)
+        if d < 10:
+            seen_digit = true
+            if in_frac:
+                if frac_den < 100:
+                    frac_num = frac_num * 10 + d
+                    frac_den = frac_den * 10
+            else:
+                int_part = int_part * 10 + d
+        elif c == ".":
+            in_frac = true
+        i = i + 1
+    if not seen_digit:
+        return -1
+    (int_part * 1000 + frac_num * 1000 / frac_den) / 100
+
+# Strip an optional trailing "NN%" position off a single gradient stop part,
+# leaving just the color text.
+fn gradient_stop_color_text(part: text) -> text:
+    val ls = find_last_top_level_space(part)
+    if ls < 0:
+        return part
+    val after = part.substring(ls + 1, part.len()).trim()
+    if parse_percent_permille(after) >= 0:
+        return part.substring(0, ls).trim()
+    part
+
+fn gradient_stop_position_or_neg1(part: text) -> i32:
+    val ls = find_last_top_level_space(part)
+    if ls < 0:
+        return -1
+    val after = part.substring(ls + 1, part.len()).trim()
+    parse_percent_permille(after)
+
+fn parse_signed_leading_int(s: text) -> i32:
+    var i = 0
+    var neg = false
+    if s.len() > 0 and s.char_at(0) == "-":
+        neg = true
+        i = 1
+    elif s.len() > 0 and s.char_at(0) == "+":
+        i = 1
+    var v = 0
+    while i < s.len():
+        val d = dec_val(s.char_at(i))
+        if d < 10:
+            v = v * 10 + d
+            i = i + 1
+        else:
+            break
+    if neg:
+        -v
+    else:
+        v
+
+# Linear-gradient angle in CSS degrees (0 = to top, 90 = to right, 180 (the
+# CSS default) = to bottom, 270 = to left). Radial gradients have no angle.
+fn parse_gradient_angle_deg(raw: text) -> i32:
+    val inner = gradient_inner(raw)
+    if inner.len() == 0:
+        return 180
+    val parts = split_top_level_commas_paren_aware(inner)
+    if parts.len() == 0:
+        return 180
+    val first = parts[0].trim()
+    if is_gradient_angle_token(first):
+        return parse_signed_leading_int(first)
+    if first == "to top":
+        return 0
+    if first == "to right":
+        return 90
+    if first == "to bottom":
+        return 180
+    if first == "to left":
+        return 270
+    180
+
+# Full N-stop list for a `linear-gradient(...)`/`radial-gradient(...)` value.
+# Explicit "%" stop positions are honored; stops without one default to 0 for
+# the first, 1000 for the last, and are evenly spaced in between (matching
+# plain-CSS gradient-stop defaulting).
+fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
+    val inner = gradient_inner(raw)
+    var stops: [GradientStopSpec] = []
+    if inner.len() == 0:
+        return stops
+    val radial = is_radial_gradient(raw)
+    val parts = split_top_level_commas_paren_aware(inner)
+    var color_parts: [text] = []
+    var idx = 0
+    while idx < parts.len():
+        val part = parts[idx]
+        val skip = if radial:
+            is_gradient_shape_or_position_token(part)
+        else:
+            part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part)
+        if not skip:
+            color_parts.push(part)
+        idx = idx + 1
+    val n = color_parts.len()
+    if n == 0:
+        return stops
+    var colors: [u32] = []
+    var raw_pos: [i32] = []
+    var i2 = 0
+    while i2 < n:
+        val cp = color_parts[i2]
+        colors.push(parse_color_any(gradient_stop_color_text(cp)))
+        raw_pos.push(gradient_stop_position_or_neg1(cp))
+        i2 = i2 + 1
+    if raw_pos[0] < 0:
+        raw_pos[0] = 0
+    if raw_pos[n - 1] < 0:
+        raw_pos[n - 1] = 1000
+    var k = 1
+    while k < n - 1:
+        if raw_pos[k] < 0:
+            var j = k + 1
+            while j < n - 1 and raw_pos[j] < 0:
+                j = j + 1
+            val prev_pos = raw_pos[k - 1]
+            val next_pos = raw_pos[j]
+            val span = j - (k - 1)
+            var m = k
+            while m < j:
+                raw_pos[m] = prev_pos + (next_pos - prev_pos) * (m - (k - 1)) / span
+                m = m + 1
+            k = j
+        else:
+            k = k + 1
+    var i3 = 0
+    while i3 < n:
+        stops.push(GradientStopSpec(color: colors[i3], pos_permille: raw_pos[i3]))
+        i3 = i3 + 1
+    stops
 
 fn parse_int(s: text) -> i32:
     var i = 0
@@ -1953,6 +2220,26 @@ fn decl_tbl_last_index(tbl: [text], prop: text) -> i32:
             return i / 2
         i = i - 2
     -1
+
+# `transition` (and its longhands) can appear more than once with a blank or
+# otherwise unusable value from an earlier reset rule; unlike `decl_tbl_get`,
+# these skip blank entries so the cascade lands on the last entry that
+# actually carries a value.
+fn decl_tbl_last_valid_transition_index(tbl: [text], prop: text) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
+            return i / 2
+        i = i - 2
+    -1
+
+fn decl_tbl_get_last_valid_transition(tbl: [text], prop: text) -> text:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
+            return tbl[i + 1]
+        i = i - 2
+    ""
 
 fn parse_nth_box_int(raw: text, index: i32) -> i32:
     val normalized = raw.trim().lower()

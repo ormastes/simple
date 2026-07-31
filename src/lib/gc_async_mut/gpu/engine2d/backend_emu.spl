@@ -617,6 +617,107 @@ fn emu_draw_radial_gradient(mut core: RenderBackend, cx: i32, cy: i32, r: i32, c
         py = py + 1
 
 # ============================================================================
+# N-stop gradients — angled linear + radial (GAP-2 upgrade)
+#
+# The two 2-color primitives above (`emu_draw_gradient_rect`/`_h`) and
+# `emu_draw_radial_gradient` stay as-is (existing callers keep their exact
+# behavior). These take a parallel (colors, positions_permille) stop list —
+# N>=1, positions 0..1000 non-decreasing — instead of exactly two colors, and
+# additionally take a CSS-style angle in degrees (0=to top, 90=to right,
+# 180=to bottom, 270=to left) for the linear case. Both are built purely on
+# `core.draw_rect_filled`, so no RenderBackend implementation needs to change.
+# ============================================================================
+
+fn _emu_gradient_color_at(colors: [u32], positions_permille: [i32], pos_permille: i32) -> u32:
+    val n = colors.len()
+    if n == 0:
+        return 0u32
+    if n == 1:
+        return colors[0]
+    if pos_permille <= positions_permille[0]:
+        return colors[0]
+    if pos_permille >= positions_permille[n - 1]:
+        return colors[n - 1]
+    var i: i32 = 1
+    while i < n:
+        if pos_permille <= positions_permille[i]:
+            val p0 = positions_permille[i - 1]
+            val p1 = positions_permille[i]
+            val span = _emu_max(p1 - p0, 1)
+            val t = pos_permille - p0
+            val c0 = colors[i - 1]
+            val c1 = colors[i]
+            val r = color_r(c0) + (color_r(c1) - color_r(c0)) * t / span
+            val g = color_g(c0) + (color_g(c1) - color_g(c0)) * t / span
+            val b = color_b(c0) + (color_b(c1) - color_b(c0)) * t / span
+            val a = color_a(c0) + (color_a(c1) - color_a(c0)) * t / span
+            return rgba(r, g, b, a)
+        i = i + 1
+    colors[n - 1]
+
+fn emu_draw_linear_gradient_stops(mut core: RenderBackend, x: i32, y: i32, w: i32, h: i32, colors: [u32], positions_permille: [i32], angle_deg: i32):
+    if w <= 0 or h <= 0 or colors.len() == 0:
+        return
+    if colors.len() == 1:
+        core.draw_rect_filled(x, y, w, h, colors[0])
+        return
+    val dx1000 = _emu_sin_approx(angle_deg)
+    val dy1000 = 0 - _emu_cos_approx(angle_deg)
+    val hw = w - 1
+    val hh = h - 1
+    val t00 = (0 - hw) * dx1000 + (0 - hh) * dy1000
+    val t10 = hw * dx1000 + (0 - hh) * dy1000
+    val t01 = (0 - hw) * dx1000 + hh * dy1000
+    val t11 = hw * dx1000 + hh * dy1000
+    var t_min = t00
+    if t10 < t_min: t_min = t10
+    if t01 < t_min: t_min = t01
+    if t11 < t_min: t_min = t11
+    var t_max = t00
+    if t10 > t_max: t_max = t10
+    if t01 > t_max: t_max = t01
+    if t11 > t_max: t_max = t11
+    val t_span = _emu_max(t_max - t_min, 1)
+    var py: i32 = 0
+    while py < h:
+        var px: i32 = 0
+        while px < w:
+            val nx = 2 * px - hw
+            val ny = 2 * py - hh
+            val t = nx * dx1000 + ny * dy1000
+            var pos_permille = (t - t_min) * 1000 / t_span
+            if pos_permille < 0:
+                pos_permille = 0
+            if pos_permille > 1000:
+                pos_permille = 1000
+            val c = _emu_gradient_color_at(colors, positions_permille, pos_permille)
+            core.draw_rect_filled(x + px, y + py, 1, 1, c)
+            px = px + 1
+        py = py + 1
+
+fn emu_draw_radial_gradient_stops(mut core: RenderBackend, cx: i32, cy: i32, r: i32, colors: [u32], positions_permille: [i32]):
+    if colors.len() == 0:
+        return
+    if r <= 0:
+        core.draw_rect_filled(cx, cy, 1, 1, colors[0])
+        return
+    var py: i32 = -r
+    while py <= r:
+        var px: i32 = -r
+        while px <= r:
+            val dist_sq = px * px + py * py
+            val r_sq = r * r
+            if dist_sq <= r_sq:
+                val dist = _emu_isqrt(dist_sq)
+                var pos_permille = dist * 1000 / _emu_max(r, 1)
+                if pos_permille > 1000:
+                    pos_permille = 1000
+                val c = _emu_gradient_color_at(colors, positions_permille, pos_permille)
+                core.draw_rect_filled(cx + px, cy + py, 1, 1, c)
+            px = px + 1
+        py = py + 1
+
+# ============================================================================
 # Alpha-Blended Rectangle — Porter-Duff src-over
 # ============================================================================
 
