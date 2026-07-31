@@ -91,8 +91,8 @@ Run only this scoped set:
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
-  logging. First admit a clean current-checkpoint Stage2/tool pair; then use the
-  single reserved attempt 26.
+  logging. Attempts 26–28 are retained; attempt 28 is the final capped failure
+  recorded below.
 - [ ] Independently review and pin the QEMU framebuffer crop, then run
   exact-ten attempt 13 and generate ten zero-stub manuals in manual attempt 13.
 - [ ] Run the final guards and independent evidence/manual review before
@@ -148,6 +148,14 @@ and provenance SHA-256 is
 The manifest records `backend=llvm-lib` and `seed_features=--features llvm`;
 the producer and independent verifier exited zero in `39:40.05` at
 `3,553,108 KiB` maximum RSS.
+
+RV64 attempt 28 was the third and final bounded build cycle. It reached the
+canonical explicit LLVM entry closure, then exited 1 in `1:36.46` at
+`278,060 KiB` maximum RSS because LLVM method resolution in
+`src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl` treats suffix
+`.to_f32()` as ambiguous between `f64.to_f32` and `i64.to_f32`. No ELF exists.
+The three-cycle cap is exhausted; fix that typed-call resolution in a fresh
+session before any new producer.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at

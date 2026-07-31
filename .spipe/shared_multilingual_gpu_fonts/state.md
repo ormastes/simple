@@ -1658,3 +1658,8 @@ pixels, and performance evidence remain release-blocking.
   provenance SHA-256 is
   `3f270a6bad8b4102647c80c4fa65bf196d0ca8bcee8f43cab047dd5494474287`.
   The final bounded RV64 cycle is next; no ELF or PASS is claimed.
+- rv64-attempt28-typed-call-blocker-2026-07-30: The third/final bounded RV64
+  cycle reached the canonical LLVM entry closure, then exited 1 in
+  `dom_color.spl`: suffix `.to_f32()` resolution is ambiguous between
+  `f64.to_f32` and `i64.to_f32`. No ELF exists and the three-cycle cap is
+  exhausted. QEMU, exact-ten, manuals, and PASS remain blocked.

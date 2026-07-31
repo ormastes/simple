@@ -74,5 +74,8 @@ and validates the canonical ELF.
 
 LLVM-enabled Stage2 attempt 30 is now independently admitted: its manifest
 records `backend=llvm-lib` and `seed_features=--features llvm`. The remaining
-step is the third and final bounded RV64 build cycle with the canonical
-explicit entry closure.
+RV64 attempt 28 used the canonical explicit entry closure and exited 1 in
+LLVM codegen: `dom_color.spl` suffix `.to_f32()` resolution is ambiguous
+between `f64.to_f32` and `i64.to_f32`. No ELF exists. The three-cycle RV64 cap
+is exhausted; resume in a fresh session by fixing typed-call resolution before
+starting another producer.

@@ -54,6 +54,16 @@ provenance SHA-256
 independent manifest verifier exited zero in `39:40.05` at `3,553,108 KiB`
 maximum RSS. The third and final bounded RV64 cycle is next.
 
+RV64 attempt 28 consumed that final cycle and exited 1 in `1:36.46` at
+`278,060 KiB` maximum RSS. The canonical explicit LLVM entry closure reached
+`src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl`, where LLVM method
+resolution rejected suffix `.to_f32()` as ambiguous between `f64.to_f32` and
+`i64.to_f32`. No ELF was produced. Command/stderr/time receipt SHA-256 values
+are `4bc81f6c8dad6764c388cd32aed1aa294777f981854fd11c764e626de804674d`,
+`d4d1505d429ecf5843dc28d56a49473b6afd92f03f23c1963f146e1bce584b80`,
+and `6bc79ff953e370915e25973d708e8f98d64f4cd705d7e80ba72ab24448073ec2`.
+The three-cycle cap is exhausted; QEMU, exact-ten, and manuals remain blocked.
+
 `STATUS: FAIL`
 
 ## Historical 2026-07-30 Stage2/RV64 result — checkpoint 2a7e

@@ -113,8 +113,9 @@ artifacts disappeared with the old temporary worktree and cannot admit current
 source. The RV64 owner repair introduced at `39c1863426a` is source-complete.
 Physical Stage2 attempt 29 is admitted at clean checkpoint `fbcaa8ccd0b`.
 Scoped-tool attempt 13 and LLVM-enabled Stage2 attempt 30 are independently
-admitted. The current blocker is the third and final bounded RV64 build cycle.
-No ELF exists, so QEMU crop calibration, exact-ten
+admitted. The current blocker is ambiguous LLVM `.to_f32()` method resolution
+in `dom_color.spl`; the three-cycle RV64 cap is exhausted. No ELF exists, so QEMU
+crop calibration, exact-ten
 attempt 13, and the
 ten manual attempt-13 receipts have not run. Stage 3,
 Stage 4, non-SimpleOS GPU hosts, and the broader cross-platform matrix remain
@@ -339,3 +340,10 @@ Rust-seed producer/acceptance run, fourth producer, or full bootstrap.
   Producer and independent verifier exited zero in `39:40.05` at
   `3,553,108 KiB` maximum RSS. The final bounded RV64 cycle is next; no ELF or
   PASS is claimed.
+- rv64-attempt28-typed-call-blocker-2026-07-30: The third/final bounded RV64
+  cycle reached the canonical explicit LLVM entry closure, then exited 1 in
+  `1:36.46` at `278,060 KiB` maximum RSS. LLVM codegen rejected
+  `dom_color.spl` suffix `.to_f32()` as ambiguous between `f64.to_f32` and
+  `i64.to_f32`. No ELF exists. The three-cycle cap is exhausted; QEMU,
+  exact-ten, manuals, and PASS remain blocked pending a fresh-session typed-call
+  resolution fix.
