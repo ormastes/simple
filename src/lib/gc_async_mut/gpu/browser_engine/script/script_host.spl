@@ -15,7 +15,9 @@ use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
     DomDocumentGeneration, DomNodeRoute, DomIdentityIndex
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_node_for_route, be_dom_event_identity
+    be_dom_node_for_route, be_dom_event_identity, be_dom_path_for_route,
+    be_dom_apply_default_action_to_route,
+    be_dom_apply_default_action_to_route_without_focus
 }
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
@@ -89,6 +91,34 @@ pub fn script_host_apply_action_to_id(root: BeDomNode, target_id: text, action: 
     _script_host_apply_event_action_to_id(
         root, target_id, be_dom_route_node_id(target_id), action
     ) ?? root
+
+pub fn script_host_apply_action_to_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    action: text, default_action: bool, allow_focus: bool = true
+) -> BeDomNode:
+    """Apply a route-authorized action by rebuilding only its ancestor path."""
+    if default_action:
+        if allow_focus:
+            return be_dom_apply_default_action_to_route(root, index, route, action)
+        return be_dom_apply_default_action_to_route_without_focus(
+            root, index, route, action
+        )
+    val path = be_dom_path_for_route(root, index, route)
+    if path.len() == 0:
+        return root
+    var next = script_host_apply_event_action(path[path.len() - 1], action)
+    var ancestor = path.len() - 2
+    while ancestor >= 0:
+        val parent = path[ancestor]
+        var children: [BeDomNode] = []
+        for child in parent.children:
+            if child.node_id == next.node_id:
+                children.push(next)
+            else:
+                children.push(child)
+        next = be_dom_set_children(parent, children)
+        ancestor = ancestor - 1
+    next
 
 pub class ScriptHost:
     """Host that manages Simple-script execution, event loop, and console buffer.
