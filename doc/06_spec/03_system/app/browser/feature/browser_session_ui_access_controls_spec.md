@@ -114,7 +114,7 @@ and REQ-WEB-BROWSER-010 (canonical relative-reference resolution).
 - **Enter and activate the destination**
   - Expected: Go pointer release and address Enter resolve `../next?x=1#ok` against the committed document and queue exactly one equivalent GET request.
   - Expected: Go keyboard Enter and Space each use the same address activation owner.
-  - Expected: the protocol admits Go and the worker returns `navigation-command-required`.
+  - Expected: the protocol admits Go, while raw worker Go and Reload release return `navigation-command-required`; rejected Reload leaves URL, loading/request/history/body, and DrawIR revision unchanged.
   - Expected: Go release and address Enter call the same process-level owner; its callable fixture admits one normalized command with `callback_count=1`, while invalid input retains focus and committed history.
 - **Use Home Bookmark Stop and Reload**
   - Expected: Back, Forward, bookmark, Stop, Home, Reload, and Favorite retain their existing behavior.
