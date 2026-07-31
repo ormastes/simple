@@ -93,9 +93,18 @@ implement-smf-profile-skeleton-done
   resolve_core; SmfSymbolInput caller-supplied because SmfReaderImpl.symbols
   is only populatable via an SFFI handle on a real .smf file) spec 5/5 + red
   sentinel. attributes=0 deferred to the L1-decode wave per contract §6.
-- Next: L1 integration wave — thin adapter SmfReaderImpl.symbols ->
-  [SmfSymbolInput] (derive defined from size/section_index) against a real
-  on-disk .smf fixture; then attributes-bit freeze, reachability wiring
-  (resolve_frontier over section edges), and the byte-parity harness per
-  smf_linker_map.md §5. Blocked oracle: compile --format=smf crash (bug doc
-  compile_format_smf_nil_receiver_crash_2026-07-31).
+- 2026-07-31 implement: L1ADAPT lane landed smf_reader_adapter.spl
+  (SmfWriterSymbol -> SmfSymbolInput, defined = size>0 OR section_index>=0)
+  spec 6/6 + red sentinel; sibling profile spec still 5/5. Route (a) on-disk
+  fixture and (b) writer round-trip both PROVEN dead: no .smf fixture
+  in-tree, rt_smf_reader_open has NO implementation anywhere, and
+  SmfWriter.write() unconditionally returns Ok([]) — SMF I/O is scaffolding
+  (bug doc smf_reader_writer_externs_unimplemented_2026-07-31).
+- Next: DECISION needed on the Phase-1 parity oracle — either implement the
+  SMF writer/reader externs (runtime-owned change) or re-scope acceptance to
+  the native-build/cc parity route already verified in smf_linker_map.md §5.
+  Then attributes-bit freeze and reachability wiring (resolve_frontier over
+  section edges). runtime_need: real rt_smf_reader_open/rt_smf_write;
+  facade_checked: yes (none exists — both are unimplemented externs);
+  chosen_path: reuse-facade impossible, deferred pending oracle decision;
+  rejected_shortcuts: spec-local rt_* externs, fabricated .smf bytes.
