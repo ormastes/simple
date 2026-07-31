@@ -36,6 +36,7 @@ FONT_REGION_RGB="$BUILD_DIR/font-region.rgb"
 FONT_REGION_CORRUPT_COPY="$BUILD_DIR/font-region-corrupt-calibration.rgb"
 FONT_ASSET="${SIMPLEOS_WM_FONT_ASSET:-assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf}"
 FONT_GUEST_PATH=/SYS/FONTS/NOTOSANS
+FONT_GUEST_LONG_PATH='/SYS/FONTS/NotoSansMono[wdth,wght].ttf'
 THEME_SNAPSHOT_SOURCE="$ROOT_DIR/src/lib/common/ui/generated/aetheric_dark_theme_snapshot.spl"
 EXPECTED_THEME_ID="aetheric_dark"
 EXPECTED_THEME_SOURCE_MANIFEST_SHA256="$(sed -n 's/.*source_manifest_sha256: "\([0-9a-f][0-9a-f]*\)".*/\1/p' "$THEME_SNAPSHOT_SOURCE" | head -n 1)"
@@ -57,6 +58,7 @@ BROWSER_DEMO_BINARY="build/os/apps/browser_demo/browser_demo.elf"
 BROWSER_DEMO_BINARY_SHA256=""
 browser_demo_build_status=not-built
 browser_demo_disk_status=not-checked
+font_disk_status=not-checked
 QEMU_PID=""
 
 mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
@@ -308,6 +310,34 @@ browser_demo_disk_payload_status() {
     echo pass
 }
 
+font_disk_payload_status() {
+    disk_path="$1"
+    if ! command -v mtype >/dev/null 2>&1; then
+        echo "mtype-unavailable"
+        return
+    fi
+    short_copy="$(mktemp "$BUILD_DIR/font-short.XXXXXX")" || {
+        echo "font-short-temp-failed"
+        return
+    }
+    long_copy="$(mktemp "$BUILD_DIR/font-long.XXXXXX")" || {
+        rm -f "$short_copy"
+        echo "font-long-temp-failed"
+        return
+    }
+    if ! mtype -i "$disk_path" "::$FONT_GUEST_PATH" >"$short_copy" 2>/dev/null || \
+       ! mtype -i "$disk_path" "::$FONT_GUEST_LONG_PATH" >"$long_copy" 2>/dev/null || \
+       [ "$(file_byte_count "$short_copy")" != "$FONT_ASSET_EXPECTED_BYTES" ] || \
+       [ "$(file_sha256 "$short_copy")" != "$FONT_ASSET_EXPECTED_SHA256" ] || \
+       [ "$(file_sha256 "$long_copy")" != "$FONT_ASSET_EXPECTED_SHA256" ]; then
+        rm -f "$short_copy" "$long_copy"
+        echo "font-guest-path-or-bytes-mismatch"
+        return
+    fi
+    rm -f "$short_copy" "$long_copy"
+    echo pass
+}
+
 serial_has_production_fault() {
     grep -Eq '^\[fault\] \*\*\* EXCEPTION FRAME|page[- ]fault|nil receiver|invalid Simple Web frame|\[simple2d-frame-failed\]|^\[wm-frame\] (content-provenance-rejected|engine2d-draw-ir-rejected|frame-degraded)' "$SERIAL_LOG" 2>/dev/null
 }
@@ -366,6 +396,7 @@ emit_failure() {
         echo "simpleos_wm_fullscreen_browser_demo_binary_sha256=$BROWSER_DEMO_BINARY_SHA256"
         echo "simpleos_wm_fullscreen_browser_demo_build_status=$browser_demo_build_status"
         echo "simpleos_wm_fullscreen_browser_demo_disk_status=$browser_demo_disk_status"
+        echo "simpleos_wm_fullscreen_font_disk_status=$font_disk_status"
         echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
         echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
         echo "simpleos_wm_fullscreen_font_asset_sha256=$FONT_ASSET_SHA256"
@@ -707,6 +738,11 @@ fi
 browser_demo_disk_status="$(browser_demo_disk_payload_status "$DISK_IMAGE" "$BROWSER_DEMO_BINARY")"
 if [ "$browser_demo_disk_status" != pass ]; then
     emit_failure "browser-demo-real-elf-not-staged"
+    exit 1
+fi
+font_disk_status="$(font_disk_payload_status "$DISK_IMAGE")"
+if [ "$font_disk_status" != pass ]; then
+    emit_failure "pinned-font-disk-asset-not-staged"
     exit 1
 fi
 
@@ -1418,6 +1454,7 @@ fi
     echo "simpleos_wm_fullscreen_browser_demo_binary_sha256=$BROWSER_DEMO_BINARY_SHA256"
     echo "simpleos_wm_fullscreen_browser_demo_build_status=$browser_demo_build_status"
     echo "simpleos_wm_fullscreen_browser_demo_disk_status=$browser_demo_disk_status"
+    echo "simpleos_wm_fullscreen_font_disk_status=$font_disk_status"
     echo "simpleos_wm_fullscreen_font_asset=$FONT_ASSET"
     echo "simpleos_wm_fullscreen_font_guest_path=$FONT_GUEST_PATH"
     echo "simpleos_wm_fullscreen_font_asset_bytes=$FONT_ASSET_BYTES"
