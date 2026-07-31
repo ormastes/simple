@@ -884,6 +884,19 @@ fn _browser_session_interactive_content(node: BeDomNode) -> bool:
         node.tag_name == "select" or node.tag_name == "textarea"
     )
 
+class _BrowserLabelActivation:
+    label_route: DomNodeRoute
+    control_route: DomNodeRoute
+
+fn _browser_session_label_activation_key(
+    activation: _BrowserLabelActivation
+) -> text:
+    (
+        activation.label_route.generation.value.to_text() + ":" +
+        activation.label_route.node_id.to_text() + ":" +
+        activation.control_route.node_id.to_text()
+    )
+
 fn _browser_session_replace_dom_path(
     path: [BeDomNode], replacement: BeDomNode
 ) -> BeDomNode:
@@ -1520,6 +1533,26 @@ impl BrowserSession:
             )
         self._publish_runtime_body_candidate(candidate, structural)
 
+    me _rollback_checkable_preactivation(
+        route: DomNodeRoute, checked_before: bool,
+        checked_radio_before: DomNodeRoute?
+    ) -> Result<bool, text>:
+        val index = self._live_dom_index_for_route(route)?
+        val restore_action = if checked_before:
+            "set-attr:checked=checked"
+        else:
+            "remove-attr:checked"
+        var rollback_dom = script_host_apply_action_to_route(
+            self.current_dom, index, route, restore_action, false, false
+        )
+        if val Some(previous_radio) = checked_radio_before:
+            if not _browser_session_same_route(previous_radio, route):
+                rollback_dom = script_host_apply_action_to_route(
+                    rollback_dom, index, previous_radio,
+                    "set-attr:checked=checked", false, false
+                )
+        self._publish_runtime_body_candidate(rollback_dom, false)
+
     me _append_dynamic_image_warning(
         load: BrowserLoadState?, warning: text
     ):
@@ -1580,9 +1613,9 @@ impl BrowserSession:
             nil, "", false, true
         )
 
-    fn _label_activation_control_route(
+    fn _label_activation_for_route(
         index: DomIdentityIndex, target_route: DomNodeRoute
-    ) -> DomNodeRoute?:
+    ) -> _BrowserLabelActivation?:
         val path = be_dom_path_for_route(
             self.current_dom, index, target_route
         )
@@ -1610,7 +1643,10 @@ impl BrowserSession:
             path_index = path_index + 1
         if _browser_session_same_route(control_route, target_route):
             return nil
-        Some(control_route)
+        Some(_BrowserLabelActivation(
+            label_route: routes[label_index],
+            control_route: control_route
+        ))
 
     me dispatch_dom_primary_pointer_down(
         route: DomNodeRoute
@@ -1664,6 +1700,14 @@ impl BrowserSession:
             nil, "", false, true
         )
 
+    me _consume_dom_dispatch_budget(amount: i32) -> Result<bool, text>:
+        if amount < 0 or amount > self.dom_dispatch_budget_remaining:
+            return Err("DOM event dispatch budget exceeded")
+        self.dom_dispatch_budget_remaining = (
+            self.dom_dispatch_budget_remaining - amount
+        )
+        Ok(true)
+
     me _dispatch_dom_event_route_with_payload(
         route: DomNodeRoute, event_type: text, bubbles: bool,
         cancelable: bool, key: text, code: text, shift_key: bool,
@@ -1695,6 +1739,13 @@ impl BrowserSession:
         var target = match be_dom_node_for_route(self.current_dom, index, route):
             Some(value): value
             nil: return Err("stale_target")
+        var dispatch_path = be_dom_path_for_route(
+            self.current_dom, index, route
+        )
+        if dispatch_path.len() == 0:
+            return Err("stale_target")
+        self._consume_dom_dispatch_budget(dispatch_path.len())?
+        val dispatch_generation = self.dom_generation
         val normalized_event_type = normalize_dom_event_type(event_type)
         val checkable_action = _browser_session_checkable_click_action_for_node(
             target, normalized_event_type
@@ -1702,6 +1753,9 @@ impl BrowserSession:
         var checked_before = false
         var checked_radio_before: DomNodeRoute? = nil
         if checkable_action != "":
+            # Reserve the preactivation write and both possible rollback writes
+            # before changing checked state.
+            self._consume_dom_dispatch_budget(3)?
             if allow_focus_default:
                 if val Some(focused) = be_dom_focused_route(
                     self.current_dom, index
@@ -1741,21 +1795,18 @@ impl BrowserSession:
                         val _ = self._blur_dom_focus_route(focused)?
                         index = self._live_dom_index_for_route(route)?
                 if should_focus:
+                    self._consume_dom_dispatch_budget(1)?
                     self._publish_dom_action(
                         index, route, "focus-element", true, true
                     )?
                     focus_transitioned = true
 
         index = self._live_dom_index_for_route(route)?
-        val dispatch_path = be_dom_path_for_route(self.current_dom, index, route)
+        dispatch_path = be_dom_path_for_route(self.current_dom, index, route)
         if dispatch_path.len() == 0:
             return Err("stale_target")
-        if dispatch_path.len() > self.dom_dispatch_budget_remaining:
-            return Err("DOM event dispatch budget exceeded")
-        self.dom_dispatch_budget_remaining = (
-            self.dom_dispatch_budget_remaining - dispatch_path.len()
-        )
-        val dispatch_generation = self.dom_generation
+        if self.dom_generation.value != dispatch_generation.value:
+            return Err("stale_target")
         val inline_action = be_dom_get_attr(
             dispatch_path[dispatch_path.len() - 1],
             "on" + normalized_event_type
@@ -1774,6 +1825,7 @@ impl BrowserSession:
                 "CSP blocked inline event handler: {normalized_event_type}"
             )
         var callable_executor_used = false
+        var dispatch_budget_exhausted = false
         var dispatch = if input_type != "":
             be_dom_dispatch_input_event_to_route(
                 self.current_dom, index, route, event_type, bubbles,
@@ -1867,6 +1919,9 @@ impl BrowserSession:
                 self._append_warning(
                     "DOM event listener failed: {executor.error}"
                 )
+                dispatch_budget_exhausted = (
+                    executor.error == "DOM event dispatch budget exceeded"
+                )
             self._flush_runtime_side_effects_and_pump_history()
             if self.dom_generation.value != dispatch_generation.value:
                 return Ok(dispatch)
@@ -1880,8 +1935,11 @@ impl BrowserSession:
             val current_route = dispatch.current_targets[action_index]
             if not callable_executor_used:
                 if self.dom_dispatch_budget_remaining <= 0:
-                    self._append_warning("DOM event dispatch budget exceeded")
-                    return Ok(dispatch)
+                    if checkable_action != "":
+                        self._rollback_checkable_preactivation(
+                            route, checked_before, checked_radio_before
+                        )?
+                    return Err("DOM event dispatch budget exceeded")
                 self.dom_dispatch_budget_remaining = (
                     self.dom_dispatch_budget_remaining - 1
                 )
@@ -1892,9 +1950,15 @@ impl BrowserSession:
                 val structural = (
                     _browser_session_dom_action_replaces_document(action)
                 )
-                self._publish_dom_action(
+                val action_result = self._publish_dom_action(
                     index, current_route, action, false, false
-                )?
+                )
+                if val Err(error) = action_result:
+                    if checkable_action != "":
+                        self._rollback_checkable_preactivation(
+                            route, checked_before, checked_radio_before
+                        )?
+                    return Err(error)
                 if structural:
                     return Ok(dispatch)
             elif (
@@ -1914,20 +1978,31 @@ impl BrowserSession:
         if (
             normalized_event_type == "click" and
             not dispatch.event.default_prevented and
-            self.label_activation_depth == 0
+            not dispatch_budget_exhausted
         ):
-            if val Some(control_route) = self._label_activation_control_route(
+            if val Some(activation) = self._label_activation_for_route(
                 index, route
             ):
-                self.label_activation_depth = self.label_activation_depth + 1
-                val forwarded = self.dispatch_dom_event_route(
-                    control_route, "click", true, true
+                val activation_key = _browser_session_label_activation_key(
+                    activation
                 )
-                self.label_activation_depth = self.label_activation_depth - 1
+                if self.active_label_activation_keys.get(
+                    activation_key
+                ) ?? false:
+                    return Ok(dispatch)
+                if (
+                    self.active_label_activation_keys.len() >=
+                        BROWSER_DOM_DISPATCH_LISTENER_MAX
+                ):
+                    return Err("DOM label activation budget exceeded")
+                self._consume_dom_dispatch_budget(1)?
+                self.active_label_activation_keys[activation_key] = true
+                val forwarded = self.dispatch_dom_event_route(
+                    activation.control_route, "click", true, true
+                )
+                self.active_label_activation_keys.remove(activation_key)
                 if val Err(error) = forwarded:
-                    self._append_warning(
-                        "label activation failed: {error}"
-                    )
+                    return Err(error)
                 return Ok(dispatch)
         val live_checkable_action = if (
             dispatch.default_action_allowed and
@@ -1941,22 +2016,15 @@ impl BrowserSession:
             checkable_action == live_checkable_action
         )
         if checkable_action != "" and not preactivation_matches_live:
-            val restore_action = if checked_before:
-                "set-attr:checked=checked"
-            else:
-                "remove-attr:checked"
-            var rollback_dom = script_host_apply_action_to_route(
-                self.current_dom, index, route, restore_action, false, false
-            )
-            if val Some(previous_radio) = checked_radio_before:
-                if not _browser_session_same_route(previous_radio, route):
-                    rollback_dom = script_host_apply_action_to_route(
-                        rollback_dom, index, previous_radio,
-                        "set-attr:checked=checked", false, false
-                    )
-            self._publish_runtime_body_candidate(rollback_dom, false)?
+            self._rollback_checkable_preactivation(
+                route, checked_before, checked_radio_before
+            )?
+        if dispatch_budget_exhausted:
+            return Err("DOM event dispatch budget exceeded")
 
         if dispatch.default_action_allowed:
+            if checkable_action == "":
+                self._consume_dom_dispatch_budget(1)?
             var focus_changed = focus_transitioned
             if (
                 _browser_session_focus_default(dispatch.default_action) and
@@ -2008,14 +2076,24 @@ impl BrowserSession:
                 )?
             if live_checkable_action != "":
                 self._sync_runtime_body_from_dom()
-                val _ = self.dispatch_dom_event_route(
+                val input_dispatch = self.dispatch_dom_event_route(
                     route, "input", true, false
-                )?
+                )
+                if val Err(error) = input_dispatch:
+                    self._rollback_checkable_preactivation(
+                        route, checked_before, checked_radio_before
+                    )?
+                    return Err(error)
                 if self._live_dom_index_for_route(route).is_err():
                     return Ok(dispatch)
-                val _ = self.dispatch_dom_event_route(
+                val change_dispatch = self.dispatch_dom_event_route(
                     route, "change", true, false
-                )?
+                )
+                if val Err(error) = change_dispatch:
+                    self._rollback_checkable_preactivation(
+                        route, checked_before, checked_radio_before
+                    )?
+                    return Err(error)
             if focus_changed:
                 if normalized_event_type != "focus":
                     val _ = self.dispatch_dom_event_route(
@@ -2589,6 +2667,7 @@ impl BrowserSession:
         self.text_selection_route = nil
         self.text_selection_anchor_byte = 0
         self.text_selection_focus_byte = 0
+        self.active_label_activation_keys = {}
         self.history = []
         self.current_index = -1
         self.warnings = []
@@ -2687,12 +2766,72 @@ impl BrowserSession:
             own_text(cleaned_html)
         # Atomic document replacement: the previous page survives until all
         # response and parser validation above has succeeded.
+        var next_request_seq = self.next_request_seq
         if val Some(previous_state) = self.runtime_state:
-            val next_fetch_seq = (
+            val previous_fetch_seq = (
                 previous_state.runtime.interpreter.next_async_request_seq
             )
-            if next_fetch_seq > self.next_request_seq:
-                self.next_request_seq = next_fetch_seq
+            if previous_fetch_seq > next_request_seq:
+                next_request_seq = previous_fetch_seq
+        val style_sources = resource_plan.style_sources
+        if url.starts_with("https://guest.runtime/"):
+            print "[BRS] style sources={style_sources.len()}"
+
+        var staged_storage = self
+        staged_storage._persist_storage_for_url(previous_document_url)
+        staged_storage.content_security_policy = resource_plan.final_csp_policy
+        staged_storage.csp_sandbox_policy = next_sandbox_policy
+        staged_storage.pending_content_security_policy = ""
+        staged_storage._activate_storage_for_url(url)
+        var native_globals_diagnostic = ""
+        var next_runtime_state: BrowserRuntimeState? = nil
+        if self.runtime_enabled and admitted_script_blocks.len() > 0:
+            val cookie_text = staged_storage._script_cookie_for_url(url)
+            var state = BrowserRuntimeState.create(
+                own_text(url),
+                initial_title,
+                body_html,
+                staged_storage.session_storage,
+                staged_storage.local_storage,
+                own_text(cookie_text),
+                next_sandbox_policy.allow_same_origin
+            )
+            state.runtime.interpreter.next_async_request_seq = (
+                next_request_seq
+            )
+            state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
+            state.runtime.interpreter.timer_time_origin_ms = self.monotonic_time_ms
+            var runtime = state.runtime
+            match runtime.eval(
+                "typeof require + ':' + typeof process + ':' + typeof Buffer"
+            ):
+                Ok(JsValue.String(value)):
+                    native_globals_diagnostic = "browser native globals: {value}"
+                Ok(_):
+                    return Err("browser runtime initialization returned invalid result")
+                Err(error):
+                    return Err(
+                        "browser runtime initialization failed: " +
+                        error.message
+                    )
+            state.runtime = runtime
+            next_runtime_state = Some(state)
+            if url.starts_with("https://guest.runtime/"):
+                print "[BRS] runtime state created"
+        val next_dom = form_capture_defaults(visible_parse.doc)
+        self.publish_dom_snapshot(next_dom, true, next_runtime_state)?
+        self.next_request_seq = next_request_seq
+        self.session_storage = staged_storage.session_storage
+        self.local_storage = staged_storage.local_storage
+        self.session_storage_by_origin = (
+            staged_storage.session_storage_by_origin
+        )
+        self.local_storage_by_origin = staged_storage.local_storage_by_origin
+        self.content_security_policy = staged_storage.content_security_policy
+        self.csp_sandbox_policy = staged_storage.csp_sandbox_policy
+        self.pending_content_security_policy = (
+            staged_storage.pending_content_security_policy
+        )
         self.active_load = nil
         self.pending_requests = []
         self.pending_request_head = 0
@@ -2705,54 +2844,6 @@ impl BrowserSession:
         self.wasm_modules = []
         self.image_resources = []
         self.admitted_image_sources = []
-        val style_sources = resource_plan.style_sources
-        if url.starts_with("https://guest.runtime/"):
-            print "[BRS] style sources={style_sources.len()}"
-
-        self._persist_storage_for_url(previous_document_url)
-        self.content_security_policy = resource_plan.final_csp_policy
-        self.csp_sandbox_policy = next_sandbox_policy
-        self.pending_content_security_policy = ""
-        self._activate_storage_for_url(url)
-        var native_globals_diagnostic = ""
-        var next_runtime_state: BrowserRuntimeState? = nil
-        if self.runtime_enabled and admitted_script_blocks.len() > 0:
-            val cookie_text = self._script_cookie_for_url(url)
-            var state = BrowserRuntimeState.create(
-                own_text(url),
-                initial_title,
-                body_html,
-                self.session_storage,
-                self.local_storage,
-                own_text(cookie_text),
-                next_sandbox_policy.allow_same_origin
-            )
-            state.runtime.interpreter.next_async_request_seq = (
-                self.next_request_seq
-            )
-            state.runtime.interpreter.timer_current_time_ms = self.monotonic_time_ms
-            state.runtime.interpreter.timer_time_origin_ms = self.monotonic_time_ms
-            var runtime = state.runtime
-            match runtime.eval(
-                "typeof require + ':' + typeof process + ':' + typeof Buffer"
-            ):
-                Ok(JsValue.String(value)):
-                    native_globals_diagnostic = "browser native globals: {value}"
-                Ok(_):
-                    native_globals_diagnostic = "browser native globals: invalid-result"
-                Err(error):
-                    native_globals_diagnostic = "browser native globals check failed: {error.message}"
-            state.runtime = runtime
-            next_runtime_state = Some(state)
-            if url.starts_with("https://guest.runtime/"):
-                print "[BRS] runtime state created"
-        val next_dom = form_capture_defaults(visible_parse.doc)
-        val published = self.publish_dom_snapshot(
-            next_dom, true, next_runtime_state
-        )
-        if published.? == false:
-            self._append_warning("DOM identity publication failed")
-            return Err("DOM identity publication failed")
         self.current_url = own_text(url)
         self.document_url = own_text(url)
         self.animation_start_time_ms = self.monotonic_time_ms

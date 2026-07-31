@@ -18,6 +18,23 @@ describe "BrowserSession generation-qualified runtime publication":
         match initial_index.route_for_layout_target_key("path:"):
             Ok(body_route): expect(body_route.node_id).to_be_greater_than(0)
             Err(error): fail("Expected canonical body route: " + error)
+        match session.runtime_state:
+            Some(state):
+                expect(state.dom_generation.unwrap().value).to_equal(
+                    session.document_generation().value
+                )
+            nil: fail("Expected the about:blank JavaScript mirror")
+
+        step("Reuse the current identity index for generation-preserving publish")
+        var marked_index = initial_index
+        marked_index.counters.build_visit_count = 777
+        session.dom_identity_index = Some(marked_index)
+        session.publish_dom_snapshot(
+            session.dom_root(), false, session.runtime_state
+        ).unwrap()
+        expect(
+            session.current_dom_identity_index().unwrap().counters.build_visit_count
+        ).to_equal(777)
 
         step("Publish set-text as a new generation with valid child identities")
         session.open_html(
@@ -60,10 +77,11 @@ describe "BrowserSession generation-qualified runtime publication":
         ).unwrap()
         val label_index = session.current_dom_identity_index().unwrap()
         val label_route = label_index.route_for_author_id("label").unwrap()
+        val choice_route = label_index.route_for_author_id("choice").unwrap()
         session.dom_dispatch_depth = 1
         session.dom_dispatch_budget_remaining = 1
         match session.dispatch_dom_event_route(
-            label_route, "click", true, true
+            choice_route, "click", true, true
         ):
             Ok(_): fail("Nested dispatch must not reset its shared budget")
             Err(error): expect(error).to_equal(
@@ -71,6 +89,9 @@ describe "BrowserSession generation-qualified runtime publication":
             )
         session.dom_dispatch_depth = 0
         session.dom_dispatch_budget_remaining = 0
+        val untouched_inputs = be_dom_find_by_tag(session.dom_root(), "input")
+        expect(be_dom_get_attr(untouched_inputs[0], "checked")).to_equal("")
+        session.active_label_activation_keys["1:999:1000"] = true
         session.dispatch_dom_event_route(
             label_route, "click", true, true
         ).unwrap()

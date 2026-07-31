@@ -2119,15 +2119,15 @@ class BrowserSession:
     script_cookie_write_overflow: bool
     dom_dispatch_depth: i32
     dom_dispatch_budget_remaining: i32
-    label_activation_depth: i32
+    active_label_activation_keys: Dict<text, bool>
 
     static fn new() -> BrowserSession:
-        BrowserSession._create(true)
+        BrowserSession._create(true).unwrap()
 
     static fn new_without_runtime() -> BrowserSession:
-        BrowserSession._create(false)
+        BrowserSession._create(false).unwrap()
 
-    static fn _create(runtime_enabled: bool) -> BrowserSession:
+    static fn _create(runtime_enabled: bool) -> Result<BrowserSession, text>:
         val initial_dom = form_capture_defaults(html_tree_builder_build(
             blank_page_html()
         ))
@@ -2135,7 +2135,24 @@ class BrowserSession:
         val initial_index = dom_identity_index_build(
             initial_dom, initial_generation
         ).unwrap()
-        BrowserSession(
+        var initial_script = SimpleScriptExecutor.new(
+            EventLoop.new(), ConsoleBuffer.new()
+        )
+        if not initial_script.install_document_state(
+            initial_dom, initial_index, initial_generation
+        ):
+            return Err("invalid initial SimpleScript document")
+        var initial_runtime_state: BrowserRuntimeState? = nil
+        if runtime_enabled:
+            var state = BrowserRuntimeState.create(
+                "about:blank", "about:blank", "", [], [], "", true
+            )
+            if not state.install_document_state(
+                initial_dom, initial_generation, initial_index
+            ):
+                return Err("invalid initial JavaScript document")
+            initial_runtime_state = Some(state)
+        Ok(BrowserSession(
             current_url: "about:blank",
             document_url: "about:blank",
             current_title: "about:blank",
@@ -2164,10 +2181,8 @@ class BrowserSession:
             session_storage_by_origin: [],
             local_storage_by_origin: [],
             cookies: CookieStore.new(),
-            runtime_state: nil,
-            simple_script_executor: SimpleScriptExecutor.new(
-                EventLoop.new(), ConsoleBuffer.new()
-            ),
+            runtime_state: initial_runtime_state,
+            simple_script_executor: initial_script,
             pending_requests: [],
             pending_request_head: 0,
             pending_request_tombstone: BrowserRequest.create(
@@ -2212,8 +2227,8 @@ class BrowserSession:
             script_cookie_write_overflow: false,
             dom_dispatch_depth: 0,
             dom_dispatch_budget_remaining: 0,
-            label_activation_depth: 0
-        )
+            active_label_activation_keys: {}
+        ))
 
 impl BrowserSession:
 
@@ -2289,7 +2304,12 @@ impl BrowserSession:
             self.dom_generation.next()?
         else:
             self.dom_generation
-        val next_index = dom_identity_index_build(next_dom, next_generation)?
+        val next_index = if replace_document:
+            dom_identity_index_build(next_dom, next_generation)?
+        else:
+            match self.dom_identity_index:
+                Some(current): current
+                nil: return Err("invalid_document")
         var next_script = self.simple_script_executor
         if not next_script.install_document_state(
             next_dom, next_index, next_generation
@@ -2313,6 +2333,7 @@ impl BrowserSession:
             self.text_selection_route = nil
             self.text_selection_anchor_byte = 0
             self.text_selection_focus_byte = 0
+            self.active_label_activation_keys = {}
         Ok(true)
 
     fn _cookie_now_seconds() -> i64:
