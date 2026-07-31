@@ -7,33 +7,33 @@
 
 ## Overview
 
-This scenario proves that a later valid `gap:0` declaration resets an earlier
-positive Flex gap through both CSS declaration application paths. The first
-row uses an inline block containing only `gap:0`, selecting the dispatch path.
-The second adds `visibility:visible`, forcing the full Style reconstruction.
+This scenario proves both that a later valid `gap:0` declaration resets an
+earlier positive Flex gap and that a later malformed declaration does not
+erase an earlier valid `gap:4px`. Both cases cross the dispatch and full Style
+reconstruction paths; an invalid-only row remains the zero-gap control.
 
-Both rows lower through shared Web semantic/layout state into the existing
+All rows lower through shared Web semantic/layout state into the existing
 canonical `DrawIrComposition` and Engine2D executor. No private painter,
 parallel Web IR, Draw IR command, or backend path is introduced.
 
 ## Standards contract
 
-CSS Box Alignment admits zero as a non-negative gap. The later inline
-declaration wins the cascade, so both row and column used gaps become zero.
-Malformed and negative gaps remain outside the accepted declaration subset.
+CSS Box Alignment admits zero as a non-negative gap. A valid later declaration
+wins, while a malformed declaration is discarded before winner selection.
+Malformed-only and negative gaps remain outside the accepted subset.
 
 ## Exact fixture
 
-The viewport is 12 by 4 pixels. Each 12-by-2 Flex row starts with a stylesheet
-gap of 4px and then receives an inline zero-gap override. Each row contains a
-4-by-2 red item followed immediately by a 4-by-2 blue item. The remaining
-four pixels in each row stay white.
+The viewport is 12 by 10 pixels. The first two 12-by-2 Flex rows reset a 4px
+stylesheet gap to zero. The next two retain `gap:4px` before a malformed
+duplicate through the dispatch and full reconstruction paths. The last row
+contains only the malformed declaration and therefore keeps the initial zero.
 
 ## Evidence boundary
 
 The SSpec asserts parsed nodes, computed gap fields, exact semantic boxes,
 canonical Draw IR rectangle geometry and color, zero skipped commands, and
-all 48 framebuffer pixels. Runtime PASS is claimed only after a qualified
+all 120 framebuffer pixels. Runtime PASS is claimed only after a qualified
 pure-Simple execution; static review alone is not runtime evidence.
 """
 
@@ -47,18 +47,30 @@ use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
 
 val FLEX_GAP_ZERO_CASCADE_HTML = (
     "<style>" +
-    "html,body{margin:0;width:12px;height:4px;background:#fff}" +
-    ".row{display:flex;width:12px;height:2px;gap:4px}" +
+    "html,body{margin:0;width:12px;height:10px;background:#fff}" +
+    ".row{display:flex;width:12px;height:2px}" +
+    ".positive{gap:4px}" +
     ".red{width:4px;height:2px;background:#dc2626}" +
     ".blue{width:4px;height:2px;background:#2563eb}" +
     "</style>" +
-    "<div id='dispatch-row' class='row' style='gap:0'>" +
+    "<div id='dispatch-row' class='row positive' style='gap:0'>" +
     "<div id='dispatch-red' class='red'></div>" +
     "<div id='dispatch-blue' class='blue'></div></div>" +
-    "<div id='full-row' class='row' " +
+    "<div id='full-row' class='row positive' " +
     "style='gap:0;visibility:visible'>" +
     "<div id='full-red' class='red'></div>" +
-    "<div id='full-blue' class='blue'></div></div>"
+    "<div id='full-blue' class='blue'></div></div>" +
+    "<div id='duplicate-dispatch-row' class='row' " +
+    "style='gap:4px;gap:bogus'>" +
+    "<div id='duplicate-dispatch-red' class='red'></div>" +
+    "<div id='duplicate-dispatch-blue' class='blue'></div></div>" +
+    "<div id='duplicate-full-row' class='row' " +
+    "style='gap:4px;gap:bogus;visibility:visible'>" +
+    "<div id='duplicate-full-red' class='red'></div>" +
+    "<div id='duplicate-full-blue' class='blue'></div></div>" +
+    "<div id='invalid-only-row' class='row' style='gap:bogus'>" +
+    "<div id='invalid-only-red' class='red'></div>" +
+    "<div id='invalid-only-blue' class='blue'></div></div>"
 )
 
 fn _gap_zero_node_index(
@@ -95,12 +107,26 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
     it "should reset positive Flex gaps through both declaration paths":
         step("Parse the split-cascade zero-gap fixture")
         val result = simple_web_layout_render_html_draw_ir_result(
-            FLEX_GAP_ZERO_CASCADE_HTML, 12, 4
+            FLEX_GAP_ZERO_CASCADE_HTML, 12, 10
         )
         val dispatch_row_index = _gap_zero_node_index(result, "dispatch-row")
         val full_row_index = _gap_zero_node_index(result, "full-row")
+        val duplicate_dispatch_index = _gap_zero_node_index(
+            result, "duplicate-dispatch-row"
+        )
+        val duplicate_full_index = _gap_zero_node_index(
+            result, "duplicate-full-row"
+        )
+        val invalid_only_index = _gap_zero_node_index(
+            result, "invalid-only-row"
+        )
         expect(result.hit_index.nodes[dispatch_row_index].tag).to_equal("div")
         expect(result.hit_index.nodes[full_row_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[duplicate_dispatch_index].tag).to_equal(
+            "div"
+        )
+        expect(result.hit_index.nodes[duplicate_full_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[invalid_only_index].tag).to_equal("div")
         expect(result.composition.batches[0].source.source_kind).to_equal(
             "html_ast"
         )
@@ -108,6 +134,11 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
         step("Resolve zero-gap Web layout geometry")
         val dispatch_style = result.hit_index.styles[dispatch_row_index]
         val full_style = result.hit_index.styles[full_row_index]
+        val duplicate_dispatch_style = (
+            result.hit_index.styles[duplicate_dispatch_index]
+        )
+        val duplicate_full_style = result.hit_index.styles[duplicate_full_index]
+        val invalid_only_style = result.hit_index.styles[invalid_only_index]
         expect([
             dispatch_style.gap_px, dispatch_style.row_gap_px,
             dispatch_style.column_gap_px
@@ -116,18 +147,72 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
             full_style.gap_px, full_style.row_gap_px,
             full_style.column_gap_px
         ]).to_equal([0, 0, 0])
+        expect([
+            duplicate_dispatch_style.gap_px,
+            duplicate_dispatch_style.row_gap_px,
+            duplicate_dispatch_style.column_gap_px
+        ]).to_equal([4, 4, 4])
+        expect([
+            duplicate_full_style.gap_px, duplicate_full_style.row_gap_px,
+            duplicate_full_style.column_gap_px
+        ]).to_equal([4, 4, 4])
+        expect([
+            invalid_only_style.gap_px, invalid_only_style.row_gap_px,
+            invalid_only_style.column_gap_px
+        ]).to_equal([0, 0, 0])
         expect(_gap_zero_box(result, "dispatch-row")).to_equal([0, 0, 12, 2])
         expect(_gap_zero_box(result, "dispatch-red")).to_equal([0, 0, 4, 2])
         expect(_gap_zero_box(result, "dispatch-blue")).to_equal([4, 0, 4, 2])
         expect(_gap_zero_box(result, "full-row")).to_equal([0, 2, 12, 2])
         expect(_gap_zero_box(result, "full-red")).to_equal([0, 2, 4, 2])
         expect(_gap_zero_box(result, "full-blue")).to_equal([4, 2, 4, 2])
+        expect(_gap_zero_box(result, "duplicate-dispatch-row")).to_equal(
+            [0, 4, 12, 2]
+        )
+        expect(_gap_zero_box(result, "duplicate-dispatch-red")).to_equal(
+            [0, 4, 4, 2]
+        )
+        expect(_gap_zero_box(result, "duplicate-dispatch-blue")).to_equal(
+            [8, 4, 4, 2]
+        )
+        expect(_gap_zero_box(result, "duplicate-full-row")).to_equal(
+            [0, 6, 12, 2]
+        )
+        expect(_gap_zero_box(result, "duplicate-full-red")).to_equal(
+            [0, 6, 4, 2]
+        )
+        expect(_gap_zero_box(result, "duplicate-full-blue")).to_equal(
+            [8, 6, 4, 2]
+        )
+        expect(_gap_zero_box(result, "invalid-only-row")).to_equal(
+            [0, 8, 12, 2]
+        )
+        expect(_gap_zero_box(result, "invalid-only-red")).to_equal(
+            [0, 8, 4, 2]
+        )
+        expect(_gap_zero_box(result, "invalid-only-blue")).to_equal(
+            [4, 8, 4, 2]
+        )
 
         step("Emit adjacent canonical Draw IR rectangles")
         val dispatch_red = _gap_zero_command(result, "dispatch-red")
         val dispatch_blue = _gap_zero_command(result, "dispatch-blue")
         val full_red = _gap_zero_command(result, "full-red")
         val full_blue = _gap_zero_command(result, "full-blue")
+        val duplicate_dispatch_red = _gap_zero_command(
+            result, "duplicate-dispatch-red"
+        )
+        val duplicate_dispatch_blue = _gap_zero_command(
+            result, "duplicate-dispatch-blue"
+        )
+        val duplicate_full_red = _gap_zero_command(
+            result, "duplicate-full-red"
+        )
+        val duplicate_full_blue = _gap_zero_command(
+            result, "duplicate-full-blue"
+        )
+        val invalid_only_red = _gap_zero_command(result, "invalid-only-red")
+        val invalid_only_blue = _gap_zero_command(result, "invalid-only-blue")
         expect([
             dispatch_red.kind, dispatch_blue.kind,
             full_red.kind, full_blue.kind
@@ -147,15 +232,45 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
             full_blue.x, full_blue.y, full_blue.width, full_blue.height
         ]).to_equal([4, 2, 4, 2])
         expect([
+            duplicate_dispatch_red.x, duplicate_dispatch_red.y,
+            duplicate_dispatch_red.width, duplicate_dispatch_red.height
+        ]).to_equal([0, 4, 4, 2])
+        expect([
+            duplicate_dispatch_blue.x, duplicate_dispatch_blue.y,
+            duplicate_dispatch_blue.width, duplicate_dispatch_blue.height
+        ]).to_equal([8, 4, 4, 2])
+        expect([
+            duplicate_full_red.x, duplicate_full_red.y,
+            duplicate_full_red.width, duplicate_full_red.height
+        ]).to_equal([0, 6, 4, 2])
+        expect([
+            duplicate_full_blue.x, duplicate_full_blue.y,
+            duplicate_full_blue.width, duplicate_full_blue.height
+        ]).to_equal([8, 6, 4, 2])
+        expect([
+            invalid_only_red.x, invalid_only_red.y,
+            invalid_only_red.width, invalid_only_red.height
+        ]).to_equal([0, 8, 4, 2])
+        expect([
+            invalid_only_blue.x, invalid_only_blue.y,
+            invalid_only_blue.width, invalid_only_blue.height
+        ]).to_equal([4, 8, 4, 2])
+        expect([
             dispatch_red.color, dispatch_blue.color,
-            full_red.color, full_blue.color
+            full_red.color, full_blue.color,
+            duplicate_dispatch_red.color, duplicate_dispatch_blue.color,
+            duplicate_full_red.color, duplicate_full_blue.color,
+            invalid_only_red.color, invalid_only_blue.color
         ]).to_equal([
+            0xFFDC2626u32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFF2563EBu32,
             0xFFDC2626u32, 0xFF2563EBu32,
             0xFFDC2626u32, 0xFF2563EBu32
         ])
 
         step("Render exact zero-gap Engine2D pixels")
-        val raster = Engine2dCompositorBackend.create_named(12, 4, "software")
+        val raster = Engine2dCompositorBackend.create_named(12, 10, "software")
         val rendered = raster.render_draw_ir_composition(result.composition, [])
         raster.shutdown()
         expect(rendered.skipped_command_count).to_equal(0)
@@ -166,6 +281,24 @@ describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
             0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
             0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
             0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
             0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
             0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
             0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
