@@ -6,6 +6,7 @@
 # @req REQ-WLM-004
 # @req REQ-WLM-005
 # @req REQ-WLM-006
+# @req REQ-WLM-007
 
 """
 # Web layout manager
@@ -31,7 +32,7 @@ fn system_change(node_id: i64, context_id: i64) -> WebLayoutChange:
         [], [], [], [], [], [], []
     )
 
-describe "REQ-WLM-001..REQ-WLM-006 web layout manager":
+describe "REQ-WLM-001..REQ-WLM-007 web layout manager":
     # @manual: show
     it "preserves the browser oracle through incremental framework execution":
         step("Capture the CPU layout oracle")
@@ -47,15 +48,18 @@ describe "REQ-WLM-001..REQ-WLM-006 web layout manager":
         val adapted = web_layout_adapt_cpu_oracle(browser, 7, execution, 4)
         expect(adapted.fault).to_equal("")
         expect(adapted.snapshot.nodes.len()).to_equal(browser.raw_boxes.bx.len())
+        expect(adapted.snapshot.text_requests.len()).to_be_greater_than(0)
+        expect(adapted.snapshot.text_results.len()).to_equal(adapted.snapshot.text_requests.len())
         var index: i64 = 0
         while index < adapted.snapshot.nodes.len():
             val node = adapted.snapshot.nodes[index]
             expect(node.id).to_equal(index + 1)
             expect(node.arena_index).to_equal(index)
-            expect(node.oracle_box.x).to_equal(browser.raw_boxes.bx[index] as i64)
-            expect(node.oracle_box.y).to_equal(browser.raw_boxes.by[index] as i64)
-            expect(node.oracle_box.width).to_equal(browser.raw_boxes.bw[index] as i64)
-            expect(node.oracle_box.height).to_equal(browser.raw_boxes.bh[index] as i64)
+            expect(node.dom_route_id).to_equal(index)
+            expect(adapted.snapshot.oracle_boxes[index].x).to_equal(browser.raw_boxes.bx[index] as i64)
+            expect(adapted.snapshot.oracle_boxes[index].y).to_equal(browser.raw_boxes.by[index] as i64)
+            expect(adapted.snapshot.oracle_boxes[index].width).to_equal(browser.raw_boxes.bw[index] as i64)
+            expect(adapted.snapshot.oracle_boxes[index].height).to_equal(browser.raw_boxes.bh[index] as i64)
             index = index + 1
 
         step("Classify browser layout islands")
@@ -78,6 +82,9 @@ describe "REQ-WLM-001..REQ-WLM-006 web layout manager":
         expect(full.result.fault).to_equal("")
         expect(incremental.result.fault).to_equal("")
         expect(incremental.result.layout.boxes).to_equal(full.result.layout.boxes)
+        expect(incremental.result.layout.fragments).to_equal(full.result.layout.fragments)
+        expect(incremental.result.layout.line_boxes).to_equal(full.result.layout.line_boxes)
+        expect(incremental.result.layout.overflows).to_equal(full.result.layout.overflows)
         expect(incremental.result.layout.receipt.visited_island_ids.len()).to_be_greater_than(0)
         expect(incremental.result.layout.receipt.visited_island_ids.len()).to_be_less_than(
             full.result.layout.islands.len()
@@ -89,7 +96,24 @@ describe "REQ-WLM-001..REQ-WLM-006 web layout manager":
         expect(incremental.result.hit_regions.len()).to_equal(browser.raw_boxes.bx.len())
         expect(incremental.result.hit_regions[0].generation).to_equal(7)
         expect(incremental.result.hit_regions[0].epoch).to_equal(2)
+        expect(incremental.result.hit_regions[0].structural_id).to_equal(1)
+        expect(incremental.result.hit_regions[0].dom_route_id).to_equal(0)
         expect(incremental.result.layout.mappings[0].kind).to_equal("LayoutOf")
+        expect(incremental.result.hit_mappings.len()).to_equal(
+            incremental.result.hit_regions.len()
+        )
+        expect(incremental.result.hit_mappings[0].kind).to_equal("HitRegionOf")
+        expect(incremental.result.hit_mappings[0].target_id).to_equal(
+            incremental.result.hit_regions[0].dom_route_id
+        )
+
+        step("Restrict viewport invalidation to changed geometry")
+        val viewport_change = web_layout_change(
+            WebLayoutMutationKind.Viewport,
+            StyleDifference.NoChange,
+            0, 0, [], [], [], [], [], [], [flex_id]
+        )
+        expect(web_layout_dirty_frontier([viewport_change]).invalidated_ids).to_equal([flex_id])
 
         val stale = web_layout_run_full(
             web_layout_manager(8), adapted.snapshot, web_layout_dirty_frontier([])
@@ -108,15 +132,22 @@ describe "REQ-WLM-001..REQ-WLM-006 web layout manager":
             formatting_boundary: seed.formatting_boundary,
             layout_contained: seed.layout_contained,
             style: seed.style,
+            text_content: seed.text_content,
+            font_family: seed.font_family,
+            font_size: seed.font_size,
+            language: seed.language,
             text_metrics: seed.text_metrics,
-            oracle_box: seed.oracle_box,
+            semantics: seed.semantics,
             estimated_work: seed.estimated_work,
-            text_measure_required: seed.text_measure_required,
-            required_fixed_point_iterations: seed.required_fixed_point_iterations
+            text_measure_required: seed.text_measure_required
         )
         val unsupported_snapshot = web_layout_snapshot(
             7, adapted.snapshot.viewport_fingerprint, [unsupported_node],
-            [], execution, 4
+            [], execution, 4,
+            adapted.snapshot.viewport_width,
+            adapted.snapshot.viewport_height,
+            adapted.snapshot.grid_tracks,
+            [adapted.snapshot.oracle_boxes[0]]
         )
         val unsupported = web_layout_run_full(
             web_layout_manager(7), unsupported_snapshot,

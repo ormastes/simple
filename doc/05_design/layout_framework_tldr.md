@@ -1,13 +1,13 @@
 # Layout Framework Detail Design — TLDR
 
-- Flat ordered node snapshot; oracle geometry stays authoritative.
-- Boundary nodes form islands; work is summed per island.
-- SCCs become deterministic topological waves.
+- Flat ordered semantic snapshot; oracle geometry is a separate verification channel.
+- Boundary nodes form islands; CPU/GPU costs are recorded per island.
+- SCCs become deterministic waves whose executed geometry hashes prove convergence.
 - Incremental runs name every visited island.
-- GPU choice includes transfers and synchronization; inline stays CPU.
+- GPU choice includes transfer/sync and becomes execution only after device readback parity.
+- Initial device packing is limited to fixed childless block/flex/grid roots.
 
 <!-- sdn-diagram:id=layout-framework-design-tldr -->
 ```sdn
-run: {discover: islands, schedule: scc_waves, execute: cost_policy, verify: geometry_and_receipts}
+run: {discover: islands, schedule: scc_waves, execute: consumer_ports, verify: oracle_and_receipts}
 ```
-

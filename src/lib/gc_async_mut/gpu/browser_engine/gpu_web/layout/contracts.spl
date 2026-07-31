@@ -1,6 +1,16 @@
 # Concrete browser consumer contracts for structural layout.
 
-use std.common.structural.layout.{LayoutBox, LayoutDependency, LayoutExecutionProfile, LayoutSnapshot}
+use std.common.structural.layout.{
+    LayoutBox,
+    LayoutDependency,
+    LayoutExecutionProfile,
+    LayoutMapping,
+    LayoutNodeSemantics,
+    LayoutSnapshot,
+    LayoutTextMeasureRequest,
+    LayoutTextMeasureResult,
+    layout_text_measure_request
+}
 
 val WEB_LAYOUT_CONTRACT_VERSION: i64 = 1
 
@@ -25,6 +35,7 @@ struct WebLayoutStyleFingerprint:
     geometry_hash: text
 
 struct WebLayoutResolvedTextMetrics:
+    available: bool
     font_identity: text
     advances: [i64]
     width: i64
@@ -45,17 +56,26 @@ struct WebLayoutNodeSnapshot:
     formatting_boundary: bool
     layout_contained: bool
     style: WebLayoutStyleFingerprint
+    text_content: text
+    font_family: text
+    font_size: i64
+    language: text
     text_metrics: WebLayoutResolvedTextMetrics
-    oracle_box: LayoutBox
+    semantics: LayoutNodeSemantics
     estimated_work: i64
     text_measure_required: bool
-    required_fixed_point_iterations: i64
 
 struct WebLayoutSnapshot:
     contract_version: i64
     generation: i64
     viewport_fingerprint: text
     nodes: [WebLayoutNodeSnapshot]
+    text_requests: [LayoutTextMeasureRequest]
+    text_results: [LayoutTextMeasureResult]
+    viewport_width: i64
+    viewport_height: i64
+    grid_tracks: [i64]
+    oracle_boxes: [LayoutBox]
     dependencies: [LayoutDependency]
     execution: LayoutExecutionProfile
     fixed_point_cap: i64
@@ -100,6 +120,7 @@ struct WebLayoutRunResult:
     epoch: i64
     layout: LayoutSnapshot
     hit_regions: [WebLayoutHitRegion]
+    hit_mappings: [LayoutMapping]
     stale: bool
     fault: text
 
@@ -219,13 +240,43 @@ fn web_layout_snapshot(
     nodes: [WebLayoutNodeSnapshot],
     dependencies: [LayoutDependency],
     execution: LayoutExecutionProfile,
-    fixed_point_cap: i64
+    fixed_point_cap: i64,
+    viewport_width: i64 = 0,
+    viewport_height: i64 = 0,
+    grid_tracks: [i64] = [],
+    oracle_boxes: [LayoutBox] = []
 ) -> WebLayoutSnapshot:
+    var text_requests: [LayoutTextMeasureRequest] = []
+    var text_results: [LayoutTextMeasureResult] = []
+    for node in nodes:
+        if node.text_measure_required:
+            text_requests.push(layout_text_measure_request(
+                node.id,
+                node.text_content,
+                node.font_family,
+                node.font_size,
+                node.language
+            ))
+            text_results.push(LayoutTextMeasureResult(
+                node_id: node.id,
+                available: node.text_metrics.available,
+                font_identity: node.text_metrics.font_identity,
+                width: node.text_metrics.width,
+                line_height: node.text_metrics.line_height,
+                advances: node.text_metrics.advances,
+                reason: ""
+            ))
     WebLayoutSnapshot(
         contract_version: WEB_LAYOUT_CONTRACT_VERSION,
         generation: generation,
         viewport_fingerprint: viewport_fingerprint,
         nodes: nodes,
+        text_requests: text_requests,
+        text_results: text_results,
+        viewport_width: viewport_width,
+        viewport_height: viewport_height,
+        grid_tracks: grid_tracks,
+        oracle_boxes: oracle_boxes,
         dependencies: dependencies,
         execution: execution,
         fixed_point_cap: fixed_point_cap

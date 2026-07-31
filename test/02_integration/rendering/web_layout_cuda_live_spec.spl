@@ -1,0 +1,81 @@
+"""Live CUDA proof for fixed-leaf block, flex, and grid layout batches."""
+
+use std.spec.{describe, it, expect}
+use std.common.structural.layout.*
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.{
+    web_cuda_layout_execution_port
+}
+
+fn fixed_leaf_semantics(profile_id: text, width: i64, height: i64) -> LayoutNodeSemantics:
+    val defaults = layout_node_semantics_default(profile_id)
+    val box = defaults.box
+    LayoutNodeSemantics(
+        first_child_id: 0,
+        next_sibling_id: 0,
+        child_count: 0,
+        node_kind: "normal",
+        display: profile_id,
+        box: LayoutBoxConstraints(
+            width: layout_length_px(width),
+            height: layout_length_px(height),
+            min_width_px: box.min_width_px,
+            max_width_px: box.max_width_px,
+            min_height_px: box.min_height_px,
+            max_height_px: box.max_height_px,
+            border_box: box.border_box,
+            padding: box.padding,
+            border: box.border,
+            margin_left: box.margin_left,
+            margin_top: box.margin_top,
+            margin_right: box.margin_right,
+            margin_bottom: box.margin_bottom,
+            margin_auto_bits: box.margin_auto_bits,
+            gap_px: box.gap_px,
+            row_gap_px: box.row_gap_px,
+            column_gap_px: box.column_gap_px
+        ),
+        flex: defaults.flex,
+        grid: defaults.grid,
+        gpu_admission_flags: 0
+    )
+
+fn live_cuda_layout(profile_id: text) -> LayoutSnapshot:
+    val nodes = [
+        layout_node(
+            1, 0, profile_id, true, false, 1, 100, false,
+            fixed_leaf_semantics(profile_id, 120, 40)
+        ),
+        layout_node(
+            2, 0, profile_id, true, false, 1, 100, false,
+            fixed_leaf_semantics(profile_id, 80, 24)
+        )
+    ]
+    val oracle = [
+        layout_box(1, 0, 0, 120, 40),
+        layout_box(2, 0, 0, 80, 24)
+    ]
+    val input = layout_input(
+        nodes, [], [1, 2],
+        layout_execution_profile(
+            "hybrid_vector_gpu", 1000, 1, 1, 24, 40, 1, 1, 1
+        ),
+        2, 640, 480, [], oracle
+    )
+    layout_run_full_with_ports(
+        input,
+        layout_text_measure_port_unavailable(),
+        layout_execution_port_oracle(oracle),
+        web_cuda_layout_execution_port(oracle)
+    )
+
+describe "web CUDA layout live proof":
+    it "computes fixed leaf geometry on-device for block flex and grid":
+        for profile_id in ["block", "flex", "grid"]:
+            val result = live_cuda_layout(profile_id)
+            expect(result.fault).to_equal("")
+            expect(result.backend).to_equal("hybrid_vector_gpu")
+            expect(result.boxes.len()).to_equal(2)
+            expect(result.execution_proof.submitted).to_equal(true)
+            expect(result.execution_proof.synchronized).to_equal(true)
+            expect(result.execution_proof.device_readback).to_equal(true)
+            expect(result.execution_proof.oracle_verified).to_equal(true)

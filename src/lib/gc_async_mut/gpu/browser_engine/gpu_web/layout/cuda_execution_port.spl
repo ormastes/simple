@@ -1,0 +1,299 @@
+"""CUDA execution port for the first exact browser layout slice."""
+
+use std.common.structural.layout.{
+    LAYOUT_LENGTH_PX,
+    LayoutBox,
+    LayoutExecutionPort,
+    LayoutExecutionProof,
+    LayoutExecutionRequest,
+    LayoutFragment,
+    LayoutIterationResult,
+    LayoutLineBox,
+    LayoutOverflow,
+    layout_box,
+    layout_fragment,
+    layout_overflow
+}
+use std.gc_async_mut.cuda.{
+    CUDA_SUCCESS, cuda_memcpy_dtoh, cuda_memcpy_htod
+}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.nogc_sync_mut.ptr.raw.{
+    raw_alloc, raw_free, raw_read_i32, raw_write_i64,
+    raw_write_u32s_checksum
+}
+
+val WEB_CUDA_LAYOUT_BLOCK_SIZE: i64 = 256
+val WEB_CUDA_LAYOUT_INPUT_WORDS: i64 = 3
+val WEB_CUDA_LAYOUT_OUTPUT_WORDS: i64 = 5
+val WEB_CUDA_LAYOUT_ARG_BYTES: i64 = 24
+
+class CudaLayoutExecutionPort:
+    oracle_boxes: [LayoutBox]
+
+fn _web_cuda_layout_ptx() -> text:
+    ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry web_layout_fixed_leaf(\n    .param .u64 input,\n    .param .u64 output,\n    .param .u32 count\n) {\n    .reg .pred %p;\n    .reg .b32 %r<12>;\n    .reg .b64 %rd<8>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [count];\n    setp.ge.u32 %p, %r3, %r4;\n    @%p bra done;\n    ld.param.u64 %rd0, [input];\n    ld.param.u64 %rd1, [output];\n    mul.lo.u32 %r5, %r3, 12;\n    cvt.u64.u32 %rd2, %r5;\n    add.u64 %rd3, %rd0, %rd2;\n    ld.global.u32 %r6, [%rd3];\n    ld.global.s32 %r7, [%rd3+4];\n    ld.global.s32 %r8, [%rd3+8];\n    mul.lo.u32 %r9, %r3, 20;\n    cvt.u64.u32 %rd4, %r9;\n    add.u64 %rd5, %rd1, %rd4;\n    st.global.u32 [%rd5], %r6;\n    mov.u32 %r10, 0;\n    st.global.u32 [%rd5+4], %r10;\n    st.global.u32 [%rd5+8], %r10;\n    st.global.s32 [%rd5+12], %r7;\n    st.global.s32 [%rd5+16], %r8;\ndone:\n    ret;\n}\n"
+
+fn _web_cuda_layout_contains(values: [i64], value: i64) -> bool:
+    for candidate in values:
+        if candidate == value:
+            return true
+    false
+
+fn _web_cuda_layout_selected(
+    request: LayoutExecutionRequest, node_id: i64
+) -> bool:
+    for island in request.islands:
+        if (
+            _web_cuda_layout_contains(
+                request.selected_island_ids, island.root_id
+            ) and
+            _web_cuda_layout_contains(island.node_ids, node_id)
+        ):
+            return true
+    false
+
+fn _web_cuda_layout_profile_supported(profile_id: text) -> bool:
+    profile_id == "block" or profile_id == "flex" or profile_id == "grid"
+
+fn _web_cuda_layout_admission_fault(
+    request: LayoutExecutionRequest
+) -> text:
+    var profile = ""
+    var selected_count: i64 = 0
+    for island in request.islands:
+        if _web_cuda_layout_contains(
+            request.selected_island_ids, island.root_id
+        ):
+            if not _web_cuda_layout_profile_supported(island.profile_id):
+                return "cuda-layout-profile-unsupported"
+            if profile == "":
+                profile = island.profile_id
+            elif profile != island.profile_id:
+                return "cuda-layout-batch-heterogeneous"
+            if island.node_ids.len() != 1:
+                return "cuda-layout-child-arrangement-unsupported"
+            selected_count = selected_count + 1
+    if selected_count == 0:
+        return "cuda-layout-empty-selection"
+    for node in request.input.nodes:
+        if _web_cuda_layout_selected(request, node.id):
+            val box = node.semantics.box
+            if node.id <= 0 or node.id > 2147483647:
+                return "cuda-layout-id-out-of-range"
+            if node.parent_id != 0 or node.semantics.child_count != 0:
+                return "cuda-layout-child-arrangement-unsupported"
+            if node.semantics.gpu_admission_flags != 0:
+                return "cuda-layout-semantic-pre-rejection"
+            if (
+                box.width.unit != LAYOUT_LENGTH_PX or
+                box.height.unit != LAYOUT_LENGTH_PX or
+                box.width.value <= 0 or box.height.value <= 0 or
+                box.width.value > 2147483647 or
+                box.height.value > 2147483647
+            ):
+                return "cuda-layout-fixed-size-required"
+            if (
+                box.padding.left != 0 or box.padding.top != 0 or
+                box.padding.right != 0 or box.padding.bottom != 0 or
+                box.border.left != 0 or box.border.top != 0 or
+                box.border.right != 0 or box.border.bottom != 0 or
+                box.margin_left.value != 0 or box.margin_top.value != 0 or
+                box.margin_right.value != 0 or box.margin_bottom.value != 0 or
+                box.margin_auto_bits != 0
+            ):
+                return "cuda-layout-box-model-unsupported"
+    ""
+
+fn _web_cuda_layout_oracle_for(
+    oracle_boxes: [LayoutBox], id: i64
+) -> LayoutBox:
+    for box in oracle_boxes:
+        if box.id == id:
+            return box
+    layout_box(id, 0, 0, 0, 0)
+
+fn _web_cuda_layout_boxes_equal(
+    actual: [LayoutBox], oracle_boxes: [LayoutBox]
+) -> bool:
+    for box in actual:
+        val oracle = _web_cuda_layout_oracle_for(oracle_boxes, box.id)
+        if (
+            box.id != oracle.id or box.x != oracle.x or
+            box.y != oracle.y or box.width != oracle.width or
+            box.height != oracle.height
+        ):
+            return false
+    true
+
+fn _web_cuda_layout_result(
+    candidate: text,
+    boxes: [LayoutBox],
+    submitted: bool,
+    synchronized: bool,
+    readback: bool,
+    verified: bool,
+    fault: text
+) -> LayoutIterationResult:
+    var fragments: [LayoutFragment] = []
+    var overflows: [LayoutOverflow] = []
+    if fault == "":
+        for box in boxes:
+            fragments.push(layout_fragment(
+                box.id, box.id, box, "principal", 0
+            ))
+            overflows.push(layout_overflow(
+                box.id, box, box.width, box.height
+            ))
+    LayoutIterationResult(
+        boxes: boxes,
+        fragments: fragments,
+        line_boxes: [] as [LayoutLineBox],
+        overflows: overflows,
+        proof: LayoutExecutionProof(
+            candidate_backend: candidate,
+            executed_backend: "hybrid_vector_gpu",
+            executed: submitted,
+            submitted: submitted,
+            synchronized: synchronized,
+            device_readback: readback,
+            oracle_verified: verified,
+            reason: fault
+        ),
+        fault: fault
+    )
+
+fn _web_cuda_layout_cleanup(
+    session: CudaSession,
+    device_input: i64,
+    device_output: i64,
+    host_input: i64,
+    host_output: i64,
+    values_ptr: i64,
+    args_ptr: i64,
+    input_bytes: i64,
+    output_bytes: i64
+):
+    if device_input > 0: session.free(device_input)
+    if device_output > 0: session.free(device_output)
+    if host_input != 0: raw_free(host_input, input_bytes)
+    if host_output != 0: raw_free(host_output, output_bytes)
+    if values_ptr != 0: raw_free(values_ptr, WEB_CUDA_LAYOUT_ARG_BYTES)
+    if args_ptr != 0: raw_free(args_ptr, WEB_CUDA_LAYOUT_ARG_BYTES)
+    session.shutdown()
+
+impl LayoutExecutionPort for CudaLayoutExecutionPort:
+    fn backend_name() -> text:
+        "hybrid_vector_gpu"
+
+    fn execute(request: LayoutExecutionRequest) -> LayoutIterationResult:
+        val admission_fault = _web_cuda_layout_admission_fault(request)
+        if admission_fault != "":
+            return _web_cuda_layout_result(
+                request.candidate_backend, [], false, false, false, false,
+                admission_fault
+            )
+        var packed: [u32] = []
+        for node in request.input.nodes:
+            if _web_cuda_layout_selected(request, node.id):
+                packed.push(node.id as u32)
+                packed.push(node.semantics.box.width.value as u32)
+                packed.push(node.semantics.box.height.value as u32)
+        val count = packed.len().to_i64() / WEB_CUDA_LAYOUT_INPUT_WORDS
+        val input_bytes = packed.len().to_i64() * 4
+        val output_bytes = count * WEB_CUDA_LAYOUT_OUTPUT_WORDS * 4
+        var session = CudaSession.create()
+        if session.init() != CUDA_SUCCESS or session.activate() != CUDA_SUCCESS:
+            session.shutdown()
+            return _web_cuda_layout_result(
+                request.candidate_backend, [], false, false, false, false,
+                "cuda-layout-init-failed"
+            )
+        if session.load_module(_web_cuda_layout_ptx()) <= 0:
+            session.shutdown()
+            return _web_cuda_layout_result(
+                request.candidate_backend, [], false, false, false, false,
+                "cuda-layout-module-load-failed"
+            )
+        val device_input = session.alloc(input_bytes)
+        val device_output = session.alloc(output_bytes)
+        val host_input = raw_alloc(input_bytes)
+        val host_output = raw_alloc(output_bytes)
+        val values_ptr = raw_alloc(WEB_CUDA_LAYOUT_ARG_BYTES)
+        val args_ptr = raw_alloc(WEB_CUDA_LAYOUT_ARG_BYTES)
+        if (
+            device_input <= 0 or device_output <= 0 or host_input == 0 or
+            host_output == 0 or values_ptr == 0 or args_ptr == 0
+        ):
+            _web_cuda_layout_cleanup(
+                session, device_input, device_output, host_input, host_output,
+                values_ptr, args_ptr, input_bytes, output_bytes
+            )
+            return _web_cuda_layout_result(
+                request.candidate_backend, [], false, false, false, false,
+                "cuda-layout-allocation-failed"
+            )
+        raw_write_u32s_checksum(host_input, packed, packed.len().to_i64())
+        val uploaded = (
+            cuda_memcpy_htod(device_input, host_input, input_bytes) ==
+            CUDA_SUCCESS
+        )
+        raw_write_i64(values_ptr, 0, device_input)
+        raw_write_i64(values_ptr, 8, device_output)
+        raw_write_i64(values_ptr, 16, count)
+        raw_write_i64(args_ptr, 0, values_ptr)
+        raw_write_i64(args_ptr, 8, values_ptr + 8)
+        raw_write_i64(args_ptr, 16, values_ptr + 16)
+        val submitted = uploaded and session.launch_kernel_args(
+            "web_layout_fixed_leaf",
+            (count + WEB_CUDA_LAYOUT_BLOCK_SIZE - 1) /
+                WEB_CUDA_LAYOUT_BLOCK_SIZE,
+            1, 1, WEB_CUDA_LAYOUT_BLOCK_SIZE, 1, 1, args_ptr
+        ) == CUDA_SUCCESS
+        val synchronized = submitted and session.sync() == CUDA_SUCCESS
+        val readback = synchronized and cuda_memcpy_dtoh(
+            host_output, device_output, output_bytes
+        ) == CUDA_SUCCESS
+        var boxes: [LayoutBox] = []
+        if readback:
+            var index: i64 = 0
+            while index < count:
+                val offset = index * WEB_CUDA_LAYOUT_OUTPUT_WORDS * 4
+                boxes.push(layout_box(
+                    raw_read_i32(host_output, offset) as i64,
+                    raw_read_i32(host_output, offset + 4) as i64,
+                    raw_read_i32(host_output, offset + 8) as i64,
+                    raw_read_i32(host_output, offset + 12) as i64,
+                    raw_read_i32(host_output, offset + 16) as i64
+                ))
+                index = index + 1
+        val verified = readback and _web_cuda_layout_boxes_equal(
+            boxes, self.oracle_boxes
+        )
+        _web_cuda_layout_cleanup(
+            session, device_input, device_output, host_input, host_output,
+            values_ptr, args_ptr, input_bytes, output_bytes
+        )
+        val fault = if not uploaded:
+            "cuda-layout-upload-failed"
+        elif not submitted:
+            "cuda-layout-submit-failed"
+        elif not synchronized:
+            "cuda-layout-sync-failed"
+        elif not readback:
+            "cuda-layout-readback-failed"
+        elif not verified:
+            "cuda-layout-oracle-mismatch"
+        else:
+            ""
+        _web_cuda_layout_result(
+            request.candidate_backend, boxes, submitted, synchronized,
+            readback, verified, fault
+        )
+
+fn web_cuda_layout_execution_port(
+    oracle_boxes: [LayoutBox]
+) -> CudaLayoutExecutionPort:
+    CudaLayoutExecutionPort(oracle_boxes: oracle_boxes)
+
+export CudaLayoutExecutionPort, web_cuda_layout_execution_port

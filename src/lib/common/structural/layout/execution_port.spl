@@ -1,0 +1,180 @@
+# Consumer execution boundary for CPU and accelerated spatial layout.
+
+use std.common.structural.layout.types.{
+    LayoutBox,
+    LayoutExecutionProof,
+    LayoutFragment,
+    LayoutInputSnapshot,
+    LayoutIsland,
+    LayoutLineBox,
+    LayoutOverflow,
+    LayoutTextMeasureResult,
+    LayoutWave,
+    layout_fragment,
+    layout_line_box,
+    layout_overflow
+}
+use std.common.structural.layout.profile.{layout_serial_cpu_profile}
+
+struct LayoutExecutionRequest:
+    input: LayoutInputSnapshot
+    islands: [LayoutIsland]
+    waves: [LayoutWave]
+    selected_island_ids: [i64]
+    previous_boxes: [LayoutBox]
+    text_results: [LayoutTextMeasureResult]
+    candidate_backend: text
+    iteration: i64
+
+struct LayoutIterationResult:
+    boxes: [LayoutBox]
+    fragments: [LayoutFragment]
+    line_boxes: [LayoutLineBox]
+    overflows: [LayoutOverflow]
+    proof: LayoutExecutionProof
+    fault: text
+
+trait LayoutExecutionPort:
+    fn backend_name() -> text
+    fn execute(request: LayoutExecutionRequest) -> LayoutIterationResult
+
+class UnavailableLayoutExecutionPort:
+    backend: text
+    reason: text
+
+impl LayoutExecutionPort for UnavailableLayoutExecutionPort:
+    fn backend_name() -> text:
+        self.backend
+
+    fn execute(request: LayoutExecutionRequest) -> LayoutIterationResult:
+        LayoutIterationResult(
+            boxes: [],
+            fragments: [],
+            line_boxes: [],
+            overflows: [],
+            proof: LayoutExecutionProof(
+                candidate_backend: request.candidate_backend,
+                executed_backend: self.backend,
+                executed: false,
+                submitted: false,
+                synchronized: false,
+                device_readback: false,
+                oracle_verified: false,
+                reason: self.reason
+            ),
+            fault: self.reason
+        )
+
+class OracleLayoutExecutionPort:
+    oracle_boxes: [LayoutBox]
+
+fn _layout_port_contains(values: [i64], value: i64) -> bool:
+    for candidate in values:
+        if candidate == value:
+            return true
+    false
+
+fn _layout_port_island_for_node(islands: [LayoutIsland], node_id: i64) -> i64:
+    for island in islands:
+        if _layout_port_contains(island.node_ids, node_id):
+            return island.root_id
+    0
+
+fn _layout_port_profile(input: LayoutInputSnapshot, node_id: i64) -> text:
+    for node in input.nodes:
+        if node.id == node_id:
+            return node.profile_id
+    ""
+
+fn _layout_port_text_end(input: LayoutInputSnapshot, node_id: i64) -> i64:
+    for request in input.text_requests:
+        if request.node_id == node_id:
+            return request.content.len()
+    0
+
+fn _layout_port_arranged_boxes(request: LayoutExecutionRequest, oracle_boxes: [LayoutBox]) -> [LayoutBox]:
+    var arranged: [LayoutBox] = []
+    for island in request.islands:
+        if _layout_port_contains(request.selected_island_ids, island.root_id):
+            val profile = layout_serial_cpu_profile(island.profile_id)
+            val island_boxes = profile.arrange(request.input, [island])
+            for box in island_boxes:
+                arranged.push(box)
+    var ordered: [LayoutBox] = []
+    for oracle_box in oracle_boxes:
+        for box in arranged:
+            if box.id == oracle_box.id:
+                ordered.push(box)
+    ordered
+
+impl LayoutExecutionPort for OracleLayoutExecutionPort:
+    fn backend_name() -> text:
+        "serial_cpu"
+
+    fn execute(request: LayoutExecutionRequest) -> LayoutIterationResult:
+        var boxes: [LayoutBox] = []
+        var fragments: [LayoutFragment] = []
+        var line_boxes: [LayoutLineBox] = []
+        var overflows: [LayoutOverflow] = []
+        for box in _layout_port_arranged_boxes(request, self.oracle_boxes):
+            val island_id = _layout_port_island_for_node(request.islands, box.id)
+            if _layout_port_contains(request.selected_island_ids, island_id):
+                boxes.push(box)
+                fragments.push(layout_fragment(box.id, box.id, box, "principal", 0))
+                if _layout_port_profile(request.input, box.id) == "inline":
+                    line_boxes.push(layout_line_box(
+                        box.id,
+                        0,
+                        box,
+                        0,
+                        _layout_port_text_end(request.input, box.id)
+                    ))
+                overflows.push(layout_overflow(box.id, box, box.width, box.height))
+        LayoutIterationResult(
+            boxes: boxes,
+            fragments: fragments,
+            line_boxes: line_boxes,
+            overflows: overflows,
+            proof: LayoutExecutionProof(
+                candidate_backend: request.candidate_backend,
+                executed_backend: "serial_cpu",
+                executed: true,
+                submitted: false,
+                synchronized: true,
+                device_readback: false,
+                oracle_verified: true,
+                reason: ""
+            ),
+            fault: ""
+        )
+
+fn layout_execution_request(
+    input: LayoutInputSnapshot,
+    islands: [LayoutIsland],
+    waves: [LayoutWave],
+    selected_island_ids: [i64],
+    previous_boxes: [LayoutBox],
+    text_results: [LayoutTextMeasureResult],
+    candidate_backend: text,
+    iteration: i64
+) -> LayoutExecutionRequest:
+    LayoutExecutionRequest(
+        input: input,
+        islands: islands,
+        waves: waves,
+        selected_island_ids: selected_island_ids,
+        previous_boxes: previous_boxes,
+        text_results: text_results,
+        candidate_backend: candidate_backend,
+        iteration: iteration
+    )
+
+fn layout_execution_port_unavailable(backend: text, reason: text) -> UnavailableLayoutExecutionPort:
+    UnavailableLayoutExecutionPort(backend: backend, reason: reason)
+
+fn layout_execution_port_oracle(oracle_boxes: [LayoutBox]) -> OracleLayoutExecutionPort:
+    OracleLayoutExecutionPort(oracle_boxes: oracle_boxes)
+
+export LayoutExecutionRequest, LayoutIterationResult, LayoutExecutionPort
+export UnavailableLayoutExecutionPort, OracleLayoutExecutionPort
+export layout_execution_request, layout_execution_port_unavailable, layout_execution_port_oracle

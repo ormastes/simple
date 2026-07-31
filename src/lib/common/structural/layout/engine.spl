@@ -3,9 +3,26 @@
 use std.common.hash.djb2.{djb2_hash_text}
 use std.common.structural.execution.contracts.{STRUCTURAL_EXECUTION_CONTRACT_VERSION, CostEstimate, LayoutExecutionProfile, StageReceipt}
 use std.common.structural.mapping.contracts.{LayoutMapping, layout_of_mapping, mapping_graph}
+use std.common.structural.layout.execution_port.{
+    LayoutExecutionPort,
+    LayoutIterationResult,
+    layout_execution_port_oracle,
+    layout_execution_port_unavailable,
+    layout_execution_request
+}
 use std.common.structural.layout.profile.{TextMeasurePort, layout_profile_gpu_eligible}
 use std.common.structural.layout.scheduler.{layout_discover_islands, layout_schedule_waves}
 use std.common.structural.layout.types.*
+
+struct _LayoutMeasured:
+    results: [LayoutTextMeasureResult]
+    reason: text
+
+struct _LayoutPortRun:
+    result: LayoutIterationResult
+    converged: bool
+    iterations: i64
+    reason: text
 
 fn _layout_contains(ids: [i64], id: i64) -> bool:
     for candidate in ids:
@@ -17,6 +34,8 @@ fn layout_cost_estimate(profile: LayoutExecutionProfile) -> CostEstimate:
     val transfer_bytes = profile.host_to_device_bytes + profile.device_to_host_bytes
     val transfer_kib = (transfer_bytes + 1023) / 1024
     CostEstimate(
+        island_root_id: 0,
+        estimated_work: 0,
         cpu_us: profile.cpu_us,
         gpu_kernel_us: profile.gpu_kernel_us,
         scheduling_us: profile.scheduling_us,
@@ -26,17 +45,55 @@ fn layout_cost_estimate(profile: LayoutExecutionProfile) -> CostEstimate:
         predicted_gpu_us: profile.gpu_kernel_us + profile.scheduling_us + transfer_kib * profile.transfer_us_per_kib + profile.synchronization_points * profile.sync_us
     )
 
+fn _layout_weight(island: LayoutIsland, all_zero: bool) -> i64:
+    if all_zero: 1
+    elif island.estimated_work > 0: island.estimated_work
+    else: 0
+
+fn _layout_share(total: i64, before: i64, after: i64, total_weight: i64) -> i64:
+    (total * after) / total_weight - (total * before) / total_weight
+
+fn _layout_island_costs(islands: [LayoutIsland], profile: LayoutExecutionProfile) -> [CostEstimate]:
+    if islands.len() == 0:
+        return []
+    var total_weight: i64 = 0
+    for island in islands:
+        if island.estimated_work > 0:
+            total_weight = total_weight + island.estimated_work
+    val all_zero = total_weight == 0
+    if all_zero:
+        total_weight = islands.len()
+    val aggregate = layout_cost_estimate(profile)
+    var cumulative: i64 = 0
+    var costs: [CostEstimate] = []
+    for island in islands:
+        val before = cumulative
+        cumulative = cumulative + _layout_weight(island, all_zero)
+        costs.push(CostEstimate(
+            island_root_id: island.root_id,
+            estimated_work: island.estimated_work,
+            cpu_us: _layout_share(profile.cpu_us, before, cumulative, total_weight),
+            gpu_kernel_us: _layout_share(profile.gpu_kernel_us, before, cumulative, total_weight),
+            scheduling_us: _layout_share(profile.scheduling_us, before, cumulative, total_weight),
+            host_to_device_bytes: _layout_share(profile.host_to_device_bytes, before, cumulative, total_weight),
+            device_to_host_bytes: _layout_share(profile.device_to_host_bytes, before, cumulative, total_weight),
+            synchronization_points: _layout_share(profile.synchronization_points, before, cumulative, total_weight),
+            predicted_gpu_us: _layout_share(aggregate.predicted_gpu_us, before, cumulative, total_weight)
+        ))
+    costs
+
 fn layout_choose_backend(islands: [LayoutIsland], profile: LayoutExecutionProfile) -> LayoutBackendDecision:
     val gpu_us = layout_cost_estimate(profile).predicted_gpu_us
     if profile.mode != "hybrid_vector_gpu":
         return LayoutBackendDecision(backend: "serial_cpu", reason: "gpu-mode-disabled", cpu_us: profile.cpu_us, gpu_us: gpu_us)
     if islands.len() == 0:
         return LayoutBackendDecision(backend: "serial_cpu", reason: "empty-layout", cpu_us: profile.cpu_us, gpu_us: gpu_us)
-
     val batch_profile = islands[0].profile_id
     for island in islands:
         if island.text_measure_required:
             return LayoutBackendDecision(backend: "serial_cpu", reason: "text-measure-required", cpu_us: profile.cpu_us, gpu_us: gpu_us)
+        if island.gpu_admission_flags != 0:
+            return LayoutBackendDecision(backend: "serial_cpu", reason: "unsupported-gpu-semantics", cpu_us: profile.cpu_us, gpu_us: gpu_us)
         if not layout_profile_gpu_eligible(island.profile_id):
             return LayoutBackendDecision(backend: "serial_cpu", reason: "unsupported-gpu-profile", cpu_us: profile.cpu_us, gpu_us: gpu_us)
         if island.profile_id != batch_profile:
@@ -46,10 +103,13 @@ fn layout_choose_backend(islands: [LayoutIsland], profile: LayoutExecutionProfil
     LayoutBackendDecision(backend: "hybrid_vector_gpu", reason: "", cpu_us: profile.cpu_us, gpu_us: gpu_us)
 
 fn _layout_oracle_boxes(input: LayoutInputSnapshot) -> [LayoutBox]:
-    var boxes: [LayoutBox] = []
-    for node in input.nodes:
-        boxes.push(node.oracle_box)
-    boxes
+    input.oracle_boxes
+
+fn _layout_oracle_box(input: LayoutInputSnapshot, node_id: i64) -> LayoutBox:
+    for box in input.oracle_boxes:
+        if box.id == node_id:
+            return box
+    layout_box(node_id, 0, 0, 0, 0)
 
 fn _layout_geometry_hash(boxes: [LayoutBox]) -> text:
     var encoded = "layout-v1"
@@ -57,10 +117,27 @@ fn _layout_geometry_hash(boxes: [LayoutBox]) -> text:
         encoded = encoded + "|" + box.id.to_text() + ":" + box.x.to_text() + "," + box.y.to_text() + "," + box.width.to_text() + "," + box.height.to_text()
     djb2_hash_text(encoded).to_text()
 
+fn _layout_boxes_equal(actual: [LayoutBox], oracle: [LayoutBox]) -> bool:
+    if actual.len() != oracle.len():
+        return false
+    var index: i64 = 0
+    while index < actual.len():
+        val left = actual[index]
+        val right = oracle[index]
+        if (left.id != right.id or left.x != right.x or left.y != right.y or
+            left.width != right.width or left.height != right.height):
+            return false
+        index = index + 1
+    true
+
 fn _layout_oracle_fault(input: LayoutInputSnapshot) -> text:
-    for node in input.nodes:
-        if node.oracle_box.id != node.id:
+    if input.oracle_boxes.len() != input.nodes.len():
+        return "oracle-shape-mismatch"
+    var index: i64 = 0
+    while index < input.nodes.len():
+        if input.oracle_boxes[index].id != input.nodes[index].id:
             return "oracle-id-mismatch"
+        index = index + 1
     ""
 
 fn _layout_island_for_node(islands: [LayoutIsland], node_id: i64) -> i64:
@@ -84,8 +161,6 @@ fn _layout_dirty_island_ids(input: LayoutInputSnapshot, islands: [LayoutIsland])
                 dirty = true
         if dirty:
             selected.push(island.root_id)
-
-    # A dirty consumer needs every transitive producer used to compute it.
     var changed = true
     while changed:
         changed = false
@@ -108,6 +183,13 @@ fn _layout_selected_islands(islands: [LayoutIsland], selected_ids: [i64]) -> [La
             selected.push(island)
     selected
 
+fn _layout_selected_boxes(input: LayoutInputSnapshot, islands: [LayoutIsland], selected_ids: [i64]) -> [LayoutBox]:
+    var boxes: [LayoutBox] = []
+    for node in input.nodes:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, node.id)):
+            boxes.push(_layout_oracle_box(input, node.id))
+    boxes
+
 fn _layout_selected_waves(waves: [LayoutWave], selected_ids: [i64]) -> [LayoutWave]:
     var selected_waves: [LayoutWave] = []
     for wave in waves:
@@ -127,87 +209,337 @@ fn _layout_mappings(islands: [LayoutIsland], selected_ids: [i64]) -> [LayoutMapp
                 mappings.push(layout_of_mapping(node_id, node_id))
     mappings
 
-fn _layout_text_fault(islands: [LayoutIsland], text_port: TextMeasurePort) -> text:
+fn _layout_text_end(input: LayoutInputSnapshot, node_id: i64) -> i64:
+    for request in input.text_requests:
+        if request.node_id == node_id:
+            return request.content.len()
+    0
+
+fn _layout_merge_fragments(
+    input: LayoutInputSnapshot,
+    islands: [LayoutIsland],
+    selected_ids: [i64],
+    selected: [LayoutFragment]
+) -> [LayoutFragment]:
+    var merged: [LayoutFragment] = []
+    for node in input.nodes:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, node.id)):
+            for fragment in selected:
+                if fragment.node_id == node.id:
+                    merged.push(fragment)
+        else:
+            val box = _layout_oracle_box(input, node.id)
+            merged.push(layout_fragment(node.id, node.id, box, "principal", 0))
+    merged
+
+fn _layout_merge_line_boxes(
+    input: LayoutInputSnapshot,
+    islands: [LayoutIsland],
+    selected_ids: [i64],
+    selected: [LayoutLineBox]
+) -> [LayoutLineBox]:
+    var merged: [LayoutLineBox] = []
+    for node in input.nodes:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, node.id)):
+            for line_box in selected:
+                if line_box.node_id == node.id:
+                    merged.push(line_box)
+        elif node.profile_id == "inline":
+            merged.push(layout_line_box(node.id, 0, _layout_oracle_box(input, node.id), 0, _layout_text_end(input, node.id)))
+    merged
+
+fn _layout_merge_overflows(
+    input: LayoutInputSnapshot,
+    islands: [LayoutIsland],
+    selected_ids: [i64],
+    selected: [LayoutOverflow]
+) -> [LayoutOverflow]:
+    var merged: [LayoutOverflow] = []
+    for node in input.nodes:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, node.id)):
+            for overflow in selected:
+                if overflow.node_id == node.id:
+                    merged.push(overflow)
+        else:
+            val box = _layout_oracle_box(input, node.id)
+            merged.push(layout_overflow(node.id, box, box.width, box.height))
+    merged
+
+fn _layout_selected_text_requests(input: LayoutInputSnapshot, islands: [LayoutIsland], selected_ids: [i64]) -> [LayoutTextMeasureRequest]:
+    var requests: [LayoutTextMeasureRequest] = []
+    for request in input.text_requests:
+        if _layout_contains(selected_ids, _layout_island_for_node(islands, request.node_id)):
+            requests.push(request)
+    requests
+
+fn _layout_measure_text(input: LayoutInputSnapshot, islands: [LayoutIsland], selected_ids: [i64], text_port: TextMeasurePort) -> _LayoutMeasured:
+    var required = false
     for island in islands:
-        if island.text_measure_required:
-            val measured = text_port.measure("", 0, "")
-            if not measured.available:
-                if measured.reason != "":
-                    return measured.reason
-                return "text-measure-unavailable"
+        if _layout_contains(selected_ids, island.root_id) and island.text_measure_required:
+            required = true
+    if not required:
+        return _LayoutMeasured(results: [], reason: "")
+    val requests = _layout_selected_text_requests(input, islands, selected_ids)
+    if requests.len() == 0:
+        return _LayoutMeasured(results: [], reason: "text-measure-unavailable")
+    val results = text_port.measure(requests)
+    for request in requests:
+        var found = false
+        for result in results:
+            if result.node_id == request.node_id:
+                found = true
+                if not result.available:
+                    return _LayoutMeasured(results: results, reason: if result.reason == "": "text-measure-unavailable" else: result.reason)
+        if not found:
+            return _LayoutMeasured(results: results, reason: "text-measure-result-missing")
+    _LayoutMeasured(results: results, reason: "")
+
+fn _layout_empty_result(candidate_backend: text, reason: text) -> LayoutIterationResult:
+    LayoutIterationResult(
+        boxes: [],
+        fragments: [],
+        line_boxes: [],
+        overflows: [],
+        proof: LayoutExecutionProof(
+            candidate_backend: candidate_backend,
+            executed_backend: "",
+            executed: false,
+            submitted: false,
+            synchronized: false,
+            device_readback: false,
+            oracle_verified: false,
+            reason: reason
+        ),
+        fault: reason
+    )
+
+fn _layout_has_selected_cycle(cyclic_ids: [i64], selected_ids: [i64]) -> bool:
+    for island_id in cyclic_ids:
+        if _layout_contains(selected_ids, island_id):
+            return true
+    false
+
+fn _layout_run_port(
+    port: LayoutExecutionPort,
+    input: LayoutInputSnapshot,
+    islands: [LayoutIsland],
+    waves: [LayoutWave],
+    selected_ids: [i64],
+    text_results: [LayoutTextMeasureResult],
+    candidate_backend: text,
+    cyclic: bool
+) -> _LayoutPortRun:
+    var previous: [LayoutBox] = []
+    var final_result = _layout_empty_result(candidate_backend, "execution-not-started")
+    var iteration: i64 = 0
+    val limit = if cyclic: input.fixed_point_cap else: 1
+    while iteration < limit:
+        iteration = iteration + 1
+        val execution_input = LayoutInputSnapshot(
+            contract_version: input.contract_version,
+            nodes: input.nodes,
+            dependencies: input.dependencies,
+            invalidated_ids: input.invalidated_ids,
+            text_requests: input.text_requests,
+            viewport_width: input.viewport_width,
+            viewport_height: input.viewport_height,
+            grid_tracks: input.grid_tracks,
+            oracle_boxes: [],
+            execution: input.execution,
+            fixed_point_cap: input.fixed_point_cap
+        )
+        final_result = port.execute(layout_execution_request(
+            execution_input,
+            islands,
+            waves,
+            selected_ids,
+            previous,
+            text_results,
+            candidate_backend,
+            iteration
+        ))
+        if final_result.fault != "":
+            return _LayoutPortRun(result: final_result, converged: false, iterations: iteration, reason: final_result.fault)
+        if not cyclic or (iteration > 1 and _layout_geometry_hash(final_result.boxes) == _layout_geometry_hash(previous)):
+            return _LayoutPortRun(result: final_result, converged: true, iterations: iteration, reason: "")
+        previous = final_result.boxes
+    _LayoutPortRun(result: final_result, converged: false, iterations: iteration, reason: "non-convergent")
+
+fn _layout_gpu_rejection(run: _LayoutPortRun, candidate_backend: text, oracle: [LayoutBox]) -> text:
+    if run.reason != "": return run.reason
+    val proof = run.result.proof
+    if not run.converged: return "non-convergent"
+    if not proof.executed: return "gpu-not-executed"
+    if proof.executed_backend != candidate_backend: return "gpu-backend-mismatch"
+    if not proof.submitted: return "gpu-not-submitted"
+    if not proof.synchronized: return "gpu-not-synchronized"
+    if not proof.device_readback: return "gpu-readback-missing"
+    if not proof.oracle_verified or not _layout_boxes_equal(run.result.boxes, oracle): return "gpu-oracle-mismatch"
     ""
 
-fn _layout_snapshot(input: LayoutInputSnapshot, text_port: TextMeasurePort, incremental: bool) -> LayoutSnapshot:
+fn _layout_cpu_rejection(run: _LayoutPortRun, oracle: [LayoutBox]) -> text:
+    if run.reason != "": return run.reason
+    if not run.converged: return "non-convergent"
+    if not run.result.proof.executed: return "cpu-not-executed"
+    if not _layout_boxes_equal(run.result.boxes, oracle): return "cpu-oracle-mismatch"
+    ""
+
+fn _layout_merge_boxes(oracle: [LayoutBox], selected: [LayoutBox]) -> [LayoutBox]:
+    var merged: [LayoutBox] = []
+    for oracle_box in oracle:
+        var replacement = oracle_box
+        for selected_box in selected:
+            if selected_box.id == oracle_box.id:
+                replacement = selected_box
+        merged.push(replacement)
+    merged
+
+fn _layout_snapshot_with_ports(
+    input: LayoutInputSnapshot,
+    text_port: TextMeasurePort,
+    cpu_port: LayoutExecutionPort,
+    gpu_port: LayoutExecutionPort,
+    incremental: bool
+) -> LayoutSnapshot:
     val discovery = layout_discover_islands(input)
-    val boxes = _layout_oracle_boxes(input)
-    val geometry_hash = _layout_geometry_hash(boxes)
     val schedule = layout_schedule_waves(discovery.islands, input.dependencies, input.fixed_point_cap)
     val selected_ids = if incremental: _layout_dirty_island_ids(input, discovery.islands) else: _layout_all_island_ids(discovery.islands)
     val selected_islands = _layout_selected_islands(discovery.islands, selected_ids)
-    val backend_decision = layout_choose_backend(selected_islands, input.execution)
+    val selected_oracle = _layout_selected_boxes(input, discovery.islands, selected_ids)
+    val all_oracle = _layout_oracle_boxes(input)
+    val visible_waves = if incremental: _layout_selected_waves(schedule.waves, selected_ids) else: schedule.waves
+    val decision = layout_choose_backend(selected_islands, input.execution)
+    val cyclic = _layout_has_selected_cycle(schedule.cyclic_island_ids, selected_ids)
 
     var fault = discovery.fault
-    if fault == "" and schedule.reason != "":
-        fault = schedule.reason
-    if fault == "":
-        fault = _layout_oracle_fault(input)
+    if fault == "" and schedule.reason != "": fault = schedule.reason
+    if fault == "": fault = _layout_oracle_fault(input)
+    val measured = if fault == "": _layout_measure_text(input, discovery.islands, selected_ids, text_port) else: _LayoutMeasured(results: [], reason: "")
 
-    var backend = backend_decision.backend
-    var fallback_reason = backend_decision.reason
-    if fault == "":
-        val text_fault = _layout_text_fault(selected_islands, text_port)
-        if text_fault != "":
-            backend = "serial_cpu"
-            fallback_reason = text_fault
-    else:
-        backend = "serial_cpu"
-        fallback_reason = fault
+    var fallback_reason = decision.reason
+    if fault != "": fallback_reason = fault
+    if measured.reason != "": fallback_reason = measured.reason
+    var run = _LayoutPortRun(
+        result: _layout_empty_result(decision.backend, fault),
+        converged: false,
+        iterations: 0,
+        reason: fault
+    )
+    var backend = "serial_cpu"
+    if fault == "" and decision.backend == "hybrid_vector_gpu" and measured.reason == "":
+        val gpu_run = _layout_run_port(gpu_port, input, discovery.islands, visible_waves, selected_ids, measured.results, decision.backend, cyclic)
+        val gpu_rejection = _layout_gpu_rejection(gpu_run, decision.backend, selected_oracle)
+        if gpu_rejection == "":
+            run = gpu_run
+            backend = decision.backend
+            fallback_reason = ""
+        else:
+            fallback_reason = gpu_rejection
+    if fault == "" and backend != "hybrid_vector_gpu":
+        run = _layout_run_port(cpu_port, input, discovery.islands, visible_waves, selected_ids, measured.results, decision.backend, cyclic)
+        val cpu_rejection = _layout_cpu_rejection(run, selected_oracle)
+        if cpu_rejection != "":
+            fault = cpu_rejection
+            fallback_reason = cpu_rejection
 
-    val visible_waves = if incremental: _layout_selected_waves(schedule.waves, selected_ids) else: schedule.waves
+    val boxes = if fault == "": _layout_merge_boxes(all_oracle, run.result.boxes) else: all_oracle
+    val fragments = if fault == "": _layout_merge_fragments(input, discovery.islands, selected_ids, run.result.fragments) else: []
+    val line_boxes = if fault == "": _layout_merge_line_boxes(input, discovery.islands, selected_ids, run.result.line_boxes) else: []
+    val overflows = if fault == "": _layout_merge_overflows(input, discovery.islands, selected_ids, run.result.overflows) else: []
+    val output_hash = _layout_geometry_hash(boxes)
+    val input_hash = _layout_geometry_hash(all_oracle)
+    val actual_oracle_verified = fault == "" and _layout_boxes_equal(run.result.boxes, selected_oracle)
+    val proof = LayoutExecutionProof(
+        candidate_backend: decision.backend,
+        executed_backend: if run.result.proof.executed_backend == "": backend else: run.result.proof.executed_backend,
+        executed: run.result.proof.executed,
+        submitted: run.result.proof.submitted,
+        synchronized: run.result.proof.synchronized,
+        device_readback: run.result.proof.device_readback,
+        oracle_verified: actual_oracle_verified,
+        reason: if fault != "": fault elif fallback_reason != "": fallback_reason else: run.result.proof.reason
+    )
     val mappings = _layout_mappings(discovery.islands, selected_ids)
-    val fallback_count = if fallback_reason == "": 0 else: 1
-    val malformed_count = if fault == "": 0 else: 1
-    val elapsed_us = if backend == "hybrid_vector_gpu": backend_decision.gpu_us else: backend_decision.cpu_us
+    val fell_back = fallback_reason != ""
+    val gpu_executed = backend == "hybrid_vector_gpu"
     val receipt = StageReceipt(
         contract_version: STRUCTURAL_EXECUTION_CONTRACT_VERSION,
         stage: "layout",
+        candidate_backend: decision.backend,
         backend: backend,
         mode: if incremental: "incremental" else: "full",
-        input_hash: geometry_hash,
-        output_hash: geometry_hash,
+        input_hash: input_hash,
+        output_hash: output_hash,
         item_count_in: input.nodes.len(),
         item_count_out: boxes.len(),
-        bytes_read: input.execution.host_to_device_bytes,
-        bytes_written: input.execution.device_to_host_bytes,
-        fallback_count: fallback_count,
+        bytes_read: if gpu_executed: input.execution.host_to_device_bytes else: 0,
+        bytes_written: if gpu_executed: input.execution.device_to_host_bytes else: 0,
+        fallback_count: if fell_back: 1 else: 0,
         fallback_reason: fallback_reason,
-        malformed_count: malformed_count,
+        malformed_count: if fault == "": 0 else: 1,
         overflow_flags: 0,
-        elapsed_us: elapsed_us,
-        deterministic_hash: geometry_hash,
+        elapsed_us: if gpu_executed: decision.gpu_us else: decision.cpu_us,
+        deterministic_hash: output_hash,
         visited_island_ids: selected_ids,
-        converged: schedule.converged and fault != "non-convergent",
-        iterations: schedule.iterations,
-        cpu_us: backend_decision.cpu_us,
-        gpu_us: backend_decision.gpu_us
+        converged: run.converged and fault == "",
+        iterations: run.iterations,
+        cpu_us: decision.cpu_us,
+        gpu_us: decision.gpu_us,
+        submitted: proof.submitted,
+        synchronized: proof.synchronized,
+        device_readback: proof.device_readback,
+        oracle_verified: proof.oracle_verified
     )
     LayoutSnapshot(
         contract_version: LAYOUT_CONTRACT_VERSION,
         boxes: boxes,
+        fragments: fragments,
+        line_boxes: line_boxes,
+        overflows: overflows,
         islands: discovery.islands,
         waves: visible_waves,
         visited_island_ids: selected_ids,
         mappings: mappings,
         mapping_graph: mapping_graph(mappings),
+        island_costs: _layout_island_costs(selected_islands, input.execution),
+        execution_proof: proof,
         receipt: receipt,
         fault: fault,
         backend: backend
     )
 
+fn layout_run_full_with_ports(
+    input: LayoutInputSnapshot,
+    text_port: TextMeasurePort,
+    cpu_port: LayoutExecutionPort,
+    gpu_port: LayoutExecutionPort
+) -> LayoutSnapshot:
+    _layout_snapshot_with_ports(input, text_port, cpu_port, gpu_port, false)
+
+fn layout_run_incremental_with_ports(
+    input: LayoutInputSnapshot,
+    text_port: TextMeasurePort,
+    cpu_port: LayoutExecutionPort,
+    gpu_port: LayoutExecutionPort
+) -> LayoutSnapshot:
+    _layout_snapshot_with_ports(input, text_port, cpu_port, gpu_port, true)
+
 fn layout_run_full(input: LayoutInputSnapshot, text_port: TextMeasurePort) -> LayoutSnapshot:
-    _layout_snapshot(input, text_port, false)
+    layout_run_full_with_ports(
+        input,
+        text_port,
+        layout_execution_port_oracle(input.oracle_boxes),
+        layout_execution_port_unavailable("hybrid_vector_gpu", "gpu-execution-unavailable")
+    )
 
 fn layout_run_incremental(input: LayoutInputSnapshot, text_port: TextMeasurePort) -> LayoutSnapshot:
-    _layout_snapshot(input, text_port, true)
+    layout_run_incremental_with_ports(
+        input,
+        text_port,
+        layout_execution_port_oracle(input.oracle_boxes),
+        layout_execution_port_unavailable("hybrid_vector_gpu", "gpu-execution-unavailable")
+    )
 
-export layout_cost_estimate, layout_choose_backend, layout_run_full, layout_run_incremental
+export layout_cost_estimate, layout_choose_backend
+export layout_run_full, layout_run_incremental
+export layout_run_full_with_ports, layout_run_incremental_with_ports

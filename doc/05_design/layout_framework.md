@@ -4,19 +4,22 @@
 ## Data
 
 - IDs and hashes use stable integer/text fields in v1; every shared contract carries `contract_version = 1` through constructors.
-- `LayoutNodeInput` is flat and ordered: stable id, parent id, profile id, boundary flags, geometry oracle box, dirty mask, estimated work, and text-measure requirement.
-- `LayoutInputSnapshot` owns nodes, dependencies, invalidated ids, execution profile, and fixed-point cap.
-- `LayoutSnapshot` owns boxes, islands, waves, visited ids, `LayoutOf` edges, fault, and `StageReceipt`.
+- `LayoutNodeInput` is flat and ordered: stable id, parent id, profile id, boundary flags, CPU-oracle box, dirty mask, work estimate, and text-measure requirement.
+- `LayoutInputSnapshot` owns nodes, dependencies, invalidated ids, family-aware text requests, execution profile, and fixed-point cap.
+- `LayoutSnapshot` owns boxes, fragments, line boxes, overflow, islands, waves, visited ids, `LayoutOf` edges, fault, and `StageReceipt`.
+- `LayoutExecutionRequest` owns the selected islands/waves, prior iteration output, and execution profile. `LayoutIterationResult` owns output geometry plus submission/synchronization/readback facts.
 
 ## Algorithms
 
 1. Discover islands in input order. The root and nodes establishing formatting/containment boundaries start islands; descendants inherit the nearest island.
-2. Sum node work into island estimates and retain dependency edges between island roots.
+2. Sum node work into island estimates. Compute and record one CPU/GPU cost per island, then sum only the selected homogeneous batch.
 3. Condense SCCs, sort component members and ready components by lowest island id, and emit topological waves.
 4. Full mode visits every island. Incremental mode selects dirty islands plus dependency-required islands only; clean independent islands are copied from the prior/oracle snapshot.
-5. Cyclic components iterate at most `fixed_point_cap`. A fixture-provided change count models convergence; exhaustion returns `non-convergent` and CPU fallback.
-6. Total GPU latency is kernel + scheduling + upload + readback + synchronization. Select GPU only when every island is block/flex/grid, the batch is homogeneous, text is absent, and GPU total is lower than CPU.
-7. Arrangement reuses oracle geometry. Verification compares stable id and exact x/y/width/height fields and emits one `LayoutOf` mapping per visited output box.
+5. Execute each cyclic wave through the chosen port. Compare ordered geometry hashes after every iteration; stop on equality or return `non-convergent` at `fixed_point_cap`.
+6. Total GPU latency is kernel + scheduling + upload + readback + synchronization. Select a GPU candidate only when every island is block/flex/grid, the batch is homogeneous, text is absent, and the summed GPU total is lower than CPU.
+7. Invoke the GPU port only for that candidate. Accept it only when submission, synchronization, device readback, and exact CPU-oracle parity all succeed; otherwise execute the CPU port and record the concrete fallback reason.
+8. Pack only `LayoutNodeSemantics`, viewport values, and grid tracks for device execution. Keep `oracle_boxes` host-side for post-readback comparison. The first CUDA slice accepts positive fixed-pixel childless block/flex/grid roots with an empty box model; all other inputs pre-reject.
+8. Emit one `LayoutOf` mapping per visited output box and retain fragments, line boxes, and overflow from the accepted execution result.
 
 ## Public API
 
@@ -24,14 +27,16 @@
 - `layout_schedule_waves(islands, dependencies, cap)`
 - `layout_run_full(input, text_port)`
 - `layout_run_incremental(input, text_port)`
+- `layout_run_full_with_ports(input, text_port, cpu_port, gpu_port)`
+- `layout_run_incremental_with_ports(input, text_port, cpu_port, gpu_port)`
 - `layout_choose_backend(islands, profile)`
-- trait `SpatialLayoutProfile`; trait `TextMeasurePort`
+- per-island estimates in `LayoutSnapshot.island_costs`
+- traits `SpatialLayoutProfile`, `TextMeasurePort`, and `LayoutExecutionPort`
 
 ## Errors
 
-Invalid cap, missing parent/island, dependency endpoint, text measurement, unsupported GPU profile, and non-convergence are explicit result/fault fields. Safe cases select CPU with a reason; malformed inputs do not silently fabricate geometry.
+Invalid cap, missing parent/island, dependency endpoint, text measurement, unsupported GPU profile, missing execution port, failed submission/synchronization/readback, oracle mismatch, and non-convergence are explicit result/fault fields. Safe cases select CPU with a reason; malformed inputs do not silently fabricate geometry.
 
 ## Observability
 
 Receipts expose mode/backend, visited island ids, fallback reason/count, input/output deterministic hashes, item counts, estimated CPU/GPU latency, transfer bytes, synchronization points, iteration count, and convergence.
-

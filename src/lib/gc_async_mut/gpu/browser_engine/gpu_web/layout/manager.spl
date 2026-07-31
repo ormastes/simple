@@ -1,17 +1,25 @@
 # Stateful browser coordinator that delegates layout work to the shared framework.
 
 use std.common.structural.layout.{
+    LayoutMapping,
     LayoutSnapshot,
     layout_input,
+    layout_execution_port_oracle,
     layout_run_full,
-    layout_run_incremental,
-    layout_text_measure_port_unavailable
+    layout_run_full_with_ports,
+    layout_run_incremental_with_ports,
+    layout_text_measure_port_unavailable,
+    layout_text_measure_port_resolved,
+    hit_region_of_mapping
 }
 use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.adapter.{
     web_layout_framework_input,
     web_layout_validate_snapshot
 }
 use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.contracts.*
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cuda_execution_port.{
+    web_cuda_layout_execution_port
+}
 
 val WEB_LAYOUT_MAX_EPOCH: i64 = 9223372036854775807
 
@@ -38,6 +46,7 @@ fn _web_layout_fault_step(
             epoch: manager.epoch,
             layout: _web_layout_empty_layout(snapshot),
             hit_regions: [],
+            hit_mappings: [],
             stale: stale,
             fault: fault
         )
@@ -65,6 +74,18 @@ fn _web_layout_hit_regions(
         ))
     regions
 
+fn _web_layout_hit_mappings(
+    snapshot: WebLayoutSnapshot,
+    layout: LayoutSnapshot
+) -> [LayoutMapping]:
+    var mappings: [LayoutMapping] = []
+    for box in layout.boxes:
+        mappings.push(hit_region_of_mapping(
+            box.id,
+            _web_layout_dom_route(snapshot, box.id)
+        ))
+    mappings
+
 fn _web_layout_run(
     manager: WebLayoutManager,
     snapshot: WebLayoutSnapshot,
@@ -82,10 +103,15 @@ fn _web_layout_run(
         return _web_layout_fault_step(manager, snapshot, false, "epoch-exhausted")
 
     val input = web_layout_framework_input(snapshot, frontier)
+    val text_port = layout_text_measure_port_resolved(snapshot.text_results)
+    val cpu_port = layout_execution_port_oracle(snapshot.oracle_boxes)
+    val gpu_port = web_cuda_layout_execution_port(snapshot.oracle_boxes)
     val layout = if incremental:
-        layout_run_incremental(input, layout_text_measure_port_unavailable())
+        layout_run_incremental_with_ports(
+            input, text_port, cpu_port, gpu_port
+        )
     else:
-        layout_run_full(input, layout_text_measure_port_unavailable())
+        layout_run_full_with_ports(input, text_port, cpu_port, gpu_port)
     if layout.fault != "":
         return _web_layout_fault_step(manager, snapshot, false, layout.fault)
 
@@ -98,6 +124,7 @@ fn _web_layout_run(
             epoch: next_epoch,
             layout: layout,
             hit_regions: _web_layout_hit_regions(snapshot, layout, next_epoch),
+            hit_mappings: _web_layout_hit_mappings(snapshot, layout),
             stale: false,
             fault: ""
         )
@@ -119,4 +146,3 @@ fn web_layout_run_incremental(
 
 export WEB_LAYOUT_MAX_EPOCH, WebLayoutManagerStep
 export web_layout_run_full, web_layout_run_incremental
-
