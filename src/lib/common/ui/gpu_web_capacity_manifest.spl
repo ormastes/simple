@@ -1,0 +1,399 @@
+# GPU Web Capacity Manifest — frozen contract + Kernel C (verify total <= capacity)
+#
+# Contract source (frozen; field names and widths are authoritative):
+#   doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md
+#     §6 "Capacity manifest" and "Exact emission without realloc"
+# Shared lane rules:
+#   doc/03_plan/platform/structural_compute/README.md
+#
+# WHY THIS EXISTS
+# A no-reallocation pipeline reserves every output arena up front. Kernel A
+# counts output records per source item, Kernel B exclusive-prefix-scans those
+# counts into exact offsets, and Kernel C -- implemented here as the CPU
+# reference oracle -- must prove `total <= capacity` BEFORE Kernel D emits into
+# those offsets. Arbitrary untrusted web content is unbounded, so the manifest
+# carries the explicit policy bounds that make the reservation finite.
+#
+# THE HONESTY RULE FOR THIS FILE
+# Kernel C never truncates and never grows a bound. Exceeding capacity is a
+# REJECTION carrying a reason receipt that names the bound, the request, the
+# limit and the overflow ("no silent fallback", shared rule 4). A capacity check
+# that silently clamps or reallocates defeats the whole design, so no clamping
+# or auto-grow API is offered here on purpose.
+#
+# This module is the CPU reference (shared rule 3) and is never deleted; the
+# hybrid_vector_gpu and resident_gpu tiers must produce identical verdicts.
+
+# ---------------------------------------------------------------------------
+# Frozen contract
+# ---------------------------------------------------------------------------
+
+struct GpuWebCapacityManifest:
+    max_input_bytes: u64
+
+    max_nodes: u32
+    max_attributes: u32
+    max_dom_edges: u32
+    max_string_bytes: u64
+
+    max_css_rules: u32
+    max_selectors: u32
+    max_selector_candidates: u32
+    max_computed_styles: u32
+    max_custom_property_edges: u32
+
+    max_layout_boxes: u32
+    max_fragments: u32
+    max_line_boxes: u32
+    max_glyphs: u32
+
+    max_events_in_flight: u32
+    max_route_depth: u16
+    max_mutations_per_epoch: u32
+    max_host_effects_per_epoch: u32
+
+    max_draw_batches: u32
+    max_draw_commands: u32
+    max_path_points: u32
+    max_patch_operations: u32
+
+    parser_scratch_bytes: u64
+    style_scratch_bytes: u64
+    layout_scratch_bytes: u64
+    scan_scratch_bytes: u64
+    backend_preprocess_bytes: u64
+
+# The Kernel A + Kernel B result: the exact total each arena will hold if
+# Kernel D is allowed to emit. Field names mirror the manifest without the
+# `max_` prefix so a breach receipt reads unambiguously against the contract.
+struct GpuWebCapacityPlan:
+    input_bytes: u64
+
+    nodes: u32
+    attributes: u32
+    dom_edges: u32
+    string_bytes: u64
+
+    css_rules: u32
+    selectors: u32
+    selector_candidates: u32
+    computed_styles: u32
+    custom_property_edges: u32
+
+    layout_boxes: u32
+    fragments: u32
+    line_boxes: u32
+    glyphs: u32
+
+    events_in_flight: u32
+    route_depth: u16
+    mutations_per_epoch: u32
+    host_effects_per_epoch: u32
+
+    draw_batches: u32
+    draw_commands: u32
+    path_points: u32
+    patch_operations: u32
+
+    parser_scratch_bytes: u64
+    style_scratch_bytes: u64
+    layout_scratch_bytes: u64
+    scan_scratch_bytes: u64
+    backend_preprocess_bytes: u64
+
+# One exceeded bound. `bound` is the manifest field name verbatim, so the
+# receipt points at the exact contract field a caller has to raise (or the
+# exact input it has to shrink).
+struct GpuWebCapacityBreach:
+    bound: text
+    requested: i64
+    limit: i64
+    overflow: i64
+
+# Kernel C verdict. `reason` is empty exactly when `accepted` is true.
+struct GpuWebCapacityVerdict:
+    accepted: bool
+    breach_count: i64
+    first_breach_bound: text
+    reason: text
+    breaches: [GpuWebCapacityBreach]
+
+val GPU_WEB_CAPACITY_REJECT_CODE: text = "gpu_web_capacity_exceeded"
+
+# Frozen-contract marker. Naming mirrors DRAW_IR_SCHEMA_VERSION in
+# src/lib/common/ui/draw_ir.spl. Shared rule 1 ("contract freeze first"): any
+# change to the field set, widths, or bound names above is a NEW version here,
+# never an in-place edit.
+val GPU_WEB_CAPACITY_MANIFEST_SCHEMA_VERSION: text = "simple-gpu-web-capacity-manifest-v1"
+
+# ---------------------------------------------------------------------------
+# Kernel C — verify total <= capacity
+# ---------------------------------------------------------------------------
+
+fn _gwc_check(acc: [GpuWebCapacityBreach], bound: text, requested: i64, limit: i64) -> [GpuWebCapacityBreach]:
+    if requested <= limit:
+        return acc
+    return acc.push(GpuWebCapacityBreach(
+        bound: bound,
+        requested: requested,
+        limit: limit,
+        overflow: requested - limit
+    ))
+
+fn gpu_web_capacity_breach_receipt(breach: GpuWebCapacityBreach) -> text:
+    return breach.bound
+        + " requested=" + breach.requested.to_text()
+        + " limit=" + breach.limit.to_text()
+        + " over=" + breach.overflow.to_text()
+
+# Kernel C. Returns a verdict, never a clamped plan. Bounds are checked in
+# frozen contract declaration order so `first_breach_bound` is deterministic.
+fn gpu_web_capacity_verify(plan: GpuWebCapacityPlan, manifest: GpuWebCapacityManifest) -> GpuWebCapacityVerdict:
+    var breaches: [GpuWebCapacityBreach] = []
+
+    breaches = _gwc_check(breaches, "max_input_bytes", plan.input_bytes.to_i64(), manifest.max_input_bytes.to_i64())
+
+    breaches = _gwc_check(breaches, "max_nodes", plan.nodes.to_i64(), manifest.max_nodes.to_i64())
+    breaches = _gwc_check(breaches, "max_attributes", plan.attributes.to_i64(), manifest.max_attributes.to_i64())
+    breaches = _gwc_check(breaches, "max_dom_edges", plan.dom_edges.to_i64(), manifest.max_dom_edges.to_i64())
+    breaches = _gwc_check(breaches, "max_string_bytes", plan.string_bytes.to_i64(), manifest.max_string_bytes.to_i64())
+
+    breaches = _gwc_check(breaches, "max_css_rules", plan.css_rules.to_i64(), manifest.max_css_rules.to_i64())
+    breaches = _gwc_check(breaches, "max_selectors", plan.selectors.to_i64(), manifest.max_selectors.to_i64())
+    breaches = _gwc_check(breaches, "max_selector_candidates", plan.selector_candidates.to_i64(), manifest.max_selector_candidates.to_i64())
+    breaches = _gwc_check(breaches, "max_computed_styles", plan.computed_styles.to_i64(), manifest.max_computed_styles.to_i64())
+    breaches = _gwc_check(breaches, "max_custom_property_edges", plan.custom_property_edges.to_i64(), manifest.max_custom_property_edges.to_i64())
+
+    breaches = _gwc_check(breaches, "max_layout_boxes", plan.layout_boxes.to_i64(), manifest.max_layout_boxes.to_i64())
+    breaches = _gwc_check(breaches, "max_fragments", plan.fragments.to_i64(), manifest.max_fragments.to_i64())
+    breaches = _gwc_check(breaches, "max_line_boxes", plan.line_boxes.to_i64(), manifest.max_line_boxes.to_i64())
+    breaches = _gwc_check(breaches, "max_glyphs", plan.glyphs.to_i64(), manifest.max_glyphs.to_i64())
+
+    breaches = _gwc_check(breaches, "max_events_in_flight", plan.events_in_flight.to_i64(), manifest.max_events_in_flight.to_i64())
+    breaches = _gwc_check(breaches, "max_route_depth", plan.route_depth.to_i64(), manifest.max_route_depth.to_i64())
+    breaches = _gwc_check(breaches, "max_mutations_per_epoch", plan.mutations_per_epoch.to_i64(), manifest.max_mutations_per_epoch.to_i64())
+    breaches = _gwc_check(breaches, "max_host_effects_per_epoch", plan.host_effects_per_epoch.to_i64(), manifest.max_host_effects_per_epoch.to_i64())
+
+    breaches = _gwc_check(breaches, "max_draw_batches", plan.draw_batches.to_i64(), manifest.max_draw_batches.to_i64())
+    breaches = _gwc_check(breaches, "max_draw_commands", plan.draw_commands.to_i64(), manifest.max_draw_commands.to_i64())
+    breaches = _gwc_check(breaches, "max_path_points", plan.path_points.to_i64(), manifest.max_path_points.to_i64())
+    breaches = _gwc_check(breaches, "max_patch_operations", plan.patch_operations.to_i64(), manifest.max_patch_operations.to_i64())
+
+    breaches = _gwc_check(breaches, "parser_scratch_bytes", plan.parser_scratch_bytes.to_i64(), manifest.parser_scratch_bytes.to_i64())
+    breaches = _gwc_check(breaches, "style_scratch_bytes", plan.style_scratch_bytes.to_i64(), manifest.style_scratch_bytes.to_i64())
+    breaches = _gwc_check(breaches, "layout_scratch_bytes", plan.layout_scratch_bytes.to_i64(), manifest.layout_scratch_bytes.to_i64())
+    breaches = _gwc_check(breaches, "scan_scratch_bytes", plan.scan_scratch_bytes.to_i64(), manifest.scan_scratch_bytes.to_i64())
+    breaches = _gwc_check(breaches, "backend_preprocess_bytes", plan.backend_preprocess_bytes.to_i64(), manifest.backend_preprocess_bytes.to_i64())
+
+    val count = breaches.len()
+    if count == 0:
+        return GpuWebCapacityVerdict(
+            accepted: true,
+            breach_count: 0,
+            first_breach_bound: "",
+            reason: "",
+            breaches: breaches
+        )
+
+    var parts: [text] = []
+    var i = 0
+    while i < count:
+        parts = parts.push(gpu_web_capacity_breach_receipt(breaches[i]))
+        i = i + 1
+
+    return GpuWebCapacityVerdict(
+        accepted: false,
+        breach_count: count,
+        first_breach_bound: breaches[0].bound,
+        reason: GPU_WEB_CAPACITY_REJECT_CODE + ": " + parts.join("; "),
+        breaches: breaches
+    )
+
+# ---------------------------------------------------------------------------
+# Manifest sources (plan §6 "Sources for the manifest")
+# ---------------------------------------------------------------------------
+#
+# POLICY NOTE ON DEFAULT VALUES — read before adding a number here.
+# Only bounds with a real, citable basis elsewhere in this repo are populated
+# below. Every other bound is left at 0, which means UNSET, not "unlimited".
+# 0 fails closed: any plan that uses such a resource is rejected by Kernel C
+# with a receipt naming the unset bound, which is exactly the visible failure
+# we want. Inventing a plausible-looking number for, say, max_css_rules would
+# read as authoritative policy while being fiction. Populate a field here only
+# together with the citation for where its number comes from.
+
+# Derived: BROWSER_RENDERER_MAX_PAYLOAD_BYTES (1 MiB)
+#   src/lib/common/web/browser_renderer_protocol.spl
+val _GWC_BASE_INPUT_BYTES: i64 = 1048576
+
+# Derived: HTML_MAX_NODES
+#   src/lib/gc_async_mut/gpu/browser_engine/dom_limits.spl
+val _GWC_BASE_NODES: i64 = 65536
+
+# Derived: HTML_MAX_ATTRIBUTES
+#   src/lib/gc_async_mut/gpu/browser_engine/html_tokenizer.spl
+val _GWC_BASE_ATTRIBUTES: i64 = 65536
+
+# Derived: BROWSER_RENDERER_MAX_GLYPHS / _DRAW_IR_SDN_MAX_GLYPHS (both 4096)
+#   src/lib/common/web/browser_renderer_protocol.spl
+#   src/lib/common/ui/draw_ir_sdn.spl
+val _GWC_BASE_GLYPHS: i64 = 4096
+
+# Derived: BROWSER_RENDERER_MAX_COMMANDS
+#   src/lib/common/web/browser_renderer_protocol.spl
+val _GWC_BASE_DRAW_COMMANDS: i64 = 1024
+
+# Derived: UI_ACCESS_MAX_EVENTS
+#   src/lib/common/ui/access_types.spl
+val _GWC_BASE_EVENTS_IN_FLIGHT: i64 = 64
+
+# Derived: BE_DOM_HTML_SERIALIZE_MAX_DEPTH — event routing walks the DOM
+# ancestor chain, so the serializer's depth ceiling bounds route depth too.
+#   src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl
+val _GWC_BASE_ROUTE_DEPTH: i64 = 512
+
+fn gpu_web_capacity_manifest_zero() -> GpuWebCapacityManifest:
+    return GpuWebCapacityManifest(
+        max_input_bytes: 0u64,
+        max_nodes: 0u32,
+        max_attributes: 0u32,
+        max_dom_edges: 0u32,
+        max_string_bytes: 0u64,
+        max_css_rules: 0u32,
+        max_selectors: 0u32,
+        max_selector_candidates: 0u32,
+        max_computed_styles: 0u32,
+        max_custom_property_edges: 0u32,
+        max_layout_boxes: 0u32,
+        max_fragments: 0u32,
+        max_line_boxes: 0u32,
+        max_glyphs: 0u32,
+        max_events_in_flight: 0u32,
+        max_route_depth: 0u16,
+        max_mutations_per_epoch: 0u32,
+        max_host_effects_per_epoch: 0u32,
+        max_draw_batches: 0u32,
+        max_draw_commands: 0u32,
+        max_path_points: 0u32,
+        max_patch_operations: 0u32,
+        parser_scratch_bytes: 0u64,
+        style_scratch_bytes: 0u64,
+        layout_scratch_bytes: 0u64,
+        scan_scratch_bytes: 0u64,
+        backend_preprocess_bytes: 0u64
+    )
+
+fn gpu_web_capacity_plan_zero() -> GpuWebCapacityPlan:
+    return GpuWebCapacityPlan(
+        input_bytes: 0u64,
+        nodes: 0u32,
+        attributes: 0u32,
+        dom_edges: 0u32,
+        string_bytes: 0u64,
+        css_rules: 0u32,
+        selectors: 0u32,
+        selector_candidates: 0u32,
+        computed_styles: 0u32,
+        custom_property_edges: 0u32,
+        layout_boxes: 0u32,
+        fragments: 0u32,
+        line_boxes: 0u32,
+        glyphs: 0u32,
+        events_in_flight: 0u32,
+        route_depth: 0u16,
+        mutations_per_epoch: 0u32,
+        host_effects_per_epoch: 0u32,
+        draw_batches: 0u32,
+        draw_commands: 0u32,
+        path_points: 0u32,
+        patch_operations: 0u32,
+        parser_scratch_bytes: 0u64,
+        style_scratch_bytes: 0u64,
+        layout_scratch_bytes: 0u64,
+        scan_scratch_bytes: 0u64,
+        backend_preprocess_bytes: 0u64
+    )
+
+# Compile-time source: static HTML/CSS/templates, GUI/theme recipes and
+# GPU-safe handlers are all known at build time, so the bounds a fixed build
+# can honour are known too. Only repo-cited bounds are filled; see the POLICY
+# NOTE above for why the rest stay 0/unset.
+#
+# Structural (not policy) relations used here, each an exact upper bound:
+#   max_dom_edges       — a tree of N nodes has N-1 parent edges, so max_nodes bounds it.
+#   max_string_bytes    — interned strings are slices of the input, so max_input_bytes bounds them.
+#   max_computed_styles — at most one computed style per node.
+#   max_draw_batches    — every batch holds at least one command, so max_draw_commands bounds it.
+fn gpu_web_capacity_manifest_compile_time_default() -> GpuWebCapacityManifest:
+    var m = gpu_web_capacity_manifest_zero()
+    m.max_input_bytes = _GWC_BASE_INPUT_BYTES.to_u64()
+    m.max_nodes = _GWC_BASE_NODES.to_u32()
+    m.max_attributes = _GWC_BASE_ATTRIBUTES.to_u32()
+    m.max_dom_edges = _GWC_BASE_NODES.to_u32()
+    m.max_string_bytes = _GWC_BASE_INPUT_BYTES.to_u64()
+    m.max_computed_styles = _GWC_BASE_NODES.to_u32()
+    m.max_glyphs = _GWC_BASE_GLYPHS.to_u32()
+    m.max_events_in_flight = _GWC_BASE_EVENTS_IN_FLIGHT.to_u32()
+    m.max_route_depth = _GWC_BASE_ROUTE_DEPTH.to_u16()
+    m.max_draw_batches = _GWC_BASE_DRAW_COMMANDS.to_u32()
+    m.max_draw_commands = _GWC_BASE_DRAW_COMMANDS.to_u32()
+    return m
+
+# Tighten-or-set. A later manifest source may lower a bound or fill an unset
+# one, but must never raise a bound an earlier source already committed to --
+# raising it is the silent-grow this whole design forbids.
+fn _gwc_tighten(current: i64, candidate: i64) -> i64:
+    if candidate < 0:
+        return current
+    if current == 0:
+        return candidate
+    if candidate < current:
+        return candidate
+    return current
+
+# Load-time source: response size and declared resource headers, plus the
+# viewport/font profile. Both inputs only ever tighten.
+#
+#   declared_response_bytes  — the response's own declared length. Nothing
+#       parsed from it can exceed it, so it bounds input and string bytes.
+#   viewport_width_px/height_px and min_glyph_cell_px — the font profile's
+#       smallest glyph cell. (w/cell) * (h/cell) is the largest number of
+#       glyph cells the viewport can hold at once. min_glyph_cell_px comes
+#       from the caller's font profile; this module does not invent a font
+#       metric. Pass 0 for any of the three to skip the viewport tightening.
+fn gpu_web_capacity_manifest_for_load(base: GpuWebCapacityManifest,
+                                      declared_response_bytes: i64,
+                                      viewport_width_px: i64,
+                                      viewport_height_px: i64,
+                                      min_glyph_cell_px: i64) -> GpuWebCapacityManifest:
+    var m = base
+    if declared_response_bytes >= 0:
+        m.max_input_bytes = _gwc_tighten(base.max_input_bytes.to_i64(), declared_response_bytes).to_u64()
+        m.max_string_bytes = _gwc_tighten(base.max_string_bytes.to_i64(), declared_response_bytes).to_u64()
+    if viewport_width_px > 0 and viewport_height_px > 0 and min_glyph_cell_px > 0:
+        val cells = (viewport_width_px / min_glyph_cell_px) * (viewport_height_px / min_glyph_cell_px)
+        m.max_glyphs = _gwc_tighten(base.max_glyphs.to_i64(), cells).to_u32()
+    return m
+
+# Backend-session source: alignment, descriptor limits and the backend's own
+# indirect/preprocess allocation requirement, queried once when the session is
+# created. `required_preprocess_bytes` is a requirement reported by the
+# backend, so it is SET (rounded up to the backend alignment), not tightened.
+# `max_descriptor_commands` is a hard device limit and only tightens.
+# Pass 0 for alignment_bytes to skip rounding; 0 for the other two to skip.
+fn gpu_web_capacity_manifest_for_backend_session(base: GpuWebCapacityManifest,
+                                                 alignment_bytes: i64,
+                                                 max_descriptor_commands: i64,
+                                                 required_preprocess_bytes: i64) -> GpuWebCapacityManifest:
+    var m = base
+    if max_descriptor_commands > 0:
+        m.max_draw_commands = _gwc_tighten(base.max_draw_commands.to_i64(), max_descriptor_commands).to_u32()
+        m.max_draw_batches = _gwc_tighten(base.max_draw_batches.to_i64(), max_descriptor_commands).to_u32()
+    if required_preprocess_bytes > 0:
+        var need = required_preprocess_bytes
+        if alignment_bytes > 0:
+            val rem = need % alignment_bytes
+            if rem != 0:
+                need = need + (alignment_bytes - rem)
+        m.backend_preprocess_bytes = need.to_u64()
+    return m
