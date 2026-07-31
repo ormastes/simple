@@ -59,6 +59,11 @@ The implementation and static evidence are present. The acceptance commands
 remain blocked until a complete Stage4 self-hosted CLI is available; the Rust
 bootstrap seed is not accepted as verification evidence.
 
+The lane uses a small-agent review split (`layout_framework_contract_audit`,
+`layout_framework_engine_audit`, `layout_framework_test_docs_audit`), with
+all contract/scheduler/dispatch behavior and evidence map checks passing in review
+for implementation scope.
+
 ## Acceptance
 
 - Fragment/box geometry equality against the CPU oracle for every profile
