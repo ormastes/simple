@@ -75,10 +75,25 @@ val WM_WINDOW_SHADOW_OFFSET_Y: i32 = 6
 val WM_BROWSER_TOOLBAR_HEIGHT: i32 = 44
 val WM_BROWSER_CONTROL_SLOT_WIDTH: i32 = 44
 val WM_BROWSER_CONTROL_DRAW_WIDTH: i32 = 40
-val WM_BROWSER_ADDRESS_X: i32 = 268
+val WM_BROWSER_CONTROL_COUNT: i32 = 7
+val WM_BROWSER_ADDRESS_X: i32 = 312
+val WM_BROWSER_ADDRESS_MIN_WIDTH: i32 = 8
 
 fn shared_wm_browser_content_extra_height(app_id: text) -> i32:
     if app_id == "browser": WM_BROWSER_TOOLBAR_HEIGHT else: 0
+
+fn _shared_wm_browser_visible_control_count(width: i32) -> i32:
+    var count = 0
+    while count < WM_BROWSER_CONTROL_COUNT:
+        val left = 4 + count * WM_BROWSER_CONTROL_SLOT_WIDTH
+        if left + WM_BROWSER_CONTROL_DRAW_WIDTH > width - 4:
+            return count
+        count = count + 1
+    count
+
+fn shared_wm_browser_address_width(width: i32) -> i32:
+    val available = width - WM_BROWSER_ADDRESS_X - 4
+    if available >= WM_BROWSER_ADDRESS_MIN_WIDTH: available else: 0
 
 fn shared_wm_browser_toolbar_control_at(
     local_x: i32, local_y: i32, width: i32
@@ -86,7 +101,8 @@ fn shared_wm_browser_toolbar_control_at(
     if local_y < 0 or local_y >= WM_BROWSER_TOOLBAR_HEIGHT or local_x < 4 or local_x >= width - 4:
         return ""
     var index = 0
-    while index < 6:
+    val visible_control_count = _shared_wm_browser_visible_control_count(width)
+    while index < visible_control_count:
         val left = 4 + index * WM_BROWSER_CONTROL_SLOT_WIDTH
         if local_x >= left and local_x < left + WM_BROWSER_CONTROL_SLOT_WIDTH:
             if index == 0: return "back"
@@ -94,9 +110,12 @@ fn shared_wm_browser_toolbar_control_at(
             if index == 2: return "stop"
             if index == 3: return "reload"
             if index == 4: return "home"
-            return "favorite"
+            if index == 5: return "favorite"
+            return "go"
         index = index + 1
-    if local_x >= WM_BROWSER_ADDRESS_X:
+    val address_width = shared_wm_browser_address_width(width)
+    if (address_width > 0 and local_x >= WM_BROWSER_ADDRESS_X and
+        local_x < WM_BROWSER_ADDRESS_X + address_width):
         return "address"
     ""
 
@@ -355,15 +374,23 @@ class SharedWmPixelBufferBackend:
         if window.app_id == "browser":
             val toolbar_y = window.y + 28
             self._px_fill_rect(window.x + 4, toolbar_y, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT, theme.host_window_body)
-            val labels = ["<", ">", "X", "R", "H", "*"]
+            val labels = ["<", ">", "X", "R", "H", "*", "Go"]
             var control_index = 0
-            while control_index < labels.len():
+            val visible_control_count = _shared_wm_browser_visible_control_count(
+                window.width
+            )
+            while control_index < visible_control_count:
                 val control_x = window.x + 4 + control_index * WM_BROWSER_CONTROL_SLOT_WIDTH
                 self._px_fill_rect(control_x, toolbar_y + 4, WM_BROWSER_CONTROL_DRAW_WIDTH, 36, theme.title_unfocused)
-                self._px_text_fit(control_x + 16, toolbar_y + 14, labels[control_index], theme.text_primary, theme.title_unfocused, 1)
+                val label_x = if labels[control_index] == "Go":
+                    control_x + 12
+                else:
+                    control_x + 16
+                val label_chars = if labels[control_index] == "Go": 2 else: 1
+                self._px_text_fit(label_x, toolbar_y + 14, labels[control_index], theme.text_primary, theme.title_unfocused, label_chars)
                 control_index = control_index + 1
             val address_x = window.x + WM_BROWSER_ADDRESS_X
-            val address_w = window.width - WM_BROWSER_ADDRESS_X - 4
+            val address_w = shared_wm_browser_address_width(window.width)
             if address_w > 0:
                 self._px_fill_rect(address_x, toolbar_y + 4, address_w, 36, 0xFFFFFFFFu32)
                 self._px_text_fit(address_x + 4, toolbar_y + 14, window.title, 0xFF111111u32, 0xFFFFFFFFu32, if address_w > 8: (address_w - 8) / 8 else: 0)
@@ -971,14 +998,21 @@ fn _wm_draw_ir_window_batch(scene: SharedWmScene, window: SharedWmWindow, backen
         commands.push(_wm_draw_ir_text("{window.window_id}-close-label", window.width - 18, 17, 2, 20, "X", theme.text_primary, "und"))
     if window.app_id == "browser":
         commands.push(draw_ir_rect("{window.window_id}-browser-toolbar", 4, 28, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT, theme.host_window_body))
-        val toolbar_labels = ["<", ">", "X", "R", "H", "*"]
+        val toolbar_labels = ["<", ">", "X", "R", "H", "*", "Go"]
         var toolbar_index = 0
-        while toolbar_index < toolbar_labels.len():
+        val visible_control_count = _shared_wm_browser_visible_control_count(
+            window.width
+        )
+        while toolbar_index < visible_control_count:
             val toolbar_x = 4 + toolbar_index * WM_BROWSER_CONTROL_SLOT_WIDTH
             commands.push(draw_ir_rect("{window.window_id}-browser-control-{toolbar_index}", toolbar_x, 32, WM_BROWSER_CONTROL_DRAW_WIDTH, 36, theme.title_unfocused))
-            commands.push(_wm_draw_ir_text("{window.window_id}-browser-control-label-{toolbar_index}", toolbar_x + 16, 55, 32, 36, toolbar_labels[toolbar_index], theme.text_primary, "und"))
+            val label_x = if toolbar_labels[toolbar_index] == "Go":
+                toolbar_x + 12
+            else:
+                toolbar_x + 16
+            commands.push(_wm_draw_ir_text("{window.window_id}-browser-control-label-{toolbar_index}", label_x, 55, 32, 36, toolbar_labels[toolbar_index], theme.text_primary, "und"))
             toolbar_index = toolbar_index + 1
-        val address_width = window.width - WM_BROWSER_ADDRESS_X - 4
+        val address_width = shared_wm_browser_address_width(window.width)
         if address_width > 0:
             commands.push(draw_ir_rect("{window.window_id}-browser-address", WM_BROWSER_ADDRESS_X, 32, address_width, 36, 0xFFFFFFFFu32))
             commands.push(_wm_draw_ir_text("{window.window_id}-browser-address-label", WM_BROWSER_ADDRESS_X + 4, 55, 32, 36, window.title, 0xFF111111u32, "und"))
@@ -1220,15 +1254,23 @@ fn shared_wm_scene_draw_window_chrome(backend: CompositorBackend, window: Shared
     if window.app_id == "browser":
         val toolbar_y = window.y + 28
         backend.fill_rect(window.x + 4, toolbar_y, window.width - 8, WM_BROWSER_TOOLBAR_HEIGHT, theme.host_window_body)
-        val labels = ["<", ">", "X", "R", "H", "*"]
+        val labels = ["<", ">", "X", "R", "H", "*", "Go"]
         var control_index = 0
-        while control_index < labels.len():
+        val visible_control_count = _shared_wm_browser_visible_control_count(
+            window.width
+        )
+        while control_index < visible_control_count:
             val control_x = window.x + 4 + control_index * WM_BROWSER_CONTROL_SLOT_WIDTH
             backend.fill_rect(control_x, toolbar_y + 4, WM_BROWSER_CONTROL_DRAW_WIDTH, 36, theme.title_unfocused)
-            _draw_shared_wm_backend_text_fit(backend, control_x + 16, toolbar_y + 14, labels[control_index], theme.text_primary, theme.title_unfocused, 1)
+            val label_x = if labels[control_index] == "Go":
+                control_x + 12
+            else:
+                control_x + 16
+            val label_chars = if labels[control_index] == "Go": 2 else: 1
+            _draw_shared_wm_backend_text_fit(backend, label_x, toolbar_y + 14, labels[control_index], theme.text_primary, theme.title_unfocused, label_chars)
             control_index = control_index + 1
         val address_x = window.x + WM_BROWSER_ADDRESS_X
-        val address_w = window.width - WM_BROWSER_ADDRESS_X - 4
+        val address_w = shared_wm_browser_address_width(window.width)
         if address_w > 0:
             backend.fill_rect(address_x, toolbar_y + 4, address_w, 36, 0xFFFFFFFFu32)
             _draw_shared_wm_backend_text_fit(backend, address_x + 4, toolbar_y + 14, window.title, 0xFF111111u32, 0xFFFFFFFFu32, if address_w > 8: (address_w - 8) / 8 else: 0)

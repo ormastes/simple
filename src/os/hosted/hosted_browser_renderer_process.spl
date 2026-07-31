@@ -66,7 +66,10 @@ use std.gc_async_mut.web.browser_session_context.{
 use std.gc_async_mut.web.browser_session_html.{
     browser_document_csp_policy
 }
-use std.gc_async_mut.web.browser_session_url.{browser_history_resolve_url}
+use std.gc_async_mut.web.browser_session_url.{
+    browser_history_resolve_url,
+    normalize_browser_address_reference_url
+}
 use std.nogc_sync_mut.io.process_ops.{
     browser_renderer_spawn_sandboxed,
     process_close_piped, process_is_piped_alive, process_read_stdout,
@@ -3310,3 +3313,55 @@ pub class HostedBrowserRendererProcess:
             self.generation, self.next_request_id,
             event_id, control, pressed
         ), timeout_ms)
+
+pub struct HostedBrowserAddressNavigationResult:
+    callback_count: i64
+    reason: text
+    retain_address_focus: bool
+    target_url: text
+
+fn _hosted_browser_address_navigation_result(
+    callback_count: i64,
+    reason: text,
+    retain_address_focus: bool,
+    target_url: text
+) -> HostedBrowserAddressNavigationResult:
+    HostedBrowserAddressNavigationResult(
+        callback_count: callback_count,
+        reason: reason,
+        retain_address_focus: retain_address_focus,
+        target_url: target_url
+    )
+
+pub fn hosted_browser_process_activate_address(
+    renderer: HostedBrowserRendererProcess,
+    document_url: text,
+    address_draft: text,
+    timeout_ms: i64
+) -> HostedBrowserAddressNavigationResult:
+    """Normalize and admit one direct hosted Go/Enter navigation.
+
+    The caller clears address focus only when callback_count is one. Failed
+    normalization cannot mutate the renderer and requests focus retention;
+    command admission and any later cancellation stay owned by `renderer`.
+    """
+    val target = match normalize_browser_address_reference_url(
+        document_url, address_draft
+    ):
+        Err(reason):
+            return _hosted_browser_address_navigation_result(
+                0, reason, true, ""
+            )
+        Ok(url):
+            url
+    match renderer.begin_navigate(
+        target, "GET", "", "", "", timeout_ms
+    ):
+        Err(reason):
+            _hosted_browser_address_navigation_result(
+                0, reason, true, target
+            )
+        Ok(_):
+            _hosted_browser_address_navigation_result(
+                1, "", false, target
+            )

@@ -359,6 +359,10 @@ fn _browser_action_result(ok: bool, code: text, message: text, target_id: text, 
         action: action
     )
 
+fn _browser_go_key(value: text) -> bool:
+    val key = value.trim().lower()
+    key == "enter" or key == "space" or value == " "
+
 impl BrowserSession:
 
     me apply_address_update(
@@ -371,6 +375,15 @@ impl BrowserSession:
             self._advance_ui_access_revision()
         self.address_draft = updated
         Ok(updated)
+
+    me activate_address(value: text) -> Result<bool, text>:
+        val address = if value != "":
+            value
+        elif self.address_draft != "":
+            self.address_draft
+        else:
+            self.current_url
+        self.begin_network_navigation(address, "GET", "", "", "")
 
     me ui_access_snapshot() -> UiAccessSnapshot:
         val surface = UiAccessSurface(
@@ -390,7 +403,7 @@ impl BrowserSession:
         val page_control_nodes = _browser_page_control_nodes(
             self.current_dom, self.ui_access_revision
         )
-        val fixed_count = 8
+        val fixed_count = 9
         val node_count = fixed_count + bookmark_nodes.len() + link_nodes.len() + page_control_nodes.len()
         var nodes: [UiAccessNode] = [_browser_node("back", "button", "Back", self.can_go_back(), false, ["click"], _browser_control_props("back")); node_count]
         nodes[1] = _browser_node("forward", "button", "Forward", self.can_go_forward(), false, ["click"], _browser_control_props("forward"))
@@ -399,8 +412,9 @@ impl BrowserSession:
         nodes[4] = _browser_node("home", "button", "Home", true, false, ["click"], _browser_control_props("home"))
         nodes[5] = _browser_node("favorite", "button", "Favorite", self.can_favorite_current_page(), self.is_favorite(self.current_url), ["click"], _browser_control_props("favorite"))
         val address_text = if self.address_draft != "": self.address_draft else: self.current_url
-        nodes[6] = _browser_node("address", "textfield", address_text, true, false, ["set_value", "submit"], _browser_control_props("address"))
-        nodes[7] = _browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title"))
+        nodes[6] = _browser_node("go", "button", "Go", address_text != "", false, ["click", "key"], _browser_control_props("go"))
+        nodes[7] = _browser_node("address", "textfield", address_text, true, false, ["set_value", "submit"], _browser_control_props("address"))
+        nodes[8] = _browser_node("title", "label", self.current_title, true, false, [], _browser_control_props("title"))
         var bookmark_idx = 0
         while bookmark_idx < bookmark_nodes.len():
             nodes[fixed_count + bookmark_idx] = bookmark_nodes[bookmark_idx]
@@ -445,8 +459,7 @@ impl BrowserSession:
                             request.target_id, request.action
                         )
             if request.action == "submit":
-                val address = if request.text_value != "": request.text_value else: self.address_draft
-                match self.begin_network_navigation(address, "GET", "", "", ""):
+                match self.activate_address(request.text_value):
                     Ok(_): return _browser_action_result(true, "ok", "address submitted", request.target_id, request.action)
                     Err(e):
                         val code = if (
@@ -459,6 +472,37 @@ impl BrowserSession:
                             request.target_id, request.action
                         )
             return _browser_action_result(false, "unsupported_operation", "unsupported address action '{request.action}'", request.target_id, request.action)
+        if node.widget_id == "go":
+            if not node.enabled:
+                return _browser_action_result(
+                    false, "disabled", "Go is disabled",
+                    request.target_id, request.action
+                )
+            if request.action == "click" or (
+                request.action == "key" and
+                _browser_go_key(request.text_value)
+            ):
+                match self.activate_address(""):
+                    Ok(_):
+                        return _browser_action_result(
+                            true, "ok", "address activated",
+                            request.target_id, request.action
+                        )
+                    Err(e):
+                        val code = if (
+                            e == "address-too-long" or
+                            e == "address-invalid-control" or
+                            e == "address-invalid-utf8"
+                        ): e else: "action_failed"
+                        return _browser_action_result(
+                            false, code, e,
+                            request.target_id, request.action
+                        )
+            return _browser_action_result(
+                false, "unsupported_operation",
+                "unsupported Go action '{request.action}'",
+                request.target_id, request.action
+            )
         val control = _browser_node_prop(node, "control")
         if control == "page_input" and node.kind == "textfield":
             val dom_target = _browser_dom_target(node)

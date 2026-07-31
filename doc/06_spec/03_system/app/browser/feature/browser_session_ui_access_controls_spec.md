@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 20 | 20 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -19,13 +19,14 @@ This spec exercises browser chrome and DOM controls through the canonical textua
 |-------|-------|
 | Category | Application |
 | Status | Active |
-| Requirements | doc/02_requirements/feature/simple_web_browser_production_hardening.md |
-| Plan | doc/03_plan/sys_test/simple_web_browser_production_hardening.md |
+| Requirements | REQ-WEB-BROWSER-009, REQ-WEB-BROWSER-010 |
+| Plan | doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md |
 | Design | doc/05_design/ui/web/simple_web_browser_production_hardening.md |
-| Research | doc/01_research/local/simple_web_browser_production_hardening.md |
+| Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl` |
-| Updated | 2026-07-30 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-31 |
+| Manual status | Static candidate; whole changed manual hand-reviewed |
+| Generator | Prior generated basis, manually reconciled; docgen not run |
 
 ## Overview
 
@@ -34,10 +35,10 @@ textual UI access surface, including bounded address input and rendered state.
 Unicode noncharacters are valid scalar values and remain allowed in drafts;
 malformed UTF-8, C0, DEL, and C1 controls fail closed before mutation.
 
-**Requirements:** doc/02_requirements/feature/simple_web_browser_production_hardening.md
-**Plan:** doc/03_plan/sys_test/simple_web_browser_production_hardening.md
+**Requirements:** REQ-WEB-BROWSER-009 and REQ-WEB-BROWSER-010 in doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
 **Design:** doc/05_design/ui/web/simple_web_browser_production_hardening.md
-**Research:** doc/01_research/local/simple_web_browser_production_hardening.md
+**Research:** doc/01_research/local/simple_web_browser_engine_production_hardening.md
 
 ## Examples
 
@@ -75,6 +76,7 @@ Display policy: `embed_tui`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Reload", 1).len() equals `1`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Home", 1).len() equals `1`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Favorite", 1).len() equals `1`
+   - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Go", 1).len() equals `1`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://example.com/two", 1).len() equals `1`
 
 
@@ -96,7 +98,558 @@ expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Stop", 1).le
 expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Reload", 1).len()).to_equal(1)
 expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Home", 1).len()).to_equal(1)
 expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Favorite", 1).len()).to_equal(1)
+expect(ui_access_find_nodes(snapshot, "browser:session", "button", "Go", 1).len()).to_equal(1)
 expect(ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://example.com/two", 1).len()).to_equal(1)
+```
+
+</details>
+
+#### should expose and activate one canonical Go control without duplicate navigation
+
+**Requirements exercised:** REQ-WEB-BROWSER-009 (address/chrome navigation)
+and REQ-WEB-BROWSER-010 (canonical relative-reference resolution).
+
+- **Open the production browser chrome**
+  - Expected: one enabled `Go` button exists at `browser:session#go` with click and key actions, ordered before Address and Title to match the visual chrome.
+- **Enter and activate the destination**
+  - Expected: Go pointer release and address Enter resolve `../next?x=1#ok` against the committed document and queue exactly one equivalent GET request.
+  - Expected: Go keyboard Enter and Space each use the same address activation owner.
+  - Expected: the protocol admits Go and the worker returns `navigation-command-required`.
+  - Expected: Go release and address Enter call the same process-level owner; its callable fixture admits one normalized command with `callback_count=1`, while invalid input retains focus and committed history.
+- **Use Home Bookmark Stop and Reload**
+  - Expected: Back, Forward, bookmark, Stop, Home, Reload, and Favorite retain their existing behavior.
+- **Observe canonical history controls and rendered document**
+  - Expected: Go occupies `(268,32,40,36)` only from width 312, while Address appears at its eight-pixel minimum from width 324; exact batch command deltas prove narrower commands are suppressed.
+  - Expected: each window batch at widths 267, 268, 311, 312, 323, and 324 has the exact clipped embedding rectangle `(0,0,width,126)`.
+  - Expected: literal boundary pixels distinguish the width-311 toolbar from width-312 Go, the width-323 toolbar from width-324 Address, and the four-pixel area to the right of Address.
+  - Expected: the 400x200 composition retains exact literal Go, gutter, and Address regions without a self-comparison oracle.
+
+Static provenance: correction cycle 3/3 is based on
+`ccbe8adb05ea719a6f117514a30dbf12f0d10b3b`. All 21 scenarios remain listed
+as 21 active, 0 skipped, and 0 pending. The whole changed manual was
+hand-reviewed against the executable source. Runtime, bootstrap, docgen, and
+push were not invoked; this is a static candidate and does not claim an
+admitted runtime or generated-manual PASS.
+
+Exact bounded gate command and recorded result:
+
+```sh
+git diff --cached --check &&
+test "$(git diff --name-only)" = "tools/tauri-shell/src-tauri/gen/android/gradlew.bat" &&
+test "$(find doc/06_spec -name '*_spec.spl' | wc -l)" -eq 0 &&
+test "$(rg -c 'hosted_browser_process_activate_address' src/os/hosted/hosted_entry.spl)" -eq 3 &&
+! rg -q 'rt_file_read_text.*hosted_entry' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl &&
+test "$(rg -c '^\| 21 \| 21 \| 0 \| 0 \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 1 &&
+test "$(rg -c '^    it "' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl)" -eq 21 &&
+test "$(rg -c '^#### ' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 21 &&
+test "$(rg -c '^\| (Total|Active|Slow|Skipped|Pending) scenarios \| [0-9]+ \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 5 &&
+test "$(rg -c '^\| (Total|Active) scenarios \| 21 \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 2 &&
+test "$(rg -c '^\| (Slow|Skipped|Pending) scenarios \| 0 \|$' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 3 &&
+test "$(rg -U -c 'All 21 scenarios remain listed\nas 21 active, 0 skipped, and 0 pending\.' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md)" -eq 1 &&
+test "$(rg -c '_expect_browser_window_batch_clip' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl)" -eq 7 &&
+diff -u <(awk 'found && /^    it / {exit} /    it "should expose and activate one canonical Go control without duplicate navigation":/ {found=1} found {print}' test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl) <(awk '/Runnable source: [0-9]+ lines folded for reproduction\./ {block=block+1} block==2 && /^```simple$/ {seen=1; next} seen && /^```$/ {exit} seen {print}' doc/06_spec/03_system/app/browser/feature/browser_session_ui_access_controls_spec.md) &&
+echo GO_CYCLE3_STATIC_GATE=PASS
+```
+
+Recorded result: `GO_CYCLE3_STATIC_GATE=PASS`.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 488 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source,
+including UI-access, hosted-pointer, isolated-renderer, direct-worker,
+hosted-entry, Draw IR, resized hit-layout, and literal-pixel assertions.
+
+```simple
+    it "should expose and activate one canonical Go control without duplicate navigation":
+        step("Open the production browser chrome")
+        val committed_url = "https://example.com/a/start"
+        val address_reference = "../next?x=1#ok"
+        val target_url = "https://example.com/next?x=1#ok"
+        var session = BrowserSession.new()
+        expect(session.open_html(
+            committed_url,
+            "<html><head><title>Start</title></head><body>Start</body></html>"
+        ).is_ok()).to_be(true)
+        val go_nodes = ui_access_find_nodes(
+            session.ui_access_snapshot(), "browser:session",
+            "button", "Go", 1
+        )
+        expect(go_nodes.len()).to_equal(1)
+        expect(go_nodes[0].canonical_id).to_equal("browser:session#go")
+        expect(go_nodes[0].action_names).to_equal(["click", "key"])
+        expect(go_nodes[0].enabled).to_be(true)
+        val chrome_snapshot = session.ui_access_snapshot()
+        expect(_snapshot_node_index(chrome_snapshot, "go")).to_equal(6)
+        expect(_snapshot_node_index(chrome_snapshot, "address")).to_equal(7)
+        expect(_snapshot_node_index(chrome_snapshot, "title")).to_equal(8)
+        var empty_address = BrowserSession.new()
+        empty_address.current_url = ""
+        empty_address.document_url = ""
+        empty_address.address_draft = ""
+        val disabled_go = ui_access_find_nodes(
+            empty_address.ui_access_snapshot(), "browser:session",
+            "button", "Go", 1
+        )
+        expect(disabled_go[0].enabled).to_be(false)
+        expect(empty_address.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#go", action: "click",
+            text_value: "", x: 0, y: 0
+        )).code).to_equal("disabled")
+
+        step("Enter and activate the destination")
+        expect(session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#address", action: "set_value",
+            text_value: address_reference, x: 0, y: 0
+        )).ok).to_be(true)
+        val go_click = session.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#go", action: "click",
+            text_value: "", x: 0, y: 0
+        ))
+        expect(go_click.ok).to_be(true)
+        expect(session.pending_request_count()).to_equal(1)
+        val go_request = session.take_pending_request().unwrap()
+        expect(session.pending_request_count()).to_equal(0)
+        expect(go_request.url).to_equal("https://example.com/next?x=1")
+        expect(go_request.method).to_equal("GET")
+
+        var pointer = HostedWebContentSession.create(
+            91, "<main>Pointer</main>", 64, 48
+        )
+        expect(pointer.browser.open_html(
+            committed_url, "<main>Pointer</main>"
+        ).is_ok()).to_be(true)
+        expect(pointer.browser.apply_address_update(
+            "", address_reference, true
+        ).is_ok()).to_be(true)
+        val pointer_down = pointer.dispatch_chrome_pointer(
+            1, "go", true
+        )
+        expect(pointer_down.callback_count).to_equal(0)
+        expect(pointer.browser.pending_request_count()).to_equal(0)
+        expect(pointer.dispatch_chrome_pointer(
+            2, "go", false
+        ).callback_count).to_equal(1)
+        expect(pointer.browser.pending_request_count()).to_equal(1)
+        val pointer_request = pointer.browser.take_pending_request().unwrap()
+        expect(pointer_request.url).to_equal(go_request.url)
+        expect(pointer_request.method).to_equal(go_request.method)
+
+        var isolated = HostedBrowserRendererRegistry.create(
+            "/bin/false", "https://home.test/"
+        )
+        val _ = isolated.ensure(
+            93, "<main>Isolated</main>", 64, 48, 0, 100000
+        )
+        var isolated_entry = isolated.entries[0]
+        isolated_entry.renderer = HostedBrowserRendererProcess.create(
+            93, 64, 48
+        )
+        isolated_entry.renderer.state = "active"
+        isolated_entry.renderer.document_url = committed_url
+        isolated_entry.renderer.document_origin = "https://example.com"
+        isolated_entry.renderer.history_urls = [committed_url]
+        isolated_entry.renderer.history_index = 0
+        isolated_entry.renderer_closed = false
+        isolated_entry.ready = true
+        isolated_entry.failure_reason = ""
+        isolated_entry.address_draft = address_reference
+        isolated.entries[0] = isolated_entry
+        val isolated_down = isolated.dispatch_chrome_pointer(
+            8, 93, "go", true
+        )
+        expect(isolated_down.callback_count).to_equal(0)
+        expect(isolated.entries[0].renderer.pending_wire).to_equal("")
+        expect(isolated.dispatch_chrome_pointer(
+            9, 93, "go", false
+        ).callback_count).to_equal(1)
+        expect(isolated.entries[0].renderer.pending_wire != "").to_be(true)
+        val isolated_command = browser_renderer_navigation_decode(
+            browser_renderer_decoder_feed(
+                browser_renderer_decoder_new(93),
+                isolated.entries[0].renderer.pending_wire
+            ).message
+        )
+        expect(isolated_command.action).to_equal("open")
+        expect(isolated_command.url).to_equal(target_url)
+
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        val worker_capability = "11111111111111111111111111111111"
+        val worker_init = browser_renderer_capability_bind_encoded(
+            browser_renderer_message_encode(
+                "init", 94, 2, "<main>Worker Go</main>"
+            ),
+            94, 2, 2, worker_capability
+        )
+        expect(worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(94),
+                worker_init.wire
+            ).message
+        ).ok).to_be(true)
+        val worker_go_down = browser_renderer_capability_bind_encoded(
+            browser_renderer_chrome_encode(94, 3, 10, "go", true),
+            94, 3, 3, worker_capability
+        )
+        expect(worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(94),
+                worker_go_down.wire
+            ).message
+        ).ok).to_be(true)
+        val worker_go_up = browser_renderer_capability_bind_encoded(
+            browser_renderer_chrome_encode(94, 4, 11, "go", false),
+            94, 4, 4, worker_capability
+        )
+        val worker_go_route = worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(94),
+                worker_go_up.wire
+            ).message
+        )
+        expect(worker_go_route.ok).to_be(false)
+        expect(worker_go_route.reason).to_equal(
+            "navigation-command-required"
+        )
+
+        var direct = HostedBrowserRendererProcess.create(95, 64, 48)
+        direct.state = "active"
+        direct.document_url = committed_url
+        direct.document_origin = "https://example.com"
+        direct.history_urls = [committed_url]
+        direct.history_index = 0
+        direct.history_current_url = committed_url
+        val direct_history = direct.history_urls
+        expect(direct.pending_wire).to_equal("")
+        val direct_release = hosted_browser_process_activate_address(
+            direct, direct.document_url, address_reference, 2000
+        )
+        expect(direct_release.callback_count).to_equal(1)
+        expect(direct_release.reason).to_equal("")
+        expect(direct_release.retain_address_focus).to_be(false)
+        expect(direct_release.target_url).to_equal(target_url)
+        expect(direct.pending_wire != "").to_be(true)
+        expect(direct.pending_wire_is_command).to_be(true)
+        expect(direct.pending_operation).to_equal("navigation")
+        expect(direct.navigation_permit.active).to_be(true)
+        val direct_envelope = browser_renderer_capability_decoder_feed(
+            browser_renderer_capability_decoder_new(95),
+            direct.pending_wire
+        )
+        val direct_command = browser_renderer_navigation_decode(
+            browser_renderer_capability_payload_message(
+                direct_envelope.message
+            )
+        )
+        expect(direct_command.ok).to_be(true)
+        expect(direct_command.action).to_equal("open")
+        expect(direct_command.url).to_equal(target_url)
+        expect(direct.history_urls).to_equal(direct_history)
+        expect(direct.history_index).to_equal(0)
+        expect(direct.document_url).to_equal(committed_url)
+
+        var rejected_direct = HostedBrowserRendererProcess.create(
+            96, 64, 48
+        )
+        rejected_direct.state = "active"
+        rejected_direct.document_url = committed_url
+        rejected_direct.document_origin = "https://example.com"
+        rejected_direct.history_urls = [committed_url]
+        rejected_direct.history_index = 0
+        rejected_direct.history_current_url = committed_url
+        val rejected_history = rejected_direct.history_urls
+        val rejected_release = hosted_browser_process_activate_address(
+            rejected_direct, rejected_direct.document_url,
+            "https://bad_host/", 2000
+        )
+        expect(rejected_release.callback_count).to_equal(0)
+        expect(rejected_release.reason).to_equal(
+            "invalid navigation authority"
+        )
+        expect(rejected_release.retain_address_focus).to_be(true)
+        expect(rejected_direct.pending_wire).to_equal("")
+        expect(rejected_direct.navigation_permit.active).to_be(false)
+        expect(rejected_direct.history_urls).to_equal(rejected_history)
+        expect(rejected_direct.history_index).to_equal(0)
+        expect(rejected_direct.document_url).to_equal(committed_url)
+
+        var entered = HostedWebContentSession.create(
+            92, "<main>Enter</main>", 64, 48
+        )
+        expect(entered.browser.open_html(
+            committed_url, "<main>Enter</main>"
+        ).is_ok()).to_be(true)
+        val _ = entered.dispatch_chrome_pointer(3, "address", true)
+        val _ = entered.dispatch_chrome_pointer(4, "address", false)
+        expect(entered.dispatch_text(
+            5, address_reference
+        ).callback_count).to_equal(1)
+        expect(entered.dispatch_key(6, 13, true).callback_count).to_equal(1)
+        expect(entered.dispatch_key(7, 13, false).callback_count).to_equal(0)
+        expect(entered.browser.pending_request_count()).to_equal(1)
+        val enter_request = entered.browser.take_pending_request().unwrap()
+        expect(enter_request.url).to_equal(go_request.url)
+        expect(enter_request.method).to_equal(go_request.method)
+
+        for key in ["Enter", "Space"]:
+            var keyed = BrowserSession.new()
+            expect(keyed.open_html(
+                committed_url, "<main>Key</main>"
+            ).is_ok()).to_be(true)
+            expect(keyed.apply_address_update(
+                "", address_reference, true
+            ).is_ok()).to_be(true)
+            expect(keyed.ui_access_act(WinTextActionRequest(
+                target_id: "browser:session#go", action: "key",
+                text_value: key, x: 0, y: 0
+            )).ok).to_be(true)
+            expect(keyed.pending_request_count()).to_equal(1)
+
+        step("Use Home Bookmark Stop and Reload")
+        var controls = _browser_session_fixture()
+        expect(controls.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#back", action: "click",
+            text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(controls.current_url).to_equal("https://example.com/one")
+        expect(controls.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#forward", action: "click",
+            text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(controls.current_url).to_equal("https://example.com/two")
+        expect(controls.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#favorite", action: "click",
+            text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        val bookmarks = ui_access_find_nodes(
+            controls.ui_access_snapshot(), "browser:session",
+            "link", "Two", 1
+        )
+        expect(bookmarks.len()).to_equal(1)
+        expect(controls.ui_access_act(WinTextActionRequest(
+            target_id: bookmarks[0].canonical_id, action: "click",
+            text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(controls.pending_request_count()).to_equal(1)
+        expect(controls.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#stop", action: "click",
+            text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(controls.pending_request_count()).to_equal(0)
+        expect(controls.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#home", action: "click",
+            text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(controls.current_url).to_equal("https://example.com/home")
+        expect(controls.ui_access_act(WinTextActionRequest(
+            target_id: "browser:session#reload", action: "click",
+            text_value: "", x: 0, y: 0
+        )).ok).to_be(true)
+        expect(controls.current_url).to_equal("https://example.com/home")
+
+        step("Observe canonical history controls and rendered document")
+        val composition = shared_wm_scene_draw_ir_composition(
+            _browser_chrome_scene(400), _empty_taskbar(),
+            DRAW_IR_BACKEND_CPU, 1000, "", 0
+        )
+        val chrome = composition.batches[2].commands
+        val go_rect = _draw_command(chrome, "win1-browser-control-6")
+        val go_label = _draw_command(
+            chrome, "win1-browser-control-label-6"
+        )
+        val address_rect = _draw_command(chrome, "win1-browser-address")
+        expect(go_rect.x).to_equal(268)
+        expect(go_rect.y).to_equal(32)
+        expect(go_rect.width).to_equal(40)
+        expect(go_rect.height).to_equal(36)
+        expect(go_label.text_value).to_equal("Go")
+        expect(go_label.x).to_equal(280)
+        expect(address_rect.x).to_equal(312)
+        expect(address_rect.y).to_equal(32)
+        expect(address_rect.width).to_equal(84)
+        expect(address_rect.height).to_equal(36)
+        expect(shared_wm_browser_toolbar_control_at(
+            280, 20, 400
+        )).to_equal("go")
+        expect(shared_wm_browser_toolbar_control_at(
+            320, 20, 400
+        )).to_equal("address")
+        expect(shared_wm_browser_toolbar_control_at(
+            250, 20, 267
+        )).to_equal("")
+        expect(shared_wm_browser_toolbar_control_at(
+            250, 20, 268
+        )).to_equal("favorite")
+        expect(shared_wm_browser_toolbar_control_at(
+            268, 20, 268
+        )).to_equal("")
+        expect(shared_wm_browser_toolbar_control_at(
+            280, 20, 311
+        )).to_equal("")
+        expect(shared_wm_browser_toolbar_control_at(
+            280, 20, 312
+        )).to_equal("go")
+        expect(shared_wm_browser_address_width(323)).to_equal(0)
+        expect(shared_wm_browser_address_width(324)).to_equal(
+            WM_BROWSER_ADDRESS_MIN_WIDTH
+        )
+        expect(shared_wm_browser_toolbar_control_at(
+            312, 20, 323
+        )).to_equal("")
+        expect(shared_wm_browser_toolbar_control_at(
+            312, 20, 324
+        )).to_equal("address")
+        expect(shared_wm_browser_toolbar_control_at(
+            320, 20, 324
+        )).to_equal("")
+        val below_favorite_267_composition = (
+            shared_wm_scene_draw_ir_composition(
+                _browser_chrome_scene(267), _empty_taskbar(),
+                DRAW_IR_BACKEND_CPU, 999, "", 0
+            )
+        )
+        val exact_favorite_268_composition = (
+            shared_wm_scene_draw_ir_composition(
+                _browser_chrome_scene(268), _empty_taskbar(),
+                DRAW_IR_BACKEND_CPU, 1000, "", 0
+            )
+        )
+        val narrow_311_composition = shared_wm_scene_draw_ir_composition(
+            _browser_chrome_scene(311), _empty_taskbar(),
+            DRAW_IR_BACKEND_CPU, 1001, "", 0
+        )
+        val exact_go_312_composition = shared_wm_scene_draw_ir_composition(
+            _browser_chrome_scene(312), _empty_taskbar(),
+            DRAW_IR_BACKEND_CPU, 1002, "", 0
+        )
+        val below_address_min_composition = (
+            shared_wm_scene_draw_ir_composition(
+            _browser_chrome_scene(323), _empty_taskbar(),
+            DRAW_IR_BACKEND_CPU, 1003, "", 0
+            )
+        )
+        val exact_address_min_composition = (
+            shared_wm_scene_draw_ir_composition(
+            _browser_chrome_scene(324), _empty_taskbar(),
+            DRAW_IR_BACKEND_CPU, 1004, "", 0
+            )
+        )
+        _expect_browser_window_batch_clip(
+            below_favorite_267_composition, 267
+        )
+        _expect_browser_window_batch_clip(
+            exact_favorite_268_composition, 268
+        )
+        _expect_browser_window_batch_clip(narrow_311_composition, 311)
+        _expect_browser_window_batch_clip(exact_go_312_composition, 312)
+        _expect_browser_window_batch_clip(
+            below_address_min_composition, 323
+        )
+        _expect_browser_window_batch_clip(
+            exact_address_min_composition, 324
+        )
+        val narrow_311 = narrow_311_composition.batches[2].commands
+        val exact_go_312 = exact_go_312_composition.batches[2].commands
+        val below_address_min = (
+            below_address_min_composition.batches[2].commands
+        )
+        val exact_address_min = (
+            exact_address_min_composition.batches[2].commands
+        )
+        expect(_has_draw_command(
+            narrow_311, "win1-browser-control-6"
+        )).to_be(false)
+        expect(_has_draw_command(
+            exact_go_312, "win1-browser-control-6"
+        )).to_be(true)
+        expect(_has_draw_command(
+            below_address_min, "win1-browser-address"
+        )).to_be(false)
+        expect(_draw_command(
+            exact_address_min, "win1-browser-address"
+        ).width).to_equal(WM_BROWSER_ADDRESS_MIN_WIDTH)
+        expect(exact_go_312.len()).to_equal(narrow_311.len() + 2)
+        expect(below_address_min.len()).to_equal(exact_go_312.len())
+        expect(exact_address_min.len()).to_equal(
+            below_address_min.len() + 2
+        )
+        val narrow_raster = Engine2dCompositorBackend.create_named(
+            311, 200, "software"
+        )
+        val narrow_frame = narrow_raster.render_draw_ir_composition(
+            narrow_311_composition, []
+        )
+        narrow_raster.shutdown()
+        expect(narrow_frame.pixels[32 * 311 + 280]).to_equal(
+            0xffe8e8e8u32
+        )
+        val go_boundary_raster = Engine2dCompositorBackend.create_named(
+            312, 200, "software"
+        )
+        val go_boundary_frame = (
+            go_boundary_raster.render_draw_ir_composition(
+                exact_go_312_composition, []
+            )
+        )
+        go_boundary_raster.shutdown()
+        expect(go_boundary_frame.pixels[32 * 312 + 280]).to_equal(
+            0xffe2e2e6u32
+        )
+        val below_address_raster = Engine2dCompositorBackend.create_named(
+            323, 200, "software"
+        )
+        val below_address_frame = (
+            below_address_raster.render_draw_ir_composition(
+                below_address_min_composition, []
+            )
+        )
+        below_address_raster.shutdown()
+        expect(below_address_frame.pixels[32 * 323 + 312]).to_equal(
+            0xffe8e8e8u32
+        )
+        val address_boundary_raster = Engine2dCompositorBackend.create_named(
+            324, 200, "software"
+        )
+        val address_boundary_frame = (
+            address_boundary_raster.render_draw_ir_composition(
+                exact_address_min_composition, []
+            )
+        )
+        address_boundary_raster.shutdown()
+        expect(address_boundary_frame.pixels[32 * 324 + 312]).to_equal(
+            0xffffffffu32
+        )
+        expect(address_boundary_frame.pixels[32 * 324 + 320]).to_equal(
+            0xffe8e8e8u32
+        )
+        val raster = Engine2dCompositorBackend.create_named(
+            400, 200, "software"
+        )
+        val first = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(first.pixels.len()).to_equal(400 * 200)
+        expect(first.rendered_command_count).to_be_greater_than(0)
+        expect(first.skipped_command_count).to_equal(0)
+        expect(_rect_non_color_count(
+            first.pixels, 400, 268, 32, 12, 36,
+            0xffe2e2e6u32
+        )).to_equal(0)
+        expect(_rect_non_color_count(
+            first.pixels, 400, 308, 32, 4, 36,
+            0xffe8e8e8u32
+        )).to_equal(0)
+        expect(_rect_non_color_count(
+            first.pixels, 400, 312, 32, 84, 7,
+            0xffffffffu32
+        )).to_equal(0)
+        expect(_rect_non_color_count(
+            first.pixels, 400, go_rect.x, go_rect.y,
+            go_rect.width, go_rect.height, go_rect.color
+        )).to_be_greater_than(0)
+        worker.close()
+        expect(isolated.close()).to_be(true)
+
 ```
 
 </details>
@@ -125,6 +678,7 @@ expect(capture).to_contain("BrowserSession UI Access Snapshot")
 expect(capture).to_contain("node: back kind=button text=Back")
 expect(capture).to_contain("node: reload kind=button text=Reload")
 expect(capture).to_contain("node: favorite kind=button text=Favorite")
+expect(capture).to_contain("node: go kind=button text=Go")
 expect(capture).to_contain("node: address kind=textfield text=https://example.com/start/index.html")
 expect(capture).to_contain("kind=link text=Read docs")
 expect(_write_ui_capture(capture)).to_equal(0)
@@ -2058,8 +2612,8 @@ expect(link_result.message).to_equal("link event canceled")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 20 |
-| Active scenarios | 20 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

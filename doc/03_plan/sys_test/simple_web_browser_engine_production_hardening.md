@@ -1388,3 +1388,28 @@ child runtime.
 Stage-4 admission is NONE. Therefore no target-runtime, docgen, numeric
 performance, 10,000-cycle, aggregate HTML/CSS, full-browser, or goal PASS is
 admitted.
+
+## Go chrome correction cycle 1/3 (2026-07-31)
+
+`REQ-WEB-BROWSER-009` and `REQ-WEB-BROWSER-010` trace to
+`test/03_system/app/browser/feature/browser_session_ui_access_controls_spec.spl`
+and its generated/manual mirror. The bounded correction covers one shared Go
+activation owner, relative-reference normalization, protocol-to-worker and
+direct-hosted-entry routing fixtures, accessibility order/enabled state,
+width 268/312/324 clipping boundaries, and independent literal-color pixel
+regions. Runtime/docgen evidence remains RED because of the pre-existing
+`browser_session_runtime.spl` parse blocker; this cycle admits one static gate
+only and makes no runtime PASS claim.
+
+Cycle 2/3 replaces the direct hosted-entry source-text assertion with callable
+`hosted_browser_process_activate_address` behavior shared by Go release and
+address Enter. The production-process fixture checks one normalized pending
+navigation, callback count, focus/error truth, and committed-history
+preservation. Exact narrow-width batch deltas and literal boundary pixels now
+cover command suppression at 311/312 and 323/324. The 21/21 manual remains a
+hand-reviewed static candidate; runtime/bootstrap/docgen/push stay uninvoked.
+
+Cycle 3/3 pins each clipped browser window batch to embedding rectangle
+`(0,0,width,126)` with clipping enabled at widths 267, 268, 311, 312, 323,
+and 324. These exact embedding assertions complement the retained command
+suppression, command-count deltas, and literal boundary-pixel evidence.
