@@ -8,6 +8,8 @@
 #
 # All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
 
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
 # ===== Method Call =====
 
 fn eval_method_call(eid: i64) -> i64:
@@ -321,6 +323,38 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
         if s.len() > 0:
             val first_ch = s[0:1]
             return val_make_int(first_ch.char_code_at(0))
+        return val_make_int(0)
+
+    # byte_at is BYTE-indexed, in contrast to char_code_at above which is
+    # CHARACTER-indexed: on non-ASCII text the two diverge (e.g.
+    # "café,".byte_at(3) == 195, the raw 0xC3 lead byte of 'é', while
+    # char_code_at(3) == 233, the decoded codepoint). `s[idx:idx+1]` (used
+    # above for char_code_at) is confirmed BYTE-addressed by probe, but
+    # slicing a single byte out of a multi-byte codepoint and then decoding
+    # it as UTF-8 (as char_code_at does) returns garbage, not the raw byte —
+    # so byte_at must not reuse that shape. Instead it reads through
+    # rt_text_to_bytes, the raw-byte extern already reachable from this
+    # engine (matches src/lib/common/web/browser_renderer_protocol.spl's
+    # byte-framing scan, which relies on byte_at being byte-indexed). Note:
+    # unlike the Rust seed's O(1) rt_string_byte_at (direct buffer read),
+    # this path is O(n) per call — rt_text_to_bytes materializes the whole
+    # byte array each time, since rt_string_byte_at is not yet registered as
+    # a known extern for this engine's dispatch (interpreter_sffi).
+    # TODO(perf): register rt_string_byte_at as a known extern for this
+    # engine and switch byte_at to it. Until then a `while i < s.len():
+    # s.byte_at(i)` scan is O(n^2) -- rt_text_to_bytes rebuilds the whole
+    # byte array on every call. This is the same quadratic-scan trap that
+    # char_code_at was already fixed for, so byte-framing callers must not
+    # be pointed at this engine for large payloads yet.
+    if method_name == "byte_at":
+        if arg_eids.len() > 0:
+            val idx_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val idx = val_get_int(idx_val)
+            val bytes = rt_text_to_bytes(s)
+            if idx >= 0 and idx < bytes.len():
+                return val_make_int(bytes[idx].to_i64())
+            return val_make_int(0)
         return val_make_int(0)
 
     if method_name == "substring":
