@@ -2,6 +2,9 @@ use std.spec.*
 
 use std.gc_async_mut.web.browser_session.{BrowserSession, BrowserResponse}
 use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_context.{
+    browser_csp_allows, browser_csp_form_action_allows
+}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{WebRenderBackend}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_layout_by_id,
@@ -378,6 +381,251 @@ describe "BrowserSession live DOM input":
                 )
             nil:
                 fail("Expected form navigation request")
+
+    it "blocks a POST form when response CSP declares form-action none":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: sandbox allow-forms " +
+            "allow-top-navigation; form-action 'none'",
+            "<html><body><p id='authorized'>Authorized profile</p>" +
+            "<form id='profile' action='https://collector.test/capture' " +
+            "method='post'><input id='secret' name='secret' value='token'>" +
+            "<button id='send' type='submit'>Send</button></form>" +
+            "</body></html>", ""
+        )).is_ok()).to_be(true)
+        val pixels_before = session.render_to_pixels(160, 96).pixel_data
+
+        val dispatch = session.dispatch_dom_event("send", "click", true, true)
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.current_url).to_equal("https://account.test/profile")
+        expect(session.current_body_html).to_contain("Authorized profile")
+        expect(_dom_input_pixels_equal(
+            pixels_before, session.render_to_pixels(160, 96).pixel_data
+        )).to_be(true)
+        expect(session.warnings.join("|")).to_contain(
+            "CSP blocked form submission"
+        )
+
+    it "allows a same-origin POST selected by form-action self":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: default-src 'none'; " +
+            "sandbox allow-forms allow-top-navigation; form-action 'self'",
+            "<html><body><form id='profile' action='/save' method='post'>" +
+            "<input name='name' value='Ada'><button id='save' " +
+            "type='submit'>Save</button></form></body></html>", ""
+        )).is_ok()).to_be(true)
+
+        val dispatch = session.dispatch_dom_event("save", "click", true, true)
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        val request = session.take_pending_request().unwrap()
+        expect(request.url).to_equal("https://account.test/save")
+        expect(request.method).to_equal("POST")
+        expect(request.body).to_equal("name=Ada")
+
+    it "does not apply default-src when form-action is absent":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: default-src 'none'; " +
+            "sandbox allow-forms allow-top-navigation",
+            "<html><body><form id='profile' " +
+            "action='https://collector.test/capture' method='post'>" +
+            "<input name='name' value='Ada'><button id='send' " +
+            "type='submit'>Send</button></form></body></html>", ""
+        )).is_ok()).to_be(true)
+
+        val dispatch = session.dispatch_dom_event("send", "click", true, true)
+
+        expect(dispatch.default_action).to_equal("button-activate")
+        val request = session.take_pending_request().unwrap()
+        expect(request.url).to_equal("https://collector.test/capture")
+        expect(request.method).to_equal("POST")
+        expect(request.body).to_equal("name=Ada")
+
+    it "matches form-action host sources without weakening fetch directives":
+        val document_url = "https://account.test/profile"
+        expect(browser_csp_form_action_allows(
+            "form-action submit.account.test/forms/", document_url,
+            "https://submit.account.test/forms/save"
+        )).to_be(true)
+        expect(browser_csp_form_action_allows(
+            "form-action submit.account.test/forms/", document_url,
+            "https://submit.account.test/other"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action *.account.test:*", document_url,
+            "https://deep.forms.account.test:9443/save"
+        )).to_be(true)
+        expect(browser_csp_form_action_allows(
+            "form-action *.account.test:*", document_url,
+            "https://account.test:9443/save"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action submit.account.test:8443", document_url,
+            "https://submit.account.test:8443/save"
+        )).to_be(true)
+        expect(browser_csp_form_action_allows(
+            "form-action submit.account.test:8443", document_url,
+            "https://submit.account.test:9443/save"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action https://submit.account.test:443", document_url,
+            "https://submit.account.test/save"
+        )).to_be(true)
+        expect(browser_csp_form_action_allows(
+            "form-action https://submit.account.test", document_url,
+            "https://submit.account.test:443/save"
+        )).to_be(true)
+        expect(browser_csp_form_action_allows(
+            "form-action submit.account.test", document_url,
+            "https://submit.account.test:8443/save"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action https://submit.account.test:", document_url,
+            "https://submit.account.test:8443/save"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action https://submit.account.test:abc", document_url,
+            "https://submit.account.test/save"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action https://[submit.account.test", document_url,
+            "https://submit.account.test/save"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action http:", document_url,
+            "https://submit.account.test/save"
+        )).to_be(true)
+        expect(browser_csp_form_action_allows(
+            "form-action https:", document_url,
+            "https://submit.account.test:8443/save"
+        )).to_be(true)
+        expect(browser_csp_form_action_allows(
+            "form-action https:", document_url,
+            "http://submit.account.test/save"
+        )).to_be(false)
+        expect(browser_csp_form_action_allows(
+            "form-action submit.account.test", document_url,
+            "http://submit.account.test/save"
+        )).to_be(false)
+        expect(browser_csp_allows(
+            "default-src https://cdn.test/assets/", "img-src", document_url,
+            "https://cdn.test/assets/logo.png", false
+        )).to_be(true)
+        expect(browser_csp_allows(
+            "default-src https://cdn.test/assets/", "img-src", document_url,
+            "https://cdn.test/private/logo.png", false
+        )).to_be(false)
+
+    it "carries form-action across document redirects and denies before queue":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: sandbox allow-forms " +
+            "allow-top-navigation allow-same-origin; " +
+            "form-action *.account.test:*",
+            "<html><body><form id='profile' " +
+            "action='https://forms.account.test:8443/submit' method='post'>" +
+            "<input name='name' value='Ada'><button id='send' " +
+            "type='submit'>Send</button></form></body></html>", ""
+        )).is_ok()).to_be(true)
+        val dispatch = session.dispatch_dom_event("send", "click", true, true)
+        expect(dispatch.default_action).to_equal("button-activate")
+        val initial = session.take_pending_request().unwrap()
+        expect(initial.csp_policy).to_contain("form-action *.account.test:*")
+        expect(initial.csp_document_url).to_equal(
+            "https://account.test/profile"
+        )
+        expect(session.commit_network_response(BrowserResponse.create(
+            initial.id, "document", initial.url, 302,
+            "Location: https://next.account.test:9443/continue", "", ""
+        )).is_ok()).to_be(true)
+        val allowed_redirect = session.take_pending_request().unwrap()
+        expect(allowed_redirect.url).to_equal(
+            "https://next.account.test:9443/continue"
+        )
+        expect(allowed_redirect.csp_policy).to_equal(initial.csp_policy)
+        expect(allowed_redirect.csp_document_url).to_equal(
+            initial.csp_document_url
+        )
+        val cookie_before_denial = session.document_cookie()
+        val request_cookie_before_denial = session.cookie_header_for_request(
+            "https://account.test/after"
+        )
+        val hsts_before_denial = session.hsts_snapshot(1000).entries.len()
+        expect(cookie_before_denial).to_equal("")
+        expect(request_cookie_before_denial).to_equal("")
+        expect(hsts_before_denial).to_equal(0)
+        val url_before_denial = session.current_url
+        val html_before_denial = session.current_body_html
+        val denied_redirect = session.commit_network_response(
+            BrowserResponse.create(
+                allowed_redirect.id, "document", allowed_redirect.url, 307,
+                "Location: https://outside.test/drop\n" +
+                "Set-Cookie: redirect_leak=1; Domain=account.test; " +
+                "Path=/; Secure\n" +
+                "Strict-Transport-Security: max-age=60", "", ""
+            )
+        )
+        expect(denied_redirect.is_err()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.document_cookie()).to_equal(cookie_before_denial)
+        expect(session.cookie_header_for_request(
+            "https://account.test/after"
+        )).to_equal(request_cookie_before_denial)
+        expect(session.hsts_snapshot(1000).entries.len()).to_equal(
+            hsts_before_denial
+        )
+        expect(session.current_url).to_equal(url_before_denial)
+        expect(session.current_body_html).to_equal(html_before_denial)
+
+    it "applies form-action to implicit and keyboard submit callers":
+        var session = BrowserSession.new()
+        expect(session.begin_network_navigation(
+            "https://account.test/profile", "GET", "", "", ""
+        ).is_ok()).to_be(true)
+        val document_request = session.take_pending_request().unwrap()
+        expect(session.commit_network_response(BrowserResponse.create(
+            document_request.id, "document", document_request.url, 200,
+            "Content-Security-Policy: sandbox allow-forms " +
+            "allow-top-navigation; form-action 'none'",
+            "<html><body><form id='profile' action='/save' method='post'>" +
+            "<input id='name' name='name' value='Ada'><button id='send' " +
+            "type='submit'>Send</button></form></body></html>", ""
+        )).is_ok()).to_be(true)
+        expect(session.dispatch_dom_keyboard_event(
+            "name", "Enter", true
+        ).is_ok()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.dispatch_dom_keyboard_activation(
+            "send", "Enter"
+        ).is_ok()).to_be(true)
+        expect(session.take_pending_request()).to_be_nil()
+        expect(session.warnings.join("|")).to_contain(
+            "CSP blocked form submission: https://account.test/save"
+        )
 
     it "updates text input value and emits its inline input handler":
         var session = BrowserSession.new()

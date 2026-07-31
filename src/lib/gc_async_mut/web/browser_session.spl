@@ -91,6 +91,8 @@ use std.gc_async_mut.web.browser_session_html.{
 }
 use std.gc_async_mut.web.browser_session_context.{
     BrowserCspSandboxPolicy, browser_csp_allows,
+    browser_csp_form_action_allows,
+    browser_csp_form_action_allows_after_redirect,
     browser_csp_header_sandbox, browser_session_is_loopback_http,
     browser_session_is_secure_context
 }
@@ -229,6 +231,7 @@ class BrowserRequest:
     script_cookie_writes: [text]
     image_resource_key: text
     csp_policy: text
+    csp_document_url: text
 
     static fn create(id: text, kind: text, url: text, method: text, headers: text, body: text, content_type: text) -> BrowserRequest:
         BrowserRequest(
@@ -247,7 +250,8 @@ class BrowserRequest:
             is_top_level_navigation: kind == "document",
             script_cookie_writes: [],
             image_resource_key: "",
-            csp_policy: ""
+            csp_policy: "",
+            csp_document_url: ""
         )
 
 class BrowserResponse:
@@ -2143,6 +2147,15 @@ impl BrowserSession:
         self.resource_overrides = upsert_pair(self.resource_overrides, normalize_browser_url(url), body)
 
     me begin_network_navigation(url: text, method: text, headers: text, body: text, content_type: text) -> Result<bool, text>:
+        self._begin_network_navigation_with_form_action_policy(
+            url, method, headers, body, content_type, "", ""
+        )
+
+    me _begin_network_navigation_with_form_action_policy(
+        url: text, method: text, headers: text, body: text,
+        content_type: text, form_action_policy: text,
+        form_action_document_url: text
+    ) -> Result<bool, text>:
         if (
             not browser_resource_size_allowed(method.len()) or
             not browser_resource_size_allowed(content_type.len())
@@ -2170,10 +2183,13 @@ impl BrowserSession:
         if self.address_draft != normalized:
             self._advance_ui_access_revision()
         self.address_draft = normalized
-        self.pending_requests.push(self._build_request(
+        var request = self._build_request(
             "document", normalized, normalized_method,
             headers, body, content_type
-        ))
+        )
+        request.csp_policy = form_action_policy
+        request.csp_document_url = form_action_document_url
+        self.pending_requests.push(request)
         self._flush_runtime_side_effects_and_pump_history()
         Ok(true)
 
@@ -2799,9 +2815,6 @@ impl BrowserSession:
                     else:
                         response.url
             if browser_status_is_redirect(response.status):
-                self._apply_response_headers(
-                    response.headers, response.url, true, document_site_url
-                )
                 val location = browser_header_location(response.headers)
                 if location == "":
                     self.stop_loading()
@@ -2855,6 +2868,26 @@ impl BrowserSession:
                             original_method = "GET"
                             original_body = ""
                             original_content_type = ""
+                        var form_action_policy = ""
+                        var form_action_document_url = ""
+                        if val Some(original) = inflight:
+                            form_action_policy = original.csp_policy
+                            form_action_document_url = original.csp_document_url
+                        if (
+                            form_action_document_url != "" and
+                            not browser_csp_form_action_allows_after_redirect(
+                                form_action_policy, form_action_document_url,
+                                upgraded_url
+                            )
+                        ):
+                            self.stop_loading()
+                            return Err(
+                                "CSP blocked form redirect: {upgraded_url}"
+                            )
+                        self._apply_response_headers(
+                            response.headers, response.url, true,
+                            document_site_url
+                        )
                         self.pending_url = upgraded_url
                         var next_request = self._build_request(
                             "document", upgraded_url, original_method, "",
@@ -2871,6 +2904,8 @@ impl BrowserSession:
                         )
                         next_request.credentials = original_credentials
                         next_request.is_top_level_navigation = original_is_top_level
+                        next_request.csp_policy = form_action_policy
+                        next_request.csp_document_url = form_action_document_url
                         next_request.headers = self._headers_with_session_cookie(
                             next_request.headers, next_request.url,
                             next_request.method, original_site_url,
