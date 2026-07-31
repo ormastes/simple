@@ -452,7 +452,8 @@ expect(_count_color(
 
 - Resolve `overflow-x: hidden|auto|scroll` with omitted or explicit visible
   `overflow-y` after the final author/inline cascade.
-- Preserve explicit `overflow-y:hidden` without manufacturing a scrollbar.
+- Preserve explicit `overflow-y:hidden` and `scrollbar-width:none` without
+  manufacturing a scrollbar.
 - Verify the resulting scrollport clip and Engine2D pixel boundary.
 
 <details>
@@ -460,8 +461,8 @@ expect(_count_color(
 
 Runnable source: `simple_web_browser_engine_production_hardening_spec.spl`.
 The scenario uses author-class `overflow-x` plus inline `overflow-y` to prove
-final-cascade normalization, then checks six scrollbar tracks, one withheld
-hidden-y track, the child Draw IR clip height, and an Engine2D pixel below it.
+final-cascade normalization, then checks six scrollbar tracks, two withheld
+tracks, the child Draw IR clip height, and an Engine2D pixel below it.
 
 </details>
 
