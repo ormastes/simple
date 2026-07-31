@@ -107,6 +107,33 @@ fn _node_overflow_dom() -> BeDomNode:
         node_id = node_id + 1
     root
 
+fn _check_deep_layout_inverse():
+    var root = BeDomNode.element_with_id(1, "html")
+    var body = BeDomNode.element_with_id(2, "body")
+    root.children.push(body)
+    var cursor = body
+    var node_id: i64 = 3
+    var remaining = HTML_MAX_TREE_DEPTH - 2
+    while remaining > 0:
+        val child = BeDomNode.element_with_id(node_id, "div")
+        cursor.children.push(child)
+        cursor = child
+        node_id = node_id + 1
+        remaining = remaining - 1
+    val index = match dom_identity_index_build(root, _generation(1)):
+        Ok(value): value
+        Err(reason): fail("Expected bounded deep layout index: {reason}")
+    val deepest = DomNodeRoute(
+        generation: _generation(1), node_id: node_id - 1
+    )
+    val target_key = match index.layout_target_key_for_route(deepest):
+        Some(value): value
+        nil: fail("Expected deep inverse layout path")
+    expect(target_key.slice(5, target_key.len()).split("/").len()).to_equal(
+        HTML_MAX_TREE_DEPTH - 2
+    )
+    expect(index.route_for_layout_target_key(target_key)).to_equal(Ok(deepest))
+
 fn _check_layout_and_admission_bounds():
     var two_body_root = BeDomNode.element_with_id(1, "html")
     var first_body = BeDomNode.element_with_id(2, "body")
@@ -190,6 +217,19 @@ fn check_dom_identity_index_built(fixture: DomIdentityGenerationFixture):
     expect(index.route_for_layout_target_key(
         _over_depth_layout_key()
     ).is_err()).to_be(true)
+    val oversized_path = (
+        "path:" + "0".repeat(HTML_MAX_TREE_DEPTH.to_i64() * 11)
+    )
+    expect(index.route_for_layout_target_key(oversized_path)).to_equal(
+        Err("invalid_target")
+    )
+    val oversized_route = (
+        "dom-route-v1:" + "1".repeat(19) + ":" + "1".repeat(20)
+    )
+    expect(dom_node_route_parse(oversized_route)).to_equal(
+        Err("invalid_route")
+    )
+    _check_deep_layout_inverse()
     _check_layout_and_admission_bounds()
 
 fn check_stable_route_dispatch(fixture: DomIdentityGenerationFixture):
@@ -224,6 +264,9 @@ fn check_stale_routes_and_index_release(
     expect(captured_index.contains_route(captured_route)).to_be(true)
     expect(replacement.index.contains_route(captured_route)).to_be(false)
     expect(replacement.index.path_for_route(captured_route)).to_be_nil()
+    expect(replacement.index.layout_target_key_for_route(
+        captured_route
+    )).to_be_nil()
     expect(replacement.replacement_route.generation.value).to_equal(2)
     var pinned: DomIdentityIndex? = Some(captured_index)
     expect(pinned.is_some()).to_be(true)

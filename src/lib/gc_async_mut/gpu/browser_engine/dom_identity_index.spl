@@ -4,6 +4,12 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_limits.{
     HTML_MAX_TREE_DEPTH, HTML_MAX_NODES
 }
+use std.common.encoding.utf8.{text_byte_len}
+
+val DOM_ROUTE_TEXT_MAX_BYTES: i64 = 52
+val DOM_LAYOUT_PATH_MAX_BYTES: i64 = (
+    5 + HTML_MAX_TREE_DEPTH.to_i64() * 11 - 1
+)
 
 class DomDocumentGeneration:
     value: i64
@@ -40,6 +46,8 @@ class _DomIdentityEntry:
     route: DomNodeRoute
     parent_route: DomNodeRoute?
     child_ordinal: i32
+    layout_parent_route: DomNodeRoute?
+    layout_ordinal: i32
     tag_name: text
     author_id: text
     form_reference: text
@@ -66,7 +74,6 @@ class DomIdentityIndex:
     route_indices: Dict<text, i32>
     author_route_indices: Dict<text, i32>
     layout_route_indices: Dict<text, i32>
-    layout_target_keys_by_route: Dict<text, text>
     form_owner_indices: Dict<text, i32>
     label_control_indices: Dict<text, i32>
     radio_group_indices_by_route: Dict<text, i32>
@@ -197,6 +204,8 @@ class DomIdentityIndex:
             return Err("target_not_found")
         if not target_key.starts_with("path:"):
             return Err("invalid_target")
+        if text_byte_len(target_key) > DOM_LAYOUT_PATH_MAX_BYTES:
+            return Err("invalid_target")
         val path_text = target_key.slice(5, target_key.len())
         val body = match self.body_route:
             Some(route): route
@@ -220,9 +229,34 @@ class DomIdentityIndex:
         Ok(current)
 
     fn layout_target_key_for_route(route: DomNodeRoute) -> text?:
-        if route.generation.value != self.generation.value:
+        var entry_index = self._entry_index(route)
+        if entry_index < 0:
             return nil
-        self.layout_target_keys_by_route.get(_dom_route_key(route))
+        val body = match self.body_route:
+            Some(value): value
+            nil: return nil
+        var reversed: [text] = []
+        var remaining = HTML_MAX_TREE_DEPTH
+        while remaining > 0:
+            val entry = self.entries[entry_index]
+            if entry.route.node_id == body.node_id:
+                var parts: [text] = []
+                var reverse_index = reversed.len() - 1
+                while reverse_index >= 0:
+                    parts.push(reversed[reverse_index])
+                    reverse_index = reverse_index - 1
+                return Some("path:" + parts.join("/"))
+            val parent = match entry.layout_parent_route:
+                Some(value): value
+                nil: return nil
+            if entry.layout_ordinal < 0:
+                return nil
+            reversed.push(entry.layout_ordinal.to_text())
+            entry_index = self._entry_index(parent)
+            if entry_index < 0:
+                return nil
+            remaining = remaining - 1
+        nil
 
 fn _dom_route_key(route: DomNodeRoute) -> text:
     route.node_id.to_text()
@@ -290,6 +324,8 @@ fn dom_node_route_text(route: DomNodeRoute) -> text:
     "dom-route-v1:" + route.generation.value.to_text() + ":" + route.node_id.to_text()
 
 fn dom_node_route_parse(value: text) -> Result<DomNodeRoute, text>:
+    if text_byte_len(value) > DOM_ROUTE_TEXT_MAX_BYTES:
+        return Err("invalid_route")
     val parts = value.split(":")
     if parts.len() != 3 or parts[0] != "dom-route-v1":
         return Err("invalid_route")
@@ -313,7 +349,6 @@ fn dom_identity_index_build(
     var route_indices: Dict<text, i32> = {}
     var author_route_indices: Dict<text, i32> = {}
     var layout_route_indices: Dict<text, i32> = {}
-    var layout_target_keys_by_route: Dict<text, text> = {}
     var duplicate_author_id_count: i64 = 0
     var layout_relation_count: i64 = 0
     var body_route: DomNodeRoute? = nil
@@ -351,6 +386,8 @@ fn dom_identity_index_build(
                 route: route,
                 parent_route: frame.parent_route,
                 child_ordinal: frame.child_ordinal,
+                layout_parent_route: frame.layout_parent_route,
+                layout_ordinal: frame.layout_ordinal,
                 tag_name: frame.node.tag_name,
                 author_id: author_id,
                 form_reference: _dom_attr(frame.node, "form"),
@@ -372,27 +409,11 @@ fn dom_identity_index_build(
                 layout_route_indices[
                     _dom_layout_key(layout_parent, frame.layout_ordinal)
                 ] = entry_index
-                val parent_target_key = (
-                    layout_target_keys_by_route.get(
-                        _dom_route_key(layout_parent)
-                    ) ?? ""
-                )
-                if parent_target_key == "":
-                    return Err("invalid_layout_relation")
-                val separator = if parent_target_key == "path:":
-                    ""
-                else:
-                    "/"
-                layout_target_keys_by_route[route_key] = (
-                    parent_target_key + separator +
-                    frame.layout_ordinal.to_text()
-                )
                 layout_relation_count = layout_relation_count + 1
         val current_layout_enabled = if (
             frame.node.tag_name == "body" and body_route == nil
         ):
             body_route = Some(route)
-            layout_target_keys_by_route[route_key] = "path:"
             true
         else:
             frame.layout_enabled
@@ -519,7 +540,6 @@ fn dom_identity_index_build(
         route_indices: route_indices,
         author_route_indices: author_route_indices,
         layout_route_indices: layout_route_indices,
-        layout_target_keys_by_route: layout_target_keys_by_route,
         form_owner_indices: form_owner_indices,
         label_control_indices: label_control_indices,
         radio_group_indices_by_route: radio_group_indices_by_route,
