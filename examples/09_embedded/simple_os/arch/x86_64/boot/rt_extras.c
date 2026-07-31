@@ -4039,6 +4039,30 @@ RuntimeValue FontRenderer_dot_browser_serif_default(void) { return NIL_VALUE; }
 RuntimeValue KLogEntry_dot_from_bytes(void) { return NIL_VALUE; }
 RuntimeValue QualcommBackend_dot_is_adreno_gpu(void) { return FALSE_VALUE; }
 RuntimeValue tools__pkg__pkg_repository__TlsClient(void) { return NIL_VALUE; }
+
+/* rt_cuda_device_identity / rt_vulkan_accepted_compute_submit_count: these
+ * are raw-i64 ABI (not tagged RuntimeValue -- see &[I64],&[I64] in
+ * codegen/runtime_sffi.rs), so they must NOT use the NOP1/NOP0 macros
+ * above (those return the tagged NIL_VALUE bit pattern, which a raw-int
+ * caller would not see as <= 0). Reached via Engine2DReadback's
+ * device-identity-stamped CUDA readback path (backend_cuda.spl, added
+ * 0c3bfb3b792) and the Vulkan frame-batching accepted-submit counter
+ * (sffi_vulkan.spl:vulkan_sffi_accepted_compute_submit_count) -- both
+ * survive as symbol references here for the same "closure spillover"
+ * reason documented above, even though this baremetal kernel never
+ * initializes a CUDA or Vulkan backend. This mirrors the hosted runtime's
+ * own already-reviewed "feature not compiled in" convention exactly:
+ * cuda_runtime.rs `#[cfg(not(feature = "cuda"))] fn rt_cuda_device_identity
+ * (..) -> i64 { 0 }` and vulkan_graphics_runtime_compute.rs
+ * `#[cfg(not(feature = "vulkan"))] { 0 }`. 0 ("no identity" / "zero
+ * submissions accepted") is the honest, permanently-correct answer on a
+ * machine with no CUDA or Vulkan hardware, not a fabricated placeholder --
+ * the CUDA caller already treats <= 0 as "unknown/no device"
+ * (backend_cuda.spl: `if device_identity <= 0: return
+ * engine2d_readback([], "device_identity_unknown")`).
+ */
+RuntimeValue rt_cuda_device_identity(RuntimeValue device) { (void)device; return 0; }
+RuntimeValue rt_vulkan_accepted_compute_submit_count(void) { return 0; }
 RuntimeValue generate_css(void) { return rt_string_from_cstr(""); }
 RuntimeValue noalloc_log_debug(void) { return NIL_VALUE; }
 RuntimeValue panic(void) { return NIL_VALUE; }

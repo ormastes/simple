@@ -996,6 +996,40 @@ RuntimeValue __simple_rt_string_char_code_at(RuntimeValue str, RuntimeValue idx)
     return rt_string_char_code_at(str, idx);
 }
 
+/* Byte-indexed (not char-indexed) raw byte read; see rt_string_char_code_at
+ * above. Deliberately NOT UTF-8 aware: byte-framing callers (e.g. the web
+ * renderer's browser_renderer_protocol.spl scanning for byte 10 '\n' / 44
+ * ',') index the raw UTF-8 buffer directly, so a character index would
+ * desync the frame at the first multi-byte codepoint. Mirrors the
+ * pure-Simple implementation at src/runtime/simple_core/core_string.spl
+ * and the RISC-V freestanding bridge in
+ * src/os/kernel/arch/riscv64/boot/freestanding_runtime.c. O(1): straight
+ * buffer read, no codepoint walk needed.
+ */
+RuntimeValue rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
+{
+    const uint8_t *data;
+    uint64_t len;
+    int64_t i = (int64_t)idx;
+    if (i < 0) return 0;
+    RuntimeString *s = IS_HEAP(str) ? (RuntimeString *)DECODE_PTR(str) : (RuntimeString *)0;
+    if (s && s->hdr.type == HEAP_STRING) {
+        data = (const uint8_t *)s->data;
+        len = s->len;
+    } else {
+        data = (const uint8_t *)(uintptr_t)str;
+        if (!data) return 0;
+        len = strlen((const char *)data);
+    }
+    if ((uint64_t)i >= len) return 0;
+    return data[i];
+}
+
+RuntimeValue __simple_rt_string_byte_at(RuntimeValue str, RuntimeValue idx)
+{
+    return rt_string_byte_at(str, idx);
+}
+
 int64_t rt_pool_safepoint(void)
 {
     return 0;
@@ -1132,6 +1166,16 @@ RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
     while (pos > 0) s->data[out++] = buf[--pos];
     s->data[out] = '\0';
     return ENCODE_PTR(s);
+}
+
+/* Signed sibling of rt_raw_u64_to_string, above. Delegates to
+ * _int_to_string (already handles 0, INT64_MIN without overflow, and
+ * negative sign) rather than duplicating digit-extraction logic. Mirrors
+ * the pure-Simple implementation at
+ * src/runtime/simple_core/core_string.spl:rt_raw_i64_to_string. */
+RuntimeValue rt_raw_i64_to_string(RuntimeValue raw)
+{
+    return _int_to_string((int64_t)raw);
 }
 
 RuntimeValue rt_value_to_string(RuntimeValue val)
