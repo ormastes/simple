@@ -113,17 +113,31 @@ class BrowserHistoryEntry:
     source_html: text
     persisted_html: text
     content_security_policy: text
+    request_method: text
+    request_body: text
+    request_content_type: text
 
     static fn create(url: text, title: text, source_html: text) -> BrowserHistoryEntry:
         BrowserHistoryEntry.create_with_policy(url, title, source_html, "")
 
     static fn create_with_policy(url: text, title: text, source_html: text, policy: text) -> BrowserHistoryEntry:
+        BrowserHistoryEntry.create_with_request(
+            url, title, source_html, policy, "GET", "", ""
+        )
+
+    static fn create_with_request(
+        url: text, title: text, source_html: text, policy: text,
+        request_method: text, request_body: text, request_content_type: text
+    ) -> BrowserHistoryEntry:
         BrowserHistoryEntry(
             url: url,
             title: title,
             source_html: source_html,
             persisted_html: "",
-            content_security_policy: policy
+            content_security_policy: policy,
+            request_method: request_method,
+            request_body: request_body,
+            request_content_type: request_content_type
         )
 
 pub struct BrowserRenderRevisions:
@@ -161,7 +175,10 @@ fn browser_history_push_bounded(
     while start > 0 and retained_count < BROWSER_HISTORY_MAX_ENTRIES:
         val size = (
             candidates[start - 1].source_html.len() +
-            candidates[start - 1].persisted_html.len()
+            candidates[start - 1].persisted_html.len() +
+            candidates[start - 1].request_method.len() +
+            candidates[start - 1].request_body.len() +
+            candidates[start - 1].request_content_type.len()
         )
         if (retained_count > 0 and
             size > BROWSER_MAX_RESOURCE_BYTES - retained_bytes):
@@ -532,6 +549,9 @@ class BrowserImageSource:
 class BrowserLoadState:
     document_url: text
     source_html: text
+    request_method: text
+    request_body: text
+    request_content_type: text
     target_index: i32
     push_history: bool
     script_blocks: [BrowserScriptBlock]
@@ -547,10 +567,20 @@ class BrowserLoadState:
     next_image_idx: i32
     pending_module: BrowserPendingModuleEval?
 
-    static fn create(document_url: text, source_html: text, target_index: i32, push_history: bool, script_blocks: [BrowserScriptBlock], style_sources: [BrowserStylesheetSource], image_sources: [BrowserImageSource]) -> BrowserLoadState:
+    static fn create(
+        document_url: text, source_html: text,
+        request_method: text, request_body: text, request_content_type: text,
+        target_index: i32, push_history: bool,
+        script_blocks: [BrowserScriptBlock],
+        style_sources: [BrowserStylesheetSource],
+        image_sources: [BrowserImageSource]
+    ) -> BrowserLoadState:
         BrowserLoadState(
             document_url: document_url,
             source_html: source_html,
+            request_method: request_method,
+            request_body: request_body,
+            request_content_type: request_content_type,
             target_index: target_index,
             push_history: push_history,
             script_blocks: script_blocks,
@@ -2107,6 +2137,21 @@ impl BrowserSession:
         self.resource_overrides = upsert_pair(self.resource_overrides, normalize_browser_url(url), body)
 
     me begin_network_navigation(url: text, method: text, headers: text, body: text, content_type: text) -> Result<bool, text>:
+        if (
+            not browser_resource_size_allowed(method.len()) or
+            not browser_resource_size_allowed(content_type.len())
+        ):
+            return Err("request metadata exceeds 50 MiB resource limit")
+        val normalized_method = if method.trim() != "":
+            method.upper()
+        else:
+            "GET"
+        val metadata_size = normalized_method.len() + content_type.len()
+        if (
+            metadata_size > BROWSER_MAX_RESOURCE_BYTES or
+            body.len() > BROWSER_MAX_RESOURCE_BYTES - metadata_size
+        ):
+            return Err("request metadata exceeds 50 MiB resource limit")
         val normalized_input = normalize_browser_address_reference_url(
             self.document_url, url
         )?
@@ -2119,17 +2164,22 @@ impl BrowserSession:
         if self.address_draft != normalized:
             self._advance_ui_access_revision()
         self.address_draft = normalized
-        self.pending_requests.push(self._build_request("document", normalized, method, headers, body, content_type))
+        self.pending_requests.push(self._build_request(
+            "document", normalized, normalized_method,
+            headers, body, content_type
+        ))
         self._flush_runtime_side_effects()
         Ok(true)
 
     me begin_network_reload() -> Result<bool, text>:
         val normalized = self.reload_target_url()?
+        val entry = self.history[self.current_index]
         self.begin_navigation(normalized)
         self.pending_navigation_target_index = self.current_index
         self.pending_navigation_push_history = false
         self.pending_requests.push(self._build_request(
-            "document", normalized, "GET", "", "", ""
+            "document", normalized, entry.request_method, "",
+            entry.request_body, entry.request_content_type
         ))
         self._flush_runtime_side_effects()
         Ok(true)
@@ -2781,7 +2831,17 @@ impl BrowserSession:
                 response.headers, response.url, true, document_site_url
             )
             self._trace_guest("document headers applied")
-            return self.commit_navigation_html(response.body)
+            var request_method = "GET"
+            var request_body = ""
+            var request_content_type = ""
+            if val Some(request) = inflight:
+                request_method = request.method
+                request_body = request.body
+                request_content_type = request.content_type
+            return self.commit_navigation_html(
+                response.body, request_method, request_body,
+                request_content_type
+            )
         if response.kind == "style":
             return self._commit_style_response(response)
         if response.kind == "script":
@@ -3008,7 +3068,10 @@ impl BrowserSession:
             return self.open_html(normalized, override_body)
         return Err("network navigation is not implemented; use begin_network_navigation for '{normalized}'")
 
-    me commit_navigation_html(html: text) -> Result<bool, text>:
+    me commit_navigation_html(
+        html: text, request_method: text = "GET",
+        request_body: text = "", request_content_type: text = ""
+    ) -> Result<bool, text>:
         if not self.is_loading:
             return Err("no pending navigation")
         if self.stop_requested:
@@ -3028,7 +3091,8 @@ impl BrowserSession:
         self.is_loading = false
         self.address_draft = ""
         self._load_page_source(
-            pending, html, html, target_index, push_history
+            pending, html, html, target_index, push_history,
+            request_method, request_body, request_content_type
         )
 
     me reload() -> Result<bool, text>:
@@ -3046,7 +3110,8 @@ impl BrowserSession:
         # Reload rebuilds committed source; persisted_html is traversal-only.
         self._load_page_source(
             entry.url, entry.source_html, entry.source_html,
-            self.current_index, false
+            self.current_index, false, entry.request_method,
+            entry.request_body, entry.request_content_type
         )
 
     me reload_to(target_url: text) -> Result<bool, text>:
@@ -3070,7 +3135,8 @@ impl BrowserSession:
                 entry.persisted_html
             else:
                 entry.source_html,
-            entry.source_html, target, false
+            entry.source_html, target, false, entry.request_method,
+            entry.request_body, entry.request_content_type
         )
 
     me go_back_to(target_url: text) -> Result<bool, text>:
@@ -3096,7 +3162,8 @@ impl BrowserSession:
                 entry.persisted_html
             else:
                 entry.source_html,
-            entry.source_html, target, false
+            entry.source_html, target, false, entry.request_method,
+            entry.request_body, entry.request_content_type
         )
 
     me go_forward_to(target_url: text) -> Result<bool, text>:
