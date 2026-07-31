@@ -107,6 +107,21 @@ diagnostic, or recovery paths, never alternate canonical producers.
 | Metal | real command-buffer batch and retained buffers/pipelines | macOS exact readback, registry ID, counters, warm latency/RSS |
 | Software/CPU-SIMD | executable oracle, not strict-GPU fallback | exact parity and explicit provenance |
 
+Audited bounded lanes (2026-07-31):
+
+- CUDA already retains its session/module/framebuffer and launches ordinary
+  primitives asynchronously. Queue image source allocations until
+  `submit_batch`, synchronize once, then release; prove two images have zero
+  pre-submit and one post-submit sync with exact device readback. Apply the same
+  pending-resource model to vector-font quads; R7 remains open while either
+  image or font submission synchronizes per operation.
+- Vulkan: pack consecutive opaque filled-rectangle records into one SSBO
+  dispatch; retain current IMAGE/font/mask/fallback flush boundaries. Prove
+  clear plus two rectangles drops from three accepted dispatches to two.
+- Metal: retain primitive command encoding until `submit_batch`; flush before
+  image, text, auxiliary, readback, and shutdown paths. Host-independent source
+  contracts precede the macOS registry-ID/counter/parity receipt.
+
 ### R8. Device-region readback and fallback policy
 
 - Implement backend-owned region readback where supported; host cropping is an

@@ -363,14 +363,63 @@ impl MirLowering:
             i = i + 1
         result
 
+    me direct_call_struct_return_shape(func: MirOperand) -> text:
+        val call_name = self.direct_call_extern_name(func)
+        if call_name == "":
+            return ""
+        if val registered = bootstrap_fn_ret_shape_lookup(call_name):
+            val shape = registered
+            if shape != "__runtime_array__":
+                return shape
+        ""
+
+    me repair_direct_struct_return_type(func: MirOperand, return_type: MirType) -> MirType:
+        match return_type.kind:
+            case MirTypeKind.Struct(struct_symbol):
+                if struct_symbol != nil:
+                    return return_type
+                val shape = self.direct_call_struct_return_shape(func)
+                if shape != "":
+                    val canonical_key = shape.replace("::", ".")
+                    if self.canonical_type_symbols.contains(canonical_key):
+                        return MirType(kind: MirTypeKind.Struct(SymbolId(id: self.canonical_type_symbols[canonical_key])))
+                    val id = self.next_canonical_type_symbol
+                    self.next_canonical_type_symbol = id + 1
+                    self.canonical_type_symbols[canonical_key] = id
+                    return MirType(kind: MirTypeKind.Struct(SymbolId(id: id)))
+                val call_name = self.direct_call_extern_name(func)
+                self.error_fatal("missing struct return type identity for direct call '{call_name}'", nil)
+                MirType.i64()
+            case _:
+                return_type
+
+    me direct_call_operand_with_return_type(func: MirOperand, return_type: MirType) -> MirOperand:
+        match func.kind:
+            case MirOperandKind.Const(value, type_):
+                match type_.kind:
+                    case MirTypeKind.FuncPtr(signature):
+                        return MirOperand(kind: MirOperandKind.Const(
+                            value,
+                            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                                params: signature.params,
+                                return_type: return_type,
+                                is_variadic: signature.is_variadic
+                            )))
+                        ))
+                    case _: ()
+            case _: ()
+        func
+
     me emit_resolved_direct_call(func: MirOperand, args_in: [MirOperand], return_type: MirType) -> LocalId:
         val args = self.expand_text_abi_args(func, args_in)
+        val effective_return_type = self.repair_direct_struct_return_type(func, return_type)
+        val effective_func = self.direct_call_operand_with_return_type(func, effective_return_type)
         var b = self.builder
-        if return_type.kind != MirTypeKind.Unit:
-            val dest = b.new_temp(return_type)
-            b.emit(MirInst(kind: MirInstKind.Call(dest, func, args), span: nil))
+        if effective_return_type.kind != MirTypeKind.Unit:
+            val dest = b.new_temp(effective_return_type)
+            b.emit(MirInst(kind: MirInstKind.Call(dest, effective_func, args), span: nil))
             self.builder = b
-            match return_type.kind:
+            match effective_return_type.kind:
                 case MirTypeKind.Array(_, _) | MirTypeKind.Slice(_):
                     self.runtime_array_locals[dest.id] = true
                     self.mark_runtime_value_local(dest.id)
@@ -387,12 +436,16 @@ impl MirLowering:
                     # mirroring how lower_struct_construct/function params
                     # already register direct constructions and typed
                     # parameters into the same map.
-                    val struct_sym = self.symbols.get_symbol_raw(struct_symbol.id)
-                    if struct_sym.?:
-                        self.struct_value_syms[dest.id] = struct_sym.name
+                    val registered_shape = self.direct_call_struct_return_shape(func)
+                    if registered_shape != "":
+                        self.struct_value_syms[dest.id] = registered_shape
+                    elif struct_symbol != nil:
+                        val struct_sym = self.symbols.get_symbol_raw(struct_symbol.id)
+                        if struct_sym.?:
+                            self.struct_value_syms[dest.id] = struct_sym.name
                 case _: ()
             return dest
-        b.emit(MirInst(kind: MirInstKind.Call(nil, func, args), span: nil))
+        b.emit(MirInst(kind: MirInstKind.Call(nil, effective_func, args), span: nil))
         val temp = b.new_temp(MirType.unit())
         self.builder = b
         temp
