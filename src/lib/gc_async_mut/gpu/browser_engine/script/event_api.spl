@@ -8,17 +8,23 @@ and event creation/control.
 JS Equivalent → Simple Function:
     node.addEventListener()     → node_add_event_listener()
     node.removeEventListener()  → node_remove_event_listener()
-    event = new Event()         → event_create()
-    node.dispatchEvent()        → event_dispatch()
+    node.dispatchEvent()        → event_dispatch_route()
     event.preventDefault()      → event_prevent_default()
     event.stopPropagation()     → event_stop_propagation()
 """
 
 #![allow(REQC001)]
 
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent, BeDomEventDispatch,
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent,
     normalize_dom_event_type}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_dispatch_event_actions}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomNodeRoute, DomIdentityIndex
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    BeDomRouteEventDispatch, be_dom_dispatch_event_to_route,
+    be_dom_dispatch_keyboard_event_to_route,
+    be_dom_dispatch_input_event_to_route
+}
 
 # =========================================================================
 # Event Listener Registration
@@ -64,25 +70,116 @@ pub fn node_remove_event_listener(mut node: BeDomNode, event_type: text, action:
 # Event Dispatch
 # =========================================================================
 
-pub fn event_dispatch(node: BeDomNode, event: BeDomEvent) -> [text]:
-    """Dispatch an event on a node and return the list of triggered actions.
+fn _event_with_page_payload(
+    dispatched: BeDomEvent, payload: BeDomEvent
+) -> BeDomEvent:
+    var next = dispatched
+    next.namespace_uri = payload.namespace_uri
+    next.client_x = payload.client_x
+    next.client_y = payload.client_y
+    next.screen_x = payload.screen_x
+    next.screen_y = payload.screen_y
+    next.button = payload.button
+    next.buttons = payload.buttons
+    next.pointer_id = payload.pointer_id
+    next.pointer_type = payload.pointer_type
+    next.is_primary = payload.is_primary
+    next.key = payload.key
+    next.code = payload.code
+    next.repeat = payload.repeat
+    next.alt_key = payload.alt_key
+    next.ctrl_key = payload.ctrl_key
+    next.meta_key = payload.meta_key
+    next.shift_key = payload.shift_key
+    next.input_data = payload.input_data
+    next.input_type = payload.input_type
+    next.is_composing = payload.is_composing
+    next
 
-    Uses the existing be_dom_dispatch_event_actions helper for target-phase
-    dispatch. Full capture/bubble path dispatch requires a tree-walk from
-    root which is handled by the ScriptRunner at a higher level.
-    """
-    be_dom_dispatch_event_actions(node, event.event_type)
+fn _event_execute_page_action(
+    dispatched: BeDomEvent, payload: BeDomEvent, action: text
+) -> BeDomEvent:
+    var next = _event_with_page_payload(dispatched, payload)
+    if action == "prevent-default":
+        next.prevent_default()
+    elif action == "stop-propagation":
+        next.stop_propagation()
+    elif action == "stop-immediate-propagation":
+        next.stop_immediate_propagation()
+    next
+
+pub fn event_dispatch_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    related_route: DomNodeRoute?, event: BeDomEvent
+) -> BeDomRouteEventDispatch:
+    """Dispatch through a generation-qualified route and preserve page payload."""
+    val event_type = normalize_dom_event_type(event.event_type)
+    var dispatch = if (
+        event_type == "beforeinput" or event_type == "input" or
+        event.input_data != nil or event.input_type != "" or
+        event.is_composing
+    ):
+        be_dom_dispatch_input_event_to_route(
+            root, index, route, event_type, event.bubbles,
+            event.cancelable, event.input_data, event.input_type,
+            event.is_composing, true,
+            fn(dispatched: BeDomEvent, _node: BeDomNode, action: text,
+               _phase: text) -> BeDomEvent:
+                _event_execute_page_action(dispatched, event, action)
+        )
+    elif (
+        event_type == "keydown" or event_type == "keyup" or
+        event_type == "keypress" or event.key != "" or event.code != ""
+    ):
+        be_dom_dispatch_keyboard_event_to_route(
+            root, index, route, event_type, event.bubbles,
+            event.cancelable, event.key, event.code, event.shift_key, true,
+            fn(dispatched: BeDomEvent, _node: BeDomNode, action: text,
+               _phase: text) -> BeDomEvent:
+                _event_execute_page_action(dispatched, event, action)
+        )
+    else:
+        be_dom_dispatch_event_to_route(
+            root, index, route, event_type, event.bubbles,
+            event.cancelable, true,
+            fn(dispatched: BeDomEvent, _node: BeDomNode, action: text,
+               _phase: text) -> BeDomEvent:
+                _event_execute_page_action(dispatched, event, action)
+        )
+    dispatch.event = _event_with_page_payload(dispatch.event, event)
+    dispatch.related_target_route = related_route
+    dispatch
+
+pub fn event_dispatch_target_author_id(
+    index: DomIdentityIndex, dispatch: BeDomRouteEventDispatch
+) -> text?:
+    """Project the target's author ID without using text as route authority."""
+    index.author_id_for_route(dispatch.target_route)
+
+pub fn event_dispatch_current_author_id(
+    index: DomIdentityIndex, dispatch: BeDomRouteEventDispatch,
+    action_index: i64
+) -> text?:
+    """Project one listener currentTarget author ID by dispatch order."""
+    if action_index < 0 or action_index >= dispatch.current_targets.len():
+        return nil
+    index.author_id_for_route(dispatch.current_targets[action_index])
+
+pub fn event_dispatch_related_author_id(
+    index: DomIdentityIndex, dispatch: BeDomRouteEventDispatch
+) -> text?:
+    """Project the optional relatedTarget author ID from its typed route."""
+    if val Some(route) = dispatch.related_target_route:
+        return index.author_id_for_route(route)
+    nil
 
 # =========================================================================
 # Event Creation
 # =========================================================================
 
-pub fn event_create(event_type: text, target_id: text) -> BeDomEvent:
-    """Create a new DOM event with sensible defaults.
-
-    The event bubbles and is cancelable by default.
-    """
-    BeDomEvent.create(event_type, "", target_id, "", target_id, true, true)
+pub fn event_create(event_type: text) -> BeDomEvent:
+    """Create a page event without embedding routing authority."""
+    BeDomEvent.create(event_type, "", true, true)
 
 # =========================================================================
 # Event Control

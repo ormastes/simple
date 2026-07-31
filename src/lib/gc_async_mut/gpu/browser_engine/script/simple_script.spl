@@ -14,16 +14,16 @@ use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, BeDomEvent}
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
     DomDocumentGeneration, DomNodeRoute, DomIdentityIndex
 }
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_node_for_route, be_dom_event_identity
-}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{be_dom_node_for_route}
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop,
     EVENT_LOOP_MAX_PENDING_TASKS}
 use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
-use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch}
+use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch_route}
 use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_script}
-use std.gc_async_mut.gpu.browser_engine.script.script_host.{script_host_apply_event_action}
+use std.gc_async_mut.gpu.browser_engine.script.script_host.{
+    script_host_apply_action_to_route
+}
 use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptFetchRequest,
     ScriptFetchResponse, fetch_send, script_fetch_to_net_request,
     script_response_from_net}
@@ -70,41 +70,29 @@ pub class SimpleScriptExecutor:
             _runner: ScriptRunner.new()
         )
 
-    me reset(dom_root: BeDomNode):
-        """Bind a new document and discard callbacks and work from the old one."""
+    me install_document_state(
+        dom_root: BeDomNode, index: DomIdentityIndex,
+        generation: DomDocumentGeneration
+    ) -> bool:
+        """Install one BrowserSession-committed DOM/index/script state."""
+        if index.generation.value != generation.value:
+            return false
+        var replaces_document = true
+        if val Some(current) = self._dom_generation:
+            replaces_document = current.value != generation.value
+        if replaces_document:
+            self._event_loop = EventLoop.new()
+            self._console_buf.clear()
+            self._callback_ids = []
+            self._callback_sources = []
+            self._callback_count = 0
         self._dom_root = dom_root
-        self._event_loop = EventLoop.new()
+        self._dom_generation = Some(generation)
+        self._dom_identity_index = Some(index)
         self._runner.dom_root = dom_root
         self._runner.event_loop = self._event_loop
-        self._console_buf.clear()
         self._runner.console_buffer = self._console_buf
-        self._callback_ids = []
-        self._callback_sources = []
-        self._callback_count = 0
         self._dom_dirty = false
-
-    me publish_dom(
-        dom_root: BeDomNode, generation: DomDocumentGeneration,
-        index: DomIdentityIndex
-    ) -> bool:
-        """Publish a DOM snapshot only when its index has the same generation."""
-        if index.generation.value != generation.value:
-            return false
-        self._dom_root = dom_root
-        self._dom_generation = Some(generation)
-        self._dom_identity_index = Some(index)
-        true
-
-    me reset_document(
-        dom_root: BeDomNode, generation: DomDocumentGeneration,
-        index: DomIdentityIndex
-    ) -> bool:
-        """Replace a document and retire all callbacks from its predecessor."""
-        if index.generation.value != generation.value:
-            return false
-        self.reset(dom_root)
-        self._dom_generation = Some(generation)
-        self._dom_identity_index = Some(index)
         true
 
     me register_callback(callback_id: i64, source: text) -> bool:
@@ -171,21 +159,14 @@ pub class SimpleScriptExecutor:
             i = i + 1
         ""
 
-    me execute(source: text, dom_root: BeDomNode):
-        """Parse and execute Simple code against dom_root.
+    me execute(source: text):
+        """Parse and execute Simple code against committed DOM state.
 
-        Stores dom_root as the current root. Empty source is a no-op. Non-empty
-        source is delegated to the canonical ScriptRunner so this compatibility
-        surface shares the browser's interpreter, DOM, event-loop, and console
-        ownership rather than maintaining a second execution path.
+        Non-empty source is delegated to the canonical ScriptRunner so this
+        compatibility surface shares BrowserSession-owned state.
         """
-        self._dom_root = dom_root
-        if source.len() == 0:
+        if self._dom_identity_index == nil or source.len() == 0:
             return
-
-        self._runner.dom_root = dom_root
-        self._runner.console_buffer = self._console_buf
-        self._runner.event_loop = self._event_loop
         val stdout = run_script(self._runner, source)
         if stdout.len() > 0:
             self._console_buf.append("log", stdout, 0)
@@ -225,19 +206,6 @@ pub class SimpleScriptExecutor:
             return -1
         due / 1000
 
-    me inject_dom_event(event: BeDomEvent):
-        """Dispatch a DOM event into registered Simple event listeners.
-
-        Deterministic listener actions are dispatched through the same DOM
-        owner used by ScriptHost. Any delivered action invalidates rendering.
-        """
-        val actions = event_dispatch(self._dom_root, event)
-        for action in actions:
-            self._dom_root = script_host_apply_event_action(self._dom_root, action)
-        if actions.len() == 0:
-            return
-        self._dom_dirty = true
-
     me inject_dom_event_route(
         route: DomNodeRoute, event: BeDomEvent
     ) -> Result<bool, text>:
@@ -250,14 +218,27 @@ pub class SimpleScriptExecutor:
         val index = match self._dom_identity_index:
             Some(value): value
             nil: return Err("invalid_document")
-        val node = match be_dom_node_for_route(self._dom_root, index, route):
-            Some(value): value
+        match be_dom_node_for_route(self._dom_root, index, route):
+            Some(_): pass_do_nothing
             nil: return Err("stale_target")
-        var next_event = event
-        val target_id = be_dom_event_identity(node)
-        next_event.target_id = target_id
-        next_event.current_target_id = target_id
-        self.inject_dom_event(next_event)
+        val dispatch = event_dispatch_route(
+            self._dom_root, index, route, nil, event
+        )
+        var action_index = 0
+        while action_index < dispatch.actions.len():
+            self._dom_root = script_host_apply_action_to_route(
+                self._dom_root, index,
+                dispatch.current_targets[action_index],
+                dispatch.actions[action_index], false
+            )
+            action_index = action_index + 1
+        if dispatch.default_action_allowed:
+            self._dom_root = script_host_apply_action_to_route(
+                self._dom_root, index, route,
+                dispatch.default_action, true
+            )
+        if dispatch.actions.len() > 0 or dispatch.default_action_allowed:
+            self._dom_dirty = true
         Ok(true)
 
     me dom_root() -> BeDomNode:

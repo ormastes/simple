@@ -2,7 +2,7 @@
 # ScriptHost
 
 Top-level Simple-script integration host for the browser engine (M15).
-Owns ConsoleBuffer, EventLoop, and ScriptRunner; exposes execute/tick/inject_dom_event surface.
+Owns ConsoleBuffer, EventLoop, and ScriptRunner; exposes typed-route event delivery.
 
 Replaces the JS engine approach — instead reuses the Simple compiler/interpreter
 to run <script> tag content as Simple language code.
@@ -15,20 +15,18 @@ use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
     DomDocumentGeneration, DomNodeRoute, DomIdentityIndex
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_node_for_route, be_dom_event_identity, be_dom_path_for_route,
+    be_dom_node_for_route, be_dom_path_for_route,
     be_dom_apply_default_action_to_route,
-    be_dom_apply_default_action_to_route_without_focus
+    be_dom_apply_default_action_to_route_without_focus,
+    be_dom_submit_form_owner_route, be_dom_set_children
 }
 use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{ConsoleBuffer}
 use std.gc_async_mut.gpu.browser_engine.script.event_loop.{EventLoop}
-use std.gc_async_mut.gpu.browser_engine.script.script_runner.{ScriptRunner, run_script, run_script_file, script_runner_dom_dirty, script_runner_clear_dirty}
-use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_apply_default_action_to_id, be_dom_dispatch_event_to_id,
-    be_dom_event_identity, be_dom_get_children, be_dom_route_node_id,
-    be_dom_set_children,
-    be_dom_submit_form_owner_id
+use std.gc_async_mut.gpu.browser_engine.script.script_runner.{
+    ScriptRunner, run_script, run_script_file
 }
 use std.gc_async_mut.gpu.browser_engine.net.fetch_dispatch.{FetchDispatch}
+use std.gc_async_mut.gpu.browser_engine.script.event_api.{event_dispatch_route}
 use std.gc_async_mut.gpu.browser_engine.script.network_api.{ScriptFetchRequest,
     ScriptFetchResponse, fetch_send, script_fetch_to_net_request,
     script_response_from_net}
@@ -62,36 +60,6 @@ pub fn script_host_apply_event_action(node: BeDomNode, action: text) -> BeDomNod
         return node_class_list_add(node, cls)
     node
 
-fn _script_host_apply_event_action_to_id(
-    root: BeDomNode, target_id: text, route_node_id: i64, action: text
-) -> BeDomNode?:
-    if (
-        (route_node_id >= 0 and root.node_id == route_node_id) or
-        (route_node_id < 0 and be_dom_event_identity(root) == target_id)
-    ):
-        return script_host_apply_event_action(root, action)
-    val children = be_dom_get_children(root)
-    var index: i64 = 0
-    while index < children.len():
-        val updated_child = _script_host_apply_event_action_to_id(
-            children[index], target_id, route_node_id, action
-        )
-        if updated_child != nil:
-            var next_children: [BeDomNode] = []
-            for child in children:
-                next_children.push(child)
-            next_children[index] = updated_child ?? children[index]
-            return be_dom_set_children(root, next_children)
-        index = index + 1
-    nil
-
-pub fn script_host_apply_action_to_id(root: BeDomNode, target_id: text, action: text, default_action: bool) -> BeDomNode:
-    if default_action:
-        return be_dom_apply_default_action_to_id(root, target_id, action)
-    _script_host_apply_event_action_to_id(
-        root, target_id, be_dom_route_node_id(target_id), action
-    ) ?? root
-
 pub fn script_host_apply_action_to_route(
     root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
     action: text, default_action: bool, allow_focus: bool = true
@@ -124,7 +92,7 @@ pub class ScriptHost:
     """Host that manages Simple-script execution, event loop, and console buffer.
 
     Fields:
-        _dom_root      - current DOM root (updated on execute)
+        _dom_root      - BrowserSession-committed DOM root
         _event_loop    - macrotask/rAF queue
         _console_buf   - bounded console.log ring buffer
         _dom_dirty     - true if scripts have mutated the DOM since last clear
@@ -153,42 +121,44 @@ pub class ScriptHost:
             fetch_dispatch: nil
         )
 
-    me publish_dom(
-        dom_root: BeDomNode, generation: DomDocumentGeneration,
-        index: DomIdentityIndex
+    me install_document_state(
+        dom_root: BeDomNode, index: DomIdentityIndex,
+        generation: DomDocumentGeneration
     ) -> bool:
-        """Adopt one checked document/index pair without a text route fallback."""
+        """Install only the BrowserSession-committed document state."""
         if index.generation.value != generation.value:
             return false
+        var replaces_document = true
+        if val Some(current) = self._dom_generation:
+            replaces_document = current.value != generation.value
+        if replaces_document:
+            self._event_loop = EventLoop.new()
         self._dom_root = dom_root
         self._dom_generation = Some(generation)
         self._dom_identity_index = Some(index)
-        true
-
-    me execute(source: text, dom_root: BeDomNode):
-        """Parse and run a Simple script block against dom_root.
-
-        Stores dom_root as the current root. The compatibility ScriptRunner
-        rejects ambient-host Simple execution; production pages use the
-        constrained BrowserSession evaluator.
-        """
-        self._dom_root = dom_root
-        if source.trim().len() == 0:
-            return
         self._runner.dom_root = dom_root
         self._runner.console_buffer = self._console_buf
         self._runner.event_loop = self._event_loop
+        self._dom_dirty = false
+        true
+
+    me execute(source: text):
+        """Parse and run a Simple script block against committed DOM state.
+
+        The compatibility ScriptRunner rejects ambient-host Simple execution;
+        production pages use the constrained BrowserSession evaluator.
+        """
+        if self._dom_identity_index == nil or source.trim().len() == 0:
+            return
         val stdout = run_script(self._runner, source)
         if stdout.len() > 0:
             self._console_buf.append("log", stdout, 0)
         self._dom_dirty = true
 
-    me execute_file(path: text, dom_root: BeDomNode):
+    me execute_file(path: text):
         """Deny legacy Simple script files without reading host paths."""
-        self._dom_root = dom_root
-        self._runner.dom_root = dom_root
-        self._runner.console_buffer = self._console_buf
-        self._runner.event_loop = self._event_loop
+        if self._dom_identity_index == nil:
+            return
         val stdout = run_script_file(self._runner, path)
         if stdout.len() > 0:
             self._console_buf.append("log", stdout, 0)
@@ -205,53 +175,6 @@ pub class ScriptHost:
         if fired_timers.len() > 0 or fired_rafs.len() > 0:
             self._dom_dirty = true
 
-    me inject_dom_event(event: BeDomEvent):
-        """Dispatch a DOM event into registered event listeners.
-
-        Runs capture, target, and bubble listeners, then applies listener and
-        allowed default actions to the original target node.
-        """
-        val dispatch = be_dom_dispatch_event_to_id(
-            self._dom_root, event.target_id, event.event_type,
-            event.bubbles, event.cancelable, true
-        )
-        var action_index = 0
-        while action_index < dispatch.actions.len():
-            self._dom_root = script_host_apply_action_to_id(
-                self._dom_root,
-                dispatch.current_target_route_ids[action_index],
-                dispatch.actions[action_index],
-                false
-            )
-            action_index = action_index + 1
-        if dispatch.default_action_allowed:
-            self._dom_root = script_host_apply_action_to_id(
-                self._dom_root, dispatch.target_route_id,
-                dispatch.default_action, true
-            )
-            if (
-                event.event_type == "click" and
-                (dispatch.default_action == "input-checkbox-toggle" or
-                 dispatch.default_action == "input-radio-select")
-            ):
-                self.inject_dom_event(BeDomEvent.create(
-                    "input", "input", event.target_id, event.target_id,
-                    "", true, false
-                ))
-                self.inject_dom_event(BeDomEvent.create(
-                    "change", "input", event.target_id, event.target_id,
-                    "", true, false
-                ))
-            if event.event_type == "click" and dispatch.default_action == "button-activate":
-                val form_id = be_dom_submit_form_owner_id(self._dom_root, event.target_id)
-                if form_id != "":
-                    self.inject_dom_event(BeDomEvent.create(
-                        "submit", "form", form_id, form_id, "", true, true
-                    ))
-        if dispatch.actions.len() == 0 and dispatch.default_action_allowed == false:
-            return
-        self._dom_dirty = true
-
     me inject_dom_event_route(
         route: DomNodeRoute, event: BeDomEvent
     ) -> Result<bool, text>:
@@ -264,14 +187,54 @@ pub class ScriptHost:
         val index = match self._dom_identity_index:
             Some(value): value
             nil: return Err("invalid_document")
-        val node = match be_dom_node_for_route(self._dom_root, index, route):
-            Some(value): value
+        match be_dom_node_for_route(self._dom_root, index, route):
+            Some(_): pass_do_nothing
             nil: return Err("stale_target")
-        var next_event = event
-        val target_id = be_dom_event_identity(node)
-        next_event.target_id = target_id
-        next_event.current_target_id = target_id
-        self.inject_dom_event(next_event)
+        val dispatch = event_dispatch_route(
+            self._dom_root, index, route, nil, event
+        )
+        var action_index = 0
+        while action_index < dispatch.actions.len():
+            self._dom_root = script_host_apply_action_to_route(
+                self._dom_root, index,
+                dispatch.current_targets[action_index],
+                dispatch.actions[action_index], false
+            )
+            action_index = action_index + 1
+        if dispatch.default_action_allowed:
+            self._dom_root = script_host_apply_action_to_route(
+                self._dom_root, index, route,
+                dispatch.default_action, true
+            )
+            if (
+                dispatch.event.event_type == "click" and
+                (dispatch.default_action == "input-checkbox-toggle" or
+                 dispatch.default_action == "input-radio-select")
+            ):
+                val _ = self.inject_dom_event_route(
+                    route, BeDomEvent.create(
+                        "input", "input", true, false
+                    )
+                )
+                val _ = self.inject_dom_event_route(
+                    route, BeDomEvent.create(
+                        "change", "input", true, false
+                    )
+                )
+            if (
+                dispatch.event.event_type == "click" and
+                dispatch.default_action == "button-activate"
+            ):
+                if val Some(form_route) = be_dom_submit_form_owner_route(
+                    self._dom_root, index, route
+                ):
+                    val _ = self.inject_dom_event_route(
+                        form_route, BeDomEvent.create(
+                            "submit", "form", true, true
+                        )
+                    )
+        if dispatch.actions.len() > 0 or dispatch.default_action_allowed:
+            self._dom_dirty = true
         Ok(true)
 
     me dom_root() -> BeDomNode:
