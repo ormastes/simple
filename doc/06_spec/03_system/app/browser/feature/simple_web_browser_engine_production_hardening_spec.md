@@ -464,8 +464,8 @@ expect(_count_color(
 Runnable source: `simple_web_browser_engine_production_hardening_spec.spl`.
 The scenario uses author-class `overflow-x` plus inline `overflow-y` to prove
 final-cascade normalization, then checks the single- and two-axis scrollbar
-tracks, four priority-specific withheld tracks, their child Draw IR clips,
-and Engine2D pixels below ordinary and hidden-scrollbar scrollports.
+tracks, four priority-specific withheld owner tracks, a nested child track
+under a hidden-scrollbar parent, their Draw IR clips, and Engine2D pixels.
 
 </details>
 
