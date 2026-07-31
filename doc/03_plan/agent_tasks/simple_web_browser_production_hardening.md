@@ -200,6 +200,45 @@ below and is not part of the landed set.
   activate the destination`; `Use Home Bookmark Stop and Reload`; `Observe
   canonical history controls and rendered document`.
 
+## Open RED Security Lane — CORS Unsafe Request Headers
+
+Current `origin/main` `30af808b2eeb` still lets a cross-origin safelisted
+method bypass preflight when it carries a non-safelisted author header. For
+example, requester `https://app.test` can issue
+`GET https://api.test/admin` with `X-Admin-Action: delete`; the actual request
+can reach the endpoint before response CORS validation denies reading it.
+
+The real OPTIONS owner path already exists and must be completed rather than
+replaced by a local header rejection:
+
+`FetchEngine.prepare_single_hop` -> `FetchEngine.handle_cors_preflight` ->
+`CorsChecker.create_preflight` -> `FetchEngine.execute_http` ->
+`CorsChecker.validate_preflight_method_with_credentials`.
+
+`CorsChecker.validate_preflight_headers` exists but is disconnected. A prior
+source/test draft was statically rejected and is not a candidate. Its four
+blocking findings are frozen:
+
+1. preserve safelisted-method behavior without requiring an ACAM token, and
+   implement ACAM `*` correctly for omitted versus included credentials;
+2. enforce the 1,024-byte aggregate CORS-safelisted header-value ceiling;
+3. prove the actual request was never sent, not merely that OPTIONS appeared
+   first; and
+4. replace the stale mirrored expectation that ACAH `*` authorizes
+   `Authorization`, which always requires an explicit grant.
+
+Frozen acceptance uses exactly four steps: `Register a cross-origin endpoint
+that omits X-Admin-Action permission`; `Issue a credential-free CORS GET
+carrying X-Admin-Action`; `Observe the first and only OPTIONS advertising
+x-admin-action`; `Reject the fetch before the ungranted action reaches the
+endpoint`. Evidence must show one total request, method `OPTIONS`,
+`Access-Control-Request-Headers: x-admin-action`, zero `GET` requests, the
+1,024-byte boundary, ACAM wildcard/credential parity, and explicit
+`Authorization` permission. See
+`doc/08_tracking/bug/browser_fetch_cors_unsafe_header_preflight_bypass_2026-07-31.md`.
+
+Status is RED: no source, executable-spec, runtime, or SPipe PASS is accepted.
+
 ## Essential Runner Lane — Stopped at Cycle 3 of 3
 
 The 2026-07-31 care pass used the current pure-Simple Stage 3 at
@@ -254,6 +293,6 @@ runner/ABI/SPipe lane is unproved and external-host evidence is still pending:
 - native DirectX validation on Windows; and
 - WebGPU validation on a host/browser with a supported adapter.
 
-This coordination update changes only this agent-plan document. It does not
-change source, runtime state, requirements, executable specs, or generated
-manuals.
+This coordination update changes only this agent plan and the linked CORS bug
+record. It does not change source, runtime state, requirements, executable
+specs, or generated manuals.
