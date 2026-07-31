@@ -714,12 +714,12 @@ pub fn rt_metal_compile_shader_fn(args: &[Value]) -> Result<Value, CompileError>
 }
 
 pub fn rt_metal_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_shader(arg_i64(
+    Ok(Value::Bool(rt_metal_destroy_shader(arg_i64(
         args,
         0,
         "rt_metal_destroy_shader",
         1,
-    )?)))
+    )?) != 0))
 }
 
 pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -735,12 +735,12 @@ pub fn rt_metal_create_compute_pipeline_fn(args: &[Value]) -> Result<Value, Comp
 }
 
 pub fn rt_metal_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileError> {
-    Ok(Value::Int(rt_metal_destroy_pipeline(arg_i64(
+    Ok(Value::Bool(rt_metal_destroy_pipeline(arg_i64(
         args,
         0,
         "rt_metal_destroy_pipeline",
         1,
-    )?)))
+    )?) != 0))
 }
 
 pub fn rt_metal_create_command_buffer_fn(args: &[Value]) -> Result<Value, CompileError> {
@@ -3835,10 +3835,11 @@ pub fn rt_vulkan_destroy_shader_fn(args: &[Value]) -> Result<Value, CompileError
                 unsafe {
                     (s.fns.destroy_shader_module)(s.device, sm, ptr::null());
                 }
+                return Ok(Value::Bool(true));
             }
         }
     }
-    Ok(Value::Int(0))
+    Ok(Value::Bool(false))
 }
 
 /// `rt_vulkan_create_compute_pipeline(shader_module: i64, entry_point: text, push_constant_size: i64) -> i64`
@@ -3982,10 +3983,11 @@ pub fn rt_vulkan_destroy_pipeline_fn(args: &[Value]) -> Result<Value, CompileErr
                     (s.fns.destroy_pipeline_layout)(s.device, e.layout, ptr::null());
                     (s.fns.destroy_descriptor_set_layout)(s.device, e.dsl, ptr::null());
                 }
+                return Ok(Value::Bool(true));
             }
         }
     }
-    Ok(Value::Int(0))
+    Ok(Value::Bool(false))
 }
 
 /// `rt_vulkan_create_descriptor_set(pipeline: i64, buffer: i64) -> i64`
