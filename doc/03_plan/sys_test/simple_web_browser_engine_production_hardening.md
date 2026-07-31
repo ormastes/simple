@@ -472,9 +472,14 @@ production row remains RED until trusted provider build provenance exists.
 ## Batch-2 held and RED evidence (2026-07-30)
 
 - `details_summary_rendering_spec.spl` is a held, unexecuted modern SSpec with
-  four visible steps: parse disclosure elements, resolve closed/open semantics,
-  emit canonical Draw IR, and verify exact Engine2D pixels. Its O(N) production
-  pass, phase-2 manual, and high review passed; executable status remains RED.
+  the original four-step disclosure/event scenario plus a marker scenario with
+  the exact steps `Parse the authored disclosure summary`, `Resolve the default
+  disclosure marker state`, `Emit canonical disclosure marker Draw IR`, and
+  `Render exact closed and open Engine2D pixels`. The marker stays on the O(N)
+  Web semantic/layout path and lowers as canonical Draw IR text. Explicit
+  `display:list-item` survives the fast declaration dispatcher and retains the
+  marker/slot, while author `display:block` suppresses both; executable status
+  remains RED pending an admitted current pure-Simple full CLI.
 - `browser_invalid_form_method_spec.spl` holds the final-reviewed production,
   modern SSpec, and canonical phase-2 manual behavior: invalid or empty form
   and submitter method tokens normalize to GET, POST remains POST, and

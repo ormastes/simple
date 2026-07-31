@@ -85,6 +85,42 @@ fn _pixels(result: SimpleWebLayoutDrawIrResult) -> [u32]:
     expect(frame.pixels.len()).to_equal(WIDTH * HEIGHT)
     frame.pixels
 
+fn _pixel_difference_count(left: [u32], right: [u32]) -> i32:
+    if left.len() != right.len():
+        fail("pixel frames must have equal dimensions")
+    var count = 0
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]:
+            count = count + 1
+        index = index + 1
+    count
+
+fn _non_white_pixel_count(pixels: [u32]) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel != 0xFFFFFFFFu32:
+            count = count + 1
+    count
+
+fn setup_summary_marker_fixture(
+    opened: bool, authored_display: text, label: text
+) -> text:
+    val open_attr = if opened: " open" else: ""
+    val display_decl = if authored_display == "":
+        ""
+    else:
+        "display:" + authored_display + ";"
+    (
+        "<style>html,body{margin:0;background:#fff}" +
+        "details{position:absolute;left:0;top:0;width:32px;height:16px}" +
+        "#summary{" + display_decl +
+        "width:32px;height:16px;color:#111}</style>" +
+        "<body><details id='disclosure'" + open_attr + ">" +
+        "<summary id='summary'><span id='label'>" + label +
+        "</span></summary><div id='content'></div></details></body>"
+    )
+
 fn setup_details_summary_fixture() -> text:
     (
         "<style>html,body{margin:0;background:#ffffff}" +
@@ -117,7 +153,7 @@ fn check_closed_summary_only(html: text):
     ]).to_equal([0, 0, 64, 12])
     expect(_style(command, "tag")).to_equal("summary")
     expect(_style(command, "display")).to_equal("block")
-    expect(_has_command(result.composition, "content")).to_equal(false)
+    expect(_has_command(result.composition, "content")).to_be(false)
     val pixels = _pixels(result)
     expect(pixels[1 * WIDTH + 1]).to_equal(0xFFDC2626u32)
     expect(pixels[13 * WIDTH + 1]).to_equal(0xFFFFFFFFu32)
@@ -131,7 +167,7 @@ fn check_closed_summary_only(html: text):
     )
     val missing_index = _node_index(missing.hit_index.nodes, "missing")
     expect(missing.hit_index.styles[missing_index].display).to_equal("none")
-    expect(_has_command(missing.composition, "missing")).to_equal(false)
+    expect(_has_command(missing.composition, "missing")).to_be(false)
     val animated = simple_web_layout_render_html_draw_ir_result_at_time(
         "<style>html,body{margin:0;background:#fff}" +
         "@keyframes reveal{from{display:block}to{display:block}}" +
@@ -143,7 +179,7 @@ fn check_closed_summary_only(html: text):
     )
     val animated_index = _node_index(animated.hit_index.nodes, "animated")
     expect(animated.hit_index.styles[animated_index].display).to_equal("none")
-    expect(_has_command(animated.composition, "animated")).to_equal(false)
+    expect(_has_command(animated.composition, "animated")).to_be(false)
     val animated_pixels = _pixels(animated)
     expect(animated_pixels[1 * WIDTH + 1]).to_equal(0xFFFFFFFFu32)
     val later_summary_root = html_tree_builder_build(
@@ -231,6 +267,131 @@ fn check_nested_disclosure_independent():
     expect(open_pixels[21 * WIDTH + 33]).to_equal(0xFF7C3AEDu32)
 
 describe "Production details and summary rendering":
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+    it "should render the default disclosure marker through canonical Draw IR":
+        val closed_html = setup_summary_marker_fixture(false, "", "More")
+        val open_html = setup_summary_marker_fixture(true, "", "More")
+        val authored_html = setup_summary_marker_fixture(
+            false, "list-item", "More"
+        )
+        val block_html = setup_summary_marker_fixture(
+            false, "block", "More"
+        )
+
+        step("Parse the authored disclosure summary")
+        val root = html_tree_builder_build(closed_html)
+        val details_path = be_dom_find_path_to_id(root, "disclosure")
+        val summary_path = be_dom_find_path_to_id(root, "summary")
+        expect(be_dom_get_tag(
+            summary_path[summary_path.len() - 1]
+        )).to_equal("summary")
+        expect(summary_path[
+            summary_path.len() - 1
+        ].parent_id).to_equal(details_path[details_path.len() - 1].node_id)
+
+        step("Resolve the default disclosure marker state")
+        val closed = simple_web_layout_render_html_draw_ir_result(
+            closed_html, WIDTH, HEIGHT
+        )
+        val opened = simple_web_layout_render_html_draw_ir_result(
+            open_html, WIDTH, HEIGHT
+        )
+        val blocked = simple_web_layout_render_html_draw_ir_result(
+            block_html, WIDTH, HEIGHT
+        )
+        val authored = simple_web_layout_render_html_draw_ir_result(
+            authored_html, WIDTH, HEIGHT
+        )
+        expect(closed.hit_index.styles[
+            _node_index(closed.hit_index.nodes, "summary")
+        ].display).to_equal("list-item")
+        expect(opened.hit_index.styles[
+            _node_index(opened.hit_index.nodes, "summary")
+        ].display).to_equal("list-item")
+        expect(blocked.hit_index.styles[
+            _node_index(blocked.hit_index.nodes, "summary")
+        ].display).to_equal("block")
+        expect(authored.hit_index.styles[
+            _node_index(authored.hit_index.nodes, "summary")
+        ].display).to_equal("list-item")
+        expect(_geometry(closed, "label")[0]).to_equal(16)
+        expect(_geometry(opened, "label")[0]).to_equal(16)
+        expect(_geometry(authored, "label")[0]).to_equal(16)
+        expect(_geometry(blocked, "label")[0]).to_equal(0)
+
+        step("Emit canonical disclosure marker Draw IR")
+        val closed_marker = _command(
+            closed.composition, "summary::marker"
+        )
+        val open_marker = _command(
+            opened.composition, "summary::marker"
+        )
+        val authored_marker = _command(
+            authored.composition, "summary::marker"
+        )
+        expect(closed_marker.kind).to_equal("text")
+        expect(closed_marker.text_value).to_equal("▶")
+        expect([closed_marker.x, closed_marker.y]).to_equal([0, 0])
+        expect(closed_marker.parent_id).to_equal("summary")
+        expect(_style(
+            closed_marker, "summary-marker-state"
+        )).to_equal("closed")
+        expect(open_marker.kind).to_equal("text")
+        expect(open_marker.text_value).to_equal("▼")
+        expect([open_marker.x, open_marker.y]).to_equal([0, 0])
+        expect(open_marker.parent_id).to_equal("summary")
+        expect(_style(
+            open_marker, "summary-marker-state"
+        )).to_equal("open")
+        expect(authored_marker.text_value).to_equal("▶")
+        expect([authored_marker.x, authored_marker.y]).to_equal([0, 0])
+        expect(_style(
+            authored_marker, "summary-marker-state"
+        )).to_equal("closed")
+        expect(_has_command(
+            blocked.composition, "summary::marker"
+        )).to_be(false)
+
+        step("Render exact closed and open Engine2D pixels")
+        val closed_pixels = _pixels(
+            simple_web_layout_render_html_draw_ir_result(
+                setup_summary_marker_fixture(false, "", ""),
+                WIDTH, HEIGHT
+            )
+        )
+        val open_pixels = _pixels(
+            simple_web_layout_render_html_draw_ir_result(
+                setup_summary_marker_fixture(true, "", ""),
+                WIDTH, HEIGHT
+            )
+        )
+        val authored_pixels = _pixels(
+            simple_web_layout_render_html_draw_ir_result(
+                setup_summary_marker_fixture(false, "list-item", ""),
+                WIDTH, HEIGHT
+            )
+        )
+        val blocked_pixels = _pixels(
+            simple_web_layout_render_html_draw_ir_result(
+                setup_summary_marker_fixture(false, "block", ""),
+                WIDTH, HEIGHT
+            )
+        )
+        expect(_non_white_pixel_count(closed_pixels)).to_be_greater_than(0)
+        expect(_non_white_pixel_count(open_pixels)).to_be_greater_than(0)
+        expect(_pixel_difference_count(
+            closed_pixels, open_pixels
+        )).to_be_greater_than(0)
+        expect(_pixel_difference_count(
+            closed_pixels, authored_pixels
+        )).to_equal(0)
+        expect(_non_white_pixel_count(blocked_pixels)).to_equal(0)
+
     # @manual: show
     # @capture(html)
     # @capture(protocol)

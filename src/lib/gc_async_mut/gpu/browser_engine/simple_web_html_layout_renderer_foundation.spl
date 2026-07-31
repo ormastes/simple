@@ -231,6 +231,7 @@ class HNode:
     id_attr: text
     attrs_raw: text    # raw tag inner text for attribute selectors
     parent: i64        # index of parent in the arena (-1 for root)
+    is_details_summary: bool # first direct summary owned by details
 
 class HtmlChildIndex:
     first_child: [i32]
@@ -252,7 +253,7 @@ class ClassFlags:
     has_focused_class: bool
 
 fn mk_node(tag: text, parent: i64) -> HNode:
-    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent)
+    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent, is_details_summary: false)
 
 fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
     val node_count = nodes.len()
@@ -623,7 +624,8 @@ fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
         has_focused_class: flags.has_focused_class,
         id_attr: attr_value_by_key(inner, "id="),
         attrs_raw: inner,
-        parent: parent
+        parent: parent,
+        is_details_summary: false
     )
 
 # ---------------------------------------------------------------------------
@@ -771,6 +773,7 @@ fn _parse_html_with_limits(
     )
     var flat_to_hnode: [i32] = [-1; projected.nodes.len()]
     var skip_subtree: [bool] = [false; projected.nodes.len()]
+    var details_has_summary: [bool] = [false; node_limit]
     var nodes: [HNode] = []
     var i = 0
     while i < projected.nodes.len() and nodes.len() < node_limit:
@@ -811,9 +814,17 @@ fn _parse_html_with_limits(
         else:
             val tag = if flat.tag == "#document": "#root" else: flat.tag
             flat_to_hnode[i] = nodes.len() as i32
-            nodes.push(mk_element_node(
+            var element = mk_element_node(
                 tag, parent, tag + flat.normalized_attrs
-            ))
+            )
+            if (
+                tag == "summary" and parent >= 0 and
+                nodes[parent].tag == "details" and
+                not details_has_summary[parent]
+            ):
+                element.is_details_summary = true
+                details_has_summary[parent] = true
+            nodes.push(element)
         i = i + 1
     if nodes.len() == 0:
         return [mk_node("#root", -1)]
