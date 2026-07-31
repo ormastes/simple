@@ -29,7 +29,7 @@ use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, LogLevel}
 use std.database.sql.types.{DbError}
 use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use os.hosted.hosted_browser_renderer_policy.{
-    hosted_browser_transport_host
+    hosted_browser_network_error, hosted_browser_transport_host
 }
 use std.common.web.browser_renderer_protocol.{
     browser_text_input_overlay_empty
@@ -274,13 +274,20 @@ class HostedWebContentSession:
         self.network_job_fetch_request = nil
         if state < 0:
             val _ = rt_browser_http_job_free(handle)
-            self._commit_network_error(request, "browser HTTP job unavailable")
+            self._commit_network_error(
+                request, "network: Network request failed"
+            )
             return
         val error = rt_browser_http_job_take_error(handle)
         val raw_response = rt_browser_http_job_take_response(handle)
         val _ = rt_browser_http_job_free(handle)
         if error != "":
-            self._commit_network_error(request, error)
+            self._commit_network_error(
+                request,
+                hosted_browser_network_error(
+                    Url.parse_or_opaque(request.url).scheme, error
+                )
+            )
             return
         match parse_http_response_bytes(raw_response):
             Ok(response):
@@ -288,7 +295,13 @@ class HostedWebContentSession:
                     request, fetch_request, response
                 )
             Err(parse_error):
-                self._commit_network_error(request, parse_error.message)
+                self._commit_network_error(
+                    request,
+                    hosted_browser_network_error(
+                        Url.parse_or_opaque(request.url).scheme,
+                        parse_error.message
+                    )
+                )
 
     me _pump_network_once():
         if self.network_job_handle > 0:
@@ -348,7 +361,7 @@ class HostedWebContentSession:
                     )
                     if handle < 0:
                         self._commit_network_error(
-                            request, "browser HTTP job unavailable"
+                            request, "network: Network request failed"
                         )
                         return
                     self.network_job_handle = handle
