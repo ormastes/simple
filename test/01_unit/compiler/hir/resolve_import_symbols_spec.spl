@@ -151,6 +151,31 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(hir.symbols.lookup("inner_fn").?).to_be_truthy()
         expect(lowering.errors.len()).to_equal(0)
 
+    it "terminates a self-glob facade while retaining direct and forwarded symbols":
+        val log = make_logger()
+        val provider_source = "pub fn forwarded() -> i64:\n    42"
+        val provider = parse_full_frontend(provider_source, "provider", "provider", log)
+        # The self glob comes before the provider glob: resolving `forwarded`
+        # must skip the cycle and continue to its non-self re-export source.
+        val facade_source = "use std.nogc_sync_mut.io.*\nuse provider.*\npub fn direct() -> i64:\n    7\nexport direct, forwarded"
+        val facade = parse_full_frontend(facade_source, "std.nogc_sync_mut.io", "std.nogc_sync_mut.io", log)
+        val consumer = parse_full_frontend("use std.nogc_sync_mut.io.*\nfn main() -> i64:\n    direct() + forwarded()", "consumer_self_glob", "consumer_self_glob", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["provider"] = provider
+        modules["std.nogc_sync_mut.io"] = facade
+        var sources: [SourceFile] = []
+        sources = sources.push(SourceFile(path: "provider", content: provider_source, module_name: "provider"))
+        sources = sources.push(SourceFile(path: "std/nogc_sync_mut/io.spl", content: facade_source, module_name: "std.nogc_sync_mut.io"))
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+
+        var lowering = hirlowering_for_module("consumer_self_glob", surfaces)
+        val hir = lowering.lower_module(consumer)
+
+        expect(hir.symbols.lookup("direct").?).to_be_truthy()
+        expect(hir.symbols.lookup("forwarded").?).to_be_truthy()
+        expect(lowering.errors.len()).to_equal(0)
+
     it "follows an aliased compatibility re-export to its defining class":
         val log = make_logger()
         val src_shared_access = "class AccessResult:\n    value: text"
