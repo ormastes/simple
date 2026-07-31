@@ -116,11 +116,11 @@ fn bootstrap_builtin_return_type(name: text, span: Span) -> HirType:
 fn bootstrap_builtin_signature(name: text, span: Span) -> HirType:
     HirType(kind: HirTypeKind.Function([], bootstrap_builtin_return_type(name, span), []), span: span)
 
-fn _hir_expr_symbol(kind: HirExprKind) -> SymbolId?:
+fn _hir_expr_symbol_or_invalid(kind: HirExprKind) -> SymbolId:
     match kind:
         case HirExprKind.Var(symbol): symbol
         case HirExprKind.NamedVar(symbol, _): symbol
-        case _: nil
+        case _: SymbolId(id: -1)
 
 fn _hir_named_type_symbol(type_: HirType) -> SymbolId?:
     match type_.kind:
@@ -165,7 +165,8 @@ impl HirLowering:
         nil
 
     me field_tuple_element_type(base_kind: HirExprKind, index: i64) -> HirType?:
-        if val base_symbol = _hir_expr_symbol(base_kind):
+        val base_symbol = _hir_expr_symbol_or_invalid(base_kind)
+        if base_symbol.is_valid():
             if rt_dict_contains(self.local_tuple_types, base_symbol.id):
                 val element_types = self.local_tuple_types[base_symbol.id]
                 if index >= 0 and index < element_types.len():
@@ -480,9 +481,8 @@ impl HirLowering:
                     # when no match is found, so ordinary method calls
                     # (`arr.push(x)`, a struct instance method, ...) are
                     # unaffected.
-                    val mc_module_base_sym = _hir_expr_symbol(mc_lowered_receiver.kind)
-                    if mc_module_base_sym.?:
-                        val mc_base_sym = mc_module_base_sym.unwrap()
+                    val mc_base_sym = _hir_expr_symbol_or_invalid(mc_lowered_receiver.kind)
+                    if mc_base_sym.is_valid():
                         if val mc_base_symbol = self.symbols.get_symbol_raw(mc_base_sym.id):
                             if val mc_module_name = mc_base_symbol.defining_module:
                                 val mc_module_callable = self.field_module_callable(mc_module_name, method_name_t)
@@ -541,9 +541,8 @@ impl HirLowering:
                     # was silently dead code prior to this fix.
                     # field_module_callable's own (defining_module, name)
                     # match is the sole -- and sufficient -- gate.
-                    val fld_module_base_sym = _hir_expr_symbol(fld_lowered_base.kind)
-                    if fld_module_base_sym.?:
-                        val fld_base_sym = fld_module_base_sym.unwrap()
+                    val fld_base_sym = _hir_expr_symbol_or_invalid(fld_lowered_base.kind)
+                    if fld_base_sym.is_valid():
                         if val fld_base_symbol = self.symbols.get_symbol_raw(fld_base_sym.id):
                             if val module_name = fld_base_symbol.defining_module:
                                 val module_callable = self.field_module_callable(module_name, fld_name_t)
@@ -594,9 +593,9 @@ impl HirLowering:
                     # `val/var x = StructName(...)` local shape; anything else
                     # falls through to the pre-existing nil/i64-default
                     # behavior unchanged.
-                    val fld_base_sym_opt = _hir_expr_symbol(fld_lowered_base.kind)
-                    val fld_field_type: HirType? = if fld_base_sym_opt.?:
-                        self.field_type_for_base(fld_base_sym_opt.unwrap(), fld_name_t)
+                    val fld_base_sym = _hir_expr_symbol_or_invalid(fld_lowered_base.kind)
+                    val fld_field_type: HirType? = if fld_base_sym.is_valid():
+                        self.field_type_for_base(fld_base_sym, fld_name_t)
                     else:
                         nil
                     return HirExpr(kind: HirExprKind.Field(fld_lowered_base, fld_name_t, nil), type_: fld_field_type, span: e.span)

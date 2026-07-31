@@ -41,8 +41,17 @@ var _signal_handlers_installed: bool = false
 var _sigusr2_handler: fn() = default_cleanup_handler
 var _sigusr2_handler_installed: bool = false
 
+# The installed cleanup handler is process-global, so the factory state is too.
+# Keeping it here avoids a returned nested closure, which LLVM cannot lower.
+var _signal_cleanup_processes: fn() -> i64 = default_cleanup_count
+var _signal_cleanup_containers: fn() -> i64 = default_cleanup_count
+var _signal_cleanup_checkpoint: fn() = default_cleanup_handler
+
 fn default_cleanup_handler():
     ()
+
+fn default_cleanup_count() -> i64:
+    0
 
 fn run_global_cleanup_handler():
     # ponytail: local indirect call until native codegen supports calling fn globals.
@@ -211,17 +220,19 @@ fn create_signal_cleanup_handler(
         )
         install_signal_handlers(handler)
     """
-    fn combined_cleanup():
-        # Save checkpoint first (if handler provided)
-        save_checkpoint()
+    _signal_cleanup_processes = cleanup_processes
+    _signal_cleanup_containers = cleanup_containers
+    _signal_cleanup_checkpoint = save_checkpoint
+    run_created_signal_cleanup
 
-        # Cleanup resources
-        val killed = cleanup_processes()
-        val stopped = cleanup_containers()
-
-        print "[SIGNAL] Cleanup complete: {killed} processes, {stopped} containers"
-
-    combined_cleanup
+fn run_created_signal_cleanup():
+    val checkpoint = _signal_cleanup_checkpoint
+    checkpoint()
+    val cleanup_processes = _signal_cleanup_processes
+    val cleanup_containers = _signal_cleanup_containers
+    val killed = cleanup_processes()
+    val stopped = cleanup_containers()
+    print "[SIGNAL] Cleanup complete: {killed} processes, {stopped} containers"
 
 # ============================================================================
 # Utility Functions
