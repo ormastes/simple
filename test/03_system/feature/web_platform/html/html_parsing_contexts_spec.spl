@@ -9,8 +9,9 @@ tokenizer/tree builder feeds Web semantics, computed style, layout,
 `DrawIrComposition`, and Engine2D.
 
 It covers context-sensitive tree repair, inert template handling, generated
-document structure, bounded projection, and the safe generic fallback used by
-embedded and media tags that do not yet have dedicated resource execution.
+document structure, bounded projection, video poster rendering, and the safe
+generic fallback used by embedded and media tags that do not yet have dedicated
+resource execution.
 
 **Plan:** doc/03_plan/sys_test/html_css_spec_traceability.md
 
@@ -92,8 +93,9 @@ The renderer must not invent `display:none` for these generic elements.
 Every selected element must retain the authored background, nonzero geometry,
 and a component command in canonical Draw IR.
 
-External-looking `href`, `src`, `srcset`, `data`, and `poster` attributes are
-semantic attributes only in this fallback profile.
+External-looking `href`, `src`, `srcset`, and `data` attributes are semantic
+attributes only in this fallback profile. A `video` poster is deliberately
+covered by the dedicated poster scenario below.
 
 `browser_document_resource_plan` must report zero scripts, zero images, and
 zero warnings while retaining the one authored inline stylesheet.
@@ -142,7 +144,8 @@ A resource discovered under an inert template is a fail-open planning error.
 
 A hidden generic embedded tag is an overbroad suppression error.
 
-A media attribute becoming a Draw IR image is an unauthorized resource escape.
+A media URL becoming a Draw IR image is an unauthorized resource escape; the
+dedicated `video[poster]` image path is the only selected exception.
 
 A correct semantic node without the expected layout or component command is a
 Web projection failure.
@@ -158,7 +161,7 @@ It does not claim complete WHATWG parsing, media playback, Canvas scripting,
 image candidate selection, image maps, plugin execution, native controls,
 iframe security, or complete HTML/CSS conformance.
 
-The embedded-media fallback is intentionally resource-inactive.
+The posterless embedded-media fallback is intentionally resource-inactive.
 
 Dedicated capabilities must add their own resource, security, lifecycle,
 layout, Draw IR, and Engine2D evidence before promotion.
@@ -179,14 +182,19 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_debug_capped_node_count,
     simple_web_layout_debug_layout_by_id,
     simple_web_layout_debug_style_by_id,
-    simple_web_layout_render_html_draw_ir_result
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_render_html_draw_ir_with_images
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
     simple_web_layout_render_html_readback_engine2d_result
 }
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.web.browser_session_runtime.*
 use std.gc_async_mut.web.browser_session_html.{
     browser_document_resource_plan
 }
+use std.common.image.png_encode.{encode_argb_to_png}
 
 fn _command_by_id(
     composition: DrawIrComposition, component_id: text
@@ -227,6 +235,13 @@ fn _pixels(html: text, width: i32, height: i32) -> [u32]:
     simple_web_layout_render_html_readback_engine2d_result(
         html, width, height, "software"
     ).readback.pixels
+
+fn _poster_png_hex(pixel: u32) -> text:
+    var out = ""
+    for byte in encode_argb_to_png([pixel], 1, 1):
+        val piece = byte.to_i64().to_hex()
+        out = out + if piece.len() == 1: "0{piece}" else: piece
+    out
 
 fn _path(html: text, id: text) -> [BeDomNode]:
     be_dom_find_path_to_id(html_tree_builder_build(html), id)
@@ -588,8 +603,7 @@ describe "Production canonical HTML parsing contexts":
             "<source id='source-row' class='fallback' " +
             "srcset='https://invalid.example/picture 1x'></picture>" +
             "<video id='video-row' class='fallback' " +
-            "src='https://invalid.example/video' " +
-            "poster='https://invalid.example/poster'>" +
+            "src='https://invalid.example/video'>" +
             "<track id='track-row' class='fallback' " +
             "src='https://invalid.example/track'></video></body>"
         )
@@ -658,6 +672,89 @@ describe "Production canonical HTML parsing contexts":
         expect(_pixels(
             html, 64, 64
         ).contains(0xFF2563EBu32)).to_equal(true)
+
+    # @manual: show
+    # @capture(html)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-004
+    it "should render an admitted video poster without fetching media":
+        val poster_color = 0xFF14B8A6u32
+        val html = (
+            "<html><head></head><body style='margin:0'>" +
+            "<video id='stage' style='display:block;width:4px;height:4px' " +
+            "poster='/poster.png' src='/movie.mp4'>" +
+            "<source src='/movie.webm' type='video/webm'>" +
+            "<track src='/captions.vtt' kind='captions'>" +
+            "</video></body></html>"
+        )
+
+        step("Plan only the poster through the bounded image resource path")
+        val plan = browser_document_resource_plan(
+            html, "https://safe.test/watch", ""
+        )
+        expect(plan.image_sources.len()).to_equal(1)
+        expect(plan.image_sources[0].authored_src).to_equal("/poster.png")
+        expect(plan.image_sources[0].resolved_url).to_equal(
+            "https://safe.test/poster.png"
+        )
+
+        step("Bind the admitted poster to its video node")
+        var allowed = BrowserSession.new()
+        allowed.register_resource(
+            "https://safe.test/poster.png", _poster_png_hex(poster_color)
+        )
+        expect(allowed.open_html(
+            "https://safe.test/watch", html
+        ).is_ok()).to_equal(true)
+        expect(allowed.image_resources.len()).to_equal(1)
+        expect(allowed.admitted_image_sources.len()).to_equal(1)
+        val render_html = allowed.render_html_document()
+        expect(render_html).to_contain(
+            "poster=\"" + allowed.image_resources[0].image_uri + "\""
+        )
+        expect(render_html).to_contain("src=\"/movie.mp4\"")
+        expect(render_html).to_contain("src=\"/movie.webm\"")
+        expect(render_html).to_contain("src=\"/captions.vtt\"")
+
+        step("Lower the poster through canonical Draw IR and Engine2D")
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            render_html, 4, 4, allowed.image_resources
+        )
+        val command = _command_by_id(composition, "stage_image")
+        expect(command.kind).to_equal("image")
+        expect(command.image_uri).to_equal(
+            allowed.image_resources[0].image_uri
+        )
+        val pixels = allowed.render_to_pixels(4, 4).pixel_data
+        expect(pixels.len()).to_equal(16)
+        expect(pixels.contains(poster_color)).to_equal(true)
+
+        step("Block the same poster under img-src without painting an alias")
+        var blocked = BrowserSession.new()
+        blocked.register_resource(
+            "https://safe.test/poster.png", _poster_png_hex(poster_color)
+        )
+        expect(blocked.open_html(
+            "https://safe.test/watch",
+            "<html><head><meta http-equiv='content-security-policy' " +
+            "content=\"img-src 'none'\"></head><body style='margin:0'>" +
+            "<video id='stage' style='display:block;width:4px;height:4px' " +
+            "poster='/poster.png'></video></body></html>"
+        ).is_ok()).to_equal(true)
+        expect(blocked.image_resources.len()).to_equal(0)
+        expect(blocked.warnings.join("|")).to_contain(
+            "CSP blocked image: https://safe.test/poster.png"
+        )
+        val blocked_composition =
+            simple_web_layout_render_html_draw_ir_with_images(
+                blocked.render_html_document(), 4, 4,
+                blocked.image_resources
+            )
+        expect(_has_command(
+            blocked_composition, "stage_image"
+        )).to_equal(false)
+        expect(blocked.render_to_pixels(
+            4, 4
+        ).pixel_data.contains(poster_color)).to_equal(false)
 
     # @manual: folded
     it "should preserve component order and bounded projection caps":
