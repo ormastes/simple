@@ -345,6 +345,11 @@ class MetalBackend:
     # Device readbacks and material receipts must both use this owner field.
     device_identity: i64
     last_image_blend_target: text
+    # Primitive compute draws share this encoder until submit_batch(). Image,
+    # text, and auxiliary submissions first flush it to retain their ordering.
+    # Appended to preserve every pre-existing native field offset.
+    pending_primitive_command: i64
+    pending_primitive_encoder: i64
 
     static fn create() -> MetalBackend:
         val backend = make_metal_backend()
@@ -376,6 +381,8 @@ fn make_metal_backend() -> MetalBackend:
         pending_composite_command: 0,
         pending_composite_encoder: 0,
         pending_composite_source: 0,
+        pending_primitive_command: 0,
+        pending_primitive_encoder: 0,
         last_probe: probe,
         last_error: "",
         lut_buffer: 0,
@@ -460,6 +467,10 @@ impl RenderBackend for MetalBackend:
             self.last_error = "Metal transparent surface initialization failed"
             self.shutdown()
             return false
+        if not self.submit_batch():
+            self.last_error = "Metal transparent surface initialization submission failed"
+            self.shutdown()
+            return false
         self.gpu_frame_complete = true
         self.dirty = true
         self.last_error = ""
@@ -483,7 +494,9 @@ impl RenderBackend for MetalBackend:
         if width <= 0 or height <= 0:
             self.last_error = "invalid Metal framebuffer dimensions"
             return false
-        if self.initialized or self.d_framebuffer != 0 or self.pending_composite_command != 0:
+        if (self.initialized or self.d_framebuffer != 0 or
+            self.pending_composite_command != 0 or
+            self.pending_primitive_command != 0):
             self.last_error = "Metal backend surface is already initialized"
             return false
         if not session.is_valid():
@@ -534,6 +547,10 @@ impl RenderBackend for MetalBackend:
             self.last_error = "Metal transparent surface initialization failed"
             self.shutdown()
             return false
+        if not self.submit_batch():
+            self.last_error = "Metal transparent surface initialization submission failed"
+            self.shutdown()
+            return false
         self.gpu_frame_complete = true
         self.dirty = true
         self.last_error = ""
@@ -546,6 +563,11 @@ impl RenderBackend for MetalBackend:
         true
 
     me shutdown():
+        if not self._flush_pending_primitives():
+            # _flush either released the uncommitted command or quarantined
+            # its framebuffer. The rest of this backend still owns ordinary
+            # mirror/session resources and must be released.
+            self.gpu_frame_complete = false
         if self.pending_composite_command != 0:
             if not metal_sffi_wait_completed(self.pending_composite_command):
                 if not metal_sffi_quarantine_submission(
@@ -775,10 +797,11 @@ impl RenderBackend for MetalBackend:
             self.mirror.clear_mask()
         self.gpu_frame_complete = false
     me submit_batch() -> bool:
-        # Immediate-mode backend: nothing buffered to flush.
-        true
+        self._flush_pending_primitives()
 
     me present():
+        if not self.submit_batch():
+            return
         if not self.gpu_only:
             self.mirror.present()
     fn read_pixels() -> [u32]:
@@ -848,6 +871,8 @@ impl MetalBackend:
         self.font.invalidate()
 
     me draw_font_batch(origin_x: i32, origin_y: i32, batch: FontRenderBatch) -> i64:
+        if not self._flush_pending_primitives():
+            return 0
         if not self.initialized or not self.gpu_frame_complete:
             return 0
         val done = self.font.draw_font_batch(self.session, self.d_framebuffer, self.mirror,
@@ -1050,6 +1075,10 @@ impl MetalBackend:
         ok
 
     me read_pixels_gpu_only() -> [u32]:
+        # Device bytes cannot be read until every deferred primitive encoder
+        # has been committed and completed.
+        if not self._flush_pending_primitives():
+            return []
         if not self.initialized or self.d_framebuffer == 0:
             self.last_error = "Metal GPU-only readback unavailable: backend not initialized or framebuffer missing"
             return []
@@ -1112,6 +1141,8 @@ impl MetalBackend:
     me draw_ir_apply_glass_material_device(
         config: Engine2dGlassMaterialConfig
     ) -> bool:
+        if not self._flush_pending_primitives():
+            return false
         # The receipt below is device-only. Normal Metal mode keeps a CPU
         # mirror that cannot be updated without executing the CPU material
         # oracle, so it must use the explicit CPU fallback lane instead of
@@ -1349,6 +1380,8 @@ impl MetalBackend:
     me _dispatch_metal_blit(x: i32, y: i32, block_w: i32, block_h: i32, host_ptr: i64, byte_size: i64) -> bool:
         if block_w <= 0 or block_h <= 0:
             return true
+        if not self._flush_pending_primitives():
+            return false
         if self.pending_composite_command != 0:
             return false
         val src_buf = metal_sffi_alloc_buffer(self.session.device, byte_size)
@@ -1425,6 +1458,8 @@ impl MetalBackend:
         true
 
     me _dispatch_metal_image_composite(x: i32, y: i32, w: i32, h: i32, pixels: [u32], opacity_milli: i32) -> bool:
+        if not self._flush_pending_primitives():
+            return false
         val total_pixels = w.to_i64() * h.to_i64()
         val byte_size = total_pixels * 4
         val host = metal_host_alloc(byte_size)
@@ -1917,6 +1952,9 @@ impl MetalBackend:
         ok
 
     me _dispatch_metal_aux_image_checked(pipeline: i64, source: i64, auxiliary: i64, params: i64, params_len: i64, w: i32, h: i32) -> bool:
+        if not self._flush_pending_primitives():
+            metal_sffi_free_buffer(source)
+            return false
         if self.pending_composite_command != 0:
             metal_sffi_free_buffer(source)
             return false
@@ -1986,67 +2024,86 @@ impl MetalBackend:
         metal_host_free(params)
         bound
 
-    me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
-        # Snapshot queue and framebuffer handles before allocating command
-        # objects so all failure paths operate on one submission state.
-        if self.pending_composite_command != 0:
-            return false
-        val q = self.command_queue
-        val fb = self.d_framebuffer
-        val cmd = metal_sffi_create_command_buffer(q)
+    me _clear_pending_primitives():
+        self.pending_primitive_command = 0
+        self.pending_primitive_encoder = 0
+
+    me _flush_pending_primitives() -> bool:
+        """Commit one retained primitive encoder and wait before an ordered boundary."""
+        val cmd = self.pending_primitive_command
+        val encoder = self.pending_primitive_encoder
         if cmd == 0:
-            return false
-        val encoder = metal_sffi_create_compute_encoder(cmd)
-        if encoder == 0:
-            metal_sffi_destroy_command_buffer(cmd)
-            return false
-        var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
-        encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
-        encoded = encoded and self._bind_metal_clip(encoder)
-        if encoded:
-            encoded = metal_sffi_dispatch_compute(encoder, pipeline, threads, 1, 1, block_x, 1, 1)
-        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
-        if not encoded:
-            metal_sffi_destroy_compute_encoder(encoder)
-            metal_sffi_destroy_command_buffer(cmd)
-            return false
-        self.pending_composite_command = cmd
-        self.pending_composite_encoder = encoder
-        self.pending_composite_source = 0
-        val committed = metal_sffi_commit_command_buffer(cmd)
-        if not committed:
+            return true
+        if encoder == 0 or not metal_sffi_end_compute_encoder(encoder):
             metal_sffi_release_uncommitted_submission(cmd, encoder, 0)
-            self.pending_composite_command = 0
-            self.pending_composite_encoder = 0
-            self.pending_composite_source = 0
+            self._clear_pending_primitives()
+            self.gpu_frame_complete = false
+            self.last_error = "Metal primitive batch encoding failed"
+            return false
+        if not metal_sffi_commit_command_buffer(cmd):
+            metal_sffi_release_uncommitted_submission(cmd, encoder, 0)
+            self._clear_pending_primitives()
             self.initialized = false
             self.gpu_frame_complete = false
-            self.last_error = "Metal 1D dispatch commit failed"
+            self.last_error = "Metal primitive batch commit failed"
             return false
         if not metal_sffi_wait_completed(cmd):
+            val quarantined = metal_sffi_quarantine_submission(
+                cmd, encoder, 0, self.d_framebuffer)
+            if quarantined:
+                self._clear_pending_primitives()
+                self.d_framebuffer = 0
             self.initialized = false
             self.gpu_frame_complete = false
-            self.last_error = "Metal 1D dispatch completion unknown"
+            self.last_error = "Metal primitive batch completion unknown"
             return false
         metal_sffi_destroy_compute_encoder(encoder)
         metal_sffi_destroy_command_buffer(cmd)
-        self.pending_composite_command = 0
-        self.pending_composite_encoder = 0
+        self._clear_pending_primitives()
+        self.gpu_frame_complete = true
         true
 
-    me _dispatch_metal_2d(pipeline: i64, w: i32, h: i32, params: i64, params_len: i64) -> bool:
-        if self.pending_composite_command != 0:
+    me _begin_pending_primitive_encoder() -> bool:
+        if self.pending_primitive_command != 0:
+            return self.pending_primitive_encoder != 0
+        if (self.pending_composite_command != 0 or not self.initialized or
+            self.command_queue == 0 or self.d_framebuffer == 0):
             return false
-        val q = self.command_queue
-        val fb = self.d_framebuffer
-        val cmd = metal_sffi_create_command_buffer(q)
+        val cmd = metal_sffi_create_command_buffer(self.command_queue)
         if cmd == 0:
             return false
         val encoder = metal_sffi_create_compute_encoder(cmd)
         if encoder == 0:
             metal_sffi_destroy_command_buffer(cmd)
             return false
-        var encoded = metal_sffi_set_buffer(encoder, fb, 0, 0)
+        self.pending_primitive_command = cmd
+        self.pending_primitive_encoder = encoder
+        true
+
+    me _dispatch_metal_1d(pipeline: i64, threads: i64, block_x: i64, params: i64, params_len: i64) -> bool:
+        if (pipeline == 0 or threads <= 0 or block_x <= 0 or params == 0 or
+            params_len <= 0 or not self._begin_pending_primitive_encoder()):
+            return false
+        val encoder = self.pending_primitive_encoder
+        var encoded = metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
+        encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
+        encoded = encoded and self._bind_metal_clip(encoder)
+        if encoded:
+            encoded = metal_sffi_dispatch_compute(
+                encoder, pipeline, threads, 1, 1, block_x, 1, 1)
+        if not encoded:
+            metal_sffi_release_uncommitted_submission(
+                self.pending_primitive_command, encoder, 0)
+            self._clear_pending_primitives()
+            self.last_error = "Metal primitive batch 1D encoding failed"
+        encoded
+
+    me _dispatch_metal_2d(pipeline: i64, w: i32, h: i32, params: i64, params_len: i64) -> bool:
+        if (pipeline == 0 or w <= 0 or h <= 0 or params == 0 or params_len <= 0 or
+            not self._begin_pending_primitive_encoder()):
+            return false
+        val encoder = self.pending_primitive_encoder
+        var encoded = metal_sffi_set_buffer(encoder, self.d_framebuffer, 0, 0)
         encoded = encoded and (metal_set_bytes_ptr(encoder, params, params_len, 1) != 0)
         encoded = encoded and self._bind_metal_clip(encoder)
         val block_x = 16
@@ -2054,35 +2111,14 @@ impl MetalBackend:
         val grid_x = ((_metal_i64(w) + block_x - 1) / block_x) * block_x
         val grid_y = ((_metal_i64(h) + block_y - 1) / block_y) * block_y
         if encoded:
-            encoded = metal_sffi_dispatch_compute(encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
-        encoded = encoded and metal_sffi_end_compute_encoder(encoder)
+            encoded = metal_sffi_dispatch_compute(
+                encoder, pipeline, grid_x, grid_y, 1, block_x, block_y, 1)
         if not encoded:
-            metal_sffi_destroy_compute_encoder(encoder)
-            metal_sffi_destroy_command_buffer(cmd)
-            return false
-        self.pending_composite_command = cmd
-        self.pending_composite_encoder = encoder
-        self.pending_composite_source = 0
-        val committed = metal_sffi_commit_command_buffer(cmd)
-        if not committed:
-            metal_sffi_release_uncommitted_submission(cmd, encoder, 0)
-            self.pending_composite_command = 0
-            self.pending_composite_encoder = 0
-            self.pending_composite_source = 0
-            self.initialized = false
-            self.gpu_frame_complete = false
-            self.last_error = "Metal 2D dispatch commit failed"
-            return false
-        if not metal_sffi_wait_completed(cmd):
-            self.initialized = false
-            self.gpu_frame_complete = false
-            self.last_error = "Metal 2D dispatch completion unknown"
-            return false
-        metal_sffi_destroy_compute_encoder(encoder)
-        metal_sffi_destroy_command_buffer(cmd)
-        self.pending_composite_command = 0
-        self.pending_composite_encoder = 0
-        true
+            metal_sffi_release_uncommitted_submission(
+                self.pending_primitive_command, encoder, 0)
+            self._clear_pending_primitives()
+            self.last_error = "Metal primitive batch 2D encoding failed"
+        encoded
 
 impl MetalBackend:
     me draw_text_bg(x: i32, y: i32, text_val: text, fg: u32, bg: u32, font_size: i32):

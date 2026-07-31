@@ -15,7 +15,7 @@
 #   engine.present()
 #   val pixels = engine.read_pixels()
 
-use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, engine2d_readback}
+use std.gpu.engine2d.backend.{RenderBackend, Engine2DExtended, Engine2DReadback, RegionReadbackPolicy, engine2d_readback, engine2d_readback_region_from_full, engine2d_region_readback_is_device_region, engine2d_region_readback_required_failure}
 use std.gpu.engine2d.color.{color_r, color_g, color_b, color_a, rgba}
 use std.gpu.engine2d.backend_emu.{
     emu_draw_text_bg,
@@ -2549,6 +2549,34 @@ class Engine2D with DrawIrRenderTarget:
             readback
         else:
             self.backend.read_pixels_with_source()
+
+    # Diagnostic callers may receive an explicitly-labelled full-device or
+    # host-crop receipt. Strict GPU presentation accepts only Vulkan's actual
+    # rectangular device transfer; it never substitutes a CPU mirror.
+    me read_pixels_region_with_source(
+        x: i32, y: i32, width: i32, height: i32, policy: RegionReadbackPolicy
+    ) -> Engine2DReadback:
+        if val Some(vulkan) = self.vulkan_backend:
+            val pending_status = vulkan._flush_pending_compute()
+            if pending_status == 1:
+                val direct = vulkan.read_pixels_region_with_source(x, y, width, height)
+                self.vulkan_backend = Some(vulkan)
+                self.backend = vulkan
+                if engine2d_region_readback_is_device_region(direct):
+                    return direct
+            elif policy == RegionReadbackPolicy.RequireDeviceRegion:
+                return engine2d_region_readback_required_failure()
+            else:
+                if pending_status < 0:
+                    vulkan.mark_completion_unknown()
+                else:
+                    vulkan.mark_cpu_fallback("primitive-batch-region-read-flush-ineligible")
+                self.vulkan_backend = Some(vulkan)
+                self.backend = vulkan
+        if policy == RegionReadbackPolicy.RequireDeviceRegion:
+            return engine2d_region_readback_required_failure()
+        val full = self.read_pixels_with_source()
+        engine2d_readback_region_from_full(full, self.width(), self.height(), x, y, width, height)
 
     # ========================================================================
     # Lifecycle

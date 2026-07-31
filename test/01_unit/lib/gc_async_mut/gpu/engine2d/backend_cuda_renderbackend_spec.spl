@@ -12,6 +12,18 @@ use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_read}
+use std.spec.{step}
+
+fn expect_backend_batch_receipt(backend: CudaBackend):
+    expect(backend.pending_resources.len()).to_equal(2)
+    expect(backend.batch_sync_count).to_equal(0)
+    expect(backend.submit_batch()).to_equal(true)
+    expect(backend.pending_resources.len()).to_equal(0)
+    expect(backend.batch_sync_count).to_equal(1)
+    val readback = backend.read_pixels_with_source()
+    expect(readback.source).to_equal("device_readback")
+    expect(readback.pixels[0]).to_equal(0xff112233u32)
+    expect(readback.pixels[1]).to_equal(0xff445566u32)
 
 describe "CudaBackend RenderBackend facade":
 
@@ -76,10 +88,28 @@ describe "CudaBackend RenderBackend facade":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
         expect(source).to_contain(
             "me _cleanup_cuda_surface():\n" +
+            "        val completion_unknown = self.completion_unknown or self.session.completion_unknown\n" +
+            "        if completion_unknown:\n" +
+            "            self._quarantine_pending_resources()\n" +
+            "        else:\n" +
+            "            self._release_pending_resources()\n" +
             "        self.cpu_fallback_used = false\n" +
             "        self.completion_unknown = false\n" +
             "        self.device_current = false\n" +
             "        self.mirror_current = false"
+        )
+
+    it "keeps failed-sync device ownership with the quarantined context":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("me _quarantine_pending_resources():")
+        expect(source).to_contain(
+            "Device pointers must not be freed after a failed sync: their ownership\n" +
+            "        # remains with the quarantined context until CudaSession destroys it."
+        )
+        expect(source).to_contain(
+            "if not self.submit_batch():\n" +
+            "            self._quarantine_pending_resources()\n" +
+            "        self._cleanup_cuda_surface()"
         )
 
     it "never labels CPU-rendered fallback pixels as device readback":
@@ -112,32 +142,41 @@ describe "CudaBackend RenderBackend facade":
         expect(first.pixels.len()).to_equal(0)
         expect(second.pixels.len()).to_equal(0)
 
-    it "quarantines accepted image work instead of freeing or overwriting it":
+    it "keeps accepted image resources pending until the batch sync":
         val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
         expect(source).to_contain(
-            "cuda_backend_free(host_pixels, image_bytes)\n" +
-            "                    self._quarantine_completion_unknown()\n" +
-            "                    return false"
+            "class _CudaPendingResource:"
         )
         expect(source).to_contain(
-            "if self.completion_unknown:\n" +
-            "            return\n" +
-            "        if not self._begin_cpu_path():\n" +
-            "            return\n" +
-            "        self.mirror.draw_image("
+            "self.pending_resources.push(_CudaPendingResource("
         )
         expect(source).to_contain(
-            "if self.completion_unknown or self.session.completion_unknown:\n" +
-            "            self._quarantine_completion_unknown()\n" +
-            "            return"
+            "me _release_pending_resources():"
         )
+        expect(source).to_contain("me submit_batch() -> bool:")
 
-    it "propagates CUDA font completion state to facade readback":
+    it "submits CUDA image resources once and reads exact device pixels":
+        var backend = CudaBackend.create()
+        if backend.init(2, 1):
+            step("Submit one backend batch and read device pixels")
+            backend.draw_image(0, 0, 1, 1, [0xff112233u32])
+            backend.draw_image(1, 0, 1, 1, [0xff445566u32])
+            expect_backend_batch_receipt(backend)
+        else:
+            expect(backend.initialized).to_equal(false)
+        backend.shutdown()
+
+    it "queues font work for the same batch boundary":
         val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
         expect(backend).to_contain(
-            "if self.session.sync() != CUDA_SUCCESS:\n" +
-            "                self._quarantine_completion_unknown()\n" +
-            "                return submitted"
+            "self.pending_device_work = true"
+        )
+        expect(backend).to_contain("if self.pending_device_work and not self.submit_batch():")
+        expect(backend).to_contain(
+            "if rc != CUDA_SUCCESS:\n" +
+            "                return submitted\n" +
+            "            self._mark_device_mutation()\n" +
+            "            submitted = submitted + 1"
         )
         val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
         expect(engine).to_contain(
