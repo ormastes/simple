@@ -8088,6 +8088,11 @@ impl JsInterpreter:
             self._timer_heap_push(PendingTimerTask.create_animation_frame(
                 timer_id, callback_id, delay_ms, self.timer_current_time_ms
             ))
+        elif timer_type == "immediate":
+            self._timer_heap_push(PendingTimerTask.create_immediate_with_args(
+                timer_id, callback_id, callback_args,
+                self.timer_current_time_ms
+            ))
         else:
             self._timer_heap_push(PendingTimerTask.create_with_args(
                 timer_id, callback_id, callback_args, delay_ms,
@@ -8139,7 +8144,33 @@ impl JsInterpreter:
         val timer_id = self._timer_id_from_value(arg_vals[0])
         if timer_id < 0:
             return JsValue.Undefined
-        self._cancel_timer_id(timer_id)
+        var removed = false
+        var task_i = 0
+        while task_i < self.pending_timer_tasks.len():
+            val task = self.pending_timer_tasks[task_i]
+            if task.id == timer_id:
+                var matching_domain = false
+                if not task.is_next_tick:
+                    if clear_type == "cancelAnimationFrame":
+                        matching_domain = task.is_animation_frame
+                    elif clear_type == "clearImmediate":
+                        matching_domain = task.is_immediate
+                    elif (
+                        clear_type == "clearTimeout" or
+                        clear_type == "clearInterval"
+                    ):
+                        matching_domain = (
+                            not task.is_animation_frame and
+                            not task.is_immediate
+                        )
+                if not matching_domain:
+                    return JsValue.Undefined
+                self._timer_heap_remove_at(task_i)
+                removed = true
+                break
+            task_i = task_i + 1
+        if not removed:
+            return JsValue.Undefined
         var handle_i = 0
         while handle_i < self.timer_handle_ids.len():
             if self.timer_handle_ids[handle_i] == timer_id:
@@ -8215,6 +8246,13 @@ impl JsInterpreter:
                         self._animation_frame_delay_ms(),
                         self.timer_current_time_ms
                     )
+                elif task.is_immediate:
+                    self.pending_timer_tasks[i] = (
+                        PendingTimerTask.create_immediate_with_args(
+                            task.id, task.callback_id, task.callback_args,
+                            self.timer_current_time_ms
+                        )
+                    )
                 else:
                     self.pending_timer_tasks[i] = PendingTimerTask.create_with_args(
                         task.id, task.callback_id, task.callback_args,
@@ -8262,6 +8300,13 @@ impl JsInterpreter:
                         self._animation_frame_delay_ms(),
                         self.timer_current_time_ms
                     ))
+                elif timer_type == "immediate":
+                    self._timer_heap_push(
+                        PendingTimerTask.create_immediate_with_args(
+                            timer_id, callback_id, callback_args,
+                            self.timer_current_time_ms
+                        )
+                    )
                 else:
                     self._timer_heap_push(PendingTimerTask.create_with_args(timer_id, callback_id, callback_args, delay_ms, self.timer_current_time_ms, false))
                 refreshed = true

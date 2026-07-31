@@ -2,11 +2,12 @@
 
 > BrowserSession and the canonical JavaScript timer owner align staggered
 > requestAnimationFrame registrations to one document-clock refresh boundary.
-> A callback registered during dispatch waits for the following boundary.
+> A callback registered during dispatch waits for the following boundary, and
+> timer clears cannot cancel animation-frame callbacks (or vice versa).
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|---------|
-| 2 | 2 | 0 | 0 |
+| 3 | 3 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -19,7 +20,7 @@
 | Requirements | REQ-WEB-BROWSER-004, 005, 006, 017, 021 |
 | Plan | `doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md` |
 | Source | `test/03_system/app/browser/feature/request_animation_frame_alignment_spec.spl` |
-| Updated | 2026-07-30 |
+| Updated | 2026-07-31 |
 
 ## Claim Boundary
 
@@ -30,6 +31,41 @@ claim native execution until the focused spec runs on an admitted current
 pure-Simple CLI.
 
 ## Scenario
+
+### should keep timer and animation-frame cancellation domains separate
+
+1. **Register the browser callback**
+   - The page registers one rAF, one 16 ms timeout, and a once-only click
+     listener. `clearTimeout(rAF)` and `cancelAnimationFrame(timeout)` must be
+     no-ops, leaving exactly two pending callbacks.
+   - Cancellation domains are exact: timeout and interval share one domain,
+     rAF is separate, immediate is separate, and nextTick is never removable by
+     a public clear API. Pairwise wrong-kind calls are no-ops.
+   - Positive controls cross-clear timeout/interval, clear rAF and immediate
+     with their matching APIs, and close rAF/immediate through unrestricted
+     `handle.close()`.
+   - Node-compatible wrong-kind handles remain `active=true`, `closed=false`,
+     `cleared=false`, and keep an empty `clearedBy`. The retained task split is
+     exactly two timers, one immediate, one rAF, and one nextTick.
+   - The checker captures the actual owner-issued nextTick task ID, invokes all
+     four public clear APIs against that ID one at a time, and after every call
+     requires both five pending tasks and the same nextTick task to remain.
+2. **Advance the monotonic browser clock**
+   - At 15 ms no callback runs and state remains exactly `:0:-1`.
+   - The Node control drains nextTick before immediate at time zero (`NM`), then
+     rAF and two timers in creation order at 16 ms (`NMFTU`).
+3. **Dispatch events and animation frames**
+   - Two click dispatches invoke the once listener exactly once.
+   - At 16 ms the rAF and timeout both run in registration order, producing
+     exact state `FT:1:16`.
+4. **Observe updated canonical Draw IR pixels and released resources**
+   - The DOM style mutation lowers through the `html_ast` Draw IR batch as the
+     `stage` rectangle at `(0,0)`, size `32x24`, color `#2563eb`.
+   - The full `64x48` Engine2D buffer is exact: 768 stage pixels are blue and
+     every one of the remaining 2,304 pixels is white, with no skipped command.
+   - Pending tasks, timer-handle lookups, pending listener-operation arrays,
+     and active listeners are zero. The once-listener tombstone holds an
+     undefined callback, proving the callable was released.
 
 ### should align staggered and nested callbacks to deterministic frames
 
@@ -82,6 +118,33 @@ The runnable source contains the complete fixture and checker implementations.
 The displayed scenario invokes each frozen helper directly:
 
 ```simple
+it "should keep timer and animation-frame cancellation domains separate":
+    step("Register the browser callback")
+    var session = setup_cancel_domain_fixture()
+    check_cancel_domain_registration(session)
+    check_node_cancel_domain_handle_metadata()
+
+    step("Advance the monotonic browser clock")
+    expect(session.advance_time(15)).to_equal(0)
+    expect(_read_js_text(
+        session, "callbackLog+':'+clickCount+':'+frameStamp"
+    )).to_equal(":0:-1")
+
+    step("Dispatch events and animation frames")
+    val _ = session.dispatch_dom_event(
+        "stage", "click", true, true
+    )
+    val _ = session.dispatch_dom_event(
+        "stage", "click", true, true
+    )
+    expect(session.advance_time(16)).to_equal(2)
+    expect(_read_js_text(
+        session, "callbackLog+':'+clickCount+':'+frameStamp"
+    )).to_equal("FT:1:16")
+
+    step("Observe updated canonical Draw IR pixels and released resources")
+    check_cancel_domain_pixels_and_resources(session)
+
 it "should align staggered and nested callbacks to deterministic frames":
     step("Schedule staggered callbacks before one refresh")
     var session = setup_raf_alignment_fixture()
@@ -111,11 +174,12 @@ it "should preserve aligned deadlines across clock edge cases":
 ```
 
 <details>
-<summary>Complete invoked helper source</summary>
+<summary>Core shared rendering and timing helper source</summary>
 
 ```simple
 class RafAlignmentFrame:
     command: DrawIrCommand
+    pixels: [u32]
     matching_pixels: i64
     rendered_commands: i32
     skipped_commands: i32
@@ -176,11 +240,31 @@ fn _render_raf_alignment_frame(
     raster.shutdown()
     RafAlignmentFrame(
         command: selected,
+        pixels: rendered.pixels,
         matching_pixels: _count_color(rendered.pixels, expected_color),
         rendered_commands: rendered.rendered_command_count,
         skipped_commands: rendered.skipped_command_count,
         source_kind: result.composition.batches[0].source.source_kind
     )
+
+fn _expect_exact_raf_stage_buffer(
+    frame: RafAlignmentFrame, stage_color: u32
+):
+    expect(frame.pixels.len()).to_equal(64 * 48)
+    var mismatched_pixels = 0
+    var y = 0
+    while y < 48:
+        var x = 0
+        while x < 64:
+            val expected = if x < 32 and y < 24:
+                stage_color
+            else:
+                0xFFFFFFFFu32
+            if frame.pixels[y * 64 + x] != expected:
+                mismatched_pixels = mismatched_pixels + 1
+            x = x + 1
+        y = y + 1
+    expect(mismatched_pixels).to_equal(0)
 
 fn setup_raf_alignment_fixture() -> BrowserSession:
     var session = BrowserSession.new()
