@@ -3981,11 +3981,24 @@ fn read_rom(addr: u8) -> u8:
         let ptx_cstr = CString::new(ptx).expect("ptx cstring");
         let kernel_name = CString::new("noop").expect("kernel name");
 
-        let module = simple_runtime::cuda_runtime::rt_cuda_module_load_data(ptx_cstr.as_ptr());
+        let module = simple_runtime::cuda_runtime::rt_cuda_module_load_data(
+            ptx_cstr.as_ptr() as *const u8,
+            ptx_cstr.as_bytes().len() as u64,
+        );
         assert!(module > 0, "expected generated PTX module to load, got {module}");
 
-        let launch =
-            simple_runtime::cuda_runtime::rt_cuda_launch_kernel(module, kernel_name.as_ptr(), 1, 1, 1, 1, 1, 1, 0);
+        let launch = simple_runtime::cuda_runtime::rt_cuda_launch_kernel(
+            module,
+            kernel_name.as_ptr() as *const u8,
+            kernel_name.as_bytes().len() as u64,
+            1,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+        );
         assert_eq!(launch, 0, "expected generated noop kernel to launch, got {launch}");
 
         let sync = simple_runtime::cuda_runtime::rt_cuda_sync();

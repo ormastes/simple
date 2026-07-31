@@ -1429,7 +1429,10 @@ pub fn rt_cuda_module_load_fn(args: &[Value]) -> Result<Value, CompileError> {
     #[cfg(feature = "cuda")]
     {
         let c_path = c_string_or_error(path, "rt_cuda_module_load")?;
-        return Ok(Value::Int(rt_cuda_module_load(c_path.as_ptr())));
+        return Ok(Value::Int(rt_cuda_module_load(
+            c_path.as_ptr() as *const u8,
+            c_path.as_bytes().len() as u64,
+        )));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -1442,7 +1445,10 @@ pub fn rt_cuda_module_load_data_fn(args: &[Value]) -> Result<Value, CompileError
     #[cfg(feature = "cuda")]
     {
         let c_ptx = c_string_or_error(ptx, "rt_cuda_module_load_data")?;
-        return Ok(Value::Int(rt_cuda_module_load_data(c_ptx.as_ptr())));
+        return Ok(Value::Int(rt_cuda_module_load_data(
+            c_ptx.as_ptr() as *const u8,
+            c_ptx.as_bytes().len() as u64,
+        )));
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -1515,7 +1521,8 @@ pub fn rt_cuda_launch_kernel_fn(args: &[Value]) -> Result<Value, CompileError> {
         let c_name = c_string_or_error(func_name, "rt_cuda_launch_kernel")?;
         return Ok(Value::Int(rt_cuda_launch_kernel(
             module,
-            c_name.as_ptr(),
+            c_name.as_ptr() as *const u8,
+            c_name.as_bytes().len() as u64,
             grid_x,
             grid_y,
             grid_z,
