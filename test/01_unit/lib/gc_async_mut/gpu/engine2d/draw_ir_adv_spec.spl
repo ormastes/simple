@@ -114,6 +114,100 @@ fn _css_background_result(style: [DrawIrStyleProp], command_x: i32, command_y: i
 
 describe "Engine2D advanced Draw IR executor":
 
+    it "preserves repeated opaque and translucent image blending with cached opacity":
+        step("Construct one opaque and one translucent resolved image")
+        val opaque = engine2d_resolved_draw_ir_image(
+            "image://opaque-cache", 2, 1, [RED, GREEN])
+        val translucent = engine2d_resolved_draw_ir_image(
+            "image://translucent-cache", 2, 1, [HALF_RED, GREEN])
+        val empty = engine2d_resolved_draw_ir_image(
+            "image://empty-cache", 0, 0, [])
+        val truncated = engine2d_resolved_draw_ir_image(
+            "image://truncated-cache", 2, 1, [RED])
+        expect(opaque.opaque).to_equal(true)
+        expect(translucent.opaque).to_equal(false)
+        expect(empty.opaque).to_equal(false)
+        expect(truncated.opaque).to_equal(false)
+
+        step("Render duplicate opaque image commands through the shared path")
+        val opaque_commands = [
+            draw_ir_image_command(
+                "opaque-first", 0, 0, 2, 1, opaque.image_uri, []),
+            draw_ir_image_command(
+                "opaque-second", 0, 0, 2, 1, opaque.image_uri, [])
+        ]
+        val opaque_batch = draw_ir_batch(
+            "opaque-cache", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 2, 1, 0, 1000, false),
+            opaque_commands)
+        var opaque_expected_engine = Engine2D.create_with_backend(2, 1, "cpu")
+        opaque_expected_engine.clear(BG)
+        opaque_expected_engine.draw_image_scaled(
+            0, 0, 2, 1, opaque.width, opaque.height, opaque.pixels)
+        opaque_expected_engine.draw_image_scaled(
+            0, 0, 2, 1, opaque.width, opaque.height, opaque.pixels)
+        val opaque_expected = opaque_expected_engine.read_pixels()
+        opaque_expected_engine.shutdown()
+        var opaque_engine = Engine2D.create_with_backend(2, 1, "cpu")
+        opaque_engine.clear(BG)
+        val opaque_result = engine2d_draw_ir_adv_batch_with_images(
+            opaque_engine, opaque_batch, false, [opaque])
+        expect(opaque_result.rendered_command_count).to_equal(2)
+        expect(opaque_result.pixels).to_equal(opaque_expected)
+        opaque_engine.shutdown()
+
+        step("Render duplicate translucent image commands through blending")
+        val translucent_commands = [
+            draw_ir_image_command(
+                "translucent-first", 0, 0, 2, 1,
+                translucent.image_uri, []),
+            draw_ir_image_command(
+                "translucent-second", 0, 0, 2, 1,
+                translucent.image_uri, [])
+        ]
+        val translucent_batch = draw_ir_batch(
+            "translucent-cache", DRAW_IR_BACKEND_CPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 2, 1, 0, 1000, false),
+            translucent_commands)
+        var translucent_expected_engine = Engine2D.create_with_backend(
+            2, 1, "cpu")
+        translucent_expected_engine.clear(BG)
+        translucent_expected_engine.draw_image_blend(
+            0, 0, 2, 1, translucent.pixels)
+        translucent_expected_engine.draw_image_blend(
+            0, 0, 2, 1, translucent.pixels)
+        val translucent_expected = translucent_expected_engine.read_pixels()
+        translucent_expected_engine.shutdown()
+        var translucent_engine = Engine2D.create_with_backend(2, 1, "cpu")
+        translucent_engine.clear(BG)
+        val translucent_result = engine2d_draw_ir_adv_batch_with_images(
+            translucent_engine, translucent_batch, false, [translucent])
+        expect(translucent_result.rendered_command_count).to_equal(2)
+        expect(translucent_result.pixels).to_equal(translucent_expected)
+        translucent_engine.shutdown()
+
+        step("Keep translucent first-frame images outside fresh-device admission")
+        val fresh_batch = draw_ir_batch(
+            "translucent-fresh", DRAW_IR_BACKEND_GPU,
+            draw_ir_embedding_config(
+                "surface", "window", 0, 0, 2, 1, 0, 1000, true),
+            [draw_ir_image_command(
+                "translucent-fresh", 0, 0, 2, 1,
+                translucent.image_uri, [])])
+        val fresh_composition = draw_ir_composition(
+            "translucent-fresh", "scene", DRAW_IR_BACKEND_GPU, [fresh_batch])
+        var fresh_engine = Engine2D.create_with_backend(2, 1, "cpu")
+        val fresh_result = (
+            engine2d_draw_ir_adv_fresh_device_composition_with_images(
+                fresh_engine, fresh_composition, [translucent])
+        )
+        expect(fresh_result.readback_source).to_equal("preflight_rejected")
+        expect(fresh_result.fallback_reason).to_contain(
+            "fresh-device-opaque-full-target-first-command-required")
+        fresh_engine.shutdown()
+
     it "samples canonical CSS background image repeat modes with exact alpha pixels":
         val no_repeat = _css_background_result(
             _css_background_style("no-repeat", "1", "1", "2", "2"),
