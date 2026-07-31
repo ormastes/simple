@@ -66,6 +66,7 @@ class ExtensionHost:
     keybinding_manager: KeybindingManager
     keybinding_registry: [ExtensionKeybindingEntry]
     custom_editor_registry: [ExtensionCustomEditorEntry]
+    theme_registry: [ExtensionThemeEntry]
 
 struct ExtensionCommandEntry:
     extension_name: text
@@ -111,6 +112,15 @@ struct ExtensionDebugAdapterEntry:
 struct ExtensionCustomEditorEntry:
     extension_name: text
     editor: ExtensionCustomEditor
+
+# Ownership record for a theme contributed by an extension's manifest,
+# mirroring ExtensionDebugAdapterEntry: registered when the owning extension
+# activates, resolved by theme id, dropped again on deactivate. `theme.path`
+# is relative to the extension root (ExtensionEntry.path) -- the host records
+# the declaration; loading the palette file is the theme service's job.
+struct ExtensionThemeEntry:
+    extension_name: text
+    theme: ExtensionTheme
 
 fn extension_debug_adapter_id(entry: ExtensionDebugAdapterEntry) -> text:
     entry.adapter.id
@@ -171,7 +181,8 @@ impl ExtensionHost:
             activation_diagnostics: [],
             keybinding_manager: keybinding_manager_new(),
             keybinding_registry: [],
-            custom_editor_registry: []
+            custom_editor_registry: [],
+            theme_registry: []
         )
 
     me index_extension(path: text):
@@ -644,6 +655,21 @@ impl ExtensionHost:
         val entry = me.find_debug_adapter(adapter_id)
         entry.adapter.id != ""
 
+    # Resolve a theme contributed by an activated extension. Empty entry
+    # (theme.id == "") when no active extension declares `theme_id`.
+    fn find_theme(theme_id: text) -> ExtensionThemeEntry:
+        for entry in me.theme_registry:
+            if entry.theme.id == theme_id:
+                return entry
+        ExtensionThemeEntry(
+            extension_name: "",
+            theme: ExtensionTheme(id: "", label: "", ui_theme: "", path: "")
+        )
+
+    fn theme_registered(theme_id: text) -> bool:
+        val entry = me.find_theme(theme_id)
+        entry.theme.id != ""
+
     # Resolve the custom editor bound to `document_kind` with the highest
     # `priority`. Ties are broken deterministically by registration order
     # (first-registered wins: only a strictly-greater priority replaces the
@@ -689,6 +715,11 @@ impl ExtensionHost:
                 extension_name: manifest.name,
                 editor: editor
             ))
+        for theme in manifest.contributes_themes:
+            me.theme_registry.push(ExtensionThemeEntry(
+                extension_name: manifest.name,
+                theme: theme
+            ))
 
     me _register_context(manifest: ExtensionManifest, path: text):
         me._unregister_context(manifest.name)
@@ -723,6 +754,11 @@ impl ExtensionHost:
             if entry.extension_name != name:
                 new_editors.push(entry)
         me.custom_editor_registry = new_editors
+        var new_themes: [ExtensionThemeEntry] = []
+        for entry in me.theme_registry:
+            if entry.extension_name != name:
+                new_themes.push(entry)
+        me.theme_registry = new_themes
 
     # KeybindingManager.overrides has no owner tag, so a per-extension removal
     # rebuilds the override list from the surviving keybinding_registry entries
