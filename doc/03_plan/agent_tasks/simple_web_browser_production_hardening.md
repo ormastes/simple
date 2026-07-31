@@ -65,6 +65,11 @@ as described below and is not part of the landed set.
   `Keep an overflowed nested frame out of the current drain`; `Refresh
   Node-compatible animation handles exactly`; `Saturate worker wakeup after
   the drain cap`.
+- JavaScript owns `PendingTimerTask`; SimpleScript separately reuses the
+  browser-engine `EventLoop`, whose rAF slots now carry one shared 16ms
+  document-origin deadline. Staggered SimpleScript callbacks share a boundary,
+  nested callbacks defer, and style mutation lowers through canonical Draw IR
+  and Engine2D at 16ms rather than on an arbitrary host poll.
 
 ### Checkable controls — `2316334812e`
 

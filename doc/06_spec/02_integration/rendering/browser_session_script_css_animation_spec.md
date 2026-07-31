@@ -683,7 +683,11 @@ expect(_pixels_equal(second.pixel_data, first.pixel_data)).to_equal(false)
 
 - Render the HTML and CSS frame before the SimpleScript callback
    - Expected: initial.command.color equals `0xFFEF4444u32`
-- Advance the production SimpleScript animation clock
+- Keep the frame red before the shared refresh boundary
+   - Expected: session.advance_time(5) equals `0`
+   - Expected: session.advance_time(15) equals `0`
+   - Expected: before_boundary.command.color equals `0xFFEF4444u32`
+- Advance the production SimpleScript animation clock to 16ms
    - Expected: session.advance_time(16) equals `1`
    - Expected: session.simple_script_callback_count() equals `1`
    - Expected: animated.command.color equals `0xFF2563EBu32`
@@ -692,7 +696,7 @@ expect(_pixels_equal(second.pixel_data, first.pixel_data)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 19 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -706,7 +710,14 @@ val initial = _browser_animation_draw_ir_trace(session, 64, 48)
 _expect_browser_animation_draw_ir_frame(initial)
 expect(initial.command.color).to_equal(0xFFEF4444u32)
 
-step("Advance the production SimpleScript animation clock")
+step("Keep the frame red before the shared refresh boundary")
+expect(session.advance_time(5)).to_equal(0)
+expect(session.advance_time(15)).to_equal(0)
+val before_boundary = _browser_animation_draw_ir_trace(session, 64, 48)
+_expect_browser_animation_draw_ir_frame(before_boundary)
+expect(before_boundary.command.color).to_equal(0xFFEF4444u32)
+
+step("Advance the production SimpleScript animation clock to 16ms")
 expect(session.advance_time(16)).to_equal(1)
 expect(session.simple_script_callback_count()).to_equal(1)
 val animated = _browser_animation_draw_ir_trace(session, 64, 48)

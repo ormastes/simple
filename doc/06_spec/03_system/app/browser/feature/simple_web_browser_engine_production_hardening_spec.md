@@ -868,18 +868,21 @@ expect(advanced.next_animation_ms).to_equal(-1)
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: session.simple_script_callback_count() equals `0`
-- Reuse one retained callback identity for rAF and timeout
+- Keep rAF pending before the document refresh boundary
    - Text capture: after_step
-   - Evidence: text output verified by 4 expected checks
-   - Expected: session.advance_time(5) equals `1`
-   - Expected: session.current_title equals `frame`
+   - Evidence: text output verified by 2 expected checks
+   - Expected: session.advance_time(5) equals `0`
+   - Expected: session.current_title equals `https://example.test/simple-callbacks`
+- Reuse one retained callback identity for timeout
+   - Text capture: after_step
+   - Evidence: text output verified by 3 expected checks
    - Expected: session.advance_time(10) equals `2`
    - Expected: session.current_title equals `frame`
 - Apply style from an interval and keep a canceled callback inert
    - Text capture: after_step
    - Evidence: text output verified by 5 expected checks
    - Expected: session.advance_time(15) equals `1`
-   - Expected: session.advance_time(30) equals `1`
+   - Expected: session.advance_time(30) equals `2`
    - Expected: session.current_title equals `frame`
    - Expected: session.style_revision equals `applied_style_revision`
    - Expected: session.simple_script_callback_count() equals `5`
@@ -907,9 +910,13 @@ expect(session.current_title).to_equal(
     "https://example.test/simple-callbacks"
 )
 
-step("Reuse one retained callback identity for rAF and timeout")
-expect(session.advance_time(5)).to_equal(1)
-expect(session.current_title).to_equal("frame")
+step("Keep rAF pending before the document refresh boundary")
+expect(session.advance_time(5)).to_equal(0)
+expect(session.current_title).to_equal(
+    "https://example.test/simple-callbacks"
+)
+
+step("Reuse one retained callback identity for timeout")
 expect(session.advance_time(10)).to_equal(2)
 expect(session.current_title).to_equal("frame")
 expect(session.current_body_html).to_contain("timeout")
@@ -922,7 +929,7 @@ expect(_count_color(
     styled.pixels, 0xFF2563EBu32
 )).to_be_greater_than(0)
 val applied_style_revision = session.style_revision
-expect(session.advance_time(30)).to_equal(1)
+expect(session.advance_time(30)).to_equal(2)
 expect(session.current_title).to_equal("frame")
 expect(session.style_revision).to_equal(applied_style_revision)
 expect(session.simple_script_callback_count()).to_equal(5)
@@ -949,8 +956,8 @@ expect(session.warnings).to_contain(
    - Text capture: after_step
    - Evidence: text output verified by 3 expected checks
    - Expected: session.simple_script_executor.has_callback(41) is true
-   - Expected: session.advance_time(5) equals `1`
-   - Expected: session.simple_script_callback_count() equals `1`
+   - Expected: session.advance_time(5) equals `0`
+   - Expected: session.simple_script_callback_count() equals `0`
 - session simple script executor log
    - Text capture: after_step
 - session simple script executor console buffer
@@ -1041,8 +1048,8 @@ expect(session.simple_script_executor.has_callback(41)).to_equal(true)
 expect(
     session.simple_script_executor._callback_sources
 ).to_contain("title \"frame\"")
-expect(session.advance_time(5)).to_equal(1)
-expect(session.simple_script_callback_count()).to_equal(1)
+expect(session.advance_time(5)).to_equal(0)
+expect(session.simple_script_callback_count()).to_equal(0)
 session.simple_script_executor.log("log", "document-owned", 0)
 expect(
     session.simple_script_executor.console_buffer().entries().len()
@@ -1088,14 +1095,16 @@ expect(
     session.simple_script_executor.schedule_timeout(91, 0, 1000)
 ).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(91)
+    session.simple_script_executor.schedule_animation_frame(91, 0, 0)
 ).to_equal(true)
-val fresh_callbacks = session.simple_script_executor.tick(0)
+val fresh_callbacks = session.simple_script_executor.tick(16000)
 expect(fresh_callbacks.len()).to_equal(1)
 expect(fresh_callbacks[0]).to_equal("title \"fresh\"")
 expect(session.simple_script_callback_count()).to_equal(1)
 expect(
-    session.simple_script_executor.schedule_animation_frame(91)
+    session.simple_script_executor.schedule_animation_frame(
+        91, 16000, 0
+    )
 ).to_equal(true)
 session.simple_script_executor.log("log", "fresh-document-owned", 0)
 expect(session.simple_script_executor.has_callback(91)).to_equal(true)
