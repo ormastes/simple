@@ -521,6 +521,65 @@ fn draw_ir_composition(composition_id: text, scene_key: text, backend_target: te
         batches: batches
     )
 
+# Flatten a child composition into its embedding owner.  The flat batch order
+# remains the paint order; the executor therefore needs no iframe-specific path.
+fn _draw_ir_embed_prefixed_id(prefix: text, value: text) -> text:
+    if value == "":
+        return prefix
+    "{prefix}:{value}"
+
+fn _draw_ir_embed_command(
+    command: DrawIrCommand, prefix: text, inherited_local_clip: DrawIrRect
+) -> DrawIrCommand:
+    var embedded = command
+    embedded.component_id = _draw_ir_embed_prefixed_id(
+        prefix, command.component_id
+    )
+    if command.parent_id != "":
+        embedded.parent_id = _draw_ir_embed_prefixed_id(prefix, command.parent_id)
+    # Child hit targets are not an input authority.  Keep only renderer-local
+    # paint geometry until the separate sandboxed child broker exists.
+    embedded.hit_rect = draw_ir_no_rect()
+    embedded.clip_rect = draw_ir_rect_intersection(
+        command.clip_rect, inherited_local_clip
+    )
+    embedded
+
+pub fn draw_ir_embed_composition(
+    child: DrawIrComposition,
+    offset_x: i32,
+    offset_y: i32,
+    ancestor_clip: DrawIrRect,
+    surface_prefix: text,
+    component_id: text,
+    layer_base: i32
+) -> [DrawIrBatch]:
+    var embedded: [DrawIrBatch] = []
+    for child_batch in child.batches:
+        val local_clip = draw_ir_rect_translate(
+            ancestor_clip,
+            0 - offset_x - child_batch.embedding.x,
+            0 - offset_y - child_batch.embedding.y
+        )
+        var commands: [DrawIrCommand] = []
+        for command in child_batch.commands:
+            commands.push(_draw_ir_embed_command(
+                command, surface_prefix, local_clip
+            ))
+        var embedding = child_batch.embedding
+        embedding.surface_id = _draw_ir_embed_prefixed_id(
+            surface_prefix, child_batch.embedding.surface_id
+        )
+        embedding.component_id = component_id
+        embedding.x = offset_x + child_batch.embedding.x
+        embedding.y = offset_y + child_batch.embedding.y
+        embedding.layer = layer_base
+        embedded.push(draw_ir_batch_with_source(
+            _draw_ir_embed_prefixed_id(surface_prefix, child_batch.batch_id),
+            child_batch.backend_target, embedding, commands, child_batch.source
+        ))
+    embedded
+
 fn _draw_ir_event_backend_target(composition: DrawIrComposition, backend_target: text) -> text:
     if backend_target == "":
         return composition.backend_target

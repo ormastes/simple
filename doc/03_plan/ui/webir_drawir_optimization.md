@@ -100,7 +100,10 @@ node-level DrawIR-diff cache.
 - The window content-frame path in `simple_web_window_renderer.spl` calls `WebRenderPixelArtifactCache.request_to_pixel_artifact[_at_time]`; that cache routes static frames through the retained Engine2D DrawIR result. Dynamic regions retain their explicit fallback branch and require separate evidence.
 - `draw_ir_diff_compositions` has **zero production render-loop callers** — its only caller outside its own spec is `src/app/ui.test_api/handler.spl` (a test API), not any paint path.
 - `SimpleWebEngine2DStaticPixelCache` still caches whole-document identity, so one changed character invalidates the frame; no node-level invalidation exists.
-- Main DrawIR commands now retain parent IDs and image lowering. **RED:** iframe child content still bypasses DrawIR through `_web_render_child_pixels` + `_web_blit_child`; no embedded child batch reaches the shared executor yet.
+- Main DrawIR commands retain parent IDs and image lowering. The bounded
+  `srcdoc` embedded-batch source tranche is under review; legacy pixel blitting
+  remains the oracle and stays RED until qualified exact parity permits caller
+  migration.
 - `DrawIrComposition`/`DrawIrEmbeddingConfig` carry no DPI field; `dpi_scale_milli` is passed by the scene owner and baked into pixel coordinates before DrawIR is built.
 - **Open correctness bug that blocks any pixel-parity gate**: `doc/08_tracking/bug/web_render_full_engine_call_order_nondeterminism_2026-07-12.md` — the full engine produces different checksums for byte-identical input depending on call order/count within a process (suspected process-lifetime cache/arena state).
 
