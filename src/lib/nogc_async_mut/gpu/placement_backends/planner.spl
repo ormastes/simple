@@ -36,9 +36,13 @@ fn make_deterministic_plan(
     val sorted = _stable_sort_requests(requests)
     val seed = plan_request_digest(sorted, budget)
     val estimate = _estimate_cost(sorted, budget)
+    val transfer_count = sorted.len()
     PlacementPlan(
         reservations: object_ref(object_slot: 0, generation: 1),
-        transfers: object_ref(object_slot: 1, generation: 1),
+        transfers: object_ref(
+            object_slot: if transfer_count > 0: transfer_count as u32 else: 0,
+            generation: 1
+        ),
         evictions: object_ref(object_slot: 2, generation: 1),
         prefetches: object_ref(object_slot: 3, generation: 1),
         leases: object_ref(object_slot: 4, generation: 1),
@@ -67,6 +71,10 @@ fn request_signature(requests: [PlacementRequest], budget: PlacementBudget) -> t
         seed = seed + req.expected_reuse_distance.to_text()
         seed = seed + ":"
         seed = seed + req.transfer_cost_hint.value.to_text()
+        seed = seed + ":"
+        seed = seed + request_retain_score(req).to_text()
+        seed = seed + ":"
+        seed = seed + req.affinity_group.value.to_text()
         i = i + 1
     seed
 
@@ -79,18 +87,80 @@ fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
 
 fn _estimate_cost(requests: [PlacementRequest], budget: PlacementBudget) -> CostEstimate:
     val request_count = requests.len()
+    var cpu_work: u64 = 0
+    var simd_work: u64 = 0
+    var gpu_work: u64 = 0
+    var host_to_device_bytes: u64 = 0
+    var device_to_host_bytes: u64 = 0
+    var ssd_read_bytes: u64 = 0
+    var ssd_write_bytes: u64 = 0
+    var predicted_latency_us: u64 = 0
+
+    var i = 0
+    while i < request_count:
+        val req = requests[i]
+        val span = if req.expected_last_use.value >= req.expected_first_use.value:
+            req.expected_last_use.value - req.expected_first_use.value
+        else:
+            0
+        val score = request_retain_score(req)
+        val transfer = req.transfer_cost_hint.value
+        val recompute = req.recompute_cost.value
+
+        cpu_work = cpu_work + (score % 97)
+        simd_work = simd_work + (score % 53)
+        gpu_work = gpu_work + if recompute > transfer: recompute else: transfer
+        host_to_device_bytes = host_to_device_bytes + (transfer + 1)
+        device_to_host_bytes = device_to_host_bytes + (recompute + 1)
+        ssd_read_bytes = ssd_read_bytes + span
+        ssd_write_bytes = ssd_write_bytes + span + 1
+        predicted_latency_us = predicted_latency_us + transfer + recompute + (span * 3)
+        i = i + 1
+
+    val effective_count = if request_count == 0: 1 else: request_count
+    val normalized_host_to_device = if request_count == 0:
+        budget.staging_bytes
+    else:
+        host_to_device_bytes % (budget.device_bytes + budget.staging_bytes + 1)
+    val normalized_device_to_host = if request_count == 0:
+        budget.host_pinned_bytes
+    else:
+        device_to_host_bytes % (budget.host_hot_bytes + budget.driver_queue_bytes + 1)
+
+    val confidence_milli = if budget.runtime_base_bytes > 0:
+        900
+    elif budget.host_hot_bytes > 0:
+        700
+    else:
+        500
+
     CostEstimate(
-        cpu_work: request_count as u64,
-        simd_work: request_count as u64,
-        gpu_work: request_count as u64,
-        host_to_device_bytes: budget.staging_bytes,
-        device_to_host_bytes: budget.host_pinned_bytes,
-        ssd_read_bytes: budget.driver_queue_bytes,
-        ssd_write_bytes: budget.manifest_cache_bytes,
-        synchronization_points: 1,
-        predicted_latency_us: if request_count == 0: 0 else: (request_count * 17) as u64,
-        confidence_milli: 500
+        cpu_work: cpu_work + budget.runtime_base_bytes as u64,
+        simd_work: simd_work + budget.host_pinned_bytes as u64,
+        gpu_work: gpu_work + budget.host_hot_bytes as u64,
+        host_to_device_bytes: normalized_host_to_device,
+        device_to_host_bytes: normalized_device_to_host,
+        ssd_read_bytes: ssd_read_bytes + budget.driver_queue_bytes,
+        ssd_write_bytes: ssd_write_bytes + budget.manifest_cache_bytes,
+        synchronization_points: if effective_count > 1: effective_count as u32 else: 1,
+        predicted_latency_us: if predicted_latency_us == 0: 0 else: predicted_latency_us,
+        confidence_milli: confidence_milli
     )
+
+fn request_retain_score(request: PlacementRequest) -> u64:
+    val span = if request.expected_last_use.value >= request.expected_first_use.value:
+        request.expected_last_use.value - request.expected_first_use.value
+    else:
+        0
+    val reuse_advantage = request.expected_reuse_distance as u64
+    val transfer = request.transfer_cost_hint.value
+    val recompute = request.recompute_cost.value
+    val transfer_cost = if transfer == 0: 1 else: transfer
+    val recompute_adv = if recompute > transfer_cost:
+        recompute - transfer_cost
+    else:
+        0
+    span * 8 + reuse_advantage * 64 + recompute_adv + request.affinity_group.value
 
 fn _stable_sort_requests(requests: [PlacementRequest]) -> [PlacementRequest]:
     var sorted: [PlacementRequest] = []
@@ -103,19 +173,39 @@ fn _stable_sort_requests(requests: [PlacementRequest]) -> [PlacementRequest]:
         while j > 0:
             val left = sorted[j - 1]
             val next = sorted[j]
-            if _request_order_leq(left, req):
+            if _request_order_leq(left, next):
                 break
             sorted[j] = left
-            sorted[j - 1] = req
+            sorted[j - 1] = next
             j = j - 1
         i = i + 1
     sorted
 
 fn _request_order_leq(a: PlacementRequest, b: PlacementRequest) -> bool:
-    # Stable sort key: higher reuse first, then object slot, then generation.
-    if a.expected_reuse_distance > b.expected_reuse_distance:
+    # Stable sort key:
+    # 1) retain score (desc)
+    # 2) affinity group id (asc)
+    # 3) reuse distance (desc)
+    # 4) liveness (asc by last use)
+    # 5) object slot and generation tie-breakers
+    val a_score = request_retain_score(a)
+    val b_score = request_retain_score(b)
+
+    if a_score > b_score:
+        true
+    elif a_score < b_score:
+        false
+    elif a.affinity_group.value < b.affinity_group.value:
+        true
+    elif a.affinity_group.value > b.affinity_group.value:
+        false
+    elif a.expected_reuse_distance > b.expected_reuse_distance:
         true
     elif a.expected_reuse_distance < b.expected_reuse_distance:
+        false
+    elif a.expected_last_use.value < b.expected_last_use.value:
+        true
+    elif a.expected_last_use.value > b.expected_last_use.value:
         false
     elif a.object.object_slot < b.object.object_slot:
         true
@@ -123,6 +213,24 @@ fn _request_order_leq(a: PlacementRequest, b: PlacementRequest) -> bool:
         false
     else:
         a.object.generation <= b.object.generation
+
+fn estimate_confidence_delta(
+    estimated_latency: u64,
+    observed_latency: u64
+) -> u64:
+    if estimated_latency > observed_latency:
+        estimated_latency - observed_latency
+    else:
+        observed_latency - estimated_latency
+
+fn calibrated_within_confidence(
+    estimated: CostEstimate,
+    observed_latency_us: u64,
+    confidence_milli: u16
+) -> bool:
+    val budget = estimate_confidence_delta(estimated.predicted_latency_us, observed_latency_us)
+    val max_delta = ((estimated.predicted_latency_us * confidence_milli as u64) / 1000) + 1
+    budget <= max_delta
 
 fn _synthesize_plan_requests(requests: PlacementRequestArenaRef) -> [PlacementRequest]:
     val request_count = (requests.object.object_slot as i64 % 3) + 1
@@ -153,3 +261,4 @@ fn _synthesize_plan_requests(requests: PlacementRequestArenaRef) -> [PlacementRe
 
 export planner_request_count, plan_request_digest, make_deterministic_plan
 export request_signature, make_plan_from_requests
+export request_retain_score, estimate_confidence_delta, calibrated_within_confidence
