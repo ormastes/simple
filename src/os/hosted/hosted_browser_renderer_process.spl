@@ -331,6 +331,8 @@ pub class HostedBrowserRendererProcess:
     network_job_fetch: BrowserRendererNetworkDecodeResult?
     network_job_policy: HostedBrowserRequestPolicy?
     network_job_request: FetchRequest?
+    network_job_phase: text
+    network_job_actual_request: FetchRequest?
     network_job_redirect_count: i64
     pending_wire: text
     pending_wire_offset: i64
@@ -442,6 +444,8 @@ pub class HostedBrowserRendererProcess:
             network_job_fetch: nil,
             network_job_policy: nil,
             network_job_request: nil,
+            network_job_phase: "",
+            network_job_actual_request: nil,
             network_job_redirect_count: 0,
             pending_wire: "",
             pending_wire_offset: 0,
@@ -611,6 +615,8 @@ pub class HostedBrowserRendererProcess:
         self.network_job_fetch = nil
         self.network_job_policy = nil
         self.network_job_request = nil
+        self.network_job_phase = ""
+        self.network_job_actual_request = nil
         self.network_job_redirect_count = 0
         self.retained_image_resources = []
 
@@ -1261,6 +1267,8 @@ pub class HostedBrowserRendererProcess:
         self.network_job_fetch = nil
         self.network_job_policy = nil
         self.network_job_request = nil
+        self.network_job_phase = ""
+        self.network_job_actual_request = nil
         self.network_job_redirect_count = 0
         if handle > 0:
             val _ = rt_browser_http_job_cancel(handle)
@@ -1674,6 +1682,46 @@ pub class HostedBrowserRendererProcess:
         else:
             self._requester_origin()
         self.network.set_requester_origin(requester_origin)
+        val plan = self.network.build_cors_preflight(request)
+        if val Some(preflight_request) = plan.preflight_request:
+            if val Some(mock_result) = h1_mock_response(preflight_request):
+                match mock_result:
+                    Err(error):
+                        return Some(_network_result(
+                            0, "", "", error.message
+                        ))
+                    Ok(response):
+                        val allowed = match self.network.validate_cors_preflight(
+                            plan.actual_request, response
+                        ):
+                            Err(_): false
+                            Ok(value): value
+                        if not allowed:
+                            return Some(_network_result(
+                                0, "", "", "network: CORS preflight denied"
+                            ))
+                        return self._start_actual_network_job(
+                            fetch, policy, redirect_count,
+                            plan.actual_request
+                        )
+            return self._start_runtime_network_job(
+                fetch, policy, redirect_count, preflight_request,
+                "preflight", Some(plan.actual_request)
+            )
+        self._start_actual_network_job(
+            fetch, policy, redirect_count, plan.actual_request
+        )
+
+    me _start_actual_network_job(
+        fetch: BrowserRendererNetworkDecodeResult,
+        policy: HostedBrowserRequestPolicy,
+        redirect_count: i64,
+        request: FetchRequest
+    ) -> HostedBrowserNetworkResult?:
+        val requester_origin = if fetch.initiator_origin != "":
+            fetch.initiator_origin
+        else:
+            self._requester_origin()
         val active_document_url = self._active_renderer_document_url()
         val site_for_cookies_url = if requester_origin == "null":
             ""
@@ -1681,7 +1729,7 @@ pub class HostedBrowserRendererProcess:
             active_document_url
         else:
             "about:blank"
-        match self.network.prepare_single_hop(
+        match self.network.prepare_single_hop_after_cors_preflight(
             request, site_for_cookies_url, policy.consumes_navigation
         ):
             Err(error):
@@ -1712,43 +1760,59 @@ pub class HostedBrowserRendererProcess:
                             return Some(self._finalize_network(
                                 fetch.kind, prepared.request, response
                             ))
-                val url = prepared.request.url
-                val port = if url.port > 0:
-                    url.port
-                elif url.scheme == "https":
-                    443
-                else:
-                    80
-                val remaining_ms = (
-                    self.command_deadline_ms -
-                    rt_time_now_monotonic_ms()
+                self._start_runtime_network_job(
+                    fetch, policy, redirect_count, prepared.request,
+                    "actual", nil
                 )
-                if remaining_ms <= 0:
-                    return Some(_network_result(
-                        0, "", "", "renderer-network-timeout"
-                    ))
-                val raw_limit = if fetch.kind == "wasm" or fetch.kind == "image":
-                    327680
-                else:
-                    589824
-                val handle = rt_browser_http_job_start_public_limited(
-                    url.scheme,
-                    hosted_browser_transport_host(url.host),
-                    port,
-                    rt_text_to_bytes(build_request_bytes(prepared.request)),
-                    remaining_ms,
-                    raw_limit
-                )
-                if handle < 0:
-                    return Some(_network_result(
-                        0, "", "", "network: Network request failed"
-                    ))
-                self.network_job_handle = handle
-                self.network_job_fetch = Some(fetch)
-                self.network_job_policy = Some(policy)
-                self.network_job_request = Some(prepared.request)
-                self.network_job_redirect_count = redirect_count
-                nil
+
+    me _start_runtime_network_job(
+        fetch: BrowserRendererNetworkDecodeResult,
+        policy: HostedBrowserRequestPolicy,
+        redirect_count: i64,
+        request: FetchRequest,
+        phase: text,
+        actual_request: FetchRequest?
+    ) -> HostedBrowserNetworkResult?:
+        val url = request.url
+        val port = if url.port > 0:
+            url.port
+        elif url.scheme == "https":
+            443
+        else:
+            80
+        val remaining_ms = (
+            self.command_deadline_ms - rt_time_now_monotonic_ms()
+        )
+        if remaining_ms <= 0:
+            return Some(_network_result(
+                0, "", "", "renderer-network-timeout"
+            ))
+        val raw_limit = if phase == "preflight":
+            65536
+        elif fetch.kind == "wasm" or fetch.kind == "image":
+            327680
+        else:
+            589824
+        val handle = rt_browser_http_job_start_public_limited(
+            url.scheme,
+            hosted_browser_transport_host(url.host),
+            port,
+            rt_text_to_bytes(build_request_bytes(request)),
+            remaining_ms,
+            raw_limit
+        )
+        if handle < 0:
+            return Some(_network_result(
+                0, "", "", "network: Network request failed"
+            ))
+        self.network_job_handle = handle
+        self.network_job_fetch = Some(fetch)
+        self.network_job_policy = Some(policy)
+        self.network_job_request = Some(request)
+        self.network_job_phase = phase
+        self.network_job_actual_request = actual_request
+        self.network_job_redirect_count = redirect_count
+        nil
 
     fn _form_action_redirect_allowed(
         policy: HostedBrowserRequestPolicy,
@@ -2101,7 +2165,9 @@ pub class HostedBrowserRendererProcess:
             return ""
         if (self.network_job_fetch == nil or
             self.network_job_policy == nil or
-            self.network_job_request == nil):
+            self.network_job_request == nil or
+            (self.network_job_phase == "preflight" and
+                self.network_job_actual_request == nil)):
             self._cancel_network_job()
             return "renderer-network-state"
         val state = rt_browser_http_job_poll(self.network_job_handle)
@@ -2111,11 +2177,15 @@ pub class HostedBrowserRendererProcess:
         val fetch = self.network_job_fetch.unwrap()
         val policy = self.network_job_policy.unwrap()
         val request = self.network_job_request.unwrap()
+        val phase = self.network_job_phase
+        val actual_request = self.network_job_actual_request
         val redirect_count = self.network_job_redirect_count
         self.network_job_handle = 0
         self.network_job_fetch = nil
         self.network_job_policy = nil
         self.network_job_request = nil
+        self.network_job_phase = ""
+        self.network_job_actual_request = nil
         self.network_job_redirect_count = 0
         var response = _network_result(
             0, "", "", "network: Network request failed"
@@ -2141,24 +2211,44 @@ pub class HostedBrowserRendererProcess:
                             )
                         )
                     Ok(parsed):
-                        # Only the runtime HTTPS job reaches this branch after
-                        # its authenticated platform-TLS handshake succeeds.
-                        # Generic/mock response finalization cannot seed HSTS.
-                        val raw_response = self._network_response(
-                            fetch.kind, parsed
-                        )
-                        if val Err(reason) = self._form_action_redirect_allowed(
-                            policy, raw_response, redirect_count
-                        ):
-                            response = _network_result(0, "", "", reason)
-                        else:
-                            if request.url.scheme == "https":
-                                val _ = self._commit_validated_https_hsts(
-                                    request.url.to_text(), parsed.headers
+                        if phase == "preflight":
+                            val allowed = match self.network.validate_cors_preflight(
+                                actual_request.unwrap(), parsed
+                            ):
+                                Err(_): false
+                                Ok(value): value
+                            if not allowed:
+                                response = _network_result(
+                                    0, "", "",
+                                    "network: CORS preflight denied"
                                 )
-                            response = self._finalize_network(
-                                fetch.kind, request, parsed
+                            else:
+                                val actual_result = self._start_actual_network_job(
+                                    fetch, policy, redirect_count,
+                                    actual_request.unwrap()
+                                )
+                                if val Some(actual_response) = actual_result:
+                                    response = actual_response
+                                else:
+                                    return ""
+                        else:
+                            # Only an authenticated actual HTTPS response may
+                            # seed HSTS; OPTIONS has no observable side effects.
+                            val raw_response = self._network_response(
+                                fetch.kind, parsed
                             )
+                            if val Err(reason) = self._form_action_redirect_allowed(
+                                policy, raw_response, redirect_count
+                            ):
+                                response = _network_result(0, "", "", reason)
+                            else:
+                                if request.url.scheme == "https":
+                                    val _ = self._commit_validated_https_hsts(
+                                        request.url.to_text(), parsed.headers
+                                    )
+                                response = self._finalize_network(
+                                    fetch.kind, request, parsed
+                                )
         self._write_network_response(
             fetch, policy, response, redirect_count
         )
@@ -2397,7 +2487,6 @@ pub class HostedBrowserRendererProcess:
         val policy = self._renderer_request_policy(fetch, effective_url)
         if not policy.ok:
             if (policy.reason == "mixed-content-blocked" or
-                policy.reason == "cross-origin-preflight-unavailable" or
                 policy.reason.starts_with("csp-")):
                 val reason = self._write_network_response(
                     fetch,

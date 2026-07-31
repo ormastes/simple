@@ -54,6 +54,10 @@ class FetchSingleHopPreparation:
     ) -> FetchSingleHopPreparation:
         FetchSingleHopPreparation(request: request, response: Some(response))
 
+pub class FetchCorsPreflightPlan:
+    actual_request: FetchRequest
+    preflight_request: FetchRequest?
+
 # The Fetch engine orchestrates the full request lifecycle.
 # Each fetch() call runs through: CORS preflight (if needed), cache check,
 # DNS resolution, HTTP transport, redirect following, cookie management,
@@ -178,6 +182,70 @@ class FetchEngine:
             _:
                 pass_do_nothing
 
+        self._prepare_single_hop_after_cors_preflight(
+            policy_request, site_for_cookies_url, is_top_level_navigation
+        )
+
+    me build_cors_preflight(
+        request: FetchRequest
+    ) -> FetchCorsPreflightPlan:
+        val actual_request = self.cors.prepare_actual_request(request)
+        val preflight_request = if (
+            actual_request.mode == RequestMode.Cors and
+            self.cors.needs_preflight(actual_request)
+        ):
+            Some(self.cors.create_preflight(actual_request))
+        else:
+            nil
+        FetchCorsPreflightPlan(
+            actual_request: actual_request,
+            preflight_request: preflight_request
+        )
+
+    me validate_cors_preflight(
+        actual_request: FetchRequest, response: FetchResponse
+    ) -> Result<bool>:
+        if response.status < 200 or response.status >= 300:
+            return Ok(false)
+        if self.cors.validate_preflight_method_with_credentials(
+            response.headers,
+            actual_request.method,
+            actual_request.credentials
+        ) == PreflightResult.Denied:
+            return Ok(false)
+        val requested_headers = cors_unsafe_request_header_names(
+            actual_request.headers
+        )
+        if (requested_headers != "" and
+            self.cors.validate_preflight_headers_with_credentials(
+                response.headers,
+                requested_headers,
+                actual_request.credentials
+            ) == PreflightResult.Denied):
+            return Ok(false)
+        Ok(true)
+
+    me prepare_single_hop_after_cors_preflight(
+        request: FetchRequest,
+        site_for_cookies_url: text = "",
+        is_top_level_navigation: bool = false
+    ) -> Result<FetchSingleHopPreparation>:
+        val policy_request = self.cors.prepare_actual_request(request)
+        match policy_request.mode:
+            RequestMode.SameOrigin:
+                if not self.cors.is_same_origin(policy_request.url):
+                    return Err(network_error("Same-origin request denied"))
+            _:
+                pass_do_nothing
+        self._prepare_single_hop_after_cors_preflight(
+            policy_request, site_for_cookies_url, is_top_level_navigation
+        )
+
+    fn _prepare_single_hop_after_cors_preflight(
+        policy_request: FetchRequest,
+        site_for_cookies_url: text,
+        is_top_level_navigation: bool
+    ) -> Result<FetchSingleHopPreparation>:
         # Step 2: Check the HTTP cache
         if request_cache_eligible(policy_request):
             val cached = self.cache.lookup(policy_request.url.to_text())
@@ -308,47 +376,19 @@ class FetchEngine:
     me handle_cors_preflight(
         request: FetchRequest, deadline_ms: i64 = 0
     ) -> Result<bool>:
-        if not self.cors.needs_preflight(request):
+        val plan = self.build_cors_preflight(request)
+        if plan.preflight_request == nil:
             self.logger.debug("fetch: no preflight needed")
             return Ok(true)
 
         self.logger.info("fetch: sending CORS preflight for {request.url.to_text()}")
-        val preflight_req = self.cors.create_preflight(request)
+        val preflight_req = plan.preflight_request.unwrap()
 
         # Send the OPTIONS preflight
         val preflight_response = self.execute_http(
             preflight_req, deadline_ms
         )?
-        if preflight_response.status < 200 or preflight_response.status >= 300:
-            self.logger.warn("fetch: CORS preflight returned HTTP {preflight_response.status}")
-            return Ok(false)
-
-        # Validate the preflight response headers (declared raw-text form)
-        val result = self.cors.validate_preflight_method_with_credentials(
-            preflight_response.headers,
-            request.method,
-            request.credentials
-        )
-        match result:
-            PreflightResult.Allowed:
-                pass_do_nothing
-            PreflightResult.Denied:
-                self.logger.warn("fetch: CORS preflight method denied")
-                return Ok(false)
-
-        val requested_headers = cors_unsafe_request_header_names(request.headers)
-        if requested_headers != "":
-            val header_result = self.cors.validate_preflight_headers_with_credentials(
-                preflight_response.headers,
-                requested_headers,
-                request.credentials
-            )
-            if header_result == PreflightResult.Denied:
-                self.logger.warn("fetch: CORS preflight headers denied")
-                return Ok(false)
-
-        self.logger.debug("fetch: CORS preflight allowed")
-        Ok(true)
+        self.validate_cors_preflight(plan.actual_request, preflight_response)
 
     # Attach stored cookies to the request as a Cookie header.
     # NOTE: FetchRequest.headers/credentials are declared as raw `text`
