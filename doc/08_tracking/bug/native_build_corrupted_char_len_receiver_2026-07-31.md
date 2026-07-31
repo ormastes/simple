@@ -1,8 +1,12 @@
 # `native-build` phase2:parse: `.len()` on identifier `c` receives a corrupted `str` (renders as U+FFFD) — localized, not fixed
 
-**Status:** localized to file + call-site identifier + exact position in the
-driver's parse sequence; root byte-provenance NOT found; no fix attempted
-(does not look trivially contained). Follow-up to
+**Status:** file-6 (`io_runtime.spl`) blocker CLEARED by `6d9c78d9902` (see
+"Update 2026-07-31: file-6 blocker cleared" below) — measured on a fresh
+worktree with a `bootstrap`+`llvm` seed rebuild. Root byte-provenance of the
+original `StrBytes` corruption was still never independently re-derived past
+what's in this doc; the fix targets the dispatch gap identified here
+(`Value::StrBytes` missing a `.len()` arm), not a separately re-proven
+byte-provenance mechanism. Follow-up to
 `doc/08_tracking/bug/native_build_direct_seed_jit_hang_2026-07-30.md`, whose
 "Separate `<corrupted char>` receiver error" section flagged this as
 worth its own investigation.
@@ -203,3 +207,73 @@ given a fixed source tree, since it's driven by declared imports).
 4. Re-test under default (JIT) execution mode once the upstream hang
    (`native_build_direct_seed_jit_hang_2026-07-30.md`) is resolved enough to
    reach this point — currently blocked, not by this bug.
+
+## Update 2026-07-31: file-6 blocker cleared by `6d9c78d9902`
+
+**Fix:** `6d9c78d99027baf7c4483a25c0d91f56b28f9c8e` — "dispatch string methods
+on `Value::StrBytes`" — adds the missing `Value::StrBytes` arm to the
+interpreter's string-method dispatch (`src/compiler_rust/compiler/src/interpreter_method/mod.rs`,
+arm now at line 900). Prior to this, every string method called on a
+`StrBytes` receiver fell through to the "method not found" fallback, which
+formats the error using `type_name()` ("str") rather than the concrete
+variant — producing the self-contradictory `method 'len' not found on type
+'str'` message this doc investigates.
+
+**Measurement setup:** fresh `git worktree --detach` at origin tip
+`cde0610d8a13e8d6a82402f83e844915c1cc4c33` (confirmed via
+`git merge-base --is-ancestor 6d9c78d99027baf7c4483a25c0d91f56b28f9c8e HEAD`
+that the fix is an ancestor). Rebuilt with
+`cargo build --profile bootstrap -p simple-driver --features llvm`
+(154 MB, LLVM-inclusive — matches the ~145 MB deploy-equivalent shape, not
+the ~57 MB no-LLVM `--release` shape). Re-ran the exact reproduction recipe
+from this doc's "Reproduction" section (`SIMPLE_NATIVE_BUILD_WORKER=1
+SIMPLE_EXECUTION_MODE=interpret SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1
+SIMPLE_COMPILER_TRACE=1 SIMPLE_INTERP_OOB_DEBUG=1 RUST_BACKTRACE=1`, direct
+worker invocation, `--entry-closure --entry src/app/cli/bootstrap_main.spl
+--backend cranelift --timeout 3000 --verbose`), under `stdbuf -oL -eL` with
+each line timestamped as it arrived.
+
+**Result: file 6 (`io_runtime.spl`) now parses clean.** Verbatim log lines:
+
+```
+2026-07-31T06:03:14Z [STDERR] [BOOTSTRAP-PHASE] +934378ms phase2:parse:file:start src/std/nogc_sync_mut/io_runtime.spl chars=10889 heap_registry=277
+2026-07-31T06:03:14Z [STDERR] [frontend] parse_and_build:start path=src/std/nogc_sync_mut/io_runtime.spl
+2026-07-31T06:06:29Z [STDERR] [frontend] parse_and_build:done path=src/std/nogc_sync_mut/io_runtime.spl
+2026-07-31T06:06:29Z [STDERR] [BOOTSTRAP-PHASE] +1129614ms phase2:parse:file:done src/std/nogc_sync_mut/io_runtime.spl heap_registry=277
+```
+
+`parse_and_build:done` fires — no error, no fallthrough to the "method not
+found" path. The run continued: 86 further files completed
+`phase2:parse:file:done` with zero occurrences of the original error string
+or any bare `error:` diagnostic (`grep -cE '^\S+ (\[STDERR\] )?error:'` = 0
+across 249,700 log lines; the 330 raw substring hits of `error:` are all
+`text=error:` — parser trace of string *literals* in the source containing
+that word, verified against surrounding `[parser-expr]`/`[parser-primary]`
+trace context, not diagnostics).
+
+That first measurement pass could not reach full completion: at ~86 files
+per ~2h50m of phase2:parse, all 485 files would take on the order of 16
+hours, because `SIMPLE_COMPILER_TRACE=1 --verbose` — needed to originally
+localize this bug — emits `[parser-expr]`/`[parser-primary]` trace lines for
+every sub-expression (249k log lines for 86 files). A second pass dropped
+`SIMPLE_COMPILER_TRACE=1` and `--verbose` (kept
+`SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1` and the `[BOOTSTRAP-PHASE]` markers) to
+measure whether phase2:parse completes all 485 files and whether the build
+reaches a later phase or produces a binary; see the follow-up report for
+that result.
+
+**Entry-closure BFS per-file rate:** first measurement pass, from the first
+`closure import` line to `Entry closure files: 485` / `Driver start:
+inputs=485`, was 05:39:33Z → 05:47:39Z = 486s / 485 files ≈ **1.0 s/file**.
+The prior measurement (referenced in this investigation's brief) recorded
+~2.2 s/file across 484 files. Recording the ~2x difference as observed;
+no cause established (e.g. warm page cache from the preceding build is a
+candidate, not confirmed) — reporting the number, not the explanation.
+
+**Conclusion:** the `StrBytes` dispatch fix (`6d9c78d9902`) does clear this
+specific blocker — file 6 and at least 86 files past it parse clean under
+the identical reproduction recipe that previously failed at file 6 100% of
+the time across two independent runs. Whether it clears the *entire*
+phase2:parse run and lets `native-build` reach a later phase or emit a
+binary is a separate, larger question this doc's original reproduction
+never reached (it hard-stopped at file 6) — see the follow-up report.
