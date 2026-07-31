@@ -48,7 +48,7 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Origin, Url}
 use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     MockResponseRegistry, build_request_bytes, observed_mock_request,
-    set_mock_registry
+    observed_mock_request_count, set_mock_registry
 }
 use std.gc_async_mut.gpu.browser_engine.shared.logging.{
     BrowserLogLevel, Logger
@@ -84,6 +84,7 @@ use os.hosted.hosted_browser_renderer_registry.{
     HostedBrowserRendererRegistry
 }
 use os.hosted.browser_profile_store.{BrowserProfileStore}
+use std.js.types.pair.{Pair}
 
 extern fn rt_time_now_unix_micros() -> i64
 extern fn rt_file_read_text(path: text) -> text
@@ -2993,7 +2994,7 @@ describe "hosted browser renderer broker policy":
             Some(unexpected):
                 fail("CSP bypassed for {unexpected.url}")
 
-    it "denies cross-origin requests that need an unbrokered preflight":
+    it "admits sanitized cross-origin author headers for broker preflight":
         val policy = hosted_browser_renderer_request_policy(
             "https://example.test",
             permit(false, ""),
@@ -3006,10 +3007,153 @@ describe "hosted browser renderer broker policy":
                 "text/plain"
             )
         )
-        expect(policy.ok).to_be(false)
-        expect(policy.reason).to_equal(
-            "cross-origin-preflight-unavailable"
+        expect(policy.ok).to_be(true)
+        expect(policy.mode).to_equal(RequestMode.Cors)
+        expect(policy.sanitized_headers).to_equal(
+            "Content-Type: text/plain"
         )
+        expect(policy.sanitized_headers.contains("Origin:")).to_be(false)
+
+    it "runs hosted OPTIONS before the admitted actual request":
+        var registry = MockResponseRegistry.create()
+        registry.register_with_headers(
+            "https://api.test/update", 204,
+            [
+                Pair("Access-Control-Allow-Origin", "https://example.test"),
+                Pair("Access-Control-Allow-Methods", "POST"),
+                Pair(
+                    "Access-Control-Allow-Headers",
+                    "content-type, x-admin-action"
+                ),
+                Pair("Set-Cookie", "preflight=blocked"),
+                Pair("Strict-Transport-Security", "max-age=600")
+            ],
+            ""
+        )
+        set_mock_registry(registry)
+        val fetch = request(
+            "fetch", "https://api.test/update", "POST",
+            "X-Admin-Action: update", "value", "text/plain",
+            "omit", [], "https://example.test"
+        )
+        val policy = hosted_browser_renderer_request_policy(
+            "https://example.test", permit(false, ""), fetch
+        )
+        var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+        broker.document_url = "https://example.test/page"
+        broker.document_origin = "https://example.test"
+        match broker._start_network_job(fetch, policy, 0):
+            nil:
+                fail("mock CORS exchange did not complete")
+            Some(response):
+                expect(response.status).to_equal(204)
+                expect(response.error).to_equal("")
+        expect(observed_mock_request_count(
+            "https://api.test/update", "OPTIONS"
+        )).to_equal(1)
+        expect(observed_mock_request_count(
+            "https://api.test/update", "POST"
+        )).to_equal(1)
+        match observed_mock_request("https://api.test/update"):
+            nil:
+                fail("missing hosted preflight")
+            Some(preflight):
+                expect(preflight.method).to_equal("OPTIONS")
+                expect(preflight.headers).to_contain(
+                    "Origin: https://example.test"
+                )
+                expect(preflight.headers).to_contain(
+                    "Access-Control-Request-Headers: content-type, x-admin-action"
+                )
+                expect(preflight.headers.contains("Cookie:")).to_be(false)
+        expect(broker.hsts_dirty).to_be(false)
+        set_mock_registry(MockResponseRegistry.create())
+
+    it "does not issue an actual request after denied preflight policy":
+        for denied_headers in [
+            "Access-Control-Allow-Origin: https://example.test\r\n" +
+                "Access-Control-Allow-Headers: x-admin-action",
+            "Access-Control-Allow-Origin: https://example.test\r\n" +
+                "Access-Control-Allow-Methods: POST",
+            "Location: https://api.test/elsewhere"
+        ]:
+            var registry = MockResponseRegistry.create()
+            var response_headers: [Pair<text, text>] = []
+            for line in denied_headers.split("\r\n"):
+                val colon = line.index_of(":")
+                if colon > 0:
+                    response_headers.push(Pair(
+                        line.slice(0, colon),
+                        line.slice(colon + 1, line.len()).trim()
+                    ))
+            registry.register_with_headers(
+                "https://api.test/denied",
+                if denied_headers.starts_with("Location:"): 302 else: 204,
+                response_headers, ""
+            )
+            set_mock_registry(registry)
+            val fetch = request(
+                "fetch", "https://api.test/denied", "POST",
+                "X-Admin-Action: update", "value", "text/plain",
+                "omit", [], "https://example.test"
+            )
+            val policy = hosted_browser_renderer_request_policy(
+                "https://example.test", permit(false, ""), fetch
+            )
+            var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+            broker.document_url = "https://example.test/page"
+            broker.document_origin = "https://example.test"
+            match broker._start_network_job(fetch, policy, 0):
+                nil:
+                    fail("denied preflight left a job active")
+                Some(response):
+                    expect(response.status).to_equal(0)
+                    expect(response.error).to_equal(
+                        "network: CORS preflight denied"
+                    )
+            expect(observed_mock_request_count(
+                "https://api.test/denied", "OPTIONS"
+            )).to_equal(1)
+            expect(observed_mock_request_count(
+                "https://api.test/denied", "POST"
+            )).to_equal(0)
+            expect(broker.hsts_dirty).to_be(false)
+        set_mock_registry(MockResponseRegistry.create())
+
+    it "clears staged preflight authority on stop and timeout":
+        var broker = HostedBrowserRendererProcess.create(7, 640, 480)
+        broker.network_job_phase = "preflight"
+        broker.network_job_actual_request = Some(fetch_request(
+            "https://api.test/update", RequestMode.Cors
+        ))
+        expect(broker._cancel_pending_for_stop()).to_be(true)
+        expect(broker.network_job_phase).to_equal("")
+        expect(broker.network_job_actual_request).to_be_nil()
+        expect(broker.network_job_handle).to_equal(0)
+
+        set_mock_registry(MockResponseRegistry.create())
+        broker.command_deadline_ms = 1
+        broker.document_url = "https://example.test/page"
+        broker.document_origin = "https://example.test"
+        val fetch = request(
+            "fetch", "https://api.test/timeout", "POST",
+            "X-Admin-Action: update", "value", "text/plain",
+            "omit", [], "https://example.test"
+        )
+        val policy = hosted_browser_renderer_request_policy(
+            "https://example.test", permit(false, ""), fetch
+        )
+        match broker._start_network_job(fetch, policy, 0):
+            nil:
+                fail("expired preflight started a runtime job")
+            Some(response):
+                expect(response.error).to_equal("renderer-network-timeout")
+        expect(broker.network_job_phase).to_equal("")
+        expect(broker.network_job_actual_request).to_be_nil()
+        expect(observed_mock_request_count(
+            "https://api.test/timeout", "POST"
+        )).to_equal(0)
+        set_mock_registry(MockResponseRegistry.create())
 
     # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-013
     it "requires a fresh renderer generation before a cross-site document":

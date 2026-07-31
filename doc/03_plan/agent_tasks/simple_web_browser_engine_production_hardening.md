@@ -1071,10 +1071,23 @@ stopped, RED, or evidence-held history.
 | `disabled_ui_dispatch` | `fbecc67eb77` rejects disabled text controls before shared dispatch. | STATIC REVIEW PASS; qualified execution HELD |
 | `animation_keyframe_perf` | `f57d9bc4600` and `782477146a9` skip unused layout keys and retain empty final keys. | STATIC REVIEW PASS / PERF-EVIDENCE-HELD; lifecycle and multi-list RED |
 | `hosted_form_action` | `c91fdc0e67b` binds redirects to host-owned form-action authorization and conservatively rejects unauthorized navigation. | STATIC REVIEW PASS; qualified execution HELD |
-| `cors_unsafe_header_preflight` | `bf7dfff029a` wires the direct Simple broker preflight path. | STATIC/EVIDENCE-HELD; hosted non-simple/live preflight remains RED |
+| `cors_unsafe_header_preflight` | `bf7dfff029a` wires the direct Fetch path; the renderer-only staged lane adds `FetchCorsPreflightPlan` and one broker-owned OPTIONS-to-actual transition with no preflight side effects. | IMPLEMENTED / STATIC-REVIEW-PENDING; live execution remains RED |
 | `tls_mixed_content` | TLS and mixed-content source controls are present. | SOURCE PRESENT / LIVE EVIDENCE HELD |
 
 The reviewed gap stack `be08f84be5c` + `1d16db5e149` + `dc55d6dffde` +
 `ca91c19d7f8` is STATIC REVIEW PASS only for supported `N`/`Npx`, duplicate,
 `initial`, `unset`, and default-parent-inherit gap winners. Nonzero `inherit`,
 `revert-layer`, and qualified execution remain RED.
+
+### Renderer-only staged CORS contract
+
+`HostedBrowserRendererProcess` is the sole network terminal owner. It stages
+only `network_job_phase` and `network_job_actual_request` beside the existing
+job state, clears the completed OPTIONS handle before starting the actual
+request, and reuses the command's absolute deadline. OPTIONS never finalizes a
+Fetch response, follows redirects, writes renderer protocol, stores cookies or
+cache entries, or seeds HSTS. `HostedWebContentSession` remains unchanged and
+cross-origin-rejected until its separate BrowserSession-owned cookie and
+credentials split has a reviewed contract. Executable evidence is
+`test/03_system/security/browser_hosted_cors_preflight_spec.spl`; its manual is
+`doc/06_spec/03_system/security/browser_hosted_cors_preflight_spec.md`.
