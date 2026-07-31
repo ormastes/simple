@@ -20,6 +20,7 @@ same-origin with another malformed origin and accepted a literal
 use std.gc_async_mut.gpu.browser_engine.net.entity.cors_types.{PreflightResult}
 use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{FetchRequest, RequestMode}
 use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url, Origin}
+use std.common.encoding.utf8.{text_byte_len}
 use std.gc_async_mut.gpu.browser_engine.security.origin_policy.{
     same_origin,
     can_read_response,
@@ -43,14 +44,144 @@ pub fn cors_origin_of_url(url: Url) -> Origin:
 
 pub fn is_simple_method(method: text) -> bool:
     """Return true if method is a CORS simple method (GET, POST, HEAD)."""
-    return (method == "GET" or method == "POST" or method == "HEAD")
+    val upper = method.to_upper()
+    return (upper == "GET" or upper == "POST" or upper == "HEAD")
+
+fn cors_header_value_has_unsafe_byte(value: text) -> bool:
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        if (code < 32 and code != 9) or code == 127:
+            return true
+        if (code == 34 or code == 40 or code == 41 or code == 58 or
+            code == 60 or code == 62 or code == 63 or code == 64 or
+            code == 91 or code == 92 or code == 93 or code == 123 or
+            code == 125):
+            return true
+    false
+
+fn cors_language_value_is_safelisted(value: text) -> bool:
+    for index in 0..value.len():
+        val code = value.char_code_at(index)
+        val ascii_digit = code >= 48 and code <= 57
+        val ascii_upper = code >= 65 and code <= 90
+        val ascii_lower = code >= 97 and code <= 122
+        val punctuation = (code == 32 or code == 42 or code == 44 or
+            code == 45 or code == 46 or code == 59 or code == 61)
+        if not (ascii_digit or ascii_upper or ascii_lower or punctuation):
+            return false
+    true
+
+fn cors_range_value_is_safelisted(value: text) -> bool:
+    val trimmed = value.trim()
+    if not trimmed.starts_with("bytes=") or trimmed.contains(","):
+        return false
+    val range = trimmed.slice(6, trimmed.len())
+    val dash = range.index_of("-")
+    if dash <= 0:
+        return false
+    if range.slice(dash + 1, range.len()).contains("-"):
+        return false
+    for index in 0..dash:
+        val code = range.char_code_at(index)
+        if code < 48 or code > 57:
+            return false
+    for index in (dash + 1)..range.len():
+        val code = range.char_code_at(index)
+        if code < 48 or code > 57:
+            return false
+    val end_text = range.slice(dash + 1, range.len())
+    if end_text != "":
+        val start_value = range.slice(0, dash).to_i64()
+        val end_value = end_text.to_i64()
+        if not start_value.? or not end_value.?:
+            return false
+        if end_value.unwrap() < start_value.unwrap():
+            return false
+    true
+
+fn cors_header_is_safelisted(name: text, value: text) -> bool:
+    if text_byte_len(value) > 128:
+        return false
+    match name:
+        "accept":
+            return not cors_header_value_has_unsafe_byte(value)
+        "accept-language":
+            return cors_language_value_is_safelisted(value)
+        "content-language":
+            return cors_language_value_is_safelisted(value)
+        "content-type":
+            if cors_header_value_has_unsafe_byte(value):
+                return false
+            val mime = value.split(";")[0].trim().to_lower()
+            return (mime == "application/x-www-form-urlencoded" or
+                mime == "multipart/form-data" or mime == "text/plain")
+        "range":
+            return cors_range_value_is_safelisted(value)
+        _:
+            return false
+
+fn cors_add_unique_name(names: [text], name: text):
+    for existing in names:
+        if existing == name:
+            return
+    names.push(name)
+
+fn cors_header_name_index(names: [text], expected: text) -> i64:
+    var index: i64 = 0
+    while index < names.len():
+        if names[index] == expected:
+            return index
+        index = index + 1
+    -1
+
+pub fn cors_unsafe_request_header_names(headers: text) -> text:
+    """Return sorted, lowercase author-header names requiring preflight."""
+    var header_names: [text] = []
+    var header_values: [text] = []
+    for raw_line in headers.split("\n"):
+        val line = raw_line.trim()
+        val colon = line.index_of(":")
+        if colon > 0:
+            val name = line.slice(0, colon).trim().to_lower()
+            val value = line.slice(colon + 1, line.len()).trim()
+            # Origin is browser-owned and is never an author request header.
+            if name != "origin":
+                val existing = cors_header_name_index(header_names, name)
+                if existing >= 0:
+                    header_values[existing] = (
+                        header_values[existing] + ", " + value
+                    )
+                else:
+                    header_names.push(name)
+                    header_values.push(value)
+
+    var unsafe_names: [text] = []
+    var potentially_unsafe_names: [text] = []
+    var safelist_value_size: i64 = 0
+    var index: i64 = 0
+    while index < header_names.len():
+        val name = header_names[index]
+        val value = header_values[index]
+        if cors_header_is_safelisted(name, value):
+            safelist_value_size = (
+                safelist_value_size + text_byte_len(value)
+            )
+            cors_add_unique_name(potentially_unsafe_names, name)
+        else:
+            cors_add_unique_name(unsafe_names, name)
+        index = index + 1
+    if safelist_value_size > 1024:
+        for name in potentially_unsafe_names:
+            cors_add_unique_name(unsafe_names, name)
+    unsafe_names.sort()
+    unsafe_names.join(", ")
 
 pub fn needs_preflight(req: FetchRequest, requester_origin: Origin) -> bool:
     """Return true if the request requires a CORS preflight OPTIONS exchange.
 
     Preflight is required when:
     - The origin differs from the request target, AND
-    - The method is non-simple, OR the Content-Type is non-simple (application/json).
+    - The method is non-simple, OR any author request header is not CORS-safelisted.
 
     The same-origin test is `origin_policy.same_origin`, so a malformed or
     opaque requester is never same-origin with anything and always preflights.
@@ -58,22 +189,20 @@ pub fn needs_preflight(req: FetchRequest, requester_origin: Origin) -> bool:
     if same_origin(requester_origin, cors_origin_of_url(req.url)):
         return false
 
-    # Non-simple method requires preflight
     if not is_simple_method(req.method):
         return true
-
-    # application/json Content-Type requires preflight
-    if req.headers.contains("application/json"):
-        return true
-
-    return false
+    cors_unsafe_request_header_names(req.headers) != ""
 
 pub fn create_preflight(original: FetchRequest) -> FetchRequest:
     """Build an OPTIONS preflight request for the original request."""
-    val preflight_headers = (
-        "Access-Control-Request-Method: " + original.method + "\r\n" +
-        "Access-Control-Request-Headers: content-type\r\n"
+    var preflight_headers = (
+        "Access-Control-Request-Method: " + original.method.to_upper() + "\r\n"
     )
+    val unsafe_names = cors_unsafe_request_header_names(original.headers)
+    if unsafe_names != "":
+        preflight_headers = preflight_headers + (
+            "Access-Control-Request-Headers: " + unsafe_names + "\r\n"
+        )
     return FetchRequest {
         method: "OPTIONS",
         url: original.url,
@@ -166,11 +295,7 @@ pub class CorsChecker:
         )
 
     me fn needs_preflight(request: FetchRequest) -> bool:
-        if self.is_same_origin(request.url):
-            return false
-        if not is_simple_method(request.method.to_upper()):
-            return true
-        request.headers.to_lower().contains("content-type: application/json")
+        needs_preflight(request, self._requester)
 
     me fn create_preflight(request: FetchRequest) -> FetchRequest:
         var preflight = create_preflight(request)
@@ -226,21 +351,33 @@ pub class CorsChecker:
     me fn validate_preflight_method_with_credentials(response_headers: text, requested_method: text, credentials: text) -> PreflightResult:
         if self.validate_response(response_headers, credentials) == PreflightResult.Denied:
             return PreflightResult.Denied
+        if is_simple_method(requested_method):
+            return PreflightResult.Allowed
         val methods = cors_header_value(response_headers, "access-control-allow-methods")
         if cors_token_list_contains(methods, requested_method):
+            return PreflightResult.Allowed
+        if (not cors_credentials_include(credentials) and
+            cors_token_list_contains(methods, "*")):
             return PreflightResult.Allowed
         PreflightResult.Denied
 
     me fn validate_preflight_headers(response_headers: text, requested_headers: text) -> PreflightResult:
-        if self.validate_response(response_headers, "omit") == PreflightResult.Denied:
+        self.validate_preflight_headers_with_credentials(
+            response_headers, requested_headers, "omit"
+        )
+
+    me fn validate_preflight_headers_with_credentials(response_headers: text, requested_headers: text, credentials: text) -> PreflightResult:
+        if self.validate_response(response_headers, credentials) == PreflightResult.Denied:
             return PreflightResult.Denied
         val allowed = cors_header_value(response_headers, "access-control-allow-headers")
-        if cors_token_list_contains(allowed, "*"):
-            return PreflightResult.Allowed
+        val wildcard = (not cors_credentials_include(credentials) and
+            cors_token_list_contains(allowed, "*"))
         for requested in requested_headers.split(","):
-            val name = requested.trim()
+            val name = requested.trim().to_lower()
             if name != "":
-                if not cors_token_list_contains(allowed, name):
+                val requires_explicit = name == "authorization" or not wildcard
+                if (requires_explicit and
+                    not cors_token_list_contains(allowed, name)):
                     return PreflightResult.Denied
         PreflightResult.Allowed
 

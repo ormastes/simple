@@ -1,6 +1,6 @@
 # Browser Fetch bypasses CORS preflight for unsafe request headers
 
-- **Status:** RED; open; no accepted source candidate
+- **Status:** source-fixed candidate; static gate only; runtime/SPipe pending
 - **Severity:** high — cross-origin network side effects can occur before denial
 - **Verified revision:** `30af808b2eebbfb38cf9f3132869a0e9e2cd26f3`
 - **Scope:** shared browser `FetchEngine` and CORS policy
@@ -96,3 +96,23 @@ Acceptance requires all of the following direct evidence:
 
 No build, bootstrap, runtime execution, or SPipe PASS is recorded by this
 tracking artifact.
+
+## 2026-07-31 bounded source candidate
+
+The candidate keeps the existing real OPTIONS transport path and changes only
+three production files:
+
+- `cors.spl` derives the exact sorted unsafe author-header names, enforces the
+  per-value and 1,024-byte aggregate safelist limits in UTF-8 bytes (including
+  aggregate escalation of `Range`), combines duplicate-name raw lines before
+  classification, validates ordered single byte ranges, emits ACRH only when
+  needed, and applies credential-aware ACAM/ACAH wildcard rules including the
+  explicit `Authorization` exception;
+- `fetch.spl` validates both requested method and unsafe names after the
+  OPTIONS response and before actual transport; and
+- `h1_client.spl` exposes a mock request-count oracle so the focused system
+  scenario can prove one OPTIONS and zero GET requests.
+
+The modern focused SSpec/manual and reconciled unit mirrors are included. This
+candidate records no build, bootstrap, runtime execution, or SPipe PASS; those
+remain pending outside this bounded static lane.

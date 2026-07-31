@@ -444,7 +444,7 @@ val request = FetchRequest(
     method: "GET",
     headers: (
         "Origin: https://attacker.test\r\n" +
-        "X-Trace: retained\r\n"
+        "Accept: text/plain\r\n"
     ),
     body: [],
     mode: RequestMode.Cors,
@@ -455,7 +455,7 @@ match fetch.prepare_single_hop(request):
         fail(error.message)
     Ok(prepared):
         expect(prepared.request.headers).to_equal(
-            "X-Trace: retained\r\n" +
+            "Accept: text/plain\r\n" +
             "Origin: https://app.test\r\n"
         )
         expect(prepared.request.headers.contains(

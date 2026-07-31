@@ -13,7 +13,10 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.cors_types {PreflightResult}
 use std.gc_async_mut.gpu.browser_engine.shared.error {BrowserError, BrowserResult, network_error}
 use std.gc_async_mut.gpu.browser_engine.shared.logging {Logger, BrowserLogLevel}
 use std.gc_async_mut.gpu.browser_engine.net.dns {DnsResolver}
-use std.gc_async_mut.gpu.browser_engine.net.cors {CorsChecker, is_simple_method, needs_preflight}
+use std.gc_async_mut.gpu.browser_engine.net.cors.{
+    CorsChecker, is_simple_method, needs_preflight,
+    cors_unsafe_request_header_names
+}
 use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
     H1Client, h1_default_deadline_ms, h1_deadline_expired
 }
@@ -328,11 +331,24 @@ class FetchEngine:
         )
         match result:
             PreflightResult.Allowed:
-                self.logger.debug("fetch: CORS preflight allowed")
-                Ok(true)
-            PreflightResult.Denied(reason):
-                self.logger.warn("fetch: CORS preflight denied: {reason}")
-                Ok(false)
+                pass_do_nothing
+            PreflightResult.Denied:
+                self.logger.warn("fetch: CORS preflight method denied")
+                return Ok(false)
+
+        val requested_headers = cors_unsafe_request_header_names(request.headers)
+        if requested_headers != "":
+            val header_result = self.cors.validate_preflight_headers_with_credentials(
+                preflight_response.headers,
+                requested_headers,
+                request.credentials
+            )
+            if header_result == PreflightResult.Denied:
+                self.logger.warn("fetch: CORS preflight headers denied")
+                return Ok(false)
+
+        self.logger.debug("fetch: CORS preflight allowed")
+        Ok(true)
 
     # Attach stored cookies to the request as a Cookie header.
     # NOTE: FetchRequest.headers/credentials are declared as raw `text`
