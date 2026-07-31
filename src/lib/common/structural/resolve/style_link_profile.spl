@@ -1,0 +1,211 @@
+# ============================================================================
+# common/structural/resolve/style_link_profile.spl — WebResourceLinkProfile
+# (StyleLinker) CPU-reference skeleton
+#
+# Plan: doc/03_plan/platform/structural_compute/link_manager_plan.md (lines
+# 18–19: stylesheet imports, custom-property graph, fonts, keyframes; line
+# 40: html_css_parser consumes `StyleLinkResult`; Wave 6/7). Contract:
+# doc/05_design/platform/structural_compute/link_manager_contract_v1.md.
+#
+# Scout result (.spipe/link_manager/style_resolver_map.md): NO symbol-level
+# CSS resolver exists in the tree today — custom properties, @import,
+# @font-face and @keyframes are produced/consumed as opaque text (blink
+# css_parser explicitly does "no custom property dereferencing"). This
+# profile introduces the first structured Definition/Reference records for
+# those spaces, built directly on GraphResolveCore (resolve_core.spl) over
+# the frozen record shapes (resolve_types.spl), mirroring
+# smf_link_profile.spl's collect/resolve structure.
+#
+# Cycle detection over the custom-property graph (--a: var(--b); --b:
+# var(--a)) is NOT wired this wave: Lane CYCLE lands `detect_cycles` in
+# resolve_frontier.spl concurrently; wave 7 wires it to
+# ResolveReason.CycleDetected.
+#
+# Composition only, no inheritance (repo rule): plain value structs, free
+# functions, same discipline as resolve_core.spl / smf_link_profile.spl.
+# ============================================================================
+
+use std.common.structural.identity.entity_id.{EntityRef, entity_ref}
+use std.common.structural.resolve.resolve_types.{
+    DefinitionRecord,
+    ReferenceRecord,
+    ResolutionRecord,
+    ResolveStatus,
+    definition_record,
+    reference_record,
+    resolution_record,
+    resolve_key,
+    resolve_status_to_u8
+}
+use std.common.structural.resolve.resolve_core.{
+    group_sorted,
+    intern_name,
+    reduce_group,
+    sort_definitions_stable,
+    sort_references_stable
+}
+
+# ----------------------------------------------------------------------------
+# ResolveKey.space discriminants for the WebResourceLinkProfile (contract §3
+# `ResolveKey.space u32`). These are `ResolveKey.space` values: they keep a
+# custom-property key from ever cross-resolving against an import / font /
+# keyframes key that merely shares a name hash. Values start at 16 so they
+# are disjoint from each other AND from `SMF_SPACE_SYMBOL`/`SMF_SPACE_SECTION`
+# (0/1, smf_link_profile.spl) — one arena can hold both profiles' records
+# without collision.
+# ----------------------------------------------------------------------------
+
+val STYLE_SPACE_CUSTOM_PROPERTY: u32 = 16
+val STYLE_SPACE_IMPORT: u32 = 17
+val STYLE_SPACE_FONT_FACE: u32 = 18
+val STYLE_SPACE_KEYFRAMES: u32 = 19
+
+fn style_space_valid(space: u32) -> bool:
+    """True for the four StyleLinker space discriminants above."""
+    space >= STYLE_SPACE_CUSTOM_PROPERTY and space <= STYLE_SPACE_KEYFRAMES
+
+# ----------------------------------------------------------------------------
+# StyleLinkInputs — one stylesheet's already-scanned symbol list, ready for
+# resolve-record collection (§18 collect step). The CSS-text → symbol-list
+# decode adapter (over blink css_parser / browser_session_html's textual
+# scanners) is a later wave; like SmfLinkInputs, this is the caller-supplied
+# stand-in for it.
+# ----------------------------------------------------------------------------
+
+struct StyleSymbolInput:
+    """One scanned style symbol. `name` is the raw text name — a custom
+    property (`--glass-surface-elevated`), an @import target
+    (`theme.css`), a font family, or a keyframes name. `space` is one of
+    the STYLE_SPACE_* consts. `defined` true means this sheet provides the
+    definition (a `--x: v;` declaration, an available import target, an
+    @font-face block, an @keyframes block) and becomes a DefinitionRecord;
+    false means the sheet only references it (`var(--x)`, `@import x;`,
+    `font-family: x`, `animation-name: x`) and becomes a ReferenceRecord.
+    """
+    name: text
+    space: u32
+    defined: bool
+
+struct StyleLinkInputs:
+    """One stylesheet's collected symbols plus the sheet identity used to
+    build stable `EntityRef` owners (`object_slot = sheet_index`,
+    `local_index = symbol_index`, the symbol's position in `symbols`)."""
+    sheet_index: u32
+    symbols: [StyleSymbolInput]
+
+struct StyleLinkResult:
+    """StyleLinker output consumed by the html_css_parser lane (plan line
+    40): one ResolutionRecord per reference in stable resolved order
+    (ascending ResolveKey, then reference input order within a key), plus
+    the distinct names of unresolved references in that same order (first
+    occurrence wins — each missing name appears exactly once)."""
+    resolutions: [ResolutionRecord]
+    unresolved_names: [text]
+
+# ----------------------------------------------------------------------------
+# style_collect_records — §18 collect step (arenas as plain arrays, intern
+# via GraphResolveCore's `intern_name`). Mirrors smf_collect_records.
+# ----------------------------------------------------------------------------
+
+fn style_collect_records(inputs: StyleLinkInputs) -> ([DefinitionRecord], [ReferenceRecord]):
+    """Turn one sheet's symbol list into DefinitionRecord/ReferenceRecord
+    arrays (§18 collect step, unsorted — order is input order,
+    `style_resolve` does the sort).
+
+    `key.space` is the symbol's own STYLE_SPACE_* discriminant, so the four
+    resource families never cross-resolve. `owner` is
+    `entity_ref(inputs.sheet_index, symbol_index)`; `order` is the same
+    running input-order counter widened to u64, making `reduce_group`'s
+    lowest-order-wins reduction deterministic by declaration position —
+    exactly the "first definition wins, later duplicates are diagnostics"
+    reading of the cascade shapes found in the scout. `attributes` is 0:
+    the StyleLinker attribute bit layout is not frozen this wave (no
+    counterpart to smf_link_attributes.spl yet).
+    """
+    var defs: [DefinitionRecord] = []
+    var refs: [ReferenceRecord] = []
+    var i = 0
+    val n = inputs.symbols.len()
+    while i < n:
+        val sym = inputs.symbols[i]
+        val key = resolve_key(intern_name(sym.name), sym.space)
+        val owner = entity_ref(inputs.sheet_index, i as u32)
+        val order = i as u64
+        if sym.defined:
+            defs.push(definition_record(key, owner, 0, order))
+        else:
+            refs.push(reference_record(key, owner, 0, order))
+        i = i + 1
+    (defs, refs)
+
+# ----------------------------------------------------------------------------
+# style_resolve — §18 resolve step (sort/group/select) assembled into one
+# ResolutionRecord per reference, exactly as smf_resolve does.
+# ----------------------------------------------------------------------------
+
+fn style_resolve(defs: [DefinitionRecord], refs: [ReferenceRecord]) -> [ResolutionRecord]:
+    """Sort, group, and reduce `defs`/`refs` with GraphResolveCore's stable
+    sorts/`group_sorted`/`reduce_group`, then assemble one
+    `ResolutionRecord` per reference (§18): the winning group's
+    selected/status/reason are copied onto every reference in that group. A
+    reference whose key has zero definitions still gets a group, so it
+    comes back Unresolved/MissingDefinition rather than being dropped —
+    every reference passed in appears exactly once in the result.
+    """
+    val sorted_defs = sort_definitions_stable(defs)
+    val sorted_refs = sort_references_stable(refs)
+    val views = group_sorted(sorted_defs, sorted_refs)
+    var results: [ResolutionRecord] = []
+    var vi = 0
+    val vn = views.len()
+    while vi < vn:
+        val view = views[vi]
+        val group = reduce_group(view, sorted_defs)
+        var ri = view.references_offset as i64
+        val r_end = ri + (view.references_count as i64)
+        while ri < r_end:
+            val reference = sorted_refs[ri]
+            results.push(resolution_record(reference.owner, group.selected, group.status, group.reason))
+            ri = ri + 1
+        vi = vi + 1
+    results
+
+# ----------------------------------------------------------------------------
+# style_link — collect + resolve + unresolved-name extraction, producing the
+# StyleLinkResult the html_css_parser lane consumes.
+# ----------------------------------------------------------------------------
+
+fn _unresolved_name_seen(seen: [text], name: text) -> bool:
+    var i = 0
+    val n = seen.len()
+    while i < n:
+        if seen[i] == name:
+            return true
+        i = i + 1
+    false
+
+fn style_link(inputs: StyleLinkInputs) -> StyleLinkResult:
+    """Run collect + resolve over one sheet and package the result.
+
+    `unresolved_names` maps each Unresolved resolution back to its source
+    name via the reference owner's `local_index` (the symbol's position in
+    `inputs.symbols` — valid because `style_collect_records` mints owners
+    that way), deduplicated first-occurrence-wins in the stable order of
+    `resolutions`. Deterministic: same inputs always yield the same result
+    arrays in the same order.
+    """
+    val (defs, refs) = style_collect_records(inputs)
+    val resolutions = style_resolve(defs, refs)
+    val unresolved_status = resolve_status_to_u8(ResolveStatus.Unresolved) as u32
+    var unresolved_names: [text] = []
+    var i = 0
+    val n = resolutions.len()
+    while i < n:
+        val res = resolutions[i]
+        if res.status == unresolved_status:
+            val sym_index = res.reference.local_index as i64
+            val name = inputs.symbols[sym_index].name
+            if not _unresolved_name_seen(unresolved_names, name):
+                unresolved_names.push(name)
+        i = i + 1
+    StyleLinkResult(resolutions: resolutions, unresolved_names: unresolved_names)

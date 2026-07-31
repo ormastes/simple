@@ -1,0 +1,206 @@
+# ============================================================================
+# WebResourceLinkProfile / StyleLinker skeleton (LINK lane) —
+# style_link_profile.spl spec.
+#
+# Fixture names are REAL shapes from the scout
+# (.spipe/link_manager/style_resolver_map.md):
+#   - `--glass-surface-elevated`: defined src/lib/common/ui/glass_css.spl:43,
+#     referenced glass_css_shell.spl:19.
+#   - `--glass-blur-elevated`: referenced glass_css_shell.spl:20 (missing in
+#     the fixture to exercise MissingDefinition).
+#   - `--ui-corner-window-radius`: defined TWICE in the tree
+#     (src/app/ui.web/html_css.spl:166 `:root` and :215
+#     `:root[data-wm-corner-radius=round]`) — the duplicate-definition case.
+#   - `toast-in`: @keyframes defined glass_css_surfaces.spl:247.
+#   - `theme.css`: @import-shaped external target
+#     (browser_session_html.spl:988 textual scanner).
+#
+# Claims:
+#   1. RESOLUTION — real custom-property and keyframes references resolve to
+#      their definition's owner EntityRef, each in its own space.
+#   2. SPACE SEPARATION — a keyframes-space reference to a name only defined
+#      in the custom-property space stays Unresolved.
+#   3. DUPLICATE DEFINITION — the html_css.spl:166/:215 double definition
+#      resolves to the lowest-order (first-declared) winner with reason
+#      DuplicateDefinition.
+#   4. MISSING DEFINITION — unresolved references surface in
+#      `unresolved_names` exactly once each (dedup, first occurrence wins).
+#   5. DETERMINISM — style_link twice on the same input yields identical
+#      resolutions and unresolved_names.
+# ============================================================================
+
+use std.spec
+use std.common.structural.identity.entity_id.{entity_ref_equal}
+use std.common.structural.resolve.resolve_types.{
+    ResolutionRecord,
+    resolution_record_equal
+}
+use std.common.structural.resolve.style_link_profile.{
+    STYLE_SPACE_CUSTOM_PROPERTY,
+    STYLE_SPACE_FONT_FACE,
+    STYLE_SPACE_IMPORT,
+    STYLE_SPACE_KEYFRAMES,
+    StyleLinkInputs,
+    StyleSymbolInput,
+    style_collect_records,
+    style_link,
+    style_resolve,
+    style_space_valid
+}
+
+# ----------------------------------------------------------------------------
+# Fixtures
+# ----------------------------------------------------------------------------
+
+fn _glass_sheet_inputs() -> StyleLinkInputs:
+    """Sheet 7. Symbol positions (== owner local_index):
+    0 def --glass-surface-elevated (custom property)
+    1 def toast-in (keyframes)
+    2 ref --glass-surface-elevated (custom property)   -> resolves to 0
+    3 ref --glass-blur-elevated (custom property)      -> missing
+    4 ref --glass-blur-elevated (custom property)      -> missing (dup ref)
+    5 ref theme.css (import)                           -> missing
+    6 ref toast-in (keyframes)                         -> resolves to 1
+    7 ref --glass-surface-elevated (KEYFRAMES space)   -> missing (space split)
+    """
+    StyleLinkInputs(sheet_index: 7, symbols: [
+        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true),
+        StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: true),
+        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false),
+        StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false),
+        StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false),
+        StyleSymbolInput(name: "theme.css", space: STYLE_SPACE_IMPORT, defined: false),
+        StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: false),
+        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_KEYFRAMES, defined: false)
+    ])
+
+fn _corner_radius_sheet_inputs() -> StyleLinkInputs:
+    """Sheet 3, the html_css.spl:166/:215 duplicate-definition shape:
+    0 def --ui-corner-window-radius (:root, first declaration)
+    1 def --ui-corner-window-radius (:root[data-wm-corner-radius=round])
+    2 ref --ui-corner-window-radius (var(--ui-corner-window-radius))
+    """
+    StyleLinkInputs(sheet_index: 3, symbols: [
+        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true),
+        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true),
+        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false)
+    ])
+
+fn _find_result(results: [ResolutionRecord], local_index: u32) -> ResolutionRecord:
+    """Result whose reference owner has `local_index` (symbol position).
+    Falls back to the last record — the expectations on the returned record
+    then fail loudly rather than crashing the spec."""
+    var i = 0
+    val n = results.len()
+    while i < n:
+        if results[i].reference.local_index == local_index:
+            return results[i]
+        i = i + 1
+    results[n - 1]
+
+fn _contains_name(names: [text], name: text) -> bool:
+    var i = 0
+    val n = names.len()
+    while i < n:
+        if names[i] == name:
+            return true
+        i = i + 1
+    false
+
+# ----------------------------------------------------------------------------
+# Space constants
+# ----------------------------------------------------------------------------
+
+describe "style_link_profile spaces":
+    it "keeps the four STYLE_SPACE consts distinct and valid":
+        expect(STYLE_SPACE_CUSTOM_PROPERTY).to_equal(16)
+        expect(STYLE_SPACE_IMPORT).to_equal(17)
+        expect(STYLE_SPACE_FONT_FACE).to_equal(18)
+        expect(STYLE_SPACE_KEYFRAMES).to_equal(19)
+        expect(style_space_valid(STYLE_SPACE_CUSTOM_PROPERTY)).to_be(true)
+        expect(style_space_valid(STYLE_SPACE_KEYFRAMES)).to_be(true)
+        expect(style_space_valid(0)).to_be(false)
+        expect(style_space_valid(20)).to_be(false)
+
+# ----------------------------------------------------------------------------
+# 1 + 2. Resolution and space separation
+# ----------------------------------------------------------------------------
+
+describe "style_link_profile resolution":
+    it "resolves a real custom-property reference to its definition owner":
+        val (defs, refs) = style_collect_records(_glass_sheet_inputs())
+        expect(defs.len()).to_equal(2)
+        expect(refs.len()).to_equal(6)
+        val results = style_resolve(defs, refs)
+        expect(results.len()).to_equal(6)
+        # glass_css_shell.spl:19 var(--glass-surface-elevated) -> glass_css.spl:43
+        val surface_ref = _find_result(results, 2)
+        expect(surface_ref.status).to_equal(1)
+        expect(surface_ref.reason).to_equal(0)
+        expect(surface_ref.definition.object_slot).to_equal(7)
+        expect(surface_ref.definition.local_index).to_equal(0)
+
+    it "resolves a keyframes reference in its own space":
+        val (defs, refs) = style_collect_records(_glass_sheet_inputs())
+        val results = style_resolve(defs, refs)
+        val toast_ref = _find_result(results, 6)
+        expect(toast_ref.status).to_equal(1)
+        expect(toast_ref.reason).to_equal(0)
+        expect(toast_ref.definition.local_index).to_equal(1)
+
+    it "does not cross-resolve the same name across spaces":
+        val (defs, refs) = style_collect_records(_glass_sheet_inputs())
+        val results = style_resolve(defs, refs)
+        # --glass-surface-elevated exists as a custom property, but the
+        # keyframes-space reference to that name must stay Unresolved.
+        val cross_ref = _find_result(results, 7)
+        expect(cross_ref.status).to_equal(0)
+        expect(cross_ref.reason).to_equal(1)
+
+# ----------------------------------------------------------------------------
+# 3. Duplicate definition (html_css.spl:166 vs :215)
+# ----------------------------------------------------------------------------
+
+describe "style_link_profile duplicate definitions":
+    it "resolves --ui-corner-window-radius to the first declaration with reason DuplicateDefinition":
+        val result = style_link(_corner_radius_sheet_inputs())
+        expect(result.resolutions.len()).to_equal(1)
+        expect(result.resolutions[0].status).to_equal(1)
+        expect(result.resolutions[0].reason).to_equal(2)
+        expect(result.resolutions[0].definition.object_slot).to_equal(3)
+        expect(result.resolutions[0].definition.local_index).to_equal(0)
+        expect(result.unresolved_names.len()).to_equal(0)
+
+# ----------------------------------------------------------------------------
+# 4. Missing definitions -> unresolved_names (dedup)
+# ----------------------------------------------------------------------------
+
+describe "style_link_profile unresolved names":
+    it "lists each unresolved name exactly once":
+        val result = style_link(_glass_sheet_inputs())
+        expect(result.resolutions.len()).to_equal(6)
+        # Three distinct missing names; --glass-blur-elevated referenced
+        # twice must appear once.
+        expect(result.unresolved_names.len()).to_equal(3)
+        expect(_contains_name(result.unresolved_names, "--glass-blur-elevated")).to_be(true)
+        expect(_contains_name(result.unresolved_names, "theme.css")).to_be(true)
+        expect(_contains_name(result.unresolved_names, "--glass-surface-elevated")).to_be(true)
+
+# ----------------------------------------------------------------------------
+# 5. Determinism
+# ----------------------------------------------------------------------------
+
+describe "style_link_profile determinism":
+    it "yields identical results on repeated runs over the same input":
+        val a = style_link(_glass_sheet_inputs())
+        val b = style_link(_glass_sheet_inputs())
+        expect(a.resolutions.len()).to_equal(b.resolutions.len())
+        var i = 0
+        while i < a.resolutions.len():
+            expect(resolution_record_equal(a.resolutions[i], b.resolutions[i])).to_be(true)
+            i = i + 1
+        expect(a.unresolved_names.len()).to_equal(b.unresolved_names.len())
+        var j = 0
+        while j < a.unresolved_names.len():
+            expect(a.unresolved_names[j] == b.unresolved_names[j]).to_be(true)
+            j = j + 1

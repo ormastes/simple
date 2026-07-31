@@ -86,3 +86,66 @@ don't get dead-stripped, they get MissingDefinition later). No wire format,
 no new batch layouts (contract §6 keeps those deferred). Spec: linear chain,
 diamond, unreachable island, empty roots, bounds reject, stable order, red
 sentinel proof.
+
+# Phase wave 6 (4 parallel lanes, base ae87d52fbdf1)
+
+Shared rules unchanged (top of file). File ownership is DISJOINT — never edit
+another lane's files; integration re-run happens at landing.
+
+## Lane PROFILE — SmfSymbolInput section_index + StageReceipts
+
+Owns: `src/compiler/70.backend/linker/gpu_smf/*` + its specs. Fold
+`section_index: i64` (negative = no section, from `SmfWriterSymbol`) into
+`SmfSymbolInput`; adapter populates it; retire the parallel
+`section_indices` argument of `smf_unreachable_symbol_indices` (read the
+struct field instead) and update its spec accordingly. Then wire
+`StageReceipt` (from `compute/placement_contracts` — read its real shape,
+never redefine) into the profile: each of collect/resolve/reachability
+produces a receipt keyed by the matching `SMF_LINK_STAGE_L*` const, in a new
+`smf_link_receipts.spl` helper + calls from the profile. Deterministic
+receipt content only (counts/hashes — no timestamps). All four gpu_smf
+specs green + red sentinel on the receipt spec.
+
+## Lane CYCLE — deterministic cycle detection in resolve_frontier
+
+Owns: `src/lib/common/structural/resolve/resolve_frontier.spl` +
+`test/01_unit/common/structural/resolve_frontier_spec.spl` (append; never
+weaken existing examples). Add `CycleResult { ok: bool, has_cycle: bool,
+cycle_members: [u32] }` and `detect_cycles(node_count, edges: [ResolveEdge])
+-> CycleResult`: deterministic (iterative Kahn peel or DFS with explicit
+stack — no recursion), cycle_members = all nodes on at least one cycle in
+ascending index order, same bounds-reject discipline as reachable_mark.
+Feeds ResolveReason.CycleDetected (StyleLinker custom-property graphs, plan
+Wave 6/7). Spec: acyclic chain/diamond, self-loop, 2-cycle, two disjoint
+cycles, cycle+tail (tail not a member), bounds reject, red sentinel.
+
+## Lane STYLE — WebResourceLinkProfile scout + skeleton
+
+Owns: NEW files only — `src/lib/common/structural/resolve/style_link_profile.spl`
++ `test/01_unit/common/structural/style_link_profile_spec.spl` + scout notes
+`.spipe/link_manager/style_resolver_map.md`. First SCOUT the current web
+resource/custom-property resolution (grep for custom property / var() /
+stylesheet import resolution under `src/lib/common/` ui/style and web dirs;
+record file:line owners + data shapes in the map — read-only). Then a
+minimal profile skeleton over resolve_core in the frozen-contract style:
+`STYLE_SPACE_*` u32 space consts (custom_property, import, font_face,
+keyframes — distinct from SMF_SPACE_*), `StyleSymbolInput`,
+`style_collect_records` -> Definition/ReferenceRecords,
+`style_resolve(defs, refs) -> [ResolutionRecord]` via resolve_core, and
+`StyleLinkResult` (plan line 40: html_css_parser consumes it) holding
+resolutions + unresolved names. Cycle detection NOT wired this wave (CYCLE
+lane lands the primitive concurrently — note it as next). Parity vs the
+current resolver is examples-level only this wave: derive at least 2 spec
+cases from real shapes found in the scout. Spec green + red sentinel.
+
+## Lane HYBRID — hybrid batch shapes design notes (docs only)
+
+Owns: `.spipe/link_manager/hybrid_batch_notes.md` only — NO code. Map each
+CPU primitive (intern/sort/group/reduce in resolve_core; reachable_mark /
+propagate_constraints in resolve_frontier) onto plan Wave-7 GPU batch stages
+(hash/sort/resolve/reachability/scan/relocation): for each, input/output
+array shapes (element widths from the frozen wire layouts), what stays CPU
+(decode/control), which placement_contracts calls (leases, StageReceipt)
+bracket each batch, and the parity gate (batch output must byte-match the
+CPU codec per contract §5.3). End with open questions for the freeze —
+freeze itself stays deferred per contract §6.

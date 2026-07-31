@@ -32,8 +32,13 @@ SMF linker) per the plan's wave order.
   scripts/check/check-link-native-build-parity.shs), and (b) resolve-layer
   byte parity vs the frozen CPU reference codec (golden vectors). SMF-level
   byte parity is deferred behind the externs bug.
-- AC-4 (later): StyleLinker/WebResourceLinkProfile parity vs current resolver;
-  custom-property cycle detection.
+- AC-4 (later; NOTE 2026-07-31): StyleLinker/WebResourceLinkProfile —
+  wave-6 scout proved NO symbol-level custom-property resolver exists
+  in-tree (var()/--x are opaque generated text; only textual @import /
+  @font-face URL extraction exists — see style_resolver_map.md), so "parity
+  vs current resolver" has no oracle; acceptance pins real scouted shapes
+  in the spec instead. Custom-property cycle detection: detect_cycles
+  primitive landed, wiring pending.
 
 ## Scope Exclusions
 
@@ -60,8 +65,8 @@ Module Plan:
 | resolve_types | src/lib/common/structural/resolve/resolve_types.spl | frozen records/enums/trait/stage ids/tags | frozen v1 |
 | resolve_codec | src/lib/common/structural/resolve/resolve_codec.spl | CPU reference codec (oracle) | frozen v1 |
 | facade | src/lib/common/structural/resolve/__init__.spl | explicit exports | frozen v1 |
-| gpu_smf linker | src/compiler/70.backend/linker/gpu_smf/ | SmfLinkProfile L0–L12 | not started |
-| StyleLinker | (Wave 6/7) | WebResourceLinkProfile | not started |
+| gpu_smf linker | src/compiler/70.backend/linker/gpu_smf/ | SmfLinkProfile L0–L12 | L1–L6 slice + attrs + receipts + reachability |
+| StyleLinker | src/lib/common/structural/resolve/style_link_profile.spl | WebResourceLinkProfile | skeleton (cycle wiring pending) |
 
 Dependency Map: resolve → identity + wire (read-only); gpu_smf → resolve +
 placement_contracts (resident tier) + existing `70.backend/linker` SMF
@@ -70,7 +75,7 @@ reader/writer as parity oracle. Contract doc:
 
 ## Phase
 
-implement-attr-reach-parity-done
+implement-receipts-cycles-style-skeleton-done
 
 ## Log
 
@@ -125,6 +130,20 @@ implement-attr-reach-parity-done
   smf_unreachable_symbol_indices with parallel section_indices arg until
   SmfSymbolInput carries section_index); spec 11/11 + red sentinel.
   Cross-lane integration re-run in one tree: 11/19/5/6 all green.
-- Next: fold section_indices into SmfSymbolInput alongside a real L1
-  decode source; StyleLinker/WebResourceLinkProfile (Wave 6/7); hybrid GPU
-  batches (Wave 7).
+- 2026-07-31 implement (wave 6, base ae87d52fbdf1, 4 parallel lanes):
+  PROFILE — SmfSymbolInput gained section_index (parallel-array arg
+  retired), new smf_link_receipts.spl reusing placement_contracts
+  StageReceipt (stage "smf_link.L<n>", sha256 input/output roots, no
+  timestamps; with-receipt wrappers live in receipts module to avoid a
+  circular import), specs 15/15+10/10+7/7. CYCLE — detect_cycles in
+  resolve_frontier (Kahn peel + BFS membership refinement — raw Kahn
+  over-approximates: downstream tails never peel), spec 16/16. STYLE —
+  style_link_profile.spl skeleton (STYLE_SPACE_* 16–19, StyleLinkResult)
+  + style_resolver_map.md scout (NO current resolver exists — AC-4
+  amended), spec 7/7. HYBRID — hybrid_batch_notes.md (batch shapes vs
+  frozen widths, 10 open questions incl. missing L7/L8 CPU oracles,
+  nondeterministic elapsed_us). All lanes red-sentinel proven;
+  integration re-run of all 7 specs in one tree: 79/79 green.
+- Next: wire detect_cycles into style_resolve (CycleDetected for
+  custom-property cycles); receipts for the style profile; begin hybrid
+  batch-layout freeze from the open-questions list.

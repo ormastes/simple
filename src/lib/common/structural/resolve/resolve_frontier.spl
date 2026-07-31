@@ -57,6 +57,17 @@ struct ConstraintPropagationResult:
     values: [u64]
     iterations: i64
 
+struct CycleResult:
+    """Result of `detect_cycles`. `ok` is false when `node_count` is negative
+    or any edge endpoint is out of bounds (same discipline as
+    `reachable_mark`); `cycle_members` is then empty. On success `has_cycle`
+    reports whether any directed cycle exists and `cycle_members` lists every
+    node that lies on at least one cycle, in ascending index order. Feeds
+    ResolveReason.CycleDetected (StyleLinker custom-property graphs)."""
+    ok: bool
+    has_cycle: bool
+    cycle_members: [u32]
+
 # ----------------------------------------------------------------------------
 # Bounds discipline shared by both entry points.
 # ----------------------------------------------------------------------------
@@ -194,3 +205,93 @@ fn propagate_constraints(node_count: i64, edges: [ResolveEdge], initial: [u64]) 
     if changed:
         return ConstraintPropagationResult(ok: false, values: values, iterations: iterations)
     ConstraintPropagationResult(ok: true, values: values, iterations: iterations)
+
+# ----------------------------------------------------------------------------
+# detect_cycles — deterministic, iterative cycle detection (Kahn peel plus an
+# exact membership probe; no recursion anywhere).
+#
+# Pass 1 (Kahn): repeatedly dequeue in-degree-0 nodes in ascending seed order
+# and decrement their successors. Nodes never peeled are exactly the nodes on
+# a cycle OR downstream of one — an over-approximation, because a purely
+# acyclic tail hanging off a cycle also keeps a permanent predecessor.
+# Pass 2 refines to the exact set: an unpeeled node is a cycle member iff a
+# BFS through the unpeeled subgraph from its successors returns to it. The
+# common acyclic case exits after pass 1 with everything peeled.
+# ----------------------------------------------------------------------------
+
+fn _indegree_counts(node_count: i64, edges: [ResolveEdge]) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < node_count:
+        var count = 0
+        for e in edges:
+            if (e.to_index as i64) == i:
+                count = count + 1
+        out.push(count)
+        i = i + 1
+    out
+
+fn _i64_array_dec(values: [i64], index: i64) -> [i64]:
+    var out: [i64] = []
+    var i = 0
+    while i < values.len():
+        if i == index:
+            out.push(values[i] - 1)
+        else:
+            out.push(values[i])
+        i = i + 1
+    out
+
+fn _cycle_member_probe(start: i64, edges: [ResolveEdge], peeled: [bool]) -> bool:
+    var visited = _false_array(peeled.len())
+    var worklist: [i64] = [start]
+    var cursor = 0
+    while cursor < worklist.len():
+        val current = worklist[cursor]
+        for e in edges:
+            if (e.from_index as i64) == current:
+                val to = e.to_index as i64
+                if to == start:
+                    return true
+                if (not peeled[to]) and (not visited[to]):
+                    visited = _bool_array_set_true(visited, to)
+                    worklist.push(to)
+        cursor = cursor + 1
+    false
+
+fn detect_cycles(node_count: i64, edges: [ResolveEdge]) -> CycleResult:
+    if node_count < 0:
+        return CycleResult(ok: false, has_cycle: false, cycle_members: [])
+    if not _edges_in_bounds(node_count, edges):
+        return CycleResult(ok: false, has_cycle: false, cycle_members: [])
+
+    var indegree = _indegree_counts(node_count, edges)
+    var peeled = _false_array(node_count)
+    var worklist: [i64] = []
+    var seed = 0
+    while seed < node_count:
+        if indegree[seed] == 0:
+            worklist.push(seed)
+        seed = seed + 1
+
+    var cursor = 0
+    while cursor < worklist.len():
+        val current = worklist[cursor]
+        peeled = _bool_array_set_true(peeled, current)
+        for e in edges:
+            if (e.from_index as i64) == current:
+                val to = e.to_index as i64
+                indegree = _i64_array_dec(indegree, to)
+                if indegree[to] == 0:
+                    worklist.push(to)
+        cursor = cursor + 1
+
+    var cycle_members: [u32] = []
+    var node = 0
+    while node < node_count:
+        if not peeled[node]:
+            if _cycle_member_probe(node, edges, peeled):
+                cycle_members.push(node as u32)
+        node = node + 1
+
+    CycleResult(ok: true, has_cycle: cycle_members.len() > 0, cycle_members: cycle_members)
