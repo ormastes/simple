@@ -95,8 +95,18 @@ relocation.kind, reachable, icf.candidate, hot_order, output_range.
 
 - MutationOp/MutationPlan wire encoding (MUTATE-lane owned; LINK freezes only
   the kinds it emits).
-- SmfLinkProfile record `attributes` bit assignments (frozen with the L1
-  decode wave, as `smf_link` schema constants).
+- ~~SmfLinkProfile record `attributes` bit assignments~~ — **frozen** (Lane
+  ATTR, wave 5): see
+  `src/compiler/70.backend/linker/gpu_smf/smf_link_attributes.spl`, schema
+  `SMF_LINK_ATTR_SCHEMA_VERSION = 1`. Layout (low bits first): bit 0
+  defined · bits 1–2 binding (0 Local · 1 Global · 2 Weak · 3 = hard
+  reject) · bits 3–4 sym_type (0 NoType · 1 Function · 2 Object · 3
+  Section) · bits 5–6 layout_phase (0 startup · 1 first_frame · 2 steady ·
+  3 cold) · bit 7 is_event_loop_anchor · bit 8 layout_pinned · bits 9–63
+  reserved (encode as 0, decoder hard-rejects any set bit). Decoder is
+  total with an explicit `ok` result carrier; goldens in
+  `test/01_unit/compiler/linker/gpu_smf/smf_link_attributes_spec.spl`
+  (never edited in place, per §5).
 - Reachability frontier / constraint-propagation batch layouts (GPU-facing;
   frozen with the hybrid wave against real batch shapes).
 

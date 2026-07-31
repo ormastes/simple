@@ -47,18 +47,62 @@
 # functions, same discipline as smf_link_profile.spl.
 # ============================================================================
 
-use compiler.backend.linker.smf_writer.{SmfWriterSymbol}
+use compiler.backend.linker.smf_writer.{
+    SmfWriterSymbol,
+    SmfWriterSymbolBinding,
+    SmfWriterSymbolType
+}
 use compiler.backend.linker.gpu_smf.smf_link_profile.{SmfSymbolInput}
+use compiler.backend.linker.gpu_smf.smf_link_attributes.{
+    SMF_LINK_BINDING_GLOBAL,
+    SMF_LINK_BINDING_LOCAL,
+    SMF_LINK_BINDING_WEAK,
+    SMF_LINK_SYM_TYPE_FUNCTION,
+    SMF_LINK_SYM_TYPE_NOTYPE,
+    SMF_LINK_SYM_TYPE_OBJECT,
+    SMF_LINK_SYM_TYPE_SECTION
+}
+
+fn smf_link_binding_code(binding: SmfWriterSymbolBinding) -> u32:
+    """Map the writer-side binding enum onto the frozen schema-v1 u32 code
+    (smf_link_attributes.spl bits 1-2). Total: every variant is assigned;
+    code 3 (the hard-rejected unknown discriminant) is unreachable from
+    this enum by construction."""
+    match binding:
+        case Local: SMF_LINK_BINDING_LOCAL
+        case Global: SMF_LINK_BINDING_GLOBAL
+        case Weak: SMF_LINK_BINDING_WEAK
+
+fn smf_link_sym_type_code(sym_type: SmfWriterSymbolType) -> u32:
+    """Map the writer-side symbol-type enum onto the frozen schema-v1 u32
+    code (smf_link_attributes.spl bits 3-4). Total over all four variants."""
+    match sym_type:
+        case NoType: SMF_LINK_SYM_TYPE_NOTYPE
+        case Function: SMF_LINK_SYM_TYPE_FUNCTION
+        case Object: SMF_LINK_SYM_TYPE_OBJECT
+        case Section: SMF_LINK_SYM_TYPE_SECTION
 
 fn smf_symbol_input_from_writer_symbol(sym: SmfWriterSymbol) -> SmfSymbolInput:
     """Adapt one writer-side symbol into the profile's `SmfSymbolInput`.
 
     `defined` is true when `sym.size > 0` or `sym.section_index >= 0` —
     see the file header for the disjunctive reading of the documented rule.
+    Attribute fields map 1:1: enum bindings/types via the code mappers
+    above, `layout_phase` narrowed from the writer's i64 (documented range
+    0-3; an out-of-range value is width-masked by
+    `smf_link_attributes_encode`, never silently widened here), and the two
+    bool flags carried through unchanged.
     """
     val has_size = sym.size > 0
     val has_section = sym.section_index >= 0
-    SmfSymbolInput(name: sym.name, defined: has_size or has_section)
+    SmfSymbolInput(
+        name: sym.name,
+        defined: has_size or has_section,
+        binding: smf_link_binding_code(sym.binding),
+        sym_type: smf_link_sym_type_code(sym.sym_type),
+        layout_phase: sym.layout_phase as u32,
+        is_event_loop_anchor: sym.is_event_loop_anchor,
+        layout_pinned: sym.layout_pinned)
 
 fn smf_symbol_inputs_from_writer_symbols(symbols: [SmfWriterSymbol]) -> [SmfSymbolInput]:
     """Adapt a whole writer-side symbol list, preserving input order (the

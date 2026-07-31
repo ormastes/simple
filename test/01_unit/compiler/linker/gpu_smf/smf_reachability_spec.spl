@@ -1,0 +1,187 @@
+# ============================================================================
+# SMF section reachability (LINK lane, Lane REACH) — smf_reachability.spl
+# spec.
+#
+# Six claims:
+#   1. LINEAR CHAIN — 0->1->2->3 from root 0 marks every section.
+#   2. DIAMOND — 0->{1,2}->3 marks all four sections (join marked once).
+#   3. UNREACHABLE ISLAND — a disconnected component stays unmarked and its
+#      defined symbols are exactly the dead-strip candidates.
+#   4. EMPTY ROOTS — ok with nothing marked; every sectioned defined symbol
+#      becomes a candidate.
+#   5. BOUNDS REJECT — out-of-range edge endpoint, out-of-range root, and
+#      negative section_count each yield ok: false.
+#   6. STABLE ORDER + EXCLUSIONS — candidates come back in input order;
+#      undefined symbols and out-of-range section indices are never listed;
+#      an inputs/section_indices length mismatch yields the empty list.
+# ============================================================================
+
+use std.spec
+use std.common.structural.resolve.resolve_frontier.{ResolveEdge}
+use compiler.backend.linker.gpu_smf.smf_link_profile.{SmfSymbolInput}
+use compiler.backend.linker.gpu_smf.smf_reachability.{
+    smf_reachable_sections,
+    smf_unreachable_symbol_indices
+}
+
+# ----------------------------------------------------------------------------
+# Fixtures
+# ----------------------------------------------------------------------------
+
+fn _chain_edges() -> [ResolveEdge]:
+    """Linear chain over 4 sections: 0 -> 1 -> 2 -> 3."""
+    [
+        ResolveEdge(from_index: 0, to_index: 1),
+        ResolveEdge(from_index: 1, to_index: 2),
+        ResolveEdge(from_index: 2, to_index: 3)
+    ]
+
+fn _diamond_edges() -> [ResolveEdge]:
+    """Diamond over 4 sections: 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3."""
+    [
+        ResolveEdge(from_index: 0, to_index: 1),
+        ResolveEdge(from_index: 0, to_index: 2),
+        ResolveEdge(from_index: 1, to_index: 3),
+        ResolveEdge(from_index: 2, to_index: 3)
+    ]
+
+fn _island_edges() -> [ResolveEdge]:
+    """5 sections, two components: 0 -> 1 (mainland), 2 -> 3 (island).
+    Section 4 is fully isolated."""
+    [
+        ResolveEdge(from_index: 0, to_index: 1),
+        ResolveEdge(from_index: 2, to_index: 3)
+    ]
+
+# ----------------------------------------------------------------------------
+# 1. Linear chain
+# ----------------------------------------------------------------------------
+
+describe "smf_reachable_sections linear chain":
+    it "marks every section of a 0->1->2->3 chain from root 0":
+        val r = smf_reachable_sections(4, _chain_edges(), [0])
+        expect(r.ok).to_be(true)
+        expect(r.values.len()).to_equal(4)
+        expect(r.values[0]).to_be(true)
+        expect(r.values[1]).to_be(true)
+        expect(r.values[2]).to_be(true)
+        expect(r.values[3]).to_be(true)
+
+    it "marks only the tail from a mid-chain root":
+        val r = smf_reachable_sections(4, _chain_edges(), [2])
+        expect(r.ok).to_be(true)
+        expect(r.values[0]).to_be(false)
+        expect(r.values[1]).to_be(false)
+        expect(r.values[2]).to_be(true)
+        expect(r.values[3]).to_be(true)
+
+# ----------------------------------------------------------------------------
+# 2. Diamond
+# ----------------------------------------------------------------------------
+
+describe "smf_reachable_sections diamond":
+    it "marks all four sections of a diamond from its apex":
+        val r = smf_reachable_sections(4, _diamond_edges(), [0])
+        expect(r.ok).to_be(true)
+        expect(r.values.len()).to_equal(4)
+        expect(r.values[0]).to_be(true)
+        expect(r.values[1]).to_be(true)
+        expect(r.values[2]).to_be(true)
+        expect(r.values[3]).to_be(true)
+
+# ----------------------------------------------------------------------------
+# 3. Unreachable island
+# ----------------------------------------------------------------------------
+
+describe "smf_reachable_sections unreachable island":
+    it "leaves the disconnected component unmarked":
+        val r = smf_reachable_sections(5, _island_edges(), [0])
+        expect(r.ok).to_be(true)
+        expect(r.values[0]).to_be(true)
+        expect(r.values[1]).to_be(true)
+        expect(r.values[2]).to_be(false)
+        expect(r.values[3]).to_be(false)
+        expect(r.values[4]).to_be(false)
+
+    it "lists exactly the island's defined symbols as dead-strip candidates":
+        val r = smf_reachable_sections(5, _island_edges(), [0])
+        val inputs = [
+            SmfSymbolInput(name: "main", defined: true),
+            SmfSymbolInput(name: "island_a", defined: true),
+            SmfSymbolInput(name: "island_b", defined: true),
+            SmfSymbolInput(name: "iso", defined: true)
+        ]
+        val sections: [i64] = [0, 2, 3, 4]
+        val dead = smf_unreachable_symbol_indices(inputs, sections, r.values)
+        expect(dead.len()).to_equal(3)
+        expect(dead[0]).to_equal(1)
+        expect(dead[1]).to_equal(2)
+        expect(dead[2]).to_equal(3)
+
+# ----------------------------------------------------------------------------
+# 4. Empty roots
+# ----------------------------------------------------------------------------
+
+describe "smf_reachable_sections empty roots":
+    it "succeeds with nothing marked and every sectioned defined symbol a candidate":
+        val r = smf_reachable_sections(3, [ResolveEdge(from_index: 0, to_index: 1)], [])
+        expect(r.ok).to_be(true)
+        expect(r.values.len()).to_equal(3)
+        expect(r.values[0]).to_be(false)
+        expect(r.values[1]).to_be(false)
+        expect(r.values[2]).to_be(false)
+
+        val inputs = [
+            SmfSymbolInput(name: "a", defined: true),
+            SmfSymbolInput(name: "b", defined: true)
+        ]
+        val sections: [i64] = [0, 2]
+        val dead = smf_unreachable_symbol_indices(inputs, sections, r.values)
+        expect(dead.len()).to_equal(2)
+        expect(dead[0]).to_equal(0)
+        expect(dead[1]).to_equal(1)
+
+# ----------------------------------------------------------------------------
+# 5. Bounds reject
+# ----------------------------------------------------------------------------
+
+describe "smf_reachable_sections bounds reject":
+    it "rejects an edge whose endpoint is out of range":
+        val r = smf_reachable_sections(2, [ResolveEdge(from_index: 0, to_index: 2)], [0])
+        expect(r.ok).to_be(false)
+
+    it "rejects a root that is out of range":
+        val r = smf_reachable_sections(2, [ResolveEdge(from_index: 0, to_index: 1)], [2])
+        expect(r.ok).to_be(false)
+
+    it "rejects a negative section_count":
+        val r = smf_reachable_sections(-1, [], [])
+        expect(r.ok).to_be(false)
+
+# ----------------------------------------------------------------------------
+# 6. Stable order + exclusions
+# ----------------------------------------------------------------------------
+
+describe "smf_unreachable_symbol_indices stable order and exclusions":
+    it "keeps candidates in input order and never lists undefined or unsectioned symbols":
+        # marks: section 0 reachable, sections 1 and 2 not.
+        val marks = [true, false, false]
+        val inputs = [
+            SmfSymbolInput(name: "dead_late_section", defined: true),
+            SmfSymbolInput(name: "undef_in_dead_section", defined: false),
+            SmfSymbolInput(name: "live", defined: true),
+            SmfSymbolInput(name: "no_section", defined: true),
+            SmfSymbolInput(name: "oob_section", defined: true),
+            SmfSymbolInput(name: "dead_early_section", defined: true)
+        ]
+        val sections: [i64] = [2, 1, 0, -1, 3, 1]
+        val dead = smf_unreachable_symbol_indices(inputs, sections, marks)
+        expect(dead.len()).to_equal(2)
+        expect(dead[0]).to_equal(0)
+        expect(dead[1]).to_equal(5)
+
+    it "returns the empty list on an inputs/section_indices length mismatch":
+        val inputs = [SmfSymbolInput(name: "a", defined: true)]
+        val sections: [i64] = [0, 1]
+        val dead = smf_unreachable_symbol_indices(inputs, sections, [false, false])
+        expect(dead.len()).to_equal(0)

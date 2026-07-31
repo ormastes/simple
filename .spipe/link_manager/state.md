@@ -24,8 +24,14 @@ SMF linker) per the plan's wave order.
   contract spec covering exact bytes, round trip, and total-decoder rejects.
 - AC-2: Contract reuses identity/wire/placement_contracts — no parallel
   identity, wire, or receipt types.
-- AC-3 (Phase 1, later): GraphResolveCore CPU core + SmfLinkProfile produce
-  byte-identical SMF output to the current linker, with StageReceipts.
+- AC-3 (Phase 1, RE-SCOPED 2026-07-31 by user decision): the in-repo SMF
+  writer/reader are unimplemented scaffolding (bug doc
+  smf_reader_writer_externs_unimplemented_2026-07-31), so "byte-identical SMF
+  output" has no oracle. Phase-1 acceptance is now: (a) deterministic
+  native-build/cc parity per smf_linker_map.md §5 (gated by
+  scripts/check/check-link-native-build-parity.shs), and (b) resolve-layer
+  byte parity vs the frozen CPU reference codec (golden vectors). SMF-level
+  byte parity is deferred behind the externs bug.
 - AC-4 (later): StyleLinker/WebResourceLinkProfile parity vs current resolver;
   custom-property cycle detection.
 
@@ -64,7 +70,7 @@ reader/writer as parity oracle. Contract doc:
 
 ## Phase
 
-implement-smf-profile-skeleton-done
+implement-attr-reach-parity-done
 
 ## Log
 
@@ -100,11 +106,25 @@ implement-smf-profile-skeleton-done
   in-tree, rt_smf_reader_open has NO implementation anywhere, and
   SmfWriter.write() unconditionally returns Ok([]) — SMF I/O is scaffolding
   (bug doc smf_reader_writer_externs_unimplemented_2026-07-31).
-- Next: DECISION needed on the Phase-1 parity oracle — either implement the
-  SMF writer/reader externs (runtime-owned change) or re-scope acceptance to
-  the native-build/cc parity route already verified in smf_linker_map.md §5.
-  Then attributes-bit freeze and reachability wiring (resolve_frontier over
-  section edges). runtime_need: real rt_smf_reader_open/rt_smf_write;
-  facade_checked: yes (none exists — both are unimplemented externs);
-  chosen_path: reuse-facade impossible, deferred pending oracle decision;
-  rejected_shortcuts: spec-local rt_* externs, fabricated .smf bytes.
+- 2026-07-31 DECISION (user): re-scope the Phase-1 parity oracle to the
+  native-build/cc route (AC-3 above). Implementing rt_smf_reader_open /
+  rt_smf_write stays open as the externs bug doc — runtime-owned, needs
+  bootstrap, not essential for Phase 1. runtime_need: real
+  rt_smf_reader_open/rt_smf_write; facade_checked: yes (none exists — both
+  are unimplemented externs); chosen_path: re-scope acceptance, keep bug
+  filed; rejected_shortcuts: spec-local rt_* externs, fabricated .smf bytes.
+- 2026-07-31 implement (wave 5, base 674cd143454a): parity gate script
+  scripts/check/check-link-native-build-parity.shs (green sha256 b9f37a50…,
+  red-proofed on bogus entry). ATTR lane froze the attributes u64 layout
+  (smf_link_attributes.spl, SMF_LINK_ATTR_SCHEMA_VERSION=1: bit0 defined,
+  1–2 binding [3=reject], 3–4 sym_type, 5–6 layout_phase, 7 anchor,
+  8 pinned, 9–63 reserved-reject; total decoder) wired into
+  smf_collect_records; SmfSymbolInput gained the attr fields; contract doc
+  §6 amended; spec 19/19 + red sentinel. REACH lane wired resolve_frontier
+  over section edges (smf_reachability.spl: smf_reachable_sections +
+  smf_unreachable_symbol_indices with parallel section_indices arg until
+  SmfSymbolInput carries section_index); spec 11/11 + red sentinel.
+  Cross-lane integration re-run in one tree: 11/19/5/6 all green.
+- Next: fold section_indices into SmfSymbolInput alongside a real L1
+  decode source; StyleLinker/WebResourceLinkProfile (Wave 6/7); hybrid GPU
+  batches (Wave 7).
