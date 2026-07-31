@@ -118,6 +118,36 @@ fn register_definition(checker: TypeChecker, item: Node) -> text:
     """Register a top-level definition (name + type signature only).
 
     This allows forward references and mutual recursion.
+
+    NOT the twin of the Rust checker's first pass, despite the resemblance.
+    `Node` (src/compiler/10.frontend/ast.spl) has exactly six variants --
+    Function, Struct, Class, Enum, Trait, Other -- so the Impl, TypeAlias,
+    Const and Static arms below name variants that do not exist and can never
+    match. An unknown variant in a pattern is not a compile error here; it
+    silently never matches, which is why they have gone unnoticed.
+
+    Consequently there is no module-level `val`/`var` gap to close in this
+    function: `Node` carries no Let variant to match, and no Let-bearing AST
+    ever reaches it. The Rust checker's Node::Let pre-registration fix
+    (checker_check.rs, b60fc67b9ca) has no counterpart here.
+
+    Nothing calls this path in the compiler either: `check_module` above is
+    reached only through `TypeChecker.check_module` (checker.spl), which has
+    zero callers, and nothing anywhere constructs an `AstModule`. The driver's
+    `type_check_impl` is a documented no-op
+    (80.driver/driver_hir_pipeline_passes.spl). The live pure-Simple inference
+    path is `30.types/type_infer/` (HmInferContext), gated warn-only behind
+    SIMPLE_TYPECHECK_WARN=1.
+
+    The registration helpers are also type-incoherent with that AST -- e.g.
+    `func.params` is `[text]` but `_parameter_type_or_fresh` expects `Param`,
+    and `class_def.methods` is `[text]` but is passed to
+    `register_function_signature` as a `FunctionDef` -- so anything beyond
+    empty params/methods would fail at runtime. This compiles only because the
+    pure-Simple compiler does not type check.
+
+    Only `ast_type_to_inference_type_engine` from this file is live; five
+    modules import it. Treat the rest as scaffolding.
     """
     match item:
         case Function(func):
