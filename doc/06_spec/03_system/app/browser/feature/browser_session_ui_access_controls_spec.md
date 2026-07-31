@@ -82,6 +82,7 @@ Display policy: `embed_tui`
 #### ends hosted address editing before Home succeeds or fails
 
 - Restore the committed address before a busy Home rejection.
+  - Expected: a renderer without a committed URL restores `about:blank`.
   - Expected: Home press ends address editing and publishes the committed URL.
   - Expected: a busy Home release reports `renderer-busy` without restoring the draft.
   - Expected: subsequent text cannot mutate the address.
@@ -123,6 +124,7 @@ and REQ-WEB-BROWSER-010 (canonical relative-reference resolution).
   - Expected: one enabled `Go` button exists at `browser:session#go` with click and key actions, ordered before Address and Title to match the visual chrome.
 - **Enter and activate the destination**
   - Expected: Go pointer release and address Enter resolve `../next?x=1#ok` against the committed document and queue exactly one equivalent GET request.
+  - Expected: Go press ends address focus without discarding its typed target; Home press restores the committed address in both parent and worker state.
   - Expected: Go keyboard Enter and Space each use the same address activation owner.
   - Expected: the protocol admits Go, while raw worker Go and Reload release return `navigation-command-required`; rejected Reload leaves URL, loading/request state, complete history/current index, body, and DrawIR revision unchanged.
   - Expected: Go release and address Enter call the same process-level owner; its callable fixture admits one normalized command with `callback_count=1`, while invalid input retains focus and committed history.

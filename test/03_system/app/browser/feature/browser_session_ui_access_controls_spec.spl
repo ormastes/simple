@@ -50,7 +50,7 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
 }
 use std.gc_async_mut.web.browser_session_url.{
     BROWSER_ADDRESS_MAX_BYTES, browser_address_input_error,
-    browser_address_update
+    browser_address_update, browser_address_draft_after_control_press
 }
 use std.common.encoding.utf8.{text_byte_len, text_codepoint_len}
 use os.hosted.hosted_web_content_session.{HostedWebContentSession}
@@ -276,6 +276,9 @@ describe "BrowserSession primitive controls through textual UI access":
     # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
     # @manual: show
     it "ends hosted address editing before Home succeeds or fails":
+        expect(browser_address_draft_after_control_press(
+            "home", "", "https://draft.test/"
+        )).to_equal("about:blank")
         step("Restore the committed address before a busy Home rejection")
         val committed_url = "https://example.com/committed"
         val draft_url = "https://draft.test/"
@@ -414,6 +417,8 @@ describe "BrowserSession primitive controls through textual UI access":
             1, "go", true
         )
         expect(pointer_down.callback_count).to_equal(0)
+        expect(pointer.browser.address_draft).to_equal(address_reference)
+        expect(pointer.chrome_focus).to_equal("")
         expect(pointer.browser.pending_request_count()).to_equal(0)
         expect(pointer.dispatch_chrome_pointer(
             2, "go", false
@@ -447,6 +452,8 @@ describe "BrowserSession primitive controls through textual UI access":
             8, 93, "go", true
         )
         expect(isolated_down.callback_count).to_equal(0)
+        expect(isolated.entries[0].address_editing).to_be(false)
+        expect(isolated.address_text(93)).to_equal(address_reference)
         expect(isolated.entries[0].renderer.pending_wire).to_equal("")
         expect(isolated.dispatch_chrome_pointer(
             9, 93, "go", false
@@ -475,6 +482,12 @@ describe "BrowserSession primitive controls through textual UI access":
                 worker_init.wire
             ).message
         ).ok).to_be(true)
+        expect(worker.browser.open_html(
+            committed_url, "<main>Worker Go</main>"
+        ).is_ok()).to_be(true)
+        expect(worker.browser.apply_address_update(
+            "", address_reference, true
+        ).is_ok()).to_be(true)
         val worker_go_down = browser_renderer_capability_bind_encoded(
             browser_renderer_chrome_encode(94, 3, 10, "go", true),
             94, 3, 3, worker_capability
@@ -485,6 +498,8 @@ describe "BrowserSession primitive controls through textual UI access":
                 worker_go_down.wire
             ).message
         ).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(address_reference)
+        expect(worker.chrome_focus).to_equal("")
         val worker_go_up = browser_renderer_capability_bind_encoded(
             browser_renderer_chrome_encode(94, 4, 11, "go", false),
             94, 4, 4, worker_capability
@@ -497,6 +512,35 @@ describe "BrowserSession primitive controls through textual UI access":
         )
         expect(worker_go_route.ok).to_be(false)
         expect(worker_go_route.reason).to_equal(
+            "navigation-command-required"
+        )
+        expect(worker.browser.apply_address_update(
+            "", address_reference, true
+        ).is_ok()).to_be(true)
+        val worker_home_down = browser_renderer_capability_bind_encoded(
+            browser_renderer_chrome_encode(94, 5, 12, "home", true),
+            94, 5, 5, worker_capability
+        )
+        expect(worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(94),
+                worker_home_down.wire
+            ).message
+        ).ok).to_be(true)
+        expect(worker.browser.address_draft).to_equal(committed_url)
+        expect(worker.chrome_focus).to_equal("")
+        val worker_home_up = browser_renderer_capability_bind_encoded(
+            browser_renderer_chrome_encode(94, 6, 13, "home", false),
+            94, 6, 6, worker_capability
+        )
+        val worker_home_route = worker.handle(
+            browser_renderer_capability_decoder_feed(
+                browser_renderer_capability_decoder_new(94),
+                worker_home_up.wire
+            ).message
+        )
+        expect(worker_home_route.ok).to_be(false)
+        expect(worker_home_route.reason).to_equal(
             "navigation-command-required"
         )
         var reload_worker = HostedBrowserRendererWorkerSession.create(64, 48)
