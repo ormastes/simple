@@ -29,7 +29,8 @@ records `unavailable:no-runtime-allocation-counter`: the current runtime has
 no allocation counter exposed to this producer tier, and the scenario does not
 substitute command counts or estimates. Consequently AC-6 has real frame-time
 and RSS evidence but remains **partial** until an authoritative allocation
-metric is available.
+metric is available. The concrete self-hosted runtime gap is tracked in
+[`draw_ir_producer_allocation_counter_selfhost_gap_2026-07-31.md`](../../../08_tracking/bug/draw_ir_producer_allocation_counter_selfhost_gap_2026-07-31.md).
 
 The producer itself retains and appends through existing mutable command and
 batch collections; no new collection type or Web layout-framework ownership is
