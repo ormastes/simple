@@ -121,6 +121,49 @@ This raises the priority of suggested fix 2 (extend the lock to the seed staging
 dir): fix 1 (parameterize by `output_dir`) would NOT have helped here, since two
 of the three runs never passed `--output` at all.
 
+## Update 2026-07-31 05:40 — the provenance gate is incompatible with a mutating shared WC
+
+A later run got **further than any other today** and still produced no binary:
+
+```
+Stage 2: Build complete: 727 compiled, 0 cached, 0 failed
+         Binary: build/bootstrap/stage2/<triple>/simple (124566 KB)
+         Time: 166.4s compile + 58.6s link = 225.0s total
+Stage 2: running bootstrap compiler sanity      -> PASS
+Stage 3: stage2 -> bootstrap_main.spl           -> succeeded, passed sanity
+bootstrap Stage 3 provenance: FAIL (git-head-or-dirty-state-changed-during-bootstrap)
+error: refusing Stage 3 without canonical provenance
+```
+
+The compile and link were **fine**. Stage 2 and Stage 3 both produced binaries
+and passed the sanity gate. The run was rejected purely because the working tree
+changed while it ran — in this instance because this session restored 190
+origin-present-but-locally-absent files mid-build. That is the gate working
+correctly: a binary whose sources mutated mid-build has no verifiable provenance.
+
+**But the failure mode is structural, not a one-off mistake.** This is a shared
+working copy with many concurrent sessions. In the ~20 minutes a full bootstrap
+needs, origin routinely gains several commits (three landed during this very
+run), and any session's edit or restore dirties the tree. The gate demands a
+stable git HEAD **and** a clean-state-delta for the whole build window; the
+environment cannot reliably supply one.
+
+Consequences worth designing around:
+1. Retrying harder does not help — each retry re-enters the same race, and with
+   5 concurrent bootstraps observed at once the odds worsen.
+2. The gate is not the thing to weaken. Provenance is exactly what makes a
+   deployed pure-Simple binary trustworthy.
+3. The fix is **isolation**: build from an immutable snapshot (a git worktree or
+   export pinned at a specific sha) rather than the live shared WC, so HEAD and
+   dirty-state are constant by construction. Note the worktree trap in
+   `.claude/rules/bootstrap.md` — a fresh worktree has an empty `build/`, so seed
+   the native cache first or pay a full cold rebuild.
+4. Until then, a redeploy needs a quiet window: no other bootstraps running, and
+   no session editing the tree — coordinate rather than launch opportunistically.
+
+Do NOT restore missing files or edit sources while other bootstraps are running;
+that dirties the tree under every one of them.
+
 ## Reproduction
 
 1. Start any long `simple native-build` (it executes
