@@ -32,3 +32,28 @@ authority, or unqualified PASS.
 Stop after three focused verify/fix cycles. Any parity mismatch blocks the
 next migration. Any need for full bootstrap, Rust seed, new IR schema, or a
 private Engine2D path stops the tranche with a concrete blocker.
+
+## Sandboxed child authority prerequisite (RED)
+
+This is a prerequisite for enabling iframe script, request/navigation, or
+input, not permission to enable any of them from renderer recursion.
+
+| Order | Lane | Scope | Dependency |
+|---:|---|---|---|
+| 1 | Child context owner | Typed child identity, URL/base/Origin, iframe+CSP sandbox intersection, worker mirror | canonical Draw IR child composition |
+| 2 | Isolated host owner | `HostedBrowserRendererProcess` child ledger, frozen `SBCI1`/`SBCP1`, separate outer SBR2 and inner one-use permit | lane 1 |
+| 3 | Direct host owner | `HostedWebContentSession` through the shared session broker, local permit, no SBR2 wire | lane 1 |
+| 4 | TDD/manual owner | Frozen four-step scenario, rejection-before-mutation matrix, hosted/isolated parity, mirrored manual | lanes 1-3; admitted focused runner/docgen |
+
+Parallel sidecars: lanes 2 and 3 may proceed after lane 1 freezes the shared
+typed intent/permit interfaces; lane 4 begins after both. Merge owner: primary
+web-browser hardening agent. Final reviewer: normal/highest-capability reviewer,
+rejecting a worker-owned ledger, ambient child network facade, parent/chrome
+access, child-visible permit, stale identity admission, false direct-mode SBR2
+claim, or conflated process/DOM/frame generation.
+
+GO: architecture handoff only. Remaining before any production support claim:
+real iframe sandbox-token parsing/intersection, child semantic/runtime mirror,
+host-ledger issuance/consume/retire, shared direct broker parity, the frozen
+executable scenario/docgen, and a focused admitted pure-Simple run. No
+bootstrap or Rust seed is authorized.
