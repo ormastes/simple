@@ -64,7 +64,7 @@ reader/writer as parity oracle. Contract doc:
 
 ## Phase
 
-implement-core-frontier-done
+implement-smf-profile-skeleton-done
 
 ## Log
 
@@ -88,7 +88,14 @@ implement-core-frontier-done
 - 2026-07-31 note: facade __init__.spl deliberately still exports only the
   frozen contract surface; core/frontier are imported by submodule path
   until gpu_smf consumes them.
-- Next: SmfLinkProfile skeleton in src/compiler/70.backend/linker/gpu_smf/
-  wired to resolve_core over decoded SMF tables (L1 via SmfReaderImpl),
-  byte-parity harness per smf_linker_map.md §5; fix or route around the
-  --format=smf crash for the SMF-writer oracle.
+- 2026-07-31 implement: SMFPROFILE lane landed the gpu_smf skeleton —
+  smf_link_profile.spl (smf_collect_records L2/L3 + smf_resolve L3/L4 over
+  resolve_core; SmfSymbolInput caller-supplied because SmfReaderImpl.symbols
+  is only populatable via an SFFI handle on a real .smf file) spec 5/5 + red
+  sentinel. attributes=0 deferred to the L1-decode wave per contract §6.
+- Next: L1 integration wave — thin adapter SmfReaderImpl.symbols ->
+  [SmfSymbolInput] (derive defined from size/section_index) against a real
+  on-disk .smf fixture; then attributes-bit freeze, reachability wiring
+  (resolve_frontier over section edges), and the byte-parity harness per
+  smf_linker_map.md §5. Blocked oracle: compile --format=smf crash (bug doc
+  compile_format_smf_nil_receiver_crash_2026-07-31).
