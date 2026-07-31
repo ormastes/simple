@@ -40,7 +40,8 @@ use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_apply_default_action_to_id_without_focus
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_focused_route, be_dom_node_for_route, be_dom_event_identity
+    BeDomRouteEventDispatch, be_dom_focused_route, be_dom_node_for_route,
+    be_dom_dispatch_event_to_route
 }
 use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
     html_tree_builder_build, html_tree_builder_build_with_scripts
@@ -1351,20 +1352,24 @@ impl BrowserSession:
         val index = match self.current_dom_identity_index():
             Some(value): value
             nil: return Err("invalid_document")
-        val node = match be_dom_node_for_route(self.current_dom, index, route):
-            Some(value): value
-            nil: return Err("stale_target")
-        # Temporary review bridge: Lane 2 keeps this projection until every
-        # legacy dispatch consumer is removed in the combined migration.
-        Ok(be_dom_event_identity(node))
+        if be_dom_node_for_route(self.current_dom, index, route) == nil:
+            return Err("stale_target")
+        Err("legacy_route_bridge_removed")
 
     me dispatch_dom_event_route(
         route: DomNodeRoute, event_type: text, bubbles: bool, cancelable: bool
-    ) -> Result<BeDomEventDispatch, text>:
-        """Gate a typed event route before the legacy dispatcher is retired."""
-        val target_id = self._event_target_id_for_route(route)?
-        Ok(self.dispatch_dom_event(
-            target_id, event_type, bubbles, cancelable
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        """Dispatch through a live typed route without text authorization."""
+        if route.generation.value != self.document_generation().value:
+            return Err("stale_target")
+        val index = match self.current_dom_identity_index():
+            Some(value): value
+            nil: return Err("invalid_document")
+        if not index.contains_route(route):
+            return Err("stale_target")
+        Ok(be_dom_dispatch_event_to_route(
+            self.current_dom, index, route, event_type, bubbles, cancelable,
+            self.csp_sandbox_policy.allow_scripts
         ))
 
     me dispatch_dom_primary_pointer_down_by_id(
