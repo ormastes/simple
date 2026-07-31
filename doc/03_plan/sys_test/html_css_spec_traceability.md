@@ -49,6 +49,7 @@ the inventory audit:
 | `7b290473ae6` | Selected `<time>` inline-flow behavior through canonical text rendering | Static semantic/style/layout/DrawIR/pixel scenario with span parity and forced-block control | Static/source evidence held; qualified execution/docgen remain unavailable |
 | `08de37b0902` | CSS logical size/min/max mapping through horizontal, vertical, and sideways writing modes | Two modern scenarios cover inherited/important winners, authored order, exact DrawIR geometry, and discriminating Engine2D pixels; complete static mirror | Static/source evidence held; qualified execution/docgen remain unavailable |
 | `771dfb23835b` | Canonical iframe Draw IR embedding design | Reviewed architecture/detail/agent plans | Design only; no iframe implementation claim |
+| current `<code>` lane | Selected UA monospace family with authored sans-serif override | Exactly four-step SSpec covers semantic parentage, inline/monospace computed style, resolved DrawIR font family/identity and origin, explicit-monospace parity, sans override, and discriminating Engine2D frames | Source/spec/handwritten-manual evidence only; qualified execution/docgen remain open |
 | Current `<hr>` lane | Native `hr` void semantics and selected UA separator defaults | Exactly four-step SSpec covers semantic identity, UA style/geometry, exact `0`/`0px`/`none`/`hidden` border clearing, mixed-invalid/missing preservation, DrawIR, and exact Engine2D control pixels | Source/spec/manual evidence only; qualified pure-Simple execution remains required |
 | current change | Selected deterministic `fieldset`/`legend` UA defaults and authored-style rendering | Isolated semantic parentage, four-side `border:none`/`0` clearing, exact DrawIR geometry, exact Engine2D/control pixels, and handwritten draft manual | Bounded fallback only; special legend formatting/cutout, disabled propagation, admitted docgen, and qualified execution remain open |
 | current definition-list lane | Cross-kind omitted-end-tag repair plus selected `dl`/`dt`/`dd` UA defaults | Exactly four-step SSpec covers sibling identity, UA and authored margins, exact DrawIR geometry, and exact Engine2D component/control pixels | Source/spec/handwritten-manual evidence only; admitted docgen, qualified execution, and corpus accounting remain open |
@@ -68,10 +69,10 @@ runs the scenarios, both tranches remain execution-evidence-blocked.
 
 ### HTML
 
-The source inventory began with 80 Partial rows. The bounded `hr`,
+The source inventory began with 80 Partial rows. The bounded `code`, `hr`,
 fieldset/legend, definition-list, `article`, blockquote, `header`,
 `details`/`summary`, `figure`, `menu`, `small`, `abbr`, and `time` lanes
-reclassify those sixteen named rows into their own fallback rows, leaving 64 in the
+reclassify those seventeen named rows into their own fallback rows, leaving 63 in the
 undifferentiated Partial backlog.
 The two rows called out as
 inventory-only or missing were subsequently covered by `28f0e779b0d2`.
@@ -80,8 +81,8 @@ No named row appears in both a bounded row and the remaining Partial count.
 | Classification | Count | Meaning |
 |---|---:|---|
 | Full | 12 | Direct semantic/tree plus applicable layout/DrawIR/Engine2D or hidden/fail-closed evidence |
-| Partial remaining | 64 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof; excludes `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`,`abbr`,`time` |
-| Bounded selected-profile fallback | 16 | `hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`,`abbr`,`time`; basic UA/cascade/DrawIR/pixel paths covered, while special formatting and aggregate conformance remain Partial/RED |
+| Partial remaining | 63 | Tag appears in text/grouped render coverage but lacks isolated end-to-end proof; excludes `code`,`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`,`abbr`,`time` |
+| Bounded selected-profile fallback | 17 | `code`,`hr`,`fieldset`,`legend`,`dl`,`dt`,`dd`,`article`,`blockquote`,`header`,`details`,`summary`,`figure`,`menu`,`small`,`abbr`,`time`; basic UA/cascade/DrawIR/pixel paths covered, while special formatting and aggregate conformance remain Partial/RED |
 | Unsupported/fail-closed | 11 | Embedded/media/native semantics are not implemented |
 | Inventory-only before landed tranche | 2 | `selectedcontent`, `slot`; bounded behavior landed |
 | Missing before landed tranche | 8 | `h1`–`h6`, `sub`, `sup`; bounded behavior landed |
@@ -137,8 +138,9 @@ an inventory literal, an `@supports` table, or metadata.
 | REQ/NFR | Row/group | Support | Executable spec/scenario | Production owners | Required oracle | Manual/result | Status |
 |---|---|---|---|---|---|---|---|
 | REQ-002/004/019/021 | HTML Full 12: `html,head,meta,title,body,main,p,div,section,table,textarea,template` | Full by static audit | `test/03_system/feature/web_platform/html/html_parsing_contexts_spec.spl`; browser production-hardening spec | tokenizer/tree, BrowserSession semantic tree, HTML layout renderer, DrawIR, Engine2D | exact tag/parent/style/geometry/commands/pixels or hidden absence | canonical manuals exist; qualified execution unavailable | Evidence-blocked |
-| REQ-002/004/019/021 | HTML Partial 64 remaining; sixteen bounded rows split below | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
+| REQ-002/004/019/021 | HTML Partial 63 remaining; seventeen bounded rows split below | Partial | grouped text/tag and bitmap matrices; exact scenario mapping missing | same canonical owners | per-group identity, UA defaults, geometry, DrawIR, pixels | new grouped specs/manuals required | RED |
 | REQ-002/004/021 | HTML `article` | Bounded block-default behavior landed in `fb4050c3d2b` | `article_element_rendering_spec.spl`: `should lower the article block default through Draw IR to pixels` | tokenizer/tree, canonical UA defaults, Web layout, DrawIR, Engine2D | semantic parentage, `display:block`, exact geometry and component/control pixels | complete handwritten mirror; qualified docgen/execution unavailable | Evidence-blocked |
+| REQ-002/004/021 | HTML `code` selected profile | Bounded native inline monospace behavior in current lane | `code_element_rendering_spec.spl`: `should lower the code UA monospace font through Draw IR to pixels` | tokenizer/tree, canonical UA defaults/cascade, Web layout, DrawIR text owner, Engine2D | semantic body parent, inline display, default/explicit monospace parity, authored sans-serif override, resolved font identity, geometry, and discriminating pixels | handwritten complete mirror; qualified execution/docgen unavailable | Evidence-blocked |
 | REQ-002/003/004/019/021 | HTML `hr` | Bounded behavior in current lane | `test/03_system/feature/web_platform/html/hr_element_wpt_spec.spl`: `should render hr defaults and author CSS through Engine2D` | canonical tree, tag defaults, shared declaration application, Web layout, DrawIR, Engine2D | void identity, selected 8 px margins and 1 px gray border, exact `border:0`/`0px`/`none`/`hidden` clearing, mixed digit-bearing invalid/missing preservation, authored red geometry, exact component/control pixels | mirrored manual generated in current lane; qualified execution unavailable | Evidence-blocked |
 | REQ-002/019/021 | HTML embedded/media fallback 10: `area,audio,canvas,embed,map,object,picture,source,track,video` | Bounded fail-closed fallback landed in `543409eee861` | safe embedded/media fallback spec | tokenizer/tree/resource fallback, Web layout, DrawIR, Engine2D | semantic/resource exclusion plus deterministic fallback commands and pixels | canonical spec/manual; qualified execution unavailable | Evidence-blocked |
 | REQ-002/004/019/021 | HTML `iframe` | Design only | modern SSpec/manual regeneration blocked after the bounded docgen cap | canonical child Web composition to DrawIR embedding | order, clip, offsets, materials, exact pixels, deadline/rules | design `771dfb23835b`; implementation/manual absent | RED |
