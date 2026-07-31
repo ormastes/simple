@@ -897,6 +897,41 @@ pub(crate) fn evaluate_method_call(
             // String methods are included from a separate file
             include!("string.rs");
         }
+        Value::StrBytes(bytes) => {
+            // `StrBytes` holds raw bytes that are NOT valid UTF-8 (a
+            // mid-codepoint slice fragment; see `Value::text_from_bytes`).
+            // It had NO method-dispatch arm at all, so every method call —
+            // even `.len()` — fell through to the generic "method not
+            // found" error, which rendered the receiver via
+            // `to_display_string()`'s lossy path and produced the
+            // self-contradictory `method 'len' not found on type 'str'`.
+            //
+            // Byte-transparent fast paths first: these methods' *results*
+            // depend on the exact byte count, so they must read `bytes`
+            // directly rather than through a lossy stand-in (U+FFFD
+            // substitution changes the byte length).
+            match method {
+                "len" | "length" => return Ok(Value::Int(bytes.len() as i64)),
+                "is_empty" => return Ok(Value::Bool(bytes.is_empty())),
+                "bytes" => {
+                    let out: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
+                    return Ok(Value::array(out));
+                }
+                _ => {}
+            }
+            // Every other string method: StrBytes fragments exist to stay
+            // byte-transparent through indexing/concatenation/join (see
+            // `Value::text_from_bytes` / `text_bytes_view`); once a caller
+            // asks for a string-shaped operation beyond raw length/bytes,
+            // rendering lossily to `Str` and reusing the shared
+            // string-method table is the SAME display-boundary rule already
+            // applied by `to_display_string()` and the FFI value bridge
+            // (`value_bridge.rs`'s `Value::StrBytes(bs) =>
+            // BridgeValue::string(&String::from_utf8_lossy(bs)...)`), not a
+            // new fidelity regression.
+            let recv_val = Value::text(String::from_utf8_lossy(bytes).into_owned());
+            include!("string.rs");
+        }
         Value::Enum {
             enum_name,
             variant,
@@ -1386,7 +1421,7 @@ pub(crate) fn evaluate_method_call(
     {
         // Map Value type to the possible type names used in `impl Trait for TypeName:`
         let type_names: &[&str] = match &recv_val {
-            Value::Str(_) => &["text", "str", "String"],
+            Value::Str(_) | Value::StrBytes(_) => &["text", "str", "String"],
             Value::Int(_) => &["i64", "i32", "int"],
             Value::Float(_) => &["f64", "float"],
             Value::Float32(_) => &["f32", "float"],
