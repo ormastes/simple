@@ -1,0 +1,195 @@
+# Browser CPU-oracle adapter for the structural layout framework.
+
+use std.common.hash.djb2.{djb2_hash_text}
+use std.common.structural.invalidation.contracts.{DIRTY_LAYOUT, LayoutDependency, layout_dependency}
+use std.common.structural.layout.{
+    LayoutExecutionProfile,
+    LayoutInputSnapshot,
+    LayoutNodeInput,
+    layout_box,
+    layout_input,
+    layout_node,
+    layout_profile_supported
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{SimpleWebLayoutDrawIrResult}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.contracts.*
+
+struct WebLayoutAdapterResult:
+    snapshot: WebLayoutSnapshot
+    fault: text
+
+fn _web_layout_hash(parts: [text]) -> text:
+    var value = "web-layout-v1"
+    for part in parts:
+        value = value + "|" + part
+    djb2_hash_text(value).to_text()
+
+fn _web_layout_i32s(values: [i32]) -> [i64]:
+    var result: [i64] = []
+    for value in values:
+        result.push(value as i64)
+    result
+
+fn _web_layout_bool(value: bool) -> text:
+    if value: "1" else: "0"
+
+fn _web_layout_boundary(profile_id: text, parent_id: i64) -> bool:
+    (parent_id == 0 or profile_id == "flex" or profile_id == "grid" or
+        profile_id == "table" or profile_id == "absolute-sticky" or
+        profile_id == "scroll" or profile_id == "replaced")
+
+fn _web_layout_empty_snapshot(
+    generation: i64,
+    viewport_fingerprint: text,
+    execution: LayoutExecutionProfile,
+    fixed_point_cap: i64
+) -> WebLayoutSnapshot:
+    web_layout_snapshot(generation, viewport_fingerprint, [], [], execution, fixed_point_cap)
+
+fn web_layout_adapt_cpu_oracle(
+    result: SimpleWebLayoutDrawIrResult,
+    generation: i64,
+    execution: LayoutExecutionProfile,
+    fixed_point_cap: i64
+) -> WebLayoutAdapterResult:
+    val nodes = result.hit_index.nodes
+    val styles = result.hit_index.styles
+    val boxes = result.raw_boxes
+    val viewport = result.hit_index.width.to_text() + "x" + result.hit_index.height.to_text()
+    if (nodes.len() != styles.len() or nodes.len() != boxes.bx.len() or
+        nodes.len() != boxes.by.len() or nodes.len() != boxes.bw.len() or
+        nodes.len() != boxes.bh.len()):
+        return WebLayoutAdapterResult(
+            snapshot: _web_layout_empty_snapshot(generation, viewport, execution, fixed_point_cap),
+            fault: "browser-oracle-shape-mismatch"
+        )
+
+    var adapted_nodes: [WebLayoutNodeSnapshot] = []
+    var dependencies: [LayoutDependency] = []
+    var index: i64 = 0
+    while index < nodes.len():
+        val node = nodes[index]
+        val style = styles[index]
+        val admission = web_layout_admit_profile(
+            node.tag,
+            style.display,
+            style.position_absolute,
+            style.position_sticky,
+            style.overflow_auto_y,
+            style.overflow_scroll_y
+        )
+        if not admission.supported:
+            return WebLayoutAdapterResult(
+                snapshot: _web_layout_empty_snapshot(generation, viewport, execution, fixed_point_cap),
+                fault: admission.reason
+            )
+
+        val id = index + 1
+        val parent_id = if node.parent < 0: 0 else: node.parent + 1
+        val oracle_box = layout_box(
+            id,
+            boxes.bx[index] as i64,
+            boxes.by[index] as i64,
+            boxes.bw[index] as i64,
+            boxes.bh[index] as i64
+        )
+        val fingerprint = web_layout_style_fingerprint(
+            _web_layout_hash([style.fg.to_text(), style.font_family, style.font_size.to_text()]),
+            _web_layout_hash([style.bg.to_text(), style.border_w.to_text(), style.border_color.to_text()]),
+            _web_layout_hash([style.opacity_pct.to_text(), style.will_change]),
+            _web_layout_hash([style.font_family, style.font_size.to_text(), style.resolved_font_identity]),
+            _web_layout_hash([style.width_px.to_text(), style.height_px.to_text(), style.display]),
+            _web_layout_hash([style.display, _web_layout_bool(style.position_absolute), _web_layout_bool(style.position_sticky)]),
+            _web_layout_hash([admission.profile_id, _web_layout_bool(style.overflow_auto_y), _web_layout_bool(style.overflow_scroll_y)]),
+            _web_layout_hash([
+                oracle_box.x.to_text(), oracle_box.y.to_text(),
+                oracle_box.width.to_text(), oracle_box.height.to_text()
+            ])
+        )
+        adapted_nodes.push(WebLayoutNodeSnapshot(
+            id: id,
+            arena_index: index,
+            dom_route_id: id,
+            parent_id: parent_id,
+            tag: node.tag,
+            profile_id: admission.profile_id,
+            formatting_boundary: _web_layout_boundary(admission.profile_id, parent_id),
+            layout_contained: false,
+            style: fingerprint,
+            text_metrics: WebLayoutResolvedTextMetrics(
+                font_identity: style.resolved_font_identity,
+                advances: _web_layout_i32s(style.resolved_font_advances),
+                width: style.resolved_font_width as i64,
+                line_height: style.resolved_font_line_height as i64
+            ),
+            oracle_box: oracle_box,
+            estimated_work: (result.hit_index.child_index.child_count[index] as i64) + 1,
+            text_measure_required: false,
+            required_fixed_point_iterations: 1
+        ))
+        if parent_id != 0:
+            dependencies.push(layout_dependency(parent_id, id, "containing-context", DIRTY_LAYOUT))
+        index = index + 1
+
+    WebLayoutAdapterResult(
+        snapshot: web_layout_snapshot(
+            generation,
+            viewport,
+            adapted_nodes,
+            dependencies,
+            execution,
+            fixed_point_cap
+        ),
+        fault: ""
+    )
+
+fn _web_layout_dirty_bits(frontier: WebLayoutFrontier, id: i64) -> i64:
+    for dirty in frontier.dirty_nodes:
+        if dirty.id == id:
+            return dirty.dirty_bits
+    0
+
+fn web_layout_validate_snapshot(snapshot: WebLayoutSnapshot) -> text:
+    if snapshot.contract_version != WEB_LAYOUT_CONTRACT_VERSION:
+        return "web-layout-contract-version-mismatch"
+    var seen: [i64] = []
+    for node in snapshot.nodes:
+        if node.id <= 0 or node.oracle_box.id != node.id:
+            return "web-layout-node-id-mismatch"
+        if not layout_profile_supported(node.profile_id):
+            return "unsupported-profile:" + node.profile_id
+        # ponytail: quadratic duplicate check is enough for v1 fixtures; index if browser-scale evidence requires it.
+        for prior_id in seen:
+            if prior_id == node.id:
+                return "duplicate-web-layout-node-id"
+        seen.push(node.id)
+    ""
+
+fn web_layout_framework_input(
+    snapshot: WebLayoutSnapshot,
+    frontier: WebLayoutFrontier
+) -> LayoutInputSnapshot:
+    var nodes: [LayoutNodeInput] = []
+    for node in snapshot.nodes:
+        nodes.push(layout_node(
+            node.id,
+            node.parent_id,
+            node.profile_id,
+            node.formatting_boundary,
+            node.layout_contained,
+            node.oracle_box,
+            _web_layout_dirty_bits(frontier, node.id),
+            node.estimated_work,
+            node.text_measure_required,
+            node.required_fixed_point_iterations
+        ))
+    layout_input(
+        nodes,
+        snapshot.dependencies,
+        frontier.invalidated_ids,
+        snapshot.execution,
+        snapshot.fixed_point_cap
+    )
+
+export WebLayoutAdapterResult, web_layout_adapt_cpu_oracle
+export web_layout_validate_snapshot, web_layout_framework_input

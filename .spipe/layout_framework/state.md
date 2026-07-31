@@ -91,7 +91,7 @@ layout_framework: { consumes: [mapping, invalidation, execution, text_measure], 
 - Documentation freshness: layout research, selected requirements, architecture, detail design, test/agent plans, guide, and TLDR companions updated. Workflow/tooling command/skill docs are N/A because no workflow or tool contract changed.
 
 ## Phase
-implement-source-done
+verify-static-warn
 
 ## Log
 - dev: Created state file with 10 acceptance criteria (type: feature).
@@ -102,3 +102,6 @@ implement-source-done
 - specs-alignment: Reviewed every file under `src/lib/common/structural/`. The two specs match the concrete barrel's constructor signatures, v1 fields, `LayoutTextMeasureResult`, `SpatialLayoutProfile`, and `TextMeasurePort`; the primary GPU fixture is homogeneous block layout as required by the design.
 - implement: Added the five behavior APIs, eight-profile serial catalog, concrete DirtyMask/MappingGraph/ExecutionProfile/CostEstimate/StageReceipt contracts, deterministic SCC waves, bounded fixed points, exact oracle snapshots, incremental receipts, and cost-qualified homogeneous GPU dispatch.
 - verification-blocker: The current pure-Simple wrapper reports `error: unknown command 'check'`, `error: unknown command 'test'`, and `error: unknown command 'spipe-docgen'`; a separate full bootstrap is active. No mirrored manual or runtime PASS is claimed in this checkpoint.
+- consumer: Implemented the web layout manager against the real `SimpleWebLayoutDrawIrResult.raw_boxes` oracle with full/incremental framework delegation, stable invalidation, mappings, receipts, epochs, and hit regions.
+- manual: Added the operator-readable framework and web-manager evidence companions manually because `spipe-docgen` remains unavailable.
+- verify: Static placeholder/conflict/runtime-boundary checks and working/staged direct-runtime guards pass; runtime STATUS remains WARN until the canonical CLI restores `check` and `test`.

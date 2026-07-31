@@ -2,84 +2,132 @@
 # @tag: system, web_browser, layout
 # @req REQ-WLM-001
 # @req REQ-WLM-002
+# @req REQ-WLM-003
+# @req REQ-WLM-004
+# @req REQ-WLM-005
+# @req REQ-WLM-006
 
 """
 # Web layout manager
 
-Freezes the concrete browser-to-structural layout interface before renderer
-wiring. Implementation evidence extends this scenario without renaming its
-four manual steps.
+Adapts the real browser CPU oracle, classifies invalidation, delegates full
+and incremental work to the structural framework, and qualifies hit regions
+by DOM generation and layout epoch.
 """
 
 use std.spec.*
-use std.common.structural.layout.{layout_box, layout_execution_profile}
+use std.common.structural.layout.{layout_execution_profile}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result
+}
 use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.*
 
-fn fingerprint(
-    inherited: text, paint: text, composite: text, intrinsic: text,
-    own: text, subtree: text, context: text
-) -> WebLayoutStyleFingerprint:
-    web_layout_style_fingerprint(inherited, paint, composite, intrinsic, own, subtree, context, "geometry")
+fn system_change(node_id: i64, context_id: i64) -> WebLayoutChange:
+    web_layout_change(
+        WebLayoutMutationKind.Style,
+        StyleDifference.LayoutSelf,
+        node_id,
+        context_id,
+        [], [], [], [], [], [], []
+    )
 
-describe "REQ-WLM-001..REQ-WLM-002 web layout manager interface":
+describe "REQ-WLM-001..REQ-WLM-006 web layout manager":
     # @manual: show
-    it "should expose generation-qualified browser layout contracts":
+    it "preserves the browser oracle through incremental framework execution":
         step("Capture the CPU layout oracle")
-        val node = WebLayoutNodeSnapshot(
-            id: 1,
-            arena_index: 0,
-            dom_route_id: 41,
-            parent_id: 0,
-            tag: "div",
-            profile_id: "block",
-            formatting_boundary: true,
-            layout_contained: false,
-            style: fingerprint("i", "p", "c", "m", "l", "s", "f"),
-            text_metrics: WebLayoutResolvedTextMetrics(font_identity: "", advances: [], width: 0, line_height: 0),
-            oracle_box: layout_box(1, 0, 0, 640, 480),
-            estimated_work: 1,
-            text_measure_required: false,
-            required_fixed_point_iterations: 1
+        val browser = simple_web_layout_render_html_draw_ir_result(
+            "<div style='display:grid;width:200px'><span>A</span></div>" +
+            "<div style='display:flex;width:200px'><span>B</span></div>",
+            640,
+            480
         )
-        val snapshot = web_layout_snapshot(
-            7,
-            "640x480",
-            [node],
-            [],
-            layout_execution_profile("serial_cpu", 10, 0, 0, 0, 0, 0, 0, 0),
-            4
+        val execution = layout_execution_profile(
+            "serial_cpu", 50, 0, 0, 0, 0, 0, 0, 0
         )
-        expect(snapshot.contract_version).to_equal(WEB_LAYOUT_CONTRACT_VERSION)
-        expect(snapshot.nodes[0].oracle_box.width).to_equal(640)
+        val adapted = web_layout_adapt_cpu_oracle(browser, 7, execution, 4)
+        expect(adapted.fault).to_equal("")
+        expect(adapted.snapshot.nodes.len()).to_equal(browser.raw_boxes.bx.len())
+        var index: i64 = 0
+        while index < adapted.snapshot.nodes.len():
+            val node = adapted.snapshot.nodes[index]
+            expect(node.id).to_equal(index + 1)
+            expect(node.arena_index).to_equal(index)
+            expect(node.oracle_box.x).to_equal(browser.raw_boxes.bx[index] as i64)
+            expect(node.oracle_box.y).to_equal(browser.raw_boxes.by[index] as i64)
+            expect(node.oracle_box.width).to_equal(browser.raw_boxes.bw[index] as i64)
+            expect(node.oracle_box.height).to_equal(browser.raw_boxes.bh[index] as i64)
+            index = index + 1
 
         step("Classify browser layout islands")
-        val base = fingerprint("i", "p", "c", "m", "l", "s", "f")
-        expect(web_layout_classify_style(base, base)).to_equal(StyleDifference.NoChange)
-        expect(web_layout_classify_style(base, fingerprint("I", "p", "c", "m", "l", "s", "f"))).to_equal(StyleDifference.InheritedOnly)
-        expect(web_layout_classify_style(base, fingerprint("i", "P", "c", "m", "l", "s", "f"))).to_equal(StyleDifference.PaintOnly)
-        expect(web_layout_classify_style(base, fingerprint("i", "p", "C", "m", "l", "s", "f"))).to_equal(StyleDifference.CompositeOnly)
-        expect(web_layout_classify_style(base, fingerprint("i", "p", "c", "M", "l", "s", "f"))).to_equal(StyleDifference.IntrinsicMeasure)
-        expect(web_layout_classify_style(base, fingerprint("i", "p", "c", "m", "L", "s", "f"))).to_equal(StyleDifference.LayoutSelf)
-        expect(web_layout_classify_style(base, fingerprint("i", "p", "c", "m", "l", "S", "f"))).to_equal(StyleDifference.LayoutSubtree)
-        expect(
-            web_layout_classify_style(base, fingerprint("i", "p", "c", "m", "l", "s", "F"))
-        ).to_equal(StyleDifference.RebuildFormattingContext)
-        expect(web_layout_admit_profile("div", "none", false, false, false, false).profile_id).to_equal("block")
-        expect(web_layout_admit_profile("div", "contents", false, false, false, false).profile_id).to_equal("block")
-        expect(web_layout_admit_profile("td", "table-cell", false, false, false, false).profile_id).to_equal("table")
-        expect(web_layout_admit_profile("div", "block", false, false, false, true).profile_id).to_equal("scroll")
-        expect(web_layout_admit_profile("div", "mystery", false, false, false, false).supported).to_equal(false)
-        expect(web_layout_admit_profile("img", "block", true, false, false, false).supported).to_equal(false)
-        val change = web_layout_change(WebLayoutMutationKind.Style, StyleDifference.LayoutSelf, 1, 1, [], [], [], [], [], [])
-        expect(change.node_id).to_equal(1)
-        expect(change.containing_context_id).to_equal(1)
+        var flex_id: i64 = 0
+        for node in adapted.snapshot.nodes:
+            if node.profile_id == "flex":
+                flex_id = node.id
+        expect(flex_id).to_be_greater_than(0)
+        val frontier = web_layout_dirty_frontier([system_change(flex_id, flex_id)])
+        expect(frontier.invalidated_ids).to_equal([flex_id])
 
         step("Apply the invalidated frontier")
-        val frontier = WebLayoutFrontier(dirty_nodes: [WebLayoutDirtyNode(id: 1, dirty_bits: 2)], invalidated_ids: [1], fault: "")
-        expect(frontier.invalidated_ids).to_equal([1])
-        expect(frontier.fault).to_equal("")
+        val manager = web_layout_manager(7)
+        val full = web_layout_run_full(
+            manager, adapted.snapshot, web_layout_dirty_frontier([])
+        )
+        val incremental = web_layout_run_incremental(
+            full.manager, adapted.snapshot, frontier
+        )
+        expect(full.result.fault).to_equal("")
+        expect(incremental.result.fault).to_equal("")
+        expect(incremental.result.layout.boxes).to_equal(full.result.layout.boxes)
+        expect(incremental.result.layout.receipt.visited_island_ids.len()).to_be_greater_than(0)
+        expect(incremental.result.layout.receipt.visited_island_ids.len()).to_be_less_than(
+            full.result.layout.islands.len()
+        )
 
         step("Verify fragments mappings and hit index")
-        val manager = web_layout_manager(snapshot.generation)
-        expect(manager.generation).to_equal(7)
-        expect(manager.epoch).to_equal(0)
+        expect(full.result.epoch).to_equal(1)
+        expect(incremental.result.epoch).to_equal(2)
+        expect(incremental.result.hit_regions.len()).to_equal(browser.raw_boxes.bx.len())
+        expect(incremental.result.hit_regions[0].generation).to_equal(7)
+        expect(incremental.result.hit_regions[0].epoch).to_equal(2)
+        expect(incremental.result.layout.mappings[0].kind).to_equal("LayoutOf")
+
+        val stale = web_layout_run_full(
+            web_layout_manager(8), adapted.snapshot, web_layout_dirty_frontier([])
+        )
+        expect(stale.result.stale).to_equal(true)
+        expect(stale.result.fault).to_equal("stale-dom-generation")
+
+        val seed = adapted.snapshot.nodes[0]
+        val unsupported_node = WebLayoutNodeSnapshot(
+            id: seed.id,
+            arena_index: seed.arena_index,
+            dom_route_id: seed.dom_route_id,
+            parent_id: seed.parent_id,
+            tag: seed.tag,
+            profile_id: "mystery",
+            formatting_boundary: seed.formatting_boundary,
+            layout_contained: seed.layout_contained,
+            style: seed.style,
+            text_metrics: seed.text_metrics,
+            oracle_box: seed.oracle_box,
+            estimated_work: seed.estimated_work,
+            text_measure_required: seed.text_measure_required,
+            required_fixed_point_iterations: seed.required_fixed_point_iterations
+        )
+        val unsupported_snapshot = web_layout_snapshot(
+            7, adapted.snapshot.viewport_fingerprint, [unsupported_node],
+            [], execution, 4
+        )
+        val unsupported = web_layout_run_full(
+            web_layout_manager(7), unsupported_snapshot,
+            web_layout_dirty_frontier([])
+        )
+        expect(unsupported.result.fault).to_equal("unsupported-profile:mystery")
+        expect(unsupported.result.epoch).to_equal(0)
+
+        val exhausted = web_layout_run_full(
+            WebLayoutManager(generation: 7, epoch: WEB_LAYOUT_MAX_EPOCH),
+            adapted.snapshot,
+            web_layout_dirty_frontier([])
+        )
+        expect(exhausted.result.fault).to_equal("epoch-exhausted")
