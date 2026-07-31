@@ -350,6 +350,12 @@ fn probe_cuda() -> BackendProbeResult:
 fn probe_cuda_processing() -> BackendProbeResult:
     probe_cuda_2d()
 
+class _CudaPendingResource:
+    host_ptr: i64
+    host_bytes: i64
+    device_ptr: i64
+    release_device: bool
+
 class CudaBackend:
     mirror: SoftwareBackend
     session: CudaSession
@@ -373,6 +379,9 @@ class CudaBackend:
     completion_unknown: bool
     device_current: bool
     mirror_current: bool
+    pending_resources: [_CudaPendingResource]
+    pending_device_work: bool
+    batch_sync_count: i64
     last_probe: BackendProbeResult
 
     static fn create() -> CudaBackend:
@@ -399,6 +408,9 @@ class CudaBackend:
             completion_unknown: false,
             device_current: false,
             mirror_current: true,
+            pending_resources: [],
+            pending_device_work: false,
+            batch_sync_count: 0,
             last_probe: BackendProbeResult.unavailable("cuda", "not probed")
         )
 
@@ -520,20 +532,30 @@ class CudaBackend:
             self.readback_ptr = 0
 
     me _cleanup_cuda_surface():
+        val completion_unknown = self.completion_unknown or self.session.completion_unknown
+        if completion_unknown:
+            self._quarantine_pending_resources()
+        else:
+            self._release_pending_resources()
         self.cpu_fallback_used = false
         self.completion_unknown = false
         self.device_current = false
         self.mirror_current = false
+        self.pending_device_work = false
         self.last_image_kernel = ""
         self._free_launch_buffers()
         if self.d_font_atlas != 0:
-            self.session.free(self.d_font_atlas)
+            if not completion_unknown:
+                self.session.free(self.d_font_atlas)
+            # A quarantined context owns outstanding device allocations until
+            # CudaSession cleanup destroys that context.
             self.d_font_atlas = 0
         self.font_atlas_bytes = 0
         self.font_atlas_generation = -1
         self.font_atlas_owner_identity = ""
         if self.d_framebuffer != 0:
-            self.session.free(self.d_framebuffer)
+            if not completion_unknown:
+                self.session.free(self.d_framebuffer)
             self.d_framebuffer = 0
         self.framebuffer_bytes = 0
 
@@ -562,8 +584,7 @@ class CudaBackend:
             return true
         if not self.initialized or not self.session.is_valid() or self.readback_ptr == 0 or self.d_framebuffer == 0:
             return false
-        if self.session.sync() != CUDA_SUCCESS:
-            self._quarantine_completion_unknown()
+        if not self.submit_batch():
             return false
         if cuda_memcpy_dtoh(self.readback_ptr, self.d_framebuffer, self.framebuffer_bytes) != CUDA_SUCCESS:
             return false
@@ -593,6 +614,24 @@ class CudaBackend:
     me _mark_device_mutation():
         self.device_current = true
         self.mirror_current = false
+        self.pending_device_work = true
+
+    me _release_pending_resources():
+        for resource in self.pending_resources:
+            if resource.host_ptr != 0:
+                cuda_backend_free(resource.host_ptr, resource.host_bytes)
+            if resource.release_device and resource.device_ptr != 0:
+                self.session.free(resource.device_ptr)
+        self.pending_resources = []
+
+    me _quarantine_pending_resources():
+        # cuda_memcpy_htod is synchronous, so host staging can always be freed.
+        # Device pointers must not be freed after a failed sync: their ownership
+        # remains with the quarantined context until CudaSession destroys it.
+        for resource in self.pending_resources:
+            if resource.host_ptr != 0:
+                cuda_backend_free(resource.host_ptr, resource.host_bytes)
+        self.pending_resources = []
 
     me _quarantine_completion_unknown():
         self.session.quarantine_completion_unknown()
@@ -618,28 +657,29 @@ class CudaBackend:
         if host_pixels != 0 and d_pixels != 0:
             _write_u32_pixels_to_host(host_pixels, pixels, pixel_count)
             val upload_rc = cuda_memcpy_htod(d_pixels, host_pixels, image_bytes)
-            if upload_rc == CUDA_SUCCESS:
-                val total = _i64(w) * _i64(h)
-                var rc = 1
-                if kernel_name == "simple_2d_copy_u32":
-                    _write_generated_copy_launch_args(self.rect_val_ptr, self.rect_args_ptr, d_pixels, self.d_framebuffer, total)
-                    rc = self.session.copy_kernel(_i64(w), _i64(h), self.rect_args_ptr)
-                else:
-                    _write_image_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, d_pixels, x, y, w, h, self.width(), self.height())
-                    val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
-                    rc = self.session.launch_kernel_args(kernel_name, grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
-                if rc == CUDA_SUCCESS:
-                    val sync_rc = self.session.sync()
-                    if sync_rc == CUDA_SUCCESS:
-                        self.last_image_kernel = kernel_name
-                        self._mark_device_mutation()
-                        cuda_backend_free(host_pixels, image_bytes)
-                        self.session.free(d_pixels)
-                        return true
-                    cuda_backend_free(host_pixels, image_bytes)
-                    self._quarantine_completion_unknown()
-                    return false
+            if upload_rc != CUDA_SUCCESS:
+                cuda_backend_free(host_pixels, image_bytes)
+                self.session.free(d_pixels)
+                return false
+            # The synchronous H->D copy owns no host bytes after this point.
             cuda_backend_free(host_pixels, image_bytes)
+            val total = _i64(w) * _i64(h)
+            var rc = 1
+            if kernel_name == "simple_2d_copy_u32":
+                _write_generated_copy_launch_args(self.rect_val_ptr, self.rect_args_ptr, d_pixels, self.d_framebuffer, total)
+                rc = self.session.copy_kernel(_i64(w), _i64(h), self.rect_args_ptr)
+            else:
+                _write_image_launch_args(self.rect_val_ptr, self.rect_args_ptr, self.d_framebuffer, d_pixels, x, y, w, h, self.width(), self.height())
+                val grid_x = (total + CUDA_2D_BLOCK_SIZE - 1) / CUDA_2D_BLOCK_SIZE
+                rc = self.session.launch_kernel_args(kernel_name, grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.rect_args_ptr)
+            if rc == CUDA_SUCCESS:
+                self.pending_resources.push(_CudaPendingResource(
+                    host_ptr: 0, host_bytes: 0,
+                    device_ptr: d_pixels, release_device: true
+                ))
+                self.last_image_kernel = kernel_name
+                self._mark_device_mutation()
+                return true
             self.session.free(d_pixels)
         else:
             if host_pixels != 0:
@@ -678,6 +718,11 @@ class CudaBackend:
             self.session.font_module_identity, dependency_identity)
         if owner_identity == "":
             return false
+        if (self.font_atlas_owner_identity == owner_identity and
+            self.font_atlas_generation == batch.atlas_generation):
+            return true
+        if self.pending_device_work and not self.submit_batch():
+            return false
         if self.d_font_atlas == 0 or self.font_atlas_bytes != required_bytes:
             val new_atlas = self.session.alloc(required_bytes)
             if new_atlas == 0:
@@ -688,21 +733,22 @@ class CudaBackend:
             self.font_atlas_bytes = required_bytes
             self.font_atlas_generation = -1
             self.font_atlas_owner_identity = ""
-        if (self.font_atlas_owner_identity == owner_identity and
-            self.font_atlas_generation == batch.atlas_generation):
-            return true
         val host_atlas = cuda_backend_alloc(required_bytes)
         if host_atlas == 0:
             return false
         _write_u32_pixels_to_host(host_atlas, batch.atlas_pixels, pixel_count as i32)
         val upload_rc = cuda_memcpy_htod(self.d_font_atlas, host_atlas, required_bytes)
-        cuda_backend_free(host_atlas, required_bytes)
         if upload_rc != CUDA_SUCCESS:
+            cuda_backend_free(host_atlas, required_bytes)
             self.font_atlas_generation = -1
             self.font_atlas_owner_identity = ""
             return false
+        # cuda_memcpy_htod is synchronous; the persistent atlas remains owned
+        # by d_font_atlas and needs no per-batch staging resource.
+        cuda_backend_free(host_atlas, required_bytes)
         self.font_atlas_generation = batch.atlas_generation
         self.font_atlas_owner_identity = owner_identity
+        self.pending_device_work = true
         true
 
     me invalidate_font_atlas():
@@ -762,9 +808,6 @@ class CudaBackend:
             val rc = self.session.launch_font_kernel_args(grid_x, 1, 1, CUDA_2D_BLOCK_SIZE, 1, 1, self.font_args_ptr)
             if rc != CUDA_SUCCESS:
                 return submitted
-            if self.session.sync() != CUDA_SUCCESS:
-                self._quarantine_completion_unknown()
-                return submitted
             self._mark_device_mutation()
             submitted = submitted + 1
         submitted
@@ -792,6 +835,8 @@ impl RenderBackend for CudaBackend:
         true
 
     me shutdown():
+        if not self.submit_batch():
+            self._quarantine_pending_resources()
         self._cleanup_cuda_surface()
         self.mirror.shutdown()
         if self.owns_session:
@@ -1015,29 +1060,30 @@ impl RenderBackend for CudaBackend:
     me clear_mask():
         self.mirror.clear_mask()
     me submit_batch() -> bool:
-        # Immediate-mode backend: nothing buffered to flush.
+        if self.session.completion_unknown or self.completion_unknown:
+            self._quarantine_completion_unknown()
+            return false
+        if not self.pending_device_work:
+            return true
+        if self.session.sync() != CUDA_SUCCESS:
+            self._quarantine_completion_unknown()
+            return false
+        self.batch_sync_count = self.batch_sync_count + 1
+        self._release_pending_resources()
+        self.pending_device_work = false
         true
 
     me present():
-        if self.session.completion_unknown:
-            self._quarantine_completion_unknown()
-        if self.initialized and self.device_current and not self.completion_unknown:
-            if self.session.sync() != CUDA_SUCCESS:
-                self._quarantine_completion_unknown()
+        if not self.submit_batch():
+            return
         self.mirror.present()
     me read_pixels() -> [u32]:
         self.read_pixels_with_source().pixels
 
     me read_pixels_with_source() -> Engine2DReadback:
-        if self.session.completion_unknown:
-            self._quarantine_completion_unknown()
-        if self.completion_unknown:
+        if not self.submit_batch():
             return engine2d_readback([], "completion_unknown")
         if self.device_current and self.initialized and self.readback_ptr > 0 and self.d_framebuffer > 0:
-            val sync_rc = self.session.sync()
-            if sync_rc != CUDA_SUCCESS:
-                self._quarantine_completion_unknown()
-                return engine2d_readback([], "completion_unknown")
             val rc = cuda_memcpy_dtoh(self.readback_ptr, self.d_framebuffer, self.framebuffer_bytes)
             if rc == CUDA_SUCCESS:
                 val pixels = _read_u32_pixels_from_host(self.readback_ptr, self.width() * self.height())

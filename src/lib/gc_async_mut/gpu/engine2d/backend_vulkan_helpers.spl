@@ -46,7 +46,7 @@ fn vulkan_dispatch_framebuffer_compute_checked(d_framebuffer: i64, pipe: i64, pu
     """Engine2D compatibility name for the shared checked buffer dispatch."""
     vulkan_sffi_dispatch_buffer_compute_checked(d_framebuffer, pipe, push_data, gx, gy, gz)
 
-fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+fn vulkan_dispatch_two_buffer_compute_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
     """Dispatch image copy/src-over with a non-replayable completion status.
 
     Returns 1 for receipt-eligible completion, 2 for completed mutation whose
@@ -125,6 +125,15 @@ fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src:
         return 1
     VK_DISPATCH_COMPLETED_INELIGIBLE
 
+fn vulkan_dispatch_image_composite_checked(d_framebuffer: i64, pipe: i64, d_src: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+    vulkan_dispatch_two_buffer_compute_checked(
+        d_framebuffer, pipe, d_src, push_data, gx, gy, gz)
+
+fn vulkan_dispatch_rect_list_checked(d_framebuffer: i64, pipe: i64, d_rects: i64, push_data: [u8], gx: i64, gy: i64) -> i64:
+    """Run the binding-0 framebuffer / binding-1 packed rect list pipeline."""
+    vulkan_dispatch_two_buffer_compute_checked(
+        d_framebuffer, pipe, d_rects, push_data, gx, gy, 1)
+
 impl VulkanBackend:
 
     me _clear_pending_compute_state():
@@ -150,7 +159,7 @@ impl VulkanBackend:
                 self.pending_compute_descriptors[i], 0, 0, 0)
             i = i + 1
 
-    me _flush_pending_compute() -> i64:
+    me _flush_pending_compute_only() -> i64:
         """Submit one Engine-managed primitive batch and release dependencies."""
         val cmd = self.pending_compute_command
         if cmd <= 0:
@@ -200,6 +209,43 @@ impl VulkanBackend:
             1
         else:
             VK_DISPATCH_COMPLETED_INELIGIBLE
+
+    me _flush_rect_list() -> i64:
+        if self.pending_rect_list_count <= 0:
+            return 1
+        val byte_count = self.pending_rect_list_count.to_i64() * 40
+        if (self.pending_rect_list_bytes.len() != byte_count or
+            self.pipe_rect_list <= 0 or self.d_framebuffer <= 0):
+            self.pending_rect_list_bytes = []
+            self.pending_rect_list_count = 0
+            return 0
+        val prior = self._flush_pending_compute_only()
+        if prior <= 0:
+            return prior
+        val d_rects = vulkan_sffi_alloc_buffer(byte_count, 0x80)
+        if d_rects <= 0 or not vulkan_sffi_copy_to_buffer(d_rects, self.pending_rect_list_bytes, 0):
+            if d_rects > 0:
+                vulkan_sffi_free_buffer(d_rects)
+            self.pending_rect_list_bytes = []
+            self.pending_rect_list_count = 0
+            return 0
+        val push_data = _pack_rect_list_pc(
+            self.pending_rect_list_count, self.w, self.h)
+        val status = vulkan_dispatch_rect_list_checked(
+            self.d_framebuffer, self.pipe_rect_list, d_rects, push_data,
+            (_i64(self.w) + 15) / 16, (_i64(self.h) + 15) / 16)
+        self.pending_rect_list_bytes = []
+        self.pending_rect_list_count = 0
+        if status > 0:
+            self.rect_list_device_dispatch_count = self.rect_list_device_dispatch_count + 1
+            self.dirty = true
+        status
+
+    me _flush_pending_compute() -> i64:
+        """Flush regular work, then the ordered opaque-rect list if present."""
+        if self.pending_rect_list_count <= 0:
+            return self._flush_pending_compute_only()
+        self._flush_rect_list()
 
     me _enqueue_framebuffer_compute(pipe: i64, push_data: [u8],
                                     gx: i64, gy: i64, gz: i64) -> i64:
@@ -254,6 +300,12 @@ impl VulkanBackend:
         status == VK_DISPATCH_COMPLETED_INELIGIBLE
 
     me _dispatch_framebuffer_checked(pipe: i64, push_data: [u8], gx: i64, gy: i64, gz: i64) -> i64:
+        # A regular primitive follows queued opaque rects, so preserve source
+        # order before recording or submitting its command.
+        if self.pending_rect_list_count > 0:
+            val prior = self._flush_pending_compute()
+            if prior <= 0:
+                return prior
         val dispatched = if self.frame_batching_enabled:
             self._enqueue_framebuffer_compute(pipe, push_data, gx, gy, gz)
         else:
@@ -270,6 +322,18 @@ impl VulkanBackend:
                 # evidence failed. Refresh device bytes, but never promote it.
                 self.dirty = true
         dispatched
+
+    me _queue_opaque_rect(x: i32, y: i32, w: i32, h: i32, color: u32) -> bool:
+        if (not self.frame_batching_enabled or self.pipe_rect_list <= 0 or
+            w <= 0 or h <= 0):
+            return false
+        val record = _pack_rect_list_record(
+            x, y, w, h, color, self.clip_x, self.clip_y, self.clip_w,
+            self.clip_h, self.clip_enabled)
+        for byte in record:
+            self.pending_rect_list_bytes.push(byte)
+        self.pending_rect_list_count = self.pending_rect_list_count + 1
+        true
 
     me _gpu_draw_text_fallback(x: i32, y: i32, text_val: text, color: u32, font_size: i32):
         """Render text on CPU and upload affected region to GPU.
@@ -372,6 +436,29 @@ fn _pack_rect_pc(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i3
     buf = _pack_i32_le(buf, 36, clip_w)
     buf = _pack_i32_le(buf, 40, clip_h)
     buf = _pack_i32_le(buf, 44, _bool_to_i32(clip_enabled))
+    buf
+
+fn _pack_rect_list_pc(rect_count: i32, fb_w: i32, fb_h: i32) -> [u8]:
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, rect_count)
+    buf = _pack_i32_le(buf, 4, fb_w)
+    buf = _pack_i32_le(buf, 8, fb_h)
+    buf
+
+fn _pack_rect_list_record(x: i32, y: i32, w: i32, h: i32, color: u32,
+                          clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32,
+                          clip_enabled: bool) -> [u8]:
+    var buf: [u8] = [0u8; 40]
+    buf = _pack_i32_le(buf, 0, x)
+    buf = _pack_i32_le(buf, 4, y)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_u32_le(buf, 16, color)
+    buf = _pack_i32_le(buf, 20, clip_x)
+    buf = _pack_i32_le(buf, 24, clip_y)
+    buf = _pack_i32_le(buf, 28, clip_w)
+    buf = _pack_i32_le(buf, 32, clip_h)
+    buf = _pack_i32_le(buf, 36, _bool_to_i32(clip_enabled))
     buf
 
 fn _pack_line_pc(x1: i32, y1: i32, x2: i32, y2: i32, color: u32, thickness: i32, fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32, clip_w: i32, clip_h: i32, clip_enabled: bool) -> [u8]:

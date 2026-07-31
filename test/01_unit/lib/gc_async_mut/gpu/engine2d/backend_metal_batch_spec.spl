@@ -1,0 +1,29 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl
+# @tag: metal, batching, source-contract
+
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+
+fn expect_backend_batch_receipt(source: text):
+    # This is intentionally host-independent: it proves the retained encoder
+    # lifecycle and mandatory ordering boundaries. Exact pixels, registry ID,
+    # and device counters require a macOS Metal host.
+    expect(source).to_contain("pending_primitive_command: i64")
+    expect(source).to_contain("pending_primitive_encoder: i64")
+    expect(source).to_contain("me _flush_pending_primitives() -> bool:")
+    expect(source).to_contain("me _begin_pending_primitive_encoder() -> bool:")
+    expect(source).to_contain("me submit_batch() -> bool:\n        self._flush_pending_primitives()")
+    expect(source).to_contain("if not self._flush_pending_primitives():\n            return []")
+    expect(source).to_contain("# its framebuffer. The rest of this backend still owns ordinary")
+    expect(source).to_contain("metal_sffi_release_uncommitted_submission(\n                self.pending_primitive_command, encoder, 0)")
+    expect(source).to_contain("Metal primitive batch completion unknown")
+    expect(source).to_contain("Metal image blit commit failed")
+    expect(source).to_contain("Metal auxiliary image commit failed")
+
+describe "Metal backend primitive batching":
+
+    it "retains primitive encoding until one backend batch is submitted":
+        step("Submit one backend batch and read device pixels")
+        val source = file_read(
+            "src/lib/gc_async_mut/gpu/engine2d/backend_metal.spl")
+        expect_backend_batch_receipt(source)

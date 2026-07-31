@@ -34,6 +34,9 @@ pub fn engine2d_readback_with_identity(pixels: [u32], source: text, backend_hand
 
 enum ReadbackSource:
     """Where a readback's pixels physically came from."""
+    DeviceRegionReadback # copied only the requested rectangle from a device framebuffer
+    FullDeviceReadback   # copied a whole device framebuffer before host-side use
+    HostCrop             # cropped a host-side mirror or software framebuffer
     DeviceReadback  # copied back from a real GPU device framebuffer
     CpuMirror       # a CPU-side mirror / cached copy of a presented frame
     Software        # produced entirely by the software rasterizer
@@ -41,6 +44,9 @@ enum ReadbackSource:
 impl ReadbackSource:
     fn to_text() -> text:
         match self:
+            case DeviceRegionReadback: "device_region"
+            case FullDeviceReadback: "full_device"
+            case HostCrop: "host_crop"
             case DeviceReadback: "device_readback"
             case CpuMirror: "cpu_mirror"
             case Software: "software"
@@ -51,12 +57,60 @@ fn readback_source_label(src: ReadbackSource) -> text:
 
 fn readback_source_from_text(source: text) -> ReadbackSource:
     """Classify a free-text readback source into its typed variant."""
-    if source == "device_readback":
+    if source == "device_region":
+        ReadbackSource.DeviceRegionReadback
+    else if source == "full_device":
+        ReadbackSource.FullDeviceReadback
+    else if source == "host_crop":
+        ReadbackSource.HostCrop
+    else if source == "device_readback":
         ReadbackSource.DeviceReadback
     else if source == "cpu_mirror" or source == "cpu_fallback" or source == "host_cache_after_device_present" or source == "swapchain_present":
         ReadbackSource.CpuMirror
     else:
         ReadbackSource.Software
+
+# Region requests are deliberately typed at the facade boundary. Diagnostic
+# callers may recover by cropping a whole readback; strict presentation never
+# treats that recovery as a device-region read.
+pub enum RegionReadbackPolicy:
+    DiagnosticRecovery
+    RequireDeviceRegion
+
+pub fn engine2d_region_readback_is_device_region(readback: Engine2DReadback) -> bool:
+    readback_source_from_text(readback.source) == ReadbackSource.DeviceRegionReadback
+
+pub fn engine2d_readback_region_from_full(
+    full: Engine2DReadback, framebuffer_width: i32, framebuffer_height: i32,
+    x: i32, y: i32, width: i32, height: i32
+) -> Engine2DReadback:
+    if (framebuffer_width <= 0 or framebuffer_height <= 0 or width <= 0 or height <= 0 or
+        full.pixels.len() != framebuffer_width.to_i64() * framebuffer_height.to_i64()):
+        return engine2d_readback_with_identity(
+            [], full.source, full.backend_handle, full.device_identity)
+    var pixels: [u32] = []
+    var row = 0
+    while row < height:
+        var column = 0
+        while column < width:
+            val source_x = x + column
+            val source_y = y + row
+            if (source_x >= 0 and source_y >= 0 and
+                source_x < framebuffer_width and source_y < framebuffer_height):
+                pixels.push(full.pixels[source_y * framebuffer_width + source_x])
+            else:
+                pixels.push(0u32)
+            column = column + 1
+        row = row + 1
+    val source = if readback_source_from_text(full.source) == ReadbackSource.DeviceReadback:
+        readback_source_label(ReadbackSource.FullDeviceReadback)
+    else:
+        readback_source_label(ReadbackSource.HostCrop)
+    engine2d_readback_with_identity(
+        pixels, source, full.backend_handle, full.device_identity)
+
+pub fn engine2d_region_readback_required_failure() -> Engine2DReadback:
+    engine2d_readback([], "strict_device_region_required")
 
 trait RenderBackend:
     fn name() -> text

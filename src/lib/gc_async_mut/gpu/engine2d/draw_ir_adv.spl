@@ -25,7 +25,7 @@ use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_target.{
     DrawIrTargetFontEvidence
 }
-use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, engine2d_readback, engine2d_readback_with_identity}
+use std.gc_async_mut.gpu.engine2d.backend.{Engine2DReadback, RegionReadbackPolicy, engine2d_readback, engine2d_readback_with_identity}
 use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch}
 use std.gc_async_mut.gpu.engine2d.draw_ir_glass_material.{
     Engine2dGlassExecutionResult,
@@ -1541,24 +1541,14 @@ fn _engine2d_draw_ir_parent_region_pixels(
         row = row + 1
     region
 
-# D9: region-limited readback seam. No backend below exposes a device-side
-# region read yet (RenderBackend only has whole-framebuffer
-# read_pixels_with_source()), so this is the DEFAULT implementation: read the
-# full frame once, exactly as every call site already did, and crop on the
-# host with _engine2d_draw_ir_parent_region_pixels. Pixel-for-pixel identical
-# to a caller doing eng.read_pixels_with_source() then cropping itself by
-# hand -- see engine2d_read_pixels_region_equivalence_spec.spl -- so this
-# alone removes no work. What it buys: every "I only need this rect" call
-# site now asks a single seam for exactly its rect instead of the whole
-# framebuffer, so a future backend-specific region read (a real device-side
-# crop) can be dropped in behind this one function with no call-site changes.
+# D9: region-limited readback seam. Vulkan can now read an in-bounds region
+# directly from its device buffer. Other lanes retain the exact old full-frame
+# crop behavior, but the receipt records whether that was full-device or host
+# crop; strict presentation may reject either fallback at the facade boundary.
 fn _engine2d_read_pixels_region(engine: Engine2D, x: i32, y: i32, width: i32, height: i32) -> Engine2DReadback:
     var eng = engine
-    val full = eng.read_pixels_with_source()
-    val cropped = _engine2d_draw_ir_parent_region_pixels(
-        full, eng.width(), eng.height(), x, y, width, height)
-    engine2d_readback_with_identity(
-        cropped, full.source, full.backend_handle, full.device_identity)
+    eng.read_pixels_region_with_source(
+        x, y, width, height, RegionReadbackPolicy.DiagnosticRecovery)
 
 fn _engine2d_draw_ir_parent_material_padding(batch: DrawIrBatch) -> i32:
     var padding = 0
