@@ -37,22 +37,29 @@ describe "direct CUDA ProcessingIR native evidence contract":
         expect(wrapper).to_contain("elapsed_us=[1-9][0-9]*")
         expect(wrapper).to_contain("warm_improved=true")
 
-    it "requires same-session recovery after synchronized readback failure":
+    it "requires same-session recovery after deterministic CUDA failures":
         val source = file_read(PROBE)
         val wrapper = file_read(WRAPPER)
-        expect(source).to_contain("val recover = args.contains(\"--recover=readback\")")
-        expect(source).to_contain("env_set(\"SIMPLE_GPU_FAULT_INJECT\", \"cuda:readback\")")
-        expect(source).to_contain("failed.reason == \"cuda-readback-failed\" and failed.values.len() == 0")
+        expect(source).to_contain("val recover_readback = args.contains(\"--recover=readback\")")
+        expect(source).to_contain("val recover_submit = args.contains(\"--recover=submit\")")
+        expect(source).to_contain("val recover_mismatch = args.contains(\"--recover=mismatch\")")
+        expect(source).to_contain("\"submit\", \"cuda:submit\", \"cuda-submit-failed\"")
+        expect(source).to_contain("\"mismatch\", \"cuda:mismatch\", \"checksum-mismatch\"")
+        expect(source).to_contain("\"readback\", \"cuda:readback\", \"cuda-readback-failed\"")
+        expect(source).to_contain("failed.reason == expected_reason and failed.values.len() == 0")
         expect(source).to_contain("recovered.device_identity == before.device_identity")
         expect(source).to_contain("recovered.backend_handle == before.backend_handle")
         expect(source).to_contain("executor.shutdown()")
-        expect(wrapper).to_contain("recovery) PROBE_ARG=--recover=readback")
-        expect(wrapper).to_contain("PROCESSING_CUDA_RECOVERY status=pass phase=readback")
+        expect(wrapper).to_contain("recovery) RECOVERY_PHASE=readback; RECOVERY_REASON=cuda-readback-failed")
+        expect(wrapper).to_contain("RECOVERY_PHASE=\nRECOVERY_REASON=")
+        expect(wrapper).to_contain("recovery-submit) RECOVERY_PHASE=submit; RECOVERY_REASON=cuda-submit-failed")
+        expect(wrapper).to_contain("recovery-mismatch) RECOVERY_PHASE=mismatch; RECOVERY_REASON=checksum-mismatch")
+        expect(wrapper).to_contain("PROCESSING_CUDA_RECOVERY status=pass phase=$RECOVERY_PHASE")
         expect(wrapper).to_contain(
             "receipt_count=$(printf '%s\\n' \"$output\" | grep -Ec '^PROCESSING_CUDA_RECOVERY ' || true)")
         expect(wrapper).to_contain(
             "if [ \"$receipt_count\" -ne 1 ] || [ \"$valid\" -ne 1 ]; then")
-        expect(wrapper).to_contain("failed_reason=cuda-readback-failed failed_count=0 failed_handle=0 failed_identity=0")
+        expect(wrapper).to_contain("failed_reason=$RECOVERY_REASON failed_count=0 failed_handle=0 failed_identity=0")
         expect(wrapper).to_contain("recovered_count=64 recovered_checksum=1082179840 recovered_exact=true")
         expect(wrapper).to_contain("identity_stable=true cpu_fallback=false")
 

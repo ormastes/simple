@@ -35,9 +35,35 @@ Run same-process readback-failure recovery:
 
 ```sh
 PROCESSING_CUDA_FILL_MODE=recovery \
-PROCESSING_CUDA_FILL_PROBE_BIN=build/simpleos_gpu_host/cuda_fill_native/processing_cuda_fill_probe-recovery \
   sh scripts/check/check-processing-cuda-fill-native.shs
 ```
+
+Run same-process submit-failure recovery:
+
+```sh
+PROCESSING_CUDA_FILL_MODE=recovery-submit \
+  sh scripts/check/check-processing-cuda-fill-native.shs
+```
+
+Run same-process checksum-mismatch recovery:
+
+```sh
+PROCESSING_CUDA_FILL_MODE=recovery-mismatch \
+  sh scripts/check/check-processing-cuda-fill-native.shs
+```
+
+The recovery mode names and typed failure reasons are:
+
+| Mode | Injected phase | Required failure reason |
+| --- | --- | --- |
+| `recovery` | `readback` | `cuda-readback-failed` |
+| `recovery-submit` | `submit` | `cuda-submit-failed` |
+| `recovery-mismatch` | `mismatch` | `checksum-mismatch` |
+
+Each mode is a single-process sequence: an exact baseline call, one injected
+failure with empty output and zero provenance, then an exact recovery call on
+the same executor. The recovery call must preserve the positive backend handle
+and device identity from the baseline.
 
 ## Checks
 
@@ -52,9 +78,15 @@ PROCESSING_CUDA_FILL_PROBE_BIN=build/simpleos_gpu_host/cuda_fill_native/processi
    `rt_u32s_from_raw` conversion, not a per-element `push` loop.
 8. Warm mode requires the second exact device request to complete faster than
    the cold request through the same executor.
-9. Recovery mode requires exact baseline output, a post-sync
-   `cuda-readback-failed` result with empty output and zero provenance, then
-   exact output with the same positive handle and device identity.
+9. `recovery` requires exact baseline output, a post-sync `cuda-readback-failed`
+   result with empty output and zero provenance, then exact output with the
+   same positive handle and device identity.
+10. `recovery-submit` requires the typed `cuda-submit-failed` result with empty
+    output and zero provenance, then exact output with the same positive handle
+    and device identity.
+11. `recovery-mismatch` requires the typed `checksum-mismatch` result with
+    empty output and zero provenance, then exact output with the same positive
+    handle and device identity.
 
 ## Current Evidence
 
@@ -75,3 +107,8 @@ return 64 exact values with checksum `1082179840`, handle `1`, and device
 identity `1002905313239842438`; the injected synchronized readback failure
 returns `cuda-readback-failed`, zero values, zero handle, and zero identity.
 The same candidate also passes ordinary parity mode.
+
+The `recovery-submit` and `recovery-mismatch` modes are documented contract
+coverage for the corresponding typed fault paths. No execution evidence for
+those modes is recorded in this manual yet; they have not been run for this
+spec update.
