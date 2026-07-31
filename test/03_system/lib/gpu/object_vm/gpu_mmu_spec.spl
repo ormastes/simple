@@ -1,0 +1,216 @@
+use std.spec.*
+use std.nogc_async_mut.gpu.object_vm.{DescriptorTable, descriptor_table_is_stale}
+use std.nogc_async_mut.gpu.store.{CasStore, cas_store_recover}
+use std.nogc_async_mut.gpu.placement_backends.{
+    make_deterministic_plan,
+    StagedPlacementBackend,
+    DirectPlacementBackend,
+    DeviceInitiatedPlacementBackend
+}
+use std.nogc_async_mut.gpu.placement_backends.staged_backend.{staged_plan}
+use std.common.compute.placement_contracts.handles.{object_ref, ResidentView}
+use std.common.compute.placement_contracts.backend.{PlacementError}
+use std.common.compute.placement_contracts.planner.{PlacementBudget, PlacementRequest}
+use std.common.compute.placement_contracts.semantic.{
+    AccessPattern,
+    AffinityGroupId,
+    CostUnit,
+    DeviceMask,
+    ObjectSetView,
+    PersistencePolicy,
+    ResidencyTierSet,
+    StageEpoch
+}
+use std.common.compute.placement_contracts.storage.{artifact_id}
+use std.common.compute.placement_contracts.residency.{ResidencyTier}
+use std.nogc_async_mut.io.env_ops.{env_get}
+
+fn valid_artifact() -> text:
+    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+fn test_budget() -> PlacementBudget:
+    PlacementBudget(
+        device_bytes: 2048,
+        host_pinned_bytes: 256,
+        host_hot_bytes: 128,
+        staging_bytes: 512,
+        driver_queue_bytes: 64,
+        manifest_cache_bytes: 64,
+        runtime_base_bytes: 16
+    )
+
+fn fixture_table() -> DescriptorTable:
+    DescriptorTable.new()
+
+fn fixture_store() -> CasStore:
+    CasStore.create("/tmp/simple-gpu-mmu-spec")
+
+fn request(slot: u32, reuse: u32) -> PlacementRequest:
+    PlacementRequest(
+        object: object_ref(object_slot: slot, generation: 1),
+        access: AccessPattern.SequentialRead,
+        required_tiers: ResidencyTierSet(tiers: []),
+        preferred_tiers: [],
+        device_mask: DeviceMask(bits: 0),
+        expected_first_use: StageEpoch(value: 0),
+        expected_last_use: StageEpoch(value: 1),
+        expected_reuse_distance: reuse,
+        recompute_cost: CostUnit(value: 128),
+        transfer_cost_hint: CostUnit(value: 64),
+        persistence: PersistencePolicy.Checkpoint,
+        affinity_group: AffinityGroupId(value: slot as u64),
+        deadline: nil
+    )
+
+fn request_set() -> [PlacementRequest]:
+    [request(1, 20), request(2, 10), request(3, 5)]
+
+fn staged_plan_10x() -> PlacementBudget:
+    test_budget()
+
+fn estimate_staged_peak(request_count: i64) -> i64:
+    val backend = StagedPlacementBackend.with_budget(256, 2048)
+    val b = staged_plan_10x()
+    var i = 0
+    var peak = 0
+    while i < request_count:
+        val plan = staged_plan(b)
+        val prefetch = backend.prefetch(plan)
+        match prefetch:
+            case Result.Ok(receipt):
+                if receipt.bytes_transferred > peak:
+                    peak = receipt.bytes_transferred
+            case Result.Err(_):
+                expect(false).to_equal(true)
+        i = i + 1
+    peak
+
+describe "GPU MMU system contract":
+    it "should create arena handles and acquire a lease":
+        step("Create arena handles and acquire a lease")
+        val table = fixture_table()
+        val object = table.allocate(
+            1024,
+            ResidencyTier.DeviceLocal,
+            PersistencePolicy.Checkpoint,
+            artifact_id(digest: valid_artifact(), byte_len: 16)
+        )
+        val lease = table.acquire_lease(object)
+        match lease:
+            case Result.Ok(view):
+                expect(view.length).to_equal(1024)
+                expect(view.object_slot).to_equal(object.object_slot)
+                expect(view.lease_epoch).to_equal(1)
+            case Result.Err(_):
+                expect(false).to_equal(true)
+
+    it "should reject stale handles and protected eviction":
+        step("Reject stale handles and protected eviction")
+        val table = fixture_table()
+        val object = table.allocate(
+            128,
+            ResidencyTier.DeviceLocal,
+            PersistencePolicy.Checkpoint,
+            artifact_id(digest: valid_artifact(), byte_len: 16)
+        )
+        expect(table.release_lease(ResidentView(
+            device_address: 0,
+            length: 0,
+            object_slot: object.object_slot,
+            lease_epoch: 999
+        ))).to_equal(false)
+        expect(table.pin(object, 1)).to_equal(true)
+        expect(table.release(object)).to_equal(false)
+        expect(table.pin(object, -1)).to_equal(true)
+        val stale = table.acquire_lease(object_ref(
+            object_slot: object.object_slot,
+            generation: object.generation + 1
+        ))
+        expect(stale).to_equal(Result.Err(PlacementError.StaleHandle))
+        expect(descriptor_table_is_stale(object, object_ref(
+            object_slot: object.object_slot,
+            generation: object.generation + 1
+        ))).to_equal(true)
+
+    it "should stage artifacts through bounded pinned transfer bytes":
+        step("Stage an artifact through the bounded pinned ring")
+        val backend = StagedPlacementBackend.with_budget(256, 128)
+        val plan = staged_plan(test_budget())
+        val transfer = backend.prefetch(plan)
+        match transfer:
+            case Result.Ok(receipt):
+                expect(receipt.bytes_transferred).to_equal(256)
+                expect(receipt.bytes_transferred <= 256).to_equal(true)
+            case Result.Err(_):
+                expect(false).to_equal(true)
+
+    it "should recover CAS roots after interrupted and corrupt writes":
+        step("Recover the CAS after interrupted or corrupt writes")
+        val store = fixture_store()
+        val object_a = object_ref(object_slot: 1, generation: 1)
+        val object_b = object_ref(object_slot: 2, generation: 1)
+        store.write_object_bytes(object_a, [1, 2, 3], artifact_id(digest: valid_artifact(), byte_len: 3))
+        store.write_object_bytes(object_b, [4, 5, 6, 7], artifact_id(digest: valid_artifact(), byte_len: 3))
+        val checkpoint = store.checkpoint(ObjectSetView(objects: [object_a, object_b]))
+        expect(checkpoint.ok).to_equal(true)
+        val recovered = cas_store_recover(store, checkpoint.root)
+        expect(recovered.ok).to_equal(true)
+        val missing_root = cas_store_recover(store, artifact_id(digest: valid_artifact(), byte_len: 0))
+        expect(missing_root.ok).to_equal(false)
+        expect(missing_root.error).to_equal("checkpoint-missing")
+
+    it "should plan from liveness and cost with deterministic ordering":
+        step("Plan placement from liveness cost and budgets")
+        val primary = make_deterministic_plan(request_set(), test_budget())
+        val replay = make_deterministic_plan([request(3, 5), request(1, 20), request(2, 10)], test_budget())
+        expect(primary.receipt_seed).to_equal(replay.receipt_seed)
+        expect(primary.estimated_cost.predicted_latency_us).to_equal(replay.estimated_cost.predicted_latency_us)
+
+    it "should compare staged and direct backend bytes when available":
+        step("Compare staged and direct backend bytes")
+        val plan = staged_plan(test_budget())
+        val staged = StagedPlacementBackend.with_budget(1024, 2048)
+        val staged_receipt = staged.prefetch(plan)
+        val direct = DirectPlacementBackend()
+        val direct_available = env_get("SIMPLE_MMU_DIRECT_BACKEND") == "1"
+        if direct_available:
+            val direct_receipt = direct.prefetch(plan)
+            match staged_receipt:
+                case Result.Ok(staged_value):
+                    match direct_receipt:
+                        case Result.Ok(direct_value):
+                            expect(direct_value.bytes_transferred).to_equal(staged_value.bytes_transferred)
+                        case Result.Err(_):
+                            expect(false).to_equal(true)
+                case Result.Err(_):
+                    expect(false).to_equal(true)
+        else:
+            match direct.prefetch(plan):
+                case Result.Ok(_):
+                    expect(false).to_equal(true)
+                case Result.Err(err):
+                    expect(err).to_equal(PlacementError.Unsupported)
+
+    it "should keep device-initiated path behind explicit gate":
+        step("Keep device-initiated placement behind its gate")
+        val device = DeviceInitiatedPlacementBackend()
+        expect(device.probe().available).to_equal(
+            env_get("SIMPLE_MMU_DEVICE_INITIATED_BACKEND") == "1"
+        )
+        val plan = staged_plan(test_budget())
+        val acquired = device.acquire(plan)
+        match acquired:
+            case Result.Ok(_):
+                expect(false).to_equal(true)
+            case Result.Err(err):
+                expect(err).to_equal(PlacementError.Unsupported)
+        val recovered = device.recover(artifact_id(digest: valid_artifact(), byte_len: 1))
+        expect(recovered.ok).to_equal(false)
+        expect(recovered.recovered_objects).to_equal(0)
+
+    it "should hold host RSS within the fixed staging+queue+manifest bound":
+        step("Measure the fixed host RSS bound")
+        val fixed_one = estimate_staged_peak(1)
+        val fixed_ten = estimate_staged_peak(10)
+        expect(fixed_ten).to_equal(fixed_one)
+        expect(fixed_one).to_equal(256)

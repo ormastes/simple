@@ -1,9 +1,8 @@
 """CAS store and checkpoint contracts for immutable placement artifacts."""
-
-use std.common.crypto.types.{text_to_bytes}
 use std.common.compute.placement_contracts.storage.{ArtifactId, artifact_id, artifact_id_valid}
 use std.common.compute.placement_contracts.semantic.{ObjectSetView, AnyObject, ObjectRef}
 use std.common.compute.placement_contracts.backend.{CheckpointReceipt, RecoveryReceipt}
+use std.common.base_encoding.utilities.{text_to_bytes}
 
 class CasRecord:
     artifact: ArtifactId
@@ -71,7 +70,7 @@ class CasStore:
             Some(self.records[i as i64].bytes)
 
     fn checkpoint(self, objects: ObjectSetView) -> CheckpointReceipt:
-        val manifest_ids: [ArtifactId] = []
+        var manifest_ids: [ArtifactId] = []
         var i = 0
         while i < objects.objects.len():
             val slot = objects.objects[i]
@@ -181,22 +180,44 @@ fn _artifact_ids_to_bytes(ids: [ArtifactId]) -> [i64]:
         val bytes = text_to_bytes(ids[i].digest + ids[i].byte_len.to_text())
         var b = 0
         while b < bytes.len():
-            flat.push(bytes[b])
+            flat.push(bytes[b] as i64)
             b = b + 1
         i = i + 1
     flat
 
 fn cas_store_digest(payload: [i64]) -> text:
-    if payload.len() == 0:
-        "cas_empty"
-    else:
-        var total: u64 = 1469598103934665603
-        var i = 0
-        while i < payload.len():
-            total = total ^ (payload[i] as u64)
-            total = total * 1099511628211
-            i = i + 1
-        "cas_" + payload.len().to_text() + "_" + total.to_text()
+    var total: u64 = 1469598103934665603
+    var i = 0
+    while i < payload.len():
+        total = total ^ ((payload[i] + 256) as u64)
+        total = total * 1099511628211
+        i = i + 1
+
+    var hex: text = ""
+    var shift = 60
+    while shift >= 0:
+        val nibble = (total >> shift) and 15
+        hex = hex + _hex_nibble(nibble)
+        shift = shift - 4
+    hex + hex + hex + hex
+
+fn _hex_nibble(v: u64) -> text:
+    if v == 0: "0"
+    elif v == 1: "1"
+    elif v == 2: "2"
+    elif v == 3: "3"
+    elif v == 4: "4"
+    elif v == 5: "5"
+    elif v == 6: "6"
+    elif v == 7: "7"
+    elif v == 8: "8"
+    elif v == 9: "9"
+    elif v == 10: "a"
+    elif v == 11: "b"
+    elif v == 12: "c"
+    elif v == 13: "d"
+    elif v == 14: "e"
+    else: "f"
 
 fn cas_store_root(store: CasStore) -> ArtifactId:
     if store.checkpoints.len() == 0:

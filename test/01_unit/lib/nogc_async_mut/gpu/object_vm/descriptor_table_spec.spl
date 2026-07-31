@@ -1,0 +1,100 @@
+use std.spec.*
+use std.nogc_async_mut.gpu.object_vm.{DescriptorTable}
+use std.common.compute.placement_contracts.handles.{
+    object_ref,
+    ObjectRef,
+    ResidentView
+}
+use std.common.compute.placement_contracts.semantic.{AnyObject}
+use std.common.compute.placement_contracts.backend.{PlacementError}
+use std.common.compute.placement_contracts.storage.{artifact_id}
+use std.common.compute.placement_contracts.residency.{ResidencyTier}
+use std.common.compute.placement_contracts.semantic.{PersistencePolicy}
+
+fn valid_artifact() -> text:
+    "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+
+fn new_fixture() -> DescriptorTable:
+    DescriptorTable.new()
+
+fn allocate_object(table: DescriptorTable) -> ObjectRef<AnyObject>:
+    table.allocate(
+        1024,
+        ResidencyTier.DeviceLocal,
+        PersistencePolicy.Checkpoint,
+        artifact_id(digest: valid_artifact(), byte_len: 16)
+    )
+
+fn stale(object: ObjectRef<AnyObject>) -> ObjectRef<AnyObject>:
+    object_ref(object_slot: object.object_slot, generation: object.generation + 1)
+
+describe "GPU object descriptor table contract":
+    it "should allocate and acquire a lease with an increasing epoch":
+        val table = new_fixture()
+        val object = allocate_object(table)
+        val first = table.acquire_lease(object)
+        val second = table.acquire_lease(object)
+        match first:
+            case Result.Ok(lease1):
+                expect(lease1.lease_epoch).to_equal(1)
+                expect(lease1.object_slot).to_equal(object.object_slot)
+                match second:
+                    case Result.Ok(lease2):
+                        expect(lease2.lease_epoch).to_equal(2)
+                        expect(table.release_lease(lease1)).to_equal(false)
+                        expect(table.release_lease(lease2)).to_equal(true)
+                    case Result.Err(_):
+                        expect(false).to_equal(true)
+            case Result.Err(_):
+                expect(false).to_equal(true)
+
+    it "should reject stale object handles":
+        val table = new_fixture()
+        val object = allocate_object(table)
+        val bad_object = stale(object)
+        val stale_lease = table.acquire_lease(bad_object)
+        expect(stale_lease).to_equal(Result.Err(PlacementError.StaleHandle))
+        val descriptor = table.descriptor(object)
+        match descriptor:
+            case Some(desc):
+                expect(desc.object_slot).to_equal(object.object_slot)
+                expect(desc.generation).to_equal(object.generation)
+            case nil:
+                expect(false).to_equal(true)
+
+    it "should reject stale resident views on release":
+        val table = new_fixture()
+        val object = allocate_object(table)
+        val live = table.acquire_lease(object)
+        match live:
+            case Result.Ok(view):
+                val bad_epoch = ResidentView(
+                    device_address: view.device_address,
+                    length: view.length,
+                    object_slot: view.object_slot,
+                    lease_epoch: view.lease_epoch + 1
+                )
+                expect(table.release_lease(bad_epoch)).to_equal(false)
+                expect(table.release_lease(view)).to_equal(true)
+            case Result.Err(_):
+                expect(false).to_equal(true)
+
+    it "should block release while pinned or in-flight":
+        val table = new_fixture()
+        val object = allocate_object(table)
+        expect(table.pin(object, 1)).to_equal(true)
+        expect(table.release(object)).to_equal(false)
+        expect(table.pin(object, -1)).to_equal(true)
+        expect(table.touch(object, 1)).to_equal(true)
+        expect(table.release(object)).to_equal(false)
+        expect(table.touch(object, -1)).to_equal(true)
+        expect(table.release(object)).to_equal(true)
+
+    it "should reuse descriptor slots with generation advance":
+        val table = new_fixture()
+        val first = allocate_object(table)
+        val freed = table.release(first)
+        expect(freed).to_equal(true)
+        val second = allocate_object(table)
+        expect(second.object_slot).to_equal(first.object_slot)
+        expect(second.generation).to_equal(first.generation + 1)
