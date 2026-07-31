@@ -33,7 +33,7 @@ use std.common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES
 }
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer, BeRenderResult}
-use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode, normalize_dom_event_type}
 use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
     DomDocumentGeneration, DomNodeRoute, DomIdentityIndex,
     dom_identity_index_build
@@ -757,6 +757,17 @@ fn _browser_dom_same_callable(left: JsValue, right: JsValue) -> bool:
                 _: false
         _: false
 
+fn _browser_dom_route_key(route: DomNodeRoute) -> text:
+    route.generation.value.to_text() + ":" + route.node_id.to_text()
+
+fn _browser_dom_listener_bucket_key(
+    route: DomNodeRoute?, object_id: i64, event_type: text
+) -> text:
+    val target = match route:
+        Some(value): "r:" + _browser_dom_route_key(value)
+        nil: "o:" + object_id.to_text()
+    target + ":" + normalize_dom_event_type(event_type)
+
 class BrowserRuntimeState:
     runtime: JsRuntime
     window_id: i64
@@ -772,6 +783,8 @@ class BrowserRuntimeState:
     document_route: DomNodeRoute?
     dom_routes: [DomNodeRoute]
     dom_element_ids: [i64]
+    dom_route_index_by_object_id: Dict<text, i32>
+    dom_element_index_by_route: Dict<text, i32>
     dom_element_list_id: i64
     dom_style_ids: [i64]
     dom_id_snapshots: [text]
@@ -779,6 +792,7 @@ class BrowserRuntimeState:
     dom_value_snapshots: [text]
     dom_style_snapshots: [text]
     dom_callable_listeners: [BrowserDomCallableListener]
+    dom_listener_indices_by_target_event: Dict<text, [i32]>
     event_prevent_default_fn_id: i64
     event_stop_propagation_fn_id: i64
     event_stop_immediate_propagation_fn_id: i64
@@ -1100,6 +1114,8 @@ class BrowserRuntimeState:
             document_route: nil,
             dom_routes: [],
             dom_element_ids: [],
+            dom_route_index_by_object_id: {},
+            dom_element_index_by_route: {},
             dom_element_list_id: -1,
             dom_style_ids: [],
             dom_id_snapshots: [],
@@ -1107,6 +1123,7 @@ class BrowserRuntimeState:
             dom_value_snapshots: [],
             dom_style_snapshots: [],
             dom_callable_listeners: [],
+            dom_listener_indices_by_target_event: {},
             event_prevent_default_fn_id: event_prevent_default_fn_id,
             event_stop_propagation_fn_id: event_stop_propagation_fn_id,
             event_stop_immediate_propagation_fn_id:
@@ -1356,11 +1373,11 @@ impl BrowserRuntimeState:
     fn route_for_object_id(object_id: i64) -> DomNodeRoute?:
         if object_id == self.document_id:
             return self.document_route
-        var index = 0
-        while index < self.dom_element_ids.len():
-            if self.dom_element_ids[index] == object_id:
-                return Some(self.dom_routes[index])
-            index = index + 1
+        val index = self.dom_route_index_by_object_id.get(
+            object_id.to_text()
+        ) ?? -1
+        if index >= 0 and index < self.dom_routes.len():
+            return Some(self.dom_routes[index])
         nil
 
     fn object_id_for_route(route: DomNodeRoute) -> i64:
@@ -1370,29 +1387,105 @@ impl BrowserRuntimeState:
                 document_route.node_id == route.node_id
             ):
                 return self.document_id
-        var index = 0
-        while index < self.dom_routes.len():
-            val candidate = self.dom_routes[index]
-            if (
-                candidate.generation.value == route.generation.value and
-                candidate.node_id == route.node_id
-            ):
-                return self.dom_element_ids[index]
-            index = index + 1
+        val index = self.dom_element_index_by_route.get(
+            _browser_dom_route_key(route)
+        ) ?? -1
+        if index >= 0 and index < self.dom_element_ids.len():
+            return self.dom_element_ids[index]
         -1
+
+    fn listener_indices_for_target_event(
+        route: DomNodeRoute?, object_id: i64, event_type: text
+    ) -> [i32]:
+        self.dom_listener_indices_by_target_event.get(
+            _browser_dom_listener_bucket_key(route, object_id, event_type)
+        ) ?? []
+
+    me rebuild_listener_buckets():
+        var buckets: Dict<text, [i32]> = {}
+        var index = 0
+        while index < self.dom_callable_listeners.len():
+            val listener = self.dom_callable_listeners[index]
+            if listener.event_type != "":
+                val key = _browser_dom_listener_bucket_key(
+                    listener.target_route, listener.target_object_id,
+                    listener.event_type
+                )
+                var indices = buckets.get(key) ?? []
+                indices.push(index)
+                buckets[key] = indices
+            index = index + 1
+        self.dom_listener_indices_by_target_event = buckets
 
     me _bind_event_target(runtime: JsRuntime, object_id: i64) -> JsRuntime:
         var next = runtime
-        next._define_method_on(
-            object_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD
+        next.set_host_property(
+            object_id, "addEventListener",
+            next.get_host_property(self.document_id, "addEventListener")
         )
-        next._define_method_on(
-            object_id, "removeEventListener", NATIVE_DOM_EVENT_TARGET_REMOVE
+        next.set_host_property(
+            object_id, "removeEventListener",
+            next.get_host_property(self.document_id, "removeEventListener")
         )
-        next._define_method_on(
-            object_id, "dispatchEvent", NATIVE_DOM_EVENT_TARGET_DISPATCH
+        next.set_host_property(
+            object_id, "dispatchEvent",
+            next.get_host_property(self.document_id, "dispatchEvent")
         )
         next
+
+    me _retire_dom_objects():
+        var retired: Dict<text, bool> = {}
+        for object_id in self.dom_element_ids:
+            if object_id != self.body_id:
+                retired[object_id.to_text()] = true
+        for style_id in self.dom_style_ids:
+            retired[style_id.to_text()] = true
+        if self.dom_element_list_id >= 0:
+            retired[self.dom_element_list_id.to_text()] = true
+        var runtime = self.runtime
+        var interpreter = runtime.interpreter
+        for object_id in interpreter.host_dom_element_ids:
+            if object_id != self.body_id:
+                retired[object_id.to_text()] = true
+        for style_id in interpreter.host_dom_style_ids:
+            retired[style_id.to_text()] = true
+        if interpreter.host_dom_element_list_id >= 0:
+            retired[interpreter.host_dom_element_list_id.to_text()] = true
+        var store = interpreter.object_store
+        var object_ids: [i64] = []
+        var keys: [text] = []
+        var values: [JsValue] = []
+        var ref_tags: [text] = []
+        var ref_ids: [text] = []
+        var enumerables: [bool] = []
+        var configurables: [bool] = []
+        var index = 0
+        while index < store.prop_obj_ids.len():
+            if not (retired.get(store.prop_obj_ids[index].to_text()) ?? false):
+                object_ids.push(store.prop_obj_ids[index])
+                keys.push(store.prop_keys[index])
+                values.push(store.prop_values[index])
+                ref_tags.push(store.prop_ref_tags[index])
+                ref_ids.push(store.prop_ref_ids[index])
+                enumerables.push(store.prop_enumerables[index])
+                configurables.push(store.prop_configurables[index])
+            index = index + 1
+        store.prop_obj_ids = object_ids
+        store.prop_keys = keys
+        store.prop_values = values
+        store.prop_ref_tags = ref_tags
+        store.prop_ref_ids = ref_ids
+        store.prop_enumerables = enumerables
+        store.prop_configurables = configurables
+        interpreter.object_store = store
+        interpreter.pending_host_event_ops = []
+        interpreter.pending_host_event_target_ids = []
+        interpreter.pending_host_event_types = []
+        interpreter.pending_host_event_callbacks = []
+        interpreter.pending_host_event_captures = []
+        interpreter.pending_host_event_once_flags = []
+        runtime.interpreter = interpreter
+        self.runtime = runtime
 
     me drain_dom_callable_listener_ops() -> bool:
         var runtime = self.runtime
@@ -1410,31 +1503,25 @@ impl BrowserRuntimeState:
             val once = interpreter.pending_host_event_once_flags[op_index]
             var matching = -1
             var tombstone = -1
-            var listener_index = 0
-            while listener_index < self.dom_callable_listeners.len():
+            val target_bucket = self.listener_indices_for_target_event(
+                target_route, target_id, event_type
+            )
+            for listener_index in target_bucket:
                 val listener = self.dom_callable_listeners[listener_index]
-                var same_target = false
-                if val Some(route) = target_route:
-                    if val Some(listener_route) = listener.target_route:
-                        same_target = (
-                            listener_route.generation.value ==
-                                route.generation.value and
-                            listener_route.node_id == route.node_id
-                        )
-                elif listener.target_route == nil:
-                    same_target = listener.target_object_id == target_id
                 if (
                     listener.event_type == event_type and
-                    same_target and
                     _browser_dom_same_callable(
                         listener.callback, callback
                     ) and
                     listener.capture == capture
                 ):
                     matching = listener_index
-                if tombstone < 0 and listener.event_type == "":
-                    tombstone = listener_index
-                listener_index = listener_index + 1
+            var tombstone_index = 0
+            while tombstone_index < self.dom_callable_listeners.len():
+                if self.dom_callable_listeners[tombstone_index].event_type == "":
+                    tombstone = tombstone_index
+                    break
+                tombstone_index = tombstone_index + 1
             if operation == "remove" and matching >= 0:
                 self.dom_callable_listeners[matching].event_type = ""
                 self.dom_callable_listeners[matching].callback = JsValue.Undefined
@@ -1463,6 +1550,8 @@ impl BrowserRuntimeState:
         interpreter.pending_host_event_once_flags = []
         runtime.interpreter = interpreter
         self.runtime = runtime
+        if changed:
+            self.rebuild_listener_buckets()
         changed
 
     me _bind_dom_node(
@@ -1529,9 +1618,129 @@ impl BrowserRuntimeState:
         self.dom_style_snapshots.push(
             _browser_dom_style_snapshot(runtime, style_id)
         )
+        val route_index = self.dom_routes.len() - 1
+        self.dom_route_index_by_object_id[element_id.to_text()] = route_index
+        self.dom_element_index_by_route[
+            _browser_dom_route_key(self.dom_routes[route_index])
+        ] = route_index
 
         for child in node.children:
             self._bind_dom_node(child, element_list_id, generation)
+
+    me _refresh_dom_node(
+        node: BeDomNode, element_list_id: i64,
+        generation: DomDocumentGeneration,
+        old_element_index_by_route: Dict<text, i32>,
+        old_element_ids: [i64], old_style_ids: [i64],
+        old_style_snapshots: [text]
+    ) -> bool:
+        if node.tag_name == "#document":
+            for child in node.children:
+                if not self._refresh_dom_node(
+                    child, element_list_id, generation,
+                    old_element_index_by_route, old_element_ids,
+                    old_style_ids, old_style_snapshots
+                ):
+                    return false
+            return true
+        if node.tag_name == "#text":
+            return true
+        val route = DomNodeRoute(
+            generation: generation, node_id: node.node_id
+        )
+        val old_index = old_element_index_by_route.get(
+            _browser_dom_route_key(route)
+        ) ?? -1
+        if (
+            old_index < 0 or old_index >= old_element_ids.len() or
+            old_index >= old_style_ids.len()
+        ):
+            return false
+        val element_id = old_element_ids[old_index]
+        val style_id = old_style_ids[old_index]
+        var runtime = self._bind_event_target(self.runtime, element_id)
+        val style_text = be_dom_get_attr(node, "style")
+        if old_index < old_style_snapshots.len():
+            for declaration in old_style_snapshots[old_index].split(";"):
+                val separator = declaration.index_of(":")
+                if separator > 0:
+                    val property_name = declaration.substring(
+                        0, separator
+                    ).trim()
+                    if property_name != "":
+                        runtime.set_host_property(
+                            style_id,
+                            _browser_dom_css_js_name(property_name),
+                            JsValue.String(v: "")
+                        )
+        runtime.set_host_property(
+            style_id, "cssText", JsValue.String(v: style_text)
+        )
+        for declaration in style_text.split(";"):
+            val separator = declaration.index_of(":")
+            if separator > 0:
+                val property_name = declaration.substring(0, separator).trim()
+                val property_value = declaration.substring(
+                    separator + 1, declaration.len()
+                ).trim()
+                if property_name != "" and property_value != "":
+                    runtime.set_host_property(
+                        style_id, _browser_dom_css_js_name(property_name),
+                        JsValue.String(v: property_value)
+                    )
+        val author_id = be_dom_get_attr(node, "id")
+        val class_name = be_dom_get_attr(node, "class")
+        val value = be_dom_get_attr(node, "value")
+        runtime.set_host_property(
+            element_id, "style", JsValue.Object(id: style_id)
+        )
+        runtime.set_host_property(
+            element_id, "tagName", JsValue.String(v: node.tag_name.upper())
+        )
+        runtime.set_host_property(
+            element_id, "id", JsValue.String(v: author_id)
+        )
+        runtime.set_host_property(
+            element_id, "className", JsValue.String(v: class_name)
+        )
+        runtime.set_host_property(
+            element_id, "value", JsValue.String(v: value)
+        )
+        runtime.set_host_property(
+            element_id, "textContent",
+            JsValue.String(v: be_dom_get_text_content(node))
+        )
+        runtime.set_host_property(
+            element_id, "innerHTML",
+            JsValue.String(v: be_dom_serialize_children(node))
+        )
+        val element_index = self.dom_element_ids.len()
+        runtime.set_host_property(
+            element_list_id, element_index.to_text(),
+            JsValue.Object(id: element_id)
+        )
+        self.runtime = runtime
+        self.dom_routes.push(route)
+        self.dom_element_ids.push(element_id)
+        self.dom_style_ids.push(style_id)
+        self.dom_id_snapshots.push(author_id)
+        self.dom_class_snapshots.push(class_name)
+        self.dom_value_snapshots.push(value)
+        self.dom_style_snapshots.push(
+            _browser_dom_style_snapshot(runtime, style_id)
+        )
+        self.dom_route_index_by_object_id[element_id.to_text()] = element_index
+        self.dom_element_index_by_route[
+            _browser_dom_route_key(route)
+        ] = element_index
+        for child in node.children:
+            if not self._refresh_dom_node(
+                child, element_list_id, generation,
+                old_element_index_by_route, old_element_ids,
+                old_style_ids, old_style_snapshots
+            ):
+                return false
+        true
 
     me install_document_state(
         root: BeDomNode, generation: DomDocumentGeneration,
@@ -1543,12 +1752,24 @@ impl BrowserRuntimeState:
         var replaces_document = true
         if val Some(current) = self.dom_generation:
             replaces_document = current.value != generation.value
-        self.dom_generation = Some(generation)
-        self.document_route = Some(DomNodeRoute(
+        val root_route = DomNodeRoute(
             generation: generation, node_id: root.node_id
-        ))
+        )
+        if not index.contains_route(root_route):
+            return false
+        val old_element_index_by_route = self.dom_element_index_by_route
+        val old_element_ids = self.dom_element_ids
+        val old_style_ids = self.dom_style_ids
+        val old_style_snapshots = self.dom_style_snapshots
+        val old_element_list_id = self.dom_element_list_id
+        if replaces_document:
+            self._retire_dom_objects()
+        self.dom_generation = Some(generation)
+        self.document_route = Some(root_route)
         self.dom_routes = []
         self.dom_element_ids = []
+        self.dom_route_index_by_object_id = {}
+        self.dom_element_index_by_route = {}
         self.dom_style_ids = []
         self.dom_id_snapshots = []
         self.dom_class_snapshots = []
@@ -1556,12 +1777,25 @@ impl BrowserRuntimeState:
         self.dom_style_snapshots = []
         if replaces_document:
             self.dom_callable_listeners = []
+            self.dom_listener_indices_by_target_event = {}
 
         var runtime = self.runtime
-        val element_list_id = runtime.create_host_object()
+        val element_list_id = if replaces_document:
+            runtime.create_host_object()
+        else:
+            old_element_list_id
+        if element_list_id < 0:
+            return false
         self.dom_element_list_id = element_list_id
         self.runtime = runtime
-        self._bind_dom_node(root, element_list_id, generation)
+        if replaces_document:
+            self._bind_dom_node(root, element_list_id, generation)
+        elif not self._refresh_dom_node(
+            root, element_list_id, generation,
+            old_element_index_by_route, old_element_ids, old_style_ids,
+            old_style_snapshots
+        ):
+            return false
         runtime = self.runtime
         runtime.set_host_property(
             element_list_id, "length",
@@ -1571,9 +1805,11 @@ impl BrowserRuntimeState:
             self.document_id, "__simple_elements",
             JsValue.Array(id: element_list_id)
         )
-        val _ = runtime.eval(
-            "function __simple_dom_matches(el, selector) { if (el === null || el === undefined || selector === '') { return false; } var first = selector.slice(0, 1); if (first === '#') { return el.id === selector.slice(1); } if (first === '.') { return (' ' + el.className + ' ').indexOf(' ' + selector.slice(1) + ' ') >= 0; } return el.tagName.toLowerCase() === selector.toLowerCase(); } function __simple_css_key(name) { name = String(name); if (name.slice(0, 2) === '--') { return name; } var out = ''; var upper = false; for (var i = 0; i < name.length; i = i + 1) { var ch = name.slice(i, i + 1); if (ch === '-') { upper = true; } else { out = out + (upper ? ch.toUpperCase() : ch); upper = false; } } return out; } document.getElementById = function(id) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (all[i].id === String(id)) { return all[i]; } } return null; }; document.querySelector = function(selector) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { return all[i]; } } return null; }; document.querySelectorAll = function(selector) { var all = document.__simple_elements; var out = []; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { out.push(all[i]); } } return out; }; function __simple_dom_install(el) { el.style.setProperty = function(name, value) { this[__simple_css_key(name)] = String(value); }; el.style.getPropertyValue = function(name) { var value = this[__simple_css_key(name)]; return value === undefined || value === null ? '' : String(value); }; el.style.removeProperty = function(name) { var key = __simple_css_key(name); var old = this.getPropertyValue(name); this[key] = ''; return old; }; } for (var __simple_i = 0; __simple_i < document.__simple_elements.length; __simple_i = __simple_i + 1) { __simple_dom_install(document.__simple_elements[__simple_i]); }"
-        )
+        if replaces_document:
+            if val Err(_) = runtime.eval(
+                "function __simple_dom_matches(el, selector) { if (el === null || el === undefined || selector === '') { return false; } var first = selector.slice(0, 1); if (first === '#') { return el.id === selector.slice(1); } if (first === '.') { return (' ' + el.className + ' ').indexOf(' ' + selector.slice(1) + ' ') >= 0; } return el.tagName.toLowerCase() === selector.toLowerCase(); } function __simple_css_key(name) { name = String(name); if (name.slice(0, 2) === '--') { return name; } var out = ''; var upper = false; for (var i = 0; i < name.length; i = i + 1) { var ch = name.slice(i, i + 1); if (ch === '-') { upper = true; } else { out = out + (upper ? ch.toUpperCase() : ch); upper = false; } } return out; } document.getElementById = function(id) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (all[i].id === String(id)) { return all[i]; } } return null; }; document.querySelector = function(selector) { var all = document.__simple_elements; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { return all[i]; } } return null; }; document.querySelectorAll = function(selector) { var all = document.__simple_elements; var out = []; for (var i = 0; i < all.length; i = i + 1) { if (__simple_dom_matches(all[i], String(selector))) { out.push(all[i]); } } return out; }; function __simple_dom_install(el) { el.style.setProperty = function(name, value) { this[__simple_css_key(name)] = String(value); }; el.style.getPropertyValue = function(name) { var value = this[__simple_css_key(name)]; return value === undefined || value === null ? '' : String(value); }; el.style.removeProperty = function(name) { var key = __simple_css_key(name); var old = this.getPropertyValue(name); this[key] = ''; return old; }; } for (var __simple_i = 0; __simple_i < document.__simple_elements.length; __simple_i = __simple_i + 1) { __simple_dom_install(document.__simple_elements[__simple_i]); }"
+            ):
+                return false
         var interpreter = runtime.interpreter
         interpreter.host_dom_element_list_id = self.dom_element_list_id
         interpreter.host_dom_element_ids = self.dom_element_ids
@@ -1881,6 +2117,9 @@ class BrowserSession:
     broker_network_policy: bool
     pending_script_cookie_writes: [text]
     script_cookie_write_overflow: bool
+    dom_dispatch_depth: i32
+    dom_dispatch_budget_remaining: i32
+    label_activation_depth: i32
 
     static fn new() -> BrowserSession:
         BrowserSession._create(true)
@@ -1889,7 +2128,9 @@ class BrowserSession:
         BrowserSession._create(false)
 
     static fn _create(runtime_enabled: bool) -> BrowserSession:
-        val initial_dom = BeDomNode.document()
+        val initial_dom = form_capture_defaults(html_tree_builder_build(
+            blank_page_html()
+        ))
         val initial_generation = DomDocumentGeneration.create(1).unwrap()
         val initial_index = dom_identity_index_build(
             initial_dom, initial_generation
@@ -1968,7 +2209,10 @@ class BrowserSession:
             hsts_policies: [],
             broker_network_policy: false,
             pending_script_cookie_writes: [],
-            script_cookie_write_overflow: false
+            script_cookie_write_overflow: false,
+            dom_dispatch_depth: 0,
+            dom_dispatch_budget_remaining: 0,
+            label_activation_depth: 0
         )
 
 impl BrowserSession:

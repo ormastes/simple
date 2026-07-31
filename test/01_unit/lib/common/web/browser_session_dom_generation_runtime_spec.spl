@@ -1,0 +1,108 @@
+use std.spec.*
+
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_by_tag, be_dom_get_attr, be_dom_get_text_content
+}
+
+describe "BrowserSession generation-qualified runtime publication":
+
+    it "keeps startup, structural handlers, labels, and nested budgets bounded":
+        step("Build the canonical empty document and identity index")
+        var session = BrowserSession.new()
+        val initial_index = match session.current_dom_identity_index():
+            Some(value): value
+            nil: fail("Expected a canonical about:blank identity index")
+        match initial_index.route_for_layout_target_key("path:"):
+            Ok(body_route): expect(body_route.node_id).to_be_greater_than(0)
+            Err(error): fail("Expected canonical body route: " + error)
+
+        step("Publish set-text as a new generation with valid child identities")
+        session.open_html(
+            "https://example.test/generation",
+            "<html><body><button id='target' " +
+            "onclick='set-text:changed'>change</button></body></html>"
+        ).unwrap()
+        val before_generation = session.document_generation()
+        val before_index = session.current_dom_identity_index().unwrap()
+        val target_route = before_index.route_for_author_id("target").unwrap()
+        session.dispatch_dom_event_route(
+            target_route, "click", true, true
+        ).unwrap()
+        expect(session.document_generation().value).to_be_greater_than(
+            before_generation.value
+        )
+        val buttons = be_dom_find_by_tag(session.dom_root(), "button")
+        expect(buttons.len()).to_equal(1)
+        expect(be_dom_get_text_content(buttons[0])).to_equal("changed")
+        expect(buttons[0].children[0].node_id).to_be_greater_than(0)
+
+        step("Rollback a rejected document candidate atomically")
+        val stable_generation = session.document_generation()
+        val stable_text = be_dom_get_text_content(session.dom_root())
+        match session.publish_dom_snapshot(BeDomNode.document(), true, nil):
+            Ok(_): fail("Invalid node identity must not publish")
+            Err(error): expect(error).to_equal("invalid_node_id")
+        expect(session.document_generation().value).to_equal(
+            stable_generation.value
+        )
+        expect(be_dom_get_text_content(session.dom_root())).to_equal(
+            stable_text
+        )
+
+        step("Forward uncanceled label activation and preserve nested budget")
+        session.open_html(
+            "https://example.test/label",
+            "<html><body><label id='label' for='choice'>Choice</label>" +
+            "<input id='choice' type='checkbox'></body></html>"
+        ).unwrap()
+        val label_index = session.current_dom_identity_index().unwrap()
+        val label_route = label_index.route_for_author_id("label").unwrap()
+        session.dom_dispatch_depth = 1
+        session.dom_dispatch_budget_remaining = 1
+        match session.dispatch_dom_event_route(
+            label_route, "click", true, true
+        ):
+            Ok(_): fail("Nested dispatch must not reset its shared budget")
+            Err(error): expect(error).to_equal(
+                "DOM event dispatch budget exceeded"
+            )
+        session.dom_dispatch_depth = 0
+        session.dom_dispatch_budget_remaining = 0
+        session.dispatch_dom_event_route(
+            label_route, "click", true, true
+        ).unwrap()
+        val inputs = be_dom_find_by_tag(session.dom_root(), "input")
+        expect(be_dom_get_attr(inputs[0], "checked")).to_equal("checked")
+
+        step("Honor cancellation and interactive-descendant suppression")
+        var canceled = BrowserSession.new()
+        canceled.open_html(
+            "https://example.test/label-canceled",
+            "<html><body><label id='label' for='choice' " +
+            "onclick='prevent-default'>Choice</label>" +
+            "<input id='choice' type='checkbox'></body></html>"
+        ).unwrap()
+        val canceled_index = canceled.current_dom_identity_index().unwrap()
+        canceled.dispatch_dom_event_route(
+            canceled_index.route_for_author_id("label").unwrap(),
+            "click", true, true
+        ).unwrap()
+        val canceled_inputs = be_dom_find_by_tag(canceled.dom_root(), "input")
+        expect(be_dom_get_attr(canceled_inputs[0], "checked")).to_equal("")
+
+        var nested = BrowserSession.new()
+        nested.open_html(
+            "https://example.test/label-interactive",
+            "<html><body><label for='choice'><a id='link' href='/next'>" +
+            "link</a></label><input id='choice' type='checkbox'></body></html>"
+        ).unwrap()
+        val nested_index = nested.current_dom_identity_index().unwrap()
+        nested.dispatch_dom_event_route(
+            nested_index.route_for_author_id("link").unwrap(),
+            "click", true, true
+        ).unwrap()
+        val nested_inputs = be_dom_find_by_tag(nested.dom_root(), "input")
+        expect(be_dom_get_attr(nested_inputs[0], "checked")).to_equal("")
