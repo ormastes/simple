@@ -56,6 +56,13 @@ fn _iframe_has_placeholder(composition: DrawIrComposition) -> bool:
                 return true
     false
 
+fn _iframe_opacity_batch_count(composition: DrawIrComposition) -> i32:
+    var count = 0
+    for batch in composition.batches:
+        if batch.embedding.surface_id.starts_with("html-opacity-"):
+            count = count + 1
+    count
+
 describe "Simple Web iframe srcdoc through DrawIR":
 
     it "keeps iframe embedding canonical and fail closed":
@@ -117,6 +124,16 @@ describe "Simple Web iframe srcdoc through DrawIR":
         expect(_iframe_has_placeholder(
             simple_web_layout_render_html_draw_ir_result(fractional, 40, 30).composition
         )).to_equal(true)
+        val fractional_overlap = "<html><body style='margin:0;background-color:#ffffff'><div style='position:relative;width:40px;height:30px;opacity:0.5'><div style='position:absolute;left:0;top:0;width:40px;height:30px;background-color:#000000'></div><iframe width='40' height='30' style='position:absolute;left:0;top:0' srcdoc=\"&lt;body style='margin:0;background-color:#22c55e'&gt;&lt;/body&gt;\"></iframe><div style='position:absolute;left:30px;top:0;width:10px;height:30px;background-color:#ef4444'></div></div></body></html>"
+        val fractional_result = simple_web_layout_render_html_draw_ir_result(
+            fractional_overlap, 40, 30
+        )
+        expect(_iframe_opacity_batch_count(fractional_result.composition)).to_equal(1)
+        val fractional_pixels = _iframe_pixels(fractional_result, 40, 30)
+        # #888 at opacity 0.5 over white is #c3c3c3. A separately composited
+        # placeholder would blend a second time and fail this exact pixel.
+        expect(fractional_pixels[10 + 10 * 40]).to_equal(0xFFC3C3C3u32)
+        expect(fractional_pixels[35 + 10 * 40]).to_equal(0xFFF7A1A1u32)
 
         step("Retire legacy iframe pixel blitting after parity")
         expect(_iframe_has_image_or_material_or_hit(basic.composition)).to_equal(false)

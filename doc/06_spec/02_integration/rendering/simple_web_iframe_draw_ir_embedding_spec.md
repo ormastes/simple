@@ -13,7 +13,9 @@ available. The legacy iframe pixel path remains the parity oracle.
    white.
 3. **Bound nested iframe work and fail closed** — confirms a 40x30 nested
    orange child, the grey depth placeholder, and a structural grey placeholder
-   for a fractional-opacity ancestor.
+   for a fractional-opacity ancestor. The overlapping pre/placeholder/post
+   fractional fixture keeps all three in one opacity batch and checks exact
+   `#c3c3c3` placeholder and `#f7a1a1` post pixels, rejecting a second blend.
 4. **Retire legacy iframe pixel blitting after parity** — asserts no child
    image/material/hit authority even with inert child script, external image,
    and input markup. An authored child red/green vertical pair
