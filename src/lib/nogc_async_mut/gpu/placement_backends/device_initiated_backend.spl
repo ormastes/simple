@@ -22,61 +22,92 @@ class DeviceInitiatedPlacementBackend:
 
 impl PlacementBackend for DeviceInitiatedPlacementBackend:
     fn probe() -> PlacementCapabilities:
+        val enabled = _device_initiated_enabled()
         PlacementCapabilities(
             backend: BackendId(value: "device_initiated"),
-            available: true,
+            available: enabled,
             production: false,
             supported_tiers: [],
-            device_mask: DeviceMask(value: 0),
-            reason: "experimental path gated"
+            device_mask: DeviceMask(bits: 0),
+            reason: if enabled:
+                "experimental device-initiated backend enabled"
+            else:
+                "experimental device-initiated backend disabled"
         )
 
     fn plan(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
+        val slot = requests.object.object_slot
         PlacementPlan(
-            reservations: request_ref(8),
-            transfers: request_ref(9),
-            evictions: request_ref(10),
-            prefetches: request_ref(11),
-            leases: request_ref(12),
+            reservations: request_ref(slot % 16),
+            transfers: request_ref((slot + 1) % 16),
+            evictions: request_ref((slot + 2) % 16),
+            prefetches: request_ref((slot + 3) % 16),
+            leases: request_ref((slot + 4) % 16),
             estimated_cost: budget_to_cost_estimate(budget),
             receipt_seed: Hash256(value: "device_initiated_seed")
         )
 
     fn acquire(plan: PlacementPlan) -> Result<LeaseSet, PlacementError>:
-        Err(PlacementError.Unsupported)
+        if _device_initiated_enabled():
+            # Explicitly fail closed until the path is wired to runtime support.
+            Err(PlacementError.Unsupported)
+        else:
+            Err(PlacementError.Unsupported)
 
     fn prefetch(plan: PlacementPlan) -> Result<TransferReceipt, PlacementError>:
         Err(PlacementError.Unsupported)
 
     fn checkpoint(objects: ObjectSetView) -> CheckpointReceipt:
-        CheckpointReceipt(
-            ok: true,
-            root: artifact_id(digest: "", byte_len: 0),
-            object_count: objects.objects.len() as i64,
-            bytes_written: 0,
-            error: ""
-        )
+        if not _device_initiated_enabled():
+            CheckpointReceipt(
+                ok: false,
+                root: artifact_id(digest: "", byte_len: 0),
+                object_count: objects.objects.len() as i64,
+                bytes_written: 0,
+                error: "device-initiated-disabled"
+            )
+        else:
+            CheckpointReceipt(
+                ok: false,
+                root: artifact_id(digest: "0", byte_len: objects.objects.len() as i64),
+                object_count: objects.objects.len() as i64,
+                bytes_written: objects.objects.len() as i64,
+                error: "device-initiated-unsupported"
+            )
 
     fn release(leases: LeaseSet):
-        pass
+        var i = 0
+        while i < leases.leases.len():
+            i = i + 1
 
     fn recover(root: ArtifactId) -> RecoveryReceipt:
-        RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "not-enabled")
+        if _device_initiated_enabled():
+            RecoveryReceipt(
+                ok: false,
+                root: root,
+                recovered_objects: 0,
+                error: "device-initiated-unsupported"
+            )
+        else:
+            RecoveryReceipt(ok: false, root: root, recovered_objects: 0, error: "device-initiated-disabled")
 
 fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
     object_ref(object_slot: slot, generation: 1)
+
+fn _device_initiated_enabled() -> bool:
+    false
 
 fn budget_to_cost_estimate(budget: PlacementBudget) -> CostEstimate:
     CostEstimate(
         cpu_work: 0,
         simd_work: 0,
-        gpu_work: 0,
-        host_to_device_bytes: 0,
-        device_to_host_bytes: 0,
-        ssd_read_bytes: 0,
-        ssd_write_bytes: 0,
+        gpu_work: if budget.device_bytes > 0: budget.device_bytes else: 0,
+        host_to_device_bytes: if budget.device_bytes > 0: budget.device_bytes else: 0,
+        device_to_host_bytes: if budget.host_pinned_bytes > 0: budget.host_pinned_bytes else: 0,
+        ssd_read_bytes: if budget.host_hot_bytes > 0: budget.host_hot_bytes else: 0,
+        ssd_write_bytes: if budget.staging_bytes > 0: budget.staging_bytes else: 0,
         synchronization_points: 0,
-        predicted_latency_us: 0,
+        predicted_latency_us: if budget.runtime_base_bytes > 0: budget.runtime_base_bytes else: 0,
         confidence_milli: 0
     )
 
