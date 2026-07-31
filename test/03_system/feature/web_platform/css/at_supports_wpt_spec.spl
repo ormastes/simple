@@ -230,6 +230,177 @@ describe "Production CSS @supports conditions":
     # @manual: show
     # @capture(html)
     # @capture(artifact)
+    it "should distinguish unsupported conditions from malformed grammar":
+        val html = (
+            "<style>html,body{margin:0;background:#fff}" +
+            "div{width:12px;height:8px}" +
+            "#malformed{background:#16a34a}" +
+            "#mixed{background:#ea580c}" +
+            "#property{background:#dc2626}" +
+            "#selector-valid{background:#dc2626}" +
+            "#general{background:#dc2626}" +
+            "@supports not garbage{#malformed{background:#9333ea}}" +
+            "@supports (display:flex) or garbage{" +
+            "#malformed{background:#9333ea}}" +
+            "@supports garbage or (display:flex){" +
+            "#malformed{background:#9333ea}}" +
+            "@supports (display:flex) and (width:12px) or " +
+            "(position:fixed){#mixed{background:#9333ea}}" +
+            "@supports not (future-property:value){" +
+            "#property{background:#2563eb}}" +
+            "@supports not selector(div:popover-open){" +
+            "#selector-valid{background:#0e7490}}" +
+            "@supports not future(foo){#general{background:#7c3aed}}" +
+            "</style><div id='malformed'></div><div id='mixed'></div>" +
+            "<div id='property'></div><div id='selector-valid'></div>" +
+            "<div id='general'></div>"
+        )
+        val inspected = simple_web_layout_render_html_draw_ir_result(
+            html, WIDTH, HEIGHT
+        )
+        val malformed_node = _supports_node_index(
+            inspected.hit_index.nodes, "malformed"
+        )
+        val mixed_node = _supports_node_index(
+            inspected.hit_index.nodes, "mixed"
+        )
+        val property_node = _supports_node_index(
+            inspected.hit_index.nodes, "property"
+        )
+        val selector_valid_node = _supports_node_index(
+            inspected.hit_index.nodes, "selector-valid"
+        )
+        val general_node = _supports_node_index(
+            inspected.hit_index.nodes, "general"
+        )
+        for node_index in [
+            malformed_node, mixed_node, property_node,
+            selector_valid_node, general_node
+        ]:
+            if (
+                node_index < 0 or
+                node_index >= inspected.hit_index.styles.len()
+            ):
+                fail("missing supports-validity semantic node")
+
+        step("Reject malformed grammar while inverting valid unsupported forms")
+        expect(eval_supports_query("not garbage")).to_be(false)
+        expect(eval_supports_query(
+            "(display:flex) or garbage"
+        )).to_be(false)
+        expect(eval_supports_query(
+            "garbage or (display:flex)"
+        )).to_be(false)
+        expect(eval_supports_query(
+            "(display:flex) and garbage"
+        )).to_be(false)
+        expect(eval_supports_query(
+            "garbage and (display:flex)"
+        )).to_be(false)
+        expect(eval_supports_query(
+            "(display:flex) and (width:12px) or (position:fixed)"
+        )).to_be(false)
+        expect(eval_supports_query(
+            "not selector(div >)"
+        )).to_be(false)
+        expect(eval_supports_query(
+            "not (future-property:value)"
+        )).to_be(true)
+        expect(eval_supports_query(
+            "not selector(div:popover-open)"
+        )).to_be(true)
+        expect(eval_supports_query("not future(foo)")).to_be(true)
+        expect(eval_supports_query(
+            "(display:flex) and (width:12px)"
+        )).to_be(true)
+        expect(eval_supports_query(
+            "(display:invalid) or (position:fixed)"
+        )).to_be(true)
+
+        step("Apply only valid condition winners in Web semantics")
+        expect(inspected.hit_index.styles[malformed_node].bg).to_equal(
+            0xFF16A34Au32
+        )
+        expect(inspected.hit_index.styles[mixed_node].bg).to_equal(
+            0xFFEA580Cu32
+        )
+        expect(inspected.hit_index.styles[property_node].bg).to_equal(
+            0xFF2563EBu32
+        )
+        expect(inspected.hit_index.styles[selector_valid_node].bg).to_equal(
+            0xFF0E7490u32
+        )
+        expect(inspected.hit_index.styles[general_node].bg).to_equal(
+            0xFF7C3AEDu32
+        )
+
+        step("Preserve validity-aware cascade results in canonical Draw IR")
+        val composition = inspected.composition
+        if composition.batches.len() == 0:
+            fail("missing supports-validity Draw IR batch")
+        val commands = composition.batches[0].commands
+        val malformed = commands[_supports_command_index(
+            commands, "malformed"
+        )]
+        val mixed = commands[_supports_command_index(commands, "mixed")]
+        val property = commands[_supports_command_index(
+            commands, "property"
+        )]
+        val selector_valid = commands[_supports_command_index(
+            commands, "selector-valid"
+        )]
+        val general = commands[_supports_command_index(commands, "general")]
+        expect(_supports_style(
+            malformed, "background-color"
+        )).to_equal("4279673674")
+        expect(_supports_style(
+            mixed, "background-color"
+        )).to_equal("4293548044")
+        expect(_supports_style(
+            property, "background-color"
+        )).to_equal("4280640491")
+        expect(_supports_style(
+            selector_valid, "background-color"
+        )).to_equal("4279137424")
+        expect(_supports_style(
+            general, "background-color"
+        )).to_equal("4286331629")
+
+        step("Read exact validity-aware pixels through both production paths")
+        val raster = Engine2dCompositorBackend.create_named(
+            WIDTH, HEIGHT, "software"
+        )
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels.len()).to_equal(WIDTH * HEIGHT)
+        val engine_pixels = rendered.pixels
+        val compatibility_pixels = BrowserRenderer.create(
+            WIDTH, HEIGHT
+        ).render_html_to_pixels(html).pixel_data
+        expect(_supports_pixel_at(
+            engine_pixels, WIDTH, 2, 2
+        )).to_equal(0xFF16A34Au32)
+        expect(_supports_pixel_at(
+            engine_pixels, WIDTH, 2, 10
+        )).to_equal(0xFFEA580Cu32)
+        expect(_supports_pixel_at(
+            engine_pixels, WIDTH, 2, 18
+        )).to_equal(0xFF2563EBu32)
+        expect(_supports_pixel_at(
+            engine_pixels, WIDTH, 2, 26
+        )).to_equal(0xFF0E7490u32)
+        expect(_supports_pixel_at(
+            engine_pixels, WIDTH, 2, 34
+        )).to_equal(0xFF7C3AEDu32)
+        expect(_supports_count_color(
+            engine_pixels, 0xFF9333EAu32
+        )).to_equal(0)
+        expect(compatibility_pixels).to_equal(engine_pixels)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
     it "should admit depth thirty-two and reject deeper malformed chains":
         val admitted = _nested_supports_condition(31)
         val rejected = _nested_supports_condition(32)
