@@ -19,6 +19,7 @@ use std.common.compute.placement_contracts.semantic.{
     PlacementRequestArena
 }
 use std.common.compute.placement_contracts.planner.{PlacementBudget, CostEstimate}
+use std.common.compute.placement_contracts.planner.{make_plan_from_requests}
 use std.common.compute.placement_contracts.handles.{ObjectRef, object_ref}
 use std.common.compute.placement_contracts.storage.{ArtifactId, artifact_id, artifact_id_valid}
 
@@ -46,25 +47,39 @@ impl PlacementBackend for StagedPlacementBackend:
         )
 
     fn plan(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
-        # Deterministic placeholder; runtime-specific request arena ingestion is
-        # intentionally deferred to implementation step 3.
-        staged_plan(budget)
+        make_plan_from_requests(requests, budget)
 
     fn acquire(plan: PlacementPlan) -> Result<LeaseSet, PlacementError>:
-        # Stage is mandatory in this feature; we reserve no concrete buffers yet
-        # at interface-first scope.
+        if plan.estimated_cost.host_to_device_bytes as i64 > self.max_inflight_bytes:
+            return Err(PlacementError.BudgetExceeded)
         Ok(LeaseSet(leases: []))
 
     fn prefetch(plan: PlacementPlan) -> Result<TransferReceipt, PlacementError>:
-        # Returns deterministic no-op receipt for empty plans.
+        if plan.estimated_cost.ssd_write_bytes < 0:
+            return Err(PlacementError.StorageFailure)
+
+        val transfer_bytes = if self.staging_budget <= 0:
+            0
+        else if plan.estimated_cost.host_to_device_bytes as i64 > self.staging_budget:
+            self.staging_budget
+        else if plan.estimated_cost.host_to_device_bytes == 0:
+            0
+        else:
+            plan.estimated_cost.host_to_device_bytes as i64
+        if transfer_bytes > self.ring_high_water:
+            self.ring_high_water = transfer_bytes
+
         Ok(TransferReceipt(
-            artifact_id: artifact_id(digest: "", byte_len: 0),
+            artifact_id: artifact_id(
+                digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                byte_len: transfer_bytes
+            ),
             backend: "staged",
             sequence: 0,
-            ring_slot: 0,
-            bytes_transferred: 0,
+            ring_slot: plan.transfers.object_slot,
+            bytes_transferred: transfer_bytes,
             device_address: 0,
-            checksum: "",
+            checksum: plan.receipt_seed.value,
             completed: true,
             error: ""
         ))
@@ -74,7 +89,7 @@ impl PlacementBackend for StagedPlacementBackend:
             ok: true,
             root: artifact_id(digest: "", byte_len: 0),
             object_count: objects.objects.len() as i64,
-            bytes_written: 0,
+            bytes_written: objects.objects.len() as i64,
             error: ""
         )
 

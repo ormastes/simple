@@ -14,11 +14,13 @@ use std.common.compute.placement_contracts.backend.{
 use std.common.compute.placement_contracts.semantic.{BackendId, ObjectSetView, DeviceMask}
 use std.common.compute.placement_contracts.storage.{ArtifactId, artifact_id}
 use std.common.compute.placement_contracts.planner.{PlacementBudget, CostEstimate}
+use std.common.compute.placement_contracts.planner.{make_plan_from_requests}
 use std.common.compute.placement_contracts.handles.{ObjectRef, object_ref}
 use std.common.compute.placement_contracts.semantic.{PlacementRequestArena, Hash256}
+use std.nogc_async_mut.io.env_ops.{env_get}
 
 class DeviceInitiatedPlacementBackend:
-    pass_dn
+    pass
 
 impl PlacementBackend for DeviceInitiatedPlacementBackend:
     fn probe() -> PlacementCapabilities:
@@ -36,16 +38,7 @@ impl PlacementBackend for DeviceInitiatedPlacementBackend:
         )
 
     fn plan(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
-        val slot = requests.object.object_slot
-        PlacementPlan(
-            reservations: request_ref(slot % 16),
-            transfers: request_ref((slot + 1) % 16),
-            evictions: request_ref((slot + 2) % 16),
-            prefetches: request_ref((slot + 3) % 16),
-            leases: request_ref((slot + 4) % 16),
-            estimated_cost: budget_to_cost_estimate(budget),
-            receipt_seed: Hash256(value: "device_initiated_seed")
-        )
+        make_plan_from_requests(requests, budget)
 
     fn acquire(plan: PlacementPlan) -> Result<LeaseSet, PlacementError>:
         if _device_initiated_enabled():
@@ -95,7 +88,7 @@ fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
     object_ref(object_slot: slot, generation: 1)
 
 fn _device_initiated_enabled() -> bool:
-    false
+    env_get("SIMPLE_MMU_DEVICE_INITIATED_BACKEND") == "1"
 
 fn budget_to_cost_estimate(budget: PlacementBudget) -> CostEstimate:
     CostEstimate(

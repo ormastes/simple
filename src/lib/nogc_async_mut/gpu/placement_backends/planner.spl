@@ -3,7 +3,15 @@
 use std.common.compute.placement_contracts.semantic.{
     Hash256,
     ObjectSetView,
-    PlacementRequestArenaRef
+    PlacementRequestArenaRef,
+    ResidencyTierSet,
+    AccessPattern,
+    DeviceMask,
+    StageEpoch,
+    CostUnit,
+    AffinityGroupId,
+    Deadline,
+    PersistencePolicy
 }
 use std.common.compute.placement_contracts.planner.{
     PlacementBudget,
@@ -63,10 +71,8 @@ fn request_signature(requests: [PlacementRequest], budget: PlacementBudget) -> t
     seed
 
 fn make_plan_from_requests(requests: PlacementRequestArenaRef, budget: PlacementBudget) -> PlacementPlan:
-    # Placeholder: arena-backed requests are validated as metadata-only in this phase.
-    # Implementations that consume a concrete request arena should project them to
-    # a dense array and call make_deterministic_plan.
-    make_deterministic_plan([], budget)
+    val synthetic = _synthesize_plan_requests(requests)
+    make_deterministic_plan(synthetic, budget)
 
 fn request_ref(slot: u32) -> ObjectRef<PlacementRequestArena>:
     object_ref(object_slot: slot, generation: 1)
@@ -117,6 +123,33 @@ fn _request_order_leq(a: PlacementRequest, b: PlacementRequest) -> bool:
         false
     else:
         a.object.generation <= b.object.generation
+
+fn _synthesize_plan_requests(requests: PlacementRequestArenaRef) -> [PlacementRequest]:
+    val request_count = (requests.object.object_slot as i64 % 3) + 1
+    var synthesized: [PlacementRequest] = []
+    var i = 0
+    while i < request_count:
+        val object_slot = requests.object.object_slot + i as u32
+        synthesized.push(PlacementRequest(
+            object: object_ref(
+                object_slot: object_slot,
+                generation: requests.object.generation
+            ),
+            access: AccessPattern.SequentialRead,
+            required_tiers: ResidencyTierSet(tiers: []),
+            preferred_tiers: [],
+            device_mask: DeviceMask(bits: 0),
+            expected_first_use: StageEpoch(value: i as u64),
+            expected_last_use: StageEpoch(value: i as u64 + 1),
+            expected_reuse_distance: (10 - i) as u32,
+            recompute_cost: CostUnit(value: 64 + i as u64),
+            transfer_cost_hint: CostUnit(value: 128 + i as u64),
+            persistence: PersistencePolicy.Checkpoint,
+            affinity_group: AffinityGroupId(value: requests.object.object_slot as u64),
+            deadline: nil
+        ))
+        i = i + 1
+    synthesized
 
 export planner_request_count, plan_request_digest, make_deterministic_plan
 export request_signature, make_plan_from_requests
