@@ -2552,7 +2552,8 @@ impl BrowserSession:
         self.active_load = nil
         self.pending_content_security_policy = ""
         self._cancel_runtime_fetches("navigation-canceled")
-        self._flush_runtime_side_effects_and_pump_history()
+        if val Err(_) = self._flush_runtime_side_effects_and_pump_history():
+            return
 
     me open_html(url: text, html: text) -> Result<bool, text>:
         self.begin_navigation(url)
@@ -2605,7 +2606,7 @@ impl BrowserSession:
         request.csp_policy = form_action_policy
         request.csp_document_url = form_action_document_url
         self.pending_requests.push(request)
-        self._flush_runtime_side_effects_and_pump_history()
+        self._flush_runtime_side_effects_and_pump_history()?
         Ok(true)
 
     me begin_network_reload() -> Result<bool, text>:
@@ -2618,7 +2619,7 @@ impl BrowserSession:
             "document", normalized, entry.request_method, "",
             entry.request_body, entry.request_content_type
         ))
-        self._flush_runtime_side_effects_and_pump_history()
+        self._flush_runtime_side_effects_and_pump_history()?
         Ok(true)
 
     me reload_target_url() -> Result<text, text>:
@@ -2772,7 +2773,8 @@ impl BrowserSession:
             runtime.interpreter = interpreter
             state.runtime = runtime
             self.runtime_state = Some(state)
-            self._flush_runtime_side_effects_and_pump_history()
+            if val Err(_) = self._flush_runtime_side_effects_and_pump_history():
+                return
 
     me _cancel_runtime_fetches(error: text):
         if val Some(state) = self.runtime_state:
@@ -2996,7 +2998,28 @@ impl BrowserSession:
         Ok(true)
 
     me _flush_runtime_side_effects_and_pump_history() -> Result<bool, text>:
-        self._flush_runtime_side_effects()?
+        # Preserve state changed while draining before _sync_from_runtime owns
+        # the metadata/DOM transaction. eval_script rolls back one step farther.
+        val previous_runtime_state = self.runtime_state
+        val previous_pending_requests = self.pending_requests
+        val previous_pending_request_head = self.pending_request_head
+        val previous_inflight_requests = self.inflight_requests
+        val previous_next_request_seq = self.next_request_seq
+        val previous_warnings = self.warnings
+        val previous_cookies = self.cookies
+        val previous_cookie_overflow = self.script_cookie_write_overflow
+        val previous_pending_cookie_writes = self.pending_script_cookie_writes
+        if val Err(error) = self._flush_runtime_side_effects():
+            self.runtime_state = previous_runtime_state
+            self.pending_requests = previous_pending_requests
+            self.pending_request_head = previous_pending_request_head
+            self.inflight_requests = previous_inflight_requests
+            self.next_request_seq = previous_next_request_seq
+            self.warnings = previous_warnings
+            self.cookies = previous_cookies
+            self.script_cookie_write_overflow = previous_cookie_overflow
+            self.pending_script_cookie_writes = previous_pending_cookie_writes
+            return Err(error)
         self._pump_pending_history_traversal()
         Ok(true)
 
@@ -3519,7 +3542,7 @@ impl BrowserSession:
                 runtime.interpreter = interpreter
                 state.runtime = runtime
                 self.runtime_state = Some(state)
-                self._flush_runtime_side_effects_and_pump_history()
+                self._flush_runtime_side_effects_and_pump_history()?
             if response.error != "":
                 return Err(response.error)
             return Ok(true)

@@ -1417,6 +1417,9 @@ impl BrowserSession:
             val previous_pending_history_delta = (
                 self.pending_history_traversal_delta
             )
+            val previous_pending_cookie_writes = (
+                self.pending_script_cookie_writes
+            )
             var runtime = state.runtime
             val result = runtime.eval(script)
             state.runtime = runtime
@@ -1431,6 +1434,9 @@ impl BrowserSession:
                 self.warnings = previous_warnings
                 self.pending_history_traversal_delta = (
                     previous_pending_history_delta
+                )
+                self.pending_script_cookie_writes = (
+                    previous_pending_cookie_writes
                 )
                 return Err(error)
             match result:
@@ -1455,7 +1461,11 @@ impl BrowserSession:
             state.runtime = runtime
             self.runtime_state = Some(state)
             if js_ran > 0:
-                self._flush_runtime_side_effects_and_pump_history()
+                val flushed = (
+                    self._flush_runtime_side_effects_and_pump_history()
+                )
+                if val Err(_) = flushed:
+                    return 0
             ran = ran + js_ran
         val simple_callbacks = self.simple_script_executor.tick(
             self.monotonic_time_ms * 1000
@@ -1945,7 +1955,7 @@ impl BrowserSession:
                 dispatch_budget_exhausted = (
                     executor.error == "DOM event dispatch budget exceeded"
                 )
-            self._flush_runtime_side_effects_and_pump_history()
+            self._flush_runtime_side_effects_and_pump_history()?
             if self.dom_generation.value != dispatch_generation.value:
                 return Ok(dispatch)
 
@@ -3001,6 +3011,7 @@ impl BrowserSession:
         val previous_local_storage_by_origin = self.local_storage_by_origin
         val previous_cookies = self.cookies
         val previous_cookie_overflow = self.script_cookie_write_overflow
+        val previous_pending_cookie_writes = self.pending_script_cookie_writes
         val previous_body_html = self.current_body_html
         var title_val = state.runtime.interpreter.host_document_title_value
         if strict_equals(title_val, JsValue.Undefined):
@@ -3372,6 +3383,9 @@ impl BrowserSession:
                 self.local_storage_by_origin = previous_local_storage_by_origin
                 self.cookies = previous_cookies
                 self.script_cookie_write_overflow = previous_cookie_overflow
+                self.pending_script_cookie_writes = (
+                    previous_pending_cookie_writes
+                )
                 self.current_body_html = previous_body_html
                 return Err(error)
             self.current_body_html = candidate_body_html
