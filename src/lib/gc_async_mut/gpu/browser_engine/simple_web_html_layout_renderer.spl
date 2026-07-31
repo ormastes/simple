@@ -151,6 +151,10 @@ class _SimpleWebAnimationFrameIndex:
     keyframes_by_name: Dict<text, i32>
     instances_by_target: Dict<text, i32>
 
+class _SimpleWebAnimationApplyResult:
+    styles: [Style]
+    property_work_count: i64
+
 class _SimpleWebAnimationSchedule:
     animation_end_ms: i64
     animation_next_ms: i64
@@ -256,10 +260,11 @@ pub fn simple_web_layout_hit_test_target_at_time_with_animations(
                 styles, nodes, child_index, registry, animation_instances,
                 false
             )
-            styles = _apply_css_animations(
+            val animation_apply = _apply_css_animations(
                 nodes, styles, registry, animation_time_ms,
                 animation_instances, frame_index
             )
+            styles = animation_apply.styles
     val node_count = nodes.len() as i32
     val boxes = layout(
         nodes, styles, child_index, 0, 0, 0, width, height,
@@ -304,6 +309,7 @@ class SimpleWebLayoutDrawIrResult:
     material_witness: SimpleWebLayoutMaterialWitness
     animation_end_ms: i64
     animation_next_ms: i64
+    animation_property_work_count: i64
     hit_index: SimpleWebLayoutHitIndex
     resolved_input_view_start_byte: i64
     resolved_scroll_y: i32
@@ -999,10 +1005,13 @@ fn _apply_css_animations(
     animation_time_ms: i64,
     animation_instances: [BrowserCssAnimationInstance],
     frame_index: _SimpleWebAnimationFrameIndex
-) -> [Style]:
+) -> _SimpleWebAnimationApplyResult:
     if registry.entries.len() == 0:
-        return styles
+        return _SimpleWebAnimationApplyResult(
+            styles: styles, property_work_count: 0
+        )
     var animated = styles
+    var property_work_count: i64 = 0
     var style_index = 0
     while style_index < animated.len():
         val st = animated[style_index]
@@ -1040,13 +1049,17 @@ fn _apply_css_animations(
                 ):
                     val entry = registry.entries[keyframe_index]
                     var underlying: [CSSDeclaration] = []
+                    var underlying_by_property: Dict<text, bool> = {}
                     for keyframe in entry.frames:
                         for declaration in keyframe.properties:
-                            var known = false
-                            for base in underlying:
-                                if base.property == declaration.property:
-                                    known = true
+                            property_work_count = property_work_count + 1
+                            val known = (
+                                underlying_by_property.get(
+                                    declaration.property
+                                ) ?? false
+                            )
                             if not known:
+                                underlying_by_property[declaration.property] = true
                                 if val Some(value) = _animation_computed_value(
                                     st, declaration.property
                                 ):
@@ -1057,20 +1070,22 @@ fn _apply_css_animations(
                         style_index.to_i64(), entry.frames, progress,
                         underlying
                     )
-                    var declarations = ""
+                    var declaration_fragments: [text] = []
                     for update in updates:
-                        if declarations.len() > 0:
-                            declarations = declarations + ";"
-                        declarations = (
-                            declarations + update.property + ":" +
+                        declaration_fragments.push(
+                            update.property + ":" +
                             animation_css_value_text(update.value)
                         )
+                    val declarations = declaration_fragments.join(";")
                     if declarations.len() > 0:
                         animated[style_index] = apply_decls(
                             st, declarations, st.font_size
                         )
         style_index = style_index + 1
-    simple_web_enforce_details_visibility(nodes, animated)
+    _SimpleWebAnimationApplyResult(
+        styles: simple_web_enforce_details_visibility(nodes, animated),
+        property_work_count: property_work_count
+    )
 
 fn _simple_web_css_animation_instance_next_ms(
     instance: BrowserCssAnimationInstance, current_time_ms: i64
@@ -1323,6 +1338,7 @@ fn _simple_web_layout_compose_retained(
     raw_boxes: LayoutResult,
     animation_registry: KeyframeRegistry,
     animation_schedule: _SimpleWebAnimationSchedule,
+    animation_property_work_count: i64,
     material_entries: [text],
     material_counts: [i64],
     cpu_material_nodes: [i32],
@@ -1482,6 +1498,7 @@ fn _simple_web_layout_compose_retained(
         material_witness: material_witness,
         animation_end_ms: animation_schedule.animation_end_ms,
         animation_next_ms: animation_schedule.animation_next_ms,
+        animation_property_work_count: animation_property_work_count,
         hit_index: SimpleWebLayoutHitIndex(
             nodes: nodes,
             styles: styles,
@@ -1610,6 +1627,7 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
         animation_end_ms: -1,
         animation_next_ms: -1
     )
+    var animation_property_work_count: i64 = 0
     if animation_registry.entries.len() > 0:
         val animation_frame_index = _simple_web_animation_frame_index(
             styles, nodes, child_index, animation_registry,
@@ -1620,9 +1638,13 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
             animation_frame_index
         )
         if animation_time_ms >= 0:
-            styles = _apply_css_animations(
+            val animation_apply = _apply_css_animations(
                 nodes, styles, animation_registry, animation_time_ms,
                 animation_instances, animation_frame_index
+            )
+            styles = animation_apply.styles
+            animation_property_work_count = (
+                animation_apply.property_work_count
             )
     styles = simple_web_resolve_collapsed_table_borders(
         nodes, child_index, styles
@@ -1652,7 +1674,7 @@ fn _simple_web_layout_render_html_draw_ir_result_at_time(
         print "[web-phase] phase=layout elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
     val _phase_composed = _simple_web_layout_compose_retained(
         html, nodes, rules, child_index, base_styles, styles, raw_boxes,
-        animation_registry, animation_schedule,
+        animation_registry, animation_schedule, animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, vector_fonts, scroll_y,
         overlay, images
@@ -1725,6 +1747,10 @@ pub fn simple_web_layout_rerender_retained(
         animation_end_ms: prior.animation_end_ms,
         animation_next_ms: prior.animation_next_ms
     )
+    # This diagnostic is frame-local. Retained paint-only frames do not apply
+    # animation declarations and therefore must not inherit a prior frame's
+    # work count.
+    var animation_property_work_count: i64 = 0
     if dirty_stage != "paint" and prior.animation_registry.entries.len() > 0:
         val animation_frame_index = _simple_web_animation_frame_index(
             styles, nodes, child_index, prior.animation_registry,
@@ -1735,9 +1761,13 @@ pub fn simple_web_layout_rerender_retained(
             animation_frame_index
         )
         if animation_time_ms >= 0:
-            styles = _apply_css_animations(
+            val animation_apply = _apply_css_animations(
                 nodes, styles, prior.animation_registry, animation_time_ms,
                 animation_instances, animation_frame_index
+            )
+            styles = animation_apply.styles
+            animation_property_work_count = (
+                animation_apply.property_work_count
             )
     if dirty_stage != "paint":
         styles = simple_web_resolve_collapsed_table_borders(
@@ -1757,6 +1787,7 @@ pub fn simple_web_layout_rerender_retained(
     _simple_web_layout_compose_retained(
         prior.document_html, nodes, rules, child_index, base_styles, styles,
         raw_boxes, prior.animation_registry, animation_schedule,
+        animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, true, scroll_y, overlay, images
     )

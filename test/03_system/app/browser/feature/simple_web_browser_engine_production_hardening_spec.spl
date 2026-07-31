@@ -486,6 +486,109 @@ fn _expect_bounded_serialization_draw_ir(
     expect(commands[bounded_index].height).to_equal(16)
     expect(commands[bounded_index].color).to_equal(0xFF123456u32)
 
+fn _animation_hot_path_fixture(properties: i32) -> text:
+    if properties != 16 and properties != 32:
+        fail("animation hot-path fixture requires 16 or 32 properties")
+    val names = [
+        "width", "height", "min-width", "max-width",
+        "min-height", "max-height", "top", "right",
+        "bottom", "left", "margin-top", "margin-right",
+        "margin-bottom", "margin-left", "padding-top", "padding-right",
+        "padding-bottom", "padding-left", "border-top-width",
+        "border-right-width", "border-bottom-width", "border-left-width",
+        "border-top-left-radius", "border-top-right-radius",
+        "border-bottom-right-radius", "border-bottom-left-radius", "color",
+        "background-color", "border-top-color", "border-right-color",
+        "border-bottom-color", "border-left-color"
+    ]
+    val from_values = [
+        "16px", "16px", "0px", "64px", "0px", "64px", "0px", "0px",
+        "0px", "0px", "0px", "0px", "0px", "0px", "0px", "0px",
+        "0px", "0px", "0px", "0px", "0px", "0px", "0px", "0px",
+        "0px", "0px", "#111111", "#222222", "#333333", "#444444",
+        "#555555", "#666666"
+    ]
+    val to_values = [
+        "17px", "17px", "1px", "63px", "1px", "63px", "1px", "1px",
+        "1px", "1px", "1px", "1px", "1px", "1px", "1px", "1px",
+        "1px", "1px", "1px", "1px", "1px", "1px", "1px", "1px",
+        "1px", "1px", "#777777", "#888888", "#999999", "#aaaaaa",
+        "#bbbbbb", "#cccccc"
+    ]
+    var from_fragments: [text] = []
+    var to_fragments: [text] = []
+    var property_index = 0
+    while property_index < properties:
+        from_fragments.push(
+            names[property_index] + ":" + from_values[property_index]
+        )
+        to_fragments.push(
+            names[property_index] + ":" + to_values[property_index]
+        )
+        property_index = property_index + 1
+    (
+        "<html style='margin:0'><head><style>html,body{margin:0}" +
+        "#bounded{width:16px;height:16px;background-color:#123456}" +
+        "#hot,#event{display:none}#hot{animation:HotPath 100ms linear " +
+        "infinite}@keyframes HotPath{from{" + from_fragments.join(";") +
+        "}to{" + to_fragments.join(";") + "}}</style></head>" +
+        "<body style='margin:0'><main id='bounded'></main>" +
+        "<div id='hot'></div><button id='event' onclick=\"document.title=" +
+        "'event-" + properties.to_text() + "'\">event</button></body></html>"
+    )
+
+fn _animation_hot_path_old_comparisons(properties: i32) -> i64:
+    val count = properties.to_i64()
+    count * (count - 1) / 2 + count * count
+
+fn _expect_animation_hot_path_frame(
+    worker: HostedBrowserRendererWorkerSession
+) -> i64:
+    val result = worker.render_session.current_result.unwrap()
+    _expect_bounded_serialization_draw_ir(result.composition)
+    val raster = Engine2dCompositorBackend.create_named(64, 48, "software")
+    val rendered = raster.render_draw_ir_composition(result.composition, [])
+    raster.shutdown()
+    expect(rendered.rendered_command_count).to_be_greater_than(0)
+    expect(rendered.skipped_command_count).to_equal(0)
+    expect(rendered.pixels.len()).to_equal(64 * 48)
+    var checksum: i64 = 0
+    var bounded_pixels = 0
+    var white_pixels = 0
+    var mismatched_pixels = 0
+    var y = 0
+    while y < 48:
+        var x = 0
+        while x < 64:
+            val expected = if x < 16 and y < 16:
+                0xFF123456u32
+            else:
+                0xFFFFFFFFu32
+            val pixel = rendered.pixels[y * 64 + x]
+            checksum = checksum + pixel.to_i64()
+            if pixel == 0xFF123456u32:
+                bounded_pixels = bounded_pixels + 1
+            if pixel == 0xFFFFFFFFu32:
+                white_pixels = white_pixels + 1
+            if pixel != expected:
+                mismatched_pixels = mismatched_pixels + 1
+            x = x + 1
+        y = y + 1
+    expect(bounded_pixels).to_equal(16 * 16)
+    expect(white_pixels).to_equal((64 * 48) - (16 * 16))
+    expect(mismatched_pixels).to_equal(0)
+    expect(checksum).to_equal(
+        (0xFF123456u32).to_i64() * (16 * 16) +
+        (0xFFFFFFFFu32).to_i64() * ((64 * 48) - (16 * 16))
+    )
+    checksum
+
+fn _current_animation_property_work(
+    worker: HostedBrowserRendererWorkerSession
+) -> i64:
+    val result = worker.render_session.current_result.unwrap()
+    result.animation_property_work_count
+
 fn _await_browser_animation(
     renderer: HostedBrowserRendererProcess
 ) -> HostedBrowserRendererResult?:
@@ -1437,6 +1540,7 @@ describe "Production Simple browser user flow":
         expect(style_worker.handle(BrowserRendererMessage(
             kind: "advance", generation: 7, request_id: 3, payload: "16"
         )).ok).to_be(true)
+        expect(_current_animation_property_work(style_worker)).to_equal(0)
         _expect_retained_stage_counts(
             style_worker.render_session.counters, 2, 2, 2, 2, 2, 2, 2
         )
@@ -1444,6 +1548,7 @@ describe "Production Simple browser user flow":
         expect(style_worker.handle(browser_renderer_decoder_feed(
             browser_renderer_decoder_new(7), resize.wire
         ).message).ok).to_be(true)
+        expect(_current_animation_property_work(style_worker)).to_equal(0)
         _expect_retained_stage_counts(
             style_worker.render_session.counters, 2, 2, 3, 3, 3, 3, 3
         )
@@ -1471,6 +1576,7 @@ describe "Production Simple browser user flow":
         expect(image_worker.handle(BrowserRendererMessage(
             kind: "advance", generation: 7, request_id: 3, payload: "16"
         )).ok).to_be(true)
+        expect(_current_animation_property_work(image_worker)).to_equal(0)
         _expect_retained_stage_counts(
             image_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
         )
@@ -1554,6 +1660,7 @@ describe "Production Simple browser user flow":
         expect(scroll_worker.handle(browser_renderer_decoder_feed(
             browser_renderer_decoder_new(7), scroll.wire
         ).message).ok).to_be(true)
+        expect(_current_animation_property_work(scroll_worker)).to_equal(0)
         _expect_retained_stage_counts(
             scroll_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
         )
@@ -1572,6 +1679,7 @@ describe "Production Simple browser user flow":
         expect(caret_worker.handle(BrowserRendererMessage(
             kind: "advance", generation: 7, request_id: 3, payload: "600"
         )).ok).to_be(true)
+        expect(_current_animation_property_work(caret_worker)).to_equal(0)
         _expect_retained_stage_counts(
             caret_worker.render_session.counters, 1, 1, 1, 1, 1, 2, 2
         )
@@ -1641,6 +1749,172 @@ describe "Production Simple browser user flow":
         expect(
             navigation_worker.render_session.counters.retained_command_count
         ).to_equal(0)
+
+    # @manual: show
+    # @capture(protocol)
+    # @capture(artifact)
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-018 NFR-WEB-BROWSER-008
+    it "should bound per-frame CSS animation property work":
+        step("Load the bounded browser fixture")
+        var worker = HostedBrowserRendererWorkerSession.create(64, 48)
+        expect(worker.handle(BrowserRendererMessage(
+            kind: "init", generation: 92, request_id: 2,
+            payload: _animation_hot_path_fixture(16)
+        )).ok).to_be(true)
+        val retained_nodes = (
+            worker.render_session.counters.retained_node_count
+        )
+        val retained_styles = (
+            worker.render_session.counters.retained_style_count
+        )
+        val retained_boxes = (
+            worker.render_session.counters.retained_box_count
+        )
+        val retained_commands = (
+            worker.render_session.counters.retained_command_count
+        )
+        val initial_draw_ir_checksum = (
+            worker.render_session.composition_checksum()
+        )
+        val initial_pixel_checksum = _expect_animation_hot_path_frame(worker)
+        val initial_result = worker.render_session.current_result.unwrap()
+        expect(initial_result.animation_property_work_count).to_equal(16 * 2)
+
+        step("Exercise repeated navigation animation and events")
+        var observed_16_work: i64 = -1
+        var observed_32_work: i64 = -1
+        var observed_paint_frames: i64 = 0
+        var replacement: i64 = 1
+        while replacement <= 4:
+            val property_count = if replacement % 2 == 1: 32 else: 16
+            val frame_time_ms = replacement * 16
+            val animation_request_id = replacement * 2 + 1
+            match worker.browser.open_html(
+                "simple-renderer://animation-hot-path-{replacement}",
+                _animation_hot_path_fixture(property_count)
+            ):
+                Ok(_): ()
+                Err(reason): fail(
+                    "animation hot-path replacement failed: {reason}"
+                )
+            val dispatch = worker.browser.dispatch_dom_event(
+                "event", "click", true, true
+            )
+            expect(dispatch.event.default_prevented).to_be(false)
+            expect(worker.browser.current_title).to_equal(
+                "event-{property_count}"
+            )
+            expect(worker.handle(BrowserRendererMessage(
+                kind: "advance", generation: 92,
+                request_id: animation_request_id,
+                payload: frame_time_ms.to_text()
+            )).ok).to_be(true)
+            val current_result = worker.render_session.current_result.unwrap()
+            val property_work = current_result.animation_property_work_count
+            expect(property_work).to_be_less_than(
+                property_count.to_i64() * 2 + 1
+            )
+            if property_count == 16:
+                observed_16_work = property_work
+            else:
+                observed_32_work = property_work
+            expect(
+                worker.render_session.counters.retained_node_count
+            ).to_equal(retained_nodes)
+            expect(
+                worker.render_session.counters.retained_style_count
+            ).to_equal(retained_styles)
+            expect(
+                worker.render_session.counters.retained_box_count
+            ).to_equal(retained_boxes)
+            expect(
+                worker.render_session.counters.retained_command_count
+            ).to_equal(retained_commands)
+            expect(worker.render_session.composition_checksum()).to_equal(
+                initial_draw_ir_checksum
+            )
+            expect(_expect_animation_hot_path_frame(worker)).to_equal(
+                initial_pixel_checksum
+            )
+
+            # A resource revision with no changed resource material forces a
+            # retained paint-only frame at the same animation clock. It must
+            # preserve output/owners while reporting no animation apply work.
+            worker.browser._advance_resource_revision()
+            expect(worker.handle(BrowserRendererMessage(
+                kind: "advance", generation: 92,
+                request_id: animation_request_id + 1,
+                payload: frame_time_ms.to_text()
+            )).ok).to_be(true)
+            val paint_result = worker.render_session.current_result.unwrap()
+            expect(paint_result.animation_property_work_count).to_equal(0)
+            expect(worker.render_session.composition_checksum()).to_equal(
+                initial_draw_ir_checksum
+            )
+            expect(_expect_animation_hot_path_frame(worker)).to_equal(
+                initial_pixel_checksum
+            )
+            expect(
+                worker.render_session.counters.retained_node_count
+            ).to_equal(retained_nodes)
+            expect(
+                worker.render_session.counters.retained_style_count
+            ).to_equal(retained_styles)
+            expect(
+                worker.render_session.counters.retained_box_count
+            ).to_equal(retained_boxes)
+            expect(
+                worker.render_session.counters.retained_command_count
+            ).to_equal(retained_commands)
+            observed_paint_frames = observed_paint_frames + 1
+            replacement = replacement + 1
+
+        step("Measure retained state and work growth")
+        expect(_animation_hot_path_old_comparisons(16)).to_equal(376)
+        expect(_animation_hot_path_old_comparisons(32)).to_equal(1520)
+        expect(observed_16_work).to_equal(16 * 2)
+        expect(observed_32_work).to_equal(32 * 2)
+        expect(observed_paint_frames).to_equal(4)
+        expect(_current_animation_property_work(worker)).to_equal(0)
+        expect(observed_16_work).to_be_less_than(
+            _animation_hot_path_old_comparisons(16)
+        )
+        expect(observed_32_work).to_be_less_than(
+            _animation_hot_path_old_comparisons(32)
+        )
+
+        step("Prove stable Draw IR output within the resource ceiling")
+        _expect_bounded_serialization_draw_ir(
+            worker.render_session.current_result.unwrap().composition
+        )
+        expect(worker.render_session.composition_checksum()).to_equal(
+            initial_draw_ir_checksum
+        )
+        expect(_expect_animation_hot_path_frame(worker)).to_equal(
+            initial_pixel_checksum
+        )
+        expect(retained_nodes).to_be_greater_than(0)
+        expect(retained_nodes).to_be_less_than(65537)
+        expect(retained_styles).to_be_greater_than(0)
+        expect(retained_styles).to_be_less_than(65537)
+        expect(retained_boxes).to_be_greater_than(0)
+        expect(retained_boxes).to_be_less_than(65537)
+        expect(retained_commands).to_be_greater_than(0)
+        expect(retained_commands).to_be_less_than(65537)
+        worker.close()
+        expect(
+            worker.render_session.counters.retained_node_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_style_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_box_count
+        ).to_equal(0)
+        expect(
+            worker.render_session.counters.retained_command_count
+        ).to_equal(0)
+        expect(worker.render_session.current_result).to_be_nil()
 
     # @manual: show
     # @capture(protocol)

@@ -1694,6 +1694,49 @@ expect(
 
 </details>
 
+#### should bound per-frame CSS animation property work
+
+Runtime PASS is unclaimed. This manual records the executable SSpec contract
+and the production diagnostic provenance for the current-source runner lane.
+
+- Load the bounded browser fixture
+   - Load the 16-property animation fixture through the retained renderer.
+   - Require exact canonical `html_ast` Draw IR for the visible `bounded`
+     rectangle and an independent full `64x48` software framebuffer oracle.
+   - Record retained node, style, box, command, Draw IR checksum, and pixel
+     checksum baselines.
+- Exercise repeated navigation animation and events
+   - Replace the document four times, alternating 32 and 16 animated
+     properties, advance the browser animation clock, and dispatch the hidden
+     event control.
+   - After every full animation frame, force a retained resource-only paint at
+     the same clock value. Require zero current-frame animation-property work,
+     an unchanged full Draw IR checksum and framebuffer, and unchanged retained
+     node, style, box, and command owners.
+- Measure retained state and work growth
+   - Require the legacy linear-search model to report exactly 376 comparisons
+     for 16 properties and 1,520 for 32 properties.
+   - Require production full-frame property-index work to remain exactly 32
+     and 64 probes, respectively, and never exceed `2P`; require all four
+     intervening paint-only frames to report exactly zero rather than a copied
+     cumulative count.
+- Prove stable Draw IR output within the resource ceiling
+   - Recheck exact Draw IR geometry/color, every framebuffer pixel, and both
+     checksums independently of the frame-local work counter. Non-animation
+     retained CSS, resource, scroll, and caret modes also report zero work.
+   - Require retained node, style, box, and command counts below 65,537, then
+     close the worker and require all four retained owners plus the current
+     result to be released.
+
+<details>
+<summary>Executable SSpec</summary>
+
+The complete direct-assertion scenario and its bounded 16/32-property fixture
+are maintained in
+`test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl`.
+
+</details>
+
 #### should serialize bounded replacements with stable Draw IR
 
 - Load the bounded browser fixture
