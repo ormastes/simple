@@ -25,6 +25,12 @@ the production browser, sandbox, HTTPS, live events, or GC/performance targets.
 4. `test/01_unit/lib/gc_async_mut/gpu/browser_engine/fetch_deadline_spec.spl`
    - one absolute Fetch deadline across local HTTP/HTTPS redirects;
    - deterministic within-budget, aggregate-timeout, and redirect-limit cases.
+5. `test/03_system/security/browser_tls_ipv6_service_identity_spec.spl`
+   - bracketed IPv6 URL/HTTP authority separated from the bare numeric TLS
+     connect and certificate service identity;
+   - malformed bracket forms and ordinary DNS names stay outside the literal
+     fast path;
+   - offline target preparation only, not live certificate/provider evidence.
 
 Mirrored manuals use the same paths below `doc/06_spec/`.
 
@@ -75,6 +81,13 @@ evidence for REQ-WEB-BROWSER-010 and REQ-WEB-BROWSER-017. Its virtual monotonic
 clock models local hop latency without sleeps or live network access. It proves
 deadline propagation and no cache commit after timeout; it does not replace the
 blocked live platform-TLS certificate/HSTS evidence.
+
+The focused IPv6 service-identity spec supplies `TLS-IPV6-N/E/D` supporting
+evidence for REQ-WEB-BROWSER-010 and REQ-WEB-BROWSER-011. It proves the H1
+owner retains `[IPv6]` for URL/HTTP authority but sends bare `IPv6` as both the
+numeric transport target and TLS peer identity. It rejects malformed bracket
+forms and suppresses a caller-supplied Host field. It does not replace live
+platform trust, chain, expiry, SAN/IP identity, deadline, or cleanup evidence.
 
 Blocking DNS is excluded from the aggregate elapsed-time claim. The current
 DNS facade accepts only a hostname, not the remaining absolute deadline; H1
@@ -320,8 +333,10 @@ deferred Stop and draining a coalesced buffered frame. Transport checks keep
 remain unchanged. Native containment must observe `get_robust_list` denial
 after final sandbox entry.
 
-Current evidence is limited to focused host C containment/TLS PASS.
-Pure-Simple scenarios and manual generation remain compiler-blocked. Signal
+Current evidence includes the focused offline H1 IPv6 service-identity SSpec
+and focused host C containment/TLS PASS. The SSpec proves target preparation
+and wire authority, not a live connection or certificate result. Qualified
+pure-Simple execution and manual generation remain compiler-blocked. Signal
 exit 139, source inspection, bootstrap output, and Rust-seed execution cannot
 satisfy the runtime gate.
 

@@ -39,6 +39,22 @@ fn h1_deadline_remaining_ms(now_ms: i64, deadline_ms: i64) -> i64:
 fn h1_connect_address(address: text, port: i64) -> text:
     if address.contains(":"): "[{address}]:{port}" else: "{address}:{port}"
 
+pub fn h1_tls_ipv6_literal_identity(host: text) -> text?:
+    """Return the unbracketed TLS identity for a canonical IPv6 URL host.
+
+    URL authority retains brackets, while the numeric TLS peer identity and
+    resolved connect address must not. Non-literal hosts keep the DNS path.
+    """
+    if host.len() <= 2 or not host.starts_with("[") or not host.ends_with("]"):
+        return nil
+    val parsed = Url.parse("https://" + host + "/")
+    if not parsed.?:
+        return nil
+    if parsed.unwrap().host != host:
+        return nil
+    val identity = host.slice(1, host.len() - 1)
+    Some(identity)
+
 # --- MockResponseRegistry ---
 # Provides canned HTTP responses for testing without real socket I/O.
 # Register URL patterns and their responses; the H1 client checks this
@@ -242,7 +258,13 @@ class H1Client:
         )?
 
         if is_tls and conn.tls_conn.? == false:
-            val addresses = self.dns.resolve(host)?
+            var service_identity = host
+            var addresses: [text] = []
+            if val identity = h1_tls_ipv6_literal_identity(host):
+                service_identity = identity
+                addresses = [identity]
+            else:
+                addresses = self.dns.resolve(host)?
             var tls_conn: TlsConnection? = nil
             for address in addresses:
                 val remaining = h1_deadline_remaining_ms(
@@ -251,7 +273,7 @@ class H1Client:
                 if remaining == 0:
                     break
                 match self.tls.handshake_address(
-                    address, host, port, remaining
+                    address, service_identity, port, remaining
                 ):
                     Ok(connected):
                         tls_conn = Some(connected)
