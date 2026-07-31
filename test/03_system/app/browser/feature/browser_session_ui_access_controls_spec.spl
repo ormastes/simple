@@ -275,6 +275,78 @@ describe "BrowserSession primitive controls through textual UI access":
     # codex-system-test
     # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
     # @manual: show
+    it "ends hosted address editing before Home succeeds or fails":
+        step("Restore the committed address before a busy Home rejection")
+        val committed_url = "https://example.com/committed"
+        val draft_url = "https://draft.test/"
+        val home_url = "https://home.test/"
+        var registry = HostedBrowserRendererRegistry.create(
+            "/bin/false", home_url
+        )
+        val _ = registry.ensure(
+            90, "<main>Committed</main>", 64, 48, 0, 100000
+        )
+        var entry = registry.entries[0]
+        entry.ready = true
+        entry.failure_reason = ""
+        entry.renderer.state = "active"
+        entry.renderer.document_url = committed_url
+        entry.renderer.document_origin = "https://example.com"
+        entry.renderer.home_url = home_url
+        registry.entries[0] = entry
+        val _ = registry.dispatch_chrome_pointer(1, 90, "address", true)
+        val _ = registry.dispatch_chrome_pointer(2, 90, "address", false)
+        expect(registry.dispatch_text(
+            3, 90, draft_url
+        ).callback_count).to_equal(1)
+        entry = registry.entries[0]
+        entry.renderer.pending_wire = "partially-written-command"
+        entry.renderer.pending_wire_offset = 1
+        registry.entries[0] = entry
+        val busy_down = registry.dispatch_chrome_pointer(
+            4, 90, "home", true
+        )
+        expect(busy_down.reason).to_equal("chrome-pressed")
+        expect(registry.entries[0].address_editing).to_be(false)
+        expect(registry.entries[0].address_replace_on_text).to_be(false)
+        expect(registry.address_text(90)).to_equal(committed_url)
+        val busy_up = registry.dispatch_chrome_pointer(
+            5, 90, "home", false
+        )
+        expect(busy_up.reason).to_equal("renderer-busy")
+        expect(registry.dispatch_text(
+            6, 90, "must-not-edit-address"
+        ).reason).to_equal("renderer-busy")
+        expect(registry.address_text(90)).to_equal(committed_url)
+
+        step("Keep successful Home navigation on the parent renderer route")
+        entry = registry.entries[0]
+        entry.renderer.pending_wire = ""
+        entry.renderer.pending_wire_offset = 0
+        registry.entries[0] = entry
+        val _ = registry.dispatch_chrome_pointer(7, 90, "address", true)
+        val _ = registry.dispatch_chrome_pointer(8, 90, "address", false)
+        expect(registry.dispatch_text(
+            9, 90, draft_url
+        ).callback_count).to_equal(1)
+        val home_down = registry.dispatch_chrome_pointer(
+            10, 90, "home", true
+        )
+        expect(home_down.reason).to_equal("chrome-pressed")
+        expect(registry.address_text(90)).to_equal(committed_url)
+        val home_up = registry.dispatch_chrome_pointer(
+            11, 90, "home", false
+        )
+        expect(home_up.callback_count).to_equal(1)
+        expect(registry.address_text(90)).to_equal(home_url)
+        expect(registry.entries[0].renderer.navigation_permit.url).to_equal(
+            home_url
+        )
+        val _ = registry.close()
+
+    # codex-system-test
+    # @req REQ-WEB-BROWSER-009 REQ-WEB-BROWSER-010
+    # @manual: show
     # @capture(text)
     # @capture(gui)
     it "should expose and activate one canonical Go control without duplicate navigation":

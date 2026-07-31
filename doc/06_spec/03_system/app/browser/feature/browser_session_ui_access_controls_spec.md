@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 21 | 21 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,6 +78,16 @@ Display policy: `embed_tui`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Favorite", 1).len() equals `1`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "button", "Go", 1).len() equals `1`
    - Expected: ui_access_find_nodes(snapshot, "browser:session", "textfield", "https://example.com/two", 1).len() equals `1`
+
+#### ends hosted address editing before Home succeeds or fails
+
+- Restore the committed address before a busy Home rejection.
+  - Expected: Home press ends address editing and publishes the committed URL.
+  - Expected: a busy Home release reports `renderer-busy` without restoring the draft.
+  - Expected: subsequent text cannot mutate the address.
+- Keep successful Home navigation on the parent renderer route.
+  - Expected: Home press publishes the committed URL before release.
+  - Expected: Home release admits the configured URL and publishes it.
 
 
 <details>
@@ -2794,8 +2804,8 @@ expect(link_result.message).to_equal("link event canceled")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 21 |
-| Active scenarios | 21 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
