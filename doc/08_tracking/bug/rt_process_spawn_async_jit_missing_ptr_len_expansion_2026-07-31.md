@@ -1,8 +1,115 @@
 # `rt_process_spawn_async` always returns pid=-1 under JIT (`bin/simple run`)
 
-**Status:** Open — diagnosed, not fixed (scoped to diagnosis only per investigation request)
+**Status:** FIXED — one-line addition to `process_c_runtime_arg_indices` in
+`src/compiler_rust/compiler/src/codegen/instr/calls.rs`
 **Found:** 2026-07-31
+**Fixed:** 2026-07-31
 **Engine:** JIT (Cranelift) only. Interpreter and `-c` (interpreter path) are unaffected.
+
+## Fix applied
+
+```rust
+"rt_process_run"
+| "rt_process_run_inherit"
+| "rt_process_spawn"
+| "rt_process_spawn_async"          // <-- added
+| "rt_process_spawn_guarded"
+| "rt_process_execute"
+| "rt_process_run_timeout"
+| "rt_process_run_bounded" => Some((&[0], &[1])),
+```
+
+Confirmed before applying: `rt_process_spawn_async` (`env_process.rs:706`) has
+the byte-identical `(cmd_ptr: *const u8, cmd_len: u64, args: RuntimeValue) -> i64`
+signature as `rt_process_spawn` (`env_process.rs:654`), and both are registered
+with the identical 3×I64 -> I64 `RuntimeFuncSpec` in
+`codegen/runtime_sffi.rs:1333` (`rt_process_spawn_async`) vs `:1322`
+(`rt_process_spawn`), so `(&[0], &[1])` is the correct expansion mapping — same
+as its sibling.
+
+## Family audit (requested alongside the fix)
+
+Every `rt_process_*` extern in `src/compiler_rust/runtime/src/value/sffi/env_process.rs`
+was cross-checked against `process_c_runtime_arg_indices`:
+
+| Function | `(cmd_ptr, cmd_len, ...)` shape? | In the table? |
+|---|---|---|
+| `rt_process_run` | yes | yes |
+| `rt_process_run_inherit` | yes | yes |
+| `rt_process_spawn` | yes | yes |
+| `rt_process_spawn_async` | yes | **fixed, now yes** |
+| `rt_process_spawn_guarded` | yes | yes |
+| `rt_process_execute` | yes | yes |
+| `rt_process_run_timeout` | yes | yes |
+| `rt_process_run_bounded` | yes | yes |
+| `rt_process_spawn_inherit` | no args | n/a (correctly absent) |
+| `rt_process_is_running` | no text arg | n/a (correctly absent) |
+| `rt_process_exists` | no text arg | n/a (correctly absent) |
+| `rt_process_wait` | no text arg | n/a (correctly absent) |
+| `rt_process_kill` | no text arg | n/a (correctly absent) |
+| `rt_process_run_with_limits` | yes (`cmd_ptr, cmd_len, args, timeout_ms, memory_bytes, cpu_seconds, max_fds, max_procs`) | **no — but not a live gap for this bug family** |
+
+`rt_process_run_with_limits` is **not** reachable through
+`process_c_runtime_arg_indices` at all today because it has no call-site
+lowering anywhere in the compiler frontend (only `elf_utils.rs`'s
+function-pointer table and its `RuntimeFuncSpec` in `runtime_sffi.rs:1337`
+reference it, and neither is a Simple-level call path). Separately, its
+`RuntimeFuncSpec` already only declares 5 `I64` args
+(`codegen/runtime_sffi.rs:1337`) against the real 8-parameter Rust signature —
+a pre-existing, unrelated arg-count mismatch, not a missing ptr/len expansion.
+Not touched here per the "no speculative entries" scope of this fix; filed as
+a separate latent-dead-code observation, not a live JIT defect, since nothing
+currently calls it.
+
+## Verification (non-vacuous, fixed vs reverted, same build recipe)
+
+Built `cargo build --profile bootstrap -p simple-driver --features llvm`
+(154 MB binary, LLVM present) twice in a fresh `git worktree --detach` at
+origin tip `bb68496f95bd7a0819ca17ab9204b001fb666b36`: once with the fix
+applied, once with it reverted (`git checkout --`), same probe both times:
+
+```simple
+extern fn rt_process_spawn_async(cmd: text, args: [text]) -> i64
+extern fn rt_process_spawn(cmd: text, args: [text]) -> i64
+extern fn rt_process_spawn_guarded(cmd: text, args: [text]) -> i64
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+
+fn main():
+    val pid_async = rt_process_spawn_async("/bin/echo", ["hello-async"])
+    print("ASYNC_PID=" + pid_async.to_text())
+    val pid_spawn = rt_process_spawn("/bin/echo", ["hello-spawn"])
+    print("SPAWN_PID=" + pid_spawn.to_text())
+    val pid_guarded = rt_process_spawn_guarded("/bin/echo", ["hello-guarded"])
+    print("GUARDED_PID=" + pid_guarded.to_text())
+    val (stdout, stderr, exit_code) = rt_process_run("/bin/echo", ["hello-run"])
+    print("RUN_STDOUT=" + stdout)
+    print("RUN_EXIT=" + exit_code.to_text())
+```
+
+**Fixed binary**, `bin/simple run probe.spl` (JIT, default):
+```
+ASYNC_PID=2001643        # real pid, child ran ("hello-async" printed)
+SPAWN_PID=2001647
+GUARDED_PID=2001651
+RUN_STDOUT=hello-run
+RUN_EXIT=0
+```
+
+**Reverted binary** (`git checkout -- calls.rs`, rebuilt, same probe),
+`bin/simple run probe.spl`:
+```
+ASYNC_PID=-1              # bug reproduced
+SPAWN_PID=2198390          # sibling controls still correct
+GUARDED_PID=2198391
+RUN_STDOUT=hello-run
+RUN_EXIT=0
+```
+
+Fix re-applied after the revert test and landed. This proves the change is
+both necessary (revert reproduces `-1`) and sufficient (fix produces a real
+pid), and that the three sibling regression controls
+(`rt_process_spawn`, `rt_process_spawn_guarded`, `rt_process_run`) are
+unaffected in both states.
 
 ## Symptom
 
@@ -120,14 +227,14 @@ in the same file was not re-audited against all process-spawn variants, and
   this is the binary all four invocation modes above were run against; no
   fresh build was performed for this diagnosis.
 
-## Suggested fix (not applied — diagnosis only)
+## Original suggested fix (now applied — see "Fix applied" above)
 
 Add `"rt_process_spawn_async"` to the `process_c_runtime_arg_indices` match
 arm in `src/compiler_rust/compiler/src/codegen/instr/calls.rs`, mirroring its
 siblings: `"rt_process_spawn_async" => Some((&[0], &[1]))`. No runtime or
-`runtime_sffi.rs` change should be needed — both already assume the
-`(ptr, len)` expansion happens at the call site. Requires a Rust seed rebuild
-to verify, which was intentionally not done here (host load constraint).
+`runtime_sffi.rs` change was needed — both already assumed the `(ptr, len)`
+expansion happens at the call site. This prediction was confirmed by the
+fixed-vs-reverted rebuild test above.
 
 ## Verification commands used (deployed binary, no rebuild)
 

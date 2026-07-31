@@ -2552,6 +2552,7 @@ pub(crate) fn process_c_runtime_arg_indices(func_name: &str) -> Option<(&'static
         "rt_process_run"
         | "rt_process_run_inherit"
         | "rt_process_spawn"
+        | "rt_process_spawn_async"
         | "rt_process_spawn_guarded"
         | "rt_process_execute"
         | "rt_process_run_timeout"
