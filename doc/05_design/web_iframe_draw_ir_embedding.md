@@ -3,9 +3,8 @@
 
 Architecture: `doc/04_architecture/web_iframe_draw_ir_embedding.md`
 
-Status: RED / pre-migration. The candidate source/spec/manual exist, but the
-authenticated focused parity run crashed (`exit 139`); compatibility callers
-remain on the established pixel/blit path.
+Status: static source/spec/manual implemented; qualified execution and five
+legacy caller parity migrations remain held.
 
 ## Minimal source changes
 
@@ -15,9 +14,8 @@ remain on the established pixel/blit path.
    `_simple_web_layout_compose_document` scopes/restores child deadlines;
    retained composition carries depth, segments commands, and inserts children
    in paint order.
-3. `simple_web_html_layout_renderer_paint_layout.spl`: keep the established
-   pixel/blit helpers during parity; delete them only after the qualified
-   corpus passes and callers are migrated.
+3. `simple_web_html_layout_renderer_paint_layout.spl`: retain pixel helpers
+   during parity; delete them only after all five callers migrate.
 4. Add `test/02_integration/rendering/simple_web_iframe_draw_ir_embedding_spec.spl`
    and its mirrored zero-stub manual.
 
@@ -70,7 +68,7 @@ Frozen displayed steps:
 - `Compose iframe srcdoc through Web semantics and Draw IR`
 - `Preserve iframe paint order and ancestor clipping`
 - `Bound nested iframe work and fail closed`
-- `Embed the iframe composition without a pixel blit`
+- `Retire legacy iframe pixel blitting after parity`
 
 | Scenario | Semantic/layout | Draw IR | Engine2D/pixels | Control |
 |---|---|---|---|---|
@@ -92,20 +90,26 @@ Use only canonical matchers. The manual shows the first three flows and folds
 matrix cases. Initial missing helpers call `fail(...)`; never `pass_todo` or a
 constant assertion.
 
-## Parity retirement gate
+## Caller migration order
 
-Production compatibility entrypoints remain on the pixel/blit path. The public
-diagnostic helper exposes those established pixels for the focused comparison.
-Run the focused basic and clipped corpus once with `--assert-ran`; only after
-that parity gate may callers migrate and only then delete
-`_web_blit_child`, `_web_render_child_pixels`, and `_web_paint_iframes`.
+Run each focused parity gate once.
+
+1. `simple_web_layout_render_html_software_pixels_traced`
+2. `simple_web_layout_render_html_software_result`
+3. `simple_web_layout_render_html_gpu_frame` (solid-only shortcut remains only
+   when no iframe exists)
+4. `simple_web_layout_render_html_software_pixels_at_scroll`
+5. `_web_render_child_pixels` recursion
+
+Then delete `_web_blit_child`, `_web_render_child_pixels`, and
+`_web_paint_iframes`; point the old iframe spec/manual to the canonical suite
+instead of maintaining duplicate behavior tests.
 
 ## Verification boundary
 
-Use an admitted current pure-Simple CLI that supports `test`, then run the
-focused spec with the interpreter, session-daemon/cache disabled,
-`--assert-ran`, and `--fail-fast`; then generate its manual. No Rust seed or
-renderer-wide suite. Static review alone remains RED.
+Use a qualified pure-Simple stage 2/3 or release binary for focused spec and
+docgen. No full bootstrap, Rust seed, or renderer-wide suite. Static review
+alone remains RED.
 
 ## Sandboxed child-document handoff (RED)
 

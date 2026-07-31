@@ -36,7 +36,7 @@ plugin interface, renderer factory, or new native dependency.
 | `src/lib/gc_async_mut/gpu/engine3d/engine.spl` | HUD/world facade and CPU fallback; an optional Vulkan adapter owns dedicated pipelines, R8 atlas upload, depth, fence, and device readback without changing the shared batch. |
 | `src/lib/gc_async_mut/gpu/engine2d/backend_{cuda,metal,opencl,vulkan,rocm}*.spl` | Backend-private upload/submission state keyed by the shared atlas owner and generation. Source wiring is not native promotion evidence. |
 | `backend_vulkan_font_types.spl` plus `test/helpers/shared_multilingual_gpu_fonts_perf_evidence.spl` | Transient pipeline/composite stage observations stay with the Vulkan owner; ordered durable v5 serialization retains stage distributions and promotion facts without turning handles into reusable authority. |
-| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. Host Web uses the HTML/WebIR Draw IR owner, but `ui.browser` still discards the supplied composition and rebuilds pixels; reconciliation R1 must cut that path over to the persistent Engine2D owner. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. Canonical SimpleOS and hosted color-background frames select the Draw IR/Engine2D route. Image/motion and nested hosted content retain compatibility fallback; direct legacy `wm_entry.spl` files are compatibility-only. |
+| Web semantic/layout, GUI widget/scene, and shared WM scene producers | Preserve selected identity/advances in `DrawIrComposition`; Engine2D is the sole vector-material executor. Host Web uses the HTML/WebIR Draw IR owner; `ui.browser` executes one `widget_tree_to_draw_ir` composition and leaves queue dispatch neutral unless that composition is submitted. “WebIR” names the existing web semantic/layout layer, not a second drawing IR. Canonical SimpleOS and hosted color-background frames select the Draw IR/Engine2D route. Image/motion and nested hosted content retain compatibility fallback; direct legacy `wm_entry.spl` files are compatibility-only. |
 
 Compatibility re-export trees continue to expose the canonical
 `nogc_sync_mut.text_layout` values. Generated copies must not acquire private
@@ -215,14 +215,14 @@ timers rather than adding a benchmark-only renderer, cache, or upload path.
 
 Current source includes the pinned catalog/matrix, canonical CPU preparation,
 CUDA/Metal/OpenCL/Vulkan Engine2D atlas submission with suffix fallback, and an
-optional Vulkan Engine3D HUD/world adapter. Web and widget/GUI producers create
-Draw IR, but production Web remains pending the reconciliation R1 cutover to
-the persistent Engine2D owner. Canonical SimpleOS ARM64/x86_64 runner/readiness
+optional Vulkan Engine3D HUD/world adapter. Web and widget/GUI producers lower
+through Draw IR and Engine2D. Canonical SimpleOS ARM64/x86_64 runner/readiness
 targets select `gui_entry_desktop.spl`, which lowers its `SharedWmScene` through
 `Engine2dWmFrameExecutor`; direct legacy `wm_entry.spl` files remain
 compatibility-only. Hosted color/top-level frames use a persistent
 `Engine2dCompositorBackend` to execute `SharedWmScene -> DrawIrComposition ->
-Engine2D`; platform presentation/readback consumes that final composition. The
+Engine2D`, with direct rendering retained for the programmatic compatibility
+gate, image/motion backgrounds, nested content, or rejected readback. The
 x86_64 SimpleOS entry registers the pinned face before composition and its `taskbar-clock` witness now
 originates in `SharedWmScene -> DrawIrComposition -> Engine2D`. The old private
 post-frame draw path is removed. The dynamic rightmost 56x48 QEMU crop is

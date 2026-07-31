@@ -1,8 +1,8 @@
 # Simple Web iframe `srcdoc` through DrawIR
 
-Status: RED/pre-migration. The authenticated focused parity run crashed
-(`exit 139`), so iframe pixel entrypoints remain on the established pixel/blit
-path. The candidate DrawIR composition remains a parity subject only.
+Status: static Draw IR source implemented; qualified execution and five caller
+migrations remain held. The authenticated focused parity run crashed
+(`exit 139`), so legacy pixel entrypoints remain the oracle.
 
 1. **Compose iframe srcdoc through Web semantics and Draw IR** — confirms the
    red marker at `(5,5)`, child green at `(20,20)`, and white outside at
@@ -17,9 +17,9 @@ path. The candidate DrawIR composition remains a parity subject only.
    for a fractional-opacity ancestor. The overlapping pre/placeholder/post
    fractional fixture keeps all three in one opacity batch and checks exact
    `#c3c3c3` placeholder and `#f7a1a1` post pixels, rejecting a second blend.
-4. **Embed the iframe composition without a pixel blit** —
+4. **Retire legacy iframe pixel blitting after parity** —
    `expect_iframe_composition_parity` first compares the established diagnostic
-   pixel result with the CPU-executed candidate `DrawIrComposition`, then checks
+   pixel result with the CPU-executed retained `DrawIrComposition`, then checks
    all five pre-migration callers: traced software, software result, software
    pixels, GPU residual, and zero-scroll. This does not claim migration or
    pixel-helper retirement before a qualified run.

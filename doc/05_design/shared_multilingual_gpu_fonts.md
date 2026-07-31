@@ -121,9 +121,10 @@ handle/generation. Fallback resolves the snapshot after choosing its run font;
 an attached face without an exact live binding never reuses the legacy unbound
 parser blob.
 
-Generic GSUB/GPOS implementation is not a delivery requirement. The parser's
-bounded Coverage/SingleSubst primitives support only the accepted witness
-profiles; unsupported or malformed data cannot set completion.
+GSUB decoding is staged: the parser owns table-bounded Coverage 1/2 and
+SingleSubst 1/2 primitives, while the shaper stays identity until active
+Script/LangSys/Feature lookup selection is available. Unsupported or malformed
+data returns unchanged material and cannot set completion.
 
 The selector and application land together. Accepted scope covers direct Latin,
 Cyrillic, Han, and the exact Hindi `हिन्दी` witness. The Hindi path selects
@@ -145,11 +146,10 @@ Neither source path is execution evidence: promotion still requires the retained
 native oracle. Web producers lower through web semantic/layout (the current
 WebIR), and GUI producers through canonical widget/scene owners; both emit Draw
 IR. Engine2D alone lowers their text to transient `FontRenderBatch`; they must
-not consume the Engine3D adapter as a parallel rendering path. Host Web layout
-prepares the HTML/WebIR composition, but `ui.browser` currently discards the
-supplied composition and rebuilds pixels. Reconciliation R1 must make the
-persistent Engine2D owner consume that exact composition; queue dispatch stays
-neutral until it is actually submitted.
+not consume the Engine3D adapter as a parallel rendering path. Host Web pixel
+and readback requests execute the HTML/WebIR composition; `ui.browser` prepares
+one `widget_tree_to_draw_ir` composition for pixels. Queue dispatch remains
+neutral until that same composition is actually submitted.
 
 The revocable font-face handle/generation is intentionally present as opaque
 rasterizer identity and is validated before use. Engine-owned texture, sampler,
@@ -372,7 +372,7 @@ Remaining completion behavior is intentionally narrow:
   changed nonempty identity clears vector state and uses bitmap behavior.
 - A selected-script run is accepted only when face generation, glyph IDs,
   clusters, advances, offsets, language, script, direction, and parallel vector
-  lengths agree. Inputs outside the accepted witness profiles reject rather than
+  lengths agree. Unsupported GSUB/GPOS lookups reject the run rather than
   returning a partial sequence.
 - Registered-only SimpleOS validates the exact registered blob, binds it to the
   existing shaper without a hosted face handle, and accepts only the pinned

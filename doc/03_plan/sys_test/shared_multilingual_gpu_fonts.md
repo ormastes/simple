@@ -21,12 +21,11 @@ production-route PASS additionally requires the real hosted frame owner to use
 `SharedWmScene -> DrawIrComposition -> Engine2D`, canonical SimpleOS entry
 wiring, and retained QEMU framebuffer pixels. Compatibility direct renderers or
 an app-private font path cannot satisfy that gate.
-Host Web layout creates the HTML/WebIR Draw IR composition, but `ui.browser`
-still discards that supplied composition and rebuilds a pixel artifact. The
-production-route gate therefore remains RED until reconciliation R1 consumes
-the supplied composition with the persistent Engine2D owner. Queue dispatch
-must remain neutral until that same composition is actually submitted, and the
-artifact must preserve the executor's exact readback source.
+Host Web pixels/readback now execute the HTML/WebIR Draw IR owner, and
+`ui.browser` executes one canonical `widget_tree_to_draw_ir` composition. Queue
+dispatch remains neutral until that composition is actually submitted, and the
+artifact preserves the executor's exact readback source. These source gates do
+not replace a retained production-frame run.
 
 Planned executable/manual pairs:
 
@@ -158,7 +157,7 @@ behavior.
 | REQ-008 | `shared_font_manifest_spec.spl` plus focused sfnt/bitmap unit specs | compound/default-glyf corpus reconstruction; unsupported-format/axis rejection; literal default-variable + bitmap fixtures | 3/3 source; refreshed literal variable oracle execution blocked |
 | REQ-009 | `font_renderer_spec.spl`, backend font unit specs, `shared_font_surfaces_spec.spl`, `check-runtime-rocm-provider.shs`, and `check-rocm-engine2d-font-readback.shs` | live font-identity separation; bounded glyph-cache counters; backend-local atlas owner + generation; shared program-version/transform rejection; ROCm reject-to-CPU replay; hosted HIP/HIPRTC ABI, UUID identity, transfer/sync failure gates; exact straight-ARGB transparent/translucent pixels; admitted configured-font device readback; warm/dirty regions | source gate includes GPU-less ROCm invalid/uninitialized rejection and quad-zero CPU replay; mock libraries prove provider ABI plus exact C pixels but remain non-real; configured harness uses strict Engine2D, Required ROCm, exact CPU parity, immutable hashes, and retained provider/device provenance; rotation/skew/subpixel/nonuniform CTM stay unsupported and retained native AMD execution remains pending |
 | REQ-010 | `gpu_font_emission_spec.spl`, `cuda_generated_font_handoff_spec.spl`, portable toolchain checker, and CUDA device readback checker | five source targets; exact shared HIP source identity; Vulkan contract; deterministic failures/hashes; selected-target bounded compilation; explicit candidate/validation/pin states; semantics revision; provenance-bound SPIR-V validation; strict final aggregate exit; native artifact exports the versioned font entry; source-tracked CUDA PTX binds immutable source/version/artifact hashes, ABI version, and compositor semantics revision; canonical construction rejects stale semantics without disabling primitive CUDA; tampering rejects before mutation; regenerated device readback matches the CPU oracle | current-host CUDA source generation is bound to a pure-Simple cached emitter, `nvcc` compiles and validates both artifacts, and exact device readback passes for the primitive kernels plus the four-pixel straight-ARGB font oracle with immutable PTX hashes and zero tolerance; retained font pin identity remains false, Vulkan compilation is unavailable on this host, and all three focused native spec cycles still exit 132 before a summary |
-| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; canonical SimpleOS pixels | canonical-owner dependency exclusion, canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, pinned cross-verified pixel hash, and wrapper/kernel/FAT32 hash recomputation are source-covered; production Web composition cutover, hosted image/motion/nested parity, and a current retained QEMU PASS remain pending |
+| REQ-011 | `shared_font_surfaces_spec.spl`, `legacy_web_gui_wm_font_route_spec.spl`, production host route contract, and SimpleOS QEMU pixel oracle | Engine2D API compatibility; DrawIR/batch evidence; production Web/GUI/WM ownership; canonical-owner legacy atlas/pipeline dependency exclusion; canonical SimpleOS pixels | canonical-owner dependency exclusion, canonical `taskbar-clock` WM DrawIR source route, 56x48 dynamic crop, pinned cross-verified pixel hash, and wrapper/kernel/FAT32 hash recomputation are source-covered; hosted image/motion/nested parity and a current retained QEMU PASS remain pending |
 | REQ-012 | `native_gpu_font_readback_spec.spl` | HUD transform; world depth/transform; texture-to-readback chain | 3/3 source gates with facade selection, distinct HUD/world pipelines, atlas owner/generation/hash, fenced submission, and readback checks; native execution pending |
 | REQ-013 | `native_gpu_font_readback_spec.spl` | promoted backend pass; unavailable classification; fake proof rejection | 3/3 source gate: live tuple promotion, controlled unavailable classification, and forged-proof rejection are wired; retained native PASS is pending |
 | REQ-014 | twelve executable/manual pairs | zero-stub manuals; guide/notice freshness; evidence-recipe audit | 12/12 manual files are present and preserve module scope prose, but the new configuration manual and two release manuals still await canonical generation and their executable specs remain unadmitted, so 0/12 pairs are accepted |
@@ -224,8 +223,8 @@ method.
 For each changed spec, run native execution and generate its manual once:
 
 ```text
-SIMPLE_NO_STUB_FALLBACK=1 bin/release/<triple>/simple test <spec> --mode=native
-bin/release/<triple>/simple spipe-docgen <spec> --output doc/06_spec --no-index
+SIMPLE_NO_STUB_FALLBACK=1 bin/simple test <spec> --mode=native
+bin/simple spipe-docgen <spec> --output doc/06_spec --no-index
 ```
 
 Run that canonical `spipe-docgen` command for every executable/manual pair and

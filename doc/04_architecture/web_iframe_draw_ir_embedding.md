@@ -1,22 +1,26 @@
 <!-- codex-architecture -->
 # Web iframe `srcdoc` through Draw IR
 
-Status: RED / pre-migration. The authenticated focused parity run crashed
-(`exit 139`), so compatibility callers remain on the established pixel/blit
-path and no composition-execution or caller-parity claim is admitted.
+Status: implemented static / execution and caller parity held
 
 Requirements: REQ-WEB-BROWSER-002/003/004/019/021 and
 NFR-WEB-BROWSER-012/017 from the production-hardening requirements.
 
 ## Problem
 
-The retained renderer recursively renders inert `<iframe srcdoc>` into a child
-pixel buffer and blits it into the parent framebuffer. Production compatibility
-entrypoints remain on that established path. The candidate flattened
-`DrawIrComposition` path is a parity subject only; do not migrate callers or
-delete `_web_blit_child`, `_web_render_child_pixels`, or
-`_web_paint_iframes` until the focused basic and clipped corpus passes with
-`--assert-ran`.
+The retained renderer now recursively composes inert `<iframe srcdoc>` and
+flattens it into the parent `DrawIrComposition`. The legacy software renderer
+still creates and blits a `[u32]` child framebuffer through five callers; that
+path remains the parity oracle until qualified pure-Simple execution permits
+caller migration.
+
+The legacy pixel helper has five callers:
+
+1. `simple_web_layout_render_html_software_pixels_traced`
+2. `simple_web_layout_render_html_software_result`
+3. `simple_web_layout_render_html_gpu_frame`
+4. `simple_web_layout_render_html_software_pixels_at_scroll`
+5. recursive `_web_render_child_pixels`
 
 Pre-rasterizing the child as a `DRAW_IR_COMMAND_IMAGE` would hide child
 semantics, clips, ordering, and provenance. It is not an accepted bridge.
@@ -133,11 +137,9 @@ compares against the combined count/hash. No material state enters Draw IR.
 - Fractional-opacity or parent-sampling ancestor groups fail closed with the
   placeholder until Draw IR has a real group primitive. Independently applying
   opacity to flat batches is incorrect.
-- The candidate retained Draw IR path must have no iframe
-  `DRAW_IR_COMMAND_IMAGE`, `[u32]` child buffer, private Engine2D path, or
-  parallel Web IR. Until migration is admitted, `_web_blit_child`,
-  `_web_render_child_pixels`, and `_web_paint_iframes` remain the established
-  production implementation and parity oracle.
+- The retained Draw IR path has no iframe `DRAW_IR_COMMAND_IMAGE`, `[u32]`
+  child buffer, private Engine2D path, or parallel Web IR. The legacy pixel
+  buffer remains only as the five-caller parity oracle.
 
 ## Ancestor clip
 
@@ -157,14 +159,13 @@ Zero-area intersections stay present zero-area clips. They must never become
 
 ## Performance and migration
 
-If admitted, the transform is O(child batches + commands) and allocates only
-final flat IR. It would remove recursive `cw * ch` child framebuffers. Existing
-depth/deadline authorities remain; add no cache or new offscreen pool.
+The transform is O(child batches + commands) and allocates only final flat IR.
+It removes recursive `cw * ch` child framebuffers. Existing depth/deadline
+authorities remain; add no cache or new offscreen pool.
 
-Keep diagnostic pixels as the oracle until the focused basic and clipped
-corpus proves exact parity. Delete `_web_blit_child`,
-`_web_render_child_pixels`, and `_web_paint_iframes` only after that qualified
-`--assert-ran` gate passes.
+Keep direct pixels as the oracle until a focused corpus proves exact parity.
+Migrate the five callers in the design order. Delete `_web_blit_child`,
+`_web_render_child_pixels`, and `_web_paint_iframes` only after caller five.
 
 ## Risks
 
