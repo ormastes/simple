@@ -610,7 +610,7 @@ evidence remain inadmissible.
 
 | Lane | Owner | Scope | Status / gate |
 | --- | --- | --- | --- |
-| `dom_identity_design` | `dom_identity_design` | Freeze one generation/index owner and fold label/radio/listener consumers into the canonical lanes below | PROPOSED / UNIMPLEMENTED / RED |
+| `dom_identity_design` | `dom_identity_design` | Freeze one generation/index owner and fold label/radio/listener consumers into the canonical lanes below | INTEGRATED STATIC CANDIDATE; target runtime/NFR evidence HELD |
 | `html_hr` | `simplescript_listeners_current` | Native separator defaults plus exact authored border clearing through canonical WebIR/DrawIR/Engine2D | FINAL REVIEW PASS; integrated static evidence, execution HELD |
 | `html_fieldset_legend` | `fieldset_legend_render` | Bounded semantic/UA fallback, authored border clearing, exact DrawIR/Engine2D pixels | FINAL REVIEW PASS; integrated Partial/RED boundary, draft manual, execution HELD |
 | `animation_publication_cache` | `animation_perf_lifecycle` | Remove full-document rebuild from the real hosted animation-frame publication path | FINAL REVIEW PASS; integrated static evidence, numeric runtime evidence HELD |
@@ -647,25 +647,34 @@ started. Missing temporary worktrees are not evidence.
 
 <!-- codex-design -->
 
-Status: **PROPOSED / UNIMPLEMENTED / RED**. Frozen names are
+Status: **INTEGRATED STATIC CANDIDATE / TARGET EXECUTION HELD**. Frozen names are
 `DomDocumentGeneration`, `DomNodeRoute`, `DomRadioGroupKey`,
 `DomIdentityIndex`; manual steps are `Build the document identity index`,
 `Dispatch through stable routes`, `Replace the document during a handler`,
 and `Reject stale routes and release the index`. Frozen helpers are
 `setup_dom_identity_generation_fixture`, `check_dom_identity_index_built`,
 `check_stable_route_dispatch`, `check_document_replacement_during_handler`,
-and `check_stale_routes_and_index_release`; each checker fails explicitly until
-production exists.
+and `check_stale_routes_and_index_release`; each checker now invokes production
+owners with direct assertions and no placeholder pass.
 
-Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; IMPLEMENTATION RED**.
+Design-audit status: **COMBINED OWNERS/APIS AND FOCUSED SSpec/MANUAL PRESENT;
+RUNTIME/NFR RECEIPTS HELD**.
+
+The integrated session surface is `document_generation`,
+`current_dom_identity_index`, `route_for_layout_target_key`,
+`layout_target_key_for_route`, `author_id_for_route`, and the single staged
+`publish_dom_snapshot` commit boundary. Lane 5 evidence lives at
+`test/03_system/app/browser/feature/browser_dom_identity_generation_spec.spl`
+and its exact `doc/06_spec/...` mirror; the 10,000-cycle numeric receipt remains
+held.
 
 | Order | Lane | Exact ownership | Acceptance / dependency |
 | --- | --- | --- | --- |
-| 1 | `dom_identity_index_owner` | Add import-free `dom_limits.spl` owning only `HTML_MAX_TREE_DEPTH`/`HTML_MAX_NODES`, move `html_tree_builder.spl` to those imports, and add `dom_identity_index.spl`; two-pass O(N) build, route/layout-key parsing, association queries, counters | independent high review; no GPU-to-web import; RED SSpec first |
-| 2 | `dom_accessor_form_migration` | `dom_accessors.spl`, `browser_session_form.spl`; replace recursive identity/form/label/radio/event-path scans | depends on 1; optional no-form-owner key, first-ID rule, no parallel registry |
-| 3 | `dom_dispatch_bridge_migration` | `dom.spl`, `browser_session.spl`, `browser_session_runtime.spl`, `browser_session_loading.spl`, `script/script_host.spl`, `script/simple_script.spl`, `script/event_api.spl`, and `js/dom_bridge.spl`; typed event routes, atomic DOM/index/script/listener publication, focus/Space/edit/blur, label/radio actions, and shared reentrant budget | depends on 1-2; stale generation aborts without new-index lookup; retire direct `bind_dom`; exact label order/cancel/rollback |
-| 4 | `dom_ui_hosted_migration` | `browser_session_ui_access.spl`, `hosted_web_content_session.spl`, `hosted_browser_renderer_worker.spl`; consume `route_for_layout_target_key` through the session generation gate; generation-bound snapshots and press/release/focus routes | depends on 3; stale/malformed hit keys reject and stale release produces no click |
-| 5 | `dom_identity_sspec` | focused modern SSpec, mirrored manual, N/2N and 10,000-cycle production receipts | depends on 1-4 and admitted current pure-Simple CLI |
+| 1 | `dom_identity_index_owner` | Add import-free `dom_limits.spl` owning only `HTML_MAX_TREE_DEPTH`/`HTML_MAX_NODES`, move `html_tree_builder.spl` to those imports, and add `dom_identity_index.spl`; two-pass O(N) build, route/layout-key parsing, association queries, counters | integrated static candidate; execution held |
+| 2 | `dom_accessor_form_migration` | `dom_accessors.spl`, `browser_session_form.spl`; replace recursive identity/form/label/radio/event-path scans | integrated static candidate; execution held |
+| 3 | `dom_dispatch_bridge_migration` | `dom.spl`, `browser_session.spl`, `browser_session_runtime.spl`, `browser_session_loading.spl`, `script/script_host.spl`, `script/simple_script.spl`, `script/event_api.spl`, and `js/dom_bridge.spl`; typed event routes, atomic DOM/index/script/listener publication, focus/Space/edit/blur, label/radio actions, and shared reentrant budget | combined source present; focused rollback/label/budget oracles present; execution held |
+| 4 | `dom_ui_hosted_migration` | `browser_session_ui_access.spl`, `hosted_web_content_session.spl`, `hosted_browser_renderer_worker.spl`; consume `route_for_layout_target_key` through the session generation gate; generation-bound snapshots and press/release/focus routes | integrated static candidate; stale-release oracle present; execution held |
+| 5 | `dom_identity_sspec` | focused modern SSpec, mirrored manual, N/2N and 10,000-cycle production receipts | SSpec/manual and held receipt schema present; numeric/runtime receipt held |
 
 Exact production ownership:
 
@@ -696,9 +705,9 @@ owner is the browser-hardening coordinator. Final acceptance requires the best
 available normal/highest-capability review of the combined source/spec/manual
 diff and one admitted target-runtime execution.
 
-Migration is not piecemeal: production stays on the current route model until
-Lanes 1-4 compile in one tree. Lane commits are review artifacts only and must
-not be pushed or merged independently. The merge deletes
+Migration is not piecemeal: Lanes 1-4 are now assembled in one static review
+tree, but target execution remains held. Lane commits remain review artifacts
+until the combined candidate is accepted. The merge deletes
 `be_dom_event_identity` as routing identity and its `node:<node_id>` fallback,
 `be_dom_route_identity`, `be_dom_route_node_id`,
 `be_dom_matches_identity`, `be_dom_event_identity_at_element_path`,

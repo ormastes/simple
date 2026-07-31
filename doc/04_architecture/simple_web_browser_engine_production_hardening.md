@@ -1083,9 +1083,9 @@ downgrade flags, and mixed SBR1/SBR2 deployments are forbidden.
 
 <!-- codex-design -->
 
-Status: **PROPOSED / UNIMPLEMENTED / RED**.
+Status: **INTEGRATED STATIC CANDIDATE / TARGET EXECUTION HELD**.
 
-Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; IMPLEMENTATION RED**.
+Design-audit status: **COMBINED OWNERS/APIS PRESENT; RUNTIME/NFR EVIDENCE HELD**.
 
 The current author-ID-or-`node_id` strings and recursive
 `be_dom_find_path_to_id` calls are not a production identity model. They can
@@ -1153,6 +1153,15 @@ labelable structure) build the candidate index first, advance generation, and
 atomically publish DOM plus index. One batch means one build and one
 generation. Value, style, focus, and text mutations that preserve those inputs
 reuse the current pair.
+
+The integrated session boundary exposes the pair through
+`document_generation()` and `current_dom_identity_index()`. Renderer input
+enters through `route_for_layout_target_key`; reverse rendering projection is
+`layout_target_key_for_route`, while page-visible author projection is
+`author_id_for_route`. `publish_dom_snapshot` is the one staged commit boundary
+for DOM, index, runtime bridge, and SimpleScript state. The focused
+SSpec/manual exercises these names statically without promoting runtime or NFR
+status.
 
 Dispatch freezes its event path as `DomNodeRoute` values. After each handler it
 first compares the captured and published generations. A mismatch never looks

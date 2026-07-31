@@ -1038,9 +1038,9 @@ numeric NFR is selected.
 
 <!-- codex-design -->
 
-Status: **PROPOSED / UNIMPLEMENTED / RED**.
+Status: **INTEGRATED STATIC CANDIDATE / TARGET EXECUTION HELD**.
 
-Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; IMPLEMENTATION RED**.
+Design-audit status: **COMBINED OWNERS/APIS PRESENT; RUNTIME/NFR EVIDENCE HELD**.
 
 ### Frozen API
 
@@ -1063,8 +1063,19 @@ The sole owner is
 - `radio_members(group) -> [DomNodeRoute]`
 - `contains_route(route) -> bool`
 - `route_for_layout_target_key(target_key) -> Result<DomNodeRoute, text>`
+- `layout_target_key_for_route(route) -> text?`
+- `author_id_for_route(route) -> text?`
 - `dom_node_route_text(route) -> text`
 - `dom_node_route_parse(value) -> Result<DomNodeRoute, text>`
+
+`BrowserSession.document_generation()` and
+`BrowserSession.current_dom_identity_index()` expose the atomically paired
+owners. `BrowserSession.route_for_layout_target_key(...)`,
+`layout_target_key_for_route(...)`, and `author_id_for_route(...)` require the
+captured generation at the session boundary. `publish_dom_snapshot(...)`
+stages the candidate index and script/runtime roots before assigning any of
+them. The focused SSpec/manual exercises these interfaces with target runtime
+and numeric NFR receipts explicitly held.
 
 Every query first compares route and index generations. `path_for_route`
 follows the route entry's parent identity chain to the root, reverses the

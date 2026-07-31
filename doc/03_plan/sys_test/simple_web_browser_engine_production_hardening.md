@@ -929,18 +929,22 @@ recorded. None of these rows is executable or merged evidence.
 - Shared-clock, label activation, and SimpleScript listener prototypes remain
   HOLD at their exact recorded defects and are not merged.
 
-## Generation-qualified DOM identity RED scenario
+## Generation-qualified DOM identity integrated static-held scenario
 
 <!-- codex-design -->
 
-Status: **PROPOSED / UNIMPLEMENTED / RED**. It traces
-REQ-WEB-BROWSER-007/008/017/018 and
+Status: **INTEGRATED STATIC EVIDENCE / TARGET EXECUTION HELD**. The focused
+executable is
+`test/03_system/app/browser/feature/browser_dom_identity_generation_spec.spl`;
+its complete mirrored manual is
+`doc/06_spec/03_system/app/browser/feature/browser_dom_identity_generation_spec.md`.
+It traces REQ-WEB-BROWSER-004/007/008/017/018 and
 NFR-WEB-BROWSER-004/005/006/008/014/015/016, but cannot promote them before
 production execution.
 
-Design-audit status: **OWNERSHIP/API BLOCKERS RESOLVED; EXECUTION RED**.
+Design-audit status: **COMBINED OWNERS/APIS PRESENT; EXECUTION HELD**.
 
-The future modern SSpec and mirrored manual expose exactly four steps:
+The modern SSpec and mirrored manual expose exactly four steps:
 
 1. `Build the document identity index`
 2. `Dispatch through stable routes`
@@ -950,11 +954,20 @@ The future modern SSpec and mirrored manual expose exactly four steps:
 Frozen helpers are `setup_dom_identity_generation_fixture`,
 `check_dom_identity_index_built`, `check_stable_route_dispatch`,
 `check_document_replacement_during_handler`, and
-`check_stale_routes_and_index_release`. Until their production owners land,
-each checker calls `fail("DOM identity index is not implemented")`; no
-placeholder PASS is permitted.
+`check_stale_routes_and_index_release`. Each now invokes production owners with
+direct assertions; no placeholder PASS is present.
 
-Step 1 builds one document with duplicate author IDs, forward external form
+| Requirement | Executable/manual evidence | Static status |
+| --- | --- | --- |
+| REQ-WEB-BROWSER-004 | current route -> layout hit -> canonical Draw IR -> Engine2D pixels | oracle present; execution held |
+| REQ-WEB-BROWSER-007 | callable, SimpleScript, UI, label/default, value/style/focus/text routes | oracle present; execution held |
+| REQ-WEB-BROWSER-008 | hosted stale press/release cannot activate equal replacement | oracle present; execution held |
+| REQ-WEB-BROWSER-017 | atomic load/eval/index rollback and retiring callbacks | oracle present; execution held |
+| REQ-WEB-BROWSER-018 | exact N/2N work plus versioned 10,000-cycle receipt schema | schema present; numeric receipt held |
+| NFR-WEB-BROWSER-004/005/006/008/014/015/016 | p95, allocations, index lifecycle/bytes, RSS, stale/budget fields | not promoted |
+
+Step 1 first proves `BrowserSession.new()` publishes the generation-1 blank
+DOM/index pair, then builds one document with duplicate author IDs, forward external form
 ownership, explicit and nested labels, same-name radios with distinct form
 owners, text controls, and capture/target/bubble listeners. It asserts the
 first-preorder ID winner, exact form/label/radio routes, and root-to-target
@@ -985,6 +998,13 @@ identity, or labelable structure publishes DOM/index/bridge/listeners once;
 an index-build failure publishes none. Value/style/text-only mutation keeps
 the generation.
 
+Focused folded cases bind each callable listener's JS heap object to its
+stored route before dispatch, require value/style/focus changes to preserve
+the current index and object identity, and require child-replacing
+`textContent` to advance the generation. They also exercise the exact label
+orders/cancellation/rollback above and require a 4,096-callable checkbox's
+synthetic input work to share the outer dispatch budget.
+
 Step 3 replaces the document from a target handler with author and numeric IDs
 resembling the old document. The handler unwinds, but old callbacks/defaults do
 not query the new index and do not focus, click, select, edit, or submit the
@@ -999,6 +1019,11 @@ component publish together while all old-generation callbacks disappear. A
 separate injected index-build/script-staging failure proves every prior
 component remains byte-for-byte/current-route identical and no candidate root,
 listener, callback, or generation escapes.
+
+The rollback oracle first rejects malformed JavaScript and an oversized
+BrowserSession load, then rejects an injected duplicate-node candidate. All
+three retain the prior DOM, generation/index identity, bridge object map, and
+callable listener roots.
 
 The hosted fixture retains the old layout hit key and captured generation,
 then replaces the document before release. The session
@@ -1033,6 +1058,10 @@ allocations, live/retired index counts/bytes, post-warmup/final/max RSS, and
 stale/budget rejects. Acceptance requires input-to-paint p95 <=50 ms, RSS
 <=384 MiB, retained bytes/final RSS within 10% of baseline, and no stale
 callback or unreleased index.
+
+The executable currently instantiates that versioned receipt with `-1` for
+every runtime-measured field and `runtime-held` status. Those sentinels are a
+fail-closed schema witness, not 10,000-cycle or NFR evidence.
 
 Step 4 also captures canonical component-bound Draw IR and Engine2D pixels for
 the surviving current control. The oracle asserts the exact current
