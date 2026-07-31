@@ -132,3 +132,11 @@ closure isolation before another build. Its CLI transport/driver-seed fix and
 focused contracts are complete, but a source-matched candidate has not been rebuilt.
 The executable at the documented path remains the July 28 hash above and is
 not admissible for submit/mismatch proof.
+
+The first 2026-07-31 bootstrap-source attempt exited before probe compilation
+with unsupported `rt_native_build` and a seed-interpreter `env_get` name
+collision during restoration. Explicit nil guards removed the restoration
+error: the 36-second rerun ends only at the unsupported interpreter intrinsic.
+Neither run is CUDA execution evidence, and neither replaced the candidate.
+Logs are retained as `build/simpleos_gpu_host/cuda_fill_native/`
+`build-after-entry-closure-{fix,env-guard}.log`.
