@@ -68,6 +68,24 @@ so the following access sees a bool. It accounts for **21 of the 21 failures in
 sql_types** and both failures in type_inference — i.e. the single largest failure
 block in the sample comes from one known operator bug.
 
+> **CORRECTION 2026-07-30 (same day): Family A is NOT an engine bug — the specs were wrong.**
+> `x.?` **extracts the Option payload**; it is not a boolean exists-check. The
+> pure-Simple compiler documents this itself in
+> `35.semantics/narrowing.spl:365` — *"ExistsCheck (`x.? -> T`)"* — and the
+> 2026-07-25 native fix (`native_exists_check_struct_payload_becomes_bool`)
+> deliberately made ExistsCheck keep a **payload** result so `evidence.?.marker`
+> works. Both engines agree: `Some(42).?` is `42`, and `x.? == true` is
+> `42 == true` → false.
+> The assertions were stale relative to that deliberate semantic change. Correct
+> idiom is `x != nil` / `x == nil` (verified: `Some(42) != nil` → true,
+> `nil != nil` → false).
+> Fixed in both mirror copies: **sql_types 23/44 → 44/44, type_inference
+> 27/29 → 29/29**, assertion count unchanged (58 in, 58 out).
+> **Remaining: 913 live sites across 304 spec files still use the wrong idiom**
+> (plus ~600 more inside commented-out placeholder blocks). That sweep is not
+> done — it is mechanical but large, and touching 304 spec files at once is a
+> repo-owner call.
+
 **Family B — dict read on a present key (spec 6).**
 
 `it "get by key from dict"` fails with `expected true to equal false`, the
