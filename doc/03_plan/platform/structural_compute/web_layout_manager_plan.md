@@ -1,6 +1,6 @@
 # Web Layout Manager Plan (browser consumer of the layout framework)
 
-**Date:** 2026-07-31 · **Status:** Implemented; runtime verification blocked
+**Date:** 2026-07-31 · **Status:** Proposed
 **Parents:** `layout_framework_plan.md` (framework); WebScene plan W5;
 architecture doc §17.5–§17.7.
 
@@ -51,10 +51,6 @@ test/01_unit/lib/gpu_web/layout/
 4. **Text integration.** GPU line breaking (supported scripts) + host shaping
    adapter; unsupported formatting contexts reported *before* execution,
    never mid-kernel.
-
-The WPT-derived parity corpus and live CUDA cases are implemented. Execution
-is pending a complete Stage4 self-hosted CLI; prior bounded build attempts did
-not produce one, and the bootstrap seed is not verification evidence.
 
 ## Acceptance
 
