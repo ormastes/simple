@@ -26,20 +26,24 @@ pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_
         {
             let cache_ref = cache.borrow();
             if let Some(class_cache) = cache_ref.get(class_name) {
-                return class_cache.get(method_name).copied();
+                if let Some(idx) = class_cache.get(method_name).copied() {
+                    if class_def.methods.get(idx).is_some_and(|method| method.name == method_name) {
+                        return Some(idx);
+                    }
+                }
             }
         }
-        // Cold path: first lookup for this class — allocate key and populate index
+        // Cold or stale path: rebuild from the current class definition.
         let mut cache_mut = cache.borrow_mut();
-        let class_cache = cache_mut.entry(class_name.to_string()).or_insert_with(|| {
-            class_def
-                .methods
-                .iter()
-                .enumerate()
-                .map(|(i, m)| (m.name.clone(), i))
-                .collect()
-        });
-        class_cache.get(method_name).copied()
+        let class_cache: HashMap<_, _> = class_def
+            .methods
+            .iter()
+            .enumerate()
+            .map(|(i, method)| (method.name.clone(), i))
+            .collect();
+        let result = class_cache.get(method_name).copied();
+        cache_mut.insert(class_name.to_string(), class_cache);
+        result
     })
 }
 
@@ -305,6 +309,36 @@ mod tests {
         assert_eq!(
             lookup_impl_method_index(&methods, "MethodIndexFixture", "alpha"),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn class_method_index_rebuilds_when_methods_reorder_or_shrink() {
+        let module = Parser::new("class MethodIndexClassFixture:\n    fn alpha():\n        1\n\n    fn beta():\n        2\n")
+            .parse()
+            .expect("parse method-index fixture");
+        let mut class_def = module
+            .items
+            .into_iter()
+            .find_map(|node| match node {
+                Node::Class(class_def) => Some(class_def),
+                _ => None,
+            })
+            .expect("class method-index fixture");
+
+        assert_eq!(
+            lookup_class_method_index(&class_def, "MethodIndexClassFixture", "alpha"),
+            Some(0)
+        );
+        class_def.methods.reverse();
+        assert_eq!(
+            lookup_class_method_index(&class_def, "MethodIndexClassFixture", "alpha"),
+            Some(1)
+        );
+        class_def.methods.retain(|method| method.name == "alpha");
+        assert_eq!(
+            lookup_class_method_index(&class_def, "MethodIndexClassFixture", "alpha"),
+            Some(0)
         );
     }
 }
