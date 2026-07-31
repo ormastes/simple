@@ -138,6 +138,22 @@ expect(worker.render_session.counters.retained_command_count).to_equal(0)
 - var animation raster = Engine2dCompositorBackend create named
    - Expected: animation_midpoint_pixels equals `768`
    - Expected: animation_pixels.skipped_command_count equals `0`
+- var shadowed worker = HostedBrowserRendererWorkerSession create
+- payload: "<style>@keyframes grow...@keyframes grow{}..."
+   - Expected: shadowed_initial_stage is greater than `-1`
+   - Expected: shadowed_initial_commands[shadowed_initial_stage].width equals `24`
+   - Expected: shadowed_initial.animation_property_work_count equals `0`
+- shadowed worker render session composition checksum
+   - Expected: shadowed_after.parse_count equals `1`
+   - Expected: shadowed_after.css_count equals `1`
+   - Expected: shadowed_after.style_count equals `2`
+   - Expected: shadowed_after.layout_count equals `1`
+   - Expected: shadowed_after.paint_count equals `2`
+   - Expected: shadowed_after.composition_revision equals `2`
+   - Expected: shadowed_stage is greater than `-1`
+   - Expected: shadowed_commands[shadowed_stage].width equals `24`
+   - Expected: shadowed_result.animation_property_work_count equals `0`
+- shadowed worker render session composition checksum
 - var scroll worker = HostedBrowserRendererWorkerSession create
 - scroll worker render session composition checksum
 - browser renderer decoder new
@@ -162,7 +178,7 @@ expect(worker.render_session.counters.retained_command_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 147 lines folded for reproduction.
+Runnable source: 193 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -265,6 +281,52 @@ for pixel in animation_pixels.pixels:
         animation_midpoint_pixels = animation_midpoint_pixels + 1
 expect(animation_midpoint_pixels).to_equal(32 * 24)
 expect(animation_pixels.skipped_command_count).to_equal(0)
+
+var shadowed_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+expect(shadowed_worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 7, request_id: 2,
+    payload: "<style>@keyframes grow{from{width:8px}to{width:32px}}@keyframes grow{}#shadowed{width:24px;height:16px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='shadowed'></div>"
+)).ok).to_be(true)
+val shadowed_initial = (
+    shadowed_worker.render_session.current_result.unwrap()
+)
+val shadowed_initial_commands = (
+    shadowed_initial.composition.batches[0].commands
+)
+val shadowed_initial_stage = _worker_command_index(
+    shadowed_initial_commands, "shadowed"
+)
+expect(shadowed_initial_stage).to_be_greater_than(-1)
+expect(shadowed_initial_commands[shadowed_initial_stage].width).to_equal(
+    24
+)
+expect(shadowed_initial.animation_property_work_count).to_equal(0)
+val shadowed_checksum = (
+    shadowed_worker.render_session.composition_checksum()
+)
+expect(shadowed_worker.handle(BrowserRendererMessage(
+    kind: "advance", generation: 7, request_id: 3, payload: "500"
+)).ok).to_be(true)
+val shadowed_after = shadowed_worker.render_session.counters
+expect(shadowed_after.parse_count).to_equal(1)
+expect(shadowed_after.css_count).to_equal(1)
+expect(shadowed_after.style_count).to_equal(2)
+expect(shadowed_after.layout_count).to_equal(1)
+expect(shadowed_after.paint_count).to_equal(2)
+expect(shadowed_after.composition_revision).to_equal(2)
+val shadowed_result = (
+    shadowed_worker.render_session.current_result.unwrap()
+)
+val shadowed_commands = shadowed_result.composition.batches[0].commands
+val shadowed_stage = _worker_command_index(
+    shadowed_commands, "shadowed"
+)
+expect(shadowed_stage).to_be_greater_than(-1)
+expect(shadowed_commands[shadowed_stage].width).to_equal(24)
+expect(shadowed_result.animation_property_work_count).to_equal(0)
+expect(
+    shadowed_worker.render_session.composition_checksum()
+).to_equal(shadowed_checksum)
 
 var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(scroll_worker.handle(BrowserRendererMessage(
