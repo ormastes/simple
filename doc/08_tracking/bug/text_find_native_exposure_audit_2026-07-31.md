@@ -1,5 +1,50 @@
 # Text `.find()` Native Codegen Exposure Audit — 2026-07-31
 
+## RETRACTION (2026-07-31, same day) — the BYTE/CHAR-RISK section is WRONG
+
+**The 6 BYTE/CHAR-RISK sites below are NOT bugs.** This audit's core premise —
+that `.substring()`/`.slice()` take *character* offsets while `.find()` returns a
+*byte* offset — was already false when the audit was written.
+
+Commit `8151c391932` ("fix(interpreter): byte-transparent text slices",
+2026-07-30 08:23 UTC, **one day before this audit**) made the interpreter's
+slice/substring index `s.as_bytes()`. The native/JIT/LLVM runtime was always
+byte-based (`rt_string_find` = memcmp over raw bytes; `rt_slice` = raw
+`s->data + begin`). Both ends of every flagged expression are therefore in the
+**same** byte coordinate system, which is exactly what correctness requires.
+
+Verification status, stated precisely:
+- **MEASURED (interpreter):** probes reproducing each flagged idiom with
+  multi-byte input (`"@décorator(x)"`, `"// 説明 TODO: fix this"`) pass today
+  and return exactly the right substring. The deployed binary
+  (`bin/release/x86_64-unknown-linux-gnu/simple`, built 2026-07-30 15:26) is
+  newer than the fix, so this is production-representative.
+- **INFERRED (native):** the byte-consistency argument for native codegen is a
+  source read of `runtime_native.c`, **not a run**. Native cannot be exercised
+  until the pending bootstrap redeploy. Do not cite native as verified.
+
+Sites 3 and 4 (`src/compiler_rust/lib/std/src/tooling/testing/parallel.spl`)
+are additionally **dead code** — zero importers across `src/`, `test/`,
+`scripts/`, `bin/`.
+
+Two things in this audit survive the retraction and are still worth acting on:
+1. The **EXPOSED-NATIVE / INTERPRETER-ONLY / UNKNOWN** breakdown of the 581
+   sites is unaffected — it is about *where code runs*, not about offset units.
+2. A separate coordinate mismatch was spotted while checking site 2: lint's
+   `check_todo_format` puts a **line-relative** offset into `Replacement.start/end`,
+   which `FixApplicator.apply` slices against **whole-file** source. Investigated
+   and found **NOT a live defect** — that rule is not in the `simple fix` rule
+   registry (`fix/rules/registry.spl:67`), so the path never executes; probed with
+   `bin/simple fix <probe>.spl --dry-run` → "No applicable fixes found". Every rule
+   that IS registered threads a `byte_offset` accumulator correctly. Latent
+   hygiene issue only — filed at `lint_replacement_line_vs_file_offset_2026-07-31.md`.
+
+**Process note for the next reader:** this audit classified 6 sites as CRITICAL
+from a code-shape pattern without running a single probe against the current
+runtime. The pattern was real; the premise it rested on had been fixed 24 hours
+earlier. Check the primitive's *current* behaviour before classifying call sites
+that depend on it.
+
 ## Executive Summary
 
 Audit of 581 `.find()` call sites in `src/**/*.spl` (excluding `test/`). **6 BYTE/CHAR-RISK sites identified** — these silently corrupt non-ASCII text by mixing byte offsets (`.find()` return value) with character-based indexing (`.substring()`/`.slice()`).

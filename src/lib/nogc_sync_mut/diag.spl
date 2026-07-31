@@ -32,9 +32,22 @@
 #
 # Interpreter landmine (verified in-session): Dict.get() returns the raw
 # value or nil, NOT a Some(..)-tagged Option — `if val Some(x) = d.get(k):`
-# silently never matches. Use `?? default` / `!= nil` instead. Same for
-# subscript-assign on module-global dicts from another function: use
-# `.set(k, v)`, not `d[k] = v`.
+# silently never matches. Use `?? default` / `!= nil` instead.
+#
+# Dict writes: use `d[k] = v`, NOT `.set(k, v)`.
+# A previous version of this comment claimed the opposite — that subscript-assign
+# on a module-global dict from another function does not work. That was RETRACTED
+# on 2026-07-31: all 7 `.set()` sites here were converted to subscript-assign and
+# diag_spec.spl stays 14/14. The claim was also actively harmful, because builtin
+# `.set()` silently DROPS the insert under native codegen (the key reads back
+# absent, with no error) — see doc/07_guide/language/dict_native_pitfalls.md.
+# Following the old advice would have made every counter, timer and deadline in
+# this module silently dead in native builds while passing every interpreter test.
+#
+# The conversion is MEASURED under the interpreter only, via a sentinel probe:
+# mis-keying one write took the spec to 13/14 with `counter bytes_sent = 0`,
+# proving the spec really covers these writes and that the green is not vacuous.
+# Native codegen remains UNVERIFIED here until the pending bootstrap redeploy.
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_stderr_write(s: text)
@@ -158,7 +171,7 @@ fn dbg_stage(component: text, stage: text):
     # the first stage of every component reported a delta of the whole uptime.
     val last = if _g_stage_last_ms.contains_key(component): _g_stage_last_ms[component] else: now
     val delta = now - last
-    _g_stage_last_ms.set(component, now)
+    _g_stage_last_ms[component] = now
 
     _g_stage_ring.push(StageEntry(component: component, stage: stage, t_ms: now))
     if _g_stage_ring.len() > _RING_CAP:
@@ -210,8 +223,8 @@ var _g_last_breach: text = ""
 fn dbg_deadline(label: text, budget_ms: i64):
     if not dbg_watchdog_on():
         return
-    _g_deadline_budget.set(label, Deadline.new(budget_ms))
-    _g_deadline_armed_at.set(label, rt_time_now_monotonic_ms())
+    _g_deadline_budget[label] = Deadline.new(budget_ms)
+    _g_deadline_armed_at[label] = rt_time_now_monotonic_ms()
     if not _g_deadline_labels.contains(label):
         _g_deadline_labels.push(label)
 
@@ -314,7 +327,7 @@ var _g_counter_labels: [text] = []
 fn dbg_time_begin(label: text):
     if not dbg_timers_on():
         return
-    _g_timer_begin.set(label, rt_time_now_monotonic_ms())
+    _g_timer_begin[label] = rt_time_now_monotonic_ms()
 
 fn dbg_time_end(label: text):
     if not dbg_timers_on():
@@ -328,14 +341,14 @@ fn dbg_time_end(label: text):
     val elapsed = rt_time_now_monotonic_ms() - start
     _g_timer_begin.remove(label)
     if not _g_timer_stats.contains_key(label):
-        _g_timer_stats.set(label, _TimerStat(label: label, count: 1, total_ms: elapsed, max_ms: elapsed))
+        _g_timer_stats[label] = _TimerStat(label: label, count: 1, total_ms: elapsed, max_ms: elapsed)
         _g_timer_labels.push(label)
     else:
         val s = _g_timer_stats[label]
         var new_max = s.max_ms
         if elapsed > new_max:
             new_max = elapsed
-        _g_timer_stats.set(label, _TimerStat(label: label, count: s.count + 1, total_ms: s.total_ms + elapsed, max_ms: new_max))
+        _g_timer_stats[label] = _TimerStat(label: label, count: s.count + 1, total_ms: s.total_ms + elapsed, max_ms: new_max)
 
 fn dbg_count(label: text, delta: i64):
     if not dbg_timers_on():
@@ -349,7 +362,7 @@ fn dbg_count(label: text, delta: i64):
         cur = _g_counters[label]
     else:
         _g_counter_labels.push(label)
-    _g_counters.set(label, cur + delta)
+    _g_counters[label] = cur + delta
 
 fn dbg_timer_stats(label: text) -> DiagTimerStats:
     if not _g_timer_stats.contains_key(label):
