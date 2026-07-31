@@ -18,9 +18,14 @@ use compiler.common.diagnostics.span.{Span}
 use compiler.blocks.value.BlockValue
 use compiler.mir.mir_lowering_types.{MirLowering, MirError}
 use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
+use compiler.mir.text_extern_abi.{text_arg_indices}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_enum_discriminant(value: Any) -> i64
+# Two-word (ptr, len) text-extern-ABI split -- see text_extern_abi.spl and
+# doc/05_design/compiler/codegen/pure_simple_text_extern_abi_fix_plan.md.
+extern fn rt_string_data(s: text) -> i64
+extern fn rt_string_len(value: text) -> i64
 
 # Monotonic counter for lambda-lift synthesized top-level function names. A
 # non-capturing `Lambda` used as a first-class VALUE (passed to a HOF) is lifted
@@ -29,20 +34,16 @@ extern fn rt_enum_discriminant(value: Any) -> i64
 # in one program do not collide onto the same address.
 var _mir_lambda_lift_counter: i64 = 0
 
-# print(x.contains(y)) etc.: method-call results are untyped on this path
-# (MIR method lowering does not thread return types), so
-# lower_bootstrap_print_call's explicit-numeric/bool coercion misses them and
-# a bool-returning text/dict/array method printed its raw 1/0 instead of
-# true/false (parity case process_run_timeout expects
-# print(err.contains("problem")) -> "true"). Detect the well-known
-# bool-returning method NAMES on the print argument's own HIR expr.
-# Isolated single-arm match with return-per-arm (the reliable seed idiom).
-fn print_arg_is_bool_method_call(e: HirExpr) -> bool:
-    match e.kind:
-        case HirExprKind.MethodCall(_, pb_method, _, _):
-            return pb_method == "contains" or pb_method == "starts_with" or pb_method == "ends_with" or pb_method == "contains_key"
-        case _:
-            return false
+# NOTE (bug #9 fix): print(x.contains(y)) etc. used to rely on a hardcoded
+# method-name allow-list here (print_arg_is_bool_method_call) because the
+# bool-returning method arms in method_calls_literals.spl (text `.contains`,
+# `.starts_with`, `.ends_with`, dict `.has`/`.contains`/`.contains_key`) did
+# not consistently type their result local as MirType.bool(). Root fix: each
+# of those arms now emits its call/binop with return_type = MirType.bool()
+# directly (see method_calls_literals.spl), so lower_bootstrap_print_call's
+# ordinary `local_mir_type_of(arg_local)` == Bool check below already routes
+# them through the true/false renderer -- the name-keyed allow-list is
+# removed, not just bypassed.
 
 fn int_list_contains(xs: [i64], v: i64) -> bool:
     var i = 0
@@ -261,7 +262,109 @@ impl MirLowering:
             return tagged
         local
 
-    me emit_resolved_direct_call(func: MirOperand, args: [MirOperand], return_type: MirType) -> LocalId:
+    me direct_call_extern_name(func: MirOperand) -> text:
+        """Extract the callee's symbol name from a direct-call `func`
+        operand, if it is the `Const(Str(name), FuncPtr(_))` shape
+        `symbol_to_operand`/`named_function_operand` produce for a named
+        (extern or ordinary) function reference. Anything else (an indirect
+        call through a computed function pointer, a lambda value, ...)
+        returns "" so callers treat it as "no registry match"."""
+        match func.kind:
+            case MirOperandKind.Const(value, type_):
+                var name = ""
+                match value:
+                    case MirConstValue.Str(n):
+                        name = n
+                    case _: ()
+                if name != "":
+                    match type_.kind:
+                        case MirTypeKind.FuncPtr(_):
+                            return name
+                        case _: ()
+                ""
+            case _:
+                ""
+
+    me text_extern_abi_helper_operand(name: text) -> MirOperand:
+        MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str(name),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
+    me emit_text_ptr_len_pair(operand: MirOperand) -> (LocalId, LocalId)?:
+        """Emit calls to the existing, already-relied-upon `rt_string_data`/
+        `rt_string_len` externs to pull a raw (ptr, len) pair out of a
+        `text`-typed operand -- reusing the SAME single-collapsed-operand
+        call convention `.len()` already lowers through everywhere else in
+        this compiler (see the fix plan's §4.3: "the split must reuse that
+        path, not invent a new one"), rather than inventing a new
+        aggregate-unpacking mechanism that would need its own per-backend
+        special case."""
+        var reused = operand
+        match operand.kind:
+            case MirOperandKind.Move(local):
+                reused = mir_operand_copy(local)
+            case _: ()
+        var b = self.builder
+        val ptr_local = b.emit_call(self.text_extern_abi_helper_operand("rt_string_data"), [reused], MirType.i64())
+        val len_local = b.emit_call(self.text_extern_abi_helper_operand("rt_string_len"), [reused], MirType.i64())
+        self.builder = b
+        if val p = ptr_local:
+            if val l = len_local:
+                return Some((p, l))
+        nil
+
+    me expand_text_abi_args(func: MirOperand, args: [MirOperand]) -> [MirOperand]:
+        """Registry-driven (ptr, len) split for known text-extern-ABI
+        functions (see `text_extern_abi.spl`). Applied once, here, at the
+        single shared call-lowering choke point so all three native backends
+        (LLVM `.spl`, Cranelift `.spl`, x86_64 isel) see the already-split
+        `(ptr: i64, len: i64)` pair and their existing generic
+        one-word-per-operand `Call` lowering becomes correct for free --
+        mirroring the already-working manual `rt_mem_attr_set_owner`
+        `.ptr()`/`.len()` split pattern in `interpreter_calls.spl`, but
+        data-driven instead of hand-written per call site."""
+        val callee_name = self.direct_call_extern_name(func)
+        if callee_name == "":
+            return args
+        val maybe_indices = text_arg_indices(callee_name)
+        if not maybe_indices.?:
+            return args
+        val indices = maybe_indices ?? []
+        if indices.len() == 0:
+            return args
+        # Defensive: an already-hand-split call site to the same C symbol
+        # (e.g. interpreter_calls.spl's 4-raw-i64-arg `rt_env_set`) has more
+        # args than the registry's text-only arity expects and no text-typed
+        # operand at the listed indices any more -- leave any call whose arg
+        # count doesn't reach every listed index untouched rather than
+        # corrupt it.
+        var max_index = -1
+        for idx in indices:
+            if idx > max_index:
+                max_index = idx
+        if max_index >= args.len():
+            return args
+        var result: [MirOperand] = []
+        var i = 0
+        while i < args.len():
+            if int_list_contains(indices, i):
+                val original = args[i]
+                val split = self.emit_text_ptr_len_pair(original)
+                if val pair = split:
+                    result = result.push(mir_operand_copy(pair.0))
+                    result = result.push(mir_operand_copy(pair.1))
+                else:
+                    # Split failed (builder rejected the call) -- keep the
+                    # original operand rather than silently dropping it.
+                    result = result.push(original)
+            else:
+                result = result.push(args[i])
+            i = i + 1
+        result
+
+    me emit_resolved_direct_call(func: MirOperand, args_in: [MirOperand], return_type: MirType) -> LocalId:
+        val args = self.expand_text_abi_args(func, args_in)
         var b = self.builder
         if return_type.kind != MirTypeKind.Unit:
             val dest = b.new_temp(return_type)
@@ -950,6 +1053,19 @@ impl MirLowering:
         # char* deref on a float bit pattern (see native_print_float_segv bug).
         var arg_is_float = false
         var arg_is_f32 = false
+        # Aggregate print routing (tuple/dict/struct("object")/enum): the old
+        # `case _: ()` no-op here left print_arg as the raw heap pointer,
+        # which then fell into the plain-string cstr-coerce path below and
+        # fed the wrong byte layout straight into rt_print's untagged fputs
+        # (SIGSEGV, or a garbage `<value:0x..>` dump). Route these through
+        # `rt_to_string` (C runtime_native.c:2393, `int64_t
+        # rt_to_string(int64_t value)`) first -- it walks the value's own
+        # tag/discriminant and renders it exactly like the interpreter oracle
+        # (tuple `(a, b)`, dict `{k: v}`, enum `Variant(payload)`, object
+        # `<Type>{field: v}`), returning a tagged heap string handle that the
+        # existing `rt_interp_cstr` unwrap further below already knows how to
+        # consume, same as any other string operand.
+        var arg_is_aggregate = false
         if val arg_ty = self.local_mir_type_of(arg_local):
             match arg_ty.kind:
                 case MirTypeKind.I8 | MirTypeKind.I16 | MirTypeKind.I32 | MirTypeKind.I64:
@@ -963,17 +1079,22 @@ impl MirLowering:
                     arg_is_f32 = true
                 case MirTypeKind.F64:
                     arg_is_float = true
+                case MirTypeKind.Tuple(_) | MirTypeKind.Dict(_, _) | MirTypeKind.Struct(_) | MirTypeKind.Enum(_):
+                    arg_is_aggregate = true
                 case _:
                     ()
-        # Method-call bool results (see print_arg_is_bool_method_call above):
-        # overrides the numeric default too -- the temp holding e.g. a
-        # `.contains(...)` result is tracked as plain I64 by the method
-        # lowering, so without this it printed 1/0 instead of true/false.
-        if not arg_is_bool and not arg_is_float and args.len() > 0:
-            if print_arg_is_bool_method_call(args[0].value):
-                arg_is_bool = true
-                arg_is_numeric = false
-        if arg_is_numeric or arg_is_bool or arg_is_float:
+        if arg_is_aggregate:
+            val to_string_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_to_string"),
+                MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+            ))
+            var b_agg = self.builder
+            val agg_res = b_agg.emit_call(to_string_op, [mir_operand_copy(arg_local)], MirType.i64())
+            self.builder = b_agg
+            if val agg_local = agg_res:
+                print_arg = mir_operand_copy(agg_local)
+                self.mark_runtime_value_local(agg_local.id)
+        elif arg_is_numeric or arg_is_bool or arg_is_float:
             val raw_render_fn = if arg_is_bool: "rt_raw_bool_to_string" elif arg_is_float: "rt_raw_f64_to_string" else: "rt_raw_i64_to_string"
             val num_op = MirOperand(kind: MirOperandKind.Const(
                 MirConstValue.Str(raw_render_fn),
