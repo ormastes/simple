@@ -22,6 +22,7 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_dispatch_event_to_id, be_dom_dispatch_keyboard_event_to_id,
+    be_dom_dispatch_input_event_to_id,
     be_dom_find_by_tag,
     be_dom_find_path_to_id,
     be_dom_focused_route_id, be_dom_get_attr, be_dom_get_text_content,
@@ -72,7 +73,7 @@ use std.gc_async_mut.web.browser_session_context.{
     browser_session_is_secure_context
 }
 use std.common.encoding.utf8.{
-    text_is_valid_utf8, text_without_last_codepoint, utf8_decode_one
+    text_is_valid_utf8, utf8_decode_one
 }
 use std.common.convert.{digit_value}
 
@@ -608,6 +609,18 @@ class BrowserDomEventExecutor:
         self.runtime.set_host_property(
             event_id, "repeat", JsValue.Boolean(v: event.repeat)
         )
+        if event.input_type != "":
+            val input_data = match event.input_data:
+                Some(value): JsValue.String(v: value)
+                nil: JsValue.Null
+            self.runtime.set_host_property(event_id, "data", input_data)
+            self.runtime.set_host_property(
+                event_id, "inputType", JsValue.String(v: event.input_type)
+            )
+            self.runtime.set_host_property(
+                event_id, "isComposing",
+                JsValue.Boolean(v: event.is_composing)
+            )
         self.runtime.set_host_property(
             event_id, "defaultPrevented", JsValue.Boolean(v: false)
         )
@@ -1020,6 +1033,71 @@ impl BrowserSession:
         self.text_selection_anchor_byte = 0
         self.text_selection_focus_byte = 0
 
+    me _set_dom_text_runtime_state(
+        target_id: text, value: text, anchor_byte: i64, focus_byte: i64
+    ):
+        if val Some(state) = self.runtime_state:
+            val path = be_dom_find_path_to_id(self.current_dom, target_id)
+            if path.len() == 0:
+                return
+            val object_id = _browser_session_object_id_for_node(
+                state, path[path.len() - 1]
+            )
+            if object_id < 0:
+                return
+            var runtime = state.runtime
+            runtime.set_host_property(
+                object_id, "value", JsValue.String(v: value)
+            )
+            runtime.set_host_property(
+                object_id, "selectionStart",
+                JsValue.Number(v: anchor_byte.to_f64())
+            )
+            runtime.set_host_property(
+                object_id, "selectionEnd",
+                JsValue.Number(v: focus_byte.to_f64())
+            )
+            state.runtime = runtime
+            self.runtime_state = Some(state)
+
+    me _read_dom_text_runtime_selection(
+        target_id: text, value: text
+    ) -> bool:
+        if val Some(state) = self.runtime_state:
+            val path = be_dom_find_path_to_id(self.current_dom, target_id)
+            if path.len() == 0:
+                return false
+            val object_id = _browser_session_object_id_for_node(
+                state, path[path.len() - 1]
+            )
+            if object_id < 0:
+                return false
+            val anchor_number = match state.runtime.get_host_property(
+                object_id, "selectionStart"
+            ):
+                JsValue.Number(v): v
+                _: return false
+            val focus_number = match state.runtime.get_host_property(
+                object_id, "selectionEnd"
+            ):
+                JsValue.Number(v): v
+                _: return false
+            val anchor = anchor_number.to_i64()
+            val focus = focus_number.to_i64()
+            if (
+                anchor_number != anchor.to_f64() or
+                focus_number != focus.to_f64() or
+                anchor < 0 or focus < 0 or
+                anchor > value.len() or focus > value.len() or
+                not _browser_session_is_utf8_boundary(value, anchor) or
+                not _browser_session_is_utf8_boundary(value, focus)
+            ):
+                return false
+            self.text_selection_target_id = target_id
+            self.text_selection_anchor_byte = anchor
+            self.text_selection_focus_byte = focus
+        true
+
     me ensure_dom_text_selection(target_id: text) -> bool:
         val path = be_dom_find_path_to_id(self.current_dom, target_id)
         if path.len() == 0:
@@ -1198,13 +1276,24 @@ impl BrowserSession:
             source_index = source_index + 1
 
     me dispatch_dom_event(target_id: text, event_type: text, bubbles: bool, cancelable: bool) -> BeDomEventDispatch:
-        self._dispatch_dom_event_with_keyboard_payload(
-            target_id, event_type, bubbles, cancelable, "", "", false
+        self._dispatch_dom_event_with_payload(
+            target_id, event_type, bubbles, cancelable, "", "", false,
+            nil, "", false
         )
 
-    me _dispatch_dom_event_with_keyboard_payload(
+    me _dispatch_dom_input_event(
         target_id: text, event_type: text, bubbles: bool, cancelable: bool,
-        key: text, code: text, shift_key: bool
+        input_data: text?, input_type: text
+    ) -> BeDomEventDispatch:
+        self._dispatch_dom_event_with_payload(
+            target_id, event_type, bubbles, cancelable, "", "", false,
+            input_data, input_type, false
+        )
+
+    me _dispatch_dom_event_with_payload(
+        target_id: text, event_type: text, bubbles: bool, cancelable: bool,
+        key: text, code: text, shift_key: bool, input_data: text?,
+        input_type: text, is_composing: bool
     ) -> BeDomEventDispatch:
         val target_route_id = _browser_session_dom_route_id(
             self.current_dom, target_id
@@ -1282,7 +1371,13 @@ impl BrowserSession:
                 "CSP blocked inline event handler: {normalized_event_type}"
         )
         var callable_executor_used = false
-        var dispatch = if key == "" and code == "":
+        var dispatch = if input_type != "":
+            be_dom_dispatch_input_event_to_id(
+                self.current_dom, target_route_id, event_type, bubbles,
+                cancelable, input_data, input_type, is_composing,
+                inline_allowed
+            )
+        elif key == "" and code == "":
             be_dom_dispatch_event_to_id(
                 self.current_dom, target_route_id, event_type, bubbles,
                 cancelable, inline_allowed
@@ -1316,7 +1411,16 @@ impl BrowserSession:
                     event_object_id: -1,
                     error: ""
                 )
-                dispatch = if key == "" and code == "":
+                dispatch = if input_type != "":
+                    be_dom_dispatch_input_event_to_id(
+                        callable_root, target_route_id, event_type, bubbles,
+                        cancelable, input_data, input_type, is_composing,
+                        inline_allowed,
+                        fn(event: BeDomEvent, node: BeDomNode, action: text,
+                           phase: text) -> BeDomEvent:
+                            executor.execute(event, node, action, phase)
+                    )
+                elif key == "" and code == "":
                     be_dom_dispatch_event_to_id(
                         callable_root, target_route_id, event_type, bubbles,
                         cancelable, inline_allowed,
@@ -1472,9 +1576,9 @@ impl BrowserSession:
         val path = be_dom_find_path_to_id(self.current_dom, target_id)
         if path.len() == 0:
             return Err("DOM keyboard target not found")
-        val key_dispatch = self._dispatch_dom_event_with_keyboard_payload(
+        val key_dispatch = self._dispatch_dom_event_with_payload(
             target_id, "keydown", true, true, key,
-            browser_dom_keyboard_code_from_key(key), false
+            browser_dom_keyboard_code_from_key(key), false, nil, "", false
         )
         if key_dispatch.event.default_prevented:
             return Ok(key_dispatch)
@@ -1504,8 +1608,9 @@ impl BrowserSession:
         if path.len() == 0:
             return Err("DOM keyboard target not found")
         val event_type = if pressed: "keydown" else: "keyup"
-        val key_dispatch = self._dispatch_dom_event_with_keyboard_payload(
-            target_id, event_type, true, true, key, code, shift_key
+        val key_dispatch = self._dispatch_dom_event_with_payload(
+            target_id, event_type, true, true, key, code, shift_key,
+            nil, "", false
         )
         if key_dispatch.event.default_prevented:
             self.pending_space_activation_target = ""
@@ -1532,8 +1637,8 @@ impl BrowserSession:
                 else:
                     html_to_text(be_dom_serialize_children(target))
                 if value != "":
-                    return self.set_dom_text_input(
-                        target_id, text_without_last_codepoint(value)
+                    return self._apply_dom_text_edit(
+                        target_id, "", false, "deleteContentBackward"
                     )
             return Ok(key_dispatch)
         if pressed and (
@@ -1610,9 +1715,9 @@ impl BrowserSession:
             if path.len() > 0:
                 val target = path[path.len() - 1]
                 if dom_text_control_selectable(target):
-                    val key_dispatch = self._dispatch_dom_event_with_keyboard_payload(
+                    val key_dispatch = self._dispatch_dom_event_with_payload(
                         target_id, "keydown", true, true,
-                        key, code, shift_key
+                        key, code, shift_key, nil, "", false
                     )
                     if key_dispatch.event.default_prevented:
                         return Ok(key_dispatch)
@@ -1665,15 +1770,13 @@ impl BrowserSession:
                         end = _browser_session_next_utf8_boundary(value, end)
                     if start == end:
                         return Ok(key_dispatch)
-                    val updated = self.set_dom_text_input(
-                        target_id,
-                        value.slice(0, start) + value.slice(end, value.len())
+                    val input_type = if is_backspace:
+                        "deleteContentBackward"
+                    else:
+                        "deleteContentForward"
+                    val updated = self._apply_dom_text_edit(
+                        target_id, "", false, input_type
                     )
-                    if val Ok(dispatch) = updated:
-                        if not dispatch.event.default_prevented:
-                            self.text_selection_target_id = target_id
-                            self.text_selection_anchor_byte = start
-                            self.text_selection_focus_byte = start
                     return updated
         if not is_tab or not pressed:
             return self._dispatch_dom_keyboard_event_with_payload(
@@ -1684,8 +1787,9 @@ impl BrowserSession:
             val current_route_id = _browser_session_dom_route_id(
                 self.current_dom, target_id
             )
-            val key_dispatch = self._dispatch_dom_event_with_keyboard_payload(
-                target_id, "keydown", true, true, key, code, shift_key
+            val key_dispatch = self._dispatch_dom_event_with_payload(
+                target_id, "keydown", true, true, key, code, shift_key,
+                nil, "", false
             )
             if key_dispatch.event.default_prevented:
                 return Ok(key_dispatch)
@@ -1706,8 +1810,8 @@ impl BrowserSession:
         Ok(self.dispatch_dom_event(next_id, "focus", false, false))
 
     me _apply_dom_text_edit(
-        target_id: text, prefix: text, insertion: text, suffix: text,
-        replace_all: bool
+        target_id: text, insertion: text, replace_all: bool,
+        input_type: text
     ) -> Result<BeDomEventDispatch, text>:
         val path = be_dom_find_path_to_id(self.current_dom, target_id)
         if path.len() == 0:
@@ -1715,11 +1819,7 @@ impl BrowserSession:
         val target = path[path.len() - 1]
         if not dom_text_control_mutable(target):
             return Err("DOM input target is not editable")
-        if (
-            not text_is_valid_utf8(prefix) or
-            not text_is_valid_utf8(insertion) or
-            not text_is_valid_utf8(suffix)
-        ):
+        if not text_is_valid_utf8(insertion):
             return Err("DOM input value is not valid UTF-8")
         val target_route_id = be_dom_route_identity(target)
         if be_dom_focused_route_id(self.current_dom) != target_route_id:
@@ -1731,10 +1831,33 @@ impl BrowserSession:
             return Err("DOM input target was removed")
         if not dom_text_control_mutable(focused_path[focused_path.len() - 1]):
             return Err("DOM input target is not editable")
-        val before_input = self.dispatch_dom_event(
-            target_id, "beforeinput", true, true
+        val focused_target = focused_path[focused_path.len() - 1]
+        val focused_value = self._ensure_dom_text_selection(
+            target_id, focused_target
+        )
+        self._set_dom_text_runtime_state(
+            target_id, focused_value, self.text_selection_anchor_byte,
+            self.text_selection_focus_byte
+        )
+        val input_data: text? = if input_type.starts_with("delete"):
+            nil
+        else:
+            Some(insertion)
+        val before_input = self._dispatch_dom_input_event(
+            target_id, "beforeinput", true, true, input_data, input_type
         )
         if before_input.event.default_prevented:
+            val canceled_path = be_dom_find_path_to_id(
+                self.current_dom, target_id
+            )
+            if canceled_path.len() > 0:
+                val canceled_value = _browser_session_text_control_value(
+                    canceled_path[canceled_path.len() - 1]
+                )
+                if text_is_valid_utf8(canceled_value):
+                    val _ = self._read_dom_text_runtime_selection(
+                        target_id, canceled_value
+                    )
             return Ok(before_input)
 
         val current_path = be_dom_find_path_to_id(self.current_dom, target_id)
@@ -1744,6 +1867,29 @@ impl BrowserSession:
         if not dom_text_control_mutable(current_target):
             return Err("DOM input target is not editable")
         val current_value = _browser_session_text_control_value(current_target)
+        if not text_is_valid_utf8(current_value):
+            return Err("DOM input value is not valid UTF-8")
+        if not self._read_dom_text_runtime_selection(
+            target_id, current_value
+        ):
+            return Err("DOM input selection is not valid UTF-8")
+        var start = 0
+        var end = current_value.len()
+        if not replace_all:
+            start = self.text_selection_anchor_byte
+            end = self.text_selection_focus_byte
+            if start > end:
+                val swap = start
+                start = end
+                end = swap
+            if start == end and input_type == "deleteContentBackward":
+                start = _browser_session_previous_utf8_boundary(
+                    current_value, start
+                )
+            elif start == end and input_type == "deleteContentForward":
+                end = _browser_session_next_utf8_boundary(current_value, end)
+        val prefix = current_value.slice(0, start)
+        val suffix = current_value.slice(end, current_value.len())
         var accepted_insertion = insertion
         var next_value = prefix + insertion + suffix
         val maxlength = _browser_session_text_maxlength(current_target)
@@ -1786,16 +1932,21 @@ impl BrowserSession:
             self.current_dom, target_id,
             "set-attr:data-input-dirty=true", false
         )
-        val input_dispatch = self.dispatch_dom_event(
-            target_id, "input", true, false
-        )
-        val caret = if replace_all:
-            next_value.len()
-        else:
-            prefix.len() + accepted_insertion.len()
+        val caret = prefix.len() + accepted_insertion.len()
         self.text_selection_target_id = target_id
         self.text_selection_anchor_byte = caret
         self.text_selection_focus_byte = caret
+        self._set_dom_text_runtime_state(
+            target_id, next_value, caret, caret
+        )
+        val accepted_data: text? = if input_type.starts_with("delete"):
+            nil
+        else:
+            Some(accepted_insertion)
+        val input_dispatch = self._dispatch_dom_input_event(
+            target_id, "input", true, false,
+            accepted_data, input_type
+        )
         Ok(input_dispatch)
 
     me set_dom_select_value(
@@ -1856,32 +2007,15 @@ impl BrowserSession:
     me set_dom_text_input(
         target_id: text, value: text
     ) -> Result<BeDomEventDispatch, text>:
-        self._apply_dom_text_edit(target_id, "", value, "", true)
+        self._apply_dom_text_edit(
+            target_id, value, true, "insertReplacementText"
+        )
 
     me append_dom_text_input(
         target_id: text, value: text
     ) -> Result<BeDomEventDispatch, text>:
-        val path = be_dom_find_path_to_id(self.current_dom, target_id)
-        if path.len() == 0:
-            return Err("DOM input target not found")
-        val target = path[path.len() - 1]
-        if not dom_text_control_mutable(target):
-            return Err("DOM input target is not editable")
-        val current_value = self._ensure_dom_text_selection(
-            target_id, target
-        )
-        var start = self.text_selection_anchor_byte
-        var end = self.text_selection_focus_byte
-        if start > end:
-            val swap = start
-            start = end
-            end = swap
         self._apply_dom_text_edit(
-            target_id,
-            current_value.slice(0, start),
-            value,
-            current_value.slice(end, current_value.len()),
-            false
+            target_id, value, false, "insertText"
         )
 
     me _blur_dom_focus(target_id: text) -> Result<BeDomEventDispatch, text>:
