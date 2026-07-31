@@ -26,9 +26,15 @@ group_by([2, 8, 4], parity)
 groups[j].1.push(item)
 ```
 
-Arrays are value types in Simple, so `groups[j]` yields a **copy** of the tuple.
-`.push` mutates that copy and it is discarded — the write never reaches
-`groups`. No error, no warning.
+Indexing to reach a **tuple field** yields a copy, so `.push` mutates the copy
+and it is discarded — the write never reaches `groups`. No error, no warning.
+
+This is one instance of a wider class, probed and audited separately in
+`doc/08_tracking/bug/mutate_through_index_loses_write_2026-07-31.md`. The rule is
+narrower than "arrays are value types": `b[0].push(x)` on a `[[i64]]` **works**;
+it is dict values and tuple/struct fields that lose the write. Six sites in
+`src/lib` share the defect, including `dependency_tracker/graph.spl:54`, where
+every graph node keeps only its first edge.
 
 ## Evidence that it is pre-existing
 
