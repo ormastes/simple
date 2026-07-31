@@ -221,8 +221,7 @@ targets select `gui_entry_desktop.spl`, which lowers its `SharedWmScene` through
 `Engine2dWmFrameExecutor`; direct legacy `wm_entry.spl` files remain
 compatibility-only. Hosted color/top-level frames use a persistent
 `Engine2dCompositorBackend` to execute `SharedWmScene -> DrawIrComposition ->
-Engine2D`, with direct rendering retained for the programmatic compatibility
-gate, image/motion backgrounds, nested content, or rejected readback. The
+Engine2D`; platform presentation/readback consumes that final composition. The
 x86_64 SimpleOS entry registers the pinned face before composition and its `taskbar-clock` witness now
 originates in `SharedWmScene -> DrawIrComposition -> Engine2D`. The old private
 post-frame draw path is removed. The dynamic rightmost 56x48 QEMU crop is
