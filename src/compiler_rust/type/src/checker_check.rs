@@ -225,8 +225,33 @@ impl TypeChecker {
                 Node::Impl(_) => {
                     // Impl blocks don't introduce new names
                 }
-                Node::Let(_)
-                | Node::Assignment(_)
+                Node::Let(let_stmt) => {
+                    // Module-level `val`/`var` must be visible to EVERY
+                    // top-level item, not just the ones that follow it in
+                    // source order. Functions/classes are pre-registered
+                    // above precisely so they can forward-reference each
+                    // other; a module-level binding that is only bound when
+                    // the second pass walks past it makes resolution depend
+                    // on item order, so any function checked before the
+                    // declaration reports "undefined identifier". That order
+                    // is not stable once modules are merged (e.g. the
+                    // `native-build --entry-closure` lane), which made this
+                    // surface as an intermittent, initializer-shape-looking
+                    // failure. Pre-bind the names here; the second pass still
+                    // runs and refines each type from the initializer.
+                    let type_annotation = match &let_stmt.pattern {
+                        Pattern::Typed { ty, .. } => Some(ty),
+                        _ => let_stmt.ty.as_ref(),
+                    };
+                    self.bind_pattern(&let_stmt.pattern);
+                    if let Some(ast_ty) = type_annotation {
+                        if let Some(name) = self.pattern_root_name(&let_stmt.pattern).map(str::to_string) {
+                            let expected_ty = self.ast_type_to_type(ast_ty);
+                            self.env.insert(name, expected_ty);
+                        }
+                    }
+                }
+                Node::Assignment(_)
                 | Node::Return(_)
                 | Node::If(_)
                 | Node::Match(_)
