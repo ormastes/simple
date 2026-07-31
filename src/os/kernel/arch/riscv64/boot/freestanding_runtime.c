@@ -2000,7 +2000,18 @@ void serial_println(spl_i64 msg) {
 
 spl_i64 rt_string_len(spl_i64 value) {
     RtString *string = rt_as_string(value);
-    return string ? (spl_i64)string->len : 0;
+    if (string) {
+        return (spl_i64)string->len;
+    }
+    if ((spl_u64)value < 0x80200000ULL || (spl_u64)value >= RT_FREESTANDING_HEAP_BASE) {
+        return 0;
+    }
+    const char *literal = (const char *)(spl_u64)value;
+    spl_i64 len = 0;
+    while ((spl_u64)(literal + len) < RT_FREESTANDING_HEAP_BASE && literal[len] != 0) {
+        len = len + 1;
+    }
+    return len;
 }
 
 spl_i64 rt_string_data(spl_i64 value) {
@@ -2009,6 +2020,17 @@ spl_i64 rt_string_data(spl_i64 value) {
         return 0;
     }
     return (spl_i64)(spl_u64)string->data;
+}
+
+spl_i64 rt_interp_cstr(spl_i64 value) {
+    spl_i64 data = rt_string_data(value);
+    if (data != 0) {
+        return data;
+    }
+    if ((spl_u64)value >= 0x80200000ULL && (spl_u64)value < RT_FREESTANDING_HEAP_BASE) {
+        return value;
+    }
+    return 0;
 }
 
 spl_i64 rt_text_count_codepoints_cached(spl_i64 value) {
