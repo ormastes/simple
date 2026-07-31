@@ -1,0 +1,175 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""# CSS flex gap zero cascade
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/css_gap_zero_cascade.md
+
+## Overview
+
+This scenario proves that a later valid `gap:0` declaration resets an earlier
+positive Flex gap through both CSS declaration application paths. The first
+row uses an inline block containing only `gap:0`, selecting the dispatch path.
+The second adds `visibility:visible`, forcing the full Style reconstruction.
+
+Both rows lower through shared Web semantic/layout state into the existing
+canonical `DrawIrComposition` and Engine2D executor. No private painter,
+parallel Web IR, Draw IR command, or backend path is introduced.
+
+## Standards contract
+
+CSS Box Alignment admits zero as a non-negative gap. The later inline
+declaration wins the cascade, so both row and column used gaps become zero.
+Malformed and negative gaps remain outside the accepted declaration subset.
+
+## Exact fixture
+
+The viewport is 12 by 4 pixels. Each 12-by-2 Flex row starts with a stylesheet
+gap of 4px and then receives an inline zero-gap override. Each row contains a
+4-by-2 red item followed immediately by a 4-by-2 blue item. The remaining
+four pixels in each row stay white.
+
+## Evidence boundary
+
+The SSpec asserts parsed nodes, computed gap fields, exact semantic boxes,
+canonical Draw IR rectangle geometry and color, zero skipped commands, and
+all 48 framebuffer pixels. Runtime PASS is claimed only after a qualified
+pure-Simple execution; static review alone is not runtime evidence.
+"""
+
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    simple_web_layout_render_html_draw_ir_result
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+val FLEX_GAP_ZERO_CASCADE_HTML = (
+    "<style>" +
+    "html,body{margin:0;width:12px;height:4px;background:#fff}" +
+    ".row{display:flex;width:12px;height:2px;gap:4px}" +
+    ".red{width:4px;height:2px;background:#dc2626}" +
+    ".blue{width:4px;height:2px;background:#2563eb}" +
+    "</style>" +
+    "<div id='dispatch-row' class='row' style='gap:0'>" +
+    "<div id='dispatch-red' class='red'></div>" +
+    "<div id='dispatch-blue' class='blue'></div></div>" +
+    "<div id='full-row' class='row' " +
+    "style='gap:0;visibility:visible'>" +
+    "<div id='full-red' class='red'></div>" +
+    "<div id='full-blue' class='blue'></div></div>"
+)
+
+fn _gap_zero_node_index(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> i32:
+    var index = 0
+    for node in result.hit_index.nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing zero-gap semantic node: {component_id}")
+    -1
+
+fn _gap_zero_box(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> [i32]:
+    val index = _gap_zero_node_index(result, component_id)
+    val boxes = result.hit_index.boxes
+    [boxes.bx[index], boxes.by[index], boxes.bw[index], boxes.bh[index]]
+
+fn _gap_zero_command(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> DrawIrCommand:
+    for command in result.composition.batches[0].commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing zero-gap Draw IR command: {component_id}")
+    result.composition.batches[0].commands[0]
+
+describe "REQ-WEB-BROWSER-003/004/021: CSS gap zero cascade":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should reset positive Flex gaps through both declaration paths":
+        step("Parse the split-cascade zero-gap fixture")
+        val result = simple_web_layout_render_html_draw_ir_result(
+            FLEX_GAP_ZERO_CASCADE_HTML, 12, 4
+        )
+        val dispatch_row_index = _gap_zero_node_index(result, "dispatch-row")
+        val full_row_index = _gap_zero_node_index(result, "full-row")
+        expect(result.hit_index.nodes[dispatch_row_index].tag).to_equal("div")
+        expect(result.hit_index.nodes[full_row_index].tag).to_equal("div")
+        expect(result.composition.batches[0].source.source_kind).to_equal(
+            "html_ast"
+        )
+
+        step("Resolve zero-gap Web layout geometry")
+        val dispatch_style = result.hit_index.styles[dispatch_row_index]
+        val full_style = result.hit_index.styles[full_row_index]
+        expect([
+            dispatch_style.gap_px, dispatch_style.row_gap_px,
+            dispatch_style.column_gap_px
+        ]).to_equal([0, 0, 0])
+        expect([
+            full_style.gap_px, full_style.row_gap_px,
+            full_style.column_gap_px
+        ]).to_equal([0, 0, 0])
+        expect(_gap_zero_box(result, "dispatch-row")).to_equal([0, 0, 12, 2])
+        expect(_gap_zero_box(result, "dispatch-red")).to_equal([0, 0, 4, 2])
+        expect(_gap_zero_box(result, "dispatch-blue")).to_equal([4, 0, 4, 2])
+        expect(_gap_zero_box(result, "full-row")).to_equal([0, 2, 12, 2])
+        expect(_gap_zero_box(result, "full-red")).to_equal([0, 2, 4, 2])
+        expect(_gap_zero_box(result, "full-blue")).to_equal([4, 2, 4, 2])
+
+        step("Emit adjacent canonical Draw IR rectangles")
+        val dispatch_red = _gap_zero_command(result, "dispatch-red")
+        val dispatch_blue = _gap_zero_command(result, "dispatch-blue")
+        val full_red = _gap_zero_command(result, "full-red")
+        val full_blue = _gap_zero_command(result, "full-blue")
+        expect([
+            dispatch_red.kind, dispatch_blue.kind,
+            full_red.kind, full_blue.kind
+        ]).to_equal(["rect", "rect", "rect", "rect"])
+        expect([
+            dispatch_red.x, dispatch_red.y,
+            dispatch_red.width, dispatch_red.height
+        ]).to_equal([0, 0, 4, 2])
+        expect([
+            dispatch_blue.x, dispatch_blue.y,
+            dispatch_blue.width, dispatch_blue.height
+        ]).to_equal([4, 0, 4, 2])
+        expect([
+            full_red.x, full_red.y, full_red.width, full_red.height
+        ]).to_equal([0, 2, 4, 2])
+        expect([
+            full_blue.x, full_blue.y, full_blue.width, full_blue.height
+        ]).to_equal([4, 2, 4, 2])
+        expect([
+            dispatch_red.color, dispatch_blue.color,
+            full_red.color, full_blue.color
+        ]).to_equal([
+            0xFFDC2626u32, 0xFF2563EBu32,
+            0xFFDC2626u32, 0xFF2563EBu32
+        ])
+
+        step("Render exact zero-gap Engine2D pixels")
+        val raster = Engine2dCompositorBackend.create_named(12, 4, "software")
+        val rendered = raster.render_draw_ir_composition(result.composition, [])
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(rendered.pixels).to_equal([
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32,
+            0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32, 0xFFDC2626u32,
+            0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32, 0xFF2563EBu32,
+            0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32, 0xFFFFFFFFu32
+        ])
