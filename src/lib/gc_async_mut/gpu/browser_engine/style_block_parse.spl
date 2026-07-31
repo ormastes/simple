@@ -117,18 +117,11 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
         if close >= 999999999:
             break
         val decl_text = body.slice(open + 1, close).trim()
-        val raw_decls = parse_declarations(decl_text)
-        var css_decls: [CSSDeclaration] = []
-        var di = 0
-        while di < raw_decls.len() and css_decls.len() < 256:
-            val d = raw_decls[di]
-            di = di + 1
-            css_decls.push(CSSDeclaration(
-                property: d.property,
-                value: keyframe_css_value(d.property, d.value),
-                important: false
-            ))
-        val offsets = sb_split_selector_list(offset_text)
+        var offsets = sb_split_selector_list(offset_text)
+        if offset_text.len() == 0 or offset_text.ends_with(","):
+            offsets.push("")
+        var parsed_offsets: [f64] = []
+        var selector_list_valid = offsets.len() > 0
         var oi = 0
         while (
             oi < offsets.len() and
@@ -137,11 +130,28 @@ fn _parse_keyframe_body(body: text) -> [Keyframe]:
             val off_raw = offsets[oi]
             oi = oi + 1
             parsed_offset_count = parsed_offset_count + 1
-            val off = off_raw.trim()
-            val offset_val = _parse_keyframe_offset(off)
-            frames = _insert_keyframe_by_offset(
-                frames, Keyframe.create(offset_val, css_decls)
-            )
+            if val Some(offset_val) = _parse_keyframe_offset(off_raw):
+                parsed_offsets.push(offset_val)
+            else:
+                selector_list_valid = false
+        if oi != offsets.len():
+            selector_list_valid = false
+        if selector_list_valid:
+            val raw_decls = parse_declarations(decl_text)
+            var css_decls: [CSSDeclaration] = []
+            var di = 0
+            while di < raw_decls.len() and css_decls.len() < 256:
+                val d = raw_decls[di]
+                di = di + 1
+                css_decls.push(CSSDeclaration(
+                    property: d.property,
+                    value: keyframe_css_value(d.property, d.value),
+                    important: false
+                ))
+            for offset_val in parsed_offsets:
+                frames = _insert_keyframe_by_offset(
+                    frames, Keyframe.create(offset_val, css_decls)
+                )
         pos = close + 1
     frames
 
@@ -172,16 +182,68 @@ fn keyframe_css_value(property: text, raw: text) -> CSSValue:
         return CSSValue.Number(v: value.to_f64())
     CSSValue.Keyword(v: value)
 
-fn _parse_keyframe_offset(off: text) -> f64:
-    if off == "from":
-        return 0.0
-    if off == "to":
-        return 1.0
-    if off.ends_with("%"):
-        val num_text = off.slice(0, off.len() - 1).trim()
-        val pct = num_text.to_f64()
-        return pct / 100.0
-    0.0
+fn _keyframe_number_token_is_valid(token: text) -> bool:
+    if token.len() == 0:
+        return false
+    val number_start = if (
+        token.starts_with("+") or token.starts_with("-")
+    ): 1 else: 0
+    if number_start >= token.len():
+        return false
+    var exponent_at = -1
+    var scan = number_start
+    while scan < token.len():
+        if token.char_at(scan) == "e":
+            if exponent_at >= 0:
+                return false
+            exponent_at = scan
+        scan = scan + 1
+    val number_end = if exponent_at >= 0: exponent_at else: token.len()
+    if exponent_at >= 0:
+        var exponent_i = exponent_at + 1
+        if exponent_i < token.len() and (
+            token.char_at(exponent_i) == "+" or
+            token.char_at(exponent_i) == "-"
+        ):
+            exponent_i = exponent_i + 1
+        if exponent_i >= token.len():
+            return false
+        while exponent_i < token.len():
+            if not "0123456789".contains(token.char_at(exponent_i)):
+                return false
+            exponent_i = exponent_i + 1
+    var saw_digit = false
+    var saw_dot = false
+    var digit_after_dot = false
+    var i = number_start
+    while i < number_end:
+        val c = token.char_at(i)
+        if c == "." and not saw_dot:
+            saw_dot = true
+        else:
+            if not "0123456789".contains(c):
+                return false
+            saw_digit = true
+            if saw_dot:
+                digit_after_dot = true
+        i = i + 1
+    saw_digit and (not saw_dot or digit_after_dot)
+
+fn _parse_keyframe_offset(off: text) -> f64?:
+    val normalized = off.trim().lower()
+    if normalized == "from":
+        return Some(0.0)
+    if normalized == "to":
+        return Some(1.0)
+    if not normalized.ends_with("%"):
+        return nil
+    val num_text = normalized.slice(0, normalized.len() - 1)
+    if not _keyframe_number_token_is_valid(num_text):
+        return nil
+    if val pct = num_text.parse_f64():
+        if pct == pct and pct >= 0.0 and pct <= 100.0:
+            return Some(pct / 100.0)
+    nil
 
 fn flatten_supports_blocks(css_text: text) -> text:
     val lower = css_text.lower()
