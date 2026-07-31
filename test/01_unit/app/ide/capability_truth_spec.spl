@@ -13,20 +13,24 @@
 # unfalsifiable (see
 # doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
 # "CRITICAL"). `_ide_capability_with_live_state` no longer writes anything;
-# it only reads `host.command_handler_registered(command_id)`. No builtin
-# extension registers a real handler on the host `ide_capabilities_live()`
-# builds today, so every capability's honest ceiling is "activatable".
+# it only reads `host.command_handler_registered(command_id)`. Exactly two
+# builtins register a real handler on the host `ide_capabilities_live()`
+# builds today -- markdown (five handlers) and sheets (one,
+# `sheets.function.double`, added 2026-07-31 over the extension's
+# already-existing DOUBLE evaluator) -- so those two reach "bound" and every
+# other capability's honest ceiling is "activatable" or below.
 
 use std.spec.{describe, it, expect}
 use app.ide.capabilities.{ide_capability_new, ide_capabilities_live, ide_capability_live_state}
 use app.ide.feature_report.{ide_capability_truth_report}
+use std.editor.extensions.host.{extension_host_with_builtin_handlers}
 use app.plugin.registry.{parse_plugin_manifest_text, plugin_manifest_to_text, plugin_entry_new, plugin_entry_new_with_classes}
 
 describe "capability truth: live state against the real extension kernel":
 
     it "the markdown capability reaches 'bound' through a real contributed handler":
-        # markdown is the one builtin that ships actual CommandRegistry
-        # handlers (md_toggle_bold_handler and friends, registered in
+        # markdown ships five actual CommandRegistry handlers
+        # (md_toggle_bold_handler and friends, registered in
         # extension_host_with_builtin_handlers). feature_check must name the
         # command that genuinely has the handler -- NOT md.preview, which is
         # merely first in the manifest and has no handler at all. Asserting
@@ -61,26 +65,49 @@ describe "capability truth: live state against the real extension kernel":
                 all_non_empty = false
         expect(all_non_empty).to_equal(true)
 
-    it "sheets has a matching builtin manifest and reaches 'activatable', but no capability reaches 'bound'":
+    it "sheets reaches 'bound' too, and exactly two capabilities do":
         # sheets-function-registry-demo matches the "sheets" capability's
         # xlsx/csv compat tags and declares its own command id as an
-        # activation event, so sheets legitimately clears "indexed" and
-        # "activatable". "bound" is a separate, higher bar: it requires a
-        # real CommandRegistry handler, and sheets contributes no handler --
-        # only markdown does. Counting the bound set (not just checking
-        # sheets) is the regression guard against the self-probe bug
-        # reappearing: its signature was EVERY capability reporting bound at
-        # once. A count of exactly 1 fails both if the self-probe returns and
-        # if the census loses sight of the editor's real host.
+        # activation event, so sheets clears "indexed" and "activatable".
+        # It now also clears "bound": `sheets.function.double` got a real
+        # dispatch handler (sheets_function_double_handler) on 2026-07-31,
+        # binding the DOUBLE evaluator the extension already published into
+        # the sheet function registry. The next `it` proves that handler
+        # actually computes, so this is a genuine promotion, not a stub.
+        #
+        # Counting the whole bound set (not just checking sheets) is the
+        # regression guard against the self-probe bug reappearing: its
+        # signature was EVERY capability reporting bound at once. This count
+        # is deliberately EXACT -- raise it when a capability honestly gains
+        # a handler, never relax it to `>=` and never delete it. A count of
+        # exactly 2 fails both if the self-probe returns and if the census
+        # loses sight of the editor's real host.
         var sheets_state = ""
+        var sheets_check = ""
         var bound_count = 0
         for cap in ide_capabilities_live():
             if cap.id == "sheets":
                 sheets_state = cap.state
+                sheets_check = cap.feature_check
             if cap.state == "bound":
                 bound_count = bound_count + 1
-        expect(sheets_state).to_equal("activatable")
-        expect(bound_count).to_equal(1)
+        expect(sheets_state).to_equal("bound")
+        expect(sheets_check).to_equal("sheets.function.double")
+        expect(bound_count).to_equal(2)
+
+    it "the sheets handler that earned 'bound' really computes DOUBLE(n)":
+        # The honesty check for the promotion above: dispatch the command on
+        # the same host the census inspects and require the real answer. A
+        # do-nothing handler would still flip the census to "bound" -- it
+        # could not return 42 here.
+        val host = extension_host_with_builtin_handlers()
+        var doubled = ""
+        match host.dispatch_command("sheets.function.double", "21"):
+            case Ok(value):
+                doubled = value
+            case Err(reason):
+                doubled = "ERR: " + reason
+        expect(doubled).to_equal("42")
 
     it "the feature_report capability-truth render shows the honest ceiling, never a self-probed 'bound'":
         # The old self-probe left its own title string ("capability truth
@@ -91,7 +118,7 @@ describe "capability truth: live state against the real extension kernel":
         val report = ide_capability_truth_report().join("\n")
         expect(report).to_contain("capability-truth:")
         expect(report).to_contain("markdown: state=bound check=markdown.toggle_bold")
-        expect(report).to_contain("sheets: state=activatable")
+        expect(report).to_contain("sheets: state=bound check=sheets.function.double")
         expect(report).to_not_contain("capability truth probe")
 
     # Lane F5 (remaining builtin manifests): draw-sdd, designer, base, math,

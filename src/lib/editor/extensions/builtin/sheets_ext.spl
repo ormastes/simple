@@ -12,10 +12,11 @@
 
 use std.editor.extensions.manifest.{ExtensionManifest, ExtensionCommand, ExtensionCustomEditor,
     ExtensionLanguage, extension_manifest_basic}
-use app.office.sheets.cell.{CellValue}
+use app.office.sheets.cell.{Cell, CellValue, cell_display_text, default_style}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.function_registry.{SheetFunctionDescriptor, sheet_function_registry_register,
-    sheet_function_registry_has}
+    sheet_function_registry_has, sheet_function_registry_evaluate}
+use common.office.number.{office_parse_signed_decimal_f64}
 
 fn sheets_ext_manifest() -> ExtensionManifest:
     var m = extension_manifest_basic(
@@ -80,3 +81,32 @@ fn sheets_ext_activation_hook(name: text) -> Result<text, text>:
     if sheets_ext_register_builtins():
         return Ok("sheets: DOUBLE registered")
     Ok("sheets: DOUBLE already registered")
+
+# ---- typed kernel handler (registered via ExtensionHost.register_command_handler)
+#
+# Dispatch half of this builtin's `sheets.function.double` contribution. The
+# manifest declared the command from the start; without a handler the command
+# was declared-but-undispatchable, which is why the "sheets" capability's
+# honest ceiling in the IDE census (src/app/ide/capabilities.spl) was
+# "activatable" rather than "bound".
+#
+# This is NOT a stub: it evaluates through `sheet_function_registry_evaluate`,
+# the same registry entry point formula.spl's `_eval_function_call` uses for a
+# real cell formula, so the handler runs the extension's own already-existing
+# evaluator (`_double_eval`) rather than reimplementing it. Registration is
+# ensured first for the direct-dispatch path (a caller may dispatch before the
+# activation hook has run); it is idempotent.
+#
+# Payload: the numeric argument, e.g. "21". Result: the value DOUBLE(n)
+# evaluates to, rendered exactly as the sheet would display it ("42").
+fn sheets_function_double_handler(payload: text) -> Result<text, text>:
+    val arg = payload.trim()
+    if arg == "":
+        return Err("sheets.function.double payload: missing numeric argument")
+    sheets_ext_register_builtins()
+    val n = office_parse_signed_decimal_f64(arg)
+    match sheet_function_registry_evaluate("DOUBLE", [[n]], Sheet.new("sheets.function.double")):
+        case Ok(value):
+            Ok(cell_display_text(Cell(value: value, style: default_style())))
+        case Err(message):
+            Err(message)
