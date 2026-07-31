@@ -11,7 +11,7 @@ REQ-WEB-BROWSER-021.
 
 ```html
 <style>
-html,body{margin:0;width:12px;height:20px;background:#fff}
+html,body{margin:0;width:12px;height:22px;background:#fff}
 .row{display:flex;width:12px;height:2px}
 .positive{gap:4px}
 .red{width:4px;height:2px;background:#dc2626}
@@ -59,6 +59,11 @@ html,body{margin:0;width:12px;height:20px;background:#fff}
   <div id="inherit-red" class="red"></div>
   <div id="inherit-blue" class="blue"></div>
 </div>
+<div id="inherit-full-row" class="row positive"
+     style="gap:inherit;visibility:visible">
+  <div id="inherit-full-red" class="red"></div>
+  <div id="inherit-full-blue" class="blue"></div>
+</div>
 ```
 
 ## Parse the split-cascade zero-gap fixture
@@ -66,7 +71,8 @@ html,body{margin:0;width:12px;height:20px;background:#fff}
 Expected semantic row nodes are `div#dispatch-row`, `div#full-row`,
 `div#duplicate-dispatch-row`, `div#duplicate-full-row`, and
 `div#invalid-only-row`, both `syntax-*` rows, and the `initial`, `unset`, and
-`inherit` controls. The composition source kind is expected to be `html_ast`.
+both `inherit` controls. The composition source kind is expected to be
+`html_ast`.
 
 ## Resolve zero-gap Web layout geometry
 
@@ -74,9 +80,10 @@ The zero-reset rows expose `[gap_px,row_gap_px,column_gap_px]` as `[0,0,0]`.
 Both duplicate-declaration rows expose `[4,4,4]`; the invalid-only negative
 control exposes `[0,0,0]`. Both syntax rows retain `[4,4,4]` after rejecting
 signed, decimal, foreign-unit, and trailing-junk duplicates. `initial` and
-`unset` reset to `[0,0,0]`. The terminal parent-default `inherit` control also
-resets the positive class gap to zero; nonzero parent inheritance is not
-claimed because the current Style input has no parent computed-gap channel.
+`unset` reset to `[0,0,0]`. Both terminal parent-default `inherit` controls
+reset the positive class gap to zero through the dispatch and full
+reconstruction paths; nonzero parent inheritance is not claimed because the
+current Style input has no parent computed-gap channel.
 
 | Component | Expected box `[x,y,w,h]` |
 |---|---|
@@ -110,10 +117,13 @@ claimed because the current Style input has no parent computed-gap channel.
 | `inherit-row` | `[0,18,12,2]` |
 | `inherit-red` | `[0,18,4,2]` |
 | `inherit-blue` | `[4,18,4,2]` |
+| `inherit-full-row` | `[0,20,12,2]` |
+| `inherit-full-red` | `[0,20,4,2]` |
+| `inherit-full-blue` | `[4,20,4,2]` |
 
 ## Emit adjacent canonical Draw IR rectangles
 
-All twenty colored items are expected to remain ordinary canonical `rect`
+All twenty-two colored items are expected to remain ordinary canonical `rect`
 commands. Red commands use `0xFFDC2626`; blue commands use `0xFF2563EB`.
 Their command geometry exactly matches the child boxes above, proving that no
 private painter or backend-specific gap correction is involved.
@@ -122,7 +132,7 @@ private painter or backend-specific gap correction is involved.
 
 Expected skipped-command count: `0`.
 
-Expected full framebuffer length: `240`. Every pixel is checked. Each listed
+Expected full framebuffer length: `264`. Every pixel is checked. Each listed
 pattern occupies both scanlines of its row, with `R=0xFFDC2626`,
 `B=0xFF2563EB`, and `W=0xFFFFFFFF`.
 
@@ -138,6 +148,7 @@ pattern occupies both scanlines of its row, with `R=0xFFDC2626`,
 | 14 | `RRRRBBBBWWWW` |
 | 16 | `RRRRBBBBWWWW` |
 | 18 | `RRRRBBBBWWWW` |
+| 20 | `RRRRBBBBWWWW` |
 
 ## Claim boundary
 
