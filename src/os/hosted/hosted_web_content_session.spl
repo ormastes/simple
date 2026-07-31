@@ -31,7 +31,8 @@ use os.hosted.browser_profile_store.{BrowserBookmarkStore}
 use os.hosted.hosted_browser_renderer_policy.{
     hosted_browser_cors_response_headers, hosted_browser_network_error,
     hosted_browser_network_origin, hosted_browser_redirect_status,
-    hosted_browser_response_header_value, hosted_browser_transport_host
+    hosted_browser_remove_response_header, hosted_browser_response_header_value,
+    hosted_browser_transport_host
 }
 use std.common.web.browser_renderer_protocol.{
     browser_text_input_overlay_empty
@@ -271,7 +272,11 @@ class HostedWebContentSession:
                 kind: request.kind,
                 url: request.url,
                 status: response.status.to_i32(),
-                headers: response.headers,
+                # HSTS is transport state, never renderer-visible response
+                # state: mock/cache/CORS delivery must not renew it.
+                headers: hosted_browser_remove_response_header(
+                    response.headers, "strict-transport-security"
+                ),
                 body: body,
                 error: ""
             )
@@ -286,6 +291,19 @@ class HostedWebContentSession:
                 self._commit_network_response(request, finalized)
             Err(error):
                 self._commit_network_error(request, error.message)
+
+    me _apply_authenticated_runtime_https_hsts(
+        fetch_request: FetchRequest, response: FetchResponse
+    ):
+        if fetch_request.url.scheme != "https":
+            return
+        val hsts_header = hosted_browser_response_header_value(
+            response.headers, "strict-transport-security"
+        )
+        if hsts_header != "":
+            val _ = self.browser._apply_hsts_header(
+                hsts_header, fetch_request.url.to_text()
+            )
 
     fn _filtered_cors_response(
         response: FetchResponse, credentials: text
@@ -313,13 +331,9 @@ class HostedWebContentSession:
         response: FetchResponse, authenticated_runtime_https: bool
     ):
         if authenticated_runtime_https:
-            val hsts_header = hosted_browser_response_header_value(
-                response.headers, "strict-transport-security"
+            self._apply_authenticated_runtime_https_hsts(
+                fetch_request, response
             )
-            if hsts_header != "":
-                val _ = self.browser._apply_hsts_header(
-                    hsts_header, fetch_request.url.to_text()
-                )
         match self.network.finalize_single_hop(fetch_request, response):
             Ok(finalized):
                 self._commit_cached_cors_response(request, finalized)
@@ -504,9 +518,16 @@ class HostedWebContentSession:
                         request, fetch_request, response,
                         fetch_request.url.scheme == "https"
                     )
-                else:
+                elif phase == "single":
+                    self._apply_authenticated_runtime_https_hsts(
+                        fetch_request, response
+                    )
                     self._finalize_network_response(
                         request, fetch_request, response
+                    )
+                else:
+                    self._commit_network_error(
+                        request, "network: Invalid runtime response phase"
                     )
             Err(parse_error):
                 self._commit_network_error(
