@@ -372,8 +372,10 @@ impl VulkanSwapchain {
 impl Drop for VulkanSwapchain {
     fn drop(&mut self) {
         unsafe {
-            // Wait for device to be idle
-            let _ = self.device.wait_idle();
+            if let Err(error) = self.device.wait_idle() {
+                tracing::error!("Leaking Vulkan swapchain after failed idle recovery: {error}");
+                return;
+            }
 
             // Destroy image views
             for &view in &self.image_views {
