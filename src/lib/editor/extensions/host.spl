@@ -787,9 +787,12 @@ fn extension_runtime_policy_external_process(allowed_roots: [text]) -> Extension
 # until a declared activation event fires (`activate_language` /
 # `activate_command` / `dispatch_command`).
 #
-# 12 of the 14 builtins are reachable this way (they declare `onLanguage:` or
-# `onCommand:` events). See extension_host_with_builtins() for why the shipped
-# constructor still activates eagerly on top of this.
+# All 14 builtins are reachable this way: `sheets-function-registry-demo` and
+# `slides-layout-registry-demo` declare their own contributed command id
+# ("onCommand:sheets.function.double" / "onCommand:slides.layout.titleDiagram")
+# as an activation event alongside their original registry-publish event, so
+# `activate_command` can reach them (see builtin/sheets_ext.spl,
+# builtin/slides_ext.spl).
 fn extension_host_with_builtins_indexed() -> ExtensionHost:
     val host = ExtensionHost.new()
     for manifest in builtin_manifest_providers():
@@ -798,36 +801,47 @@ fn extension_host_with_builtins_indexed() -> ExtensionHost:
         host.register_activation_hook(hook_entry.name, hook_entry.hook)
     host
 
-# Activate every indexed builtin by name — the EAGER half, deliberately kept
-# separate from indexing so the eventual lazy switch is a call-site change,
-# not a rewrite. Explicit per-name activation; no wildcard event.
-#
-# WHY THIS STILL EXISTS (do not delete without doing the two items below —
-# doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md):
-#
-#  1. `sheets-function-registry-demo` and `slides-layout-registry-demo` are
-#     UNREACHABLE lazily. Their only declared activation events are
-#     "onFunctionRegistry:sheets" / "onLayoutRegistry:slides", which nothing in
-#     src/ ever emits (`activate_event` is only ever reached through
-#     `activate_language` / `activate_command`), and neither manifest lists its
-#     own contributed command id as an activation event — so even
-#     `dispatch_command` cannot bring them up. Their activation hooks publish
-#     into process-global registries (`app.office.sheets.function_registry`,
-#     `app.office.slides.layout_registry`) that `sheets/formula.spl` and
-#     `slides/slide.spl` read directly, holding no host and firing no event.
-#     Fixing this needs the typed provider-handle API, not a deleted loop.
-#  2. `ide_capabilities_live()` (src/app/ide/capabilities.spl) gates on
-#     `host.is_active(name)` and never activates; going lazy today would
-#     downgrade 10 of 11 capabilities from `bound` to `indexed` while they
-#     remain genuinely bindable — a false report, not an honest one.
-fn _extension_host_activate_all_builtins(host: ExtensionHost):
-    for manifest in builtin_manifest_providers():
-        host.activate(manifest.name)
-
-# Builtin host as the app ships it today: indexed, then eagerly activated.
-# Prefer extension_host_with_builtins_indexed() for anything that wants the
-# lazy contract; this wrapper is what the current consumers depend on.
+# Builtin host as the app ships it: genuinely lazy, identical to the indexed
+# constructor. Formerly this layered an explicit activate-all loop on top
+# (every builtin capability could only ever report the terminal `bound`
+# state); removed 2026-07-31, see
+# doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md.
 fn extension_host_with_builtins() -> ExtensionHost:
+    extension_host_with_builtins_indexed()
+
+# ---- shared singleton for process-global registry readers ------------------
+#
+# sheets/formula.spl (function_registry) and slides/slide.spl + slides_app.spl
+# (layout_registry) read their extension-contributed data from process-global
+# registries directly, not through a threaded ExtensionHost -- formula.spl is
+# a 9.7k-line evaluator called per cell, so threading a typed provider handle
+# through its whole call chain was judged out of proportion to this fix (see
+# the bug doc's fix-direction #1 "at minimum" alternative). Instead, those
+# readers call `extension_host_ensure_command_activated(command_id)` once
+# before consulting their registry -- a real onCommand: activation event,
+# not activation-at-construction. List-of-one storage mirrors
+# function_registry.spl's / layout_registry.spl's own singleton pattern (a
+# class instance read back out of an array is not guaranteed to alias the
+# stored element).
+var _extension_host_singleton: [ExtensionHost] = []
+var _extension_host_activated_commands: [text] = []
+
+fn extension_host_singleton() -> ExtensionHost:
+    if _extension_host_singleton.len() > 0:
+        return _extension_host_singleton[0]
     val host = extension_host_with_builtins_indexed()
-    _extension_host_activate_all_builtins(host)
+    _extension_host_singleton = [host]
     host
+
+# Idempotent per process: activates the extension backing `command_id` at
+# most once. Safe to call on every read (per-cell formula eval, per-render UI
+# build) -- after the first call it is an O(k) scan of the small
+# already-activated-commands list, not a re-scan of every extension.
+fn extension_host_ensure_command_activated(command_id: text):
+    for done in _extension_host_activated_commands:
+        if done == command_id:
+            return
+    var host = extension_host_singleton()
+    host.activate_command(command_id)
+    _extension_host_singleton = [host]
+    _extension_host_activated_commands = _extension_host_activated_commands.push(command_id)

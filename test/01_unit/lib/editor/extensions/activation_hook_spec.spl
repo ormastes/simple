@@ -110,25 +110,32 @@ describe "extension activation hooks (L6b)":
         expect(host.activate("hook-sibling-demo")).to_equal(true)
         expect(host.activation_hook_ran("hook-sibling-demo")).to_equal(false)
 
-    it "sheets DOUBLE is reachable via the function registry after activating the builtin, no manual registration call":
+    it "sheets DOUBLE is reachable via the function registry after activating the builtin through its own onCommand event":
         sheet_function_registry_reset()
         expect(sheet_function_registry_has("DOUBLE")).to_equal(false)
         val host = extension_host_with_builtins()
+        expect(host.is_active("sheets-function-registry-demo")).to_equal(false)
+        expect(host.activate_command("sheets.function.double")).to_equal(1)
         expect(host.is_active("sheets-function-registry-demo")).to_equal(true)
         expect(sheet_function_registry_has("DOUBLE")).to_equal(true)
 
-    it "slides title_diagram is reachable via the layout registry after activating the builtin, no manual registration call":
+    it "slides title_diagram is reachable via the layout registry after activating the builtin through its own onCommand event":
         slide_layout_registry_reset()
         expect(slide_layout_registry_has("title_diagram")).to_equal(false)
         val host = extension_host_with_builtins()
+        expect(host.is_active("slides-layout-registry-demo")).to_equal(false)
+        expect(host.activate_command("slides.layout.titleDiagram")).to_equal(1)
         expect(host.is_active("slides-layout-registry-demo")).to_equal(true)
         expect(slide_layout_registry_has("title_diagram")).to_equal(true)
 
-describe "builtin hooks are eager only because the registry builtins are lazily unreachable (2026-07-30)":
+describe "the sheets/slides registry builtins are lazily reachable through their own onCommand event (fixed 2026-07-31)":
 
-    # These pin the CONCRETE blocker to dropping the eager activate-all loop in
-    # extension_host_with_builtins(). They are not aspiration -- they assert the
-    # real, currently-shipping semantics so the blocker cannot rot silently.
+    # Was the CONCRETE blocker to dropping the eager activate-all loop in
+    # extension_host_with_builtins() -- their manifests declared only
+    # onFunctionRegistry:/onLayoutRegistry:, which nothing in src/ ever
+    # emitted. Fix: builtin/sheets_ext.spl / builtin/slides_ext.spl now also
+    # declare "onCommand:<their own contributed command id>" as an activation
+    # event, which activate_command *does* reach.
     # doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
 
     it "the indexed builtin host runs no activation hook: DOUBLE and title_diagram stay unregistered":
@@ -141,23 +148,18 @@ describe "builtin hooks are eager only because the registry builtins are lazily 
         expect(sheet_function_registry_has("DOUBLE")).to_equal(false)
         expect(slide_layout_registry_has("title_diagram")).to_equal(false)
 
-    it "no activation event can reach the sheets/slides registry builtins -- the reason the eager loop stays":
+    it "activate_command reaches the sheets/slides registry builtins through their own declared command id":
         sheet_function_registry_reset()
         slide_layout_registry_reset()
         val host = extension_host_with_builtins_indexed()
-        # Their sole declared events are onFunctionRegistry:/onLayoutRegistry:,
-        # which nothing emits; activate_event is only ever reached via
-        # activate_language / activate_command, and neither manifest lists its
-        # own contributed command id as an activation event.
-        expect(host.activate_command("sheets.function.double")).to_equal(0)
-        expect(host.activate_command("slides.layout.titleDiagram")).to_equal(0)
-        expect(host.is_active("sheets-function-registry-demo")).to_equal(false)
-        expect(host.is_active("slides-layout-registry-demo")).to_equal(false)
-        expect(sheet_function_registry_has("DOUBLE")).to_equal(false)
-        # Direct activation by name still works -- which is exactly what the
-        # eager loop in extension_host_with_builtins() does on their behalf.
-        expect(host.activate("sheets-function-registry-demo")).to_equal(true)
+        expect(host.activate_command("sheets.function.double")).to_equal(1)
+        expect(host.activate_command("slides.layout.titleDiagram")).to_equal(1)
+        expect(host.is_active("sheets-function-registry-demo")).to_equal(true)
+        expect(host.is_active("slides-layout-registry-demo")).to_equal(true)
         expect(sheet_function_registry_has("DOUBLE")).to_equal(true)
+        expect(slide_layout_registry_has("title_diagram")).to_equal(true)
+        # Idempotent: nothing left to activate the second time.
+        expect(host.activate_command("sheets.function.double")).to_equal(0)
 
     it "a lazily-reachable builtin runs its hook only once its own event fires":
         sheet_function_registry_reset()

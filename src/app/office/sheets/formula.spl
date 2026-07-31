@@ -10,6 +10,7 @@ use app.office.sheets.cell.{CellValue, CellRef, parse_cell_ref, cell_ref_to_stri
 use app.office.sheets.cell_ref.{parse_range, expand_range_refs, CellRange}
 use app.office.sheets.spreadsheet.{Sheet}
 use app.office.sheets.function_registry.{sheet_function_registry_has, sheet_function_registry_evaluate}
+use std.editor.extensions.host.{extension_host_ensure_command_activated}
 use app.office.sheets.math_bridge.{excel_sin, excel_cos, excel_tan, excel_atan, excel_asin, excel_acos,
                                         excel_sinh, excel_cosh, excel_tanh, excel_ln, excel_log10, excel_log,
                                         excel_exp, excel_sqrt, excel_sqrt_pi, excel_round, excel_trunc,
@@ -3299,6 +3300,17 @@ fn _eval_function_call(name: text, tokens: [text], pos: i32, sheet: Sheet, depth
     # DOUBLE fixture in builtin/sheets_ext.spl) can add functions without
     # touching this 9.7k-line file further. Unregistered names fall through
     # to the existing behavior unchanged.
+    #
+    # Activate-before-read seam (doc/08_tracking/bug/
+    # builtin_extensions_activate_eagerly_2026-07-30.md fix direction #1,
+    # minimum alternative): the sheets builtin extension is not active until
+    # something fires its declared "onCommand:sheets.function.double" event.
+    # This is that firing point -- idempotent after the first formula
+    # evaluation in the process, so registered extension functions (DOUBLE
+    # today) are reachable from real formula evaluation, not just when a host
+    # happens to have been built and activated elsewhere (e.g. a capability
+    # probe).
+    extension_host_ensure_command_activated("sheets.function.double")
     if sheet_function_registry_has(name):
         return _eval_registry_function(name, tokens, pos, sheet, depth)
     if _is_text_function(name):

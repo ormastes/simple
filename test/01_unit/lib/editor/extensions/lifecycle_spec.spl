@@ -72,19 +72,25 @@ describe "extension lifecycle: activate -> dispatch -> deactivate":
             case Err(e):
                 expect(e.contains("no handler registered")).to_equal(true)
 
-    it "builtins register and activate without wildcard activation":
+    it "builtins register (unactivated) and activate lazily through their own declared events, without wildcard activation":
         val host = extension_host_with_builtins()
         expect(host.extension_count()).to_be_greater_than(2)
-        expect(host.is_active("simple-language")).to_equal(true)
+        expect(host.is_active("simple-language")).to_equal(false)
+        expect(host.is_active("markdown-language")).to_equal(false)
+        expect(host.is_active("sdn-graph-language")).to_equal(false)
+        expect(host.command_registered("markdown.toggle_bold")).to_equal(false)
+        expect(host.find_language_for_ext(".md")).to_equal("")
+        expect(host.activate_language("markdown")).to_equal(1)
         expect(host.is_active("markdown-language")).to_equal(true)
-        expect(host.is_active("sdn-graph-language")).to_equal(true)
         expect(host.command_registered("markdown.toggle_bold")).to_equal(true)
         expect(host.find_language_for_ext(".md")).to_equal("markdown")
+        # A matching event does not drag unrelated builtins up with it.
+        expect(host.is_active("simple-language")).to_equal(false)
 
-    # --- the lazy half of the builtin seam -------------------------------
-    # extension_host_with_builtins() = extension_host_with_builtins_indexed()
-    # + an explicit activate-all loop. These pin what the indexed half really
-    # does, so the eventual lazy switch has a green contract to land against.
+    # --- the builtin seam is genuinely lazy now ---------------------------
+    # extension_host_with_builtins() == extension_host_with_builtins_indexed()
+    # (no eager activate-all loop, removed 2026-07-31). These pin the shared
+    # semantics so both constructor names cannot silently diverge again.
     # See doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md
 
     it "the indexed builtin host activates nothing and registers no contributions":
@@ -115,9 +121,9 @@ describe "extension lifecycle: activate -> dispatch -> deactivate":
         expect(host.is_active("writer")).to_equal(true)
         expect(host.command_registered("writer.format_bold")).to_equal(true)
 
-    it "eager and indexed builtin hosts index the same manifests":
+    it "extension_host_with_builtins() and extension_host_with_builtins_indexed() index the same manifests, both unactivated":
         val eager = extension_host_with_builtins()
         val indexed = extension_host_with_builtins_indexed()
         expect(indexed.extension_count()).to_equal(eager.extension_count())
-        expect(eager.active_count()).to_equal(eager.extension_count())
+        expect(eager.active_count()).to_equal(0)
         expect(indexed.active_count()).to_equal(0)
