@@ -952,6 +952,15 @@ impl HirLowering:
             glob_imp_idx = glob_imp_idx + 1
 
     me resolve_import_symbols(module: ParserModule):
+        val current_module_name = hir_module_logical_name_from_path(module.name)
+        val current_module_key = self.resolve_module_key(current_module_name)
+        var current_surface_index: i64 = -1
+        if self.module_surfaces.index_by_name.contains_key(module.name):
+            current_surface_index = self.module_surfaces.index_by_name[module.name]
+        elif self.module_surfaces.index_by_name.contains_key(current_module_name):
+            current_surface_index = self.module_surfaces.index_by_name[current_module_name]
+        elif current_module_key != "" and self.module_surfaces.index_by_name.contains_key(current_module_key):
+            current_surface_index = self.module_surfaces.index_by_name[current_module_key]
         var import_idx = 0
         while import_idx < module.imports.len():
             val imp = module.imports[import_idx]
@@ -1015,6 +1024,13 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 if imp.items.len() == 0:
+                    # A facade's own wildcard import cannot add symbols. More
+                    # importantly, expanding its re-exports here re-enters the
+                    # same facade once per item during Stage-4 HIR lowering.
+                    val imported_surface_index = self.module_surfaces.index_by_name[imported_key]
+                    if current_surface_index >= 0 and imported_surface_index == current_surface_index:
+                        import_idx = import_idx + 1
+                        continue
                     self.register_glob_imported_symbols(imported_mod.unwrap(), resolved_module_name, imp.span)
                     # A module-only import also provides a namespace for
                     # qualified calls such as `module.function()`.
