@@ -64,7 +64,7 @@ reader/writer as parity oracle. Contract doc:
 
 ## Phase
 
-design-interface-frozen
+implement-core-frontier-done
 
 ## Log
 
@@ -74,4 +74,21 @@ design-interface-frozen
 - 2026-07-31 arch/design: froze resolve contract v1 — types, codec, facade,
   golden vectors (hand-derived), contract spec; ambiguities table raised in
   contract doc §7 (ResolveKey width, attributes/order width, group_key
-  parameter type, spec dir, MutationIR ownership).
+  parameter type, spec dir, MutationIR ownership). Landed `1a6b00f5da1`.
+- 2026-07-31 implement: three parallel lanes with guides
+  (.spipe/link_manager/LANE_GUIDE.md). CORE: resolve_core.spl (sha256-based
+  intern, stable merge sort, group/reduce) spec 7/7 + red sentinel; raised
+  §7 row 6 (reason on Resolved with duplicates). FRONTIER:
+  resolve_frontier.spl (BFS reachability, OR-fixpoint with explicit cap
+  failure) spec 9/9 + red sentinel. SMFMAP: smf_linker_map.md — existing
+  linker covers only part of L0–L12 (L2/L3/L10/L12 absent,
+  symbol_analysis/reloc_engine are dead code, live L7–L9 via external cc);
+  parity harness verified deterministic; found `compile --format=smf` nil
+  receiver crash (bug doc compile_format_smf_nil_receiver_crash_2026-07-31).
+- 2026-07-31 note: facade __init__.spl deliberately still exports only the
+  frozen contract surface; core/frontier are imported by submodule path
+  until gpu_smf consumes them.
+- Next: SmfLinkProfile skeleton in src/compiler/70.backend/linker/gpu_smf/
+  wired to resolve_core over decoded SMF tables (L1 via SmfReaderImpl),
+  byte-parity harness per smf_linker_map.md §5; fix or route around the
+  --format=smf crash for the SMF-writer oracle.

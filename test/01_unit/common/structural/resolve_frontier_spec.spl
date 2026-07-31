@@ -1,0 +1,118 @@
+# ============================================================================
+# Resolve frontier v1 (LINK lane, Lane FRONTIER) — reachability and
+# constraint-propagation CPU reference spec.
+#
+# Four claims:
+#   1. REACHABILITY — worklist BFS marks exactly the nodes reachable from the
+#      given roots, deterministically, and never re-marks a node twice.
+#   2. TERMINATION — a cycle in the edge set does not loop forever; every
+#      cycle member ends up marked.
+#   3. BOUNDS DISCIPLINE — an edge indexing outside node_count is an explicit
+#      `ok: false` rejection, never a trap and never a silent skip.
+#   4. CONSTRAINT FIXPOINT — bitwise-OR propagation over a chain converges to
+#      the expected merged values and reports a plausible iteration count.
+# ============================================================================
+
+use std.spec
+use std.common.structural.resolve.resolve_frontier.{
+    ResolveEdge,
+    propagate_constraints,
+    reachable_mark
+}
+
+describe "resolve frontier v1 reachability":
+    it "marks every node on a linear chain reached from the root":
+        val edges = [
+            ResolveEdge(from_index: 0, to_index: 1),
+            ResolveEdge(from_index: 1, to_index: 2),
+            ResolveEdge(from_index: 2, to_index: 3)
+        ]
+        val out = reachable_mark(4, edges, [0])
+        expect(out.ok).to_be(true)
+        expect(out.values[0]).to_be(true)
+        expect(out.values[1]).to_be(true)
+        expect(out.values[2]).to_be(true)
+        expect(out.values[3]).to_be(true)
+
+    it "marks a diamond-reached node once, not twice, and still ok":
+        # 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3: node 3 is reachable via two paths.
+        val edges = [
+            ResolveEdge(from_index: 0, to_index: 1),
+            ResolveEdge(from_index: 0, to_index: 2),
+            ResolveEdge(from_index: 1, to_index: 3),
+            ResolveEdge(from_index: 2, to_index: 3)
+        ]
+        val out = reachable_mark(4, edges, [0])
+        expect(out.ok).to_be(true)
+        expect(out.values.len()).to_equal(4)
+        expect(out.values[0]).to_be(true)
+        expect(out.values[1]).to_be(true)
+        expect(out.values[2]).to_be(true)
+        expect(out.values[3]).to_be(true)
+
+    it "leaves an unreached island node false":
+        val edges = [ResolveEdge(from_index: 0, to_index: 1)]
+        val out = reachable_mark(3, edges, [0])
+        expect(out.ok).to_be(true)
+        expect(out.values[0]).to_be(true)
+        expect(out.values[1]).to_be(true)
+        expect(out.values[2]).to_be(false)
+
+    it "terminates on a cycle and marks every cycle member":
+        val edges = [
+            ResolveEdge(from_index: 0, to_index: 1),
+            ResolveEdge(from_index: 1, to_index: 2),
+            ResolveEdge(from_index: 2, to_index: 0)
+        ]
+        val out = reachable_mark(3, edges, [0])
+        expect(out.ok).to_be(true)
+        expect(out.values[0]).to_be(true)
+        expect(out.values[1]).to_be(true)
+        expect(out.values[2]).to_be(true)
+
+    it "reaches nothing when roots is empty":
+        val edges = [ResolveEdge(from_index: 0, to_index: 1)]
+        val out = reachable_mark(3, edges, [])
+        expect(out.ok).to_be(true)
+        expect(out.values[0]).to_be(false)
+        expect(out.values[1]).to_be(false)
+        expect(out.values[2]).to_be(false)
+
+describe "resolve frontier v1 bounds discipline":
+    it "rejects an edge whose to_index is out of bounds, never trapping":
+        val edges = [ResolveEdge(from_index: 0, to_index: 5)]
+        val out = reachable_mark(2, edges, [0])
+        expect(out.ok).to_be(false)
+
+    it "rejects an edge whose from_index is out of bounds for propagation too":
+        val edges = [ResolveEdge(from_index: 9, to_index: 0)]
+        val out = propagate_constraints(2, edges, [0, 0])
+        expect(out.ok).to_be(false)
+
+describe "resolve frontier v1 constraint propagation":
+    it "converges a chain to the expected OR-merged values and reports iterations":
+        # 0 -> 1 -> 2, seeding node 0 with bit 0b001; the bit should flow to
+        # every downstream node once the fixpoint converges.
+        val edges = [
+            ResolveEdge(from_index: 0, to_index: 1),
+            ResolveEdge(from_index: 1, to_index: 2)
+        ]
+        val out = propagate_constraints(3, edges, [1, 0, 0])
+        expect(out.ok).to_be(true)
+        expect(out.values[0]).to_equal(1)
+        expect(out.values[1]).to_equal(1)
+        expect(out.values[2]).to_equal(1)
+        expect(out.iterations).to_equal(3)
+        expect(out.iterations).to_be_less_than(edges.len() + 2)
+
+    it "OR-merges independent seed bits without clobbering either":
+        # 0 -> 2, 1 -> 2: node 2 should see both seed bits merged.
+        val edges = [
+            ResolveEdge(from_index: 0, to_index: 2),
+            ResolveEdge(from_index: 1, to_index: 2)
+        ]
+        val out = propagate_constraints(3, edges, [1, 2, 0])
+        expect(out.ok).to_be(true)
+        expect(out.values[0]).to_equal(1)
+        expect(out.values[1]).to_equal(2)
+        expect(out.values[2]).to_equal(3)

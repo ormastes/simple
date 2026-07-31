@@ -109,6 +109,7 @@ relocation.kind, reachable, icf.candidate, hot_order, output_range.
 | 3 | `group_key` parameter | §18 `ResolveRecord` | `ResolveRecord` type not defined | takes `ReferenceRecord` (definitions carry the key already) |
 | 4 | Spec dir | plan `test/01_unit/lib/structural/` | conflicts with ID-TAG precedent | followed `test/01_unit/common/structural/` |
 | 5 | MutationIR ownership | §12 vs plan line 38 | no MUTATE-lane code exists yet | LINK ships kind enum only; wire format deferred to MUTATE |
+| 6 | `reason` on a Resolved group with duplicates | §18 reduction | one `reason` field, not one per diagnostic | reduce_group sets status Resolved + reason DuplicateDefinition + diagnostic_count = extras (anomaly on success) |
 
 ## 8. Verification status
 
