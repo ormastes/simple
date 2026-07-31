@@ -84,13 +84,31 @@ describe "ProcessingIR GPU offload break-even evidence":
         val gpu_workload = value_of(receipt, "processing_ir_offload_gpu_workload_id")
         expect(cpu_workload.len()).to_be_greater_than(0)
         expect(cpu_workload).to_equal(gpu_workload)
+        val output_only = cpu_workload == "fill_u32_v1"
+        expect(cpu_workload == "alpha_u32_v1" or output_only).to_equal(true)
+        if output_only:
+            expect(value_of(receipt, "processing_ir_offload_workload_kind")).to_equal("output_only")
+            expect(value_of(receipt, "processing_ir_offload_break_even_found")).to_equal("false")
+            expect(value_of(receipt, "processing_ir_offload_executor_timing")).to_equal("allocation_us+launch_sync_us+readback_us+conversion_cleanup_us")
+            expect(value_of(receipt, "processing_ir_offload_device_name").len()).to_be_greater_than(0)
+            expect(value_of(receipt, "processing_ir_offload_device_uuid").len()).to_equal(32)
+            expect(number_of(receipt, "processing_ir_offload_device_identity")).to_be_greater_than(0)
+            expect(value_of(receipt, "processing_ir_offload_source_sha256").len()).to_equal(64)
+            expect(value_of(receipt, "processing_ir_offload_artifact_sha256").len()).to_equal(64)
+            expect(value_of(receipt, "processing_ir_offload_raw_samples_sha256").len()).to_equal(64)
+            expect(value_of(receipt, "processing_ir_offload_provenance_manifest_path").len()).to_be_greater_than(0)
+            expect(value_of(receipt, "processing_ir_offload_provenance_manifest_sha256").len()).to_equal(64)
+            expect(number_of(receipt, "processing_ir_offload_coverage_max_batch")).to_be_greater_than(1048575)
 
         val warmup = number_of(receipt, "processing_ir_offload_warmup_samples")
         val samples = number_of(receipt, "processing_ir_offload_measured_samples")
         val rows = number_of(receipt, "processing_ir_offload_row_count")
         expect(warmup).to_be_greater_than(2)
         expect(samples).to_be_greater_than(4)
-        expect(rows).to_be_greater_than(3)
+        if output_only:
+            expect(rows).to_be_greater_than(2)
+        else:
+            expect(rows).to_be_greater_than(3)
 
         val cpu_rss = number_of(receipt, "processing_ir_offload_cpu_rss_kb")
         val gpu_rss = number_of(receipt, "processing_ir_offload_gpu_rss_kb")
@@ -133,41 +151,51 @@ describe "ProcessingIR GPU offload break-even evidence":
 
             expect(workload).to_equal(cpu_workload)
             expect(cpu).to_be_greater_than(0)
-            expect(upload).to_be_greater_than(0)
             expect(device).to_be_greater_than(0)
             expect(readback).to_be_greater_than(0)
             expect(transfer).to_be_greater_than(0)
             expect(total).to_be_greater_than(0)
-            expect(upload_bytes).to_be_greater_than(0)
             expect(readback_bytes).to_be_greater_than(0)
             expect(command_count).to_be_greater_than(0)
             expect(transfer).to_equal(upload + readback)
-            expect(submission_mode == "batched" or submission_mode == "per_command").to_equal(true)
             expect(readback_source).to_equal("device_readback")
             expect(readback_exact).to_equal("true")
             expect(mismatch_count).to_equal(0)
-            if batch == previous_batch:
+            if output_only:
+                expect(upload).to_equal(0)
+                expect(upload_bytes).to_equal(0)
+                expect(submission_mode).to_equal("output_only")
+                expect(row_number(receipt, i, "executor_allocation_us")).to_be_greater_than(0)
+                expect(row_number(receipt, i, "executor_launch_sync_us")).to_be_greater_than(0)
+                expect(row_number(receipt, i, "executor_conversion_cleanup_us")).to_be_greater_than(0)
+                expect(row_number(receipt, i, "executor_total_us")).to_equal(total)
+            else:
+                expect(upload).to_be_greater_than(0)
+                expect(upload_bytes).to_be_greater_than(0)
+                expect(submission_mode == "batched" or submission_mode == "per_command").to_equal(true)
+            if not output_only and batch == previous_batch:
                 expect(submission_mode == previous_mode).to_equal(false)
             else:
                 expect(batch).to_be_greater_than(previous_batch)
 
-            if first_transfer_bytes < 0:
+            if not output_only and first_transfer_bytes < 0:
                 first_transfer_bytes = upload_bytes + readback_bytes
-            elif first_transfer_bytes != upload_bytes + readback_bytes:
+            elif not output_only and first_transfer_bytes != upload_bytes + readback_bytes:
                 varied_transfer_size = true
-            if first_command_count < 0:
+            if not output_only and first_command_count < 0:
                 first_command_count = command_count
-            elif first_command_count != command_count:
+            elif not output_only and first_command_count != command_count:
                 varied_command_count = true
-            if submission_mode == "batched":
+            if not output_only and submission_mode == "batched":
                 saw_batched = true
-            else:
+            elif not output_only:
                 saw_per_command = true
 
             if total >= cpu:
                 slower_rows = slower_rows + 1
                 expect(decision).to_equal("cpu")
             else:
+                expect(output_only).to_equal(false)
                 faster_rows = faster_rows + 1
                 if first_fast_batch < 0:
                     first_fast_batch = batch
@@ -177,25 +205,32 @@ describe "ProcessingIR GPU offload break-even evidence":
             i = i + 1
 
         val measured_break_even = number_of(receipt, "processing_ir_offload_break_even_batch")
-        expect(slower_rows).to_be_greater_than(0)
-        expect(faster_rows).to_be_greater_than(0)
-        expect(measured_break_even).to_equal(first_fast_batch)
-        expect(varied_transfer_size).to_equal(true)
-        expect(varied_command_count).to_equal(true)
-        expect(saw_batched).to_equal(true)
-        expect(saw_per_command).to_equal(true)
+        if output_only:
+            expect(slower_rows).to_equal(rows)
+            expect(faster_rows).to_equal(0)
+            expect(measured_break_even).to_equal(0)
+            expect(number_of(receipt, "processing_ir_offload_coverage_max_batch")).to_equal(row_number(receipt, rows - 1, "batch"))
+        else:
+            expect(slower_rows).to_be_greater_than(0)
+            expect(faster_rows).to_be_greater_than(0)
+            expect(measured_break_even).to_equal(first_fast_batch)
+            expect(varied_transfer_size).to_equal(true)
+            expect(varied_command_count).to_equal(true)
+            expect(saw_batched).to_equal(true)
+            expect(saw_per_command).to_equal(true)
 
         # A policy must never choose GPU for a measured round-trip that is
         # slower than its CPU baseline; total_us includes every measured phase.
-        var below_threshold: i64 = 0
-        i = 0
-        while i < rows:
-            val batch = row_number(receipt, i, "batch")
-            val total = row_number(receipt, i, "total_us")
-            val cpu = row_number(receipt, i, "cpu_us")
-            if batch < measured_break_even:
-                below_threshold = below_threshold + 1
-                expect(total >= cpu).to_equal(true)
-                expect(row_text(receipt, i, "decision")).to_equal("cpu")
-            i = i + 1
-        expect(below_threshold).to_be_greater_than(0)
+        if not output_only:
+            var below_threshold: i64 = 0
+            i = 0
+            while i < rows:
+                val batch = row_number(receipt, i, "batch")
+                val total = row_number(receipt, i, "total_us")
+                val cpu = row_number(receipt, i, "cpu_us")
+                if batch < measured_break_even:
+                    below_threshold = below_threshold + 1
+                    expect(total >= cpu).to_equal(true)
+                    expect(row_text(receipt, i, "decision")).to_equal("cpu")
+                i = i + 1
+            expect(below_threshold).to_be_greater_than(0)
