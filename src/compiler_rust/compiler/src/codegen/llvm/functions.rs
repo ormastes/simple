@@ -2212,6 +2212,78 @@ impl LlvmBackend {
                     return Ok(());
                 }
 
+                let receiver_type = vreg_types.get(receiver).copied();
+                if method == "to_f32"
+                    && matches!(
+                        receiver_type,
+                        Some(
+                            crate::hir::TypeId::I8
+                                | crate::hir::TypeId::I16
+                                | crate::hir::TypeId::I32
+                                | crate::hir::TypeId::I64
+                                | crate::hir::TypeId::U8
+                                | crate::hir::TypeId::U16
+                                | crate::hir::TypeId::U32
+                                | crate::hir::TypeId::U64
+                                | crate::hir::TypeId::F32
+                                | crate::hir::TypeId::F64
+                        )
+                    )
+                {
+                    let recv_val = self.get_vreg(receiver, vreg_map)?;
+                    let f32_type = self.context_ref().f32_type();
+                    let converted = match recv_val {
+                        inkwell::values::BasicValueEnum::FloatValue(value) if value.get_type() == f32_type => {
+                            value.into()
+                        }
+                        inkwell::values::BasicValueEnum::FloatValue(value) => builder
+                            .build_float_trunc(value, f32_type, "to_f32")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("float to f32", &e))?
+                            .into(),
+                        inkwell::values::BasicValueEnum::IntValue(value)
+                            if matches!(receiver_type, Some(crate::hir::TypeId::F32 | crate::hir::TypeId::F64)) =>
+                        {
+                            let value = builder
+                                .build_bit_cast(value, self.context_ref().f64_type(), "to_f32_bits")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("float bits to f64", &e))?
+                                .into_float_value();
+                            builder
+                                .build_float_trunc(value, f32_type, "to_f32")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("float to f32", &e))?
+                                .into()
+                        }
+                        inkwell::values::BasicValueEnum::IntValue(value)
+                            if matches!(
+                                receiver_type,
+                                Some(
+                                    crate::hir::TypeId::U8
+                                        | crate::hir::TypeId::U16
+                                        | crate::hir::TypeId::U32
+                                        | crate::hir::TypeId::U64
+                                )
+                            ) =>
+                        {
+                            builder
+                                .build_unsigned_int_to_float(value, f32_type, "to_f32")
+                                .map_err(|e| crate::error::factory::llvm_build_failed("unsigned int to f32", &e))?
+                                .into()
+                        }
+                        inkwell::values::BasicValueEnum::IntValue(value) => builder
+                            .build_signed_int_to_float(value, f32_type, "to_f32")
+                            .map_err(|e| crate::error::factory::llvm_build_failed("signed int to f32", &e))?
+                            .into(),
+                        _ => {
+                            return Err(CompileError::semantic(format!(
+                                "numeric `{method}` receiver has unsupported LLVM value type"
+                            )));
+                        }
+                    };
+                    if let Some(d) = dest {
+                        vreg_map.insert(*d, converted);
+                    }
+                    return Ok(());
+                }
+
                 if matches!(method, "chr" | "to_char") {
                     let recv_val = self.get_vreg(receiver, vreg_map)?;
                     let recv_casted = self.coerce_value_to_type(recv_val, Some(i64_type.into()), builder)?;
@@ -3223,6 +3295,59 @@ mod tests {
     }
 
     #[test]
+    fn numeric_to_f32_uses_receiver_type_not_suffix_lookup() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("numeric_to_f32").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let f32_type = backend.context_ref().f32_type();
+            module.add_function(
+                "i64.to_f32",
+                f32_type.fn_type(&[backend.context_ref().i64_type().into()], false),
+                None,
+            );
+            module.add_function(
+                "f64.to_f32",
+                f32_type.fn_type(&[backend.context_ref().f64_type().into()], false),
+                None,
+            );
+        }
+
+        for (name, receiver_type) in [
+            ("i64_probe", crate::hir::TypeId::I64),
+            ("f64_probe", crate::hir::TypeId::F64),
+        ] {
+            let mut func = MirFunction::new(
+                name.to_string(),
+                crate::hir::TypeId::F32,
+                simple_parser::ast::Visibility::Private,
+            );
+            func.params.push(MirLocal {
+                name: "value".to_string(),
+                ty: receiver_type,
+                kind: LocalKind::Parameter,
+                is_ghost: false,
+            });
+            func.blocks[0].instructions.push(MirInst::MethodCallStatic {
+                dest: Some(VReg(1)),
+                receiver: VReg(0),
+                func_name: "to_f32".to_string(),
+                args: vec![],
+            });
+            func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+            backend.compile_function(&func).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(ir.contains("sitofp i64"), "{ir}");
+        assert!(ir.contains("fptrunc double"), "{ir}");
+        backend.verify().unwrap();
+    }
+
+    #[test]
     fn direct_call_dest_uses_callee_return_type() {
         let mut func = MirFunction::new(
             "caller".to_string(),
@@ -3409,9 +3534,7 @@ mod tests {
             let boxed = backend
                 .build_box_float_value(float_val.into(), builder, module)
                 .unwrap();
-            let _ = backend
-                .build_unbox_float_value(boxed.into(), builder, module)
-                .unwrap();
+            let _ = backend.build_unbox_float_value(boxed.into(), builder, module).unwrap();
             builder.build_return(None).unwrap();
         }
 

@@ -91,8 +91,9 @@ Run only this scoped set:
 - [ ] Produce the canonical desktop ELF from the prepared owner repair. The
   focused Rust closure gate passes 2/2 and the RV64 entry closure is now 45
   modules without `vfs_init`, `vfs_boot_init`, `boot.cpu`, or diagnostic
-  logging. Attempts 26–28 are retained; attempt 28 is the final capped failure
-  recorded below.
+  logging. Attempts 26–28 are retained. The attempt-28 LLVM `to_f32` ambiguity
+  is fixed with a focused Rust regression; run the next producer only in a
+  fresh session because this session's three-producer cap remains exhausted.
 - [ ] Independently review and pin the QEMU framebuffer crop, then run
   exact-ten attempt 13 and generate ten zero-stub manuals in manual attempt 13.
 - [ ] Run the final guards and independent evidence/manual review before
@@ -154,8 +155,11 @@ canonical explicit LLVM entry closure, then exited 1 in `1:36.46` at
 `278,060 KiB` maximum RSS because LLVM method resolution in
 `src/lib/gc_async_mut/gpu/browser_engine/dom_color.spl` treats suffix
 `.to_f32()` as ambiguous between `f64.to_f32` and `i64.to_f32`. No ELF exists.
-The three-cycle cap is exhausted; fix that typed-call resolution in a fresh
-session before any new producer.
+The shared LLVM owner now lowers numeric `to_f32` by receiver type before
+suffix lookup. Focused Rust test
+`numeric_to_f32_uses_receiver_type_not_suffix_lookup` passes for i64 and
+tagged-f64 receivers. The three-producer cap is still exhausted; run the next
+RV64 producer in a fresh session.
 
 RV64 attempt 25 is retained at
 `/tmp/simple-font-rv64-attempt25-stage/evidence/`. It exited 1 in `3:21.66` at
