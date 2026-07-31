@@ -32,9 +32,10 @@ Requirements: `REQ-WEB-BROWSER-003`, `REQ-WEB-BROWSER-004`,
    Check the complete ARGB buffer size plus exact checkbox corners, rounded
    radio corners, edges, and centers. Click the checkbox on and off, select the
    second radio, and attempt to click the disabled checkbox. Require exact
-   targets and default actions, exclusive indicators, full-buffer restoration
-   after the checkbox round trip, a changed full buffer after radio selection,
-   and a bit-for-bit unchanged buffer and state after disabled activation.
+   generation-qualified target routes projected to their indexed author IDs,
+   exact default actions, exclusive indicators, full-buffer restoration after
+   the checkbox round trip, a changed full buffer after radio selection, and a
+   bit-for-bit unchanged buffer and state after disabled activation.
 
 Evidence: parsed DOM semantics, Web layout/hit metadata, canonical Draw IR
 commands, live browser events, checked state, and full-buffer Engine2D pixel

@@ -34,9 +34,10 @@
 
 3. **Reject invalid transport or capability state**
    - Activate the cross-origin POST form through implicit Enter submission.
+   - Resolve the dispatched typed route back to the indexed `send` author ID.
    - Require a CSP denial warning, zero queued requests, and no queued body.
-   - Separately prove `form-action 'self'` queues the authorized same-origin
-     POST with its exact live body.
+   - Separately resolve the `save` route and prove `form-action 'self'` queues
+     the authorized same-origin POST with its exact live body.
 
 4. **Render only the authorized document**
    - Keep the HTTPS account URL and visible profile document committed.
@@ -48,8 +49,9 @@
 PASS requires the denied destination and `token-123` body never to enter a
 pending request, the same-origin `/save` POST to remain functional, and the
 authorized document's canonical command and complete framebuffer to match the
-fixed oracle. Any cross-origin queued request, document replacement, geometry or
-source mismatch, or pixel mismatch is FAIL.
+fixed oracle. Author IDs are evidence projections from generation-qualified
+dispatch routes, never dispatch authority. Any cross-origin queued request,
+document replacement, geometry or source mismatch, or pixel mismatch is FAIL.
 
 ## Companion Integration Controls
 
