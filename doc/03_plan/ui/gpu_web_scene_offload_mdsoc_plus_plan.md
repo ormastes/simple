@@ -20,6 +20,13 @@ reinterpreted as already supporting GPU-owned web semantics.
   immutable scene generation in, validated plan, new generation out, receipt;
 - DrawIR v3 tables carry `SourceProvenanceTable` entries expressed as MappingGraph edges
   (`PaintOf`, `HitRegionOf`) so paint/hit results trace to DOM/style/layout entities.
+- DrawIR v3 is a packed, additive encoding of the one shared display list — DrawIR v2 /
+  `DrawIrComposition` — not a second display-list format. The standing WebIR rejection
+  (`doc/03_plan/ui/webir_drawir_optimization.md` §Decision) applies to v3 unchanged: v2 stays
+  canonical and the v2/v3 adapters (Program 2, I9) are the only bridge.
+- QueryIR shares its "declarative query → planned execution form" shape with the compiler's
+  CollectionPlan IR (`doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md`
+  §4–§5); keep the two cost registries converged rather than growing a second op-cost table.
 
 Per-lane parallel plans: `doc/03_plan/platform/structural_compute/`.
 

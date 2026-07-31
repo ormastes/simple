@@ -35,6 +35,10 @@ Parent documents (authoritative for contracts and semantics):
    every fallback carries a reason receipt.
 5. **Three modes everywhere:** `cpu_reference`, `hybrid_vector_gpu`,
    `resident_gpu` — same observable results.
+6. **ADR-004 value semantics in every table/arena implementation.** Mutating a
+   value reached through a dict index or an indexed tuple/struct field is
+   silently lost; use the write-back idiom. Lint COLL019 flags the pattern.
+   See `doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md`.
 
 ## Dependency order
 

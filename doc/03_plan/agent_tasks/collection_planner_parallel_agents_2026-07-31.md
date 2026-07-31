@@ -54,6 +54,11 @@ close. Run in parallel; all five must be green before Wave 3 starts.
 **Gate:** P0-TEST green across five engines. Until then, `--fix` may not emit any
 lambda-based rewrite, and no index may be synthesised on `Dict`.
 
+Naming note: `P0-MAP` here is a collection-lowering lane and is unrelated to the
+structural-compute `MAP` (mapping-graph) lane in
+`doc/03_plan/platform/structural_compute/README.md`; keep the `P0-` prefix when
+cross-referencing to avoid the collision.
+
 ## Wave 2 — stdlib, runnable now (independent of Wave 1)
 
 | Lane | Owns | Task | Done when |

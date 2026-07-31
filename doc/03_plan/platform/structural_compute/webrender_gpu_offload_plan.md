@@ -30,6 +30,11 @@ Everything in the GPU WebScene lane not owned by a sibling plan:
   `HitRegionOf`).
 - Invalidation frontiers = DirtyMask + selector-feature model shared with the
   html_css_parser lane.
+- DrawIR v3 is a packed encoding of the one shared display list
+  (`DrawIrComposition` — DrawIR v2); it is not a second display-list format.
+  The WebIR rejection stands: `doc/03_plan/ui/webir_drawir_optimization.md`
+  §Decision. Table/pool implementations follow ADR-004 write-back semantics
+  (`doc/04_architecture/adr/ADR-004-indexed-access-value-semantics.md`).
 
 ## Ownership and ordering
 

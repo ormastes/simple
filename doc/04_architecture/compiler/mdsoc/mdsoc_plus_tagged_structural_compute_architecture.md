@@ -2182,6 +2182,14 @@ struct CostEstimate:
 
 The scheduler chooses GPU only when expected total cost, including transfer and synchronization, beats the CPU path under the requested latency/throughput objective.
 
+`CostEstimate` must stay converged with the compiler's collection cost algebra
+(`CostExpr`/`MemoryExpr`/`CardinalityExpr` and the REG1 operation-cost registry
+`config/compiler/collection_operations.sdn` — see
+`doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md`
+§4–§5). Two independently maintained op-cost tables will diverge; when a
+QueryIR dialect needs a per-op cost, source it from that registry and extend
+the registry rather than hardcoding a second table here.
+
 ### 21.3 Stage receipt
 
 ```simple
