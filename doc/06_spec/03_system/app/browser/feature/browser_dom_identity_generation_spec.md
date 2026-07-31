@@ -63,7 +63,8 @@ route without mutation. Both the direct hosted adapter and isolated worker
 replace during press and release without a click. The worker also clears its
 pressed/stale-hit routes and root-request/command-capability authority. The
 release oracle replaces the document between a valid press and capability-
-bound release, then proves no callback, body, title, or navigation mutation.
+bound release, then proves no callback, body, title, URL, history, or pending-
+navigation mutation through rejection and same-request retry.
 surviving current route is recovered from the canonical hit index,
 its `replace` Draw IR command is an exact green `8x8` rectangle, and Engine2D
 produces a green inside pixel and white outside pixel. Closing the session
@@ -86,9 +87,9 @@ Every runtime-measured field remains `-1` and status remains `runtime-held` in
 this static lane. No timing, allocation, RSS, 10,000-cycle, docgen, or target
 runtime PASS is claimed.
 
-Source remains **HOLD/RED**: rejected evaluation can leak
-`pending_script_cookie_writes`, and isolated stale rejection does not yet prove
-all route/capability cleanup. These are acceptance oracles, not a source PASS.
+Source **HOLD/RED** is now limited to independent acceptance of the rejected-
+evaluation `pending_script_cookie_writes` rollback. Isolated stale rejection
+has complete static route/capability and navigation-state evidence.
 
 ## Traceability
 
