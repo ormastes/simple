@@ -8,8 +8,9 @@ C `NFR-WEB-HARD-*` IDs are recorded in the final requirement documents and
 traced below.
 
 New HSTS and overflow/scrollbar evidence has independent static `REVIEW PASS`.
-Dynamic execution remains held on the active qualified full-CLI build; this
-plan does not report those scenarios as runtime `PASS`.
+Dynamic execution is `HELD`: the sole qualified pure-Simple phase-2
+full-CLI native-build attempt was stopped without an artifact, so this plan
+reports neither runtime `FAIL` nor `PASS`.
 
 ## Executable Coverage
 
@@ -100,8 +101,14 @@ Selected trace IDs are carried by the executable specs and regenerated manuals.
 
 ## Release Blockers
 
-- The active qualified full-CLI build must complete before the new hosted-HSTS
-  and overflow/scrollbar SSpecs can supply dynamic evidence.
+- A source-admitted pure-Simple full CLI is required before the new hosted-HSTS
+  and overflow/scrollbar SSpecs can supply dynamic evidence. The bounded
+  phase-2 `stage2-runtime-authority` attempt used one native-build, no stub
+  fallback, two threads, and a preserved cache; after about 75 minutes at
+  approximately 99.8% CPU and stable approximately 2.4--2.5 GiB RSS it had no
+  output artifact and zero cache files after dependency warnings, so it was
+  stopped without retry. This records a compiler progress/performance blocker,
+  not a demonstrated memory leak; no Rust seed or full bootstrap was used.
 - Metal, AMD ROCm, DirectX, and WebGPU native proof require external host
   environments.
 - AC-7 hygiene evidence must be current at handoff; unrelated dirty files and

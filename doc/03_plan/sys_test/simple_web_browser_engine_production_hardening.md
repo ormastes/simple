@@ -1721,3 +1721,15 @@ and the absent admitted pure-Simple runtime receipt remain unchanged.
 review for supported `N`/`Npx`, duplicate, `initial`, `unset`, and
 default-parent-inherit gap cases only. Nonzero `inherit`, `revert-layer`, and
 qualified execution remain RED.
+
+## Qualified full-CLI evidence hold (2026-07-31)
+
+One source-scoped full-CLI native-build was attempted with the pure-Simple
+phase-2 `stage2-runtime-authority`, stub fallback disabled, two threads, and
+the cache preserved. It was stopped after about 75 minutes of continuous
+approximately 99.8% CPU use and stable approximately 2.4--2.5 GiB RSS. It had
+emitted dependency warnings but no output artifact and zero cache files. This
+records a compiler progress/performance blocker without claiming a memory
+leak. No retry, Rust seed, or full bootstrap was used. Dynamic HTML, CSS,
+Draw IR, Engine2D, event, animation, security, and HTTPS evidence remains
+`HELD`; it is neither runtime `FAIL` nor runtime `PASS`.

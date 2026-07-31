@@ -268,7 +268,7 @@ Status is INTEGRATED / STATIC/EVIDENCE-HELD: source and executable-spec/manual
 artifacts are accepted, but no qualified target-runtime, docgen, or SPipe PASS
 is admitted while the pure-Simple runner remains unavailable.
 
-## Essential Runner Lane — Active Qualified Full-CLI Build
+## Essential Runner Lane — Qualified Full-CLI Build Held
 
 The 2026-07-31 care pass used the current pure-Simple Stage 3 at
 `c0d1ed…`. The prior `std.cli.log_modes` lowering boundary did not reproduce:
@@ -293,22 +293,30 @@ The exact retained full-CLI logs are in the isolated
   and
 - `build/native_probe/interpret-dispatch-care/logs/baseline-build-cycle3.log`.
 
-Those three stopped attempts remain historical failures. A separate active,
-fresh phase-2 pure-Simple full-CLI build now uses the retained cache and the
-qualified stage2 runtime authority; it is not a full bootstrap and has not yet
-produced admissible runtime evidence.
+Those three stopped attempts remain historical failures. One separate
+qualified attempt used the pure-Simple phase-2
+`stage2-runtime-authority` to native-build the full CLI with stub fallback
+disabled, two compiler threads, and the cache preserved. It was stopped after
+about 75 minutes of continuous approximately 99.8% CPU use and stable
+approximately 2.4--2.5 GiB RSS. After dependency warnings it had produced no
+output artifact and zero cache files. This is a concrete native-compiler
+throughput/progress blocker; stable RSS is insufficient evidence of a memory
+leak. The attempt was not retried, and neither the Rust seed nor a full
+bootstrap was used.
 
 Candidate `3f3e0bd59963766e320289d96803ab1d3dcae44b` was rejected and remains
 unpushed. It is not evidence for any accepted lane. No compiler edit, full
 bootstrap, deployment, target-runtime PASS, or SPipe PASS has occurred. The
-new qualified build is the sole active dynamic-evidence owner.
+qualified attempt supplies no dynamic browser evidence.
 
 ## Evidence Boundary
 
-Runtime and SPipe execution remain explicitly unclaimed. The active full-CLI
-build has not completed, the earlier standalone SSpec launch was invalid, and
-the bounded Grid seed diagnostic does not cross that boundary. Static review
-therefore must not be reported as runtime `PASS`.
+Runtime and SPipe execution remain explicitly unclaimed. The qualified
+full-CLI attempt was stopped without an artifact, the earlier standalone SSpec
+launch was invalid, and the bounded Grid seed diagnostic does not cross that
+boundary. Dynamic browser evidence is **HELD**, not `FAIL` or `PASS`, until a
+source-admitted pure-Simple full CLI exists. Static review therefore must not
+be reported as runtime `PASS`.
 
 The overall production-hardening goal remains incomplete because the essential
 runner/ABI/SPipe lane is unproved and external-host evidence is still pending:

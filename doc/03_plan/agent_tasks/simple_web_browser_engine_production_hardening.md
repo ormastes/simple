@@ -396,6 +396,17 @@ requirement, merge a patch, or provide executable evidence.
 No batch-4 row promotes production completion. The admitted-runtime focused
 SSpec run remains mandatory; bootstrap and the Rust seed are not admissible.
 
+### Qualified runner outcome (2026-07-31)
+
+The one qualified pure-Simple phase-2 `stage2-runtime-authority` full-CLI
+native-build used no stub fallback, two threads, and the preserved cache. It
+was stopped after about 75 minutes of continuous approximately 99.8% CPU use
+and stable approximately 2.4--2.5 GiB RSS, with no output artifact and zero
+cache files after dependency warnings. This is a concrete compiler
+progress/performance blocker, not evidence of a memory leak. There was no
+retry, Rust seed, or full bootstrap. Every runtime-dependent browser lane
+therefore remains `HELD`, neither runtime `FAIL` nor `PASS`.
+
 ## Cascade-owner implementation lanes (2026-07-30)
 
 Status: **PROPOSED / UNIMPLEMENTED**. Root Codex is merge owner and the final
