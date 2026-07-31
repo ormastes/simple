@@ -2,10 +2,14 @@
 
 ## Status
 
-Snapshot: 2026-06-16. Current plan maps the implemented hardening behavior to
+Snapshot: 2026-07-31. Current plan maps the implemented hardening behavior to
 executable evidence. Selected Feature Option C `REQ-WEB-HARD-*` and NFR Option
 C `NFR-WEB-HARD-*` IDs are recorded in the final requirement documents and
 traced below.
+
+New HSTS and overflow/scrollbar evidence has independent static `REVIEW PASS`.
+Dynamic execution remains held on the active qualified full-CLI build; this
+plan does not report those scenarios as runtime `PASS`.
 
 ## Executable Coverage
 
@@ -31,6 +35,8 @@ traced below.
 | Live shared-WM `/ui/login` fixed-window burst gate | `test/03_system/gui/simple_web_browser_production_hardening_spec.spl` | passed locally on 2026-06-16 |
 | Renderer parity gate | `scripts/check/check-production-gui-web-renderer-parity-evidence.shs` | requires explicit current-source Stage4 receipt; static admission and motion self-tests updated, live rerun pending an admitted binary |
 | GPU environment matrix | `doc/03_plan/sys_test/simple_web_browser_gpu_environment_matrix.md` | Linux Vulkan/CUDA/OpenCL pass; Metal/ROCm/DirectX/WebGPU native device-readback still external/partial |
+| Hosted HSTS authenticated-transport boundary | `test/03_system/app/browser/feature/browser_hosted_hsts_transport_boundary_spec.spl` | `f081a28d6f4`: independent static `REVIEW PASS`; dynamic held on active full-CLI build |
+| Final overflow normalization, Draw IR clipping, and scrollbar paint | `test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl` | chain `4d171219e88` -> `e321b86eeae` -> `d58b333df90` -> `27d116eb2b6`: final independent static `REVIEW PASS`; dynamic held; intermediate `e321`/`d58` tips were incomplete |
 
 ## Required Commands
 
@@ -39,6 +45,8 @@ bin/simple check src/app/ui.web/server.spl src/app/ui.web/tls_serve_loop.spl src
 bin/simple test test/01_unit/app/ui/ws_handler_spec.spl --mode=interpreter --clean
 bin/simple test test/01_unit/app/ui/web_auth_hardening_spec.spl --mode=interpreter --clean
 bin/simple test test/03_system/gui/simple_web_browser_production_hardening_spec.spl --mode=interpreter --clean --timeout 360
+bin/simple test test/03_system/app/browser/feature/browser_hosted_hsts_transport_boundary_spec.spl --mode=interpreter
+bin/simple test test/03_system/app/browser/feature/simple_web_browser_engine_production_hardening_spec.spl --mode=interpreter
 SIMPLE_BIN=/absolute/path/to/stage4/simple sh scripts/check/check-production-gui-web-renderer-parity-evidence.shs
 jj --no-pager status
 jj --no-pager log -r 'conflicts()' --no-graph --template 'change_id.short() ++ " " ++ commit_id.short() ++ " " ++ description.first_line() ++ "\n"'
@@ -92,6 +100,8 @@ Selected trace IDs are carried by the executable specs and regenerated manuals.
 
 ## Release Blockers
 
+- The active qualified full-CLI build must complete before the new hosted-HSTS
+  and overflow/scrollbar SSpecs can supply dynamic evidence.
 - Metal, AMD ROCm, DirectX, and WebGPU native proof require external host
   environments.
 - AC-7 hygiene evidence must be current at handoff; unrelated dirty files and

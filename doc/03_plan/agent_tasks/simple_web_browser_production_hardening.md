@@ -5,8 +5,10 @@
 Merge owner and final reviewer: `/root`.
 
 Wave 1's six implementation lanes remain landed. Wave 2 adds five pushed
-lanes. All eleven lanes have independent static `ACCEPT` verdicts covering
-scoped diff review, interface/spec/manual consistency, exact evidence oracles,
+lanes. Wave 3 adds authenticated-transport HSTS ownership and the complete
+overflow/scrollbar corrective chain. The thirteen final lanes have independent
+static review verdicts covering scoped diff review, interface/spec/manual
+consistency, exact evidence oracles,
 and the absence of placeholders. They do not claim runtime or SPipe execution.
 
 | Wave | Landed lane | Final pushed hash | Independent review |
@@ -22,12 +24,16 @@ and the absence of placeholders. They do not claim runtime or SPipe execution.
 | 2 | Bounded Grid stretch | `b6dbe39e8ea` | Static `ACCEPT` |
 | 2 | Animation per-frame indexing | `b35f319697c` | Static `ACCEPT` |
 | 2 | Canonical Go control | `9812bb073aa` | Static `ACCEPT` |
+| 3 | Hosted HSTS authenticated-transport ownership | `f081a28d6f4` | Static `REVIEW PASS`; dynamic held |
+| 3 | Final overflow normalization and scrollbar policy | `4d171219e88` -> `e321b86eeae` -> `d58b333df90` -> `27d116eb2b6` | Complete chain: static `REVIEW PASS`; dynamic held |
 
 No accepted lane contains `pass_todo`, unconditional placeholder assertions,
 empty scenario bodies, or fail-fast placeholders left as successful evidence.
-There are no outstanding candidate hashes or pending review states for these
-eleven lanes. The separate essential-runner candidate was rejected as described
-below and is not part of the landed set.
+There are no outstanding candidate hashes or pending static review states for
+the thirteen final lanes. `e321b86eeae` and `d58b333df90` were incomplete,
+review-failed intermediate CSS tips; only the complete chain ending at
+`27d116eb2b6` is accepted. The separate essential-runner candidate was rejected
+as described below and is not part of the landed set.
 
 ## Canonical Interfaces and Manual Step Vocabularies
 
@@ -200,6 +206,25 @@ below and is not part of the landed set.
   activate the destination`; `Use Home Bookmark Stop and Reload`; `Observe
   canonical history controls and rendered document`.
 
+### Hosted HSTS authenticated-transport ownership — `f081a28d6f4`
+
+- `HostedWebContentSession` now strips `Strict-Transport-Security` before every
+  renderer/browser commit. Only completed runtime HTTPS `single` and CORS
+  `actual` responses call `_apply_authenticated_runtime_https_hsts`; mock,
+  cache, preflight, HTTP, and error paths cannot seed or renew HSTS.
+- Independent static `REVIEW PASS`; the focused SSpec remains dynamically held
+  on the active full-CLI build.
+
+### Final overflow normalization and scrollbar policy — `4d171219e88` through `27d116eb2b6`
+
+- Final-cascade `overflow-x`/`overflow-y` winners, including the two-value
+  shorthand, normalize before Draw IR clipping. `scrollbar-width:none` controls
+  paint without disabling the scrollport clip and remains non-inherited.
+- `e321b86eeae` and `d58b333df90` were incomplete intermediate review failures;
+  the corrected chain ending at `27d116eb2b6` has independent static
+  `REVIEW PASS`. Its exact Draw IR and Engine2D SSpec remains dynamically held
+  on the active full-CLI build.
+
 ## CORS Unsafe Request Headers — Integrated, Evidence Held
 
 The former cross-origin unsafe-author-header bypass is repaired in
@@ -238,7 +263,7 @@ Status is INTEGRATED / STATIC/EVIDENCE-HELD: source and executable-spec/manual
 artifacts are accepted, but no qualified target-runtime, docgen, or SPipe PASS
 is admitted while the pure-Simple runner remains unavailable.
 
-## Essential Runner Lane — Stopped at Cycle 3 of 3
+## Essential Runner Lane — Active Qualified Full-CLI Build
 
 The 2026-07-31 care pass used the current pure-Simple Stage 3 at
 `c0d1ed…`. The prior `std.cli.log_modes` lowering boundary did not reproduce:
@@ -263,26 +288,22 @@ The exact retained full-CLI logs are in the isolated
   and
 - `build/native_probe/interpret-dispatch-care/logs/baseline-build-cycle3.log`.
 
-The last failure identifies runtime-bundle authority as a separate prerequisite,
-not a reason to edit the compiler or perform a full bootstrap in this lane.
-After that authority is repaired separately, the next runner action is a
-behavioral phase-trace SSpec with the exact steps `Compile the runner fixture`,
-`Enter interpreter mode after checks`, `Skip native monomorphization`, and
-`Run the requested SSpec`.
+Those three stopped attempts remain historical failures. A separate active,
+fresh phase-2 pure-Simple full-CLI build now uses the retained cache and the
+qualified stage2 runtime authority; it is not a full bootstrap and has not yet
+produced admissible runtime evidence.
 
 Candidate `3f3e0bd59963766e320289d96803ab1d3dcae44b` was rejected and remains
 unpushed. It is not evidence for any accepted lane. No compiler edit, full
-bootstrap, deployment, target-runtime PASS, or SPipe PASS occurred. The
-mandatory three-cycle limit is exhausted; no further retry is planned in this
-wave.
+bootstrap, deployment, target-runtime PASS, or SPipe PASS has occurred. The
+new qualified build is the sole active dynamic-evidence owner.
 
 ## Evidence Boundary
 
-Runtime and SPipe execution remain explicitly unclaimed. The invalid standalone
-SSpec launch and unresolved full-CLI runtime bundle prevent trustworthy
-execution of the target specs, and the bounded Grid seed diagnostic does not
-cross that boundary. Static `ACCEPT` therefore must not be reported as runtime
-`PASS`.
+Runtime and SPipe execution remain explicitly unclaimed. The active full-CLI
+build has not completed, the earlier standalone SSpec launch was invalid, and
+the bounded Grid seed diagnostic does not cross that boundary. Static review
+therefore must not be reported as runtime `PASS`.
 
 The overall production-hardening goal remains incomplete because the essential
 runner/ABI/SPipe lane is unproved and external-host evidence is still pending:
@@ -292,6 +313,5 @@ runner/ABI/SPipe lane is unproved and external-host evidence is still pending:
 - native DirectX validation on Windows; and
 - WebGPU validation on a host/browser with a supported adapter.
 
-This coordination update changes only this agent plan and the linked CORS bug
-record. It does not change source, runtime state, requirements, executable
-specs, or generated manuals.
+This coordination update records landed source/spec commits; it does not claim
+new runtime, docgen, or SPipe evidence.
