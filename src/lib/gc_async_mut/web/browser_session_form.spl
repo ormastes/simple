@@ -1,8 +1,10 @@
 use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
-    be_dom_find_path_to_id, be_dom_get_attr, be_dom_get_text_content,
-    be_dom_has_attr, be_dom_matches_identity, be_dom_event_identity,
-    be_dom_route_identity, be_dom_form_owner_id
+    be_dom_get_attr, be_dom_get_text_content, be_dom_has_attr,
+    be_dom_node_for_route, be_dom_submit_form_owner_route
+}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomIdentityIndex, DomNodeRoute
 }
 use std.gc_async_mut.web.browser_session_url.{
     browser_url_form_encode, resolve_relative_url, without_fragment
@@ -163,21 +165,36 @@ fn _browser_select_update(
 fn browser_select_update(node: BeDomNode, value: text) -> BrowserSelectUpdate:
     _browser_select_update(node, value, false, false)
 
-fn _browser_form_control_identity(node: BeDomNode, form_id: text) -> text:
-    if form_id.starts_with("\u{0000}route-node:"):
-        return be_dom_route_identity(node)
-    be_dom_event_identity(node)
+fn _browser_same_route(left: DomNodeRoute, right: DomNodeRoute) -> bool:
+    left.generation.value == right.generation.value and
+        left.node_id == right.node_id
+
+fn _browser_owned_by_form(
+    index: DomIdentityIndex, route: DomNodeRoute, form_route: DomNodeRoute
+) -> bool:
+    if val Some(owner) = index.form_owner_for_route(route):
+        return _browser_same_route(owner, form_route)
+    false
+
+fn _browser_is_submitter(
+    route: DomNodeRoute, submitter_route: DomNodeRoute?
+) -> bool:
+    if val Some(submitter) = submitter_route:
+        return _browser_same_route(route, submitter)
+    false
 
 fn _browser_control_pairs(
-    root: BeDomNode, node: BeDomNode, form_id: text, submitter_id: text
+    node: BeDomNode, index: DomIdentityIndex, form_route: DomNodeRoute,
+    submitter_route: DomNodeRoute?
 ) -> [text]:
     var pairs: [text] = []
+    val route = DomNodeRoute(
+        generation: index.generation, node_id: node.node_id
+    )
     if (
         (node.tag_name == "input" or node.tag_name == "button" or
          node.tag_name == "textarea" or node.tag_name == "select") and
-        be_dom_form_owner_id(
-            root, _browser_form_control_identity(node, form_id)
-        ) != form_id
+        not _browser_owned_by_form(index, route, form_route)
     ):
         return pairs
     if be_dom_has_attr(node, "disabled"):
@@ -196,7 +213,9 @@ fn _browser_control_pairs(
             not be_dom_has_attr(node, "checked")
         ):
             return pairs
-        if input_type == "submit" and not be_dom_matches_identity(node, submitter_id):
+        if input_type == "submit" and not _browser_is_submitter(
+            route, submitter_route
+        ):
             return pairs
         var value = be_dom_get_attr(node, "value")
         if (input_type == "checkbox" or input_type == "radio") and value == "":
@@ -208,7 +227,7 @@ fn _browser_control_pairs(
         val button_type = if declared_type == "": "submit" else: declared_type
         if (
             name != "" and button_type == "submit" and
-            be_dom_matches_identity(node, submitter_id)
+            _browser_is_submitter(route, submitter_route)
         ):
             val declared = be_dom_get_attr(node, "value")
             pairs.push(_browser_form_pair(
@@ -237,35 +256,54 @@ fn _browser_control_pairs(
             pairs.push(_browser_form_pair(name, value))
         return pairs
     for child in node.children:
-        for pair in _browser_control_pairs(root, child, form_id, submitter_id):
+        for pair in _browser_control_pairs(
+            child, index, form_route, submitter_route
+        ):
             pairs.push(pair)
     pairs
 
 fn browser_form_submission(
     root: BeDomNode,
-    form_id: text,
-    submitter_id: text,
+    index: DomIdentityIndex,
+    form_route: DomNodeRoute,
+    submitter_route: DomNodeRoute?,
     current_url: text
 ) -> BrowserFormSubmission:
-    val form_path = be_dom_find_path_to_id(root, form_id)
-    if form_path.len() == 0:
+    val form = match be_dom_node_for_route(root, index, form_route):
+        Some(node): node
+        nil: return BrowserFormSubmission(
+            method: "", url: "", body: "", content_type: "",
+            error: "form not found"
+        )
+    if form.tag_name != "form":
         return BrowserFormSubmission(
             method: "", url: "", body: "", content_type: "",
             error: "form not found"
         )
-    val form = form_path[form_path.len() - 1]
     var submitter_action = ""
     var submitter_method = ""
     var submitter_has_method = false
     var submitter_enctype = ""
-    if submitter_id != "":
-        val submitter_path = be_dom_find_path_to_id(root, submitter_id)
-        if submitter_path.len() == 0:
+    if val Some(route) = submitter_route:
+        val submitter = match be_dom_node_for_route(root, index, route):
+            Some(node): node
+            nil: return BrowserFormSubmission(
+                method: "", url: "", body: "", content_type: "",
+                error: "submitter not found"
+            )
+        val submitter_owner = match be_dom_submit_form_owner_route(
+            root, index, route
+        ):
+            Some(owner): owner
+            nil: return BrowserFormSubmission(
+                method: "", url: "", body: "", content_type: "",
+                error: "submitter not found"
+            )
+        if not _browser_same_route(submitter_owner, form_route):
             return BrowserFormSubmission(
                 method: "", url: "", body: "", content_type: "",
                 error: "submitter not found"
             )
-        val submitter = submitter_path[submitter_path.len() - 1]
         submitter_action = be_dom_get_attr(submitter, "formaction")
         submitter_method = be_dom_get_attr(submitter, "formmethod")
         submitter_has_method = be_dom_has_attr(submitter, "formmethod")
@@ -306,7 +344,10 @@ fn browser_form_submission(
             method: "", url: "", body: "", content_type: "",
             error: "unsupported form encoding: {enctype}"
         )
-    val body = _browser_control_pairs(root, root, form_id, submitter_id).join("&")
+    # One O(N) tree walk; each control consults the immutable owner map.
+    val body = _browser_control_pairs(
+        root, index, form_route, submitter_route
+    ).join("&")
     if method == "post":
         return BrowserFormSubmission(
             method: "POST", url: action, body: body,

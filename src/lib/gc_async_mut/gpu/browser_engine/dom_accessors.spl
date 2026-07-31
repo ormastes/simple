@@ -2,6 +2,9 @@ use std.gc_async_mut.gpu.browser_engine.dom.{
     BeDomNode, BeDomEvent, BeDomEventDispatch, StyleProps,
     normalize_dom_event_type
 }
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomIdentityIndex, DomNodeRoute, DomRadioGroupKey
+}
 use common.web.html_escape.{html_escape_core}
 
 fn be_dom_add_child(mut parent: BeDomNode, child: BeDomNode):
@@ -1422,6 +1425,591 @@ fn be_dom_set_children(node: BeDomNode, children: [BeDomNode]) -> BeDomNode:
         event_listener_actions: node.event_listener_actions,
         event_listener_capture: node.event_listener_capture)
 
+# Temporary Lane 2 bridge.  Lane 3 moves all dispatch callers to these typed
+# routes before the text-identity helpers above are deleted in the atomic merge.
+# The combined deletion also removes be_dom_default_action_to_id,
+# be_dom_dispatch_input_event_to_id,
+# _be_dom_apply_default_action_to_id_with_focus_policy,
+# be_dom_apply_default_action_to_id_without_focus, _be_dom_radio_form_id, and
+# _be_dom_uncheck_radio_group after their typed replacements below are wired.
+fn be_dom_path_for_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
+) -> [BeDomNode]:
+    if not index.contains_route(route):
+        return []
+    val ordinals = match index.path_for_route(route):
+        Some(value): value
+        nil: return []
+    var current = root
+    var path: [BeDomNode] = [current]
+    for ordinal in ordinals:
+        if ordinal < 0 or ordinal >= current.children.len():
+            return []
+        current = current.children[ordinal]
+        path.push(current)
+    if current.node_id != route.node_id:
+        return []
+    path
+
+fn be_dom_node_for_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
+) -> BeDomNode?:
+    val path = be_dom_path_for_route(root, index, route)
+    if path.len() == 0:
+        return nil
+    Some(path[path.len() - 1])
+
+fn be_dom_default_action_to_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    event_type: text
+) -> text:
+    _be_dom_default_action(be_dom_path_for_route(root, index, route), event_type)
+
+class BeDomRouteEventDispatch:
+    event: BeDomEvent
+    target_route: DomNodeRoute
+    actions: [text]
+    phases: [text]
+    current_targets: [DomNodeRoute]
+    default_action: text
+    default_action_allowed: bool
+
+fn _be_dom_clear_event_text_routes(event: BeDomEvent) -> BeDomEvent:
+    var next = event
+    next.target_id = ""
+    next.current_target_id = ""
+    next.related_target_id = ""
+    next
+
+fn _be_dom_empty_route_dispatch(
+    event: BeDomEvent, target_route: DomNodeRoute
+) -> BeDomRouteEventDispatch:
+    BeDomRouteEventDispatch(
+        event: _be_dom_clear_event_text_routes(event),
+        target_route: target_route,
+        actions: [],
+        phases: [],
+        current_targets: [],
+        default_action: "",
+        default_action_allowed: false
+    )
+
+fn _be_dom_create_route_event(
+    target: BeDomNode, event_type: text, bubbles: bool, cancelable: bool
+) -> BeDomEvent:
+    var event = BeDomEvent.create(
+        normalize_dom_event_type(event_type), "", "", "", "",
+        bubbles, cancelable
+    )
+    event.target_tag = target.tag_name
+    event
+
+fn _be_dom_append_route_action(
+    dispatch: BeDomRouteEventDispatch, node: BeDomNode,
+    current_route: DomNodeRoute, action: text, phase: text,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent
+) -> BeDomRouteEventDispatch:
+    var next = dispatch
+    next.actions.push(action)
+    next.phases.push(phase)
+    next.current_targets.push(current_route)
+    next.event.current_target_id = ""
+    next.event.current_target_tag = node.tag_name
+    next.event = _be_dom_clear_event_text_routes(
+        executor(next.event, node, action, phase)
+    )
+    next
+
+fn _be_dom_dispatch_route_node(
+    dispatch: BeDomRouteEventDispatch, node: BeDomNode,
+    current_route: DomNodeRoute, phase: text, listener_mode: text,
+    include_inline: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent
+) -> BeDomRouteEventDispatch:
+    var next = dispatch
+    val normalized = next.event.event_type
+    if include_inline:
+        val inline_action = be_dom_get_attr(node, "on" + normalized)
+        if inline_action != "":
+            next = _be_dom_append_route_action(
+                next, node, current_route, inline_action, phase, executor
+            )
+            if next.event.immediate_propagation_stopped:
+                return next
+    var listener_index = 0
+    while listener_index < node.event_listener_types.len():
+        val type_matches = (
+            node.event_listener_types[listener_index] == normalized
+        )
+        var phase_matches = listener_mode == "all"
+        if listener_mode == "capture":
+            phase_matches = node.event_listener_capture[listener_index]
+        elif listener_mode == "bubble":
+            phase_matches = not node.event_listener_capture[listener_index]
+        if type_matches and phase_matches:
+            next = _be_dom_append_route_action(
+                next, node, current_route,
+                node.event_listener_actions[listener_index], phase, executor
+            )
+            if next.event.immediate_propagation_stopped:
+                return next
+        listener_index = listener_index + 1
+    next
+
+fn _be_dom_finish_route_default_action(
+    dispatch: BeDomRouteEventDispatch, path: [BeDomNode], event_type: text
+) -> BeDomRouteEventDispatch:
+    var next = dispatch
+    next.default_action = _be_dom_default_action(path, event_type)
+    next.default_action_allowed = (
+        next.default_action != "" and not next.event.default_prevented
+    )
+    next
+
+fn _be_dom_dispatch_route_path_with_event_executor(
+    path: [BeDomNode], routes: [DomNodeRoute], target_route: DomNodeRoute,
+    event: BeDomEvent, event_type: text, bubbles: bool,
+    include_inline_target: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent
+) -> BeDomRouteEventDispatch:
+    if path.len() == 0 or routes.len() != path.len():
+        return _be_dom_empty_route_dispatch(event, target_route)
+    var route_index = 0
+    while route_index < routes.len():
+        if path[route_index].node_id != routes[route_index].node_id:
+            return _be_dom_empty_route_dispatch(event, target_route)
+        route_index = route_index + 1
+    val target = path[path.len() - 1]
+    if (
+        normalize_dom_event_type(event_type) == "click" and
+        be_dom_has_attr(target, "disabled")
+    ):
+        return _be_dom_empty_route_dispatch(event, target_route)
+    var dispatch = _be_dom_empty_route_dispatch(event, target_route)
+    var path_index = 0
+    while path_index + 1 < path.len():
+        dispatch = _be_dom_dispatch_route_node(
+            dispatch, path[path_index], routes[path_index],
+            "capture", "capture", false, executor
+        )
+        if dispatch.event.propagation_stopped:
+            return _be_dom_finish_route_default_action(
+                dispatch, path, event_type
+            )
+        path_index = path_index + 1
+    val target_index = path.len() - 1
+    dispatch = _be_dom_dispatch_route_node(
+        dispatch, target, routes[target_index],
+        "target", "capture", false, executor
+    )
+    if not dispatch.event.immediate_propagation_stopped:
+        dispatch = _be_dom_dispatch_route_node(
+            dispatch, target, routes[target_index],
+            "target", "bubble", include_inline_target, executor
+        )
+    if dispatch.event.propagation_stopped:
+        return _be_dom_finish_route_default_action(
+            dispatch, path, event_type
+        )
+    if bubbles:
+        var ancestor_index = path.len() - 2
+        while ancestor_index >= 0:
+            dispatch = _be_dom_dispatch_route_node(
+                dispatch, path[ancestor_index], routes[ancestor_index],
+                "bubble", "bubble", false, executor
+            )
+            if dispatch.event.propagation_stopped:
+                return _be_dom_finish_route_default_action(
+                    dispatch, path, event_type
+                )
+            ancestor_index = ancestor_index - 1
+    _be_dom_finish_route_default_action(dispatch, path, event_type)
+
+fn be_dom_dispatch_event_to_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    event_type: text, bubbles: bool, cancelable: bool,
+    include_inline_target: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent =
+        _be_dom_default_listener_executor
+) -> BeDomRouteEventDispatch:
+    val path = be_dom_path_for_route(root, index, route)
+    val routes = index.event_path_for_route(route)
+    if path.len() == 0:
+        val event = BeDomEvent.create(
+            normalize_dom_event_type(event_type), "", "", "", "",
+            bubbles, cancelable
+        )
+        return _be_dom_empty_route_dispatch(event, route)
+    _be_dom_dispatch_route_path_with_event_executor(
+        path, routes, route,
+        _be_dom_create_route_event(
+            path[path.len() - 1], event_type, bubbles, cancelable
+        ),
+        event_type, bubbles, include_inline_target, executor
+    )
+
+fn be_dom_dispatch_keyboard_event_to_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    event_type: text, bubbles: bool, cancelable: bool, key: text,
+    code: text, shift_key: bool, include_inline_target: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent =
+        _be_dom_default_listener_executor
+) -> BeDomRouteEventDispatch:
+    val path = be_dom_path_for_route(root, index, route)
+    val routes = index.event_path_for_route(route)
+    if path.len() == 0:
+        var event = BeDomEvent.create(
+            normalize_dom_event_type(event_type), "", "", "", "",
+            bubbles, cancelable
+        )
+        event.key = key
+        event.code = code
+        event.shift_key = shift_key
+        return _be_dom_empty_route_dispatch(event, route)
+    var event = _be_dom_create_route_event(
+        path[path.len() - 1], event_type, bubbles, cancelable
+    )
+    event.key = key
+    event.code = code
+    event.shift_key = shift_key
+    _be_dom_dispatch_route_path_with_event_executor(
+        path, routes, route, event,
+        event_type, bubbles, include_inline_target, executor
+    )
+
+fn be_dom_dispatch_input_event_to_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    event_type: text, bubbles: bool, cancelable: bool, input_data: text?,
+    input_type: text, is_composing: bool, include_inline_target: bool,
+    executor: fn(BeDomEvent, BeDomNode, text, text) -> BeDomEvent =
+        _be_dom_default_listener_executor
+) -> BeDomRouteEventDispatch:
+    val path = be_dom_path_for_route(root, index, route)
+    val routes = index.event_path_for_route(route)
+    if path.len() == 0:
+        var event = BeDomEvent.create(
+            normalize_dom_event_type(event_type), "", "", "", "",
+            bubbles, cancelable
+        )
+        event.input_data = input_data
+        event.input_type = input_type
+        event.is_composing = is_composing
+        return _be_dom_empty_route_dispatch(event, route)
+    var event = _be_dom_create_route_event(
+        path[path.len() - 1], event_type, bubbles, cancelable
+    )
+    event.input_data = input_data
+    event.input_type = input_type
+    event.is_composing = is_composing
+    _be_dom_dispatch_route_path_with_event_executor(
+        path, routes, route, event,
+        event_type, bubbles, include_inline_target, executor
+    )
+
+fn _be_dom_focused_route(
+    node: BeDomNode, index: DomIdentityIndex
+) -> DomNodeRoute?:
+    val route = DomNodeRoute(
+        generation: index.generation, node_id: node.node_id
+    )
+    if index.contains_route(route) and be_dom_has_attr(node, "data-focused"):
+        return Some(route)
+    for child in node.children:
+        if val Some(found) = _be_dom_focused_route(child, index):
+            return Some(found)
+    nil
+
+fn be_dom_focused_route(
+    root: BeDomNode, index: DomIdentityIndex
+) -> DomNodeRoute?:
+    _be_dom_focused_route(root, index)
+
+fn _be_dom_same_route(left: DomNodeRoute, right: DomNodeRoute) -> bool:
+    left.generation.value == right.generation.value and
+        left.node_id == right.node_id
+
+class _BeDomFocusRouteOrder:
+    positive_routes: [DomNodeRoute]
+    positive_tab_indexes: [i64]
+    regular_routes: [DomNodeRoute]
+
+fn _be_dom_collect_focus_route_order(
+    node: BeDomNode, index: DomIdentityIndex, order: _BeDomFocusRouteOrder
+):
+    if be_dom_has_attr(node, "hidden") or be_dom_get_display(node) == "none":
+        return
+    val route = DomNodeRoute(
+        generation: index.generation, node_id: node.node_id
+    )
+    if index.contains_route(route) and _be_dom_is_focusable_node(node):
+        var tab_index: i64 = 0
+        val raw_tab_index = be_dom_get_attr(node, "tabindex").trim()
+        if raw_tab_index != "":
+            if val Some(parsed_tab_index) = raw_tab_index.to_i64():
+                tab_index = parsed_tab_index
+        if tab_index > 0:
+            var insert_at = 0
+            while (
+                insert_at < order.positive_tab_indexes.len() and
+                order.positive_tab_indexes[insert_at] <= tab_index
+            ):
+                insert_at = insert_at + 1
+            order.positive_routes.insert(insert_at, route)
+            order.positive_tab_indexes.insert(insert_at, tab_index)
+        else:
+            order.regular_routes.push(route)
+    for child in node.children:
+        _be_dom_collect_focus_route_order(child, index, order)
+
+fn be_dom_next_focus_route(
+    root: BeDomNode, index: DomIdentityIndex,
+    current_route: DomNodeRoute?, reverse: bool
+) -> DomNodeRoute?:
+    if val Some(current) = current_route:
+        if not index.contains_route(current):
+            return nil
+    val order = _BeDomFocusRouteOrder(
+        positive_routes: [], positive_tab_indexes: [], regular_routes: []
+    )
+    _be_dom_collect_focus_route_order(root, index, order)
+    var routes = order.positive_routes
+    for route in order.regular_routes:
+        routes.push(route)
+    if routes.len() == 0:
+        return nil
+    var current_index = -1
+    if val Some(current) = current_route:
+        var index_value = 0
+        while index_value < routes.len():
+            if _be_dom_same_route(routes[index_value], current):
+                current_index = index_value
+                break
+            index_value = index_value + 1
+    if reverse:
+        if current_index <= 0:
+            return Some(routes[routes.len() - 1])
+        return Some(routes[current_index - 1])
+    if current_index < 0 or current_index + 1 >= routes.len():
+        return Some(routes[0])
+    Some(routes[current_index + 1])
+
+fn be_dom_form_owner_route(
+    index: DomIdentityIndex, route: DomNodeRoute
+) -> DomNodeRoute?:
+    index.form_owner_for_route(route)
+
+fn be_dom_submit_form_owner_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
+) -> DomNodeRoute?:
+    val target = match be_dom_node_for_route(root, index, route):
+        Some(node): node
+        nil: return nil
+    if target.tag_name == "input":
+        if be_dom_get_attr(target, "type").lower() != "submit":
+            return nil
+    elif target.tag_name == "button":
+        if _be_dom_button_type(target) != "submit":
+            return nil
+    else:
+        return nil
+    index.form_owner_for_route(route)
+
+fn be_dom_reset_form_owner_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
+) -> DomNodeRoute?:
+    val target = match be_dom_node_for_route(root, index, route):
+        Some(node): node
+        nil: return nil
+    if target.tag_name == "input":
+        if be_dom_get_attr(target, "type").lower() != "reset":
+            return nil
+    elif target.tag_name == "button":
+        if _be_dom_button_type(target) != "reset":
+            return nil
+    else:
+        return nil
+    index.form_owner_for_route(route)
+
+class BeDomImplicitSubmitRouteResult:
+    default_submitter_route: DomNodeRoute?
+    allows_direct_submit: bool
+
+class _BeDomImplicitSubmitRouteScan:
+    default_submitter_route: DomNodeRoute?
+    blocker_count: i32
+
+fn _be_dom_scan_implicit_submit_routes(
+    node: BeDomNode, index: DomIdentityIndex, form_route: DomNodeRoute,
+    scan: _BeDomImplicitSubmitRouteScan
+):
+    val route = DomNodeRoute(
+        generation: index.generation, node_id: node.node_id
+    )
+    if index.contains_route(route):
+        if val Some(owner) = index.form_owner_for_route(route):
+            if (
+                owner.node_id == form_route.node_id and
+                owner.generation.value == form_route.generation.value
+            ):
+                if (
+                    scan.default_submitter_route == nil and
+                    not be_dom_has_attr(node, "disabled") and
+                    ((node.tag_name == "button" and
+                      _be_dom_button_type(node) == "submit") or
+                     (node.tag_name == "input" and
+                      be_dom_get_attr(node, "type").lower() == "submit"))
+                ):
+                    scan.default_submitter_route = Some(route)
+                if be_dom_input_blocks_implicit_submission(node):
+                    scan.blocker_count = scan.blocker_count + 1
+    for child in node.children:
+        _be_dom_scan_implicit_submit_routes(child, index, form_route, scan)
+
+fn be_dom_implicit_submit_route_result(
+    root: BeDomNode, index: DomIdentityIndex, form_route: DomNodeRoute
+) -> BeDomImplicitSubmitRouteResult:
+    val form = match be_dom_node_for_route(root, index, form_route):
+        Some(node): node
+        nil: return BeDomImplicitSubmitRouteResult(
+            default_submitter_route: nil, allows_direct_submit: false
+        )
+    if form.tag_name != "form":
+        return BeDomImplicitSubmitRouteResult(
+            default_submitter_route: nil, allows_direct_submit: false
+        )
+    val scan = _BeDomImplicitSubmitRouteScan(
+        default_submitter_route: nil, blocker_count: 0
+    )
+    _be_dom_scan_implicit_submit_routes(root, index, form_route, scan)
+    BeDomImplicitSubmitRouteResult(
+        default_submitter_route: scan.default_submitter_route,
+        allows_direct_submit: scan.blocker_count <= 1
+    )
+
+fn be_dom_checked_radio_route_for_target(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute
+) -> DomNodeRoute?:
+    val group = match index.radio_group_for_route(route):
+        Some(value): value
+        nil: return nil
+    for member in index.radio_members(group):
+        if val Some(node) = be_dom_node_for_route(root, index, member):
+            if be_dom_has_attr(node, "checked"):
+                return Some(member)
+    nil
+
+fn be_dom_radio_group_for_route(
+    index: DomIdentityIndex, route: DomNodeRoute
+) -> DomRadioGroupKey?:
+    index.radio_group_for_route(route)
+
+fn be_dom_radio_group_members(
+    index: DomIdentityIndex, group: DomRadioGroupKey
+) -> [DomNodeRoute]:
+    index.radio_members(group)
+
+fn _be_dom_mutate_at_ordinals(
+    node: BeDomNode, ordinals: [i32], ordinal_index: i32,
+    action: text, uncheck_radio: bool
+) -> BeDomNode:
+    if ordinal_index >= ordinals.len():
+        if uncheck_radio:
+            var unchecked = node
+            unchecked.remove_attr("checked")
+            return unchecked
+        return be_dom_apply_default_action(node, action)
+    val child_index = ordinals[ordinal_index]
+    if child_index < 0 or child_index >= node.children.len():
+        return node
+    var children: [BeDomNode] = []
+    for child in node.children:
+        children.push(child)
+    children[child_index] = _be_dom_mutate_at_ordinals(
+        children[child_index], ordinals, ordinal_index + 1,
+        action, uncheck_radio
+    )
+    be_dom_set_children(node, children)
+
+fn _be_dom_mutate_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    action: text, uncheck_radio: bool
+) -> BeDomNode:
+    if be_dom_node_for_route(root, index, route) == nil:
+        return root
+    val ordinals = match index.path_for_route(route):
+        Some(value): value
+        nil: return root
+    _be_dom_mutate_at_ordinals(root, ordinals, 0, action, uncheck_radio)
+
+fn _be_dom_apply_default_action_to_route_with_focus_policy(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    action: text, allow_focus_default: bool
+) -> BeDomNode:
+    val path = be_dom_path_for_route(root, index, route)
+    if path.len() == 0:
+        return root
+    if action == "focus-element" and not allow_focus_default:
+        return root
+    if action == "details-toggle":
+        val owner_index = _be_dom_details_summary_owner_index(path)
+        if owner_index < 0:
+            return root
+        val details_route = DomNodeRoute(
+            generation: index.generation,
+            node_id: path[owner_index].node_id
+        )
+        return _be_dom_mutate_route(
+            root, index, details_route, action, false
+        )
+    val click_owner_index = _be_dom_click_owner_index(path)
+    if (
+        click_owner_index >= 0 and
+        _be_dom_click_action(path[click_owner_index]) == action and
+        click_owner_index != path.len() - 1
+    ):
+        val click_owner_route = DomNodeRoute(
+            generation: index.generation,
+            node_id: path[click_owner_index].node_id
+        )
+        return _be_dom_apply_default_action_to_route_with_focus_policy(
+            root, index, click_owner_route, action, allow_focus_default
+        )
+    var next = root
+    if allow_focus_default and (
+        action == "focus-element" or action == "button-activate" or
+        action == "input-checkbox-toggle" or
+        action == "input-radio-select"
+    ):
+        next = _be_dom_clear_focus(next)
+        if action != "focus-element":
+            next = _be_dom_mutate_route(
+                next, index, route, "focus-element", false
+            )
+    if action == "input-radio-select":
+        if val Some(group) = index.radio_group_for_route(route):
+            for member in index.radio_members(group):
+                if not _be_dom_same_route(member, route):
+                    next = _be_dom_mutate_route(
+                        next, index, member, "", true
+                    )
+    _be_dom_mutate_route(next, index, route, action, false)
+
+fn be_dom_apply_default_action_to_route(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    action: text
+) -> BeDomNode:
+    _be_dom_apply_default_action_to_route_with_focus_policy(
+        root, index, route, action, true
+    )
+
+fn be_dom_apply_default_action_to_route_without_focus(
+    root: BeDomNode, index: DomIdentityIndex, route: DomNodeRoute,
+    action: text
+) -> BeDomNode:
+    _be_dom_apply_default_action_to_route_with_focus_policy(
+        root, index, route, action, false
+    )
+
 export be_dom_add_child, be_dom_get_children, be_dom_remove_child, be_dom_insert_before
 export be_dom_set_attr, be_dom_get_attr, be_dom_set_style, be_dom_get_style
 export be_dom_event_identity, be_dom_route_identity, be_dom_route_node_id
@@ -1468,3 +2056,17 @@ export be_dom_apply_default_action, be_dom_apply_default_action_to_id
 export be_dom_dispatch_event_apply_default
 export be_dom_keyboard_activation_event_for_target
 export be_dom_dispatch_keyboard_activation_apply_default
+export be_dom_path_for_route, be_dom_node_for_route
+export BeDomRouteEventDispatch
+export be_dom_default_action_to_route, be_dom_dispatch_event_to_route
+export be_dom_dispatch_keyboard_event_to_route
+export be_dom_dispatch_input_event_to_route
+export be_dom_focused_route
+export be_dom_next_focus_route
+export be_dom_form_owner_route, be_dom_submit_form_owner_route
+export be_dom_reset_form_owner_route
+export BeDomImplicitSubmitRouteResult, be_dom_implicit_submit_route_result
+export be_dom_checked_radio_route_for_target
+export be_dom_radio_group_for_route, be_dom_radio_group_members
+export be_dom_apply_default_action_to_route
+export be_dom_apply_default_action_to_route_without_focus
