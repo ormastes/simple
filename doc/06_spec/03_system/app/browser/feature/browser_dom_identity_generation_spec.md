@@ -62,6 +62,8 @@ dispatch, SimpleScript bridge, and stale textual UI snapshot reject the old
 route without mutation. Both the direct hosted adapter and isolated worker
 replace during press and release without a click. The worker also clears its
 pressed/stale-hit routes and root-request/command-capability authority. The
+release oracle replaces the document between a valid press and capability-
+bound release, then proves no callback, body, title, or navigation mutation.
 surviving current route is recovered from the canonical hit index,
 its `replace` Draw IR command is an exact green `8x8` rectangle, and Engine2D
 produces a green inside pixel and white outside pixel. Closing the session
