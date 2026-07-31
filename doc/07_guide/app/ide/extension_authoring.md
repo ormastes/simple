@@ -101,17 +101,28 @@ Extend a domain instead of forking it:
 | `app/office/slides/layout_registry.spl` | slide layouts + placeholders |
 | `app/office/slides/element_kind_registry.spl` | slide element kinds |
 
-Settings and keybindings do **not** go through the extension kernel. Use the
-live stacks: `lib/editor/00.common/settings_schema.spl` →
-`lib/editor/view/settings_view.spl` for settings, and
-`lib/editor/00.common/keybindings.spl` → `lib/editor/core/keybinding_manager.spl`
-for chords. Kernel-side `settings.spl` / `menus.spl` / `keybindings.spl` were
-deleted 2026-07-30 as unused duplicates of those. There is no menu contribution
-point: `ExtensionManifest` has no `contributes_menus` field.
+Settings do **not** go through the extension kernel. Use the live stack:
+`lib/editor/00.common/settings_schema.spl` →
+`lib/editor/view/settings_view.spl`. Kernel-side `settings.spl` / `menus.spl` /
+`keybindings.spl` were deleted 2026-07-30 as unused duplicates of the live
+stacks. There is no menu contribution point: `ExtensionManifest` has no
+`contributes_menus` field.
 
-Manifest `keybindings` are parsed but **not yet applied** — nothing feeds them
-into `keybinding_manager_add_override`, so an extension keybinding does not
-reach the editor. Don't rely on it.
+Manifest `keybindings` **are now bound into a host-owned `KeybindingManager`**
+(`host.spl` `_register_contributions` → `keybinding_manager_add_override`,
+reversed by `_unregister_contributions` on deactivate; query via
+`host.keybinding_resolve(key, mode)`). But nothing in the running editor reads
+that manager: `editor_controller.spl` only calls `default_keybindings()` (from
+`lib/editor/00.common/keybindings.spl`, a separate stack) to render the
+keyboard-shortcuts panel — there is no key→command resolution path through the
+host's `KeybindingManager` anywhere. So a contributed keybinding still cannot
+reach dispatch; it is stored, not wired. The `when` context-predicate field on
+a keybinding contribution is also dropped in the conversion — `KeyBinding` has
+no "when" concept. Spec:
+`test/01_unit/lib/editor/keybinding_contribution_spec.spl` (6/6, proves the
+sink round-trips, not that dispatch works). Details:
+`doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md` §
+Adjacent, not fixed here.
 
 ## 5. Shipping a builtin
 
@@ -120,6 +131,17 @@ manifest, then exactly one provider line in `builtin/index.spl`. Declare only
 commands that have a real implementation behind them — `ide_capabilities_live()`
 reports `declared → indexed → activatable → bound`, and a command with no
 handler stops at `activatable`, visibly.
+
+> **`bound` is weaker than it sounds.** `_ide_capability_with_live_state`
+> (`src/app/ide/capabilities.spl:213-215`) registers a probe command handler
+> and then checks whether that same handler is registered — it proves the
+> command id *can be bound*, not that any real caller invokes it or that a
+> real handler backs it in production. Combined with builtins activating
+> eagerly (see the callout in §2 above), a builtin-backed capability is nearly
+> guaranteed to report `bound`. Do not treat "`declared → activatable → bound`"
+> progressing to `bound` as proof the feature works end to end. Detail:
+> `doc/08_tracking/bug/builtin_extensions_activate_eagerly_2026-07-30.md` §
+> CRITICAL.
 
 ## 6. Security model
 

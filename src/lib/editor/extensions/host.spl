@@ -16,6 +16,11 @@ use std.editor.extensions.builtin.index.{builtin_manifest_providers, builtin_act
 use std.editor.extensions.builtin.spl_language.*
 use std.editor.extensions.builtin.md_language.*
 use std.editor.core.path_text.*
+use std.editor.core.keybinding_manager.{
+    KeybindingManager, keybinding_manager_new, keybinding_manager_add_override,
+    keybinding_manager_resolve
+}
+use std.editor.common.keybindings.{KeyBinding}
 use std.io_runtime.{dir_walk}
 
 struct ExtensionEntry:
@@ -57,6 +62,9 @@ class ExtensionHost:
     lifetimes: [ExtensionLifetimeEntry]
     activation_hooks: [ExtensionActivationHookEntry]
     activation_diagnostics: [text]
+    keybinding_manager: KeybindingManager
+    keybinding_registry: [ExtensionKeybindingEntry]
+    custom_editor_registry: [ExtensionCustomEditorEntry]
 
 struct ExtensionCommandEntry:
     extension_name: text
@@ -67,6 +75,13 @@ fn extension_command_entry_name(entry: ExtensionCommandEntry) -> text:
 
 fn extension_command_entry_command_id(entry: ExtensionCommandEntry) -> text:
     entry.command.id
+
+# Ownership record for a keybinding contributed by an extension's manifest,
+# mirroring ExtensionCommandEntry so `contributes_keybindings` can be reversed
+# per-extension on deactivate (KeybindingManager.overrides carries no owner).
+struct ExtensionKeybindingEntry:
+    extension_name: text
+    binding: KeyBinding
 
 # Per-extension registration ownership. Struct (not the ExtensionLifetime
 # class): class instances stored inside an array field lose later mutations
@@ -88,6 +103,13 @@ struct ExtensionActivationHookEntry:
 struct ExtensionDebugAdapterEntry:
     extension_name: text
     adapter: ExtensionDebugAdapter
+
+# Ownership record for a custom-editor contribution, mirroring
+# ExtensionDebugAdapterEntry so `contributes_custom_editors` can be resolved
+# by `document_kind` and reversed per-extension on deactivate.
+struct ExtensionCustomEditorEntry:
+    extension_name: text
+    editor: ExtensionCustomEditor
 
 fn extension_debug_adapter_id(entry: ExtensionDebugAdapterEntry) -> text:
     entry.adapter.id
@@ -145,7 +167,10 @@ impl ExtensionHost:
             listeners: EventListenerRegistry.new(),
             lifetimes: [],
             activation_hooks: [],
-            activation_diagnostics: []
+            activation_diagnostics: [],
+            keybinding_manager: keybinding_manager_new(),
+            keybinding_registry: [],
+            custom_editor_registry: []
         )
 
     me index_extension(path: text):
@@ -618,6 +643,26 @@ impl ExtensionHost:
         val entry = me.find_debug_adapter(adapter_id)
         entry.adapter.id != ""
 
+    # Resolve the custom editor bound to `document_kind` with the highest
+    # `priority`. Ties are broken deterministically by registration order
+    # (first-registered wins: only a strictly-greater priority replaces the
+    # current best). Empty entry (extension_name == "") when none registered.
+    fn resolve_custom_editor(document_kind: text) -> ExtensionCustomEditorEntry:
+        var best = ExtensionCustomEditorEntry(
+            extension_name: "",
+            editor: ExtensionCustomEditor(id: "", document_kind: "", priority: 0)
+        )
+        var found = false
+        for entry in me.custom_editor_registry:
+            if entry.editor.document_kind == document_kind:
+                if not found or entry.editor.priority > best.editor.priority:
+                    best = entry
+                    found = true
+        best
+
+    fn custom_editor_registered(document_kind: text) -> bool:
+        me.resolve_custom_editor(document_kind).extension_name != ""
+
     me _register_contributions(manifest: ExtensionManifest):
         for cmd in manifest.contributes_commands:
             me.command_registry.push(ExtensionCommandEntry(
@@ -630,6 +675,18 @@ impl ExtensionHost:
             me.debug_adapter_registry.push(ExtensionDebugAdapterEntry(
                 extension_name: manifest.name,
                 adapter: adapter
+            ))
+        for kb in manifest.contributes_keybindings:
+            val binding = KeyBinding(key: kb.key, command: kb.command, mode: "", args: "")
+            me.keybinding_registry.push(ExtensionKeybindingEntry(
+                extension_name: manifest.name,
+                binding: binding
+            ))
+            me.keybinding_manager = keybinding_manager_add_override(me.keybinding_manager, binding)
+        for editor in manifest.contributes_custom_editors:
+            me.custom_editor_registry.push(ExtensionCustomEditorEntry(
+                extension_name: manifest.name,
+                editor: editor
             ))
 
     me _register_context(manifest: ExtensionManifest, path: text):
@@ -654,6 +711,29 @@ impl ExtensionHost:
             if entry.extension_name != name:
                 new_adapters.push(entry)
         me.debug_adapter_registry = new_adapters
+        var new_kb: [ExtensionKeybindingEntry] = []
+        for entry in me.keybinding_registry:
+            if entry.extension_name != name:
+                new_kb.push(entry)
+        me.keybinding_registry = new_kb
+        me._rebuild_keybinding_overrides()
+        var new_editors: [ExtensionCustomEditorEntry] = []
+        for entry in me.custom_editor_registry:
+            if entry.extension_name != name:
+                new_editors.push(entry)
+        me.custom_editor_registry = new_editors
+
+    # KeybindingManager.overrides has no owner tag, so a per-extension removal
+    # rebuilds the override list from the surviving keybinding_registry entries
+    # rather than mutating the manager in place.
+    me _rebuild_keybinding_overrides():
+        var manager = KeybindingManager(config: me.keybinding_manager.config, overrides: [])
+        for entry in me.keybinding_registry:
+            manager = keybinding_manager_add_override(manager, entry.binding)
+        me.keybinding_manager = manager
+
+    fn keybinding_resolve(key: text, mode: text) -> text:
+        keybinding_manager_resolve(me.keybinding_manager, key, mode)
 
     me _unregister_context(name: text):
         var new_contexts: [ExtensionContextEntry] = []

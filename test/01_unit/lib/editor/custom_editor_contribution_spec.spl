@@ -1,0 +1,137 @@
+# Extension manifest `contributes_custom_editors` wiring.
+#
+# ExtensionManifest decodes contributes_custom_editors (manifest.spl,
+# manifest_sdn.spl) -- three builtins declare it (writer_ext.spl ->
+# writer.rich_document_editor, sheets_ext.spl -> sheets.grid, slides_ext.spl
+# -> slides.canvas) -- but until now nothing bound them: they were parsed and
+# dropped. This proves ExtensionHost._register_contributions binds each
+# contributed custom editor into a real registry, resolvable by
+# `document_kind` (highest `priority` wins, ties broken by registration
+# order), and that ExtensionHost._unregister_contributions reverses it on
+# deactivate.
+#
+# NOTE: unlike the keybinding contribution, this registry currently has NO
+# consumer elsewhere in src/ -- the document-open path does not yet look up
+# a custom editor by document_kind. This spec pins the data stops being
+# dropped; it does not claim an end-to-end feature.
+
+use std.spec
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+
+fn ce_demo_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "ce-demo", "1.0.0", "",
+        ["onCommand:ce.demo.ping"],
+        [ExtensionCommand(id: "ce.demo.ping", title: "CE Demo Ping", category: "Demo")],
+        []
+    )
+    m.contributes_custom_editors = [
+        ExtensionCustomEditor(id: "ce.demo.editor", document_kind: "demo.kind", priority: 0)
+    ]
+    m
+
+fn ce_sibling_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "ce-sibling-demo", "1.0.0", "",
+        ["onCommand:ce.sibling.ping"],
+        [ExtensionCommand(id: "ce.sibling.ping", title: "CE Sibling Ping", category: "Demo")],
+        []
+    )
+    m.contributes_custom_editors = [
+        ExtensionCustomEditor(id: "ce.sibling.editor", document_kind: "sibling.kind", priority: 0)
+    ]
+    m
+
+fn ce_low_priority_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "ce-low-demo", "1.0.0", "",
+        ["onCommand:ce.low.ping"],
+        [ExtensionCommand(id: "ce.low.ping", title: "CE Low Ping", category: "Demo")],
+        []
+    )
+    m.contributes_custom_editors = [
+        ExtensionCustomEditor(id: "ce.low.editor", document_kind: "shared.kind", priority: 0)
+    ]
+    m
+
+fn ce_high_priority_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "ce-high-demo", "1.0.0", "",
+        ["onCommand:ce.high.ping"],
+        [ExtensionCommand(id: "ce.high.ping", title: "CE High Ping", category: "Demo")],
+        []
+    )
+    m.contributes_custom_editors = [
+        ExtensionCustomEditor(id: "ce.high.editor", document_kind: "shared.kind", priority: 5)
+    ]
+    m
+
+describe "extension manifest contributes_custom_editors binds into a resolvable registry":
+
+    it "is unresolved before activation":
+        val host = ExtensionHost.new()
+        host.register_manifest(ce_demo_manifest(), "<test>")
+        expect(host.custom_editor_registered("demo.kind")).to_equal(false)
+        expect(host.resolve_custom_editor("demo.kind").extension_name).to_equal("")
+
+    it "binds the contributed custom editor on activate, resolvable by document_kind":
+        val host = ExtensionHost.new()
+        host.register_manifest(ce_demo_manifest(), "<test>")
+        expect(host.activate("ce-demo")).to_equal(true)
+        expect(host.custom_editor_registered("demo.kind")).to_equal(true)
+        val resolved = host.resolve_custom_editor("demo.kind")
+        expect(resolved.extension_name).to_equal("ce-demo")
+        expect(resolved.editor.id).to_equal("ce.demo.editor")
+
+    it "reverses the binding on deactivate":
+        val host = ExtensionHost.new()
+        host.register_manifest(ce_demo_manifest(), "<test>")
+        host.activate("ce-demo")
+        expect(host.custom_editor_registered("demo.kind")).to_equal(true)
+        expect(host.deactivate("ce-demo")).to_equal(true)
+        expect(host.custom_editor_registered("demo.kind")).to_equal(false)
+        expect(host.resolve_custom_editor("demo.kind").extension_name).to_equal("")
+
+    it "re-binds on re-activate after deactivate":
+        val host = ExtensionHost.new()
+        host.register_manifest(ce_demo_manifest(), "<test>")
+        host.activate("ce-demo")
+        host.deactivate("ce-demo")
+        expect(host.custom_editor_registered("demo.kind")).to_equal(false)
+        expect(host.activate("ce-demo")).to_equal(true)
+        expect(host.resolve_custom_editor("demo.kind").editor.id).to_equal("ce.demo.editor")
+
+    it "deactivating one extension leaves a sibling extension's custom editor bound":
+        val host = ExtensionHost.new()
+        host.register_manifest(ce_demo_manifest(), "<test>")
+        host.register_manifest(ce_sibling_manifest(), "<test>")
+        host.activate("ce-demo")
+        host.activate("ce-sibling-demo")
+        expect(host.resolve_custom_editor("demo.kind").extension_name).to_equal("ce-demo")
+        expect(host.resolve_custom_editor("sibling.kind").extension_name).to_equal("ce-sibling-demo")
+
+        expect(host.deactivate("ce-demo")).to_equal(true)
+        expect(host.resolve_custom_editor("demo.kind").extension_name).to_equal("")
+        expect(host.resolve_custom_editor("sibling.kind").extension_name).to_equal("ce-sibling-demo")
+
+    it "resolves the highest-priority editor when two extensions declare the same document_kind":
+        val host = ExtensionHost.new()
+        host.register_manifest(ce_low_priority_manifest(), "<test>")
+        host.register_manifest(ce_high_priority_manifest(), "<test>")
+        host.activate("ce-low-demo")
+        host.activate("ce-high-demo")
+        val resolved = host.resolve_custom_editor("shared.kind")
+        expect(resolved.extension_name).to_equal("ce-high-demo")
+        expect(resolved.editor.priority).to_equal(5)
+
+    it "falls back to the remaining editor once the higher-priority one is deactivated":
+        val host = ExtensionHost.new()
+        host.register_manifest(ce_low_priority_manifest(), "<test>")
+        host.register_manifest(ce_high_priority_manifest(), "<test>")
+        host.activate("ce-low-demo")
+        host.activate("ce-high-demo")
+        expect(host.deactivate("ce-high-demo")).to_equal(true)
+        val resolved = host.resolve_custom_editor("shared.kind")
+        expect(resolved.extension_name).to_equal("ce-low-demo")
+        expect(resolved.editor.priority).to_equal(0)

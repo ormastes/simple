@@ -1,0 +1,86 @@
+# Extension manifest `contributes_keybindings` wiring.
+#
+# ExtensionManifest decodes contributes_keybindings (manifest.spl,
+# manifest_sdn.spl) but until now nothing bound them: they were parsed and
+# dropped. This proves ExtensionHost._register_contributions binds each
+# contributed keybinding into the editor's real KeybindingManager sink
+# (src/lib/editor/core/keybinding_manager.spl -- keybinding_manager_add_override),
+# not a parallel registry, and that ExtensionHost._unregister_contributions
+# reverses it on deactivate.
+
+use std.spec
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+
+fn kb_demo_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "kb-demo", "1.0.0", "",
+        ["onCommand:kb.demo.ping"],
+        [ExtensionCommand(id: "kb.demo.ping", title: "KB Demo Ping", category: "Demo")],
+        []
+    )
+    m.contributes_keybindings = [
+        ExtensionKeybinding(command: "kb.demo.ping", key: "Ctrl+Shift+K", when: "")
+    ]
+    m
+
+fn kb_sibling_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic(
+        "kb-sibling-demo", "1.0.0", "",
+        ["onCommand:kb.sibling.ping"],
+        [ExtensionCommand(id: "kb.sibling.ping", title: "KB Sibling Ping", category: "Demo")],
+        []
+    )
+    m.contributes_keybindings = [
+        ExtensionKeybinding(command: "kb.sibling.ping", key: "Ctrl+Shift+J", when: "")
+    ]
+    m
+
+describe "extension manifest contributes_keybindings binds into the KeybindingManager":
+
+    it "is unresolved before activation":
+        val host = ExtensionHost.new()
+        host.register_manifest(kb_demo_manifest(), "<test>")
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "normal")).to_equal("")
+
+    it "binds the contributed key to its command on activate":
+        val host = ExtensionHost.new()
+        host.register_manifest(kb_demo_manifest(), "<test>")
+        expect(host.activate("kb-demo")).to_equal(true)
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "normal")).to_equal("kb.demo.ping")
+
+    it "reverses the binding on deactivate":
+        val host = ExtensionHost.new()
+        host.register_manifest(kb_demo_manifest(), "<test>")
+        host.activate("kb-demo")
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "normal")).to_equal("kb.demo.ping")
+        expect(host.deactivate("kb-demo")).to_equal(true)
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "normal")).to_equal("")
+
+    it "does not resolve in any mode after deactivate, then re-binds on re-activate":
+        val host = ExtensionHost.new()
+        host.register_manifest(kb_demo_manifest(), "<test>")
+        host.activate("kb-demo")
+        host.deactivate("kb-demo")
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "insert")).to_equal("")
+        expect(host.activate("kb-demo")).to_equal(true)
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "normal")).to_equal("kb.demo.ping")
+
+    it "deactivating one extension leaves a sibling extension's keybinding bound":
+        val host = ExtensionHost.new()
+        host.register_manifest(kb_demo_manifest(), "<test>")
+        host.register_manifest(kb_sibling_manifest(), "<test>")
+        host.activate("kb-demo")
+        host.activate("kb-sibling-demo")
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "normal")).to_equal("kb.demo.ping")
+        expect(host.keybinding_resolve("Ctrl+Shift+J", "normal")).to_equal("kb.sibling.ping")
+
+        expect(host.deactivate("kb-demo")).to_equal(true)
+        expect(host.keybinding_resolve("Ctrl+Shift+K", "normal")).to_equal("")
+        expect(host.keybinding_resolve("Ctrl+Shift+J", "normal")).to_equal("kb.sibling.ping")
+
+    it "a builtin key still resolves unchanged when no contribution overrides it":
+        val host = ExtensionHost.new()
+        host.register_manifest(kb_demo_manifest(), "<test>")
+        host.activate("kb-demo")
+        expect(host.keybinding_resolve("h", "normal")).to_equal("move-left")
