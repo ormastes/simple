@@ -10,6 +10,11 @@
 # COLL006: String concat in loop       str = str + x            CRITICAL
 # COLL007: Array rebuild to pop last   arr = arr[0..len-1]      HIGH
 # COLL008: Unbounded global .push()    module var with no reset MEDIUM
+# COLL019: Mutation through indexed    d[k].push(x)             HIGH
+#          access is silently lost     a[i].field.push(x)
+#          (ADR-004 value semantics; COLL009-018 are reserved for the
+#          collection-planner diagnostics, see doc/01_research/compiler/
+#          collection_planner/collection_plan_ir_2026-07-31.md section 7)
 #
 # Works with the arena-based core AST (integer-tagged nodes).
 
@@ -17,10 +22,10 @@ use compiler.core.ast_expr.{
     EXPR_WHILE, EXPR_FOR, EXPR_ASSIGN, EXPR_BINARY,
     EXPR_METHOD_CALL, EXPR_ARRAY_LIT, EXPR_INT_LIT, EXPR_IDENT,
     EXPR_COMPOUND_ASSIGN, EXPR_SLICE, EXPR_STRING_LIT,
-    EXPR_INTERPOLATED_STRING,
+    EXPR_INTERPOLATED_STRING, EXPR_INDEX, EXPR_FIELD_ACCESS, EXPR_DICT_LIT,
     expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_stmts
 }
-use compiler.core.types.{TYPE_TEXT}
+use compiler.core.types.{TYPE_TEXT, TYPE_DICT, TYPE_DICT_BASE, TYPE_TUPLE_BASE}
 use compiler.frontend.core.ast_stmt.{
     STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN,
     STMT_IF, STMT_FOR, STMT_WHILE, STMT_BLOCK, STMT_COMPOUND_ASSIGN,
@@ -70,6 +75,11 @@ fn check_collection_patterns(decl_indices: [i64]) -> [CollectionLintWarning]:
     # COLL008: unbounded global arrays with .push() but no reset
     val coll008 = check_unbounded_globals(decl_indices)
     for w in coll008:
+        warnings.push(w)
+
+    # COLL019: mutation through indexed access (not loop-dependent)
+    val coll019 = check_index_mutation_all(decl_indices)
+    for w in coll019:
         warnings.push(w)
 
     warnings
@@ -702,6 +712,153 @@ fn check_stmts_for_chained_filter(stmts: [i64], fn_name: text) -> [CollectionLin
         # Recurse into blocks, loops, ifs
         if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
             val nested = check_stmts_for_chained_filter(stmt_get_body(s), fn_name)
+            for w in nested:
+                warnings.push(w)
+    warnings
+
+# ============================================================================
+# COLL019: mutation through indexed access is silently lost (ADR-004)
+# ============================================================================
+#
+# Value semantics (doc/04_architecture/adr/ADR-004-indexed-access-value-
+# semantics.md): indexing a Dict, or reaching a tuple/struct field of an
+# indexed element, yields a VALUE. A mutating method called on that value
+# updates a discarded copy — no error, no warning, wrong results. 17 real
+# sites shipped with this defect before the audit.
+#
+# Two shapes fire:
+#   d[k].push(x)        where d has syntactic dict evidence   (kind 1)
+#   a[i].field.push(x)  any field access whose base is an index (kind 2)
+#
+# ponytail: dict evidence is syntactic only (annotation or {} initializer on a
+# local/param), so `self.field[k].push(x)` on a dict-typed struct field is NOT
+# caught — this lint runs pre-type-inference and has no field types. Upgrade
+# path: re-run the check post-inference with real receiver types.
+# Plain array-of-arrays (`b[i].push(x)` on [[T]]) mutates in place and must
+# never fire; it only can via kind 1, which requires dict evidence.
+
+# Mutating methods whose effect is lost on a value copy. Read-only methods
+# (len, contains, ...) are fine on a copy and must not fire.
+fn is_mutating_collection_method(name: text) -> bool:
+    if name == "push" or name == "pop" or name == "insert" or name == "remove":
+        return true
+    if name == "clear" or name == "sort" or name == "append" or name == "extend":
+        return true
+    if name == "push_front" or name == "push_back" or name == "enqueue" or name == "dequeue":
+        return true
+    false
+
+# TYPE_DICT is the bare tag; dict generic specializations are encoded as
+# TYPE_DICT_BASE + id in [TYPE_DICT_BASE, TYPE_TUPLE_BASE).
+fn is_dict_type_tag(t: i64) -> bool:
+    if t == TYPE_DICT:
+        return true
+    t >= TYPE_DICT_BASE and t < TYPE_TUPLE_BASE
+
+# Parameter names of a function declared with a dict type.
+fn fn_param_dict_names(decl_idx: i64) -> [text]:
+    var names: [text] = []
+    val param_names = decl_get_param_names(decl_idx)
+    val param_types = decl_get_param_types(decl_idx)
+    var i = 0
+    while i < param_names.len() and i < param_types.len():
+        if is_dict_type_tag(param_types[i]):
+            names.push(param_names[i])
+        i = i + 1
+    names
+
+# Local names with syntactic dict evidence: a dict type annotation, or an
+# initializer that is a dict literal (incl. `{}`).
+fn collect_dict_var_names(stmts: [i64], seed: [text]) -> [text]:
+    var names = seed
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+        if tag == STMT_VAL_DECL or tag == STMT_VAR_DECL:
+            val declared = stmt_get_name(s)
+            if declared != "" and not name_in_list(names, declared):
+                if is_dict_type_tag(stmt_get_type(s)):
+                    names.push(declared)
+                else:
+                    val init = stmt_get_expr(s)
+                    if init >= 0 and expr_get_tag(init) == EXPR_DICT_LIT:
+                        names.push(declared)
+        if tag == STMT_IF or tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE:
+            val nested = collect_dict_var_names(stmt_get_body(s), names)
+            for n in nested:
+                if not name_in_list(names, n):
+                    names.push(n)
+    names
+
+# 0 = not the pattern, 1 = dict-index receiver, 2 = field through index.
+fn index_mutation_kind(e: i64, dict_vars: [text]) -> i64:
+    if e < 0:
+        return 0
+    if expr_get_tag(e) != EXPR_METHOD_CALL:
+        return 0
+    if not is_mutating_collection_method(expr_get_str(e)):
+        return 0
+    val receiver = expr_get_left(e)
+    if receiver < 0:
+        return 0
+    val rtag = expr_get_tag(receiver)
+    if rtag == EXPR_INDEX:
+        val base = expr_get_left(receiver)
+        if base >= 0 and expr_get_tag(base) == EXPR_IDENT:
+            if name_in_list(dict_vars, expr_get_str(base)):
+                return 1
+        return 0
+    if rtag == EXPR_FIELD_ACCESS:
+        val base = expr_get_left(receiver)
+        if base >= 0 and expr_get_tag(base) == EXPR_INDEX:
+            return 2
+    0
+
+fn coll019_warning(kind: i64, fn_name: text) -> CollectionLintWarning:
+    val what = if kind == 1: "a dict index" else: "an indexed tuple/struct field"
+    CollectionLintWarning(
+        code: "COLL019",
+        severity: "HIGH",
+        message: "mutation through {what} is silently lost (value semantics)",
+        hint: "write back: var b = c[k]; b.push(x); c[k] = b — see ADR-004",
+        item_name: fn_name
+    )
+
+fn check_index_mutation_all(decl_indices: [i64]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for idx in decl_indices:
+        if decl_get_tag(idx) == DECL_FN:
+            val fn_name = decl_get_name(idx)
+            val body = decl_get_body(idx)
+            val dict_vars = collect_dict_var_names(body, fn_param_dict_names(idx))
+            val ws = check_stmts_for_index_mutation(body, fn_name, dict_vars)
+            for w in ws:
+                warnings.push(w)
+    warnings
+
+fn check_stmts_for_index_mutation(stmts: [i64], fn_name: text, dict_vars: [text]) -> [CollectionLintWarning]:
+    var warnings: [CollectionLintWarning] = []
+    for s in stmts:
+        if s < 0:
+            continue
+        val tag = stmt_get_tag(s)
+
+        if tag == STMT_EXPR:
+            val e = stmt_get_expr(s)
+            val kind = index_mutation_kind(e, dict_vars)
+            if kind > 0:
+                warnings.push(coll019_warning(kind, fn_name))
+            # Loops can appear as expression statements; walk their bodies.
+            if e >= 0:
+                val etag = expr_get_tag(e)
+                if etag == EXPR_FOR or etag == EXPR_WHILE:
+                    val nested = check_stmts_for_index_mutation(expr_get_stmts(e), fn_name, dict_vars)
+                    for w in nested:
+                        warnings.push(w)
+
+        if tag == STMT_BLOCK or tag == STMT_FOR or tag == STMT_WHILE or tag == STMT_IF:
+            val nested = check_stmts_for_index_mutation(stmt_get_body(s), fn_name, dict_vars)
             for w in nested:
                 warnings.push(w)
     warnings
