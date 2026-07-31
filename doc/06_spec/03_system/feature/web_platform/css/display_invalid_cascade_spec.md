@@ -19,13 +19,18 @@ parent's computed `inline`; important author-origin `revert` restores the UA
 Inside a `display:none` parent, an ordinary `div` and a `display:revert` div
 both retain their UA computed `block`; ancestor suppression, not inherited
 display poisoning, keeps them invisible. An explicit `display:inherit` child
-computes to its parent's `none`.
+computes to its parent's `none`. Each child has bounded, distinct background
+and text paint material, so command absence cannot pass vacuously.
+
+A lower normal `display:contents` with authored width and margin, followed by
+important `display:block`, computes to block while retaining width `3` and
+left margin `2`; only the final display winner may apply contents side effects.
 
 ## Keep hidden nodes out of canonical Draw IR
 
-Neither hidden probe nor any hidden-parent child has a Draw IR command. The
-visible full-path control remains a canonical `rect` command at `[6,1,2,2]`;
-no private rendering path is introduced.
+Neither hidden probe nor any paint-producing hidden-parent child has a Draw IR
+command. The visible full-path control remains a canonical `rect` command at
+`[6,1,2,2]`; no private rendering path is introduced.
 
 ## Render exact visible-control Engine2D pixels
 

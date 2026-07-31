@@ -32,7 +32,9 @@ not claimed until the qualified pure-Simple CLI is available.
 - `initial`/`unset` compute to `inline`; important `inherit` copies the parent;
   important `revert` restores the UA tag default.
 - Hidden-parent ordinary/revert children retain UA `block`; explicit inherit
-  copies parent `none`; ancestor suppression keeps every child out of Draw IR.
+  copies parent `none`; distinct paint-producing children remain out of Draw IR.
+- A lower `contents` declaration overridden by important `block` retains its
+  authored width and margin, proving only the final winner clears box state.
 - Hidden probes emit no command; the visible full-path control emits its exact
   canonical box.
 - Engine2D skips zero commands and returns the exact 32-pixel framebuffer.
