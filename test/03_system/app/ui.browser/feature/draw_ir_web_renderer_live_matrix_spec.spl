@@ -1,0 +1,101 @@
+# codex-system-test
+# @req AC-9
+"""Fail-closed Draw IR/Web live rendering matrix.
+
+This aggregate consumes retained dotenv evidence. It does not generate a
+passing fixture, probe unavailable hardware, or promote source/static checks.
+Linux Metal is accepted only as an external-host blocker with an accountable
+handoff; physical macOS Metal remains separate required evidence.
+"""
+
+use std.spec.*
+use std.env.{env_get, parse_dotenv}
+use std.io.{file_exists, file_hash_sha256, file_read}
+
+fn _live_matrix_value(fields: [(text, text)], key: text) -> text:
+    for field in fields:
+        val (name, value) = field
+        if name == key:
+            return value
+    ""
+
+fn _live_matrix_positive(value: text) -> bool:
+    value != "" and value.to_i64() > 0
+
+fn _live_matrix_revision_valid(value: text) -> bool:
+    (value.len() == 40 or value.len() == 64) and value != "unknown"
+
+fn expect_live_matrix_row(
+    fields: [(text, text)],
+    row: text,
+    current_revision: text,
+    gpu_required: bool
+):
+    val prefix = "draw_ir_live_matrix_" + row + "_"
+    val binary_path = _live_matrix_value(fields, prefix + "binary_path")
+    val binary_sha = _live_matrix_value(fields, prefix + "binary_sha256")
+
+    expect(_live_matrix_value(fields, prefix + "status")).to_equal("pass")
+    expect(_live_matrix_value(fields, prefix + "source_revision")).to_equal(
+        current_revision)
+    expect(binary_sha.len()).to_equal(64)
+    expect(file_exists(binary_path)).to_equal(true)
+    if file_exists(binary_path):
+        expect(file_hash_sha256(binary_path)).to_equal(binary_sha)
+    expect(_live_matrix_positive(
+        _live_matrix_value(fields, prefix + "warm_timing_ns"))).to_equal(true)
+    expect(_live_matrix_positive(
+        _live_matrix_value(fields, prefix + "max_rss_kib"))).to_equal(true)
+    expect(_live_matrix_value(fields, prefix + "parity")).to_equal("exact")
+
+    if gpu_required:
+        expect(_live_matrix_value(fields, prefix + "device_kind")).to_equal(
+            "physical")
+        expect(_live_matrix_value(fields, prefix + "driver") == "").to_equal(
+            false)
+        expect(_live_matrix_positive(
+            _live_matrix_value(fields, prefix + "device_identity"))).to_equal(
+                true)
+        expect(_live_matrix_value(fields, prefix + "readback_source")).to_equal(
+            "device_readback")
+        expect(_live_matrix_value(fields, prefix + "cpu_fallback")).to_equal(
+            "false")
+
+fn _expect_external_metal_handoff(
+    fields: [(text, text)], current_revision: text
+):
+    val prefix = "draw_ir_live_matrix_metal_"
+    expect(_live_matrix_value(fields, prefix + "status")).to_equal("unavailable")
+    expect(_live_matrix_value(fields, prefix + "evidence_class")).to_equal(
+        "external-host")
+    expect(_live_matrix_value(fields, prefix + "source_revision")).to_equal(
+        current_revision)
+    expect(_live_matrix_value(fields, prefix + "owner") == "").to_equal(false)
+    expect(_live_matrix_value(fields, prefix + "prerequisite") == "").to_equal(
+        false)
+    expect(_live_matrix_value(fields, prefix + "resume_command") == "").to_equal(
+        false)
+    expect(_live_matrix_value(fields, prefix + "artifact_path") == "").to_equal(
+        false)
+
+describe "Draw IR Web renderer live matrix":
+    it "verifies retained Linux rows and keeps external Metal accountable":
+        step("Verify the live rendering matrix")
+        expect(env_get("SIMPLE_TEST_ASSERT_RAN") ?? "").to_equal("1")
+
+        val evidence_path = env_get("DRAW_IR_LIVE_MATRIX_EVIDENCE") ?? ""
+        val current_revision = (
+            env_get("DRAW_IR_LIVE_MATRIX_CURRENT_REVISION") ?? "")
+        expect(evidence_path == "").to_equal(false)
+        expect(file_exists(evidence_path)).to_equal(true)
+        expect(_live_matrix_revision_valid(current_revision)).to_equal(true)
+
+        val fields = parse_dotenv(file_read(evidence_path))
+        expect(_live_matrix_value(
+            fields, "draw_ir_live_matrix_current_revision")).to_equal(
+                current_revision)
+        expect_live_matrix_row(fields, "software", current_revision, false)
+        expect_live_matrix_row(fields, "cpu_simd", current_revision, false)
+        expect_live_matrix_row(fields, "cuda", current_revision, true)
+        expect_live_matrix_row(fields, "vulkan", current_revision, true)
+        _expect_external_metal_handoff(fields, current_revision)
