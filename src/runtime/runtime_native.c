@@ -2360,6 +2360,36 @@ int64_t __simple_rt_string_char_code_at(int64_t string, int64_t index) {
     return rt_string_char_code_at(string, index);
 }
 
+/* Return the raw BYTE at BYTE index `index`, or 0 if out of range.
+ *
+ * Deliberately NOT rt_string_char_code_at: that one is CHARACTER-indexed and
+ * the two disagree on any non-ASCII text ("café,".byte_at(3) is 195, the
+ * 0xC3 lead byte, while char_code_at(3) is 233 for 'é'). Byte-framing callers
+ * (e.g. the web renderer's browser_renderer_protocol.spl scanning for byte
+ * 10 '\n' / 44 ',') index the raw UTF-8 buffer directly, so a character
+ * index would desync the frame at the first multi-byte codepoint.
+ * O(1): straight buffer read, no codepoint walk needed. */
+int64_t rt_string_byte_at(int64_t string, int64_t index) {
+    RtCoreString* s = rt_core_as_string(string);
+    const uint8_t* data;
+    uint64_t len;
+    if (index < 0) return 0;
+    if (s) {
+        data = (const uint8_t*)s->data;
+        len = s->len;
+    } else {
+        data = (const uint8_t*)(uintptr_t)string;
+        if (!data) return 0;
+        len = strlen((const char*)data);
+    }
+    if ((uint64_t)index >= len) return 0;
+    return data[index];
+}
+
+int64_t __simple_rt_string_byte_at(int64_t string, int64_t index) {
+    return rt_string_byte_at(string, index);
+}
+
 int64_t rt_string_char_at(int64_t string, int64_t index) {
     RtCoreString* s = rt_core_as_string(string);
     if (!s || index < 0 || (uint64_t)index >= s->len) return rt_core_nil();

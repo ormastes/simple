@@ -2303,6 +2303,33 @@ pub extern "C" fn rt_string_char_code_at(string: RuntimeValue, index: i64) -> i6
     }
 }
 
+/// Return the raw BYTE at the given BYTE index, or 0 if out of range.
+///
+/// Deliberately NOT `rt_string_char_code_at`: that one is CHARACTER-indexed
+/// and the two disagree on any non-ASCII text (`"café,".byte_at(3)` is 195,
+/// the 0xC3 lead byte, while `char_code_at(3)` is 233 for 'é'). Byte-framing
+/// callers (e.g. the web renderer's `browser_renderer_protocol.spl` scanning
+/// for byte 10 `\n` / 44 `,`) index the raw UTF-8 buffer directly, so a
+/// character index would desync the frame at the first multi-byte codepoint.
+/// O(1): straight buffer read, no codepoint walk needed.
+#[no_mangle]
+pub extern "C" fn rt_string_byte_at(string: RuntimeValue, index: i64) -> i64 {
+    let len = rt_string_len(string);
+    if len < 0 || index < 0 || index >= len {
+        return 0;
+    }
+
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data, len as usize);
+        bytes[index as usize] as i64
+    }
+}
+
 /// Compiled symbol for `text.from_char_code(code)`.
 ///
 /// NOTE: currently dead code on main -- codegen for `.chr()` / `.to_char()`

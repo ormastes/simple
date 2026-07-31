@@ -399,6 +399,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]), // RuntimeValue string -> raw ptr
     RuntimeFuncSpec::new("rt_string_char_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_char_code_at", &[I64, I64], &[I64]),
+    // Byte-indexed (not char-indexed) raw byte read; see rt_string_char_code_at.
+    RuntimeFuncSpec::new("rt_string_byte_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_split", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_bytes", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_chars", &[I64], &[I64]),

@@ -590,6 +590,7 @@ impl Lowerer {
             "substring",
             "char_at",
             "char_code_at",
+            "byte_at",
             "bytes",
         ];
         if !WATCHED.contains(&method) {
@@ -848,7 +849,7 @@ impl Lowerer {
         // doc/08_tracking/bug/native_char_code_at_tag_shift_2026-07-19.md.
         // Only applies as a last-resort fallback (a genuine user method of the
         // same name matched above), and only on a string/erased receiver.
-        if matches!(method, "char_code_at" | "ord" | "codepoint" | "code_point" | "hash")
+        if matches!(method, "char_code_at" | "byte_at" | "ord" | "codepoint" | "code_point" | "hash")
             && (recv_ty == TypeId::STRING || recv_ty == TypeId::ANY)
         {
             return TypeId::I64;

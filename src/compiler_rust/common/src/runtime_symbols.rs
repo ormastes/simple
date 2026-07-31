@@ -1837,6 +1837,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simd_xor_u64x2",
     "rt_simd_xor_u8x16",
     "rt_spin_loop_hint",
+    "rt_string_byte_at",
     "rt_string_char_code_at",
     "rt_string_to_float",
     "rt_test_db_cleanup_stale_runs",

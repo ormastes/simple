@@ -1327,6 +1327,7 @@ fn try_compile_builtin_method_call<M: Module>(
         "contains" => "rt_contains",
         "char_at" | "at" => "rt_string_char_at",
         "char_code_at" => "rt_string_char_code_at",
+        "byte_at" => "rt_string_byte_at",
         "hash" => "rt_hash_text",
         // Array methods
         "push" | "append" => "rt_array_push",

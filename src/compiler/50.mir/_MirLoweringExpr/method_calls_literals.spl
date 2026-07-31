@@ -2412,6 +2412,39 @@ impl MirLowering:
                     if val char_code_local = char_code_result:
                         return char_code_local
 
+                # `byte_at` is BYTE-indexed, unlike `char_code_at` above which
+                # is CHARACTER-indexed -- they deliberately diverge on
+                # non-ASCII text ("café,".byte_at(3) is 195, the 0xC3 lead
+                # byte; char_code_at(3) is 233 for 'é'). Must route to its own
+                # runtime primitive, or byte-framing callers (e.g. the web
+                # renderer's browser_renderer_protocol.spl scanning for byte
+                # 10/44) desync at the first multi-byte codepoint.
+                var byte_at_receiver_is_text = self.local_is_str(unresolved_receiver_local)
+                if not byte_at_receiver_is_text and self.find_local_hir_type(unresolved_receiver_local.id) != nil:
+                    val byte_at_receiver_hir_type = self.find_local_hir_type(unresolved_receiver_local.id) ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
+                    match byte_at_receiver_hir_type.kind:
+                        case HirTypeKind.Str: byte_at_receiver_is_text = true
+                        case _: ()
+                if method == "byte_at" and args.len() == 1 and byte_at_receiver_is_text:
+                    val byte_at_index = self.lower_expr(args[0].value)
+                    val byte_at_op = MirOperand(kind: MirOperandKind.Const(
+                        MirConstValue.Str("__simple_rt_string_byte_at"),
+                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                            params: [MirType.i64(), MirType.i64()],
+                            return_type: MirType.i64(),
+                            is_variadic: false
+                        )))
+                    ))
+                    var byte_at_builder = self.builder
+                    val byte_at_result = byte_at_builder.emit_call(
+                        byte_at_op,
+                        [mir_operand_copy(unresolved_receiver_local), mir_operand_copy(byte_at_index)],
+                        MirType.i64()
+                    )
+                    self.builder = byte_at_builder
+                    if val byte_at_local = byte_at_result:
+                        return byte_at_local
+
                 # Primitive/text `.to_text()` and `.to_string()` share the
                 # existing interpolation renderer, but only after custom
                 # struct methods had first chance to resolve above.

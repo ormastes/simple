@@ -653,6 +653,7 @@ pub use value::{
     // String operations
     rt_any_add,
     rt_cstring_to_text,
+    rt_string_byte_at,
     rt_string_char_code_at,
     rt_string_concat,
     rt_string_data,

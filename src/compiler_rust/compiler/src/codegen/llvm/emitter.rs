@@ -177,6 +177,7 @@ impl LlvmEmitter<'_> {
             "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
             "char_at" | "at" => Some("rt_string_char_at"),
             "char_code_at" => Some("rt_string_char_code_at"),
+            "byte_at" => Some("rt_string_byte_at"),
             "join" => Some("rt_string_join"),
             "trim" => Some("rt_string_trim"),
             "trim_start" => Some("rt_string_trim_start"),

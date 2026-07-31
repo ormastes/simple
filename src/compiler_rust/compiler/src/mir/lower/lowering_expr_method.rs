@@ -1333,6 +1333,29 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // `byte_at` is BYTE-indexed, unlike `char_code_at` which is
+        // CHARACTER-indexed -- they deliberately diverge on non-ASCII text
+        // (`"café,".byte_at(3)` is 195, the 0xC3 lead byte; `char_code_at(3)`
+        // is 233 for 'é'). Must route to its own runtime primitive rather
+        // than reusing `rt_string_char_code_at`, or byte-framing callers
+        // (e.g. `browser_renderer_protocol.spl` scanning for byte 10/44)
+        // desync on the first multi-byte codepoint.
+        if method == "byte_at"
+            && args.len() == 1
+            && (receiver.ty == TypeId::STRING || receiver_local_ty == Some(TypeId::STRING))
+        {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_string_byte_at"),
+                    args: vec![receiver_reg, arg_regs[0]],
+                });
+                dest
+            });
+        }
+
         if method == "len" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
