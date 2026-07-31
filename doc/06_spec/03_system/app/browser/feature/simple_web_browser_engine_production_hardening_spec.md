@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 22 | 22 | 0 | 0 |
+| 23 | 23 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -445,6 +445,23 @@ expect(_count_color(
     rendered.pixels, 0xFF22C55Eu32
 )).to_equal(0)
 ```
+
+</details>
+
+#### should normalize split overflow axes before Draw IR clipping
+
+- Resolve `overflow-x: hidden|auto|scroll` with omitted or explicit visible
+  `overflow-y` after the final author/inline cascade.
+- Preserve explicit `overflow-y:hidden` without manufacturing a scrollbar.
+- Verify the resulting scrollport clip and Engine2D pixel boundary.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: `simple_web_browser_engine_production_hardening_spec.spl`.
+The scenario uses author-class `overflow-x` plus inline `overflow-y` to prove
+final-cascade normalization, then checks six scrollbar tracks, one withheld
+hidden-y track, the child Draw IR clip height, and an Engine2D pixel below it.
 
 </details>
 

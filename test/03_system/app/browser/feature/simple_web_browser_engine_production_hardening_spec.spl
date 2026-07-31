@@ -947,6 +947,47 @@ describe "Production Simple browser user flow":
         )).to_equal(0)
 
     # @manual: show
+    # @capture(html)
+    # @capture(draw_ir)
+    # @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+    it "should normalize split overflow axes before Draw IR clipping":
+        step("Resolve visible y against every non-visible x cascade winner")
+        val html = (
+            "<style>.hidden{overflow-x:hidden}.auto{overflow-x:auto}" +
+            ".scroll{overflow-x:scroll}</style>" +
+            "<html style='margin:0'><body style='margin:0'>" +
+            "<div id='hidden-omitted' class='hidden' style='width:24px;height:12px'>" +
+            "<div id='red' style='width:24px;height:24px;background:#ff0000'></div></div>" +
+            "<div id='hidden-visible' class='hidden' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='auto-omitted' class='auto' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='auto-visible' class='auto' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='scroll-omitted' class='scroll' style='width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='scroll-visible' class='scroll' style='overflow-y:visible;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "<div id='hidden-y' class='hidden' style='overflow-y:hidden;width:24px;height:12px'><div style='height:24px'></div></div>" +
+            "</body></html>"
+        )
+        val composition = simple_web_layout_render_html_draw_ir_with_images(
+            html, 32, 96, []
+        )
+        val commands = composition.batches[0].commands
+        expect(_browser_draw_ir_command_index(commands, "hidden-omitted_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "hidden-visible_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "auto-omitted_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "auto-visible_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "scroll-omitted_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "scroll-visible_scrollbar_track")).to_be_greater_than(-1)
+        expect(_browser_draw_ir_command_index(commands, "hidden-y_scrollbar_track")).to_equal(-1)
+
+        step("Clip the child in canonical Draw IR and Engine2D")
+        val red_index = _browser_draw_ir_command_index(commands, "red")
+        expect(red_index).to_be_greater_than(-1)
+        expect(commands[red_index].clip_rect.height).to_equal(12)
+        val raster = Engine2dCompositorBackend.create_named(32, 96, "software")
+        val rendered = raster.render_draw_ir_composition(composition, [])
+        raster.shutdown()
+        expect(rendered.pixels[1 + 12 * 32]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
     # @capture(text)
     # @req REQ-WEB-BROWSER-005 REQ-WEB-BROWSER-006
     # @req REQ-WEB-BROWSER-007 REQ-WEB-BROWSER-008
