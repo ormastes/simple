@@ -3,6 +3,8 @@
 Click listeners may change the activation target before default behavior runs.
 The original checkbox/radio pre-activation is rolled back when its action no
 longer matches, and only the action derived from the live routed node executes.
+New browsing-context targets remain distinct from current-document navigation
+and fail closed when popup authority or a popup host is unavailable.
 
 ## Scenario: route only the action derived from the live target
 
@@ -71,10 +73,70 @@ checked (`checked == "checked"`), receives `data-input == "yes"`,
 exactly `1`; consuming it yields
 `https://example.test/control-link`.
 
+## Scenario: never coerce a new target into the current document
+
+### 1. Install whitespace, mixed-case, named, and keyword targets
+
+`setup_target_context_fixture` commits real network documents with
+`Content-Security-Policy: sandbox allow-top-navigation`. The matrix contains:
+
+- new contexts: `target=" _self "`, mixed-case and exact `_BLANK`/`_blank`,
+  and the colon-and-whitespace name `report: frame`;
+- current contexts: mixed-case and exact `_SELF`/`_self`, exact `_parent`,
+  exact `_top`, and empty target.
+
+Only `report: frame` grants `allow-popups`, while no popup-context host is
+installed. Every fixture starts at
+`https://example.test/target-context`, title `Committed target fixture`,
+one history entry, and index zero.
+
+### 2. Preserve raw new-context names and classify exact keywords
+
+The shared DOM default-action oracle must return exact distinct actions:
+
+- whitespace-surrounded self:
+  `navigate-popup:7: _self /next`;
+- mixed/exact blank:
+  `navigate-popup:6:_BLANK/next` and
+  `navigate-popup:6:_blank/next`;
+- colon-and-whitespace name:
+  `navigate-popup:13:report: frame/next`;
+- mixed/exact self, parent, top, and empty: `navigate:/next`.
+
+The decimal length prefix separates the raw target from the URL without
+interpreting colons or whitespace in either value. Only comparison with the
+reserved HTML target keywords is case-insensitive, and no whitespace is
+trimmed.
+
+### 3. Activate whitespace and keyword targets by pointer and Enter
+
+The scenario drives all links through `ui_access_snapshot`,
+`ui_access_find_nodes`, and `ui_access_act`. Pointer and Enter are both used
+across new-context and current-context targets, including whitespace-surrounded
+self, mixed-case blank/self, parent, top, exact keywords, and empty target.
+
+### 4. Fail popup attempts closed and preserve current-target behavior
+
+`expect_target_context_unchanged` proves each blocked or unavailable popup has
+zero pending requests, keeps the exact committed URL/title/body, retains one
+history entry at index zero, and records the exact warning:
+
+- no `allow-popups`: `CSP sandbox blocked popup`;
+- popup allowed but no host: `popup-context-unavailable`.
+
+`expect_current_target_navigation` proves mixed/exact self, parent, top, and
+empty target each still queue exactly one `document` request for
+`https://example.test/next`.
+
 ## Executable helper and oracle map
 
 - `_open_live_default_fixture`: fails explicitly on document setup error.
 - `_act_live_control`: requires one UI-access node and a successful action.
+- `setup_target_context_fixture`: commits a real CSP-governed target document.
+- `expect_target_context_unchanged`: checks request, page, history, and warning
+  state after a popup attempt.
+- `expect_current_target_navigation`: consumes and checks the unchanged
+  current-document request.
 - `_live_attr`: requires the routed node to remain present and returns its
   exact attribute value.
 - `setup_post_dispatch_activation_fixture`: builds the mutation matrix.
