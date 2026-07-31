@@ -64,6 +64,30 @@ fi
     exit 1
 }
 
+# The sysroot (crt0.o, libsimpleos_c.a, headers, simpleos.ld) is a BUILD PRODUCT,
+# not a tracked file, so a freshly created worktree has none and the link below
+# died with "missing browser-demo build input: .../simpleos.ld" -- which reads
+# like a toolchain fault but is only an unprovisioned prerequisite.
+# src/os/port/llvm/sysroot.shs is the canonical producer and rebuilds every one
+# of those inputs from tracked source, so provision on demand instead of making
+# each caller remember a manual step. This adds no stub and skips no check: the
+# required-inputs loop below still runs unchanged afterwards.
+# Only when the caller did NOT pin an external sysroot -- an explicit
+# SIMPLEOS_SYSROOT is the caller's contract and must never be written to here.
+if [ -z "${SIMPLEOS_SYSROOT:-}" ]; then
+    sysroot_missing=""
+    for required in "$LINKER_SCRIPT" "$CRT0" "$LIBC"; do
+        [ -f "$required" ] || sysroot_missing="$required"
+    done
+    if [ -n "$sysroot_missing" ]; then
+        echo "browser-demo: provisioning SimpleOS sysroot (missing $sysroot_missing)" >&2
+        sh "$ROOT/src/os/port/llvm/sysroot.shs" >&2 || {
+            echo "browser-demo sysroot provisioning failed: $SYSROOT" >&2
+            exit 1
+        }
+    fi
+fi
+
 for required in "$LINKER_SCRIPT" "$CRT0" "$LIBC" "$SRC"; do
     [ -f "$required" ] || {
         echo "missing browser-demo build input: $required" >&2
