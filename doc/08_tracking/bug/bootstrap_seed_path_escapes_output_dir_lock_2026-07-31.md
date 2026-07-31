@@ -88,6 +88,39 @@ It was deliberately NOT applied, for two reasons:
 
 Option 3 is strictly a diagnosis improvement and does not fix the collision.
 
+## Update 2026-07-31 04:10 — the collision recurred, with THREE deploys queued
+
+Later the same session, after the blocking `native-build` finally exited (34 min
+wait), `ps` showed **three** independent bootstrap trees all carrying `--deploy`:
+
+| pid | age | invocation |
+|---|---|---|
+| 3464685 | 17 min | `--pure-simple --full-cli --deploy --no-mcp --jobs=half` |
+| 3906074 | 2 min | `--pure-simple --full-cli --deploy --no-mcp` |
+| 3983320 | 2 min | `--full-bootstrap --deploy --jobs=4` (this session's) |
+
+None of them is protected from the others: they differ in `--output` (or don't
+set it), so each acquires a *different* `${output_dir}.lock` and the guard stays
+quiet — while all three target the same hardcoded
+`src/compiler_rust/target/bootstrap/simple` **and** the same deploy destination
+`bin/release/<triple>/simple`.
+
+This session's run was **deliberately stood down** (SIGTERM) rather than raced,
+leaving the oldest to finish. That is a manual workaround for a guard that should
+have serialized them automatically, and it only works because a human/agent
+happened to run `ps` first. Two `--deploy` runs finishing near-simultaneously can
+also interleave writes to the *deployed* binary, not just the staged seed — worth
+noting that `--deploy` widens the blast radius beyond what the "Root cause"
+section above describes.
+
+Note the killed run's own log ends with `error: failed to fingerprint Rust seed
+inputs` after the TERM — a torn shutdown leaves a misleading error, so don't read
+that line as the cause of a stand-down.
+
+This raises the priority of suggested fix 2 (extend the lock to the seed staging
+dir): fix 1 (parameterize by `output_dir`) would NOT have helped here, since two
+of the three runs never passed `--output` at all.
+
 ## Reproduction
 
 1. Start any long `simple native-build` (it executes

@@ -39,6 +39,24 @@ Two things in this audit survive the retraction and are still worth acting on:
    that IS registered threads a `byte_offset` accumulator correctly. Latent
    hygiene issue only — filed at `lint_replacement_line_vs_file_offset_2026-07-31.md`.
 
+**A real native-only exposure DOES exist — but it is not the one this audit
+claimed.** Byte-consistency fixes *positions*; it does not make a byte boundary a
+*character* boundary. Follow-up measurement found the engines diverge when a
+slice splits a multi-byte character:
+- interpreter: `String::from_utf8_lossy` substitutes U+FFFD — benign;
+- native/JIT: `rt_slice` (`src/runtime/runtime_native.c:3067-3128`) is a raw
+  pointer-arithmetic byte copy with **no UTF-8 validation**, so
+  `"café".slice(3,4)` yields a text whose `.len()` is 1 — genuinely invalid
+  UTF-8, silently. (`print()` masks it: the stdout path applies its own lossy
+  sanitizer, so the terminal shows U+FFFD while the stored bytes stay corrupt.)
+
+That only bites where a boundary comes from something *other* than a byte-offset
+search — a hardcoded truncation length, arithmetic, or a character count. The six
+sites retracted above all take both boundaries from `.find()`, which is why they
+are safe. See `byte_slice_utf8_boundary_audit_2026-07-31.md`; note that audit
+fully classified only 31 of 7,218 call sites, so its counts are a sample, not a
+census.
+
 **Process note for the next reader:** this audit classified 6 sites as CRITICAL
 from a code-shape pattern without running a single probe against the current
 runtime. The pattern was real; the premise it rested on had been fixed 24 hours
