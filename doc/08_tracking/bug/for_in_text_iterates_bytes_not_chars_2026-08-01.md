@@ -141,23 +141,35 @@ PASS for_in_dict_pairs got=2         (dict->tuple conversion still fires)
 FAIL SENTINEL_must_fail got=7 want=8
 ```
 
-## Native AOT lane is UNMEASURABLE on this build (live control FAILS)
+## Native AOT lane: original claim CORRECTED (2026-08-01)
 
-`compile <f>.spl --native -o out` emits a binary that runs, exits 0, and prints
-NOTHING — **including for a trivial `fn main(): print("HELLO_CONTROL")`**
-(3768-byte stripped ELF, `nm -g` reports no symbols). Because the live control
-fails, the empty output from the for-in probe is not evidence about for-in; the
-whole `--native` emit path is broken here independently of this bug.
+This section previously claimed the `--native` emit path was broken outright,
+citing a 3768-byte stripped ELF that ran, printed nothing and exited 0 "including
+for a trivial `fn main(): print("HELLO_CONTROL")`". **That scope was wrong.**
+Root-caused and corrected in
+`doc/08_tracking/bug/native_emit_silent_empty_binary_2026-08-01.md`. Summary:
 
-The earlier claim in this doc that the defect "reproduced identically on the
-native AOT path" should be treated as unproven for the same reason.
+- On the **canonical Rust bootstrap seed**
+  (`src/compiler_rust/target/bootstrap/simple`, 154 MB with LLVM), the
+  hello-world control **PASSES**: a 2.6 MB binary that prints and exits 0.
+  Verified across both flag orders, absolute paths inside and outside the repo,
+  `--backend=cranelift`, `--opt-level none`, and both `native-build` forms.
+- The real defect was confined to the **compiled pure-Simple CLI lane**
+  (`src/app/cli/bootstrap_main.spl`): the enum `options.mode` did not survive
+  struct transport into the driver, `compile()` fell through with no mode
+  matched, and returned Success having emitted nothing while exiting 0. Fixed at
+  origin `e1150d003b7c4e39f170ce40626b7155e087faa6` via `options.cli_mode_text =
+  "aot"`, plus a positive-artifact assertion so it can never be silent again.
+- `nm -g` reporting no symbols was a **red herring** — host `--native` output is
+  auto-stripped by default, so working binaries look identical.
+- The **absolute-path trap did not fire** here; absolute paths compiled and ran
+  correctly. Disregard the earlier note in this section that claimed otherwise.
 
-Native AOT shares the MIR lowering site that was fixed, so it is expected to be
-corrected too — but that is inference, not measurement. Re-verify once
-`--native` emits working binaries again.
-
-Also note: passing an **absolute** path to `simple compile` exits 0 without
-compiling. Use repo-relative paths for any native probe.
+**Still unproven:** the claim that this for-in defect "reproduced identically on
+the native AOT path". Native AOT shares the MIR lowering site that was fixed, so
+it is expected to be corrected too — but that remains inference, not
+measurement. Re-measure on the canonical seed, asserting a positive artifact
+(non-trivial size + expected stdout from a live control), not exit 0.
 
 ## Blast radius (measured, owned source only)
 

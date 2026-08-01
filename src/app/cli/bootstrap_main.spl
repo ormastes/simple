@@ -278,6 +278,19 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     # lazy-import-returned result never resolve (Task #145 erased-receiver
     # class); plain imported calls resolve by symbol name.
     if compile_result_is_success(result):
+        # Positive-artifact assertion, same contract as run_compile_bootstrap's
+        # SMF path: a Success verdict is NOT evidence a binary was emitted. The
+        # cli_mode_text lane above exists precisely because compile() could fall
+        # through with no mode matched, report Success, emit nothing, and exit 0
+        # -- which made every `--native` measurement vacuous instead of failing
+        # loudly. Never report success without checking the file on disk.
+        if not file_exists(output):
+            print "error: in-process native-build reported success without creating '{output}'"
+            return 1
+        val output_bytes = file_size(output)
+        if output_bytes <= 300:
+            print "error: in-process native-build produced a stub artifact ({output_bytes} bytes)"
+            return 1
         return 0
     else:
         for err in compile_result_errors(result):
@@ -360,6 +373,11 @@ fn run_compile_bootstrap(args: [text]) -> i64:
     options.bootstrap_input_count = 1
     options.bootstrap_input_0 = source
     options.mode = CompileMode.Aot
+    # Sibling of the native lane's channel above: the enum options.mode does not
+    # survive struct transport into a COMPILED stage2 driver, so compile() can
+    # fall through with no mode matched. The stub guard below turns that into a
+    # loud failure, but this override is what makes the lane actually work.
+    options.cli_mode_text = "aot"
     options.output_file = Some(output)
     options.output_format = driver_output_format_smf()
     options.backend = backend
