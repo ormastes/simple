@@ -1,8 +1,8 @@
 # Bug: bootstrap AST env mirror serves stale nodes and bypasses the stale-index guard
 
 **ID:** ast_env_mirror_bypasses_stale_index_guard_2026-08-01
-**Severity:** P2 — latent correctness (silent wrong AST tag) + proven O(N^2) + proven exec ceiling
-**Status:** Diagnosed, NOT fixed. Fix proposed below; deliberately not landed (see "Why not fixed yet")
+**Severity:** P1 — latent correctness (silent wrong AST tag) + proven O(N^2) + **exec ceiling already exceeded by current source files** (measured 2026-08-01)
+**Status:** Diagnosed, NOT fixed. Largest-file question ANSWERED 2026-08-01 (see "Largest-file measurement") — the mirror is unusable on this repo as-is
 **Reported:** 2026-08-01
 **Mode:** only when `SIMPLE_BOOTSTRAP=1` and `SIMPLE_NATIVE_ARENA_DECLS != 1`
 **Related:** `ast_env_var_quadratic_parse_2026-06-13.md` (perf only),
@@ -80,8 +80,116 @@ process exec fails*, including the linker (`mold`/`lld`/`ld`, `70.backend/linker
 
 Scope bound (important, and it limits the blast radius): because indices restart at 0 each file
 and overwrite existing keys, environ size is bounded by the **largest single file's** node count,
-not the total across the build. Whether any single repo source file exceeds ~4,700 expr nodes is
-**UNMEASURED** — I could not run the bootstrap compiler this session (see below).
+not the total across the build. That reduced the open question to a single maximum — **now measured
+below.**
+
+## Largest-file measurement — the ceiling is ALREADY EXCEEDED (2026-08-01)
+
+**Answer: yes, and not marginally.** The `~4,700 expr node` exec ceiling is not a future risk to
+guard against; current sources are several times past it. **Headroom is negative.**
+
+### Instrument (exact, and why it is exact)
+
+`expr_alloc` (`nodes.spl:414`) increments `expr_count_slot[0]` via `expr_count_set` **before and
+independently of** any env mirroring — the mirror writes (`expr_i64_set` etc.) are separately gated
+on `expr_env_mirror_enabled()`. So parsing with `SIMPLE_BOOTSTRAP` **unset** and reading
+`expr_count_env()` yields the identical node count the bootstrap mirror would have produced, without
+paying the O(N^2) `setenv` cost. The counts below are that counter — not a source-line proxy.
+
+- Driver: `parse_module_silent_checked(content, path)` then `expr_count_env()`, one file per
+  iteration (`parse_module` resets the arena per file, matching the real per-file scope bound).
+- Binary: `bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731` (Jul 30, 154 MB).
+- **Lane: interpreter.** The JIT cannot resolve `parse_module_silent_checked` and drops the whole
+  module to the interpreter. The parser actually executing is the in-tree Simple source under
+  `src/compiler/10.frontend/`, which is exactly the layer that owns the mirror.
+- Corpus: 39,730 `.spl` files, deduplicated by `readlink -f` so the ~17 `src/compiler` layer
+  symlinks are not double-counted.
+
+### Exact counts (PROVED — parser arena counter)
+
+| file | bytes | expr nodes | nodes/byte |
+|------|-------|-----------|-----------|
+| `test/unit/lib/nogc_async_mut/steam/controller_hid_spec.spl` | 2,000 | **158** | 0.079 |
+| `test/01_unit/nvfs/.spipe_matchers_nvfs_remount_persistence_spec.spl` | 4,000 | **339** | 0.085 |
+| `test/unit/lib/text/text_length_spec.spl` | 8,000 | **586** | 0.073 |
+| `test/01_unit/lib/http/h3/h3_frame_round_trip_spec.spl` | 12,000 | **917** | 0.076 |
+| `src/compiler_rust/lib/std/src/core/dsl.spl` | 15,998 | **443** | 0.028 |
+
+Density is **not** uniform: expression-dense spec code runs ~0.08 nodes/byte, while
+declaration-heavy code (`dsl.spl`, 32% comment/blank, many type signatures) runs ~0.028. So
+4,700 nodes corresponds to anywhere from **~55 KB to ~170 KB** of source depending on file style.
+670 `.spl` files exceed 30 KB; 164 exceed 60 KB; 25 exceed 170 KB.
+
+### Repo-wide distribution (APPROXIMATION — read the error bar)
+
+Exactly measuring all 39,730 files is infeasible in the interpreter lane (a 50 KB file takes
+minutes). Every file was instead scored with a static **atom count** (identifier/number/operator
+tokens, comments stripped), calibrated against the five exact measurements above:
+
+    nodes / atoms = 0.782, 0.864, 0.691, 0.871, 0.317
+
+**The spread is wide (0.32-0.87) and the low end is real, not noise:** atoms in type annotations
+and declarations never become expression nodes, so the proxy *overestimates* declaration-heavy
+files. Results are therefore reported across the whole range, worst case first:
+
+| threshold | ratio 0.32 (worst observed) | ratio 0.82 (typical) |
+|-----------|----------------------------|----------------------|
+| >= 4,000 expr nodes (measured `E2BIG` point) | **22 files** | **168 files** |
+| >= 4,700 expr nodes (short-value ceiling)    | **20 files** | **132 files** |
+
+Largest file, `src/app/ui.web/html_css.spl` (52,651 atoms): **~17,000-43,000 expr nodes**, i.e.
+**~3.6x to 9x the exec ceiling**. Even the most pessimistic calibration leaves it far over.
+Top candidates by estimated nodes:
+
+| file | atoms | ~nodes (0.32-0.82) |
+|------|-------|--------------------|
+| `src/app/ui.web/html_css.spl` | 52,651 | 16,800 - 43,200 |
+| `src/app/office/sheets/formula.spl` | 49,736 | 15,900 - 40,800 |
+| `test/01_unit/lib/common/web/browser_session_fetch_wasm_chain_spec.spl` | 40,765 | 13,000 - 33,400 |
+| `src/lib/nogc_sync_mut/js/engine/interpreter_native.spl` | 39,061 | 12,500 - 32,000 |
+| `src/lib/common/web/public_suffix_data.spl` | 28,056 | 9,000 - 23,000 |
+| `src/compiler/70.backend/backend/llvm_native_link.spl` | 15,014 | 4,800 - 12,300 |
+
+### A hard structural lower bound that needs no calibration at all
+
+`src/lib/common/web/public_suffix_data.spl` contains **10,700 string literals**. Every string
+literal is exactly one `expr_string_lit` -> one `expr_alloc`. That single file therefore allocates
+**>= 10,700 expr nodes** — **2.3x the 4,700 ceiling and 2.7x the measured 4,000 `E2BIG` point** —
+with no ratio, no proxy, and no extrapolation involved. **This alone settles the question**, and it
+is why the wide calibration spread above does not change the verdict.
+
+### The over-threshold files are inside the live mirror lane
+
+`src/app/ci/build_simpleos_toolchain.spl:402` runs `SIMPLE_BOOTSTRAP=1 ... native-build --source
+src/compiler --source src/lib --source src/app` with no `SIMPLE_NATIVE_ARENA_DECLS=1`. Of the files
+over 4,700 nodes, **11 (worst-case ratio) to 64 (typical) are under `src/`**, and at both ends of
+the range all four subtrees are represented — `src/lib`, `src/compiler`, `src/app`, `src/os`. So
+every declared `--source` root contains at least one offender.
+
+Caveat, stated honestly: that command also passes `--entry-closure --entry
+src/app/simpleos_tool/main.spl`, so only modules reachable from that entry are actually parsed.
+Which specific offenders land in the closure is **NOT measured here.**
+
+### Consequence
+
+Under the mirror, one such file drives environ past `ARG_MAX` (2,097,152 bytes) mid-parse, after
+which **every subsequent `exec` fails with `E2BIG` — including the linker invocation** in
+`70.backend/linker/`. The O(N^2) `setenv` cost at 10,000+ nodes is separately prohibitive (2,000
+nodes already measured at ~1 s, growth ~4x per doubling; 10,700 nodes extrapolates to ~30 s of pure
+`setenv` for that one file, before any `getenv` reads).
+
+**This resolves the open question in the direction that removes a design decision rather than
+adding one:** no guard threshold needs choosing, because current sources exceed every candidate
+threshold — a size guard would fire on day one. The actionable consequences are (a) the mirror
+cannot be enabled on this repo as-is, and (b) the proposed `expr_env_read` bounds-fix below must
+**not** be validated by "the bootstrap lane still builds", because on a large file that lane cannot
+build at all.
+
+**Not measured / left open:** exact counts for files above ~16 KB (interpreter lane too slow this
+session — the 3 largest files were still parsing when this was written), and the entry-closure
+membership question above. Neither affects the verdict, which the 10,700-literal structural bound
+establishes independently.
+
 
 ## Is the enabling condition still live? YES — this is why it must not simply be deleted
 
