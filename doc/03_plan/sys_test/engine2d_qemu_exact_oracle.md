@@ -11,6 +11,26 @@ and must not be promoted as TODO529 evidence. Canonical AArch64 and RV64
 production entries exist, but the executable spec has no rows for them. No live
 result is claimed by this plan.
 
+### 2026-08-01 focused x86_64 execution evidence (non-admission)
+
+An incremental pure-Simple Stage 3 compiler built
+`gui_entry_engine2d_min.spl` into an ELF32/EM_386 multiboot image in 29.7s.
+A supervised QEMU launch reached `[E2D] Engine2D verification frame painted`
+and a QMP `screendump` retained
+`build/os/engine2d_qemu_stage3_capture.ppm`
+(`sha256:d14626323ad11342180ee3facecb1510c5766ba2f99f52e9e544f3dbbbb6e344`,
+1024x768). Independent spot checks match the documented Engine2D scene:
+background `0A2540`; title bars `E74C3C`, `27AE60`, `2980B9`; and window bodies
+`1E1E2E` at their declared coordinates.
+
+This is boot/render/capture evidence only. The legacy fixture
+(`sha256:f40b679cca5c27f990406abf4a9b8fc72e23262952f502c2908f5552ed159227`) is
+black at pixel zero and conflicts with the scene. A matching historical
+`wm_compare` capture is also non-admissible because its report records
+`rt_gui_fill4` with Engine2D dispatch bypassed. Do not copy either capture into
+the oracle path. A separate scalar producer, frozen scene contract, provenance,
+and independent admission review remain required.
+
 ## Contract
 
 The system gate covers REQ-016, REQ-017, and REQ-018 from
