@@ -1,5 +1,55 @@
 # Theme rendering and WM host/simpleOS sync state (2026-07-25)
 
+## 2026-08-01 GH sync + renderer/IR scan (latest check)
+
+- Ran `git fetch --all --prune`.
+- No remote ref/tag/branch with `runderer` name exists. Closest related lane is still
+  `origin/sync-renderer-ir-spec-update` (`2a4bf46c9d`) with three commits:
+  `f7b8526aa8`, `2277b52949`, `2a4bf46c9d`.
+- `tmp-docfix` remains on the local WIP line (`4a8b187fb5`) and is not yet fast-forward aligned to `origin/main` (`659ff7cdc2`) in this workspace.
+- Impact check:
+  - overlap against this lane is effectively limited to `src/os/hosted/hosted_entry.spl`
+    and hosted web renderer protocol files in that lane.
+  - no direct edits to:
+    - `src/os/compositor/host_wm_theme_bootstrap.spl`
+    - `src/os/compositor/simpleos_wm_theme_bootstrap.spl`
+    - `src/lib/common/ui/wm_theme_css.spl`
+    - `examples/09_embedded/simple_os/arch/*/gui_entry_desktop.spl`
+    - `scripts/os/make_os_disk.c`
+    - `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`
+- Plan action unchanged: continue this lane on host/SimpleOS WM snapshot-capture parity and theme-wire fidelity; coordinate with hosted/web renderer owner for `sync-renderer-ir-spec-update` merge when scope expands.
+
+## 2026-08-01 GH sync + renderer/IR scan refresh
+
+- Ran `git fetch --all --prune` from origin. `tmp-docfix` matches `origin/tmp-docfix`; local tree currently has one WIP file:
+  - `M src/lib/common/ui/wm_chrome_theme.spl`.
+- Searched remote refs for `runderer` markers: no direct match found.
+- Renderer/IR lane remains `origin/sync-renderer-ir-spec-update` at `2a4bf46c9d`:
+  - `f7b8526aa8` (hosted web themed restart hardening),
+  - `2277b52949` (hosted theme receipts),
+  - `2a4bf46c9d` (renderer + DrawIR IR plan/spec artifact sync).
+- Scope overlap remains limited:
+  - shared path `src/os/hosted/hosted_entry.spl` only; no direct changes in this lane’s target files (`host_wm_theme_bootstrap.spl`, `simpleos_wm_theme_bootstrap.spl`, `wm_theme_css.spl`, SimpleOS `/THEME.CSS`).
+- Plan action: keep this lane focused on host/simpleOS theme snapshot/capture fidelity; defer renderer/web protocol/doc merges to the renderer lane unless scope expands.
+
+## 2026-08-01 latest sync-gh + runderer/IR check (this run)
+
+- `git fetch --all --prune` completed.
+- Remote scan for `runderer`/runner markers returned no direct remote branch/tag/match.
+- Renderer/IR lane in scope is still `origin/sync-renderer-ir-spec-update` at `2a4bf46c9d`:
+  - `f7b8526aa8` `fix(web): preserve themed renderer restarts`
+  - `2277b52949` `test(web): enforce hosted theme receipts`
+  - `2a4bf46c9d` `docs: sync renderer and DrawIR IR spec plan artifacts`
+- Diff against this WM/SimpleOS lane remains confined to hosted web protocol surfaces (`src/os/hosted/hosted_entry.spl`, hosted browser renderer process/worker/protocol files, and `src/os/compositor/simple_web_window_renderer.spl`).
+- No direct overlap requiring code changes in this lane:
+  - `src/os/compositor/host_wm_theme_bootstrap.spl`
+  - `src/os/compositor/simpleos_wm_theme_bootstrap.spl`
+  - `src/lib/common/ui/wm_theme_css.spl`
+  - `examples/09_embedded/simple_os/arch/*/gui_entry_desktop.spl`
+  - `scripts/os/make_os_disk.c`
+  - SimpleOS `/THEME.CSS` guest bootstrap path
+- Plan action: keep this lane focused on host/SimpleOS theme snapshot fidelity + capture parity; defer renderer/web IR/doc merges to the renderer owner unless scope is expanded.
+
 ## 2026-08-01 sync-gh + runderer/IR latest snapshot
 
 - Synced `tmp-docfix` to `origin/tmp-docfix` (`1e0209f4b7`) and confirmed clean working tree (`0 0` ahead/behind).
