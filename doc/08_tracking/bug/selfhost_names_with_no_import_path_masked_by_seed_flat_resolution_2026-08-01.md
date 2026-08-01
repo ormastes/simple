@@ -469,3 +469,206 @@ sufficient and appropriate: the code under test is a pure text function over
 source content, with no engine-divergent construct. It does NOT prove the
 downstream stage3 census delta — that needs a stage2 build and is out of scope
 for this lane.
+
+---
+
+## 2026-08-01 (later pass) — class (B) residue closed, and three method corrections
+
+Scope of this pass: re-classify all 545 census lines against the **current tip**
+(`3807bab68e8`), close the remaining class-(B) one-liners, and correct three
+premises in the sections above that were producing wrong verdicts.
+
+### Correction 1 — `compiler.backend.backend_api` DOES resolve (premise above is WRONG)
+
+The note "A module path that maps to no file is silent. `compiler.backend.backend_api`
+has no file" is **incorrect**, and so is the reasoning in the `BackendKind`
+bullet that leans on it. Module paths are **not** a plain
+`dots -> directories` mapping. `10.frontend/core/interpreter/module_loader_resolve.spl`
+resolves a path with two extra rules:
+
+- a segment matches a child dir named `seg` **or** `NN.seg`
+  (`resolve_with_numbered_dirs` / `find_numbered_dir_interp`, lines 296-352), and
+- a numbered layer dir may be **traversed without consuming a segment**
+  (the transparent-dir path, `_find_transparent_file` / `_resolve_transparent`,
+  lines 353-395).
+
+So `compiler.backend.backend_api` resolves to
+`src/compiler/70.backend/backend/backend_api.spl` — the same file the earlier
+section says is "a different module path".
+
+The decisive, one-line demonstration that plain path mapping is wrong:
+**there is no `src/compiler/core` directory anywhere in the tree**
+(`ls src/compiler/core` → No such file or directory), yet
+`use compiler.core.tokens.{...}` is written **266×** in-tree and resolves to
+`src/compiler/10.frontend/core/tokens.spl`. Likewise `compiler.core.parser`
+(66×) and `compiler.core.ast_types` (10×).
+
+**The class-(B) verdict for `BackendKind` survives**, but for a different reason
+than recorded: not "the glob target does not exist", but "the glob target exists
+and imports the name with a plain `use`, which is not a re-export". The
+`export use` vs plain `use` discriminator is the whole test; module-path
+existence was a red herring in both directions.
+
+### Correction 2 — multi-line brace imports must be parsed
+
+A line-oriented `^use ...\{...\}` matcher silently misses imports that span
+lines, e.g. `70.backend/backend/vhdl/vhdl_design_catalog.spl:6` opens
+`use compiler.common.attributes.{` and closes three lines later. Before the
+parser in this pass was made brace-balancing, that produced **3 false class-(B)
+verdicts** — symbols reported as "no import path" that were already imported.
+Any future analyzer must accumulate lines until braces balance, and must also
+treat `use a.b.c.Symbol` (no braces) as a named import when `a.b.c` is a module.
+
+### Correction 3 — exclude `src/compiler_rust/**` when counting declaring modules
+
+It is the vendored seed tree, outside owned-code scope. Counting it inflates the
+ambiguity that gates a fix: `Span` shows 10 declaring modules including it, 5
+owned, and **2** in the compiler tier; `Visibility` shows 7 / 3 / **1**. Three
+sites that were "ambiguous, do not guess" are decidable once the seed tree is
+excluded.
+
+### Re-classification of the 545 census at tip `3807bab68e8`
+
+Method per pair: brace-aware import parse of the using file, declaration index
+over the whole tree, then glob reachability that follows a glob's first hop and
+thereafter **only `export use` edges**. Symlink-canonicalised
+(17 `src/compiler/<name>` layer symlinks) so no file is double-counted.
+
+| class | error lines | unique pairs |
+|---|---|---|
+| already named-imported at tip | 345 | 46 |
+| (A) reachable via a glob re-export hop | 77 | 28 |
+| (B) no import path at all | 120 | 68 |
+| no declaration anywhere | 3 | 3 |
+| **total** | **545** | **145** |
+
+The 120 class-(B) lines break down as:
+
+| bucket | lines | pairs | action |
+|---|---|---|---|
+| fixed in this pass | 51 | 30 | one named import per site |
+| separate defects (already filed below) | 45 | 27 | not import defects |
+| genuinely ambiguous provider | 24 | 11 | needs an owner — listed below |
+
+### Fixed in this pass — 30 pairs, 51 census lines, 19 import lines, 16 files
+
+Each addition names **one declaring module** that is the symbol's **sole**
+declaring module (or, for the four tier-resolved sites, the sole *owned
+compiler-tier* one), so no import winner can be swapped — consistent with
+`SymbolTable.define` being last-write-wins for `Function`/`Const`/`TypeAlias`.
+
+| using file | added import | symbols | lines |
+|---|---|---|---|
+| `10.frontend/core/_Ast/module_state.spl` | `compiler.core.ast_types` (extend) | `make_core_decl` | 1 |
+| `10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl` | `compiler.frontend.core._Ast.decl_nodes` | `decl_aop_advice`, `decl_arch_rule` | 2 |
+| `10.frontend/core/_ParserDecls/enum_module_body.spl` | `compiler.core.tokens` (extend) | `tok_kind_name` | 1 |
+| `10.frontend/core/_ParserDecls/fn_struct_decls.spl` | `compiler.frontend.core._Ast.decl_nodes` | `decl_set_param_muts` | 1 |
+| `10.frontend/core/parser_decls_use.spl` | `compiler.core.parser` (extend) | `parser_parse_type_with_union` | 3 |
+| `10.frontend/core/parser_stmts.spl` | `compiler.frontend.core._ParserPrimary.primary_expr` | `parse_fn_lambda_after_kw` | 3 |
+| `10.frontend/desugar/placeholder_lambda.spl` | `compiler.frontend.core._AstExpr.accessors` | `expr_interpolated_string` | 2 |
+| `10.frontend/treesitter/heuristic.spl` | `compiler.common.dependency.visibility` | `Visibility` | 2 |
+| `50.mir/_MirLowering/function_lowering.spl` | `compiler.mir.mir_types` | `MirConstant` | 1 |
+| `50.mir/_MirLowering/module_lowering.spl` | `compiler.common._Attributes.decl_attrs` | `DriverManifestAttr`, `DriverManifestAttrKind`, `vhdl_hardware_metadata_default` | 6 |
+| `50.mir/_MirLowering/module_lowering.spl` | `compiler.common.dependency.visibility` | `Visibility` | 3 |
+| `50.mir/_MirLowering/module_lowering.spl` | `compiler.mir.mir_types` | `MirConstant`, `MirFieldDef`, `MirStatic`, `MirTypeDefKind` | 7 |
+| `50.mir/_MirLoweringExpr/method_calls_literals.spl` | `compiler.mir.mir_instruction_support` | `GpuMemoryScope` | 1 |
+| `60.mir_opt/_OptimizationPasses/engine.spl` | `compiler.mir.mir_instruction_graph` | `mir_fold_binop` | 1 |
+| `70.backend/backend/_VhdlProcess/process_codegen.spl` | `compiler.mir.mir_instruction_support` | `vhdl_clock_domain_from_metadata` | 1 |
+| `70.backend/backend/compiler.spl` | `compiler.backend.codegen` | `CodegenMode`, `CodegenPipeline` | 4 |
+| `70.backend/backend/vhdl/vhdl_design_catalog.spl` | `compiler.hir.hir_types` (extend) | `SymbolId` | 4 |
+| `70.backend/backend/vhdl/vhdl_design_catalog.spl` | `compiler.mir.mir_types` | `MirConstant`, `MirFieldDef`, `MirStatic`, `MirTypeDefKind`, `MirVariantDef` | 7 |
+| `80.driver/driver_source_pipeline_loading.spl` | `compiler.common.driver_core_modes` | `CompileMode` | 1 |
+
+Pre-landing checks, all PROVED, all green:
+
+- every added symbol **is declared** in the module named (declaration scan of the
+  resolved target file) — 0 exceptions;
+- every module spelling **resolves to exactly one file**, and that file is the
+  declaring file — 0 exceptions;
+- every spelling is **already used in-tree** (the A/B control), from 1× up to
+  266×; the highest-usage resolving spelling was chosen in every case;
+- no added symbol was **already imported** in the using file — 0 duplicates;
+- every added line **re-parses** as a named import of exactly the intended
+  module — 0 exceptions;
+- no `FIX` site's file has an **unresolved glob**, so no "class B" verdict rests
+  on a glob the analyzer failed to follow.
+
+Two sites called out earlier deserve their specific resolutions:
+
+- **`parser_parse_type_with_union` — the cycle check is satisfied, no new edge.**
+  `parser_decls_use.spl` **already** imports `compiler.core.parser` (line 26,
+  `{par_kind_get, par_text_get, par_line_get, par_col_get}`); the symbol is added
+  to that existing brace list, so the import edge already existed and no cycle
+  can be created. In-tree control: `parser_stmts.spl:70` carries
+  `use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}`
+  and has **zero** `parser_parse_type_with_union` errors in the same census.
+- **`SymbolId`** is added to the `compiler.hir.hir_types` import
+  `vhdl_design_catalog.spl:5` already has — again zero new edges.
+
+### Still blocked — 11 pairs / 24 census lines, ambiguous provider
+
+`dir_walk` and `file_write_bytes` remain **DO-NOT-GUESS** and are confirmed so:
+after excluding the vendored seed tree they still have 10 and 7 owned declaring
+modules respectively, and **zero** in the compiler tier — they are lib-tier
+functions called from `70.backend/linker/`, so the choice is a tier decision an
+owner must make, not a lookup.
+
+| symbol | using file | owned decls | compiler-tier decls | lines |
+|---|---|---|---|---|
+| `Span` | `10.frontend/treesitter/heuristic.spl` | 5 | 2 | 8 |
+| `expr_kind` | `10.frontend/desugar/suspension_analysis.spl` | 2 | 2 | 4 |
+| `stmt_kind` | `10.frontend/desugar/suspension_analysis.spl` | 3 | 3 | 3 |
+| `shell` | `70.backend/linker/link.spl` | 18 | 0 | 2 |
+| `Span` | `10.frontend/treesitter/outline_types.spl` | 5 | 2 | 1 |
+| `Span` | `25.traits/trait_validation.spl` | 5 | 2 | 1 |
+| `Span` | `25.traits/associated_types.spl` | 5 | 2 | 1 |
+| `Span` | `30.types/type_infer/context.spl` | 5 | 2 | 1 |
+| `GpuBarrierScope` | `50.mir/_MirLoweringExpr/method_calls_literals.spl` | 3 | 3 | 1 |
+| `dir_walk` | `70.backend/linker/smf_getter.spl` | 10 | 0 | 1 |
+| `file_write_bytes` | `70.backend/linker/link.spl` | 7 | 0 | 1 |
+
+The two `Span` candidates in the compiler tier are
+`00.common/diagnostics/span.spl` and `10.frontend/core/lexer_types.spl`; these
+are different `Span` types, so picking one is a semantic decision. `Span` is a
+first-write-wins kind, so a wrong pick would not swap an existing winner, but it
+would bind the wrong type.
+
+### Evidence basis for this pass — and its limits
+
+Per symbol: a static reachability proof plus an in-tree A/B control, as above.
+
+Additionally, each of the 19 added import lines was **executed through the real
+compiler** in an isolated tree at the tip: a generated probe `.spl` carrying
+exactly that `use` line was run with `simple_seed run`, and all 18 distinct
+`(module, symbol-set)` probes printed their marker with no resolution
+diagnostic. All 24 added `(module, symbol)` pairs are covered by those probes.
+
+**Non-vacuity was measured, and the harness is only half sharp** — this is the
+part to not over-read:
+
+| deliberately broken probe | result |
+|---|---|
+| wrong **module** (`compiler.core.tokens_NOPE`) | correctly rejected — `cannot resolve import: module path segment ... not found` |
+| wrong **symbol** (`tokens.{tok_kind_name_NOPE}`) | **FALSE PASS** — seed prints the marker and exits 0 |
+
+So the probe is decisive for the **module spelling** axis and **vacuous for the
+symbol-existence** axis — which is expected and is the very defect this document
+is about: the seed resolves flat, so it does not check a named import against the
+declaring module. Symbol existence is therefore carried by the static
+declaration scan (every added symbol declared in the resolved target file, 0
+exceptions), not by the probe. A symbol-level runtime check requires a
+self-hosted stage2, not the seed.
+
+**Not claimed:** a completed seed to stage2 A/B build. One was started against
+this tip and was still emitting objects (about 5 per minute under
+`--backend cranelift --low-memory` with a cold cache, roughly 90 minutes per
+side) when this landed; it is not evidence and is not cited here. Note also that
+the deployed `bin/simple_seed` (57 MB) is the **no-LLVM** variant —
+`--backend llvm` fails with "native backend 'llvm' is not available in this
+build", so any stage2 timing quoted elsewhere in this file was produced by a
+different binary.
+
+Stage3/stage4 counts were deliberately **not** used: stage4 exits 1 at
+`[ERROR] phase 3 FAILED` (phase 3 is HIR lowering) with `[stmt_get_tag] OOB`
+from log line 1, so its counts are early-abort artifacts, and stage3 runs the
+bootstrap-flat pipeline which never performs this lowering.
