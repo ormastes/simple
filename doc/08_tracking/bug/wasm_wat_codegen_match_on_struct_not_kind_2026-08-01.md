@@ -258,3 +258,73 @@ spec that instantiates `MirToWat` and asserts on emitted WAT text. It pins that
 a const, a call, and an operand each emit a real instruction, and that
 unsupported constants trap instead of emitting a plausible value. Each `it`
 block fails against the pre-fix code.
+
+---
+
+# Follow-up 2026-08-01 (second pass): `translate_binop` / `translate_unaryop`
+
+The first pass fixed const/call/operand. Two more functions in the same file
+were still carrying the bare-identifier defect
+(`case_bare_ident_is_irrefutable_binding_2026-08-01.md`), and the reported
+symptom for them was **wrong**.
+
+## The reported symptom was wrong; measurement found the real one
+
+It was reported as "13 float-op victims — everything from `FAdd` onward emits
+`f64.add`". Executed against the real enum, the swallowing arm is **`case And:`
+at line 414, seven arms earlier than `FAdd`**, and the swallowed instruction is
+**`i32.and`**, not `f64.add`.
+
+`MirBinOp` (`mir_instruction_support.spl:178`) has exactly 24 variants:
+`Add Sub Mul Div Rem Pow MatMul BitAnd BitOr BitXor Shl Shr Eq Ne Lt Le Gt Ge
+BroadcastAdd BroadcastSub BroadcastMul BroadcastDiv BroadcastPow Offset`.
+
+There are **no `And`/`Or`/`Xor`/`Mod` variants and no `F*` float variants at
+all**. The ten `f64.*` arms were never lowering anything — they matched a
+variant that does not exist. Fixing their spelling would have been meaningless;
+the fix is to delete the fiction and restore the arms it was hiding.
+
+## Measured, before → after (bootstrap binary, 24 binops + 4 unaryops)
+
+| op | before | after |
+|---|---|---|
+| Pow | `i32.and` | `;; UNSUPPORTED` + `unreachable` |
+| MatMul | `i32.and` | `;; UNSUPPORTED` + `unreachable` |
+| BitAnd | `i32.and` | `i64.and` |
+| BitOr | `i32.and` | `i64.or` |
+| BitXor | `i32.and` | `i64.xor` |
+| Shl | `i32.and` | `i64.shl` |
+| Shr | `i32.and` | `i64.shr_s` |
+| BroadcastAdd/Sub/Mul/Div/Pow | `i32.and` | `;; UNSUPPORTED` + `unreachable` |
+| Offset | `i32.and` | `i64.add` |
+| UnaryOp BitNot | `f64.neg` | `i64.const -1` + `i64.xor` |
+| UnaryOp Transpose | `f64.neg` | `;; UNSUPPORTED` + `unreachable` |
+
+14 of 24 binops and 2 of 4 unaryops were wrong. Seven of them (`BitAnd`,
+`BitOr`, `BitXor`, `Shl`, `Shr`, and unary `BitNot`, plus `Pow`'s body) had a
+**correct lowering written directly below the swallowing arm that never ran**.
+`case _:` was dead in both functions, so nothing ever reported a problem.
+
+`Offset` follows the in-file `GetElementPtr` lowering (unscaled `i64.add`),
+matching the LLVM backend's `getelementptr i8`
+(`_MirToLlvm/core_codegen.spl:1261`). `Pow` additionally re-pushed both
+operands that were already on the value stack and then emitted only a comment —
+four values left on the stack, no result. `wasm_runtime.spl` imports no pow
+helper, so it now traps.
+
+## OPEN — separate defect, not fixed here
+
+`MirBinOp` carries no operand type and `translate_binop` receives none, so a
+**float** add/sub/mul/div/comparison still lowers to the `i64.*` instruction —
+silently wrong code for any f32/f64 program. This is a missing feature (thread
+per-local types from `func.body.locals` into the binop lowering), not the
+irrefutable-binding defect, and it is why the fictional `F*` arms looked
+plausible enough to survive. It must be fixed before this backend can compile
+float arithmetic.
+
+## Spec
+
+`test/01_unit/compiler/backend/wasm_mir_to_wat_spec.spl` grew from 10 to 24
+`it` blocks with `translate_binop` and `translate_unaryop` sections. Sabotage
+check: re-inserting `case And: builder.emit("i32.and")` above the restored arms
+turns the new blocks red.

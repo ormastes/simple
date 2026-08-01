@@ -399,6 +399,19 @@ class MirToWat:
         self.emit_operand(builder, left)
         self.emit_operand(builder, right)
 
+        # MirBinOp (mir_instruction_support.spl:178) has exactly these variants:
+        #   Add Sub Mul Div Rem Pow MatMul BitAnd BitOr BitXor Shl Shr
+        #   Eq Ne Lt Le Gt Ge
+        #   BroadcastAdd BroadcastSub BroadcastMul BroadcastDiv BroadcastPow
+        #   Offset
+        # There are NO `And`/`Or`/`Xor`/`Mod` variants and NO `F*` float
+        # variants. `case And:` was therefore an irrefutable BINDING pattern,
+        # not a comparison, so it matched EVERY value that reached it and every
+        # arm below it was dead -- including `case _:`. Measured before this
+        # fix: Pow, MatMul, BitAnd, BitOr, BitXor, Shl, Shr, BroadcastAdd,
+        # BroadcastSub, BroadcastMul, BroadcastDiv, BroadcastPow and Offset ALL
+        # emitted `i32.and`. Seven of those had a correct lowering written
+        # directly below the swallowing arm and it never ran.
         match op:
             case Add: builder.emit("i64.add")
             case Sub: builder.emit("i64.sub")
@@ -411,42 +424,66 @@ class MirToWat:
             case Le: builder.emit("i64.le_s")
             case Gt: builder.emit("i64.gt_s")
             case Ge: builder.emit("i64.ge_s")
-            case And: builder.emit("i32.and")
-            case Or: builder.emit("i32.or")
-            case Xor: builder.emit("i32.xor")
             case Shl: builder.emit("i64.shl")
             case Shr: builder.emit("i64.shr_s")
             case BitAnd: builder.emit("i64.and")
             case BitOr: builder.emit("i64.or")
             case BitXor: builder.emit("i64.xor")
-            case FAdd: builder.emit("f64.add")
-            case FSub: builder.emit("f64.sub")
-            case FMul: builder.emit("f64.mul")
-            case FDiv: builder.emit("f64.div")
-            case FEq: builder.emit("f64.eq")
-            case FNe: builder.emit("f64.ne")
-            case FLt: builder.emit("f64.lt")
-            case FLe: builder.emit("f64.le")
-            case FGt: builder.emit("f64.gt")
-            case FGe: builder.emit("f64.ge")
-            case Pow:
-                # WASM has no native pow; use f64 conversion + pow loop
-                self.emit_operand(builder, left)
-                builder.emit("f64.convert_i64_s")
-                self.emit_operand(builder, right)
-                builder.emit("f64.convert_i64_s")
-                builder.emit(";; pow via runtime (no native wasm pow)")
 
-            case Mod:
-                builder.emit("i64.rem_s")
+            case Offset:
+                # Pointer arithmetic: base + byte offset, unscaled -- the same
+                # lowering GetElementPtr already uses for pointer math in this
+                # backend (i64.add), and what the LLVM backend emits as
+                # `getelementptr i8` (core_codegen.spl:1261).
+                builder.emit("i64.add")
+
+            case Pow:
+                # The old arm re-pushed BOTH operands (they are already on the
+                # stack from the top of this function), converted them, and then
+                # emitted only a comment -- leaving four values on the value
+                # stack and never producing a result. WASM has no native pow and
+                # wasm_runtime.spl imports no pow helper, so there is nothing to
+                # call. Trap instead of emitting invalid WAT.
+                builder.emit(";; UNSUPPORTED: wasm backend has no pow lowering")
+                builder.emit("unreachable")
+
+            case MatMul:
+                builder.emit(";; UNSUPPORTED: wasm backend has no MatMul lowering")
+                builder.emit("unreachable")
+            case BroadcastAdd:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastAdd lowering")
+                builder.emit("unreachable")
+            case BroadcastSub:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastSub lowering")
+                builder.emit("unreachable")
+            case BroadcastMul:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastMul lowering")
+                builder.emit("unreachable")
+            case BroadcastDiv:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastDiv lowering")
+                builder.emit("unreachable")
+            case BroadcastPow:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastPow lowering")
+                builder.emit("unreachable")
 
             case _:
-                builder.emit(";; unhandled binop")
+                # Defensive: every MirBinOp variant is enumerated above, so this
+                # only fires if the enum grows. Fail loudly rather than emit a
+                # plausible instruction for an operation we cannot lower.
+                builder.emit(";; UNSUPPORTED: unknown MirBinOp variant")
+                builder.emit("unreachable")
 
         builder.emit_local_named_set("_l{dest.id}")
 
     me translate_unaryop(builder: WatBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Translate a unary operation."""
+        # MirUnaryOp (mir_instruction_support.spl:198) has exactly four
+        # variants: Neg, Not, BitNot, Transpose. `FNeg`, `Abs`, `Truncate`,
+        # `Extend` and `SignExtend` are not variants, so `case FNeg:` was an
+        # irrefutable BINDING that swallowed everything below it. Measured
+        # before this fix: the real `BitNot` and `Transpose` variants both
+        # emitted `f64.neg`, i.e. bitwise-not lowered to float negation.
+        # Width conversion is reached through Cast, not UnaryOp.
         match op:
             case Neg:
                 builder.emit("i64.const 0")
@@ -455,27 +492,16 @@ class MirToWat:
             case Not:
                 self.emit_operand(builder, operand)
                 builder.emit("i32.eqz")
-            case FNeg:
-                self.emit_operand(builder, operand)
-                builder.emit("f64.neg")
             case BitNot:
                 self.emit_operand(builder, operand)
                 builder.emit("i64.const -1")
                 builder.emit("i64.xor")
-            case Abs:
-                self.emit_operand(builder, operand)
-                builder.emit("f64.abs")
-            case Truncate:
-                self.emit_operand(builder, operand)
-                builder.emit("i32.wrap_i64")
-            case Extend:
-                self.emit_operand(builder, operand)
-                builder.emit("i64.extend_i32_u")
-            case SignExtend:
-                self.emit_operand(builder, operand)
-                builder.emit("i64.extend_i32_s")
+            case Transpose:
+                builder.emit(";; UNSUPPORTED: wasm backend has no Transpose lowering")
+                builder.emit("unreachable")
             case _:
-                builder.emit(";; unhandled unaryop")
+                builder.emit(";; UNSUPPORTED: unknown MirUnaryOp variant")
+                builder.emit("unreachable")
 
         builder.emit_local_named_set("_l{dest.id}")
 

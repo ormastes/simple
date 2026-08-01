@@ -36,6 +36,19 @@ fn ty(k: MirTypeKind) -> MirType:
 fn op_const(v: MirConstValue, t: MirType) -> MirOperand:
     MirOperand(kind: MirOperandKind.Const(v, t))
 
+fn op_local(n: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(local(n)))
+
+fn binop_wat(op: MirBinOp) -> text:
+    val b = builder()
+    translator().translate_binop(b, local(20), op, op_local(0), op_local(1))
+    b.build()
+
+fn unaryop_wat(op: MirUnaryOp) -> text:
+    val b = builder()
+    translator().translate_unaryop(b, local(21), op, op_local(0))
+    b.build()
+
 describe "MirToWat translation layer":
 
     describe "translate_const":
@@ -126,3 +139,85 @@ describe "MirToWat translation layer":
 
             expect(wat).to_contain("local.get $_l7")
             expect(wat).to_contain("call_indirect")
+
+    describe "translate_binop":
+        # REGRESSION: `And` is NOT a MirBinOp variant (the enum has BitAnd/BitOr
+        # /BitXor, no And/Or/Xor, no Mod, and no F* float ops at all). A bare
+        # identifier in `case` position is an IRREFUTABLE BINDING, so
+        # `case And:` matched EVERY op that reached it and killed all 27 arms
+        # below it, `case _:` included. Measured before the fix: Pow, MatMul,
+        # BitAnd, BitOr, BitXor, Shl, Shr, all five Broadcast ops and Offset
+        # every one of them emitted `i32.and`.
+
+        it "emits i64.and for BitAnd instead of the swallowed i32.and":
+            expect(binop_wat(MirBinOp.BitAnd)).to_contain("i64.and")
+
+        it "emits i64.or for BitOr":
+            expect(binop_wat(MirBinOp.BitOr)).to_contain("i64.or")
+
+        it "emits i64.xor for BitXor":
+            expect(binop_wat(MirBinOp.BitXor)).to_contain("i64.xor")
+
+        it "emits i64.shl for Shl":
+            expect(binop_wat(MirBinOp.Shl)).to_contain("i64.shl")
+
+        it "emits an arithmetic right shift for Shr":
+            expect(binop_wat(MirBinOp.Shr)).to_contain("i64.shr_s")
+
+        it "keeps the already-reachable arms working":
+            expect(binop_wat(MirBinOp.Add)).to_contain("i64.add")
+            expect(binop_wat(MirBinOp.Ge)).to_contain("i64.ge_s")
+
+        it "lowers Offset as unscaled pointer arithmetic":
+            expect(binop_wat(MirBinOp.Offset)).to_contain("i64.add")
+
+        it "traps on Pow rather than emitting a comment and no result":
+            # The old Pow arm re-pushed both operands (already on the stack),
+            # converted them, then emitted only a comment -- four values left
+            # on the value stack and no result produced.
+            val wat = binop_wat(MirBinOp.Pow)
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+
+        it "traps on MatMul":
+            val wat = binop_wat(MirBinOp.MatMul)
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+
+        it "traps on every Broadcast op instead of emitting a bitwise and":
+            for op in [MirBinOp.BroadcastAdd, MirBinOp.BroadcastSub,
+                       MirBinOp.BroadcastMul, MirBinOp.BroadcastDiv,
+                       MirBinOp.BroadcastPow]:
+                val wat = binop_wat(op)
+                expect(wat).to_contain("UNSUPPORTED")
+                expect(wat).to_contain("unreachable")
+
+        it "never emits i32.and for an op that is not a bitwise and":
+            # The single sharpest pin on the defect: i32.and was the swallowing
+            # arm's instruction and is not the correct lowering for ANY
+            # MirBinOp variant, so it must not appear at all.
+            for op in [MirBinOp.Pow, MirBinOp.MatMul, MirBinOp.BitAnd,
+                       MirBinOp.BitOr, MirBinOp.BitXor, MirBinOp.Shl,
+                       MirBinOp.Shr, MirBinOp.Offset]:
+                assert_false(binop_wat(op).contains("i32.and"))
+
+    describe "translate_unaryop":
+        # Same defect, same file: `FNeg` is not a MirUnaryOp variant (the enum
+        # is Neg/Not/BitNot/Transpose), so `case FNeg:` swallowed the real
+        # BitNot and Transpose arms and both emitted `f64.neg`.
+
+        it "emits a bitwise complement for BitNot, not f64.neg":
+            val wat = unaryop_wat(MirUnaryOp.BitNot)
+            expect(wat).to_contain("i64.const -1")
+            expect(wat).to_contain("i64.xor")
+            assert_false(wat.contains("f64.neg"))
+
+        it "traps on Transpose instead of negating a float":
+            val wat = unaryop_wat(MirUnaryOp.Transpose)
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains("f64.neg"))
+
+        it "keeps Neg and Not working":
+            expect(unaryop_wat(MirUnaryOp.Neg)).to_contain("i64.sub")
+            expect(unaryop_wat(MirUnaryOp.Not)).to_contain("i32.eqz")
