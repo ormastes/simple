@@ -24,6 +24,23 @@
 #   3. its scope is src/compiler + src/app   -> src/lib, src/os never scanned
 # This script is additive; it does not replace or weaken that ratchet.
 #
+# BOTH DECLARATION FORMS ARE IN SCOPE (fixed 2026-08-01)
+# ------------------------------------------------------
+# The first revision of this script matched only lines containing `@extern`,
+# which made it blind to the bare `extern fn sym(...)` form -- the *majority*
+# form in this tree (~9,550 declaration lines / ~3,800 distinct symbols, versus
+# ~172 `@extern` lines). That blind spot swallowed this script's own motivating
+# case: `rt_smf_reader_open`, declared `extern fn` at
+# src/compiler/70.backend/linker/smf_reader.spl:31, has no implementation
+# anywhere in src/runtime or src/compiler_rust, so the single-file SMF reader
+# bridge returns a silent nil -- and the guard reported "all clean".
+#
+# The irony is load-bearing: the header above proves the silent-nil behaviour
+# using `extern fn rt_bogus`, the very form the extractor could not see. A guard
+# that misses its motivating case is worse than no guard, because it converts an
+# open question into a false all-clear. Both forms reach the identical
+# unregistered fall-through, so both are scanned.
+#
 # THE SANCTIONED EXEMPTION
 # ------------------------
 # Some externs are legitimately unresolved on the host: freestanding/baremetal
@@ -56,13 +73,17 @@ decls="$work/decls.tsv"; cand="$work/cand.txt"; reg="$work/reg.txt"
 # ---------------------------------------------------------------------------
 # 1. Declared extern symbols (owned scope; vendored runtime excluded).
 #
-# Three surface forms, all of which reach the same silent fall-through:
+# Four surface forms, all of which reach the same silent fall-through:
 #     @extern("abi", "sym") fn f(...)     abi = runtime | bare
 #     @extern("sym") fn f(...)
 #     @extern fn sym(...)                 bare decorator: symbol = fn name
+#     [pub] extern fn sym(...)            bare keyword form: symbol = fn name
+# The last form carries no ABI tag, so it can never be `bare`-exempt; it is
+# always held to the registration requirement.
 # Emits: abi<TAB>symbol<TAB>file:line
 # ---------------------------------------------------------------------------
-grep -rn --include='*.spl' --exclude-dir=vendor '@extern' src test 2>/dev/null \
+grep -rnE --include='*.spl' --exclude-dir=vendor \
+     '@extern|^[[:space:]]*(pub[[:space:]]+)?extern[[:space:]]+fn[[:space:]]' src test 2>/dev/null \
 | perl -ne '
     chomp;
     next unless /^([^:]+):(\d+):(.*)$/;
@@ -72,6 +93,7 @@ grep -rn --include='*.spl' --exclude-dir=vendor '@extern' src test 2>/dev/null \
     if    ($t =~ /\@extern\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)/) { $abi=$1; $sym=$2; }
     elsif ($t =~ /\@extern\(\s*"([^"]+)"\s*\)/)                 { $sym=$1; }
     elsif ($t =~ /\@extern\s+fn\s+([A-Za-z_]\w*)/)              { $sym=$1; }
+    elsif ($t =~ /^\s*(?:pub\s+)?extern\s+fn\s+([A-Za-z_]\w*)/) { $sym=$1; }
     print "$abi\t$sym\t$f:$l\n" if $sym ne "";
 ' | sort -u > "$decls"
 
@@ -79,13 +101,19 @@ cut -f2 "$decls" | sort -u > "$cand"
 
 # VACUITY GUARD. A parser regression that silently matches nothing would make
 # this script report "all clean" forever -- the exact failure mode it exists to
-# prevent. The repo has ~387 extern declarations; anything near zero means the
-# extractor broke, not that the tree got clean.
+# prevent. The repo has ~9,700 extern declaration sites across both forms;
+# anything near zero means the extractor broke, not that the tree got clean.
+#
+# The bound is deliberately set just under the bare-form population alone: the
+# original 100 was low enough that dropping the entire bare-keyword form (~97%
+# of declarations) still sailed past it. That is exactly how rt_smf_reader_open
+# stayed invisible. Raise this bound as the tree grows; never lower it.
 decl_n=$(wc -l < "$decls" | tr -d ' ')
-if [ "$decl_n" -lt 100 ]; then
+if [ "$decl_n" -lt 5000 ]; then
   echo "extern_registration_ok=false"
-  echo "VACUITY GUARD TRIPPED: only $decl_n @extern declarations found (expected ~387)."
-  echo "The declaration extractor is broken. Fix it -- do not lower this bound."
+  echo "VACUITY GUARD TRIPPED: only $decl_n extern declarations found (expected ~9700)."
+  echo "The declaration extractor is broken -- most likely one of the two surface"
+  echo "forms stopped matching. Fix it -- do not lower this bound."
   exit 1
 fi
 
@@ -115,12 +143,27 @@ fi
     | grep -oE '"[A-Za-z_][A-Za-z0-9_]*"' | tr -d '"'
 } | sort -u | grep -xFf "$cand" > "$reg" || :
 
-# SELF-TEST. Two fixed controls keep the registration detector honest: a symbol
-# that is definitely registered must be found, and the scan must not be empty.
+# SELF-TEST. Fixed controls keep the registration detector honest: a symbol that
+# is definitely registered must be found, and the scan must not be empty.
 if ! grep -qx 'rt_file_read_text' "$reg"; then
   echo "extern_registration_ok=false"
   echo "SELF-TEST FAILED: rt_file_read_text is registered in the runtime but the"
   echo "detector did not find it. The registration scan is broken."
+  exit 1
+fi
+
+# PER-FORM CONTROL. rt_file_read_text above is declared in BOTH surface forms,
+# so it stays green even if the bare-keyword extractor dies -- it cannot detect
+# the regression this script was fixed for. rt_array_len is declared ONLY as
+# `extern fn` and is heavily registered in the Rust runtime, so it reaches $reg
+# only via the bare-form path. If this trips, the bare-form extractor is broken
+# and the guard has silently reverted to its @extern-only blind spot.
+if ! grep -qx 'rt_array_len' "$cand"; then
+  echo "extern_registration_ok=false"
+  echo "SELF-TEST FAILED: rt_array_len is declared as a bare 'extern fn' but the"
+  echo "declaration extractor did not collect it. The bare-form scan is broken --"
+  echo "this is the exact blind spot that hid rt_smf_reader_open. Fix the"
+  echo "extractor; do not delete this control."
   exit 1
 fi
 
