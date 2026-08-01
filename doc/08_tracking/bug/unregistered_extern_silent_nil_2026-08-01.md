@@ -169,13 +169,13 @@ emits
 ## Current counts
 
 ```
-extern_decl_total=169
+extern_decl_total=164
 extern_registered=33
 extern_bare_exempt=30      (legitimate freestanding class)
-extern_unregistered=25     (actionable)
+extern_unregistered=20     (actionable)
 ```
 
-## The backlog — 25 unregistered non-`bare` extern symbols remaining
+## The backlog — 20 unregistered non-`bare` extern symbols remaining
 
 By group:
 
@@ -234,8 +234,34 @@ By group:
   with the declared-candidate set, so removing 178 mostly-registered candidates
   necessarily shrinks it. The vacuity guard (bound 100) still passes at 169 and
   was re-checked, not adjusted.
-- **2 in `src/compiler_rust/lib/std/src/spec/snapshot/`**, **1 in `.../io/`**,
-  **1 in `.../tooling/core/`**.
+- **2 in `src/compiler_rust/lib/std/src/spec/snapshot/`**, **1 in `.../tooling/core/`**.
+- ~~`rt_path_exists` x2, `rt_walk_directory` x3~~ — **RETIRED 2026-08-01 in pure
+  Simple, no new runtime symbols.**
+  - `rt_walk_directory` (`io/fs_helpers.spl:71`, `tooling/todo_parser.spl:427`,
+    `tooling/generics_migrate.spl:357`) was registered in no runtime, so
+    `walk_directory` returned a silent nil on *every* call. This was live:
+    `io.fs_helpers.walk_directory` is imported by
+    `tooling/dashboard/collectors/{spipe,plan}_collector.spl` among others, and
+    `generics_migrate.collect_spl_files` saw no files at all.
+    `infra.file_io` already exposes `walk_dir_unsafe`, a wrapper over the
+    **registered** `rt_dir_walk` (`runtime/src/value/sffi/file_io/directory.rs:223`).
+    `fs_helpers.walk_directory` now calls it and applies the include/exclude
+    globs in pure Simple (`**`, `*`, `?`), matching the previous contract; the
+    two tooling copies import it instead of redeclaring the extern.
+  - `rt_path_exists` (`tooling/todo_parser.spl:419`,
+    `tooling/generics_migrate.spl:337`) backed a local `fn exist` that had **no
+    callers** in either file and was exported from neither. Deleted rather than
+    re-pointed at the registered `rt_file_exists`, per the no-unused-code rule.
+
+  Evidence lane: seed `lint` (tree-walking parser, lane A) before vs after, same
+  binary and inputs. `todo_parser` and `generics_migrate` sat at `PARSE001` both
+  before and after (1 error -> 1 error): pre-existing, untouched by this change.
+  `fs_helpers` went from **4 errors including `PARSE001`** to **3 errors with no
+  `PARSE001`** -- the remaining three are pre-existing `primitive_api` style
+  errors, line-shifted by one added import. No native/link-lane evidence is
+  claimed: no working compiler front-end is available in this environment (a
+  known-good control file failed to compile, so that check was discarded rather
+  than reported as a pass).
 
 Full machine-readable list, `symbol<TAB>file:line`:
 
@@ -257,14 +283,9 @@ rt_inotify_init	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:310
 rt_inotify_read	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:316
 rt_module_load	src/compiler_rust/lib/std/src/tooling/watch/reload_apply.spl:168
 rt_module_unload	src/compiler_rust/lib/std/src/tooling/watch/reload_apply.spl:145
-rt_path_exists	src/compiler_rust/lib/std/src/tooling/generics_migrate.spl:337
-rt_path_exists	src/compiler_rust/lib/std/src/tooling/todo_parser.spl:419
 rt_reflect_function_name	src/compiler_rust/lib/std/src/spec/snapshot/runner.spl:197
 rt_reflect_source_file	src/compiler_rust/lib/std/src/spec/snapshot/runner.spl:185
 rt_sha256	src/compiler_rust/lib/std/src/tooling/core/incremental.spl:38
-rt_walk_directory	src/compiler_rust/lib/std/src/io/fs_helpers.spl:71
-rt_walk_directory	src/compiler_rust/lib/std/src/tooling/generics_migrate.spl:357
-rt_walk_directory	src/compiler_rust/lib/std/src/tooling/todo_parser.spl:427
 rt_websocket_send	src/compiler_rust/lib/std/src/tooling/watch/reload.spl:383
 ```
 <!-- END unregistered-extern-list -->

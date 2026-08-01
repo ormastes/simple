@@ -2,7 +2,8 @@
 #
 # Provides convenience functions for common file operations.
 
-use infra.file_io.{read_file, write_file, create_dir_all, remove_file, list_dir}
+use infra.file_io.{read_file, write_file, create_dir_all, remove_file, list_dir,
+                   walk_dir_unsafe}
 use core.result.{Ok, Err}
 
 # =========================================================================
@@ -67,16 +68,100 @@ pub fn list_directory(path: text) -> Result<List<text>, text>:
     list_dir(path)
 
 pub fn walk_directory(path: text, patterns: List<text>, exclude_patterns: List<text>) -> List<text>:
-    """Recursively walk directory."""
-    @extern("runtime", "rt_walk_directory")
-    fn _rt_walk_directory(
-        root_ptr: &u8,
-        root_len: u64,
-        include_patterns: &List<text>,
-        exclude_patterns: &List<text>
-    ) -> List<text>
+    """Recursively walk `path`, returning files matching the include patterns
+    and not matching any exclude pattern.
 
-    return _rt_walk_directory(path.ptr(), path.len(), &patterns, &exclude_patterns)
+    Patterns are globs matched against the whole path, `/`-separated, where `**`
+    spans zero or more segments and `*`/`?` match within one segment. An empty
+    include list means "every file".
+
+    Implemented in pure Simple over `infra.file_io.walk_dir_unsafe`, which wraps
+    the registered `rt_dir_walk`. This previously declared `@extern("runtime",
+    "rt_walk_directory")`, a symbol that is registered in no runtime -- so it
+    returned a silent nil on every call rather than failing to link.
+    """
+    val all_files = walk_dir_unsafe(path)
+    var out: List<text> = []
+    for f in all_files:
+        if _glob_any(f, patterns) and not _glob_any(f, exclude_patterns):
+            out.push(f)
+    return out
+
+# =========================================================================
+# Glob Matching (pure Simple; supports **, *, ?)
+# =========================================================================
+
+fn _glob_any(path: text, patterns: List<text>) -> bool:
+    """True if `patterns` is empty, or any pattern matches `path`."""
+    if patterns.len() == 0:
+        return true
+    for p in patterns:
+        if _glob_match_path(path, p):
+            return true
+    false
+
+fn _glob_match_path(path: text, pattern: text) -> bool:
+    _glob_parts(path.split("/"), 0, pattern.split("/"), 0)
+
+fn _glob_parts(path_parts: [text], pi: i64, pattern_parts: [text], qi: i64) -> bool:
+    # Both exhausted = match
+    if pi >= path_parts.len() and qi >= pattern_parts.len():
+        return true
+
+    # Pattern exhausted but path remains = no match
+    if qi >= pattern_parts.len():
+        return false
+
+    val pat = pattern_parts[qi]
+
+    # ** matches zero or more path segments
+    if pat == "**":
+        if _glob_parts(path_parts, pi, pattern_parts, qi + 1):
+            return true
+        if pi < path_parts.len():
+            return _glob_parts(path_parts, pi + 1, pattern_parts, qi)
+        return false
+
+    # Path exhausted but a non-** pattern segment remains
+    if pi >= path_parts.len():
+        return false
+
+    if _glob_segment(path_parts[pi], pat):
+        return _glob_parts(path_parts, pi + 1, pattern_parts, qi + 1)
+
+    false
+
+fn _glob_segment(s: text, pattern: text) -> bool:
+    _glob_chars(s, 0, pattern, 0)
+
+fn _glob_chars(s: text, si: i64, pattern: text, pi: i64) -> bool:
+    if si >= s.len() and pi >= pattern.len():
+        return true
+
+    if pi >= pattern.len():
+        return false
+
+    val pc = pattern[pi:pi + 1]
+
+    # * matches zero or more characters within one segment
+    if pc == "*":
+        if _glob_chars(s, si, pattern, pi + 1):
+            return true
+        if si < s.len():
+            return _glob_chars(s, si + 1, pattern, pi)
+        return false
+
+    if si >= s.len():
+        return false
+
+    # ? matches exactly one character
+    if pc == "?":
+        return _glob_chars(s, si + 1, pattern, pi + 1)
+
+    if s[si:si + 1] == pc:
+        return _glob_chars(s, si + 1, pattern, pi + 1)
+
+    false
 
 # =========================================================================
 # Exports
