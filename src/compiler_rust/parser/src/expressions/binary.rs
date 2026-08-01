@@ -171,10 +171,58 @@ impl<'a> Parser<'a> {
     parse_binary_single!(parse_bitwise_xor, parse_bitwise_and, Xor, BinOp::BitXor);
     parse_binary_single!(parse_bitwise_and, parse_shift, Ampersand, BinOp::BitAnd);
 
+    /// Step over a line break when the next meaningful token is a leading
+    /// COMPARISON/EQUALITY-family operator on a *strictly more deeply
+    /// indented* line (`a\n    == b`).
+    ///
+    /// `parse_equality` and `parse_comparison` are hand-written (for `not in`
+    /// and for `a < b < c` chaining) and so never inherited the
+    /// `parse_binary_*!` macros' "Case 2" leading-continuation arm; they only
+    /// ever got the TRAILING-form fix from 023a60a05aa. That left the seed
+    /// rejecting `== != < > <= >= is in` as leading continuations while the
+    /// self-hosted parser accepted them — see doc/08_tracking/bug/
+    /// parser_leading_operator_line_continuation_2026-08-01.md.
+    ///
+    /// The deeper-indent requirement mirrors the self-hosted
+    /// `leading_op_continues` rule and the `indent_required` variant of
+    /// `parse_binary_multi!` above: it is what stops a same-indent statement
+    /// from being swallowed into the previous expression. It is enforced via
+    /// `peek_indented_operator_continuation`, which also returns `None` on a
+    /// `Dedent`, so a shallower line can never continue an expression either.
+    ///
+    /// `not in` is deliberately absent: bare `not` is a legal statement start,
+    /// so accepting a leading `not` would glue a following `not ...` statement
+    /// onto the previous expression — exactly the class of silent misparse the
+    /// indent guard exists to prevent (guard 3 of the self-hosted rule).
+    fn skip_leading_comparison_continuation(&mut self) {
+        if !matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
+            return;
+        }
+        let is_family = matches!(
+            self.peek_indented_operator_continuation(),
+            Some(
+                TokenKind::Eq
+                    | TokenKind::NotEq
+                    | TokenKind::Is
+                    | TokenKind::In
+                    | TokenKind::Lt
+                    | TokenKind::Gt
+                    | TokenKind::LtEq
+                    | TokenKind::GtEq
+            )
+        );
+        if is_family {
+            self.binary_indent_count += self.skip_newlines_and_indents_for_method_chain();
+        }
+    }
+
     // Equality and membership operators (manual for `not in` support)
     pub(crate) fn parse_equality(&mut self) -> Result<Expr, ParseError> {
         let mut left = self.parse_comparison()?;
         loop {
+            // Case 2: leading-operator line continuation (`a\n    == b`).
+            // No-op when an operator is already the current token.
+            self.skip_leading_comparison_continuation();
             let kind = self.current.kind.clone();
             let op = match &kind {
                 TokenKind::Eq => BinOp::Eq,
@@ -211,6 +259,12 @@ impl<'a> Parser<'a> {
     pub(crate) fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
         let left = self.parse_range()?;
 
+        // Case 2: leading-operator line continuation (`a\n    < b`). This must
+        // run BEFORE the "is there a comparison at all?" probe below —
+        // otherwise the probe sees a `Newline`, returns `left` untouched, and
+        // the continuation is never reachable.
+        self.skip_leading_comparison_continuation();
+
         // Check if there's a comparison operator
         let op = match &self.current.kind {
             TokenKind::Lt => Some(BinOp::Lt),
@@ -229,6 +283,9 @@ impl<'a> Parser<'a> {
         let mut prev_right = left;
 
         loop {
+            // Keep chained comparisons (`a\n    < b\n    < c`) continuable.
+            // No-op on the first iteration: `current` is already the operator.
+            self.skip_leading_comparison_continuation();
             let op = match &self.current.kind {
                 TokenKind::Lt => BinOp::Lt,
                 TokenKind::Gt => BinOp::Gt,

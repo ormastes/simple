@@ -2,13 +2,30 @@
 
 ## Status
 
-OPEN, SEED-ONLY. Not a regression from the `elif`-specific fix landed the same
-day (see `elif_condition_continuation_is_still_unsupported` in
-`src/compiler_rust/parser/src/expressions/binary.rs`); it is a pre-existing,
-orthogonal gap in the Rust seed's layout-token bookkeeping that this task
-explicitly scoped out (touching it means changing how INDENT/DEDENT interact
-with expression parsing — a statement/expression boundary change, not a
-contained patch).
+**CLOSED 2026-08-01.** Fixed in source by `parse_condition_block`; see
+`elif_condition_deep_continuation_indent_ambiguity_is_now_supported` in
+`src/compiler_rust/parser/src/expressions/binary.rs`.
+
+Re-measured 2026-08-01 with `cargo test -p simple-parser` against the TIP
+crate: a 27-cell sweep (`if` and `elif`, operators `==` and `or`, continuation
+columns 5..13 with the header at col 4 and the block body at col 8) is
+**PARSE_OK in every cell**. The originally reported boundary — "cols 5-8 parse,
+cols 9-13 do not" — no longer reproduces at tip.
+
+Why the report outlived the fix: the boundary was measured against the
+**deployed `bin/simple_seed`**, a 2026-07-25 build that predates
+`parse_condition_block`. Probing with that binary reproduces already-fixed
+parser bugs verbatim, indistinguishable from open gaps. Always re-measure a
+seed parser claim with `cargo test -p simple-parser` at tip.
+
+Downstream correction: `scripts/check/check-seed-parse-superset.shs` carried
+this boundary as "RULE B" and was therefore **rejecting legal code**. RULE B
+has been deleted and its two fixtures re-pinned as must-NOT-flag negatives so
+it cannot be reintroduced. See
+`parser_leading_operator_line_continuation_2026-08-01.md`.
+
+The original analysis below is retained for the record; it describes the
+mechanism that `parse_condition_block` now handles.
 
 ## Reproduction
 

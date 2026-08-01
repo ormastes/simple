@@ -1,8 +1,10 @@
 # Leading-operator line continuation does not parse — breaks a landed frozen contract file
 
 **Date:** 2026-08-01
-**Status:** FIXED (self-hosted frontend) — see "Fix" below. One narrower seed
-gap remains open and is recorded there.
+**Status:** FIXED (self-hosted frontend 2026-08-01; Rust bootstrap seed
+2026-08-01). The seed/self-hosted divergence is now CLOSED in source — see
+"CLOSED 2026-08-01" below. The only residue is that the DEPLOYED
+`bin/simple_seed` binary predates the seed fix and still needs a redeploy.
 **Severity:** HIGH — `src/lib/common/ui/gpu_web_capacity_manifest.spl`, a frozen
 C0 contract already on `main`, currently fails to parse, so every module that
 imports it is unbuildable
@@ -179,13 +181,94 @@ Regression spec:
 covers the operator family and both negative shapes above, and it fails to
 parse without the fix (verified: PARSE_FAILED before, PARSE_OK after).
 
-## Still open: the Rust bootstrap seed rejects leading comparison/equality
+## CLOSED 2026-08-01: the Rust bootstrap seed now accepts the same family
 
-The seed accepts leading `+ - * / % and or`, but rejects a leading
-`== != < > <= >=` and a leading operator inside an `if`/`while` condition with
-`Unexpected token: expected Colon, found Newline`. `023a60a05aa` fixed the
-TRAILING form for those same hand-written `parse_comparison` / `parse_equality`
-productions in `parser/src/expressions/binary.rs`; the LEADING form was not
-part of that change. The self-hosted frontend is now a strict superset, so the
-regression spec deliberately does not assert those cells — the seed is what
-executes specs today.
+**Status: the parser-level seed/self-hosted divergence is CLOSED.** The seed
+previously accepted leading `+ - * / % & ^ << >> and or` but rejected leading
+`== != < > <= >= is in ??`. `023a60a05aa` had fixed the TRAILING form for the
+hand-written `parse_comparison` / `parse_equality` productions; the LEADING
+form was never added to them, and `??` (in `expressions/postfix.rs`) had the
+same gap.
+
+### Root cause
+
+Three productions in `src/compiler_rust/parser/src/` are hand-written rather
+than macro-generated, so none inherited the `parse_binary_*!` macros' "Case 2"
+leading-continuation arm:
+
+| Production | File | Why hand-written | Operators |
+|---|---|---|---|
+| `parse_equality` | `expressions/binary.rs` | special-cases `not in` | `== != is in` |
+| `parse_comparison` | `expressions/binary.rs` | special-cases chaining `a < b < c` | `< > <= >=` |
+| `DoubleQuestion` arm | `expressions/postfix.rs` | postfix loop, not a binary production | `??` |
+
+### Fix
+
+New `Parser::skip_leading_comparison_continuation` in `expressions/binary.rs`,
+called from three sites: the `parse_equality` loop, the `parse_comparison`
+pre-probe (it MUST run before the "is there a comparison at all?" early return,
+or the continuation is unreachable), and the `parse_comparison` chaining loop.
+`expressions/postfix.rs` gained a leading-`??` branch in its existing `Newline`
+arm alongside the leading-`.` method-chain rule.
+
+The rule MIRRORS the self-hosted `leading_op_continues` rather than inventing a
+new one. It reuses `peek_indented_operator_continuation` (already used by the
+`indent_required` variant for `+`/`-`), which enforces guard 2 above — the
+continuation must be on a STRICTLY more deeply indented line — and returns
+`None` on a `Dedent`, so a shallower line can never continue an expression.
+`not in` is deliberately excluded from the leading form: bare `not` is a legal
+statement start, so accepting it would violate guard 3.
+
+### Verification
+
+All measurements used `cargo test -p simple-parser` against the TIP crate, NOT
+the deployed `bin/simple_seed` — that binary is a 2026-07-25 build and
+reproduces already-fixed bugs verbatim, which is how three lanes chased phantom
+defects this session.
+
+- Regression gate: `src/compiler_rust/parser/tests/leading_comparison_continuation.rs`.
+  RED before the fix (5 of 8 tests failing), GREEN after (8/8). It carries two
+  controls that pass in BOTH states: a same-indent `< b` that must NOT be glued,
+  and a set of deliberate syntax errors that must stay rejected.
+- Full parser suite: 927 tests across 40 binaries, 0 failures.
+- Corpus differential: all 13,807 `.spl` files under `src/` parsed with the
+  pre-fix and post-fix parser. **Zero** files changed verdict (13,637 OK both
+  ways) — the change is purely additive.
+
+### Correction: the `if`/`elif` indent boundary was ALREADY closed
+
+The companion report
+`seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md`
+recorded that an `if`/`elif` condition continuation indented strictly deeper
+than the block body was rejected (with `if` at col 4 and body at col 8:
+cols 5-8 parse, 9-13 do not). **That is stale.** Measured on the tip crate
+BEFORE this change, a 27-cell sweep (`if`/`elif` x `==`/`or` x cols 5..13) is
+PARSE_OK in every cell — `parse_condition_block` had already fixed it. The
+original measurement was taken against the stale deployed seed binary.
+
+Consequence: `scripts/check/check-seed-parse-superset.shs` RULE B was rejecting
+legal code and has been deleted. Its two RULE B fixtures are now pinned as
+must-NOT-flag negatives so it cannot be reintroduced.
+
+### Guard status
+
+`scripts/check/check-seed-parse-superset.shs` was narrowed, not deleted:
+
+- RULE A (the operator family) is retained ONLY as a stale-binary gate: the
+  deployed `bin/simple_seed` predates this fix, so bootstrap-path source must
+  not start using the newly-legal forms until the seed binary is redeployed
+  (another lane owns that). The scan has a documented removal condition.
+- RULE B deleted (see above).
+- NEW `assert_seed_fix_present` asserts the three leading-operator branches are
+  still present in the seed source and fails loudly if the divergence reopens.
+  Proven non-vacuous: reverting `binary.rs`, reverting `postfix.rs`, and
+  deleting the regression test each make the guard exit 1.
+- Selftest grew 17 -> 19 fixtures (9 must-flag, 10 must-not-flag); the
+  fail-on-zero-files check is unchanged. Full scan still PASSes: 11,304
+  bootstrap-path files, 0 hits.
+
+### Not fixed here (pre-existing, unrelated)
+
+The seed accepts `val x = a ==` followed by a dedented `return x`, gluing the
+`return` in as the RHS of the trailing `==`. Found while building the
+deliberate-syntax-error control; it predates this change and is out of scope.

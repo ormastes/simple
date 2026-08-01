@@ -762,6 +762,23 @@ impl<'a> Parser<'a> {
                     if self.peek_through_newlines_and_indents_is(&TokenKind::Dot) {
                         consumed_indents += self.skip_newlines_and_indents_for_method_chain();
                         // Now self.current should be Dot, continue the loop
+                    } else if matches!(
+                        self.peek_indented_operator_continuation(),
+                        Some(TokenKind::DoubleQuestion)
+                    ) {
+                        // Leading-operator line continuation for `??`
+                        // (`a\n    ?? b`). The trailing form (`a ??\n  b`) was
+                        // already handled in the `DoubleQuestion` arm above;
+                        // the leading form was the last member of the
+                        // comparison/equality family the seed still rejected
+                        // while the self-hosted parser accepted it. See
+                        // doc/08_tracking/bug/
+                        // parser_leading_operator_line_continuation_2026-08-01.md
+                        // and `skip_leading_comparison_continuation` in
+                        // expressions/binary.rs for why the continuation must
+                        // sit on a STRICTLY more deeply indented line.
+                        consumed_indents += self.skip_newlines_and_indents_for_method_chain();
+                        // Now self.current should be DoubleQuestion; loop.
                     } else {
                         break;
                     }

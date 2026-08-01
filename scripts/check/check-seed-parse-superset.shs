@@ -18,9 +18,10 @@
 # branch -- src/compiler_rust/parser/src/expressions/binary.rs:
 #     parse_equality    -- ==  !=  is  in  (it special-cases `not in`)
 #     parse_comparison  -- <   >   <=  >=  (it special-cases chaining a<b<c)
-# Both carry only the TRAILING form added by 023a60a05aa. The macro-generated
-# productions (parse_term/parse_factor/parse_or/parse_and/parse_shift/...) DO
-# have the leading branch, so + - * / % & ^ << >> and or are fine.
+# plus `??` in expressions/postfix.rs. All three carried only the TRAILING form
+# added by 023a60a05aa. The macro-generated productions (parse_term/
+# parse_factor/parse_or/parse_and/parse_shift/...) DO have the leading branch,
+# so + - * / % & ^ << >> and or were always fine.
 #
 # The seed is what compiles the compiler. scripts/bootstrap/bootstrap-from-
 # scratch.sh stage 2 runs it as
@@ -31,20 +32,42 @@
 # "Unexpected token: expected expression, found Indent" in a file nobody
 # touched.
 #
+# ===========================================================================
+# STATUS 2026-08-01: THE PARSER-LEVEL DIVERGENCE IS CLOSED IN SOURCE.
+# ===========================================================================
+# The seed's three missing leading-operator branches were added (see
+# `assert_seed_fix_present` below for the anchors this script now pins). The
+# scan that follows is retained for ONE remaining reason only: the DEPLOYED
+# `bin/simple_seed` binary predates the fix, so bootstrap-path source that
+# starts using the newly-legal forms cannot be compiled by a developer's stale
+# seed until it is redeployed. This is a STALE-BINARY gate, no longer a
+# grammar gate.
+#
+#   REMOVE THE SCAN once the seed binary is redeployed from a tree containing
+#   the fix. Keep `assert_seed_fix_present` -- that is what fails loudly if the
+#   parser fix is ever reverted and the divergence reopens.
+#
 # MEASURED SEED BEHAVIOUR
 # -----------------------
-# One file per cell, run through the seed's own parser
-# (src/compiler_rust/target/release/simple). 34 cells, and the detector below
-# agrees with the seed on all 34.
+# Measured with `cargo test -p simple-parser` against the TIP crate (NOT the
+# deployed bin/simple_seed, which is a 2026-07-25 build and reproduces
+# already-fixed bugs verbatim). Probe: parser/tests/leading_comparison_
+# continuation.rs, and a 27-cell if/elif indent sweep.
 #
 #   Leading operator, statement level:
-#     REJECTED  ==  !=  ??  <  >  <=  >=  is  in
-#     ACCEPTED  +  -  *  /  %  &  ^  <<  >>  and  or
+#     BEFORE 2026-08-01 fix  REJECTED  ==  !=  ??  <  >  <=  >=  is  in
+#     AFTER                  ACCEPTED  -- all of them, when the continuation
+#                            line is indented STRICTLY DEEPER (the same guard
+#                            the self-hosted `leading_op_continues` applies).
+#     ALWAYS ACCEPTED        +  -  *  /  %  &  ^  <<  >>  and  or
 #   Leading operator continuing an `if`/`elif` CONDITION header:
-#     REJECTED  when the continuation line is indented STRICTLY DEEPER than the
-#               block BODY. Measured with `if` at column 4 and body at column 8:
-#               continuation indent 5,6,7,8 parse; 9,10,11,12,13 do not.
-#     ACCEPTED  otherwise. `while` conditions are unaffected.
+#     ACCEPTED at every continuation indent. The old "rejected when indented
+#     strictly deeper than the block body (cols 9-13 with if@4 body@8)" rule
+#     was measured against the STALE deployed seed; `parse_condition_block`
+#     had already fixed it in source before this change. A 27-cell sweep
+#     (if/elif x `==`/`or` x cols 5..13) is PARSE_OK on the tip crate, so that
+#     rule was DELETED from the detector -- it was rejecting legal code.
+#     `while` conditions were never affected.
 #   Trailing operator (`a ==` newline `b`): ACCEPTED (023a60a05aa).
 #   Anything inside unclosed ( [ { : ACCEPTED -- both parsers suppress layout
 #     inside brackets, so bracket-enclosed continuations are never flagged.
@@ -179,33 +202,17 @@ END {
             else if (b ~ /^>[^>=]/ || b == ">") why = "leading '>': seed parse_comparison has no leading-operator branch"
             else if (b ~ /^(is|in)([ \t(]|$)/)  why = "leading '" substr(b,1,2) "': seed parse_equality has no leading-operator branch"
 
+            # RULE B (`if`/`elif` condition continuation indented deeper than
+            # the block body) was DELETED on 2026-08-01. It was measured
+            # against the stale deployed seed; `parse_condition_block` had
+            # already fixed that shape in source, and a 27-cell sweep on the
+            # tip crate is PARSE_OK at every continuation indent. Keeping it
+            # would have rejected legal code. See the header.
+
             if (why != "") {
                 printf "%s:%d: %s\n", FILENAME, i, why
                 printf "    %s\n", substr(LINE[i], 1, 120)
                 hits++
-            } else if (BODY[head] ~ /^(if|elif)([ \t(]|$)/ &&
-                       (b ~ /^(\+|-|\*|\/|%|&|\^)/ || b ~ /^(<<|>>)/ ||
-                        b ~ /^(and|or)([ \t(]|$)/)) {
-                # RULE B -- `if`/`elif` CONDITION continuation. The seed's
-                # parse_if indent bookkeeping only survives while the
-                # continuation is indented NO DEEPER THAN THE BLOCK BODY.
-                body_ind = -1
-                for (j = i; j <= N; j++) {
-                    if (SKIP[j]) continue
-                    if (CODE[j] ~ /:[ \t]*$/) {           # header terminator
-                        for (k = j + 1; k <= N; k++) {
-                            if (SKIP[k]) continue
-                            body_ind = IND[k]
-                            break
-                        }
-                        break
-                    }
-                }
-                if (body_ind >= 0 && IND[i] > body_ind) {
-                    printf "%s:%d: leading operator in an if/elif condition indented deeper than the block body (%d > %d): seed parse_if loses its indent bookkeeping\n", FILENAME, i, IND[i], body_ind
-                    printf "    %s\n", substr(LINE[i], 1, 120)
-                    hits++
-                }
             }
             is_cont = 1
         }
@@ -225,7 +232,7 @@ AWK_EOF
 # Self-test. Every fixture's expected verdict was measured against the seed;
 # see the table at the top of this file. A wrong verdict fails the script.
 # ---------------------------------------------------------------------------
-SELFTEST_EXPECTED=17
+SELFTEST_EXPECTED=19
 
 selftest() {
     st_dir="$WORK_DIR/selftest"
@@ -240,11 +247,16 @@ selftest() {
     printf 'fn f(a: i64, b: [i64]) -> bool:\n    val x = a\n        in b\n    x\n' > "$st_dir/pos_in.spl"
     printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        is b\n    x\n'   > "$st_dir/pos_is.spl"
     printf 'fn f(a: i64?, b: i64) -> i64:\n    val x = a\n        ?? b\n    x\n'   > "$st_dir/pos_coalesce.spl"
-    # if-condition continuation DEEPER than the body (measured: reject)
-    printf 'fn f(a: bool, b: bool) -> i64:\n    if a\n         or b:\n        return 1\n    0\n' > "$st_dir/pos_if_deep.spl"
-    printf 'fn f(a: i64, b: i64) -> i64:\n    if a\n            + b:\n        return 1\n    0\n' > "$st_dir/pos_if_plus.spl"
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        < b\n    x\n'    > "$st_dir/pos_lt.spl"
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        >= b\n    x\n'   > "$st_dir/pos_ge.spl"
 
     # ---- MUST NOT BE FLAGGED: seed measured PARSE_OK ----
+    # Former RULE B positives. Measured PARSE_OK on the TIP crate at every
+    # continuation indent (27-cell sweep), so flagging them would reject legal
+    # code. They are pinned as NEGATIVES so RULE B cannot be reintroduced by
+    # accident.
+    printf 'fn f(a: bool, b: bool) -> i64:\n    if a\n         or b:\n        return 1\n    0\n' > "$st_dir/neg_if_deep.spl"
+    printf 'fn f(a: i64, b: i64) -> i64:\n    if a\n            + b:\n        return 1\n    0\n' > "$st_dir/neg_if_plus.spl"
     printf 'fn f(a: i64, b: i64) -> i64:\n    val x = a\n        + b\n    x\n'  > "$st_dir/neg_plus.spl"
     printf 'fn f(a: bool, b: bool) -> bool:\n    val x = a\n        and b\n    x\n' > "$st_dir/neg_and.spl"
     printf 'fn f(a: i64, b: i64) -> i64:\n    val x = a\n        << b\n    x\n' > "$st_dir/neg_shl.spl"
@@ -281,12 +293,65 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "selftest: $st_ran/$SELFTEST_EXPECTED fixtures correct (9 must-flag, 8 must-not-flag)"
+    echo "selftest: $st_ran/$SELFTEST_EXPECTED fixtures correct (9 must-flag, 10 must-not-flag)"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Divergence-closed assertion. The parser-level divergence was closed on
+# 2026-08-01; this pins the three leading-operator branches in the seed source
+# so that reverting the fix FAILS LOUDLY here instead of silently reopening the
+# gap. Anchors are the call sites, not the comments.
+# ---------------------------------------------------------------------------
+assert_seed_fix_present() {
+    af_binary="src/compiler_rust/parser/src/expressions/binary.rs"
+    af_postfix="src/compiler_rust/parser/src/expressions/postfix.rs"
+    af_test="src/compiler_rust/parser/tests/leading_comparison_continuation.rs"
+    af_fail=0
+
+    for af_f in "$af_binary" "$af_postfix" "$af_test"; do
+        if [ ! -f "$af_f" ]; then
+            echo "FAIL: expected seed parser file is missing: $af_f" >&2
+            af_fail=1
+        fi
+    done
+    [ "$af_fail" -eq 0 ] || return 1
+
+    # parse_equality and parse_comparison must both route through the shared
+    # leading-continuation helper (3 call sites: equality loop, comparison
+    # pre-probe, comparison chain loop).
+    af_calls="$(grep -c 'self\.skip_leading_comparison_continuation()' "$af_binary" || true)"
+    if [ "$af_calls" -lt 3 ]; then
+        echo "FAIL: binary.rs has $af_calls skip_leading_comparison_continuation() call sites, expected >= 3." >&2
+        echo "      The leading-operator continuation for == != < > <= >= is in has been REVERTED." >&2
+        af_fail=1
+    fi
+    if ! grep -q 'fn skip_leading_comparison_continuation' "$af_binary"; then
+        echo "FAIL: binary.rs no longer defines skip_leading_comparison_continuation." >&2
+        af_fail=1
+    fi
+    # `??` leading continuation lives in the postfix Newline arm.
+    if ! grep -q 'Some(TokenKind::DoubleQuestion)' "$af_postfix"; then
+        echo "FAIL: postfix.rs no longer takes a leading '??' line continuation." >&2
+        af_fail=1
+    fi
+
+    if [ "$af_fail" -ne 0 ]; then
+        echo "" >&2
+        echo "The seed/self-hosted leading-operator divergence has REOPENED." >&2
+        echo "Run: cargo test -p simple-parser --test leading_comparison_continuation" >&2
+        return 1
+    fi
+    echo "divergence-closed assertion: seed parser carries all 3 leading-operator branches"
     return 0
 }
 
 if ! selftest; then
     echo "FAIL: check-seed-parse-superset selftest failed -- the detector is not trustworthy" >&2
+    exit 1
+fi
+
+if ! assert_seed_fix_present; then
     exit 1
 fi
 
