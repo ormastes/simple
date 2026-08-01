@@ -43,6 +43,25 @@ peer reports.
 - Keep `gpu_web_scene` and DrawIR-v3 C0 contract files read-only unless a schema
   bump is performed with an explicit version bump plan.
 
+### Current design/IR contract check (2026-08-01)
+
+- Reviewed the live IR and rendering design artifacts:
+  - `doc/04_architecture/ui/gpu_web_scene_ports.md`
+  - `doc/05_design/ui/gpu_web_scene_contracts.md`
+  - `doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md`
+  - `src/lib/common/ui/draw_ir_v3_execution_route.spl`
+  - `src/lib/common/ui/draw_ir_v3_ports.spl`
+  - `src/lib/common/ui/gpu_web_ports.spl`
+- These changes are already reflected in the branch and do not require edits to
+  runtime evidence lanes yet; they mainly tighten schema/route semantics and
+  fallback accounting.
+- Plan impact:
+  - Do not apply any additional `gpu_web`/DrawIR contract edits in this lane
+    unless a schema-bump plan is created and approved.
+  - Vulkan/Metal/host WM execution work must continue to treat route/classification
+    evidence (`GPU_ROUTE_*`, `DrawIrV3ExecutionRoute`) as hard requirements, not
+    optional diagnostics.
+
 The latest bounded producer work is recorded in cycles 25–27 below and
 supersedes the older diagnostic summaries. Parsing, cmap, tables, metrics,
 and outline geometry remain localized. A focused cross-module native fixture
