@@ -1,5 +1,21 @@
 # Theme rendering and WM host/simpleOS sync state (2026-07-25)
 
+## 2026-08-01 gh-sync + runderer/IR scan refresh (current run)
+
+- Ran `git fetch --all --prune` from origin.
+- No remote branch/tag/ref contains `runderer` by name (case-insensitive scan across local and remote refs).
+- Tracked IR lane remains `origin/sync-renderer-ir-spec-update` (`2a4bf46c9d`), with top commits:
+  - `2a4bf46c9d` `docs: sync renderer and DrawIR IR spec plan artifacts`
+  - `2277b52949` `test(web): enforce hosted theme receipts`
+  - `f7b8526aa8` `fix(web): preserve themed renderer restarts`
+- `tmp-docfix` is currently clean and still behind `origin/main` by **68 commits** (0 ahead / 68 behind), with **no local uncommitted work** from this sync run.
+- No direct file overlap found in this lane against the IR-tracker scope beyond shared hosted entry/web surfaces:
+  - `src/os/hosted/hosted_entry.spl`
+  - `src/os/hosted/hosted_browser_renderer*`
+  - `src/os/compositor/simple_web_window_renderer.spl`
+  - protocol/evidence spec docs in hosted/web renderer ownership
+- Lane action unchanged: keep focused on host/SimpleOS WM theme snapshot/capture fidelity and `/THEME.CSS` propagation; defer renderer/IR branch/merge changes unless scope is explicitly expanded.
+
 ## 2026-08-01 sync-and-push completion (this run)
 
 - Ran `git fetch --all --prune` from `origin`.
