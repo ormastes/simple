@@ -19,6 +19,7 @@ use compiler.core.tokens.{TOK_KW_AS}
 use compiler.core.tokens.{TOK_PLUS, TOK_MINUS}
 use compiler.core.tokens.{TOK_ASSIGN}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET}
+use compiler.core.tokens.{TOK_RBRACKET, TOK_RBRACE}
 use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_PIPE, TOK_FAT_ARROW}
 use compiler.core.tokens.{TOK_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
@@ -40,6 +41,7 @@ use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
 use compiler.core.ast.{expr_unsafe_block}
 use compiler.frontend.core.lexer.{lex_token_end_get, lex_source_char_at}
+use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
 use compiler.core.ast.{expr_get_arg_names, expr_call_args_set}
 use compiler.core.ast.{stmt_expr_stmt, stmt_val_decl, stmt_if_val_decl, stmt_lazy_val_decl, stmt_var_decl}
@@ -1201,8 +1203,18 @@ fn parse_match_stmt() -> i64:
 # which AST constructor it wraps the result in.
 fn parse_match_arms_common() -> (i64, [i64]):
     val scrutinee = parse_expr()
+    # Enable forced indentation BEFORE consuming the ':' so the newline after
+    # it survives. Inside a call's parens the lexer treats the whole
+    # parenthesized expression as one logical line and emits no
+    # NEWLINE/INDENT/DEDENT at all, so a `match` used as an argument or
+    # struct-literal field value never got the INDENT its arm block expects
+    # ("expected Indent, got IntLit"). Mirrors the Rust seed's
+    # parse_match_expr and the block-bodied lambda path in
+    # _ParserPrimary/primary_expr.spl. Disabled again on every exit below.
+    lex_enable_forced_indentation()
     parser_expect(161)
     parser_skip_newlines()
+    val saw_indent = par_kind_get() == 181
     parser_expect(181)
 
     var arm_indices: [i64] = []
@@ -1214,6 +1226,23 @@ fn parse_match_arms_common() -> (i64, [i64]):
             parser_advance()
             break
         if kind == 190:
+            break
+        # A `match` used as a VALUE inside a call's arg list, a struct-literal
+        # field list or a collection literal ends at that list's separator or
+        # closing bracket, NOT at a DEDENT: the terminator shares the last
+        # arm's line, so the lexer has not flushed a DEDENT yet. Without this
+        # break the terminator fell through to the caseless-arm branch below
+        # and was fed to parse_expr as if it started another pattern, which is
+        # where `Box(a: match x: 1: "one" _: "o", b: x)` failed with
+        # "expected pattern, found Comma" (and `found RParen` when the match
+        # was the LAST element). Leave the terminator unconsumed for the
+        # enclosing list parser and resync the lexer's indent stack, exactly
+        # as the block-bodied lambda path does in
+        # _ParserPrimary/primary_expr.spl.
+        val ends_enclosing_list = kind == TOK_COMMA or kind == TOK_RPAREN or kind == TOK_RBRACKET or kind == TOK_RBRACE
+        if ends_enclosing_list:
+            if saw_indent:
+                lex_pop_indent()
             break
 
         if kind == 44:
@@ -1329,6 +1358,7 @@ fn parse_match_arms_common() -> (i64, [i64]):
                 val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, pattern_binding, rationale)
                 arm_indices.push(arm_idx)
 
+    lex_disable_forced_indentation()
     (scrutinee, arm_indices)
 
 fn parse_match_stmt_tail() -> i64:
