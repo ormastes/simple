@@ -821,3 +821,92 @@ true-positive controls still firing 2/2 and 1/1.**
 which files fail to parse: PARSE001 agrees across both engines, and the
 `.repeat()` defect only adds noise lines and corrupts *fix* text, which a census
 never applies.
+
+## CRASH verdict — LANDED. "Died without a summary" is now a countable outcome
+
+**TODO(lint,P1): a census harness must treat "process died without a summary" as
+a distinct CRASH verdict** — **DONE**, as
+`scripts/check/check-lint-census.shs`.
+
+The NOT-LINTED work above closes the case where lint *runs* and cannot parse a
+file. It cannot close the case where lint **dies**, because nothing in a dead
+process gets to report anything. Both holes are fail-open in the same direction:
+a sweep that scores by summary lines sees a crashed file as absent rather than
+failed, and a sweep that scores by "files that produced no complaint" sees it as
+clean.
+
+The harness gives every file exactly one of four verdicts and never a bucket
+called "checked":
+
+| verdict | meaning |
+|---|---|
+| `LINTED` | analysed; lint reported a summary |
+| `NOT_LINTED` | lint ran, could not parse the file, and said so |
+| `CRASH` | the process ended without emitting a summary line |
+| `TIMEOUT` | the process exceeded the per-file budget |
+
+`CRASH` and `TIMEOUT` are failures of the *instrument*, not verdicts about the
+file, and are counted separately so a clean census cannot quietly have lost
+files. Exit 0 requires every file to be `LINTED` or `NOT_LINTED`; any `CRASH` or
+`TIMEOUT` exits 1; any harness fault exits 2. One process per file, per the
+batching evidence already recorded in this file. The run asserts
+`verdicts == inputs` and ERRORs otherwise, so a harness that dies partway cannot
+be mistaken for a completed census.
+
+### Non-vacuity — PROVED by sabotage, not asserted
+
+Per this file's own standing rule, a count-based check cannot detect selective
+blindness, so the classifier is exercised directly:
+
+    sh scripts/check/check-lint-census.shs --self-test
+
+`--self-test` feeds the **same `classify_run`** the census calls (not a copy)
+synthetic lint output for all four outcomes, including the two shapes that
+matter most: a crash that still exits 0, and a run that emitted real warnings
+and then died — the case a summary-line-counting sweep gets wrong.
+
+RED: `classify_run` gutted to an unconditional `echo "LINTED"; return`
+
+    FAIL  not_linted_json -> LINTED (expected NOT_LINTED)
+    FAIL  crash_arena_oob -> LINTED (expected CRASH)
+    FAIL  crash_rc_zero -> LINTED (expected CRASH)
+    FAIL  crash_after_findings -> LINTED (expected CRASH)
+    FAIL  timeout_124 -> LINTED (expected TIMEOUT)
+    ...
+    FAIL: self-test 9 of 11 classifier cases wrong        (exit 1)
+
+GREEN: implementation restored, byte-identical to the committed file
+
+    PASS: self-test 11 of 11 classifier cases correct     (exit 0)
+
+Gutting the implementation flips 9 of 11 cases. This oracle fails when
+sabotaged, which is the precondition the retracted census failed.
+
+### Live end-to-end run — the reproducer scores CRASH, a live control scores LINTED
+
+Not just synthetic. Binary
+`bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731`, tree = a
+private `git archive` of origin `5ca84bcefe5`, never the shared working copy.
+Two real files in one census, the live reproducer plus a positive control:
+
+    census: inputs=2 verdicts=2 linted=1 not_linted=0 crash=1 timeout=0
+    --- files with no verdict of their own ---
+    CRASH   src/compiler_rust/lib/std/src/tooling/misc_commands.spl   rc=1
+    FAIL: 1 file(s) crashed and 0 timed out without producing a lint
+    summary; they are NOT checked files                   (exit 1)
+
+The control (`LINTED`, rc=0) in the same session rules out a harness that simply
+fails everything. Before this, that same run through the plain CLI produced
+**zero** summary lines and the file was absent from the tally entirely.
+
+### What this does NOT do
+
+It does not make a crashed file's *content* verified — a `CRASH` file has been
+analysed **less** than a `NOT_LINTED` one. It does not lower the per-file lint
+cost, so a repo-wide census is still governed by the throughput numbers above.
+And it is a harness, not a gate: nothing yet runs it in CI.
+
+**TODO(lint,P2): wire `check-lint-census.shs` into the repo verification layer
+so a crashed lint file fails a gate rather than only a manual sweep. Until then
+this is opt-in, and `repo_verification_layer_is_fail_open_2026-07-28.md` still
+applies.**
