@@ -1130,7 +1130,14 @@ impl Lowerer {
                 "capitalize" | "swapcase" | "title" | "titlecase" | "chomp" | "trim_start_matches"
                 | "trim_end_matches" | "removeprefix" | "remove_prefix" | "removesuffix" | "remove_suffix"
                 | "squeeze" | "replace_first" | "push_str" | "pad_left" | "pad_start" | "pad_right" | "pad_end"
-                | "center" | "zfill" | "substr" => Some(TypeId::STRING),
+                | "center" | "zfill" | "substr" | "rev" | "reversed" | "sorted" | "take" | "taken" | "drop"
+                | "dropped" | "skip" => Some(TypeId::STRING),
+                // `partition`/`rpartition` return [before, separator, after].
+                "partition" | "rpartition" => Some(
+                    self.module
+                        .types
+                        .register(HirType::Array { element: TypeId::STRING, size: None }),
+                ),
                 // `find_all`/`find_indices` return an array of BYTE offsets,
                 // the same shape as `.bytes()`.
                 "find_all" | "find_indices" => Some(

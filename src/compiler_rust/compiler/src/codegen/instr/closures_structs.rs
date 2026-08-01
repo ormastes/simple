@@ -1514,6 +1514,14 @@ fn try_compile_builtin_method_call<M: Module>(
         // than a padded default. `args` here EXCLUDES the receiver.
         "substr" if args.len() >= 2 => "rt_string_substr",
         "substr" => "rt_string_substr_from",
+        // See calls.rs: receiver-dispatched in the runtime, because this table
+        // is keyed on the method name alone.
+        "rev" | "reversed" => "rt_reverse",
+        "take" | "taken" => "rt_take",
+        "drop" | "dropped" | "skip" => "rt_drop",
+        "sorted" => "rt_string_sorted",
+        "partition" => "rt_string_partition",
+        "rpartition" => "rt_string_rpartition",
         // Full alias sets, matching interpreter_method/string.rs:76-77.
         "to_upper" | "upper" | "up" | "uppercase" | "to_uppercase" => "rt_string_to_upper",
         "to_lower" | "lower" | "down" | "lowercase" | "to_lowercase" => "rt_string_to_lower",

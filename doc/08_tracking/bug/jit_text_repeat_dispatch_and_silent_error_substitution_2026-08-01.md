@@ -564,3 +564,110 @@ table, so the C lane agrees with the other two on all input.
 Ten of the twelve are the receiver-polymorphic set (all also array methods) and
 need `rt_at`-style receiver dispatch; `parse_i64` and `ptr` are the two
 documented non-transcription cases.
+
+---
+
+# Update 2026-08-01 (batch 5): 12 -> 2
+
+## Landed: 10 receiver-polymorphic methods via 6 new runtime functions
+
+`rev`, `reversed`, `sorted`, `take`, `taken`, `drop`, `dropped`, `skip`,
+`partition`, `rpartition`.
+
+Every one of these names is ALSO an array method, and the dispatch tables in
+`codegen/instr/{calls,closures_structs}.rs` are keyed on the method NAME with no
+receiver type. Two different answers were needed, and picking the wrong one
+would have been a silent wrong answer rather than a loud failure:
+
+- **Receiver-dispatched in the runtime** (`rt_at`/`rt_array_at` precedent):
+  `rt_reverse`, `rt_take`, `rt_drop`. Text reverses/takes/drops by CHARACTER,
+  an array by ELEMENT. Implemented for both receivers in both runtimes.
+- **Text-only, and LOUD on anything else:** `rt_string_sorted`,
+  `rt_string_partition`, `rt_string_rpartition`. Ordering an array means
+  ordering tag-boxed values of mixed type and the C runtime has no such
+  comparator; the array `partition` takes a PREDICATE and returns
+  `[passing, failing]` -- a different arity, argument type AND result shape, and
+  it has to invoke a closure. A shared symbol would have had to guess. Instead
+  `refuse_non_text_receiver` prints a diagnostic naming the method and exits 70,
+  the same policy this bug already applies to an unresolved symbol.
+
+`reverse` is deliberately NOT rerouted. It still points at `rt_array_reverse`,
+which reverses IN PLACE and returns a bool for EVERY receiver including text.
+That is a separate wrong mapping; changing it would also change
+`arr.reverse()`'s return value, which is out of scope here. Verified unchanged:
+`[1,2,3].reverse()` prints `[3, 2, 1]` on both engines on both binaries.
+
+### Value evidence (PROVED)
+
+30 real probes + the 2 controls. On pristine `8dd8f17b656`, 28 are JIT-BROKEN;
+after this batch all 30 agree on both engines. The two that already passed on v0
+are `[1,2,3].take(2)` and `[1,2,3].drop(1)` -- statically-typed array receivers
+reach a different, already-working lowering, and they still produce the same
+values after the change. Batches 3 and 4 (24 + 25 probes) were re-run on the new
+binary and are still green.
+
+### The loud-stays-loud control (PROVED)
+
+`[1,2,3].partition(pred)` under the JIT:
+
+| binary | behaviour |
+|---|---|
+| v0 | `Runtime error: unresolved symbol ...` (loud) |
+| v3 | `Runtime error: str.partition was called on a receiver that is not text ...` (loud) |
+
+Loud before, loud after, and the new message names the method and the reason. No
+path was converted from a loud failure into a wrong value. `[3,1,2].sorted()`
+with a statically-typed receiver is unaffected and still prints `[1, 2, 3]` on
+both binaries -- the text-only symbol is a safety net for the erased-receiver
+path, not the route a typed array takes.
+
+### C runtime measured, not just compiled (PROVED)
+
+All 21 C cases printed the same bytes as the interpreter and the JIT, including
+`rev`/`take`/`drop` on multi-byte receivers and all three slots of
+`partition`/`rpartition` in both the hit and miss cases, plus the array
+receivers (`arr_rev` = 3 2 1, `arr_take` = 1 2, `arr_drop` = 2 3).
+
+### Noticed in passing, NOT fixed here
+
+The interpreter's array `partition` only matches `Value::Lambda`, so
+`a.partition(named_fn)` returns `([], [])` instead of partitioning. Pre-existing
+on the unmodified baseline and untouched by this change.
+
+## Remaining 2 -- neither is a transcription job
+
+- **`parse_i64`.** Still blocked on the pre-existing `parse_*` Option/raw-i64
+  mismatch first recorded in batch 1: the interpreter's
+  `parse_int | parse_i32 | parse_i64` arm returns an **Option**
+  (`Value::some`/`Value::none`), while the already-wired
+  `parse_int -> rt_string_to_int` returns a raw `i64` and silently strips it.
+  Reproduced on the unmodified baseline, so it is not introduced here. Wiring
+  `parse_i64` to the same symbol would spread a known defect to a third
+  spelling. The fix is Option-returning runtime entry points for the whole
+  `parse_*` family (`parse_int`, `parse_i32`, `parse_i64`, `parse_float`,
+  `parse_f64`, `parse_f64_safe`), which is a different change from a table edit
+  and should be its own lane.
+- **`ptr`.** The interpreter pins a COPY of the string in a thread-local
+  `PINNED_STRINGS` cache for the process lifetime and returns its address. On
+  the compiled lanes the string's own buffer is already stable and registered,
+  so the honest compiled equivalent is `rt_string_data`, not a second pinned
+  copy -- but that is a semantic DECISION about an SFFI escape hatch (who owns
+  the memory, how long it lives, whether the two engines should even agree),
+  not a transcription of an interpreter arm. Wiring it without that decision
+  would hand callers a pointer with different lifetime rules on each engine,
+  which is precisely the silent-divergence class this document tracks.
+
+## Site list, consolidated
+
+Wiring one text method touches, in the worst case:
+
+1. `runtime/src/value/collections.rs` -- Rust implementation
+2. `src/runtime/runtime_native.c` + `src/runtime/runtime.h` -- C implementation
+3. `compiler/src/codegen/runtime_sffi.rs` -- `RuntimeFuncSpec` signature
+4. `compiler/src/codegen/instr/calls.rs` -- Cranelift method table
+5. `compiler/src/codegen/instr/closures_structs.rs` -- closure/dynamic table
+6. `runtime/src/value/mod.rs` -- `pub use` re-export (silent when missed)
+7. `common/src/runtime_symbols.rs` -- `RUNTIME_SYMBOL_NAMES` (silent when missed)
+8. `compiler/src/hir/lower/expr/mod.rs` -- result-type table (silent when missed,
+   and the 102-probe sweep reports PASS anyway). Needed for EVERY result type
+   that requires boxing, not just bool.

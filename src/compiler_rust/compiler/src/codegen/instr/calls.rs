@@ -3320,6 +3320,27 @@ pub fn compile_call<M: Module>(
                 // includes the receiver.
                 "substr" if args.len() >= 3 => Some("rt_string_substr"),
                 "substr" => Some("rt_string_substr_from"),
+                // Receiver-polymorphic names: `rev`/`reversed`, `take`/`taken`
+                // and `drop`/`dropped`/`skip` are ALSO array methods
+                // (interpreter_method/collections.rs), and this table is keyed
+                // on the method name with no receiver type. The runtime
+                // functions therefore dispatch on the receiver themselves, the
+                // rt_at/rt_array_at precedent. `reverse` is deliberately NOT
+                // rerouted -- it still points at rt_array_reverse below, which
+                // is a separate known-wrong mapping (in-place, returns bool,
+                // for every receiver) tracked in the bug doc; changing it here
+                // would also change `arr.reverse()`'s return value.
+                "rev" | "reversed" => Some("rt_reverse"),
+                "take" | "taken" => Some("rt_take"),
+                "drop" | "dropped" | "skip" => Some("rt_drop"),
+                // TEXT-ONLY, and loud on any other receiver rather than
+                // guessing. `sorted` would need a comparator over tag-boxed
+                // values that the C runtime does not have, and the array
+                // `partition` takes a PREDICATE and returns [passing, failing]
+                // -- a different arity, argument type and result shape.
+                "sorted" => Some("rt_string_sorted"),
+                "partition" => Some("rt_string_partition"),
+                "rpartition" => Some("rt_string_rpartition"),
                 // The interpreter folds five spellings into one arm each
                 // (interpreter_method/string.rs:76-77); only two of each were
                 // wired here, so `up`/`uppercase`/`to_uppercase` and their

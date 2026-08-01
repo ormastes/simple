@@ -3944,6 +3944,204 @@ int64_t rt_string_substr_from(int64_t value, int64_t start) {
     return rt_string_new((const uint8_t*)s->data + b, s->len - b);
 }
 
+/* Refuse a non-text receiver LOUDLY.
+ *
+ * The dispatch tables are keyed on the method NAME only, with no receiver type,
+ * so a name shared with an array method reaches the text entry point with the
+ * wrong receiver. Returning a plausible-looking value there is how this whole
+ * bug started. These names had no compiled implementation at all before, so
+ * exiting is exactly as loud as the behaviour it replaces, never quieter. */
+static void rt_refuse_non_text_receiver(const char* method) {
+    fprintf(stderr,
+            "Runtime error: str.%s was called on a receiver that is not text. "
+            "This method has no compiled implementation for that receiver type -- "
+            "a code-generation dispatch gap, not a program error. Refusing to "
+            "substitute a value.\n",
+            method);
+    exit(70);
+}
+
+/* Reverse the CHARACTERS of a runtime string (helper, no receiver check). */
+static int64_t rt_string_reverse_chars(RtCoreString* s) {
+    if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    char* out = (char*)malloc((size_t)s->len);
+    if (!out) return rt_core_nil();
+    uint64_t o = s->len;
+    for (uint64_t i = 0; i < s->len;) {
+        uint64_t w = rt_utf8_width(s->data, i, s->len);
+        o -= w;
+        memcpy(out + o, s->data + i, (size_t)w);
+        i += w;
+    }
+    int64_t result = rt_string_new((const uint8_t*)out, s->len);
+    free(out);
+    return result;
+}
+
+/* rev / reversed: reverse by CHARACTER for text, by ELEMENT for an array.
+ * Receiver-dispatched, following the rt_at/rt_array_at precedent.
+ *
+ * The pre-existing `reverse` mapping is deliberately left alone -- it points at
+ * rt_array_reverse, which this file has never defined, so `arr.reverse()` is
+ * unresolved on the native lane today and is tracked separately. */
+int64_t rt_reverse(int64_t receiver) {
+    /* rt_core_as_array validates the header; SplArray* carries the tagged
+     * value directly, exactly as rt_array_len_safe does. */
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr) {
+        int64_t n = rt_array_len(arr);
+        SplArray* out = rt_array_new(n > 0 ? n : 0);
+        if (!out) return rt_core_nil();
+        for (int64_t i = n - 1; i >= 0; i--) rt_array_push(out, rt_array_get(arr, i));
+        return (int64_t)(uintptr_t)out;
+    }
+    RtCoreString* s = rt_core_as_string(receiver);
+    if (!s) rt_refuse_non_text_receiver("rev");
+    return rt_string_reverse_chars(s);
+}
+
+/* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
+ * A negative n yields an empty result, matching the saturating eval_arg_usize. */
+int64_t rt_take(int64_t receiver, int64_t n) {
+    if (n < 0) n = 0;
+    /* rt_core_as_array validates the header; SplArray* carries the tagged
+     * value directly, exactly as rt_array_len_safe does. */
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr) {
+        int64_t len = rt_array_len(arr);
+        int64_t take = n < len ? n : len;
+        SplArray* out = rt_array_new(take > 0 ? take : 0);
+        if (!out) return rt_core_nil();
+        for (int64_t i = 0; i < take; i++) rt_array_push(out, rt_array_get(arr, i));
+        return (int64_t)(uintptr_t)out;
+    }
+    RtCoreString* s = rt_core_as_string(receiver);
+    if (!s) rt_refuse_non_text_receiver("take");
+    uint64_t e = 0;
+    int64_t taken = 0;
+    while (e < s->len && taken < n) { e += rt_utf8_width(s->data, e, s->len); taken++; }
+    return rt_string_new((const uint8_t*)s->data, e);
+}
+
+/* drop / dropped / skip: all but the first n CHARACTERS / ELEMENTS. */
+int64_t rt_drop(int64_t receiver, int64_t n) {
+    if (n < 0) n = 0;
+    /* rt_core_as_array validates the header; SplArray* carries the tagged
+     * value directly, exactly as rt_array_len_safe does. */
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr) {
+        int64_t len = rt_array_len(arr);
+        int64_t start = n < len ? n : len;
+        SplArray* out = rt_array_new(len - start > 0 ? len - start : 0);
+        if (!out) return rt_core_nil();
+        for (int64_t i = start; i < len; i++) rt_array_push(out, rt_array_get(arr, i));
+        return (int64_t)(uintptr_t)out;
+    }
+    RtCoreString* s = rt_core_as_string(receiver);
+    if (!s) rt_refuse_non_text_receiver("drop");
+    uint64_t b = 0;
+    int64_t skipped = 0;
+    while (b < s->len && skipped < n) { b += rt_utf8_width(s->data, b, s->len); skipped++; }
+    return rt_string_new((const uint8_t*)s->data + b, s->len - b);
+}
+
+/* sorted on TEXT: the receiver's characters in codepoint order.
+ *
+ * TEXT ONLY, on purpose, in BOTH runtimes. Ordering an array means ordering
+ * tag-boxed values of mixed type, and this file has no such comparator (nor an
+ * rt_array_sorted). Implementing it in the Rust runtime alone would make the
+ * lanes disagree on arr.sorted(); declining loudly keeps them identical and
+ * leaves array `sorted` exactly as unwired as it already is. */
+int64_t rt_string_sorted(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) rt_refuse_non_text_receiver("sorted");
+    if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    /* Collect codepoint spans, insertion-sort them by codepoint value, emit. */
+    uint64_t n = 0;
+    for (uint64_t i = 0; i < s->len; i += rt_utf8_width(s->data, i, s->len)) n++;
+    uint64_t* off = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
+    uint64_t* wid = (uint64_t*)malloc((size_t)n * sizeof(uint64_t));
+    uint32_t* cp  = (uint32_t*)malloc((size_t)n * sizeof(uint32_t));
+    if (!off || !wid || !cp) { free(off); free(wid); free(cp); return value; }
+    uint64_t k = 0;
+    for (uint64_t i = 0; i < s->len;) {
+        uint64_t w = rt_utf8_width(s->data, i, s->len);
+        uint32_t c;
+        unsigned char lead = (unsigned char)s->data[i];
+        if (w == 1) c = lead;
+        else if (w == 2) c = ((uint32_t)(lead & 0x1F) << 6) | ((unsigned char)s->data[i+1] & 0x3F);
+        else if (w == 3) c = ((uint32_t)(lead & 0x0F) << 12) | (((unsigned char)s->data[i+1] & 0x3F) << 6)
+                             | ((unsigned char)s->data[i+2] & 0x3F);
+        else c = ((uint32_t)(lead & 0x07) << 18) | (((unsigned char)s->data[i+1] & 0x3F) << 12)
+                 | (((unsigned char)s->data[i+2] & 0x3F) << 6) | ((unsigned char)s->data[i+3] & 0x3F);
+        off[k] = i; wid[k] = w; cp[k] = c; k++;
+        i += w;
+    }
+    for (uint64_t i = 1; i < n; i++) {
+        uint64_t o = off[i], w = wid[i]; uint32_t c = cp[i];
+        int64_t j = (int64_t)i - 1;
+        while (j >= 0 && cp[j] > c) { off[j+1] = off[j]; wid[j+1] = wid[j]; cp[j+1] = cp[j]; j--; }
+        off[j+1] = o; wid[j+1] = w; cp[j+1] = c;
+    }
+    char* out = (char*)malloc((size_t)s->len);
+    if (!out) { free(off); free(wid); free(cp); return value; }
+    uint64_t o = 0;
+    for (uint64_t i = 0; i < n; i++) { memcpy(out + o, s->data + off[i], (size_t)wid[i]); o += wid[i]; }
+    int64_t result = rt_string_new((const uint8_t*)out, o);
+    free(out); free(off); free(wid); free(cp);
+    return result;
+}
+
+/* Shared body for partition / rpartition: [before, separator, after].
+ * An empty or absent separator puts the receiver in the FIRST slot for
+ * partition and the LAST slot for rpartition, matching the interpreter arms. */
+static int64_t rt_string_partition_at(int64_t value, int64_t sep_value, int from_end, const char* who) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) rt_refuse_non_text_receiver(who);
+    RtCoreString* sep = rt_core_as_string(sep_value);
+    SplArray* out = rt_array_new(3);
+    if (!out) return rt_core_nil();
+    int64_t hit = -1;
+    if (sep && sep->len > 0 && sep->len <= s->len) {
+        if (from_end) {
+            for (int64_t i = (int64_t)(s->len - sep->len); i >= 0; i--) {
+                if (memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) { hit = i; break; }
+            }
+        } else {
+            for (uint64_t i = 0; i + sep->len <= s->len; i++) {
+                if (memcmp(s->data + i, sep->data, (size_t)sep->len) == 0) { hit = (int64_t)i; break; }
+            }
+        }
+    }
+    if (hit >= 0) {
+        rt_array_push(out, rt_string_new((const uint8_t*)s->data, (uint64_t)hit));
+        rt_array_push(out, rt_string_new((const uint8_t*)sep->data, sep->len));
+        rt_array_push(out, rt_string_new((const uint8_t*)s->data + hit + sep->len,
+                                         s->len - (uint64_t)hit - sep->len));
+    } else if (from_end) {
+        rt_array_push(out, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(out, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(out, rt_string_new((const uint8_t*)s->data, s->len));
+    } else {
+        rt_array_push(out, rt_string_new((const uint8_t*)s->data, s->len));
+        rt_array_push(out, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(out, rt_string_new((const uint8_t*)"", 0));
+    }
+    return (int64_t)(uintptr_t)out;
+}
+
+/* partition: split at the FIRST occurrence. TEXT ONLY -- the array `partition`
+ * takes a PREDICATE and returns [passing, failing], a different arity, argument
+ * type and result shape, and invoking a closure is not possible from here. */
+int64_t rt_string_partition(int64_t value, int64_t sep) {
+    return rt_string_partition_at(value, sep, 0, "partition");
+}
+
+/* rpartition: split at the LAST occurrence. */
+int64_t rt_string_rpartition(int64_t value, int64_t sep) {
+    return rt_string_partition_at(value, sep, 1, "rpartition");
+}
+
 /* replace_first: replace only the FIRST occurrence of `pattern`. */
 int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacement) {
     RtCoreString* s = rt_core_as_string(value);

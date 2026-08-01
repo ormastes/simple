@@ -2527,6 +2527,166 @@ pub extern "C" fn rt_string_substr_from(string: RuntimeValue, start: i64) -> Run
     new_string(&out)
 }
 
+/// Refuse a non-text receiver LOUDLY.
+///
+/// The dispatch tables in `codegen/instr/{calls,closures_structs}.rs` are keyed
+/// on the method NAME only -- they have no receiver type -- so a name shared
+/// with an array or dict method reaches the text entry point with the wrong
+/// receiver. Returning a plausible-looking value there is how this whole bug
+/// started: it trades a loud failure for a silent wrong answer. These names had
+/// no compiled implementation at all before, so exiting here is exactly as loud
+/// as the behaviour it replaces, and never quieter.
+fn refuse_non_text_receiver(method: &str) -> ! {
+    eprintln!(
+        "Runtime error: str.{method} was called on a receiver that is not text. \
+         This method has no compiled implementation for that receiver type -- a \
+         code-generation dispatch gap, not a program error. Refusing to \
+         substitute a value."
+    );
+    std::process::exit(70);
+}
+
+/// `rev` / `reversed`: reverse by CHARACTER for text, by ELEMENT for an array.
+///
+/// Receiver-dispatched, following the `rt_at`/`rt_array_at` precedent: the
+/// dispatch table cannot tell the two receivers apart, so the runtime must.
+///
+/// NOTE the pre-existing `reverse` mapping is deliberately left alone. It points
+/// at `rt_array_reverse`, which reverses IN PLACE and returns a bool, for EVERY
+/// receiver including text. That is a separate wrong mapping tracked in
+/// doc/08_tracking/bug/jit_text_repeat_dispatch_and_silent_error_substitution_2026-08-01.md;
+/// changing it here would also change `arr.reverse()`'s return value, which is
+/// out of scope for this fix.
+#[no_mangle]
+pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        return rt_array_reversed(receiver);
+    }
+    match string_as_str(receiver) {
+        Some(s) => new_string(&s.chars().rev().collect::<String>()),
+        None => refuse_non_text_receiver("rev"),
+    }
+}
+
+/// `take` / `taken`: first `n` CHARACTERS of text, or first `n` ELEMENTS of an
+/// array. Receiver-dispatched. A negative `n` yields an empty result, matching
+/// the saturating `eval_arg_usize` the interpreter now uses.
+#[no_mangle]
+pub extern "C" fn rt_take(receiver: RuntimeValue, n: i64) -> RuntimeValue {
+    let n = n.max(0);
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        let len = rt_array_len(receiver);
+        let take = n.min(len.max(0));
+        let out = rt_array_new(take.max(0) as u64);
+        for i in 0..take {
+            rt_array_push(out, rt_array_get(receiver, i));
+        }
+        return out;
+    }
+    match string_as_str(receiver) {
+        Some(s) => new_string(&s.chars().take(n as usize).collect::<String>()),
+        None => refuse_non_text_receiver("take"),
+    }
+}
+
+/// `drop` / `dropped` / `skip`: all but the first `n` CHARACTERS of text, or all
+/// but the first `n` ELEMENTS of an array. Receiver-dispatched.
+#[no_mangle]
+pub extern "C" fn rt_drop(receiver: RuntimeValue, n: i64) -> RuntimeValue {
+    let n = n.max(0);
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        let len = rt_array_len(receiver).max(0);
+        let start = n.min(len);
+        let out = rt_array_new((len - start).max(0) as u64);
+        for i in start..len {
+            rt_array_push(out, rt_array_get(receiver, i));
+        }
+        return out;
+    }
+    match string_as_str(receiver) {
+        Some(s) => new_string(&s.chars().skip(n as usize).collect::<String>()),
+        None => refuse_non_text_receiver("drop"),
+    }
+}
+
+/// `sorted` on TEXT: the receiver's characters in codepoint order.
+///
+/// TEXT ONLY, on purpose. `sorted` is also an array method, but ordering an
+/// array means ordering tag-boxed values of mixed type, and the C runtime has no
+/// such comparator (nor an `rt_array_sorted`). Implementing it in the Rust
+/// runtime alone would make the two lanes disagree on `arr.sorted()`; declining
+/// loudly keeps them identical and leaves array `sorted` exactly as unwired as
+/// it is today.
+#[no_mangle]
+pub extern "C" fn rt_string_sorted(string: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        refuse_non_text_receiver("sorted");
+    };
+    let mut chars: Vec<char> = s.chars().collect();
+    chars.sort_unstable();
+    new_string(&chars.into_iter().collect::<String>())
+}
+
+/// Shared body for `partition` / `rpartition`: `[before, separator, after]`.
+///
+/// An empty separator, or a separator that does not occur, yields the receiver
+/// in ONE of the three slots and two empty strings -- first slot for
+/// `partition`, LAST slot for `rpartition`, matching the interpreter arms.
+fn string_partition_at(s: &str, sep: &str, from_end: bool) -> RuntimeValue {
+    let hit = if sep.is_empty() {
+        None
+    } else if from_end {
+        s.rfind(sep)
+    } else {
+        s.find(sep)
+    };
+    let out = rt_array_new(3);
+    match hit {
+        Some(idx) => {
+            rt_array_push(out, new_string(&s[..idx]));
+            rt_array_push(out, new_string(sep));
+            rt_array_push(out, new_string(&s[idx + sep.len()..]));
+        }
+        None if from_end => {
+            rt_array_push(out, new_string(""));
+            rt_array_push(out, new_string(""));
+            rt_array_push(out, new_string(s));
+        }
+        None => {
+            rt_array_push(out, new_string(s));
+            rt_array_push(out, new_string(""));
+            rt_array_push(out, new_string(""));
+        }
+    }
+    out
+}
+
+/// `partition`: split at the FIRST occurrence into `[before, sep, after]`.
+///
+/// TEXT ONLY. `partition` is also an array method, but the array form takes a
+/// PREDICATE and returns `[passing, failing]` -- a different arity, a different
+/// argument type and a different result shape. Guessing between them from a
+/// tagged value would be a silent wrong answer; the array form additionally
+/// needs to invoke a closure, which this runtime cannot do from here.
+#[no_mangle]
+pub extern "C" fn rt_string_partition(string: RuntimeValue, sep: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        refuse_non_text_receiver("partition");
+    };
+    let sep = string_as_str(sep).unwrap_or("");
+    string_partition_at(s, sep, false)
+}
+
+/// `rpartition`: split at the LAST occurrence into `[before, sep, after]`.
+#[no_mangle]
+pub extern "C" fn rt_string_rpartition(string: RuntimeValue, sep: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        refuse_non_text_receiver("rpartition");
+    };
+    let sep = string_as_str(sep).unwrap_or("");
+    string_partition_at(s, sep, true)
+}
+
 /// Check if string starts with prefix
 /// Returns 1 if true, 0 if false
 #[no_mangle]
