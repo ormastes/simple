@@ -690,3 +690,87 @@ It must then execute this hashed probe once before any source fix or Q-FONT
 claim. Q-FONT remains waiting; A-GUEST also remains waiting for the admitted
 compiler. Q-LIVE remains unauthorized and no QEMU/QMP process was launched by
 these delegated lanes.
+
+## 2026-08-01 AC-2 / AC-3 current-evidence audit and resume handoff
+
+This is an evidence audit, not a new live-run claim.  At reviewed revision
+`9892b6f51fd71ac4095b73da6e64272e109087db`, the guest-side WM/theme, Draw IR,
+Engine2D frame, serial-receipt, capture-correlation, and event-route source
+wiring is present.  That source state establishes the AC-2 wiring prerequisite
+only; it does **not** establish AC-3.  No current source-matched admitted
+ELF/FAT32 artifact and no current correlated live-QEMU evidence bundle have
+been retained, so every live row remains pending.
+
+| Acceptance row | Current evidence | Status | Boundary that remains |
+|---|---|---|---|
+| AC-2 — guest WM/theme/render/event wiring | Canonical source routes and the static preflight/spec references listed above; the current theme propagation repair is source-level only. | Wired, not live-proven | A current admitted guest artifact must exercise the route through a visible guest frame. |
+| AC-3 — x86_64 live render/events | The transport classifier and reviewed bug report preserve the negative result. | BLOCKED | `virtio-serial-unimplemented`; x86_64 cannot borrow AArch64 RAM-tail evidence. |
+| AC-3 — RISC-V live render/events | The same classifier and bug report preserve the negative result. | BLOCKED | `virtio-serial-unimplemented`; requires the framed VirtIO serial adapter and its per-ISA queue/IRQ proof. |
+| AC-3 — AArch64/HVF live render/events | File-backed-RAM-tail source/wrapper path exists. | PENDING | Build and admit the current ARM64 ELF/FAT32/manifest set, then obtain the required physical Cocoa-input interval. |
+
+The retained evidence is deliberately negative/diagnostic and must remain
+available to the next owner: the 2026-07-30 x86 serial log
+`serial-vfsfix.log` (SHA-256
+`a8262af1620e0bb513ea66e8f719e0a939b8c8c40fbc849ff9173f258a98a915`), its
+mixed-provenance EFI/font identities recorded above, the unexecuted Q-NIL
+probe at `/private/tmp/simple-q-nil-20260730.YDdE5k/test/02_integration/rendering/font_renderer_receiver_native_probe.spl`
+(SHA-256 `2257670baf4a416a6d9f08061e27dbe64912c2f1907e0a011df6fe718eae7f78`),
+and the transport design/negative classification in
+`doc/08_tracking/bug/simpleos_qemu_virtio_serial_host_gpu_transport_2026-07-30.md`.
+They are failure-analysis inputs, never artifact admission or screenshot proof.
+
+### Exact resume sequence
+
+Q-LIVE is the sole launch/capture/process-cleanup owner.  A-GUEST owns the
+artifact receipt only; Q-TRANSPORT owns the x86_64/RISC-V blocker repair and
+its source-only checks. `/root` remains merge owner, and a separate
+high-capability Codex reviewer is the final reviewer for provenance, manual
+input separation, and per-row conclusion.  No other agent may start QEMU,
+open QMP, reuse a socket, or write the run evidence root.
+
+After a clean current-origin isolated worktree has an admitted pure-Simple
+compiler, sufficient disk headroom, and no competing QEMU/build owner, run
+each bounded prerequisite once in this order:
+
+```sh
+git fetch origin main
+git worktree add --detach /private/tmp/simple-qemu-live-<utc-run-id> origin/main
+cd /private/tmp/simple-qemu-live-<utc-run-id>
+test -z "$(git status --porcelain)"
+sh scripts/check/check-simpleos-qemu-engine2d-simd-kernels.shs
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight
+SIMPLEOS_ARM64_QMP_EVIDENCE_DIR=build/evidence/simpleos-qemu-wm-real-screen-9892b6f51f-<utc-run-id>/diagnostic-qmp sh scripts/check/check-simpleos-arm64-qmp-input-evidence.shs
+```
+
+The final command is diagnostic QMP evidence only.  It cannot satisfy the
+physical-input rows.  Its admitted build inputs must be retained at the same
+run root: `simpleos_arm64_desktop_engine2d.elf`,
+`fat32-arm64-desktop.img`, `make_os_disk`,
+`simpleos_arm64_desktop_engine2d.build-manifest.env`, its frozen-source
+admission manifest, compiler path/version/SHA-256, command, `launch.env`,
+`artifact-sha256.txt`, serial/QMP logs, before/after framebuffer captures,
+macOS QEMU-window captures, `interaction.env`, `render.env`, and no-orphan
+cleanup receipt.
+
+Only after that admission reaches READY may Q-LIVE launch one visible ARM64
+Cocoa QEMU instance with the serial interval open.  The project owner must
+then physically perform, in order, the visible-window click, title-bar drag,
+`a` keypress, Ctrl press, and Ctrl release.  Q-LIVE captures the later frame
+and finalizes the correlation; QMP/AppleScript/synthetic events remain marked
+diagnostic.  Until that human interval exists, ARM64 AC-3 is pending even when
+the diagnostic wrapper passes.
+
+For x86_64 and RISC-V, do not run a live retry after the sequence above. Resume
+only after Q-TRANSPORT implements and tests the framed VirtIO serial endpoint;
+then run the retained required source checks exactly once before a new
+preflight:
+
+```sh
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --self-test-qemu-accel
+SIMPLE_LIB=src bin/simple test test/03_system/os/qemu/simpleos_qemu_host_gpu_2d_spec.spl --mode=interpreter
+sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight
+```
+
+`virtio-serial-unimplemented` remains the correct fail-closed outcome until
+those checks and a fresh admitted per-ISA artifact exist.
