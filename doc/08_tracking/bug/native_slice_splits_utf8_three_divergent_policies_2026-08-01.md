@@ -1,7 +1,9 @@
 # Text slicing at a mid-codepoint boundary: THREE divergent policies, one of them invalid UTF-8
 
-Status: OPEN (evidence + design decision landed; code fix NOT landed — see
-"Why no code landed in this pass")
+Status: OPEN — stage 1 (counting mode) LANDED `2ca6b4da3a9`; stage 2
+(blast-radius measurement) MEASURED, see "Stage 2". Stage 3 (fix the sites) and
+stage 4 (flip to a hard error) are NOT done: the flip is **deferred**, with the
+number that justifies deferring recorded below.
 Measured: 2026-08-01
 
 ## Summary
@@ -120,31 +122,146 @@ break protocol/wire code.
 
 ### Rollout constraint (do not skip)
 
-The blast radius is **not yet measured**. ~7,218 owned text-slice call sites
-exist; only 31 were ever classified (11 AT RISK), so any count quoted from the
-2026-07-31 audit is a *sample, not a census*. Flipping straight to a hard abort
-without measuring risks converting a cosmetic glitch into a toolchain crash.
-Required sequencing:
+~7,218 owned text-slice call sites exist statically; only 31 were ever
+classified (11 AT RISK), so any count quoted from the 2026-07-31 audit is a
+*sample, not a census*. Flipping straight to a hard abort without measuring
+risks converting a cosmetic glitch into a toolchain crash. Required sequencing:
 
 1. Route all five implementations through the single existing validator.
-2. Run in **counting** mode over a real workload (full test suite + a compiler
-   self-build) to enumerate the true call sites that trip it.
-3. Fix those sites, **then** flip the default to a hard error.
+   — **DONE**, `2ca6b4da3a9`.
+2. Run in **counting** mode over a real workload to enumerate the true call
+   sites that trip it. — **DONE**, see "Stage 2": 1,427 violations in 39 spec
+   files over the full 18,704-spec suite.
+3. Fix those sites, **then** flip the default to a hard error. — **OPEN.**
 
-Step 2 is the gate. It must not be skipped, and the eventual default must be
-the error — not a permanently-warning check.
+Step 2 was the gate and it held: the static bound (7,218) overstates the runtime
+blast radius by more than two orders of magnitude in file terms, and the
+measurement is what makes step 3 finite. The eventual default must still be the
+error — not a permanently-warning check.
 
-## Why no code landed in this pass
+## Stage 1 — counting mode (LANDED `2ca6b4da3a9`)
 
-All five implementations sit behind either the C runtime or the Rust seed.
-Verifying a change to either requires relinking the seed binary (a cargo build
-into the shared working tree), which this lane is explicitly forbidden from
-doing (shared clone, ~14 concurrent lanes). Repo precedent is to **revert
-rather than ship unverified** compiler/runtime changes, so only the measured
-evidence and the design decision land here.
+Seven slice implementations across four runtimes report the range they are about
+to return to one audit; each engine's own existing UTF-8 validator decides
+whether the slice turned valid UTF-8 into invalid UTF-8. Gate
+`SIMPLE_UTF8_SLICE_AUDIT`, **default OFF** (`1` = count + log first per site,
+`2` = count + log every occurrence). Nothing fails; no observable behaviour
+changes.
 
-Exact patch points are listed in the family table above; the validator to route
-through is `rt_text_validate_utf8` (`runtime_simd_utf8.c:185`).
+## Stage 2 — measured blast radius (PROVED, 2026-08-01)
+
+Measured with a purpose-built seed binary at base `f7b68068a3e` (`cargo build
+--release --bin simple` in an isolated worktree; **no deployed binary carries
+the audit** — `strings bin/simple` and
+`bin/release/x86_64-unknown-linux-gnu/simple` both match
+`SIMPLE_UTF8_SLICE_AUDIT` **0** times, so no measurement predating this build
+can be real).
+
+### The check is LIVE, not inert (PROVED)
+
+A zero from a check that never ran is indistinguishable from a real zero, so
+every enabled process emits one synthetic `site=self_test` violation, and the
+probe carries aligned controls:
+
+| run | stdout lengths | audit lines |
+|---|---|---|
+| `s[0:2]`, default engine | `bad=2 ok1=1 ok2=3 ok3=6` | `self_test`, **`rt_slice_rust start=0 end=2`** |
+| `s[0:2]`, `SIMPLE_EXECUTION_MODE=interpret` | same | `self_test`, **`interp_bracket start=0 end=2`** |
+| `.slice(0,2)`/`.substring(0,8)`, default | `a=2 b=8` | `self_test`, 2 × `rt_slice_rust` |
+| `.slice(0,2)`/`.substring(0,8)`, interpret | `a=4 b=9` | `self_test`, 2 × `interp_method` |
+| any of the above, gate unset **or** `=0` | unchanged | **0 lines** |
+
+Three independent non-vacuity facts, all PROVED:
+1. The **site name changes with the engine** (`rt_slice_rust` ↔ `interp_bracket`
+   / `interp_method`) — the per-engine true-positive control, proving the two
+   runs really used different engines and that each engine's own hook fired.
+2. The **aligned controls `[0:1]`, `[0:3]`, `[0:6]` produce no lines** — the
+   audit is not simply counting every slice.
+3. The interpreter's lossy divergence reproduces exactly (`a_len` 4 vs 2,
+   `b_len` 9 vs 8), matching the original byte-level evidence above.
+
+### The census
+
+Workload: **all 18,704 `*_spec.spl` under `test/`**, executed one process each
+(`simple run <spec>`, default engine, `SIMPLE_UTF8_SLICE_AUDIT=2`, 25 s cap,
+20-way parallel).
+
+| quantity | value |
+|---|---|
+| spec programs executed | 18,704 |
+| processes that reached the audit (`self_test` fired) | **2,051** (11.0 %) |
+| **real violations** | **1,427** |
+| — `interp_method` (`.slice`/`.substring`) | 833 |
+| — `interp_bracket` (`s[a:b]`) | 594 |
+| — `rt_slice_rust` (Cranelift JIT) | **0** — see caveat |
+| distinct spec files that violate | **39** of 18,704 (0.21 %) |
+| exit codes | 12,524 × 0 · 5,500 × 1 · 675 × timeout · 3 × SIGSEGV · 2 × 70 |
+
+So the earlier "~7,218 candidate sites" is confirmed to be a **static** upper
+bound: at runtime the defect concentrates in **39 spec files**, i.e. a small
+number of production modules — which is exactly why staging mattered. Flipping
+straight to a hard error would have failed those 39 immediately, and the count
+was not knowable without measuring.
+
+**Caveat — the `rt_slice_rust` zero is a COVERAGE GAP, not a live zero.** The
+probe above proves that site fires under the default engine, so the hook is not
+inert; but in-process specs fall back to the interpreter, so the spec suite
+cannot exercise the JIT slice path at all. Do not read 0 as "the JIT is clean".
+
+**Caveat — 5,500 specs exited 1 and 675 timed out at 25 s.** Those are
+pre-existing at this base (the audit is default-off and read-only), but their
+slices are unmeasured, so 1,427 is a **floor**.
+
+**Not measurable here (PROVED, not assumed):** driving the pure-Simple compiler
+(`simple run src/app/cli/main.spl …`, the command the bootstrap uses) produces
+empty stdout, rc 0 and **zero audit lines including no `self_test`** under this
+seed — the Simple `main` never executes, so the compiler-self-build workload
+contributes nothing. The C sites (`rt_slice_c`, `spl_str_slice`,
+`spl_str_slice_legacy`, `rt_slice_simple`) are likewise unexercised: standalone
+`--native` still fails closed with `[CollectionOps]` on any function containing
+a slice.
+
+### Where the 1,427 come from
+
+Grouped by subsystem (violations, spec files):
+
+| subsystem | violations |
+|---|---|
+| `app/office/sheets` formula/locale text | 456 |
+| browser engine + web browser session/renderer | 293 |
+| JSON `\uXXXX` unescape (3 separate impls: `lib/common/json`, `lib/js`, `lib/common/js`) | 177 |
+| editor md wiki index + md renderer | 132 |
+| `torch` device-placement / training-seed status | 98 |
+| `app/devhub` convert storage (multibyte) | 86 |
+| HTML tokenizer / tree builder | 58 |
+| TOML encoding (multibyte) | 42 |
+| gdb-mi parser, glob, disk-image builder, `app/fix`, llm-cli, compiler lexer, misc | 79 |
+| `bugs/text_slice_substring_spec` (the deliberate reproduction) | 6 |
+
+The dominant shape is a **byte loop written as a character loop** — e.g.
+`src/app/office/sheets/formula.spl:202,243,255,274,682,1529,…` all do
+`val c = expr[i:i + 1]` while stepping `i` by 1. On ASCII input this is
+harmless, which is why it survived; on any non-ASCII input every step past a
+lead byte stores invalid UTF-8. The fix is to iterate by CHARACTER, which is
+also the direction of the 2026-07-30 character-alignment decision.
+
+### Why the flip to a hard error is DEFERRED
+
+1,427 live violations across 39 spec files is not a justified residual. Making
+the check loud now converts a silent-corruption defect into 39 immediately
+failing spec files plus whatever the two unmeasured surfaces (JIT, native/C)
+contribute. Stage 3 must land first. The eventual default must still be the
+**error** — not a permanently-warning check.
+
+Reproduce the census:
+
+```
+SIMPLE_UTF8_SLICE_AUDIT=2 <seed-with-audit> run <spec> 2>&1 |
+  grep '^SIMPLE_UTF8_SLICE_AUDIT '
+```
+
+Subtract exactly one `site=self_test` line per process. A run with **no**
+`self_test` line did not reach the audit and its zero is inert.
 
 ## Reproduce
 
