@@ -45,6 +45,33 @@ interface-done
 - dev: Created state file with 11 acceptance criteria (type: feature) and defined the broad-lane cooperative interface/review contract.
 - research: Confirmed the planned implementation surface was absent, identified reusable arena-generation, protected-residency, bounded-queue, strict-capability, CAS/checkpoint, CPU-simulation, and RSS patterns, and mapped primary domain sources to AC-1 through AC-11.
 - arch: Fixed four acyclic owner modules, public value shapes, deterministic failure boundaries, and the staged-first capability model.
+- reconcile (2026-08-01): Folded the lane's competing class-based `DescriptorTable` (branch layout-web-layout-interface-clean, 410d3d47482) into main's functional object_vm oracle instead of replacing it; residency_model.spl retained. Grafted: count-based pins (`object_vm_pin`), in-flight transfer protection (`object_vm_touch` + `in_flight` column, honored by retire and eviction), retired-slot reuse in `object_vm_define`, `object_vm_is_protected`, and the typed ObjectRef/ResidentView bridge (`object_vm_object_ref`, `object_vm_resident_view`, `object_vm_handles_stale`, `object_vm_epoch_key`). Lane unit + system spec scenarios ported onto the reconciled API; fixed the pre-existing wrong-module planner import in the system spec (planner symbols now imported from residency_model).
+
+## Evidence (verified 2026-08-01, reconciliation pass)
+
+Runner: Rust seed `src/compiler_rust/target/bootstrap/simple run <spec>` (live
+pure-Simple `bin/simple` currently has no `test`/`run` subcommands). Harness
+proven able to fail before trusting green: a mutated copy of each target spec
+reported failures (probe: 2 examples 1 failure; mutated unit copy: 8 examples
+4 failures), and the pristine system spec baselined at 8 examples 4 failures
+(wrong-module planner imports) before the fix.
+
+| Check | Command | Result |
+|---|---|---|
+| Unit: descriptor table contract (ported lane spec) | `run test/01_unit/lib/gpu/object_vm/descriptor_table_spec.spl` | 8 examples, 0 failures |
+| Unit: residency model regression after in_flight graft | `run test/01_unit/lib/gpu/object_vm/object_vm_residency_spec.spl` | 25 examples, 0 failures |
+| System: gpu_mmu_spec (8 original + 2 typed-bridge + 6 ported lane scenarios) | `run test/03_system/lib/gpu/object_vm/gpu_mmu_spec.spl` | 16 examples, 0 failures |
+| System baseline before import fix (pristine f62284b95c6) | `run <pristine copy>` | 8 examples, 4 failures (planner symbols not found) |
+
+AC coverage from the runnable system spec: AC-1/AC-7 covered; AC-2 partial
+(duplicate-miss coalescing has no scenario); AC-3 partial (staged bound + fixed
+peak-bytes proxy at 10x request count, no measured host RSS); AC-4 partial
+(checkpoint recovery + missing-root fail-closed; no corrupted-blob or
+partial-journal scenario); AC-5 partial (deterministic permuted replay; no
+calibration-bound scenario); AC-6 covered as an explicit capability gate (this
+host exercises the unavailable branch; parity branch env-gated behind
+SIMPLE_MMU_DIRECT_BACKEND=1); AC-8 mostly covered (EntityRef not exercised);
+AC-9/AC-10/AC-11 outstanding for the lane's later phases.
 
 ## Research Summary
 
