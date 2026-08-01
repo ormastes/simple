@@ -422,3 +422,217 @@ the JIT or native lanes from the test runner. The one place engine choice was
 varied (`SIMPLE_EXECUTION_MODE=interpret` vs `jit` on the hijack repro) gave the
 same wrong answer in both, which is evidence about the hijack, not coverage of
 those lanes.
+
+# Addendum 2026-08-01 (third lane) — the fourth shape is now a *reported* defect
+
+The previous addendum filed "same-signature cross-module hijack is silent" as
+defect 2 and left it unowned. This lane makes it loud, measures it, and
+establishes the resolution policy per engine by experiment. Everything below is
+labelled PROVED (ran it, read the captured output) or INFERRED (static reading).
+
+## The diagnostic now covers identical signatures (PROVED)
+
+`warn_duplicate_private_signatures` bailed out whenever all colliding
+definitions had the *same* signature, under the comment
+`// all identical → harmless under last-write-wins`. That reasoning is inverted.
+Identical signatures are the **most** dangerous case: one definition silently
+wins, and because the signatures agree no type error, no arity error and no
+ambiguity fallback can fire, so the call site is indistinguishable from a
+correct one. The single shape undetectable by any other means was the single
+shape never reported.
+
+Landed in both loaders, **warn-only and default-off**, behind
+`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`:
+
+- `src/compiler_rust/compiler/src/pipeline/module_loader.rs` — the Rust seed,
+  which is what `bin/simple` actually is today. Names every defining module,
+  read from the existing `FLATTEN_MODULE_OWNER_ATTR_PREFIX` attribute that
+  `strip_flattened_import_nodes` already stamps, so no new bookkeeping.
+- `src/compiler/10.frontend/core/interpreter/eval_tables.spl` — the
+  pure-Simple mirror in `_ftr_warn_collision`. No module attribution exists on
+  that side (`decl_id` carries no owner), so it reports name + kind only.
+  Gate memoised in a slot; `rt_env_get_i64` is a linear environ scan and
+  `func_table_register` is a hot path.
+
+Not promoted to fatal, deliberately. Same-file duplicates are excluded from the
+new arm (that is a plain local redefinition, already covered elsewhere); it
+fires only when the definitions come from **two or more distinct modules**.
+
+Evidence, on a freshly built driver from this change:
+
+| command | `SAME signature` warnings | program output |
+|---|---|---|
+| `simple run main_ab.spl` (gate unset) | **0** | `call_b=A` (silently wrong) |
+| `simple run main_ab.spl` (gate=1) | **1**, naming `a.spl` and `b.spl` | `call_b=A` (silently wrong) |
+
+The base row is the argument: the identical binary, on the identical program
+that is *already producing the wrong answer*, says nothing at all by default.
+
+## Fallout, measured two ways
+
+**Runtime (PROVED) — the number that matters.** `simple test` on a 3-example
+spec that imports only two toy modules, with the gate on:
+
+| | count |
+|---|---|
+| same-signature collisions (new arm) | **313 distinct names / 355 warning lines** |
+| differing-signature collisions (pre-existing arm) | **38 distinct names / 42 lines** |
+
+**8.2x more collisions were being suppressed than reported.** By kind: 305
+public functions, 50 private helpers. By breadth: 238 across 2 modules, 67
+across 3, 3 across 4, 4 across 5, 1 across 6. This is not a repo-wide census —
+it is the co-compiled import graph of the *test-runner stack*, which every
+single spec in the tree pulls in. Every spec is exposed to all 313.
+
+**Static upper bound (PROVED for the counts, INFERRED for the verdict).**
+Scanning column-0 bodied definitions in `.spl` files:
+
+| | `src/**` | incl. `test/**` |
+|---|---|---|
+| RAW colliding names | 7,776 | — |
+| same-signature, before exclusions | 6,544 | 8,468 |
+| **same-signature, after exclusions** | **6,505** | **8,415** |
+| differing-signature only | 1,211 | — |
+
+Two false-positive classes had to be removed first, and both were large:
+**bodyless `extern fn` headers** (18,968 of them; `rt_file_read_text` appears in
+862 files) re-declare *one* native symbol — that is binding, not hijacking, and
+keeping them inflated the headline ~27%; and **duplicated source trees** (11,553
+files: 10,555 byte-identical copies plus 998 `test/01_unit`↔`test/unit`
+mirrors).
+
+Generic-name exclusion list (128 names) — lifecycle `run new init setup teardown
+start stop reset close open build create make load save clear finish flush`;
+test boilerplate `test describe it expect spec before after before_each
+after_each assert assert_eq assert_true assert_false check verify validate
+should given when then suite case`; accessors/conversions `get set len length
+size count name value key to_text to_string to_str from_text to_json from_json
+to_i64 to_int as_text str text repr display id`; generic verbs `format parse
+print println log debug info warn error emit write read add remove push pop next
+peek process handle execute apply update render render_line compare equals eq
+hash clone copy is_empty contains find index_of split join trim escape unescape
+encode decode min max abs sum usage help version default empty ok fail pass skip
+todo noop dump trace status result summary report path exists`.
+
+Notably the exclusion list **barely bites here — 39 names**. Unlike the shim
+census (4.7x inflation, dominated by `verify` and `check`), these collisions are
+overwhelmingly *specific hand-written helpers*, not generic names: `print_help`
+(103 files), `_result` (48), `_is_log_option` (47), `print_usage` (38),
+`file_exists` (36), `escape_json` (20), `jo1`/`jo2`/`jo3`, `js`, `jp`, `Q`,
+`path_join`. `main` is reported as its own bucket (1,146 definitions across
+1,146 files, 621 `()->unit` vs 487 `()->i64`) — a real hazard, but a different
+and already-known one.
+
+**The 6,505 is an UPPER BOUND, not a hazard count.** A collision only bites when
+both definitions are co-compiled. A 2-level `use`-following proxy over the top
+25 confirmed only **8 as co-reachable** (`file_exists`, `file_read`,
+`file_write`, `parse_int`, `escape_json`, `text_to_bytes`, and two others).
+Prefer the 313 runtime figure for any decision.
+
+Positive control (PROVED): the detector independently rediscovers
+`extract_json_string`, `extract_json_value`, `jo1`, `jo2`, `jo3` colliding with
+identical signatures between `src/app/llm_caret/json_helpers.spl` and
+`src/lib/nogc_async_mut/mcp/helpers.spl`. **Correction to the previous
+addendum:** `ja` is *not* among them — `mcp/helpers.spl` contains no `ja` token
+at all (`grep -c` = 0). The earlier addendum listed it in error. `ja` does
+collide, across five other files.
+
+## Which definition wins, PER ENGINE (PROVED)
+
+Two modules `a.spl`/`b.spl` each defining `fn who() -> text`, plus `call_a()`
+/`call_b()` inside their own module, and a third file importing both. Every cell
+below was run with the import order swapped, both ways.
+
+| caller | interpreter | JIT (Cranelift) | native (`compile --native`) |
+|---|---|---|---|
+| from **inside** a defining module (`call_a`) | correct — resolves per owning module, either order | **first-import-wins** | **first-import-wins** |
+| from a **third** module (`who()` direct) | **first-import-wins** | **first-import-wins** | **first-import-wins** |
+
+Native did **not** fail closed — both artifacts built (610,208 bytes) and differ
+byte-wise, so the winner is baked in at compile time. No engine printed any
+diagnostic before this change.
+
+The distinction in row 1 is the whole subtlety, and it is why single-repro
+conclusions about this defect have been wrong twice. The interpreter carries a
+per-function owning-module tag (`FLATTEN_MODULE_OWNER_ATTR_PREFIX` /
+`FUNCTION_MODULE_OWNER`), so a call made *from inside* a defining module keeps
+reaching its own copy. Only the bare-name **fallback** collapses. **A spec is
+always the row-2 case** — it imports its subject and something else, and defines
+neither — so a spec gets first-import-wins on every engine, and the hijacker
+wins simply by being imported earlier.
+
+### `module_loader.rs:1305` was wrong on both halves (PROVED)
+
+It read: *"Functions resolve by bare name (interpreter `HashMap<String,
+FunctionDef>`; codegen `func_ids`, last-write-wins)"*.
+
+- The interpreter does **not** resolve by bare name alone (row 1 above).
+- Codegen is **first**-import-wins, not last-write-wins — the verdict flips when
+  the two `use` lines are swapped.
+
+Corrected in place, with the experiment that establishes it recorded next to it
+so the next reader does not restate a policy from reading one engine.
+
+## `simple run` vs `simple test` — and the previous addendum had it backwards
+
+PROVED, one file (`tp_spec.spl`), two commands, nothing else changed:
+
+| call | `simple run` | `simple test` | correct |
+|---|---|---|---|
+| `who()` (third-party, direct) | `A` | `A` | order-dependent — both agree |
+| `call_a()` | `A` | `A` | `A` |
+| `call_b()` | **`A`** | `B` | `B` |
+
+So on an identical file **`simple test` is the one that gets it RIGHT and
+`simple run` gets it wrong** — the opposite of the direction recorded in the
+previous addendum. That entry described a comparison between two *different*
+import sets (adding `use std.mcp.helpers` to a `run` script), not between the
+two commands on one file. Recorded as a correction, not absorbed.
+
+Mechanism (PROVED by isolating one variable): `run` defaults to the JIT, which
+collapses; `test` pins the interpreter, which does not collapse for row-1
+callers. `run_file_with_interpreter_mode` (`driver/src/main.rs:1378-1387`)
+unconditionally `set_var("SIMPLE_EXECUTION_MODE", "interpret")`, **overriding
+the user's own env var** — forcing `SIMPLE_EXECUTION_MODE=jit` on `simple test`
+still yields the interpreter's answer. The practical consequence is the
+existing engine-reach limit sharpened into a stronger claim: `simple test` green
+is not merely *silent* about JIT and native, it is evidence about the one engine
+that **ships to nobody**.
+
+## New gap found while verifying: `simple test` hides the spec's own collisions
+
+PROVED: with the gate on, `simple run tp_spec.spl` warns about `who`.
+`simple test tp_spec.spl` emits all 355 runner-stack warnings and **none** for
+`who` — the spec's own import graph is invisible.
+
+INFERRED mechanism: `simple test` executes `src/app/test_runner_new/**`, which
+runs each spec in a child process via `process_run_bounded`
+(`test_runner_new/json_wrapper.spl:80`) and binds the child's stderr into a
+value: `val (stdout, stderr, worker_code) = process_run_bounded(...)`. The child
+loads the spec and does warn; the parent captures that stream and does not
+forward it. So the diagnostic reaches `run`, `compile` and the runner stack, but
+not the spec graph under `test` — exactly the place the vacuity shape lives.
+Filed here rather than fixed; forwarding child stderr is a test-runner change,
+not a loader change.
+
+## Did the frozen-`std` snapshot block anything?
+
+Partly, and it is worth stating precisely. All repros in this lane deliberately
+use plain sibling `.spl` files and **no `std.*` import**, so the snapshot
+(`/home/ormastes/dev/pub/.simple-build-36f5e286`, frozen 2026-08-01 14:46) was
+never in the path and none of the PROVED results above depend on it. What was
+*not* re-attempted is the original `json_helpers` ↔ `std.mcp.helpers` hijack
+against a worktree edit — that remains impossible for the reason the previous
+addendum documents, and the mechanism established here (first-import-wins for a
+third-party caller, on every engine) explains it without needing that repro.
+
+## Engine reach (restated, and one correction)
+
+Every count here is `bin/simple` = the Rust bootstrap seed (`enum-probe` = 0,
+154 MB, deployed 2026-08-01 14:48). The previous addendum said varying
+`SIMPLE_EXECUTION_MODE` on the hijack repro "gave the same wrong answer in
+both". That is true only for the third-party-caller row; for a caller inside a
+defining module the two engines **differ**, which is how the first-wins/
+last-wins question got settled. Specs still cannot reach JIT or native from the
+test runner — and per the section above, that is now known to be enforced by an
+unconditional `set_var`, not merely a default.

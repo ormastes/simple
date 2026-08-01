@@ -15,7 +15,7 @@ use simple_parser::Parser;
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::interpreter::{
     normalize_path_key, tag_function_module_owner, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX,
-    FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+    FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_OWNER_ATTR_PREFIX,
 };
 use crate::stdlib_variant::stdlib_root_candidates;
 use crate::CompileError as _;
@@ -1302,11 +1302,33 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
 /// Diagnostic: warn when two or more co-compiled top-level functions share a
 /// registry key but have differing signatures.
 ///
-/// Functions resolve by bare name (interpreter `HashMap<String, FunctionDef>`;
-/// codegen `func_ids`, last-write-wins), so once the import flattening merges two
-/// same-named definitions, a call may silently dispatch to the wrong one — nil /
-/// garbage in the interpreter, NULL-deref SIGSEGV under Cranelift (the
-/// `aes_gcm`/`hkdf` `_append_bytes` case).
+/// Once import flattening merges two same-named definitions, a call may silently
+/// dispatch to the wrong one — nil / garbage in the interpreter, NULL-deref SIGSEGV
+/// under Cranelift (the `aes_gcm`/`hkdf` `_append_bytes` case).
+///
+/// **Resolution policy, measured 2026-08-01 — the previous description here was
+/// wrong on both halves.** This comment used to read "Functions resolve by bare name
+/// (interpreter `HashMap<String, FunctionDef>`; codegen `func_ids`, last-write-wins)".
+/// Neither clause survives a two-module experiment (`a.spl` and `b.spl` each defining
+/// `fn who() -> text`, plus a third file importing both):
+///
+/// - The **interpreter does not resolve by bare name alone.** A call made from
+///   *inside* a defining module is resolved against that module's owner tag (see
+///   `FLATTEN_MODULE_OWNER_ATTR_PREFIX` and `FUNCTION_MODULE_OWNER`), so `a.call_a()`
+///   keeps reaching `a.who` and `b.call_b()` keeps reaching `b.who`, in either import
+///   order. It is only the bare-name *fallback* — a call from a third module that
+///   defines neither — that collapses.
+/// - **Codegen is first-import-wins, not last-write-wins.** Flip the two `use` lines
+///   and the surviving definition flips with them, under both the Cranelift JIT and
+///   `compile --native` (the two native artifacts differ byte-wise, so the winner is
+///   baked in at compile time).
+/// - For the third-module caller, **every** engine — interpreter fallback, JIT and
+///   native alike — is first-import-wins. That is the shape a spec has: it imports
+///   its subject and something else, and defines neither.
+///
+/// Do not restate a registry policy here from reading one engine. Four divergent
+/// policies exist in this tree; the only reliable method is the two-module
+/// experiment above, run per engine, with the import order swapped.
 ///
 /// **Scope widened 2026-08-01.** This check used to skip every name that did not
 /// start with `_`, and every qualified (`Type.method`) name, on the assumption that
@@ -1329,6 +1351,27 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
 /// public and method half of the family was unwarned. See
 /// `doc/08_tracking/bug/diag_stage_facet_cross_module_collision_under_test_2026-07-06.md`
 /// ("Why 'no collision warning was printed' proves nothing").
+///
+/// **Scope widened again 2026-08-01 (same-signature arm).** The check used to bail
+/// out whenever all the colliding definitions had *identical* signatures, under the
+/// comment "all identical → harmless under last-write-wins". That reasoning is
+/// inverted. Identical signatures are the *most* dangerous case, not the harmless
+/// one: one definition silently wins and the others are discarded, and because the
+/// signatures agree there is no type error, no arity error and no ambiguity fallback
+/// to surface it. The call site is indistinguishable from a correct one. That made
+/// the single collision shape undetectable by any other means the single shape that
+/// was never reported.
+///
+/// The concrete damage is a vacuity class, not just a wrong answer: a spec that
+/// correctly imports its subject, and whose local copy has already been removed, can
+/// still be served by an unrelated module's same-named function and stay green
+/// through a sabotage of the file it imports. See
+/// `doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md`
+/// ("A FOURTH vacuity shape: name-collision hijack").
+///
+/// The same-signature arm is **warn-only and default-off**, behind
+/// `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`, because that family is much larger than
+/// the differing-signature family and would otherwise bury the original warning.
 ///
 /// Non-breaking diagnostic only. The real fix is to key the registry on
 /// (module path, name) rather than on the name alone; until then the workaround is
@@ -1353,18 +1396,50 @@ fn render_signature(f: &FunctionDef) -> String {
     format!("({})->{ret}", params.join(","))
 }
 
+/// Best-effort source-module attribution for a function in the *flattened* module.
+///
+/// `strip_flattened_import_nodes` stamps every retained imported free function with
+/// a synthetic `FLATTEN_MODULE_OWNER_ATTR_PREFIX` attribute carrying its true owning
+/// file (see the doc comment on that function). Functions belonging to the entry file
+/// itself never pass through that splice and so carry no tag.
+fn function_owner_module(f: &FunctionDef) -> &str {
+    f.attributes
+        .iter()
+        .find_map(|a| a.name.strip_prefix(FLATTEN_MODULE_OWNER_ATTR_PREFIX))
+        .unwrap_or("<entry file>")
+}
+
+/// Env gate for the same-signature half of the collision diagnostic.
+///
+/// Default OFF. The same-signature family is far larger than the differing-signature
+/// family (every module pair that re-declares an identically-typed helper trips it),
+/// so turning it on unconditionally would bury the existing warning under noise on a
+/// full test/bootstrap run. Opt in with `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`.
+fn same_signature_diag_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("SIMPLE_DIAG_SAME_SIGNATURE_COLLISION")
+            .map(|v| v != "0" && !v.is_empty())
+            .unwrap_or(false)
+    })
+}
+
 fn warn_duplicate_private_signatures(module: &Module) {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
 
-    let mut by_name: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut by_name: HashMap<&str, Vec<(String, &str)>> = HashMap::new();
     for item in &module.items {
         if let Node::Function(f) = item {
             // Every top-level function participates in the flat registry: private
             // helpers, public free functions, and qualified `Type.method` entries
             // alike. Do NOT reintroduce a `starts_with('_')` / `contains('.')` skip
             // here — that is precisely the blind spot documented above.
-            by_name.entry(f.name.as_str()).or_default().push(render_signature(f));
+            by_name
+                .entry(f.name.as_str())
+                .or_default()
+                .push((render_signature(f), function_owner_module(f)));
         }
     }
 
@@ -1376,15 +1451,81 @@ fn warn_duplicate_private_signatures(module: &Module) {
     let mut names: Vec<&str> = by_name.keys().copied().collect();
     names.sort();
     for name in names {
-        let sigs = &by_name[name];
-        if sigs.len() < 2 {
+        let entries = &by_name[name];
+        if entries.len() < 2 {
             continue;
         }
-        let mut distinct: Vec<&String> = sigs.iter().collect();
+        let sigs: Vec<&String> = entries.iter().map(|(sig, _)| sig).collect();
+        let mut distinct: Vec<&String> = sigs.clone();
         distinct.sort();
         distinct.dedup();
+        let kind = if name.contains('.') {
+            "method"
+        } else if name.starts_with('_') {
+            "private helper"
+        } else {
+            "public function"
+        };
         if distinct.len() < 2 {
-            continue; // all identical → harmless under last-write-wins
+            // ------------------------------------------------------------------
+            // SAME-SIGNATURE COLLISION.
+            //
+            // This arm used to be `continue` with the comment "all identical →
+            // harmless under last-write-wins". That is exactly backwards, and it
+            // made the *only* collision shape that no other tool can detect the
+            // *one* shape that was never reported.
+            //
+            // Two co-compiled definitions with identical signatures are not
+            // harmless: one of them silently wins and the other is discarded.
+            // Because the signatures agree, no type error, no arity error and no
+            // ambiguity fallback ever fires — the call simply runs a different
+            // module's body than the one the caller imported. That is a silent
+            // wrong answer, and it is undetectable from the call site.
+            //
+            // It is also the mechanism behind a whole vacuity class: a spec can
+            // correctly import its subject, be green, and still be testing some
+            // other module's same-named function. See
+            // doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md
+            // ("A FOURTH vacuity shape: name-collision hijack").
+            //
+            // Warn-only and default-off (see `same_signature_diag_enabled`); this
+            // is deliberately NOT promoted to an error here.
+            // ------------------------------------------------------------------
+            if !same_signature_diag_enabled() {
+                continue;
+            }
+            let mut owners: Vec<&str> = entries.iter().map(|(_, owner)| *owner).collect();
+            owners.sort();
+            owners.dedup();
+            if owners.len() < 2 {
+                // Same file declaring the same signature twice is a plain local
+                // redefinition, not a cross-module hijack. Left to the existing
+                // same-file overload checks so this diagnostic stays about the
+                // cross-module case it was added for.
+                continue;
+            }
+            let key = format!("samesig|{name}|{}|{}", distinct[0], owners.join("|"));
+            if let Ok(mut set) = warned.lock() {
+                if !set.insert(key) {
+                    continue;
+                }
+            }
+            eprintln!(
+                "warning: {} `{}` has {} co-compiled definitions across {} modules with the \
+                 SAME signature ({}) — one silently wins and the rest are discarded. Because the \
+                 signatures agree, no type/arity error and no ambiguity fallback can fire, so a \
+                 call resolves to a different module's body than the one it imported: a silent \
+                 wrong answer, and the shape that makes an importing spec vacuous. Defined in: \
+                 {}. Rename one of the definitions to a unique name. \
+                 [compiler_cross_module_private_symbol_collision]",
+                kind,
+                name,
+                entries.len(),
+                owners.len(),
+                distinct[0],
+                owners.join(", "),
+            );
+            continue;
         }
         let key = format!(
             "{name}|{}",
@@ -1395,13 +1536,6 @@ fn warn_duplicate_private_signatures(module: &Module) {
                 continue;
             }
         }
-        let kind = if name.contains('.') {
-            "method"
-        } else if name.starts_with('_') {
-            "private helper"
-        } else {
-            "public function"
-        };
         eprintln!(
             "warning: {} `{}` has {} co-compiled definitions with {} differing \
              signatures ({}); JIT call sites resolve by exact arg-type match (mangled `$dupN` \

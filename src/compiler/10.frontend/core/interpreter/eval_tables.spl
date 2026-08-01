@@ -162,6 +162,35 @@ fn _ftr_collision_kind(name: text) -> text:
         return "private helper"
     "public function"
 
+# Same-signature arm gate. Default OFF.
+#
+# Two co-compiled definitions with IDENTICAL signatures are not harmless. One
+# silently wins and the other is discarded, and because the signatures agree no
+# type error, no arity error and no ambiguity fallback can ever fire — the call
+# just runs a different module's body than the one the caller imported. It is
+# the only collision shape undetectable from the call site, and it was the one
+# shape this warning never reported.
+#
+# Measured 2026-08-01 on the Rust seed: 313 distinct same-signature collisions
+# are co-compiled into the import graph of even a 3-example spec, against 38
+# differing-signature ones. Reporting them unconditionally would bury the
+# existing warning, so this arm is opt-in via
+# SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1. Warn-only; deliberately not fatal.
+#
+# See doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md
+# ("A FOURTH vacuity shape: name-collision hijack").
+extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
+
+var _ftr_samesig_diag: i64 = -1
+
+fn _ftr_samesig_diag_enabled() -> bool:
+    # Memoised in a slot: func_table_register is a hot path and rt_env_get_i64 is
+    # itself a linear environ scan (see ast_env_var_quadratic_parse_2026-06-13),
+    # so this must not be re-read per registration.
+    if _ftr_samesig_diag == -1:
+        _ftr_samesig_diag = rt_env_get_i64("SIMPLE_DIAG_SAME_SIGNATURE_COLLISION", 0)
+    _ftr_samesig_diag == 1
+
 fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
     # Private helpers, public free functions and `Type__method` registrations all
     # share this one flat table, so all three are checked. See the note above the
@@ -169,6 +198,18 @@ fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
     if existing_did == new_did:
         return
     if not _ftr_sig_differs(existing_did, new_did):
+        # SAME-SIGNATURE COLLISION. This used to be an unconditional `return`.
+        # See `_ftr_samesig_diag` above for why that was backwards.
+        if not _ftr_samesig_diag_enabled():
+            return
+        var k = 0
+        while k < _ftr_collision_warned.len():
+            if _ftr_collision_warned[k] == "samesig:{name}":
+                return
+            k = k + 1
+        _ftr_collision_warned.push("samesig:{name}")
+        val same_kind = _ftr_collision_kind(name)
+        print "[WARN] {same_kind} '{name}' has co-compiled definitions with the SAME signature; one silently wins and the rest are discarded. No type/arity error can fire, so a call resolves to a different module's body than the one it imported — a silent wrong answer, and the shape that makes an importing spec vacuous. Rename one of the definitions. [compiler_cross_module_private_symbol_collision]"
         return
     var j = 0
     while j < _ftr_collision_warned.len():
