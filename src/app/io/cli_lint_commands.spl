@@ -129,24 +129,31 @@ fn run_lint_command(args: [text]) -> i64:
     # doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
     var not_linted_files = 0
     var lint_files: [text] = []
-    var seen_targets: [text] = []
-    var seen_files: [text] = []
+    # Dedupe via dict-keyed sets, NOT an array `.contains()` scan. `simple lint
+    # src` discovers ~32k files; the array form is O(n^2) membership plus an
+    # O(n^2) copy from push-clones and does not finish, which is why a full-repo
+    # lint census had never been completed. Dict shape is `{text: bool}`
+    # deliberately: never call `Dict.len()` (returns -1 under native codegen)
+    # and never `.get()` a struct-valued dict — `contains_key` + `d[k] = v` is
+    # safe on every engine. See .claude/rules/code-style.md.
+    var seen_targets: {text: bool} = {}
+    var seen_files: {text: bool} = {}
     for target in files:
         val target_identity = source_path_identity(target)
-        if seen_targets.contains(target_identity):
+        if seen_targets.contains_key(target_identity):
             continue
-        seen_targets.push(target_identity)
+        seen_targets[target_identity] = true
         if not is_dir(target):
-            if not seen_files.contains(target_identity):
+            if not seen_files.contains_key(target_identity):
                 lint_files.push(target)
-                seen_files.push(target_identity)
+                seen_files[target_identity] = true
             continue
         val discovered_files = discover_spl_files(target)
         for discovered in discovered_files:
             val discovered_identity = source_path_identity(discovered)
-            if not seen_files.contains(discovered_identity):
+            if not seen_files.contains_key(discovered_identity):
                 lint_files.push(discovered)
-                seen_files.push(discovered_identity)
+                seen_files[discovered_identity] = true
         if discovered_files.len() == 0:
             if json_output:
                 print "{\"type\":\"lint-error\",\"file\":\"{escape_json(target)}\",\"message\":\"no Simple source files found\"}"

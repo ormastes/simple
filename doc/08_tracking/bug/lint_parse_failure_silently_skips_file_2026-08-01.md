@@ -170,14 +170,58 @@ progressing, not wedged.)
 **TODO(lint,P1): build a per-file-isolated, sabotage-validated census and only
 then record a number here.**
 
-Separately, and independent of the oracle problem: the lint CLI cannot perform
-this census itself, because `app.io.cli_lint_commands.run_lint_command` dedupes
-targets with a linear `seen_files.contains()` scan. That is O(n^2) and does not
-terminate in practical time at repo scale.
+Separately, and independent of the oracle problem: `run_lint_command` deduped
+targets with a linear `seen_files.contains()` scan, which is O(n^2) at repo
+scale.
 
 **TODO(lint,P2): replace the O(n^2) target dedupe with a set/dict-backed
-membership test so a repo-scale directory target is usable.** (Another lane is
-reported to be fixing this.)
+membership test so a repo-scale directory target is usable.** — **DONE**, see
+below.
+
+### O(n^2) target dedupe — FIXED, measured
+
+`src/app/io/cli_lint_commands.spl` (`run_lint_command`) and the identical
+sibling `src/app/check/targets.spl` (`expand_check_targets`, used by `simple
+check`) both now dedupe with `{text: bool}` dict sets — `contains_key(k)` plus
+`d[k] = true` — instead of `[text].contains()` + `.push()`. The `{text: bool}`
+shape is deliberate: it never needs `Dict.len()` (returns -1 under native
+codegen) and never `.get()`s a struct-valued dict, so it is safe on the
+interpreter, the JIT and native codegen alike (`.claude/rules/code-style.md`).
+
+Measured with a standalone microbenchmark that runs the two dedupe shapes over
+N synthetic paths, one process per data point, binary
+`bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731`, `/usr/bin/time`
+for wall and peak RSS. All runs verified `unique == N`.
+
+| N | array `.contains()` wall | dict `contains_key` wall | array RSS | dict RSS |
+|---|---|---|---|---|
+| 1,000 | 0.28 s | 0.04 s | 62.5 MB | 63.2 MB |
+| 2,000 | 0.63 s | 0.04 s | 63.5 MB | 63.7 MB |
+| 4,000 | 2.60 s | 0.05 s | 64.5 MB | 64.8 MB |
+| 8,000 | 11.49 s | 0.13 s | 66.0 MB | 66.8 MB |
+| 16,000 | 55.03 s | 0.24 s | 70.1 MB | 70.3 MB |
+| 32,023 | **239.80 s** | **0.27 s** | 78.3 MB | 79.1 MB |
+
+The array form is textbook quadratic — 4.4x, 4.8x, 4.4x per doubling — and costs
+**239.8 s of pure CPU at repo scale before a single file is linted**. The dict
+form is flat at 0.27 s: an **888x** reduction, and it stays flat as N grows, so
+this is a complexity fix and not merely a constant-factor one. Peak RSS is
+unchanged (~78 MB either way), which also rules the dedupe out as the source of
+the multi-GB single-process growth recorded above.
+
+**Correction to the earlier claim in this file:** the array dedupe does *not*
+literally fail to terminate — it terminates in ~240 s. It was never on its own
+the reason a repo-scale lint run dies. Two other costs dominate and both remain
+open: per-process lint startup measured at **273 s** for a 5-file directory and
+**316 s** for a single 709-line file (same binary, same tree, loaded host), and
+the unbounded cross-file RSS growth recorded above. Fixing the dedupe is
+necessary but not sufficient for a CLI-driven census.
+
+Functional check, same binary, tmpfs checkout of the tip tree: `simple lint
+--json src/app/check` emits 5 `lint-file-summary` lines for 5 files, and
+`simple lint --json src/app/check src/app/check ./src/app/check` — the same
+directory three times, spelled two ways — still emits exactly 5. Dedupe
+behaviour is preserved across both the target set and the discovered-file set.
 
 ### What this does NOT invalidate
 
