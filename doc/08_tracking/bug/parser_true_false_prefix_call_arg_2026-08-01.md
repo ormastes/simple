@@ -75,6 +75,21 @@ So the production was removed rather than narrowed. Narrowing it (e.g. only
 firing when the next token ends the argument) would have fixed the parse error
 while leaving the silent-rewrite path intact.
 
+## Blast radius
+
+**Loud mode:** the failing stage-3 log names exactly **one** file —
+`vulkan_backend.spl`, 21 errors, all of them there. Note `native-build` aborts
+phase 2 on the first file that fails to parse, so this is the *first* blocker,
+not provably the only one; later files were never reached.
+
+**Silent mode (upper bound):** `rg '[(,]\s*(true|false)_[A-Za-z0-9_]+\s*[,)]'`
+over `src/` and `test/` matches **68 sites in 25 files**. This is an upper
+bound, not a count of corrupted call sites — the same shape appears in `case`
+patterns (e.g. `case If(cond, true_target, false_target):`), which go through the
+pattern parser, not `parse_call_arg_raw`. It has not been narrowed further
+because the fix makes every one of them correct regardless of which parser
+consumed it.
+
 ## Reproduction (no bootstrap needed)
 
 The stage2 binary from a previous run reproduces it directly in ~2 seconds:
@@ -106,6 +121,26 @@ Discriminator table (all other shapes parse clean):
 
 `return true_x.id` outside a call argument is fine — the rule lived only in
 `parse_call_arg_raw`.
+
+## Sibling sweep (the family, enumerated)
+
+`rg 'par_text_get\(\) ==' src/compiler/10.frontend/` lists every place the parser
+interprets identifier *text* as syntax. All the others are **exact** matches —
+`todo`, `mut`, `with`, `mod`, `from`, `iso`, `print`, `assert`, `volatile`,
+`bits`, `pri`, `pc`, `priority`, `cli`, `comptime`, `candidates`, `generic`,
+`limits`. This was the only **prefix** match, which is why it was the only one
+that captured unrelated names.
+
+Each was differentially tested as an ordinary local passed to a function
+(stage2 vs the Rust seed oracle). **No divergence in the blocking direction** —
+nothing else makes the self-hosted compiler reject what the seed accepts.
+
+Two diverge the *other* way, and are recorded here rather than filed separately
+because neither can block a bootstrap: `with` and `generic` are **hard keywords
+in the seed** (`Unexpected token: expected pattern, found With`) but ordinary
+identifiers in the pure-Simple parser. The tree compiles under the seed today,
+so nothing uses them as identifiers; the risk is only that new pure-Simple code
+could adopt a name the seed will later reject.
 
 ## Correction to the earlier diagnosis
 
