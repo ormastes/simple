@@ -272,3 +272,91 @@ must-NOT-flag negatives so it cannot be reintroduced.
 The seed accepts `val x = a ==` followed by a dedented `return x`, gluing the
 `return` in as the RHS of the trailing `==`. Found while building the
 deliberate-syntax-error control; it predates this change and is out of scope.
+
+## 2026-08-01 (later): language-level spec widened, seed redeploy confirmed
+
+The deployed seed has been rebuilt from origin tip `f93c9b2623`
+(57,029,288 B, sha256 `6f2f872e9bf2…`), so the coverage boundary that
+`test/01_unit/compiler/parser_leading_operator_continuation_spec.spl`
+deliberately withheld is no longer accurate. The spec has been widened from
+8 to 14 assertions.
+
+### Premise verified independently (PROVED)
+
+Probed with three immutable binary copies, never the live symlink, since the
+live path can be swapped underneath a run. All 15 leading-continuation probe
+forms (`== != < > <= >= is in ??` in a binding, and the six comparison
+operators in an `if` condition):
+
+| binary | sha256 | leading family | same-indent `< b` |
+|---|---|---|---|
+| `simple_seed.pre-parserfix-2026-08-01.bak` (Jul-25) | `16e81384…` | PARSE_FAIL 15/15 | PARSE_FAIL |
+| `simple_seed.rollback2-jul30-workingcopy-2026-08-01.bak` (Jul-30) | `af796ec5…` | PARSE_FAIL 15/15 | PARSE_FAIL |
+| `simple_seed` (tip `f93c9b2623`) | `6f2f872e…` | PARSE_OK 15/15 | PARSE_FAIL |
+
+The same-indent negative holds in ALL THREE states, and 6 of the Rust gate's
+deliberate-syntax-error fixtures stay REJECTED in all three — the change is
+additive, not a general loosening.
+
+### Spec result (PROVED, tree-walking interpreter via `simple_seed test`)
+
+| binary | result |
+|---|---|
+| tip `6f2f872e…` | **14 total, 14 passed, 0 failed** |
+| Jul-30 `af796ec5…` | **RED** — `test-runner: no examples executed` |
+| Jul-25 `16e81384…` | **RED** — `test-runner: no examples executed` |
+
+Control validity: the PREVIOUS 8-assertion spec still passes 8/8 on the Jul-30
+binary, so that binary is a genuine discriminating control and the RED above is
+caused by the new assertions, not by a broken control.
+
+Because the fix is at parse level, the RED is whole-file rather than
+per-assertion: a pre-fix binary cannot load the module at all.
+
+### NEW DEFECT found while widening: `while`-condition continuation
+
+A leading `<` continuation in a `while` HEADER parses and evaluates correctly in
+isolation, but a module that ALSO declares a function whose `if`/`else` arms
+begin with a unary minus fails to load with **no diagnostic whatsoever** — the
+runner reports only `test-runner: no examples executed`. Deterministic 3/3 on
+the tip seed. Minimal reproducer (these two declarations plus any `describe`):
+
+```simple
+fn lead_while_cond(n: i64) -> i64:
+    var i = 0
+    var c = 0
+    while i
+        < n:
+        i = i + 1
+        c = c + 2
+    return c
+
+fn block_body_starts_with_minus(c: bool) -> i64:
+    if c:
+        -1
+    else:
+        -2
+```
+
+Removing either declaration makes the module load. The second one is the guard-1
+negative control the spec already carries, so the `while` case is withheld from
+the spec and recorded here instead of being silently dropped. The silent
+no-diagnostic failure mode is the more serious half of this: a module that does
+not load produces no error, which is exactly the shape that manufactures false
+greens.
+
+### Pre-existing `in`-operator defect (unrelated to continuation)
+
+`a in b` evaluates to `false` for a member that IS present, identically in the
+ONE-LINE, TRAILING and LEADING forms (`2 in [1,2,3]` -> false on the tip seed
+interpreter). It is therefore not a continuation bug. The spec asserts
+leading-vs-one-line PARITY for `in` rather than membership truth, so it stays
+honest without going red for an unrelated reason. Needs its own bug entry.
+
+### RULE A removal condition is now MET
+
+`scripts/check/check-seed-parse-superset.shs` RULE A was retained only as a
+stale-binary gate, with the documented removal condition "until the seed binary
+is redeployed". That redeploy has happened (`f93c9b2623`, above). RULE A can be
+retired; the owning lane should confirm no bootstrap-path source still needs the
+restriction before removing it. Not changed here.

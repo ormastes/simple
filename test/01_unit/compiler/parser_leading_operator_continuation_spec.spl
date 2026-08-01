@@ -38,14 +38,87 @@ the previous line silently miscompiles working code:
    `core_process.spl`. Guarded by requiring the continuation line to be
    indented strictly deeper than the current logical line.
 
-## Coverage boundary — leading comparison/equality is self-hosted-only
+## Coverage boundary — narrowed 2026-08-01, the seed has caught up
 
-The self-hosted frontend now also continues a leading `== != < > <= >= ??` and
-a leading operator inside an `if`/`while` condition. The Rust bootstrap seed
-still rejects those (`Unexpected token: expected Colon, found Newline`), and
-the seed is what executes specs today, so they are deliberately NOT asserted
-here. The remaining seed gap is recorded in the bug doc; widening this spec
-before the seed catches up would make it unrunnable rather than green.
+This spec previously withheld the comparison/equality/membership/coalesce
+family (`== != < > <= >= is in ??`) and the condition position,
+because the Rust bootstrap seed rejected them with
+`Unexpected token: expected Colon, found Newline` and the seed is what executes
+specs. `75f3da617b3` closed that gap in the three hand-written productions that
+never inherited the `parse_binary_*!` macros' leading-continuation arm
+(`parse_equality`, `parse_comparison`, and the `DoubleQuestion` postfix arm).
+Those forms are now asserted below.
+
+Measured on the seed rebuilt from `f93c9b2623` (sha256 `6f2f872e9bf2…`): every
+form asserted below is a parse error on the previous seed
+(`simple_seed.rollback2-jul30-workingcopy-2026-08-01.bak`, sha `af796ec5…`),
+which already passed the TRAILING forms — so these assertions are RED against
+that binary and are not vacuous.
+
+What still cannot be asserted at the language level, and why:
+
+1. **Shapes that must NOT parse** — the same-indent `a` / `< b` non-glue case,
+   and the deliberate-syntax-error fixtures. A `.spl` spec cannot contain source
+   that fails to parse, because the parse error takes the whole file down rather
+   than failing one `it`. These stay in the parser-unit gate
+   `src/compiler_rust/parser/tests/leading_comparison_continuation.rs`
+   (`same_indent_leading_comparison_is_not_glued`,
+   `deliberate_syntax_error_fixture_still_fails`). Both were verified to still
+   REJECT on the current seed as well as the pre-fix one — the change is
+   additive, not a general loosening.
+2. **AST-shape assertions** — that a leading `<` builds an `Lt` node rather than
+   merely parsing — are structural and also live in that Rust gate. Here the
+   equivalent non-vacuity evidence is behavioural: each `it` below asserts the
+   continued expression *evaluates* as one joined expression.
+
+3. **The `while` condition position** — see the separate defect below. `if` and
+   `elif` are asserted; `while` is withheld, and unlike the boundary this spec
+   just removed, that withholding is backed by a reproducer rather than an
+   assumption.
+
+There is deliberately no assertion about an `if`/`elif` "indent boundary". The
+boundary recorded in older notes was an artifact of the stale seed; at tip the
+leading continuation parses in both `if` and `elif` conditions.
+
+## Blocked: leading continuation in a `while` condition (found 2026-08-01)
+
+A leading `<` continuation in a `while` HEADER parses and evaluates correctly on
+its own — but when the same module also declares a function whose `if`/`else`
+arms begin with a unary minus, the module fails to load with NO diagnostic at
+all: the runner reports only `test-runner: no examples executed`. Deterministic,
+3/3, on the `f93c9b2623` seed. Minimal reproducer — these two declarations plus
+any `describe` are sufficient:
+
+```simple
+fn lead_while_cond(n: i64) -> i64:
+    var i = 0
+    var c = 0
+    while i
+        < n:
+        i = i + 1
+        c = c + 2
+    return c
+
+fn block_body_starts_with_minus(c: bool) -> i64:
+    if c:
+        -1
+    else:
+        -2
+```
+
+`block_body_starts_with_minus` is the guard-1 negative control this spec already
+carries, so the `while` case cannot be added here until that is fixed. Asserting
+it would take the whole file down and destroy the 14 assertions below rather
+than fail one `it`. Tracked in the bug doc.
+
+## Known-unrelated defect: the `in` operator
+
+`a in b` evaluates to `false` for a present member on the current seed
+interpreter — in the ONE-LINE, TRAILING and LEADING forms alike. That is a
+pre-existing `in`-operator defect with nothing to do with line continuation, so
+asserting membership truth here would go red for an unrelated reason. Instead
+the leading form is asserted to agree with the one-line form, which is exactly
+the continuation property this spec owns. Tracked in the bug doc.
 
 ## Syntax
 
@@ -96,6 +169,97 @@ fn lead_or(a: bool, b: bool) -> bool:
     val x = a
         or b
     return x
+
+# --- Comparison / equality ----------------------------------------------------
+#
+# These six ride the two hand-written productions `parse_comparison` and
+# `parse_equality`, which never inherited the `parse_binary_*!` macros'
+# leading-continuation arm. Unblocked by 75f3da617b3.
+
+fn lead_eq(a: i64, b: i64) -> bool:
+    val x = a
+        == b
+    return x
+
+fn lead_ne(a: i64, b: i64) -> bool:
+    val x = a
+        != b
+    return x
+
+fn lead_lt(a: i64, b: i64) -> bool:
+    val x = a
+        < b
+    return x
+
+fn lead_gt(a: i64, b: i64) -> bool:
+    val x = a
+        > b
+    return x
+
+fn lead_le(a: i64, b: i64) -> bool:
+    val x = a
+        <= b
+    return x
+
+fn lead_ge(a: i64, b: i64) -> bool:
+    val x = a
+        >= b
+    return x
+
+# --- Membership / identity ----------------------------------------------------
+#
+# `is` and `in` ride `parse_equality` alongside `==`/`!=`.
+
+fn lead_is(a: i64, b: i64) -> bool:
+    val x = a
+        is b
+    return x
+
+# See the docstring: `in` is independently broken on the seed interpreter, so
+# the assertion is leading-vs-one-line PARITY, not membership truth.
+fn oneline_in(a: i64, b: [i64]) -> bool:
+    return a in b
+
+fn lead_in(a: i64, b: [i64]) -> bool:
+    val x = a
+        in b
+    return x
+
+# --- Nil-coalesce -------------------------------------------------------------
+#
+# `??` lives in `expressions/postfix.rs` and had the same gap.
+
+fn lead_coalesce(a: i64?, b: i64) -> i64:
+    val x = a
+        ?? b
+    return x
+
+# --- Condition positions ------------------------------------------------------
+#
+# The `if`/`elif` condition position. No indent boundary is asserted:
+# the one in older notes was an artifact of the stale seed.
+
+fn lead_if_cond(a: i64, b: i64) -> i64:
+    if a
+        > b:
+        return 1
+    return 2
+
+fn lead_if_eq_cond(a: i64, b: i64) -> i64:
+    if a
+        == b:
+        return 1
+    return 2
+
+fn lead_elif_cond(a: i64, b: i64) -> i64:
+    if a
+        > b:
+        return 1
+    elif a
+        == b:
+        return 0
+    return -1
+
 
 # --- Statement contexts -------------------------------------------------------
 
@@ -173,6 +337,48 @@ describe("leading-operator line continuation"):
     it("continues and/or onto the next line"):
         assert_equal(lead_and(true, false), false)
         assert_equal(lead_or(true, false), true)
+
+    it("continues comparison and equality operators onto the next line"):
+        # Both truth values per operator: a form that always returned the same
+        # constant would pass a one-sided check while being truncated.
+        assert_equal(lead_eq(2, 2), true)
+        assert_equal(lead_eq(2, 3), false)
+        assert_equal(lead_ne(2, 3), true)
+        assert_equal(lead_ne(2, 2), false)
+        assert_equal(lead_lt(1, 2), true)
+        assert_equal(lead_lt(2, 1), false)
+        assert_equal(lead_gt(5, 2), true)
+        assert_equal(lead_gt(2, 5), false)
+        assert_equal(lead_le(2, 2), true)
+        assert_equal(lead_le(3, 2), false)
+        assert_equal(lead_ge(3, 2), true)
+        assert_equal(lead_ge(1, 2), false)
+
+    it("continues the identity operator onto the next line"):
+        assert_equal(lead_is(2, 2), true)
+        assert_equal(lead_is(2, 3), false)
+
+    it("continues the membership operator identically to the one-line form"):
+        # Parity, not membership truth - see the docstring: `in` is broken
+        # independently of line continuation on the seed interpreter.
+        assert_equal(lead_in(2, [1, 2, 3]), oneline_in(2, [1, 2, 3]))
+        assert_equal(lead_in(9, [1, 2, 3]), oneline_in(9, [1, 2, 3]))
+
+    it("continues the nil-coalesce operator onto the next line"):
+        assert_equal(lead_coalesce(nil, 7), 7)
+        assert_equal(lead_coalesce(4, 7), 4)
+
+    it("continues a leading operator in an if condition"):
+        assert_equal(lead_if_cond(5, 2), 1)
+        assert_equal(lead_if_cond(1, 2), 2)
+        assert_equal(lead_if_eq_cond(2, 2), 1)
+        assert_equal(lead_if_eq_cond(1, 2), 2)
+
+    it("continues a leading operator in an elif condition"):
+        assert_equal(lead_elif_cond(5, 2), 1)
+        assert_equal(lead_elif_cond(2, 2), 0)
+        assert_equal(lead_elif_cond(1, 2), -1)
+
 
     it("continues a return expression - the frozen-contract shape"):
         assert_equal(lead_in_return("bound", "why"), "bound reason=why")
