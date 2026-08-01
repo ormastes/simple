@@ -81,7 +81,7 @@ fn parse_use_decl() -> i64:
         else:
             module_path = kw0
         parser_advance()
-    for i in 0..100:
+    while true:
         val sep_kind = par_kind_get()
         val is_dot_sep: bool = sep_kind == TOK_DOT
         val is_domain_sep: bool = sep_kind == TOK_MINUS or sep_kind == TOK_SLASH
@@ -128,7 +128,7 @@ fn parse_use_decl() -> i64:
     val has_import_list: bool = has_brace or has_paren
     if has_import_list:
         parser_advance()
-        for i in 0..10000:
+        while true:
             val at_c1: bool = par_kind_get() == 143
             val at_c2: bool = par_kind_get() == 141
             val at_c: bool = at_c1 or at_c2
@@ -155,6 +155,16 @@ fn parse_use_decl() -> i64:
                 else:
                     imported_names.push(orig_name)
             if par_kind_get() == 160:
+                parser_advance()
+            elif not is_name_tok:
+                # Termination witness. The loop above is unbounded (it used to
+                # be `for i in 0..10000`, which capped an import list at 10000
+                # commas), so every pass must retire at least one token or the
+                # parser hangs. The break guards cover `}`, `)` and EOF, and
+                # the is_name_tok arm consumes the name; this arm covers
+                # everything else -- e.g. `use a.{*}` -- by consuming the
+                # unexpected token as error recovery. Under the old counted
+                # form the same input silently span out the bound instead.
                 parser_advance()
         # Consume closing ) or }
         val is_rb: bool = par_kind_get() == 143
@@ -218,7 +228,7 @@ fn parse_export_decl() -> i64:
     val first_name = par_text_get()
     parser_expect(6)
     var export_name = first_name
-    for i in 0..10000:
+    while true:
         if par_kind_get() != TOK_DOT:
             break
         parser_advance()  # consume '.'
@@ -231,16 +241,22 @@ fn parse_export_decl() -> i64:
         if par_kind_get() == 142:
             var brace_names: [text] = []
             parser_advance()  # consume '{'
-            for j in 0..10000:
+            while true:
                 val at_rb: bool = par_kind_get() == 143
                 if at_rb:
                     break
                 if par_kind_get() == 190:
                     break
-                if par_kind_get() == 6:
+                val bl_is_name: bool = par_kind_get() == 6
+                if bl_is_name:
                     brace_names.push(par_text_get())
                     parser_advance()
                 if par_kind_get() == 160:
+                    parser_advance()
+                elif not bl_is_name:
+                    # Termination witness -- see the note on the import-list
+                    # loop above. Neither a name nor a comma nor a terminator
+                    # would otherwise move the cursor.
                     parser_advance()
             if par_kind_get() == 143:
                 parser_advance()  # consume '}'
@@ -261,13 +277,13 @@ fn parse_export_decl() -> i64:
         names.push(export_name + ":" + first_alias)
     else:
         names.push(export_name)
-    for i in 0..10000:
+    while true:
         if par_kind_get() != 160:
             break
         parser_advance()
         var loop_name = par_text_get()
         parser_expect(6)
-        for j in 0..10000:
+        while true:
             if par_kind_get() != TOK_DOT:
                 break
             parser_advance()  # consume '.'
@@ -324,7 +340,7 @@ fn parse_export_decl() -> i64:
         var from_module: text = par_text_get()
         parser_expect(TOK_IDENT)
         var saw_dot: bool = false
-        for i in 0..100:
+        while true:
             if par_kind_get() != TOK_DOT:
                 break
             parser_advance()  # consume '.'
@@ -477,7 +493,7 @@ fn parse_class_body_method(struct_name: text, is_static: bool, is_me: bool) -> i
         else:
             param_defaults.push(-1)
 
-        for i in 0..10000:
+        while true:
             if par_kind_get() != 160:
                 break
             parser_advance()
@@ -583,7 +599,7 @@ fn skip_impl_where_clause():
 
     var generic_depth: i64 = 0
     var needs_constraint_colon = true
-    for i in 0..1000:
+    while true:
         val kind = par_kind_get()
         if kind == TOK_EOF:
             parser_error("unterminated where clause in impl header")
@@ -628,7 +644,7 @@ fn parse_impl_decl() -> i64:
 
     var method_ids: [i64] = []
 
-    for i in 0..1000:
+    while true:
         parser_skip_newlines()
         if par_kind_get() == 182:
             parser_advance()
