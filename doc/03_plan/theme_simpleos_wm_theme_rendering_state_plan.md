@@ -22,6 +22,19 @@
   - Re-run `check-simpleos-wm-visible-display-evidence` once grub tooling is available.
   - Re-run host + qemu WM render parity checks after this commit.
 
+## 2026-08-01 sync-gh + renderer/IR (runderer) check refresh
+
+- Ran `git fetch` against `origin`; `tmp-docfix` remains at `55115a8241` and `origin/main` is also `55115a8241`, so no source/code fast-forward is pending for this lane.
+- Checked for renderer/runner/IR-spec drift:
+  - `origin/sync-renderer-ir-spec-update` currently at `2a4bf46c9d` with:
+    - `2a4bf46c9d`: docs/spec artifact sync for renderer IR plan/docs (`doc/03_plan/...`, `doc/04_architecture/web_iframe_draw_ir_embedding.md`, `doc/05_design/ui/rendering/draw_ir_multibackend_design.md`, `doc/06_spec/...`).
+    - `2277b52949` and `f7b8526aa8` in the same branch: hosted/web renderer restart and theme receipt hardening in hosted renderer process/test specs.
+  - No new `/tmp-docfix`-blocking renderer runner behavior or protocol behavior changes were detected for this SimpleOS WM theme lane; these changes remain owned by the hosted-web renderer lane unless we explicitly expand scope.
+- Plan update applied: continue current lane focus on:
+  - hosted `SIMPLE_WM_THEME_FILE` propagation,
+  - SimpleOS `/THEME.CSS` propagation,
+  - capture/evidence checks and web-window themed payload envelope fidelity.
+
 ## 2026-08-01 sync-gh follow-up on renderer-runner + IR-spec branch drift
 
 - Pulled `origin` and reviewed `origin/sync-renderer-ir-spec-update` against `origin/main`.
@@ -132,14 +145,40 @@ Plan impact: upstream introduced parser/HIR and DrawIR architecture updates plus
   - `check-simpleos-wm-visible-display-evidence.shs`: FAIL on this host for the same grub tooling blocker.
   - `doc/09_report/simpleos_wm_visible_display_evidence_2026-07-25.md` added by validation run.
 
-## 2026-08-01 GH sync re-check: renderer/IR-runner spec scan
+## 2026-08-01 GH sync re-check (renderer-runner and IR-spec branch scan)
 
-- Ran `git fetch --all --prune` and compared against `origin/main`.
-- Latest runner/IR-related upstream in this range:
-  - `118c636ead` `feat(web/2d): land GAP-2 N-stop gradient CSS wiring + l4-stage-a salvage audit` (web2D gradient pipeline wiring + doc updates).
-  - `31c858cab9` `refactor(ui): S2 DrawIR backend accessor seam (VK identity, MTL/DXGI remap)`.
-- `IR spec` impact scan result:
-  - no new `*_spec.spl` files in this lane’s renderer stack changed in those two points;
-  - no immediate plan item change required beyond current theme propagation + payload fidelity tasks.
-- Known tracking note:
-  - upstream `118c...` touched this plan file on main in a different maintenance path; branch remains intentionally on `origin/tmp-docfix` docs lane, so I am keeping this plan as the local lane tracker and logging the delta here.
+- Compared `origin/sync-renderer-ir-spec-update` again against local lane head.
+- New relevant commit set remains:
+  - `f7b8526aa8` + `2277b52949` (hosted renderer run/receipt/protocol hardening in:
+    `src/os/compositor/simple_web_window_renderer.spl`,
+    `src/os/hosted/hosted_browser_renderer_process.spl`,
+    `src/os/hosted/hosted_entry.spl`,
+    `src/os/hosted/hosted_browser_renderer_worker.spl`,
+    `src/lib/common/web/browser_renderer_protocol.spl`,
+    plus hosted/browser runtime unit specs).
+  - `2a4bf46c9d` (renderer+IR spec artifact/docset sync, plus new `doc/06_spec/03_system/security/*` and `.../01_unit/lib/common/web/browser_renderer_command_capability_codec_spec.md` contracts).
+- Observed plan impact for this lane:
+  - No additional host/simpleOS theme-propagation item changed by these commits.
+  - Renderer protocol/spec ownership is still split with the hosted/web lane; keep this lane focused on:
+    - `/THEME.CSS` SimpleOS theme injection,
+    - hosted WM theme-file input (`SIMPLE_WM_THEME_FILE`),
+    - and capture/evidence parity tasks already listed.
+- Re-check note:
+  - `tmp-docfix` is currently clean and remains on its existing lane head (`55115a8241`) with no direct main merge available from this workspace snapshot.
+  - If we need a clean fast-forward onto `origin/main`, we should coordinate branch rebasing before accepting external hosted/web protocol commits.
+
+## 2026-08-01 GH sync + renderer/IR check refresh (runderer scope)
+
+- Latest sync target checked: `origin/tmp-docfix` is still at `55115a8241` and equal to `origin/main/HEAD`.
+- Ran direct diff review against `origin/sync-renderer-ir-spec-update`:
+  - Branch remains out-of-scope for this lane; changes are concentrated in hosted/web renderer protocol + IR spec artifacts:
+    - `src/os/compositor/simple_web_window_renderer.spl`
+    - `src/os/hosted/hosted_browser_renderer_*.spl`
+    - `src/lib/common/web/browser_renderer_protocol.spl`
+    - `test/01_unit/os/compositor/simple_web_window_renderer_spec.spl`
+    - `doc/03_plan/web_iframe_draw_ir_embedding.md`
+    - `doc/06_spec/...browser_renderer_*_spec.md`
+  - No file in this diff targets `simpleos_wm_theme_bootstrap`, `host_wm_theme_bootstrap`, or the SimpleOS `/THEME.CSS` capture path.
+- Plan impact:
+  - No immediate plan shift for this WM-host theme lane.
+  - Continue with host/simpleOS theme propagation and evidence capture checks; defer renderer/IR protocol consumption to the hosted/web owner lane unless scope is explicitly expanded.
