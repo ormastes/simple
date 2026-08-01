@@ -141,6 +141,52 @@ at the point it happens.
    real timeout and the pinned identity is the evidence; fitting either to the
    observed value would hide the defect.
 
+## UPDATE 2026-08-01: item 2 landed; item 1 is MEASURED INSUFFICIENT
+
+**Item 2 (fail closed) is done** — `render_degraded` is threaded onto
+`SimpleWebLayoutEngine2DExecutionResult` / `SimpleWebLayoutEngine2DReadbackResult`
+and through `SimpleWebEngine2DStaticPixelCache`, and the showcase gate now fails
+`reason=vector-font-evidence-degraded` (exit 12) BEFORE any font comparison.
+
+**Item 1 will not produce a green cell.** It is a real improvement but the gap
+is an order of magnitude larger than a face cache can close. Measured with
+`src/compiler_rust/target/bootstrap/simple run`, interpreter lane, via
+`font_renderer_debug_resolve`:
+
+| what | measured |
+|---|---|
+| resolve, **distinct** content per call (steady state) | **~2.45 s per text node** |
+| first (cold) resolve | 9.7 s |
+| `load_selected_font_file` on the 17.7 MB face (native `rt_file_hash_sha256` path) | 799 ms |
+| `font_runtime_ttf_default_supported` | 9 ms |
+| `browser_font_candidates_for_family` | 18 ms |
+
+`WEB_RENDER_BUDGET_MS` is 10 000 and is stage-partitioned, so the style pass
+gets a fraction of it. At ~2.45 s per distinct text node the budget is gone
+after the first two or three text nodes — consistent with the observed
+`budget-break at=74 of=151`. Roughly 30 distinct text nodes cost ~74 s. Removing
+the per-node 799 ms file re-read saves at most about a third of that; the
+remainder is interpreted shaping/measuring. Cell #3 is compiled-lane gated and
+that lane is slower still, so the shortfall is ~10-30x, not ~2x.
+
+**Measurement trap that cost this lane an hour, recorded so it is not repeated:**
+resolving the *same* content repeatedly reports ~70 ms per call and looks like a
+healthy cache. That is the resolved-metrics cache
+(`_resolved_font_metric_cached`), whose key includes `content`, short-circuiting
+before any font work. A real page has ~30 *distinct* strings, so it never hits
+that cache. Any per-node cost measurement MUST vary the content. For the same
+reason the `at=cache-hit` x0 receipt is **correct behaviour**, not a cache
+defect — 30 distinct strings can only miss.
+
+Note also that the two `[rfm]` receipt families describe *different* caches:
+`from_cache=true` x28 is the FACE cache working, while `at=cache-hit` x0 is the
+metrics cache correctly missing. Reading them as one cache is what produced the
+"cache hit re-parses the blob per text node" framing above.
+
+So the remaining blocker is the cost of an interpreted per-node text measure,
+not font-face caching. Next lane should target that, and should not expect item
+1 alone to flip the verdict.
+
 ## Repro
 
 ```bash
