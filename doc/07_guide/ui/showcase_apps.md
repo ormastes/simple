@@ -2,6 +2,24 @@
 
 The canonical app IDs are `graphics_2d_showcase`, `web_standards_showcase`, and `gui_widget_showcase`. Readiness is recorded in `src/lib/common/ui/showcase_catalog.spl`; a false entry means the surface is not yet accepted even if an older demo window exists.
 
+## Canonical identity and title mapping
+
+| app_id | catalog title | runtime window/title pattern |
+|---|---|---|
+| `graphics_2d_showcase` | `2D Rendering Showcase` | `2d_showcase_backed_<backend>` |
+| `web_standards_showcase` | `Web Standards Showcase` | `web_showcase_backed_<backend>` |
+| `gui_widget_showcase` | `Widget Showcase` | `gui_showcase_backed_<backend>` |
+
+Host/installed WM and SimpleOS launchers use the same backend-aware pattern as each app:
+
+- `2d_showcase_backed_<backend>`
+- `web_showcase_backed_<backend>`
+- `gui_showcase_backed_<backend>`
+
+Where:
+
+- `<backend>` is resolved in `showcase_backend_token()` (`software`, `simd`, `cpu_simd`, `cpu-simd`, `simd_cpu`, `simd-cpu`, `vulkan`, `metal`, `tauri2`, `electron`, etc.)
+
 ## Standalone
 
 ```text
@@ -11,6 +29,22 @@ SIMPLE_GUI=1 scripts/gui/macos-gui-run.shs examples/06_io/ui/widget_showcase_gui
 ```
 
 On Linux, use `scripts/gui/linux-gui-run.shs` with the same source/page arguments. The graphics and web entries currently remain blocked by the recorded nil-receiver runtime failures; the commands are reproductions, not PASS claims.
+
+## Backend control (ground-truth behavior)
+
+All showcase apps that render with Engine2D use `SIMPLE_GUI_BACKEND` unless another knob is wired in source.
+
+- `widget_showcase_gui.spl`: CLI wins first (`--backend=<name>`), then `SIMPLE_GUI_BACKEND`, default `software`.
+- `graphics_2d_showcase_gui.spl`: `SIMPLE_GUI_BACKEND`, default `software` (standalone `run_graphics_2d_showcase` path), while the host-WM child path defaults to `cpu_simd`.
+- `web_render_file_gui.spl` / `web_standards_showcase_gui.spl`: `SIMPLE_GUI_BACKEND`, default `cpu_simd`.
+- Host-WM launchers forward `SIMPLE_GUI_BACKEND` to their child process; if set, they require exact backend match between requested and actual engine in the child.
+
+Backend string handling is normalized by the engine layer; known aliases like `simd_cpu` and `cpu-simd` resolve to `cpu_simd`, and unknown names fall back to `software`.
+
+Validation checks in these showcases commonly reject:
+- requested GPU backends that resolve to CPU mirrors,
+- missing device readback for GPU verification (`vulkan`/`metal` cases),
+- zero or synthetic backend handles and missing provenance.
 
 ## Host WM
 

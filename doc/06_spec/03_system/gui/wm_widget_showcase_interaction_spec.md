@@ -2,34 +2,9 @@
 
 > Pins the live hosted-widget-showcase contract: Winit events are routed into the
 
-<!-- sdn-diagram:id=wm_widget_showcase_interaction_spec.arch -->
-<details class="sdn-source">
-<summary>SDN source</summary>
-
-```sdn id=wm_widget_showcase_interaction_spec.arch hash=sha256:auto render=ascii
-@layout dag
-@direction LR
-
-wm_widget_showcase_interaction_spec -> std
-wm_widget_showcase_interaction_spec -> common
-wm_widget_showcase_interaction_spec -> os
-```
-
-</details>
-
-<details class="sdn-ascii" open>
-<summary>Diagram</summary>
-
-```ascii generated-from=wm_widget_showcase_interaction_spec.arch hash=sha256:auto
-# run: simple md-diagram-update
-```
-
-</details>
-<!-- sdn-diagram:end -->
-
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 12 | 12 | 0 | 0 |
+| 22 | 22 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -45,7 +20,7 @@ Pins the live hosted-widget-showcase contract: Winit events are routed into the
 | Category | Other |
 | Status | Active |
 | Source | `test/03_system/gui/wm_widget_showcase_interaction_spec.spl` |
-| Updated | 2026-06-01 |
+| Updated | 2026-08-01 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 Pins the live hosted-widget-showcase contract: Winit events are routed into the
@@ -67,7 +42,7 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val s = src()
 expect(s).to_contain("fn apply_wm_input")
-expect(s).to_contain("winit_poll_input(lp)")
+expect(s).to_contain("winit_wait_input(lp, wait_ms)")
 expect(s).to_contain("host_compositor_pointer_move")
 expect(s).to_contain("host_compositor_left_button_at")
 expect(s).to_contain("input.click_buttons")
@@ -120,20 +95,282 @@ expect(s).to_contain("host_taskbar_item_x")
 
 </details>
 
-#### creates the showcase as a hosted internal window through COMP_CREATE_WINDOW
+#### creates the child process window through COMP_CREATE_WINDOW
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 val s = src()
 expect(s).to_contain("HostCompositor.new")
 expect(s).to_contain("COMP_CREATE_WINDOW.to_i64()")
-expect(s).to_contain("Widget Showcase")
-expect(s).to_contain("[wm-showcase] launched app=Widget Showcase")
+expect(s).to_contain("req.title")
+expect(s).to_contain("req.pid")
+expect(s).to_contain("[wm-showcase] launched source=")
+```
+
+</details>
+
+#### launches the same showcase source from the filesystem as a child process
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = src()
+expect(s).to_contain("process_spawn_async")
+expect(s).to_contain("bin/simple")
+expect(s).to_contain("WIDGET_SHOWCASE_APP_SOURCE")
+expect(s).to_contain("showcase_source_path")
+expect(s).to_contain("[\"run\", showcase_source_path]")
+expect(s).to_contain("wm_widget_showcase_client_env")
+expect(s).to_contain("SHOWCASE_PPM_SCALE")
+expect(s).to_contain("SIMPLE_TIMEOUT_SECONDS=0")
+expect(s).to_contain("SIMPLE_EXECUTION_LIMIT=0")
+expect(s).to_contain("process_kill(child_pid)")
+```
+
+</details>
+
+#### preserves native-size showcase pixels in the normal WM launch path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = src()
+expect(s).to_contain("env[\"SHOWCASE_PPM_SCALE\"] = \"1\"")
+expect(s.contains("env[\"SHOWCASE_PPM_SCALE\"] = \"2\"")).to_equal(false)
+expect(s).to_contain("val requested_scale = env_get(\"SHOWCASE_PPM_SCALE\") ?? \"\"")
+val child = showcase_src()
+expect(child).to_contain("val full = build_frame_state(w, h, state)")
+expect(child).to_contain("if frame_scale > 1:")
+expect(child).to_contain("full")
+```
+
+</details>
+
+#### forwards child-content pointer events through the shared filesystem bridge
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 14 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = src()
+expect(s).to_contain("WM_EVENT_FILE_ENV")
+expect(s).to_contain("wm_fs_app_event_encode")
+expect(s).to_contain("write_child_pointer_event")
+expect(s).to_contain("child_event_seq")
+expect(s).to_contain("child_local_at")
+expect(s).to_contain("win.x + 4")
+expect(s).to_contain("win.y + 28")
+expect(s).to_contain("file_write")
+expect(s).to_contain("child_pointer_down")
+expect(s).to_contain("child_drag_forwarding")
+expect(s).to_contain("child_needs_press_stream")
+expect(s).to_contain("x >= 134 and x < 199")
+expect(s).to_contain("elif not pressed")
+```
+
+</details>
+
+#### keeps taskbar and window chrome events on the host compositor path
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = src()
+expect(s).to_contain("host_compositor_pointer_move")
+expect(s).to_contain("host_compositor_left_button_at")
+expect(s).to_contain("win.x + win.w - 24")
+expect(s).to_contain("draw_taskbar_pixels")
+expect(s).to_contain("host_taskbar_item_x")
+expect(s).to_contain("state.dirty")
+```
+
+</details>
+
+#### does not embed widget showcase drawing code inside the WM wrapper
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 21 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = src()
+expect(s.contains("fn widget_button")).to_equal(false)
+expect(s.contains("fn widget_checks")).to_equal(false)
+expect(s.contains("fn draw_showcase_content")).to_equal(false)
+expect(s.contains("Engine2D.create_with_backend_fast")).to_equal(false)
+expect(s).to_contain("renderer=wm-pixel-compositor")
+expect(s).to_contain("compose_pixels")
+expect(s).to_contain("draw_taskbar_pixels")
+expect(s).to_contain("pack_pixels")
+expect(s).to_contain("decode_ppm_to_argb")
+expect(s).to_contain("blit_child_frame_pixels")
+expect(s).to_contain("winit_present_rgba")
+expect(s.contains("MetalBackend")).to_equal(false)
+expect(s.contains("rt_winit_buffer")).to_equal(false)
+expect(s).to_contain("WmLoopState")
+expect(s).to_contain("if fx == 0 and fy == 0")
+expect(s).to_contain("was_dragging")
+expect(s).to_contain("child_refresh_pending")
+expect(s).to_contain("child_refresh_deadline")
+expect(s).to_contain("val wait_ms = if state.child_refresh_pending: 20 else: 80")
+expect(s).to_contain("state.dirty = false")
+```
+
+</details>
+
+#### keeps host and SimpleOS divergence limited to platform adapter/config
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 17 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wm = src()
+val child = showcase_src()
+expect(wm).to_contain("common.ui.wm_app_process_contract")
+expect(wm).to_contain("HostCompositor")
+expect(wm).to_contain("HeadlessHostCompositorBackend")
+expect(wm).to_contain("wm_fs_bridge_decode")
+expect(wm).to_contain("wm_fs_app_event_encode")
+expect(wm).to_contain("file_read_bytes(frame_path)")
+expect(wm).to_contain("process_spawn_async")
+expect(wm).to_contain("winit_window_new")
+expect(wm.contains("MetalBackend")).to_equal(false)
+expect(wm.contains("rt_")).to_equal(false)
+expect(child).to_contain("run_wm_client")
+expect(child).to_contain("wm_app_mode_is_client")
+expect(child).to_contain("wm_fs_app_event_decode")
+expect(child).to_contain("write_wm_frame")
+expect(child).to_contain("write_wm_state")
+```
+
+</details>
+
+#### keeps native and WM-client modes in the same showcase source file
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = showcase_src()
+expect(s).to_contain("fn build_frame")
+expect(s).to_contain("fn run_wm_client")
+expect(s).to_contain("wm_app_mode_is_client")
+expect(s).to_contain("wm_widget_showcase_bridge_request_sized")
+expect(s).to_contain("winit_window_new")
+```
+
+</details>
+
+#### records and consumes WM child button and slider events in client mode
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 26 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val s = showcase_src()
+expect(s).to_contain("wm_fs_app_event_decode")
+expect(s).to_contain("ShowcaseState")
+expect(s).to_contain("button_count")
+expect(s).to_contain("button_pressed")
+expect(s).to_contain("checkbox_on")
+expect(s).to_contain("switch_on")
+expect(s).to_contain("slider_value")
+expect(s).to_contain("last_event_seq")
+expect(s).to_contain("hit_rect(x, y, 12, 56, 60, 18)")
+expect(s).to_contain("hit_rect(x, y, 268, 58, 120, 22)")
+expect(s).to_contain("hit_rect(x, y, 12, 124, 78, 18)")
+expect(s).to_contain("kind == \"up\"")
+expect(s).to_contain("hit_rect(x, y, 268, 186, 130, 28)")
+expect(s).to_contain("slider_dragging")
+expect(s).to_contain("write_wm_state")
+expect(s).to_contain("wm_client_log")
+expect(s).to_contain("SIMPLE_WM_CLIENT_LOG")
+expect(s).to_contain("button_count=")
+expect(s).to_contain("state.button_count")
+expect(s).to_contain("use common.ui.widget.{UITree, WidgetNode, WidgetKind}")
+expect(s).to_contain("fn showcase_ui_tree(st: ShowcaseState) -> UITree")
+expect(s).to_contain("frame_scale")
+expect(s).to_contain("ev.x * coord_scale")
+expect(s).to_contain("showcase_state_same")
+expect(s).to_contain("coord_scale > 1")
+```
+
+</details>
+
+#### refreshes child frames when bridge sequence or progress animation advances
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 18 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val wm = src()
+expect(wm).to_contain("last_frame_seq")
+expect(wm).to_contain("req.frame_seq_path")
+expect(wm).to_contain("load_child_frame")
+expect(wm).to_contain("blit_child_frame_pixels")
+expect(wm).to_contain("state.dirty = true")
+expect(wm).to_contain("child_frame_refresh")
+expect(wm).to_contain("child_frame_refresh_timeout")
+expect(wm).to_contain("child_frame_decode_timeout")
+expect(wm).to_contain("state.child_refresh_deadline = 0")
+expect(wm).to_contain("write_child_pointer_event(child_event_path, state.child_event_seq, \"tick\"")
+val child = showcase_src()
+expect(child).to_contain("frame_seq")
+expect(child).to_contain("progress_value")
+expect(child).to_contain("kind == \"tick\"")
+expect(child).to_contain("build_wm_pixels")
+expect(child).to_contain("file_write_bytes(frame_path")
+expect(child).to_contain("wm_fs_bridge_encode")
+```
+
+</details>
+
+#### uses the shared app source constant in contract and wrapper
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+expect(WIDGET_SHOWCASE_APP_SOURCE).to_equal(SHOWCASE_SOURCE)
+val s = src()
+expect(s).to_contain("WIDGET_SHOWCASE_APP_SOURCE")
 ```
 
 </details>
@@ -320,22 +557,6 @@ expect(host_compositor_focused_window_id(comp)).to_equal(1)
 
 ### WM showcase environment behavior
 
-#### fails closed outside a GUI environment before creating a host window
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 3 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-val result = process_run_timeout("bin/simple", ["run", ENTRY], 30000)
-expect(result.2).to_equal(2)
-expect(result.0).to_contain("[wm-showcase] error=no-gui-requested")
-```
-
-</details>
-
 <details>
 <summary>Advanced: keeps the no-GUI gate before winit_loop_new in source order</summary>
 
@@ -344,7 +565,7 @@ expect(result.0).to_contain("[wm-showcase] error=no-gui-requested")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -353,6 +574,7 @@ val gate_pos = s.index_of("SIMPLE_GUI")
 val loop_pos = s.index_of("winit_loop_new()")
 expect(gate_pos >= 0).to_equal(true)
 expect(loop_pos > gate_pos).to_equal(true)
+expect(s).to_contain("[wm-showcase] error=no-gui-requested")
 ```
 
 </details>
@@ -360,12 +582,47 @@ expect(loop_pos > gate_pos).to_equal(true)
 
 </details>
 
+#### defines the filesystem launch and event bridge contract for the WM child
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 22 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val frame_path = "build/tmp/wm_showcase_spec.ppm"
+val event_path = wm_widget_showcase_event_path(frame_path)
+val seq_path = wm_widget_showcase_frame_seq_path(frame_path)
+val req = wm_widget_showcase_bridge_request_sized(1234, frame_path, 268, 362)
+expect(req.source_path).to_equal(SHOWCASE_SOURCE)
+expect(req.title).to_equal(widget_showcase_window_title("software"))
+expect(req.pid).to_be_greater_than(0)
+expect(req.event_path).to_equal(event_path)
+expect(req.frame_seq_path).to_equal(seq_path)
+val event_body = wm_fs_app_event_encode(wm_fs_app_event(1, "up", 18, 30, 0, false))
+val ev = wm_fs_app_event_decode(event_body)
+expect(ev.seq).to_equal(1)
+expect(ev.kind).to_equal("up")
+expect(ev.x).to_equal(18)
+expect(ev.y).to_equal(30)
+expect(ev.pressed).to_equal(false)
+expect(wm_fs_app_event_seq_path(event_path, ev.seq)).to_equal(event_path + ".1")
+val bridge_doc = "kind=create_window\nsource_path={SHOWCASE_SOURCE}\napp_id=/examples/widget-showcase\ntitle={widget_showcase_window_title(\"software\")}\npid=1234\nwindow_w=268\nwindow_h=362\ncontent=source={SHOWCASE_SOURCE} frame={frame_path} pid=1234\nframe_path={frame_path}\nevent_path={event_path}\nframe_seq_path={seq_path}\n"
+val decoded = wm_fs_bridge_decode(bridge_doc)
+expect(decoded.source_path).to_equal(SHOWCASE_SOURCE)
+expect(decoded.event_path).to_equal(event_path)
+expect(decoded.frame_seq_path).to_equal(seq_path)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 12 |
-| Active scenarios | 12 |
+| Total scenarios | 22 |
+| Active scenarios | 22 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

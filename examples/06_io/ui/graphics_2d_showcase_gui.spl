@@ -14,6 +14,7 @@ use std.nogc_sync_mut.sffi.io.{file_write_bytes}
 use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 use std.diag.{dbg_stage, dbg_deadline, dbg_deadline_clear, dbg_event_hop, dbg_events_on, dbg_provenance}
 use common.ui.wm_app_process_contract.{WmFsAppEvent, WmFsFrameReceipt, WM_APP_MODE_ENV, WM_BRIDGE_FILE_ENV, WM_FRAME_FILE_ENV, WM_EVENT_FILE_ENV, WM_FRAME_SEQ_FILE_ENV, WM_CLIENT_HOLD_ENV, wm_app_mode_is_client, wm_graphics_2d_showcase_bridge_request_sized, wm_fs_bridge_encode, wm_graphics_2d_showcase_event_path, wm_graphics_2d_showcase_frame_seq_path, wm_fs_app_event_seq_path, wm_fs_app_event_decode, wm_fs_frame_checksum, wm_fs_frame_receipt, wm_fs_frame_receipt_encode, wm_fs_frame_receipt_path}
+use common.ui.wm_app_process_contract.{wm_graphics_2d_showcase_bridge_request_sized_with_backend}
 
 # Design-space reference dimensions. The gallery below is authored in this
 # 800x600 coordinate space and scaled up to the resolved render resolution.
@@ -376,16 +377,22 @@ fn run_wm_client_graphics_2d() -> i64:
     val frame_scale = wm_frame_scale()
     val frame_w = render_w / frame_scale
     val frame_h = render_h / frame_scale
+    val configured_backend = (env_get(SHOWCASE_BACKEND_ENV) ?? "").trim()
+    val requested_backend = if configured_backend == "": "cpu_simd" else: configured_backend
     val pid = getpid()
-    val req = wm_graphics_2d_showcase_bridge_request_sized(pid, frame_path, frame_w + 8, frame_h + 32)
+    val req = wm_graphics_2d_showcase_bridge_request_sized_with_backend(
+        pid,
+        frame_path,
+        frame_w + 8,
+        frame_h + 32,
+        requested_backend
+    )
     if not file_write(bridge_path, wm_fs_bridge_encode(req)):
         print "[wm-graphics-2d-client] error=bridge-write-failed path={bridge_path}"
         dbg_stage("wm_child", "bridge_write_failed")
         return 1
     dbg_stage("wm_child", "bridge_write_done")
 
-    val configured_backend = (env_get(SHOWCASE_BACKEND_ENV) ?? "").trim()
-    val requested_backend = if configured_backend == "": "cpu_simd" else: configured_backend
     dbg_stage("wm_child", "backend_create_start")
     val requested_engine = Engine2D.create_requested_backend(frame_w, frame_h, requested_backend)
     var engine = match requested_engine:
