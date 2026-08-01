@@ -524,3 +524,158 @@ standing instruction — not removed.
 
 No commit/push performed (per campaign rule); changes left in-tree for
 orchestrator review.
+
+## RK1 update (2026-08-01): the "re-key the MIR enum maps by `runtime_name`" plan — three premises REFUTED, fix is NOT cheap
+
+Lane RK1 was tasked to fix this class at its root by re-keying the MIR enum
+maps by `runtime_name` and aligning the interpreter. **No `src/` change was
+made.** Direct reading refuted three of the task's load-bearing premises, and
+the tip provides no way to verify a change to enum lowering. Findings below,
+each labelled PROVED (direct read) or INFERRED.
+
+### PROVED — the defect mechanism, as stated, is real
+
+1. **Bare-keyed, unconditional, last-wins write.**
+   `MirLowering.register_enum_variants` writes
+   `enum_variant_index[enum_def.name]` and
+   `enum_variant_discriminants[enum_def.name]` with no guard
+   (`src/compiler/50.mir/_MirLowering/module_lowering.spl:236-241` — the task
+   cited 241/244, the actual lines are 236-241). Two enums sharing a bare name
+   clobber each other; the last registered wins.
+2. **The reader is silent on a miss.** `MirLowering.enum_variant_discriminant`
+   returns `-1` for "enum not in the map", "discriminants not in the map", and
+   "variant not found in this enum", with no diagnostic distinguishing them
+   (`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:66-77`).
+   This is what converts a collision into a wrong answer rather than an error.
+3. **The engines run opposite policies.** The interpreter's own bare-keyed
+   table `enum_table_register`
+   (`src/compiler/10.frontend/core/interpreter/eval_tables.spl:603-613`)
+   returns early when the name is already present — **first-wins**, the exact
+   opposite of MIR's last-wins. Same collision, opposite winner, so which
+   declaration is "correct" flips with parse order and with engine choice.
+4. **`HirEnum.runtime_name` exists and is namespaced.**
+   `hir_definitions.spl:171` declares the field;
+   `20.hir/hir_lowering/_Items/declaration_lowering.spl:755` populates it as
+   `"{owner_module}.{name}"` (falling back to the bare name when
+   `owner_module` is empty).
+
+### REFUTED — premise 1: `enum_runtime_id_index` is NOT a namespace-aware pattern to follow
+
+The task stated that "namespace-aware handling with a collision error already
+exists in the same MIR file — `enum_runtime_id_index`", and that the fix was
+therefore cheap. **This is false, and it is the third refuted attribution in
+this area** (after `named_type_register` and the original "cross-module"
+framing above).
+
+`register_enum_runtime_name` (`module_lowering.spl:190-199`) ends with:
+
+    self.enum_runtime_id_names[id_key] = runtime_name
+    self.enum_runtime_id_index[enum_name] = runtime_id
+
+`enum_runtime_id_index` is keyed by the **bare** `enum_name`, last-wins —
+carrying the identical defect. The collision error one line above guards a
+*different* map, `enum_runtime_id_names`, which is keyed by the decimal text
+of `hash(runtime_name) % 2147483646 + 2`. That check detects **hash**
+collisions between two *distinct* runtime names. It is orthogonal to bare-name
+collisions and cannot fire on one: two enums named `Style` in different modules
+have different `runtime_name`s, hence different hashes, hence no error — while
+`enum_runtime_id_index["Style"]` is silently overwritten.
+
+**Consequence: there are THREE bare-keyed defective maps, not two, and the
+repo contains zero correct patterns to copy.**
+
+### REFUTED — premise 2: the enumeration artifact does not exist
+
+`doc/08_tracking/bug/enum_bare_name_collision_enumeration_2026-08-01.tsv` is
+**not present** in the repo (no `.tsv` files exist in `doc/08_tracking/bug/`,
+and no file matching `*enum*bare*name*` or `*enum*collision*enumeration*`
+exists anywhere under `doc/`). The task's instruction "use it; do not
+re-derive it" cannot be followed, and the quoted 332 / 192 / 140 / 84 split is
+not backed by any landed artifact.
+
+### REFUTED — premise 3: the `StyleMutation` workaround was never landed
+
+The task's verification target was that `WebLayoutMutationKind.Style` had been
+renamed to `StyleMutation` as a workaround. **`StyleMutation` occurs nowhere in
+`src/`.** The enum still reads, unrenamed
+(`src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/contracts.spl:93-97`):
+
+    enum WebLayoutMutationKind:
+        Style
+        Insert
+        FontResource
+        Viewport
+
+So the stated "confirm the rename becomes unnecessary" check has no subject in
+the current tree.
+
+### INFERRED (strongly supported) — a straight re-key would be catastrophic, and silently so
+
+The write side is two lines. The **read** side is ~40 sites, and the dominant
+ones are structurally incapable of supplying a `runtime_name`:
+
+- **Convertible.** The main match-lowering site derives `enum_name` from
+  `self.symbols.get_symbol_raw(esym.id).name` — the bare name
+  (`switch_operators_calls.spl:1391-1395`). `Symbol.defining_module` *is*
+  reachable here: `canonical_mir_type_symbol` (`module_lowering.spl:170-180`)
+  already builds `"{defining_module}.{info.name}"`, the same shape as
+  `runtime_name`. This site could be converted.
+- **NOT convertible — no enum context exists by construction.** The
+  bare-variant resolution fallback iterates *every* key looking for an owner:
+  `switch_operators_calls.spl:1429`, `expr_dispatch.spl:3157`,
+  `module_lowering.spl:1228`. A bare `case Circle(r):` with no qualifier has no
+  module to key on; that scan is the mechanism that finds the owner.
+- **NOT convertible — hardcoded bare literals.** ~12 lookups of literal
+  `"Option"` / `"Result"`: `module_lowering.spl:778-793`,
+  `bootstrap_globals.spl:525-534,631-637`,
+  `switch_operators_calls.spl:1478-1483,1872-1873,3197-3202`,
+  `expr_dispatch.spl:1744,1838`.
+
+Because the reader answers a miss with a silent `-1` (PROVED #2 above),
+re-keying the maps without converting every reader turns each unconverted
+lookup into a silent wrong answer — the same failure mode, applied to *all*
+enums instead of only colliding ones, with no diagnostic. Item 4 of the task
+("make the reader's miss loud") is therefore a **prerequisite** for the re-key,
+not a follow-on.
+
+### Recommended design (dual-key + ambiguity flag), not attempted here
+
+A re-key is the wrong shape. The change that preserves all bare-name readers:
+
+1. In `register_enum_variants`, write **both** `map[runtime_name]`
+   (authoritative, cannot collide) and `map[bare_name]` (compatibility).
+2. When a bare key is re-registered with a **divergent** variant set, record it
+   in a new `enum_bare_ambiguous: Dict<text, bool>` instead of silently
+   clobbering. Identical variant sets (the benign tier-mirror case) stay
+   unflagged.
+3. Convert the readers that *can* supply a namespace (the match site above) to
+   try `runtime_name` first, bare second.
+4. A lookup that resolves only via a bare key **flagged ambiguous** emits a
+   located diagnostic naming both candidate owners, instead of answering.
+5. Apply the same key and the same policy to `enum_runtime_id_index` and to the
+   interpreter's `enum_table_register`, so the two engines stop disagreeing.
+
+### Why nothing was landed: the tip cannot verify a change to enum lowering
+
+The deployed `bin/simple`
+(`bin/release/x86_64-unknown-linux-gnu/simple`) is the stripped bootstrap
+compiler. `bin/simple --help` exits 0 and prints five lines advertising only
+`--opt-level` / `--list-optimizations` — **no `test`, `run`, `lint`, `check`,
+or `build` subcommand exists.** (Consistent with the standing note that the
+live binary lost all subcommands.) There is consequently no way at this tip to
+compile-check a `.spl` edit, let alone satisfy this defect's actual evidence
+bar, which requires: measurement on **both** engines (they disagree by
+construction — that is the defect), a **true-positive control** that still
+fires on both to rule out agreement-by-silence, and a **sabotage** run proving
+non-vacuity. A rebuild is the blocked self-host path.
+
+Editing MIR enum lowering — where the failure mode is a *silent* `-1` and where
+this doc already records that "no error appeared" is never evidence of
+correctness — without any of that would manufacture exactly the false-green
+this lane exists to eliminate. The analysis is therefore landed as-is, and the
+`src/` change is left for a lane with a working toolchain.
+
+**Unblocking order for the next lane:** (a) restore a runnable
+`test`/`lint`-capable binary; (b) land item 4 (loud reader miss) alone and
+absorb the fallout; (c) only then dual-key. Steps (b) and (c) must not be
+combined — a silent reader hides the re-key's own regressions.
