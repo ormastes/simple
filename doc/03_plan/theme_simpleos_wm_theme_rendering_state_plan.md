@@ -9,6 +9,9 @@
     - `2277b52949` (hosted theme receipts tests)
     - `f7b8526aa8` (themed renderer restart preservation)
     - `2a4bf46c9d` (renderer + DrawIR plan/spec artifact sync)
+- Current local snapshot:
+  - `tmp-docfix` is `ahead 50, behind 2` vs `origin/tmp-docfix`
+  - `origin/main` is `1cfed202c5`
 - Cross-lane impact is unchanged for this WM/SimpleOS theme task:
   - no direct edits to `host_wm_theme_bootstrap.spl`, `simpleos_wm_theme_bootstrap.spl`, or `wm_theme_css.spl`
   - overlap remains only in hosted/web renderer protocol ownership (`src/os/hosted/hosted_entry.spl`, `src/os/hosted/hosted_browser_renderer*`, `src/os/compositor/simple_web_window_renderer.spl`, protocol/spec files)
