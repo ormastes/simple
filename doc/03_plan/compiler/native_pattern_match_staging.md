@@ -297,6 +297,21 @@ Independent, orthogonal follow-ups surfaced by this work:
     written the return register into a bogus vreg. Signatures widened to
     `LocalId?` and the return-value move guarded (`rv32_isel_call` was already
     correct and is now matched by the other three).
+  - **SUPERSEDED 2026-08-01 — `Abort` is now LIVE.** The reachability finding
+    below ("zero `MirTerminator.Abort(` construction sites") held only until the
+    `panic` builtin got its MIR interception. `panic(msg)` previously had **no
+    MIR handling at all**: HIR accepted it (`is_interp_builtin_fn`) and defined
+    a bodiless `SymbolKind.Function`, so MIR fell through to the generic
+    direct-call path and emitted a call to an external symbol literally named
+    `panic` — which links to `runtime_native.c`'s `void panic(int64_t)`, whose
+    `rt_core_as_string` returns NULL on a raw literal `char*` so **the message
+    was lost**, or, unregistered, picks up the weak `return 0` stub so the panic
+    became a **no-op**. Neither terminated the block. It now lowers to
+    `rt_panic(msg)` (real message, via the print-path argument coercion) **plus**
+    `MirTerminator.Abort` (`mir_data.spl` `terminate_abort`), making this isel
+    arm's first real user. Covered by execution in
+    `test/01_unit/compiler/backend/native/isel_x86_64_spec.spl`
+    ("Isel X86_64 Abort terminator lowering", "MirBuilder terminate_abort").
   - **Reachability: latent, not live.** No MIR builder in `src/**` originates
     either terminator — zero `MirTerminator.Abort(` construction sites anywhere,
     and all four `MirTerminator.CallTerminator(` sites (`copy_prop`, `loop_licm`,

@@ -3,7 +3,7 @@ use std.spec.*
 use compiler.mir.mir_data.*
 use compiler.mir.intrinsics.{BIT_BSWAP}
 use compiler.backend.native.isel_x86_64.{isel_module}
-use compiler.backend.native.mach_inst.{MachModule, MachBlock, X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_AND, X86_OP_OR, X86_OP_SUB, X86_OP_SHL, X86_OP_SHR, X86_OP_BSWAP}
+use compiler.backend.native.mach_inst.{MachModule, MachBlock, X86_OP_MOV_REG_REG, X86_OP_MOV_REG_IMM, X86_OP_AND, X86_OP_OR, X86_OP_SUB, X86_OP_SHL, X86_OP_SHR, X86_OP_BSWAP, X86_OP_INT3, X86_OP_NOP}
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_types.{SymbolId}
 
@@ -97,6 +97,55 @@ fn build_bswap_module(name: text) -> MirModule:
 fn entry_block(module: MachModule) -> MachBlock:
     module.functions[0].blocks[1]
 
+fn build_abort_module(name: text) -> MirModule:
+    """A function whose entry block DIVERGES via MirTerminator.Abort, with a
+    reachable-looking successor laid out immediately after it.
+
+    This is the shape `panic(msg)` now lowers to (mir_data.spl
+    `terminate_abort`, switch_operators_calls.spl `lower_bootstrap_panic_call`)
+    and, until that lowering existed, NOTHING in `src/**` ever constructed an
+    Abort terminator -- the isel arm added in 30743ecd674 had zero real users.
+    The second block exists precisely so a regression is observable: if Abort
+    ever goes back to lowering as a bare NOP, control falls straight out of
+    `entry` into `next` and runs the very code the abort exists to prevent.
+    """
+    val i64_type = MirType(kind: MirTypeKind.I64)
+    val sig = MirSignature(params: [], return_type: i64_type, is_variadic: false)
+    val locals = [
+        MirLocal(id: LocalId(id: 0), name: Some("_return"), type_: i64_type, kind: LocalKind.Return),
+        MirLocal(id: LocalId(id: 1), name: Some("after"), type_: i64_type, kind: LocalKind.Temp)
+    ]
+    val entry = MirBlock(
+        id: BlockId.new(0),
+        label: Some("entry"),
+        instructions: [],
+        terminator: MirTerminator.Abort("explicit panic() -- diverging, must not fall through")
+    )
+    val next = MirBlock(
+        id: BlockId.new(1),
+        label: Some("after_panic"),
+        instructions: [
+            MirInst(kind: MirInstKind.Const(LocalId(id: 1), MirConstValue.Int(42), i64_type), span: nil)
+        ],
+        terminator: MirTerminator.Ret(Some(MirOperand(kind: MirOperandKind.Copy(LocalId(id: 1)))))
+    )
+    val func = MirFunction(
+        symbol: SymbolId.new(0),
+        name: name,
+        signature: sig,
+        locals: locals,
+        blocks: [entry, next],
+        entry_block: BlockId.new(0),
+        span: Span(start: 0, end: 0, line: 1, col: 1),
+        generic_params: [],
+        is_generic_template: false,
+        specialization_of: nil,
+        type_bindings: {}
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[SymbolId.new(0)] = func
+    MirModule(name: name, functions: functions, statics: {}, constants: {}, types: {})
+
 fn opcode_at(block: MachBlock, index: i64) -> i64:
     block.insts[index].opcode
 
@@ -171,3 +220,48 @@ describe "Isel X86_64 bit_bswap intrinsic lowering":
         val bswap_idx = find_opcode(block, X86_OP_BSWAP)
         expect(bswap_idx >= 0).to_equal(true)
         expect(opcode_at(block, bswap_idx - 1)).to_equal(X86_OP_MOV_REG_REG)
+
+describe "Isel X86_64 Abort terminator lowering":
+    it "traps on Abort instead of falling through into the next block":
+        val mach = isel_module(build_abort_module("abort_test"))
+        val block = entry_block(mach)
+        # INT3 must be present: Abort HALTS.
+        assert_true(find_opcode(block, X86_OP_INT3) >= 0)
+
+    it "does not lower Abort to a bare NOP":
+        # The regression this guards: Abort falling into the trailing `case _:`
+        # and emitting X86_OP_NOP, which deletes the terminator entirely and
+        # lets control run on into the block laid out next.
+        val mach = isel_module(build_abort_module("abort_nop_test"))
+        val block = entry_block(mach)
+        val int3_idx = find_opcode(block, X86_OP_INT3)
+        val nop_idx = find_opcode(block, X86_OP_NOP)
+        assert_true(int3_idx >= 0)
+        assert_true(nop_idx < 0 or nop_idx > int3_idx)
+
+describe "MirBuilder terminate_abort":
+    it "marks the current block as diverging with an Abort terminator":
+        # The producer side of the same contract: `panic(msg)` lowering
+        # (switch_operators_calls.spl `lower_bootstrap_panic_call`) calls this
+        # so the panicking block DIVERGES. Before it existed there were zero
+        # Abort construction sites in src/**, so no block was ever marked
+        # non-returning and a panic left control falling through.
+        var b = MirBuilder.new()
+        val sig = MirSignature(params: [], return_type: MirType(kind: MirTypeKind.Unit), is_variadic: false)
+        b.begin_function(SymbolId.new(0), "panics", sig, Span(start: 0, end: 0, line: 1, col: 1))
+        val blk = b.new_block(Some("panic_block"))
+        b.switch_to_block(blk)
+        b.terminate_abort("explicit panic() -- diverging, must not fall through")
+
+        var saw_abort = false
+        var saw_message = ""
+        for block in b.blocks:
+            if block.id.id == blk.id:
+                match block.terminator:
+                    case Abort(message):
+                        saw_abort = true
+                        saw_message = message
+                    case _:
+                        ()
+        assert_true(saw_abort)
+        assert_contains(saw_message, "must not fall through")
