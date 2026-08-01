@@ -1,5 +1,21 @@
 # Theme rendering and WM host/simpleOS sync state (2026-07-25)
 
+## 2026-08-01 GH sync + runderer/IR recheck (post-rebase)
+
+- Ran `git fetch --all --prune` and rebased `tmp-docfix` on `origin/main`.
+- Remote search still shows no branch/tag named `runderer` (searched current `git branch -r` and `git tag` candidates).
+- Renderer/IR tracking lane remains `origin/sync-renderer-ir-spec-update` at `2a4bf46c9d`, with these visible commits:
+  - `2a4bf46c9d` `docs: sync renderer and DrawIR IR spec plan artifacts`
+  - `2277b52949` `test(web): enforce hosted theme receipts`
+  - `f7b8526aa8` `fix(web): preserve themed renderer restarts`
+- Compared from `origin/main`:
+  - no direct file overlap with this lane’s WM/SimpleOS theme payload files beyond hosted protocol sharing.
+  - overlap scope remains `src/os/hosted/hosted_entry.spl` + hosted web renderer/protocol surfaces.
+- Local lane working state after sync: `HEAD` at `2c5457092a`, ahead of `origin/main` by 9 commits with pending WIP in:
+  - `examples/09_embedded/simple_os/arch/*/gui_entry_desktop.spl`
+  - `test/01_unit/os/wm_theme_bootstrap_contract_spec.spl`
+- Plan action unchanged: continue this lane on WM/SimpleOS theme snapshot and capture fidelity, and leave renderer/web IR protocol/doc integration to the renderer-lane owner unless scope is explicitly expanded.
+
 ## 2026-08-01 latest GH sync + runderer/IR recheck (this run)
 
 - Ran `git fetch --all --prune`; remote now at `origin/main = 5d3223e329`.
