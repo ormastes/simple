@@ -268,3 +268,126 @@ reason to distrust the static explanation and settle it by sabotage.
 The reporting fix is what matters regardless, and is why it was landed first and
 separately: the next grammar divergence will again mask a whole file, and until
 now nothing counted it.
+
+## Census attempt 3 — oracle VALIDATED BY SABOTAGE, but the repo-wide count is still not measurable
+
+**Binary:** `bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731`
+(Jul 30). **Tree:** a tmpfs `git archive` of origin `931cf1dcf6555e34d69665149ac8ea14e6ec1488`.
+
+### The binary's date does NOT make these verdicts stale — PROVED
+
+The standing worry about this lane is that a Jul-30 host binary reproduces
+already-fixed parser bugs. For *this* oracle that worry does not apply, and it
+is provable rather than arguable: the host binary compiles `lint` **from the
+source tree it is run in**. Two independent demonstrations, same binary:
+
+1. The Jul-30 binary prints the `NOT LINTED:` banner that only landed in the
+   tree on 2026-08-01. It cannot have had that string baked in.
+2. Editing `src/compiler/10.frontend/core/parser.spl` in the tree changes the
+   verdict (next section).
+
+So the parser under test is the **tree's** parser at tip, not a Jul-30 snapshot.
+The host binary's date is load-bearing for codegen, not for these parse
+verdicts.
+
+### Sabotage validation — the precondition the previous census failed
+
+The previous census oracle was proved vacuous: gutting
+`parse_module_silent_checked` did not change its verdict. The same sabotage was
+therefore applied to this one before any file was counted.
+
+`parse_module_silent_checked` in `src/compiler/10.frontend/core/parser.spl` was
+replaced with an unconditional failure plus a marker:
+
+    fn parse_module_silent_checked(source: text, path: text) -> bool:
+        print("SABOTAGE_MARKER_PMSC {path}")
+        true
+
+Same command, same two fixtures, before and after
+(`simple lint --json probe/good.spl probe/bad.spl`):
+
+| | `probe/good.spl` | `probe/bad.spl` | `not_linted_files` |
+|---|---|---|---|
+| control | `errors:0`, no flag | `not_linted:true` | 1 |
+| sabotaged | **`not_linted:true`** | `not_linted:true` | **2** |
+
+The marker fired exactly twice, and the good file **flipped**. The verdict
+demonstrably comes from the implementation named. This oracle is sound where
+the previous one was vacuous. The parser was then restored and re-verified
+byte-identical to the origin blob before any census file was run.
+
+### Order-dependence
+
+Measured, not assumed: linting `bad.spl` *before* `good.spl` still reports
+`good.spl` clean, and `good.spl` alone is clean — so a preceding parse failure
+did not contaminate the following file for this pair. That is one pair, not a
+proof, so the census harness still uses **one process per file** and never
+relies on batching.
+
+### Harness
+
+`census.sh` — one `simple lint --json <file>` process per file, verdict in
+{LINTED, NOT_LINTED, TIMEOUT, CRASH}, nothing folded into "checked". It carries
+its own positive and negative control in every run and asserts
+`result count == input count`, exiting nonzero otherwise.
+
+That assertion is not decorative. The first revision of the harness died on
+`export -f` (fatal under dash), **linted zero files, and exited 0** — a silent
+no-op that was caught only because the verdict tally was checked. This is the
+same failure class as the retracted census and as
+`reference_probe_harness_falls_through_exit_zero`.
+
+### Measured throughput — why the repo-wide number is still out of reach
+
+| workload | files | wall | effective |
+|---|---|---|---|
+| 2 tiny fixtures, 1 process | 2 | 7.3 s | — |
+| 12 uniformly random repo `.spl`, 6-way | 12 | 121 s | ~10 s/file |
+| cluster census, 8-way | — | — | **~30 s/file** |
+
+At ~30 s/file effective, the full **31,998** `.spl` files under `src/`, `test/`
+and `scripts/` is **~90 h of wall clock** on this host. That is the honest
+blocker, and it is *not* the O(n^2) dedupe (fixed above, and worth only 240 s of
+the total). It is per-file lint cost: a 3-line fixture costs ~3.5 s, while
+`src/app/io/_CliCommands/run_commands.spl` (709 lines) costs **316 s** in a
+single-file process — lint appears to pay for the linted file's transitive
+module graph, so cost tracks imports, not line count.
+
+**No repo-wide count is published here.** A uniform random sample of 12 files
+returned 0 NOT_LINTED, which is consistent with a low single-digit percentage
+but far too small to bound anything.
+
+### What PARSE001 cannot tell you
+
+The diagnostic is emitted at `<file>:1:0` with no line or construct, so this
+oracle can enumerate *which* files fail but not *why*. A breakdown by failure
+shape is therefore **not** cheaply available, and one plausible shape was tested
+and refuted: `import a.b.{C}` at line 1 (used by 396 files) parses fine, so the
+`import` keyword is not the cause in `src/app/interpreter/ast_types.spl`.
+
+**TODO(lint,P2): give PARSE001 the parser's real line/column and message so a
+census can group failures by cause instead of only listing paths.**
+
+### Cluster census — IN PROGRESS, not a result
+
+A one-process-per-file census of the two directories the retracted figures
+named — `src/app/interpreter` (99 files) and `src/compiler_rust/lib` (725) — is
+running at the time of writing and is **~7 h** at measured throughput. Do not
+quote a number from it until it reports `CENSUS_OK` with
+`result count == input count`. Partial prefixes are not results: the earlier
+retracted census was a partial prefix.
+
+Two scoping notes that must be settled before any count from it becomes a
+headline, both confirmed here:
+
+* `src/app/interpreter` has **zero external importers** (verified by grep for
+  `app.interpreter.` across `src/` and `test/`, excluding the tree itself), so
+  it is unexercisable by specs. Failures there are most likely **dead code, not
+  live verification risk**, and must be reported separately rather than folded
+  into a repo headline.
+* `src/compiler_rust/lib/std` holds **682** of that directory's 725 `.spl`
+  files — the Rust seed's bundled copy of the Simple stdlib. It is not in the
+  declared external-paths list in `CLAUDE.md`, so it is nominally in scope, but
+  it is a duplicate of `src/lib` shipped for the seed. Whether the pure-Simple
+  lint gate is even meant to apply to it is an open scoping question, not a
+  measurement question.
