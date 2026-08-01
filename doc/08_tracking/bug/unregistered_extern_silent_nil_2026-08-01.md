@@ -169,19 +169,37 @@ emits
 ## Current counts
 
 ```
-extern_decl_total=385
+extern_decl_total=347
 extern_registered=195
 extern_bare_exempt=30      (legitimate freestanding class)
-extern_unregistered=75     (actionable)
+extern_unregistered=37     (actionable)
 ```
 
-## The backlog — 75 unregistered non-`bare` extern symbols
+## The backlog — 37 unregistered non-`bare` extern symbols remaining
 
 By group:
 
-- **38 in `src/compiler/90.tools/sffi_gen/specs/treesitter.spl`** — *input data*
-  to the sffi_gen code generator, not call sites. Expected to be unregistered;
-  should be excluded by scope, not by exemption.
+- ~~**38 in `src/compiler/90.tools/sffi_gen/specs/treesitter.spl`**~~ — **RETIRED
+  2026-08-01 by deleting the file.** The original hypothesis here was that these
+  were live *input data* to the sffi_gen code generator and so should be excluded
+  by scope. That hypothesis is disproved. Evidence:
+  1. `TreesitterFFI` is referenced nowhere outside its own file.
+  2. `treesitter` is **not** exported from `sffi_gen/specs/__init__.spl`, which
+     indexes the 15 spec modules the generator actually consumes.
+  3. It was the **only** one of the 48 files in `specs/` to use `@extern` at all;
+     every real spec instead declares `fn <name>_specs() -> [InternFnSpec]` and
+     builds `InternFnSpec(...)` values. The generator has no `@extern`-class
+     reader, and its `@sffi_spec` marker is referenced nowhere.
+  4. `rt_ts_*` appears in the Rust tree exactly once, in a `//!` doc comment in
+     `interpreter_extern/dynamic_sffi.rs:10` — i.e. never registered. (This is
+     precisely the comment-match trap the gate strips for.)
+  5. The shipping tree-sitter support is hand-written **pure Simple** under
+     `src/compiler/10.frontend/treesitter/` and uses zero `rt_ts_` externs.
+  6. Its own header comment pointed at `src/app/sffi_gen/specs/treesitter.spl`,
+     a path that no longer exists.
+
+  So it was an abandoned alternative binding approach, never wired to anything —
+  dead code, deleted per the repo's no-unused-code rule rather than exempted.
 - **21 in `src/compiler_rust/lib/std/src/tooling/`** — watch/reload/dashboard
   helpers (`rt_fsevents_*`, `rt_http_*`, `rt_websocket_*`, `rt_dir_entries`,
   `rt_execute_command`).
@@ -229,44 +247,6 @@ rt_path_exists	src/compiler_rust/lib/std/src/tooling/todo_parser.spl:419
 rt_reflect_function_name	src/compiler_rust/lib/std/src/spec/snapshot/runner.spl:197
 rt_reflect_source_file	src/compiler_rust/lib/std/src/spec/snapshot/runner.spl:185
 rt_sha256	src/compiler_rust/lib/std/src/tooling/core/incremental.spl:38
-rt_ts_node_child	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:212
-rt_ts_node_child_count	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:201
-rt_ts_node_end_byte	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:164
-rt_ts_node_end_point	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:186
-rt_ts_node_has_error	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:317
-rt_ts_node_is_extra	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:306
-rt_ts_node_is_missing	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:295
-rt_ts_node_is_named	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:284
-rt_ts_node_is_null	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:328
-rt_ts_node_named_child	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:235
-rt_ts_node_named_child_count	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:224
-rt_ts_node_next_sibling	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:258
-rt_ts_node_parent	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:247
-rt_ts_node_prev_sibling	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:269
-rt_ts_node_start_byte	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:153
-rt_ts_node_start_point	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:175
-rt_ts_node_symbol	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:142
-rt_ts_node_type	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:131
-rt_ts_parser_free	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:37
-rt_ts_parser_new	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:26
-rt_ts_parser_parse	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:61
-rt_ts_parser_parse_incremental	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:73
-rt_ts_parser_set_language	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:45
-rt_ts_query_capture_count	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:377
-rt_ts_query_capture_name	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:388
-rt_ts_query_cursor_exec	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:420
-rt_ts_query_cursor_free	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:412
-rt_ts_query_cursor_new	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:404
-rt_ts_query_cursor_next_capture	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:441
-rt_ts_query_cursor_next_match	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:430
-rt_ts_query_cursor_set_byte_range	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:452
-rt_ts_query_cursor_set_point_range	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:462
-rt_ts_query_free	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:358
-rt_ts_query_new	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:343
-rt_ts_query_pattern_count	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:366
-rt_ts_tree_edit	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:109
-rt_ts_tree_free	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:90
-rt_ts_tree_root_node	src/compiler/90.tools/sffi_gen/specs/treesitter.spl:98
 rt_walk_directory	src/compiler_rust/lib/std/src/io/fs_helpers.spl:71
 rt_walk_directory	src/compiler_rust/lib/std/src/tooling/generics_migrate.spl:357
 rt_walk_directory	src/compiler_rust/lib/std/src/tooling/todo_parser.spl:427
