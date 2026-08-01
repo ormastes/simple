@@ -169,13 +169,13 @@ emits
 ## Current counts
 
 ```
-extern_decl_total=347
-extern_registered=195
+extern_decl_total=169
+extern_registered=33
 extern_bare_exempt=30      (legitimate freestanding class)
-extern_unregistered=37     (actionable)
+extern_unregistered=25     (actionable)
 ```
 
-## The backlog — 37 unregistered non-`bare` extern symbols remaining
+## The backlog — 25 unregistered non-`bare` extern symbols remaining
 
 By group:
 
@@ -203,10 +203,37 @@ By group:
 - **21 in `src/compiler_rust/lib/std/src/tooling/`** — watch/reload/dashboard
   helpers (`rt_fsevents_*`, `rt_http_*`, `rt_websocket_*`, `rt_dir_entries`,
   `rt_execute_command`).
-- **12 in `src/app/interpreter/extern/`** — `ffi_regex_*` (note `sffi_regex_find`
-  *does* exist in `runtime/src/value/mod.rs:1012`, so these may be a
-  naming-variant mismatch rather than a true gap) and four `rt_math_*`. This
-  tree is separately known to be unexercisable by specs.
+- ~~**12 in `src/app/interpreter/extern/`**~~ — **RETIRED 2026-08-01 by deleting
+  the `src/app/interpreter/extern/` package (25 files, 178 `@extern` decls).**
+  The package is dead code, and the tree says so itself:
+  1. `src/app/__init__.spl:33` — "`app.interpreter` - REMOVED. Use
+     `core.interpreter` instead"; `compiler/10.frontend/core/interpreter/mod.spl:21`
+     — "Legacy Interpreter (DELETED 2026-02-10) … Location: src/app/interpreter/
+     (removed)". Both tombstones were written; the files were never deleted.
+  2. Zero importers of `app.interpreter.extern[.*]` anywhere in `src/` or `test/`
+     outside the package itself, and no `FILE.md` manifest references it.
+  3. No spec exercises it; it is not reachable from `interpreter/main.spl`, which
+     imports only `core`, `parser`, `ast_convert`.
+  4. `ffi/__init__.spl:7`'s `from extern import {load_library, resolve_symbol,
+     ExternLib}` resolves to the **sibling** `ffi/extern.spl` (which exports
+     exactly those names at `:7`), *not* to this package — so nothing broke.
+
+  On the `ffi_`/`sffi_` naming-mismatch hypothesis: it was correct as far as it
+  went. All 8 stems do exist as `sffi_regex_*` with real implementations
+  (`runtime/src/value/sffi/regex.rs:92,112,148,189,234,263,296,332`, registered at
+  `interpreter_extern/mod.rs:285-292`), and a live wrapper with byte-identical
+  signatures already ships at `src/lib/nogc_sync_mut/io/regex_simple.spl:15-22`.
+  Re-registering would therefore have produced a second, unreachable copy of a
+  binding that already works — so the dead package was deleted instead.
+  The four `rt_math_lcm/sign/fract/rem` had no implementation anywhere and no
+  caller; they went with it. Deleted, not tagged `bare`: they are ordinary host
+  math, not freestanding intrinsics, and `bare` is not a parking space.
+
+  Note this deletion drops `extern_decl_total` from 347 to 169 and
+  `extern_registered` from 195 to 33 — the registered figure is an intersection
+  with the declared-candidate set, so removing 178 mostly-registered candidates
+  necessarily shrinks it. The vacuity guard (bound 100) still passes at 169 and
+  was re-checked, not adjusted.
 - **2 in `src/compiler_rust/lib/std/src/spec/snapshot/`**, **1 in `.../io/`**,
   **1 in `.../tooling/core/`**.
 
@@ -214,14 +241,6 @@ Full machine-readable list, `symbol<TAB>file:line`:
 
 <!-- BEGIN unregistered-extern-list -->
 ```
-ffi_regex_captures	src/app/interpreter/extern/regex.spl:22
-ffi_regex_find	src/app/interpreter/extern/regex.spl:16
-ffi_regex_find_all	src/app/interpreter/extern/regex.spl:19
-ffi_regex_is_match	src/app/interpreter/extern/regex.spl:13
-ffi_regex_replace	src/app/interpreter/extern/regex.spl:25
-ffi_regex_replace_all	src/app/interpreter/extern/regex.spl:28
-ffi_regex_split	src/app/interpreter/extern/regex.spl:31
-ffi_regex_split_n	src/app/interpreter/extern/regex.spl:34
 rt_dir_entries	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:13
 rt_execute_command	src/compiler_rust/lib/std/src/tooling/dashboard/collectors/vcs_collector.spl:81
 rt_fsevents_close	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:420
@@ -236,10 +255,6 @@ rt_inotify_add_watch	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:358
 rt_inotify_close	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:319
 rt_inotify_init	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:310
 rt_inotify_read	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:316
-rt_math_fract	src/app/interpreter/extern/math.spl:171
-rt_math_lcm	src/app/interpreter/extern/math.spl:156
-rt_math_rem	src/app/interpreter/extern/math.spl:174
-rt_math_sign	src/app/interpreter/extern/math.spl:168
 rt_module_load	src/compiler_rust/lib/std/src/tooling/watch/reload_apply.spl:168
 rt_module_unload	src/compiler_rust/lib/std/src/tooling/watch/reload_apply.spl:145
 rt_path_exists	src/compiler_rust/lib/std/src/tooling/generics_migrate.spl:337
