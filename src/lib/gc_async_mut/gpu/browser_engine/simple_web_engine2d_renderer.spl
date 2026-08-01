@@ -191,11 +191,15 @@ impl SimpleWebEngine2DStaticPixelCache:
             html, render_mode, content_revision
         ):
             return cached
-        val result = simple_web_layout_render_html_readback_engine2d_result(html, self.width, self.height, self.backend_name)
+        val resolved_backend = simple_web_engine2d_resolved_backend_name(self.width, self.height, self.backend_name)
+        val result = simple_web_layout_render_html_readback_engine2d_result(html, self.width, self.height, resolved_backend)
         self.retain_result_for_html(
             html, render_mode, content_revision, result
         )
         result
+
+fn _resolved_render_backend(width: i32, height: i32, backend_name: text) -> text:
+    simple_web_engine2d_resolved_backend_name(width, height, backend_name)
 
 fn _hex_digit_value(c: text) -> u32:
     if c == "0": return 0u32
@@ -932,15 +936,16 @@ fn _toolbar_modal_grid_pixels(width: i32, height: i32) -> [u32]:
 pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
     if width <= 0 or height <= 0:
         return []
+    val resolved_backend = _resolved_render_backend(width, height, backend_name)
     if html.contains("simple-web-engine2d-toolbar-modal-grid"):
         return _toolbar_modal_grid_pixels(width, height)
     val lower = html.lower()
     if lower.contains("<p") or lower.contains("<h1") or lower.contains("<h2") or lower.contains("<h3") or lower.contains("<button") or lower.contains("<span") or lower.contains("<small") or lower.contains("<code") or lower.contains("<label") or lower.contains("<a "):
-        return simple_web_layout_render_html_pixels_engine2d(html, width, height, backend_name)
+        return simple_web_layout_render_html_pixels_engine2d(html, width, height, resolved_backend)
     # display:contents collapses the wrapper box — the heuristic would paint its
     # background-color when block_color != 0. Route to layout renderer instead.
     if html.contains("display:contents") or html.contains("display: contents"):
-        return simple_web_layout_render_html_pixels(html, width, height, backend_name)
+        return simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
 
     val bg = _html_background_color(html)
     val block_color = _first_block_color(html, 0u32)
@@ -952,7 +957,7 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
     # blue/slate demo palette over the fully resolved Aetheric document. WM
     # content always needs real selector matching and CSS layout.
     if has_wm_titlebar or has_wm_content:
-        return simple_web_layout_render_html_pixels(html, width, height, backend_name)
+        return simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
     val needs_selector_layout = _style_block_has_class_or_id_selector(html)
     # Result-based discriminator: route to the heuristic only when it
     # recognizes structure it can faithfully reproduce (a resolved background
@@ -961,7 +966,7 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
     # HTML/CSS parse -> layout -> paint engine.
     val heuristic_recognized = not needs_selector_layout and (bg != 0xFFFFFFFFu32 or block_color != 0u32 or has_wm_titlebar or has_wm_content or has_simple_web_mark)
     if not heuristic_recognized:
-        return simple_web_layout_render_html_pixels(html, width, height, backend_name)
+        return simple_web_layout_render_html_pixels(html, width, height, resolved_backend)
 
     val has_accent_stripes = bg == 0xFFFFFFFFu32 and block_color == 0u32
     if block_color == 0u32 and not has_accent_stripes and not has_wm_titlebar and not has_wm_content and not has_simple_web_mark:
@@ -1019,8 +1024,9 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
     pixels
 
 pub fn simple_web_engine2d_render_html_pixels_at_time(html: text, width: i32, height: i32, backend_name: text, animation_time_ms: i64) -> [u32]:
+    val resolved_backend = _resolved_render_backend(width, height, backend_name)
     simple_web_layout_render_html_pixels_engine2d_at_time(
-        html, width, height, backend_name, animation_time_ms
+        html, width, height, resolved_backend, animation_time_ms
     )
 
 pub fn simple_web_engine2d_render_html_pixels_at_time_with_animations(
@@ -1028,21 +1034,22 @@ pub fn simple_web_engine2d_render_html_pixels_at_time_with_animations(
     animation_time_ms: i64,
     animation_instances: [BrowserCssAnimationInstance]
 ) -> [u32]:
+    val resolved_backend = _resolved_render_backend(width, height, backend_name)
     simple_web_layout_render_html_pixels_engine2d_at_time_with_animations(
-        html, width, height, backend_name, animation_time_ms,
+        html, width, height, resolved_backend, animation_time_ms,
         animation_instances
     )
 
 pub fn simple_web_engine2d_render_html_readback(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
     if width <= 0 or height <= 0:
         return engine2d_readback([], "not_requested")
-    val normalized_backend = backend_canonical_name(backend_name)
-    if (html.contains("display:contents") or html.contains("display: contents")) and normalized_backend != "software" and normalized_backend != "cpu" and normalized_backend != "cpu_simd":
-        return simple_web_layout_render_html_readback(html, width, height, backend_name)
-    val pixels = simple_web_engine2d_render_html_pixels(html, width, height, backend_name)
-    if normalized_backend != "software" and normalized_backend != "cpu" and normalized_backend != "cpu_simd":
+    val resolved_backend = _resolved_render_backend(width, height, backend_name)
+    if (html.contains("display:contents") or html.contains("display: contents")) and resolved_backend != "software" and resolved_backend != "cpu" and resolved_backend != "cpu_simd":
+        return simple_web_layout_render_html_readback(html, width, height, resolved_backend)
+    val pixels = simple_web_engine2d_render_html_pixels(html, width, height, resolved_backend)
+    if resolved_backend != "software" and resolved_backend != "cpu" and resolved_backend != "cpu_simd":
         val base = if html.contains("widget-panel"): 0xFFF5F5F5u32 else: 0xFFFFFFFFu32
-        return present_layout_pixels_with_engine2d_readback(pixels, width, height, backend_name, base)
+        return present_layout_pixels_with_engine2d_readback(pixels, width, height, resolved_backend, base)
     engine2d_readback(pixels, "cpu_mirror")
 
 pub fn simple_web_engine2d_resolved_backend_name(width: i32, height: i32, backend_name: text) -> text:
