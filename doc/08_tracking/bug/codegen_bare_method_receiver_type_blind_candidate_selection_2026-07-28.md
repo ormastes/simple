@@ -107,6 +107,38 @@ name-suffix match alone bound it.
 This matters because it means *narrowing among candidates cannot close the
 class*. The defect is that selection never consults the receiver type at all.
 
+## Correction (2026-08-01): Step 3 alone cannot decide the ANY cases
+
+Measured under the Rust seed's cranelift JIT with
+`SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1`, one construct per file:
+
+| fixture | receiver | reported `receiver_ty` | bound to | verdict |
+|---|---|---|---|---|
+| `"hello world".lower().index_of("world")` with a same-module `Str.index_of` | erased text | `Some(TypeId(14))` = `TypeId::ANY` | `Str.index_of` | **THEFT** (999, not 6) |
+| `self.backend.shutdown()` where `backend: any` holds a `Backend` | erased field | `Some(TypeId(14))` = `TypeId::ANY` | `Backend.shutdown` | **LEGIT** (42) |
+
+Both report the *same* `receiver_ty`. A TypeId-to-name map therefore cannot
+separate theft from legitimate erased-field dispatch for the 79 of 97 census
+binds that were `ANY` (45) or untyped (34) — Step 3 can only adjudicate the
+remaining 18 with a concrete receiver type. **The only compile-time-available
+discriminator for the ANY majority is the runtime tag**, i.e. a genuine fix has
+to emit a tag test and branch between the `rt_*` builtin and the name-bound user
+method. No such predicate is exported by the runtime today
+(`rt_value_is_heap` does not distinguish a text/array/dict from a user struct).
+
+Also measured, and why the blanket form of Step 3's alternative is unsafe:
+"always try the builtin first for a bare name" would hijack `clear`
+(`rt_array_clear`) plus `set` / `find` / `sort` / `map` / `filter` / `first` /
+`last` / `hash` / `at` / `replace` / `split` / `reverse` — all common user method
+names that legitimately reach this path. The builtin table is much wider than
+`is_bare_builtin_collection_method`, so it cannot simply replace it.
+
+Separately, the numeric casts (`to_i64` 33 binds, `to_i32` 8, `to_u32` 2) must
+NOT be added to `is_bare_builtin_collection_method`: their builtin lowering is a
+*static* cast keyed on `vreg_types` (`from_ty`), not a tag dispatch, so on an
+`ANY` receiver it would reinterpret a tagged pointer as a number. Routing them
+to the builtin trades one wrong answer for another.
+
 ## Why it is not a contained fix
 
 1. **No receiver-type check is possible at this layer.** `InstrContext`
@@ -139,8 +171,18 @@ gated on `!lookup_name.contains('.')`, so genuinely typed receivers still reach
 their real methods — confirmed above (typed `Foo_dot_*` relocs unchanged).
 
 This is a denylist-shaped defense: **every new victim needs a new entry, and
-victims are found by crashes.** `equals` is the obvious next one — 19 `fn equals`
-definitions exist in owned source.
+victims are found by crashes.** `equals` is *not* in fact reachable this way:
+`try_compile_builtin_method_call` has no `equals` arm, so a bare `equals` falls
+through regardless of whether it is listed.
+
+2026-08-01: `("index_of", 1)` added, this time found by a minimal repro rather
+than a crash. `rt_index_of` tag-dispatches (`rt_array_index_of` fails closed with
+-1 on a non-array, then `rt_string_find`), so it is safe on any receiver.
+Regression spec: `test/01_unit/compiler/codegen/erased_receiver_index_of_bind_spec.spl`
+(+ its `fixtures/erased_receiver_index_of.spl`). The spec shells out to a `run`
+subprocess on purpose — `use std.spec` demotes the whole program to the tree-walk
+interpreter, so an in-process `it` block cannot reach this codegen path at all
+and passes identically on fixed and unfixed compilers.
 
 ## Suggested next steps, cheapest first
 
@@ -149,8 +191,18 @@ definitions exist in owned source.
    above. Discovery is now a compile-time message, not a guest page fault.
 2. Add the arity filter behind that measurement, once the placeholder-signature
    question in (2) above is settled.
-3. Plumb a TypeId-to-name map into `InstrContext` and check the receiver type.
-   This is the actual root fix.
+3. ~~Plumb a TypeId-to-name map into `InstrContext` and check the receiver
+   type.~~ **Superseded 2026-08-01** — see the Correction section: theft and
+   legitimate erased-field dispatch both report `receiver_ty = ANY`, so this
+   closes at most 18 of the 97 census binds. Worth doing for those 18, but it is
+   not the root fix.
+4. **New root-fix candidate:** export a runtime predicate that distinguishes a
+   builtin value (text / array / dict / scalar) from a user struct, then emit a
+   tag test at every erased-receiver name-suffix bind that has a tag-dispatching
+   builtin of the same name, branching between the two. This is the only
+   discriminator that is actually correct in the `ANY` majority. Cost: one new
+   `rt_*` symbol plus block emission in `compile_method_call_static`; needs a
+   full bootstrap to validate.
 
 ## Repro
 

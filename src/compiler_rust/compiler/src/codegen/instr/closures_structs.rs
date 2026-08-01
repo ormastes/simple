@@ -180,6 +180,28 @@ pub(crate) fn is_bare_builtin_collection_method(method: &str, arg_count: usize) 
             // — adding it here would break those.
             | ("pop", 0)
             | ("push" | "append", 1)
+            // Text/array search. Enumerated as a confirmed erased-receiver
+            // THEFT in the census (8 binds, all stolen by
+            // `dbfs_engine.txn.TxnStepSequence.index_of`) but never added
+            // here. Reproduced minimally 2026-08-01 under the seed JIT:
+            //
+            //   struct Foo:  (impl Foo: fn index_of(self, needle: text) -> i64: return 999)
+            //   val e = "hello world".lower()   # result type is erased to ANY
+            //   e.index_of("world")             # -> 999, not 6
+            //
+            // `SIMPLE_DEBUG_ERASED_RECEIVER_BIND=1` on that fixture reports
+            // `receiver_ty=Some(TypeId(14))` (= `TypeId::ANY`) bound by
+            // name-suffix alone to `Foo.index_of`.
+            //
+            // `rt_index_of` tag-dispatches: it tries `rt_array_index_of`
+            // (whose `as_typed_ptr!` fails closed with -1 on a non-array) and
+            // then `rt_string_find`, so it is safe on any receiver value.
+            //
+            // Scope note: arity 1 only. A user `index_of(a, b)` (or a 0-arg
+            // one) still falls through to normal name resolution, and a typed
+            // receiver emits a qualified `Type.index_of` which the caller's
+            // `!lookup_name.contains('.')` gate excludes.
+            | ("index_of", 1)
     )
 }
 
@@ -1039,6 +1061,19 @@ mod tests {
         // through normal name resolution.
         assert!(!is_bare_builtin_collection_method("slice", 0));
         assert!(!is_bare_builtin_collection_method("slice", 4));
+    }
+
+    /// Same defect class again, enumerated in the 2026-07-28 census (8 stolen
+    /// binds) and reproduced minimally 2026-08-01: an erased `text` receiver
+    /// bound `.index_of(needle)` to a same-module `Foo.index_of` and returned
+    /// that method's value instead of the match position.
+    #[test]
+    fn erased_index_of_uses_builtin_dispatch() {
+        assert!(is_bare_builtin_collection_method("index_of", 1));
+        // Arity-gated: only the 1-arg builtin idiom is captured, so a user
+        // `index_of()` / `index_of(a, b)` still resolves normally.
+        assert!(!is_bare_builtin_collection_method("index_of", 0));
+        assert!(!is_bare_builtin_collection_method("index_of", 2));
     }
 }
 
