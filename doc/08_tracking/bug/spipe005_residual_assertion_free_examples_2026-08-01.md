@@ -186,6 +186,29 @@ nothing depended on them. **All 16 deleted:**
   same dead type-inference cluster as `d48bc04ab35b`; those four were the
   remainder.
 
+### Root cause: `.spipe_matchers_*` are transient artifacts that got committed
+
+Deleting these files is **not by itself a durable fix**. They are temp rewrites
+the test runner emits next to each spec at execution time —
+`src/lib/nogc_sync_mut/test_runner/test_runner_execute.spl:420`:
+
+```
+val tmp = dir + ".spipe_matchers_" + base
+file_write(tmp, joined)
+```
+
+Running any spec regenerates its neighbour verbatim. This was observed directly:
+the three `test/01_unit/lib/database/` files were deleted, a spec was run to
+verify, and they reappeared at 15:05 with the identical 4-line fake-pass body —
+and were therefore re-added by the first landing of this change.
+
+They are **not gitignored**, and **101 of them are tracked**. That is the real
+defect: a per-run build artifact is under version control, which is how a
+commented-out spec with a fake-pass body became durable repo content in the first
+place. **Recommended fix (not done here, it is a test-runner-lane change):** add
+`.spipe_matchers_*` to `.gitignore` and untrack all 101 in one pass, or have the
+runner emit them under `build/` instead of beside the spec.
+
 ### Follow-on finding: the "real siblings" are source-text greps
 
 Deleting the fake-pass files does **not** restore the coverage they implied. The
