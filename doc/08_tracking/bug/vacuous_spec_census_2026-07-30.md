@@ -365,6 +365,55 @@ mocks) is a confirmed shim cluster that **cannot be repaired-and-proved until a
 binary is deployed whose stdlib root follows the project**. It is left in place
 deliberately rather than rewritten unverified.
 
+## Batch 2 — `app/llm_caret/types` (PROVED)
+
+`test/{01_unit,unit}/app/llm_caret/types_spec.spl`, subject
+`src/app/llm_caret/types.spl`.
+
+`test/unit/...` was a **349-line shim**: it redefined all five structs
+(`Message`, `ChatRequest`, `ChatResponse`, `StreamEvent`, `ProviderConfig`) and
+all eighteen constructors/predicates inline under the comment *"Re-define types
+inline for test isolation (import compatibility pattern)"*, and imported
+nothing. 26 examples, all green, none able to observe the shipped module.
+
+**No drift.** A body-by-body comparison (whitespace-normalised) found 18/18
+functions and all five struct field lists byte-equivalent to the shipped file.
+This is an important negative result: a shim can be perfectly faithful *today*
+and still be totally vacuous, because nothing makes it stay faithful. It is the
+counter-example to the assumption that shim vacuity always shows up as drift.
+Disposition: replaced, not because it lied, but because it cannot fail.
+
+The `test/01_unit` mirror had already been de-shimmed (14 field-complete
+examples) and its assertions strictly subsume all 26 shim examples, so it was
+adopted for both mirrors and extended with two sentinel pins
+(`temperature == -1.0` exactly, `max_turns == 0` exactly — the shim asserted
+only `temperature < 0`). Result: 16 total, 16 passed, 0 failed on both.
+
+Sabotage (`new_system_message` role `system`→`sys`; `new_chat_request`
+`temperature` `-1.0`→`0.5`; `new_success_response` `stop_reason`
+`end_turn`→`stop`), restored and diff-verified:
+
+| spec | clean | under sabotage | Δ |
+|---|---|---|---|
+| `types_spec.spl` (rewritten) | 16 total, 0 failed | 16 total, **4 failed** | **+4** |
+| `types_spec.spl` **as it was at base** (shim) | 26 total, 0 failed | 26 total, **0 failed** | **0** |
+
+## Located, not yet repaired — `app/llm_caret/config` (PROVED, no fix landed)
+
+`test/unit/app/llm_caret/config_spec.spl` is a shim (local `_apply_config`,
+`parse_config_text`, `reset_config`, plus a generic local `check`) and reports
+**22 total, 22 passed, 0 failed**. Its `test/01_unit` mirror has already been
+de-shimmed and reports **16 total, 9 passed, 7 failed** against the same
+shipped `src/app/llm_caret/config.spl`.
+
+The seven failures are one symptom: parsed values never replace the built-in
+defaults — `expected gpt-4o to equal gpt-test`, `expected python3 to equal
+python3.13`, `expected 100 to equal 50`, `expected "" to equal
+compat-test-key`. So the shim is not merely vacuous; it is **holding a green
+badge over seven live failures in its own subject**, which the mirror already
+shows. Repair needs the config defect root-caused first and is left for a
+follow-up rather than absorbed here.
+
 ## Engine reach
 
 Same limit as the first addendum, restated because it now matters more: every
