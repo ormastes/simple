@@ -1,7 +1,9 @@
 # JIT text-method dispatch gap silently substitutes the string `error`
 
 - **ID:** jit_text_repeat_dispatch_and_silent_error_substitution_2026-08-01
-- **Status:** partially fixed (`repeat` fixed; 51 sibling methods still missing)
+- **Status:** partially fixed -- 49 of 51 sibling methods wired; **2 remain**
+  (`parse_i64`, `ptr`), both blocked on a decision rather than on transcription.
+  See the batch 5 section at the end for why.
 - **Severity:** critical — silent, zero-exit data corruption that can reach files on disk
 - **Engines affected:** Cranelift JIT (default engine). Tree-walking interpreter is correct.
 - **Measured against:** origin `main` tip `5ca84bcefe5`, built in an isolated scratch
@@ -671,3 +673,20 @@ Wiring one text method touches, in the worst case:
 8. `compiler/src/hir/lower/expr/mod.rs` -- result-type table (silent when missed,
    and the 102-probe sweep reports PASS anyway). Needed for EVERY result type
    that requires boxing, not just bool.
+
+## Pre-existing test failures, proved pre-existing (PROVED)
+
+`cargo test --release -p simple-runtime` reports **1080 passed, 7 failed** both
+with batch 5 applied and on pristine `8dd8f17b656` with only the two runtime
+source files reverted. Identical failure list, identical pass count:
+
+    executor::tests::test_isolated_thread_spawn_with_args_and_join
+    executor::tests::test_isolated_thread_spawn_with_args_and_join_direct_function_record
+    loader::package::format::tests::test_manifest_section_rejects_partial_runtime_variants_trailer
+    loader::settlement::native::tests::test_native_lib_manager
+    value::collections::tests::test_dict_invalid_value
+    value::collections::tests::test_low_heap_tagged_values_do_not_crash_collection_runtime
+    value::heap::attr_tests::owner_attribution_orders_by_live_bytes_and_frees_settle
+
+None of the three batches in this document adds a failure. They are recorded
+here so a later lane does not attribute them to this work.
