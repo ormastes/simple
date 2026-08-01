@@ -104,6 +104,25 @@ peer reports.
     `Engine2D.draw_text` → transient `FontRenderer`/`FontRenderBatch` material.
     Atlas/cache state must not enter Draw IR, and this lane must not add a
     private parallel font draw path.
+  - Strict Vulkan/Metal web acceptance must retain the DrawIR-v3 execution
+    profile, requested and executed modes, route, reason code, fallback level,
+    `accepted`, `strict_pass`, and deterministic hash. Full-offload evidence
+    requires `GPU_ROUTE_GPU`, reason `NONE`, and `strict_pass=true`.
+    `CPU_SELECTED` is policy evidence only; `GPU_FALLBACK` is a failure and
+    must retain a denial reason in the 200–299 range.
+  - Web events must prove one sealed/coalesced input batch per epoch with scene
+    generation and sequence, CPU/GPU mutation-journal byte parity, one epoch
+    receipt, and explicit host-effect, fault, and overflow receipts. Production
+    evidence uses checksums/hashes; any pixel capture must be labeled
+    test/shadow readback.
+  - Do not use a WM child-web capture as Vulkan/Metal evidence when its bridge
+    selected `cpu_simd` or dropped backend forwarding. The standalone selected-
+    backend web and GUI gates remain mandatory before the host-WM gate.
+  - `draw_ir_v3_execution_route.spl` is a CPU-reference contract, not proof of
+    a live GPU backend. Capacity-overflow acceptance remains pending until the
+    frozen capacity-manifest parser defect is repaired and a real
+    `GpuOverflowReceipt(bound, requested, limit)` is wired. This requires an
+    explicit schema-version plan; do not edit C0 contracts in this lane.
 
 The latest bounded producer work is recorded in cycles 25–27 below and
 supersedes the older diagnostic summaries. Parsing, cmap, tables, metrics,
