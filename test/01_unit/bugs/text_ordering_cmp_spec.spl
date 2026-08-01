@@ -63,3 +63,77 @@ describe "text ordering comparison is lexicographic content compare":
         expect("" < "a").to_equal(true)
         expect("a" > "").to_equal(true)
         expect("" < "").to_equal(false)
+
+# ============================================================================
+# 2026-08-01 regression guard: statically-UNTYPED text operands
+# ============================================================================
+#
+# The 2026-07-22 fix above guarded the ordering arm with
+#   vreg_is_text(left) && vreg_is_text(right)
+# i.e. it only fired when BOTH operand vregs were statically TypeId::STRING.
+# A text produced by a method call (`.substring(...)`) does not get its vreg
+# type threaded, so the guard failed and the comparison fell straight back
+# into the raw-pointer icmp arm -- reintroducing address ordering, silently,
+# and ONLY under the JIT (the tree-walking interpreter was always correct).
+#
+# `==` was unaffected because Eq/NotEq already had a tag-aware dynamic
+# fallback (rt_native_eq); ordering had none. That asymmetry is why the
+# failure looked like ">= behaving as ==" at the lint level.
+#
+# Real-world impact: `ch >= "0" and ch <= "9"` in
+# src/compiler/35.semantics/lint/module_init_literal.spl returned FALSE for
+# most digits, producing MODINIT001 lint false positives.
+#
+# See doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
+
+# The operand shapes below were each MEASURED to produce a wrong answer under
+# the pre-fix JIT while the tree-walking interpreter gave the right one. The
+# defect is sensitive to how much static type info survives to codegen, so
+# these specific shapes (receiver arriving as a fn PARAMETER) are the ones that
+# actually carry weight -- a substring of a bare literal often kept its typing
+# and passed even before the fix.
+
+fn _ge_zero(t: text) -> bool:
+    """Digit-range lower bound, receiver via parameter. Pre-fix JIT answered
+    `true` for "/" (0x2F), which sorts BELOW "0" (0x30)."""
+    val ch = t.substring(0, 1)
+    ch >= "0"
+
+fn _le_nine(t: text) -> bool:
+    val ch = t.substring(0, 1)
+    ch <= "9"
+
+fn _lower_lt(a: text, b: text) -> bool:
+    """The lexicographic-sorting family: both operands are method results, so
+    NEITHER is statically typed. Pre-fix JIT said `"banana" < "apple"` was
+    true -- a comparator that would silently corrupt any text sort."""
+    a.lower() < b.lower()
+
+describe "text ordering is content-based for runtime-produced (untyped) operands":
+    it "orders a substring result below the digit range":
+        # '/' is 0x2F, one below '0' (0x30). PRE-FIX JIT: true (address order).
+        expect(_ge_zero("/")).to_equal(false)
+        expect(_ge_zero(".")).to_equal(false)
+        expect(_ge_zero(" ")).to_equal(false)
+
+    it "orders a substring result inside the digit range":
+        expect(_ge_zero("0")).to_equal(true)
+        expect(_ge_zero("7")).to_equal(true)
+        expect(_ge_zero("9")).to_equal(true)
+        expect(_le_nine("0")).to_equal(true)
+        expect(_le_nine("9")).to_equal(true)
+
+    it "orders a substring result above the digit range":
+        expect(_ge_zero("a")).to_equal(true)
+        expect(_le_nine("a")).to_equal(false)
+
+    it "gives a correct lexicographic comparator for text sorting":
+        # PRE-FIX JIT: both directions returned true, so the comparator was
+        # not even antisymmetric.
+        expect(_lower_lt("apple", "banana")).to_equal(true)
+        expect(_lower_lt("banana", "apple")).to_equal(false)
+
+    it "keeps the sorting comparator antisymmetric and irreflexive":
+        expect(_lower_lt("Zebra", "apple")).to_equal(false)
+        expect(_lower_lt("apple", "Zebra")).to_equal(true)
+        expect(_lower_lt("apple", "apple")).to_equal(false)

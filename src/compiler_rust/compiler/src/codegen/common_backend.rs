@@ -583,6 +583,15 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_interp_call"
             | "rt_native_eq"
             | "rt_native_neq"
+            // P0 follow-up (2026-08-01): rt_native_cmp is the ordering
+            // counterpart of rt_native_eq, emitted directly from the
+            // BinOp::Lt/Gt/LtEq/GtEq arm in codegen/instr/core.rs when neither
+            // operand is statically typed. Like rt_native_eq and
+            // rt_text_cmp_any it never appears as a MIR call node, so it must
+            // be a codegen root here or it is absent from `runtime_funcs` and
+            // call_runtime_2 panics with "missing runtime fn". See
+            // doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
+            | "rt_native_cmp"
             // Synthesized directly by codegen (not by a MIR call node) and so
             // never present in `referenced_call_names`: the `BinOp::Pow` float
             // path (codegen/instr/core.rs) emits a `rt_math_pow` call. Must be

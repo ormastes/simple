@@ -483,6 +483,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_value_compare", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_native_eq", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_native_neq", &[I64, I64], &[I64]),
+    // 2026-08-01: ordering counterpart of rt_native_eq. Emitted directly by
+    // codegen/instr/core.rs's BinOp::Lt/Gt/LtEq/GtEq arm when neither operand
+    // is statically typed, so that a tagged heap string is content-compared
+    // instead of address-compared. See
+    // doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
+    RuntimeFuncSpec::new("rt_native_cmp", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_truthy", &[I64], &[I8]),
     // =========================================================================
     // Math shims (C ABI: f64 in/out — see runtime/src/value/sffi/math.rs).

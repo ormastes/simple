@@ -318,7 +318,7 @@ pub(super) fn build_vreg_types(
                             Some(TypeId::STRING)
                         }
                         "rt_is_some" | "rt_is_none" => Some(TypeId::BOOL),
-                        "rt_string_eq" | "rt_native_eq" | "rt_native_neq" => Some(TypeId::I64),
+                        "rt_string_eq" | "rt_native_eq" | "rt_native_neq" | "rt_native_cmp" => Some(TypeId::I64),
                         // Array/collection length returns a native i64. Recording
                         // it here types the `len()` result VReg so a CHAINED
                         // `arr.len().to_i64()` (or `.to_u32()` etc.) sees an i64

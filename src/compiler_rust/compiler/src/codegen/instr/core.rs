@@ -367,7 +367,7 @@ pub(crate) fn compile_binop<M: Module>(
                 };
                 let cmp_i8 = builder.ins().fcmp(cc, lhs, rhs);
                 ensure_i64(builder, cmp_i8)
-            } else if vreg_is_text(ctx, left_vreg) && vreg_is_text(ctx, right_vreg) {
+            } else if vreg_is_text(ctx, left_vreg) || vreg_is_text(ctx, right_vreg) {
                 // P0 fix (2026-07-22): text ordering compare. Mirrors the
                 // vreg_is_text fast path BinOp::Eq already has just below
                 // (compile_text_eq_with_identity_fast_path / rt_string_eq) --
@@ -379,7 +379,47 @@ pub(crate) fn compile_binop<M: Module>(
                 // strcmp-style signed result; compare that against 0 with the
                 // requested predicate. See
                 // doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md.
+                //
+                // P0 follow-up (2026-08-01): the guard was `&&`, so it only
+                // fired when BOTH vregs were statically TypeId::STRING. A
+                // runtime-produced text (e.g. a `.substring()` result, whose
+                // vreg type is not threaded) made the guard fail and dropped
+                // the whole comparison back into the raw-pointer icmp arm --
+                // reintroducing exactly the address-ordering defect this arm
+                // exists to prevent, silently and only under the JIT. Simple
+                // is statically typed, so one side being known text is enough
+                // to prove the comparison is a text comparison; rt_text_cmp_any
+                // normalizes tagged-or-raw on both sides anyway. See
+                // doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
                 let cmp = call_runtime_2(ctx, builder, "rt_text_cmp_any", lhs, rhs);
+                let zero = builder.ins().iconst(types::I64, 0);
+                let cc = match op {
+                    BinOp::Lt => IntCC::SignedLessThan,
+                    BinOp::Gt => IntCC::SignedGreaterThan,
+                    BinOp::LtEq => IntCC::SignedLessThanOrEqual,
+                    BinOp::GtEq => IntCC::SignedGreaterThanOrEqual,
+                    _ => unreachable!(),
+                };
+                let cmp_i8 = builder.ins().icmp(cc, cmp, zero);
+                ensure_i64(builder, cmp_i8)
+            } else if !(vreg_is_native_equality_scalar(ctx, left_vreg)
+                && vreg_is_native_equality_scalar(ctx, right_vreg))
+            {
+                // P0 follow-up (2026-08-01): NEITHER operand is statically
+                // typed. Eq/NotEq already handle this case dynamically via
+                // rt_native_eq/rt_native_neq (tag-aware: content-compares
+                // tagged heap strings, icmp-compares raw integers), which is
+                // precisely why `==` on text stayed correct while `<`/`<=`/
+                // `>`/`>=` did not -- ordering had no such fallback and fell
+                // into the raw icmp arm below, comparing string handles.
+                // rt_native_cmp is the ordering counterpart of rt_native_eq
+                // and returns a strcmp-style signed result.
+                //
+                // Gated on the operands NOT being known scalars so genuine
+                // integer comparisons keep the inline icmp and take no
+                // runtime-call perf hit; only the statically-unknown case
+                // pays for the dynamic dispatch.
+                let cmp = call_runtime_2(ctx, builder, "rt_native_cmp", lhs, rhs);
                 let zero = builder.ins().iconst(types::I64, 0);
                 let cc = match op {
                     BinOp::Lt => IntCC::SignedLessThan,

@@ -3064,6 +3064,49 @@ int64_t rt_text_cmp_any(int64_t left, int64_t right) {
     return (int64_t)strcmp(a, b);
 }
 
+/* 2026-08-01: ordering counterpart of rt_native_eq, for `<` `<=` `>` `>=`
+ * when codegen cannot statically prove either operand's type.
+ *
+ * Eq/NotEq have had a tag-aware dynamic fallback (rt_native_eq /
+ * rt_native_neq) for a long time; the ordering operators did not. Codegen's
+ * ordering arm therefore fell through to a raw `icmp` on the two operands as
+ * opaque integers whenever static typing was incomplete -- which for a tagged
+ * heap string compares its HANDLE ADDRESS, not its content. That is the same
+ * class of defect rt_text_cmp_any was introduced to fix for the statically
+ * typed case, and it stayed live for the untyped case (observed: a
+ * `.substring()` result compared against a `"0"`/`"9"` literal produced
+ * address ordering under the JIT, making an ASCII digit-range check return
+ * false for most digits). See
+ * doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
+ *
+ * Dispatch mirrors rt_native_eq exactly:
+ *   - either side a tagged heap string  -> byte-wise strcmp via
+ *     rt_text_cmp_any (which additionally normalizes a raw char* literal on
+ *     the other side, so tagged/raw mixes work)
+ *   - either side a tagged float        -> numeric float compare
+ *   - otherwise                         -> raw signed integer compare, which
+ *     is what the inline icmp arm would have done
+ *
+ * Returns a strcmp-style signed result (<0, 0, >0); the caller applies the
+ * requested predicate against 0. */
+int64_t rt_native_cmp(int64_t left, int64_t right) {
+    RtCoreString* left_string = rt_core_as_string(left);
+    RtCoreString* right_string = rt_core_as_string(right);
+    if (left_string || right_string) {
+        return rt_text_cmp_any(left, right);
+    }
+    if (rt_core_is_float(left) || rt_core_is_float(right)) {
+        double a = rt_core_is_float(left) ? rt_core_as_float(left) : (double)left;
+        double b = rt_core_is_float(right) ? rt_core_as_float(right) : (double)right;
+        if (a < b) return -1;
+        if (a > b) return 1;
+        return 0;
+    }
+    if (left < right) return -1;
+    if (left > right) return 1;
+    return 0;
+}
+
 int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     if (step == 0) return rt_core_nil();
 

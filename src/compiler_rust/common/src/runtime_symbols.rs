@@ -166,6 +166,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_str_hash",
     "rt_native_eq",
     "rt_native_neq",
+    "rt_native_cmp",
     "rt_slice",
     "rt_string_contains",
     "rt_string_starts_with",
@@ -325,6 +326,10 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_utf8_")
         || name == "rt_text_count_codepoints"
         || name == "rt_text_cmp_any"
+        // rt_native_cmp is the ordering counterpart of rt_native_eq; it can
+        // strcmp tagged heap strings, so it belongs in the same tier as
+        // rt_text_cmp_any rather than the pure-scalar tier.
+        || name == "rt_native_cmp"
         || name.starts_with("rt_swi_")
         || name.starts_with("rt_rank_")
         || name == "rt_select_query"
@@ -1146,6 +1151,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_value_eq",
     "rt_native_eq",
     "rt_native_neq",
+    "rt_native_cmp",
     "rt_value_compare",
     "rt_value_truthy",
     // Signature verification (RSA-SHA256/512, Ed25519, ECDSA-P256) for SSH host keys

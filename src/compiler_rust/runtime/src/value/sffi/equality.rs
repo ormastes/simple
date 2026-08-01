@@ -42,6 +42,43 @@ pub extern "C" fn rt_native_neq(a: i64, b: i64) -> i64 {
     }
 }
 
+/// P0 follow-up (2026-08-01): ordering counterpart of `rt_native_eq`, backing
+/// the codegen `<`/`<=`/`>`/`>=` arm when NEITHER operand is statically typed.
+///
+/// `Eq`/`NotEq` have had this tag-aware dynamic fallback for a long time; the
+/// ordering operators never did, so codegen fell through to a raw `icmp` on
+/// the two operands as opaque integers. For a tagged heap string that compares
+/// its HANDLE ADDRESS rather than its content -- the exact defect
+/// `rt_text_cmp_any` was introduced to fix for the *statically typed* case,
+/// left live for the untyped case. Observed under the JIT: a `.substring()`
+/// result compared against `"0"`/`"9"` literals produced address ordering, so
+/// an ASCII digit-range check (`ch >= "0" and ch <= "9"`) returned false for
+/// most digits, which surfaced as MODINIT001 lint false positives.
+///
+/// Dispatch mirrors `rt_native_eq`: both sides tagged-heap -> semantic value
+/// compare (content, via `value_compare`, which handles strings); otherwise a
+/// raw signed integer compare, which is what the inline `icmp` arm would have
+/// emitted.
+///
+/// Returns a strcmp-style signed result (<0, 0, >0); the caller applies the
+/// requested predicate against 0. See
+/// doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md.
+#[no_mangle]
+pub extern "C" fn rt_native_cmp(a: i64, b: i64) -> i64 {
+    let au = a as u64;
+    let bu = b as u64;
+    if (au & tags::TAG_MASK) == tags::TAG_HEAP && (bu & tags::TAG_MASK) == tags::TAG_HEAP {
+        return rt_value_compare(RuntimeValue::from_raw(au), RuntimeValue::from_raw(bu));
+    }
+    if a < b {
+        -1
+    } else if a > b {
+        1
+    } else {
+        0
+    }
+}
+
 fn value_eq(a: RuntimeValue, b: RuntimeValue) -> bool {
     value_eq_inner(a, b, &mut Vec::new())
 }
