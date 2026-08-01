@@ -43,11 +43,29 @@ impl Lowerer {
     /// Else branch is optional.
     pub(super) fn lower_if(
         &mut self,
+        let_pattern: Option<&Pattern>,
         condition: &Expr,
         then_branch: &Expr,
         else_branch: Option<&Expr>,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        // `if val PAT = expr: a else: b` used as an EXPRESSION must thread the
+        // pattern binding into the then-arm's scope, exactly like the statement
+        // form (`Node::If` in stmt_lowering.rs). This arm previously discarded
+        // `let_pattern` (it matched with `..` at the lower_expr call site), so the
+        // bound name was never registered as a local. Under `lenient_types` the
+        // unresolved name silently became `HirExprKind::Global`, which lowers to
+        // `MirInst::GlobalLoad` and finally dies in LLVM codegen with
+        // "llvm global load referenced undeclared symbol `<name>`".
+        //
+        // The tree-walking interpreter had the identical defect and was fixed
+        // separately (see interpreter/expr/control.rs and
+        // doc/08_tracking/bug/if_val_expression_form_binding_lost_2026-07-20.md);
+        // the compiled HIR/MIR/LLVM path was left behind, which is why no
+        // interpreter spec catches this.
+        if let Some(pattern) = let_pattern {
+            return self.lower_if_let_expr(pattern, condition, then_branch, else_branch, ctx);
+        }
         let cond_hir = Box::new(self.lower_condition(condition, ctx)?);
         let then_hir = Box::new(self.lower_expr(then_branch, ctx)?);
         let else_hir = if let Some(eb) = else_branch {
@@ -64,6 +82,91 @@ impl Lowerer {
                 then_branch: then_hir,
                 else_branch: else_hir,
             },
+            ty,
+        })
+    }
+
+    /// Lower `if val PAT = subject: then else: else` in EXPRESSION position.
+    ///
+    /// Mirrors the statement lowering in `stmt_lowering.rs` (`Node::If` with a
+    /// `let_pattern`), but produces a value instead of a statement list. The
+    /// subject store and the pattern payload extraction are emitted as HIR
+    /// statements wrapped in `HirExprKind::Block`, the same shape match-arm
+    /// bindings use (`lower_match_arms`).
+    fn lower_if_let_expr(
+        &mut self,
+        pattern: &Pattern,
+        condition: &Expr,
+        then_branch: &Expr,
+        else_branch: Option<&Expr>,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<HirExpr> {
+        // `if val v = expr.?:` parses `expr.?` as `Expr::ExistsCheck` (a bool
+        // presence check). Combined with a `val` binding the intent is "bind v to
+        // the unwrapped value", so unwrap one ExistsCheck layer to keep the
+        // subject Option-typed. Same reasoning as the statement path.
+        let condition_expr = match condition {
+            Expr::ExistsCheck(inner) => inner.as_ref(),
+            other => other,
+        };
+        let subject_hir = self.lower_expr(condition_expr, ctx)?;
+        let subject_ty = subject_hir.ty;
+
+        // Temp local holding the subject value, so the pattern condition and the
+        // payload extraction both read it without re-evaluating the expression.
+        let subject_idx = ctx.locals.len();
+        ctx.add_local("$if_let_subject".to_string(), subject_ty, Mutability::Immutable);
+        let store_stmt = HirStmt::Let {
+            local_index: subject_idx,
+            ty: subject_ty,
+            value: Some(subject_hir),
+        };
+
+        let cond_hir = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
+
+        // Register the bindings BEFORE lowering the then-branch: this is the step
+        // whose absence caused the undeclared-global defect.
+        let bindings = self.extract_pattern_bindings(pattern, subject_ty);
+        let previous_bindings = self.register_match_bindings(pattern, &bindings, ctx);
+        let binding_stmts =
+            self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+
+        let then_hir = self.lower_expr(then_branch, ctx)?;
+        let ty = then_hir.ty;
+        let then_hir = if binding_stmts.is_empty() {
+            then_hir
+        } else {
+            let mut stmts = binding_stmts;
+            stmts.push(HirStmt::Expr(then_hir));
+            HirExpr {
+                kind: HirExprKind::Block(stmts),
+                ty,
+            }
+        };
+
+        // Bindings leave name scope, but the locals stay in `ctx.locals` so the
+        // indices already baked into the HIR remain valid.
+        self.restore_match_bindings(previous_bindings, ctx);
+
+        let else_hir = if let Some(eb) = else_branch {
+            Some(Box::new(self.lower_expr(eb, ctx)?))
+        } else {
+            None
+        };
+
+        let if_expr = HirExpr {
+            kind: HirExprKind::If {
+                condition: Box::new(cond_hir),
+                then_branch: Box::new(then_hir),
+                else_branch: else_hir,
+            },
+            ty,
+        };
+
+        // The subject store must run before the test, so the whole form becomes a
+        // block whose value is the if-expression.
+        Ok(HirExpr {
+            kind: HirExprKind::Block(vec![store_stmt, HirStmt::Expr(if_expr)]),
             ty,
         })
     }
