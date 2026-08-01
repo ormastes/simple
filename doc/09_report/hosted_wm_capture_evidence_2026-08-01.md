@@ -13,7 +13,7 @@
 - accent_pixels: 190
 - sample_checksum: 473142143
 - theme_id: aetheric_dark
-- theme_source_manifest_sha256: 
+- theme_source_manifest_sha256:
 - render_us: 0
 - backend_selected: simple_web_request_local_raster_readback
 - backend_fallback_reason: Metal submit/readback is not wired for this hosted evidence probe; using verified local pixels from WebRenderRequest.with_pixel_output content
