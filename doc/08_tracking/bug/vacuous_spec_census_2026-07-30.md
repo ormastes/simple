@@ -192,3 +192,184 @@ bootstrap seed, which runs the tree-walking interpreter. `parse_test_args` is
 pure argument handling with no engine-specific behaviour, so the evidence
 transfers; but no spec in this batch reaches the JIT or native lanes, and no
 claim here should be read as covering them.
+
+---
+
+# Addendum 2026-08-01 (second shim lane) — the 736 is 155, and a FOURTH shape
+
+## Detector re-derivation (PROVED for the counts, INFERRED for the verdict)
+
+The 736 above was reproduced and then tightened. Same corpus (18,704
+`*_spec.spl` under `test/`, 13,804 `.spl` under `src/`, `src/**/vendor/**`
+excluded), same base rule — *no implementation `use`, and a locally-defined
+`fn` whose name is also defined under `src/`*:
+
+| tier | rule added | files | unique | live examples |
+|---|---|---|---|---|
+| RAW | base rule only | **5,603** | 4,168 | 65,325 |
+| FILT | minus generic-name list | **1,204** | 868 | 20,275 |
+| TIER-A | + name defined in ≤3 spec files + local body ≥8 lines | **155** | **109** | **3,497** |
+
+Exclusion list used for FILT (~120 names): `check run parse make setup format
+main init new create build get set add test verify assert expect helper reset
+clear close open read write print log to_text len size count start stop update
+find has is_empty contains push pop value name key result output input data next
+prev first last item node join split trim escape unescape encode decode hash
+equals compare clone copy apply emit render draw dump load save handle process
+execute step tick before after teardown fixture stub mock fake sample gen id
+path file dir min max abs sum avg sort reverse map filter reduce zip range slice
+error warn info debug trace fail pass skip todo note`.
+
+RAW→FILT is a **4.7× correction**, dominated by two names — `verify` (2,813
+files) and `check` (1,712), i.e. the prior lane's `check` finding plus a larger
+sibling it missed. FILT→TIER-A is a further **7.8×**.
+
+The two extra TIER-A predicates are what separate a *reimplementation of the
+subject* from a *test helper that happens to share a name*: a helper is short
+and is copy-pasted into hundreds of specs (`double`, `identity`, `multiply`,
+`slow_it`, `check_msg`, `find_simple_binary`), whereas a shim is long and
+spec-specific. **Corrected working figure: 155 files / 109 unique specs /
+3,497 live examples**, still an upper bound. The list is reproducible from the
+tiering rule above; it was not committed (scratch tooling).
+
+## Batch 1 — `app/llm_caret/json_helpers` (PROVED)
+
+`test/{01_unit,unit}/app/llm_caret/json_helpers_spec.spl`, subject
+`src/app/llm_caret/json_helpers.spl`.
+
+`test/unit/...` carried a **165-line local copy** of the whole module and
+imported nothing. Drift, and it is the sharpest kind:
+
+| the copy | the shipped module |
+|---|---|
+| `extract_json_string/_value/nested` use `json.index_of()` | uses hand-written `json_find`, added *specifically* to route around the seed's `Option<i64>` tag-box defect (`llm_caret_index_of_optioni64_tagbox_2026-07-07.md`) |
+| `extract_json_int` uses `int(raw)` | uses `json_parse_int`, a boxing-free replacement added for the same reason |
+| `escape_json_text` hand-rolled | delegates to `std.text.escape_json` |
+| `jo4`, `jo5`, `jo6`, `json_find`, `json_parse_int` absent | shipped, and had **zero** coverage |
+
+**The copy reintroduced the exact defect the shipped code exists to avoid.**
+It was not merely vacuous, it was *red*: baseline `21 total, 16 passed, 5
+failed`, all five in "JSON Parsing", e.g. `expected :42 to equal 42` — the
+off-by-one that `json_find` was written to prevent. So the repo was carrying
+five permanent red examples that told it nothing about the shipped code.
+
+After: `41 total, 40 passed, 1 failed` on both mirrors.
+
+## A FOURTH vacuity shape: name-collision hijack (PROVED)
+
+The `test/01_unit` mirror had **already been de-shimmed** by an earlier pass —
+it imports the shipped module and was `21 total, 21 passed, 0 failed`. It is
+still **100% vacuous**, and the sabotage table below proves it.
+
+Cause: it also carries `use std.mcp.helpers.{Q, LB, RB, js, jp}`.
+`src/lib/nogc_async_mut/mcp/helpers.spl` defines its **own**
+`extract_json_string` (→ `extract_json_string_v2`), `extract_json_value`,
+`jo1`, `jo2`, `jo3`, `ja` with **identical signatures**. Co-compiling it makes
+those definitions win, so every `extract_json_*` call in that spec is served by
+a different module than the one it imported. **No collision warning fires** —
+the existing `compiler_cross_module_private_symbol_collision` warning only
+triggers on *differing* signatures.
+
+Two independent confirmations:
+- `simple run` on the identical call returns the correct `say \"hi\"`;
+  `simple test` returns `say \` (the `_v2` implementation has no escape
+  tracking). Adding `use std.mcp.helpers` to a `simple run` script flips it
+  from correct to wrong, with nothing else changed.
+- Under the sabotage below, only the **uniquely-named** functions move
+  (`json_find` ×3, `json_parse_int` ×1). Every `extract_json_*` example is
+  unmoved, because those calls never reach the sabotaged file.
+
+This is a distinct repair from shim vacuity: the import is already correct and
+the local copy is already gone, yet the spec cannot observe its subject. Any
+"de-shimming" pass that does not check for same-signature name collisions
+produces specs that *look* repaired and are not.
+
+`json_helpers_spec.spl` keeps one deliberately **RED** example
+(`extracts a string value containing an escaped quote`) pinning this. It was
+not weakened; the assertion is the correct behaviour of the imported subject.
+
+## Non-vacuity proof — the base row is the argument (PROVED)
+
+Three one-line sabotages to the shipped implementation
+`src/app/llm_caret/json_helpers.spl` — `json_find` returning `i + 1` on match,
+`json_parse_int` dropping its sign handling, and `ja` separating with `;` —
+same binary, same command (`bin/simple test <spec>`), restored and
+`diff`-verified afterwards:
+
+| spec | clean | under sabotage | Δ |
+|---|---|---|---|
+| `test/unit/.../json_helpers_spec.spl` (rewritten) | 41 total, 1 failed | 41 total, **5 failed** | **+4** |
+| `test/unit/.../json_helpers_spec.spl` **as it was at base** (shim) | 21 total, 5 failed | 21 total, 5 failed | **0** |
+| `test/01_unit/.../json_helpers_spec.spl` **as it was at base** (de-shimmed, hijacked) | 21 total, 0 failed | 21 total, **0 failed** | **0** |
+
+Row 3 is the new result: an *already-repaired* spec, green, that stays green
+through a three-point sabotage of the file it imports.
+
+## Corrections in both directions
+
+- **5 examples newly correct-and-green**: the five "JSON Parsing" examples that
+  were red because the *copy* used `index_of`. They now assert real behaviour
+  and pass. A "fewer failures now" metric and a "more failures now" metric both
+  mis-score this.
+- **+20 examples newly load-bearing**: `json_find` (6), `json_parse_int` (6,
+  two of them defect pins), `jo4`/`jo5`/`jo6` (3), plus negative-int, missing
+  raw value, nested-miss, message round-trip and padding cases.
+- **1 example newly RED**: the escaped-quote hijack above — a real defect that
+  no previous state of either mirror could express.
+
+## Defects recorded, not absorbed
+
+1. **`std.mcp.helpers.extract_json_string_v2` has no escape handling** — it
+   returns at the first `"`, so `say \"hi\"` truncates to `say \`. Pinned by
+   the RED example above. `src/lib/nogc_async_mut/mcp/helpers.spl:104`.
+2. **Same-signature cross-module hijack is silent** — see above. The warning
+   path needs to cover equal signatures, not only differing ones.
+3. **`json_parse_int` skips non-digits instead of rejecting** — `"1a2"` → `12`,
+   `"abc"` → `0`. Pinned by two positive controls named `PINS DEFECT: …`.
+   `src/app/llm_caret/json_helpers.spl:194`.
+4. **Comma-separated `match` arms do not parse** — `65 => "A", 66 => "B"` on one
+   line gives `Unexpected token: expected pattern, found Comma`; one arm per
+   line works. Minimal repro confirmed on `bin/simple run`. This made
+   `src/compiler_rust/lib/std/src/tooling/base64_utils.spl` **unloadable in its
+   entirety** — a shipped module that has never compiled, which is why nothing
+   in the tree imports it and why its spec could only ever have been a mock.
+   Normalised to one-arm-per-line in that file (with the reason recorded in
+   place, not silently), verified by running the module: `encode_base64("ABC")`
+   → `QUJD`. ~20 other `src/` files match a loose comma-arm pattern and were not
+   audited — that is a separate sweep.
+5. **`char_to_byte`/`byte_to_char` in `base64_utils.spl` cover only A-J, a-e,
+   0-2, space and `!`** — every other byte maps to `0`/`"?"`, so `encode_base64`
+   is wrong for ordinary text. Recorded as a `TODO(base64-charmap)` at the site.
+
+## Measurement trap: `use std.*` resolves OUTSIDE the project (PROVED)
+
+The deployed seed resolves `use std.tooling.*` to a **baked absolute path**,
+`/home/ormastes/dev/pub/.simple-build-36f5e286/src/compiler_rust/lib/std/src/`,
+not to the project root. Editing
+`<worktree>/src/compiler_rust/lib/std/src/tooling/base64_utils.spl` and
+re-running the spec produced a byte-identical error pointing at the foreign
+snapshot; the effect reproduces on `bin/simple run` with a two-line script and
+survives copying the binary into the worktree.
+
+Consequences, both bad:
+- Any spec importing `std.*` from a worktree is asserting against a **foreign,
+  possibly stale copy** of the library, so a green result is not evidence about
+  the tree you are editing.
+- A sabotage-based non-vacuity proof of any `std.*`-imported module is
+  **impossible** from a worktree, because the sabotage is never loaded.
+
+`use app.*` and `use std.nogc_*` do resolve from the project root, which is why
+Batch 1 was moved to `app/llm_caret`. The `app/tooling` family (base64, url,
+time, format, json, markdown utils — ~270 examples, all pure lookup-table
+mocks) is a confirmed shim cluster that **cannot be repaired-and-proved until a
+binary is deployed whose stdlib root follows the project**. It is left in place
+deliberately rather than rewritten unverified.
+
+## Engine reach
+
+Same limit as the first addendum, restated because it now matters more: every
+number here is `bin/simple test` on the Rust bootstrap seed. Specs cannot reach
+the JIT or native lanes from the test runner. The one place engine choice was
+varied (`SIMPLE_EXECUTION_MODE=interpret` vs `jit` on the hijack repro) gave the
+same wrong answer in both, which is evidence about the hijack, not coverage of
+those lanes.

@@ -1,169 +1,50 @@
 # LLM Caret JSON Helpers Specification
+#
+# Subject: src/app/llm_caret/json_helpers.spl
+#
+# History: this spec previously carried a 165-line local reimplementation of the
+# whole module and imported nothing, so it could never observe the shipped code.
+# The local copy had drifted in a way that mattered: it used `json.index_of()`
+# and `int()`, while the shipped module deliberately hand-rolls `json_find` and
+# `json_parse_int` to route around the seed's Option<i64>/char tag-box defect
+# (doc/08_tracking/bug/llm_caret_index_of_optioni64_tagbox_2026-07-07.md).
+# The copy therefore reintroduced the exact bug the shipped code exists to avoid
+# — five examples were RED for that reason, while the real workaround functions
+# json_find / json_parse_int / jo4 / jo5 / jo6 had zero coverage.
+#
+# IMPORTANT — do NOT add `use std.mcp.helpers.{...}` to this spec.
+# src/lib/nogc_async_mut/mcp/helpers.spl defines its own `extract_json_string`
+# (and jo1/jo2/jo3/ja/extract_json_value) with the SAME signatures but WITHOUT
+# escape handling. Co-compiling it silently hijacks the calls this spec makes to
+# app.llm_caret.json_helpers, and no collision warning is emitted because the
+# signatures match. See the shim-vacuity addendum in
+# doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
+#
+# The `_lb`/`_rb`/`_q`/`_str`/`_pair` below are deliberately-renamed local test
+# fixtures for building JSON literals. They are NOT copies of the subject: the
+# subject is the object/array builders and the extractors imported above.
 
-# Inline helpers for test isolation
-fn LB() -> text:
-    "{(123 as char)}"
+use app.llm_caret.json_helpers.{escape_json_text, jo1, jo2, jo3, jo4, jo5, jo6}
+use app.llm_caret.json_helpers.{ja, json_find, json_parse_int}
+use app.llm_caret.json_helpers.{extract_json_string, extract_json_value}
+use app.llm_caret.json_helpers.{extract_json_int, extract_json_bool}
+use app.llm_caret.json_helpers.{extract_nested_string}
+use app.llm_caret.json_helpers.{build_message_json, build_messages_json}
 
-fn RB() -> text:
-    "{(125 as char)}"
-
-fn Q() -> text:
+fn _q() -> text:
     "\""
 
-fn escape_json_text(s: text) -> text:
-    var result = ""
-    var i = 0
-    while i < s.len():
-        val ch = s[i]
-        if ch == "\\":
-            result = result + "\\\\"
-        elif ch == "\"":
-            result = result + "\\\""
-        elif ch == "\n":
-            result = result + "\\n"
-        elif ch == "\r":
-            result = result + "\\r"
-        elif ch == "\t":
-            result = result + "\\t"
-        else:
-            result = result + ch
-        i = i + 1
-    result
+fn _lb() -> text:
+    "{"
 
-fn js(s: text) -> text:
-    var r = Q()
-    r = r + escape_json_text(s)
-    r = r + Q()
-    r
+fn _rb() -> text:
+    "}"
 
-fn jp(key: text, val_str: text) -> text:
-    var r = Q()
-    r = r + key
-    r = r + Q()
-    r = r + ":"
-    r = r + val_str
-    r
+fn _str(s: text) -> text:
+    _q() + escape_json_text(s) + _q()
 
-fn jo1(pair: text) -> text:
-    var r = LB()
-    r = r + pair
-    r = r + RB()
-    r
-
-fn jo2(p1: text, p2: text) -> text:
-    var r = LB()
-    r = r + p1
-    r = r + ","
-    r = r + p2
-    r = r + RB()
-    r
-
-fn jo3(p1: text, p2: text, p3: text) -> text:
-    var r = LB()
-    r = r + p1
-    r = r + ","
-    r = r + p2
-    r = r + ","
-    r = r + p3
-    r = r + RB()
-    r
-
-fn ja(items: [text]) -> text:
-    var r = "["
-    var i = 0
-    for item in items:
-        if i > 0:
-            r = r + ","
-        r = r + item
-        i = i + 1
-    r = r + "]"
-    r
-
-fn _unwrap_idx(opt) -> i64:
-    match opt:
-        Some(i): return i
-        nil: return -1
-
-fn extract_json_string(json: text, key: text) -> text:
-    val quote = "\""
-    val search = quote + key + quote + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    if trimmed.starts_with(quote):
-        val rest = trimmed.substring(1)
-        var end = 0
-        var escaped = false
-        while end < rest.len():
-            val ch = rest[end]
-            if escaped:
-                escaped = false
-            elif ch == "\\":
-                escaped = true
-            elif ch == "\"":
-                return rest.substring(0, end)
-            end = end + 1
-    ""
-
-fn extract_json_value(json: text, key: text) -> text:
-    val search = Q() + key + Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return "null"
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    val trimmed = after.trim()
-    var end = 0
-    while end < trimmed.len():
-        val ch = trimmed[end]
-        if ch == "," or ch == RB() or ch == "]":
-            break
-        end = end + 1
-    trimmed.substring(0, end).trim()
-
-fn extract_json_int(json: text, key: text) -> i64:
-    val raw = extract_json_value(json, key)
-    if raw == "null" or raw == "":
-        return 0
-    int(raw)
-
-fn extract_json_bool(json: text, key: text) -> bool:
-    val raw = extract_json_value(json, key)
-    raw == "true"
-
-fn extract_nested_string(json: text, outer_key: text, inner_key: text) -> text:
-    val search = Q() + outer_key + Q() + ":"
-    val idx = _unwrap_idx(json.index_of(search))
-    if idx < 0:
-        return ""
-    val slen = search.len()
-    val start = idx + slen
-    val after = json.substring(start)
-    extract_json_string(after, inner_key)
-
-fn build_message_json(role: text, content: text) -> text:
-    jo2(jp("role", js(role)), jp("content", js(content)))
-
-fn build_messages_json(roles: [text], contents: [text]) -> text:
-    var items: [text] = []
-    var i = 0
-    while i < roles.len():
-        var r = roles[i]
-        var c = ""
-        if i < contents.len():
-            c = contents[i]
-        items = items + [build_message_json(r, c)]
-        i = i + 1
-    ja(items)
-
-# ============================================================================
-# Tests
-# ============================================================================
+fn _pair(key: text, val_str: text) -> text:
+    _q() + key + _q() + ":" + val_str
 
 describe "JSON Escaping":
     it "escapes plain text unchanged":
@@ -182,28 +63,37 @@ describe "JSON Escaping":
         expect(escape_json_text("a\tb")).to_equal("a\\tb")
 
 describe "JSON Building":
-    it "builds string value":
-        val result = js("hello")
-        expect(result).to_equal("\"hello\"")
-
-    it "builds key-value pair":
-        val result = jp("name", js("Alice"))
-        expect(result).to_contain("\"name\"")
-        expect(result).to_contain("\"Alice\"")
-
     it "builds single-pair object":
-        val result = jo1(jp("key", js("val")))
-        expect(result).to_start_with(LB())
-        expect(result).to_end_with(RB())
+        val result = jo1(_pair("key", _str("val")))
+        expect(result).to_start_with(_lb())
+        expect(result).to_end_with(_rb())
 
     it "builds two-pair object":
-        val result = jo2(jp("a", js("1")), jp("b", js("2")))
+        val result = jo2(_pair("a", _str("1")), _pair("b", _str("2")))
         expect(result).to_contain(",")
         expect(result).to_contain("\"a\"")
         expect(result).to_contain("\"b\"")
 
+    it "builds three-pair object":
+        val result = jo3(_pair("a", _str("1")), _pair("b", _str("2")), _pair("c", _str("3")))
+        expect(result).to_start_with(_lb())
+        expect(result).to_end_with(_rb())
+        expect(result).to_contain("\"c\"")
+
+    it "builds four-pair object":
+        val result = jo4(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"))
+        expect(extract_json_value(result, "d")).to_equal("4")
+
+    it "builds five-pair object":
+        val result = jo5(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"), _pair("e", "5"))
+        expect(extract_json_value(result, "e")).to_equal("5")
+
+    it "builds six-pair object":
+        val result = jo6(_pair("a", "1"), _pair("b", "2"), _pair("c", "3"), _pair("d", "4"), _pair("e", "5"), _pair("f", "6"))
+        expect(extract_json_value(result, "f")).to_equal("6")
+
     it "builds array from items":
-        val result = ja([js("a"), js("b"), js("c")])
+        val result = ja([_str("a"), _str("b"), _str("c")])
         expect(result).to_start_with("[")
         expect(result).to_end_with("]")
         expect(result).to_contain("\"a\"")
@@ -213,41 +103,120 @@ describe "JSON Building":
         val result = ja([])
         expect(result).to_equal("[]")
 
+describe "JSON Substring Search":
+    # json_find is the shipped hand-written replacement for text.index_of().
+    # It had no coverage at all while the spec carried its own index_of copy.
+    it "finds a needle at the start":
+        expect(json_find("abcdef", "abc")).to_equal(0)
+
+    it "finds a needle in the middle":
+        expect(json_find("abcdef", "cd")).to_equal(2)
+
+    it "finds a needle at index 3":
+        # Index 3 is the exact value the seed's Option<i64> tag-box collides
+        # with the nil sentinel on; json_find exists to avoid that.
+        expect(json_find("abcdef", "d")).to_equal(3)
+
+    it "returns -1 when absent":
+        expect(json_find("abcdef", "xyz")).to_equal(-1)
+
+    it "returns -1 when the needle is longer than the haystack":
+        expect(json_find("ab", "abcdef")).to_equal(-1)
+
+    it "returns 0 for an empty needle":
+        expect(json_find("abcdef", "")).to_equal(0)
+
+describe "JSON Integer Parsing":
+    # json_parse_int is the shipped boxing-free replacement for int().
+    it "parses a positive integer":
+        expect(json_parse_int("42")).to_equal(42)
+
+    it "parses zero":
+        expect(json_parse_int("0")).to_equal(0)
+
+    it "parses a negative integer":
+        expect(json_parse_int("-17")).to_equal(-17)
+
+    it "parses a multi-digit integer":
+        expect(json_parse_int("12345")).to_equal(12345)
+
+    # DEFECT PIN (positive control, not an endorsement).
+    # TODO(json-parse-int-strict): json_parse_int silently SKIPS any non-digit
+    # character instead of rejecting the input, so "1a2" parses as 12 and a
+    # non-numeric string parses as 0. See src/app/llm_caret/json_helpers.spl:194.
+    it "PINS DEFECT: skips embedded non-digits instead of rejecting":
+        expect(json_parse_int("1a2")).to_equal(12)
+
+    it "PINS DEFECT: returns 0 for a wholly non-numeric string":
+        expect(json_parse_int("abc")).to_equal(0)
+
 describe "JSON Parsing":
     it "extracts string value":
-        val json = jo1(jp("name", js("Alice")))
+        val json = jo1(_pair("name", _str("Alice")))
         val result = extract_json_string(json, "name")
         expect(result).to_equal("Alice")
 
     it "returns empty for missing key":
-        val json = jo1(jp("name", js("Alice")))
+        val json = jo1(_pair("name", _str("Alice")))
         expect(extract_json_string(json, "missing")).to_equal("")
 
+    # KNOWN RED — this example is expected to fail today and is deliberately
+    # NOT weakened. It asserts the CORRECT behaviour of the imported subject.
+    # TODO(json-extract-hijack): under `simple test`, the call below does not
+    # reach app.llm_caret.json_helpers.extract_json_string at all. The test
+    # runner co-compiles src/lib/nogc_async_mut/mcp/helpers.spl, which defines
+    # an identically-signed `extract_json_string` (-> extract_json_string_v2)
+    # with NO escape tracking, and that definition wins. No collision warning
+    # is emitted because the signatures match.
+    # Evidence: `simple run` on the same call returns the correct
+    # `say \"hi\"`; `simple test` returns `say \`. Sabotaging json_find in the
+    # shipped module moves json_find's own examples but leaves every
+    # extract_json_* example untouched — they are served by the other module.
+    # Recorded in doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
+    it "extracts a string value containing an escaped quote":
+        # The shipped extractor tracks backslash escapes; this is the behaviour
+        # that std.mcp.helpers' same-named function does NOT have.
+        val json = jo1(_pair("name", _str("say \"hi\"")))
+        expect(extract_json_string(json, "name")).to_equal("say \\\"hi\\\"")
+
     it "extracts numeric value":
-        val json = jo2(jp("count", "42"), jp("name", js("test")))
+        val json = jo2(_pair("count", "42"), _pair("name", _str("test")))
         val result = extract_json_value(json, "count")
         expect(result).to_equal("42")
 
+    it "returns null for a missing raw value":
+        val json = jo1(_pair("count", "42"))
+        expect(extract_json_value(json, "missing")).to_equal("null")
+
     it "extracts integer value":
-        val json = jo1(jp("count", "99"))
+        val json = jo1(_pair("count", "99"))
         expect(extract_json_int(json, "count")).to_equal(99)
 
     it "returns 0 for missing int":
-        val json = jo1(jp("name", js("test")))
+        val json = jo1(_pair("name", _str("test")))
         expect(extract_json_int(json, "missing")).to_equal(0)
 
+    it "extracts a negative integer value":
+        val json = jo1(_pair("delta", "-5"))
+        expect(extract_json_int(json, "delta")).to_equal(-5)
+
     it "extracts boolean value":
-        val json = jo1(jp("active", "true"))
+        val json = jo1(_pair("active", "true"))
         expect(extract_json_bool(json, "active")).to_equal(true)
 
     it "extracts false boolean":
-        val json = jo1(jp("active", "false"))
+        val json = jo1(_pair("active", "false"))
         expect(extract_json_bool(json, "active")).to_equal(false)
 
     it "extracts nested string":
-        val inner = jo1(jp("name", js("Bob")))
-        val json = jo1(jp("user", inner))
+        val inner = jo1(_pair("name", _str("Bob")))
+        val json = jo1(_pair("user", inner))
         expect(extract_nested_string(json, "user", "name")).to_equal("Bob")
+
+    it "returns empty for a missing outer key in a nested lookup":
+        val inner = jo1(_pair("name", _str("Bob")))
+        val json = jo1(_pair("user", inner))
+        expect(extract_nested_string(json, "missing", "name")).to_equal("")
 
 describe "Message JSON":
     it "builds single message":
@@ -257,9 +226,19 @@ describe "Message JSON":
         expect(result).to_contain("\"content\"")
         expect(result).to_contain("\"Hello\"")
 
+    it "round-trips a message through the extractors":
+        val result = build_message_json("user", "Hello")
+        expect(extract_json_string(result, "role")).to_equal("user")
+        expect(extract_json_string(result, "content")).to_equal("Hello")
+
     it "builds messages array":
         val result = build_messages_json(["user", "assistant"], ["Hi", "Hello!"])
         expect(result).to_start_with("[")
         expect(result).to_end_with("]")
         expect(result).to_contain("\"user\"")
         expect(result).to_contain("\"assistant\"")
+
+    it "pads missing content with an empty string":
+        val result = build_messages_json(["user", "assistant"], ["Hi"])
+        expect(result).to_contain("\"assistant\"")
+        expect(result).to_contain("\"\"")
