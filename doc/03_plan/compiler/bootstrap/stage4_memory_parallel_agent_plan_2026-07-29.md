@@ -65,7 +65,12 @@ Own: `src/compiler/**` AST arena modules (pure-Simple side).
 Generation-bearing IDs behind SIMPLE_BOOTSTRAP_STAGE4 debug accessors first
 (stale-read DIAGNOSIS, not representation change): reset bumps a generation
 counter; debug accessor logs generation mismatch instead of OOB cascade.
-Gate: stale_generation_reads == 0 during Retry 12.
+Gate: ~~stale_generation_reads == 0~~ during Retry 12. **Corrected (run 12):**
+`stale_generation_reads` is a string the compiler never prints — grepping it
+always returns 0 and reads as a PASS. Gate instead on the real message anchor
+`: produced at generation ` (see the Run 12 entry under `### L7`), and note
+that this is only measurable **after** `ast_gen_check_index` is wired into the
+arena accessors — it currently has zero production call sites.
 
 ### L7 — Retry 12 execution (after L1, L2)
 Own: run artifacts only (no source). Full Stage-4 with L5 sampler attached,
@@ -78,7 +83,7 @@ run 10).
 
 | Pass | Env gates | Corpus | Threshold | Wall-clock budget |
 |---|---|---|---|---|
-| A — diagnostic (gates ON) | `SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_AST_GEN_CHECK=1` | first 300 modules in build order (bounded; run 10's 225-module sample already covers the shared foundation + all six landed lanes' touched files with zero findings, so a prefix is representative — see run 10) | `stale_generation_reads == 0` AND OOB diagnostics `== 0` over the entire bounded corpus (zero tolerance, no sampling within the pass) | 4h (run 10 measured ~48s/module; 300 modules ≈ 4h at that rate — kill and file a bug if exceeded, do not silently truncate or extrapolate) |
+| A — diagnostic (gates ON) | `SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_AST_GEN_CHECK=1` | first 300 modules in build order (bounded; run 10's 225-module sample already covers the shared foundation + all six landed lanes' touched files with zero findings, so a prefix is representative — see run 10) | ~~`stale_generation_reads == 0`~~ **[corrected run 12: never-printed string, always false-greens — gate on `: produced at generation ` instead, and only once `ast_gen_check_index` is actually called in production]** AND OOB diagnostics `== 0` over the entire bounded corpus (zero tolerance, no sampling within the pass) | 4h (run 10 measured ~48s/module; 300 modules ≈ 4h at that rate — kill and file a bug if exceeded, do not silently truncate or extrapolate) |
 | B — byte-residue (gates OFF) | `SIMPLE_BOOTSTRAP_STAGE4=1` only (`SIMPLE_AST_GEN_CHECK` unset) | full corpus, all ~1494 modules | L5 gate thresholds unchanged (`check-stage4-memory-gate.shs`: RSS ceiling AND byte-slope, not RSS alone) | 30 min (run 10 measured ~7min gates-off; 30 min gives ~4x headroom) |
 
 If Pass A ever reports a nonzero diagnostic, double the corpus bound and
@@ -229,6 +234,97 @@ does not satisfy admission; both are required.
       before reading zero diagnostics as a pass.
     - Pass B (gates OFF, full ~1494 modules, `check-stage4-memory-gate.shs`)
       is **not** started; it is only meaningful after Pass A is scored.
+  - **Run 11 (2026-08-01) — DIED BEFORE STAGE 1. VOID, not a pass.** The run
+    aborted with `error: Rust runtime authority changed during private
+    admission` and produced **zero** stage logs. Cause: a parallel lane ran
+    `cargo build --profile bootstrap` against the shared
+    `src/compiler_rust/target/bootstrap/` while the script was freezing its
+    private copy of the seed. `bootstrap-from-scratch.sh` snapshots that
+    directory before and after the copy (lines ~1108-1127) and aborts by design
+    when the two snapshots differ. **The run exercised nothing** — it must not
+    be scored, in either direction. At failure the host had ~50 GB available of
+    125 GB with **swap fully exhausted (7/7 GB)** and a `simple` process at
+    7.8 GB RSS.
+  - **Run 12 (2026-08-01) — NOT LAUNCHED. Blocked, deliberately.** Four
+    independent blockers were measured at preflight; the last is decisive on
+    its own.
+    1. **The isolation knob assumed by the retry plan does not exist.** The
+       intended fix for run 11 was "copy the seed to a private directory and
+       point the run at it". There is no such knob.
+       `runtime_origin_absolute` is hardcoded relative to the *current working
+       directory* — `runtime_origin_absolute="$(absolute_path
+       src/compiler_rust/target/bootstrap)"` (`bootstrap-from-scratch.sh:1063`)
+       — and `SIMPLE_RUNTIME_PATH` is **exported by the script itself**,
+       overwriting any caller value: `export
+       SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap"`
+       (line 989). The script's only flags are `--deploy --release
+       --full-bootstrap --pure-simple --full-cli --mode --verbose --no-mcp`
+       (plus `--backend`/`--output`); there is **no `--runtime-path`** and no
+       `${SIMPLE_RUNTIME_PATH:-}` override. Isolating the seed therefore
+       requires running from a full private *repo copy*, not an env var.
+    2. **A private seed copy taken now would be torn.** Two
+       `cargo build --profile bootstrap` processes were actively rewriting the
+       shared 6.9 GB seed tree at preflight (PIDs 935743 and 1020591, the
+       latter started 3 s into the check), plus a `cargo test -p
+       simple-compiler --features llvm`. Copying a 6.9 GB tree mid-write
+       reproduces run 11's exact race, except the corruption would be silent
+       rather than caught by the authority check. The seed must be quiescent
+       before any copy.
+    3. **Memory has no reserve and the OOM killer targets this workload.**
+       Sampled over 20 s: `MemAvailable` 51.3 → 47.9 GB and falling, **swap
+       free 0 MB throughout**. A *second* Stage-4 lane was already running
+       (PID 262451, `stage4-spdev-current/global-cycle3-stage2`, `simple
+       native-build --backend cranelift`) and growing — 8.4 → 9.4 GB RSS over
+       ~2 min. Critically, the host runs `earlyoom -r 3600 --prefer
+       ^(simple|rustc|cc1|cc1plus|lto1|collect2|qemu-system|ld)` — it
+       **preferentially kills `simple` and `rustc`**. With swap already at 0 %
+       free, earlyoom's swap precondition is permanently satisfied, so only
+       memory need cross its threshold to fire. This confirms and sharpens the
+       known finding that the 64 GB resource monitor cannot protect the run:
+       `is_simple_run_or_test()` matches only an adjacent `simple run`/`simple
+       test` argv pair, so a stage `simple native-build` falls to the generic
+       branch — an OOM fires before the monitor does, and now with an OOM
+       killer explicitly biased toward `simple`. Launching a second 4 h Stage-4
+       lane would likely kill both it and the 15-min-old lane already running.
+    4. **Gate criterion 3 is structurally unmeasurable — a SECOND false
+       green.** Beyond the already-recorded trap that the literal
+       `stale_generation_reads` is a string the compiler never prints, the
+       underlying check is **never invoked in production**.
+       `ast_gen_check_index` (`src/compiler/10.frontend/core/_AstExpr/nodes.spl:326`)
+       has **zero production call sites** — it is not called from
+       `expr_get_tag`, `stmt_get_tag`, or any arena accessor; its only callers
+       are unit tests (`test/01_unit/compiler/ast_arena_generation_spec.spl`,
+       `ast_arena_harden_spec.spl`). So a real Stage-4 native build emits **no
+       stale-generation line regardless of actual staleness**, and criterion 3
+       reads zero by construction. Spending ~4 h to produce an unscoreable
+       result is the same void outcome as run 11, just discovered before the
+       compute is burned rather than after.
+  - **Corrected diagnostic strings (use these, not `stale_generation_reads`).**
+    The stale-generation message is assembled at runtime, which is why no fixed
+    literal exists —
+    `ast_gen_stale_message()` (`_AstExpr/nodes.spl:323-324`) builds
+    `stale <kind> <idx>: produced at generation <N>, arena now at <M>`, printed
+    at `nodes.spl:338` at most once per generation. The only non-interpolated,
+    greppable anchor is **`: produced at generation `** (secondary: `, arena
+    now at `). It is gated on `SIMPLE_AST_GEN_CHECK=1` or
+    `SIMPLE_BOOTSTRAP_STAGE4=1` (`nodes.spl:316-321`). The OOB markers are
+    real and *are* emitted in production: `[stmt_get_tag] OOB`
+    (`core/ast_stmt.spl:499`), `[expr_get_tag] OOB`
+    (`_AstExpr/accessors.spl:108`), `[flat-bridge] missing expr|stmt tag`
+    (`_FlatAstBridge/convert_nodes.spl:674` and `:1359`); the existing gate
+    regex `'\[stmt_get_tag\] OOB|\[flat-bridge\] missing (stmt|expr) tag'`
+    lives at `bootstrap-from-scratch.sh:1626` and
+    `check-stage4-selfhost-parse-memory-multifile.shs:253`.
+  - **Prerequisites before any run 12 relaunch** (all four, in order):
+    (a) wire `ast_gen_check_index` into the arena accessors so criterion 3 can
+    actually fire, and re-specify the gate against `: produced at generation `
+    — otherwise Pass A cannot be scored; (b) wait for the shared seed tree to
+    go quiescent (no `cargo build --profile bootstrap` running) before copying
+    it; (c) isolate by running from a private repo copy, since no runtime-path
+    knob exists — then verify the run's `runtime:` line points at that copy;
+    (d) require swap headroom > 0 and no competing Stage-4 lane, or serialise
+    against it. Arm the watcher on failure signatures (`error:`, `Killed`,
+    `OOM`, `parser_error`, `OOB`), not only on success markers.
   - Successor plan for the M-milestones:
     doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md.
 
