@@ -109,8 +109,12 @@ class BorrowChecker:
 
     fn convert_terminator(mir_term: MirTerminator, block_id: i64) -> Terminator:
         """Convert MIR terminator to CFG terminator."""
+        # `Return` is not a MirTerminator variant — the return terminator
+        # is `Ret(value)`. As `Return(_)` the arm never matched, so a MIR
+        # return was never converted to `Terminator.Return` in the CFG.
+        # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
         match mir_term:
-            case Return(_):
+            case Ret(_):
                 Terminator.Return
             case Goto(target):
                 val typed_target: BlockId = target
@@ -185,12 +189,11 @@ class BorrowChecker:
                 val dest_local: LocalId = dest
                 nll.record_assign(point, Place.local(dest_local.id))
 
-            case Assign(dest, _):
-                # Assignment (re)initializes the destination. Recording a
-                # USE here (old behavior) would flag legitimate
-                # re-initialization of a moved-out local as use-after-move.
-                val dest_local: LocalId = dest
-                nll.record_assign(point, Place.local(dest_local.id))
+            # A `case Assign(dest, _)` arm stood here. `Assign` is not a
+            # MirInstKind variant — re-initialization is already covered by
+            # the `Copy`, `Move` and `Const` arms above, which record the
+            # same `record_assign`. The arm never matched and was dead.
+            # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
 
             case _:
                 pass_do_nothing
