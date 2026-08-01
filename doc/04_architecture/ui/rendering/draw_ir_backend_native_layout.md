@@ -140,6 +140,15 @@ vkCreateImage(dev, rt_array_data_ptr_u8(info), 0, out_ptr)
   (b) instance/device/queue bootstrap, (c) debug/validation plumbing. All
   steady-state resource creation, descriptor updates, command recording, and
   submission go Simple → SFFI → libvulkan.
+- **S1 finding (2026-08-01)**: the current Rust runtime decodes usage flags
+  with a **runtime-local bit layout, not `VkImageUsageFlagBits`** (e.g.
+  runtime SAMPLED=0x01 vs VK 0x4; buffer VERTEX=0x40 vs VK 0x80 —
+  `vulkan_graphics_runtime_{buffer,graphics}.rs` decode tables). So the named
+  constants introduced in S1 are `RT_VULKAN_*` (mirroring the Rust tables,
+  value-identical to the old magic masks); true `VK_*` usage bits become the
+  canonical wire values only when S3 bypasses the Rust decode and calls
+  libvulkan directly. Formats, unlike usage bits, are already genuine
+  `VkFormat` values end-to-end.
 
 ### 2.4 Enum value cross-table (why "values actually same" holds only for Vulkan)
 
