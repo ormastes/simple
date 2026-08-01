@@ -285,12 +285,12 @@ same shape.
 
 These are **not** import defects. Adding an import would be wrong.
 
-1. **`use lazy` named imports are not honoured by HIR lowering.** PROVED.
+1. **`use lazy` named imports are silently dropped — FIXED 2026-08-01.** PROVED.
    `80.driver/driver.spl:20` and `80.driver/driver_types.spl:19` both carry
    `use lazy compiler.backend.backend.interpreter.{InterpreterBackendImpl}`, and
-   the census still reports `unresolved name: InterpreterBackendImpl` for both.
-   The name IS imported; the `lazy` modifier drops it. 2 error lines. This is a
-   resolver defect, not source hygiene.
+   the census still reported `unresolved name: InterpreterBackendImpl` for both.
+   The name IS imported; the `lazy` modifier dropped it. 2 error lines. This is a
+   resolver defect, not source hygiene. **See the dedicated section below.**
 2. **`_` and `_1` are resolved as ordinary names.** 8 error lines across
    `40.mono/monomorphize/engine.spl` (4), `70.backend/backend/vulkan/spirv_builder.spl`
    (2 + one `_1`), `70.backend/linker/linker_wrapper_helpers.spl` (1),
@@ -328,3 +328,144 @@ These are **not** import defects. Adding an import would be wrong.
 - A module path that maps to no file is silent. `compiler.backend.backend_api`
   has no file; the glob simply contributes nothing, and nothing warns.
 
+
+---
+
+## Defect #1 in full: `use lazy M.{sym}` named imports dropped from the entry closure
+
+Status: **FIXED 2026-08-01.** Fix in `src/compiler/80.driver/driver_source_loading.spl`.
+Regression cover: `test/01_unit/compiler/driver/lazy_named_import_closure_spec.spl`.
+
+### Root cause (PROVED) — it is not HIR lowering
+
+The original filing said "HIR lowering does not register it". That is the
+symptom, not the cause. HIR lowering is entirely `lazy`-agnostic:
+`resolve_import_symbols` (`20.hir/hir_lowering/_Items/module_lowering.spl:1050`)
+never reads `imp.is_lazy`, and the parser stores the named list correctly
+(`10.frontend/core/parser_decls_use.spl:124-187` collects `imported_names`, then
+`decl_set_lazy` only flags the decl). The names survive all the way into
+`ParserImport.items`.
+
+The drop is one line earlier in the pipeline, in the **entry-closure scanner**:
+
+    src/compiler/80.driver/driver_source_loading.spl:446
+        if line.starts_with("use lazy "):
+            continue
+
+This is the only closure scanner in the tree (callers:
+`app/io/_CliCompile/compile_targets.spl:618` BFS and
+`80.driver/driver_source_pipeline_loading.spl:197` phase1 load_sources). Skipping
+the line means the module is never loaded, so in `resolve_import_symbols`
+`imported_key == ""`, the whole `if imported_key != ""` block is skipped, and
+**nothing is registered** — no error, no warning. The name then reports
+`unresolved name`. The Rust seed masks it entirely because it resolves flat over
+the loaded closure.
+
+### Reproduction
+
+Interpreter lane, `bin/simple_seed run` (rebuilt from origin tip today), calling
+`_driver_entry_import_module_paths` directly, one process per measurement. The
+`use lazy` / plain contrast is the whole diagnosis:
+
+| import form | before | after |
+|---|---|---|
+| `use M.{sym}` | `[M]` | `[M]` |
+| `use lazy M.{sym}` | **`[]`** | `[M]` |
+| `use M (sym)` | `[M]` | `[M]` |
+| `use lazy M (sym)` | **`[]`** | `[M]` |
+| `use M.{sym as alias}` | `[M]` | `[M]` |
+| `use lazy M.{sym as alias}` | **`[]`** | `[M]` |
+| `use M.*` | `[M]` | `[M]` |
+| `use lazy M.*` | `[]` | `[]` (intended) |
+| `use M` | `[M]` | `[M]` |
+| `use lazy M` | `[]` | `[]` (intended) |
+| `use M as a` | `[M]` | `[M]` |
+| `use lazy M as a` | `[]` | `[]` (intended) |
+| `export use M.{sym}` | `[M]` | `[M]` |
+| `export use lazy M.{sym}` | **`[lazy]`** | `[M]` |
+| `pub use M.{sym}` | `[M]` | `[M]` |
+| `pub use lazy M.{sym}` | **`[lazy]`** | `[M]` |
+| `import M.{sym}` | `[M]` | `[M]` |
+| `import lazy M.{sym}` | **`[lazy]`** | `[M]` |
+
+**Sibling defect found by enumerating the family:** `export use lazy`,
+`pub use lazy` and `import lazy` never matched the `use lazy ` prefix test at
+all. They fell through to the plain arms and collected the literal module path
+**`"lazy"`** — a phantom module that maps to no file and therefore contributes
+silently nothing, while the real module was lost. Zero in-tree instances today,
+so this was latent, but it is fixed by the same change.
+
+### The fix
+
+Strip the `lazy` modifier after the `use`/`pub use`/`export use`/`import`
+prefix, then skip **only** when the lazy import carries no explicit name list.
+
+- **Named** (`M.{a, b}` / `M (a, b)`) — a static name dependency. The names must
+  resolve, so the module is collected like any other import.
+- **Name-less** (`use lazy M`, `use lazy M.*`, `use lazy M as a`) — genuinely
+  dynamic, still skipped.
+
+That split matches in-tree usage exactly (see blast radius): every one of the 9
+name-less lazy imports is an MCP deferred tool module (#LAZY-002 startup cost),
+and every one of the 36 named lazy imports references its names in code.
+
+### Blast radius (PROVED, `/usr/bin/grep`, whole tree at the tip)
+
+45 lazy import lines across 19 files:
+
+| form | count | effect of fix |
+|---|---|---|
+| `use lazy M.{...}` | 28 | now collected |
+| `use lazy M (...)` | 8 | now collected |
+| `use lazy M` (name-less) | 9 | unchanged, still deferred |
+| `use lazy M.*` | 0 | — |
+| `export use lazy` / `pub use lazy` / `import lazy` | 0 | latent fix |
+
+All 9 name-less sites are in `src/lib/nogc_async_mut/mcp/main_lazy.spl`.
+
+### Import-winner analysis (required by `SymbolTable.define` semantics)
+
+`SymbolTable.define` (`20.hir/hir_types.spl:246`) is first-write-wins only for
+`Class`/`Struct`/`Enum`/`Trait`; `Function`/`Const`/`TypeAlias` are
+**last-write-wins**, so a change in *when* a symbol registers can swap a winner.
+
+The fix newly registers **49 distinct names** (the named items of the 36 lazy
+imports). Provider counts, by declaring module:
+
+- 40 of 49 have 0 or 1 declaring module — cannot swap.
+- 3 are first-write-wins kinds and so cannot swap even when contested:
+  `Size` (5, class/struct), `FixApplicator` (2, class), `BackendError` (2, enum/struct).
+- **6 are last-write-wins functions with more than one provider** and are the
+  residual risk: `read_file` (8), `compile_native` (3),
+  `aot_native_project_with_backend` (3), `aot_native_file_with_backend` (3),
+  `check_short_grammar_refactor` (2), `check_formatting` (2).
+
+Bounding measurement (PROVED): **all 10 modules** named by the lazy imports
+already have at least one NON-lazy importer elsewhere in the tree
+(`compiler.mir.mir_instructions` 100, `compiler.driver.driver` 29,
+`compiler.backend.backend_types` 19, `compiler.tools.fix.rules` 43,
+`compiler.backend.linker.lib_smf_writer` 4, `compiler.driver.driver_api` 3,
+`compiler.backend.backend.interpreter` 3, `compiler.tools.formatter.main` 1,
+`compiler.tools.fix.main` 1, `app.compile.native` 1). So the fix introduces **no
+new provider** into the registry — every one of these modules was already
+loadable into a closure. INFERRED from that: the residual exposure is ordering
+within closures that could already contain these modules, not a new contested
+name. Not verified by a full stage3 census; the 6 names above are the list to
+check if a winner swap is later observed.
+
+### Non-vacuity (sabotage)
+
+With the fix reverted to the tip version, the regression spec goes RED:
+`Results: 9 total, 3 passed, 6 failed`. The 3 that stay green are exactly the
+preserved-behaviour cases (name-less lazy still deferred, MCP tool modules still
+out of the closure, `lazy_thing.mod` not mistaken for the modifier), which is the
+intended asymmetry. With the fix applied: `9 total, 9 passed, 0 failed`.
+
+### Lane note
+
+Every measurement here is the **tree-walking interpreter** lane
+(`bin/simple_seed run` / `bin/simple_seed test`), one process per file. That is
+sufficient and appropriate: the code under test is a pure text function over
+source content, with no engine-divergent construct. It does NOT prove the
+downstream stage3 census delta — that needs a stage2 build and is out of scope
+for this lane.

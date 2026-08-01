@@ -443,9 +443,7 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
 
         val line = scan_line.trim()
         var tail: text = ""
-        if line.starts_with("use lazy "):
-            continue
-        elif line.starts_with("pub use "):
+        if line.starts_with("pub use "):
             tail = line.substring(8)
         elif line.starts_with("export use "):
             tail = line.substring(11)
@@ -454,6 +452,39 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
         elif line.starts_with("import "):
             tail = line.substring(7)
         else:
+            continue
+
+        # `lazy` modifier.
+        #
+        # DEFECT (fixed 2026-08-01, doc/08_tracking/bug/
+        # selfhost_names_with_no_import_path_masked_by_seed_flat_resolution_2026-08-01.md
+        # defect #1): this used to `continue` on ANY line starting `use lazy `.
+        # That dropped the module from the entry closure entirely, so HIR
+        # lowering's resolve_import_symbols found no module surface for it
+        # (imported_key == "") and registered NOTHING -- every name in a
+        # `use lazy M.{a, b}` came out `unresolved name`, e.g.
+        # InterpreterBackendImpl from 80.driver/driver.spl:20 and
+        # driver_types.spl:19. The import was present and correct; the closure
+        # scan silently discarded its module.
+        #
+        # A NAMED lazy import (`M.{a, b}` or `M (a, b)`) states a STATIC name
+        # dependency: the names must resolve, so the module has to be loaded.
+        # Only the name-less forms -- `use lazy M`, `use lazy M.*`,
+        # `use lazy M as alias` -- are dynamic-by-design and stay skipped. That
+        # is exactly the form src/lib/nogc_async_mut/mcp/main_lazy.spl uses for
+        # its 9 deferred tool modules (#LAZY-002 startup cost), so that
+        # behaviour is preserved unchanged.
+        #
+        # The old prefix test also never matched `export use lazy `,
+        # `pub use lazy ` or `import lazy `: those fell through to the plain
+        # arms and collected the literal module path "lazy". Stripping the
+        # modifier after the use/import prefix fixes that whole family too.
+        var lazy_import = false
+        if tail.starts_with("lazy "):
+            lazy_import = true
+            tail = tail.substring(5).trim()
+        val has_named_list: bool = tail.contains("{") or tail.contains("(")
+        if lazy_import and not has_named_list:
             continue
 
         var cut: i64 = rt_string_len(tail)
@@ -470,7 +501,10 @@ fn _driver_entry_import_module_paths_text_fallback(content: text) -> [text]:
 
 pub fn _driver_entry_import_module_paths(content: text) -> [text]:
     """Dotted module paths of the use/pub-use/export-use/import declarations in a
-    source text. `use lazy` imports are dynamic-by-design and skipped.
+    source text. Name-less `use lazy` imports (`use lazy M`, `use lazy M.*`,
+    `use lazy M as a`) are dynamic-by-design and skipped; NAMED lazy imports
+    (`use lazy M.{a, b}`) declare static names that must resolve, so their
+    module is collected like any other -- see the comment in the text fallback.
     Docstring bodies are skipped via a triple-quote toggle.
     PERF (doc/08_tracking/bug/native_build_entry_closure_slow_2026-07-31.md):
     this used to memoize by the full content string in a process-local
