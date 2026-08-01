@@ -2367,6 +2367,166 @@ pub extern "C" fn rt_string_replace_first(
     new_string(&s.replacen(p, r, 1))
 }
 
+/// The character a pad-family method should use when the caller omitted the
+/// optional pad argument.
+///
+/// `adapt_args_to_signature` pads a missing argument with tagged nil (bit
+/// pattern 3), which is not a heap string, so `string_as_str` yields `None`.
+/// That is unambiguous here because the parameter is a TEXT slot -- unlike an
+/// INT slot, where tagged nil and the integer 3 are the same 64 bits.
+///
+/// A supplied argument contributes its FIRST character, matching the
+/// interpreter's `.chars().next().unwrap_or(' ')`.
+fn pad_char_or_space(pad: RuntimeValue) -> char {
+    string_as_str(pad).and_then(|s| s.chars().next()).unwrap_or(' ')
+}
+
+/// `pad_left` / `pad_start`: left-pad to `width` CHARACTERS.
+///
+/// Width is a character count, not a byte count, matching the interpreter's
+/// `s.chars().count()`. A width at or below the current length returns the
+/// receiver unchanged, so a negative width is a no-op rather than a panic --
+/// the interpreter reached this through `eval_arg_usize`, which used to cast
+/// `-5` to `18446744073709551611` and PANIC with "capacity overflow".
+#[no_mangle]
+pub extern "C" fn rt_string_pad_left(string: RuntimeValue, width: i64, pad: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let current = s.chars().count() as i64;
+    if width <= current {
+        return string;
+    }
+    let c = pad_char_or_space(pad);
+    let mut out = String::new();
+    for _ in 0..(width - current) {
+        out.push(c);
+    }
+    out.push_str(s);
+    new_string(&out)
+}
+
+/// `pad_right` / `pad_end`: right-pad to `width` CHARACTERS.
+#[no_mangle]
+pub extern "C" fn rt_string_pad_right(string: RuntimeValue, width: i64, pad: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let current = s.chars().count() as i64;
+    if width <= current {
+        return string;
+    }
+    let c = pad_char_or_space(pad);
+    let mut out = String::from(s);
+    for _ in 0..(width - current) {
+        out.push(c);
+    }
+    new_string(&out)
+}
+
+/// `center`: pad both sides to `width` CHARACTERS, extra character on the RIGHT.
+#[no_mangle]
+pub extern "C" fn rt_string_center(string: RuntimeValue, width: i64, pad: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let current = s.chars().count() as i64;
+    if width <= current {
+        return string;
+    }
+    let total = width - current;
+    let left = total / 2;
+    let c = pad_char_or_space(pad);
+    let mut out = String::new();
+    for _ in 0..left {
+        out.push(c);
+    }
+    out.push_str(s);
+    for _ in 0..(total - left) {
+        out.push(c);
+    }
+    new_string(&out)
+}
+
+/// `zfill`: left-pad with `0` to `width` CHARACTERS, keeping a leading sign in
+/// front of the zeros (`"-7".zfill(4)` is `"-007"`, not `"00-7"`).
+#[no_mangle]
+pub extern "C" fn rt_string_zfill(string: RuntimeValue, width: i64) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let current = s.chars().count() as i64;
+    if width <= current {
+        return string;
+    }
+    let (sign, rest) = match s.as_bytes().first() {
+        Some(b'+') | Some(b'-') => s.split_at(1),
+        _ => ("", s),
+    };
+    let mut out = String::from(sign);
+    for _ in 0..(width - current) {
+        out.push('0');
+    }
+    out.push_str(rest);
+    new_string(&out)
+}
+
+/// `find_all` / `find_indices`: BYTE offsets of every non-overlapping match.
+///
+/// Byte offsets, matching `find`/`index_of`/`rfind` in both engines. An empty
+/// needle yields an empty array rather than an offset per position, matching the
+/// interpreter's explicit empty-needle guard.
+#[no_mangle]
+pub extern "C" fn rt_string_find_all(string: RuntimeValue, needle: RuntimeValue) -> RuntimeValue {
+    let (Some(s), Some(n)) = (string_as_str(string), string_as_str(needle)) else {
+        return rt_array_new(0);
+    };
+    if n.is_empty() {
+        return rt_array_new(0);
+    }
+    let result = rt_array_new(0);
+    for (idx, _) in s.match_indices(n) {
+        rt_array_push(result, RuntimeValue::from_int(idx as i64));
+    }
+    result
+}
+
+/// `substr(start, length)`: CHARACTER-indexed substring by start and length.
+///
+/// Deliberately NOT `rt_slice`: that one is byte-indexed (and `slice`/
+/// `substring` keep those semantics on purpose), while the interpreter's
+/// `substr` walks `chars()`. Routing `substr` to `rt_slice` would have been a
+/// silent JIT-vs-interpreter divergence on any multi-byte receiver.
+///
+/// Negative `start` or `length` clamps to 0, matching the saturating
+/// `eval_arg_usize` the interpreter now uses.
+#[no_mangle]
+pub extern "C" fn rt_string_substr(string: RuntimeValue, start: i64, length: i64) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let start = start.max(0) as usize;
+    let length = length.max(0) as usize;
+    let out: String = s.chars().skip(start).take(length).collect();
+    new_string(&out)
+}
+
+/// `substr(start)`: CHARACTER-indexed substring from `start` to the end.
+///
+/// A separate entry point rather than a default argument: the omitted-argument
+/// slot is padded with tagged nil, whose bit pattern IS the integer 3, so an
+/// integer parameter cannot tell "absent" from "3". The dispatch site therefore
+/// selects between the two symbols on the argument count.
+#[no_mangle]
+pub extern "C" fn rt_string_substr_from(string: RuntimeValue, start: i64) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let start = start.max(0) as usize;
+    let out: String = s.chars().skip(start).collect();
+    new_string(&out)
+}
+
 /// Check if string starts with prefix
 /// Returns 1 if true, 0 if false
 #[no_mangle]

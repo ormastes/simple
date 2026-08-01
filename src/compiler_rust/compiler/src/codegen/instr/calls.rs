@@ -3303,6 +3303,23 @@ pub fn compile_call<M: Module>(
                 // exists. Note `push` stays on `rt_array_push`: it is
                 // receiver-polymorphic and out of scope here.
                 "push_str" => Some("rt_string_concat"),
+                // Pad family. The optional pad-character argument is padded
+                // with tagged nil when absent, which the runtime reads as
+                // "use a space" -- unambiguous because that parameter is a TEXT
+                // slot. Width is a CHARACTER count in both engines.
+                "pad_left" | "pad_start" => Some("rt_string_pad_left"),
+                "pad_right" | "pad_end" => Some("rt_string_pad_right"),
+                "center" => Some("rt_string_center"),
+                "zfill" => Some("rt_string_zfill"),
+                "find_all" | "find_indices" => Some("rt_string_find_all"),
+                // `substr` needs ARITY-AWARE dispatch, not a default argument:
+                // its optional parameter is an INT, and the tagged-nil bit
+                // pattern used to pad a missing argument IS the integer 3, so a
+                // one-argument `substr(3)` and a two-argument `substr(x, 3)`
+                // would be indistinguishable inside the callee. `args` here
+                // includes the receiver.
+                "substr" if args.len() >= 3 => Some("rt_string_substr"),
+                "substr" => Some("rt_string_substr_from"),
                 // The interpreter folds five spellings into one arm each
                 // (interpreter_method/string.rs:76-77); only two of each were
                 // wired here, so `up`/`uppercase`/`to_uppercase` and their

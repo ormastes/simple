@@ -1110,12 +1110,15 @@ impl Lowerer {
                 // order) return a fresh String — same shape as the
                 // `concat`/`slice` entry just above. See the MIR expansion
                 // in lowering_expr_method.rs (lane BATCH3). NOTE: `substr`/
-                // `take` were deliberately NOT added here — `rt_slice`'s
+                // `take` were deliberately NOT added here at first — `rt_slice`'s
                 // string branch is byte-indexed while the interpreter is
                 // char-indexed, a silent JIT-vs-interpreter divergence on
-                // multi-byte UTF-8 receivers, so those two are reclassified
+                // multi-byte UTF-8 receivers, so those two were reclassified
                 // NEEDS-RUNTIME (need a char-aware slice symbol) rather than
-                // CLEAN-LOWERING.
+                // CLEAN-LOWERING. `substr` now HAS that char-aware symbol
+                // (`rt_string_substr`/`rt_string_substr_from`) and is listed
+                // below; `take` is still open because it is also an array
+                // method and needs receiver dispatch.
                 "appended" | "prepended" => Some(TypeId::STRING),
                 // Newly wired text methods (see calls.rs and
                 // runtime/src/value/collections.rs). `char_count` returns a raw
@@ -1126,7 +1129,15 @@ impl Lowerer {
                 "char_count" => Some(TypeId::I64),
                 "capitalize" | "swapcase" | "title" | "titlecase" | "chomp" | "trim_start_matches"
                 | "trim_end_matches" | "removeprefix" | "remove_prefix" | "removesuffix" | "remove_suffix"
-                | "squeeze" | "replace_first" | "push_str" => Some(TypeId::STRING),
+                | "squeeze" | "replace_first" | "push_str" | "pad_left" | "pad_start" | "pad_right" | "pad_end"
+                | "center" | "zfill" | "substr" => Some(TypeId::STRING),
+                // `find_all`/`find_indices` return an array of BYTE offsets,
+                // the same shape as `.bytes()`.
+                "find_all" | "find_indices" => Some(
+                    self.module
+                        .types
+                        .register(HirType::Array { element: TypeId::I64, size: None }),
+                ),
                 "split" => Some(
                     self.module
                         .types

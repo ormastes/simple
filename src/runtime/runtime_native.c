@@ -3794,6 +3794,156 @@ int64_t rt_string_squeeze(int64_t value, int64_t set) {
     return result;
 }
 
+/* Codepoint count of a runtime string (helper shared by the pad family). */
+static int64_t rt_str_char_count(RtCoreString* s) {
+    int64_t n = 0;
+    for (uint64_t i = 0; i < s->len; i += rt_utf8_width(s->data, i, s->len)) n++;
+    return n;
+}
+
+/* First character of the optional pad argument, or ' ' when it was omitted.
+ *
+ * A missing argument arrives as tagged nil, which is not a heap string, so
+ * rt_core_as_string returns NULL. That is unambiguous for a TEXT parameter --
+ * unlike an INT parameter, where tagged nil and the integer 3 are the same 64
+ * bits. Returns the byte width through *w so a multi-byte pad character pads
+ * correctly. */
+static const char* rt_pad_char(int64_t pad, uint64_t* w) {
+    RtCoreString* p = rt_core_as_string(pad);
+    if (!p || p->len == 0) { *w = 1; return " "; }
+    *w = rt_utf8_width(p->data, 0, p->len);
+    return p->data;
+}
+
+/* pad_left / pad_start: left-pad to `width` CHARACTERS (not bytes).
+ * A width at or below the current length is a no-op, so a negative width
+ * returns the receiver rather than attempting a huge allocation. */
+int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    int64_t current = rt_str_char_count(s);
+    if (width <= current) return value;
+    uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
+    uint64_t n = (uint64_t)(width - current);
+    uint64_t out_len = n * pw + s->len;
+    char* out = (char*)malloc((size_t)out_len);
+    if (!out) return value;
+    for (uint64_t i = 0; i < n; i++) memcpy(out + i * pw, pc, (size_t)pw);
+    memcpy(out + n * pw, s->data, (size_t)s->len);
+    int64_t result = rt_string_new((const uint8_t*)out, out_len);
+    free(out);
+    return result;
+}
+
+/* pad_right / pad_end: right-pad to `width` CHARACTERS. */
+int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    int64_t current = rt_str_char_count(s);
+    if (width <= current) return value;
+    uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
+    uint64_t n = (uint64_t)(width - current);
+    uint64_t out_len = s->len + n * pw;
+    char* out = (char*)malloc((size_t)out_len);
+    if (!out) return value;
+    memcpy(out, s->data, (size_t)s->len);
+    for (uint64_t i = 0; i < n; i++) memcpy(out + s->len + i * pw, pc, (size_t)pw);
+    int64_t result = rt_string_new((const uint8_t*)out, out_len);
+    free(out);
+    return result;
+}
+
+/* center: pad both sides to `width` CHARACTERS, extra character on the RIGHT. */
+int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    int64_t current = rt_str_char_count(s);
+    if (width <= current) return value;
+    uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
+    uint64_t total = (uint64_t)(width - current);
+    uint64_t left = total / 2;
+    uint64_t right = total - left;
+    uint64_t out_len = (left + right) * pw + s->len;
+    char* out = (char*)malloc((size_t)out_len);
+    if (!out) return value;
+    uint64_t o = 0;
+    for (uint64_t i = 0; i < left; i++, o += pw) memcpy(out + o, pc, (size_t)pw);
+    memcpy(out + o, s->data, (size_t)s->len); o += s->len;
+    for (uint64_t i = 0; i < right; i++, o += pw) memcpy(out + o, pc, (size_t)pw);
+    int64_t result = rt_string_new((const uint8_t*)out, out_len);
+    free(out);
+    return result;
+}
+
+/* zfill: left-pad with '0' to `width` CHARACTERS, keeping a leading sign in
+ * front of the zeros ("-7".zfill(4) is "-007", not "00-7"). */
+int64_t rt_string_zfill(int64_t value, int64_t width) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    int64_t current = rt_str_char_count(s);
+    if (width <= current) return value;
+    uint64_t sign = (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) ? 1 : 0;
+    uint64_t zeros = (uint64_t)(width - current);
+    uint64_t out_len = s->len + zeros;
+    char* out = (char*)malloc((size_t)out_len);
+    if (!out) return value;
+    if (sign) out[0] = s->data[0];
+    memset(out + sign, '0', (size_t)zeros);
+    memcpy(out + sign + zeros, s->data + sign, (size_t)(s->len - sign));
+    int64_t result = rt_string_new((const uint8_t*)out, out_len);
+    free(out);
+    return result;
+}
+
+/* find_all / find_indices: BYTE offsets of every non-overlapping match.
+ * An empty needle yields an EMPTY array, matching the interpreter's guard. */
+int64_t rt_string_find_all(int64_t value, int64_t needle) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* n = rt_core_as_string(needle);
+    SplArray* out = rt_array_new(0);
+    if (!out) return rt_core_nil();
+    if (!s || !n || n->len == 0) return (int64_t)(uintptr_t)out;
+    for (uint64_t i = 0; i + n->len <= s->len;) {
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) {
+            rt_array_push(out, rt_value_int((int64_t)i));
+            i += n->len;
+        } else {
+            i++;
+        }
+    }
+    return (int64_t)(uintptr_t)out;
+}
+
+/* substr(start, length): CHARACTER-indexed substring by start and length.
+ * Deliberately NOT rt_slice, which is byte-indexed. Negative arguments clamp
+ * to 0, matching the saturating eval_arg_usize in the interpreter. */
+int64_t rt_string_substr(int64_t value, int64_t start, int64_t length) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    if (start < 0) start = 0;
+    if (length < 0) length = 0;
+    uint64_t b = 0;
+    int64_t skipped = 0;
+    while (b < s->len && skipped < start) { b += rt_utf8_width(s->data, b, s->len); skipped++; }
+    uint64_t e = b;
+    int64_t taken = 0;
+    while (e < s->len && taken < length) { e += rt_utf8_width(s->data, e, s->len); taken++; }
+    return rt_string_new((const uint8_t*)s->data + b, e - b);
+}
+
+/* substr(start): CHARACTER-indexed substring from `start` to the end.
+ * A separate symbol rather than a default argument, because the omitted-slot
+ * padding value (tagged nil) IS the integer 3 for an int parameter. */
+int64_t rt_string_substr_from(int64_t value, int64_t start) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    if (start < 0) start = 0;
+    uint64_t b = 0;
+    int64_t skipped = 0;
+    while (b < s->len && skipped < start) { b += rt_utf8_width(s->data, b, s->len); skipped++; }
+    return rt_string_new((const uint8_t*)s->data + b, s->len - b);
+}
+
 /* replace_first: replace only the FIRST occurrence of `pattern`. */
 int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacement) {
     RtCoreString* s = rt_core_as_string(value);

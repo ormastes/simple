@@ -487,3 +487,80 @@ Grouped by the obstacle that is actually distinct, not by name:
   (pin a copy for the process lifetime) have no meaningful compiled-lane
   equivalent -- the compiled string's buffer is already stable. Needs a decision,
   not a transcription.
+
+---
+
+# Update 2026-08-01 (batch 4): 21 -> 12
+
+## Landed: 9 methods via 7 new runtime functions in BOTH runtimes
+
+`pad_left`, `pad_start`, `pad_right`, `pad_end`, `center`, `zfill`, `find_all`,
+`find_indices`, `substr`.
+
+New entry points: `rt_string_pad_left`, `rt_string_pad_right`,
+`rt_string_center`, `rt_string_zfill`, `rt_string_find_all`,
+`rt_string_substr`, `rt_string_substr_from`.
+
+### The optional-argument problem has TWO answers, not one
+
+- **Optional TEXT argument (the pad character):** safe to default inside the
+  runtime. `adapt_args_to_signature` pads a missing argument with tagged nil,
+  which is not a heap string, so the callee's "is this text?" test already
+  answers "no". `pad_left`/`pad_right`/`center` and batch 3's `squeeze` all use
+  this.
+- **Optional INT argument (`substr`'s length):** NOT safe. Tagged nil is
+  `TAG_SPECIAL(3) | SPECIAL_NIL(0)` = the 64-bit value **3**, which is
+  indistinguishable from the integer 3 in an int slot. A sentinel here would
+  have made `"abcdefgh".substr(3)` return three characters instead of five --
+  a silent wrong answer, exactly the class of bug this document exists for. It
+  is dispatched on `args.len()` to two symbols instead
+  (`rt_string_substr` / `rt_string_substr_from`), and the collision case is a
+  probe: `"abcdefgh".substr(3)` -> `defgh` and `"abcdefgh".substr(0, 3)` ->
+  `abc` on both engines. PROVED.
+
+`substr` is char-indexed in both new symbols, deliberately NOT routed to the
+byte-indexed `rt_slice`. The stale comment in `hir/lower/expr/mod.rs` that
+listed `substr` as NEEDS-RUNTIME for exactly this reason is updated in place;
+`take` still carries that status because it is also an array method.
+
+### Value evidence (PROVED)
+
+25 real probes + the same 2 controls, run against pristine `8dd8f17b656` and
+against the new build:
+
+| | v0 | v2 |
+|---|---|---|
+| non-green rows | **25 of 25 JIT-BROKEN** | **0** |
+| controls | both correct | both correct |
+
+Batch 3's 24 probes were re-run on the same binary and are still green, so this
+batch regressed nothing.
+
+The harness caught **three wrong expectations of its own** before they could
+become false claims: `pad_right` (trailing spaces), `center` with an odd
+padding total (the extra character goes on the RIGHT: `"ab".center(5,"-")` is
+`-ab--`, not `--ab-`), and array `.to_text()`, which returns the empty string
+here so the `find_all` probes had to compare elements and length instead. A
+harness that only compared the two engines to each other would have called all
+three PASS.
+
+### C runtime measured, not just compiled (PROVED)
+
+All 23 C cases printed the same bytes as the interpreter and the JIT, including
+`substr` on a multi-byte receiver (`"héllo".substr(1,2)` -> `él`) and a
+multi-byte pad character (`"é".pad_left(3,"*")` -> `**é`). The C `find_all`
+returns a 2-element array with elements 1 and 3.
+
+### No new divergence
+
+Every function in this batch is codepoint- or byte-exact; none needs a Unicode
+table, so the C lane agrees with the other two on all input.
+
+## Remaining 12
+
+    rev reversed sorted taken take dropped drop skip partition rpartition
+    parse_i64 ptr
+
+Ten of the twelve are the receiver-polymorphic set (all also array methods) and
+need `rt_at`-style receiver dispatch; `parse_i64` and `ptr` are the two
+documented non-transcription cases.

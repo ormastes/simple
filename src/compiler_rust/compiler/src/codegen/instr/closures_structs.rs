@@ -1504,6 +1504,16 @@ fn try_compile_builtin_method_call<M: Module>(
         "squeeze" => "rt_string_squeeze",
         "replace_first" => "rt_string_replace_first",
         "push_str" => "rt_string_concat",
+        "pad_left" | "pad_start" => "rt_string_pad_left",
+        "pad_right" | "pad_end" => "rt_string_pad_right",
+        "center" => "rt_string_center",
+        "zfill" => "rt_string_zfill",
+        "find_all" | "find_indices" => "rt_string_find_all",
+        // Arity-aware, see calls.rs: tagged nil and the integer 3 are the same
+        // bits, so `substr`'s optional int argument needs two symbols rather
+        // than a padded default. `args` here EXCLUDES the receiver.
+        "substr" if args.len() >= 2 => "rt_string_substr",
+        "substr" => "rt_string_substr_from",
         // Full alias sets, matching interpreter_method/string.rs:76-77.
         "to_upper" | "upper" | "up" | "uppercase" | "to_uppercase" => "rt_string_to_upper",
         "to_lower" | "lower" | "down" | "lowercase" | "to_lowercase" => "rt_string_to_lower",
