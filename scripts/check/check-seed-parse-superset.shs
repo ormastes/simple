@@ -1,0 +1,361 @@
+#!/bin/sh
+# check-seed-parse-superset.shs
+#
+# BOOTSTRAP GATE: fail when a bootstrap-compiled .spl file uses a line
+# continuation that the SELF-HOSTED frontend accepts but the RUST SEED rejects.
+#
+# WHY THIS EXISTS
+# ---------------
+# 69d3e4db82b added CoreLexer.leading_op_continues to the self-hosted lexer
+# (src/compiler/10.frontend/core/lexer_struct.spl), so a line whose first
+# non-blank characters spell a binary operator continues the previous logical
+# line. That fix is correct and load-bearing -- do NOT narrow it. Its three
+# guards (token_can_end_expr, strictly-deeper indent, operator-cannot-begin-a-
+# statement) each stop a real miscompile.
+#
+# The Rust bootstrap seed does the same job in the PARSER, per production, and
+# two of those productions are hand-written and never got the leading-operator
+# branch -- src/compiler_rust/parser/src/expressions/binary.rs:
+#     parse_equality    -- ==  !=  is  in  (it special-cases `not in`)
+#     parse_comparison  -- <   >   <=  >=  (it special-cases chaining a<b<c)
+# Both carry only the TRAILING form added by 023a60a05aa. The macro-generated
+# productions (parse_term/parse_factor/parse_or/parse_and/parse_shift/...) DO
+# have the leading branch, so + - * / % & ^ << >> and or are fine.
+#
+# The seed is what compiles the compiler. scripts/bootstrap/bootstrap-from-
+# scratch.sh stage 2 runs it as
+#     --source src/compiler --source src/app --source src/lib
+#     --entry-closure --entry src/app/cli/bootstrap_main.spl
+# so a bootstrap-reachable file written in the superset-only syntax cannot be
+# compiled by the seed, and the bootstrap dies with a location-poor
+# "Unexpected token: expected expression, found Indent" in a file nobody
+# touched.
+#
+# MEASURED SEED BEHAVIOUR
+# -----------------------
+# One file per cell, run through the seed's own parser
+# (src/compiler_rust/target/release/simple). 34 cells, and the detector below
+# agrees with the seed on all 34.
+#
+#   Leading operator, statement level:
+#     REJECTED  ==  !=  ??  <  >  <=  >=  is  in
+#     ACCEPTED  +  -  *  /  %  &  ^  <<  >>  and  or
+#   Leading operator continuing an `if`/`elif` CONDITION header:
+#     REJECTED  when the continuation line is indented STRICTLY DEEPER than the
+#               block BODY. Measured with `if` at column 4 and body at column 8:
+#               continuation indent 5,6,7,8 parse; 9,10,11,12,13 do not.
+#     ACCEPTED  otherwise. `while` conditions are unaffected.
+#   Trailing operator (`a ==` newline `b`): ACCEPTED (023a60a05aa).
+#   Anything inside unclosed ( [ { : ACCEPTED -- both parsers suppress layout
+#     inside brackets, so bracket-enclosed continuations are never flagged.
+#
+# SCOPE: the roots the seed compiles. Files outside them may use the full
+# self-hosted grammar; only the bootstrap path is constrained.
+#
+# NON-VACUITY: --selftest (run automatically before every scan, and fatal if it
+# fails) feeds the detector fixtures that MUST be flagged and fixtures that MUST
+# NOT be, including both sides of the if-condition indent boundary. If the
+# detector stops detecting, this script fails instead of passing quietly.
+#
+# Usage:
+#   sh scripts/check/check-seed-parse-superset.shs            # selftest + scan
+#   sh scripts/check/check-seed-parse-superset.shs --selftest # selftest only
+#   SEED_SUPERSET_ROOTS="src/compiler" sh ...                 # narrow the scan
+#   SEED_SUPERSET_FILE_LIST=<path> sh ...                     # scan exactly the
+#       newline-separated paths in <path> instead of walking the roots. Used by
+#       scripts/hooks/pre-commit to check only the staged bootstrap-path files.
+#       The selftest still runs; an empty list is reported explicitly, never
+#       swallowed.
+
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# Roots the bootstrap seed compiles (stage 2 --source list), plus src/runtime,
+# whose core_*.spl belong to the core-c-bootstrap runtime bundle.
+ROOTS="${SEED_SUPERSET_ROOTS:-src/compiler src/app src/lib src/runtime}"
+
+WORK_DIR="${WORK_DIR:-${TMPDIR:-/tmp}/seed_parse_superset_check.$$}"
+mkdir -p "$WORK_DIR"
+trap 'rm -rf "$WORK_DIR"' EXIT INT TERM
+
+DETECT="$WORK_DIR/detect.awk"
+
+# ---------------------------------------------------------------------------
+# The detector. Two passes: pass 1 classifies every line, pass 2 applies the
+# guards (the if/elif rule needs the block body's indent, which is downstream).
+# ---------------------------------------------------------------------------
+cat > "$DETECT" <<'AWK_EOF'
+# Indentation width, using handle_indentation's weights: space 1, tab 4, CR 0.
+function indent_of(s,   i, n, c, w) {
+    w = 0; n = length(s)
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (c == " ") w++
+        else if (c == "\t") w += 4
+        else if (c == "\r") continue
+        else break
+    }
+    return w
+}
+
+# Strip string literals and any trailing line comment; leave the net bracket
+# delta of the remainder in DEPTH_DELTA.
+function strip_and_depth(s,   i, n, c, q, out) {
+    n = length(s); out = ""; q = ""; DEPTH_DELTA = 0
+    for (i = 1; i <= n; i++) {
+        c = substr(s, i, 1)
+        if (q != "") {
+            if (c == "\\") { i++; continue }
+            if (c == q) q = ""
+            continue
+        }
+        if (c == "\"" || c == "'") { q = c; out = out "0"; continue }
+        if (c == "#") break
+        if (c == "(" || c == "[" || c == "{") DEPTH_DELTA++
+        else if (c == ")" || c == "]" || c == "}") DEPTH_DELTA--
+        out = out c
+    }
+    return out
+}
+
+function fence_count(s,   n, i) {
+    n = 0
+    for (i = 1; i <= length(s) - 2; i++)
+        if (substr(s, i, 3) == "\"\"\"") { n++; i += 2 }
+    return n
+}
+
+{
+    raw = $0
+    sub(/\r$/, "", raw)
+    N++
+    LINE[N] = raw
+
+    # docstrings / triple-quoted blocks are prose, never code
+    fc = fence_count(raw)
+    if (in_doc) { SKIP[N] = 1; if (fc % 2 == 1) in_doc = 0; next }
+    if (fc % 2 == 1) { SKIP[N] = 1; in_doc = 1; next }
+
+    b = raw
+    sub(/^[ \t]+/, "", b)
+    if (b == "" || b ~ /^#/) { SKIP[N] = 1; next }
+
+    SKIP[N]  = 0
+    BODY[N]  = b
+    IND[N]   = indent_of(raw)
+    CODE[N]  = strip_and_depth(raw)
+    DELTA[N] = DEPTH_DELTA
+}
+
+END {
+    depth = 0   # bracket depth entering the current line
+    prev  = 0   # previous meaningful line
+    head  = 0   # line that STARTED the current logical line
+    hits  = 0
+
+    for (i = 1; i <= N; i++) {
+        if (SKIP[i]) continue
+        is_cont = 0
+
+        # Guard 0: both parsers suppress layout inside unclosed brackets.
+        # Guard 1: the previous token must be able to END an expression;
+        #          otherwise the TRAILING-operator rule applies, which both
+        #          parsers support.
+        # Guard 2: strictly deeper indentation than the current logical line.
+        if (depth == 0 && prev > 0 && IND[i] > IND[head] &&
+            CODE[prev] !~ /[-+*\/%<>=&^|,([{~!?:]$/ &&
+            CODE[prev] !~ /(^|[^A-Za-z0-9_])(and|or|not|is|in|as)[ \t]*$/) {
+
+            b = BODY[i]; why = ""
+
+            # RULE A -- operators the seed rejects in EVERY context, because
+            # parse_equality / parse_comparison are hand-written and only ever
+            # got the trailing form.
+            if (b ~ /^(==|!=|<=|>=)/)           why = "leading '" substr(b,1,2) "': seed parse_equality/parse_comparison have no leading-operator branch"
+            else if (b ~ /^\?\?/)               why = "leading '??': seed has no leading-operator branch for it"
+            else if (b ~ /^<[^<=]/ || b == "<") why = "leading '<': seed parse_comparison has no leading-operator branch"
+            else if (b ~ /^>[^>=]/ || b == ">") why = "leading '>': seed parse_comparison has no leading-operator branch"
+            else if (b ~ /^(is|in)([ \t(]|$)/)  why = "leading '" substr(b,1,2) "': seed parse_equality has no leading-operator branch"
+
+            if (why != "") {
+                printf "%s:%d: %s\n", FILENAME, i, why
+                printf "    %s\n", substr(LINE[i], 1, 120)
+                hits++
+            } else if (BODY[head] ~ /^(if|elif)([ \t(]|$)/ &&
+                       (b ~ /^(\+|-|\*|\/|%|&|\^)/ || b ~ /^(<<|>>)/ ||
+                        b ~ /^(and|or)([ \t(]|$)/)) {
+                # RULE B -- `if`/`elif` CONDITION continuation. The seed's
+                # parse_if indent bookkeeping only survives while the
+                # continuation is indented NO DEEPER THAN THE BLOCK BODY.
+                body_ind = -1
+                for (j = i; j <= N; j++) {
+                    if (SKIP[j]) continue
+                    if (CODE[j] ~ /:[ \t]*$/) {           # header terminator
+                        for (k = j + 1; k <= N; k++) {
+                            if (SKIP[k]) continue
+                            body_ind = IND[k]
+                            break
+                        }
+                        break
+                    }
+                }
+                if (body_ind >= 0 && IND[i] > body_ind) {
+                    printf "%s:%d: leading operator in an if/elif condition indented deeper than the block body (%d > %d): seed parse_if loses its indent bookkeeping\n", FILENAME, i, IND[i], body_ind
+                    printf "    %s\n", substr(LINE[i], 1, 120)
+                    hits++
+                }
+            }
+            is_cont = 1
+        }
+
+        if (!is_cont) head = i      # a continuation does not start a logical line
+        prev = i
+        depth += DELTA[i]
+        if (depth < 0) depth = 0
+    }
+
+    if (hits > 0) exit 1
+    exit 0
+}
+AWK_EOF
+
+# ---------------------------------------------------------------------------
+# Self-test. Every fixture's expected verdict was measured against the seed;
+# see the table at the top of this file. A wrong verdict fails the script.
+# ---------------------------------------------------------------------------
+SELFTEST_EXPECTED=17
+
+selftest() {
+    st_dir="$WORK_DIR/selftest"
+    rm -rf "$st_dir"; mkdir -p "$st_dir"
+    st_fail=0
+
+    # ---- MUST BE FLAGGED: seed measured PARSE_REJECT ----
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        == b\n    x\n'   > "$st_dir/pos_eq.spl"
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        != b\n    x\n'   > "$st_dir/pos_ne.spl"
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        > b\n    x\n'    > "$st_dir/pos_gt.spl"
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        <= b\n    x\n'   > "$st_dir/pos_le.spl"
+    printf 'fn f(a: i64, b: [i64]) -> bool:\n    val x = a\n        in b\n    x\n' > "$st_dir/pos_in.spl"
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a\n        is b\n    x\n'   > "$st_dir/pos_is.spl"
+    printf 'fn f(a: i64?, b: i64) -> i64:\n    val x = a\n        ?? b\n    x\n'   > "$st_dir/pos_coalesce.spl"
+    # if-condition continuation DEEPER than the body (measured: reject)
+    printf 'fn f(a: bool, b: bool) -> i64:\n    if a\n         or b:\n        return 1\n    0\n' > "$st_dir/pos_if_deep.spl"
+    printf 'fn f(a: i64, b: i64) -> i64:\n    if a\n            + b:\n        return 1\n    0\n' > "$st_dir/pos_if_plus.spl"
+
+    # ---- MUST NOT BE FLAGGED: seed measured PARSE_OK ----
+    printf 'fn f(a: i64, b: i64) -> i64:\n    val x = a\n        + b\n    x\n'  > "$st_dir/neg_plus.spl"
+    printf 'fn f(a: bool, b: bool) -> bool:\n    val x = a\n        and b\n    x\n' > "$st_dir/neg_and.spl"
+    printf 'fn f(a: i64, b: i64) -> i64:\n    val x = a\n        << b\n    x\n' > "$st_dir/neg_shl.spl"
+    # if-condition continuation NO DEEPER than the body (measured: parses)
+    printf 'fn f(a: bool, b: bool) -> i64:\n    if a\n       or b:\n        return 1\n    0\n' > "$st_dir/neg_if_shallow.spl"
+    # inside unclosed brackets: layout suppressed in both parsers
+    printf 'fn t(a: text, b: text) -> bool:\n    a == b\n\nfn g() -> bool:\n    t("x"\n        == "y")\n' > "$st_dir/neg_paren.spl"
+    # trailing-operator form: supported by both
+    printf 'fn f(a: i64, b: i64) -> bool:\n    val x = a ==\n        b\n    x\n' > "$st_dir/neg_trailing.spl"
+    # prose inside a docstring must not be mistaken for code
+    printf 'fn f() -> i64:\n    """Doc.\n\n    Args:\n        thing: something that\n               is described here\n               == not code\n    """\n    1\n' > "$st_dir/neg_docstring.spl"
+    # a comment line is transparent, not a continuation
+    printf 'fn f(a: i64) -> i64:\n    val x = a\n    # note\n    x\n' > "$st_dir/neg_comment.spl"
+
+    st_ran=0
+    for st_f in "$st_dir"/pos_*.spl; do
+        st_ran=$((st_ran + 1))
+        if awk -f "$DETECT" "$st_f" > /dev/null 2>&1; then
+            echo "SELFTEST FAIL: detector did NOT flag $(basename "$st_f")" >&2
+            st_fail=1
+        fi
+    done
+    for st_f in "$st_dir"/neg_*.spl; do
+        st_ran=$((st_ran + 1))
+        if ! awk -f "$DETECT" "$st_f" > /dev/null 2>&1; then
+            echo "SELFTEST FAIL: detector WRONGLY flagged $(basename "$st_f")" >&2
+            awk -f "$DETECT" "$st_f" >&2 || true
+            st_fail=1
+        fi
+    done
+
+    if [ "$st_ran" -ne "$SELFTEST_EXPECTED" ]; then
+        echo "SELFTEST FAIL: expected $SELFTEST_EXPECTED fixtures, ran $st_ran -- the harness did not run" >&2
+        return 1
+    fi
+    [ "$st_fail" -eq 0 ] || return 1
+    echo "selftest: $st_ran/$SELFTEST_EXPECTED fixtures correct (9 must-flag, 8 must-not-flag)"
+    return 0
+}
+
+if ! selftest; then
+    echo "FAIL: check-seed-parse-superset selftest failed -- the detector is not trustworthy" >&2
+    exit 1
+fi
+
+if [ "${1:-}" = "--selftest" ]; then
+    echo "PASS: selftest only, scan skipped"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Scan the bootstrap-compiled roots.
+# ---------------------------------------------------------------------------
+FILES="$WORK_DIR/files.txt"
+: > "$FILES"
+
+if [ -n "${SEED_SUPERSET_FILE_LIST:-}" ]; then
+    if [ ! -f "$SEED_SUPERSET_FILE_LIST" ]; then
+        echo "FAIL: SEED_SUPERSET_FILE_LIST=$SEED_SUPERSET_FILE_LIST does not exist" >&2
+        exit 1
+    fi
+    while IFS= read -r listed; do
+        [ -n "$listed" ] || continue
+        [ -f "$listed" ] || continue
+        printf '%s\n' "$listed" >> "$FILES"
+    done < "$SEED_SUPERSET_FILE_LIST"
+    if [ ! -s "$FILES" ]; then
+        echo "PASS: file-list mode, 0 bootstrap-path .spl files to check"
+        exit 0
+    fi
+else
+    for root in $ROOTS; do
+        [ -d "$root" ] || continue
+        find "$root" -name '*.spl' -type f >> "$FILES"
+    done
+    count_roots="$(wc -l < "$FILES" | tr -d ' ')"
+    if [ "$count_roots" -eq 0 ]; then
+        echo "FAIL: no .spl files found under: $ROOTS -- the scan did not run" >&2
+        exit 1
+    fi
+fi
+
+count="$(wc -l < "$FILES" | tr -d ' ')"
+
+REPORT="$WORK_DIR/report.txt"
+: > "$REPORT"
+scanned=0
+while IFS= read -r f; do
+    scanned=$((scanned + 1))
+    awk -f "$DETECT" "$f" >> "$REPORT" 2>/dev/null || true
+done < "$FILES"
+
+if [ "$scanned" -ne "$count" ]; then
+    echo "FAIL: scanned $scanned of $count files -- the scan aborted early" >&2
+    exit 1
+fi
+
+if [ -s "$REPORT" ]; then
+    echo "FAIL: bootstrap-path source uses a line continuation the Rust seed rejects." >&2
+    echo "The self-hosted frontend accepts it (CoreLexer.leading_op_continues); the seed does" >&2
+    echo "not, so stage 2 of the bootstrap cannot compile these files." >&2
+    echo "" >&2
+    cat "$REPORT" >&2
+    echo "" >&2
+    echo "FIX: move the operator to the END of the previous line (both parsers accept the" >&2
+    echo "trailing form), or wrap the expression in parentheses (both parsers suppress" >&2
+    echo "layout inside brackets). For an if/elif condition, outdent the continuation to" >&2
+    echo "no deeper than the block body. Do NOT narrow leading_op_continues." >&2
+    exit 1
+fi
+
+echo "PASS: $scanned bootstrap-path .spl files, 0 seed-incompatible continuations"
+echo "roots: $ROOTS"
+exit 0
