@@ -1,0 +1,474 @@
+# ============================================================================
+# common/structural/parse — FROZEN PARSE contract, wave 1 (CPU reference)
+#
+# Plan:         doc/03_plan/platform/structural_compute/parser_framework_plan.md
+# Architecture: mdsoc_plus_tagged_structural_compute_architecture.md Part II §10
+# Shared rules: doc/03_plan/platform/structural_compute/README.md
+#
+# Hot-structure invariant, mirrored verbatim from the frozen DrawIR v3
+# contract (`src/lib/common/ui/draw_ir_v3.spl`):
+#   * no text keys in any structure the executor walks;
+#   * no nested dynamic arrays — variable-length payloads are (start, count)
+#     spans into a flat scalar column;
+#   * `0xffffffff` is the absent-id sentinel, because ids are 0-based indices;
+#   * an explicit schema version constant, `simple-...-v1`.
+#
+# ---------------------------------------------------------------------------
+# INTERPRETATION NOTES — where the plan and architecture are SILENT.
+# These are this lane's choices, NOT the plan's. Flagged so a later wave can
+# overrule them without archaeology.
+#
+# 1. Architecture §10.2 spells `ParseDialect` as an *interface*. A vtable
+#    cannot be executed by a SIMD or GPU executor, and shared rule 5 requires
+#    all three modes to produce identical observable results from the same
+#    dialect. So `ParseDialect` here is a DATA descriptor (flat programs +
+#    ids), with accessor functions named after the interface methods. The
+#    plan does not say which form to use.
+# 2. §10.3 `ParseRequest`/`ParseResult` reference types owned by other,
+#    not-yet-frozen lanes: `ArtifactRef`, `ObjectRef<T>`, `TagShardRef`,
+#    `MappingShardRef`, `QueryIndexShardRef`, `InvalidationSetRef`,
+#    `PlacementPolicyRef`. Wave 1 is lexical only (plan phase 2 gate =
+#    byte/token/diagnostic parity), so those fields are OMITTED rather than
+#    stubbed with a fake type. Adding them is a new schema version (rule 1).
+# 3. §10.3 `entry_rule: GrammarRuleId`. There is no GrammarProgram in wave 1;
+#    the field is kept under its architecture name with a `u32` id that this
+#    wave interprets as the entry LEX state selector.
+# 4. §10.4 `ParseActionSink` lists `emit_node`/`emit_index`. Wave 1 emits no
+#    nodes and no query indexes, so only `emit_token`, `emit_diagnostic` and
+#    `emit_tag` exist. `reserve_*` is unnecessary for the scalar reference.
+# 5. The plan names NO capacity bounds for PARSE. `ParseCapacityManifest`
+#    mirrors the *shape and fail-closed policy* of the frozen
+#    `GpuWebCapacityManifest`; every bound is UNSET (0) and REJECTS. No
+#    default value is invented here — the caller must supply bounds.
+# ============================================================================
+
+use std.common.structural.execution.contracts.{StageReceipt}
+
+# --- schema version -------------------------------------------------------
+# Contract changes = new schema version (structural_compute README rule 1).
+val PARSE_SCHEMA_VERSION: text = "simple-structural-parse-v1"
+# Numeric mirror, for headers that cannot carry text.
+val PARSE_SCHEMA_ID: u32 = 1u32
+
+# Absent / null id. Ids are 0-based flat indices, so the sentinel is max u32.
+val PARSE_NO_ID: u32 = 0xffffffffu32
+val PARSE_NO_ID_I64: i64 = 4294967295
+
+# --- token kinds ----------------------------------------------------------
+# Token kinds above 0 are assigned by the DIALECT, not by the framework.
+val PARSE_TOKEN_NONE: u16 = 0u16
+
+# --- lex state flags (u16 bitmask) ----------------------------------------
+val PARSE_STATE_FLAG_NONE: u16 = 0u16
+# Accepting state whose match is trivia: consumed, never emitted as a token.
+val PARSE_STATE_FLAG_SKIP: u16 = 1u16
+
+# --- ParseOutputMask (u32 bitmask) ----------------------------------------
+val PARSE_OUTPUT_NONE: u32 = 0u32
+val PARSE_OUTPUT_TOKENS: u32 = 1u32
+val PARSE_OUTPUT_DIAGNOSTICS: u32 = 2u32
+
+# --- TagDemand ------------------------------------------------------------
+# Acceptance criterion in the plan: "TagDemand off => zero tag/index
+# allocation (measured)". `tags_emitted` on ParseResult is that measurement.
+val PARSE_TAG_DEMAND_OFF: u32 = 0u32
+val PARSE_TAG_DEMAND_ALL: u32 = 0xffffffffu32
+
+# --- execution modes (README rule 5: three modes everywhere) --------------
+val PARSE_MODE_CPU_REFERENCE: text = "cpu_reference"
+val PARSE_MODE_HYBRID_VECTOR_GPU: text = "hybrid_vector_gpu"
+val PARSE_MODE_RESIDENT_GPU: text = "resident_gpu"
+
+val PARSE_STAGE_ID: text = "parse.lex"
+val PARSE_BACKEND_CPU_REFERENCE: text = "cpu_reference"
+
+# --- fallback / reject reason receipts ------------------------------------
+# README rule 4: no silent fallback — every fallback carries a reason receipt.
+# A fallback is a mode DEMOTION that still produced a result; a reject
+# produced no result at all. Both land in StageReceipt.fallback_reason.
+val PARSE_FALLBACK_NONE: text = ""
+val PARSE_FALLBACK_MODE_UNIMPLEMENTED: text = "parse_mode_unimplemented"
+val PARSE_REJECT_UNKNOWN_MODE: text = "parse_mode_unknown"
+val PARSE_REJECT_CAPACITY_UNSET: text = "parse_capacity_bound_unset"
+val PARSE_REJECT_CAPACITY_EXCEEDED: text = "parse_capacity_exceeded"
+val PARSE_REJECT_LEX_PROGRAM_MALFORMED: text = "parse_lex_program_malformed"
+
+# --- diagnostic codes (u16) -----------------------------------------------
+val PARSE_DIAG_NONE: u16 = 0u16
+val PARSE_DIAG_UNRECOGNIZED_BYTE: u16 = 1u16
+val PARSE_DIAG_CAPACITY_EXCEEDED: u16 = 2u16
+
+# ==========================================================================
+# Source blob — flat byte buffer. Plan phase 1 ("representation repair"):
+# no per-character objects, no copied substrings; every downstream span is
+# an offset into THIS buffer.
+# ==========================================================================
+struct ParseSourceBlob:
+    schema_id: u32
+    bytes: [u8]
+
+fn parse_source_blob(bytes: [u8]) -> ParseSourceBlob:
+    ParseSourceBlob(schema_id: PARSE_SCHEMA_ID, bytes: bytes)
+
+fn parse_source_blob_empty() -> ParseSourceBlob:
+    ParseSourceBlob(schema_id: PARSE_SCHEMA_ID, bytes: [])
+
+fn parse_source_blob_from_text(source: text) -> ParseSourceBlob:
+    var out: [u8] = []
+    val raw = source.bytes()
+    val n = raw.len()
+    var i = 0
+    while i < n:
+        out = out.push(raw[i] as u8)
+        i = i + 1
+    ParseSourceBlob(schema_id: PARSE_SCHEMA_ID, bytes: out)
+
+fn parse_source_blob_len(blob: ParseSourceBlob) -> i64:
+    blob.bytes.len().to_i64()
+
+# ==========================================================================
+# LexProgram — table-driven DFA, struct-of-arrays, no nested arrays.
+#
+# `byte_class` is 256 entries: raw byte -> class id. `transition` is a flat
+# `state_count * class_count` column; `PARSE_NO_ID` means "no transition".
+# Keeping the table flat is what lets wave 4 run the identical program on a
+# SIMD/GPU executor without reshaping the dialect.
+# ==========================================================================
+struct ParseLexProgram:
+    schema_id: u32
+    program_id: u32
+    class_count: i64
+    state_count: i64
+    start_state: u32
+    byte_class: [u8]
+    transition: [u32]
+    state_token_kind: [u16]
+    state_flags: [u16]
+
+fn parse_lex_program(
+    program_id: u32,
+    class_count: i64,
+    state_count: i64,
+    start_state: u32,
+    byte_class: [u8],
+    transition: [u32],
+    state_token_kind: [u16],
+    state_flags: [u16]
+) -> ParseLexProgram:
+    ParseLexProgram(
+        schema_id: PARSE_SCHEMA_ID,
+        program_id: program_id,
+        class_count: class_count,
+        state_count: state_count,
+        start_state: start_state,
+        byte_class: byte_class,
+        transition: transition,
+        state_token_kind: state_token_kind,
+        state_flags: state_flags
+    )
+
+# Total structural check. A malformed program is a HARD REJECT, never
+# coerced to a default (CONVENTIONS §2.3).
+fn parse_lex_program_valid(program: ParseLexProgram) -> bool:
+    if program.class_count <= 0 or program.state_count <= 0:
+        return false
+    if program.byte_class.len().to_i64() != 256:
+        return false
+    if program.transition.len().to_i64() != program.state_count * program.class_count:
+        return false
+    if program.state_token_kind.len().to_i64() != program.state_count:
+        return false
+    if program.state_flags.len().to_i64() != program.state_count:
+        return false
+    if program.start_state.to_i64() >= program.state_count:
+        return false
+    var i = 0
+    while i < 256:
+        if program.byte_class[i].to_i64() >= program.class_count:
+            return false
+        i = i + 1
+    true
+
+fn parse_lex_transition(program: ParseLexProgram, state: i64, class_id: i64) -> i64:
+    if state < 0 or state >= program.state_count:
+        return PARSE_NO_ID_I64
+    if class_id < 0 or class_id >= program.class_count:
+        return PARSE_NO_ID_I64
+    program.transition[state * program.class_count + class_id].to_i64()
+
+# ==========================================================================
+# TokenArena — SoA columns. A token is a (start, count) byte span into the
+# source blob; it never owns text.
+# ==========================================================================
+struct ParseToken:
+    kind: u16
+    start: u32
+    count: u32
+
+struct ParseTokenArena:
+    schema_id: u32
+    kind: [u16]
+    start: [u32]
+    count: [u32]
+
+fn parse_token_arena_empty() -> ParseTokenArena:
+    ParseTokenArena(schema_id: PARSE_SCHEMA_ID, kind: [], start: [], count: [])
+
+fn parse_token_arena_len(arena: ParseTokenArena) -> i64:
+    arena.kind.len().to_i64()
+
+fn parse_token_at(arena: ParseTokenArena, index: i64) -> ParseToken:
+    if index < 0 or index >= arena.kind.len().to_i64():
+        return ParseToken(kind: PARSE_TOKEN_NONE, start: PARSE_NO_ID, count: 0u32)
+    ParseToken(kind: arena.kind[index], start: arena.start[index], count: arena.count[index])
+
+# ==========================================================================
+# DiagnosticArena — same SoA shape; diagnostics are (code, span), no text.
+# ==========================================================================
+struct ParseDiagnostic:
+    code: u16
+    start: u32
+    count: u32
+
+struct ParseDiagnosticArena:
+    schema_id: u32
+    code: [u16]
+    start: [u32]
+    count: [u32]
+
+fn parse_diagnostic_arena_empty() -> ParseDiagnosticArena:
+    ParseDiagnosticArena(schema_id: PARSE_SCHEMA_ID, code: [], start: [], count: [])
+
+fn parse_diagnostic_arena_len(arena: ParseDiagnosticArena) -> i64:
+    arena.code.len().to_i64()
+
+fn parse_diagnostic_at(arena: ParseDiagnosticArena, index: i64) -> ParseDiagnostic:
+    if index < 0 or index >= arena.code.len().to_i64():
+        return ParseDiagnostic(code: PARSE_DIAG_NONE, start: PARSE_NO_ID, count: 0u32)
+    ParseDiagnostic(code: arena.code[index], start: arena.start[index], count: arena.count[index])
+
+# ==========================================================================
+# ParseActionSink (architecture §10.4, wave-1 subset — see note 4).
+#
+# ADR-004 value semantics: every emit returns a NEW sink. Never mutate a
+# sink reached through an index.
+# ==========================================================================
+struct ParseActionSink:
+    schema_id: u32
+    tag_demand: u32
+    tokens: ParseTokenArena
+    diagnostics: ParseDiagnosticArena
+    tags_emitted: i64
+
+fn parse_action_sink_new(tag_demand: u32) -> ParseActionSink:
+    ParseActionSink(
+        schema_id: PARSE_SCHEMA_ID,
+        tag_demand: tag_demand,
+        tokens: parse_token_arena_empty(),
+        diagnostics: parse_diagnostic_arena_empty(),
+        tags_emitted: 0
+    )
+
+fn parse_sink_emit_token(sink: ParseActionSink, kind: u16, start: u32, count: u32) -> ParseActionSink:
+    val arena = sink.tokens
+    val next = ParseTokenArena(
+        schema_id: arena.schema_id,
+        kind: arena.kind.push(kind),
+        start: arena.start.push(start),
+        count: arena.count.push(count)
+    )
+    ParseActionSink(
+        schema_id: sink.schema_id,
+        tag_demand: sink.tag_demand,
+        tokens: next,
+        diagnostics: sink.diagnostics,
+        tags_emitted: sink.tags_emitted
+    )
+
+fn parse_sink_emit_diagnostic(sink: ParseActionSink, code: u16, start: u32, count: u32) -> ParseActionSink:
+    val arena = sink.diagnostics
+    val next = ParseDiagnosticArena(
+        schema_id: arena.schema_id,
+        code: arena.code.push(code),
+        start: arena.start.push(start),
+        count: arena.count.push(count)
+    )
+    ParseActionSink(
+        schema_id: sink.schema_id,
+        tag_demand: sink.tag_demand,
+        tokens: sink.tokens,
+        diagnostics: next,
+        tags_emitted: sink.tags_emitted
+    )
+
+# TagDemand off allocates nothing at all — the plan's measured acceptance
+# criterion. The counter stays 0 so a spec can observe it.
+fn parse_sink_emit_tag(sink: ParseActionSink, key: u32) -> ParseActionSink:
+    if sink.tag_demand == PARSE_TAG_DEMAND_OFF:
+        return sink
+    if key == PARSE_NO_ID:
+        return sink
+    ParseActionSink(
+        schema_id: sink.schema_id,
+        tag_demand: sink.tag_demand,
+        tokens: sink.tokens,
+        diagnostics: sink.diagnostics,
+        tags_emitted: sink.tags_emitted + 1
+    )
+
+# ==========================================================================
+# Capacity manifest — FAIL CLOSED. See interpretation note 5.
+#
+# Every bound is UNSET (0) until a caller supplies it, and an unset bound
+# REJECTS. This mirrors `GpuWebCapacityVerdict` in the frozen
+# `gpu_web_capacity_manifest.spl`, where unset bounds fail closed by design.
+# No PARSE bound is invented in this file.
+# ==========================================================================
+struct ParseCapacityManifest:
+    schema_id: u32
+    max_source_bytes: i64
+    max_tokens: i64
+    max_diagnostics: i64
+
+fn parse_capacity_manifest_zero() -> ParseCapacityManifest:
+    ParseCapacityManifest(
+        schema_id: PARSE_SCHEMA_ID,
+        max_source_bytes: 0,
+        max_tokens: 0,
+        max_diagnostics: 0
+    )
+
+fn parse_capacity_manifest(max_source_bytes: i64, max_tokens: i64, max_diagnostics: i64) -> ParseCapacityManifest:
+    ParseCapacityManifest(
+        schema_id: PARSE_SCHEMA_ID,
+        max_source_bytes: max_source_bytes,
+        max_tokens: max_tokens,
+        max_diagnostics: max_diagnostics
+    )
+
+struct ParseCapacityVerdict:
+    accepted: bool
+    reason: text
+
+fn parse_capacity_verdict_accepted() -> ParseCapacityVerdict:
+    ParseCapacityVerdict(accepted: true, reason: PARSE_FALLBACK_NONE)
+
+# ==========================================================================
+# Request / result (architecture §10.3, wave-1 subset — see notes 2 and 3).
+# ==========================================================================
+struct ParseRequest:
+    schema_id: u32
+    source: ParseSourceBlob
+    entry_rule: u32
+    outputs: u32
+    tag_demand: u32
+    mode: text
+    capacity: ParseCapacityManifest
+
+fn parse_request(
+    source: ParseSourceBlob,
+    entry_rule: u32,
+    outputs: u32,
+    tag_demand: u32,
+    mode: text,
+    capacity: ParseCapacityManifest
+) -> ParseRequest:
+    ParseRequest(
+        schema_id: PARSE_SCHEMA_ID,
+        source: source,
+        entry_rule: entry_rule,
+        outputs: outputs,
+        tag_demand: tag_demand,
+        mode: mode,
+        capacity: capacity
+    )
+
+struct ParseResult:
+    schema_id: u32
+    ok: bool
+    tokens: ParseTokenArena
+    diagnostics: ParseDiagnosticArena
+    tags_emitted: i64
+    receipt: StageReceipt
+
+# ==========================================================================
+# ParseDialect — data descriptor (see interpretation note 1). Accessors are
+# named after the §10.2 interface methods.
+# ==========================================================================
+struct ParseDialect:
+    schema_id: u32
+    dialect_id: u32
+    lex_program: ParseLexProgram
+    structure_program_id: u32
+    grammar_program_id: u32
+    action_program_id: u32
+    tag_schema_id: u32
+    mapping_policy_id: u32
+    incremental_policy_id: u32
+
+# Wave-1 dialect: lexical only. Every program the framework does not yet
+# execute is the absent-id sentinel, never a zero that could be mistaken
+# for program 0.
+fn parse_dialect_lexical(dialect_id: u32, lex_program: ParseLexProgram) -> ParseDialect:
+    ParseDialect(
+        schema_id: PARSE_SCHEMA_ID,
+        dialect_id: dialect_id,
+        lex_program: lex_program,
+        structure_program_id: PARSE_NO_ID,
+        grammar_program_id: PARSE_NO_ID,
+        action_program_id: PARSE_NO_ID,
+        tag_schema_id: PARSE_NO_ID,
+        mapping_policy_id: PARSE_NO_ID,
+        incremental_policy_id: PARSE_NO_ID
+    )
+
+fn parse_dialect_id(dialect: ParseDialect) -> u32:
+    dialect.dialect_id
+
+fn parse_dialect_lex_program(dialect: ParseDialect) -> ParseLexProgram:
+    dialect.lex_program
+
+fn parse_dialect_structure_program(dialect: ParseDialect) -> u32:
+    dialect.structure_program_id
+
+fn parse_dialect_grammar_program(dialect: ParseDialect) -> u32:
+    dialect.grammar_program_id
+
+fn parse_dialect_action_program(dialect: ParseDialect) -> u32:
+    dialect.action_program_id
+
+fn parse_dialect_tag_schema(dialect: ParseDialect) -> u32:
+    dialect.tag_schema_id
+
+fn parse_dialect_mapping_policy(dialect: ParseDialect) -> u32:
+    dialect.mapping_policy_id
+
+fn parse_dialect_incremental_policy(dialect: ParseDialect) -> u32:
+    dialect.incremental_policy_id
+
+export PARSE_SCHEMA_VERSION, PARSE_SCHEMA_ID, PARSE_NO_ID, PARSE_NO_ID_I64
+export PARSE_TOKEN_NONE, PARSE_STATE_FLAG_NONE, PARSE_STATE_FLAG_SKIP
+export PARSE_OUTPUT_NONE, PARSE_OUTPUT_TOKENS, PARSE_OUTPUT_DIAGNOSTICS
+export PARSE_TAG_DEMAND_OFF, PARSE_TAG_DEMAND_ALL
+export PARSE_MODE_CPU_REFERENCE, PARSE_MODE_HYBRID_VECTOR_GPU, PARSE_MODE_RESIDENT_GPU
+export PARSE_STAGE_ID, PARSE_BACKEND_CPU_REFERENCE
+export PARSE_FALLBACK_NONE, PARSE_FALLBACK_MODE_UNIMPLEMENTED
+export PARSE_REJECT_UNKNOWN_MODE, PARSE_REJECT_CAPACITY_UNSET
+export PARSE_REJECT_CAPACITY_EXCEEDED, PARSE_REJECT_LEX_PROGRAM_MALFORMED
+export PARSE_DIAG_NONE, PARSE_DIAG_UNRECOGNIZED_BYTE, PARSE_DIAG_CAPACITY_EXCEEDED
+export ParseSourceBlob, parse_source_blob, parse_source_blob_empty
+export parse_source_blob_from_text, parse_source_blob_len
+export ParseLexProgram, parse_lex_program, parse_lex_program_valid, parse_lex_transition
+export ParseToken, ParseTokenArena, parse_token_arena_empty
+export parse_token_arena_len, parse_token_at
+export ParseDiagnostic, ParseDiagnosticArena, parse_diagnostic_arena_empty
+export parse_diagnostic_arena_len, parse_diagnostic_at
+export ParseActionSink, parse_action_sink_new, parse_sink_emit_token
+export parse_sink_emit_diagnostic, parse_sink_emit_tag
+export ParseCapacityManifest, parse_capacity_manifest_zero, parse_capacity_manifest
+export ParseCapacityVerdict, parse_capacity_verdict_accepted
+export ParseRequest, parse_request, ParseResult
+export ParseDialect, parse_dialect_lexical, parse_dialect_id, parse_dialect_lex_program
+export parse_dialect_structure_program, parse_dialect_grammar_program
+export parse_dialect_action_program, parse_dialect_tag_schema
+export parse_dialect_mapping_policy, parse_dialect_incremental_policy
