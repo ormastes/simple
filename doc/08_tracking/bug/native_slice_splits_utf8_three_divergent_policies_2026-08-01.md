@@ -245,13 +245,62 @@ harmless, which is why it survived; on any non-ASCII input every step past a
 lead byte stores invalid UTF-8. The fix is to iterate by CHARACTER, which is
 also the direction of the 2026-07-30 character-alignment decision.
 
+### What the 1,427 actually ARE — this changes the stage-4 plan
+
+Classifying every violation by slice width (PROVED, from the census log):
+
+| width `end - start` | count | share | shape |
+|---|---|---|---|
+| **1 byte** | **1,254** | 87.9 % | `s[i:i + 1]` stepping `i` by 1 — a **scanner** |
+| 2–3 bytes | 40 | 2.8 % | short fixed windows |
+| >3 bytes | 133 | 9.3 % | wider windows |
+
+The wide ones are mostly **not** truncation either: the torch-status cluster (98)
+is a naive substring search taking a constant-width window at *consecutive*
+start offsets (`start=97,98,99 … outlen=46` over an 8,855-byte document). So the
+overwhelmingly dominant shape across all widths is a **byte-stepping scanner
+that compares a fixed-width byte window against an ASCII literal** — code that
+is *correct in aggregate* (it reassembles contiguous ranges) but that
+materialises an invalid-UTF-8 value at every intermediate step.
+
+**Consequence: erroring at the slice primitive would break essentially every
+text scanner in the repo**, not a handful of buggy call sites. Stage 3 therefore
+cannot be "fix 39 files"; it needs a **byte-oriented accessor** (or char-unit
+iteration) for the scanner shape *first*, and only then can stage 4 flip. This
+is the concrete blocker the measurement was run to find, and it was not visible
+from the static 7,218-site count.
+
+A genuine-bug class does exist inside the remainder, and counting mode found it:
+
+- **`strip_utf8_bom` — FIXED in this change.** `src/lib/common/encoding/text_ops.spl:112`
+  tested the BOM with `char_code_at(0)` (**character**-indexed, returns 65279)
+  and then stripped it with `s.slice(1, s.len())` (**byte**-indexed). U+FEFF is
+  3 bytes, so it dropped only the lead byte and returned the two orphaned
+  continuation bytes as the head of the result — invalid UTF-8, and 2 bytes
+  longer than asked for. Audit line: `start=1 end=14 srclen=14 outlen=13`.
+  Direct probe before: `out_len=13, equal=false`; after: `out_len=11,
+  equal=true`, byte-identical on the default engine and under
+  `SIMPLE_EXECUTION_MODE=interpret`, with the violation line gone and the
+  `self_test` liveness control still firing (so the zero is measured, not
+  inert). `test/01_unit/lib/common/encoding/text_ops_bom_spec.spl` exited **1**
+  in the census and now passes **3 examples, 0 failures**.
+
+This is the mixed-units hazard the 2026-07-30 character-alignment decision is
+meant to remove: one function used a character index and a byte index on the
+same string. Other single-occurrence wide-span sites (e.g. a `[0:14]` truncation
+of a 33-byte string in `ui/window` scene-render) are likely the same shape and
+remain OPEN.
+
 ### Why the flip to a hard error is DEFERRED
 
-1,427 live violations across 39 spec files is not a justified residual. Making
-the check loud now converts a silent-corruption defect into 39 immediately
-failing spec files plus whatever the two unmeasured surfaces (JIT, native/C)
-contribute. Stage 3 must land first. The eventual default must still be the
-**error** — not a permanently-warning check.
+1,427 live violations across 39 spec files is not a justified residual, and
+87.9 % of them are the scanner idiom rather than buggy call sites. Making the
+check loud now would not surface 39 bugs; it would break every byte-stepping
+text scanner in the repo, plus whatever the two unmeasured surfaces (JIT,
+native/C) contribute. Stage 3 must land first, and stage 3 now has a concrete
+prerequisite the static count never revealed: a byte-oriented accessor for the
+scanner shape. The eventual default must still be the **error** — not a
+permanently-warning check.
 
 Reproduce the census:
 
