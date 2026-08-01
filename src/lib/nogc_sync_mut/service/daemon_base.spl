@@ -1,0 +1,81 @@
+"""
+# Service Daemon Base — Composable daemon with PID file, UDS, queue
+#
+# DaemonBase composes lifecycle (PID), lease manager, request queue,
+# and audit log into a single service entry point. VCS-specific daemons
+# build on top of this.
+"""
+
+use std.io_runtime
+use std.service.lifecycle
+use std.service.lease_manager
+use std.service.request_queue
+use std.service.audit_log
+
+extern fn rt_getpid() -> i64
+extern fn rt_mkdir_p(path: text) -> bool
+
+# --- Daemon Configuration ---
+
+struct DaemonConfig:
+    pid_path: text
+    socket_path: text
+    max_hold_ms: i64
+
+fn daemon_config_new(pid_path: text, socket_path: text, max_hold_ms: i64) -> DaemonConfig:
+    DaemonConfig(pid_path: pid_path, socket_path: socket_path, max_hold_ms: max_hold_ms)
+
+# --- Daemon Base ---
+
+struct DaemonBase:
+    config: DaemonConfig
+    pid_state: PidFileState
+    lease_mgr: LeaseManager
+    queue: RequestQueue
+    audit: AuditLog
+    running: bool
+
+fn daemon_base_new(config: DaemonConfig) -> DaemonBase:
+    val audit_path = _parent_dir(config.pid_path) + "/audit.log"
+    DaemonBase(
+        config: config,
+        pid_state: PidFileState(path: config.pid_path, pid: -1i64, acquired: false),
+        lease_mgr: lease_manager_new(),
+        queue: request_queue_new(),
+        audit: audit_log_new(audit_path),
+        running: false
+    )
+
+fn _parent_dir(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1i64:
+        return "."
+    var out: [text] = []
+    var i = 0i64
+    while i < parts.len() - 1i64:
+        out.push(parts[i])
+        i = i + 1i64
+    out.join("/")
+
+# --- Start / Stop ---
+
+fn daemon_base_start(base: DaemonBase) -> bool:
+    val sj_dir = _parent_dir(base.config.pid_path)
+    rt_mkdir_p(sj_dir)
+
+    val pid_state = acquire_pid_file(base.config.pid_path)
+    if not pid_state.acquired:
+        return false
+    base.pid_state = pid_state
+    base.running = true
+    audit_daemon_start(base.audit, pid_state.pid)
+    true
+
+fn daemon_base_stop(base: DaemonBase):
+    if base.running:
+        audit_daemon_stop(base.audit, base.pid_state.pid)
+        release_pid_file(base.pid_state)
+        base.running = false
+
+fn daemon_base_is_running(base: DaemonBase) -> bool:
+    base.running

@@ -1,0 +1,118 @@
+# DTLS protocol constants (RFC 6347 / RFC 9147).
+#
+# DTLS composes the existing TLS content-type and handshake-type constants
+# (see src/lib/nogc_sync_mut/tls/types.spl) and adds datagram-specific version
+# and content-type values. Per project policy, dispatch values are plain
+# integer `val` constants (NOT enums) -- mirrors the TLS module and avoids the
+# payload-enum JIT bug.
+
+# --- DTLS protocol versions (2 bytes, the 1's-complement-style encoding) ---
+val DTLS_VERSION_1_0 = 0xFEFF
+val DTLS_VERSION_1_2 = 0xFEFD
+# DTLS 1.3 negotiates via supported_versions; the record's legacy field is 1.2.
+val DTLS_VERSION_1_3_LEGACY = 0xFEFD
+
+# --- Content types (1 byte) -- identical to TLS CONTENT_TYPE_* plus Ack ---
+val DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC = 20
+val DTLS_CONTENT_TYPE_ALERT = 21
+val DTLS_CONTENT_TYPE_HANDSHAKE = 22
+val DTLS_CONTENT_TYPE_APPLICATION_DATA = 23
+val DTLS_CONTENT_TYPE_ACK = 26          # DTLS 1.3 only (RFC 9147 §7)
+
+# --- DTLS 1.3 unified header flag bits (RFC 9147 §4) ---
+# High 3 bits are fixed 0b001; then C (Connection ID present), S (seq length:
+# 0 => 1 byte, 1 => 2 bytes), L (length present), and 2 epoch low bits.
+val DTLS13_UNIFIED_FIXED_BITS = 0x20    # 0b00100000
+val DTLS13_FLAG_CID = 0x10              # C
+val DTLS13_FLAG_SEQ16 = 0x08            # S (1 => 16-bit seq)
+val DTLS13_FLAG_LENGTH = 0x04           # L
+val DTLS13_EPOCH_MASK = 0x03            # EE (low 2 bits of epoch)
+
+# ============================================================================
+# DtlsRecord12 -- DTLS 1.2 record layer (RFC 6347 §4.1)
+# ============================================================================
+
+struct DtlsRecord12:
+    """A DTLS 1.2 record. 13-byte header + fragment.
+
+    content_type: u8 (one of DTLS_CONTENT_TYPE_*); version: u16 (0xFEFD);
+    epoch: u16 and sequence_number: u48 are the datagram additions over TLS;
+    length is the fragment byte count; fragment is the (cipher/plain) body.
+    """
+    content_type: u8
+    version: u16
+    epoch: u16
+    sequence_number: u64        # 48-bit value carried in a u64
+    length: u16
+    fragment: [u8]
+
+impl DtlsRecord12:
+    static fn new(content_type: u8, version: u16, epoch: u16, sequence_number: u64, fragment: [u8]) -> DtlsRecord12:
+        DtlsRecord12(content_type: content_type, version: version, epoch: epoch, sequence_number: sequence_number, length: fragment.len().to_u16(), fragment: fragment)
+
+# ============================================================================
+# DtlsHandshakeFragment -- handshake fragmentation header (RFC 6347 §4.2.2)
+# ============================================================================
+
+struct DtlsHandshakeFragment:
+    """A fragment of a (reused TLS) handshake message.
+
+    msg_type: u8 (a TLS HANDSHAKE_TYPE_* constant); length: u24 full message
+    length; message_seq: u16 for reorder; fragment_offset/fragment_length: u24
+    locate this fragment within the full message; body is this fragment's bytes.
+    """
+    msg_type: u8
+    length: u32                 # u24
+    message_seq: u16
+    fragment_offset: u32        # u24
+    fragment_length: u32        # u24
+    body: [u8]
+
+impl DtlsHandshakeFragment:
+    static fn new(msg_type: u8, length: u32, message_seq: u16, fragment_offset: u32, body: [u8]) -> DtlsHandshakeFragment:
+        DtlsHandshakeFragment(msg_type: msg_type, length: length, message_seq: message_seq, fragment_offset: fragment_offset, fragment_length: body.len().to_u32(), body: body)
+
+# ============================================================================
+# DtlsRecord13 -- DTLS 1.3 unified header record (RFC 9147 §4)
+# ============================================================================
+
+struct DtlsRecord13:
+    """A DTLS 1.3 unified-header record.
+
+    flags: u8 (DTLS13_FIXED_BITS | optional C/S/L | 2 epoch bits);
+    connection_id present iff flags&C; seq_number is 1 or 2 bytes on the wire
+    (encrypted in real use, carried plain here as the framing value); length is
+    present iff flags&L; encrypted_record is the remaining body.
+    """
+    flags: u8
+    connection_id: [u8]
+    seq_number: u16
+    length: u16
+    encrypted_record: [u8]
+
+impl DtlsRecord13:
+    static fn new(flags: u8, connection_id: [u8], seq_number: u16, encrypted_record: [u8]) -> DtlsRecord13:
+        DtlsRecord13(flags: flags, connection_id: connection_id, seq_number: seq_number, length: encrypted_record.len().to_u16(), encrypted_record: encrypted_record)
+
+    fn has_cid() -> bool:
+        (self.flags & DTLS13_FLAG_CID) != 0
+
+    fn has_seq16() -> bool:
+        (self.flags & DTLS13_FLAG_SEQ16) != 0
+
+    fn has_length() -> bool:
+        (self.flags & DTLS13_FLAG_LENGTH) != 0
+
+export DTLS_VERSION_1_0
+export DTLS_VERSION_1_2
+export DTLS_VERSION_1_3_LEGACY
+export DTLS_CONTENT_TYPE_CHANGE_CIPHER_SPEC
+export DTLS_CONTENT_TYPE_ALERT
+export DTLS_CONTENT_TYPE_HANDSHAKE
+export DTLS_CONTENT_TYPE_APPLICATION_DATA
+export DTLS_CONTENT_TYPE_ACK
+export DTLS13_UNIFIED_FIXED_BITS
+export DTLS13_FLAG_CID
+export DTLS13_FLAG_SEQ16
+export DTLS13_FLAG_LENGTH
+export DTLS13_EPOCH_MASK

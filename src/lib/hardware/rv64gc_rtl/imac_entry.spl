@@ -1,0 +1,85 @@
+# Reset-owned product boundary for the VHDL-qualified RV64IMAC core.
+# The behavioral F/D product entry is deliberately separate and unqualified.
+# DTB bytes and memory images belong to the SoC memory owner, not this CPU port.
+
+use std.hardware.rv64gc_rtl.imac_protected_core.core64_imac_cycle
+use std.hardware.rv64gc_rtl.imac_protected_core.core64_imac_init_single_master
+use std.hardware.rv64gc_rtl.imac_protected_core.core64_imac_reset_result
+
+struct Core64ImacProductPorts:
+    bus_valid: bool
+    bus_addr: i64
+    bus_size: u32
+    bus_write: bool
+    bus_wdata: i64
+    bus_is_pte: bool
+    bus_atomic: bool
+    rvfi_valid: bool
+    rvfi_order: i64
+    rvfi_insn: u32
+    rvfi_trap: bool
+    rvfi_halt: bool
+    rvfi_intr: bool
+    rvfi_mode: u32 @bits(2)
+    rvfi_ixl: u32 @bits(2)
+    rvfi_rs1_addr: u32 @bits(5)
+    rvfi_rs2_addr: u32 @bits(5)
+    rvfi_rs1_rdata: i64
+    rvfi_rs2_rdata: i64
+    rvfi_rd_addr: u32 @bits(5)
+    rvfi_rd_wdata: i64
+    rvfi_pc_rdata: i64
+    rvfi_pc_wdata: i64
+    rvfi_mem_addr: i64
+    rvfi_mem_rmask: u32 @bits(8)
+    rvfi_mem_wmask: u32 @bits(8)
+    rvfi_mem_rdata: i64
+    rvfi_mem_wdata: i64
+
+# ponytail: one hart; introduce explicit instance state when multi-hart RTL exists.
+var _core64_imac_product_state = core64_imac_init_single_master(0)
+
+@hardware
+@flatten_struct_output
+@clocked(clk, none)
+fn core64_imac_product_entry(clk: bool, reset_n: bool, reset_vec: i64,
+                             msip: bool, mtip: bool, meip: bool,
+                             stip: bool, seip: bool, time_value: i64,
+                             request_ready: bool,
+                             response_valid: bool,
+                             response_error: bool,
+                             response_data: i64) -> Core64ImacProductPorts:
+    var result = core64_imac_reset_result(reset_vec)
+    var rvfi_mode: u32 = 3
+    if not reset_n:
+        _core64_imac_product_state = result.state
+    else:
+        rvfi_mode = _core64_imac_product_state.priv_mode as u32
+        result = core64_imac_cycle(_core64_imac_product_state, msip, mtip,
+            meip, stip, seip, time_value, request_ready, response_valid,
+            response_error, response_data)
+        _core64_imac_product_state = result.state
+    Core64ImacProductPorts(bus_valid: result.bus_valid, bus_addr: result.bus_addr,
+     bus_size: result.bus_size, bus_write: result.bus_write,
+     bus_wdata: result.bus_wdata, bus_is_pte: result.bus_is_pte,
+     bus_atomic: result.bus_atomic,
+     rvfi_valid: result.rvfi.rvfi_valid, rvfi_order: result.rvfi.rvfi_order,
+     rvfi_insn: result.rvfi.rvfi_insn, rvfi_trap: result.rvfi.rvfi_trap,
+     rvfi_halt: result.state.halt, rvfi_intr: result.rvfi.rvfi_intr,
+     rvfi_mode: rvfi_mode, rvfi_ixl: 2,
+     rvfi_rs1_addr: result.rvfi.rvfi_rs1_addr,
+     rvfi_rs2_addr: result.rvfi.rvfi_rs2_addr,
+     rvfi_rs1_rdata: result.rvfi.rvfi_rs1_rdata,
+     rvfi_rs2_rdata: result.rvfi.rvfi_rs2_rdata,
+     rvfi_rd_addr: result.rvfi.rvfi_rd_addr,
+     rvfi_rd_wdata: result.rvfi.rvfi_rd_wdata,
+     rvfi_pc_rdata: result.rvfi.rvfi_pc_rdata,
+     rvfi_pc_wdata: result.rvfi.rvfi_pc_wdata,
+     rvfi_mem_addr: result.rvfi.rvfi_mem_addr,
+     rvfi_mem_rmask: result.rvfi.rvfi_mem_rmask,
+     rvfi_mem_wmask: result.rvfi.rvfi_mem_wmask,
+     rvfi_mem_rdata: result.rvfi.rvfi_mem_rdata,
+     rvfi_mem_wdata: result.rvfi.rvfi_mem_wdata)
+
+export core64_imac_product_entry
+export Core64ImacProductPorts

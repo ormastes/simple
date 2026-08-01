@@ -1,0 +1,234 @@
+#!/bin/sh
+# check-simpleos-servers-qemu.shs — one-boot QEMU gate for Lane C2's
+# combined sshd + http + dbd servers entry.
+#
+# Boots examples/09_embedded/simple_os/arch/x86_64/servers_entry.spl (sshd
+# on 22, http on 8080, dbd on 5433, one round-robin accept loop, no
+# threads) and proves, via host-side hostfwd probes over raw TCP (no
+# curl — nc/printf per repo convention):
+#   a. ssh session negotiates a full connection (login + session close)
+#   b. GET / on the http server returns 200 status JSON
+#   c. GET /files/VERSION.TXT serves a real file from the mounted root FS
+#   d. dbd SET/GET round-trip over RESP (real std.nogc_sync_mut.redis.server)
+#   e. malformed HTTP request -> clean 400, server stays up after
+#   f. malformed/oversized dbd request -> clean -ERR, server stays up after
+#   g. reboot-persistence: a FRESH QEMU boot on the SAME disk image still
+#      answers GET for the key written in boot #1 (durable across reboot)
+#
+# Modeled on scripts/os/ssh_clang_hello_ring3.shs's boot/serial/hostfwd
+# pattern. Env: SKIP_KERNEL=1 reuse kernel, SKIP_STAGE=1 reuse disk image,
+# QEMU_MEM (2G), BOOT_WAIT (30s).
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+SEED="src/compiler_rust/target/release/simple"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/servers_entry.spl"
+LINKER="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+KERNEL="build/os/simpleos_servers.elf"
+DISK_IMG="build/os/hello/fat32-hello.img"
+SERIAL1="build/os/check_simpleos_servers_qemu.boot1.serial.log"
+SERIAL2="build/os/check_simpleos_servers_qemu.boot2.serial.log"
+CACHE="build/os/servers_cache_private"
+QEMU_MEM="${QEMU_MEM:-2G}"
+BOOT_WAIT="${BOOT_WAIT:-30}"
+
+mkdir -p build/os/generated/generated build/os/hello
+
+# ---- 1. Stage a FAT32+NVMe image (reuse the ring3-demo image: it already
+#         carries VERSION.TXT + the app fixtures vfs_boot_init_production()
+#         probes for during storage bring-up) -----------------------------
+if [ "${SKIP_STAGE:-0}" != "1" ] && [ ! -f "$DISK_IMG" ]; then
+    echo "[servers-gate] staging disk image -> $DISK_IMG"
+    sh scripts/os/build_clang_hello_ring3.shs >/dev/null 2>&1 || true
+fi
+[ -f "$DISK_IMG" ] || { echo "[servers-gate] FAIL: missing $DISK_IMG (run build_clang_hello_ring3.shs first)"; exit 1; }
+
+# ---- 2. Build markers + kernel -------------------------------------------
+printf 'pub fn ssh_live_build_marker() -> text:\n    "servers-build:gate"\n' \
+    > build/os/generated/ssh_live_build_marker.spl
+cat > build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+
+if [ "${SKIP_KERNEL:-0}" != "1" ] || [ ! -f "$KERNEL" ]; then
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    rm -rf "$CACHE"; mkdir -p "$CACHE"
+    rm -f "$KERNEL"
+    echo "[servers-gate] building kernel -> $KERNEL"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT/src" SIMPLE_OS_LOG_MODE=off SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os --backend cranelift --cpu x86-64-v1 \
+        --opt-level=aggressive --log off --entry-closure --cache-dir "$CACHE" \
+        --entry "$ENTRY" --target x86_64-unknown-none -o "$KERNEL" \
+        --linker-script "$LINKER" 2>&1 | tail -40
+    if [ ! -f "$KERNEL" ]; then
+        echo "[servers-gate] KERNEL BUILD FAILED"
+        echo "[servers-gate] gate blocked by toolchain redeploy (or a real build error above)"
+        exit 1
+    fi
+fi
+
+# ---- 3. Pick free host ports ----------------------------------------------
+SSH_PORT="${SSH_PORT:-42222}"
+HTTP_PORT="${HTTP_PORT:-48080}"
+DBD_PORT="${DBD_PORT:-45433}"
+if ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "; then SSH_PORT=22222; fi
+if ss -ltn 2>/dev/null | grep -q ":$HTTP_PORT "; then HTTP_PORT=28080; fi
+if ss -ltn 2>/dev/null | grep -q ":$DBD_PORT "; then DBD_PORT=25433; fi
+echo "[servers-gate] host ports: ssh=$SSH_PORT->22 http=$HTTP_PORT->8080 dbd=$DBD_PORT->5433"
+
+boot_qemu() {
+    SERIAL_FILE="$1"
+    rm -f "$SERIAL_FILE"
+    qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+        -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+        -kernel "$KERNEL" -serial "file:$SERIAL_FILE" \
+        -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+        -drive "file=$DISK_IMG,if=none,id=nvm,format=raw" -device nvme,serial=deadbeef,drive=nvm \
+        -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22,hostfwd=tcp::$HTTP_PORT-:8080,hostfwd=tcp::$DBD_PORT-:5433" \
+        -device virtio-net-pci,netdev=n0 &
+    QEMU_PID=$!
+}
+
+wait_for_marker() {
+    SERIAL_FILE="$1"
+    MARKER="$2"
+    i=0
+    while [ $i -lt "$BOOT_WAIT" ]; do
+        grep -qa "$MARKER" "$SERIAL_FILE" 2>/dev/null && return 0
+        kill -0 "$QEMU_PID" 2>/dev/null || return 1
+        sleep 1; i=$((i+1))
+    done
+    grep -qa "$MARKER" "$SERIAL_FILE" 2>/dev/null
+}
+
+PASS=1
+note_fail() { echo "FAIL: $1"; PASS=0; }
+
+# ============================================================================
+# Boot #1 — exercise every hardening/behavior surface
+# ============================================================================
+boot_qemu "$SERIAL1"
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+
+if ! wait_for_marker "$SERIAL1" "\[servers\] round-robin loop start"; then
+    echo "[servers-gate] FAIL: round-robin loop never started"
+    echo "===== serial tail ====="; tail -60 "$SERIAL1" 2>/dev/null || true
+    kill "$QEMU_PID" 2>/dev/null || true
+    exit 1
+fi
+echo "PASS boot: $(grep -a '\[servers\] round-robin loop start' "$SERIAL1" | head -1)"
+grep -qa "\[http\] serving on 0.0.0.0:8080" "$SERIAL1" && echo "PASS http-marker: $(grep -a '\[http\] serving' "$SERIAL1" | head -1)" || note_fail "no [http] serving marker"
+grep -qa "\[dbd\] serving on 0.0.0.0:5433" "$SERIAL1" && echo "PASS dbd-marker: $(grep -a '\[dbd\] serving' "$SERIAL1" | head -1)" || note_fail "no [dbd] serving marker"
+grep -qa "\[dbd\] backend=" "$SERIAL1" && echo "PASS dbd-backend: $(grep -a '\[dbd\] backend=' "$SERIAL1" | head -1)" || note_fail "no [dbd] backend= marker"
+
+# ---- a. ssh exec works ----------------------------------------------------
+echo "[servers-gate] a. ssh session over port $SSH_PORT"
+timeout 12 sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
+    root@127.0.0.1 true >/dev/null 2>&1 || true
+sleep 1
+if grep -qa "\[sshd\] session close" "$SERIAL1" 2>/dev/null; then
+    echo "PASS ssh: $(grep -a '\[sshd\] session close' "$SERIAL1" | head -1)"
+else
+    note_fail "no [sshd] session close after ssh attempt"
+fi
+
+# ---- b. GET / ---------------------------------------------------------
+echo "[servers-gate] b. GET / on port $HTTP_PORT"
+HTTP_ROOT=$(printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | timeout 6 nc -w 4 127.0.0.1 "$HTTP_PORT" 2>/dev/null || true)
+echo "$HTTP_ROOT" | grep -q "200 OK" && echo "$HTTP_ROOT" | grep -q "SimpleOS" \
+    && echo "PASS http-root: $(echo "$HTTP_ROOT" | head -1)" \
+    || note_fail "GET / did not return 200 SimpleOS status ($HTTP_ROOT)"
+
+# ---- c. GET /files/VERSION.TXT --------------------------------------------
+echo "[servers-gate] c. GET /files/VERSION.TXT on port $HTTP_PORT"
+HTTP_FILE=$(printf 'GET /files/VERSION.TXT HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | timeout 6 nc -w 4 127.0.0.1 "$HTTP_PORT" 2>/dev/null || true)
+echo "$HTTP_FILE" | grep -q "200 OK" \
+    && echo "PASS http-files: $(echo "$HTTP_FILE" | head -1)" \
+    || note_fail "GET /files/VERSION.TXT did not return 200 ($HTTP_FILE)"
+
+# ---- d. dbd SET/GET (RESP) -------------------------------------------------
+echo "[servers-gate] d. dbd SET/GET (RESP) on port $DBD_PORT"
+DBD_SET=$(printf 'SET gatekey gateval\n' | timeout 6 nc -w 4 127.0.0.1 "$DBD_PORT" 2>/dev/null || true)
+echo "$DBD_SET" | grep -q "^+OK" \
+    && echo "PASS dbd-set: $(echo "$DBD_SET" | tr -d '\r')" \
+    || note_fail "SET gatekey gateval did not return +OK ($DBD_SET)"
+DBD_GET=$(printf 'GET gatekey\n' | timeout 6 nc -w 4 127.0.0.1 "$DBD_PORT" 2>/dev/null || true)
+echo "$DBD_GET" | grep -q "gateval" \
+    && echo "PASS dbd-get: $(echo "$DBD_GET" | tr -d '\r')" \
+    || note_fail "GET gatekey did not return gateval ($DBD_GET)"
+
+# ---- e. malformed HTTP request, then a good request afterwards ------------
+echo "[servers-gate] e. malformed HTTP request on port $HTTP_PORT"
+HTTP_BAD=$(printf 'NOT A REQUEST\r\n\r\n' | timeout 6 nc -w 4 127.0.0.1 "$HTTP_PORT" 2>/dev/null || true)
+echo "$HTTP_BAD" | grep -q "400 Bad Request" \
+    && echo "PASS http-malformed: $(echo "$HTTP_BAD" | head -1)" \
+    || note_fail "malformed request did not return 400 ($HTTP_BAD)"
+HTTP_AFTER_BAD=$(printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' | timeout 6 nc -w 4 127.0.0.1 "$HTTP_PORT" 2>/dev/null || true)
+echo "$HTTP_AFTER_BAD" | grep -q "200 OK" \
+    && echo "PASS http-alive-after-malformed: $(echo "$HTTP_AFTER_BAD" | head -1)" \
+    || note_fail "http server did not survive the malformed request ($HTTP_AFTER_BAD)"
+
+# ---- f. malformed/oversized dbd request, then a good command afterwards ---
+echo "[servers-gate] f. malformed (unknown command) dbd request on port $DBD_PORT"
+DBD_BAD=$(printf 'BOGUSCOMMAND foo\n' | timeout 6 nc -w 4 127.0.0.1 "$DBD_PORT" 2>/dev/null || true)
+echo "$DBD_BAD" | grep -q "^-ERR" \
+    && echo "PASS dbd-malformed: $(echo "$DBD_BAD" | tr -d '\r')" \
+    || note_fail "malformed dbd request did not return -ERR ($DBD_BAD)"
+echo "[servers-gate] f2. oversized dbd request (no terminator in bound) on port $DBD_PORT"
+OVERSIZED=$(python3 -c "print('SET k ' + 'a'*8000, end='')" 2>/dev/null || perl -e 'print "SET k " . ("a" x 8000)')
+DBD_OVER=$(printf '%s' "$OVERSIZED" | timeout 6 nc -w 4 127.0.0.1 "$DBD_PORT" 2>/dev/null || true)
+echo "$DBD_OVER" | grep -q "^-ERR" \
+    && echo "PASS dbd-oversized: $(echo "$DBD_OVER" | tr -d '\r')" \
+    || note_fail "oversized dbd request did not return -ERR ($DBD_OVER)"
+DBD_AFTER_OVER=$(printf 'GET gatekey\n' | timeout 6 nc -w 4 127.0.0.1 "$DBD_PORT" 2>/dev/null || true)
+echo "$DBD_AFTER_OVER" | grep -q "gateval" \
+    && echo "PASS dbd-alive-after-oversized: $(echo "$DBD_AFTER_OVER" | tr -d '\r')" \
+    || note_fail "dbd server did not survive the oversized request ($DBD_AFTER_OVER)"
+
+kill "$QEMU_PID" 2>/dev/null || true
+sleep 1
+
+# ============================================================================
+# Boot #2 — same disk image, fresh QEMU process: reboot-persistence proof
+# ============================================================================
+echo "[servers-gate] g. reboot-persistence: fresh boot on the same disk image"
+boot_qemu "$SERIAL2"
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+if ! wait_for_marker "$SERIAL2" "\[dbd\] serving on 0.0.0.0:5433"; then
+    note_fail "boot #2 dbd never came up"
+else
+    DBD_REBOOT_GET=$(printf 'GET gatekey\n' | timeout 6 nc -w 4 127.0.0.1 "$DBD_PORT" 2>/dev/null || true)
+    echo "$DBD_REBOOT_GET" | grep -q "gateval" \
+        && echo "PASS dbd-reboot-persist: $(echo "$DBD_REBOOT_GET" | tr -d '\r')" \
+        || note_fail "key did not survive reboot ($DBD_REBOOT_GET)"
+    grep -qa "\[dbd\] backend=vfs-log replayed=" "$SERIAL2" \
+        && echo "PASS dbd-replay-marker: $(grep -a '\[dbd\] backend=vfs-log replayed=' "$SERIAL2" | head -1)" \
+        || note_fail "no vfs-log replay marker on boot #2"
+fi
+kill "$QEMU_PID" 2>/dev/null || true
+sleep 1
+
+echo "===== gate ====="
+if [ "$PASS" = "1" ]; then
+    echo "SERVERS GATE PASSES"
+else
+    echo "SERVERS GATE FAILS"
+    echo "===== boot1 serial tail ====="; tail -60 "$SERIAL1" 2>/dev/null || true
+    echo "===== boot2 serial tail ====="; tail -60 "$SERIAL2" 2>/dev/null || true
+    exit 1
+fi

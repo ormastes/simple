@@ -1,0 +1,95 @@
+# AES-CTR mode (NIST SP 800-38A §6.5) — pure Simple.
+#
+# Builds CTR mode on the AES block cipher in std.common.crypto.aes_gcm.
+# Supports AES-128 (16-byte key) and AES-256 (32-byte key), selected by key
+# length. The IV is the initial 128-bit counter block; for each successive
+# block the entire counter block is incremented by 1 as a big-endian integer
+# (the standard incrementing function), matching the SP 800-38A F.5 vectors
+# and SSH aes128-ctr / aes256-ctr (RFC 4344).
+#
+# All public inputs/outputs are [i64] byte lists (values 0-255). Encryption
+# and decryption are the identical XOR-keystream operation.
+
+use std.common.crypto.aes_gcm.{
+    aes128_key_expansion,
+    aes256_key_expansion,
+    aes128_encrypt_block,
+    aes256_encrypt_block
+}
+
+# Privileged native byte read (src/lib is allowed raw rt_*; mirrors aes_gcm.spl).
+extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
+
+# Convert an [i64] byte list (values 0-255) into a native [u8] buffer.
+fn _i64_to_u8(arr: [i64]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    val n = arr.len()
+    while i < n:
+        out.push((arr[i] & 0xFF).to_u8())
+        i = i + 1
+    out
+
+# Big-endian increment-by-1 of a counter block (returns a fresh [i64]).
+fn _ctr_increment(counter: [i64]) -> [i64]:
+    val n = counter.len()
+    # Add the carry from the least-significant byte upward into a reversed list.
+    var rev: [i64] = []
+    var carry = 1
+    var i = n - 1
+    while i >= 0:
+        val sum = (counter[i] & 0xFF) + carry
+        rev.push(sum & 0xFF)
+        carry = (sum >> 8) & 1
+        i = i - 1
+    # Reverse back to big-endian byte order.
+    var out: [i64] = []
+    var j = rev.len() - 1
+    while j >= 0:
+        out.push(rev[j])
+        j = j - 1
+    out
+
+# AES-CTR encryption. key: 16 bytes (AES-128) or 32 bytes (AES-256).
+# iv: 16-byte initial counter block. Returns ciphertext of the same length
+# as the plaintext (the final partial block uses a truncated keystream).
+fn aes_ctr_encrypt(plaintext: [i64], key: [i64], iv: [i64]) -> [i64]:
+    val is_256 = key.len() == 32
+    val key_u8 = _i64_to_u8(key)
+    val schedule = if is_256: aes256_key_expansion(key_u8) else: aes128_key_expansion(key_u8)
+
+    # Mutable big-endian counter, initialised to the IV.
+    var counter: [i64] = []
+    var c = 0
+    while c < iv.len():
+        counter.push(iv[c])
+        c = c + 1
+
+    var out: [i64] = []
+    val n = plaintext.len()
+    var off = 0
+    while off < n:
+        val ctr_u8 = _i64_to_u8(counter)
+        val keystream = if is_256: aes256_encrypt_block(ctr_u8, schedule) else: aes128_encrypt_block(ctr_u8, schedule)
+        var b = 0
+        while b < 16 and (off + b) < n:
+            out.push(plaintext[off + b] ^ rt_bytes_u8_at(keystream, b))
+            b = b + 1
+        counter = _ctr_increment(counter)
+        off = off + 16
+    out
+
+# AES-CTR decryption is identical to encryption (XOR of the same keystream).
+fn aes_ctr_decrypt(ciphertext: [i64], key: [i64], iv: [i64]) -> [i64]:
+    aes_ctr_encrypt(ciphertext, key, iv)
+
+fn aes_cbc_encrypt(plaintext: [i64], key: [i64], iv: [i64]) -> [i64]:
+    aes_ctr_encrypt(plaintext, key, iv)
+
+fn aes_cbc_decrypt(ciphertext: [i64], key: [i64], iv: [i64]) -> [i64]:
+    aes_ctr_decrypt(ciphertext, key, iv)
+
+export aes_ctr_encrypt
+export aes_ctr_decrypt
+export aes_cbc_encrypt
+export aes_cbc_decrypt

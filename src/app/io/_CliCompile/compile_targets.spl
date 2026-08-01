@@ -1,0 +1,1351 @@
+# CLI compile — target backends (simpleos/c/cuda/opencl/vhdl/native)
+use app.io._CliCompile.compile_options.{cli_native_default_opt_level, cli_parse_opt_level, cli_print_shared_opt_level_help, cli_print_shared_optimization_inventory}
+# CLI Compile Functions - Compilation pipeline
+# Extracted from cli_ops.spl for modularity
+# Functions here reference helpers in cli_ops.spl (same directory, no imports needed)
+
+# Helpers from cli_ops.spl
+use app.io.env_ops (env_set)
+use app.io.process_ops (process_run)
+use app.io.file_ops (file_exists, file_write, file_copy, file_remove)
+use app.io.dir_ops (dir_create)
+use app.io.sysinfo_ops (getpid)
+use app.io.time_ops (time_now_unix_micros)
+use std.nogc_sync_mut.shell.file (rename)
+
+# Pure Simple compiler driver (use desugared static methods for interpreter compatibility)
+use compiler.driver.driver (compiler_driver_create, compiler_driver_run_compile, aot_file, aot_c_file, aot_cuda_file, aot_opencl_file, aot_vhdl_file, compile_to_smf)
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_module_paths, _driver_entry_sibling_module_paths,
+    _driver_resolve_entry_import, _driver_text_bucket_set_new,
+    _driver_text_bucket_set_has, _driver_text_bucket_set_add
+}
+# Dict.entries currently lowers to this implementation; keep its object in the
+# entry closure even though this walker no longer constructs a custom HashMap.
+use std.nogc_sync_mut.src.collections.hashmap.{HashMap}
+use lazy compiler.backend.linker.lib_smf_writer (LibSmfBuilder)
+use lazy app.compile.native (compile_native)
+use compiler.common.driver_core_types (CompileOptions, CompileMode, CompileResult, driver_core_compile_options_default, compile_result_errors, compileoptions_normalize_mir_optimization, driver_output_format_both, driver_output_format_native)
+use compiler.mir_opt.mod (TargetOptContext, target_opt_context_default)
+use app.startup.launch_metadata.{launch_metadata_for_native_build, launch_metadata_sidecar_path, render_launch_metadata_sidecar}
+
+extern fn rt_compile_to_llvm_ir(source_file: text, target_triple: text, bare_metal: bool) -> (text, text, i64)
+extern fn rt_file_exists(path: text) -> bool
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_path_absolute(path: text) -> text
+
+fn _cli_eprint(message: text):
+    eprint(message)
+
+fn _cli_dir_create_impl(path: text, recursive: bool) -> bool:
+    file_exists(path) or dir_create(path, recursive)
+
+fn _cli_file_write_impl(path: text, content: text) -> bool:
+    file_write(path, content)
+
+fn _cli_file_copy_impl(source: text, destination: text) -> bool:
+    file_copy(source, destination)
+
+fn _cli_process_run(command: text, args: [text]) -> (text, text, i64):
+    process_run(command, args)
+
+fn _cli_file_exists_impl(path: text) -> bool:
+    file_exists(path)
+
+fn _cli_file_remove_impl(path: text) -> bool:
+    file_remove(path)
+
+fn _cli_file_rename_impl(source: text, destination: text) -> bool:
+    rename(source, destination)
+
+fn cli_native_build_is_entry_arg(arg: text) -> bool:
+    arg == "--entry" or arg.starts_with("--entry=")
+
+fn cli_native_build_value_error(args: [text], index: i64, flag: text, positive_integer: bool) -> text:
+    if index + 1 >= args.len():
+        return "{flag} requires a value"
+    val value = args[index + 1]
+    if value == "":
+        return "{flag} requires a value"
+    if positive_integer:
+        if not cli_native_build_is_positive_decimal(value):
+            return "{flag} requires a positive integer"
+    elif value.starts_with("-"):
+        return "{flag} requires a value"
+    ""
+
+fn cli_native_build_inline_value_error(arg: text, prefix: text, flag: text, positive_integer: bool) -> text:
+    val value = arg.substring(prefix.len())
+    if value == "":
+        return "{flag} requires a value"
+    if positive_integer:
+        if not cli_native_build_is_positive_decimal(value):
+            return "{flag} requires a positive integer"
+    ""
+
+fn cli_native_build_is_positive_decimal(value: text) -> bool:
+    if value == "":
+        return false
+    for ch in value:
+        if ch < "0" or ch > "9":
+            return false
+    (value.to_i64() ?? 0) > 0
+
+fn cli_native_build_log_value_error(value: text) -> text:
+    if value != "on" and value != "off":
+        return "--log requires 'on' or 'off'"
+    ""
+
+# Reject malformed build invocations before they can reach the compiler or
+# publish an output. The compile loop below intentionally stays focused on
+# decoding already-valid options.
+fn cli_native_build_option_error(args: [text]) -> text:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "native-build":
+            i = i + 1
+            continue
+        if arg == "--help" or arg == "-h" or arg == "--list-optimizations":
+            i = i + 1
+            continue
+        if arg == "--entry-closure" or arg == "--low-memory" or arg == "--verbose" or arg == "-v" or arg == "--strip" or arg == "--emit-smf" or arg == "--emit-object" or arg == "--emit-archive" or arg == "--release" or arg == "--release-optimized" or arg == "--no-borrow-check" or arg == "--no-mangle" or arg == "--no-incremental" or arg == "--clean":
+            i = i + 1
+            continue
+        if arg == "--log":
+            val error = cli_native_build_value_error(args, i, arg, false)
+            if error != "":
+                return error
+            val log_error = cli_native_build_log_value_error(args[i + 1])
+            if log_error != "":
+                return log_error
+            i = i + 2
+            continue
+        if arg == "--backend" or arg == "--runtime-bundle" or arg == "--runtime-path" or arg == "--linker-script" or arg == "--entry" or arg == "--source" or arg == "-o" or arg == "--output" or arg == "--mode" or arg == "--build-mode" or arg == "--cache-dir" or arg == "--target" or arg == "--cpu" or arg == "--opt-level":
+            val error = cli_native_build_value_error(args, i, arg, false)
+            if error != "":
+                return error
+            i = i + 2
+            continue
+        if arg == "--threads" or arg == "--jobs" or arg == "-j" or arg == "--timeout":
+            val error = cli_native_build_value_error(args, i, arg, true)
+            if error != "":
+                return error
+            i = i + 2
+            continue
+        if arg.starts_with("--backend="):
+            val error = cli_native_build_inline_value_error(arg, "--backend=", "--backend", false)
+            if error != "": return error
+        elif arg.starts_with("--runtime-bundle="):
+            val error = cli_native_build_inline_value_error(arg, "--runtime-bundle=", "--runtime-bundle", false)
+            if error != "": return error
+        elif arg.starts_with("--runtime-path="):
+            val error = cli_native_build_inline_value_error(arg, "--runtime-path=", "--runtime-path", false)
+            if error != "": return error
+        elif arg.starts_with("--linker-script="):
+            val error = cli_native_build_inline_value_error(arg, "--linker-script=", "--linker-script", false)
+            if error != "": return error
+        elif arg.starts_with("--log="):
+            val error = cli_native_build_inline_value_error(arg, "--log=", "--log", false)
+            if error != "": return error
+            val log_error = cli_native_build_log_value_error(arg.substring("--log=".len()))
+            if log_error != "": return log_error
+        elif arg.starts_with("--entry="):
+            val error = cli_native_build_inline_value_error(arg, "--entry=", "--entry", false)
+            if error != "": return error
+        elif arg.starts_with("--source="):
+            val error = cli_native_build_inline_value_error(arg, "--source=", "--source", false)
+            if error != "": return error
+        elif arg.starts_with("--output="):
+            val error = cli_native_build_inline_value_error(arg, "--output=", "--output", false)
+            if error != "": return error
+        elif arg.starts_with("-o") and arg.len() > 2:
+            val error = cli_native_build_inline_value_error(arg, "-o", "-o", false)
+            if error != "": return error
+        elif arg.starts_with("--threads="):
+            val error = cli_native_build_inline_value_error(arg, "--threads=", "--threads", true)
+            if error != "": return error
+        elif arg.starts_with("--jobs="):
+            val error = cli_native_build_inline_value_error(arg, "--jobs=", "--jobs", true)
+            if error != "": return error
+        elif arg.starts_with("--timeout="):
+            val error = cli_native_build_inline_value_error(arg, "--timeout=", "--timeout", true)
+            if error != "": return error
+        elif arg.starts_with("--mode="):
+            val error = cli_native_build_inline_value_error(arg, "--mode=", "--mode", false)
+            if error != "": return error
+        elif arg.starts_with("--build-mode="):
+            val error = cli_native_build_inline_value_error(arg, "--build-mode=", "--build-mode", false)
+            if error != "": return error
+        elif arg.starts_with("--cache-dir="):
+            val error = cli_native_build_inline_value_error(arg, "--cache-dir=", "--cache-dir", false)
+            if error != "": return error
+        elif arg.starts_with("--target="):
+            val error = cli_native_build_inline_value_error(arg, "--target=", "--target", false)
+            if error != "": return error
+        elif arg.starts_with("--cpu="):
+            val error = cli_native_build_inline_value_error(arg, "--cpu=", "--cpu", false)
+            if error != "": return error
+        elif arg.starts_with("--opt-level="):
+            val error = cli_native_build_inline_value_error(arg, "--opt-level=", "--opt-level", false)
+            if error != "": return error
+        elif arg.starts_with("-"):
+            return "unknown option: {arg}"
+        i = i + 1
+    ""
+
+fn cli_native_build_add_bootstrap_input(options: CompileOptions, input_path: text) -> CompileOptions:
+    var result = options
+    val slot = result.bootstrap_input_count
+    if slot == 0:
+        result.bootstrap_input_0 = input_path
+    elif slot == 1:
+        result.bootstrap_input_1 = input_path
+    elif slot == 2:
+        result.bootstrap_input_2 = input_path
+    elif slot == 3:
+        result.bootstrap_input_3 = input_path
+    elif slot == 4:
+        result.bootstrap_input_4 = input_path
+    elif slot == 5:
+        result.bootstrap_input_5 = input_path
+    result.bootstrap_input_count = slot + 1
+    result
+
+
+fn compile_simpleos(source_file: text, target: text, emit: text, output_file: text, verbose: bool) -> i64:
+    # Compile for SimpleOS targets (bare-metal ELF with SimpleOS conventions).
+    # Supported: x86_64-simpleos, x86_64-unknown-simpleos, simpleos.
+    # Parse architecture from target string
+    val arch = if target == "simpleos" or target == "x86_64-simpleos" or target == "x86_64-unknown-simpleos":
+        "x86_64"
+    else:
+        _cli_eprint("Error: Unknown SimpleOS target: {target}")
+        _cli_eprint("Supported: x86_64-simpleos, x86_64-unknown-simpleos, simpleos")
+        return 1
+
+    val target_triple = "{arch}-unknown-none-elf"
+
+    if verbose:
+        print "Compiling {source_file} for SimpleOS ({target})"
+        print "  Architecture: {arch}"
+        print "  Target triple: {target_triple}"
+        print "  Emit: {emit}"
+        if output_file != "":
+            print "  Output: {output_file}"
+
+    if not _cli_dir_create_impl("build/simpleos", true):
+        _cli_eprint("Error: Failed to create build/simpleos directory")
+        return 1
+
+    val (llvm_ir, compile_err, compile_exit) = rt_compile_to_llvm_ir(source_file, target_triple, true)
+
+    if compile_exit != 0 or llvm_ir == "":
+        _cli_eprint("Error: LLVM IR generation failed for SimpleOS target")
+        if compile_err != "":
+            _cli_eprint(compile_err)
+        return 1
+
+    val base_name = "simpleos_kernel"
+    val ir_file = "build/simpleos/{base_name}.ll"
+    if not _cli_file_write_impl(ir_file, llvm_ir):
+        _cli_eprint("Error: Failed to write LLVM IR to {ir_file}")
+        return 1
+
+    if verbose:
+        print "  Generated: {ir_file}"
+
+    if emit == "llvm-ir":
+        if output_file != "":
+            if not _cli_file_copy_impl(ir_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {ir_file}"
+        return 0
+
+    if verbose:
+        print "Compiling LLVM IR -> Object file..."
+
+    val obj_file = "build/simpleos/{base_name}.o"
+    val (llc_out, llc_err, llc_exit) = _cli_process_run("llc", [
+        "--filetype=obj",
+        "--relocation-model=static",
+        ir_file,
+        "-o", obj_file
+    ])
+
+    if llc_exit != 0:
+        _cli_eprint("Error: llc compilation failed")
+        _cli_eprint(llc_err)
+        return 1
+
+    if verbose:
+        print "  Generated: {obj_file}"
+
+    if emit == "object":
+        if output_file != "":
+            if not _cli_file_copy_impl(obj_file, output_file):
+                _cli_eprint("Error: Failed to copy to {output_file}")
+                return 1
+            print "Output: {output_file}"
+        else:
+            print "Output: {obj_file}"
+        return 0
+
+    if verbose:
+        print "Linking Object -> ELF binary (SimpleOS)..."
+
+    val elf_file = if output_file != "":
+        output_file
+    else:
+        "build/simpleos/kernel.elf"
+
+    # Use ld.lld for SimpleOS (matches toolchain_simpleos_x86_64 in llvm_cross_target.spl)
+    val linker = "ld.lld"
+    val (ld_out, ld_err, ld_exit) = _cli_process_run(linker, [
+        "--no-relax",
+        "-nostdlib",
+        "--entry=_start",
+        obj_file,
+        "-o", elf_file
+    ])
+
+    if ld_exit != 0:
+        # Fallback to ld if ld.lld is not available
+        val (ld2_out, ld2_err, ld2_exit) = _cli_process_run("ld", [
+            "-nostdlib",
+            "--entry=_start",
+            obj_file,
+            "-o", elf_file
+        ])
+        if ld2_exit != 0:
+            _cli_eprint("Error: Linking failed for SimpleOS target")
+            _cli_eprint(ld2_err)
+            _cli_eprint("")
+            _cli_eprint("Install: apt install lld (provides ld.lld)")
+            return 1
+
+    if verbose:
+        print "  Generated: {elf_file}"
+
+    print "Success: {elf_file}"
+    return 0
+
+# ============================================================================
+# Advanced Features
+# ============================================================================
+
+fn compile_c_backend(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".cpp")
+
+    if verbose:
+        print "Compiling {source_file} to C++20 (MIR C backend)"
+        print "  Output: {out}"
+
+    val aot_result = aot_c_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            print "Build with: clang -std=gnu11 -O2 {out} src/runtime/runtime.c -I src/runtime -o output"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: C backend generation failed")
+            return 1
+
+fn compile_cuda(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".ptx")
+
+    if verbose:
+        print "Compiling {source_file} to PTX (CUDA backend)"
+        print "  Output: {out}"
+
+    val aot_result = aot_cuda_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: CUDA/PTX compilation failed")
+            return 1
+
+fn compile_opencl(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".cl")
+
+    if verbose:
+        print "Compiling {source_file} to OpenCL C"
+        print "  Output: {out}"
+
+    val aot_result = aot_opencl_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: OpenCL compilation failed")
+            return 1
+
+fn compile_vhdl(source_file: text, output_file: text, verbose: bool) -> i64:
+    var out = output_file
+    if out == "":
+        out = source_file.replace(".spl", ".vhd")
+
+    if verbose:
+        print "Compiling {source_file} to VHDL"
+        print "  Output: {out}"
+
+    val aot_result = aot_vhdl_file(source_file, out)
+    match aot_result:
+        case CompileResult.Success(_):
+            print "Output: {out}"
+            return 0
+        case _:
+            val errors = aot_result.get_errors()
+            for err in errors:
+                _cli_eprint("error: {err}")
+            _cli_eprint("Error: VHDL compilation failed")
+            return 1
+
+# Native build: compile entire project to native binary
+# Supports --backend=llvm-lib for pure Simple LLVM compilation (Stage 3 bootstrap),
+# otherwise delegates to Rust NativeProjectBuilder SFFI.
+fn _nb_dirname(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() <= 1:
+        return ""
+    var out = ""
+    var i = 0
+    while i < parts.len() - 1:
+        if i > 0:
+            out = out + "/"
+        out = out + parts[i]
+        i = i + 1
+    out
+
+fn _nb_resolve_relative(mp: text, importer_file: text) -> text:
+    # `.sibling` / `..parent_pkg.mod` resolve against the importing FILE's
+    # directory, mirroring the driver's _driver_resolve_relative_entry_import.
+    # The dotted-segment resolver below cannot express these (leading dots
+    # split to empty segments), which silently dropped sibling modules from
+    # the --entry-closure worker input set ("unresolved name" storms in HIR).
+    var dots = 0
+    while dots < mp.len() and mp.substring(dots, dots + 1) == ".":
+        dots = dots + 1
+    if dots >= mp.len():
+        return ""
+    var base_dir = _nb_dirname(importer_file)
+    var up = 1
+    while up < dots and base_dir != "":
+        base_dir = _nb_dirname(base_dir)
+        up = up + 1
+    val rel = mp.substring(dots).replace(".", "/")
+    val base = if base_dir == "": rel else: "{base_dir}/{rel}"
+    if rt_file_exists("{base}.spl"):
+        return "{base}.spl"
+    if rt_file_exists("{base}/mod.spl"):
+        return "{base}/mod.spl"
+    if rt_file_exists("{base}/__init__.spl"):
+        return "{base}/__init__.spl"
+    ""
+
+fn _nb_basename(path: text) -> text:
+    val parts = path.split("/")
+    if parts.len() == 0:
+        return path
+    parts[parts.len() - 1]
+
+fn _nb_trim_trailing_slashes(path: text) -> text:
+    var p = path
+    while p.len() > 1 and p.ends_with("/"):
+        p = p.substring(0, p.len() - 1)
+    p
+
+fn _nb_source_dirs_cover_workspace(source_dirs: [text]) -> bool:
+    source_dirs.contains("src/app") and source_dirs.contains("src/lib") and source_dirs.contains("src/compiler")
+
+fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
+    # Drop duplicate roots and redundant bare `src` when explicit workspace
+    # roots already cover app, lib, and compiler imports.
+    var normalized: [text] = []
+    for raw_dir in source_dirs:
+        val dir = _nb_trim_trailing_slashes(raw_dir)
+        if dir == "" or normalized.contains(dir):
+            continue
+        normalized = normalized.push(dir)
+    var result: [text] = []
+    val workspace_covered = _nb_source_dirs_cover_workspace(normalized)
+    for candidate in normalized:
+        if workspace_covered and candidate == "src":
+            continue
+        result = result.push(candidate)
+    result
+
+fn _nb_resolve_under_root(root: text, segs: [text]) -> text:
+    if segs.len() == 0:
+        return ""
+    val rel = _nb_join_segments(segs)
+    val p1 = "{root}/{rel}.spl"
+    if rt_file_exists(p1):
+        return p1
+    val p2 = "{root}/{rel}/mod.spl"
+    if rt_file_exists(p2):
+        return p2
+    val p3 = "{root}/{rel}/__init__.spl"
+    if rt_file_exists(p3):
+        return p3
+    ""
+
+fn _nb_resolve_segs(segs: [text], source_dirs: [text], importer_path: text) -> text:
+    # Resolve a module segment list to an .spl file under a --source root.
+    # Mirrors the Rust discovery FS-fallback: strip a leading segment matching
+    # the root's dir name. Returns "" if unresolved.
+    val module_path = _nb_join_segments(segs)
+    val entry_dir = _driver_entry_import_dirname(importer_path)
+    if segs.len() > 0:
+        val resolved = _driver_resolve_entry_import(module_path, entry_dir)
+        if resolved != "":
+            val resolved_abs = rt_path_absolute(resolved).replace("\\", "/")
+            for root in source_dirs:
+                val root_abs = _nb_trim_trailing_slashes(rt_path_absolute(root).replace("\\", "/"))
+                val root_prefix = if root_abs.ends_with("/"): root_abs else: root_abs + "/"
+                if resolved_abs.starts_with(root_prefix):
+                    return resolved
+    for root in source_dirs:
+        val dir_name = _nb_basename(root)
+        val public_lib_alias = dir_name == "lib" and segs.len() > 0 and segs[0] == "std"
+        if segs.len() > 0 and (segs[0] == dir_name or public_lib_alias):
+            var stripped: [text] = []
+            var si = 1
+            while si < segs.len():
+                stripped = stripped.push(segs[si])
+                si = si + 1
+            val stripped_path = _nb_resolve_under_root(root, stripped)
+            if stripped_path != "":
+                return stripped_path
+        val direct_path = _nb_resolve_under_root(root, segs)
+        if direct_path != "":
+            return direct_path
+    if segs.len() > 0 and not _nb_source_dirs_cover_workspace(source_dirs):
+        val src_path = _nb_resolve_under_root("src", segs)
+        if src_path != "":
+            return src_path
+    # Unprefixed tier-qualified paths (`nogc_sync_mut.io_runtime` from the
+    # std.io_runtime shim's `export use`; `common.ui.access_types`) live
+    # under src/lib but carry no std./lib. prefix — no root above matches.
+    val lib_direct = _nb_resolve_under_root("src/lib", segs)
+    if lib_direct != "":
+        return lib_direct
+    # `std.X` flattens the concurrency-tier directories: std.mcp_sdk.server.
+    # method_detect is physically src/lib/<tier>/mcp_sdk/server/method_detect
+    # .spl. Mirror the seed interpreter's family-fallback order.
+    if segs.len() > 1 and segs[0] == "std":
+        var tier_tail: [text] = []
+        var tier_ti = 1
+        while tier_ti < segs.len():
+            tier_tail = tier_tail.push(segs[tier_ti])
+            tier_ti = tier_ti + 1
+        for tier in ["nogc_async_mut", "nogc_sync_mut", "nogc_async_immut", "common", "gc_async_mut", "nogc_async_mut_noalloc"]:
+            val tier_path = _nb_resolve_under_root("src/lib/" + tier, tier_tail)
+            if tier_path != "":
+                return tier_path
+    ""
+
+fn _nb_join_segments(segs: [text]) -> text:
+    var result = ""
+    var i = 0
+    while i < segs.len():
+        if i > 0:
+            result = result + "/"
+        result = result + segs[i]
+        i = i + 1
+    result
+
+fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
+    # BFS the entry's import closure so --entry-closure compiles only reachable
+    # modules (one `main`), not every file in the --source dirs. Over-approximates
+    # safely: an unresolved `use` is skipped; a genuinely missing import still
+    # errors in the compile phase.
+    val trace_closure = (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
+    # Level-gated, default-off per-file timing probe. The 25-file checkpoint
+    # above only shows aggregate progress; this prints a per-file elapsed-us
+    # delta so a flat vs. growing per-file cost (O(n) vs O(n^2)) can be told
+    # apart without waiting on the whole closure to finish. See
+    # doc/08_tracking/bug/native_build_entry_closure_slow_2026-07-31.md.
+    val trace_timing = (rt_env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE_TIMING") ?? "") == "1"
+    var queue: [text] = [entry]
+    var discovered = _driver_text_bucket_set_new(512)
+    discovered = _driver_text_bucket_set_add(discovered, entry)
+    var result: [text] = []
+    var resolve_cache: Dict<text, text> = {}
+    val closure_source_dirs = _nb_normalize_source_dirs(source_dirs)
+    var qi = 0
+    var timing_file_start_us: i64 = 0
+    while qi < queue.len():
+        val f = queue[qi]
+        qi = qi + 1
+        if trace_timing:
+            timing_file_start_us = time_now_unix_micros()
+        result = result.push(f)
+        if not rt_file_exists(f):
+            if trace_closure and f == entry:
+                _cli_eprint("[native-build] closure entry missing {f}")
+            continue
+        val content = rt_file_read_text(f) ?? ""
+        if trace_closure and f == entry:
+            _cli_eprint("[native-build] closure entry read len={content.len()}")
+        if trace_closure and result.len() % 25 == 0:
+            _cli_eprint("[native-build] closure visited {result.len()} queued={queue.len()} file={f}")
+        # The shared scanner skips comments, docstrings, and lazy imports
+        # without materializing every ordinary source line. Sibling `mod` and
+        # `export member.*` declarations use a separate guarded compatibility
+        # scan because they resolve relative to the declaring file.
+        var module_paths = _driver_entry_import_module_paths(content)
+        for sibling in _driver_entry_sibling_module_paths(content):
+            module_paths = module_paths.push(sibling)
+        for mp in module_paths:
+            if mp.starts_with("."):
+                val rel_rp = _nb_resolve_relative(mp, f)
+                if rel_rp != "" and not _driver_text_bucket_set_has(discovered, rel_rp):
+                    queue = queue.push(rel_rp)
+                    discovered = _driver_text_bucket_set_add(discovered, rel_rp)
+                continue
+            val segs = mp.split(".")
+            val seg_key = _nb_join_segments(segs)
+            var rp = ""
+            if resolve_cache.has(seg_key):
+                rp = resolve_cache[seg_key]
+            else:
+                rp = _nb_resolve_segs(segs, closure_source_dirs, f)
+                resolve_cache[seg_key] = rp
+            if trace_closure and f == entry:
+                _cli_eprint("[native-build] closure import {mp} -> {rp}")
+            if rp != "" and not _driver_text_bucket_set_has(discovered, rp):
+                queue = queue.push(rp)
+                discovered = _driver_text_bucket_set_add(discovered, rp)
+            if rp == "" and segs.len() > 1:
+                var drop: [text] = []
+                var di = 0
+                while di < segs.len() - 1:
+                    drop = drop.push(segs[di])
+                    di = di + 1
+                val drop_key = _nb_join_segments(drop)
+                var drop_rp = ""
+                if resolve_cache.has(drop_key):
+                    drop_rp = resolve_cache[drop_key]
+                else:
+                    drop_rp = _nb_resolve_segs(drop, closure_source_dirs, f)
+                    resolve_cache[drop_key] = drop_rp
+                if drop_rp != "" and not _driver_text_bucket_set_has(discovered, drop_rp):
+                    queue = queue.push(drop_rp)
+                    discovered = _driver_text_bucket_set_add(discovered, drop_rp)
+        if trace_timing:
+            val elapsed_us = time_now_unix_micros() - timing_file_start_us
+            _cli_eprint("[native-build] closure timing n={result.len()} queued={queue.len()} elapsed_us={elapsed_us} imports={module_paths.len()} content_len={content.len()} file={f}")
+    result
+
+fn cli_native_build(args: [text]) -> i64:
+    val option_error = cli_native_build_option_error(args)
+    if option_error != "":
+        _cli_eprint("Error: {option_error}")
+        return 2
+    # Check for --backend=llvm-lib flag to use pure Simple LLVM pipeline
+    var backend = ""
+    var backend_explicit = false
+    var runtime_bundle = "auto"
+    var runtime_bundle_explicit = false
+    var log_mode = "on"
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--help" or arg == "-h":
+            print "Simple Native Build"
+            print ""
+            print "Usage: simple native-build [options] [source-dirs...]"
+            print ""
+            print "Options:"
+            print "  --source <dir>       Source directory to compile (repeatable)"
+            print "  -o <path>            Output binary path"
+            print "  --entry <file>       Entry file"
+            print "  --backend <name>     Codegen backend: llvm-lib, llvm, cranelift"
+            print "  --mode <name>        Build mode: dynload (default) or one-binary"
+            print "  --cache-dir <dir>    Native cache directory (default: build/native_cache)"
+            print "  --release            Release build (standard optimization profile)"
+            print "  --release-optimized  Max optimization: -O3 + x86-64-v3 + ThinLTO"
+            cli_print_shared_opt_level_help()
+            print "  --list-optimizations Print implemented optimization groups and levels"
+            print "  --strip              Strip symbols from output"
+            print "  --emit-object        Emit relocatable object output instead of linking executable"
+            print "  --emit-archive       Emit a static archive instead of linking executable"
+            print "  --no-mangle          Preserve declared function symbol names"
+            print "  --runtime-bundle <mode> Runtime lane: auto, simple-core, core-c-bootstrap"
+            print "  --cpu <policy>       CPU policy: default, native, or x86-64-v1..v4"
+            print "  --entry-closure      Compile only modules reachable from --entry"
+            print "  --threads <n>        Native build workers"
+            print "  --jobs <n>, -j <n>   Alias for --threads"
+            print "  --log <on|off>       Compile normal SimpleOS logging in or out"
+            print "  --verbose, -v        Verbose output"
+            return 0
+        elif arg == "--list-optimizations":
+            cli_print_shared_optimization_inventory("native-build")
+            return 0
+        if arg.starts_with("--backend="):
+            backend = arg.substring(10)
+            backend_explicit = true
+        elif arg == "--backend" and i + 1 < args.len():
+            i = i + 1
+            backend = args[i]
+            backend_explicit = true
+        elif arg == "--runtime-bundle" and i + 1 < args.len():
+            var bundle = args[i + 1]
+            if cli_runtime_bundle_is_rust_or_hosted(bundle):
+                _cli_eprint("Error: runtime bundle '{bundle}' was removed; use simple-core or core-c-bootstrap")
+                return 1
+            if bundle == "simple_core":
+                bundle = "simple-core"
+            elif bundle == "core_c_bootstrap":
+                bundle = "core-c-bootstrap"
+            runtime_bundle = bundle
+            runtime_bundle_explicit = true
+            i = i + 1
+        elif arg.starts_with("--runtime-bundle="):
+            var bundle = arg.substring(17)
+            if cli_runtime_bundle_is_rust_or_hosted(bundle):
+                _cli_eprint("Error: runtime bundle '{bundle}' was removed; use simple-core or core-c-bootstrap")
+                return 1
+            if bundle == "simple_core":
+                bundle = "simple-core"
+            elif bundle == "core_c_bootstrap":
+                bundle = "core-c-bootstrap"
+            runtime_bundle = bundle
+            runtime_bundle_explicit = true
+        elif arg.starts_with("--log="):
+            val mode = arg.substring(6)
+            if mode == "":
+                _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                return 1
+            if mode != "on" and mode != "off":
+                _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                return 1
+            log_mode = mode
+        elif arg == "--log":
+            if i + 1 >= args.len():
+                _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                return 1
+            i = i + 1
+            val mode = args[i]
+            if mode.starts_with("-"):
+                _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                return 1
+            if mode != "on" and mode != "off":
+                _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                return 1
+            log_mode = mode
+        elif arg.starts_with("--log"):
+            _cli_eprint("Error: invalid log option '{arg}' (expected --log or --log=<on|off>)")
+            return 1
+        i = i + 1
+
+    if not backend_explicit:
+        backend = "llvm"
+        backend_explicit = true
+
+    if backend_explicit and (backend == "llvm-lib" or backend == "llvmlib" or backend == "llvm" or backend == "cranelift"):
+        # Pure Simple path: use CompilerDriver with LLVM lib backend
+        # Parse native-build args: --source, --entry, -o, --strip, --no-mangle, etc.
+        var entry_point = ""
+        var output = "a.out"
+        var verbose = false
+        var strip = false
+        var emit_smf = false
+        var emit_object = false
+        var emit_archive = false
+        var source_dirs: [text] = []
+        var entry_closure = false
+        var release = true
+        var opt_level = cli_native_default_opt_level()
+        var native_target = ""
+        var native_cpu = ""
+        var build_mode = "dynload"
+        var cache_dir = "build/native_cache"
+        var native_threads = 0
+        var runtime_path = ""
+        var optimization_requested = false
+        var no_borrow_check = false
+        var no_mangle = false
+        var low_memory = false
+        var j = 0
+        # Skip "native-build" command name
+        if args.len() > 0 and args[0] == "native-build":
+            j = 1
+        while j < args.len():
+            val a = args[j]
+            if a == "--entry-closure":
+                # Compile only modules reachable from --entry (suppresses the
+                # driver's implicit whole-src bulk-load). Must be matched BEFORE
+                # the `--entry` prefix check below, or it is mis-read as `--entry`
+                # and eats the next token as the entry path.
+                entry_closure = true
+            elif cli_native_build_is_entry_arg(a):
+                if a.contains("="):
+                    val eq_idx = a.index_of("=")
+                    # index_of returns a raw i64 (-1 if absent), NOT an Optional —
+                    # `match Some(idx)/nil` matched neither arm and silently dropped
+                    # the `--entry=<file>` form. Use an explicit `>= 0` check.
+                    if eq_idx >= 0:
+                        entry_point = a.substring(eq_idx + 1)
+                    else:
+                        _cli_eprint("Error: --entry requires an argument")
+                        return 1
+                elif j + 1 < args.len():
+                    j = j + 1
+                    entry_point = args[j]
+            elif a == "--source":
+                if j + 1 < args.len():
+                    j = j + 1
+                    source_dirs = source_dirs.push(args[j])
+            elif a.starts_with("--source="):
+                source_dirs = source_dirs.push(a.substring(9))
+            elif a == "-o":
+                if j + 1 < args.len():
+                    j = j + 1
+                    output = args[j]
+            elif a.starts_with("-o"):
+                output = a.substring(2)
+            elif a == "--output":
+                if j + 1 < args.len():
+                    j = j + 1
+                    output = args[j]
+            elif a.starts_with("--output="):
+                output = a.substring(9)
+            elif a == "--verbose" or a == "-v":
+                verbose = true
+            elif a == "--strip":
+                strip = true
+            elif a == "--emit-smf":
+                emit_smf = true
+            elif a == "--emit-object":
+                emit_object = true
+            elif a == "--emit-archive":
+                emit_archive = true
+            elif a == "--threads" or a == "--jobs" or a == "-j":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: {a} requires a positive integer")
+                    return 1
+                j = j + 1
+                native_threads = args[j].to_i64() ?? 0
+                if native_threads <= 0:
+                    _cli_eprint("Error: {a} requires a positive integer")
+                    return 1
+            elif a.starts_with("--threads="):
+                native_threads = a.substring(10).to_i64() ?? 0
+                if native_threads <= 0:
+                    _cli_eprint("Error: --threads requires a positive integer")
+                    return 1
+            elif a.starts_with("--jobs="):
+                native_threads = a.substring(7).to_i64() ?? 0
+                if native_threads <= 0:
+                    _cli_eprint("Error: --jobs requires a positive integer")
+                    return 1
+            elif a == "--mode" or a == "--build-mode":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --mode requires dynload or one-binary")
+                    return 1
+                j = j + 1
+                build_mode = args[j]
+            elif a.starts_with("--mode="):
+                build_mode = a.substring(7)
+                if build_mode == "":
+                    build_mode = "dynload"
+            elif a.starts_with("--build-mode="):
+                build_mode = a.substring(13)
+                if build_mode == "":
+                    build_mode = "dynload"
+            elif a == "--cache-dir":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --cache-dir requires a path")
+                    return 1
+                j = j + 1
+                cache_dir = args[j]
+            elif a.starts_with("--cache-dir="):
+                cache_dir = a.substring(12)
+                if cache_dir == "":
+                    cache_dir = "build/native_cache"
+            elif a.starts_with("--target="):
+                native_target = a.substring(9)
+            elif a == "--target":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --target requires an argument")
+                    return 1
+                j = j + 1
+                native_target = args[j]
+            elif a.starts_with("--cpu="):
+                native_cpu = a.substring(6)
+            elif a == "--cpu":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --cpu requires an argument")
+                    return 1
+                j = j + 1
+                native_cpu = args[j]
+            elif a == "--release":
+                release = true
+                if opt_level < 2:
+                    opt_level = 2
+                optimization_requested = true
+            elif a == "--release-optimized":
+                release = true
+                opt_level = cli_native_default_opt_level()
+                optimization_requested = true
+            elif a.starts_with("--opt-level="):
+                val opt_text = a.substring(12)
+                val parsed_level = cli_parse_opt_level(opt_text)
+                if parsed_level.is_none():
+                    _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
+                    return 1
+                match parsed_level:
+                    Some(level):
+                        opt_level = level
+                    nil:
+                        _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
+                        return 1
+                release = opt_level > 0
+                optimization_requested = true
+            elif a == "--opt-level":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --opt-level requires an argument")
+                    return 1
+                j = j + 1
+                val opt_text = args[j]
+                val parsed_level = cli_parse_opt_level(opt_text)
+                if parsed_level.is_none():
+                    _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
+                    return 1
+                match parsed_level:
+                    Some(level):
+                        opt_level = level
+                    nil:
+                        _cli_eprint("Error: invalid --opt-level value '{opt_text}'")
+                        return 1
+                release = opt_level > 0
+                optimization_requested = true
+            elif a == "--no-mangle":
+                no_mangle = true
+            elif a == "--low-memory":
+                low_memory = true
+            elif a == "--timeout" or a == "--runtime-bundle" or a == "--linker-script":
+                # The public wrapper consumes these values; consume them here
+                # too so compatibility options cannot reinterpret one as entry.
+                j = j + 1
+            elif a == "--runtime-path":
+                if j + 1 < args.len():
+                    j = j + 1
+                    runtime_path = args[j]
+            elif a.starts_with("--timeout=") or a.starts_with("--runtime-bundle=") or a.starts_with("--linker-script=") or a == "--no-incremental":
+                pass
+            elif a.starts_with("--runtime-path="):
+                runtime_path = a.substring(15)
+            elif a == "--clean":
+                # Ask the driver to wipe this build's cache scope before
+                # compiling. The driver consumes (clears) the flag, so it
+                # applies to this build only.
+                env_set("SIMPLE_NATIVE_BUILD_CLEAN", "1")
+            elif a.starts_with("--backend=") or a == "--backend":
+                if a == "--backend" and j + 1 < args.len():
+                    j = j + 1
+                # Already handled above
+            elif a.starts_with("--log="):
+                val mode = a.substring(6)
+                if mode == "":
+                    _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                    return 1
+                if mode != "on" and mode != "off":
+                    _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                    return 1
+            elif a == "--log":
+                if j + 1 >= args.len():
+                    _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                    return 1
+                j = j + 1
+                val mode = args[j]
+                if mode.starts_with("-"):
+                    _cli_eprint("Error: --log requires a value ('on' or 'off')")
+                    return 1
+                if mode != "on" and mode != "off":
+                    _cli_eprint("Error: invalid --log value '{mode}' (expected 'on' or 'off')")
+                    return 1
+            elif a.starts_with("--log"):
+                _cli_eprint("Error: invalid log option '{a}' (expected --log or --log=<on|off>)")
+                return 1
+            elif not a.starts_with("-") and entry_point == "":
+                entry_point = a
+            j = j + 1
+
+        if build_mode != "dynload" and build_mode != "one-binary":
+            _cli_eprint("Error: invalid --mode '{build_mode}' (expected dynload or one-binary)")
+            return 1
+
+        if emit_object and emit_archive:
+            _cli_eprint("Error: --emit-object and --emit-archive are mutually exclusive")
+            return 1
+
+        if entry_point == "":
+            _cli_eprint("Error: No entry point specified for native-build backend")
+            _cli_eprint("Usage: simple native-build --backend=llvm --entry <file.spl> -o <output> [--source <dir>]...")
+            return 1
+
+        # A missing --output parent dir previously made the worker fail with a
+        # silent exit 1 after the full compile (bug: native_build_missing_output_dir_silent_fail_2026-07-23).
+        # rfind returns a raw i64 (-1 if absent); `?? 0` is a dead no-op on a
+        # non-Optional and would misread a match at the native nil sentinel.
+        val out_slash = output.rfind("/")
+        if out_slash > 0:
+            val out_parent = output.substring(0, out_slash)
+            if not _cli_dir_create_impl(out_parent, true):
+                _cli_eprint("Error: could not create output directory {out_parent} for --output {output}")
+                return 1
+        # Build into a private sibling first. A stale requested output must not
+        # satisfy the success check when a driver/linker reports Success without
+        # writing its artifact; conversely, a failed build must leave the last
+        # known-good requested output untouched.
+        val staged_output = "{output}.simple-native-build-{getpid()}-{time_now_unix_micros()}.tmp"
+        if _cli_file_exists_impl(staged_output) and not _cli_file_remove_impl(staged_output):
+            _cli_eprint("Error: could not clear stale native-build staging output {staged_output}")
+            return 1
+
+        if verbose:
+            _cli_eprint("[native-build] Using pure Simple native backend {backend}")
+            _cli_eprint("[native-build] Entry: {entry_point}, Output: {output}")
+            if source_dirs.len() > 0:
+                _cli_eprint("[native-build] Source dirs: {source_dirs}")
+        val old_log_mode = env_get("SIMPLE_OS_LOG_MODE") ?? ""
+        val old_emit_object = env_get("SIMPLE_NATIVE_BUILD_EMIT_OBJECT") ?? ""
+        val old_no_mangle = env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? ""
+        val old_native_arena_decls = env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? ""
+        val old_native_threads = env_get("SIMPLE_NATIVE_BUILD_THREADS") ?? ""
+        val old_native_cache_dir = env_get("SIMPLE_NATIVE_BUILD_CACHE_DIR") ?? ""
+        val old_native_entry = env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        val old_native_entry_closure = env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""
+        val old_native_target = env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        val old_native_cpu = env_get("SIMPLE_NATIVE_CPU") ?? ""
+        val old_native_runtime_bundle = env_get("SIMPLE_NATIVE_RUNTIME_BUNDLE") ?? ""
+        val old_runtime_path = env_get("SIMPLE_RUNTIME_PATH") ?? ""
+        val old_core_runtime_path = env_get("SIMPLE_CORE_RUNTIME_PATH") ?? ""
+        val set_native_target = native_target != ""
+        val set_native_cpu = native_cpu != ""
+        if not env_set("SIMPLE_OS_LOG_MODE", log_mode):
+            _cli_eprint("Error: could not export SIMPLE_OS_LOG_MODE={log_mode}")
+            return 1
+        if not _cli_dir_create_impl(cache_dir, true):
+            env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+            _cli_eprint("Error: could not create native-build cache directory {cache_dir}")
+            return 1
+        val native_output_mode = if emit_archive: "archive" elif emit_object: "1" else: ""
+        env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", native_output_mode)
+        env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", if no_mangle: "1" else: "")
+        if not env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", cache_dir):
+            env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+            env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+            env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+            _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_CACHE_DIR={cache_dir}")
+            return 1
+        if native_threads > 0:
+            env_set("SIMPLE_NATIVE_BUILD_THREADS", "{native_threads}")
+        env_set("SIMPLE_NATIVE_ARENA_DECLS", "1")
+        if not env_set("SIMPLE_NATIVE_BUILD_ENTRY", entry_point):
+            env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+            env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+            env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+            env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+            env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+            env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+            env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+            if set_native_target:
+                env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+            if set_native_cpu:
+                env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+            if native_threads > 0:
+                env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+            _cli_eprint("Error: could not export SIMPLE_NATIVE_BUILD_ENTRY={entry_point}")
+            return 1
+        if set_native_target:
+            env_set("SIMPLE_NATIVE_BUILD_TARGET", native_target)
+        if set_native_cpu:
+            env_set("SIMPLE_NATIVE_CPU", native_cpu)
+        # Keep the pre-closure flag clear. The driver must register logical
+        # aliases for the physical closure inputs before it marks the walk done.
+        val effective_entry_closure = entry_closure or emit_object or emit_archive
+        env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "0")
+        if runtime_bundle_explicit:
+            env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", runtime_bundle)
+        if runtime_path != "":
+            env_set("SIMPLE_RUNTIME_PATH", runtime_path)
+            env_set("SIMPLE_CORE_RUNTIME_PATH", runtime_path)
+        if not optimization_requested:
+            release = true
+            opt_level = cli_native_default_opt_level()
+
+        val _nb_target_opt_ctx = target_opt_context_default()
+
+        val result = if emit_smf:
+            # --emit-smf: produce native binary + SMF cache file
+            use compiler.driver.driver_types (CompileOptions, CompileMode)
+            use compiler.driver.driver (CompilerDriver)
+            var options = driver_core_compile_options_default()
+            var native_inputs: [text] = []
+            if effective_entry_closure:
+                for cf in _native_build_entry_closure(entry_point, source_dirs):
+                    native_inputs = native_inputs.push(cf)
+                    options = cli_native_build_add_bootstrap_input(options, cf)
+            else:
+                for source_dir in source_dirs:
+                    native_inputs = native_inputs.push(source_dir)
+                    options = cli_native_build_add_bootstrap_input(options, source_dir)
+                native_inputs = native_inputs.push(entry_point)
+                options = cli_native_build_add_bootstrap_input(options, entry_point)
+            options.input_files = native_inputs
+            if verbose and effective_entry_closure:
+                _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
+            options.mode = CompileMode.Aot
+            options.cli_mode_text = "aot"
+            options.output_file = Some(staged_output)
+            options.output_format = driver_output_format_both()
+            options.backend = backend
+            options.release = release
+            options.opt_level = opt_level
+            options.low_memory = low_memory
+            options.target_opt_ctx = _nb_target_opt_ctx
+            options = compileoptions_normalize_mir_optimization(options)
+            val driver = compiler_driver_create(options)
+            if verbose:
+                _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
+            val driver_result = compiler_driver_run_compile(driver)
+            if verbose:
+                _cli_eprint("[native-build] Driver finished")
+            driver_result
+        else:
+            var options = driver_core_compile_options_default()
+            var native_inputs: [text] = []
+            if effective_entry_closure:
+                for cf in _native_build_entry_closure(entry_point, source_dirs):
+                    native_inputs = native_inputs.push(cf)
+                    options = cli_native_build_add_bootstrap_input(options, cf)
+            else:
+                for source_dir in source_dirs:
+                    native_inputs = native_inputs.push(source_dir)
+                    options = cli_native_build_add_bootstrap_input(options, source_dir)
+                native_inputs = native_inputs.push(entry_point)
+                options = cli_native_build_add_bootstrap_input(options, entry_point)
+            options.input_files = native_inputs
+            if verbose and effective_entry_closure:
+                _cli_eprint("[native-build] Entry closure files: {native_inputs.len()}")
+            options.mode = CompileMode.Aot
+            options.cli_mode_text = "aot"
+            options.output_file = Some(staged_output)
+            if build_mode == "dynload" and not emit_object and not emit_archive:
+                options.output_format = driver_output_format_both()
+            else:
+                options.output_format = driver_output_format_native()
+            options.backend = backend
+            options.release = release
+            options.opt_level = opt_level
+            options.low_memory = low_memory
+            options.target_opt_ctx = _nb_target_opt_ctx
+            options = compileoptions_normalize_mir_optimization(options)
+            val driver = compiler_driver_create(options)
+            if verbose:
+                _cli_eprint("[native-build] Driver start: inputs={native_inputs.len()} backend={backend} mode={build_mode}")
+            val driver_result = compiler_driver_run_compile(driver)
+            if verbose:
+                _cli_eprint("[native-build] Driver finished")
+            driver_result
+        match result:
+            case CompileResult.Success(_):
+                # Root-cause guard for the exit-0-with-no-binary hang
+                # (doc/08_tracking/bug/native_build_worker_zombie_parent_hang_2026-07-03.md):
+                # the driver/linker pipeline can report Success (e.g. a linker
+                # subprocess that silently no-ops) without the output file ever
+                # landing on disk. Never let that surface as a quiet success --
+                # fail loudly here, at the single funnel all native-build exits
+                # pass through, instead of leaving callers to discover a missing
+                # binary after trusting exit code 0.
+                if not _cli_file_exists_impl(staged_output):
+                    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                    env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+                    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                    env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                    env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+                    env_set("SIMPLE_CORE_RUNTIME_PATH", old_core_runtime_path)
+                    if runtime_bundle_explicit:
+                        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                    if set_native_target:
+                        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                    if set_native_cpu:
+                        env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                    _cli_file_remove_impl(staged_output)
+                    _cli_eprint("error: native-build reported success but produced no fresh output binary: {staged_output}")
+                    _cli_eprint("  (compiler driver returned Success without writing the expected file -- treating as a hard failure, not a silent success)")
+                    return 1
+                if not _cli_file_rename_impl(staged_output, output):
+                    _cli_file_remove_impl(staged_output)
+                    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                    env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+                    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                    env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                    env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+                    env_set("SIMPLE_CORE_RUNTIME_PATH", old_core_runtime_path)
+                    if runtime_bundle_explicit:
+                        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                    if set_native_target:
+                        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                    if set_native_cpu:
+                        env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                    _cli_eprint("error: native-build produced staging output but could not publish it: {output}")
+                    return 1
+                val metadata_path = launch_metadata_sidecar_path(output)
+                val non_launchable_output = emit_object or emit_archive
+                var metadata_ok = true
+                if non_launchable_output:
+                    if _cli_file_exists_impl(metadata_path):
+                        metadata_ok = _cli_file_remove_impl(metadata_path)
+                else:
+                    val metadata = launch_metadata_for_native_build("host", "", "native")
+                    val metadata_text = render_launch_metadata_sidecar(metadata)
+                    metadata_ok = _cli_file_write_impl(metadata_path, metadata_text)
+                if not metadata_ok:
+                    env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                    env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                    env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+                    env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                    env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                    env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                    env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+                    env_set("SIMPLE_CORE_RUNTIME_PATH", old_core_runtime_path)
+                    if runtime_bundle_explicit:
+                        env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                    if set_native_target:
+                        env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                    if set_native_cpu:
+                        env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                    if native_threads > 0:
+                        env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                    _cli_eprint("Error: failed to update launch metadata sidecar: {metadata_path}")
+                    return 1
+                env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+                env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+                env_set("SIMPLE_CORE_RUNTIME_PATH", old_core_runtime_path)
+                if runtime_bundle_explicit:
+                    env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                if set_native_target:
+                    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                if set_native_cpu:
+                    env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                if native_threads > 0:
+                    env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                if verbose:
+                    _cli_eprint("[native-build] Build successful: {output}")
+                    if not non_launchable_output:
+                        _cli_eprint("[native-build] Launch metadata: {metadata_path}")
+                return 0
+            case _:
+                _cli_file_remove_impl(staged_output)
+                env_set("SIMPLE_OS_LOG_MODE", old_log_mode)
+                env_set("SIMPLE_NATIVE_BUILD_EMIT_OBJECT", old_emit_object)
+                env_set("SIMPLE_NATIVE_BUILD_NO_MANGLE", old_no_mangle)
+                env_set("SIMPLE_NATIVE_BUILD_CACHE_DIR", old_native_cache_dir)
+                env_set("SIMPLE_NATIVE_ARENA_DECLS", old_native_arena_decls)
+                env_set("SIMPLE_NATIVE_BUILD_ENTRY", old_native_entry)
+                env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", old_native_entry_closure)
+                env_set("SIMPLE_RUNTIME_PATH", old_runtime_path)
+                env_set("SIMPLE_CORE_RUNTIME_PATH", old_core_runtime_path)
+                if runtime_bundle_explicit:
+                    env_set("SIMPLE_NATIVE_RUNTIME_BUNDLE", old_native_runtime_bundle)
+                if set_native_target:
+                    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_native_target)
+                if set_native_cpu:
+                    env_set("SIMPLE_NATIVE_CPU", old_native_cpu)
+                if native_threads > 0:
+                    env_set("SIMPLE_NATIVE_BUILD_THREADS", old_native_threads)
+                if verbose:
+                    _cli_eprint("[native-build] failed backend={backend} mode={build_mode} cache-dir={cache_dir} threads={native_threads} entry={entry_point} output={output}")
+                val errors = compile_result_errors(result)
+                if errors.len() == 0:
+                    _cli_eprint("error: native-build failed without diagnostics")
+                else:
+                    for err in errors:
+                        _cli_eprint("error: {err}")
+                return 1
+    else:
+        if backend_explicit:
+            _cli_eprint("Error: native-build backend '{backend}' is not available in the pure Simple command path")
+        else:
+            _cli_eprint("Error: native-build requires --backend=llvm-lib in the pure Simple command path")
+        _cli_eprint("The Rust seed is bootstrap-only; native-build no longer falls back to rt_native_build.")
+        return 1
+
+fn cli_normalize_runtime_bundle_aliases(args: [text]) -> [text]:
+    # Map semantic Simple/C runtime lane names onto legacy driver values.
+    # Delegation must not revive the removed Rust-hosted lane or collapse pure
+    # Simple and C-bootstrap lanes into the legacy `runtime` value.
+    var normalized: [text] = []
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--runtime-bundle" and i + 1 < args.len():
+            normalized = normalized.push(arg)
+            val value = args[i + 1]
+            if value == "simple_core":
+                normalized = normalized.push("simple-core")
+            elif value == "core_c_bootstrap":
+                normalized = normalized.push("core-c-bootstrap")
+            else:
+                normalized = normalized.push(value)
+            i = i + 2
+            continue
+        elif arg.starts_with("--runtime-bundle="):
+            val value = arg.substring(17)
+            if value == "simple_core":
+                normalized = normalized.push("--runtime-bundle=simple-core")
+            elif value == "core_c_bootstrap":
+                normalized = normalized.push("--runtime-bundle=core-c-bootstrap")
+            else:
+                normalized = normalized.push(arg)
+            i = i + 1
+            continue
+        normalized = normalized.push(arg)
+        i = i + 1
+    return normalized
+
+fn cli_runtime_bundle_is_rust_or_hosted(bundle: text) -> bool:
+    bundle == "hosted" or bundle == "rust-hosted" or bundle == "rust_hosted" or bundle == "hosted-runtime" or bundle == "rust-runtime" or bundle == "all"

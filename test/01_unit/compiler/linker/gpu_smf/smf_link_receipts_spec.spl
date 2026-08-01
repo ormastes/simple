@@ -1,0 +1,228 @@
+# ============================================================================
+# SmfLinkProfile StageReceipts (Lane PROFILE) — smf_link_receipts.spl spec.
+#
+# Six claims:
+#   1. STAGE KEYS — collect/resolve/reachability receipts are keyed by the
+#      matching SMF_LINK_STAGE_L* const (L2 / L4 / L6) via smf_link_stage_id,
+#      and carry the cpu_reference backend + CpuReference mode.
+#   2. WRAPPER FIDELITY — each *_with_receipt wrapper returns exactly what
+#      the frozen underlying function returns (record/resolution/mark
+#      content unchanged).
+#   3. COUNTS — item_count_in/item_count_out reflect the stage's real
+#      element counts; byte and time counters are structurally 0.
+#   4. DETERMINISM — running the same stage twice on the same input yields
+#      byte-identical input_root, output_root and deterministic_hash (no
+#      timestamps anywhere in the receipt).
+#   5. SENSITIVITY — a one-symbol input change moves input_root,
+#      output_root and deterministic_hash (the roots are content hashes,
+#      not constants).
+#   6. MALFORMED — a bounds-rejected reachability run is recorded as
+#      malformed_count 1; a clean run as 0.
+# ============================================================================
+
+use std.spec
+use std.common.structural.resolve.resolve_types.{
+    SMF_LINK_STAGE_L2_ARENAS,
+    SMF_LINK_STAGE_L4_SELECT,
+    SMF_LINK_STAGE_L6_REACHABILITY
+}
+use std.common.structural.resolve.resolve_frontier.{ResolveEdge}
+use std.common.compute.placement_contracts.backend.{StageReceipt}
+use std.common.compute.placement_contracts.semantic.{ExecutionMode}
+use compiler.backend.linker.gpu_smf.smf_link_profile.{
+    SmfLinkInputs,
+    SmfSymbolInput,
+    smf_collect_records,
+    smf_resolve
+}
+use compiler.backend.linker.gpu_smf.smf_reachability.{smf_reachable_sections}
+use compiler.backend.linker.gpu_smf.smf_link_receipts.{
+    smf_link_stage_id,
+    smf_collect_records_with_receipt,
+    smf_resolve_with_receipt,
+    smf_reachable_sections_with_receipt
+}
+
+# ----------------------------------------------------------------------------
+# Fixtures
+# ----------------------------------------------------------------------------
+
+fn _sym(name: text, defined: bool, section_index: i64) -> SmfSymbolInput:
+    SmfSymbolInput(
+        name: name,
+        defined: defined,
+        binding: 1,
+        sym_type: 0,
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false,
+        section_index: section_index)
+
+fn _inputs() -> SmfLinkInputs:
+    """Module 7: 0 main(def) 1 foo(def) 2 bar(ref) 3 foo(ref) 4 main(ref)."""
+    SmfLinkInputs(
+        module_index: 7,
+        symbols: [
+            _sym("main", true, 0),
+            _sym("foo", true, 1),
+            _sym("bar", false, -1),
+            _sym("foo", false, -1),
+            _sym("main", false, -1)
+        ])
+
+fn _renamed_inputs() -> SmfLinkInputs:
+    """Same shape as _inputs but one definition renamed (foo -> qux)."""
+    SmfLinkInputs(
+        module_index: 7,
+        symbols: [
+            _sym("main", true, 0),
+            _sym("qux", true, 1),
+            _sym("bar", false, -1),
+            _sym("foo", false, -1),
+            _sym("main", false, -1)
+        ])
+
+fn _chain_edges() -> [ResolveEdge]:
+    [
+        ResolveEdge(from_index: 0, to_index: 1),
+        ResolveEdge(from_index: 1, to_index: 2)
+    ]
+
+fn _is_cpu_reference(receipt: StageReceipt) -> bool:
+    match receipt.mode:
+        case CpuReference: true
+        case HybridVectorGpu: false
+        case ResidentGpu: false
+
+# ----------------------------------------------------------------------------
+# 1. Stage keys + backend identity
+# ----------------------------------------------------------------------------
+
+describe "smf_link_receipts stage keys":
+    it "keys the collect receipt by SMF_LINK_STAGE_L2_ARENAS":
+        val o = smf_collect_records_with_receipt(_inputs())
+        expect(o.receipt.stage.value).to_equal(smf_link_stage_id(SMF_LINK_STAGE_L2_ARENAS).value)
+        expect(o.receipt.stage.value).to_equal("smf_link.L2")
+        expect(o.receipt.backend.value).to_equal("cpu_reference")
+        expect(_is_cpu_reference(o.receipt)).to_be(true)
+
+    it "keys the resolve receipt by SMF_LINK_STAGE_L4_SELECT":
+        val c = smf_collect_records_with_receipt(_inputs())
+        val o = smf_resolve_with_receipt(c.defs, c.refs)
+        expect(o.receipt.stage.value).to_equal(smf_link_stage_id(SMF_LINK_STAGE_L4_SELECT).value)
+        expect(o.receipt.stage.value).to_equal("smf_link.L4")
+        expect(o.receipt.backend.value).to_equal("cpu_reference")
+        expect(_is_cpu_reference(o.receipt)).to_be(true)
+
+    it "keys the reachability receipt by SMF_LINK_STAGE_L6_REACHABILITY":
+        val o = smf_reachable_sections_with_receipt(3, _chain_edges(), [0])
+        expect(o.receipt.stage.value).to_equal(smf_link_stage_id(SMF_LINK_STAGE_L6_REACHABILITY).value)
+        expect(o.receipt.stage.value).to_equal("smf_link.L6")
+        expect(o.receipt.backend.value).to_equal("cpu_reference")
+        expect(_is_cpu_reference(o.receipt)).to_be(true)
+
+# ----------------------------------------------------------------------------
+# 2. Wrapper fidelity — same results as the frozen functions
+# ----------------------------------------------------------------------------
+
+describe "smf_link_receipts wrapper fidelity":
+    it "returns the same defs/refs as smf_collect_records":
+        val o = smf_collect_records_with_receipt(_inputs())
+        val (defs, refs) = smf_collect_records(_inputs())
+        expect(o.defs.len()).to_equal(defs.len())
+        expect(o.refs.len()).to_equal(refs.len())
+        expect(o.defs.len()).to_equal(2)
+        expect(o.refs.len()).to_equal(3)
+        expect(o.defs[0].order as i64).to_equal(defs[0].order as i64)
+        expect(o.refs[0].owner.local_index as i64).to_equal(refs[0].owner.local_index as i64)
+
+    it "returns the same resolutions as smf_resolve":
+        val c = smf_collect_records_with_receipt(_inputs())
+        val o = smf_resolve_with_receipt(c.defs, c.refs)
+        val direct = smf_resolve(c.defs, c.refs)
+        expect(o.results.len()).to_equal(direct.len())
+        expect(o.results.len()).to_equal(3)
+
+    it "returns the same marks as smf_reachable_sections":
+        val o = smf_reachable_sections_with_receipt(3, _chain_edges(), [0])
+        val direct = smf_reachable_sections(3, _chain_edges(), [0])
+        expect(o.result.ok).to_be(true)
+        expect(o.result.values.len()).to_equal(direct.values.len())
+        expect(o.result.values[0]).to_be(direct.values[0])
+        expect(o.result.values[2]).to_be(direct.values[2])
+
+# ----------------------------------------------------------------------------
+# 3. Counts + structurally-zero counters
+# ----------------------------------------------------------------------------
+
+describe "smf_link_receipts counts":
+    it "counts collect input symbols and output records":
+        val o = smf_collect_records_with_receipt(_inputs())
+        expect(o.receipt.item_count_in as i64).to_equal(5)
+        expect(o.receipt.item_count_out as i64).to_equal(5)
+
+    it "counts resolve input records and output resolutions":
+        val c = smf_collect_records_with_receipt(_inputs())
+        val o = smf_resolve_with_receipt(c.defs, c.refs)
+        expect(o.receipt.item_count_in as i64).to_equal(5)
+        expect(o.receipt.item_count_out as i64).to_equal(3)
+
+    it "counts reachability inputs (edges + roots) and marked sections":
+        val o = smf_reachable_sections_with_receipt(3, _chain_edges(), [0])
+        expect(o.receipt.item_count_in as i64).to_equal(3)
+        expect(o.receipt.item_count_out as i64).to_equal(3)
+
+    it "keeps byte and time counters structurally zero":
+        val o = smf_collect_records_with_receipt(_inputs())
+        expect(o.receipt.bytes_read as i64).to_equal(0)
+        expect(o.receipt.bytes_written as i64).to_equal(0)
+        expect(o.receipt.elapsed_us as i64).to_equal(0)
+        expect(o.receipt.fallback_count as i64).to_equal(0)
+        expect(o.receipt.overflow_flags as i64).to_equal(0)
+
+# ----------------------------------------------------------------------------
+# 4. Determinism — identical input, identical receipt hashes
+# ----------------------------------------------------------------------------
+
+describe "smf_link_receipts determinism":
+    it "produces byte-identical collect receipt hashes across two runs":
+        val a = smf_collect_records_with_receipt(_inputs())
+        val b = smf_collect_records_with_receipt(_inputs())
+        expect(a.receipt.input_root.value).to_equal(b.receipt.input_root.value)
+        expect(a.receipt.output_root.value).to_equal(b.receipt.output_root.value)
+        expect(a.receipt.deterministic_hash.value).to_equal(b.receipt.deterministic_hash.value)
+
+    it "produces byte-identical resolve and reachability receipt hashes across two runs":
+        val c = smf_collect_records_with_receipt(_inputs())
+        val ra = smf_resolve_with_receipt(c.defs, c.refs)
+        val rb = smf_resolve_with_receipt(c.defs, c.refs)
+        expect(ra.receipt.deterministic_hash.value).to_equal(rb.receipt.deterministic_hash.value)
+        val ka = smf_reachable_sections_with_receipt(3, _chain_edges(), [0])
+        val kb = smf_reachable_sections_with_receipt(3, _chain_edges(), [0])
+        expect(ka.receipt.deterministic_hash.value).to_equal(kb.receipt.deterministic_hash.value)
+
+# ----------------------------------------------------------------------------
+# 5. Sensitivity — the roots are content hashes
+# ----------------------------------------------------------------------------
+
+describe "smf_link_receipts sensitivity":
+    it "moves every hash when one symbol is renamed":
+        val a = smf_collect_records_with_receipt(_inputs())
+        val b = smf_collect_records_with_receipt(_renamed_inputs())
+        expect(a.receipt.input_root.value != b.receipt.input_root.value).to_be(true)
+        expect(a.receipt.output_root.value != b.receipt.output_root.value).to_be(true)
+        expect(a.receipt.deterministic_hash.value != b.receipt.deterministic_hash.value).to_be(true)
+
+# ----------------------------------------------------------------------------
+# 6. Malformed — bounds-rejected reachability is visible in the receipt
+# ----------------------------------------------------------------------------
+
+describe "smf_link_receipts malformed marking":
+    it "records a clean reachability run with malformed_count 0":
+        val o = smf_reachable_sections_with_receipt(3, _chain_edges(), [0])
+        expect(o.receipt.malformed_count as i64).to_equal(0)
+
+    it "records a bounds-rejected reachability run with malformed_count 1":
+        val o = smf_reachable_sections_with_receipt(2, [ResolveEdge(from_index: 0, to_index: 5)], [0])
+        expect(o.result.ok).to_be(false)
+        expect(o.receipt.malformed_count as i64).to_equal(1)

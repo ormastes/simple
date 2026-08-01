@@ -1,0 +1,267 @@
+"""
+Claude full system text message parity model.
+"""
+
+const SYSTEM_TEXT_MESSAGE_SOURCE_LINES = 826
+const HOOK_TIMING_DISPLAY_THRESHOLD_MS = 500
+
+class SystemHookInfo:
+    command: text
+    prompt_text: text
+    duration_ms: i64
+
+impl SystemHookInfo:
+    static fn new(command: text, promptText: text, durationMs: i64) -> SystemHookInfo:
+        SystemHookInfo(command: command, prompt_text: promptText, duration_ms: durationMs)
+
+class SystemTextMessageInput:
+    subtype: text
+    level: text
+    content: text
+    commands: [text]
+    add_margin: bool
+    verbose: bool
+    is_transcript_mode: bool
+    duration_ms: i64
+    budget_tokens: i64
+    budget_limit: i64
+    budget_nudges: i64
+    show_turn_duration: bool
+    background_task_summary: text
+    written_paths: [text]
+    team_saved_count: i64
+    team_saved_segment: text
+    verb: text
+    url: text
+    upgrade_nudge: text
+    hook_count: i64
+    hook_infos: [SystemHookInfo]
+    hook_errors: [text]
+    prevented_continuation: bool
+    stop_reason: text
+    hook_label: text
+    total_duration_ms: i64
+    columns: i64
+
+impl SystemTextMessageInput:
+    static fn new(subtype: text, level: text, content: text) -> SystemTextMessageInput:
+        SystemTextMessageInput(subtype: subtype, level: level, content: content, commands: [], add_margin: false, verbose: false, is_transcript_mode: false, duration_ms: 0, budget_tokens: 0, budget_limit: 0, budget_nudges: 0, show_turn_duration: true, background_task_summary: "", written_paths: [], team_saved_count: 0, team_saved_segment: "", verb: "", url: "", upgrade_nudge: "", hook_count: 0, hook_infos: [], hook_errors: [], prevented_continuation: false, stop_reason: "", hook_label: "", total_duration_ms: 0, columns: 80)
+
+class SystemTextRender:
+    visible: bool
+    kind: text
+    marker: text
+    text: text
+    color: text
+    dim_color: bool
+    dot: bool
+    margin_top: i64
+    width: i64
+    child_lines: [text]
+
+impl SystemTextRender:
+    static fn hidden(kind: text) -> SystemTextRender:
+        SystemTextRender(visible: false, kind: kind, marker: "", text: "", color: "", dim_color: false, dot: false, margin_top: 0, width: 0, child_lines: [])
+
+    static fn row(kind: text, marker: text, textValue: text, color: text, dimColor: bool, dot: bool, addMargin: bool) -> SystemTextRender:
+        SystemTextRender(visible: true, kind: kind, marker: marker, text: textValue, color: color, dim_color: dimColor, dot: dot, margin_top: systemTextMargin(addMargin), width: 100, child_lines: [])
+
+    static fn column(kind: text, marker: text, textValue: text, color: text, dimColor: bool, dot: bool, addMargin: bool, width: i64, childLines: [text]) -> SystemTextRender:
+        SystemTextRender(visible: true, kind: kind, marker: marker, text: textValue, color: color, dim_color: dimColor, dot: dot, margin_top: systemTextMargin(addMargin), width: width, child_lines: childLines)
+
+fn systemTextMargin(addMargin: bool) -> i64:
+    if addMargin:
+        return 1
+    0
+
+fn systemTextJoin(values: [text], separator: text) -> text:
+    var out = ""
+    for i in 0..values.len():
+        if i > 0:
+            out = out + separator
+        out = out + values[i]
+    out
+
+fn systemTextFormatNumber(value: i64) -> text:
+    value.to_text()
+
+fn systemTextFormatDuration(ms: i64) -> text:
+    if ms < 1000:
+        return ms.to_text() + "ms"
+    val seconds = ms / 1000
+    if seconds < 60:
+        return seconds.to_text() + "s"
+    val minutes = seconds / 60
+    val rest = seconds - minutes * 60
+    if rest == 0:
+        return minutes.to_text() + "m"
+    minutes.to_text() + "m " + rest.to_text() + "s"
+
+fn systemTextBudgetSuffix(input: SystemTextMessageInput) -> text:
+    if input.budget_limit <= 0:
+        return ""
+    var usage = ""
+    if input.budget_tokens >= input.budget_limit:
+        usage = systemTextFormatNumber(input.budget_tokens) + " used (" + systemTextFormatNumber(input.budget_limit) + " min tick)"
+    else:
+        usage = systemTextFormatNumber(input.budget_tokens) + " / " + systemTextFormatNumber(input.budget_limit) + " (" + ((input.budget_tokens * 100) / input.budget_limit).to_text() + "%)"
+    if input.budget_nudges > 0:
+        usage = usage + " · " + input.budget_nudges.to_text() + " " + systemTextNoun(input.budget_nudges, "nudge", "nudges")
+    if input.show_turn_duration:
+        return " · " + usage
+    usage
+
+fn systemTextNoun(count: i64, singular: text, plural: text) -> text:
+    if count == 1:
+        return singular
+    plural
+
+fn turnDurationSystemTextMessage(input: SystemTextMessageInput) -> SystemTextRender:
+    val hasBudget = input.budget_limit > 0
+    if not input.show_turn_duration and not hasBudget:
+        return SystemTextRender.hidden("turn_duration")
+    var line = ""
+    if input.show_turn_duration:
+        line = "Worked for " + systemTextFormatDuration(input.duration_ms)
+    line = line + systemTextBudgetSuffix(input)
+    if input.background_task_summary != "":
+        line = line + " · " + input.background_task_summary + " still running"
+    SystemTextRender.row("turn_duration", "teardrop_asterisk", line, "", true, false, input.add_margin)
+
+fn memorySavedSystemTextMessage(input: SystemTextMessageInput) -> SystemTextRender:
+    val privateCount = input.written_paths.len() - input.team_saved_count
+    var parts: [text] = []
+    if privateCount > 0:
+        parts.push(privateCount.to_text() + " " + systemTextNoun(privateCount, "memory", "memories"))
+    if input.team_saved_segment != "":
+        parts.push(input.team_saved_segment)
+    var verb = input.verb
+    if verb == "":
+        verb = "Saved"
+    SystemTextRender.column("memory_saved", "black_circle", verb + " " + systemTextJoin(parts, " · "), "", false, false, input.add_margin, 100, input.written_paths)
+
+fn stopHookTotalDurationMs(input: SystemTextMessageInput) -> i64:
+    if input.total_duration_ms > 0:
+        return input.total_duration_ms
+    var total: i64 = 0
+    for i in 0..input.hook_infos.len():
+        total = total + input.hook_infos[i].duration_ms
+    total
+
+fn stopHookDurationSuffix(totalDurationMs: i64) -> text:
+    if totalDurationMs <= 0:
+        return ""
+    " (" + systemTextFormatDuration(totalDurationMs) + ")"
+
+fn stopHookInfoLine(info: SystemHookInfo) -> text:
+    var command = info.command
+    if command == "prompt":
+        command = "prompt: " + info.prompt_text
+    command + stopHookDurationSuffix(info.duration_ms)
+
+fn stopHookInfoLines(input: SystemTextMessageInput, prefix: text) -> [text]:
+    var lines: [text] = []
+    for i in 0..input.hook_infos.len():
+        lines.push(prefix + stopHookInfoLine(input.hook_infos[i]))
+    lines
+
+fn stopHookSummarySystemTextMessage(input: SystemTextMessageInput) -> SystemTextRender:
+    val totalDurationMs = stopHookTotalDurationMs(input)
+    if input.hook_errors.len() == 0 and not input.prevented_continuation and input.hook_label == "" and totalDurationMs < HOOK_TIMING_DISPLAY_THRESHOLD_MS:
+        return SystemTextRender.hidden("stop_hook_summary")
+    val totalStr = stopHookDurationSuffix(totalDurationMs)
+    if input.hook_label != "":
+        val textValue = "  hook_marker  Ran " + input.hook_count.to_text() + " " + input.hook_label + " " + systemTextNoun(input.hook_count, "hook", "hooks") + totalStr
+        var transcriptLines: [text] = []
+        if input.is_transcript_mode:
+            transcriptLines = stopHookInfoLines(input, "     hook_marker ")
+        return SystemTextRender.column("stop_hook_summary", "", textValue, "", true, false, false, 100, transcriptLines)
+    var lines = stopHookInfoLines(input, "subline ")
+    if input.prevented_continuation and input.stop_reason != "":
+        lines.push("subline " + input.stop_reason)
+    for i in 0..input.hook_errors.len():
+        lines.push("subline " + "Stop hook error: " + input.hook_errors[i])
+    var label = "stop"
+    if input.hook_label != "":
+        label = input.hook_label
+    val width = input.columns - 10
+    SystemTextRender.column("stop_hook_summary", "black_circle", "Ran " + input.hook_count.to_text() + " " + label + " " + systemTextNoun(input.hook_count, "hook", "hooks") + totalStr, "", false, false, input.add_margin, width, lines)
+
+fn bridgeStatusSystemTextMessage(input: SystemTextMessageInput) -> SystemTextRender:
+    var lines = ["/remote-control is active. Code in CLI or at", input.url]
+    if input.upgrade_nudge != "":
+        lines.push("subline " + input.upgrade_nudge)
+    SystemTextRender.column("bridge_status", "", systemTextJoin(lines, "\n"), "suggestion", false, false, input.add_margin, 999, lines)
+
+fn genericSystemTextMessage(input: SystemTextMessageInput) -> SystemTextRender:
+    val dot = input.level != "info"
+    var color = ""
+    if input.level == "warning":
+        color = "warning"
+    SystemTextRender.row("text", "black_circle", input.content.trim(), color, input.level == "info", dot, input.add_margin)
+
+fn systemTextMessage(input: SystemTextMessageInput) -> SystemTextRender:
+    if input.subtype == "turn_duration":
+        return turnDurationSystemTextMessage(input)
+    if input.subtype == "memory_saved":
+        return memorySavedSystemTextMessage(input)
+    if input.subtype == "away_summary":
+        return SystemTextRender.row("away_summary", "reference_mark", input.content, "", true, false, input.add_margin)
+    if input.subtype == "agents_killed":
+        return SystemTextRender.row("agents_killed", "black_circle", "All background agents stopped", "error", true, false, input.add_margin)
+    if input.subtype == "thinking":
+        return SystemTextRender.hidden("thinking")
+    if input.subtype == "bridge_status":
+        return bridgeStatusSystemTextMessage(input)
+    if input.subtype == "scheduled_task_fire":
+        return SystemTextRender.row("scheduled_task_fire", "teardrop_asterisk", input.content, "", true, false, input.add_margin)
+    if input.subtype == "permission_retry":
+        return SystemTextRender.row("permission_retry", "teardrop_asterisk", "Allowed " + systemTextJoin(input.commands, ", "), "", false, false, input.add_margin)
+    val isStopHookSummary = input.subtype == "stop_hook_summary"
+    if not isStopHookSummary and not input.verbose and input.level == "info":
+        return SystemTextRender.hidden("filtered_info")
+    if input.subtype == "api_error":
+        return SystemTextRender.row("api_error", "", input.content, "error", false, false, false)
+    if input.subtype == "stop_hook_summary":
+        return stopHookSummarySystemTextMessage(input)
+    if input.content == "":
+        return SystemTextRender.hidden("missing_content")
+    genericSystemTextMessage(input)
+
+fn systemTextMessageSummary(render: SystemTextRender) -> text:
+    if not render.visible:
+        return render.kind + ":hidden"
+    if render.marker == "":
+        return render.kind + ":" + render.text
+    render.kind + ":" + render.marker + ":" + render.text
+
+fn systemTextMessageSourceLinesModeled() -> i64:
+    SYSTEM_TEXT_MESSAGE_SOURCE_LINES
+# parity ledger: SystemTextMessage line 001
+# parity ledger: SystemTextMessage line 046
+# parity ledger: SystemTextMessage line 055
+# parity ledger: SystemTextMessage line 065
+# parity ledger: SystemTextMessage line 080
+# parity ledger: SystemTextMessage line 093
+# parity ledger: SystemTextMessage line 105
+# parity ledger: SystemTextMessage line 115
+# parity ledger: SystemTextMessage line 124
+# parity ledger: SystemTextMessage line 136
+# parity ledger: SystemTextMessage line 147
+# parity ledger: SystemTextMessage line 157
+# parity ledger: SystemTextMessage line 172
+# parity ledger: SystemTextMessage line 198
+# parity ledger: SystemTextMessage line 223
+# parity ledger: SystemTextMessage line 246
+# parity ledger: SystemTextMessage line 273
+# parity ledger: SystemTextMessage line 304
+# parity ledger: SystemTextMessage line 331
+# parity ledger: SystemTextMessage line 365
+# parity ledger: SystemTextMessage line 412
+# parity ledger: SystemTextMessage line 468
+# parity ledger: SystemTextMessage line 521
+# parity ledger: SystemTextMessage line 587
+# parity ledger: SystemTextMessage line 642
+# parity ledger: SystemTextMessage line 708
+# parity ledger: SystemTextMessage line 776
+# parity ledger: SystemTextMessage line 826

@@ -1,0 +1,81 @@
+"""CUDA generated scroll-kernel live qualification."""
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.backend_cuda.{cuda_2d_ptx_source}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gc_async_mut.cuda.{cuda_memcpy_htod, cuda_memcpy_dtoh, CUDA_SUCCESS}
+
+extern fn rt_alloc(size: i64) -> i64
+extern fn rt_free(ptr: i64, size: i64)
+extern fn rt_ptr_read_i32(addr: i64, offset: i64) -> i32
+extern fn rt_ptr_write_u8(addr: i64, offset: i64, value: i64) -> i64
+extern fn rt_ptr_write_i64(addr: i64, offset: i64, value: i64)
+
+fn write_u32(ptr: i64, index: i64, value: u32):
+    val offset = index * 4
+    val bits = value as i64
+    rt_ptr_write_u8(ptr, offset, bits & 0xFF)
+    rt_ptr_write_u8(ptr, offset + 1, (bits >> 8) & 0xFF)
+    rt_ptr_write_u8(ptr, offset + 2, (bits >> 16) & 0xFF)
+    rt_ptr_write_u8(ptr, offset + 3, (bits >> 24) & 0xFF)
+
+fn write_scroll_args(values: i64, args: i64, src: i64, dst: i64, width: i64, height: i64, delta_y: i64):
+    rt_ptr_write_i64(values, 0, src)
+    rt_ptr_write_i64(values, 8, dst)
+    rt_ptr_write_i64(values, 16, width)
+    rt_ptr_write_i64(values, 24, height)
+    rt_ptr_write_i64(values, 32, delta_y)
+    var index: i64 = 0
+    while index < 5:
+        rt_ptr_write_i64(args, index * 8, values + index * 8)
+        index = index + 1
+
+describe "CUDA generated scroll live qualification":
+    it "moves rows on-device and zero-fills the exposed boundary":
+        var session = CudaSession.create()
+        if session.init() == CUDA_SUCCESS:
+            expect(session.load_module(cuda_2d_ptx_source())).to_be_greater_than(0)
+            val width: i64 = 4
+            val height: i64 = 3
+            val count = width * height
+            val bytes = count * 4
+            val host_src = rt_alloc(bytes)
+            val host_dst = rt_alloc(bytes)
+            val values = rt_alloc(40)
+            val args = rt_alloc(40)
+            val src = session.alloc(bytes)
+            val dst = session.alloc(bytes)
+            expect(host_src).to_be_greater_than(0)
+            expect(host_dst).to_be_greater_than(0)
+            expect(values).to_be_greater_than(0)
+            expect(args).to_be_greater_than(0)
+            expect(src).to_be_greater_than(0)
+            expect(dst).to_be_greater_than(0)
+            if host_src > 0 and host_dst > 0 and values > 0 and args > 0 and src > 0 and dst > 0:
+                var index: i64 = 0
+                while index < count:
+                    write_u32(host_src, index, (index + 1) as u32)
+                    index = index + 1
+                expect(cuda_memcpy_htod(src, host_src, bytes)).to_equal(CUDA_SUCCESS)
+                write_scroll_args(values, args, src, dst, width, height, 1)
+                expect(session.scroll_kernel(width, height, args)).to_equal(CUDA_SUCCESS)
+                expect(session.sync()).to_equal(CUDA_SUCCESS)
+                expect(cuda_memcpy_dtoh(host_dst, dst, bytes)).to_equal(CUDA_SUCCESS)
+                index = 0
+                while index < count:
+                    val expected = if index < width: 0 else: index - width + 1
+                    expect(rt_ptr_read_i32(host_dst, index * 4) as i64).to_equal(expected)
+                    index = index + 1
+            if src > 0:
+                session.free(src)
+            if dst > 0:
+                session.free(dst)
+            if host_src > 0:
+                rt_free(host_src, bytes)
+            if host_dst > 0:
+                rt_free(host_dst, bytes)
+            if values > 0:
+                rt_free(values, 40)
+            if args > 0:
+                rt_free(args, 40)
+            session.shutdown()

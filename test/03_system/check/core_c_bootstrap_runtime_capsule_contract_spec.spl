@@ -1,0 +1,98 @@
+use std.io.{file_read}
+use std.spec.{describe, it, expect}
+
+val PRODUCER = "scripts/check/build-core-c-bootstrap-runtime-capsule.shs"
+
+describe "direct core-C bootstrap runtime capsule producer":
+    it "uses the canonical ordered core-C source graph":
+        val source = file_read(PRODUCER)
+        for input in [
+            "runtime_native.c",
+            "runtime_framebuffer.c",
+            "runtime_directx_core.c",
+            "runtime_legacy_core.c",
+            "runtime_mcp_core.c",
+            "runtime_fork.c",
+            "runtime_memtrack.c",
+            "runtime_process.c",
+            "runtime_font.c",
+            "runtime_pool.c",
+            "runtime_simd_utf8.c",
+            "runtime_simd_dispatch.c"
+        ]:
+            expect(source).to_contain(input)
+        expect(source).to_contain("hosted_cocoa.c")
+        expect(source).to_contain("hosted_win32.c")
+        expect(source).to_contain("platform/platform_macos.h")
+        expect(source).to_contain("platform/unix_common.h")
+        expect(source).to_contain("stb_truetype.h")
+        expect(source.contains("runtime_https_openssl_core.c")).to_equal(false)
+
+    it "builds a deterministic archive without a language compiler lane":
+        val source = file_read(PRODUCER)
+        expect(source).to_contain("\"$CC_PATH\" $COMMON_FLAGS $TARGET_FLAGS")
+        expect(source).to_contain("\"$AR_PATH\" rcsD \"$ARCHIVE\"")
+        expect(source).to_contain("ZERO_AR_DATE=1 \"$AR_PATH\" rcs \"$ARCHIVE\"")
+        expect(source).to_contain("-MMD -MF \"$depfile\"")
+        expect(source).to_contain("for declared_input in $SOURCE_FILES $HEADER_FILES")
+        expect(source).to_contain("repeat-compile-failed")
+        expect(source).to_contain("repeat-build-archive-mismatch")
+        expect(source).to_contain("-DSIMPLE_CORE_C_STANDALONE=1")
+        expect(source).to_contain("-mno-outline-atomics")
+        expect(source.contains("bin/" + "simple")).to_equal(false)
+        expect(source.contains("native-" + "build")).to_equal(false)
+        expect(source.contains("car" + "go")).to_equal(false)
+        expect(source.contains("SIMPLE_ALLOW_" + "FREESTANDING_STUBS")).to_equal(false)
+
+    it "fails closed on dirty input and existing output":
+        val source = file_read(PRODUCER)
+        expect(source).to_contain("git status --porcelain --untracked-files=all")
+        expect(source).to_contain("runtime-source-dirty")
+        expect(source).to_contain("output-already-exists")
+        expect(source).to_contain("missing-runtime-input")
+        expect(source).to_contain("archive-empty")
+
+    it "requires the contract ABI from the canonical runtime-native provider":
+        val producer = file_read(PRODUCER)
+        val runtime = file_read("src/runtime/runtime_native.c")
+        val header = file_read("src/runtime/runtime.h")
+        for symbol in ["simple_contract_check", "simple_contract_check_msg"]:
+            expect(runtime).to_contain("void {symbol}(")
+            expect(header).to_contain("void     {symbol}(")
+            expect(producer).to_contain("{symbol}_archive_symbol=T")
+            expect(producer).to_contain("{symbol}_provider=runtime_native.o")
+
+    it "attests immutable inputs tools archive provider and self-check":
+        val source = file_read(PRODUCER)
+        for field in [
+            "schema=core-c-bootstrap-runtime-capsule-v1",
+            "head_revision=",
+            "runtime_tree=",
+            "cc_path=",
+            "cc_binary_sha256=",
+            "cc_version_sha256=",
+            "ar_path=",
+            "ar_binary_sha256=",
+            "ar_version_sha256=",
+            "nm_binary_sha256=",
+            "nm_version_sha256=",
+            "common_flags=",
+            "target_flags=",
+            "archive_mode=",
+            "source_list_sha256=",
+            "header_list_sha256=",
+            "local_input_list_sha256=",
+            "archive_sha256=",
+            "repeat_archive_sha256=",
+            "repeated_build_equal=true",
+            "repeated_build_receipt_sha256=",
+            "archive_members_sha256=",
+            "producer_script_sha256="
+        ]:
+            expect(source).to_contain(field)
+        expect(source).to_contain("rt_string_free_archive_symbol=T")
+        expect(source).to_contain("rt_string_free_provider=runtime_native.o")
+        expect(source).to_contain("NF >= 3")
+        expect(source).to_contain("rt_string_free_selfcheck=pass")
+        expect(source).to_contain("rt_string_free_selfcheck.c")
+        expect(source).to_contain("SELFCHECK PASSED (0 failures)")

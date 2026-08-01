@@ -1,0 +1,147 @@
+"""
+# Browser Fetch Aggregate Redirect Deadline
+
+## Overview
+
+The browser owns one absolute five-second Fetch budget across redirects after
+DNS resolution returns. Deterministic mock latency covers mixed HTTP/HTTPS
+hops without sleeping or depending on external hosts. Blocking DNS remains
+outside this claim because its runtime facade has no remaining-deadline input.
+
+**Requirements:** doc/02_requirements/feature/simple_web_browser_engine_production_hardening.md
+**Plan:** doc/03_plan/sys_test/simple_web_browser_engine_production_hardening.md
+**Design:** doc/05_design/simple_web_browser_engine_production_hardening.md
+**Research:** N/A
+
+## Examples
+
+An HTTP redirect may upgrade to HTTPS, but every hop receives the same absolute
+deadline. A chain totaling less than five seconds succeeds; a later hop that
+would cross the deadline fails before its response is committed.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, RequestMode
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.fetch.{FetchEngine}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    MockResponseRegistry, get_mock_registry, set_mock_registry
+}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{
+    Logger, BrowserLogLevel
+}
+use std.js.types.pair.{Pair}
+
+fn _deadline_request(url: text) -> FetchRequest:
+    FetchRequest(
+        url: Url.parse_or_opaque(url),
+        method: "GET",
+        headers: "",
+        body: [],
+        mode: RequestMode.Navigate,
+        credentials: "omit"
+    )
+
+describe "Browser Fetch aggregate redirect deadline":
+
+    after_each:
+        set_mock_registry(MockResponseRegistry.create())
+
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-017
+    # @manual: show
+    it "should stop a mixed-scheme redirect chain at one absolute deadline":
+        step("Register three local hops whose aggregate latency exceeds five seconds")
+        var registry = MockResponseRegistry.create_at(1000)
+        registry.register_slow(
+            "http://slow.test/start", 302,
+            [Pair("Location", "https://slow.test/second")], "", 2000
+        )
+        registry.register_slow(
+            "https://slow.test/second", 302,
+            [Pair("Location", "https://slow.test/final")], "", 2000
+        )
+        registry.register_slow(
+            "https://slow.test/final", 200,
+            [Pair("Cache-Control", "max-age=60")], "late", 2000
+        )
+        set_mock_registry(registry)
+        var fetch = FetchEngine.new_for_origin(
+            Logger.new("fetch-deadline", BrowserLogLevel.Error),
+            "http://slow.test"
+        )
+
+        step("Fetch with one absolute deadline shared by every redirect")
+        match fetch.fetch(_deadline_request("http://slow.test/start")):
+            Ok(_):
+                fail("slow redirect chain escaped the aggregate deadline")
+            Err(error):
+                expect(error.source).to_equal("network")
+                expect(error.message).to_equal(
+                    "h1: aggregate request deadline exceeded"
+                )
+
+        step("Reject the late response without committing cache state")
+        expect(get_mock_registry().observed_requests.len()).to_equal(3)
+        expect(get_mock_registry().now_ms).to_equal(6000)
+        expect(fetch.cache.entries.len()).to_equal(0)
+
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-017
+    # @manual: show
+    it "should complete a mixed-scheme redirect chain within the same budget":
+        step("Register a local HTTP to HTTPS chain within five seconds")
+        var registry = MockResponseRegistry.create_at(1000)
+        registry.register_slow(
+            "http://fast.test/start", 302,
+            [Pair("Location", "https://fast.test/second")], "", 1500
+        )
+        registry.register_slow(
+            "https://fast.test/second", 302,
+            [Pair("Location", "https://fast.test/final")], "", 1500
+        )
+        registry.register_slow(
+            "https://fast.test/final", 200, [], "done", 1500
+        )
+        set_mock_registry(registry)
+        var fetch = FetchEngine.new_for_origin(
+            Logger.new("fetch-deadline", BrowserLogLevel.Error),
+            "http://fast.test"
+        )
+
+        step("Complete all hops before the absolute deadline")
+        match fetch.fetch(_deadline_request("http://fast.test/start")):
+            Err(error):
+                fail(error.message)
+            Ok(response):
+                expect(response.status).to_equal(200)
+                expect(response.body_text()).to_equal("done")
+        expect(get_mock_registry().observed_requests.len()).to_equal(3)
+        expect(get_mock_registry().now_ms).to_equal(5500)
+
+    # @req REQ-WEB-BROWSER-010 REQ-WEB-BROWSER-017
+    # @manual: folded
+    it "should retain the twenty-redirect ceiling inside the deadline":
+        step("Register a zero-latency local redirect loop")
+        var registry = MockResponseRegistry.create_at(1000)
+        registry.register_slow(
+            "https://loop.test/again", 302,
+            [Pair("Location", "/again")], "", 0
+        )
+        set_mock_registry(registry)
+        var fetch = FetchEngine.new_for_origin(
+            Logger.new("fetch-deadline", BrowserLogLevel.Error),
+            "https://loop.test"
+        )
+
+        step("Stop after twenty redirects without refreshing the deadline")
+        match fetch.fetch(_deadline_request("https://loop.test/again")):
+            Ok(_):
+                fail("redirect loop escaped the twenty-hop ceiling")
+            Err(error):
+                expect(error.message).to_equal(
+                    "Too many redirects (max: 20)"
+                )
+        expect(get_mock_registry().observed_requests.len()).to_equal(21)
+        expect(get_mock_registry().now_ms).to_equal(1000)

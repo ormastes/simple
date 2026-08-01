@@ -1,0 +1,663 @@
+# ============================================================================
+# common/structural/execution/profile_types.spl — FROZEN ExecutionProfile and
+# capability vocabulary, contract v1.
+#
+# Architecture §21 (execution profile), §21.1 (StageBackend.capabilities),
+# §21.2 (cost estimate), §21.4 (fallback rules), §21.5 (cross-domain mode
+# matrix), §20.2 (device_mask), §20.7 (storage backends), §26 (contract
+# freeze, artifact group 9: "ExecutionProfile and capability vocabulary").
+#
+# Contract document: doc/05_design/platform/structural_compute/
+# execution_profile_contract_v1.md
+#
+# ---------------------------------------------------------------------------
+# WHAT IS *NOT* DECLARED HERE, ON PURPOSE
+# ---------------------------------------------------------------------------
+# `ExecutionMode` and `DeviceMask` already exist in
+# common/compute/placement_contracts/semantic.spl. `ExecutionMode` carries
+# exactly §21's three variants in exactly §21's order; `DeviceMask` is
+# `class DeviceMask: bits: u64`, an opaque bit container with NO defined bit
+# meanings anywhere in the tree. Both are IMPORTED. What this group freezes
+# for DeviceMask is therefore the BIT VOCABULARY, not the type.
+#
+# `VerificationPolicy` already exists, frozen by the receipts wave in
+# common/structural/receipt/receipt_types.spl with §21.1's five levels. It is
+# IMPORTED. Redeclaring it is how two lanes come to disagree about a
+# discriminant while both report success.
+#
+# `ExecutionProfile` — the name — already exists in this very directory
+# (contracts.spl) and is a DIFFERENT, UNRELATED record: it carries cpu_us,
+# gpu_kernel_us, scheduling_us, transfer_us_per_kib and sync_us, i.e. MEASURED
+# COST, is aliased `LayoutExecutionProfile`, and is read by ~20 modules. §21's
+# ExecutionProfile carries determinism, budgets, targets and policies and
+# shares not one field with it beyond `mode`. Per the freeze rule "if a name
+# collides with an unrelated type, pick a distinct one", §21's record is
+# frozen here as `StageExecutionProfile` — matching the frozen `Stage*` family
+# (StageReceipt, StageFallbackReason) and §21.1's own
+# `estimate(request, profile: ExecutionProfile)`, which is a PER-STAGE call.
+# contracts.spl is neither edited nor redeclared.
+#
+# `CapabilitySet` (§12.6 ClangAdapterCapability.supported_features) is NOT
+# frozen here. The architecture never enumerates a single feature of it, and
+# `CapabilitySet` is already a kernel type (src/os/kernel/types/
+# capability_types.spl). It belongs to the Clang lane and is reported for
+# ratification rather than guessed.
+#
+# ---------------------------------------------------------------------------
+# HOW THIS LINES UP WITH THE FROZEN RECEIPT (no silent fallback)
+# ---------------------------------------------------------------------------
+# The receipts wave froze `requested_mode` / `candidate_backend` /
+# `fallback_reason` so a forced degradation is distinguishable from a
+# cost-policy CPU choice AFTER the fact. This group is the BEFORE half: a
+# StageExecutionProfile states what was requested and, critically, whether
+# degrading is permitted at all (`fallback: StageFallbackPolicy`).
+#
+# The two halves meet at one rule: a profile whose requested mode its own
+# device mask forbids is UNSATISFIABLE, and an unsatisfiable profile can only
+# ever be honoured by a silent fallback. Such a profile is refused by the
+# encoder, so it cannot reach a backend and cannot become an unexplained
+# CpuReference receipt. Rejecting it here is what makes the receipt-side
+# guarantee reachable rather than aspirational.
+# ============================================================================
+
+use std.common.compute.placement_contracts.semantic.{DeviceMask, ExecutionMode}
+use std.common.structural.receipt.receipt_types.{
+    VERIFICATION_POLICY_MAX,
+    VerificationPolicy,
+    execution_mode_to_u8,
+    execution_mode_uses_gpu,
+    execution_mode_valid,
+    verification_policy_to_u8,
+    verification_policy_valid
+}
+
+val STRUCTURAL_EXECUTION_PROFILE_VERSION: i64 = 1
+
+# ----------------------------------------------------------------------------
+# Device-mask bit vocabulary
+#
+# DERIVATION. The architecture never lists device classes. It does, twice,
+# distinguish exactly four kinds of executor by naming a separate cost channel
+# for each in §21.2's CostEstimate:
+#
+#     cpu_work                     -> scalar CPU   (§21.5 "canonical scalar")
+#     simd_work                    -> vector CPU   (§21.5 "SIMD/GPU lex")
+#     gpu_work                     -> GPU
+#     ssd_read_bytes/ssd_write_bytes -> storage    (§20.7 storage backends)
+#
+# A cost model that budgets a channel separately must be able to forbid that
+# channel separately, so those four channels are the minimum vocabulary the
+# surrounding sections actually distinguish. No fifth bit is invented: the
+# remaining 60 bits are RESERVED and a set reserved bit is a hard reject, so
+# a later ratification can add a bit without a version bump ambiguity.
+# ----------------------------------------------------------------------------
+
+val DEVICE_BIT_CPU_SCALAR: i64 = 1
+val DEVICE_BIT_CPU_SIMD: i64 = 2
+val DEVICE_BIT_GPU: i64 = 4
+val DEVICE_BIT_STORAGE: i64 = 8
+
+val DEVICE_MASK_KNOWN: i64 = 15
+val DEVICE_MASK_BIT_COUNT: i64 = 4
+
+fn device_mask_bits(m: DeviceMask) -> i64:
+    """The raw bits of an imported DeviceMask, as the i64 the wire uses."""
+    m.bits
+
+fn device_mask_of(bits: i64) -> DeviceMask:
+    """Wrap raw wire bits back into the imported DeviceMask type."""
+    DeviceMask(bits: bits)
+
+fn device_mask_valid(bits: i64) -> bool:
+    """No reserved bit set, and at least one device allowed. A mask of zero
+    permits no executor at all, so nothing could ever run under it; that is a
+    malformed profile, not an empty one."""
+    if bits <= 0:
+        return false
+    (bits & (DEVICE_MASK_KNOWN ^ -1)) == 0
+
+fn device_mask_has(bits: i64, bit: i64) -> bool:
+    (bits & bit) != 0
+
+fn device_mask_covers(outer: i64, inner: i64) -> bool:
+    """True when `outer` permits every device `inner` needs."""
+    (inner & (outer ^ -1)) == 0
+
+fn device_mask_to_text(bits: i64) -> text:
+    """Stable, order-fixed rendering. Bit order is declaration order, so the
+    spelling is a function of the bits alone and diffs cleanly."""
+    var s = ""
+    if device_mask_has(bits, DEVICE_BIT_CPU_SCALAR):
+        s = s + "cpu_scalar"
+    if device_mask_has(bits, DEVICE_BIT_CPU_SIMD):
+        if s.len() > 0:
+            s = s + "|"
+        s = s + "cpu_simd"
+    if device_mask_has(bits, DEVICE_BIT_GPU):
+        if s.len() > 0:
+            s = s + "|"
+        s = s + "gpu"
+    if device_mask_has(bits, DEVICE_BIT_STORAGE):
+        if s.len() > 0:
+            s = s + "|"
+        s = s + "storage"
+    s
+
+# ----------------------------------------------------------------------------
+# Execution-mode bit vocabulary
+#
+# A StageBackend advertises WHICH of §21's three modes it can run. The mask is
+# over ExecutionMode's own discriminants, so bit i means mode i and no second
+# ordering is introduced.
+# ----------------------------------------------------------------------------
+
+val MODE_BIT_CPU_REFERENCE: i64 = 1
+val MODE_BIT_HYBRID_VECTOR_GPU: i64 = 2
+val MODE_BIT_RESIDENT_GPU: i64 = 4
+
+val MODE_MASK_KNOWN: i64 = 7
+val MODE_MASK_BIT_COUNT: i64 = 3
+
+fn mode_bit(m: ExecutionMode) -> i64:
+    """The single mask bit for a mode: 1 << its frozen discriminant."""
+    1 << execution_mode_to_u8(m)
+
+fn mode_mask_valid(bits: i64) -> bool:
+    """No reserved bit, and at least one supported mode. A backend that
+    supports no mode cannot be selected for anything."""
+    if bits <= 0:
+        return false
+    (bits & (MODE_MASK_KNOWN ^ -1)) == 0
+
+fn mode_mask_has(bits: i64, m: ExecutionMode) -> bool:
+    (bits & mode_bit(m)) != 0
+
+fn mode_mask_uses_gpu(bits: i64) -> bool:
+    """True when the mask advertises either of §21.5's two device columns."""
+    (bits & (MODE_BIT_HYBRID_VECTOR_GPU | MODE_BIT_RESIDENT_GPU)) != 0
+
+# ----------------------------------------------------------------------------
+# StageFallbackPolicy — what a profile permits when its mode cannot be honoured
+#
+# DERIVATION. §21.4 enumerates eight fallback REASONS but never says who is
+# allowed to fall back; the receipts wave froze the reasons, so this group
+# must freeze the permission. The only ladder the architecture states is in
+# the in-tree compiler contract src/compiler/00.common/structural_contracts/
+# offload_profile.spl:
+#
+#     hybrid -> cpu_reference;  resident -> hybrid -> cpu_reference
+#
+# That ladder has exactly three stopping points, which is exactly this
+# vocabulary and no more:
+#
+#     Forbid       stop immediately; raise instead of degrading
+#     AllowHybrid  resident may degrade to hybrid, never to CPU
+#     AllowCpu     the full ladder, down to cpu_reference
+#
+# Named `StageFallbackPolicy`, not `FallbackPolicy`, and deliberately not
+# reusing `OffloadFallbackPolicy`: that enum lives in the compiler app layer,
+# has only the two outer rungs (AllowCpu / RequireRequested), and cannot
+# express the middle one. Same reasoning that made the receipts wave choose
+# `StageFallbackReason` over `FallbackReason`.
+# ----------------------------------------------------------------------------
+
+enum StageFallbackPolicy:
+    """Whether, and how far, a stage may degrade below its requested mode."""
+    Forbid
+    AllowHybrid
+    AllowCpu
+
+fn stage_fallback_policy_to_u8(p: StageFallbackPolicy) -> i64:
+    match p:
+        case StageFallbackPolicy.Forbid: 0
+        case StageFallbackPolicy.AllowHybrid: 1
+        case StageFallbackPolicy.AllowCpu: 2
+
+val STAGE_FALLBACK_POLICY_MAX: i64 = 2
+val STAGE_FALLBACK_POLICY_COUNT: i64 = 3
+
+fn stage_fallback_policy_from_u8(v: i64) -> StageFallbackPolicy:
+    """Caller MUST gate on `stage_fallback_policy_valid` first. Total by
+    construction, pinning unknown input to Forbid — the SAFE rung. An unknown
+    discriminant must never decode to a value that permits more degradation
+    than the producer wrote."""
+    match v:
+        case 1: StageFallbackPolicy.AllowHybrid
+        case 2: StageFallbackPolicy.AllowCpu
+        case _: StageFallbackPolicy.Forbid
+
+fn stage_fallback_policy_valid(v: i64) -> bool:
+    v >= 0 and v <= STAGE_FALLBACK_POLICY_MAX
+
+fn stage_fallback_policy_equal(a: StageFallbackPolicy,
+                               b: StageFallbackPolicy) -> bool:
+    stage_fallback_policy_to_u8(a) == stage_fallback_policy_to_u8(b)
+
+fn stage_fallback_policy_to_text(p: StageFallbackPolicy) -> text:
+    match p:
+        case StageFallbackPolicy.Forbid: "forbid"
+        case StageFallbackPolicy.AllowHybrid: "allow_hybrid"
+        case StageFallbackPolicy.AllowCpu: "allow_cpu"
+
+fn stage_fallback_policy_permits_cpu(p: StageFallbackPolicy) -> bool:
+    stage_fallback_policy_to_u8(p) == 2
+
+# ----------------------------------------------------------------------------
+# StorageCapabilityTier — §20.7, verbatim and closed.
+#
+# The three named backends, in the order printed there, carrying the status
+# §20.7 assigns each: staged is the "mandatory portable backend", direct is an
+# "optional capability", device_initiated is an "experimental capability".
+# ----------------------------------------------------------------------------
+
+enum StorageCapabilityTier:
+    """Which SSD-to-device path a backend can drive (§20.7)."""
+    Staged
+    Direct
+    DeviceInitiated
+
+fn storage_tier_to_u8(t: StorageCapabilityTier) -> i64:
+    match t:
+        case StorageCapabilityTier.Staged: 0
+        case StorageCapabilityTier.Direct: 1
+        case StorageCapabilityTier.DeviceInitiated: 2
+
+val STORAGE_TIER_MAX: i64 = 2
+val STORAGE_TIER_COUNT: i64 = 3
+
+fn storage_tier_from_u8(v: i64) -> StorageCapabilityTier:
+    """Caller MUST gate on `storage_tier_valid` first."""
+    match v:
+        case 1: StorageCapabilityTier.Direct
+        case 2: StorageCapabilityTier.DeviceInitiated
+        case _: StorageCapabilityTier.Staged
+
+fn storage_tier_valid(v: i64) -> bool:
+    v >= 0 and v <= STORAGE_TIER_MAX
+
+fn storage_tier_to_text(t: StorageCapabilityTier) -> text:
+    match t:
+        case StorageCapabilityTier.Staged: "staged"
+        case StorageCapabilityTier.Direct: "direct"
+        case StorageCapabilityTier.DeviceInitiated: "device_initiated"
+
+val STORAGE_BIT_STAGED: i64 = 1
+val STORAGE_BIT_DIRECT: i64 = 2
+val STORAGE_BIT_DEVICE_INITIATED: i64 = 4
+val STORAGE_MASK_KNOWN: i64 = 7
+
+fn storage_tier_bit(t: StorageCapabilityTier) -> i64:
+    1 << storage_tier_to_u8(t)
+
+fn storage_mask_valid(bits: i64) -> bool:
+    """No reserved bit, and — the §20.7 rule — staged is MANDATORY whenever any
+    storage path is claimed at all. A backend advertising direct or
+    device_initiated without the portable staged path has no fallback when the
+    optional facility is unavailable, which is the silent degradation §21.4
+    forbids. Zero is legal here (unlike a device mask): a stage that touches no
+    storage claims no tier."""
+    if bits < 0:
+        return false
+    if (bits & (STORAGE_MASK_KNOWN ^ -1)) != 0:
+        return false
+    if bits == 0:
+        return true
+    (bits & STORAGE_BIT_STAGED) != 0
+
+fn storage_mask_has(bits: i64, t: StorageCapabilityTier) -> bool:
+    (bits & storage_tier_bit(t)) != 0
+
+# ----------------------------------------------------------------------------
+# Booleans on the wire
+#
+# One byte, and ONLY 0 or 1. Any other value is a hard reject rather than a
+# truthiness coercion: `deterministic` gates reproducibility claims, so a byte
+# of 2 must not quietly become `true`.
+# ----------------------------------------------------------------------------
+
+fn wire_bool_to_u8(b: bool) -> i64:
+    if b:
+        return 1
+    0
+
+fn wire_bool_valid(v: i64) -> bool:
+    v == 0 or v == 1
+
+fn wire_bool_from_u8(v: i64) -> bool:
+    v == 1
+
+# ----------------------------------------------------------------------------
+# StageExecutionProfile — §21's ExecutionProfile, field for field.
+#
+# §21 spells the budget/target fields u64. Simple has no unsigned 64-bit
+# scalar, so they are carried as i64 and REQUIRED to be non-negative: a
+# negative value here is the bit pattern of a budget above 2^63, which no real
+# budget is, and treating it as an error catches sign bugs instead of
+# encoding them. `allowed_devices` is the exception — it is a bit field, not a
+# quantity, and is validated by `device_mask_valid` instead.
+# ----------------------------------------------------------------------------
+
+struct StageExecutionProfile:
+    contract_version: i64
+    mode: ExecutionMode
+    deterministic: bool
+    host_memory_budget: i64
+    device_memory_budget: i64
+    latency_target_us: i64
+    throughput_target: i64
+    fallback: StageFallbackPolicy
+    verification: VerificationPolicy
+    allowed_devices: i64
+
+fn stage_execution_profile(mode: ExecutionMode,
+                           deterministic: bool,
+                           host_memory_budget: i64,
+                           device_memory_budget: i64,
+                           latency_target_us: i64,
+                           throughput_target: i64,
+                           fallback: StageFallbackPolicy,
+                           verification: VerificationPolicy,
+                           allowed_devices: i64) -> StageExecutionProfile:
+    StageExecutionProfile(
+        contract_version: STRUCTURAL_EXECUTION_PROFILE_VERSION,
+        mode: mode,
+        deterministic: deterministic,
+        host_memory_budget: host_memory_budget,
+        device_memory_budget: device_memory_budget,
+        latency_target_us: latency_target_us,
+        throughput_target: throughput_target,
+        fallback: fallback,
+        verification: verification,
+        allowed_devices: allowed_devices
+    )
+
+fn stage_execution_profile_cpu_reference() -> StageExecutionProfile:
+    """The mode every domain is required to be able to run (§21.5's CPU
+    column). Deterministic, no degradation permitted because there is nothing
+    below it, scalar CPU only."""
+    stage_execution_profile(ExecutionMode.CpuReference, true, 0, 0, 0, 0,
+                            StageFallbackPolicy.Forbid,
+                            VerificationPolicy.DeterministicHash,
+                            DEVICE_BIT_CPU_SCALAR)
+
+fn stage_execution_profile_zero() -> StageExecutionProfile:
+    """Every field at its wire zero. Used as the rejected-decode payload; it is
+    NOT a valid profile (allowed_devices == 0 fails device_mask_valid), which
+    is deliberate — a rejected decode must not hand back something usable."""
+    StageExecutionProfile(
+        contract_version: 0,
+        mode: ExecutionMode.CpuReference,
+        deterministic: false,
+        host_memory_budget: 0,
+        device_memory_budget: 0,
+        latency_target_us: 0,
+        throughput_target: 0,
+        fallback: StageFallbackPolicy.Forbid,
+        verification: VerificationPolicy.Off,
+        allowed_devices: 0
+    )
+
+fn stage_execution_profile_equal(a: StageExecutionProfile,
+                                 b: StageExecutionProfile) -> bool:
+    if a.contract_version != b.contract_version:
+        return false
+    if execution_mode_to_u8(a.mode) != execution_mode_to_u8(b.mode):
+        return false
+    if a.deterministic != b.deterministic:
+        return false
+    if a.host_memory_budget != b.host_memory_budget:
+        return false
+    if a.device_memory_budget != b.device_memory_budget:
+        return false
+    if a.latency_target_us != b.latency_target_us:
+        return false
+    if a.throughput_target != b.throughput_target:
+        return false
+    if stage_fallback_policy_to_u8(a.fallback) != stage_fallback_policy_to_u8(b.fallback):
+        return false
+    if verification_policy_to_u8(a.verification) != verification_policy_to_u8(b.verification):
+        return false
+    a.allowed_devices == b.allowed_devices
+
+# ----------------------------------------------------------------------------
+# Profile invariants — enforced on ENCODE as well as decode.
+#
+# Each one names the sentence it comes from. Together they make an
+# unsatisfiable profile unrepresentable, which is what stops a silent fallback
+# from being the only way to honour a request.
+# ----------------------------------------------------------------------------
+
+fn profile_budgets_valid(p: StageExecutionProfile) -> bool:
+    """Non-negative, and the two memory budgets must not overflow when summed.
+
+    The sum is the trap the earlier waves hit at 32 bits: `a + b <= MAX` on two
+    same-width unsigned fields wraps and silently passes. Here both operands
+    are already i64, and with both known non-negative an i64 overflow shows up
+    as a NEGATIVE sum — so the check is on the sign of the sum, never on a
+    comparison against a width-limited constant."""
+    if p.host_memory_budget < 0:
+        return false
+    if p.device_memory_budget < 0:
+        return false
+    if p.latency_target_us < 0:
+        return false
+    if p.throughput_target < 0:
+        return false
+    (p.host_memory_budget + p.device_memory_budget) >= 0
+
+fn profile_mode_device_consistent(p: StageExecutionProfile) -> bool:
+    """§21.5's two right-hand columns both place work on a device. Requesting
+    hybrid_vector_gpu or resident_gpu while the device mask forbids the GPU is
+    unsatisfiable, and the only way to "honour" it is to run somewhere else
+    without saying so."""
+    if not execution_mode_uses_gpu(p.mode):
+        return true
+    device_mask_has(p.allowed_devices, DEVICE_BIT_GPU)
+
+fn profile_fallback_reachable(p: StageExecutionProfile) -> bool:
+    """A permitted rung must actually be reachable.
+
+    AllowCpu names cpu_reference as a degradation target, so the scalar CPU
+    must be permitted by the device mask; otherwise the policy promises a
+    landing spot the mask forbids.
+
+    AllowHybrid is only meaningful from resident_gpu — it is the middle rung of
+    §20.7's ladder `resident -> hybrid -> cpu_reference`. From hybrid or from
+    cpu_reference there is no hybrid step below, so AllowHybrid there would be
+    a second, differently-spelled encoding of Forbid. Rejecting it keeps one
+    policy to one spelling."""
+    if stage_fallback_policy_permits_cpu(p.fallback):
+        return device_mask_has(p.allowed_devices, DEVICE_BIT_CPU_SCALAR)
+    if stage_fallback_policy_to_u8(p.fallback) == 1:
+        return execution_mode_to_u8(p.mode) == 2
+    true
+
+fn stage_execution_profile_valid(p: StageExecutionProfile) -> bool:
+    """Every invariant, in one gate. Encode and decode both call this, so a
+    buffer can never carry a profile that a producer could not have built."""
+    if p.contract_version != STRUCTURAL_EXECUTION_PROFILE_VERSION:
+        return false
+    if not execution_mode_valid(execution_mode_to_u8(p.mode)):
+        return false
+    if not verification_policy_valid(verification_policy_to_u8(p.verification)):
+        return false
+    if not stage_fallback_policy_valid(stage_fallback_policy_to_u8(p.fallback)):
+        return false
+    if not device_mask_valid(p.allowed_devices):
+        return false
+    if not profile_budgets_valid(p):
+        return false
+    if not profile_mode_device_consistent(p):
+        return false
+    profile_fallback_reachable(p)
+
+# ----------------------------------------------------------------------------
+# StageCapabilities — §21.1 `fn capabilities() -> StageCapabilities`.
+#
+# DERIVATION. §21.1 declares the call and never the record. The minimum a
+# planner needs in order to decide whether a profile can be honoured WITHOUT
+# degrading is exactly one answer per question the profile asks:
+#
+#   profile asks mode           -> supported_modes  (§21.5's matrix cells)
+#   profile asks allowed_devices-> device_mask      (§20.2, §21.2's channels)
+#   profile asks verification   -> max_verification (§21.1's verify policy)
+#   profile asks deterministic  -> deterministic    (§21's profile field)
+#   §20.7's storage paths       -> storage_tiers
+#
+# `backend` is the BackendId spelling, so a receipt's `backend` /
+# `candidate_backend` can be matched against the capabilities that were
+# consulted. Nothing else is added: a field with no question behind it would
+# be invented, not derived.
+# ----------------------------------------------------------------------------
+
+struct StageCapabilities:
+    contract_version: i64
+    backend: text
+    supported_modes: i64
+    storage_tiers: i64
+    max_verification: VerificationPolicy
+    deterministic: bool
+    device_mask: i64
+
+fn stage_capabilities(backend: text,
+                      supported_modes: i64,
+                      storage_tiers: i64,
+                      max_verification: VerificationPolicy,
+                      deterministic: bool,
+                      device_mask: i64) -> StageCapabilities:
+    StageCapabilities(
+        contract_version: STRUCTURAL_EXECUTION_PROFILE_VERSION,
+        backend: backend,
+        supported_modes: supported_modes,
+        storage_tiers: storage_tiers,
+        max_verification: max_verification,
+        deterministic: deterministic,
+        device_mask: device_mask
+    )
+
+fn stage_capabilities_zero() -> StageCapabilities:
+    StageCapabilities(
+        contract_version: 0,
+        backend: "",
+        supported_modes: 0,
+        storage_tiers: 0,
+        max_verification: VerificationPolicy.Off,
+        deterministic: false,
+        device_mask: 0
+    )
+
+fn stage_capabilities_equal(a: StageCapabilities, b: StageCapabilities) -> bool:
+    if a.contract_version != b.contract_version:
+        return false
+    if a.backend != b.backend:
+        return false
+    if a.supported_modes != b.supported_modes:
+        return false
+    if a.storage_tiers != b.storage_tiers:
+        return false
+    if verification_policy_to_u8(a.max_verification) != verification_policy_to_u8(b.max_verification):
+        return false
+    if a.deterministic != b.deterministic:
+        return false
+    a.device_mask == b.device_mask
+
+fn stage_capabilities_valid(c: StageCapabilities) -> bool:
+    """Same rules as the profile, applied to the advertising side. A backend
+    that claims a GPU mode without the GPU device bit, or claims cpu_reference
+    without the scalar CPU bit, is describing something that cannot run."""
+    if c.contract_version != STRUCTURAL_EXECUTION_PROFILE_VERSION:
+        return false
+    if c.backend.len() == 0:
+        return false
+    if not mode_mask_valid(c.supported_modes):
+        return false
+    if not device_mask_valid(c.device_mask):
+        return false
+    if not storage_mask_valid(c.storage_tiers):
+        return false
+    if not verification_policy_valid(verification_policy_to_u8(c.max_verification)):
+        return false
+    if mode_mask_uses_gpu(c.supported_modes):
+        if not device_mask_has(c.device_mask, DEVICE_BIT_GPU):
+            return false
+    if mode_mask_has(c.supported_modes, ExecutionMode.CpuReference):
+        if not device_mask_has(c.device_mask, DEVICE_BIT_CPU_SCALAR):
+            return false
+    true
+
+# ----------------------------------------------------------------------------
+# The join: can this backend honour this profile WITHOUT degrading?
+#
+# This is the predicate the whole "no silent fallback" rule reduces to. It is
+# deliberately total and side-effect free so a planner can call it before
+# committing, and a spec can assert it directly.
+# ----------------------------------------------------------------------------
+
+fn capabilities_satisfy_profile(c: StageCapabilities,
+                                p: StageExecutionProfile) -> bool:
+    """True when the backend can run the profile's requested mode as asked."""
+    if not stage_capabilities_valid(c):
+        return false
+    if not stage_execution_profile_valid(p):
+        return false
+    if not mode_mask_has(c.supported_modes, p.mode):
+        return false
+    if not device_mask_covers(c.device_mask, p.allowed_devices):
+        return false
+    if verification_policy_to_u8(c.max_verification) < verification_policy_to_u8(p.verification):
+        return false
+    if p.deterministic:
+        if not c.deterministic:
+            return false
+    true
+
+fn profile_requires_error_on_unsatisfied(p: StageExecutionProfile) -> bool:
+    """§21.4 with Forbid: when the requested mode cannot be honoured and no
+    degradation is permitted, the planner MUST raise. Silently running
+    somewhere else is precisely the forbidden behaviour."""
+    stage_fallback_policy_to_u8(p.fallback) == 0
+
+fn profile_degradation_target(p: StageExecutionProfile) -> ExecutionMode:
+    """The single rung below the requested mode that the policy permits.
+
+    Returns the requested mode itself when no degradation is permitted, which
+    lets a caller detect "no move available" without a second predicate. The
+    ladder is §20.7's, exactly: resident -> hybrid -> cpu_reference."""
+    val f = stage_fallback_policy_to_u8(p.fallback)
+    if f == 0:
+        return p.mode
+    if f == 1:
+        return ExecutionMode.HybridVectorGpu
+    if execution_mode_to_u8(p.mode) == 0:
+        return p.mode
+    ExecutionMode.CpuReference
+
+export STRUCTURAL_EXECUTION_PROFILE_VERSION
+export DEVICE_BIT_CPU_SCALAR, DEVICE_BIT_CPU_SIMD, DEVICE_BIT_GPU
+export DEVICE_BIT_STORAGE, DEVICE_MASK_KNOWN, DEVICE_MASK_BIT_COUNT
+export MODE_BIT_CPU_REFERENCE, MODE_BIT_HYBRID_VECTOR_GPU
+export MODE_BIT_RESIDENT_GPU, MODE_MASK_KNOWN, MODE_MASK_BIT_COUNT
+export STORAGE_BIT_STAGED, STORAGE_BIT_DIRECT, STORAGE_BIT_DEVICE_INITIATED
+export STORAGE_MASK_KNOWN, STORAGE_TIER_MAX, STORAGE_TIER_COUNT
+export STAGE_FALLBACK_POLICY_MAX, STAGE_FALLBACK_POLICY_COUNT
+export StageFallbackPolicy, StorageCapabilityTier
+export StageExecutionProfile, StageCapabilities
+export device_mask_bits, device_mask_of, device_mask_valid, device_mask_has
+export device_mask_covers, device_mask_to_text
+export mode_bit, mode_mask_valid, mode_mask_has, mode_mask_uses_gpu
+export stage_fallback_policy_to_u8, stage_fallback_policy_from_u8
+export stage_fallback_policy_valid, stage_fallback_policy_equal
+export stage_fallback_policy_to_text, stage_fallback_policy_permits_cpu
+export storage_tier_to_u8, storage_tier_from_u8, storage_tier_valid
+export storage_tier_to_text, storage_tier_bit, storage_mask_valid
+export storage_mask_has
+export wire_bool_to_u8, wire_bool_valid, wire_bool_from_u8
+export stage_execution_profile, stage_execution_profile_cpu_reference
+export stage_execution_profile_zero, stage_execution_profile_equal
+export stage_execution_profile_valid
+export profile_budgets_valid, profile_mode_device_consistent
+export profile_fallback_reachable
+export stage_capabilities, stage_capabilities_zero, stage_capabilities_equal
+export stage_capabilities_valid
+export capabilities_satisfy_profile, profile_requires_error_on_unsatisfied
+export profile_degradation_target

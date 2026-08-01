@@ -1,0 +1,75 @@
+"""GpuPipe — inter-kernel pipe, host/GPU-emulation half (NoGC).
+
+W3.3 of doc/03_plan/language/gpu_fpga/sycl_parity_unified_kernel_plan_2026-06-13.md.
+The FPGA half is the VHDL FIFO lane (compiler vhdl_kernel_pipe module); this
+is the same abstraction for host execution and GPU emulation: a fixed-capacity
+FIFO ring buffer with non-blocking try semantics (SYCL/Intel-HLS pipe
+equivalent). v1 carries i64 elements; wider payloads bit-pack per the pipe
+element-width plan.
+"""
+
+# ============================================================================
+# GpuPipe
+# ============================================================================
+
+class GpuPipe:
+    capacity: i64
+    buf: [i64]
+    head: i64
+    count: i64
+    valid: bool
+
+    static fn create(capacity: i64) -> GpuPipe:
+        """Create a pipe with the given positive capacity; fail-closed otherwise."""
+        if capacity <= 0:
+            return GpuPipe(capacity: 0, buf: [], head: 0, count: 0, valid: false)
+        var storage: [i64] = []
+        var i = 0
+        while i < capacity:
+            storage.push(0)
+            i = i + 1
+        GpuPipe(capacity: capacity, buf: storage, head: 0, count: 0, valid: true)
+
+    fn is_empty() -> bool:
+        self.count == 0
+
+    fn is_full() -> bool:
+        self.count >= self.capacity
+
+    fn len() -> i64:
+        self.count
+
+    me try_write(value: i64) -> bool:
+        """Non-blocking write; false when the pipe is full or invalid."""
+        if not self.valid or self.is_full():
+            return false
+        val tail = (self.head + self.count) % self.capacity
+        self.buf[tail] = value
+        self.count = self.count + 1
+        true
+
+    fn can_read() -> bool:
+        self.valid and self.count > 0
+
+    fn peek() -> i64:
+        """Front element without consuming; only meaningful when can_read()."""
+        if not self.can_read():
+            return 0
+        self.buf[self.head]
+
+    me read() -> i64:
+        """Consume and return the front element; 0 when empty (guard with
+        can_read() — FIFO discipline is the caller's contract, matching the
+        hardware rd_en/empty handshake)."""
+        if not self.can_read():
+            return 0
+        val value = self.buf[self.head]
+        self.head = (self.head + 1) % self.capacity
+        self.count = self.count - 1
+        value
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export GpuPipe

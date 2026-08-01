@@ -1,0 +1,251 @@
+# LLM Caret - Public API Module
+#
+# Unified LLM access layer providing Claude-CLI-like chat API.
+# Wraps multiple backends: Claude CLI, Claude API, OpenAI API,
+# OpenAI-compatible endpoints, and local torch models.
+#
+# Usage:
+#   use app.llm_caret.mod.{llm_init_defaults, llm_chat, llm_clear}
+#   llm_init_defaults()
+#   val response = llm_chat("Hello!")
+#   print response
+
+use app.io.mod.{env_get}
+use app.llm_caret.provider.{LLMResponse, dispatch_send}
+
+# Re-export the retry/backoff/timeout policy so callers of the unified
+# module don't need a separate `use app.llm_caret.retry.{...}`.
+export use app.llm_caret.retry.{
+    RetryPolicy, RetryOutcome,
+    default_retry_policy, retry_policy_from_env,
+    is_retryable_status, should_retry, backoff_delay_ms, effective_delay_ms,
+    with_retry
+}
+
+# Re-export real tool execution + permission gating (Phase 1.1).
+export use app.llm_caret.tools.{
+    PermissionPolicy, ToolCall, ToolResult, ModelResponse,
+    run_tool, permission_decision, guard_path, parse_tool_use_blocks,
+    default_policy, allow_all_policy, policy_with_allow
+}
+export use app.llm_caret.chat.{AgentResult, run_agent_loop, run_agent_loop_rendered, tool_call_status, tool_call_summary}
+
+# Interactive chat UI (std.tui) + its renderer seam.
+export use app.llm_caret.chat_tui.{
+    ChatTui, make_chat_tui, caret_chat, run_chat_tui, run_chat_plain,
+    render_turn, render_tool_call, tui_tool_renderer
+}
+export use app.llm_caret.tui_io.{CaretIo, CaretLoopResult, production_caret_io}
+export use app.llm_caret.tui_input.{
+    select_renderer_mode, caret_is_tty
+}
+
+# ============================================================================
+# JSON helpers (inlined)
+# ============================================================================
+
+fn _LB() -> text:
+    (123 as char).to_text()
+
+fn _RB() -> text:
+    (125 as char).to_text()
+
+fn _Q() -> text:
+    "\""
+
+fn _escape_json(s: text) -> text:
+    var parts = []
+    var i = 0
+    while i < s.len():
+        val ch = s[i]
+        if ch == "\\":
+            parts.append("\\\\")
+        elif ch == "\"":
+            parts.append("\\\"")
+        elif ch == "\n":
+            parts.append("\\n")
+        elif ch == "\r":
+            parts.append("\\r")
+        elif ch == "\t":
+            parts.append("\\t")
+        else:
+            parts.append(ch)
+        i = i + 1
+    parts.join("")
+
+# ============================================================================
+# Module-level state
+# ============================================================================
+
+var LLM_INITIALIZED: bool = false
+var LLM_PROVIDER = "claude_cli"
+var LLM_MODEL = ""
+var LLM_CLI_PATH = "claude"
+var LLM_API_KEY = ""
+var LLM_BASE_URL = ""
+var LLM_SYSTEM_PROMPT = ""
+var LLM_SESSION_ID = ""
+var LLM_MAX_TURNS = 0
+
+# History
+var LLM_ROLES: [text] = []
+var LLM_CONTENTS: [text] = []
+
+# ============================================================================
+# Initialization
+# ============================================================================
+
+fn llm_init_defaults():
+    LLM_INITIALIZED = true
+    LLM_PROVIDER = "claude_cli"
+    LLM_MODEL = ""
+    LLM_CLI_PATH = ""
+    LLM_API_KEY = ""
+    LLM_BASE_URL = ""
+    LLM_SYSTEM_PROMPT = ""
+    LLM_SESSION_ID = ""
+    LLM_MAX_TURNS = 0
+    LLM_ROLES = []
+    LLM_CONTENTS = []
+
+fn llm_init(provider: text, model: text):
+    LLM_INITIALIZED = true
+    LLM_PROVIDER = provider
+    LLM_MODEL = model
+    # A new public client initialization is a new logical backend and
+    # conversation. Provider credentials, endpoints, executable overrides,
+    # session state, and prompt policy must never bleed across initialization.
+    LLM_CLI_PATH = ""
+    LLM_API_KEY = ""
+    LLM_BASE_URL = ""
+    LLM_SYSTEM_PROMPT = ""
+    LLM_SESSION_ID = ""
+    LLM_MAX_TURNS = 0
+    LLM_ROLES = []
+    LLM_CONTENTS = []
+
+fn llm_set_api_key(key: text):
+    LLM_API_KEY = key
+
+fn llm_set_base_url(url: text):
+    LLM_BASE_URL = url
+
+fn llm_set_cli_path(path: text):
+    LLM_CLI_PATH = path
+
+fn llm_system(prompt: text):
+    LLM_SYSTEM_PROMPT = prompt
+
+fn llm_provider() -> text:
+    LLM_PROVIDER
+
+fn llm_model() -> text:
+    LLM_MODEL
+
+fn llm_clear():
+    LLM_ROLES = []
+    LLM_CONTENTS = []
+    LLM_SESSION_ID = ""
+
+# ============================================================================
+# History
+# ============================================================================
+
+fn llm_history_len() -> i64:
+    LLM_ROLES.len()
+
+fn llm_history_role(idx: i64) -> text:
+    if idx >= 0 and idx < LLM_ROLES.len():
+        return LLM_ROLES[idx]
+    ""
+
+fn llm_history_content(idx: i64) -> text:
+    if idx >= 0 and idx < LLM_CONTENTS.len():
+        return LLM_CONTENTS[idx]
+    ""
+
+# ============================================================================
+# Build messages JSON from history
+# ============================================================================
+
+fn _build_messages_json() -> text:
+    var items: [text] = []
+    var i = 0
+    while i < LLM_ROLES.len():
+        var msg_parts = []
+        msg_parts.append(_LB())
+        msg_parts.append(_Q() + "role" + _Q() + ":" + _Q() + LLM_ROLES[i] + _Q() + ",")
+        msg_parts.append(_Q() + "content" + _Q() + ":" + _Q() + _escape_json(LLM_CONTENTS[i]) + _Q())
+        msg_parts.append(_RB())
+        items = items + [msg_parts.join("")]
+        i = i + 1
+    var parts = []
+    parts.append("[")
+    var j = 0
+    for item in items:
+        if j > 0:
+            parts.append(",")
+        parts.append(item)
+        j = j + 1
+    parts.append("]")
+    parts.join("")
+
+fn _build_direct_messages_json(prompt: text) -> text:
+    "[" + _LB() +
+        _Q() + "role" + _Q() + ":" + _Q() + "user" + _Q() + "," +
+        _Q() + "content" + _Q() + ":" + _Q() +
+        _escape_json(prompt) + _Q() + _RB() + "]"
+
+fn _effective_api_key() -> text:
+    if LLM_API_KEY != "":
+        return LLM_API_KEY
+    if LLM_PROVIDER == "claude_api":
+        return env_get("ANTHROPIC_API_KEY") ?? ""
+    if LLM_PROVIDER == "openai":
+        return env_get("OPENAI_API_KEY") ?? ""
+    ""
+
+fn _dispatch_current(prompt: text, messages_json: text) -> LLMResponse:
+    dispatch_send(
+        LLM_PROVIDER, prompt, LLM_MODEL, _effective_api_key(),
+        LLM_BASE_URL, LLM_CLI_PATH, LLM_SYSTEM_PROMPT, LLM_SESSION_ID,
+        LLM_MAX_TURNS, 0, messages_json
+    )
+
+fn _record_provider_session(response: LLMResponse):
+    if response.session_id != "":
+        LLM_SESSION_ID = response.session_id
+
+# ============================================================================
+# Chat (main entry point)
+# ============================================================================
+
+fn llm_chat(user_msg: text) -> text:
+    if not LLM_INITIALIZED:
+        return "ERROR: call llm_init_defaults() or llm_init() first"
+    # Add user message to history
+    LLM_ROLES = LLM_ROLES + ["user"]
+    LLM_CONTENTS = LLM_CONTENTS + [user_msg]
+    val response = _dispatch_current(user_msg, _build_messages_json())
+    if response.is_error:
+        return "ERROR: " + response.error
+    _record_provider_session(response)
+    # Add assistant response to history
+    LLM_ROLES = LLM_ROLES + ["assistant"]
+    LLM_CONTENTS = LLM_CONTENTS + [response.content]
+    response.content
+
+# ============================================================================
+# Direct send (without history management)
+# ============================================================================
+
+fn llm_send(prompt: text) -> text:
+    if not LLM_INITIALIZED:
+        return "ERROR: call llm_init_defaults() or llm_init() first"
+    val response = _dispatch_current(
+        prompt, _build_direct_messages_json(prompt)
+    )
+    if response.is_error:
+        return "ERROR: " + response.error
+    _record_provider_session(response)
+    response.content

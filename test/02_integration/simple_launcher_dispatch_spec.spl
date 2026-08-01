@@ -1,0 +1,42 @@
+"""
+# Simple launcher dispatch regression spec
+
+Verifies the compiled `bin/simple` dispatches recognized subcommands in-process to
+their handlers, and treats an unrecognized first argument as a file path to run.
+
+Post-self-hosting `bin/simple` is a compiled binary with an in-process CommandEntry
+dispatch table (`src/app/cli/dispatch/table.spl`) — NOT the old shell wrapper that
+copied itself and re-exec'd a runtime with `run <entrypoint.spl>`. This spec was
+rewritten (#38) to test the current in-process routing instead of the removed
+shell-wrapper mechanism (the old copy-text + fake-runtime + re-exec approach cannot
+work against a compiled binary).
+"""
+
+use std.spec
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_file_read_text(path: text) -> text
+
+fn run_simple(args: [text]) -> (text, text, i64):
+    rt_process_run("bin/simple", args)
+
+describe "simple launcher dispatch (in-process)":
+
+    it "dispatches the lint subcommand to its handler":
+        val (out, _err, _code) = run_simple(["lint"])
+        expect(out.contains("Usage: simple lint")).to_equal(true)
+
+    it "dispatches the fmt subcommand to its handler":
+        val (out, _err, _code) = run_simple(["fmt"])
+        expect(out.contains("Usage: simple fmt")).to_equal(true)
+
+    it "treats an unrecognized first argument as a file path to run":
+        val (out, err, _code) = run_simple(["zz_not_a_command_launcher_spec.spl"])
+        expect((out + err).contains("file not found")).to_equal(true)
+
+    it "registers subcommands in the in-process dispatch table (no shell re-exec)":
+        val table = rt_file_read_text("src/app/cli/dispatch/table.spl") ?? ""
+        expect(table.contains("get_command_table")).to_equal(true)
+        expect(table.contains("CommandEntry")).to_equal(true)
+        expect(table.contains("\"lint\"")).to_equal(true)
+        expect(table.contains("\"fmt\"")).to_equal(true)

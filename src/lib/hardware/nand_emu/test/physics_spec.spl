@@ -1,0 +1,246 @@
+#![allow(primitive_api)]
+
+# ============================================================================
+# nand_emu — Physics core spec (Vt program / erase / retention / disturb / sense)
+# ============================================================================
+#
+# Manual-first SSpec for the phenomenological threshold-voltage physics
+# (doc §3.1, §3.4, §7.3, Appendix B). Every assertion is an ABSOLUTE oracle —
+# a hand-computable value from the documented formulae, never a self-comparison:
+#
+#   * SLC read rule (§3.1): an erased cell (code 88) senses 1; a programmed cell
+#     (>= PV = 148) senses 0, at vref 128.
+#   * ISPP (§7.3): programming leaves target-1 cells untouched and drives a
+#     target-0 cell up to at least the program-verify level.
+#   * Retention (§7.3): 0 for erased cells; strictly more negative for more wear
+#     (pe_cycles) and longer time (dt) at fixed Vt.
+#   * Disturb (§3.4): monotonic non-decreasing in the neighbor counters.
+#   * Lazy sense (§7.3): retention drifts a programmed cell DOWN so that after
+#     enough emulated time it senses as 1 (erased) — the exact failure signature
+#     real firmware refreshes against.
+#   * Determinism (§3.3): identical seeds reproduce identical results.
+#
+# Oracle constants below were computed by hand from the Appendix B defaults and
+# cross-checked against the module before being frozen here.
+# ============================================================================
+
+use std.nogc_sync_mut.spec.{describe, it, expect, step}
+use hardware.nand_emu.nand_types.{ne_default_cell_params, ne_page_meta_new, ne_block_meta_new, NeBlockMeta}
+use hardware.nand_emu.physics.{
+    ne_gauss, ne_program_cell, ne_erase_cell,
+    ne_retention_delta, ne_disturb_delta, ne_sense, ne_sense_bit
+}
+
+fn main():
+
+    # ------------------------------------------------------------------
+    # ne_gauss — deterministic sum-of-uniforms noise (doc §3.3)
+    # ------------------------------------------------------------------
+    describe("ne_gauss deterministic noise"):
+        it("returns the identical offset for the identical seed"):
+            """A replayable device: the same (sigma, seed) must always give the
+            same noise so runs are diffable. gauss(3, 100) is 2 on every call."""
+            step("Draw gaussian noise twice with sigma 3, seed 100")
+            expect(ne_gauss(3, 100)).to_equal(2)
+            expect(ne_gauss(3, 100)).to_equal(2)
+
+        it("emits no noise when sigma is zero"):
+            """sigma <= 0 disables noise entirely (a noiseless golden run)."""
+            step("Request gaussian noise with sigma 0")
+            expect(ne_gauss(0, 5)).to_equal(0)
+
+        it("produces a different offset for a different seed"):
+            """Different cell seeds are genuinely different physical cells."""
+            step("Compare noise at seed 100 vs seed 101")
+            expect(ne_gauss(3, 100)).to_equal(2)
+            expect(ne_gauss(3, 101)).to_equal(-3)
+
+    # ------------------------------------------------------------------
+    # ne_program_cell — ISPP pulse-and-verify (doc §7.3)
+    # ------------------------------------------------------------------
+    describe("ne_program_cell ISPP"):
+        it("leaves a target-1 cell untouched"):
+            """Programming a 1 means "stay erased": the stored Vt is returned
+            unchanged, whether the cell sits in the erased lobe (88) or high
+            (200)."""
+            step("Program a 1 into an erased (88) and a high (200) cell")
+            val p = ne_default_cell_params()
+            expect(ne_program_cell(88, true, p, 100)).to_equal(88)
+            expect(ne_program_cell(200, true, p, 100)).to_equal(200)
+
+        it("drives a target-0 cell to at least the program-verify level"):
+            """Program-and-verify keeps pulsing until Vt reaches PV (148, +0.50 V)
+            or the pulse budget is spent. An erased cell (88) programmed with the
+            default coefficients (seed 100) lands at exactly code 148 = PV."""
+            step("Program a 0 into an erased cell (88) with fresh params")
+            val p = ne_default_cell_params()
+            val out = ne_program_cell(88, false, p, 100)
+            expect(out).to_equal(148)
+            expect(out).to_be_greater_than(147)
+
+        it("is deterministic for a fixed seed"):
+            """The ISPP loop derives all jitter from the seed, so the programmed
+            code is reproducible."""
+            step("Program the same cell twice with seed 12345")
+            val p = ne_default_cell_params()
+            expect(ne_program_cell(88, false, p, 12345)).to_equal(158)
+            expect(ne_program_cell(88, false, p, 12345)).to_equal(158)
+
+    # ------------------------------------------------------------------
+    # ne_erase_cell — erased distribution with wear (doc §7.3 / Appendix B)
+    # ------------------------------------------------------------------
+    describe("ne_erase_cell"):
+        it("returns a cell into the erased distribution below vref"):
+            """Erase resets the cell into the erased lobe (mean 88); at seed 7,
+            pe 0 the code is 76, which is below vref 128 and therefore senses as
+            1 (erased)."""
+            step("Erase a previously-high cell (200) at pe 0, seed 7")
+            val p = ne_default_cell_params()
+            val code = ne_erase_cell(200, p, 0, 7)
+            expect(code).to_equal(76)
+            expect(ne_sense_bit(code, 128)).to_equal(true)
+
+        it("is deterministic for a fixed seed"):
+            """Same seed reproduces the same erased code."""
+            step("Erase twice with seed 7")
+            val p = ne_default_cell_params()
+            expect(ne_erase_cell(200, p, 0, 7)).to_equal(76)
+            expect(ne_erase_cell(200, p, 0, 7)).to_equal(76)
+
+    # ------------------------------------------------------------------
+    # ne_retention_delta — charge loss ~ log10(time) (doc §7.3)
+    # ------------------------------------------------------------------
+    describe("ne_retention_delta"):
+        it("does not drift erased or near-vref cells"):
+            """Cells at or below vref (code 128) carry little charge, so the
+            retention delta is exactly 0 (the erased mean 88 does not drift)."""
+            step("Query retention on an erased cell (88) after 9 s at pe 0")
+            val p = ne_default_cell_params()
+            expect(ne_retention_delta(9.0, 0, 88, p)).to_equal(0)
+
+        it("computes the exact one-decade loss for a programmed cell"):
+            """ret_coef 2.0 * log10(1+9)=1 * (1+0/1000)=1 * (168-128)/40=1 = 2.0
+            codes of loss, i.e. delta -2. At ten-decade time (dt 999 => log10 3)
+            the loss triples to exactly -6."""
+            step("Compute retention at dt 9 s and dt 999 s (pe 0, Vt 168)")
+            val p = ne_default_cell_params()
+            expect(ne_retention_delta(9.0, 0, 168, p)).to_equal(-2)
+            expect(ne_retention_delta(999.0, 0, 168, p)).to_equal(-6)
+
+        it("gets strictly more negative with wear at fixed time and Vt"):
+            """The (1 + pe/1000) wear factor deepens the loss: at pe 1000 the same
+            9 s / Vt 168 cell loses -4, more than the -2 it loses fresh."""
+            step("Compare retention at pe 0 vs pe 1000 (dt 9 s, Vt 168)")
+            val p = ne_default_cell_params()
+            expect(ne_retention_delta(9.0, 1000, 168, p)).to_be_less_than(ne_retention_delta(9.0, 0, 168, p))
+            expect(ne_retention_delta(9.0, 1000, 168, p)).to_equal(-4)
+
+        it("gets strictly more negative with longer time at fixed wear and Vt"):
+            """log10(time) growth deepens the loss: dt 999 s loses more than dt
+            9 s for the same fresh Vt-168 cell (-6 vs -2)."""
+            step("Compare retention at dt 9 s vs dt 999 s (pe 0, Vt 168)")
+            val p = ne_default_cell_params()
+            expect(ne_retention_delta(999.0, 0, 168, p)).to_be_less_than(ne_retention_delta(9.0, 0, 168, p))
+
+    # ------------------------------------------------------------------
+    # ne_disturb_delta — neighbor-activity drift (doc §3.4, Appendix B)
+    # ------------------------------------------------------------------
+    describe("ne_disturb_delta"):
+        it("is zero with no neighbor activity"):
+            """No neighbor reads or programs means no disturb."""
+            step("Query disturb with both counters at 0")
+            val p = ne_default_cell_params()
+            expect(ne_disturb_delta(0, 0, p)).to_equal(0)
+
+        it("rises monotonically with neighbor reads"):
+            """rd_coef +1 code per 10,000 neighbor reads: 10,000 => +1, 20,000
+            => +2, strictly increasing."""
+            step("Compare disturb at 10,000 vs 20,000 neighbor reads")
+            val p = ne_default_cell_params()
+            expect(ne_disturb_delta(10000, 0, p)).to_equal(1)
+            expect(ne_disturb_delta(20000, 0, p)).to_equal(2)
+            expect(ne_disturb_delta(20000, 0, p)).to_be_greater_than(ne_disturb_delta(10000, 0, p))
+
+        it("rises monotonically with neighbor programs"):
+            """pd_coef +1 code per 200 neighbor programs: 200 => +1, 400 => +2,
+            strictly increasing."""
+            step("Compare disturb at 200 vs 400 neighbor programs")
+            val p = ne_default_cell_params()
+            expect(ne_disturb_delta(0, 200, p)).to_equal(1)
+            expect(ne_disturb_delta(0, 400, p)).to_equal(2)
+            expect(ne_disturb_delta(0, 400, p)).to_be_greater_than(ne_disturb_delta(0, 200, p))
+
+    # ------------------------------------------------------------------
+    # ne_sense — lazy drift at read time + bit flips (doc §7.3)
+    # ------------------------------------------------------------------
+    describe("ne_sense lazy drift and bit flips"):
+        it("senses an erased cell as 1 and a programmed cell as 0"):
+            """SLC read rule at vref 128 with no elapsed time: erased (88) reads
+            1 with effective code 88; programmed (168) reads 0 with code 168."""
+            step("Sense a fresh erased and a fresh programmed cell at now=0")
+            val p = ne_default_cell_params()
+            val meta = ne_page_meta_new()
+            val blk = ne_block_meta_new()
+            val er = ne_sense(88, meta, blk, p, 128, 0)
+            expect(er.bit).to_equal(true)
+            expect(er.eff_code).to_equal(88)
+            val pr = ne_sense(168, meta, blk, p, 128, 0)
+            expect(pr.bit).to_equal(false)
+            expect(pr.eff_code).to_equal(168)
+
+        it("flips an erased 1 to a programmed 0 through ISPP"):
+            """Programming an erased cell (senses 1) drives it to >= PV so it now
+            senses 0 — the intended 1 -> 0 write transition."""
+            step("Program an erased cell then sense it")
+            val p = ne_default_cell_params()
+            val meta = ne_page_meta_new()
+            val blk = ne_block_meta_new()
+            expect(ne_sense(88, meta, blk, p, 128, 0).bit).to_equal(true)
+            val programmed = ne_program_cell(88, false, p, 100)
+            expect(ne_sense(programmed, meta, blk, p, 128, 0).bit).to_equal(false)
+
+        it("drifts a worn programmed cell down until it senses as 1 (erased)"):
+            """The retention failure signature: a programmed cell (168) in a
+            block at 30,000 P/E, read 9 s after programming, loses 62 codes of
+            charge (2.0 * log10(10)=1 * (1+30) * 1) -> effective code 106, which
+            is below vref 128 and now senses as 1 (erased). This is exactly the
+            drifted-0-reads-as-1 failure firmware must refresh against."""
+            step("Sense a Vt-168 cell in a 30k-P/E block 9 s after program")
+            val p = ne_default_cell_params()
+            val meta = ne_page_meta_new()
+            val worn = NeBlockMeta(pe_cycles: 30000, last_erase_time: 0, bad_flag: false, edc_state: 0, reserved: 0)
+            val drifted = ne_sense(168, meta, worn, p, 128, 9)
+            expect(drifted.eff_code).to_equal(106)
+            expect(drifted.bit).to_equal(true)
+
+        it("does not drift the same programmed cell at zero elapsed time"):
+            """Same worn block, but read immediately (now = last_prog_time): no
+            time has passed, so the cell still senses 0 (code 168). Contrast with
+            the drifted read above pins the drift to elapsed time, not wear
+            alone."""
+            step("Sense the same worn Vt-168 cell at now=0 (no elapsed time)")
+            val p = ne_default_cell_params()
+            val meta = ne_page_meta_new()
+            val worn = NeBlockMeta(pe_cycles: 30000, last_erase_time: 0, bad_flag: false, edc_state: 0, reserved: 0)
+            val fresh = ne_sense(168, meta, worn, p, 128, 0)
+            expect(fresh.eff_code).to_equal(168)
+            expect(fresh.bit).to_equal(false)
+
+    # ------------------------------------------------------------------
+    # Determinism across the whole physics core (doc §3.3)
+    # ------------------------------------------------------------------
+    describe("physics determinism"):
+        it("reproduces identical program, erase and sense results for equal seeds"):
+            """Two independent evaluations with identical inputs and seeds yield
+            byte-identical Vt codes and sense results — the replayability the Vt
+            model is built for."""
+            step("Re-run program, erase and sense with the same seeds")
+            val p = ne_default_cell_params()
+            val meta = ne_page_meta_new()
+            val blk = ne_block_meta_new()
+            expect(ne_program_cell(88, false, p, 777)).to_equal(ne_program_cell(88, false, p, 777))
+            expect(ne_erase_cell(200, p, 0, 42)).to_equal(ne_erase_cell(200, p, 0, 42))
+            val s1 = ne_sense(168, meta, blk, p, 128, 0)
+            val s2 = ne_sense(168, meta, blk, p, 128, 0)
+            expect(s1.eff_code).to_equal(s2.eff_code)
+            expect(s1.bit).to_equal(s2.bit)

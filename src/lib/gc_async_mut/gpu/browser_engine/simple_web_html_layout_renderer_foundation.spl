@@ -1,0 +1,2411 @@
+# HTML parsing, CSS cascade, and computed styles for the Simple web renderer.
+
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.text_layout.font_renderer.{resolve_font_metrics_with_language}
+use std.common.web.browser_renderer_protocol.{
+    BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+}
+use std.common.animation.timing.{parse_timing_function}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_flat_projection_with_limits
+}
+
+# Render budget + CSS quotas (hostile-page hardening)
+# ---------------------------------------------------------------------------
+# A hostile or pathological page (a huge <style>, thousands of rules matching a
+# single node, a giant DOM) can drive the O(rules) cascade or the O(nodes) paint
+# loops for minutes. These guards degrade GRACEFULLY: on wall-clock budget expiry
+# the current phase stops at a loop boundary and whatever has been resolved or
+# painted so far is returned (never a panic, never an empty buffer — the
+# framebuffer is always allocated at width*height before paint). CSS quotas
+# silently drop over-limit rules/declarations so the first, load-bearing rules
+# still win.
+extern fn rt_time_now_micros() -> i64
+
+struct SimpleWebBackdropAdmission:
+    admitted: bool
+    realized_blur_px: i64
+    realized_saturation_milli: i64
+
+fn simple_web_backdrop_admission(backdrop: text) -> SimpleWebBackdropAdmission:
+    val terms = backdrop.split(" ")
+    if terms.len() != 2:
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    val blur_term = terms[0]
+    val saturation_term = terms[1]
+    if not blur_term.starts_with("blur(") or not blur_term.ends_with("px)"):
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    if (not saturation_term.starts_with("saturate(") or
+        not saturation_term.ends_with("%)")):
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    val blur_text = blur_term.slice(5, blur_term.len() - 3)
+    val saturation_text = saturation_term.slice(9, saturation_term.len() - 2)
+    val blur = blur_text.to_i64()
+    val saturation_percent = saturation_text.to_i64()
+    if (blur == nil or saturation_percent == nil or blur < 0 or
+        blur > 1000000 or saturation_percent < 0 or
+        saturation_percent > 300):
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    if backdrop != "blur({blur}px) saturate({saturation_percent}%)":
+        return SimpleWebBackdropAdmission(
+            admitted: false, realized_blur_px: 0,
+            realized_saturation_milli: 0)
+    SimpleWebBackdropAdmission(
+        admitted: true,
+        realized_blur_px: if blur > 4: 4 else: blur,
+        realized_saturation_milli: saturation_percent * 10)
+
+# Default wall-clock budget for one software render, in milliseconds. Sized
+# for AOT/JIT-compiled execution. Under `bin/simple run` (tree-walking
+# interpreter), parse_html/compute_styles/layout for even a small document
+# (see doc header) routinely exceed this, so `_web_budget_expired()` (below)
+# trips mid-paint and only the canvas-background command survives — a
+# uniform-fill frame that still reports nonzero/varied-looking pixel stats
+# at the framebuffer level but has no real content. This is NOT scaled up
+# here by default (that would silently hide the interpreter-perf gap for
+# every caller, including compiled ones close to the edge of their own
+# budget). Interpreted-mode callers that need real content — showcase
+# evidence capture, manual debugging via `bin/simple run` — must opt in via
+# SIMPLE_WEB_RENDER_BUDGET_MS (see _web_render_budget_ms_env_override below).
+# The interpreter-vs-budget gap itself is a perf defect, tracked separately
+# from this render-budget mechanism; do not paper over it by raising this
+# default.
+val WEB_RENDER_BUDGET_MS: i64 = 10000
+val SIMPLE_WEB_MAX_HTML_NODES: i32 = 65536
+val SIMPLE_WEB_MAX_HTML_BYTES: i64 = BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+val SIMPLE_WEB_MAX_HTML_PARTS: i32 = 262144
+
+fn _simple_web_html_source_admitted(html: text, byte_limit: i64) -> bool:
+    if html.len() > byte_limit:
+        return false
+    var part_count = 1
+    var i = 0
+    while i < html.len():
+        if html.char_code_at(i) == 60:
+            part_count = part_count + 1
+            if part_count > SIMPLE_WEB_MAX_HTML_PARTS:
+                return false
+        i = i + 1
+    true
+
+# Optional override for WEB_RENDER_BUDGET_MS, read from the environment at the
+# start of every render so long/headless probes can raise the budget without
+# threading an explicit i64 arg through the public entry points (an explicit
+# i64 default-arg on those entry points has a known seed-interpreter bug that
+# whites out painted backgrounds — see
+# doc/08_tracking/bug/seed_interp_explicit_i64_default_arg_poisons_render_backgrounds_2026-07-11.md).
+# Unset or non-numeric -> falls back to WEB_RENDER_BUDGET_MS / the caller's
+# explicit budget_ms as before.
+fn _web_render_budget_ms_env_override() -> i64:
+    val raw = env_get("SIMPLE_WEB_RENDER_BUDGET_MS") ?? ""
+    if raw == "":
+        return 0
+    val n = raw.trim().to_i64()
+    if n == nil or n <= 0:
+        return 0
+    n
+
+# Level-gated, default-off phase-boundary tracing (doc/08_tracking/bug/
+# web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md, "Module-
+# compile-cost root cause" follow-up: settling whether style resolution or a
+# later phase -- layout, shaping, paint -- is where wall-clock actually goes
+# on a long run). Off by default (SIMPLE_WEB_PHASE_TRACE unset); set to "1"
+# to emit `[web-phase] phase=<name> elapsed_ms=<n>` lines at each boundary
+# and periodic per-node style-loop progress. Per the log-retention policy
+# (doc/07_guide/infra/logging/log_retention_policy.md) this is landed as a
+# permanent, level-gated instrument rather than a temporary probe to be
+# reverted -- keep it in the tree.
+fn _web_phase_trace_enabled() -> bool:
+    (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
+# Cap on the number of style rules the cascade will apply per node; rules beyond
+# this index (CSS source order) are skipped so the first rules keep their effect.
+val WEB_STYLE_RULE_QUOTA: i32 = 4096
+# Cap on declarations processed for a single rule; a rule with more is skipped.
+val WEB_RULE_DECL_QUOTA: i32 = 256
+# Maximum embedding depth for iframe rendering-inside-rendering. The top document
+# is depth 0; each nested iframe child renders one level deeper. A child whose
+# depth would EXCEED this cap is not recursed into — its content box is filled
+# with a flat placeholder instead — so a page that embeds itself (or a cycle)
+# can never drive unbounded recursion.
+val WEB_IFRAME_DEPTH_CAP: i32 = 3
+# Placeholder fill painted in place of an iframe whose child would exceed the
+# depth cap (opaque grey).
+val WEB_IFRAME_PLACEHOLDER: u32 = 0xFF888888u32
+
+# Per-render mutable state (reset at the start of every public render entry).
+var _web_render_deadline_us: i64 = 0
+var _web_render_degraded: bool = false
+
+# Platform budget floor: slow/emulated platforms (e.g. SimpleOS under QEMU
+# TCG, ~30x slower than native) legitimately need more wall-clock than the
+# native-tuned defaults. The platform entry point may raise the floor once at
+# startup; 0 means no floor. This is a calibration knob, not a budget bypass —
+# the budget still expires past the floored deadline.
+var _web_render_budget_floor_ms: i64 = 0
+# Absolute floor deadline for the current render (begin-time + floor); rearm
+# never lowers the deadline below this.
+var _web_render_floor_deadline_us: i64 = 0
+
+pub fn simple_web_layout_set_render_budget_floor_ms(ms: i64):
+    if ms > 0:
+        _web_render_budget_floor_ms = ms
+
+# Diagnostic: current clock vs armed deadline, as text (safe channel), for
+# budget-break attribution receipts.
+pub fn web_budget_now_and_deadline() -> text:
+    val now = rt_time_now_micros()
+    "now_us={now} deadline_us={_web_render_deadline_us}"
+
+# True iff the most recent render tripped its wall-clock budget (a phase stopped
+# early). Quota drops do NOT set this — they are silent by design.
+pub fn simple_web_layout_last_render_degraded() -> bool:
+    _web_render_degraded
+
+# Arm the budget for a fresh render: record the deadline and clear the flag.
+# A budget_ms that is <= 0, or that is still the module default (i.e. the
+# caller went through the public entry point's default arg rather than
+# passing an explicit override), is subject to the SIMPLE_WEB_RENDER_BUDGET_MS
+# env override; an explicit non-default budget_ms from the caller always wins.
+fn _web_budget_begin(budget_ms: i64):
+    val env_override = _web_render_budget_ms_env_override()
+    val ms = if budget_ms <= 0 or budget_ms == WEB_RENDER_BUDGET_MS:
+        if env_override > 0: env_override else: WEB_RENDER_BUDGET_MS
+    else:
+        budget_ms
+    val floored_ms = if ms < _web_render_budget_floor_ms: _web_render_budget_floor_ms else: ms
+    val begin_now = rt_time_now_micros()
+    _web_render_deadline_us = begin_now + floored_ms * 1000
+    _web_render_floor_deadline_us = if _web_render_budget_floor_ms > 0: begin_now + _web_render_budget_floor_ms * 1000 else: 0
+    _web_render_degraded = false
+
+# Re-arm the deadline mid-render to hand the NEXT stage its own slice of the
+# total budget, without ever extending the overall wall-clock past whatever
+# the caller originally granted. Used to stage-partition a single budget_ms
+# across style -> layout -> paint so an early stage exhausting its slice does
+# not zero out every later stage (see simple_web_layout_render_html_software_pixels).
+# A stage that already tripped the deadline stays expired: rearming only ever
+# raises the deadline to a point <= the original total, so if the previous
+# absolute deadline was already in the past, moving it later just grants the
+# next stage its fresh slice; it never un-expires a stage's own past work.
+fn _web_budget_rearm(deadline_us: i64):
+    if _web_render_deadline_us > 0:
+        _web_render_deadline_us = if _web_render_floor_deadline_us > deadline_us: _web_render_floor_deadline_us else: deadline_us
+
+# True once the wall-clock deadline has passed; latches the degraded flag so
+# callers can report the render as degraded. A deadline of 0 means "not armed"
+# (guards are inert), so any code path that never called _web_budget_begin runs
+# unbounded exactly as before.
+fn _web_budget_expired() -> bool:
+    if _web_render_deadline_us <= 0:
+        return false
+    if rt_time_now_micros() > _web_render_deadline_us:
+        _web_render_degraded = true
+        return true
+    false
+
+# ---------------------------------------------------------------------------
+# Flat node arena
+# ---------------------------------------------------------------------------
+
+class HNode:
+    tag: text          # lowercased tag, "#text", or "#root"
+    text_data: text    # text for #text nodes
+    text_trimmed: text
+    style_attr: text   # raw style="" value
+    class_attr: text
+    class_words: [text]
+    has_widget_class: bool
+    has_icon_image_class: bool
+    has_widget_panel_class: bool
+    has_widget_button_class: bool
+    has_widget_image_class: bool
+    has_focused_class: bool
+    id_attr: text
+    attrs_raw: text    # raw tag inner text for attribute selectors
+    parent: i64        # index of parent in the arena (-1 for root)
+    is_details_summary: bool # first direct summary owned by details
+
+class HtmlChildIndex:
+    first_child: [i32]
+    next_sibling: [i32]
+    child_count: [i32]
+
+class SelectorContext:
+    child_index: HtmlChildIndex
+    element_position: [i32]
+    element_sibling_count: [i32]
+    has_content_child: [bool]
+
+class ClassFlags:
+    has_widget_class: bool
+    has_icon_image_class: bool
+    has_widget_panel_class: bool
+    has_widget_button_class: bool
+    has_widget_image_class: bool
+    has_focused_class: bool
+
+fn mk_node(tag: text, parent: i64) -> HNode:
+    HNode(tag: tag, text_data: "", text_trimmed: "", style_attr: "", class_attr: "", class_words: [], has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false, id_attr: "", attrs_raw: "", parent: parent, is_details_summary: false)
+
+fn build_child_index(nodes: [HNode]) -> HtmlChildIndex:
+    val node_count = nodes.len()
+    var first_child: [i32] = [-1; node_count]
+    var last_child: [i32] = [-1; node_count]
+    var next_sibling: [i32] = [-1; node_count]
+    var child_count: [i32] = [0; node_count]
+    var i = 0
+    while i < node_count:
+        val parent = nodes[i].parent
+        if parent >= 0 and parent < node_count:
+            if first_child[parent] < 0:
+                first_child[parent] = i
+            else:
+                next_sibling[last_child[parent]] = i
+            last_child[parent] = i
+            child_count[parent] = child_count[parent] + 1
+        i = i + 1
+    HtmlChildIndex(first_child: first_child, next_sibling: next_sibling, child_count: child_count)
+
+fn build_selector_context(nodes: [HNode], child_index: HtmlChildIndex) -> SelectorContext:
+    val node_count = nodes.len()
+    var element_position: [i32] = [1; node_count]
+    var element_sibling_count: [i32] = [1; node_count]
+    var has_content_child: [bool] = [false; node_count]
+    var parent = 0
+    while parent < node_count:
+        var element_count = 0
+        var child = child_index.first_child[parent]
+        while child >= 0:
+            val nd = nodes[child]
+            if nd.tag == "#text":
+                if nd.text_trimmed.len() > 0:
+                    has_content_child[parent] = true
+            else:
+                has_content_child[parent] = true
+                element_count = element_count + 1
+                element_position[child] = element_count
+            child = child_index.next_sibling[child]
+        child = child_index.first_child[parent]
+        while child >= 0:
+            if nodes[child].tag != "#text":
+                element_sibling_count[child] = element_count
+            child = child_index.next_sibling[child]
+        parent = parent + 1
+    SelectorContext(child_index: child_index, element_position: element_position, element_sibling_count: element_sibling_count, has_content_child: has_content_child)
+
+# ---------------------------------------------------------------------------
+# Position-aware string find (works around index_of(needle,pos) ignoring pos)
+# ---------------------------------------------------------------------------
+
+fn text_index_of(haystack: text, needle: text) -> i32:
+    find_from(haystack, needle, 0)
+
+fn text_matches_at(haystack: text, needle: text, offset: i32) -> bool:
+    # BYTE-indexed. `offset` is a byte offset and every index below is a byte
+    # index. This is the only self-consistent choice: `len()`, `slice()`,
+    # `substring()` and `index_of()` are ALL byte-indexed, and callers feed the
+    # offsets these scanners return straight into `substring`/`slice`.
+    #
+    # Do NOT reintroduce `char_code_at`/`char_at` here. Both are CHARACTER-
+    # indexed, so bounding a loop with `len()` (bytes) while probing with
+    # `char_code_at` (characters) silently returns a character index into a
+    # byte-indexed world; on any multi-byte document every downstream
+    # `substring` then cuts mid-sequence and truncates. That was the defect
+    # this form replaces (regression guard:
+    # test/01_unit/lib/gc_async_mut/gpu/browser_engine/
+    # simple_web_html_layout_renderer_scan_index_space_spec.spl).
+    #
+    # `bytes()` keeps the original freestanding-safety property that motivated
+    # `char_code_at`: the comparison is between two plain integers, so no
+    # boolean crosses a runtime text-builtin boundary. The SimpleOS x86_64
+    # kernel build mis-marshals boolean results from text builtins at depth
+    # (doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md,
+    # residual item 3), which is what collapsed `_html_scan_events` to zero
+    # events in the guest while the host produced a full DOM. It also avoids
+    # the per-character heap string `char_at` would allocate.
+    val needle_len = needle.len() as i32
+    if offset < 0 or offset + needle_len > (haystack.len() as i32):
+        return false
+    if needle_len == 0:
+        return true
+    val hb = haystack.bytes()
+    val nb = needle.bytes()
+    var j = 0
+    while j < needle_len:
+        if hb[offset + j] != nb[j]:
+            return false
+        j = j + 1
+    true
+
+# Freestanding-safe replacement for `s.starts_with(literal)`. Same rationale as
+# text_matches_at: no boolean crosses a runtime call boundary.
+fn text_starts_with_portable(s: text, prefix: text) -> bool:
+    text_matches_at(s, prefix, 0)
+
+# Advance past ASCII spaces. Defined in this base module because BOTH
+# ..._style.spl (parse_font_shorthand_family) and ..._layout.spl call it, and
+# _style sits below _layout in the import order.
+fn skip_wrap_spaces(txt: text, off: i32) -> i32:
+    # BYTE-indexed: `off` in, byte offset out, so the result composes with
+    # `substring`/`slice`. A space is ASCII, but the INDEX still has to be a
+    # byte index — `char_code_at` here returned a character index that callers
+    # then cut on, truncating any string containing multi-byte text.
+    var out = off
+    val n = txt.len() as i32
+    if out >= n:
+        return out
+    val b = txt.bytes()
+    while out < n and b[out] == 32:
+        out = out + 1
+    out
+
+fn find_from(s: text, needle: text, pos: i32) -> i32:
+    # O(n*m) portable positional search. Do not emulate this through
+    # substring(start).index_of(): native substring can be represented as an
+    # untagged slice, while index_of expects tagged text and silently returns a
+    # bogus near-zero offset for non-zero starts. Keeping this in Simple also
+    # lets older deployed interpreters run current web-renderer source without
+    # requiring a newly added runtime extern.
+    # BYTE-indexed throughout: `pos` in, byte index out, matching `index_of`.
+    val start = if pos < 0: 0 else: pos
+    val nlen = needle.len() as i32
+    if nlen == 0:
+        return start
+    val slen = s.len() as i32
+    if start >= slen or slen < nlen:
+        return -1
+    val limit = slen - nlen
+    # Decode both operands to bytes ONCE, then compare integers. Calling
+    # text_matches_at per probe would re-decode the whole haystack at every
+    # offset; the previous `char_code_at` form was worse still, since each
+    # `char_code_at(i)` re-walks the UTF-8 from byte 0, making the scan
+    # quadratic in the match position.
+    val hb = s.bytes()
+    val nb = needle.bytes()
+    val first = nb[0]
+    var i = start
+    while i <= limit:
+        if hb[i] == first:
+            var j = 1
+            var matched = true
+            while j < nlen:
+                if hb[i + j] != nb[j]:
+                    matched = false
+                    j = nlen
+                else:
+                    j = j + 1
+            if matched:
+                return i
+        i = i + 1
+    -1
+
+fn html_attr_name_byte_equal(actual: i64, expected: i64) -> bool:
+    var actual_folded = actual
+    var expected_folded = expected
+    if actual_folded >= 65 and actual_folded <= 90:
+        actual_folded = actual_folded + 32
+    if expected_folded >= 65 and expected_folded <= 90:
+        expected_folded = expected_folded + 32
+    actual_folded == expected_folded
+
+fn attr_key_index(inner: text, key: text, key_len: i32) -> i32:
+    if key_len == 0:
+        return 0
+    # BYTE-indexed, like the other scanners here: the returned index is used as
+    # a byte offset by callers. `char_at` is CHARACTER-indexed, so pairing it
+    # with `inner.len()` (bytes) mis-located every attribute in a tag whose
+    # inner text contained multi-byte characters (e.g. a non-ASCII alt/title
+    # value preceding the attribute being read).
+    val inner_len = inner.len() as i32
+    if inner_len < key_len:
+        return -1
+    val ib = inner.bytes()
+    val kb = key.bytes()
+    val first = kb[0]
+    val limit = inner_len - key_len
+    var i = 0
+    # Quote-aware scan: a key substring that lands INSIDE a quoted attribute
+    # value is not a real attribute. This matters for values that embed markup —
+    # e.g. an <iframe srcdoc="...div style='height:10px'..."> must not have its
+    # own `style=`/`width=`/`height=` read from inside the srcdoc value.
+    # 0 = not inside a quoted value; otherwise the opening quote byte
+    # (34 = '"', 39 = '\''). Byte comparisons keep this freestanding-safe.
+    var quote = 0
+    while i <= limit:
+        val ci = ib[i]
+        if quote != 0:
+            if ci == quote:
+                quote = 0
+            i = i + 1
+            continue
+        if ci == 34 or ci == 39:
+            quote = ci
+            i = i + 1
+            continue
+        if html_attr_name_byte_equal(ci, first):
+            # Left word-boundary guard: a candidate match is only a real
+            # attribute when it starts the inner text or follows ASCII
+            # whitespace. Without this, a longer attribute name ending with
+            # the key falsely matches — `align=` inside `valign=`, `bgcolor=`
+            # inside `data-bgcolor=`, `width=` inside `data-width=`.
+            var at_token_start = i == 0
+            if not at_token_start:
+                # 32 = space, 9 = tab, 10 = LF, 13 = CR
+                val prev = ib[i - 1]
+                at_token_start = prev == 32 or prev == 9 or prev == 10 or prev == 13
+            if at_token_start:
+                var j = 1
+                var matched = true
+                while j < key_len:
+                    if not html_attr_name_byte_equal(ib[i + j], kb[j]):
+                        matched = false
+                        break
+                    j = j + 1
+                if matched:
+                    return i
+        i = i + 1
+    -1
+
+fn attr_present(inner: text, name: text) -> bool:
+    if name.len() == 0 or inner.len() < name.len():
+        return false
+    val ib = inner.bytes()
+    val nb = name.bytes()
+    val limit = inner.len() - name.len()
+    var quote = 0
+    var i = 0
+    while i <= limit:
+        val current = ib[i]
+        if quote != 0:
+            if current == quote:
+                quote = 0
+            i = i + 1
+            continue
+        if current == 34 or current == 39:
+            quote = current
+            i = i + 1
+            continue
+        var token_start = i == 0
+        if not token_start:
+            val previous = ib[i - 1]
+            token_start = (
+                previous == 32 or previous == 9 or
+                previous == 10 or previous == 13
+            )
+        if token_start:
+            var matched = true
+            var j = 0
+            while j < name.len():
+                if not html_attr_name_byte_equal(ib[i + j], nb[j]):
+                    matched = false
+                    break
+                j = j + 1
+            if matched:
+                val end = i + name.len()
+                if end >= inner.len():
+                    return true
+                val next = ib[end]
+                if (
+                    next == 32 or next == 9 or next == 10 or
+                    next == 13 or next == 47 or next == 61
+                ):
+                    return true
+        i = i + 1
+    false
+
+fn is_void(tag: text) -> bool:
+    tag == "meta" or tag == "br" or tag == "img" or tag == "input" or tag == "link" or tag == "hr" or tag == "area" or tag == "base" or tag == "col" or tag == "embed" or tag == "source" or tag == "track" or tag == "wbr"
+
+# ---------------------------------------------------------------------------
+# Attribute extraction (reads class/id/style out of the raw tag inner text)
+# ---------------------------------------------------------------------------
+
+fn attr_value(inner: text, name: text) -> text:
+    # find name= and read the quoted value; simple, tolerant
+    val key = name + "="
+    attr_value_by_key(inner, key)
+
+fn attr_value_by_key(inner: text, key: text) -> text:
+    val key_len = key.len()
+    val kpos = attr_key_index(inner, key, key_len)
+    if kpos < 0:
+        return ""
+    var i = kpos + key_len
+    if i >= inner.len():
+        return ""
+    val q = inner.slice(i, i + 1)
+    if q == "\"" or q == "'":
+        val end = find_from(inner, q, i + 1)
+        if end < 0:
+            return ""
+        return decode_html_entities(inner.substring(i + 1, end))
+    # unquoted: read to whitespace
+    var j = i
+    val inner_len = inner.len()
+    while j < inner_len:
+        val c = inner.slice(j, j + 1)
+        if c == " " or c == "\t" or c == "\n" or c == "\r" or c == "/":
+            break
+        j = j + 1
+    decode_html_entities(inner.substring(i, j))
+
+fn split_class_words_trimmed(class_attr: text) -> [text]:
+    var word_count = 1
+    var i = 0
+    val class_len = class_attr.len()
+    while i < class_len:
+        if class_attr.slice(i, i + 1) == " ":
+            word_count = word_count + 1
+        i = i + 1
+    var words: [text] = [""; word_count]
+    i = 0
+    var start = 0
+    var word_i = 0
+    while i < class_len:
+        if class_attr.slice(i, i + 1) == " ":
+            words[word_i] = class_attr.substring(start, i).trim()
+            word_i = word_i + 1
+            start = i + 1
+        i = i + 1
+    words[word_i] = class_attr.substring(start, class_len).trim()
+    words
+
+fn class_flags_from_attr(class_attr: text) -> ClassFlags:
+    var flags = ClassFlags(has_widget_class: false, has_icon_image_class: false, has_widget_panel_class: false, has_widget_button_class: false, has_widget_image_class: false, has_focused_class: false)
+    var i = 0
+    val class_len = class_attr.len()
+    while i < class_len:
+        val c = class_attr.slice(i, i + 1)
+        if c == "w":
+            if not flags.has_widget_class and text_matches_at(class_attr, "widget-", i):
+                flags.has_widget_class = true
+            if not flags.has_widget_panel_class and text_matches_at(class_attr, "widget-panel", i):
+                flags.has_widget_panel_class = true
+            if not flags.has_widget_button_class and text_matches_at(class_attr, "widget-button", i):
+                flags.has_widget_button_class = true
+            if not flags.has_widget_image_class and text_matches_at(class_attr, "widget-image", i):
+                flags.has_widget_image_class = true
+        elif c == "i":
+            if not flags.has_icon_image_class and text_matches_at(class_attr, "icon-image", i):
+                flags.has_icon_image_class = true
+        elif c == "f":
+            if not flags.has_focused_class and text_matches_at(class_attr, "focused", i):
+                flags.has_focused_class = true
+        i = i + 1
+    flags
+
+fn mk_element_node(tag: text, parent: i64, inner: text) -> HNode:
+    # Construct array-bearing node fields in one typed value. Mutating an
+    # initially-empty [text] field and then copying the class into [HNode]
+    # loses earlier siblings' array handles in native code.
+    val class_attr: text = attr_value_by_key(inner, "class=")
+    val class_words: [text] = if class_attr.len() > 0: split_class_words_trimmed(class_attr) else: []
+    val flags: ClassFlags = class_flags_from_attr(class_attr)
+    HNode(
+        tag: tag,
+        text_data: "",
+        text_trimmed: "",
+        style_attr: attr_value_by_key(inner, "style="),
+        class_attr: class_attr,
+        class_words: class_words,
+        has_widget_class: flags.has_widget_class,
+        has_icon_image_class: flags.has_icon_image_class,
+        has_widget_panel_class: flags.has_widget_panel_class,
+        has_widget_button_class: flags.has_widget_button_class,
+        has_widget_image_class: flags.has_widget_image_class,
+        has_focused_class: flags.has_focused_class,
+        id_attr: attr_value_by_key(inner, "id="),
+        attrs_raw: inner,
+        parent: parent,
+        is_details_summary: false
+    )
+
+# ---------------------------------------------------------------------------
+# Canonical projection -> renderer arena
+# ---------------------------------------------------------------------------
+
+# Encode a Unicode code point to UTF-8 text. The common-tier helper
+# (char_from_codepoint) returns U+FFFD for bytes >= 128, so non-ASCII must go
+# through the runtime byte->text boundary here instead.
+extern fn rt_bytes_to_text(data: [u8]) -> text
+
+fn _codepoint_to_text(cp: i64) -> text:
+    if cp <= 0 or cp > 0x10FFFF or (cp >= 0xD800 and cp <= 0xDFFF):
+        return "�"
+    var bytes: [u8] = []
+    if cp < 0x80:
+        bytes.push(cp)
+    elif cp < 0x800:
+        bytes.push(0xC0 + cp / 64)
+        bytes.push(0x80 + cp % 64)
+    elif cp < 0x10000:
+        bytes.push(0xE0 + cp / 4096)
+        bytes.push(0x80 + (cp / 64) % 64)
+        bytes.push(0x80 + cp % 64)
+    else:
+        bytes.push(0xF0 + cp / 262144)
+        bytes.push(0x80 + (cp / 4096) % 64)
+        bytes.push(0x80 + (cp / 64) % 64)
+        bytes.push(0x80 + cp % 64)
+    rt_bytes_to_text(bytes)
+
+# Decode decimal (&#NNNN;) and hex (&#xHHHH;) numeric character references per
+# the WHATWG character-reference rules. Runs BEFORE the named-entity replaces:
+# "&amp;#38;" contains no literal "&#" pair, so double-decoding cannot occur.
+fn _decode_numeric_entities(s: text) -> text:
+    var start = find_from(s, "&#", 0)
+    if start < 0:
+        return s
+    val n = s.len()
+    var out = ""
+    var i = 0
+    while start >= 0:
+        out = out + s.substring(i, start)
+        var j = start + 2
+        var is_hex = false
+        if j < n and (s[j] == "x" or s[j] == "X"):
+            is_hex = true
+            j = j + 1
+        var cp = 0i64
+        var digits = 0
+        var valid = true
+        while j < n and digits <= 7:
+            val c = s[j]
+            if c == ";":
+                break
+            var d = -1
+            if c >= "0" and c <= "9":
+                d = c.char_code_at(0) - 48
+            elif is_hex and c >= "a" and c <= "f":
+                d = c.char_code_at(0) - 87
+            elif is_hex and c >= "A" and c <= "F":
+                d = c.char_code_at(0) - 55
+            if d < 0:
+                valid = false
+                break
+            cp = cp * (if is_hex: 16 else: 10) + d
+            digits = digits + 1
+            j = j + 1
+        if valid and digits > 0 and j < n and s[j] == ";":
+            out = out + _codepoint_to_text(cp)
+            i = j + 1
+        else:
+            # Not a well-formed reference: emit "&#" literally and move on.
+            out = out + "&#"
+            i = start + 2
+        start = find_from(s, "&#", i)
+    out + s.substring(i, n)
+
+# Decode the HTML character entities the markdown/office HTML emitters produce
+# (markdown_escape_html: & < > " '). Text nodes carry escaped content, so the
+# painter would otherwise show "&quot;" literally instead of a quote. Decode
+# &amp; LAST so "&amp;lt;" round-trips to "&lt;", not "<".
+fn decode_html_entities(s: text) -> text:
+    if s.len() == 0:
+        return s
+    if find_from(s, "&", 0) < 0:
+        return s
+    var out = _decode_numeric_entities(s)
+    out = out.replace("&lt;", "<")
+    out = out.replace("&gt;", ">")
+    out = out.replace("&quot;", "\"")
+    out = out.replace("&#39;", "'")
+    out = out.replace("&apos;", "'")
+    out = out.replace("&nbsp;", " ")
+    out = out.replace("&#32;", " ")
+    out = out.replace("&#x20;", " ")
+    out = out.replace("&#X20;", " ")
+    out = out.replace("&#34;", "\"")
+    out = out.replace("&#x22;", "\"")
+    out = out.replace("&#X22;", "\"")
+    out = out.replace("&#38;", "&")
+    out = out.replace("&#x26;", "&")
+    out = out.replace("&#X26;", "&")
+    out = out.replace("&#60;", "<")
+    out = out.replace("&#x3C;", "<")
+    out = out.replace("&#x3c;", "<")
+    out = out.replace("&#X3C;", "<")
+    out = out.replace("&#X3c;", "<")
+    out = out.replace("&#62;", ">")
+    out = out.replace("&#x3E;", ">")
+    out = out.replace("&#x3e;", ">")
+    out = out.replace("&#X3E;", ">")
+    out = out.replace("&#X3e;", ">")
+    out.replace("&amp;", "&")
+
+fn parse_html(html: text) -> [HNode]:
+    _parse_html_with_limits(
+        html, SIMPLE_WEB_MAX_HTML_NODES, SIMPLE_WEB_MAX_HTML_BYTES
+    )
+
+fn _parse_html_with_node_limit(html: text, requested_node_limit: i32) -> [HNode]:
+    _parse_html_with_limits(
+        html, requested_node_limit, SIMPLE_WEB_MAX_HTML_BYTES
+    )
+
+fn _parse_html_with_limits(
+    html: text, requested_node_limit: i32, requested_byte_limit: i64
+) -> [HNode]:
+    val node_limit = if requested_node_limit < 1:
+        1
+    elif requested_node_limit > SIMPLE_WEB_MAX_HTML_NODES:
+        SIMPLE_WEB_MAX_HTML_NODES
+    else:
+        requested_node_limit
+    val byte_limit = if requested_byte_limit < 0:
+        0
+    elif requested_byte_limit > SIMPLE_WEB_MAX_HTML_BYTES:
+        SIMPLE_WEB_MAX_HTML_BYTES
+    else:
+        requested_byte_limit
+    if not _simple_web_html_source_admitted(html, byte_limit):
+        return [mk_node("#root", -1)]
+    val projected = html_tree_builder_flat_projection_with_limits(
+        html, node_limit, SIMPLE_WEB_MAX_HTML_PARTS, 65536
+    )
+    var flat_to_hnode: [i32] = [-1; projected.nodes.len()]
+    var skip_subtree: [bool] = [false; projected.nodes.len()]
+    var details_has_summary: [bool] = [false; node_limit]
+    var nodes: [HNode] = []
+    var i = 0
+    while i < projected.nodes.len() and nodes.len() < node_limit:
+        val flat = projected.nodes[i]
+        val parent_skipped = (
+            flat.parent >= 0 and skip_subtree[flat.parent]
+        )
+        val skip = (
+            parent_skipped or flat.tag == "head" or flat.tag == "style" or
+            flat.tag == "script" or flat.tag == "title" or
+            flat.tag == "meta" or flat.tag == "link" or flat.tag == "base"
+        )
+        skip_subtree[i] = skip
+        if skip:
+            i = i + 1
+            continue
+        val parent = if flat.parent < 0:
+            -1
+        else:
+            flat_to_hnode[flat.parent]
+        if flat.tag == "#text":
+            val trimmed = flat.text_data.trim()
+            if trimmed.len() > 0 or flat.text_data == " ":
+                if (nodes.len() > 0 and nodes[nodes.len() - 1].tag == "#text" and
+                    nodes[nodes.len() - 1].parent == parent):
+                    val previous_index = nodes.len() - 1
+                    var previous = nodes[previous_index]
+                    previous.text_data = previous.text_data + flat.text_data
+                    previous.text_trimmed = previous.text_data.trim()
+                    nodes[previous_index] = previous
+                    flat_to_hnode[i] = previous_index
+                else:
+                    var text_node = mk_node("#text", parent)
+                    text_node.text_data = flat.text_data
+                    text_node.text_trimmed = trimmed
+                    flat_to_hnode[i] = nodes.len() as i32
+                    nodes.push(text_node)
+        else:
+            val tag = if flat.tag == "#document": "#root" else: flat.tag
+            flat_to_hnode[i] = nodes.len() as i32
+            var element = mk_element_node(
+                tag, parent, tag + flat.normalized_attrs
+            )
+            if (
+                tag == "summary" and parent >= 0 and
+                nodes[parent].tag == "details" and
+                not details_has_summary[parent]
+            ):
+                element.is_details_summary = true
+                details_has_summary[parent] = true
+            nodes.push(element)
+        i = i + 1
+    if nodes.len() == 0:
+        return [mk_node("#root", -1)]
+    nodes
+
+pub fn simple_web_layout_debug_capped_node_count(
+    html: text, requested_node_limit: i32
+) -> i32:
+    _parse_html_with_node_limit(html, requested_node_limit).len() as i32
+
+pub fn simple_web_layout_debug_capped_input_node_count(
+    html: text, requested_byte_limit: i64
+) -> i32:
+    _parse_html_with_limits(
+        html, SIMPLE_WEB_MAX_HTML_NODES, requested_byte_limit
+    ).len() as i32
+
+pub fn simple_web_layout_debug_dump_nodes(html: text) -> text:
+    """Permanent debug entry point (bounded module-internal parse_html/HNode
+    are not otherwise externally testable): one line per node,
+    'index|tag|parent|id_attr|style_attr_len|attrs_raw_len'. Used to isolate
+    the vector-font-evidence style-attribute-loss defect -- see
+    doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md section 16."""
+    val nodes = parse_html(html)
+    var out: [text] = []
+    var i = 0
+    while i < nodes.len():
+        val node = nodes[i]
+        out.push(
+            i.to_text() + "|" + node.tag + "|" + node.parent.to_text() + "|" +
+            node.id_attr + "|" + node.style_attr.len().to_text() + "|" +
+            node.attrs_raw.len().to_text()
+        )
+        i = i + 1
+    out.join("\n")
+
+pub fn simple_web_layout_debug_attr_by_id(html: text, id: text, attr: text) -> text:
+    val nodes = parse_html(html)
+    var i = 0
+    val node_count = nodes.len()
+    while i < node_count:
+        val node = nodes[i]
+        if node.id_attr == id:
+            if attr == "style":
+                return node.style_attr
+            if attr == "class":
+                return node.class_attr
+            if attr == "id":
+                return node.id_attr
+            return attr_value(node.attrs_raw, attr)
+        i = i + 1
+    ""
+
+
+pub fn simple_web_layout_uses_legacy_widget_chrome(html: text) -> bool:
+    html.contains("widget-panel") and not html.contains("<style")
+
+# ---------------------------------------------------------------------------
+# Minimal CSS color parsing (#rgb, #rrggbb, rgb()/rgba(), a few names)
+# ---------------------------------------------------------------------------
+
+fn hex_val(c: text) -> i32:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    val l = c.lower()
+    if l == "a": return 10
+    if l == "b": return 11
+    if l == "c": return 12
+    if l == "d": return 13
+    if l == "e": return 14
+    if l == "f": return 15
+    0
+
+fn dec_val(c: text) -> i32:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    10
+
+fn argb(r: i32, g: i32, b: i32) -> u32:
+    0xFF000000u32 | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
+
+fn parse_int_range(s: text, start: i32, end: i32) -> i32:
+    var i = start
+    var v = 0
+    var matched_any_digit = false
+    while i < end:
+        val c = s.char_at(i)
+        val digit = dec_val(c)
+        if digit < 10:
+            v = v * 10 + digit
+            matched_any_digit = true
+        else:
+            if matched_any_digit:
+                break
+        i = i + 1
+    v
+
+# returns packed u32, or 0 for "none/transparent/empty"
+fn parse_color(raw: text) -> u32:
+    val s = raw.trim().lower()
+    if s.len() == 0 or s == "transparent" or s == "none" or s == "inherit":
+        return 0u32
+    if s == "white": return argb(255, 255, 255)
+    if s == "black": return argb(0, 0, 0)
+    if s == "red": return argb(220, 50, 50)
+    if s.char_at(0) == "#":
+        val h_len = s.len() - 1
+        if h_len >= 6:
+            val r = hex_val(s.char_at(1)) * 16 + hex_val(s.char_at(2))
+            val g = hex_val(s.char_at(3)) * 16 + hex_val(s.char_at(4))
+            val b = hex_val(s.char_at(5)) * 16 + hex_val(s.char_at(6))
+            return argb(r, g, b)
+        if h_len >= 3:
+            val r = hex_val(s.char_at(1)) * 17
+            val g = hex_val(s.char_at(2)) * 17
+            val b = hex_val(s.char_at(3)) * 17
+            return argb(r, g, b)
+        return 0u32
+    if s.len() >= 3 and text_matches_at(s, "rgb", 0):
+        val lp = text_index_of(s, "(")
+        val rp = text_index_of(s, ")")
+        if lp >= 0 and rp > lp:
+            val c1 = find_from(s, ",", lp + 1)
+            val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
+            if c1 >= 0 and c2 >= 0 and c2 < rp:
+                return argb(parse_int_range(s, lp + 1, c1), parse_int_range(s, c1 + 1, c2), parse_int_range(s, c2 + 1, rp))
+    0u32
+
+fn parse_color_any(raw: text) -> u32:
+    val direct = parse_color(raw)
+    if direct != 0u32:
+        return direct
+    val lower = raw.lower()
+    val rgb = text_index_of(lower, "rgb")
+    if rgb >= 0:
+        val rp = find_from(raw, ")", rgb)
+        if rp >= 0:
+            val cv = parse_color(raw.substring(rgb, rp + 1))
+            if cv != 0u32:
+                return cv
+    val hash = text_index_of(raw, "#")
+    if hash >= 0:
+        return parse_color(raw.substring(hash, raw.len()))
+    0u32
+
+# "0.09", ".5", "1" -> 0..255 alpha
+fn parse_alpha_fraction_range(s: text, start: i32, end: i32) -> i32:
+    var i = start
+    var int_part = 0
+    var frac_num = 0
+    var frac_den = 1
+    var seen_digit = false
+    var in_frac = false
+    while i < end:
+        val c = s.char_at(i)
+        val d = dec_val(c)
+        if d < 10:
+            seen_digit = true
+            if in_frac:
+                if frac_den < 1000:
+                    frac_num = frac_num * 10 + d
+                    frac_den = frac_den * 10
+            else:
+                int_part = int_part * 10 + d
+        elif c == ".":
+            in_frac = true
+        elif seen_digit:
+            break
+        i = i + 1
+    if int_part >= 1:
+        return 255
+    (frac_num * 255 + frac_den / 2) / frac_den
+
+# Alpha-aware CSS color: 0 for none/transparent, else ARGB with true alpha
+# (rgba() keeps its alpha; every other form is opaque like parse_color_any).
+fn parse_color_alpha(raw: text) -> u32:
+    val s = raw.trim().lower()
+    val rgba_at = text_index_of(s, "rgba")
+    if rgba_at >= 0:
+        val lp = find_from(s, "(", rgba_at)
+        val rp = if lp >= 0: find_from(s, ")", lp + 1) else: -1
+        if lp >= 0 and rp > lp:
+            val c1 = find_from(s, ",", lp + 1)
+            val c2 = if c1 >= 0: find_from(s, ",", c1 + 1) else: -1
+            val c3 = if c2 >= 0: find_from(s, ",", c2 + 1) else: -1
+            if c1 >= 0 and c2 >= 0 and c3 >= 0 and c3 < rp:
+                val a255 = parse_alpha_fraction_range(s, c3 + 1, rp)
+                if a255 <= 0:
+                    return 0u32
+                val r = parse_int_range(s, lp + 1, c1)
+                val g = parse_int_range(s, c1 + 1, c2)
+                val b = parse_int_range(s, c2 + 1, c3)
+                return (a255.to_u32() << 24) | ((r.to_u32()) << 16) | ((g.to_u32()) << 8) | b.to_u32()
+    parse_color_any(raw)
+
+# True for a bare CSS angle token ("45deg", "-90deg", "0.5turn", "200grad",
+# "1rad"). `parse_linear_gradient_color` and `parse_gradient_angle_deg` both
+# need this to tell an angle apart from a color stop — a numeric angle has no
+# color meaning and must never reach `parse_color_any`.
+fn is_gradient_angle_token(s: text) -> bool:
+    val n = s.len()
+    if n == 0:
+        return false
+    var i = 0
+    if s.char_at(0) == "-" or s.char_at(0) == "+":
+        i = 1
+    var saw_digit = false
+    while i < n:
+        val c = s.char_at(i)
+        val d = dec_val(c)
+        if d < 10:
+            saw_digit = true
+            i = i + 1
+        elif c == ".":
+            i = i + 1
+        else:
+            break
+    if not saw_digit:
+        return false
+    val suffix = s.substring(i, n)
+    suffix == "deg" or suffix == "grad" or suffix == "rad" or suffix == "turn"
+
+fn parse_linear_gradient_color(raw: text, target: i32) -> u32:
+    # BUG (fixed here): a numeric angle token ("45deg", ...) used to fall
+    # through to `elif item_index == target: return parse_color_any(part)`
+    # exactly like a real color stop, because only the `to <side>` keyword
+    # form was recognized as a direction token. That shifted every stop
+    # index by one whenever the gradient carried an explicit angle: target=0
+    # returned the (non-color) angle text as 0u32 instead of the first stop,
+    # and target=1 returned the first stop instead of the second.
+    val lower = raw.lower()
+    val start = text_index_of(lower, "linear-gradient(")
+    if start < 0:
+        return 0u32
+    val lp = find_from(raw, "(", start)
+    val rp = find_from(raw, ")", lp + 1)
+    if lp < 0 or rp <= lp:
+        return 0u32
+    val inner = raw.substring(lp + 1, rp)
+    var item_index = 0
+    var pos = 0
+    val inner_len = inner.len()
+    while pos <= inner_len:
+        val comma = find_from(inner, ",", pos)
+        val end = if comma >= 0: comma else: inner_len
+        val part = inner.substring(pos, end).trim()
+        if part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part):
+            item_index = item_index - 1
+        elif item_index == target:
+            return parse_color_any(part)
+        if comma < 0:
+            break
+        item_index = item_index + 1
+        pos = comma + 1
+    0u32
+
+# ============================================================================
+# N-stop / angled / radial gradient upgrade (GAP-2)
+#
+# `parse_linear_gradient_color` above stays as the legacy 2-stop (from/to)
+# accessor consumed by the existing DrawIR pipeline. The functions below are
+# additive: a full stop list (N>=1, explicit or evenly-spaced positions),
+# the gradient angle in degrees, and radial-vs-linear detection. Paired
+# raster primitives that consume a stop list live in
+# `std.gc_async_mut.gpu.engine2d.backend_emu` (`emu_draw_linear_gradient_stops`,
+# `emu_draw_radial_gradient_stops`) so the paint side has no dependency on
+# CSS string parsing.
+# ============================================================================
+
+struct GradientStopSpec:
+    color: u32
+    pos_permille: i32
+
+# Split `s` on top-level commas only (parens — e.g. `rgba(0,0,0,0.5)` —
+# nest depth so their internal commas are not stop separators).
+fn split_top_level_commas_paren_aware(s: text) -> [text]:
+    var parts: [text] = []
+    var depth = 0
+    var start = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.char_at(i)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        elif c == "," and depth == 0:
+            parts.push(s.substring(start, i).trim())
+            start = i + 1
+        i = i + 1
+    parts.push(s.substring(start, n).trim())
+    parts
+
+# Text inside the outer `linear-gradient(...)`/`radial-gradient(...)` parens,
+# or "" if neither prefix is present.
+fn gradient_inner(raw: text) -> text:
+    val lower = raw.lower()
+    var start = text_index_of(lower, "linear-gradient(")
+    var open_len = "linear-gradient(".len()
+    if start < 0:
+        start = text_index_of(lower, "radial-gradient(")
+        open_len = "radial-gradient(".len()
+    if start < 0:
+        return ""
+    val lp = start + open_len - 1
+    val rp = find_from(raw, ")", lp + 1)
+    if rp <= lp:
+        return ""
+    raw.substring(lp + 1, rp)
+
+fn is_radial_gradient(raw: text) -> bool:
+    text_index_of(raw.lower(), "radial-gradient(") >= 0
+
+fn is_gradient_shape_or_position_token(s: text) -> bool:
+    val lower = s.lower()
+    (
+        lower.starts_with("circle") or lower.starts_with("ellipse") or
+        text_index_of(lower, "at ") >= 0 or lower == "closest-side" or
+        lower == "closest-corner" or lower == "farthest-side" or
+        lower == "farthest-corner"
+    )
+
+fn find_last_top_level_space(s: text) -> i32:
+    var last: i32 = -1
+    var depth = 0
+    var i = 0
+    val n = s.len()
+    while i < n:
+        val c = s.char_at(i)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        elif c == " " and depth == 0:
+            last = i
+        i = i + 1
+    last
+
+# "37%" / "12.5%" -> permille (0..1000). Returns -1 when `s` is not a
+# percentage (no explicit stop position given).
+fn parse_percent_permille(s: text) -> i32:
+    val n = s.len()
+    if n == 0 or s.char_at(n - 1) != "%":
+        return -1
+    var i = 0
+    var int_part = 0
+    var frac_num = 0
+    var frac_den = 1
+    var seen_digit = false
+    var in_frac = false
+    while i < n - 1:
+        val c = s.char_at(i)
+        val d = dec_val(c)
+        if d < 10:
+            seen_digit = true
+            if in_frac:
+                if frac_den < 100:
+                    frac_num = frac_num * 10 + d
+                    frac_den = frac_den * 10
+            else:
+                int_part = int_part * 10 + d
+        elif c == ".":
+            in_frac = true
+        i = i + 1
+    if not seen_digit:
+        return -1
+    (int_part * 1000 + frac_num * 1000 / frac_den) / 100
+
+# Strip an optional trailing "NN%" position off a single gradient stop part,
+# leaving just the color text.
+fn gradient_stop_color_text(part: text) -> text:
+    val ls = find_last_top_level_space(part)
+    if ls < 0:
+        return part
+    val after = part.substring(ls + 1, part.len()).trim()
+    if parse_percent_permille(after) >= 0:
+        return part.substring(0, ls).trim()
+    part
+
+fn gradient_stop_position_or_neg1(part: text) -> i32:
+    val ls = find_last_top_level_space(part)
+    if ls < 0:
+        return -1
+    val after = part.substring(ls + 1, part.len()).trim()
+    parse_percent_permille(after)
+
+fn parse_signed_leading_int(s: text) -> i32:
+    var i = 0
+    var neg = false
+    if s.len() > 0 and s.char_at(0) == "-":
+        neg = true
+        i = 1
+    elif s.len() > 0 and s.char_at(0) == "+":
+        i = 1
+    var v = 0
+    while i < s.len():
+        val d = dec_val(s.char_at(i))
+        if d < 10:
+            v = v * 10 + d
+            i = i + 1
+        else:
+            break
+    if neg:
+        -v
+    else:
+        v
+
+# Linear-gradient angle in CSS degrees (0 = to top, 90 = to right, 180 (the
+# CSS default) = to bottom, 270 = to left). Radial gradients have no angle.
+fn parse_gradient_angle_deg(raw: text) -> i32:
+    val inner = gradient_inner(raw)
+    if inner.len() == 0:
+        return 180
+    val parts = split_top_level_commas_paren_aware(inner)
+    if parts.len() == 0:
+        return 180
+    val first = parts[0].trim()
+    if is_gradient_angle_token(first):
+        return parse_signed_leading_int(first)
+    if first == "to top":
+        return 0
+    if first == "to right":
+        return 90
+    if first == "to bottom":
+        return 180
+    if first == "to left":
+        return 270
+    180
+
+# Full N-stop list for a `linear-gradient(...)`/`radial-gradient(...)` value.
+# Explicit "%" stop positions are honored; stops without one default to 0 for
+# the first, 1000 for the last, and are evenly spaced in between (matching
+# plain-CSS gradient-stop defaulting).
+fn parse_gradient_stops(raw: text) -> [GradientStopSpec]:
+    val inner = gradient_inner(raw)
+    var stops: [GradientStopSpec] = []
+    if inner.len() == 0:
+        return stops
+    val radial = is_radial_gradient(raw)
+    val parts = split_top_level_commas_paren_aware(inner)
+    var color_parts: [text] = []
+    var idx = 0
+    while idx < parts.len():
+        val part = parts[idx]
+        val skip = if radial:
+            is_gradient_shape_or_position_token(part)
+        else:
+            part.starts_with("to ") or part == "top" or part == "bottom" or part == "left" or part == "right" or is_gradient_angle_token(part)
+        if not skip:
+            color_parts.push(part)
+        idx = idx + 1
+    val n = color_parts.len()
+    if n == 0:
+        return stops
+    var colors: [u32] = []
+    var raw_pos: [i32] = []
+    var i2 = 0
+    while i2 < n:
+        val cp = color_parts[i2]
+        colors.push(parse_color_any(gradient_stop_color_text(cp)))
+        raw_pos.push(gradient_stop_position_or_neg1(cp))
+        i2 = i2 + 1
+    if raw_pos[0] < 0:
+        raw_pos[0] = 0
+    if raw_pos[n - 1] < 0:
+        raw_pos[n - 1] = 1000
+    var k = 1
+    while k < n - 1:
+        if raw_pos[k] < 0:
+            var j = k + 1
+            while j < n - 1 and raw_pos[j] < 0:
+                j = j + 1
+            val prev_pos = raw_pos[k - 1]
+            val next_pos = raw_pos[j]
+            val span = j - (k - 1)
+            var m = k
+            while m < j:
+                raw_pos[m] = prev_pos + (next_pos - prev_pos) * (m - (k - 1)) / span
+                m = m + 1
+            k = j
+        else:
+            k = k + 1
+    var i3 = 0
+    while i3 < n:
+        stops.push(GradientStopSpec(color: colors[i3], pos_permille: raw_pos[i3]))
+        i3 = i3 + 1
+    stops
+
+fn parse_int(s: text) -> i32:
+    var i = 0
+    var v = 0
+    var matched_any_digit = false
+    val s_len = s.len()
+    while i < s_len:
+        val c = s.char_at(i)
+        val digit = dec_val(c)
+        if digit < 10:
+            v = v * 10 + digit
+            matched_any_digit = true
+        else:
+            if matched_any_digit:
+                break
+        i = i + 1
+    v
+
+fn parse_nth_int(s: text, target: i32) -> i32:
+    var i = 0
+    var seen = 0
+    val s_len = s.len()
+    while i < s_len:
+        val c = s.char_at(i)
+        if dec_val(c) < 10:
+            var v = 0
+            while i < s_len:
+                val d = s.char_at(i)
+                val digit = dec_val(d)
+                if digit >= 10:
+                    break
+                v = v * 10 + digit
+                i = i + 1
+            if seen == target:
+                return v
+            seen = seen + 1
+        else:
+            i = i + 1
+    -1
+
+fn parse_signed_nth_int(s: text, target: i32) -> i32:
+    var i = 0
+    var seen = 0
+    val s_len = s.len()
+    while i < s_len:
+        var sign = 1
+        if s.char_at(i) == "-":
+            sign = -1
+            i = i + 1
+        if i < s_len and dec_val(s.char_at(i)) < 10:
+            var v = 0
+            while i < s_len:
+                val digit = dec_val(s.char_at(i))
+                if digit >= 10:
+                    break
+                v = v * 10 + digit
+                i = i + 1
+            if seen == target:
+                return v * sign
+            seen = seen + 1
+        else:
+            i = i + 1
+    -1000000
+
+fn parse_transform_translate_x(raw: text) -> i32:
+    val t = raw.trim().lower()
+    if t == "none":
+        return 0
+    if text_index_of(t, "translatex(") >= 0:
+        val v = parse_signed_nth_int(t, 0)
+        return if v == -1000000: 0 else: v
+    if text_index_of(t, "translate(") >= 0:
+        val v = parse_signed_nth_int(t, 0)
+        return if v == -1000000: 0 else: v
+    0
+
+fn parse_transform_translate_y(raw: text) -> i32:
+    val t = raw.trim().lower()
+    if t == "none":
+        return 0
+    if text_index_of(t, "translatey(") >= 0:
+        val v = parse_signed_nth_int(t, 0)
+        return if v == -1000000: 0 else: v
+    if text_index_of(t, "translate(") >= 0:
+        val v = parse_signed_nth_int(t, 1)
+        return if v == -1000000: 0 else: v
+    0
+
+fn parse_individual_translate_x(raw: text) -> i32:
+    val t = raw.trim().lower()
+    if t == "none":
+        return 0
+    val v = parse_signed_nth_int(t, 0)
+    if v == -1000000:
+        return 0
+    v
+
+fn parse_individual_translate_y(raw: text) -> i32:
+    val t = raw.trim().lower()
+    if t == "none":
+        return 0
+    val v = parse_signed_nth_int(t, 1)
+    if v == -1000000:
+        return 0
+    v
+
+fn parse_scale_pct(raw: text) -> i32:
+    val t = raw.trim().lower()
+    if t.len() == 0 or t == "none":
+        return 100
+    val v = parse_int(t)
+    if v <= 0:
+        return 100
+    if t.contains("%"):
+        return v
+    v * 100
+
+fn parse_transform_scale_pct(raw: text) -> i32:
+    val t = raw.trim().lower()
+    val start = text_index_of(t, "scale(")
+    if start < 0:
+        return 100
+    val value_start = start + 6
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    parse_scale_pct(t.substring(value_start, value_end))
+
+fn parse_rotate_quarter_turn(raw: text) -> bool:
+    val t = raw.trim().lower()
+    if t.len() == 0 or t == "none":
+        return false
+    val v = parse_signed_nth_int(t, 0)
+    if v == -1000000:
+        return false
+    val normalized = ((v % 360) + 360) % 360
+    normalized == 90 or normalized == 270
+
+fn parse_transform_rotate_quarter_turn(raw: text) -> bool:
+    val t = raw.trim().lower()
+    val start = text_index_of(t, "rotate(")
+    if start < 0:
+        return false
+    val value_start = start + 7
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    parse_rotate_quarter_turn(t.substring(value_start, value_end))
+
+fn parse_clip_rect_value(raw: text, target: i32) -> i32:
+    val t = raw.trim().lower()
+    val rect_start = text_index_of(t, "rect(")
+    if rect_start < 0:
+        return 0
+    val value_start = rect_start + 5
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    val v = parse_signed_nth_int(t.substring(value_start, value_end), target)
+    if v == -1000000:
+        return 0
+    v
+
+fn parse_opacity_pct(raw: text) -> i32:
+    val t = raw.trim()
+    if t.len() == 0:
+        return 100
+    if t == "0":
+        return 0
+    if t == "1":
+        return 100
+    val dot = text_index_of(t, ".")
+    if dot >= 0:
+        var frac = 0
+        var scale = 1
+        var i = dot + 1
+        val t_len = t.len()
+        while i < t_len and scale < 100:
+            val d = t.char_at(i)
+            if d < "0" or d > "9":
+                break
+            frac = frac * 10 + hex_val(d)
+            scale = scale * 10
+            i = i + 1
+        return (frac * 100 + scale / 2) / scale
+    val pct = parse_int(t)
+    if pct < 0:
+        return 0
+    if pct > 100:
+        return 100
+    pct
+
+fn parse_filter_opacity_pct(raw: text) -> i32:
+    val t = raw.trim().lower()
+    val start = text_index_of(t, "opacity(")
+    if start < 0:
+        return -1
+    val value_start = start + 8
+    var value_end = find_from(t, ")", value_start)
+    if value_end < 0:
+        value_end = t.len()
+    parse_opacity_pct(t.substring(value_start, value_end))
+
+fn parse_css_time_ms(raw: text) -> i32:
+    val t = raw.trim().lower()
+    if t.len() == 0:
+        return 0
+    var sign = 1
+    var magnitude = t
+    if magnitude.starts_with("-"):
+        sign = -1
+        magnitude = magnitude.substring(1, magnitude.len())
+    elif magnitude.starts_with("+"):
+        magnitude = magnitude.substring(1, magnitude.len())
+    var unit_ms = 0
+    if magnitude.ends_with("ms"):
+        unit_ms = 1
+    elif magnitude.ends_with("s"):
+        unit_ms = 1000
+    else:
+        return sign * parse_int(magnitude)
+    val dot = text_index_of(magnitude, ".")
+    if dot < 0:
+        return sign * parse_int(magnitude) * unit_ms
+    var whole = 0
+    if dot > 0:
+        whole = parse_int(magnitude.substring(0, dot))
+    var frac = 0
+    var scale = 1
+    var i = dot + 1
+    val magnitude_len = magnitude.len()
+    while i < magnitude_len:
+        val c = magnitude.char_at(i)
+        if c < "0" or c > "9":
+            break
+        frac = frac * 10 + dec_val(c)
+        scale = scale * 10
+        i = i + 1
+    # The render clock stores integer milliseconds, rounded symmetrically.
+    sign * (whole * unit_ms + ((frac * unit_ms + scale / 2) / scale))
+
+fn transition_token_is_time(token: text) -> bool:
+    val t = token.trim().lower()
+    var unit_len = 0
+    if t.ends_with("ms"):
+        unit_len = 2
+    elif t.ends_with("s"):
+        unit_len = 1
+    if unit_len == 0 or t.len() <= unit_len:
+        return false
+    animation_number_token_is_valid(
+        t.substring(0, t.len() - unit_len)
+    )
+
+val CSS_TIMING_TOKEN_MAX_BYTES: i32 = 1024
+val CSS_TIMING_TOKEN_MAX_DEPTH: i32 = 4
+val CSS_TIMING_TOKEN_MAX_COUNT: i32 = 16
+
+# Split one animation/transition shorthand on top-level ASCII whitespace.
+# Internal functional commas survive; top-level commas (lists), unbalanced or
+# excessively nested functions, and oversized token streams fail closed.
+fn css_timing_shorthand_tokens(raw: text) -> [text]:
+    var tokens: [text] = []
+    if raw.len() == 0 or raw.len() > CSS_TIMING_TOKEN_MAX_BYTES:
+        return tokens
+    val bytes = raw.bytes()
+    var depth = 0
+    var start = -1
+    var i = 0
+    while i <= bytes.len():
+        val code = if i < bytes.len(): bytes[i] else: 32
+        if i < bytes.len():
+            if code == 40:
+                depth = depth + 1
+                if depth > CSS_TIMING_TOKEN_MAX_DEPTH:
+                    return []
+            elif code == 41:
+                if depth <= 0:
+                    return []
+                depth = depth - 1
+            elif code == 44 and depth == 0:
+                # List-valued animation/transition timing is unsupported.
+                return []
+        val whitespace = (
+            code == 9 or code == 10 or code == 12 or
+            code == 13 or code == 32
+        )
+        if whitespace and depth == 0:
+            if start >= 0:
+                tokens.push(raw.substring(start, i))
+                if tokens.len() > CSS_TIMING_TOKEN_MAX_COUNT:
+                    return []
+                start = -1
+        elif start < 0:
+            start = i
+        i = i + 1
+    if depth != 0:
+        return []
+    tokens
+
+fn parse_transition_nth_time_ms(raw: text, target: i32) -> i32:
+    var seen = 0
+    for part in css_timing_shorthand_tokens(raw):
+        val token = part.trim()
+        if transition_token_is_time(token):
+            if seen == target:
+                return parse_css_time_ms(token)
+            seen = seen + 1
+    0
+
+fn parse_transition_property_name(raw: text) -> text:
+    for part in css_timing_shorthand_tokens(raw):
+        val token = part.trim().lower()
+        if (
+            token.len() > 0 and not transition_token_is_time(token) and
+            parse_timing_function(token) == nil
+        ):
+            return token
+    "all"
+
+fn parse_transition_timing(raw: text) -> text:
+    for raw_token in css_timing_shorthand_tokens(raw):
+        val token = raw_token.trim().lower()
+        if parse_timing_function(token) != nil:
+            return token
+    "ease"
+
+fn animation_token_is_reserved(token: text) -> bool:
+    val t = token.trim().lower()
+    transition_token_is_time(t) or parse_timing_function(t) != nil or t == "infinite" or t == "normal" or t == "reverse" or t == "alternate" or t == "alternate-reverse" or t == "none" or t == "forwards" or t == "backwards" or t == "both" or t == "running" or t == "paused"
+
+val CSS_ANIMATION_MAX_FINITE_ITERATIONS: f64 = 9223372036854774784.0
+
+fn animation_number_token_is_valid(raw: text) -> bool:
+    val token = raw.trim().lower()
+    if token.len() == 0:
+        return false
+    val number_start = if (
+        token.starts_with("+") or token.starts_with("-")
+    ): 1 else: 0
+    if number_start >= token.len():
+        return false
+    var exponent_at = -1
+    var scan = number_start
+    while scan < token.len():
+        val c = token.char_at(scan)
+        if c == "e":
+            if exponent_at >= 0:
+                return false
+            exponent_at = scan
+        scan = scan + 1
+    val number_end = if exponent_at >= 0: exponent_at else: token.len()
+    if exponent_at >= 0:
+        var exponent_i = exponent_at + 1
+        if exponent_i >= token.len():
+            return false
+        if (
+            token.char_at(exponent_i) == "+" or
+            token.char_at(exponent_i) == "-"
+        ):
+            exponent_i = exponent_i + 1
+        if exponent_i >= token.len():
+            return false
+        while exponent_i < token.len():
+            val digit = dec_val(token.char_at(exponent_i))
+            if digit >= 10:
+                return false
+            exponent_i = exponent_i + 1
+
+    var saw_digit = false
+    var saw_dot = false
+    var digit_after_dot = false
+    var i = number_start
+    while i < number_end:
+        val c = token.char_at(i)
+        if c == "." and not saw_dot:
+            saw_dot = true
+        else:
+            val digit = dec_val(c)
+            if digit >= 10:
+                return false
+            saw_digit = true
+            if saw_dot:
+                digit_after_dot = true
+        i = i + 1
+    saw_digit and (not saw_dot or digit_after_dot)
+
+fn parse_animation_iteration_number_token(raw: text) -> f64?:
+    if not animation_number_token_is_valid(raw):
+        return nil
+    val token = raw.trim().lower()
+    if token.starts_with("-"):
+        var mantissa_i = 1
+        while (
+            mantissa_i < token.len() and
+            token.char_at(mantissa_i) != "e"
+        ):
+            val digit = dec_val(token.char_at(mantissa_i))
+            if digit > 0 and digit < 10:
+                return nil
+            mantissa_i = mantissa_i + 1
+    if val parsed = token.parse_f64():
+        if (
+            parsed == parsed and parsed >= 0.0 and
+            parsed <= CSS_ANIMATION_MAX_FINITE_ITERATIONS
+        ):
+            return Some(parsed)
+    nil
+
+fn animation_token_looks_numeric(token: text) -> bool:
+    if token.len() == 0:
+        return false
+    val first = token.char_at(0)
+    if first == "." or first == "+" or dec_val(first) < 10:
+        return true
+    (
+        first == "-" and token.len() > 1 and
+        (token.char_at(1) == "." or dec_val(token.char_at(1)) < 10)
+    )
+
+fn parse_animation_name(raw: text) -> text:
+    val parts = css_timing_shorthand_tokens(raw)
+    for part in parts:
+        val token = part.trim().lower()
+        if (
+            animation_token_looks_numeric(token) and
+            not transition_token_is_time(token) and
+            parse_animation_iteration_number_token(token) == nil
+        ):
+            return "none"
+    for part in parts:
+        val token = part.trim()
+        val lowered = token.lower()
+        if (
+            token.len() > 0 and not animation_token_is_reserved(lowered) and
+            parse_animation_iteration_number_token(lowered) == nil
+        ):
+            return token
+    "none"
+
+fn parse_animation_iteration_count(raw: text) -> text:
+    val parts = css_timing_shorthand_tokens(raw)
+    for part in parts:
+        val token = part.trim().lower()
+        if token == "infinite":
+            return "infinite"
+        if (
+            token.len() > 0 and
+            parse_animation_iteration_number_token(token) != nil and
+            not transition_token_is_time(token)
+        ):
+            return token
+    "1"
+
+fn parse_animation_direction(raw: text) -> text:
+    for token in css_timing_shorthand_tokens(raw.lower()):
+        if (
+            token == "normal" or token == "reverse" or
+            token == "alternate" or token == "alternate-reverse"
+        ):
+            return token
+    "normal"
+
+fn parse_animation_fill_mode(raw: text) -> text:
+    for token in css_timing_shorthand_tokens(raw.lower()):
+        if (
+            token == "none" or token == "forwards" or
+            token == "backwards" or token == "both"
+        ):
+            return token
+    "none"
+
+fn parse_animation_play_state(raw: text) -> text:
+    for token in css_timing_shorthand_tokens(raw.lower()):
+        if token == "paused" or token == "running":
+            return token
+    "running"
+
+fn animation_time_token_is_valid(raw: text, allow_negative: bool) -> bool:
+    val token = raw.trim().lower()
+    val unit_len = if token.ends_with("ms"): 2 else: 1
+    if (
+        token.len() <= unit_len or
+        (unit_len == 1 and not token.ends_with("s"))
+    ):
+        return false
+    val number = token.substring(0, token.len() - unit_len)
+    if not animation_number_token_is_valid(number):
+        return false
+    if val parsed = number.parse_f64():
+        val milliseconds = if unit_len == 2:
+            parsed
+        else:
+            parsed * 1000.0
+        if (
+            parsed == parsed and milliseconds == milliseconds and
+            milliseconds >= -2147483648.0 and
+            milliseconds <= 2147483647.0 and
+            (allow_negative or parsed >= 0.0)
+        ):
+            return true
+    false
+
+fn animation_shorthand_is_valid(raw: text) -> bool:
+    val parts = css_timing_shorthand_tokens(raw.trim().lower())
+    if parts.len() == 0:
+        return false
+    var time_count = 0
+    var name_count = 0
+    var timing_count = 0
+    var iteration_count = 0
+    var direction_count = 0
+    var fill_count = 0
+    var play_count = 0
+    for part in parts:
+        if transition_token_is_time(part):
+            if (
+                time_count >= 2 or
+                not animation_time_token_is_valid(part, time_count == 1)
+            ):
+                return false
+            time_count = time_count + 1
+        elif parse_timing_function(part) != nil:
+            timing_count = timing_count + 1
+            if timing_count > 1:
+                return false
+        elif part == "infinite" or animation_token_looks_numeric(part):
+            if (
+                iteration_count > 0 or
+                (
+                    part != "infinite" and
+                    parse_animation_iteration_number_token(part) == nil
+                )
+            ):
+                return false
+            iteration_count = iteration_count + 1
+        elif (
+            part == "normal" or part == "reverse" or
+            part == "alternate" or part == "alternate-reverse"
+        ):
+            direction_count = direction_count + 1
+            if direction_count > 1:
+                return false
+        elif (
+            part == "none" or part == "forwards" or
+            part == "backwards" or part == "both"
+        ):
+            fill_count = fill_count + 1
+            if fill_count > 1:
+                return false
+        elif part == "running" or part == "paused":
+            play_count = play_count + 1
+            if play_count > 1:
+                return false
+        else:
+            if part.contains("(") or part.contains(")"):
+                return false
+            name_count = name_count + 1
+            if name_count > 1:
+                return false
+    true
+
+fn animation_declaration_value_is_valid(prop: text, raw: text) -> bool:
+    val value = raw.trim().lower()
+    if value.len() == 0:
+        return false
+    if prop == "animation":
+        return animation_shorthand_is_valid(value)
+    if prop == "animation-name":
+        val tokens = css_timing_shorthand_tokens(value)
+        return (
+            tokens.len() == 1 and
+            not animation_token_looks_numeric(value)
+        )
+    if prop == "animation-duration":
+        return animation_time_token_is_valid(value, false)
+    if prop == "animation-delay":
+        return animation_time_token_is_valid(value, true)
+    if prop == "animation-timing-function":
+        return parse_timing_function(value) != nil
+    if prop == "animation-iteration-count":
+        return (
+            value == "infinite" or
+            parse_animation_iteration_number_token(value) != nil
+        )
+    if prop == "animation-direction":
+        return (
+            value == "normal" or value == "reverse" or
+            value == "alternate" or value == "alternate-reverse"
+        )
+    if prop == "animation-fill-mode":
+        return (
+            value == "none" or value == "forwards" or
+            value == "backwards" or value == "both"
+        )
+    if prop == "animation-play-state":
+        return value == "running" or value == "paused"
+    false
+
+fn transition_shorthand_is_valid(raw: text) -> bool:
+    val parts = css_timing_shorthand_tokens(raw.trim().lower())
+    if parts.len() == 0:
+        return false
+    var time_count = 0
+    var timing_count = 0
+    var property_count = 0
+    for part in parts:
+        if transition_token_is_time(part):
+            if (
+                time_count >= 2 or
+                not animation_time_token_is_valid(part, time_count == 1)
+            ):
+                return false
+            time_count = time_count + 1
+        elif parse_timing_function(part) != nil:
+            timing_count = timing_count + 1
+            if timing_count > 1:
+                return false
+        else:
+            if (
+                part.contains("(") or part.contains(")") or
+                animation_token_looks_numeric(part)
+            ):
+                return false
+            property_count = property_count + 1
+            if property_count > 1:
+                return false
+    true
+
+fn transition_declaration_value_is_valid(prop: text, raw: text) -> bool:
+    val value = raw.trim().lower()
+    if value.len() == 0:
+        return false
+    if prop == "transition":
+        return transition_shorthand_is_valid(value)
+    if prop == "transition-property":
+        val parts = css_timing_shorthand_tokens(value)
+        return (
+            parts.len() == 1 and not parts[0].contains("(") and
+            not parts[0].contains(")") and
+            not animation_token_looks_numeric(parts[0])
+        )
+    if prop == "transition-duration":
+        return animation_time_token_is_valid(value, false)
+    if prop == "transition-delay":
+        return animation_time_token_is_valid(value, true)
+    if prop == "transition-timing-function":
+        return parse_timing_function(value) != nil
+    false
+
+fn decl_tbl_last_valid_transition_index(
+    tbl: [text], prop: text
+) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if (
+            tbl[i] == prop and
+            transition_declaration_value_is_valid(prop, tbl[i + 1])
+        ):
+            return i / 2
+        i = i - 2
+    -1
+
+fn decl_tbl_get_last_valid_transition(tbl: [text], prop: text) -> text:
+    val index = decl_tbl_last_valid_transition_index(tbl, prop)
+    if index < 0:
+        return ""
+    tbl[index * 2 + 1]
+
+fn decl_tbl_last_valid_animation_index(
+    tbl: [text], prop: text
+) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if (
+            tbl[i] == prop and
+            animation_declaration_value_is_valid(prop, tbl[i + 1])
+        ):
+            return i / 2
+        i = i - 2
+    -1
+
+fn decl_tbl_get_last_valid_animation(tbl: [text], prop: text) -> text:
+    val index = decl_tbl_last_valid_animation_index(tbl, prop)
+    if index < 0:
+        return ""
+    tbl[index * 2 + 1]
+
+fn parse_aspect_ratio_numerator(raw: text) -> i32:
+    val value = raw.trim().lower()
+    if value.len() == 0 or value == "auto":
+        return 0
+    val first = parse_nth_int(value, 0)
+    if first > 0:
+        return first
+    0
+
+fn parse_aspect_ratio_denominator(raw: text) -> i32:
+    val value = raw.trim().lower()
+    if value.len() == 0 or value == "auto":
+        return 0
+    val second = parse_nth_int(value, 1)
+    if second > 0:
+        return second
+    1
+
+fn css_word_contains(raw: text, word: text) -> bool:
+    val padded = " " + raw.trim().lower() + " "
+    text_index_of(padded, " " + word + " ") >= 0
+
+# read a property value from a declaration block "a: b; c: d"
+fn decl_get(decls: text, prop: text) -> text:
+    var pos = 0
+    var found = ""
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val semi = find_from(decls, ";", pos)
+        val end = if semi >= 0: semi else: decls_len
+        val colon = find_from(decls, ":", pos)
+        if colon >= 0 and colon < end:
+            val name = decls.substring(pos, colon).trim().lower()
+            if name == prop:
+                found = decls.substring(colon + 1, end).trim()
+        if semi < 0:
+            break
+        pos = semi + 1
+    found
+
+fn normalize_overflow_box_alignment(raw: text) -> text:
+    val value = raw.trim().lower()
+    if value == "safe center":
+        return "safe-center"
+    if value == "unsafe center":
+        return "unsafe-center"
+    if value.starts_with("safe "):
+        return value.substring(5, value.len()).trim()
+    if value.starts_with("unsafe "):
+        return value.substring(7, value.len()).trim()
+    value
+
+fn supports_content_distribution_alignment(value: text) -> bool:
+    value == "space-between" or value == "space-around" or value == "space-evenly" or value == "center" or value == "safe-center" or value == "unsafe-center" or value == "flex-end" or value == "flex-start" or value == "start" or value == "end"
+
+fn supports_align_content_alignment(value: text) -> bool:
+    supports_content_distribution_alignment(value) or value == "stretch" or value == "normal"
+
+fn border_style_disables_paint(raw: text) -> bool:
+    val value = raw.trim().lower()
+    value == "none" or value == "hidden"
+
+fn css_border_style_token(raw: text) -> text:
+    for token in ws_tokens(raw.trim().lower()):
+        if (
+            token == "none" or token == "hidden" or token == "dotted" or
+            token == "dashed" or token == "solid" or token == "double" or
+            token == "groove" or token == "ridge" or token == "inset" or
+            token == "outset"
+        ):
+            return token
+    ""
+
+fn border_shorthand_disables_paint(raw: text) -> bool:
+    val value = raw.trim().lower()
+    (
+        value == "0" or value == "0px" or
+        value == "none" or value == "hidden"
+    )
+
+fn css_border_style_side(raw: text, side: i32) -> text:
+    var styles: [text] = []
+    for token in ws_tokens(raw.trim().lower()):
+        val style = css_border_style_token(token)
+        if style != "":
+            styles.push(style)
+    if styles.len() == 0:
+        return ""
+    if styles.len() == 1:
+        return styles[0]
+    if styles.len() == 2:
+        if side == 0 or side == 2: return styles[0]
+        return styles[1]
+    if styles.len() == 3:
+        if side == 0: return styles[0]
+        if side == 2: return styles[2]
+        return styles[1]
+    styles[side]
+
+fn decl_last_pos(decls: text, prop: text) -> i32:
+    var pos = 0
+    var found = -1
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val semi = find_from(decls, ";", pos)
+        val end = if semi >= 0: semi else: decls_len
+        val colon = find_from(decls, ":", pos)
+        if colon >= 0 and colon < end:
+            val name = decls.substring(pos, colon).trim().lower()
+            if name == prop:
+                found = pos
+        if semi < 0:
+            break
+        pos = semi + 1
+    found
+
+# ---------------------------------------------------------------------------
+# Parsed declaration table.
+#
+# `decl_get` / `decl_last_pos` each re-scan the WHOLE declaration string and
+# allocate `substring().trim().lower()` per declaration examined. `apply_decls`
+# issues 244 `decl_get` plus 32 `decl_last_pos` calls against one block, so a
+# single rule costs 276 x O(len(decls)) scans and hundreds of throwaway strings
+# — fatal on the guest's non-reclaiming bump heap.
+#
+# These helpers parse the block ONCE into a flat name/value table plus an
+# aligned start-position table, so the 276 lookups become table scans.
+# Semantics are byte-identical to the scanning versions: same trim/lower
+# normalisation, same "an entry without a colon before its `;` is skipped",
+# and LAST-WINS on duplicate names (the lookups walk the table BACKWARDS, which
+# is why they must not stop at the first textual occurrence).
+# ---------------------------------------------------------------------------
+
+# Number of well-formed `name: value` entries in a declaration block.
+fn decl_entry_count(decls: text) -> i32:
+    var pos = 0
+    var count = 0
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val semi = find_from(decls, ";", pos)
+        val end = if semi >= 0: semi else: decls_len
+        val colon = find_from(decls, ":", pos)
+        if colon >= 0 and colon < end:
+            count = count + 1
+        if semi < 0:
+            break
+        pos = semi + 1
+    count
+
+# Flat table, stride 2: [name0, value0, name1, value1, ...] in source order.
+# Names are trimmed+lowered, values trimmed — exactly as `decl_get` does.
+fn decl_table_build(decls: text) -> [text]:
+    val n = decl_entry_count(decls)
+    if n == 0:
+        val empty: [text] = []
+        return empty
+    # Preallocated + indexed store: `.push` in a loop clones the array (O(N^2)).
+    var tbl: [text] = [""; n * 2]
+    var pos = 0
+    var idx = 0
+    val decls_len = decls.len()
+    while pos < decls_len:
+        val semi = find_from(decls, ";", pos)
+        val end = if semi >= 0: semi else: decls_len
+        val colon = find_from(decls, ":", pos)
+        if colon >= 0 and colon < end:
+            tbl[idx] = decls.substring(pos, colon).trim().lower()
+            tbl[idx + 1] = decls.substring(colon + 1, end).trim()
+            idx = idx + 2
+        if semi < 0:
+            break
+        pos = semi + 1
+    tbl
+
+# Table-backed `decl_get`. Backwards walk == last-wins on duplicates.
+fn decl_tbl_get(tbl: [text], prop: text) -> text:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop:
+            return tbl[i + 1]
+        i = i - 2
+    ""
+
+# Invalid declarations do not participate in the cascade. Walk backwards so a
+# malformed later value cannot displace the last display keyword we implement.
+fn is_supported_display_keyword(value: text) -> bool:
+    (
+        value == "block" or value == "none" or value == "inline" or
+        value == "inline-block" or value == "list-item" or
+        value == "flex" or value == "grid" or value == "contents"
+    )
+
+fn decl_tbl_get_last_valid_display(tbl: [text]) -> text:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == "display":
+            val value = tbl[i + 1].trim().lower()
+            if is_supported_display_keyword(value):
+                return value
+        i = i - 2
+    ""
+
+# CSS-wide values need cascade provenance and are resolved by compute_styles,
+# not by the declaration applier. `revert-layer` stays excluded because the
+# current parser flattens @layer and cannot identify the previous layer.
+fn decl_tbl_get_last_cascading_display(tbl: [text]) -> text:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == "display":
+            val value = tbl[i + 1].trim().lower()
+            if (
+                is_supported_display_keyword(value) or value == "initial" or
+                value == "unset" or value == "inherit" or value == "revert"
+            ):
+                return value
+        i = i - 2
+    ""
+
+# Table-backed replacement for `decl_last_pos`. Backwards walk == last-wins.
+#
+# Returns the ENTRY INDEX (0-based, in source order), NOT the byte offset that
+# `decl_last_pos` returns. That substitution is sound because entry indices are
+# strictly increasing in byte offset (the build loop advances `pos`
+# monotonically), and `apply_decls` consumes these values ONLY as `a > b`,
+# `a >= 0` and `a < 0` — never as an offset into `decls`. Order and the -1
+# "absent" sentinel are therefore preserved exactly, which is all the cascade
+# tie-breaking depends on. Verified exhaustively against `decl_last_pos` over
+# 46 real+adversarial blocks x 244 properties (all ordered pairs agree).
+#
+# Keeping indices also lets us skip building a parallel byte-offset table,
+# which removed a second full scan of every declaration block.
+fn decl_tbl_last_index(tbl: [text], prop: text) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop:
+            return i / 2
+        i = i - 2
+    -1
+
+# `transition` (and its longhands) can appear more than once with a blank or
+# otherwise unusable value from an earlier reset rule; unlike `decl_tbl_get`,
+# these skip blank entries so the cascade lands on the last entry that
+# actually carries a value.
+fn decl_tbl_last_valid_transition_index(tbl: [text], prop: text) -> i32:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
+            return i / 2
+        i = i - 2
+    -1
+
+fn decl_tbl_get_last_valid_transition(tbl: [text], prop: text) -> text:
+    var i = (tbl.len() as i32) - 2
+    while i >= 0:
+        if tbl[i] == prop and tbl[i + 1].trim().len() > 0:
+            return tbl[i + 1]
+        i = i - 2
+    ""
+
+fn parse_nth_box_int(raw: text, index: i32) -> i32:
+    val normalized = raw.trim().lower()
+    val parts = normalized.split(" ")
+    val count = parts.len()
+    if count == 0:
+        return 0
+    if count == 1:
+        return parse_int(parts[0])
+    if count == 2:
+        if index == 0 or index == 2:
+            return parse_int(parts[0])
+        return parse_int(parts[1])
+    if count == 3:
+        if index == 0:
+            return parse_int(parts[0])
+        if index == 2:
+            return parse_int(parts[2])
+        return parse_int(parts[1])
+    if index >= 0 and index < count:
+        return parse_int(parts[index])
+    0
+
+fn parse_line_height_value(raw: text) -> i32:
+    if raw.contains("px"):
+        val lh = parse_int(raw)
+        if lh > 0:
+            return lh
+        return 0
+    val whole = parse_int(raw)
+    var mult10 = whole * 10
+    val dot = find_from(raw, ".", 0)
+    if dot >= 0 and dot + 1 < raw.len():
+        mult10 = whole * 10 + parse_int(raw.substring(dot + 1, dot + 2))
+    if mult10 > 0:
+        return 0 - mult10
+    0
+
+# Parse a CSS decimal number to its value times ten (e.g. "1.5" -> 15, "2" -> 20,
+# "0.8" -> 8). Only the first fractional digit is honored, matching the
+# line-height parser's precision. Trailing units (em/rem/%) are ignored because
+# parse_int stops at the first non-digit run.
+fn parse_decimal_x10(raw: text) -> i32:
+    val whole = parse_int(raw)
+    var m10 = whole * 10
+    val dot = find_from(raw, ".", 0)
+    if dot >= 0 and dot + 1 < raw.len():
+        m10 = whole * 10 + parse_int(raw.substring(dot + 1, dot + 2))
+    m10
+
+# Split on ASCII whitespace, dropping empty tokens.
+fn ws_tokens(s: text) -> [text]:
+    var out: [text] = []
+    # Byte offsets compose with substring and avoid O(N²) UTF-8 indexing.
+    val bytes = s.bytes()
+    var i = 0
+    var start = -1
+    while i <= bytes.len():
+        val code = if i < bytes.len(): bytes[i] else: 32
+        val whitespace = (
+            code == 9 or code == 10 or code == 12 or
+            code == 13 or code == 32
+        )
+        if whitespace:
+            if start >= 0:
+                out.push(s.substring(start, i))
+                start = -1
+        elif start < 0:
+            start = i
+        i = i + 1
+    out
+
+# Resolve one margin token to px. Percent values use the negative sentinel that
+# the longhand margin handlers also use (resolved against parent at layout).
+fn margin_token_px(tok: text) -> i32:
+    if tok.ends_with("%"):
+        return 0 - parse_int(tok)
+    parse_int(tok)
+
+fn margin_token_vh_px(tok: text) -> i32:
+    if tok.ends_with("vh"):
+        return 0 - (1000 + parse_int(tok))
+    parse_int(tok)
+
+fn object_position_axis_pct(token: text, horizontal: bool) -> i32:
+    val t = token.trim().lower()
+    if t == "left":
+        return 0
+    if t == "top":
+        return 0
+    if t == "center":
+        return 50
+    if t == "right":
+        return 100
+    if t == "bottom":
+        return 100
+    if t.ends_with("%"):
+        val pct = parse_int(t)
+        if pct < 0:
+            return 0
+        if pct > 100:
+            return 100
+        return pct
+    if horizontal:
+        return 50
+    50
+
+fn object_position_x_pct(raw: text) -> i32:
+    val normalized = raw.trim().lower()
+    if normalized.len() == 0:
+        return 50
+    val parts = normalized.split(" ")
+    if parts.len() == 1:
+        val token = parts[0].trim().lower()
+        if token == "top" or token == "bottom":
+            return 50
+        return object_position_axis_pct(token, true)
+    object_position_axis_pct(parts[0], true)
+
+fn object_position_y_pct(raw: text) -> i32:
+    val normalized = raw.trim().lower()
+    if normalized.len() == 0:
+        return 50
+    val parts = normalized.split(" ")
+    if parts.len() == 1:
+        val token = parts[0].trim().lower()
+        if token == "left" or token == "right":
+            return 50
+        return object_position_axis_pct(token, false)
+    object_position_axis_pct(parts[1], false)
+
+# ---------------------------------------------------------------------------
+# Computed style
+# ---------------------------------------------------------------------------

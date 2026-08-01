@@ -1,0 +1,495 @@
+# JWT — RFC 7519 / JWS RFC 7515 — pure Simple
+#
+# Implements compact JWS serialisation for:
+#   HS256  — HMAC-SHA-256 (RFC 7515 §A.1)
+#   EdDSA  — Ed25519 (RFC 8037)
+#
+# All header/payload arguments are [u8] (raw UTF-8 bytes) to avoid
+# String::from_utf8_lossy corruption of non-ASCII claims
+# (feedback_text_only_byte_cliffs.md).
+#
+# Public API:
+#   jwt_sign_hs256(header_json, payload_json, key)       -> [u8]
+#   jwt_verify_hs256(jwt_bytes, key)                     -> JwtVerifyResult
+#   jwt_sign_eddsa(header_json, payload_json, priv_key)  -> [u8]
+#   jwt_verify_eddsa(jwt_bytes, pub_key)                 -> JwtVerifyResult
+#   jwt_decode_unverified(jwt_bytes)                     -> JwtDecodeResult
+
+use os.crypto.ed25519.{ed25519_sign, ed25519_keypair_from_seed, ed25519_verify}
+
+# ============================================================================
+# JwtError
+# ============================================================================
+
+enum JwtError:
+    InvalidStructure(msg: text)
+    SignatureMismatch
+    AlgorithmRejected(msg: text)
+    InvalidEncoding(msg: text)
+
+# Verify result — Ok carries decoded header + payload; Err carries reason
+enum JwtVerifyResult:
+    Ok(header: [u8], payload: [u8])
+    Err(error: JwtError)
+
+# Decode result — Ok carries header + payload + raw signature bytes
+enum JwtDecodeResult:
+    Ok(header: [u8], payload: [u8], sig: [u8])
+    Err(error: JwtError)
+
+# ============================================================================
+# Base64URL helpers (pure, [u8] in / [u8] out or text out)
+# ============================================================================
+
+fn _b64url_chars() -> text:
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+
+# Encode [u8] → base64url text (no padding)
+fn _b64u_encode(data: [u8]) -> text:
+    val alphabet = _b64url_chars()
+    var parts: [text] = []
+    var len = data.len()
+    var i: u64 = 0
+    while i < len:
+        var b1 = data[i].to_i64()
+        var b2: i64 = 0
+        var b3: i64 = 0
+        if i + 1 < len:
+            b2 = data[i + 1].to_i64()
+        if i + 2 < len:
+            b3 = data[i + 2].to_i64()
+        val idx1 = b1 >> 2
+        val idx2 = ((b1 & 3) << 4) | (b2 >> 4)
+        val idx3 = ((b2 & 15) << 2) | (b3 >> 6)
+        val idx4 = b3 & 63
+        parts.push(alphabet.substring(idx1, idx1 + 1))
+        parts.push(alphabet.substring(idx2, idx2 + 1))
+        if i + 1 < len:
+            parts.push(alphabet.substring(idx3, idx3 + 1))
+        if i + 2 < len:
+            parts.push(alphabet.substring(idx4, idx4 + 1))
+        i = i + 3
+    parts.join("")
+
+# Decode base64url text → [u8]. Returns empty on invalid input.
+fn _b64u_char_index(c: text) -> i64:
+    val alphabet = _b64url_chars()
+    var i = 0
+    while i < 64:
+        if alphabet.substring(i, i + 1) == c:
+            return i
+        i = i + 1
+    return -1
+
+fn _b64u_decode(encoded: text) -> [u8]:
+    # Normalise: strip padding, convert + → - and / → _ already in URL form
+    val clean = encoded.replace("=", "")
+    val clean_len = clean.length()
+    var result: [u8] = []
+    var i = 0
+    while i < clean_len:
+        val idx1 = _b64u_char_index(clean.substring(i, i + 1))
+        if i + 1 >= clean_len:
+            break
+        val idx2 = _b64u_char_index(clean.substring(i + 1, i + 2))
+        val byte1 = ((idx1 << 2) | (idx2 >> 4)) & 0xFF
+        result.push(byte1.to_u8())
+        if i + 2 < clean_len:
+            val idx3 = _b64u_char_index(clean.substring(i + 2, i + 3))
+            val byte2 = (((idx2 & 15) << 4) | (idx3 >> 2)) & 0xFF
+            result.push(byte2.to_u8())
+        if i + 3 < clean_len:
+            val idx4 = _b64u_char_index(clean.substring(i + 3, i + 4))
+            val byte3 = (((idx3 & 3) << 6) | idx4) & 0xFF
+            result.push(byte3.to_u8())
+        i = i + 4
+    result
+
+# ============================================================================
+# Internal: concat two [u8] slices
+# ============================================================================
+
+fn _bytes_concat(a: [u8], b: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < a.len():
+        out.push(a[i])
+        i = i + 1
+    i = 0
+    while i < b.len():
+        out.push(b[i])
+        i = i + 1
+    out
+
+# Append ASCII text bytes to a [u8] accumulator
+fn _bytes_push_text(buf: [u8], s: text) -> [u8]:
+    var out = buf
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+# ============================================================================
+# Internal: constant-time [u8] comparison (timing-safe)
+# ============================================================================
+
+fn _ct_eq_bytes(a: [u8], b: [u8]) -> bool:
+    if a.len() != b.len():
+        return false
+    var acc: i64 = 0
+    var i: u64 = 0
+    while i < a.len():
+        acc = acc | (a[i].to_i64() ^ b[i].to_i64())
+        i = i + 1
+    acc == 0
+
+# ============================================================================
+# Internal: HMAC-SHA-256 (inline, avoids sha256_process_block arity conflicts)
+# ============================================================================
+
+fn _jwtc_sha256_k() -> list:
+    [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
+        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
+        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
+        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
+        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
+    ]
+
+fn _jwtc_sha256_init_h() -> list:
+    [0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19]
+
+fn _jwtc_rotr32(x: i64, n: i64) -> i64:
+    val mask: i64 = 0xFFFFFFFF
+    ((x >> n) | ((x << (32 - n)) & mask)) & mask
+
+fn _jwtc_ch(e: i64, f: i64, g: i64) -> i64:
+    (e & f) ^ ((e ^ 0xFFFFFFFF) & g) & 0xFFFFFFFF
+
+fn _jwtc_maj(a: i64, b: i64, c: i64) -> i64:
+    (a & b) ^ (a & c) ^ (b & c)
+
+fn _jwtc_sigma0(a: i64) -> i64:
+    _jwtc_rotr32(a, 2) ^ _jwtc_rotr32(a, 13) ^ _jwtc_rotr32(a, 22)
+
+fn _jwtc_sigma1(e: i64) -> i64:
+    _jwtc_rotr32(e, 6) ^ _jwtc_rotr32(e, 11) ^ _jwtc_rotr32(e, 25)
+
+fn _jwtc_gamma0(x: i64) -> i64:
+    _jwtc_rotr32(x, 7) ^ _jwtc_rotr32(x, 18) ^ (x >> 3)
+
+fn _jwtc_gamma1(x: i64) -> i64:
+    _jwtc_rotr32(x, 17) ^ _jwtc_rotr32(x, 19) ^ (x >> 10)
+
+fn _jwtc_sha256_pad(bytes: list) -> list:
+    val orig_len = bytes.len()
+    val bit_len = orig_len * 8
+    var padded = []
+    var i = 0
+    while i < orig_len:
+        padded.push(bytes.get(i))
+        i = i + 1
+    padded.push(0x80)
+    while (padded.len() % 64) != 56:
+        padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push(0)
+    padded.push((bit_len >> 24) & 0xFF)
+    padded.push((bit_len >> 16) & 0xFF)
+    padded.push((bit_len >> 8) & 0xFF)
+    padded.push(bit_len & 0xFF)
+    padded
+
+fn _jwtc_sha256_compress(h_state: list, block: list) -> list:
+    val k = _jwtc_sha256_k()
+    var w = []
+    var i = 0
+    while i < 16:
+        val idx = i * 4
+        val word = ((block.get(idx) & 0xFF) << 24) | ((block.get(idx + 1) & 0xFF) << 16) | ((block.get(idx + 2) & 0xFF) << 8) | (block.get(idx + 3) & 0xFF)
+        w.push(word)
+        i = i + 1
+    while i < 64:
+        val s0 = _jwtc_gamma0(w.get(i - 15))
+        val s1 = _jwtc_gamma1(w.get(i - 2))
+        val word = (w.get(i - 16) + s0 + w.get(i - 7) + s1) & 0xFFFFFFFF
+        w.push(word)
+        i = i + 1
+    var a = h_state.get(0)
+    var b = h_state.get(1)
+    var c = h_state.get(2)
+    var d = h_state.get(3)
+    var e = h_state.get(4)
+    var f = h_state.get(5)
+    var g = h_state.get(6)
+    var hh = h_state.get(7)
+    i = 0
+    while i < 64:
+        val t1 = (hh + _jwtc_sigma1(e) + _jwtc_ch(e, f, g) + k.get(i) + w.get(i)) & 0xFFFFFFFF
+        val t2 = (_jwtc_sigma0(a) + _jwtc_maj(a, b, c)) & 0xFFFFFFFF
+        hh = g
+        g = f
+        f = e
+        e = (d + t1) & 0xFFFFFFFF
+        d = c
+        c = b
+        b = a
+        a = (t1 + t2) & 0xFFFFFFFF
+        i = i + 1
+    [
+        (h_state.get(0) + a) & 0xFFFFFFFF,
+        (h_state.get(1) + b) & 0xFFFFFFFF,
+        (h_state.get(2) + c) & 0xFFFFFFFF,
+        (h_state.get(3) + d) & 0xFFFFFFFF,
+        (h_state.get(4) + e) & 0xFFFFFFFF,
+        (h_state.get(5) + f) & 0xFFFFFFFF,
+        (h_state.get(6) + g) & 0xFFFFFFFF,
+        (h_state.get(7) + hh) & 0xFFFFFFFF
+    ]
+
+fn _jwtc_sha256_list(bytes: list) -> list:
+    val padded = _jwtc_sha256_pad(bytes)
+    var h = _jwtc_sha256_init_h()
+    var i = 0
+    while i < padded.len():
+        var block = []
+        var j = 0
+        while j < 64:
+            block.push(padded.get(i + j))
+            j = j + 1
+        h = _jwtc_sha256_compress(h, block)
+        i = i + 64
+    var result = []
+    i = 0
+    while i < 8:
+        val v = h.get(i)
+        result.push((v >> 24) & 0xFF)
+        result.push((v >> 16) & 0xFF)
+        result.push((v >> 8) & 0xFF)
+        result.push(v & 0xFF)
+        i = i + 1
+    result
+
+# HMAC-SHA-256 over [u8] key and [u8] message; returns 32-byte [u8]
+fn _jwtc_hmac_sha256(key: [u8], message: [u8]) -> [u8]:
+    val block_size: i64 = 64
+    # Convert key to list
+    var k = []
+    var i: u64 = 0
+    if key.len().to_i64() > block_size:
+        var kl = []
+        while i < key.len():
+            kl.push(key[i].to_i64())
+            i = i + 1
+        k = _jwtc_sha256_list(kl)
+    else:
+        while i < key.len():
+            k.push(key[i].to_i64())
+            i = i + 1
+    while k.len() < block_size:
+        k.push(0)
+    # i_key_pad and o_key_pad
+    var i_key_pad = []
+    var o_key_pad = []
+    var j = 0
+    while j < block_size:
+        i_key_pad.push(k.get(j) ^ 0x36)
+        o_key_pad.push(k.get(j) ^ 0x5c)
+        j = j + 1
+    # inner = SHA256(i_key_pad || message)
+    var inner_input = []
+    j = 0
+    while j < i_key_pad.len():
+        inner_input.push(i_key_pad.get(j))
+        j = j + 1
+    i = 0
+    while i < message.len():
+        inner_input.push(message[i].to_i64())
+        i = i + 1
+    val inner_hash = _jwtc_sha256_list(inner_input)
+    # outer = SHA256(o_key_pad || inner_hash)
+    var outer_input = []
+    j = 0
+    while j < o_key_pad.len():
+        outer_input.push(o_key_pad.get(j))
+        j = j + 1
+    j = 0
+    while j < inner_hash.len():
+        outer_input.push(inner_hash.get(j))
+        j = j + 1
+    val out_list = _jwtc_sha256_list(outer_input)
+    # Convert list → [u8]
+    var result: [u8] = []
+    j = 0
+    while j < out_list.len():
+        result.push(out_list.get(j).to_u8())
+        j = j + 1
+    result
+
+# ============================================================================
+# Internal: build signing input bytes from header_b64 and payload_b64
+# ============================================================================
+
+fn _jwtc_signing_input(header_b64: text, payload_b64: text) -> [u8]:
+    var buf: [u8] = []
+    buf = _bytes_push_text(buf, header_b64)
+    buf = _bytes_push_text(buf, ".")
+    buf = _bytes_push_text(buf, payload_b64)
+    buf
+
+# ============================================================================
+# Internal: check alg=none rejection in decoded header bytes
+# ============================================================================
+
+fn _jwtc_reject_alg_none(header_bytes: [u8]) -> bool:
+    # Convert header bytes to lowercase text for comparison
+    var s = ""
+    var i: u64 = 0
+    while i < header_bytes.len():
+        val b = header_bytes[i].to_i64()
+        # lowercase ASCII
+        if b >= 65 and b <= 90:
+            s = s + (b + 32).chr()
+        else:
+            s = s + b.chr()
+        i = i + 1
+    # Reject if "none" appears as the alg value
+    s.contains("\"alg\":\"none\"")
+
+# ============================================================================
+# jwt_decode_unverified — split without verifying signature
+# ============================================================================
+
+fn jwt_decode_unverified(jwt_bytes: [u8]) -> JwtDecodeResult:
+    # Convert bytes to text for splitting (JWT compact form is ASCII)
+    var s = ""
+    var i: u64 = 0
+    while i < jwt_bytes.len():
+        s = s + jwt_bytes[i].to_i64().chr()
+        i = i + 1
+    val parts = s.split(".")
+    if parts.len() != 3:
+        return JwtDecodeResult.Err(JwtError.InvalidStructure(msg: "expected 3 segments, got " + parts.len().to_text()))
+    val header_bytes = _b64u_decode(parts.get(0))
+    val payload_bytes = _b64u_decode(parts.get(1))
+    val sig_bytes = _b64u_decode(parts.get(2))
+    JwtDecodeResult.Ok(header: header_bytes, payload: payload_bytes, sig: sig_bytes)
+
+# ============================================================================
+# jwt_sign_hs256
+# ============================================================================
+
+fn jwt_sign_hs256(header_json: [u8], payload_json: [u8], key: [u8]) -> [u8]:
+    val header_b64 = _b64u_encode(header_json)
+    val payload_b64 = _b64u_encode(payload_json)
+    val signing_input = _jwtc_signing_input(header_b64, payload_b64)
+    val mac = _jwtc_hmac_sha256(key, signing_input)
+    val sig_b64 = _b64u_encode(mac)
+    val compact = header_b64 + "." + payload_b64 + "." + sig_b64
+    var result: [u8] = []
+    var i = 0
+    while i < compact.length():
+        result.push(compact.char_code_at(i).to_u8())
+        i = i + 1
+    result
+
+# ============================================================================
+# jwt_verify_hs256
+# ============================================================================
+
+fn jwt_verify_hs256(jwt_bytes: [u8], key: [u8]) -> JwtVerifyResult:
+    # Convert bytes to ASCII text for splitting
+    var s = ""
+    var i: u64 = 0
+    while i < jwt_bytes.len():
+        s = s + jwt_bytes[i].to_i64().chr()
+        i = i + 1
+    val parts = s.split(".")
+    if parts.len() != 3:
+        return JwtVerifyResult.Err(JwtError.InvalidStructure(msg: "expected 3 segments"))
+    val header_b64 = parts.get(0)
+    val payload_b64 = parts.get(1)
+    val sig_b64 = parts.get(2)
+    # Reject alg=none
+    val header_bytes = _b64u_decode(header_b64)
+    if _jwtc_reject_alg_none(header_bytes):
+        return JwtVerifyResult.Err(JwtError.AlgorithmRejected(msg: "alg=none is not permitted"))
+    val signing_input = _jwtc_signing_input(header_b64, payload_b64)
+    val mac = _jwtc_hmac_sha256(key, signing_input)
+    val expected_b64 = _b64u_encode(mac)
+    # Constant-time compare base64url strings
+    var acc: i64 = 0
+    if sig_b64.length() != expected_b64.length():
+        return JwtVerifyResult.Err(JwtError.SignatureMismatch)
+    var j = 0
+    while j < sig_b64.length():
+        acc = acc | (sig_b64.char_code_at(j) ^ expected_b64.char_code_at(j))
+        j = j + 1
+    if acc != 0:
+        return JwtVerifyResult.Err(JwtError.SignatureMismatch)
+    val payload_bytes = _b64u_decode(payload_b64)
+    JwtVerifyResult.Ok(header: header_bytes, payload: payload_bytes)
+
+# ============================================================================
+# jwt_sign_eddsa — Ed25519 (RFC 8037)
+# priv_key: 32-byte seed
+# ============================================================================
+
+fn jwt_sign_eddsa(header_json: [u8], payload_json: [u8], priv_key: [u8]) -> [u8]:
+    val kp = ed25519_keypair_from_seed(priv_key)
+    val seed = kp.0
+    val pub_key = kp.1
+    val header_b64 = _b64u_encode(header_json)
+    val payload_b64 = _b64u_encode(payload_json)
+    val signing_input = _jwtc_signing_input(header_b64, payload_b64)
+    val sig = ed25519_sign(seed, pub_key, signing_input)
+    val sig_b64 = _b64u_encode(sig)
+    val compact = header_b64 + "." + payload_b64 + "." + sig_b64
+    var result: [u8] = []
+    var i = 0
+    while i < compact.length():
+        result.push(compact.char_code_at(i).to_u8())
+        i = i + 1
+    result
+
+# ============================================================================
+# jwt_verify_eddsa — Ed25519 (RFC 8037)
+# pub_key: 32-byte compressed Edwards point
+# ============================================================================
+
+fn jwt_verify_eddsa(jwt_bytes: [u8], pub_key: [u8]) -> JwtVerifyResult:
+    var s = ""
+    var i: u64 = 0
+    while i < jwt_bytes.len():
+        s = s + jwt_bytes[i].to_i64().chr()
+        i = i + 1
+    val parts = s.split(".")
+    if parts.len() != 3:
+        return JwtVerifyResult.Err(JwtError.InvalidStructure(msg: "expected 3 segments"))
+    val header_b64 = parts.get(0)
+    val payload_b64 = parts.get(1)
+    val sig_b64 = parts.get(2)
+    val header_bytes = _b64u_decode(header_b64)
+    if _jwtc_reject_alg_none(header_bytes):
+        return JwtVerifyResult.Err(JwtError.AlgorithmRejected(msg: "alg=none is not permitted"))
+    val signing_input = _jwtc_signing_input(header_b64, payload_b64)
+    val sig = _b64u_decode(sig_b64)
+    if not ed25519_verify(pub_key, signing_input, sig):
+        return JwtVerifyResult.Err(JwtError.SignatureMismatch)
+    val payload_bytes = _b64u_decode(payload_b64)
+    JwtVerifyResult.Ok(header: header_bytes, payload: payload_bytes)

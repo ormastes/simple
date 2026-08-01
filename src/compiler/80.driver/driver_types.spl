@@ -1,0 +1,225 @@
+# Driver Types - heavyweight driver-only types and context wiring.
+#
+# Lightweight public types now live in driver_core_types.spl so external
+# callers can import CompileResult / CompileOptions without loading the full
+# compiler graph.
+
+export use compiler.common.driver_core_types.*
+
+use compiler.hir.hir.*
+use compiler.mir.mir.*
+use compiler.frontend.core.lexer.*
+use compiler.frontend.parser_types.{ParserModule}
+use compiler.frontend.treesitter.*
+use compiler.common.config.*
+use compiler.backend.backend_port.{BackendPort}
+use lazy compiler.backend.backend_types.{BackendResult, BackendError}
+use compiler.backend.codegen.{CodegenMode}
+use compiler.backend.backend.compiler.{CompilerBackendImpl}
+use lazy compiler.backend.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend.sdn.{SdnBackendImpl}
+use compiler.common.attributes.{VhdlHardwareMetadataFlatRow}
+use compiler.common.di.{DiContainer}
+use compiler.tools.aop.{AopWeaver, LogAspect}
+use compiler.frontend.core.aop.{WeavingConfig, Pointcut, PointcutKind}
+use compiler.common.compiler_services.{CompilerServices, create_default_services}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName}
+
+extern fn rt_string_free(value: text) -> i64
+
+# ------------------------------------------------------------------------------
+# Compilation Context
+# ------------------------------------------------------------------------------
+
+class CompileContext:
+    options: CompileOptions
+    config: Dict<text, text>  # Using dict instead of Config to avoid interpreter issues
+    backend: BackendPort       # Typed port: visible contract, replaces extensions.resolve("Backend")
+    extensions: DiContainer    # Dynamic extension point for plugins (Feature 5)
+    aop: AopWeaver
+    logger: BootLogger
+    sources: [SourceFile]
+    native_sources_fingerprint: text
+    modules: Dict<text, ParserModule>
+    module_surfaces: ModuleSurfacesByName?
+    hir_modules: Dict<text, HirModule>
+    bootstrap_entry_hir: HirModule?
+    mir_modules: Dict<text, MirModule>
+    bootstrap_entry_mir: MirModule?
+    errors: [text]
+    warnings: [text]
+    visibility_warnings: [text]  # Visibility warnings (W0401)
+    vhdl_hardware_metadata_rows: [VhdlHardwareMetadataFlatRow]
+
+    static fn create(options: CompileOptions) -> CompileContext:
+        # Load config
+        var config: Dict<text, text> = {}
+        val compiler_config = CompilerConfig.from_env()
+        if compiler_config.coverage_enabled:
+            config["coverage"] = "1"
+
+        # Standalone native CLI transports its requested mode through the
+        # stable text field because the enum field can be corrupted by the
+        # aggregate argument copy into this function.
+        var selected_mode_text = options.mode.to_text()
+        if options.cli_mode_text != "":
+            selected_mode_text = options.cli_mode_text
+
+        # Build typed BackendPort from concrete implementation based on mode
+        val backend = if selected_mode_text == "interpret" or selected_mode_text == "smf_exec":
+            val interp_impl = InterpreterBackendImpl.new()
+            val interp_name = if selected_mode_text == "interpret": "interpreter" else: "smf_exec"
+            BackendPort(
+                name: interp_name,
+                run_fn: fn(m): interp_impl.process_module(m),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): interp_name
+            )
+        elif selected_mode_text == "jit":
+            val jit_impl = CompilerBackendImpl.jit()
+            BackendPort(
+                name: "jit",
+                run_fn: fn(m): jit_impl.process_module(m),
+                supports_jit_fn: fn(): true,
+                target_triple_fn: fn(): "native-jit"
+            )
+        elif selected_mode_text == "aot":
+            val output = options.output_file ?? "a.out"
+            val aot_impl = CompilerBackendImpl.aot(output)
+            BackendPort(
+                name: "aot",
+                run_fn: fn(m): aot_impl.process_module(m),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): "native-aot"
+            )
+        elif selected_mode_text == "sdn":
+            val sdn_impl = SdnBackendImpl()
+            BackendPort(
+                name: "sdn",
+                run_fn: fn(m): sdn_impl.process_module(m),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): "sdn"
+            )
+        else:
+            BackendPort(
+                name: "check",
+                run_fn: fn(m): Ok(BackendResult.Unit),
+                supports_jit_fn: fn(): false,
+                target_triple_fn: fn(): "check"
+            )
+
+        # Setup extensions container for plugin/extension use (Feature 5)
+        val extensions = DiContainer(bindings: {}, singletons: {}, profile: options.profile, all_bindings: [], locked: false)
+
+        # Setup logger from env var (SIMPLE_LOG=debug|trace|info|warn|error)
+        val logger = if options.verbose:
+            BootLogger(level: 10)  # verbose flag forces debug level
+        else:
+            BootLogger.from_env()
+
+        # Setup AOP
+        val aop_config = WeavingConfig(enabled: false, before_advices: [], after_success_advices: [], after_error_advices: [], around_advices: [])
+        val runtime_enabled = not options.release  # Runtime advice disabled in release builds
+        var aop = AopWeaver(advices: [], config: aop_config, logger: logger, runtime_enabled: runtime_enabled, runtime_allowlist: [])
+        if options.verbose:
+            aop.add_log_aspect(LogAspect(level: 6), Pointcut(kind: PointcutKind.All, pattern: "*"))
+
+        CompileContext(
+            options: options,
+            config: config,
+            backend: backend,
+            extensions: extensions,
+            aop: aop,
+            logger: logger,
+            sources: [],
+            native_sources_fingerprint: "",
+            modules: {},
+            module_surfaces: nil,
+            hir_modules: {},
+            bootstrap_entry_hir: nil,
+            mir_modules: {},
+            bootstrap_entry_mir: nil,
+            errors: [],
+            warnings: [],
+            visibility_warnings: [],
+            vhdl_hardware_metadata_rows: []
+        )
+
+    me add_error(message: text):
+        self.errors.push(message)
+
+    me add_warning(message: text):
+        self.warnings.push(message)
+
+    me add_visibility_warning(message: text):
+        self.visibility_warnings.push(message)
+
+    fn has_errors() -> bool:
+        self.errors.len() > 0
+
+    fn get_extension(name: text) -> Any:
+        # Resolve a named extension, returning nil if not registered
+        self.extensions.resolve_or(name, nil)
+
+    me register_extension(name: text, value: Any):
+        # Register a named extension instance for plugin use
+        self.extensions.bind_instance(name, value)
+
+    # ------------------------------------------------------------------
+    # Memory eviction (--low-memory mode)
+    # ------------------------------------------------------------------
+    # `rt_string_free` is registry-checked: aliases may carry the same copied
+    # RuntimeValue, and a second call safely returns 0 without dereferencing an
+    # unregistered pointer. Never inspect content after the first call because
+    # a logical alias may already name freed storage. Paths are not ownership.
+    me reclaim_source_contents() -> i64:
+        var reclaimed: i64 = 0
+        for source in self.sources:
+            val freed = rt_string_free(source.content)
+            if freed == 1:
+                reclaimed = reclaimed + 1
+        reclaimed
+
+    me source_contents_reclaimable() -> bool:
+        self.options.low_memory and self.options.backend != "vhdl"
+
+    # After parsing, raw source text is no longer needed.
+    me evict_sources():
+        var metadata: [SourceFile] = []
+        for source in self.sources:
+            metadata = metadata.push(SourceFile(
+                path: source.path,
+                authored_path: source.authored_path,
+                content: "",
+                module_name: source.module_name
+            ))
+        self.sources = metadata
+
+    # After HIR lowering, AST modules are no longer needed.
+    me evict_ast():
+        self.modules = {}
+
+    # After MIR lowering, HIR modules are no longer needed.
+    me evict_hir():
+        self.hir_modules = {}
+        self.bootstrap_entry_hir = nil
+
+    # After codegen writes .o for a module, its MIR can be released.
+    me evict_mir_module(name: text):
+        self.mir_modules.remove(name)
+
+# ============================================================================
+# Compile Options Hash Helper
+# ============================================================================
+
+fn compute_options_hash(opts: CompileOptions) -> CompileOptionsHash:
+    use compiler.driver.cache.compile_options_hash.{CompileOptionsHash, compile_options_hash_compute}
+    val opt_level = compileoptions_effective_mir_opt_level(opts)
+    compile_options_hash_compute(opts.backend, opt_level, opts.release, opts.debug_info, opts.gc_off, opts.profile, opts.allowed_families)
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CompileContext, compute_options_hash
+export BackendResult, BackendError

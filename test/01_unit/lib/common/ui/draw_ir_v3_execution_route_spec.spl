@@ -1,0 +1,238 @@
+# @cover src/lib/common/ui/draw_ir_v3_execution_route.spl 80%
+# @tag: unit, ui, draw_ir, draw_ir_v3, gpu_web, execution_route
+
+use std.spec
+use common.ui.draw_ir_v3.{
+    DRAW_IR_V3_KIND_RECT,
+    DrawIrV3Scene,
+    draw_ir_v3_empty_command,
+    draw_ir_v3_empty_scene,
+    draw_ir_v3_geometry_append,
+    draw_ir_v3_geometry_next_id,
+    draw_ir_v3_paint_append,
+    draw_ir_v3_paint_next_id,
+    draw_ir_v3_scene_push_command
+}
+use common.ui.draw_ir_v3_ports.{
+    DRAW_IR_V3_CAP_COMPUTE_PASSES,
+    DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+}
+use common.ui.gpu_web_receipt_contract.{
+    GPU_FALLBACK_L0_GPU_NATIVE,
+    GPU_FALLBACK_L4_DOCUMENT_COMPAT,
+    GPU_FALLBACK_L5_DEVICE_RECOVERY,
+    GPU_ROUTE_CPU_SELECTED,
+    GPU_ROUTE_GPU,
+    GPU_ROUTE_GPU_FALLBACK
+}
+use common.ui.draw_ir_v3_execution_route.{
+    DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU,
+    DRAW_IR_V3_MODE_RESIDENT_GPU,
+    DRAW_IR_V3_REASON_CAPACITY_OVERFLOW,
+    DRAW_IR_V3_REASON_COST_BELOW_THRESHOLD,
+    DRAW_IR_V3_REASON_EMPTY_SCENE,
+    DRAW_IR_V3_REASON_MISSING_CAPABILITY,
+    DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE,
+    DRAW_IR_V3_REASON_NO_DEVICE,
+    draw_ir_v3_missing_capabilities,
+    draw_ir_v3_profile_balanced,
+    draw_ir_v3_profile_cpu_only,
+    draw_ir_v3_profile_full_offload,
+    draw_ir_v3_reason_name,
+    draw_ir_v3_route_capacity_denial,
+    draw_ir_v3_route_cpu_reference_receipt,
+    draw_ir_v3_route_decision_is_consistent,
+    draw_ir_v3_route_device_fault,
+    draw_ir_v3_route_is_cpu_selected,
+    draw_ir_v3_route_is_gpu_fallback,
+    draw_ir_v3_route_name,
+    draw_ir_v3_route_reason_receipt,
+    draw_ir_v3_route_select
+}
+
+# --- fixtures ---------------------------------------------------------------
+# Capability sets are functions, not module-level vals: a module-level
+# initializer that is not a literal is a native-build hazard (MODINIT001).
+
+fn _caps_tier0() -> u32:
+    DRAW_IR_V3_CAP_COMPUTE_PASSES
+
+fn _caps_tier1() -> u32:
+    DRAW_IR_V3_CAP_COMPUTE_PASSES + DRAW_IR_V3_CAP_INDIRECT_DISPATCH
+
+# A scene carrying `count` rect commands that all reference one real geometry
+# row and one real paint row, so the command count is the only thing varying.
+fn _scene_with_rects(count: i64) -> DrawIrV3Scene:
+    var scene = draw_ir_v3_empty_scene(7u32, 3u32)
+
+    var geometry = scene.geometry
+    val gid = draw_ir_v3_geometry_next_id(geometry)
+    geometry = draw_ir_v3_geometry_append(geometry, 0, 0, 16, 16, 0)
+    scene.geometry = geometry
+
+    var paint = scene.paint
+    val pid = draw_ir_v3_paint_next_id(paint)
+    paint = draw_ir_v3_paint_append(paint, 0xff2288ccu32, 0u32, 0, 1000, 0u16)
+    scene.paint = paint
+
+    var i = 0
+    while i < count:
+        var cmd = draw_ir_v3_empty_command()
+        cmd.kind = DRAW_IR_V3_KIND_RECT
+        cmd.geometry_id = gid
+        cmd.paint_id = pid
+        scene = draw_ir_v3_scene_push_command(scene, cmd)
+        i = i + 1
+    return scene
+
+describe "DrawIR v3 execution route selection":
+    """Route a DrawIR v3 scene to GPU, to CPU by cost policy, or to CPU by
+    denial, and prove the last two are never confused with each other."""
+
+    it "should route an empty scene to the CPU as a policy choice, not a fallback":
+        step("Select a route for a scene with no commands under a balanced profile")
+        val profile = draw_ir_v3_profile_balanced(4)
+        val decision = draw_ir_v3_route_select(
+            profile, draw_ir_v3_empty_scene(1u32, 1u32), _caps_tier1(), true)
+
+        expect(decision.command_count).to_equal(0)
+        expect(decision.route).to_equal(GPU_ROUTE_CPU_SELECTED)
+        expect(decision.reason_code).to_equal(DRAW_IR_V3_REASON_EMPTY_SCENE)
+        expect(draw_ir_v3_route_is_gpu_fallback(decision)).to_equal(false)
+        expect(draw_ir_v3_route_decision_is_consistent(decision)).to_equal(true)
+
+    it "should distinguish a cost-policy CPU route from a denied GPU route":
+        step("Route a small scene on a capable device, then the same scene with no device")
+        val profile = draw_ir_v3_profile_balanced(10)
+        val scene = _scene_with_rects(3)
+
+        val by_cost = draw_ir_v3_route_select(profile, scene, _caps_tier1(), true)
+        val by_denial = draw_ir_v3_route_select(profile, scene, _caps_tier1(), false)
+
+        step("Both ran on the CPU, but the route and the reason must differ")
+        expect(draw_ir_v3_route_is_cpu_selected(by_cost)).to_equal(true)
+        expect(draw_ir_v3_route_is_gpu_fallback(by_cost)).to_equal(false)
+        expect(by_cost.reason_code).to_equal(DRAW_IR_V3_REASON_COST_BELOW_THRESHOLD)
+
+        expect(draw_ir_v3_route_is_gpu_fallback(by_denial)).to_equal(true)
+        expect(draw_ir_v3_route_is_cpu_selected(by_denial)).to_equal(false)
+        expect(by_denial.reason_code).to_equal(DRAW_IR_V3_REASON_NO_DEVICE)
+
+        expect(by_cost.route == by_denial.route).to_equal(false)
+        expect(by_cost.fallback_level).to_equal(GPU_FALLBACK_L0_GPU_NATIVE)
+        expect(by_denial.fallback_level).to_equal(GPU_FALLBACK_L4_DOCUMENT_COMPAT)
+
+        step("Neither decision may pair a route with the other class's reason")
+        expect(draw_ir_v3_route_decision_is_consistent(by_cost)).to_equal(true)
+        expect(draw_ir_v3_route_decision_is_consistent(by_denial)).to_equal(true)
+
+    it "should name the cpu_selected and gpu_fallback routes differently in a reason receipt":
+        step("Render reason receipts for a cost-policy route and a denial route")
+        val profile = draw_ir_v3_profile_balanced(10)
+        val scene = _scene_with_rects(2)
+        val by_cost = draw_ir_v3_route_select(profile, scene, _caps_tier1(), true)
+        val by_denial = draw_ir_v3_route_select(profile, scene, _caps_tier1(), false)
+
+        expect(draw_ir_v3_route_name(by_cost.route)).to_equal("cpu_selected")
+        expect(draw_ir_v3_reason_name(by_cost.reason_code)).to_equal("cost_below_threshold")
+        expect(draw_ir_v3_route_name(by_denial.route)).to_equal("gpu_fallback")
+        expect(draw_ir_v3_reason_name(by_denial.reason_code)).to_equal("no_device")
+
+        step("The rendered receipts themselves must not be identical")
+        val cost_receipt = draw_ir_v3_route_reason_receipt(by_cost)
+        val denial_receipt = draw_ir_v3_route_reason_receipt(by_denial)
+        expect(cost_receipt == denial_receipt).to_equal(false)
+
+    it "should route to the GPU when the scene is large enough and the device is capable":
+        step("Route a scene above the cost threshold on a tier-1 device")
+        val profile = draw_ir_v3_profile_balanced(2)
+        val decision = draw_ir_v3_route_select(
+            profile, _scene_with_rects(5), _caps_tier1(), true)
+
+        expect(decision.route).to_equal(GPU_ROUTE_GPU)
+        expect(decision.executed_mode).to_equal(DRAW_IR_V3_MODE_HYBRID_VECTOR_GPU)
+        expect(draw_ir_v3_route_is_cpu_selected(decision)).to_equal(false)
+        expect(draw_ir_v3_route_is_gpu_fallback(decision)).to_equal(false)
+        expect(draw_ir_v3_route_decision_is_consistent(decision)).to_equal(true)
+
+    it "should serve a cpu-only profile with no GPU present":
+        step("Route under the cpu-only profile with device_available false")
+        val decision = draw_ir_v3_route_select(
+            draw_ir_v3_profile_cpu_only(), _scene_with_rects(4), 0u32, false)
+
+        expect(draw_ir_v3_route_is_cpu_selected(decision)).to_equal(true)
+        expect(decision.reason_code).to_equal(DRAW_IR_V3_REASON_MODE_IS_CPU_REFERENCE)
+        expect(draw_ir_v3_route_is_gpu_fallback(decision)).to_equal(false)
+
+    it "should deny a resident-GPU profile on a device missing the indirect-dispatch tier":
+        step("Route the full-offload profile against a tier-0-only device")
+        val decision = draw_ir_v3_route_select(
+            draw_ir_v3_profile_full_offload(), _scene_with_rects(6), _caps_tier0(), true)
+
+        expect(draw_ir_v3_route_is_gpu_fallback(decision)).to_equal(true)
+        expect(decision.reason_code).to_equal(DRAW_IR_V3_REASON_MISSING_CAPABILITY)
+        expect(decision.missing_capabilities).to_equal(DRAW_IR_V3_CAP_INDIRECT_DISPATCH)
+        expect(decision.strict_pass).to_equal(false)
+
+    it "should let a strict full-offload profile pass only on a native GPU route":
+        step("Route the full-offload profile against a fully capable device")
+        val decision = draw_ir_v3_route_select(
+            draw_ir_v3_profile_full_offload(), _scene_with_rects(6), _caps_tier1(), true)
+
+        expect(decision.route).to_equal(GPU_ROUTE_GPU)
+        expect(decision.executed_mode).to_equal(DRAW_IR_V3_MODE_RESIDENT_GPU)
+        expect(decision.strict_pass).to_equal(true)
+
+    it "should report a mid-submission device fault at the device-recovery level":
+        step("Build a device-fault decision for a balanced profile")
+        val decision = draw_ir_v3_route_device_fault(draw_ir_v3_profile_balanced(2), 9)
+
+        expect(draw_ir_v3_route_is_gpu_fallback(decision)).to_equal(true)
+        expect(decision.fallback_level).to_equal(GPU_FALLBACK_L5_DEVICE_RECOVERY)
+        expect(draw_ir_v3_route_decision_is_consistent(decision)).to_equal(true)
+
+    it "should report a capacity denial as a document-level gpu_fallback":
+        step("Build a capacity-overflow denial for a balanced profile")
+        val decision = draw_ir_v3_route_capacity_denial(draw_ir_v3_profile_balanced(2), 40)
+
+        expect(draw_ir_v3_route_is_gpu_fallback(decision)).to_equal(true)
+        expect(decision.reason_code).to_equal(DRAW_IR_V3_REASON_CAPACITY_OVERFLOW)
+        expect(decision.fallback_level).to_equal(GPU_FALLBACK_L4_DOCUMENT_COMPAT)
+        expect(draw_ir_v3_route_decision_is_consistent(decision)).to_equal(true)
+
+    it "should not mark a submission accepted after a gpu_fallback":
+        step("Build CPU-reference receipts for a policy route and a denial route")
+        val profile = draw_ir_v3_profile_balanced(10)
+        val scene = _scene_with_rects(3)
+        val cost_receipt = draw_ir_v3_route_cpu_reference_receipt(
+            scene, 3u64, draw_ir_v3_route_select(profile, scene, _caps_tier1(), true), 12u64)
+        val denial_receipt = draw_ir_v3_route_cpu_reference_receipt(
+            scene, 3u64, draw_ir_v3_route_select(profile, scene, _caps_tier1(), false), 12u64)
+
+        expect(cost_receipt.accepted).to_equal(true)
+        expect(denial_receipt.accepted).to_equal(false)
+        expect(cost_receipt.route).to_equal(GPU_ROUTE_CPU_SELECTED)
+        expect(denial_receipt.route).to_equal(GPU_ROUTE_GPU_FALLBACK)
+
+    it "should produce a mode-independent deterministic hash for the same scene":
+        step("Hash one scene through a cpu-only route and a GPU route")
+        val scene = _scene_with_rects(4)
+        val cpu_receipt = draw_ir_v3_route_cpu_reference_receipt(
+            scene,
+            3u64,
+            draw_ir_v3_route_select(draw_ir_v3_profile_cpu_only(), scene, 0u32, false),
+            1u64)
+        val gpu_receipt = draw_ir_v3_route_cpu_reference_receipt(
+            scene,
+            3u64,
+            draw_ir_v3_route_select(draw_ir_v3_profile_balanced(2), scene, _caps_tier1(), true),
+            1u64)
+
+        expect(cpu_receipt.deterministic_hash_lo).to_equal(gpu_receipt.deterministic_hash_lo)
+        expect(cpu_receipt.route == gpu_receipt.route).to_equal(false)
+
+    it "should report exactly the capability bits the device is missing":
+        step("Diff a tier-1 requirement against a tier-0 device")
+        expect(draw_ir_v3_missing_capabilities(_caps_tier1(), _caps_tier0()))
+            .to_equal(DRAW_IR_V3_CAP_INDIRECT_DISPATCH)
+        expect(draw_ir_v3_missing_capabilities(_caps_tier1(), _caps_tier1())).to_equal(0u32)

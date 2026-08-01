@@ -1,0 +1,260 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    BeDomRouteEventDispatch, be_dom_dispatch_event_to_route
+}
+use std.gc_async_mut.gpu.browser_engine.dom_identity_index.{
+    DomDocumentGeneration, DomIdentityIndex, DomNodeRoute,
+    dom_identity_index_build
+}
+use std.gc_async_mut.gpu.browser_engine.layout_box.{BeLayoutBox}
+use std.gc_async_mut.gpu.browser_engine.layout.{hit_test}
+
+class _HitTestFixture:
+    root: BeDomNode
+    layout: BeLayoutBox
+    index: DomIdentityIndex
+
+class _PointerActivation:
+    down: BeDomRouteEventDispatch
+    up: BeDomRouteEventDispatch
+    click: BeDomRouteEventDispatch?
+
+fn _box(
+    node: BeDomNode, x: f64, y: f64, width: f64, height: f64,
+    children: [BeLayoutBox]
+) -> BeLayoutBox:
+    var box = BeLayoutBox.block_for(node, x, y, width, height)
+    box.children = children
+    box
+
+fn _interactive_fixture() -> _HitTestFixture:
+    var button = BeDomNode.element_with_id(3, "button")
+    button.set_attr("id", "save")
+    button.set_attr("onclick", "inline-click")
+    button.add_event_listener("mousedown", "target-down")
+    button.add_event_listener("mouseup", "target-up")
+    button.add_event_listener("click", "target-listener")
+
+    var section = BeDomNode.element_with_id(2, "section")
+    section.set_attr("id", "panel")
+    section.add_event_listener_with_capture("click", "panel-capture", true)
+    section.add_event_listener("click", "panel-bubble")
+    section.add_child(button)
+
+    var root = BeDomNode.element_with_id(1, "main")
+    root.set_attr("id", "root")
+    root.add_event_listener_with_capture(
+        "mousedown", "root-down-capture", true
+    )
+    root.add_event_listener_with_capture("click", "root-capture", true)
+    root.add_event_listener("click", "root-bubble")
+    root.add_child(section)
+
+    val button_box = _box(button, 20.0, 20.0, 40.0, 20.0, [])
+    val section_box = _box(section, 10.0, 10.0, 80.0, 60.0, [button_box])
+    val layout = _box(root, 0.0, 0.0, 120.0, 100.0, [section_box])
+    val generation = DomDocumentGeneration.create(1).unwrap()
+    val index = dom_identity_index_build(root, generation).unwrap()
+    _HitTestFixture(root: root, layout: layout, index: index)
+
+fn _route_at(
+    fixture: _HitTestFixture, x: i32, y: i32
+) -> DomNodeRoute?:
+    match hit_test(
+        fixture.layout, fixture.root, x.to_f64(), y.to_f64()
+    ):
+        Some(node):
+            val route = DomNodeRoute(
+                generation: fixture.index.generation, node_id: node.node_id
+            )
+            if fixture.index.contains_route(route):
+                return Some(route)
+            nil
+        nil: nil
+
+fn _author_id_at(fixture: _HitTestFixture, x: i32, y: i32) -> text:
+    match _route_at(fixture, x, y):
+        Some(route): fixture.index.author_id_for_route(route) ?? ""
+        nil: ""
+
+fn _hit_test_path(
+    fixture: _HitTestFixture, x: i32, y: i32
+) -> [DomNodeRoute]:
+    match _route_at(fixture, x, y):
+        Some(route): fixture.index.event_path_for_route(route)
+        nil: []
+
+fn _dispatch_at(
+    fixture: _HitTestFixture, x: i32, y: i32, event_type: text,
+    alt_key: bool = false, ctrl_key: bool = false,
+    meta_key: bool = false, shift_key: bool = false
+) -> BeDomRouteEventDispatch?:
+    val route = match _route_at(fixture, x, y):
+        Some(value): value
+        nil: return nil
+    var dispatch = be_dom_dispatch_event_to_route(
+        fixture.root, fixture.index, route, event_type, true, true, true
+    )
+    dispatch.event.client_x = x
+    dispatch.event.client_y = y
+    dispatch.event.button = 0
+    dispatch.event.buttons = if event_type == "mousedown": 1 else: 0
+    dispatch.event.pointer_id = 1
+    dispatch.event.pointer_type = "mouse"
+    dispatch.event.is_primary = true
+    dispatch.event.alt_key = alt_key
+    dispatch.event.ctrl_key = ctrl_key
+    dispatch.event.meta_key = meta_key
+    dispatch.event.shift_key = shift_key
+    Some(dispatch)
+
+fn _same_route(left: DomNodeRoute, right: DomNodeRoute) -> bool:
+    left.generation.value == right.generation.value and (
+        left.node_id == right.node_id
+    )
+
+fn _pointer_activation(
+    fixture: _HitTestFixture, down_x: i32, down_y: i32,
+    up_x: i32, up_y: i32
+) -> _PointerActivation:
+    val down = _dispatch_at(
+        fixture, down_x, down_y, "mousedown"
+    ).unwrap()
+    val up = _dispatch_at(fixture, up_x, up_y, "mouseup").unwrap()
+    var click: BeDomRouteEventDispatch? = nil
+    if _same_route(down.target_route, up.target_route):
+        val synthesized = _dispatch_at(fixture, up_x, up_y, "click").unwrap()
+        click = Some(synthesized)
+    _PointerActivation(down: down, up: up, click: click)
+
+fn _author_id(index: DomIdentityIndex, route: DomNodeRoute) -> text:
+    index.author_id_for_route(route) ?? ""
+
+describe "Browser renderer hit-test event routing":
+
+    it "keeps authored identity separate from deepest-box hit testing":
+        val fixture = _interactive_fixture()
+
+        expect(fixture.root.node_id).to_be_greater_than(0)
+        expect(fixture.root.children[0].node_id).to_be_greater_than(0)
+        expect(fixture.root.children[0].children[0].node_id).to_be_greater_than(0)
+        expect(_author_id_at(fixture, 25, 25)).to_equal("save")
+        expect(_author_id_at(fixture, 15, 15)).to_equal("panel")
+        expect(_route_at(fixture, 200, 200)).to_be_nil()
+
+    it "returns a root-to-target typed route path for pointer coordinates":
+        val fixture = _interactive_fixture()
+        val path = _hit_test_path(fixture, 25, 25)
+
+        expect(path.len()).to_equal(3)
+        expect(_author_id(fixture.index, path[0])).to_equal("root")
+        expect(_author_id(fixture.index, path[1])).to_equal("panel")
+        expect(_author_id(fixture.index, path[2])).to_equal("save")
+
+    it "dispatches click through capture target and bubble phases from hit test":
+        val fixture = _interactive_fixture()
+        val dispatch = _dispatch_at(
+            fixture, 25, 25, "click"
+        ).unwrap()
+
+        expect(_author_id(
+            fixture.index, dispatch.target_route
+        )).to_equal("save")
+        expect(dispatch.default_action).to_equal("button-activate")
+        expect(dispatch.default_action_allowed).to_be(true)
+        expect(dispatch.actions.len()).to_equal(6)
+        expect(dispatch.actions[0]).to_equal("root-capture")
+        expect(dispatch.phases[0]).to_equal("capture")
+        expect(dispatch.actions[1]).to_equal("panel-capture")
+        expect(dispatch.phases[1]).to_equal("capture")
+        expect(dispatch.actions[2]).to_equal("inline-click")
+        expect(dispatch.phases[2]).to_equal("target")
+        expect(dispatch.actions[3]).to_equal("target-listener")
+        expect(dispatch.phases[3]).to_equal("target")
+        expect(dispatch.actions[4]).to_equal("panel-bubble")
+        expect(dispatch.phases[4]).to_equal("bubble")
+        expect(dispatch.actions[5]).to_equal("root-bubble")
+        expect(dispatch.phases[5]).to_equal("bubble")
+
+    it "dispatches raw pointer-derived events through hit-tested routes":
+        val fixture = _interactive_fixture()
+        val dispatch = _dispatch_at(
+            fixture, 25, 25, "mousedown"
+        ).unwrap()
+
+        expect(dispatch.event.event_type).to_equal("mousedown")
+        expect(_author_id(
+            fixture.index, dispatch.target_route
+        )).to_equal("save")
+        expect(dispatch.event.client_x).to_equal(25)
+        expect(dispatch.event.client_y).to_equal(25)
+        expect(dispatch.event.button).to_equal(0)
+        expect(dispatch.event.buttons).to_equal(1)
+        expect(dispatch.event.pointer_id).to_equal(1)
+        expect(dispatch.event.pointer_type).to_equal("mouse")
+        expect(dispatch.actions.len()).to_equal(2)
+        expect(dispatch.actions[0]).to_equal("root-down-capture")
+        expect(dispatch.phases[0]).to_equal("capture")
+        expect(dispatch.actions[1]).to_equal("target-down")
+        expect(dispatch.phases[1]).to_equal("target")
+        expect(dispatch.default_action_allowed).to_be(false)
+
+    it "dispatches pointer-derived events with modifier key state":
+        val fixture = _interactive_fixture()
+        val dispatch = _dispatch_at(
+            fixture, 25, 25, "mousedown", true, false, true, true
+        ).unwrap()
+
+        expect(_author_id(
+            fixture.index, dispatch.target_route
+        )).to_equal("save")
+        expect(dispatch.event.client_x).to_equal(25)
+        expect(dispatch.event.alt_key).to_be(true)
+        expect(dispatch.event.ctrl_key).to_be(false)
+        expect(dispatch.event.meta_key).to_be(true)
+        expect(dispatch.event.shift_key).to_be(true)
+
+    it "synthesizes click after pointer down and up on the same route":
+        val fixture = _interactive_fixture()
+        val activation = _pointer_activation(
+            fixture, 25, 25, 30, 30
+        )
+        val click = activation.click.unwrap()
+
+        expect(activation.down.event.event_type).to_equal("mousedown")
+        expect(_author_id(
+            fixture.index, activation.down.target_route
+        )).to_equal("save")
+        expect(activation.up.event.event_type).to_equal("mouseup")
+        expect(_author_id(
+            fixture.index, activation.up.target_route
+        )).to_equal("save")
+        expect(click.event.event_type).to_equal("click")
+        expect(click.event.client_x).to_equal(30)
+        expect(click.event.client_y).to_equal(30)
+        expect(click.event.buttons).to_equal(0)
+        expect(click.default_action).to_equal("button-activate")
+        expect(click.actions[2]).to_equal("inline-click")
+
+    it "does not synthesize click when pointer up lands on a different route":
+        val fixture = _interactive_fixture()
+        val activation = _pointer_activation(
+            fixture, 25, 25, 15, 15
+        )
+
+        expect(_author_id(
+            fixture.index, activation.down.target_route
+        )).to_equal("save")
+        expect(_author_id(
+            fixture.index, activation.up.target_route
+        )).to_equal("panel")
+        expect(activation.click).to_be_nil()
+
+    it "returns no authorized dispatch route for pointer misses":
+        val fixture = _interactive_fixture()
+
+        expect(_dispatch_at(
+            fixture, 200, 200, "click"
+        )).to_be_nil()

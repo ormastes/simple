@@ -1,0 +1,305 @@
+# Bare-Primitive Internal Binding Lint (mission-critical profile)
+#
+# bare_primitive_internal: firmware-style REQ-MC-011 rule — in mission-critical
+# code even INTERNAL locals must carry domain types. A `val`/`var` binding that
+# is typed only by a bare primitive is flagged:
+#
+# W-MC-VAL-001: bare numeric/bool literal initializer with no annotation and
+#               no unit suffix, OR an explicit annotation from the canonical
+#               bare-primitive table (compiler.semantics.lint.primitive_types).
+#
+# What warns:
+#   - `val x = 1` / `var x = 1` / `= 1.5` / `= true` / `= false`
+#   - `val big = 1_000` — `_` before a DIGIT is a numeric separator (lexer
+#     parity: lex_scan_number in 10.frontend/core/lexer_scanners.spl treats
+#     `_`+digit as part of the number; a suffix is `_`+alpha or a direct
+#     alpha run like `5ms`), so this is still a bare literal.
+#   - `val t: i64 = ...` — any annotation in the bare-primitive table
+#     (single source of truth: is_bare_primitive_name; includes bool).
+#   - suffixed literals whose suffix IS a bare primitive (`5_i32`, `10u8`) —
+#     equivalent to an explicit primitive annotation.
+#
+# What does NOT warn:
+#   - unit-suffix literals: `1_s`, `250_ms`, `5ms` (suffix not in the table)
+#   - domain annotation: `val x: DurationMs = 1` (annotation governs)
+#   - non-literal initializers (call, field read, var expression) — the
+#     expression's type governs; checked by REQ-MC-001's semantic checker
+#   - string literals (text is not in the bare-primitive table for this rule)
+#   - `for i in 0..n` induction variables (documented follow-up decision)
+#   - discard bindings (`val _ = ...`, `_`-prefixed names)
+#   - `extern fn` declarations (no bodies anyway)
+#   - vendored sources (src/compiler_rust/vendor, src/runtime/vendor)
+#
+# ponytail: text-level heuristic over trimmed `val`/`var` lines — acceptable
+# for a warning-level rule; upgrade path = typed-HIR walk (classify the
+# binding's resolved type instead of its source text).
+#
+# Levels: default "allow" in moderate/lib/reliable (would flood non-MC code);
+# "warn" only under the mission-critical profile; deny at profile v2.
+
+use compiler.semantics.lint.primitive_types.{is_bare_primitive_name}
+
+# ============================================================================
+# Finding Struct
+# ============================================================================
+
+pub struct BarePrimitiveFinding:
+    code: text
+    message: text
+    name: text
+    note: text
+    line_num: i64
+
+    fn fmt() -> text:
+        "[{self.code}] WARNING: {self.message} — {self.note}"
+
+# ============================================================================
+# Character Helpers
+# ============================================================================
+
+fn _bpi_is_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn _bpi_is_alpha(ch: text) -> bool:
+    val is_lower = ch >= "a" and ch <= "z"
+    val is_upper = ch >= "A" and ch <= "Z"
+    is_lower or is_upper
+
+fn _bpi_is_ident_char(ch: text) -> bool:
+    if ch == "_":
+        return true
+    _bpi_is_alpha(ch) or _bpi_is_digit(ch)
+
+fn _bpi_is_hex_digit(ch: text) -> bool:
+    if _bpi_is_digit(ch):
+        return true
+    val lo = ch >= "a" and ch <= "f"
+    val hi = ch >= "A" and ch <= "F"
+    lo or hi
+
+# ============================================================================
+# Literal Classification
+# ============================================================================
+
+# Classify an initializer expression text.
+# Returns: "bare"     — bare numeric/bool literal (warn)
+#          "suffixed" — numeric literal with a non-primitive unit suffix (ok)
+#          "other"    — anything else: string, call, expression, ... (ok)
+fn _bpi_classify_init(init_raw: text) -> text:
+    val init = init_raw.trim()
+    if init == "":
+        return "other"
+    # Bool literals (allow a trailing comment).
+    if init == "true" or init == "false":
+        return "bare"
+    if init.starts_with("true ") or init.starts_with("false "):
+        val rest_off = if init.starts_with("true "): 5 else: 6
+        if init.substring(rest_off, init.len()).trim().starts_with("#"):
+            return "bare"
+        return "other"
+    var i = 0
+    val n = init.len()
+    # Optional leading sign on a numeric literal.
+    if init.substring(0, 1) == "-":
+        i = 1
+    if i >= n or not _bpi_is_digit(init.substring(i, i + 1)):
+        return "other"
+    # Radix prefix (0x / 0b / 0o).
+    var is_prefixed = false
+    if init.substring(i, i + 1) == "0" and i + 1 < n:
+        val second = init.substring(i + 1, i + 2)
+        if second == "x" or second == "b" or second == "o":
+            is_prefixed = true
+            i = i + 2
+            while i < n:
+                val hc = init.substring(i, i + 1)
+                if _bpi_is_hex_digit(hc) or hc == "_":
+                    i = i + 1
+                else:
+                    break
+    var suffix = ""
+    if not is_prefixed:
+        # Digits with `_` separators. Lexer parity (lex_scan_number):
+        # `_` + digit continues the number; `_` + alpha starts a suffix;
+        # a direct alpha run also starts a suffix (`5ms`, `10u8`).
+        while i < n:
+            val ch = init.substring(i, i + 1)
+            if _bpi_is_digit(ch):
+                i = i + 1
+            elif ch == "_":
+                if i + 1 < n and _bpi_is_digit(init.substring(i + 1, i + 2)):
+                    i = i + 2  # numeric separator: `1_000`
+                else:
+                    break      # `_` + alpha (or end) — suffix position
+            else:
+                break
+        # Fraction part: `.` + digit (not `..` range, not method call).
+        if i < n and init.substring(i, i + 1) == ".":
+            if i + 1 < n and _bpi_is_digit(init.substring(i + 1, i + 2)):
+                i = i + 1
+                while i < n:
+                    val fc = init.substring(i, i + 1)
+                    val fu = fc == "_" and i + 1 < n and _bpi_is_digit(init.substring(i + 1, i + 2))
+                    if _bpi_is_digit(fc):
+                        i = i + 1
+                    elif fu:
+                        i = i + 2
+                    else:
+                        break
+            else:
+                return "other"  # `1.method()` / `0..n` — not a bare literal
+        # Exponent part.
+        if i < n:
+            val ec = init.substring(i, i + 1)
+            if ec == "e" or ec == "E":
+                val has_more = i + 1 < n
+                var j = i + 1
+                if has_more:
+                    val sc = init.substring(j, j + 1)
+                    if sc == "+" or sc == "-":
+                        j = j + 1
+                if j < n and _bpi_is_digit(init.substring(j, j + 1)):
+                    i = j
+                    while i < n and _bpi_is_digit(init.substring(i, i + 1)):
+                        i = i + 1
+        # Suffix: `_` + alpha, or direct alpha run.
+        if i < n:
+            val sch = init.substring(i, i + 1)
+            if sch == "_" and i + 1 < n and _bpi_is_alpha(init.substring(i + 1, i + 2)):
+                var k = i + 1
+                while k < n and _bpi_is_ident_char(init.substring(k, k + 1)):
+                    suffix = suffix + init.substring(k, k + 1)
+                    k = k + 1
+                i = k
+            elif _bpi_is_alpha(sch):
+                var k = i
+                while k < n and _bpi_is_ident_char(init.substring(k, k + 1)):
+                    suffix = suffix + init.substring(k, k + 1)
+                    k = k + 1
+                i = k
+    # Whatever follows the literal must be empty or a comment, else this is a
+    # larger expression (`1 + n`, `1.max(2)`) — out of scope for the text rule.
+    val rest = init.substring(i, n).trim()
+    if rest != "" and not rest.starts_with("#"):
+        return "other"
+    if suffix == "":
+        return "bare"
+    # A primitive-named suffix (`5_i32`, `10u8`) is an explicit primitive
+    # annotation in literal form — still bare. Unit suffixes (`1_s`, `250_ms`)
+    # carry a domain type — clean.
+    if is_bare_primitive_name(suffix):
+        return "bare"
+    "suffixed"
+
+# ============================================================================
+# Binding-Line Parsing
+# ============================================================================
+
+# Extract (name, annotation, initializer) from a trimmed `val`/`var` line.
+# Returns ["", "", ""] when the line is not a simple binding.
+fn _bpi_parse_binding(t: text) -> [text]:
+    var rest = ""
+    if t.starts_with("val "):
+        rest = t.substring(4, t.len()).trim()
+    elif t.starts_with("var "):
+        rest = t.substring(4, t.len()).trim()
+    else:
+        return ["", "", ""]
+    # Binding name = leading identifier run. Tuple/pattern bindings skipped.
+    var name = ""
+    var i = 0
+    val n = rest.len()
+    while i < n:
+        val ch = rest.substring(i, i + 1)
+        if _bpi_is_ident_char(ch):
+            name = name + ch
+        else:
+            break
+        i = i + 1
+    if name == "":
+        return ["", "", ""]
+    var after = rest.substring(i, n).trim()
+    var anno = ""
+    if after.starts_with(":"):
+        after = after.substring(1, after.len())
+        # Annotation runs to the first top-level `=` (not `==`).
+        var d = 0
+        var eq = -1
+        var j = 0
+        val alen = after.len()
+        while j < alen:
+            val ch = after.substring(j, j + 1)
+            if ch == "(" or ch == "[" or ch == "<":
+                d = d + 1
+            elif ch == ")" or ch == "]" or ch == ">":
+                if d > 0:
+                    d = d - 1
+            elif ch == "=" and d == 0:
+                val next_eq = j + 1 < alen and after.substring(j + 1, j + 2) == "="
+                if not next_eq:
+                    eq = j
+                    break
+            j = j + 1
+        if eq >= 0:
+            anno = after.substring(0, eq).trim()
+            after = after.substring(eq + 1, alen)
+        else:
+            anno = after.trim()
+            after = ""
+    elif after.starts_with("="):
+        val is_eq_eq = after.len() > 1 and after.substring(1, 2) == "="
+        if is_eq_eq:
+            return ["", "", ""]
+        after = after.substring(1, after.len())
+    else:
+        return ["", "", ""]
+    [name, anno, after.trim()]
+
+# ============================================================================
+# Main Entry Point
+# ============================================================================
+
+pub fn check_bare_primitive_internal(source: text, file_path: text) -> [BarePrimitiveFinding]:
+    """Text-based heuristic for W-MC-VAL-001 (bare_primitive_internal).
+
+    Emits one WARNING per `val`/`var` binding whose only type information is a
+    bare primitive: a bare numeric/bool literal initializer without annotation
+    or unit suffix, or an explicit primitive-table annotation. Vendored
+    sources are skipped."""
+    var findings: [BarePrimitiveFinding] = []
+    if file_path.contains("src/compiler_rust/vendor") or file_path.contains("src/runtime/vendor"):
+        return findings
+    val lines = source.split("\n")
+    val n = lines.len()
+    var i = 0
+    while i < n:
+        val t = lines[i].trim()
+        if t == "" or t.starts_with("#"):
+            i = i + 1
+            continue
+        val parsed = _bpi_parse_binding(t)
+        val name = parsed[0]
+        if name == "" or name.starts_with("_"):
+            i = i + 1
+            continue
+        val anno = parsed[1]
+        val init = parsed[2]
+        if anno != "":
+            if is_bare_primitive_name(anno):
+                findings.push(BarePrimitiveFinding(
+                    code: "W-MC-VAL-001",
+                    message: "binding `{name}` is annotated with bare primitive `{anno}`",
+                    name: name,
+                    note: "use a domain type (e.g. a newunit) instead of `{anno}` in mission-critical code",
+                    line_num: i + 1
+                ))
+        elif _bpi_classify_init(init) == "bare":
+            findings.push(BarePrimitiveFinding(
+                code: "W-MC-VAL-001",
+                message: "binding `{name}` is a bare primitive literal with no domain type",
+                name: name,
+                note: "annotate with a domain type or use a unit-suffix literal (e.g. `250_ms`)",
+                line_num: i + 1
+            ))
+        i = i + 1
+    findings

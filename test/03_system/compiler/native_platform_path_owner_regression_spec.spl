@@ -1,0 +1,37 @@
+"""Native platform path-owner regression for strict self-hosted AOT."""
+
+use std.spec.*
+use std.io_runtime.{dir_create_all, file_write, remove_file_if_exists, shell}
+
+val BUILD_DIR = "build/native_platform_path_owner_regression"
+val SOURCE_PATH = BUILD_DIR + "/main.spl"
+val BINARY_PATH = BUILD_DIR + "/main"
+
+describe "self-hosted native platform path ownership":
+    it "links real named path owners without a module global or fallback stub":
+        step("Write the real platform-facade path probe")
+        expect(dir_create_all(BUILD_DIR)).to_equal(true)
+        expect(remove_file_if_exists(BINARY_PATH)).to_equal(true)
+        expect(file_write(
+            SOURCE_PATH,
+            "use nogc_sync_mut.platform.{normalize_path, is_absolute_path, join_path}\n" +
+            "fn main():\n" +
+            "    if normalize_path(\"alpha\\\\beta\") == \"alpha/beta\" and is_absolute_path(\"/tmp/simple\") and join_path(\"alpha\", \"beta\") == \"alpha/beta\":\n" +
+            "        print 42\n" +
+            "    else:\n" +
+            "        print 1\n"
+        )).to_equal(true)
+
+        step("Compile through strict self-hosted entry closure")
+        val compiled = shell(
+            "env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 " +
+            "bin/simple native-build --entry " + SOURCE_PATH + " -o " + BINARY_PATH + " --clean"
+        )
+        expect(compiled.exit_code).to_equal(0)
+        expect(compiled.stderr.contains("undeclared symbol")).to_equal(false)
+        expect(compiled.stderr.contains("generated stub")).to_equal(false)
+
+        step("Run the native artifact")
+        val ran = shell(BINARY_PATH)
+        expect(ran.exit_code).to_equal(0)
+        expect(ran.stdout).to_equal("42")

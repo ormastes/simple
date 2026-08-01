@@ -1,0 +1,542 @@
+# Simple Web Engine2D JS Bitmap Evidence
+
+- status: pass
+- reason: pass
+- baseline runtime: node
+- node fixture tool: tools/node-render-bitmap/simple_web_engine2d_fixture.js
+- node fixture target: pure_simple
+- node fixture renderer: node-simple-web-engine2d-baseline
+- node fixture producer: node-simple-web-engine2d-baseline
+- node fixture Engine2D backend: software
+- node fixture pixel format: argb-u32
+- node fixture baseline source: js-fixture
+- scene: simple-web-engine2d-image-taskbar-command
+- dimensions: 96x64
+- iterations per trial: 1000
+- trials: 3
+- simple checksum: 26296152649728
+- baseline checksum: 26296152649728
+- simple weighted checksum: 80792557145241600
+- baseline weighted checksum: 80792557145241600
+- mismatch count: 0
+- blur/tolerance used: false
+- optimized path: static-pixel-cache
+- simple cache hits: 1000
+- simple cache stores: 1
+- best simple frame us: 6
+- best baseline frame us: 122
+- baseline/simple speedup x1000: 20333
+- simple ARGB path: build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- baseline ARGB path: build/simple_web_engine2d_js_bitmap_evidence_current/node-argb.json
+- simple binary: release/x86_64-unknown-linux-gnu/simple (repo-self-hosted-fallback, pass)
+
+## Simple Output
+- ## trial 1
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3889:58
+-    |
+- 3889 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3907:58
+-    |
+- 3907 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3940:58
+-    |
+- 3940 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3943:42
+-    |
+- 3943 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3967:58
+-    |
+- 3967 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3970:42
+-    |
+- 3970 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: Cranelift JIT compile: Module error: unresolved external symbol 'rt_len' would NULL-jump in JIT; deferring to interpreter
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3889:58
+-    |
+- 3889 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3907:58
+-    |
+- 3907 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3940:58
+-    |
+- 3940 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3943:42
+-    |
+- 3943 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3967:58
+-    |
+- 3967 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3970:42
+-    |
+- 3970 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=6
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=6
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+- ## trial 2
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3889:58
+-    |
+- 3889 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3907:58
+-    |
+- 3907 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3940:58
+-    |
+- 3940 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3943:42
+-    |
+- 3943 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3967:58
+-    |
+- 3967 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3970:42
+-    |
+- 3970 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: Cranelift JIT compile: Module error: unresolved external symbol 'rt_len' would NULL-jump in JIT; deferring to interpreter
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3889:58
+-    |
+- 3889 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3907:58
+-    |
+- 3907 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3940:58
+-    |
+- 3940 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3943:42
+-    |
+- 3943 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3967:58
+-    |
+- 3967 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3970:42
+-    |
+- 3970 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=6
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=6
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+- ## trial 3
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3889:58
+-    |
+- 3889 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3907:58
+-    |
+- 3907 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3940:58
+-    |
+- 3940 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3943:42
+-    |
+- 3943 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3967:58
+-    |
+- 3967 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3970:42
+-    |
+- 3970 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [INFO] JIT compilation failed, falling back to interpreter: Cranelift JIT compile: Module error: unresolved external symbol 'rt_len' would NULL-jump in JIT; deferring to interpreter
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3889:58
+-    |
+- 3889 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3907:58
+-    |
+- 3907 |         if ri >= right_count or (li < left_count and left[li] <= right[ri]):
+-    |                                                          ^
+- 
+- Use angle brackets: left<...> instead of left[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3940:58
+-    |
+- 3940 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3943:42
+-    |
+- 3943 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3967:58
+-    |
+- 3967 |             while pos < rule_count and has_last and rules[pos] == last:
+-    |                                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [33mwarning[0m: Deprecated syntax for type parameters
+-   --> /home/yoon/simple/src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl:3970:42
+-    |
+- 3970 |             if pos < rule_count and rules[pos] < min_rule:
+-    |                                          ^
+- 
+- Use angle brackets: rules<...> instead of rules[...]
+- 
+- Run `simple migrate --fix-generics` to automatically update your code
+- 
+- [memory-guard] SIMPLE_LIB=src contains 600+ .spl files — consider narrowing scope to avoid memory bloat
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=6
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+- renderer=pure-simple-web-engine2d-cache
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=6
+- backend_name=software
+- optimized_path=static-pixel-cache
+- cache_hits=1000
+- cache_stores=1
+- argb_path=build/simple_web_engine2d_js_bitmap_evidence_current/simple-argb.json
+- blur_or_tolerance_used=false
+
+## Baseline Output
+- ## trial 1
+- target=pure_simple
+- renderer=node-simple-web-engine2d-baseline
+- producer=node-simple-web-engine2d-baseline
+- engine2d_backend=software
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=122
+- pixel_format=argb-u32
+- baseline_source=js-fixture
+- blur_or_tolerance_used=false
+- ## trial 2
+- target=pure_simple
+- renderer=node-simple-web-engine2d-baseline
+- producer=node-simple-web-engine2d-baseline
+- engine2d_backend=software
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=122
+- pixel_format=argb-u32
+- baseline_source=js-fixture
+- blur_or_tolerance_used=false
+- ## trial 3
+- target=pure_simple
+- renderer=node-simple-web-engine2d-baseline
+- producer=node-simple-web-engine2d-baseline
+- engine2d_backend=software
+- scene=simple-web-engine2d-image-taskbar-command
+- width=96
+- height=64
+- iterations=1000
+- checksum=26296152649728
+- weighted_checksum=80792557145241600
+- total_checksum=26296152649728000
+- frame_us=123
+- pixel_format=argb-u32
+- baseline_source=js-fixture
+- blur_or_tolerance_used=false

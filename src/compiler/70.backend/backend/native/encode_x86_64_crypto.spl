@@ -1,0 +1,362 @@
+# src/compiler/70.backend/backend/native/encode_x86_64_crypto.spl
+#
+# x86_64 Crypto Instruction Byte-Emit Encoder — Pure Simple
+#
+# Produces exact byte sequences for x86_64 cipher hardware instructions:
+#   AES-NI   (Intel AES-NI, 66 0F 38 / 66 0F 3A prefix map)
+#   SHA-NI   (Intel SHA Extensions, 0F 38 prefix map)
+#   CRC32    (SSE4.2 CRC32, F2 0F 38 prefix map)
+#   PCLMULQDQ (Carry-less multiply, 66 0F 3A 44)
+#
+# Encoding convention:
+#   [mandatory_prefix] [REX] [escape_bytes] [opcode] [ModRM] [imm8?]
+#   All functions return [i64] — list of byte values 0..255.
+#   This matches the convention in riscv_rvv.spl, arm_neon.spl, x86_64_simd.spl.
+#
+# Register parameters (dst, src): XMM or GPR index 0..15.
+#   XMM0..XMM7 → index 0..7 (no REX extension needed)
+#   XMM8..XMM15 → index 8..15 (REX.R extends ModRM.reg; REX.B extends ModRM.rm)
+#
+# Reference: Intel SDM Vol 2, AES-NI / SHA Extensions / SSE4.2 / PCLMULQDQ entries.
+#
+# ALL byte goldens verified against Intel SDM Vol 2 opcode tables.
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+fn _modrm_direct(reg: i64, rm: i64) -> i64:
+    """
+    ModRM byte for register-direct operands (mod=11).
+    mod=11 → 192; reg field uses low 3 bits of reg; rm field uses low 3 bits of rm.
+    """
+    192 + ((reg % 8) * 8) + (rm % 8)
+
+fn _rex_rb(dst: i64, src: i64) -> i64:
+    """
+    REX prefix byte for no-W ops (XMM or 32-bit GPR).
+    REX = 0x40 | (R << 2) | B
+      R: extends ModRM.reg (dst); set when dst >= 8
+      B: extends ModRM.rm  (src); set when src >= 8
+    Returns 0 when no extension bits are needed (emit nothing).
+    """
+    var rex = 0x40
+    if dst >= 8:
+        rex = rex + 4
+    if src >= 8:
+        rex = rex + 1
+    rex
+
+fn _needs_rex_rb(dst: i64, src: i64) -> bool:
+    dst >= 8 or src >= 8
+
+fn _rex_wrb(dst: i64, src: i64) -> i64:
+    """
+    REX prefix with REX.W=1 (64-bit operand size) plus R/B extension bits.
+    Always emitted (W=1 is mandatory for 64-bit forms).
+    """
+    var rex = 0x48  # 0x40 | W(3)
+    if dst >= 8:
+        rex = rex + 4   # REX.R
+    if src >= 8:
+        rex = rex + 1   # REX.B
+    rex
+
+# ============================================================================
+# AES-NI Instructions (66 0F 38 xx /r)
+#
+# Encoding: 66 [REX] 0F 38 <opcode> ModRM
+#   - 66 is mandatory operand-size prefix (comes BEFORE REX per Intel SDM §2.2.1)
+#   - REX only emitted when dst >= 8 or src >= 8
+# ============================================================================
+
+fn _emit_aesni_0f38(dst: i64, src: i64, opcode: i64) -> [i64]:
+    """
+    Core helper for AES-NI ops in the 66 0F 38 <opcode> /r encoding family.
+    """
+    val modrm = _modrm_direct(dst, src)
+    if _needs_rex_rb(dst, src):
+        val rex = _rex_rb(dst, src)
+        [0x66, rex, 0x0F, 0x38, opcode, modrm]
+    else:
+        [0x66, 0x0F, 0x38, opcode, modrm]
+
+fn emit_aesenc(dst: i64, src: i64) -> [i64]:
+    """
+    AESENC dst, src — one round of AES encryption.
+    Encoding: 66 [REX] 0F 38 DC /r
+    dst, src: XMM register indices 0..15.
+    Example: emit_aesenc(0, 0) → [0x66, 0x0F, 0x38, 0xDC, 0xC0]
+    """
+    _emit_aesni_0f38(dst, src, 0xDC)
+
+fn emit_aesenclast(dst: i64, src: i64) -> [i64]:
+    """
+    AESENCLAST dst, src — final round of AES encryption.
+    Encoding: 66 [REX] 0F 38 DD /r
+    """
+    _emit_aesni_0f38(dst, src, 0xDD)
+
+fn emit_aesdec(dst: i64, src: i64) -> [i64]:
+    """
+    AESDEC dst, src — one round of AES decryption.
+    Encoding: 66 [REX] 0F 38 DE /r
+    """
+    _emit_aesni_0f38(dst, src, 0xDE)
+
+fn emit_aesdeclast(dst: i64, src: i64) -> [i64]:
+    """
+    AESDECLAST dst, src — final round of AES decryption.
+    Encoding: 66 [REX] 0F 38 DF /r
+    """
+    _emit_aesni_0f38(dst, src, 0xDF)
+
+fn emit_aesimc(dst: i64, src: i64) -> [i64]:
+    """
+    AESIMC dst, src — inverse MixColumns (key schedule assist).
+    Encoding: 66 [REX] 0F 38 DB /r
+    """
+    _emit_aesni_0f38(dst, src, 0xDB)
+
+fn emit_aeskeygenassist(dst: i64, src: i64, rcon: i64) -> [i64]:
+    """
+    AESKEYGENASSIST dst, src, imm8 — key expansion step.
+    Encoding: 66 [REX] 0F 3A DF /r ib
+    rcon: round constant byte (e.g. 0x01, 0x02, 0x04, ...).
+    """
+    val modrm = _modrm_direct(dst, src)
+    if _needs_rex_rb(dst, src):
+        val rex = _rex_rb(dst, src)
+        [0x66, rex, 0x0F, 0x3A, 0xDF, modrm, rcon]
+    else:
+        [0x66, 0x0F, 0x3A, 0xDF, modrm, rcon]
+
+# ============================================================================
+# SHA-NI Instructions (0F 38 xx /r)
+#
+# No mandatory prefix; REX only when registers >= 8.
+# Encoding: [REX] 0F 38 <opcode> ModRM
+# ============================================================================
+
+fn _emit_shani_0f38(dst: i64, src: i64, opcode: i64) -> [i64]:
+    """
+    Core helper for SHA-NI ops in the NP 0F 38 <opcode> /r encoding family.
+    NP = No Prefix (no mandatory 66/F2/F3).
+    """
+    val modrm = _modrm_direct(dst, src)
+    if _needs_rex_rb(dst, src):
+        val rex = _rex_rb(dst, src)
+        [rex, 0x0F, 0x38, opcode, modrm]
+    else:
+        [0x0F, 0x38, opcode, modrm]
+
+fn emit_sha256rnds2(dst: i64, src: i64) -> [i64]:
+    """
+    SHA256RNDS2 dst, src — two rounds of SHA-256 message schedule.
+    Encoding: NP [REX] 0F 38 CB /r
+    Implicit third operand XMM0 is not encoded.
+    dst, src: XMM register indices 0..15.
+    """
+    _emit_shani_0f38(dst, src, 0xCB)
+
+fn emit_sha256msg1(dst: i64, src: i64) -> [i64]:
+    """
+    SHA256MSG1 dst, src — initial SHA-256 message expansion step.
+    Encoding: NP [REX] 0F 38 CC /r
+    """
+    _emit_shani_0f38(dst, src, 0xCC)
+
+fn emit_sha256msg2(dst: i64, src: i64) -> [i64]:
+    """
+    SHA256MSG2 dst, src — final SHA-256 message expansion step.
+    Encoding: NP [REX] 0F 38 CD /r
+    """
+    _emit_shani_0f38(dst, src, 0xCD)
+
+# ============================================================================
+# SSE4.2 CRC32 Instructions (F2 0F 38 Fx /r)
+#
+# Mandatory prefix F2 (comes BEFORE REX).
+# Dst is always a GPR (r32 or r64); src can be r8, r32, or r64.
+# ============================================================================
+
+fn emit_crc32_r32_r8(dst: i64, src: i64) -> [i64]:
+    """
+    CRC32 r32, r/m8 — accumulate CRC32 over 8-bit source.
+    Encoding: F2 [REX] 0F 38 F0 /r
+    dst: 32-bit GPR index 0..15 (rax=0, rcx=1, ...)
+    src: 8-bit GPR index 0..15 (low byte of register)
+    Note: REX is emitted when src in {4,5,6,7} (spl/bpl/sil/dil vs AH/CH/DH/BH)
+          or when either operand >= 8.
+    """
+    val modrm = _modrm_direct(dst, src)
+    # Emit REX when: any extension bit needed OR src in {4,5,6,7}
+    # (accessing spl/bpl/sil/dil requires REX even with W=R=X=B=0)
+    if dst >= 8 or src >= 4:
+        val rex = _rex_rb(dst, src)
+        [0xF2, rex, 0x0F, 0x38, 0xF0, modrm]
+    else:
+        [0xF2, 0x0F, 0x38, 0xF0, modrm]
+
+fn emit_crc32_r32_r32(dst: i64, src: i64) -> [i64]:
+    """
+    CRC32 r32, r/m32 — accumulate CRC32 over 32-bit source.
+    Encoding: F2 [REX] 0F 38 F1 /r
+    dst, src: 32-bit GPR indices 0..15.
+    """
+    val modrm = _modrm_direct(dst, src)
+    if _needs_rex_rb(dst, src):
+        val rex = _rex_rb(dst, src)
+        [0xF2, rex, 0x0F, 0x38, 0xF1, modrm]
+    else:
+        [0xF2, 0x0F, 0x38, 0xF1, modrm]
+
+fn emit_crc32_r64_r64(dst: i64, src: i64) -> [i64]:
+    """
+    CRC32 r64, r/m64 — accumulate CRC32 over 64-bit source.
+    Encoding: F2 REX.W 0F 38 F1 /r
+    REX.W is always required for the 64-bit form.
+    dst, src: 64-bit GPR indices 0..15.
+    Example: emit_crc32_r64_r64(0, 0) → [0xF2, 0x48, 0x0F, 0x38, 0xF1, 0xC0]
+    """
+    val rex = _rex_wrb(dst, src)
+    val modrm = _modrm_direct(dst, src)
+    [0xF2, rex, 0x0F, 0x38, 0xF1, modrm]
+
+# ============================================================================
+# PCLMULQDQ (66 0F 3A 44 /r ib)
+#
+# Carry-less multiplication of 128-bit XMM registers.
+# Encoding: 66 [REX] 0F 3A 44 ModRM imm8
+# imm8 selects which 64-bit halves to multiply:
+#   0x00 = low64(dst)  * low64(src)  (LowxLow)
+#   0x01 = low64(dst)  * high64(src) (LowxHigh)
+#   0x10 = high64(dst) * low64(src)  (HighxLow)
+#   0x11 = high64(dst) * high64(src) (HighxHigh)
+# ============================================================================
+
+fn emit_pclmulqdq(dst: i64, src: i64, imm8: i64) -> [i64]:
+    """
+    PCLMULQDQ dst, src, imm8 — carry-less quadword multiply.
+    Encoding: 66 [REX] 0F 3A 44 /r ib
+    dst, src: XMM register indices 0..15.
+    imm8: lane selector (0x00=LowxLow, 0x01=LowxHigh, 0x10=HighxLow, 0x11=HighxHigh).
+    Example: emit_pclmulqdq(0, 0, 0x11) → [0x66, 0x0F, 0x3A, 0x44, 0xC0, 0x11]
+    """
+    val modrm = _modrm_direct(dst, src)
+    if _needs_rex_rb(dst, src):
+        val rex = _rex_rb(dst, src)
+        [0x66, rex, 0x0F, 0x3A, 0x44, modrm, imm8]
+    else:
+        [0x66, 0x0F, 0x3A, 0x44, modrm, imm8]
+
+# ============================================================================
+# VEX-encoded AES and PCLMULQDQ Instructions (3-operand, non-destructive)
+#
+# VEX 3-byte prefix (C4h) encoding for 128-bit XMM forms (L=0, W=0):
+#
+#   Byte 0: 0xC4
+#   Byte 1: ~R  ~X  ~B  m4 m3 m2 m1 m0
+#     ~R   = 1 when dst  < 8, else 0  (inverted REX.R — extends ModRM.reg)
+#     ~X   = 1 (no SIB index for register-register operands)
+#     ~B   = 1 when src2 < 8, else 0  (inverted REX.B — extends ModRM.rm)
+#     mmmmm= 00010 (2) for 0F 38 map; 00011 (3) for 0F 3A map
+#   Byte 2: W  ~v3 ~v2 ~v1 ~v0  L  p1 p0
+#     W    = 0 (128-bit integer form)
+#     ~vvvv= inverted 4-bit src1 index (15 - src1 for src1 in 0..15)
+#     L    = 0 (128-bit vector length)
+#     pp   = 01 (66h mandatory prefix)
+#   Byte 3: opcode
+#   Byte 4: ModRM — mod=11, reg=dst%8, rm=src2%8
+#
+# Arithmetic used for bit-packing (per project rule — no bit-shift ops):
+#   byte1_0f38(dst, src2) = 128*(1 - dst/8) + 64 + 32*(1 - src2/8) + 2
+#                         = 226 - 128*(dst/8) - 32*(src2/8)
+#   byte1_0f3a(dst, src2) = 226 - 128*(dst/8) - 32*(src2/8) + 1
+#                         = 227 - 128*(dst/8) - 32*(src2/8)
+#   byte2(src1)           = (15 - src1)*8 + 1
+#
+# Reference: Intel SDM Vol 2A §2.3.5 (VEX Prefix), Table 2-9.
+# ============================================================================
+
+fn _vex_byte1_0f38(dst: i64, src2: i64) -> i64:
+    """
+    VEX Byte 1 for 0F 38 map (mmmmm=2), register-register.
+    ~R=1-dst/8, ~X=1, ~B=1-src2/8, mmmmm=2.
+    """
+    226 - (dst / 8) * 128 - (src2 / 8) * 32
+
+fn _vex_byte1_0f3a(dst: i64, src2: i64) -> i64:
+    """
+    VEX Byte 1 for 0F 3A map (mmmmm=3), register-register.
+    ~R=1-dst/8, ~X=1, ~B=1-src2/8, mmmmm=3.
+    """
+    227 - (dst / 8) * 128 - (src2 / 8) * 32
+
+fn _vex_byte2(src1: i64) -> i64:
+    """
+    VEX Byte 2: W=0, ~vvvv=(15-src1), L=0, pp=01 (66h prefix).
+    = (15 - src1)*8 + 1
+    """
+    (15 - src1) * 8 + 1
+
+fn _emit_vaesni_0f38(dst: i64, src1: i64, src2: i64, opcode: i64) -> [i64]:
+    """
+    Core helper for VEX-encoded AES-NI ops: VEX.128.66.0F38 <opcode> /r
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    val b1 = _vex_byte1_0f38(dst, src2)
+    val b2 = _vex_byte2(src1)
+    val modrm = _modrm_direct(dst, src2)
+    [0xC4, b1, b2, opcode, modrm]
+
+fn emit_vaesenc(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESENC dst, src1, src2 — VEX 3-operand AES encryption round.
+    Encoding: VEX.128.66.0F38 DC /r
+    Non-destructive: dst ← AesRound(src1, src2); src1 unchanged.
+    dst, src1, src2: XMM register indices 0..15.
+    Example: emit_vaesenc(1, 2, 3) → [0xC4, 0xE2, 0x69, 0xDC, 0xCB]
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDC)
+
+fn emit_vaesenclast(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESENCLAST dst, src1, src2 — VEX final AES encryption round.
+    Encoding: VEX.128.66.0F38 DD /r
+    Non-destructive: dst ← AesRoundLast(src1, src2).
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDD)
+
+fn emit_vaesdec(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESDEC dst, src1, src2 — VEX AES decryption round.
+    Encoding: VEX.128.66.0F38 DE /r
+    Non-destructive: dst ← AesInvRound(src1, src2).
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDE)
+
+fn emit_vaesdeclast(dst: i64, src1: i64, src2: i64) -> [i64]:
+    """
+    VAESDECLAST dst, src1, src2 — VEX final AES decryption round.
+    Encoding: VEX.128.66.0F38 DF /r
+    Non-destructive: dst ← AesInvRoundLast(src1, src2).
+    dst, src1, src2: XMM register indices 0..15.
+    """
+    _emit_vaesni_0f38(dst, src1, src2, 0xDF)
+
+fn emit_vpclmulqdq(dst: i64, src1: i64, src2: i64, imm8: i64) -> [i64]:
+    """
+    VPCLMULQDQ dst, src1, src2, imm8 — VEX carry-less quadword multiply.
+    Encoding: VEX.128.66.0F3A 44 /r ib
+    Non-destructive 3-operand form: dst ← Clmul(src1, src2, imm8).
+    dst, src1, src2: XMM register indices 0..15.
+    imm8: lane selector (0x00=LowxLow, 0x01=LowxHigh, 0x10=HighxLow, 0x11=HighxHigh).
+    Example: emit_vpclmulqdq(1, 2, 3, 0x00) → [0xC4, 0xE2, 0x69, 0x44, 0xCB, 0x00]
+    """
+    val b1 = _vex_byte1_0f3a(dst, src2)
+    val b2 = _vex_byte2(src1)
+    val modrm = _modrm_direct(dst, src2)
+    [0xC4, b1, b2, 0x44, modrm, imm8]

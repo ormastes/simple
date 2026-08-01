@@ -1,0 +1,397 @@
+# ============================================================================
+# RV32I RTL MMU — Sv32 Two-Level Page Table Walker
+# ============================================================================
+#
+# Implements the RISC-V Sv32 virtual memory translation unit for RV32.
+# All operations are pure functions returning new state — suitable for
+# synthesizable RTL.
+#
+# Sv32 virtual address (32-bit):
+#   VPN[1] = bits [31:22]  (10 bits)
+#   VPN[0] = bits [21:12]  (10 bits)
+#   Offset = bits [11:0]   (12 bits)
+#
+# Sv32 PTE (32-bit):
+#   PPN[1] = bits [31:20]  (12 bits)
+#   PPN[0] = bits [19:10]  (10 bits)
+#   Flags  = bits [9:0]    (V,R,W,X,U,G,A,D,RSW)
+#
+# Translation modes (from satp register):
+#   MODE=0 (Bare) — no translation
+#   MODE=1 (Sv32) — two-level page table walk
+#
+# M-mode always bypasses translation (identity map).
+#
+# VHDL synthesizable subset: u32, bool, structs only.
+# ============================================================================
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val MMU_TLB_SIZE: u32     = 16    # Number of TLB entries
+val PAGE_SIZE: u32        = 4096  # 4 KiB
+val PAGE_OFFSET_BITS: u32 = 12
+val VPN_BITS: u32         = 10
+val PTE_SIZE: u32         = 4     # 4 bytes per PTE
+
+# PTE flag bit positions
+val PTE_V_BIT: u32 = 0   # Valid
+val PTE_R_BIT: u32 = 1   # Readable
+val PTE_W_BIT: u32 = 2   # Writable
+val PTE_X_BIT: u32 = 3   # Executable
+val PTE_U_BIT: u32 = 4   # User accessible
+val PTE_G_BIT: u32 = 5   # Global
+val PTE_A_BIT: u32 = 6   # Accessed
+val PTE_D_BIT: u32 = 7   # Dirty
+
+# PTE flag masks
+val PTE_V_MASK: u32 = 1   # bit 0
+val PTE_R_MASK: u32 = 2   # bit 1
+val PTE_W_MASK: u32 = 4   # bit 2
+val PTE_X_MASK: u32 = 8   # bit 3
+val PTE_U_MASK: u32 = 16  # bit 4
+val PTE_G_MASK: u32 = 32  # bit 5
+val PTE_A_MASK: u32 = 64  # bit 6
+val PTE_D_MASK: u32 = 128 # bit 7
+
+# Access type codes
+val ACCESS_FETCH: u32 = 0
+val ACCESS_LOAD: u32  = 1
+val ACCESS_STORE: u32 = 2
+
+# Privilege levels
+val PRIV_U: u32 = 0   # User
+val PRIV_S: u32 = 1   # Supervisor
+val PRIV_M: u32 = 3   # Machine
+
+# Page fault cause codes
+val CAUSE_INSN_PAGE_FAULT: u32  = 12
+val CAUSE_LOAD_PAGE_FAULT: u32  = 13
+val CAUSE_STORE_PAGE_FAULT: u32 = 15
+
+# ============================================================================
+# TLB Entry
+# ============================================================================
+
+struct TlbEntry:
+    """Single TLB entry caching a virtual-to-physical mapping."""
+    vpn: u32      # Virtual page number (VPN[1]:VPN[0], 20 bits)
+    ppn: u32      # Physical page number (22 bits)
+    flags: u32    # PTE flags (lower 10 bits)
+    asid: u32     # Address-space identifier at refill time
+    valid: bool   # Entry is valid
+
+# ============================================================================
+# MMU State
+# ============================================================================
+#
+# TLB is flat (tlb_0 .. tlb_15) for synthesizability — no dynamic arrays
+# in the critical translation path.  We use a [TlbEntry] helper plus
+# tlb_count for FIFO replacement.
+# ============================================================================
+
+struct MmuState:
+    """Sv32 MMU state with 16-entry TLB."""
+    tlb_0: TlbEntry
+    tlb_1: TlbEntry
+    tlb_2: TlbEntry
+    tlb_3: TlbEntry
+    tlb_4: TlbEntry
+    tlb_5: TlbEntry
+    tlb_6: TlbEntry
+    tlb_7: TlbEntry
+    tlb_8: TlbEntry
+    tlb_9: TlbEntry
+    tlb_10: TlbEntry
+    tlb_11: TlbEntry
+    tlb_12: TlbEntry
+    tlb_13: TlbEntry
+    tlb_14: TlbEntry
+    tlb_15: TlbEntry
+    tlb_count: u32     # FIFO write pointer (wraps at MMU_TLB_SIZE)
+    satp_mode: u32     # 0=Bare, 1=Sv32
+    satp_asid: u32     # Current 9-bit ASID
+    satp_ppn: u32      # Root page table PPN (22 bits)
+
+# ============================================================================
+# TLB Lookup Result
+# ============================================================================
+
+struct TlbLookupResult:
+    """Result of searching the TLB."""
+    ppn: u32      # Physical page number (valid only if hit)
+    flags: u32    # PTE flags (valid only if hit)
+    hit: bool     # True if TLB contains a matching valid entry
+
+# ============================================================================
+# Create — initial MMU state (Bare mode, empty TLB)
+# ============================================================================
+
+fn mmu_create() -> MmuState:
+    """Create initial MMU state.  Translation disabled (Bare mode)."""
+    val empty = TlbEntry(vpn: 0, ppn: 0, flags: 0, asid: 0, valid: false)
+    MmuState(
+        tlb_0: empty, tlb_1: empty, tlb_2: empty, tlb_3: empty,
+        tlb_4: empty, tlb_5: empty, tlb_6: empty, tlb_7: empty,
+        tlb_8: empty, tlb_9: empty, tlb_10: empty, tlb_11: empty,
+        tlb_12: empty, tlb_13: empty, tlb_14: empty, tlb_15: empty,
+        tlb_count: 0,
+        satp_mode: 0,
+        satp_asid: 0,
+        satp_ppn: 0
+    )
+
+# ============================================================================
+# Set SATP — parse mode and ppn from satp CSR value
+# ============================================================================
+
+fn mmu_set_satp(state: MmuState, satp_val: u32) -> MmuState:
+    """Parse the SATP register and update MMU configuration.
+    RV32 SATP layout:
+      bit  [31]    — MODE (0=Bare, 1=Sv32)
+      bits [30:22] — ASID (9 bits)
+      bits [21:0]  — PPN  (22 bits)"""
+    var out = state
+    out.satp_mode = (satp_val >> 31) & 0x1
+    out.satp_asid = (satp_val >> 22) & 0x1FF
+    out.satp_ppn = satp_val & 0x003FFFFF
+    out
+
+# ============================================================================
+# TLB Lookup
+# ============================================================================
+
+fn mmu_tlb_read_entry(state: MmuState, idx: u32) -> TlbEntry:
+    """Read TLB entry by index (flat field access)."""
+    if idx == 0:
+        return state.tlb_0
+    if idx == 1:
+        return state.tlb_1
+    if idx == 2:
+        return state.tlb_2
+    if idx == 3:
+        return state.tlb_3
+    if idx == 4:
+        return state.tlb_4
+    if idx == 5:
+        return state.tlb_5
+    if idx == 6:
+        return state.tlb_6
+    if idx == 7:
+        return state.tlb_7
+    if idx == 8:
+        return state.tlb_8
+    if idx == 9:
+        return state.tlb_9
+    if idx == 10:
+        return state.tlb_10
+    if idx == 11:
+        return state.tlb_11
+    if idx == 12:
+        return state.tlb_12
+    if idx == 13:
+        return state.tlb_13
+    if idx == 14:
+        return state.tlb_14
+    if idx == 15:
+        return state.tlb_15
+    TlbEntry(vpn: 0, ppn: 0, flags: 0, asid: 0, valid: false)
+
+fn mmu_tlb_lookup(state: MmuState, vpn: u32) -> TlbLookupResult:
+    """Search TLB for a matching entry.
+    vpn is the full 20-bit virtual page number (VPN[1]:VPN[0])."""
+    val r0 = mmu_tlb_lookup_at(state, vpn, 0)
+    if r0.hit: return r0
+    val r1 = mmu_tlb_lookup_at(state, vpn, 1)
+    if r1.hit: return r1
+    val r2 = mmu_tlb_lookup_at(state, vpn, 2)
+    if r2.hit: return r2
+    val r3 = mmu_tlb_lookup_at(state, vpn, 3)
+    if r3.hit: return r3
+    val r4 = mmu_tlb_lookup_at(state, vpn, 4)
+    if r4.hit: return r4
+    val r5 = mmu_tlb_lookup_at(state, vpn, 5)
+    if r5.hit: return r5
+    val r6 = mmu_tlb_lookup_at(state, vpn, 6)
+    if r6.hit: return r6
+    val r7 = mmu_tlb_lookup_at(state, vpn, 7)
+    if r7.hit: return r7
+    val r8 = mmu_tlb_lookup_at(state, vpn, 8)
+    if r8.hit: return r8
+    val r9 = mmu_tlb_lookup_at(state, vpn, 9)
+    if r9.hit: return r9
+    val r10 = mmu_tlb_lookup_at(state, vpn, 10)
+    if r10.hit: return r10
+    val r11 = mmu_tlb_lookup_at(state, vpn, 11)
+    if r11.hit: return r11
+    val r12 = mmu_tlb_lookup_at(state, vpn, 12)
+    if r12.hit: return r12
+    val r13 = mmu_tlb_lookup_at(state, vpn, 13)
+    if r13.hit: return r13
+    val r14 = mmu_tlb_lookup_at(state, vpn, 14)
+    if r14.hit: return r14
+    val r15 = mmu_tlb_lookup_at(state, vpn, 15)
+    if r15.hit: return r15
+    TlbLookupResult(ppn: 0, flags: 0, hit: false)
+
+fn mmu_tlb_lookup_at(state: MmuState, vpn: u32, idx: u32) -> TlbLookupResult:
+    val entry = mmu_tlb_read_entry(state, idx)
+    val global_mapping = (entry.flags & PTE_G_MASK) != 0
+    if entry.valid and entry.vpn == vpn and (global_mapping or entry.asid == state.satp_asid):
+        return TlbLookupResult(ppn: entry.ppn, flags: entry.flags, hit: true)
+    TlbLookupResult(ppn: 0, flags: 0, hit: false)
+
+# ============================================================================
+# TLB Insert — FIFO replacement
+# ============================================================================
+
+fn mmu_tlb_write_entry(state: MmuState, idx: u32, entry: TlbEntry) -> MmuState:
+    """Write a TLB entry by index (flat field access)."""
+    var out = state
+    if idx == 0:
+        out.tlb_0 = entry
+    else if idx == 1:
+        out.tlb_1 = entry
+    else if idx == 2:
+        out.tlb_2 = entry
+    else if idx == 3:
+        out.tlb_3 = entry
+    else if idx == 4:
+        out.tlb_4 = entry
+    else if idx == 5:
+        out.tlb_5 = entry
+    else if idx == 6:
+        out.tlb_6 = entry
+    else if idx == 7:
+        out.tlb_7 = entry
+    else if idx == 8:
+        out.tlb_8 = entry
+    else if idx == 9:
+        out.tlb_9 = entry
+    else if idx == 10:
+        out.tlb_10 = entry
+    else if idx == 11:
+        out.tlb_11 = entry
+    else if idx == 12:
+        out.tlb_12 = entry
+    else if idx == 13:
+        out.tlb_13 = entry
+    else if idx == 14:
+        out.tlb_14 = entry
+    else if idx == 15:
+        out.tlb_15 = entry
+    out
+
+fn mmu_tlb_insert(state: MmuState, vpn: u32, ppn: u32, flags: u32) -> MmuState:
+    """Insert a new TLB entry using FIFO replacement policy."""
+    val entry = TlbEntry(vpn: vpn, ppn: ppn, flags: flags,
+        asid: state.satp_asid, valid: true)
+    val idx = state.tlb_count % MMU_TLB_SIZE
+    var out = mmu_tlb_write_entry(state, idx, entry)
+    out.tlb_count = state.tlb_count + 1
+    out
+
+# ============================================================================
+# TLB Flush — clear all entries (for SFENCE.VMA)
+# ============================================================================
+
+fn mmu_tlb_invalidate_match(entry: TlbEntry, vpn: u32, asid: u32,
+                            match_vpn: bool, match_asid: bool) -> TlbEntry:
+    if not entry.valid:
+        return entry
+    if match_vpn and entry.vpn != vpn:
+        return entry
+    if match_asid:
+        if (entry.flags & PTE_G_MASK) != 0 or entry.asid != asid:
+            return entry
+    var out = entry
+    out.valid = false
+    out
+
+fn mmu_tlb_invalidate_at(state: MmuState, idx: u32, vpn: u32, asid: u32,
+                         match_vpn: bool, match_asid: bool) -> MmuState:
+    val entry = mmu_tlb_read_entry(state, idx)
+    val next = mmu_tlb_invalidate_match(entry, vpn, asid, match_vpn, match_asid)
+    mmu_tlb_write_entry(state, idx, next)
+
+@hardware
+fn mmu_sfence_vma(state: MmuState, vaddr: u32, asid: u32,
+                   match_vaddr: bool, match_asid: bool) -> MmuState:
+    """Apply SFENCE.VMA matching rules; ASID-scoped fences retain globals."""
+    val vpn = sv32_full_vpn(vaddr)
+    var out = state
+    val fence_asid = asid & 0x1FF
+    out = mmu_tlb_invalidate_at(out, 0, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 1, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 2, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 3, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 4, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 5, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 6, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 7, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 8, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 9, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 10, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 11, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 12, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 13, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 14, vpn, fence_asid, match_vaddr, match_asid)
+    out = mmu_tlb_invalidate_at(out, 15, vpn, fence_asid, match_vaddr, match_asid)
+    out
+
+@hardware
+fn mmu_flush(state: MmuState) -> MmuState:
+    """Invalidate every entry (SFENCE.VMA x0, x0)."""
+    var out = mmu_sfence_vma(state, 0, 0, false, false)
+    out.tlb_count = 0
+    out
+
+# ============================================================================
+# Helpers — Sv32 address field extraction
+# ============================================================================
+
+fn sv32_vpn1(vaddr: u32) -> u32:
+    """Extract VPN[1] from a Sv32 virtual address (bits [31:22])."""
+    (vaddr >> 22) & 0x3FF
+
+fn sv32_vpn0(vaddr: u32) -> u32:
+    """Extract VPN[0] from a Sv32 virtual address (bits [21:12])."""
+    (vaddr >> 12) & 0x3FF
+
+fn sv32_offset(vaddr: u32) -> u32:
+    """Extract the 12-bit page offset from a virtual address."""
+    vaddr & 0xFFF
+
+fn sv32_full_vpn(vaddr: u32) -> u32:
+    """Extract the full 20-bit VPN (VPN[1]:VPN[0]) from a virtual address."""
+    (vaddr >> 12) & 0xFFFFF
+
+fn pte_ppn1(pte: u32) -> u32:
+    """Extract PPN[1] from an Sv32 PTE (bits [31:20])."""
+    (pte >> 20) & 0xFFF
+
+fn pte_ppn0(pte: u32) -> u32:
+    """Extract PPN[0] from an Sv32 PTE (bits [19:10])."""
+    (pte >> 10) & 0x3FF
+
+fn pte_ppn_full(pte: u32) -> u32:
+    """Extract the full 22-bit PPN from an Sv32 PTE (bits [31:10])."""
+    (pte >> 10) & 0x3FFFFF
+
+fn pte_flags_extract(pte: u32) -> u32:
+    """Extract the 10-bit flags from an Sv32 PTE (bits [9:0])."""
+    pte & 0x3FF
+
+# ============================================================================
+# Fault cause from access type
+# ============================================================================
+
+fn fault_cause_for(access_type: u32) -> u32:
+    """Return the page-fault exception cause code for the given access type."""
+    if access_type == ACCESS_FETCH:
+        return CAUSE_INSN_PAGE_FAULT
+    if access_type == ACCESS_STORE:
+        return CAUSE_STORE_PAGE_FAULT
+    # ACCESS_LOAD or default
+    CAUSE_LOAD_PAGE_FAULT

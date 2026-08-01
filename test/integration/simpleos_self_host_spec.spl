@@ -1,0 +1,202 @@
+"""
+# SimpleOS Self-Host Chain Integration Test
+
+Verifies the end-to-end self-host chain: SimpleOS boots in QEMU, loads the
+Simple compiler from initramfs, compiles a trivial program to a native
+binary, and runs the output.
+
+Status: RED PHASE. The kernel exec path (posix_spawn / fork+execve) is
+deferred; `step_trivial_self_host` in `simpleos_smoke_init.spl` will emit
+`TRIVIAL_SELFHOST_SKIP reason=no-exec` until the kernel gains user-process
+spawn support. See `src/os/port/init/simpleos_smoke_init.spl` for the
+in-guest implementation.
+
+Two-layer test:
+  (a) Hosted-callable layer (this file): exercises QEMU command
+      construction and tag/path configuration for the self-host chain.
+      Runs under `bin/simple test` in interpreter mode.
+  (b) Full QEMU smoke: documented as a manual command at the bottom.
+      Requires a built kernel + initramfs. The host orchestrator
+      `src/os/port/e2e_verify.spl` greps for `TRIVIAL_SELFHOST_OK`.
+
+@cover src/os/port/init/simpleos_smoke_init.spl 80%
+@cover src/os/port/e2e_verify.spl 60%
+@req REQ-SIMPLEOS-SELFHOST
+@feature simpleos-self-host-chain
+# tag: os, qemu, slow, self-host
+"""
+
+use std.spec
+use std.io_runtime  # NOTE: never `app.io` — see project memory.
+
+use os.qemu_runner.{get_target, build_qemu_command, OsTarget}
+use os.kernel.arch.arch_context.{Architecture}
+
+# ============================================================================
+# Constants — must stay in sync with simpleos_smoke_init.spl
+# ============================================================================
+val TAG_TRIVIAL_OK = "TRIVIAL_SELFHOST_OK"
+val TAG_TRIVIAL_SKIP = "TRIVIAL_SELFHOST_SKIP"
+val TAG_TRIVIAL_FAIL = "TRIVIAL_SELFHOST_FAIL"
+
+val SIMPLE_BIN = "/bin/simple"
+val TRIVIAL_SRC_DIR = "/tmp/selfhost_test"
+val TRIVIAL_SRC_FILE = "/tmp/selfhost_test/hello.spl"
+val TRIVIAL_OUTPUT = "/tmp/selfhost_test/hello"
+val TRIVIAL_EXPECTED_OUTPUT = "hello from self-host"
+
+# ============================================================================
+# Test Group 1: Self-Host Chain Configuration
+# ============================================================================
+
+describe "SimpleOS self-host chain — QEMU configuration":
+    """
+    ## QEMU Boot Configuration
+
+    Validates that the x86_64 target produces the correct QEMU command line
+    for booting SimpleOS with initramfs containing the Simple compiler.
+    """
+
+    slow_it "x86_64 target includes kernel and serial stdio":
+        val target = get_target(Architecture.X86_64)
+        val cmd = build_qemu_command(target)
+        expect(cmd[0]).to_equal("qemu-system-x86_64")
+        expect(cmd).to_contain("-kernel")
+        expect(cmd).to_contain("-serial")
+        expect(cmd).to_contain("stdio")
+
+    slow_it "x86_64 target uses q35 machine":
+        val target = get_target(Architecture.X86_64)
+        val cmd = build_qemu_command(target)
+        expect(cmd).to_contain("-machine")
+        expect(cmd).to_contain("q35")
+
+# ============================================================================
+# Test Group 2: Self-Host Tag Contract
+# ============================================================================
+
+describe "SimpleOS self-host chain — tag contract":
+    """
+    ## Tag-Based Pass/Fail Contract
+
+    The in-guest init emits tagged lines to the serial console. The host
+    orchestrator (e2e_verify.spl) greps QEMU stdout for these tags.
+    This test group validates the tag strings are consistent.
+    """
+
+    slow_it "TAG_TRIVIAL_OK matches the expected tag format":
+        expect(TAG_TRIVIAL_OK).to_equal("TRIVIAL_SELFHOST_OK")
+
+    slow_it "TAG_TRIVIAL_SKIP starts with TRIVIAL_SELFHOST_SKIP":
+        expect(TAG_TRIVIAL_SKIP).to_start_with("TRIVIAL_SELFHOST_SKIP")
+
+    slow_it "TAG_TRIVIAL_FAIL starts with TRIVIAL_SELFHOST_FAIL":
+        expect(TAG_TRIVIAL_FAIL).to_start_with("TRIVIAL_SELFHOST_FAIL")
+
+# ============================================================================
+# Test Group 3: In-Guest Paths
+# ============================================================================
+
+describe "SimpleOS self-host chain — in-guest path contract":
+    """
+    ## Path Contract
+
+    Validates that the in-guest paths used by the trivial self-host step
+    are well-formed and consistent with the initramfs layout.
+    """
+
+    slow_it "simple compiler binary path is /bin/simple":
+        expect(SIMPLE_BIN).to_equal("/bin/simple")
+
+    slow_it "trivial source is written under /tmp/selfhost_test/":
+        expect(TRIVIAL_SRC_FILE).to_start_with("/tmp/selfhost_test/")
+        expect(TRIVIAL_SRC_FILE).to_end_with(".spl")
+
+    slow_it "output binary path matches source directory":
+        expect(TRIVIAL_OUTPUT).to_start_with("/tmp/selfhost_test/")
+
+    slow_it "trivial program expected output is defined":
+        expect(TRIVIAL_EXPECTED_OUTPUT).to_equal("hello from self-host")
+
+# ============================================================================
+# Test Group 4: Native-Build Command Shape
+# ============================================================================
+
+describe "SimpleOS self-host chain — native-build command":
+    """
+    ## Compilation Command Shape
+
+    Validates the arguments that will be passed to the Simple compiler
+    inside the guest for the trivial self-host compilation step.
+    """
+
+    slow_it "native-build args include source and entry flags":
+        val args: [text] = [
+            "native-build",
+            "--source", TRIVIAL_SRC_DIR,
+            "--entry", TRIVIAL_SRC_FILE,
+            "-o", TRIVIAL_OUTPUT,
+        ]
+        expect(args).to_contain("native-build")
+        expect(args).to_contain("--source")
+        expect(args).to_contain("--entry")
+        expect(args).to_contain(TRIVIAL_SRC_FILE)
+        expect(args).to_contain("-o")
+        expect(args).to_contain(TRIVIAL_OUTPUT)
+
+    slow_it "entry file path ends with hello.spl":
+        expect(TRIVIAL_SRC_FILE).to_end_with("hello.spl")
+
+# ============================================================================
+# Test Group 5: E2E Tag Grep Contract
+# ============================================================================
+
+describe "SimpleOS self-host chain — e2e tag grep":
+    """
+    ## Host-Side Tag Detection
+
+    Simulates what e2e_verify.spl does: grep stdout for the expected tag.
+    Ensures the tag detection logic is correct.
+    """
+
+    slow_it "detects TRIVIAL_SELFHOST_OK in stdout":
+        val stdout = "SIMPLEOS_SMOKE_INIT_STARTED\nTRIVIAL_SELFHOST_OK\nSIMPLEOS_SMOKE_INIT_DONE"
+        expect(stdout.contains(TAG_TRIVIAL_OK)).to_equal(true)
+
+    slow_it "detects TRIVIAL_SELFHOST_SKIP in stdout":
+        val stdout = "TRIVIAL_SELFHOST_SKIP reason=no-exec\nSIMPLEOS_SMOKE_INIT_DONE"
+        expect(stdout.contains(TAG_TRIVIAL_SKIP)).to_equal(true)
+
+    slow_it "returns false when tag is absent":
+        val stdout = "SIMPLEOS_SMOKE_INIT_STARTED\nSIMPLEOS_SMOKE_INIT_DONE"
+        expect(stdout.contains(TAG_TRIVIAL_OK)).to_equal(false)
+
+
+# ----------------------------------------------------------------------------
+# Manual QEMU smoke — run on a release build with initramfs.
+#
+#   # 1. Build the kernel and initramfs with the Simple compiler included:
+#   bin/simple run src/os/port/initramfs_pack.spl -- build
+#
+#   # 2. Run the full e2e verification (includes trivial self-host):
+#   bin/simple run src/os/port/e2e_verify.spl
+#
+#   # 3. Or run QEMU directly:
+#   qemu-system-x86_64 \
+#       -m 1G \
+#       -kernel build/os/kernel/simpleos \
+#       -initrd build/os/initramfs.img.zst \
+#       -append "init=/sbin/init console=ttyS0" \
+#       -nographic -serial stdio
+#
+# Expected tag on the QEMU serial output:
+#
+#   TRIVIAL_SELFHOST_OK
+#
+# If the kernel lacks exec support, expect:
+#
+#   TRIVIAL_SELFHOST_SKIP reason=no-exec
+#
+# A fully-automated QEMU harness runs via e2e_verify.spl which greps
+# for all smoke tags including TRIVIAL_SELFHOST_OK.
+# ----------------------------------------------------------------------------

@@ -1,0 +1,472 @@
+"""
+# Unified SimpleArtifactManifest Specification (P2 Process/Loader)
+
+**Feature IDs:** #OS-P2-ARTIFACT-MANIFEST
+**Category:** Runtime / Security
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md (lane MAN)
+**Design:** doc/01_research/domain/simpleos_production_host_master_plan.md (§5.3, §5.4, §12)
+**Research:** doc/01_research/domain/simpleos_production_host_master_plan.md
+
+## Overview
+
+Master plan §5.3 requires ONE artifact manifest covering ELF, SMF, script and
+native-Simple artifacts so the loader has a single policy surface instead of
+per-format ad-hoc decisions. This spec is the contract for
+`src/os/kernel/loader/artifact_manifest.spl`:
+
+  - each of the four artifact kinds has a typed skeleton, and a well-formed
+    manifest of that kind validates;
+  - validation is FAIL CLOSED with a DISTINCT reason per failure: unsupported
+    format version, unknown artifact kind, empty entrypoint, script with no
+    interpreter, target-triple mismatch, signature with no content hash;
+  - a script manifest with no interpreter is REJECTED, never defaulted — the
+    loader must not choose an interpreter for untrusted source;
+  - `manifest_required_rights` is a CEILING: no combination of declared fields
+    can produce a bit the artifact kind does not allow (no kind allows
+    CAP_RIGHT_ADMIN; a script can never get CAP_RIGHT_EXEC);
+  - `manifest_effective_rights` is the §5.4 intersection composed from the
+    landed `spawn_authority.spawn_effective_rights`, so the result is always a
+    subset of the artifact ceiling, the parent's delegable rights AND the
+    system ceiling — asserted with concrete bit values.
+
+The manifest is the kernel-side typed projection of the ALREADY-LANDED launch
+metadata (`src/app/startup/launch_metadata.spl`), not a second manifest format:
+`manifest_from_launch_metadata` is the one-way adapter and is covered here.
+
+Oracles are absolute (exact reason strings, exact bitmasks) — no
+self-referential comparisons.
+"""
+
+use std.spec.{describe, it, expect, expect_not, assert_true, step}
+use os.kernel.types.capability_types.{
+    CAP_RIGHT_READ, CAP_RIGHT_WRITE, CAP_RIGHT_EXEC, CAP_RIGHT_ADMIN,
+    CAP_RIGHT_MOUNT, CAP_RIGHT_MAP
+}
+use os.kernel.loader.spawn_authority.{spawn_rights_is_subset}
+use os.kernel.loader.artifact_manifest.{
+    SimpleArtifactManifest, ManifestTarget, ManifestResourceLimits,
+    ManifestArgument, ManifestPreload,
+    manifest_format_version,
+    manifest_kind_elf, manifest_kind_smf, manifest_kind_script,
+    manifest_kind_native_simple, manifest_kind_is_known,
+    manifest_reason_ok, manifest_reason_bad_format_version,
+    manifest_reason_unknown_kind, manifest_reason_empty_entrypoint,
+    manifest_reason_script_without_interpreter,
+    manifest_reason_target_mismatch, manifest_reason_signature_without_hash,
+    manifest_running_target, manifest_target_matches,
+    manifest_for_kind, manifest_kind_base_rights, manifest_kind_allowed_rights,
+    manifest_with_entrypoint, manifest_with_interpreter, manifest_with_target,
+    manifest_with_signature, manifest_with_libraries, manifest_with_startup,
+    manifest_with_requested_rights,
+    manifest_validate, manifest_validate_for_target,
+    manifest_required_rights, manifest_effective_rights,
+    manifest_rights_within_ceilings,
+    manifest_kind_from_launch_entry_kind, manifest_from_launch_metadata,
+    manifest_summary
+}
+
+# ---------------------------------------------------------------------------
+# Fixtures — every well-formed manifest is built from its own kind skeleton.
+# ---------------------------------------------------------------------------
+
+fn _elf_ok() -> SimpleArtifactManifest:
+    manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "/usr/bin/clang")
+
+fn _smf_ok() -> SimpleArtifactManifest:
+    manifest_with_entrypoint(manifest_for_kind(manifest_kind_smf()), "smf_main")
+
+fn _script_ok() -> SimpleArtifactManifest:
+    manifest_with_interpreter(
+        manifest_with_entrypoint(manifest_for_kind(manifest_kind_script()), "/etc/boot.shs"),
+        "/usr/bin/simple"
+    )
+
+fn _native_ok() -> SimpleArtifactManifest:
+    manifest_with_entrypoint(manifest_for_kind(manifest_kind_native_simple()), "/usr/bin/simple")
+
+describe("unified SimpleArtifactManifest (master plan 5.3)"):
+
+    # =======================================================================
+    # 1. Each kind has a typed skeleton whose well-formed manifest validates
+    # =======================================================================
+
+    it("validates a well-formed ELF manifest"):
+        step("the elf skeleton carries elf64 + W^X abi features and app_default namespace")
+        val m = _elf_ok()
+        expect(m.artifact_kind).to_equal("elf")
+        expect(m.format_version).to_equal(1)
+        expect(m.required_abi_features).to_contain("elf64")
+        expect(m.required_abi_features).to_contain("w_xor_x")
+        expect(m.namespace_template).to_equal("app_default")
+
+        step("and it validates against the running target")
+        val check = manifest_validate(m)
+        assert_true(check.ok)
+        expect(check.reason).to_equal("ok")
+
+    it("validates a well-formed SMF manifest"):
+        val m = _smf_ok()
+        expect(m.artifact_kind).to_equal("smf")
+        expect(m.required_abi_features).to_contain("smf1")
+        expect(m.required_abi_features).to_contain("module_graph")
+        val check = manifest_validate(m)
+        assert_true(check.ok)
+        expect(check.reason).to_equal("ok")
+
+    it("validates a well-formed script manifest that declares its interpreter"):
+        val m = _script_ok()
+        expect(m.artifact_kind).to_equal("script")
+        expect(m.interpreter).to_equal("/usr/bin/simple")
+        expect(m.required_abi_features).to_contain("script_host")
+        val check = manifest_validate(m)
+        assert_true(check.ok)
+        expect(check.reason).to_equal("ok")
+
+    it("validates a well-formed native-Simple manifest"):
+        val m = _native_ok()
+        expect(m.artifact_kind).to_equal("native_simple")
+        expect(m.required_abi_features).to_contain("simple_rt")
+        expect(m.required_abi_features).to_contain("launch_meta_v1")
+        val check = manifest_validate(m)
+        assert_true(check.ok)
+        expect(check.reason).to_equal("ok")
+
+    it("knows exactly the four artifact kinds"):
+        assert_true(manifest_kind_is_known("elf"))
+        assert_true(manifest_kind_is_known("smf"))
+        assert_true(manifest_kind_is_known("script"))
+        assert_true(manifest_kind_is_known("native_simple"))
+        step("anything else is unknown - no fuzzy prefix matching")
+        expect_not(manifest_kind_is_known("wasm"))
+        expect_not(manifest_kind_is_known("elf64"))
+        expect_not(manifest_kind_is_known(""))
+
+    # =======================================================================
+    # 2. Fail-closed rejections — each with its OWN distinct reason
+    # =======================================================================
+
+    it("rejects a manifest with an empty entrypoint"):
+        step("a bare skeleton is deliberately not yet valid")
+        val skeleton = manifest_for_kind(manifest_kind_elf())
+        expect(skeleton.entrypoint).to_equal("")
+        val check = manifest_validate(skeleton)
+        expect_not(check.ok)
+        expect(check.reason).to_equal("empty_entrypoint")
+        expect(manifest_reason_empty_entrypoint()).to_equal("empty_entrypoint")
+
+    it("rejects an unknown artifact kind"):
+        val m = manifest_with_entrypoint(manifest_for_kind("wasm"), "/usr/bin/thing")
+        val check = manifest_validate(m)
+        expect_not(check.ok)
+        expect(check.reason).to_equal("unknown_artifact_kind")
+        expect(manifest_reason_unknown_kind()).to_equal("unknown_artifact_kind")
+
+    it("rejects a target-triple mismatch against the running target"):
+        step("the running target is simpleos/x86_64/simpleos")
+        val running = manifest_running_target()
+        expect(running.os).to_equal("simpleos")
+        expect(running.arch).to_equal("x86_64")
+        expect(running.abi).to_equal("simpleos")
+
+        step("a linux/aarch64 artifact does not run here")
+        val foreign = manifest_with_target(
+            _elf_ok(),
+            ManifestTarget(os: "linux", arch: "aarch64", abi: "gnu")
+        )
+        val check = manifest_validate(foreign)
+        expect_not(check.ok)
+        expect(check.reason).to_equal("target_triple_mismatch")
+        expect(manifest_reason_target_mismatch()).to_equal("target_triple_mismatch")
+
+        step("an EMPTY target field is not a wildcard - fail closed")
+        val blank = manifest_with_target(_elf_ok(), ManifestTarget(os: "", arch: "", abi: ""))
+        expect(manifest_validate(blank).reason).to_equal("target_triple_mismatch")
+
+        step("but an explicit any/any/any wildcard matches")
+        val anywhere = manifest_with_target(
+            _elf_ok(),
+            ManifestTarget(os: "any", arch: "any", abi: "any")
+        )
+        assert_true(manifest_validate(anywhere).ok)
+        assert_true(manifest_target_matches(anywhere.target, running))
+
+    it("rejects a signature that no content hash binds"):
+        val unbound = manifest_with_signature(_elf_ok(), "ed25519:aabbcc", [])
+        val check = manifest_validate(unbound)
+        expect_not(check.ok)
+        expect(check.reason).to_equal("signature_without_content_hash")
+        expect(manifest_reason_signature_without_hash()).to_equal("signature_without_content_hash")
+
+        step("the same signature WITH a hash that binds it is accepted")
+        val bound = manifest_with_signature(_elf_ok(), "ed25519:aabbcc", ["blake3:deadbeef"])
+        assert_true(manifest_validate(bound).ok)
+        expect(bound.content_hashes.len()).to_equal(1)
+
+    it("rejects a script manifest with no interpreter - never defaults one"):
+        step("the script skeleton has an EMPTY interpreter on purpose")
+        val bare = manifest_with_entrypoint(
+            manifest_for_kind(manifest_kind_script()),
+            "/etc/boot.shs"
+        )
+        expect(bare.interpreter).to_equal("")
+
+        step("so it is rejected rather than run under some assumed default")
+        val check = manifest_validate(bare)
+        expect_not(check.ok)
+        expect(check.reason).to_equal("script_without_interpreter")
+        expect(manifest_reason_script_without_interpreter()).to_equal("script_without_interpreter")
+
+        step("only an explicitly declared interpreter unlocks it")
+        assert_true(manifest_validate(_script_ok()).ok)
+
+    it("rejects a manifest from a future format version"):
+        val future = SimpleArtifactManifest(
+            format_version: 2,
+            artifact_kind: manifest_kind_elf(),
+            target: manifest_running_target(),
+            entrypoint: "/usr/bin/clang",
+            required_abi_features: [],
+            required_services: [],
+            required_capabilities: 0u32,
+            resource_limits: ManifestResourceLimits(
+                max_memory_bytes: 0, max_open_handles: 0, max_threads: 0, cpu_budget_us: 0
+            ),
+            namespace_template: "app_default",
+            native_libraries: [],
+            smf_libraries: [],
+            interpreter: "",
+            argument_schema: [],
+            startup_preloads: [],
+            content_hashes: [],
+            signature: "",
+            debug_identity: ""
+        )
+        expect(manifest_format_version()).to_equal(1)
+        val check = manifest_validate(future)
+        expect_not(check.ok)
+        expect(check.reason).to_equal("unsupported_format_version")
+        expect(manifest_reason_bad_format_version()).to_equal("unsupported_format_version")
+
+    it("reports the six rejection reasons as six distinct strings"):
+        step("a shared reason string would let two failures be confused")
+        val reasons = [
+            manifest_reason_ok(),
+            manifest_reason_bad_format_version(),
+            manifest_reason_unknown_kind(),
+            manifest_reason_empty_entrypoint(),
+            manifest_reason_script_without_interpreter(),
+            manifest_reason_target_mismatch(),
+            manifest_reason_signature_without_hash()
+        ]
+        var distinct: [text] = []
+        for r in reasons:
+            var seen = false
+            for d in distinct:
+                if d == r:
+                    seen = true
+            if not seen:
+                distinct.push(r)
+        expect(distinct.len()).to_equal(7)
+
+    # =======================================================================
+    # 3. Rights ceiling — concrete bit values
+    # =======================================================================
+
+    it("computes the ELF policy ceiling as READ|EXEC|MAP with concrete bits"):
+        expect(CAP_RIGHT_READ).to_equal(1u32)
+        expect(CAP_RIGHT_EXEC).to_equal(4u32)
+        expect(CAP_RIGHT_ADMIN).to_equal(8u32)
+        expect(CAP_RIGHT_MAP).to_equal(64u32)
+
+        step("base rights for elf are 1|4|64 = 69")
+        expect(manifest_kind_base_rights(manifest_kind_elf())).to_equal(69u32)
+        expect(manifest_required_rights(_elf_ok())).to_equal(69u32)
+
+    it("never lets any artifact kind request CAP_RIGHT_ADMIN"):
+        step("ADMIN is absent from every kind's allowed mask")
+        expect(manifest_kind_allowed_rights(manifest_kind_elf()) & CAP_RIGHT_ADMIN).to_equal(0u32)
+        expect(manifest_kind_allowed_rights(manifest_kind_smf()) & CAP_RIGHT_ADMIN).to_equal(0u32)
+        expect(manifest_kind_allowed_rights(manifest_kind_script()) & CAP_RIGHT_ADMIN).to_equal(0u32)
+        expect(manifest_kind_allowed_rights(manifest_kind_native_simple()) & CAP_RIGHT_ADMIN).to_equal(0u32)
+
+        step("so declaring ADMIN in the manifest is silently clamped away")
+        val greedy = manifest_with_requested_rights(
+            _elf_ok(),
+            CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP | CAP_RIGHT_ADMIN
+        )
+        expect(manifest_required_rights(greedy) & CAP_RIGHT_ADMIN).to_equal(0u32)
+        expect(manifest_required_rights(greedy)).to_equal(69u32)
+
+    it("never lets a script request EXEC or MOUNT"):
+        step("a script is read and mapped - the INTERPRETER is what executes")
+        expect(manifest_kind_base_rights(manifest_kind_script())).to_equal(65u32)
+        expect(manifest_required_rights(_script_ok())).to_equal(65u32)
+
+        val greedy = manifest_with_requested_rights(
+            _script_ok(),
+            CAP_RIGHT_READ | CAP_RIGHT_MAP | CAP_RIGHT_EXEC | CAP_RIGHT_MOUNT | CAP_RIGHT_ADMIN
+        )
+        expect(manifest_required_rights(greedy) & CAP_RIGHT_EXEC).to_equal(0u32)
+        expect(manifest_required_rights(greedy) & CAP_RIGHT_MOUNT).to_equal(0u32)
+        expect(manifest_required_rights(greedy) & CAP_RIGHT_ADMIN).to_equal(0u32)
+        expect(manifest_required_rights(greedy)).to_equal(65u32)
+
+    it("gives an unknown artifact kind no rights at all"):
+        val m = manifest_with_entrypoint(manifest_for_kind("wasm"), "/usr/bin/thing")
+        expect(manifest_kind_allowed_rights("wasm")).to_equal(0u32)
+        expect(manifest_required_rights(m)).to_equal(0u32)
+        expect(manifest_effective_rights(m, 511u32, 511u32)).to_equal(0u32)
+
+    it("adds MAP when libraries or startup preloads are declared"):
+        val with_libs = manifest_with_libraries(_smf_ok(), ["libc.so"], ["std.smf"])
+        expect(with_libs.native_libraries.len()).to_equal(1)
+        expect(with_libs.smf_libraries.len()).to_equal(1)
+        expect(manifest_required_rights(with_libs) & CAP_RIGHT_MAP).to_equal(64u32)
+
+        step("a section 12 startup contract rides on the SAME manifest")
+        val with_startup = manifest_with_startup(
+            _elf_ok(),
+            [ManifestArgument(name: "--config", value_kind: "path", required: true, default_value: "")],
+            [ManifestPreload(
+                source_arg: "--config",
+                fixed_path: "",
+                mode: "map_read_only",
+                required: true,
+                maximum_bytes: 65536,
+                access: "read",
+                prefault: true,
+                hash_policy: "verify"
+            )]
+        )
+        expect(with_startup.argument_schema.len()).to_equal(1)
+        expect(with_startup.startup_preloads.len()).to_equal(1)
+        expect(with_startup.startup_preloads[0].mode).to_equal("map_read_only")
+        expect(manifest_required_rights(with_startup) & CAP_RIGHT_READ).to_equal(1u32)
+        expect(manifest_required_rights(with_startup) & CAP_RIGHT_MAP).to_equal(64u32)
+        assert_true(manifest_validate(with_startup).ok)
+
+    # =======================================================================
+    # 4. Effective rights — intersection only, never amplification (§5.4)
+    # =======================================================================
+
+    it("intersects effective rights with BOTH ceilings using concrete bits"):
+        step("parent may delegate READ|WRITE|EXEC = 7")
+        val parent: u32 = CAP_RIGHT_READ | CAP_RIGHT_WRITE | CAP_RIGHT_EXEC
+        expect(parent).to_equal(7u32)
+
+        step("system ceiling is READ|EXEC|ADMIN|MAP = 77")
+        val system: u32 = CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_ADMIN | CAP_RIGHT_MAP
+        expect(system).to_equal(77u32)
+
+        step("artifact ceiling is 69, so effective = 7 & 69 & 77 & 69 = 5")
+        val m = _elf_ok()
+        expect(manifest_required_rights(m)).to_equal(69u32)
+        val eff = manifest_effective_rights(m, parent, system)
+        expect(eff).to_equal(5u32)
+        expect(eff).to_equal(CAP_RIGHT_READ | CAP_RIGHT_EXEC)
+
+        step("and it is a subset of the artifact ceiling, the parent AND the system")
+        assert_true(spawn_rights_is_subset(eff, manifest_required_rights(m)))
+        assert_true(spawn_rights_is_subset(eff, parent))
+        assert_true(spawn_rights_is_subset(eff, system))
+        assert_true(manifest_rights_within_ceilings(m, parent, system))
+
+        step("WRITE was in the parent but not the artifact ceiling - dropped")
+        expect(eff & CAP_RIGHT_WRITE).to_equal(0u32)
+        step("MAP was in the artifact ceiling but not the parent - dropped")
+        expect(eff & CAP_RIGHT_MAP).to_equal(0u32)
+        step("ADMIN was in the system ceiling only - never amplified in")
+        expect(eff & CAP_RIGHT_ADMIN).to_equal(0u32)
+
+    it("cannot amplify past a powerless parent"):
+        val m = _elf_ok()
+        expect(manifest_effective_rights(m, 0u32, 511u32)).to_equal(0u32)
+        assert_true(manifest_rights_within_ceilings(m, 0u32, 511u32))
+
+    it("cannot amplify past a powerless system ceiling"):
+        val m = _native_ok()
+        expect(manifest_effective_rights(m, 511u32, 0u32)).to_equal(0u32)
+
+    it("keeps script effective rights free of EXEC even when parent holds it"):
+        val parent: u32 = CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
+        val system: u32 = CAP_RIGHT_READ | CAP_RIGHT_EXEC | CAP_RIGHT_MAP
+        val eff = manifest_effective_rights(_script_ok(), parent, system)
+        expect(eff).to_equal(65u32)
+        expect(eff & CAP_RIGHT_EXEC).to_equal(0u32)
+        assert_true(spawn_rights_is_subset(eff, parent))
+
+    # =======================================================================
+    # 5. Built on the EXISTING launch metadata — no second manifest
+    # =======================================================================
+
+    it("projects launch-metadata entry kinds onto artifact kinds"):
+        step("launch_metadata.startup_detect_launch_kind vocabulary")
+        expect(manifest_kind_from_launch_entry_kind("smf")).to_equal("smf")
+        expect(manifest_kind_from_launch_entry_kind("script")).to_equal("script")
+        expect(manifest_kind_from_launch_entry_kind("native")).to_equal("native_simple")
+        step("an already-unified kind passes through unchanged")
+        expect(manifest_kind_from_launch_entry_kind("elf")).to_equal("elf")
+        step("anything else maps to the empty kind, which validation rejects")
+        expect(manifest_kind_from_launch_entry_kind("bogus")).to_equal("")
+
+    it("adapts a parsed LaunchMetadata into a valid unified manifest"):
+        val m = manifest_from_launch_metadata(
+            "native",
+            "simpleos",
+            "x86_64",
+            "simpleos",
+            "/usr/bin/simple",
+            ["libm.so"],
+            []
+        )
+        expect(m.artifact_kind).to_equal("native_simple")
+        expect(m.entrypoint).to_equal("/usr/bin/simple")
+        expect(m.target.os).to_equal("simpleos")
+        expect(m.native_libraries).to_contain("libm.so")
+        assert_true(manifest_validate(m).ok)
+        expect(manifest_required_rights(m) & CAP_RIGHT_MAP).to_equal(64u32)
+
+        step("a cross-target LaunchMetadata is rejected here, not silently run")
+        val cross = manifest_from_launch_metadata(
+            "native", "linux", "x86_64", "gnu", "/usr/bin/simple", [], []
+        )
+        expect(manifest_validate(cross).reason).to_equal("target_triple_mismatch")
+
+    it("renders a greppable one-line summary for serial traces"):
+        val s = manifest_summary(_script_ok())
+        expect(s).to_contain("kind=script")
+        expect(s).to_contain("os=simpleos")
+        expect(s).to_contain("entry=/etc/boot.shs")
+        expect(s).to_contain("interp=/usr/bin/simple")
+
+    it("builds manifests without mutating the input manifest"):
+        step("builders are pure - the skeleton must survive being built from")
+        val skeleton = manifest_for_kind(manifest_kind_script())
+        val bound = manifest_with_entrypoint(skeleton, "/etc/boot.shs")
+        expect(bound.entrypoint).to_equal("/etc/boot.shs")
+        expect(skeleton.entrypoint).to_equal("")
+
+        val interp = manifest_with_interpreter(bound, "/usr/bin/simple")
+        expect(interp.interpreter).to_equal("/usr/bin/simple")
+        expect(bound.interpreter).to_equal("")
+        expect(manifest_validate(bound).reason).to_equal("script_without_interpreter")
+
+    it("validates against an explicitly supplied running target"):
+        step("validate_for_target is the pure form validate() delegates to")
+        val m = manifest_with_target(
+            _elf_ok(),
+            ManifestTarget(os: "linux", arch: "x86_64", abi: "gnu")
+        )
+        val here = manifest_validate_for_target(m, manifest_running_target())
+        expect_not(here.ok)
+        expect(here.reason).to_equal("target_triple_mismatch")
+
+        val there = manifest_validate_for_target(
+            m,
+            ManifestTarget(os: "linux", arch: "x86_64", abi: "gnu")
+        )
+        assert_true(there.ok)
+        expect(there.reason).to_equal("ok")

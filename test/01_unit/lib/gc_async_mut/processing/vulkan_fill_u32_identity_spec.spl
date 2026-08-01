@@ -1,0 +1,37 @@
+# @cover src/lib/gc_async_mut/processing/vulkan_fill_u32.spl 20%
+
+use std.spec.{describe, it, expect, expect_not, assert_not_equal}
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_fill_u32}
+use std.gc_async_mut.processing.vulkan_fill_u32.{
+    ProcessingVulkanResult,
+    processing_vulkan_device_identity,
+    processing_ir_execute_vulkan
+}
+
+fn _expect_rejected(result: ProcessingVulkanResult, reason: text):
+    expect_not(result.completed)
+    expect(result.reason).to_equal(reason)
+    expect(result.values.len()).to_equal(0)
+    expect(result.backend_handle).to_equal(0)
+    expect(result.device_identity).to_equal(0)
+
+describe "Vulkan ProcessingIR device identity":
+    """Host-independent Vulkan identity and pre-device validation contracts."""
+
+    it "derives a stable identity from the device and driver rather than a buffer handle":
+        val first = processing_vulkan_device_identity("Test GPU|vendor=1|device=2|driver=1|api=3")
+        val repeated = processing_vulkan_device_identity("Test GPU|vendor=1|device=2|driver=1|api=3")
+        val other_driver = processing_vulkan_device_identity("Test GPU|vendor=1|device=2|driver=2|api=3")
+
+        expect(first).to_be_greater_than(0)
+        expect(repeated).to_equal(first)
+        assert_not_equal(other_driver, first)
+        expect(processing_vulkan_device_identity("")).to_equal(0)
+        expect(first).to_be_less_than(2147483648)
+
+    it "rejects invalid IR before Vulkan initialization":
+        val zero = processing_ir_execute_vulkan(processing_ir_fill_u32(0, 7u32))
+        expect(zero.reason).to_equal("invalid-element-count")
+        _expect_rejected(zero, "invalid-element-count")
+        _expect_rejected(processing_ir_execute_vulkan(processing_ir_fill_u32(536870912, 7u32)), "output-size-overflow")
+        _expect_rejected(processing_ir_execute_vulkan(ProcessingIr(op: 99, element_count: 1, value: 7u32)), "unsupported-op")

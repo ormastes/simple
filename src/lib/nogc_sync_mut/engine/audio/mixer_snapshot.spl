@@ -1,0 +1,216 @@
+# Mixer Snapshot — Saved mixer state with lerp transitions
+#
+# A MixerSnapshot captures volume levels per audio group.
+# MixerSnapshotManager stores snapshots and provides lerp-based
+# transitions between them.
+#
+# Usage:
+#   var mgr = MixerSnapshotManager.new()
+#   var combat = MixerSnapshot.new("combat")
+#   combat.set_volume("sfx", 1.0)
+#   combat.set_volume("music", 0.3)
+#   mgr.register_snapshot(combat)
+#   mgr.apply_snapshot("combat")
+#   mgr.transition_to("calm", 2.0)
+#   mgr.update(0.016)
+
+# ============================================================================
+# GroupVolume — Volume level for a named audio group
+# ============================================================================
+
+struct GroupVolume:
+    group_name: text
+    volume: f64
+
+# ============================================================================
+# MixerSnapshot — Named collection of group volumes
+# ============================================================================
+
+struct MixerSnapshot:
+    name: text
+    volumes: [GroupVolume]
+
+impl MixerSnapshot:
+    static fn new(name: text) -> MixerSnapshot:
+        MixerSnapshot(name: name, volumes: [])
+
+    me set_volume(group_name: text, volume: f64):
+        """Add or update volume for a group."""
+        var i = 0
+        while i < self.volumes.len():
+            if self.volumes[i].group_name == group_name:
+                self.volumes[i] = GroupVolume(group_name: group_name, volume: volume)
+                return
+            i = i + 1
+        self.volumes = self.volumes.push(GroupVolume(group_name: group_name, volume: volume))
+
+    fn get_volume(self, group_name: text) -> f64:
+        """Return volume for group, default 1.0 if not found."""
+        var i = 0
+        while i < self.volumes.len():
+            if self.volumes[i].group_name == group_name:
+                return self.volumes[i].volume
+            i = i + 1
+        1.0
+
+    fn group_count(self) -> i64:
+        self.volumes.len()
+
+# ============================================================================
+# MixerSnapshotManager — Manages snapshots with lerp transitions
+# ============================================================================
+
+class MixerSnapshotManager:
+    snapshots: [MixerSnapshot]
+    current_volumes: [GroupVolume]
+    transitioning: bool
+    transition_elapsed: f64
+    transition_duration: f64
+    target_snapshot_name: text
+    source_volumes: [GroupVolume]
+
+impl MixerSnapshotManager:
+    static fn new() -> MixerSnapshotManager:
+        MixerSnapshotManager(
+            snapshots: [],
+            current_volumes: [],
+            transitioning: false,
+            transition_elapsed: 0.0,
+            transition_duration: 0.0,
+            target_snapshot_name: "",
+            source_volumes: []
+        )
+
+    me register_snapshot(snapshot: MixerSnapshot):
+        """Store a named snapshot."""
+        self.snapshots = self.snapshots.push(snapshot)
+
+    me apply_snapshot(name: text) -> bool:
+        """Immediately set current_volumes to snapshot values."""
+        var si = self._find_snapshot_index(name)
+        if si < 0:
+            return false
+        var snap = self.snapshots[si]
+        self.current_volumes = []
+        var i = 0
+        while i < snap.volumes.len():
+            self.current_volumes = self.current_volumes.push(
+                GroupVolume(group_name: snap.volumes[i].group_name, volume: snap.volumes[i].volume)
+            )
+            i = i + 1
+        self.transitioning = false
+        true
+
+    me transition_to(name: text, duration: f64) -> bool:
+        """Start lerp transition to target snapshot."""
+        var si = self._find_snapshot_index(name)
+        if si < 0:
+            return false
+        self.target_snapshot_name = name
+        self.transition_duration = duration
+        self.transition_elapsed = 0.0
+        self.transitioning = true
+        # Save current volumes as source
+        self.source_volumes = []
+        var i = 0
+        while i < self.current_volumes.len():
+            self.source_volumes = self.source_volumes.push(
+                GroupVolume(group_name: self.current_volumes[i].group_name, volume: self.current_volumes[i].volume)
+            )
+            i = i + 1
+        true
+
+    me update(dt: f64):
+        """If transitioning, advance elapsed and lerp volumes."""
+        if not self.transitioning:
+            return
+
+        self.transition_elapsed = self.transition_elapsed + dt
+        var t = 0.0
+        if self.transition_duration > 0.0:
+            t = self.transition_elapsed / self.transition_duration
+        else:
+            t = 1.0
+        if t > 1.0:
+            t = 1.0
+
+        # Find target snapshot
+        var si = self._find_snapshot_index(self.target_snapshot_name)
+        if si < 0:
+            self.transitioning = false
+            return
+        var target_snap = self.snapshots[si]
+
+        # Build interpolated volumes — collect all group names from source and target
+        var result_volumes: [GroupVolume] = []
+
+        # Process source volumes
+        var i = 0
+        while i < self.source_volumes.len():
+            var gname = self.source_volumes[i].group_name
+            var src_vol = self.source_volumes[i].volume
+            var tgt_vol = target_snap.get_volume(gname)
+            var lerped = self._lerp(src_vol, tgt_vol, t)
+            result_volumes = result_volumes.push(GroupVolume(group_name: gname, volume: lerped))
+            i = i + 1
+
+        # Process target-only volumes (not in source)
+        var j = 0
+        while j < target_snap.volumes.len():
+            var gname = target_snap.volumes[j].group_name
+            var found = false
+            var k = 0
+            while k < self.source_volumes.len():
+                if self.source_volumes[k].group_name == gname:
+                    found = true
+                    k = self.source_volumes.len()
+                else:
+                    k = k + 1
+            if not found:
+                var src_vol = 1.0
+                var tgt_vol = target_snap.volumes[j].volume
+                var lerped = self._lerp(src_vol, tgt_vol, t)
+                result_volumes = result_volumes.push(GroupVolume(group_name: gname, volume: lerped))
+            j = j + 1
+
+        self.current_volumes = result_volumes
+
+        if self.transition_elapsed >= self.transition_duration:
+            self.transitioning = false
+
+    fn get_current_volume(self, group_name: text) -> f64:
+        """Current interpolated volume for a group."""
+        var i = 0
+        while i < self.current_volumes.len():
+            if self.current_volumes[i].group_name == group_name:
+                return self.current_volumes[i].volume
+            i = i + 1
+        1.0
+
+    fn is_transitioning(self) -> bool:
+        self.transitioning
+
+    fn snapshot_count(self) -> i64:
+        self.snapshots.len()
+
+    fn _find_snapshot(self, name: text) -> MixerSnapshot?:
+        """Find a snapshot by name."""
+        var i = 0
+        while i < self.snapshots.len():
+            if self.snapshots[i].name == name:
+                return self.snapshots[i]
+            i = i + 1
+        nil
+
+    fn _find_snapshot_index(self, name: text) -> i32:
+        """Returns index or -1 if not found."""
+        var i = 0
+        while i < self.snapshots.len():
+            if self.snapshots[i].name == name:
+                return i
+            i = i + 1
+        -1
+
+    fn _lerp(self, a: f64, b: f64, t: f64) -> f64:
+        """Linear interpolation: a + (b - a) * t"""
+        a + (b - a) * t

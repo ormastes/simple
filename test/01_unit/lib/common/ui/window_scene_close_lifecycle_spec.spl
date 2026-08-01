@@ -1,0 +1,193 @@
+# Window lifecycle unit spec: close/minimize semantics on the shared WM scene
+# and the titlebar-button hit regions behind the drawn chrome.
+#
+# The Draw IR window batch draws a close button ("{id}-close" at
+# width-24,2,20,20), and traffic lights (red 12,9 / yellow 30,9 / green 48,9,
+# each 10x10). A drawn button MUST dispatch: red/X close the window (remove it
+# from the scene), yellow minimizes it. These specs pin that contract.
+
+use std.spec
+use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.window_scene.{
+    SharedWmScene,
+    SharedWmWindow,
+    simple_gui_internal_window,
+    simple_gui_internal_window_with_chrome_kind,
+    simple_gui_internal_window_scene,
+    shared_wm_close_window_by_window_id,
+    shared_wm_minimize_window_by_window_id,
+    shared_wm_topmost_visible_window_id,
+    shared_wm_dispatch_pointer,
+    shared_wm_translate_pointer_event,
+    shared_wm_visible_windows,
+    shared_wm_focused_window_id,
+    shared_wm_scene_layout_key
+}
+
+fn _taskbar_empty() -> TaskbarModel:
+    TaskbarModel(pinned: [], running: [], tray: [])
+
+fn _win(n: i32, x: i32, y: i32, z: i32, focused: bool) -> SharedWmWindow:
+    simple_gui_internal_window("surf{n}", "win{n}", 42u64, "app{n}", "Window {n}", x, y, 300, 200, "", false, focused, z)
+
+# Three staggered windows; win3 is on top (z 3) and focused.
+fn _three_window_scene() -> SharedWmScene:
+    simple_gui_internal_window_scene(800, 600, "cpu", [
+        _win(1, 100, 100, 1, false),
+        _win(2, 150, 150, 2, false),
+        _win(3, 200, 200, 3, true)
+    ])
+
+describe "SharedWmScene window close lifecycle":
+
+    it "close removes exactly the target window and keeps the others intact":
+        val scene = _three_window_scene()
+        val closed = shared_wm_close_window_by_window_id(scene, "win2")
+        expect(closed.windows.len()).to_equal(2)
+        expect(closed.windows[0].window_id).to_equal("win1")
+        expect(closed.windows[1].window_id).to_equal("win3")
+        expect(closed.windows[0].x).to_equal(100)
+        expect(closed.windows[0].width).to_equal(300)
+        expect(closed.windows[1].z_index).to_equal(3)
+        expect(closed.width).to_equal(800)
+        expect(closed.height).to_equal(600)
+
+    it "closing the focused window hands focus to the topmost remaining visible window":
+        val scene = _three_window_scene()
+        val closed = shared_wm_close_window_by_window_id(scene, "win3")
+        expect(closed.windows.len()).to_equal(2)
+        expect(shared_wm_focused_window_id(closed)).to_equal("win2")
+
+    it "closing an unfocused window leaves the focused window untouched":
+        val scene = _three_window_scene()
+        val closed = shared_wm_close_window_by_window_id(scene, "win1")
+        expect(closed.windows.len()).to_equal(2)
+        expect(shared_wm_focused_window_id(closed)).to_equal("win3")
+
+    it "closing an unknown window id is a structural no-op":
+        val scene = _three_window_scene()
+        val closed = shared_wm_close_window_by_window_id(scene, "no-such-window")
+        expect(closed.windows.len()).to_equal(3)
+        expect(shared_wm_scene_layout_key(closed)).to_equal(shared_wm_scene_layout_key(scene))
+
+    it "closing the last window empties the scene and leaves no focus owner":
+        val scene = simple_gui_internal_window_scene(800, 600, "cpu", [_win(1, 100, 100, 1, true)])
+        val closed = shared_wm_close_window_by_window_id(scene, "win1")
+        expect(closed.windows.len()).to_equal(0)
+        expect(shared_wm_focused_window_id(closed)).to_equal("")
+        expect(shared_wm_visible_windows(closed).len()).to_equal(0)
+
+    it "minimize keeps the window in the scene but hides it and moves focus":
+        val scene = _three_window_scene()
+        val minimized = shared_wm_minimize_window_by_window_id(scene, "win3")
+        expect(minimized.windows.len()).to_equal(3)
+        expect(minimized.windows[2].minimized).to_equal(true)
+        expect(minimized.windows[2].focused).to_equal(false)
+        expect(shared_wm_visible_windows(minimized).len()).to_equal(2)
+        expect(shared_wm_focused_window_id(minimized)).to_equal("win2")
+
+    it "topmost visible id follows z-index and skips minimized windows":
+        val scene = _three_window_scene()
+        expect(shared_wm_topmost_visible_window_id(scene)).to_equal("win3")
+        val after_min = shared_wm_minimize_window_by_window_id(scene, "win3")
+        expect(shared_wm_topmost_visible_window_id(after_min)).to_equal("win2")
+        val after_both = shared_wm_minimize_window_by_window_id(after_min, "win2")
+        expect(shared_wm_topmost_visible_window_id(after_both)).to_equal("win1")
+
+describe "titlebar button pointer dispatch":
+
+    # win3 sits at (200,200) size 300x200. Its drawn button rects in screen
+    # coordinates: close X [476,496)x[202,222), traffic red [212,222)x[209,219),
+    # yellow [230,240)x[209,219), green [248,258)x[209,219).
+
+    it "a click on the close X dispatches close_window and removes the window":
+        val scene = _three_window_scene()
+        val result = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 486, 212, "left", "down", 1000, "", 0)
+        expect(result.action).to_equal("close_window")
+        expect(result.window_id).to_equal("win3")
+        expect(result.target_id).to_equal("surf3")
+        expect(result.app_id).to_equal("app3")
+        expect(result.scene.windows.len()).to_equal(2)
+        expect(shared_wm_focused_window_id(result.scene)).to_equal("win2")
+
+    it "a click on the red traffic light also dispatches close_window":
+        val scene = _three_window_scene()
+        val result = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 216, 214, "left", "down", 1000, "", 0)
+        expect(result.action).to_equal("close_window")
+        expect(result.window_id).to_equal("win3")
+        expect(result.scene.windows.len()).to_equal(2)
+
+    it "a click on the yellow traffic light dispatches minimize_window":
+        val scene = _three_window_scene()
+        val result = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 235, 214, "left", "down", 1000, "", 0)
+        expect(result.action).to_equal("minimize_window")
+        expect(result.window_id).to_equal("win3")
+        expect(result.scene.windows.len()).to_equal(3)
+        expect(shared_wm_visible_windows(result.scene).len()).to_equal(2)
+        expect(shared_wm_focused_window_id(result.scene)).to_equal("win2")
+
+    it "the green traffic light falls through to drag until zoom state exists":
+        # SharedWmWindow has no maximize state; the green light must NOT
+        # silently close or minimize. It behaves as a titlebar drag start.
+        val scene = _three_window_scene()
+        val result = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 253, 214, "left", "down", 1000, "", 0)
+        expect(result.action).to_equal("begin_drag_window")
+        expect(result.window_id).to_equal("win3")
+
+    it "titlebar clicks outside every button rect still begin a drag":
+        val scene = _three_window_scene()
+        val result = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 300, 210, "left", "down", 1000, "", 0)
+        expect(result.action).to_equal("begin_drag_window")
+        expect(result.window_id).to_equal("win3")
+        expect(result.scene.windows.len()).to_equal(3)
+
+    it "one pixel outside the close X is a drag, one pixel inside is a close":
+        val scene = _three_window_scene()
+        # close X spans x [476,496): 475 misses, 476 and 495 hit, 496 misses.
+        val left_miss = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 475, 212, "left", "down", 1000, "", 0)
+        val left_hit = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 476, 212, "left", "down", 1000, "", 0)
+        val right_hit = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 495, 212, "left", "down", 1000, "", 0)
+        val right_miss = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 496, 212, "left", "down", 1000, "", 0)
+        expect(left_miss.action).to_equal("begin_drag_window")
+        expect(left_hit.action).to_equal("close_window")
+        expect(right_hit.action).to_equal("close_window")
+        expect(right_miss.action).to_equal("begin_drag_window")
+
+    it "close and minimize translate as window component events":
+        val scene = _three_window_scene()
+        val close_t = shared_wm_translate_pointer_event(scene, _taskbar_empty(), 486, 212, "left", "down", 1000, "", 0, "cpu").translation
+        val min_t = shared_wm_translate_pointer_event(scene, _taskbar_empty(), 235, 214, "left", "down", 1000, "", 0, "cpu").translation
+        expect(close_t.action).to_equal("close_window")
+        expect(close_t.component_kind).to_equal("window")
+        expect(min_t.action).to_equal("minimize_window")
+        expect(min_t.component_kind).to_equal("window")
+
+    it "a borderless window has no close button to hit":
+        val borderless = simple_gui_internal_window_with_chrome_kind("surfb", "winb", 42u64, "appb", "Borderless", 200, 200, 300, 200, "", false, true, 5, "borderless")
+        val scene = simple_gui_internal_window_scene(800, 600, "cpu", [borderless])
+        # Same coordinates that hit the close X on a titled window.
+        val result = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 486, 212, "left", "down", 1000, "", 0)
+        expect(result.action).to_equal("begin_drag_window")
+        expect(result.scene.windows.len()).to_equal(1)
+
+    it "a close button covered by a higher window belongs to the top window":
+        # win_low at (150,150): its close X spans [426,446)x[152,172).
+        # win_top at (400,100) size 300x200 covers that rect with BODY pixels
+        # (local y 62 > titlebar 28), so the click must focus win_top, not
+        # close win_low.
+        val low = _win(4, 150, 150, 2, false)
+        val top = simple_gui_internal_window("surf5", "win5", 42u64, "app5", "Top", 400, 100, 300, 200, "", false, true, 5)
+        val scene = simple_gui_internal_window_scene(800, 600, "cpu", [low, top])
+        val result = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 436, 162, "left", "down", 1000, "", 0)
+        expect(result.action).to_equal("focus_window")
+        expect(result.window_id).to_equal("win5")
+        expect(result.scene.windows.len()).to_equal(2)
+
+    it "pointer up and non-left buttons never close a window":
+        val scene = _three_window_scene()
+        val up = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 486, 212, "left", "up", 1000, "", 0)
+        val right_button = shared_wm_dispatch_pointer(scene, _taskbar_empty(), 486, 212, "right", "down", 1000, "", 0)
+        expect(up.action).to_equal("ignored")
+        expect(right_button.action).to_equal("ignored")
+        expect(up.scene.windows.len()).to_equal(3)
+        expect(right_button.scene.windows.len()).to_equal(3)

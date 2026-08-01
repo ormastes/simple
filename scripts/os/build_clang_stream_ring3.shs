@@ -1,0 +1,116 @@
+#!/bin/sh
+# build_clang_stream_ring3.shs — Track 3d: launch the 124.6 MB freestanding
+# clang_static ON SimpleOS through the GENERAL streaming loader
+# (x86_64_fs_exec_enter_stream_ring3), NOT the bespoke fs_elf_exec_smoke harness.
+#
+# Image recipe (pure-Simple, bypasses the ~8.39 MB disk_image.spl FAT cap):
+#   1. payload_size.txt <- byte count of clang_static
+#   2. fsexec_mkimg_big.spl writes a FAT32 structural prefix with /HELLO.C at
+#      cluster 3 and /FSEXEC.ELF (clang_static) at cluster 4 (contiguous chain).
+#   3. cat prefix clang_static > img ; truncate -s <total> img
+# The streaming loader then pulls each PT_LOAD off /FSEXEC.ELF via
+# simpleos_fat32_stream_read_at into pmm frames — the file is never whole-buffered.
+#
+# Env: SEED, CLANG_BIN, SKIP_KERNEL=1, SKIP_IMG=1, QEMU_MEM (default 2G),
+#      QEMU_TIMEOUT (default 600s).
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+SEED="${SEED:-src/compiler_rust/target/release/simple}"
+CLANG_BIN="${CLANG_BIN:-build/os/clang_static/bin/clang_static}"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/fs_exec_clang_stream_ring3_entry.spl"
+# low-1MB base: clang_static links at 0x10000000; the default 128MB kernel base
+# puts kernel .bss on top of that VA range in the user AS (syscall path faults).
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker_low1mb.ld"
+OUT_DIR="build/os/elfexec"
+KERNEL_OUTPUT="$OUT_DIR/fsexec_clang_stream.elf"
+IMG="$OUT_DIR/fat32-clang.img"
+PREFIX="$OUT_DIR/fat32-clang-prefix.bin"
+SERIAL_LOG="$OUT_DIR/clang_stream_run.log"
+QEMU_MEM="${QEMU_MEM:-2G}"
+QEMU_TIMEOUT="${QEMU_TIMEOUT:-600}"
+
+mkdir -p "$OUT_DIR/stageD" build/os/generated/generated
+
+# ---- 1. Image -----------------------------------------------------------
+if [ "${SKIP_IMG:-0}" != "1" ]; then
+    [ -f "$CLANG_BIN" ] || { echo "[clang-stream] missing $CLANG_BIN"; exit 1; }
+    printf 'int main(void){ return 7; }\n' > "$OUT_DIR/stageD/hello.c"
+    SIZE="$(stat -c%s "$CLANG_BIN")"
+    echo "$SIZE" > "$OUT_DIR/payload_size.txt"
+    echo "[clang-stream] clang_static size=$SIZE bytes; writing FAT32 prefix"
+    MKOUT="$(SIMPLE_LIB="${SIMPLE_LIB:-src}" "$SEED" run scripts/os/fsexec_mkimg_big.spl 2>&1)"
+    echo "$MKOUT" | grep -E 'fsexec_mkimg_big' || true
+    [ -f "$PREFIX" ] || { echo "[clang-stream] prefix build FAILED"; exit 1; }
+    # total_bytes is printed by the mkimg .spl (no stale total.txt — it lands the
+    # image at BPB total_sectors so the FAT's spare clusters are physically backed).
+    TOTAL="$(echo "$MKOUT" | sed -n 's/.*total_bytes=\([0-9][0-9]*\).*/\1/p' | tail -1)"
+    [ -n "$TOTAL" ] || { echo "[clang-stream] could not parse total_bytes from mkimg"; exit 1; }
+    echo "[clang-stream] assembling image: prefix + payload -> $IMG (total=$TOTAL)"
+    cat "$PREFIX" "$CLANG_BIN" > "$IMG"
+    truncate -s "$TOTAL" "$IMG"
+    echo "[clang-stream] image size=$(stat -c%s "$IMG")"
+fi
+[ -f "$IMG" ] || { echo "[clang-stream] missing image $IMG"; exit 1; }
+
+# ---- 2. Kernel ----------------------------------------------------------
+if [ "${SKIP_KERNEL:-0}" != "1" ]; then
+    cat >build/os/generated/generated/simpleos_log_config.spl <<'SPL'
+val SIMPLEOS_LOG_COMPILED: bool = false
+
+fn simpleos_log_compile_enabled() -> bool:
+    SIMPLEOS_LOG_COMPILED
+
+fn simpleos_log_compile_mode_name() -> text:
+    if SIMPLEOS_LOG_COMPILED:
+        return "on"
+    "off"
+SPL
+    OBJCOPY_PREFIX=""
+    for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/local/opt/llvm/bin; do
+        [ -f "$d/llvm-objcopy" ] && OBJCOPY_PREFIX="$d" && break
+    done
+    echo "[clang-stream] building kernel -> $KERNEL_OUTPUT"
+    rm -f "$KERNEL_OUTPUT"
+    SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+    SIMPLE_ALLOW_FREESTANDING_STUBS=1 \
+    PATH="${OBJCOPY_PREFIX:+$OBJCOPY_PREFIX:}$PATH" \
+        "$SEED" native-build \
+        --source build/os/generated --source src/os --source src/lib \
+        --source examples/09_embedded/simple_os/arch/x86_64 \
+        --backend cranelift --cpu x86-64-v1 --opt-level=aggressive --log off \
+        --entry-closure --entry "$ENTRY" \
+        --target x86_64-unknown-none -o "$KERNEL_OUTPUT" \
+        --linker-script "$LINKER_SCRIPT" 2>&1 | tail -30
+    [ -f "$KERNEL_OUTPUT" ] || { echo "[clang-stream] KERNEL BUILD FAILED"; exit 1; }
+fi
+
+# ---- 3. Run -------------------------------------------------------------
+rm -f "$SERIAL_LOG"
+echo "[clang-stream] launching QEMU (mem=$QEMU_MEM timeout=${QEMU_TIMEOUT}s disk=$IMG)"
+START=$(date +%s)
+set +e
+timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
+    -no-user-config -monitor none -net none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -kernel "$KERNEL_OUTPUT" \
+    -serial "file:$SERIAL_LOG" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$IMG,if=none,id=nvme0,format=raw" \
+    -device nvme,drive="nvme0",serial="clangstreamnvme0"
+RC=$?
+set -e
+END=$(date +%s)
+echo "[clang-stream] qemu exit rc=$RC wall=$((END-START))s"
+echo "===== serial log ====="
+cat "$SERIAL_LOG" 2>/dev/null || echo "(no serial log)"
+echo "===== marker check ====="
+grep -q 'file_size=124602568' "$SERIAL_LOG" 2>/dev/null && echo "PASS stream-open (125MB)" || echo "MISS stream-open"
+grep -q 'clang version'       "$SERIAL_LOG" 2>/dev/null && echo "PASS clang banner" || echo "MISS clang banner"
+# The bare-exec dispatcher's exit(0) halts QEMU via isa-debug-exit directly
+# (rc=(status<<1)|1), so a clean exit shows as this serial line, not the kernel
+# resume marker.
+grep -q '\[syscall\] exit status=0' "$SERIAL_LOG" 2>/dev/null && echo "PASS clean exit(0)" || echo "MISS clean exit(0)"
+grep -q 'CLANG FILE-LAUNCH WORKS' "$SERIAL_LOG" 2>/dev/null && echo "PASS clang-launch (kernel resume)" || echo "MISS clang-launch (kernel resume; expected if exit halted QEMU directly)"

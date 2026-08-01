@@ -1,0 +1,118 @@
+# x86_64 Boot Page Table Entry Generation
+#
+# Pure compile-time helper functions for building static page table entries
+# used during early kernel boot identity mapping.
+#
+# Covers 4-level paging: PML4 -> PDPT -> PD -> PT
+# 2MiB huge pages are the primary unit for the first 4GiB identity map.
+# All functions return numeric u64 values -- no allocation, no side effects.
+#
+# MDSOC: feature dimension, boot layer (lowest)
+
+# ============================================================================
+# Page table entry flags (x86_64)
+# ============================================================================
+
+# Bit 0 -- entry is present in memory
+val PT_PRESENT: u64 = 0x0000000000000001
+
+# Bit 1 -- entry is writable
+val PT_WRITABLE: u64 = 0x0000000000000002
+
+# Bit 2 -- user-mode accessible (ring 3)
+val PT_USER: u64 = 0x0000000000000004
+
+# Bit 7 -- huge page (2MiB in PD, 1GiB in PDPT)
+val PT_HUGE_PAGE: u64 = 0x0000000000000080
+
+# Bit 63 -- no-execute (NX) -- requires EFER.NXE
+val PT_NO_EXECUTE: u64 = 0x8000000000000000
+
+# ============================================================================
+# Address masks
+# ============================================================================
+
+# Physical address bits 12-51 for a 4KiB-aligned entry
+val PT_ADDR_MASK_4K: u64 = 0x000FFFFFFFFFF000
+
+# Physical address bits 21-51 for a 2MiB-aligned (huge page) entry
+val PT_ADDR_MASK_2M: u64 = 0x000FFFFFFFE00000
+
+# ============================================================================
+# Index extraction -- virtual address -> table index
+# ============================================================================
+
+pub fn pml4_index(virt: u64) -> u64:
+    """Return the PML4 table index (bits 47:39) for a virtual address."""
+    (virt >> 39) & 0x1FF
+
+pub fn pdpt_index(virt: u64) -> u64:
+    """Return the PDPT table index (bits 38:30) for a virtual address."""
+    (virt >> 30) & 0x1FF
+
+pub fn pd_index(virt: u64) -> u64:
+    """Return the PD table index (bits 29:21) for a virtual address."""
+    (virt >> 21) & 0x1FF
+
+pub fn pt_index(virt: u64) -> u64:
+    """Return the PT table index (bits 20:12) for a virtual address."""
+    (virt >> 12) & 0x1FF
+
+# ============================================================================
+# Entry constructors
+# ============================================================================
+
+pub fn page_entry_4k(phys: u64, flags: u64) -> u64:
+    """Build a 4KiB page table entry from a physical address and flags.
+
+    phys must be 4KiB-aligned; low 12 bits are masked out automatically.
+    """
+    (phys & PT_ADDR_MASK_4K) | (flags & ~PT_ADDR_MASK_4K)
+
+pub fn page_entry_2m(phys: u64, flags: u64) -> u64:
+    """Build a 2MiB huge-page PD entry from a physical address and flags.
+
+    phys must be 2MiB-aligned; low 21 bits are masked out automatically.
+    PT_HUGE_PAGE is forced on regardless of caller-supplied flags.
+    """
+    (phys & PT_ADDR_MASK_2M) | (flags & ~PT_ADDR_MASK_2M) | PT_HUGE_PAGE
+
+pub fn page_entry_table(phys: u64, flags: u64) -> u64:
+    """Build a table-pointer entry (PML4e / PDPTe / PDe pointing to next table).
+
+    phys is the physical address of the child table (must be 4KiB-aligned).
+    """
+    (phys & PT_ADDR_MASK_4K) | (flags & ~PT_ADDR_MASK_4K)
+
+# ============================================================================
+# Identity-mapping helpers for the first 4GiB
+# ============================================================================
+
+# Number of 2MiB slots covering 4GiB
+val IDENTITY_2M_COUNT: u64 = 2048
+
+pub fn identity_pd_entry_2m(index: u64, flags: u64) -> u64:
+    """Return the PD entry for the Nth 2MiB identity-mapped physical slot.
+
+    index  -- 0-based slot (0 = 0x00000000, 1 = 0x00200000, ..., 2047 = 0xFFE00000)
+    flags  -- caller-supplied flags (PT_PRESENT | PT_WRITABLE etc.); PT_HUGE_PAGE is
+              forced on by page_entry_2m.
+
+    Iterating index from 0 to IDENTITY_2M_COUNT - 1 covers 0 GiB to 4 GiB.
+    """
+    val phys = index << 21
+    page_entry_2m(phys, flags)
+
+pub fn identity_pdpt_entry(pd_phys: u64, flags: u64) -> u64:
+    """Return a PDPT entry pointing at a PD table.
+
+    pd_phys -- physical address of the PD table (4KiB-aligned).
+    """
+    page_entry_table(pd_phys, flags)
+
+pub fn identity_pml4_entry(pdpt_phys: u64, flags: u64) -> u64:
+    """Return a PML4 entry pointing at a PDPT table.
+
+    pdpt_phys -- physical address of the PDPT table (4KiB-aligned).
+    """
+    page_entry_table(pdpt_phys, flags)

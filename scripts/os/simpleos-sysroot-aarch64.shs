@@ -1,0 +1,183 @@
+#!/usr/bin/env sh
+# Build the aarch64-unknown-simpleos user sysroot.
+#
+# Mirrors the x86_64 sysroot at build/os/sysroot for aarch64:
+#   build/os/sysroot-aarch64/
+#     lib/crt0.o              — aarch64 CRT0 (simpleos_crt0_aarch64.S)
+#     lib/libsimpleos_c.a     — SimpleOS libc shim, aarch64-unknown-none-elf
+#     share/simpleos/simpleos.ld        — user linker script, base 0x50000000
+#     share/simpleos/target-triple.txt  — aarch64-unknown-simpleos
+#
+# Link base 0x50000000: QEMU virt RAM starts at 0x40000000; the arm64
+# fs-exec kernel (examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld)
+# owns [0x40200000, 0x50000000) (254M). 0x50000000 is the first byte clear of
+# the kernel band and stays inside 384M RAM (top 0x58000000) — the same
+# "payload clears the kernel image + .bss" discipline as x86_64's 0x40000000.
+#
+# libsimple_runtime.a (aarch64) is built separately by the seed
+# (native-build --emit-archive --target aarch64-unknown-simpleos) and copied
+# into lib/ by the caller (see simpleos-native-build path notes).
+set -eu
+
+REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+cd "$REPO_ROOT"
+
+SYSROOT="${SIMPLEOS_SYSROOT_AARCH64:-build/os/sysroot-aarch64}"
+LIBC_DIR="src/os/libc"
+CC="${CLANG:-clang}"
+AR="${AR:-ar}"
+TRIPLE="aarch64-unknown-none-elf"
+OBJ_DIR="$SYSROOT/obj"
+
+CFLAGS="-target $TRIPLE -ffreestanding -nostdlib -fno-builtin \
+  -fno-stack-protector -fno-exceptions \
+  -fno-unwind-tables -fno-asynchronous-unwind-tables \
+  -O2 -Wall -Wextra -Wno-unused-parameter \
+  -I $LIBC_DIR/include"
+
+ASFLAGS="-target $TRIPLE -ffreestanding -nostdlib"
+
+C_SRCS="simpleos_libc.c simpleos_math.c simpleos_math_ext.c simpleos_fs.c \
+  simpleos_pthread.c simpleos_alloc.c simpleos_process.c \
+  simpleos_string_ext.c simpleos_stdlib_ext.c \
+  simpleos_time.c simpleos_printf_float.c simpleos_cxxabi.c \
+  simpleos_dlmalloc.c simpleos_signal.c simpleos_libc_ext.c \
+  simpleos_poll.c simpleos_process_wait.c \
+  simpleos_pthread_rwlock.c simpleos_pthread_cond.c \
+  simpleos_sched.c \
+  simpleos_epoll.c simpleos_eventfd.c simpleos_timerfd.c \
+  simpleos_signalfd.c simpleos_inotify.c simpleos_fs_walk.c \
+  simpleos_glob_stub.c simpleos_pwd_stub.c simpleos_strfmon.c \
+  simpleos_fork.c simpleos_ipc.c simpleos_socket.c \
+  simpleos_filelock.c simpleos_statvfs.c simpleos_utsname.c"
+
+mkdir -p "$OBJ_DIR" "$SYSROOT/lib" "$SYSROOT/share/simpleos"
+
+echo "[sysroot-aarch64] compiling libc ($TRIPLE)..."
+OBJS=""
+for src in $C_SRCS; do
+  obj="$OBJ_DIR/$(basename "$src" .c).o"
+  # shellcheck disable=SC2086
+  $CC $CFLAGS -c "$LIBC_DIR/$src" -o "$obj"
+  OBJS="$OBJS $obj"
+done
+
+echo "[sysroot-aarch64] assembling crt0/syscall/setjmp..."
+# shellcheck disable=SC2086
+$CC $ASFLAGS -c "$LIBC_DIR/simpleos_crt0_aarch64.S" -o "$SYSROOT/lib/crt0.o"
+$CC $ASFLAGS -c "$LIBC_DIR/simpleos_syscall_aarch64.S" -o "$OBJ_DIR/simpleos_syscall.o"
+$CC $ASFLAGS -c "$LIBC_DIR/simpleos_setjmp_aarch64.S" -o "$OBJ_DIR/simpleos_setjmp.o"
+OBJS="$OBJS $OBJ_DIR/simpleos_syscall.o $OBJ_DIR/simpleos_setjmp.o"
+
+echo "[sysroot-aarch64] archiving libsimpleos_c.a..."
+rm -f "$SYSROOT/lib/libsimpleos_c.a"
+# shellcheck disable=SC2086
+$AR rcs "$SYSROOT/lib/libsimpleos_c.a" $OBJS
+
+echo "[sysroot-aarch64] writing linker script + triple stamp..."
+cat > "$SYSROOT/share/simpleos/simpleos.ld" <<'EOF'
+/* SimpleOS aarch64 userspace linker script
+ *
+ * Text starts at 0x50000000 — the first byte clear of the arm64 fs-exec
+ * kernel band [0x40200000, 0x50000000) (QEMU virt RAM base 0x40000000).
+ * Static linking only.
+ */
+ENTRY(_start)
+
+SECTIONS {
+    . = 0x50000000;
+
+    .text : {
+        *(.text.entry)
+        *(.text .text.*)
+    }
+
+    . = ALIGN(4096);
+    .rodata : {
+        *(.rodata .rodata.*)
+    }
+
+    /* C++ exception unwinding tables — kept for baremetal libunwind
+     * boundary-symbol lookup (no dynamic loader / dl_iterate_phdr). */
+    . = ALIGN(8);
+    .eh_frame_hdr : {
+        __eh_frame_hdr_start = .;
+        KEEP(*(.eh_frame_hdr))
+        __eh_frame_hdr_end = .;
+    }
+
+    . = ALIGN(8);
+    .eh_frame : {
+        __eh_frame_start = .;
+        KEEP(*(.eh_frame))
+        __eh_frame_end = .;
+    }
+
+    . = ALIGN(4096);
+    .data : {
+        *(.data .data.*)
+        *(.sdata .sdata.*)
+    }
+
+    /* Static-link GOT: keep it placed (NOT discarded) so absolute target
+     * VAs get baked into real load addresses (same rationale as x86_64). */
+    . = ALIGN(8);
+    .got : {
+        *(.got) *(.got.*)
+    }
+
+    . = ALIGN(8);
+    .got.plt : {
+        *(.got.plt)
+    }
+
+    . = ALIGN(16);
+    .init_array : {
+        __init_array_start = .;
+        KEEP(*(.init_array .init_array.*))
+        __init_array_end = .;
+    }
+
+    . = ALIGN(16);
+    .fini_array : {
+        __fini_array_start = .;
+        KEEP(*(.fini_array .fini_array.*))
+        __fini_array_end = .;
+    }
+
+    . = ALIGN(16);
+    .tdata : {
+        _tls_start = .;
+        *(.tdata .tdata.*)
+    }
+
+    . = ALIGN(16);
+    .tbss : {
+        *(.tbss .tbss.*)
+        _tls_end = .;
+    }
+
+    . = ALIGN(4096);
+    .bss : {
+        __bss_start = .;
+        *(.bss .bss.*)
+        *(.sbss .sbss.*)
+        *(COMMON)
+        __bss_end = .;
+    }
+
+    _end = .;
+
+    /DISCARD/ : {
+        *(.comment)
+        *(.note .note.*)
+        *(.plt)
+        *(.rela.plt)
+    }
+}
+EOF
+
+printf 'aarch64-unknown-simpleos\n' > "$SYSROOT/share/simpleos/target-triple.txt"
+
+echo "[sysroot-aarch64] done: $SYSROOT"
+ls -l "$SYSROOT/lib"

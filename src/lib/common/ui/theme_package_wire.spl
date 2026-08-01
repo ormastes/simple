@@ -1,0 +1,434 @@
+# Canonical immutable theme-package and render-snapshot wire values.
+#
+# The format is deliberately ASCII-only and fixed-order. Every arbitrary text
+# field is lower-case hex of its UTF-8 bytes, so CSS may contain newlines, NUL,
+# or Unicode without becoming a framing delimiter. This module is common UI
+# code: it owns no cache, I/O, mutex, transaction candidate, or runtime extern.
+
+use common.ui.theme_render_snapshot.{ThemeShadowLayer, ThemeMaterialSemantics, ThemeRenderSnapshot, theme_material_sha256}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear, text_to_bytes_linear}
+
+pub val THEME_RENDER_SNAPSHOT_WIRE_V1_MAGIC: text = "theme-render-snapshot-wire-v1"
+pub val THEME_PACKAGE_INSTALL_WIRE_V1_MAGIC: text = "theme-package-install-wire-v1"
+pub val THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_BYTES: i64 = 1048576
+pub val THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_TEXT_BYTES: i64 = 262144
+pub val THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_SHADOWS: i64 = 32
+pub val THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES: i64 = 1048576
+pub val THEME_PACKAGE_INSTALL_WIRE_V1_MAX_METADATA_BYTES: i64 = 4096
+pub val THEME_PACKAGE_INSTALL_WIRE_V1_MAX_SNAPSHOT_BYTES: i64 = 262144
+
+pub fn theme_package_install_wire_v1_utf8_byte_len(wire_text: text) -> i64:
+    text_to_bytes_linear(wire_text).len()
+
+pub fn theme_package_install_wire_v1_within_bound(wire_text: text) -> bool:
+    val byte_len = theme_package_install_wire_v1_utf8_byte_len(wire_text)
+    byte_len > 0 and byte_len <= THEME_PACKAGE_INSTALL_WIRE_V1_MAX_UTF8_BYTES
+
+# This decoded value is private-use transaction input. It is never a published
+# transaction candidate: publication is the canonical wire text itself.
+# The aggregate-return ABI is not yet native-verified. Transaction consumers
+# must keep the canonical `text` as their candidate and publication payload;
+# they may not consume either aggregate decoder across a native module boundary
+# until `theme_package_wire_native_abi_probe_spec.spl` passes incrementally.
+class ThemePackageInstallProjection:
+    requested_id: text
+    default_id: text
+    registry_path: text
+    snapshot: ThemeRenderSnapshot
+
+fn _theme_wire_bytes_equal(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len():
+        return false
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            return false
+        i = i + 1
+    true
+
+fn _theme_wire_hex_digit(value: i64) -> text:
+    "0123456789abcdef".char_at(value)
+
+fn _theme_wire_hex_value(ch: text) -> i64:
+    if ch.len() != 1:
+        return -1
+    val code = ch.char_at(0) as i64
+    if code >= 48 and code <= 57:
+        return code - 48
+    if code >= 97 and code <= 102:
+        return code - 97 + 10
+    -1
+
+fn _theme_wire_hex_encode(value: text) -> Result<text, text>:
+    val bytes = text_to_bytes_linear(value)
+    val restored = validated_utf8_bytes_to_text_linear(bytes)?
+    if restored != value or not _theme_wire_bytes_equal(text_to_bytes_linear(restored), bytes):
+        return Err("theme wire: text is not canonical UTF-8")
+    if bytes.len() > THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_TEXT_BYTES:
+        return Err("theme wire: text field exceeds byte limit")
+    val builder = StringBuilder.new()
+    for byte in bytes:
+        val value_i64 = byte.to_i64()
+        builder.push(_theme_wire_hex_digit((value_i64 >> 4) & 15))
+        builder.push(_theme_wire_hex_digit(value_i64 & 15))
+    Ok(builder.to_text())
+
+fn _theme_wire_hex_decode(value: text) -> Result<text, text>:
+    if value.len() % 2 != 0:
+        return Err("theme wire: hex field has odd length")
+    if value.len() / 2 > THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_TEXT_BYTES:
+        return Err("theme wire: decoded text field exceeds byte limit")
+    val byte_count = value.len() / 2
+    var bytes: [u8] = [0u8; byte_count]
+    var i = 0
+    var byte_index = 0
+    while i < value.len():
+        val high = _theme_wire_hex_value(value.char_at(i))
+        val low = _theme_wire_hex_value(value.char_at(i + 1))
+        if high < 0 or low < 0:
+            return Err("theme wire: hex field is malformed or noncanonical")
+        bytes[byte_index] = ((high << 4) | low).to_u8()
+        byte_index = byte_index + 1
+        i = i + 2
+    val decoded = match validated_utf8_bytes_to_text_linear(bytes):
+        Err(error): return Err("theme wire: hex field does not decode to UTF-8: {error}")
+        Ok(text_value): text_value
+    if not _theme_wire_bytes_equal(text_to_bytes_linear(decoded), bytes):
+        return Err("theme wire: UTF-8 conversion changed decoded bytes")
+    Ok(decoded)
+
+fn _theme_wire_hash_valid(value: text) -> bool:
+    val bytes = text_to_bytes_linear(value)
+    if bytes.len() != 64:
+        return false
+    for byte in bytes:
+        val code = byte.to_i64()
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)):
+            return false
+    true
+
+fn _theme_wire_u32_text(value: u32) -> text:
+    "{value.to_u64()}"
+
+fn _theme_wire_i32_text(value: i32) -> text:
+    "{value.to_i64()}"
+
+fn _theme_wire_parse_u32(value: text) -> Result<u32, text>:
+    if value == "":
+        return Err("theme wire: unsigned number is empty")
+    var out: u64 = 0u64
+    var i = 0
+    while i < value.len():
+        val code = value.char_at(i) as i64
+        if code < 48 or code > 57:
+            return Err("theme wire: unsigned number is malformed")
+        val digit = (code - 48).to_u64()
+        if out > 429496729u64 or (out == 429496729u64 and digit > 5u64):
+            return Err("theme wire: unsigned number overflows u32")
+        out = out * 10u64 + digit
+        i = i + 1
+    if value.len() > 1 and value.slice(0, 1) == "0":
+        return Err("theme wire: unsigned number is noncanonical")
+    Ok(out.to_u32())
+
+fn _theme_wire_parse_i32(value: text) -> Result<i32, text>:
+    if value == "":
+        return Err("theme wire: signed number is empty")
+    var negative = false
+    var start = 0
+    if value.slice(0, 1) == "-":
+        negative = true
+        start = 1
+    if start >= value.len():
+        return Err("theme wire: signed number is malformed")
+    if value.len() - start > 1 and value.slice(start, start + 1) == "0":
+        return Err("theme wire: signed number is noncanonical")
+    var out: i64 = 0
+    var i = start
+    val limit: i64 = if negative: 2147483648 else: 2147483647
+    while i < value.len():
+        val code = value.char_at(i) as i64
+        if code < 48 or code > 57:
+            return Err("theme wire: signed number is malformed")
+        val digit = code - 48
+        if out > (limit - digit) / 10:
+            return Err("theme wire: signed number overflows i32")
+        out = out * 10 + digit
+        i = i + 1
+    if negative and out == 0:
+        return Err("theme wire: negative zero is noncanonical")
+    if negative:
+        return Ok((-out).to_i32())
+    Ok(out.to_i32())
+
+fn _theme_wire_parse_count(value: text) -> Result<i64, text>:
+    val parsed = _theme_wire_parse_u32(value)?
+    val count = parsed.to_i64()
+    if count > THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_SHADOWS:
+        return Err("theme wire: shadow count exceeds limit")
+    Ok(count)
+
+fn _theme_wire_parse_bool(value: text) -> Result<bool, text>:
+    if value == "0":
+        return Ok(false)
+    if value == "1":
+        return Ok(true)
+    Err("theme wire: bool must be 0 or 1")
+
+fn _theme_wire_field(key: text, value: text) -> text:
+    "{key}={value}\n"
+
+fn _theme_wire_text_field(key: text, value: text) -> Result<text, text>:
+    Ok(_theme_wire_field(key, _theme_wire_hex_encode(value)?))
+
+fn _theme_wire_install_metadata_valid(value: text) -> Result<(), text>:
+    if value == "":
+        return Err("theme wire: install metadata is required")
+    if text_to_bytes_linear(value).len() > THEME_PACKAGE_INSTALL_WIRE_V1_MAX_METADATA_BYTES:
+        return Err("theme wire: install metadata exceeds byte limit")
+    _theme_wire_hex_encode(value)?
+    Ok(())
+
+fn _theme_wire_required(lines: [text], index: i64, key: text) -> Result<text, text>:
+    if index >= lines.len():
+        return Err("theme wire: missing field {key}")
+    val prefix = "{key}="
+    val line = lines[index]
+    if not line.starts_with(prefix):
+        return Err("theme wire: expected field {key}")
+    Ok(line.slice(prefix.len(), line.len()))
+
+fn _theme_wire_required_text(lines: [text], index: i64, key: text) -> Result<text, text>:
+    _theme_wire_hex_decode(_theme_wire_required(lines, index, key)?)
+
+fn _theme_wire_check_envelope(wire: text, magic: text) -> Result<[text], text>:
+    val wire_bytes = text_to_bytes_linear(wire)
+    if wire_bytes.len() == 0 or wire_bytes.len() > THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_BYTES:
+        return Err("theme wire: wire size is invalid")
+    for byte in wire_bytes:
+        val code = byte.to_i64()
+        if code > 127 or (code < 32 and code != 10):
+            return Err("theme wire: wire must be printable ASCII plus line feeds")
+    if not wire.ends_with("\n"):
+        return Err("theme wire: missing final newline")
+    val lines = wire.split("\n")
+    if lines.len() < 2 or lines[0] != magic or lines[lines.len() - 1] != "":
+        return Err("theme wire: wrong magic/version or trailing data")
+    Ok(lines)
+
+fn _theme_wire_validate_snapshot(snapshot: ThemeRenderSnapshot) -> Result<(), text>:
+    if snapshot.id == "" or snapshot.family_id == "":
+        return Err("theme wire: snapshot id and family_id are required")
+    _theme_wire_hex_encode(snapshot.id)?
+    _theme_wire_hex_encode(snapshot.family_id)?
+    _theme_wire_hex_encode(snapshot.source_reference)?
+    _theme_wire_hex_encode(snapshot.composed_css)?
+    _theme_wire_hex_encode(snapshot.material.font_family)?
+    _theme_wire_hex_encode(snapshot.material.window_gradient_source_css)?
+    if not _theme_wire_hash_valid(snapshot.source_manifest_sha256):
+        return Err("theme wire: source_manifest_sha256 is malformed")
+    if not _theme_wire_hash_valid(snapshot.material_sha256):
+        return Err("theme wire: material_sha256 is malformed")
+    if theme_material_sha256(snapshot.material) != snapshot.material_sha256:
+        return Err("theme wire: material_sha256 does not match material")
+    if snapshot.material.active_shadows.len() > THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_SHADOWS or snapshot.material.inactive_shadows.len() > THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_SHADOWS:
+        return Err("theme wire: shadow count exceeds limit")
+    Ok(())
+
+fn _theme_wire_encode_shadow(prefix: text, shadow: ThemeShadowLayer) -> text:
+    var out = _theme_wire_field("{prefix}.offset_x_px", _theme_wire_i32_text(shadow.offset_x_px))
+    out = "{out}{_theme_wire_field("{prefix}.offset_y_px", _theme_wire_i32_text(shadow.offset_y_px))}"
+    out = "{out}{_theme_wire_field("{prefix}.blur_radius_px", _theme_wire_i32_text(shadow.blur_radius_px))}"
+    out = "{out}{_theme_wire_field("{prefix}.spread_radius_px", _theme_wire_i32_text(shadow.spread_radius_px))}"
+    out = "{out}{_theme_wire_field("{prefix}.rgba", _theme_wire_u32_text(shadow.rgba))}"
+    out = "{out}{_theme_wire_field("{prefix}.inset", if shadow.inset: "1" else: "0")}"
+    out
+
+fn _theme_wire_decode_shadow(lines: [text], index: i64, prefix: text) -> Result<ThemeShadowLayer, text>:
+    val offset_x_px = _theme_wire_parse_i32(_theme_wire_required(lines, index, "{prefix}.offset_x_px")?)?
+    val offset_y_px = _theme_wire_parse_i32(_theme_wire_required(lines, index + 1, "{prefix}.offset_y_px")?)?
+    val blur_radius_px = _theme_wire_parse_i32(_theme_wire_required(lines, index + 2, "{prefix}.blur_radius_px")?)?
+    val spread_radius_px = _theme_wire_parse_i32(_theme_wire_required(lines, index + 3, "{prefix}.spread_radius_px")?)?
+    val rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index + 4, "{prefix}.rgba")?)?
+    val inset = _theme_wire_parse_bool(_theme_wire_required(lines, index + 5, "{prefix}.inset")?)?
+    Ok(ThemeShadowLayer(offset_x_px: offset_x_px, offset_y_px: offset_y_px, blur_radius_px: blur_radius_px, spread_radius_px: spread_radius_px, rgba: rgba, inset: inset))
+
+pub fn theme_render_snapshot_wire_v1_encode(snapshot: ThemeRenderSnapshot) -> Result<text, text>:
+    _theme_wire_validate_snapshot(snapshot)?
+    val material = snapshot.material
+    var out = "{THEME_RENDER_SNAPSHOT_WIRE_V1_MAGIC}\n"
+    out = "{out}{_theme_wire_text_field("id", snapshot.id)?}"
+    out = "{out}{_theme_wire_text_field("family_id", snapshot.family_id)?}"
+    out = "{out}{_theme_wire_text_field("source_reference", snapshot.source_reference)?}"
+    out = "{out}{_theme_wire_field("source_manifest_sha256", snapshot.source_manifest_sha256)}"
+    out = "{out}{_theme_wire_field("material_sha256", snapshot.material_sha256)}"
+    out = "{out}{_theme_wire_text_field("composed_css", snapshot.composed_css)?}"
+    out = "{out}{_theme_wire_field("background_rgba", _theme_wire_u32_text(snapshot.background_rgba))}"
+    out = "{out}{_theme_wire_field("foreground_rgba", _theme_wire_u32_text(snapshot.foreground_rgba))}"
+    out = "{out}{_theme_wire_field("accent_rgba", _theme_wire_u32_text(snapshot.accent_rgba))}"
+    out = "{out}{_theme_wire_field("desktop_fill_rgba", _theme_wire_u32_text(material.desktop_fill_rgba))}"
+    out = "{out}{_theme_wire_field("window_fill_rgba", _theme_wire_u32_text(material.window_fill_rgba))}"
+    out = "{out}{_theme_wire_field("active_title_fill_rgba", _theme_wire_u32_text(material.active_title_fill_rgba))}"
+    out = "{out}{_theme_wire_field("inactive_title_fill_rgba", _theme_wire_u32_text(material.inactive_title_fill_rgba))}"
+    out = "{out}{_theme_wire_field("surface_alpha_milli", _theme_wire_i32_text(material.surface_alpha_milli))}"
+    out = "{out}{_theme_wire_field("backdrop_blur_px", _theme_wire_i32_text(material.backdrop_blur_px))}"
+    out = "{out}{_theme_wire_field("backdrop_saturation_milli", _theme_wire_i32_text(material.backdrop_saturation_milli))}"
+    out = "{out}{_theme_wire_field("border_width_px", _theme_wire_i32_text(material.border_width_px))}"
+    out = "{out}{_theme_wire_field("border_rgba", _theme_wire_u32_text(material.border_rgba))}"
+    out = "{out}{_theme_wire_field("corner_radius_px", _theme_wire_i32_text(material.corner_radius_px))}"
+    out = "{out}{_theme_wire_field("active_shadow_count", "{material.active_shadows.len()}")}"
+    var shadow_index = 0
+    for shadow in material.active_shadows:
+        out = "{out}{_theme_wire_encode_shadow("active_shadow.{shadow_index}", shadow)}"
+        shadow_index = shadow_index + 1
+    out = "{out}{_theme_wire_field("inactive_shadow_count", "{material.inactive_shadows.len()}")}"
+    shadow_index = 0
+    for shadow in material.inactive_shadows:
+        out = "{out}{_theme_wire_encode_shadow("inactive_shadow.{shadow_index}", shadow)}"
+        shadow_index = shadow_index + 1
+    out = "{out}{_theme_wire_text_field("font_family", material.font_family)?}"
+    out = "{out}{_theme_wire_field("font_size_px", _theme_wire_i32_text(material.font_size_px))}"
+    out = "{out}{_theme_wire_field("font_weight", _theme_wire_i32_text(material.font_weight))}"
+    out = "{out}{_theme_wire_field("text_rgba", _theme_wire_u32_text(material.text_rgba))}"
+    out = "{out}{_theme_wire_field("secondary_text_rgba", _theme_wire_u32_text(material.secondary_text_rgba))}"
+    out = "{out}{_theme_wire_field("solid_fallback_rgba", _theme_wire_u32_text(material.solid_fallback_rgba))}"
+    out = "{out}{_theme_wire_field("fallback_contrast_milli", _theme_wire_i32_text(material.fallback_contrast_milli))}"
+    out = "{out}{_theme_wire_field("window_gradient_available", if material.window_gradient_available: "1" else: "0") }"
+    out = "{out}{_theme_wire_field("window_gradient_start_rgba", _theme_wire_u32_text(material.window_gradient_start_rgba))}"
+    out = "{out}{_theme_wire_field("window_gradient_end_rgba", _theme_wire_u32_text(material.window_gradient_end_rgba))}"
+    out = "{out}{_theme_wire_text_field("window_gradient_source_css", material.window_gradient_source_css)?}"
+    if text_to_bytes_linear(out).len() > THEME_RENDER_SNAPSHOT_WIRE_V1_MAX_BYTES:
+        return Err("theme wire: encoded snapshot exceeds wire limit")
+    Ok(out)
+
+pub fn theme_render_snapshot_wire_v1_decode(wire: text) -> Result<ThemeRenderSnapshot, text>:
+    val lines = _theme_wire_check_envelope(wire, THEME_RENDER_SNAPSHOT_WIRE_V1_MAGIC)?
+    var index = 1
+    val id = _theme_wire_required_text(lines, index, "id")?
+    index = index + 1
+    val family_id = _theme_wire_required_text(lines, index, "family_id")?
+    index = index + 1
+    val source_reference = _theme_wire_required_text(lines, index, "source_reference")?
+    index = index + 1
+    val source_manifest_sha256 = _theme_wire_required(lines, index, "source_manifest_sha256")?
+    index = index + 1
+    val material_sha256 = _theme_wire_required(lines, index, "material_sha256")?
+    index = index + 1
+    val composed_css = _theme_wire_required_text(lines, index, "composed_css")?
+    index = index + 1
+    val background_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "background_rgba")?)?
+    index = index + 1
+    val foreground_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "foreground_rgba")?)?
+    index = index + 1
+    val accent_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "accent_rgba")?)?
+    index = index + 1
+    val desktop_fill_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "desktop_fill_rgba")?)?
+    index = index + 1
+    val window_fill_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "window_fill_rgba")?)?
+    index = index + 1
+    val active_title_fill_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "active_title_fill_rgba")?)?
+    index = index + 1
+    val inactive_title_fill_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "inactive_title_fill_rgba")?)?
+    index = index + 1
+    val surface_alpha_milli = _theme_wire_parse_i32(_theme_wire_required(lines, index, "surface_alpha_milli")?)?
+    index = index + 1
+    val backdrop_blur_px = _theme_wire_parse_i32(_theme_wire_required(lines, index, "backdrop_blur_px")?)?
+    index = index + 1
+    val backdrop_saturation_milli = _theme_wire_parse_i32(_theme_wire_required(lines, index, "backdrop_saturation_milli")?)?
+    index = index + 1
+    val border_width_px = _theme_wire_parse_i32(_theme_wire_required(lines, index, "border_width_px")?)?
+    index = index + 1
+    val border_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "border_rgba")?)?
+    index = index + 1
+    val corner_radius_px = _theme_wire_parse_i32(_theme_wire_required(lines, index, "corner_radius_px")?)?
+    index = index + 1
+    val active_count = _theme_wire_parse_count(_theme_wire_required(lines, index, "active_shadow_count")?)?
+    index = index + 1
+    var active_shadows: [ThemeShadowLayer] = []
+    var shadow_index = 0
+    while shadow_index < active_count:
+        active_shadows = active_shadows.push(_theme_wire_decode_shadow(lines, index, "active_shadow.{shadow_index}")?)
+        index = index + 6
+        shadow_index = shadow_index + 1
+    val inactive_count = _theme_wire_parse_count(_theme_wire_required(lines, index, "inactive_shadow_count")?)?
+    index = index + 1
+    var inactive_shadows: [ThemeShadowLayer] = []
+    shadow_index = 0
+    while shadow_index < inactive_count:
+        inactive_shadows = inactive_shadows.push(_theme_wire_decode_shadow(lines, index, "inactive_shadow.{shadow_index}")?)
+        index = index + 6
+        shadow_index = shadow_index + 1
+    val font_family = _theme_wire_required_text(lines, index, "font_family")?
+    index = index + 1
+    val font_size_px = _theme_wire_parse_i32(_theme_wire_required(lines, index, "font_size_px")?)?
+    index = index + 1
+    val font_weight = _theme_wire_parse_i32(_theme_wire_required(lines, index, "font_weight")?)?
+    index = index + 1
+    val text_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "text_rgba")?)?
+    index = index + 1
+    val secondary_text_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "secondary_text_rgba")?)?
+    index = index + 1
+    val solid_fallback_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "solid_fallback_rgba")?)?
+    index = index + 1
+    val fallback_contrast_milli = _theme_wire_parse_i32(_theme_wire_required(lines, index, "fallback_contrast_milli")?)?
+    index = index + 1
+    val window_gradient_available = _theme_wire_parse_bool(_theme_wire_required(lines, index, "window_gradient_available")?)?
+    index = index + 1
+    val window_gradient_start_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "window_gradient_start_rgba")?)?
+    index = index + 1
+    val window_gradient_end_rgba = _theme_wire_parse_u32(_theme_wire_required(lines, index, "window_gradient_end_rgba")?)?
+    index = index + 1
+    val window_gradient_source_css = _theme_wire_required_text(lines, index, "window_gradient_source_css")?
+    index = index + 1
+    if index != lines.len() - 1:
+        return Err("theme wire: trailing or duplicate field")
+    val material = ThemeMaterialSemantics(desktop_fill_rgba: desktop_fill_rgba, window_fill_rgba: window_fill_rgba, active_title_fill_rgba: active_title_fill_rgba, inactive_title_fill_rgba: inactive_title_fill_rgba, surface_alpha_milli: surface_alpha_milli, backdrop_blur_px: backdrop_blur_px, backdrop_saturation_milli: backdrop_saturation_milli, border_width_px: border_width_px, border_rgba: border_rgba, corner_radius_px: corner_radius_px, active_shadows: active_shadows, inactive_shadows: inactive_shadows, font_family: font_family, font_size_px: font_size_px, font_weight: font_weight, text_rgba: text_rgba, secondary_text_rgba: secondary_text_rgba, solid_fallback_rgba: solid_fallback_rgba, fallback_contrast_milli: fallback_contrast_milli, window_gradient_available: window_gradient_available, window_gradient_start_rgba: window_gradient_start_rgba, window_gradient_end_rgba: window_gradient_end_rgba, window_gradient_source_css: window_gradient_source_css)
+    val snapshot = ThemeRenderSnapshot(id: id, family_id: family_id, source_reference: source_reference, source_manifest_sha256: source_manifest_sha256, material_sha256: material_sha256, composed_css: composed_css, background_rgba: background_rgba, foreground_rgba: foreground_rgba, accent_rgba: accent_rgba, material: material)
+    _theme_wire_validate_snapshot(snapshot)?
+    val canonical = theme_render_snapshot_wire_v1_encode(snapshot)?
+    if canonical != wire:
+        return Err("theme wire: snapshot wire is noncanonical")
+    Ok(snapshot)
+
+pub fn theme_package_install_wire_v1_encode(requested_id: text, default_id: text, registry_path: text, snapshot: ThemeRenderSnapshot) -> Result<text, text>:
+    _theme_wire_install_metadata_valid(requested_id)?
+    _theme_wire_install_metadata_valid(default_id)?
+    _theme_wire_install_metadata_valid(registry_path)?
+    val snapshot_wire = theme_render_snapshot_wire_v1_encode(snapshot)?
+    if text_to_bytes_linear(snapshot_wire).len() > THEME_PACKAGE_INSTALL_WIRE_V1_MAX_SNAPSHOT_BYTES:
+        return Err("theme wire: snapshot is too large for install wire")
+    var out = "{THEME_PACKAGE_INSTALL_WIRE_V1_MAGIC}\n"
+    out = "{out}{_theme_wire_text_field("requested_id", requested_id)?}"
+    out = "{out}{_theme_wire_text_field("default_id", default_id)?}"
+    out = "{out}{_theme_wire_text_field("registry_path", registry_path)?}"
+    out = "{out}{_theme_wire_text_field("snapshot_wire", snapshot_wire)?}"
+    if not theme_package_install_wire_v1_within_bound(out):
+        return Err("theme wire: encoded install exceeds wire limit")
+    Ok(out)
+
+pub fn theme_package_install_wire_v1_decode(wire: text) -> Result<ThemePackageInstallProjection, text>:
+    if not theme_package_install_wire_v1_within_bound(wire):
+        return Err("theme wire: wire size is invalid")
+    val lines = _theme_wire_check_envelope(wire, THEME_PACKAGE_INSTALL_WIRE_V1_MAGIC)?
+    val requested_id = _theme_wire_required_text(lines, 1, "requested_id")?
+    val default_id = _theme_wire_required_text(lines, 2, "default_id")?
+    val registry_path = _theme_wire_required_text(lines, 3, "registry_path")?
+    val snapshot_wire = _theme_wire_required_text(lines, 4, "snapshot_wire")?
+    if lines.len() != 6:
+        return Err("theme wire: install wire has trailing or duplicate field")
+    _theme_wire_install_metadata_valid(requested_id)?
+    _theme_wire_install_metadata_valid(default_id)?
+    _theme_wire_install_metadata_valid(registry_path)?
+    if text_to_bytes_linear(snapshot_wire).len() > THEME_PACKAGE_INSTALL_WIRE_V1_MAX_SNAPSHOT_BYTES:
+        return Err("theme wire: snapshot is too large for install wire")
+    val snapshot = theme_render_snapshot_wire_v1_decode(snapshot_wire)?
+    val projection = ThemePackageInstallProjection(requested_id: requested_id, default_id: default_id, registry_path: registry_path, snapshot: snapshot)
+    val canonical = theme_package_install_wire_v1_encode(requested_id, default_id, registry_path, snapshot)?
+    if canonical != wire:
+        return Err("theme wire: install wire is noncanonical")
+    Ok(projection)
+
+export ThemePackageInstallProjection
+export theme_render_snapshot_wire_v1_encode, theme_render_snapshot_wire_v1_decode
+export theme_package_install_wire_v1_encode, theme_package_install_wire_v1_decode
+export theme_package_install_wire_v1_utf8_byte_len, theme_package_install_wire_v1_within_bound

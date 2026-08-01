@@ -1,0 +1,111 @@
+"""WmService Focus/Resize Ownership + Client Identity Hardening.
+
+Covers three protocol-security hardening items on the WM IPC parse path:
+  1. parse_focus now verifies ownership like destroy/resize/move/minimize.
+  2. parse_resize writes the new dimensions into the ECS window world
+     (WmWorld.geometries), not just the returned WmAction.
+  3. parse_create_window uses src_port (kernel-verified sender) as the
+     process identity instead of trusting a client-supplied payload
+     process_id, so a spoofed process_id cannot be used to hijack pid-keyed
+     ownership queries (see shell.spl's window_owner_process_id /
+     window_ids_for_process consumers).
+"""
+
+use std.spec
+use os.services.wm.wm_service.{WmService}
+
+extern fn unsafe_addr_of(ref: any) -> u64
+
+fn push_u32(buf: [u8], value: u32):
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+
+fn push_i32(buf: [u8], value: i32):
+    push_u32(buf, value.to_u32())
+
+fn push_u64(buf: [u8], value: u64):
+    buf.push((value & 0xFF).to_u8())
+    buf.push(((value >> 8) & 0xFF).to_u8())
+    buf.push(((value >> 16) & 0xFF).to_u8())
+    buf.push(((value >> 24) & 0xFF).to_u8())
+    buf.push(((value >> 32) & 0xFF).to_u8())
+    buf.push(((value >> 40) & 0xFF).to_u8())
+    buf.push(((value >> 48) & 0xFF).to_u8())
+    buf.push(((value >> 56) & 0xFF).to_u8())
+
+describe "WmService.parse_focus ownership (item 1)":
+    it "rejects a focus request from a port that does not own the window":
+        val wm = WmService.new()
+        wm.register_window_owner(10, 100)
+        var payload: [u8] = []
+        push_u64(payload, 10)
+        val action = wm.parse_focus(999, unsafe_addr_of(payload), payload.len().to_u32())
+        expect(action.kind).to_equal("none")
+
+    it "accepts a focus request from the owning port":
+        val wm = WmService.new()
+        wm.register_window_owner(10, 100)
+        var payload: [u8] = []
+        push_u64(payload, 10)
+        val action = wm.parse_focus(100, unsafe_addr_of(payload), payload.len().to_u32())
+        expect(action.kind).to_equal("focus")
+        expect(action.window_id).to_equal(10)
+
+describe "WmService.parse_resize protocol + ECS wiring (item 2)":
+    it "rejects a resize request from a non-owner port":
+        val wm = WmService.new()
+        wm.register_window_owner(20, 200)
+        var payload: [u8] = []
+        push_u64(payload, 20)
+        push_i32(payload, 800)
+        push_i32(payload, 600)
+        val action = wm.parse_resize(999, unsafe_addr_of(payload), payload.len().to_u32())
+        expect(action.kind).to_equal("none")
+
+    it "applies an owner resize and updates the ECS window world geometry":
+        val wm = WmService.new()
+        wm.world.spawn_window(21, 210, 210, "app.resize")
+        wm.register_window_owner(21, 210)
+        var payload: [u8] = []
+        push_u64(payload, 21)
+        push_i32(payload, 1024)
+        push_i32(payload, 768)
+        val action = wm.parse_resize(210, unsafe_addr_of(payload), payload.len().to_u32())
+        expect(action.kind).to_equal("resize")
+        expect(action.width).to_equal(1024)
+        expect(action.height).to_equal(768)
+        val e = wm.world.find_entity_for_window(21)
+        val slot = wm.world.geometries.get_slot(e)
+        expect(slot >= 0).to_equal(true)
+        expect(wm.world.geometries.dense[slot].w).to_equal(1024)
+        expect(wm.world.geometries.dense[slot].h).to_equal(768)
+
+describe "WmService client identity spoofing (item 3)":
+    it "keys ownership by src_port instead of a spoofed payload process_id, and rejects a destroy from the spoofed identity":
+        val wm = WmService.new()
+        var create_payload: [u8] = []
+        push_u32(create_payload, 5)
+        for ch in "Spoof":
+            create_payload.push(ch)
+        push_i32(create_payload, 0)
+        push_i32(create_payload, 0)
+        push_i32(create_payload, 100)
+        push_i32(create_payload, 100)
+        push_u64(create_payload, 9999) # spoofed victim pid in the payload
+        val create_action = wm.parse_create_window(42, unsafe_addr_of(create_payload), create_payload.len().to_u32())
+        expect(create_action.process_id).to_equal(42)
+
+        wm.register_window_owner_with_identity(1, create_action.owner_port, create_action.process_id, create_action.app_id)
+        expect(wm.window_owner_process_id(1)).to_equal(42)
+
+        var destroy_from_spoofed_pid: [u8] = []
+        push_u64(destroy_from_spoofed_pid, 1)
+        val spoofed_destroy = wm.parse_destroy_window(9999, unsafe_addr_of(destroy_from_spoofed_pid), destroy_from_spoofed_pid.len().to_u32())
+        expect(spoofed_destroy.kind).to_equal("none")
+
+        var destroy_from_owner: [u8] = []
+        push_u64(destroy_from_owner, 1)
+        val owner_destroy = wm.parse_destroy_window(42, unsafe_addr_of(destroy_from_owner), destroy_from_owner.len().to_u32())
+        expect(owner_destroy.kind).to_equal("destroy_window")

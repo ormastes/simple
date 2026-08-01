@@ -1,0 +1,260 @@
+# ============================================================================
+# common/structural/resolve/resolve_core.spl — GraphResolveCore CPU primitives
+#
+# Architecture Part VII §18 (GraphResolveCore record/profile contract), §29
+# Wave 7. Contract document:
+# doc/05_design/platform/structural_compute/link_manager_contract_v1.md
+#
+# Phase 1 (CPU reference) primitives shared by every ResolveProfile: name
+# interning, stable sort of definitions/references, contiguous per-key
+# grouping over the two sorted arrays, and deterministic single-group
+# reduction. This is the CPU oracle (contract §5): any future vectorized or
+# GPU-resident implementation must reproduce identical ResolveGroupResult
+# values.
+#
+# No parallel hash or sort implementation: `intern_name` reuses the existing
+# SHA-256 primitive (crypto/sha256.spl); the stable sort here is a dedicated
+# merge sort because algorithm_utils.spl only covers `[i64]` and
+# natural-order `<T>`, neither of which can express a struct-field sort key.
+# ============================================================================
+
+use std.common.crypto.types.{text_to_bytes}
+use std.common.crypto.sha256.{sha256_bytes}
+use std.common.structural.identity.entity_id.{EntityRef, Hash128, entity_ref, hash128}
+use std.common.structural.resolve.resolve_types.{
+    DefinitionRecord,
+    ReferenceRecord,
+    ResolveGroupResult,
+    ResolveGroupView,
+    ResolveKey,
+    ResolveReason,
+    ResolveStatus,
+    resolve_key_equal,
+    resolve_reason_to_u8,
+    resolve_status_to_u8
+}
+
+# ----------------------------------------------------------------------------
+# intern_name — deterministic Hash128 for a definition/reference name (§18).
+# ----------------------------------------------------------------------------
+
+fn intern_name(name: text) -> Hash128:
+    """Deterministic 128-bit intern hash for a symbol/resource name.
+
+    Reuses SHA-256 (crypto/sha256.spl, crypto/types.spl) rather than a
+    parallel hash implementation: the first 16 digest bytes become `hi`/`lo`,
+    8 bytes each, assembled little-endian (byte 0 of a half is its
+    least-significant byte) — the same byte-assembly idiom
+    `structural/wire.spl` uses for on-wire u64 fields. The same text always
+    yields the same Hash128 in this process and across runs; two distinct
+    texts collide only as likely as a genuine SHA-256 collision.
+    """
+    val digest = sha256_bytes(text_to_bytes(name))
+    hash128(_digest_u64_le(digest, 0), _digest_u64_le(digest, 8))
+
+fn _digest_u64_le(bytes: [i64], off: i64) -> i64:
+    """Assemble 8 digest bytes (each 0..255) into one 64-bit value, byte `off`
+    least-significant. Mirrors `wire.spl#wire_get_u64`'s byte order."""
+    var v = 0
+    var i = 7
+    while i >= 0:
+        v = (v << 8) | (bytes[off + i] & 0xFF)
+        i = i - 1
+    v
+
+# ----------------------------------------------------------------------------
+# Stable sort of DefinitionRecord / ReferenceRecord by
+# (key.name_hash.hi, key.name_hash.lo, key.space, order).
+#
+# Both `_def_key_le`/`_ref_key_le` are full lexicographic "<=" over that
+# 4-tuple; the merge step always takes the left run on a tie, which is what
+# makes the sort stable by construction: records whose entire sort key
+# (including `order`) matches keep their original relative position.
+# ----------------------------------------------------------------------------
+
+fn _def_key_le(a: DefinitionRecord, b: DefinitionRecord) -> bool:
+    if a.key.name_hash.hi != b.key.name_hash.hi:
+        return a.key.name_hash.hi < b.key.name_hash.hi
+    if a.key.name_hash.lo != b.key.name_hash.lo:
+        return a.key.name_hash.lo < b.key.name_hash.lo
+    if a.key.space != b.key.space:
+        return a.key.space < b.key.space
+    a.order <= b.order
+
+fn _merge_definitions(left: [DefinitionRecord], right: [DefinitionRecord]) -> [DefinitionRecord]:
+    var result: [DefinitionRecord] = []
+    var i = 0
+    var j = 0
+    val ln = left.len()
+    val rn = right.len()
+    while i < ln and j < rn:
+        if _def_key_le(left[i], right[j]):
+            result.push(left[i])
+            i = i + 1
+        else:
+            result.push(right[j])
+            j = j + 1
+    while i < ln:
+        result.push(left[i])
+        i = i + 1
+    while j < rn:
+        result.push(right[j])
+        j = j + 1
+    result
+
+fn sort_definitions_stable(defs: [DefinitionRecord]) -> [DefinitionRecord]:
+    """Stable merge sort of definitions by
+    (key.name_hash.hi, key.name_hash.lo, key.space, order) (§18)."""
+    val n = defs.len()
+    if n <= 1:
+        return defs
+    val mid = n / 2
+    var left: [DefinitionRecord] = []
+    var right: [DefinitionRecord] = []
+    var i = 0
+    while i < mid:
+        left.push(defs[i])
+        i = i + 1
+    while i < n:
+        right.push(defs[i])
+        i = i + 1
+    _merge_definitions(sort_definitions_stable(left), sort_definitions_stable(right))
+
+fn _ref_key_le(a: ReferenceRecord, b: ReferenceRecord) -> bool:
+    if a.key.name_hash.hi != b.key.name_hash.hi:
+        return a.key.name_hash.hi < b.key.name_hash.hi
+    if a.key.name_hash.lo != b.key.name_hash.lo:
+        return a.key.name_hash.lo < b.key.name_hash.lo
+    if a.key.space != b.key.space:
+        return a.key.space < b.key.space
+    a.order <= b.order
+
+fn _merge_references(left: [ReferenceRecord], right: [ReferenceRecord]) -> [ReferenceRecord]:
+    var result: [ReferenceRecord] = []
+    var i = 0
+    var j = 0
+    val ln = left.len()
+    val rn = right.len()
+    while i < ln and j < rn:
+        if _ref_key_le(left[i], right[j]):
+            result.push(left[i])
+            i = i + 1
+        else:
+            result.push(right[j])
+            j = j + 1
+    while i < ln:
+        result.push(left[i])
+        i = i + 1
+    while j < rn:
+        result.push(right[j])
+        j = j + 1
+    result
+
+fn sort_references_stable(refs: [ReferenceRecord]) -> [ReferenceRecord]:
+    """Stable merge sort of references by
+    (key.name_hash.hi, key.name_hash.lo, key.space, order) (§18)."""
+    val n = refs.len()
+    if n <= 1:
+        return refs
+    val mid = n / 2
+    var left: [ReferenceRecord] = []
+    var right: [ReferenceRecord] = []
+    var i = 0
+    while i < mid:
+        left.push(refs[i])
+        i = i + 1
+    while i < n:
+        right.push(refs[i])
+        i = i + 1
+    _merge_references(sort_references_stable(left), sort_references_stable(right))
+
+# ----------------------------------------------------------------------------
+# group_sorted — contiguous per-key slices over the two sorted arrays (§18).
+# ----------------------------------------------------------------------------
+
+fn _resolve_key_le(a: ResolveKey, b: ResolveKey) -> bool:
+    if a.name_hash.hi != b.name_hash.hi:
+        return a.name_hash.hi < b.name_hash.hi
+    if a.name_hash.lo != b.name_hash.lo:
+        return a.name_hash.lo < b.name_hash.lo
+    a.space <= b.space
+
+fn group_sorted(defs: [DefinitionRecord], refs: [ReferenceRecord]) -> [ResolveGroupView]:
+    """One ResolveGroupView per distinct ResolveKey present in `defs` and/or
+    `refs`, in ascending key order (§18). Callers MUST pass arrays already
+    ordered by `sort_definitions_stable`/`sort_references_stable`; this is a
+    two-pointer scan, not a general grouper. A key with references but no
+    definitions groups fine (`definitions_count == 0`, resolved as
+    Unresolved/MissingDefinition by `reduce_group`); a key with definitions
+    but no references groups fine too (nothing yet references it).
+    """
+    var views: [ResolveGroupView] = []
+    var di = 0
+    var ri = 0
+    val dn = defs.len()
+    val rn = refs.len()
+    while di < dn or ri < rn:
+        var take_def_first = false
+        if di >= dn:
+            take_def_first = false
+        elif ri >= rn:
+            take_def_first = true
+        else:
+            take_def_first = _resolve_key_le(defs[di].key, refs[ri].key)
+        val cur_key = if take_def_first: defs[di].key else: refs[ri].key
+        val d_start = di
+        while di < dn and resolve_key_equal(defs[di].key, cur_key):
+            di = di + 1
+        val r_start = ri
+        while ri < rn and resolve_key_equal(refs[ri].key, cur_key):
+            ri = ri + 1
+        views.push(ResolveGroupView(
+            key: cur_key,
+            definitions_offset: d_start as u32,
+            definitions_count: (di - d_start) as u32,
+            references_offset: r_start as u32,
+            references_count: (ri - r_start) as u32))
+    views
+
+# ----------------------------------------------------------------------------
+# reduce_group — deterministic reduction of one group (§18).
+# ----------------------------------------------------------------------------
+
+fn reduce_group(view: ResolveGroupView, defs: [DefinitionRecord]) -> ResolveGroupResult:
+    """Reduce one group to a single outcome (§18, contract §3).
+
+    `defs` MUST be the same `sort_definitions_stable`-ordered array `view`
+    was produced from, so `defs[view.definitions_offset]` is the group's
+    lowest-order definition.
+
+    - Zero definitions: Unresolved / MissingDefinition, selected is the zero
+      EntityRef, diagnostic_count 0.
+    - Exactly one definition: Resolved / Unspecified, diagnostic_count 0.
+    - Two or more: still Resolved to the lowest-order definition (the first
+      slot in the group, since the group is order-sorted), but the result
+      carries reason DuplicateDefinition and diagnostic_count is the number
+      of definitions after the winner — one diagnostic per extra definition
+      (contract §3) — so callers can detect and report the anomaly even
+      though resolution itself succeeded.
+    """
+    if view.definitions_count == 0:
+        return ResolveGroupResult(
+            key: view.key,
+            selected: entity_ref(0, 0),
+            status: resolve_status_to_u8(ResolveStatus.Unresolved) as u32,
+            reason: resolve_reason_to_u8(ResolveReason.MissingDefinition) as u32,
+            diagnostic_count: 0)
+    val winner = defs[view.definitions_offset as i64]
+    if view.definitions_count == 1:
+        return ResolveGroupResult(
+            key: view.key,
+            selected: winner.owner,
+            status: resolve_status_to_u8(ResolveStatus.Resolved) as u32,
+            reason: resolve_reason_to_u8(ResolveReason.Unspecified) as u32,
+            diagnostic_count: 0)
+    ResolveGroupResult(
+        key: view.key,
+        selected: winner.owner,
+        status: resolve_status_to_u8(ResolveStatus.Resolved) as u32,
+        reason: resolve_reason_to_u8(ResolveReason.DuplicateDefinition) as u32,
+        diagnostic_count: view.definitions_count - 1)

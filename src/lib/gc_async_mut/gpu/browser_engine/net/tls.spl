@@ -1,0 +1,213 @@
+"""
+# TLS Manager
+
+TLS handshake and certificate validation for the browser engine.
+Delegates cryptographic operations to the hosted runtime via extern.
+"""
+
+#![allow(REQC001)]
+#![allow(REQC004)]
+#![allow(unnamed_duplicate_typed_args)]
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsConfig, CertChain, TlsVersion}
+use std.gc_async_mut.gpu.browser_engine.shared.error.{BrowserError, network_error}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger}
+use std.nogc_sync_mut.io.browser_net_runtime.{
+    browser_runtime_string_free,
+    browser_tls_connect, browser_tls_connect_address,
+    browser_tls_write, browser_tls_write_timeout,
+    browser_tls_read, browser_tls_read_timeout,
+    browser_tls_close, browser_tls_protocol
+}
+
+pub class TlsConnection:
+    host: text
+    port: i64
+    version: TlsVersion
+    cipher: text
+    handle: i64
+
+    static fn create(host: text, port: i64, version: TlsVersion, cipher: text, handle: i64) -> TlsConnection:
+        TlsConnection(host: host, port: port, version: version, cipher: cipher, handle: handle)
+
+    fn description() -> text:
+        val ver = match self.version:
+            TlsVersion.Tls12: "TLS 1.2"
+            TlsVersion.Tls13: "TLS 1.3"
+        "{ver} connection to {self.host}:{self.port} (cipher: {self.cipher})"
+
+    fn write_text(data: text) -> i64:
+        browser_tls_write(self.handle, data)
+
+    fn write_text_timeout(data: text, timeout_ms: i64) -> i64:
+        browser_tls_write_timeout(self.handle, data, timeout_ms)
+
+    fn read_text(max_bytes: i64) -> text:
+        browser_tls_read(self.handle, max_bytes)
+
+    fn read_text_timeout(max_bytes: i64, timeout_ms: i64) -> text:
+        browser_tls_read_timeout(self.handle, max_bytes, timeout_ms)
+
+    fn close() -> bool:
+        browser_tls_close(self.handle)
+
+pub class TlsManager:
+    config: TlsConfig
+    logger: Logger
+    trusted_certs: [text]
+
+    static fn new(logger: Logger, config: TlsConfig) -> TlsManager:
+        TlsManager(
+            config: config,
+            logger: logger,
+            trusted_certs: default_trusted_certs()
+        )
+
+    me handshake(host: text, port: i64) -> Result<TlsConnection, BrowserError>:
+        self._handshake_target(host, host, port, 5000, false)
+
+    me handshake_address(
+        address: text, host: text, port: i64, timeout_ms: i64
+    ) -> Result<TlsConnection, BrowserError>:
+        self._handshake_target(address, host, port, timeout_ms, true)
+
+    me _handshake_target(
+        address: text, host: text, port: i64, timeout_ms: i64,
+        resolved_address: bool
+    ) -> Result<TlsConnection, BrowserError>:
+        self.logger.info("TLS handshake starting with {host}:{port}")
+
+        if not self.config.verify_peer:
+            return Err(network_error("TLS peer verification cannot be disabled for browser connections"))
+
+        if host.len() == 0:
+            return Err(network_error("TLS handshake: empty hostname"))
+
+        if port <= 0 or port > 65535:
+            return Err(network_error("TLS handshake: invalid port {port}"))
+        if timeout_ms <= 0:
+            return Err(network_error("TLS handshake: deadline exceeded"))
+
+        val version = negotiate_version(self.config.min_version)
+        val cipher = default_cipher(version)
+
+        val handle = if resolved_address:
+            browser_tls_connect_address(
+                address, port, host, timeout_ms
+            )
+        else:
+            browser_tls_connect(host, port, host)
+        if handle < 0:
+            return Err(network_error("TLS handshake failed for {host}:{port}: runtime TLS transport unavailable or certificate verification failed"))
+
+        val negotiated = browser_tls_protocol(handle)
+        match validated_negotiated_tls_version(negotiated, self.config.min_version):
+            Ok(actual_version):
+                self.logger.info("TLS handshake complete for {host}:{port} ({negotiated})")
+                val _ = browser_runtime_string_free(negotiated)
+                Ok(TlsConnection.create(host, port, actual_version, cipher, handle))
+            Err(error):
+                val _ = browser_runtime_string_free(negotiated)
+                val _ = browser_tls_close(handle)
+                Err(error)
+
+pub fn validated_negotiated_tls_version(protocol: text, min_version: TlsVersion) -> Result<TlsVersion, BrowserError>:
+    if protocol == "TLSv1.3":
+        return Ok(TlsVersion.Tls13)
+    if protocol == "TLSv1.2":
+        match min_version:
+            TlsVersion.Tls12: return Ok(TlsVersion.Tls12)
+            TlsVersion.Tls13: return Err(network_error("TLS 1.2 is below the configured TLS 1.3 minimum"))
+    Err(network_error("Unsupported or missing negotiated TLS protocol: {protocol}"))
+
+pub fn verify_certificate(chain: CertChain, hostname: text) -> Result<(), BrowserError>:
+    if chain.certs.len() == 0:
+        return Err(network_error("Certificate chain is empty"))
+
+    val leaf_cert = chain.certs[0]
+    if not check_hostname(leaf_cert, hostname):
+        return Err(network_error("Certificate hostname mismatch: expected {hostname}, got {leaf_cert}"))
+
+    if chain.ca_certs.len() == 0:
+        return Err(network_error("Certificate chain has no trust anchor"))
+
+    val trusted = default_trusted_certs()
+    var i = 0
+    while i < chain.ca_certs.len():
+        val ca = chain.ca_certs[i]
+        i = i + 1
+        var j = 0
+        while j < trusted.len():
+            val root = trusted[j]
+            j = j + 1
+            if ca == root:
+                return Ok(())
+
+    Err(network_error("Certificate trust anchor is not trusted"))
+
+pub fn check_hostname(cert_cn: text, hostname: text) -> bool:
+    val cn = cert_cn.to_lower()
+    val host = hostname.to_lower()
+
+    if cn == host:
+        return true
+
+    if cn.starts_with("*."):
+        val wildcard_base = cn.slice(2, cn.len())
+        if not contains_char(wildcard_base, "."):
+            return false
+
+        if not host.ends_with(wildcard_base):
+            return false
+
+        val prefix_len = host.len() - wildcard_base.len()
+        if prefix_len <= 0:
+            return false
+
+        val prefix = host.slice(0, prefix_len)
+
+        if not prefix.ends_with("."):
+            return false
+
+        val label = prefix.slice(0, prefix.len() - 1)
+        if label.len() == 0:
+            return false
+
+        if contains_char(label, "."):
+            return false
+
+        return true
+
+    false
+
+fn negotiate_version(min_version: TlsVersion) -> TlsVersion:
+    match min_version:
+        TlsVersion.Tls13:
+            TlsVersion.Tls13
+        TlsVersion.Tls12:
+            TlsVersion.Tls13
+
+fn default_cipher(version: TlsVersion) -> text:
+    match version:
+        TlsVersion.Tls13:
+            "TLS_AES_256_GCM_SHA384"
+        TlsVersion.Tls12:
+            "ECDHE-RSA-AES256-GCM-SHA384"
+
+fn default_trusted_certs() -> [text]:
+    [
+        "DigiCert Global Root G2",
+        "ISRG Root X1",
+        "Baltimore CyberTrust Root",
+        "Amazon Root CA 1",
+        "Google Trust Services - GlobalSign Root CA-R2",
+        "Sectigo RSA Domain Validation Secure Server CA"
+    ]
+
+fn contains_char(s: text, ch: text) -> bool:
+    var i = 0
+    while i < s.len():
+        if s.slice(i, i + 1) == ch:
+            return true
+        i = i + 1
+    false

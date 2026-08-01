@@ -1,0 +1,67 @@
+# Memory snapshot dump — versioned TSV per M8 `simple mem` CLI design.
+#
+# See doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md section 3.
+#
+# Format (one snapshot per file/string):
+#   simple-mem-snapshot\tv1\t{unix_ts}
+#   KIND\t{kind}\t{live_bytes}\t{live_count}
+#   OWNER\t{name}\t{live}\t{peak}\t{allocs}      (one per rt_mem_attr_report row,
+#                                                 absent when attribution is off)
+#   RSS\t{bytes}
+
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros, env_get, file_write}
+use std.nogc_sync_mut.io.signal_handlers.{install_sigusr2_handler}
+
+# Heap object kind tags run 1..28 (HeapObjectType); kind 0 is reserved/unused.
+val MEM_DUMP_KIND_MIN = 1
+val MEM_DUMP_KIND_MAX = 28
+
+val MEM_DUMP_DEFAULT_PATH = "build/mem_snapshot.tsv"
+
+extern fn rt_heap_live_bytes_by_kind(kind: i64) -> i64
+extern fn rt_heap_live_count_by_kind(kind: i64) -> i64
+extern fn rt_mem_attr_report(n: i64) -> text
+extern fn memory_usage() -> i64
+
+# Build one versioned TSV memory snapshot as a string.
+fn mem_dump_tsv() -> text:
+    val ts = time_now_unix_micros() / 1000000
+    var out = "simple-mem-snapshot\tv1\t{ts}\n"
+
+    var kind = MEM_DUMP_KIND_MIN
+    while kind <= MEM_DUMP_KIND_MAX:
+        val bytes = rt_heap_live_bytes_by_kind(kind)
+        val count = rt_heap_live_count_by_kind(kind)
+        out = out + "KIND\t{kind}\t{bytes}\t{count}\n"
+        kind = kind + 1
+
+    val owner_report = rt_mem_attr_report(32)
+    if owner_report.len() > 0:
+        for line in owner_report.split("\n"):
+            if line.len() > 0:
+                out = out + "OWNER\t{line}\n"
+
+    val rss = memory_usage()
+    out = out + "RSS\t{rss}\n"
+    out
+
+# Write a memory snapshot to `path`. Returns true on success.
+fn mem_dump_to(path: text) -> bool:
+    file_write(path, mem_dump_tsv())
+
+fn mem_dump_target_path() -> text:
+    val configured = env_get("SIMPLE_MEM_DUMP_PATH")
+    if configured.len() > 0:
+        return configured
+    MEM_DUMP_DEFAULT_PATH
+
+fn on_mem_dump_usr2():
+    mem_dump_to(mem_dump_target_path())
+
+# Install a SIGUSR2 handler that dumps a memory snapshot to
+# $SIMPLE_MEM_DUMP_PATH (default 'build/mem_snapshot.tsv') whenever the
+# process receives SIGUSR2. Returns true if the handler installed.
+fn install_mem_dump_on_usr2() -> bool:
+    install_sigusr2_handler(on_mem_dump_usr2)
+
+export mem_dump_tsv, mem_dump_to, mem_dump_target_path, install_mem_dump_on_usr2

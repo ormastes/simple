@@ -1,0 +1,49 @@
+use std.spec.{describe, it, expect}
+
+extern fn rt_file_read_text(path: text) -> text
+extern fn rt_timestamp_get_hour(micros: i64) -> i32
+extern fn rt_timestamp_get_minute(micros: i64) -> i32
+extern fn rt_timestamp_get_second(micros: i64) -> i32
+extern fn rt_timestamp_get_microsecond(micros: i64) -> i32
+
+describe "hosted timestamp provider ownership":
+    it "records and subtracts the Windows progress reset epoch":
+        val source = rt_file_read_text("src/runtime/runtime_timestamp.c") ?? ""
+        expect(source).to_contain("static int64_t g_progress_start_nanos = 0;")
+        expect(source.split("g_progress_start_nanos = rt_time_now_nanos();").len() - 1).to_equal(2)
+        expect(source).to_contain("int64_t elapsed_nanos = rt_time_now_nanos() - g_progress_start_nanos;")
+        expect(source).to_contain("if (elapsed_nanos <= 0) return 0.0;")
+        expect(source).to_contain("return (double)elapsed_nanos / 1000000000.0;")
+        expect(source.contains("return (double)rt_time_now_nanos() / 1000000000.0;")).to_be(false)
+
+    it "uses a floor-day remainder for negative sub-second timestamps":
+        expect(rt_timestamp_get_hour(-1)).to_equal(23)
+        expect(rt_timestamp_get_minute(-1)).to_equal(59)
+        expect(rt_timestamp_get_second(-1)).to_equal(59)
+        expect(rt_timestamp_get_microsecond(-1)).to_equal(999999)
+        expect(rt_timestamp_get_hour(0)).to_equal(0)
+        expect(rt_timestamp_get_microsecond(1)).to_equal(1)
+
+    it "keeps the bootstrap SFFI timestamp owner floor-based":
+        val source = rt_file_read_text("src/app/sffi_gen.templates/bootstrap_sffi.txt") ?? ""
+        expect(source).to_contain("micros.div_euclid(86_400_000_000)")
+        expect(source).to_contain("micros.rem_euclid(86_400_000_000)")
+        expect(source.contains("let secs = micros / 1_000_000")).to_be(false)
+
+        val compiler_gen = rt_file_read_text("src/compiler/90.tools/sffi_gen/specs/time_mod.spl") ?? ""
+        val app_gen = rt_file_read_text("src/app/ffi_gen.specs/time_mod.spl") ?? ""
+        expect(compiler_gen.split("micros.div_euclid(86_400_000_000)").len() - 1).to_equal(3)
+        expect(compiler_gen.split("micros.rem_euclid(86_400_000_000)").len() - 1).to_equal(3)
+        expect(app_gen.split("micros.div_euclid(86_400_000_000)").len() - 1).to_equal(3)
+        expect(app_gen.split("micros.rem_euclid(86_400_000_000)").len() - 1).to_equal(3)
+        expect(compiler_gen.contains("chrono::")).to_be(false)
+        expect(app_gen.contains("chrono::")).to_be(false)
+
+        val workspace_gen = rt_file_read_text("src/compiler/90.tools/sffi_gen/sffi_gen_workspace.spl") ?? ""
+        expect(workspace_gen.contains("chrono = ")).to_be(false)
+
+        val app_time = rt_file_read_text("src/app/io/time_ops.spl") ?? ""
+        val lib_time = rt_file_read_text("src/lib/nogc_sync_mut/io/time_ops.spl") ?? ""
+        expect(app_time).to_equal(lib_time)
+        expect(app_time).to_contain("use common.time_utils.{timestamp_get_year")
+        expect(app_time.contains("val _ = micros")).to_be(false)

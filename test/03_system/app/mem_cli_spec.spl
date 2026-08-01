@@ -1,0 +1,84 @@
+# M8 CLI skeleton for `simple mem`: post-mortem TSV snapshot inspection
+# (top/diff/help). Exercises src/app/mem/main.spl directly via
+# `simple run <file> <args...>` (no `--` separator: `simple run` forwards a
+# literal "--" token as the first post-separator arg, per
+# app/io/_CliCommands/handler_commands.spl::cli_handle_run, which would land
+# as our verb) — the "simple mem <verb>" dispatch arm in
+# app/cli/_CliMain/main_and_help.spl is source-only until the next binary
+# deploy, so this spec proves the app entry's own logic rather than the
+# dispatch arm (see doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md).
+
+use std.spec.*
+use std.io_runtime.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_text}
+
+extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
+
+val SNAP_A = "test/fixture/memstat/snap_a.tsv"
+val SNAP_B = "test/fixture/memstat/snap_b.tsv"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    "/proc/self/exe"
+
+fn run_mem(mem_args: [text]) -> (text, text, i32):
+    run_mem_timeout(mem_args, 30000)
+
+fn run_mem_timeout(mem_args: [text], timeout_ms: i64) -> (text, text, i32):
+    var args = ["run", "src/app/mem/main.spl"]
+    for a in mem_args:
+        args.push(a)
+    rt_process_run_timeout(simple_binary(), args, timeout_ms)
+
+describe "simple mem CLI":
+    it "top --profile prints an owner from the fixture snapshot":
+        val (out, _err, code) = run_mem(["top", "--profile", SNAP_A])
+        expect(code).to_equal(0)
+        expect(out).to_contain("app.mem.top")
+
+    it "top --once --profile produces one table without entering TUI loop":
+        val (out, _err, code) = run_mem(["top", "--once", "--profile", SNAP_A])
+        expect(code).to_equal(0)
+        expect(out).to_contain("Snapshot:")
+        expect(out).to_contain("app.mem.top")
+
+    it "diff prints the biggest-delta owner before the others":
+        val (out, _err, code) = run_mem(["diff", SNAP_A, SNAP_B])
+        expect(code).to_equal(0)
+        val idx_diff_cmd = out.index_of("app.mem.diff_cmd")
+        val idx_top = out.index_of("app.mem.top")
+        val idx_json = out.index_of("lib.json.parser")
+        expect(idx_diff_cmd >= 0).to_equal(true)
+        expect(idx_top >= 0).to_equal(true)
+        expect(idx_json >= 0).to_equal(true)
+        expect(idx_diff_cmd < idx_top).to_equal(true)
+        expect(idx_diff_cmd < idx_json).to_equal(true)
+
+    it "help exits 0 and prints usage":
+        val (out, _err, code) = run_mem(["help"])
+        expect(code).to_equal(0)
+        expect(out).to_contain("simple mem")
+        expect(out).to_contain("Usage:")
+
+    it "unknown verb exits 1 with help":
+        val (out, _err, code) = run_mem(["bogus-verb"])
+        expect(code).to_equal(1)
+        expect(out).to_contain("Usage:")
+
+    it "snapshot -o writes a v1 snapshot that top --profile can then read":
+        val snap_path = "build/mem_cli_spec_snapshot.tsv"
+        val (_snap_out, _snap_err, snap_code) = run_mem(["snapshot", "-o", snap_path])
+        expect(snap_code).to_equal(0)
+        expect(file_exists(snap_path)).to_equal(true)
+        val content = file_read_text(snap_path)
+        val first_line = content.split("\n")[0]
+        expect(first_line.starts_with("simple-mem-snapshot\tv1")).to_equal(true)
+        val (_top_out, _top_err, top_code) = run_mem(["top", "--profile", snap_path])
+        expect(top_code).to_equal(0)
+
+    it "gate exits 0 and prints the stage4-memory-gate verdict":
+        val (out, _err, code) = run_mem_timeout(["gate"], 120000)
+        expect(code).to_equal(0)
+        expect(out).to_contain("stage4-memory-gate")

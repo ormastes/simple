@@ -1,0 +1,309 @@
+# MIR instruction support types: blocks, GPU/VHDL metadata, operands, and
+# terminators.  This module has no dependency on instruction kinds or graphs.
+
+use compiler.hir.hir_types.{SymbolId}
+use compiler.frontend.parser_types_expr.{AsmConstraintKind, AsmLocation}
+use compiler.common.attributes.{VhdlClockedMetadata, VhdlResetPolarity, VhdlResetSynchrony}
+use compiler.mir.mir_types.*
+
+struct BlockId:
+    """Basic block identifier."""
+    id: i64
+
+impl BlockId:
+    static fn new(id: i64) -> BlockId:
+        BlockId(id: id)
+
+    static fn entry() -> BlockId:
+        BlockId.new(0)
+
+# ============================================================================
+# GPU Support Types
+# ============================================================================
+
+"""Barrier scope for GPU synchronization."""
+enum GpuBarrierScope:
+    Workgroup   # Synchronize threads within workgroup/block
+    Device      # Synchronize all threads on device (expensive)
+    Subgroup    # Synchronize threads within subgroup/warp
+
+"""Memory scope for GPU memory fences."""
+enum GpuMemoryScope:
+    Workgroup   # Workgroup-level memory visibility
+    Device      # Device-level memory visibility
+    QueueFamily # Vulkan queue family scope
+    All         # All memory (host + device)
+
+"""Atomic operation kinds for GPU."""
+enum GpuAtomicOpKind:
+    Add         # Atomic add
+    Sub         # Atomic subtract
+    And         # Atomic bitwise and
+    Or          # Atomic bitwise or
+    Xor         # Atomic bitwise xor
+    Min         # Atomic min
+    Max         # Atomic max
+    Exchange    # Atomic exchange
+    CompareExchange  # Compare and exchange
+
+# ============================================================================
+# VHDL Support Types
+# ============================================================================
+
+"""VHDL process kind."""
+enum VhdlProcessKind:
+    Combinational(sensitivity: [text])  # Combinational process with sensitivity list
+    Clocked(domain: VhdlClockDomain)    # Clocked (sequential) process
+    AsyncReset(domain: VhdlClockDomain) # Asynchronous reset process
+
+"""VHDL clock domain definition."""
+struct VhdlClockDomain:
+    name: text
+    clock_signal: text
+    reset_signal: text?
+    reset_polarity: VhdlResetPolarity
+    reset_synchrony: VhdlResetSynchrony
+    edge: VhdlClockEdge
+
+"""VHDL clock edge."""
+enum VhdlClockEdge:
+    Rising
+    Falling
+
+fn vhdl_clock_domain_name_from_metadata(clocked: VhdlClockedMetadata) -> text:
+    # Preserved logical clock-domain name for structured metadata.
+    val domain = clocked.domain.trim()
+    if domain != "":
+        domain
+    else:
+        clocked.clock_signal
+
+fn vhdl_clock_domain_from_metadata(clocked: VhdlClockedMetadata) -> VhdlClockDomain:
+    """Create MIR clock-domain data from parsed @clocked metadata."""
+    VhdlClockDomain(
+        name: vhdl_clock_domain_name_from_metadata(clocked),
+        clock_signal: clocked.clock_signal,
+        reset_signal: if clocked.has_reset: Some(clocked.reset_signal) else: nil,
+        reset_polarity: clocked.reset_polarity,
+        reset_synchrony: clocked.reset_synchrony,
+        edge: VhdlClockEdge.Rising
+    )
+
+"""VHDL signal kind."""
+enum VhdlSignalKind:
+    Wire        # Combinational signal
+    Register    # Registered signal (flip-flop)
+    Latch       # Latch-inferred signal (usually an error)
+    Constant    # Constant signal
+    Port(dir: VhdlPortDirection)  # Port signal
+
+"""VHDL port direction."""
+enum VhdlPortDirection:
+    In
+    Out
+    InOut
+    Buffer
+
+"""VHDL signal resolution."""
+enum VhdlSignalResolution:
+    Unresolved  # bit/bit_vector (single driver)
+    Resolved    # std_logic/std_logic_vector (multi-driver)
+
+"""VHDL numeric kind for type-safe width tracking."""
+enum VhdlNumericKind:
+    Signed(width: i64)
+    Unsigned(width: i64)
+    Integer(lo: i64, hi: i64)
+    Natural
+    Positive
+
+# ============================================================================
+# Borrow Checking Support Types
+# ============================================================================
+
+"""Borrow kind for borrow checking."""
+enum MirBorrowKind:
+    Shared      # &T - immutable borrow
+    Mutable     # &mut T - exclusive mutable borrow
+
+"""Place projection for borrow checking."""
+enum MirProjection:
+    Deref               # *place
+    Field(idx: i64)     # place.field_idx
+    Index(local: LocalId) # place[idx_local]
+    Downcast(variant: i64) # place as Variant
+
+"""Memory place for borrow checking."""
+struct MirPlace:
+    local: LocalId
+    projection: [MirProjection]
+
+impl MirPlace:
+    static fn local_place(id: LocalId) -> MirPlace:
+        """Create a place referring to a local variable."""
+        MirPlace(local: id, projection: [])
+
+    fn deref() -> MirPlace:
+        """Add a dereference projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Deref))
+
+    fn field(idx: i64) -> MirPlace:
+        """Add a field projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Field(idx)))
+
+    fn index(local: LocalId) -> MirPlace:
+        """Add an index projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Index(local)))
+
+    fn downcast(variant: i64) -> MirPlace:
+        """Add a downcast projection."""
+        MirPlace(local: self.local, projection: self.projection.push(MirProjection.Downcast(variant)))
+
+    fn to_text() -> text:
+        """Convert place to text representation."""
+        var result = "_l{self.local.id}"
+        for proj in self.projection:
+            match proj:
+                case Deref: result = "(*{result})"
+                case Field(idx): result = "{result}.{idx}"
+                case Index(local): result = "{result}[_l{local.id}]"
+                case Downcast(variant): result = "{result} as v{variant}"
+        result
+
+# ============================================================================
+# Operations and Operands
+# ============================================================================
+
+"""Binary operation."""
+enum MirBinOp:
+    # Arithmetic
+    Add, Sub, Mul, Div, Rem
+    Pow                         # **
+    # Matrix operations
+    MatMul                      # @
+    # Bitwise
+    BitAnd, BitOr, BitXor, Shl, Shr
+    # Comparison
+    Eq, Ne, Lt, Le, Gt, Ge
+    # Broadcast operations (dotted operators)
+    BroadcastAdd                # .+
+    BroadcastSub                # .-
+    BroadcastMul                # .*
+    BroadcastDiv                # ./
+    BroadcastPow                # .^
+    # Offset
+    Offset  # Pointer arithmetic
+
+"""Unary operation."""
+enum MirUnaryOp:
+    Neg
+    Not
+    BitNot
+    Transpose   # ' (postfix, m{} only)
+
+"""Aggregate construction kind."""
+enum AggregateKind:
+    Array(type_: MirType)
+    Tuple
+    Struct(symbol: SymbolId)
+    Enum(symbol: SymbolId, variant: i64)
+
+struct MirOperand:
+    """Instruction operand."""
+    kind: MirOperandKind
+
+"""Operand kind."""
+enum MirOperandKind:
+    Copy(local: LocalId)
+    Move(local: LocalId)
+    Const(value: MirConstValue, type_: MirType)
+
+# Free functions for MirOperand construction (workaround for bootstrap)
+fn mir_operand_copy(local: LocalId) -> MirOperand:
+    # Explicit return: implicit-tail struct constructs can lose the tail
+    # value on the stage4 native lane (returns 0 -> nil-receiver downstream).
+    val op = MirOperand(kind: MirOperandKind.Copy(local))
+    return op
+
+fn mir_operand_move(local: LocalId) -> MirOperand:
+    val op = MirOperand(kind: MirOperandKind.Move(local))
+    return op
+
+fn mir_operand_const_int(value: i64) -> MirOperand:
+    val op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
+    return op
+
+fn mir_operand_const_float(value: f64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Float(value), MirType.f64()))
+
+fn mir_operand_const_bool(value: bool) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Bool(value), MirType.bool()))
+
+impl MirOperand:
+    static fn copy(local: LocalId) -> MirOperand:
+        mir_operand_copy(local)
+
+    static fn move(local: LocalId) -> MirOperand:
+        mir_operand_move(local)
+
+    static fn const_int(value: i64) -> MirOperand:
+        mir_operand_const_int(value)
+
+    static fn const_float(value: f64) -> MirOperand:
+        mir_operand_const_float(value)
+
+    static fn const_bool(value: bool) -> MirOperand:
+        mir_operand_const_bool(value)
+
+# ============================================================================
+# MIR Terminators
+# ============================================================================
+
+"""Switch case mapping a constant value to a target block."""
+struct SwitchCase:
+    value: i64
+    target: BlockId
+
+"""Inline assembly operand."""
+struct MirAsmOperand:
+    """Assembly operand (input/output) with constraint information."""
+    name: text                  # Operand name (e.g., "op", "result")
+    kind: AsmConstraintKind     # in, out, inout, lateout
+    location: AsmLocation        # reg, mem, imm, specific register
+    operand: MirOperand         # MIR operand for the value
+
+"""Block terminator."""
+enum MirTerminator:
+    # Unconditional
+    Goto(target: BlockId)
+    Ret(value: MirOperand?)
+
+    # Conditional
+    If(cond: MirOperand, then_: BlockId, else_: BlockId)
+    Switch(value: MirOperand, targets: [SwitchCase], default: BlockId)
+
+    # Exceptional
+    Unreachable
+    Abort(message: text)
+
+    # Call terminators (for unwinding)
+    CallTerminator(
+        dest: LocalId?,
+        func: MirOperand,
+        args: [MirOperand],
+        normal: BlockId,
+        unwind: BlockId?
+    )
+
+# Compatibility exports are explicit so this owner can also be imported
+# directly without relying on wildcard visibility.
+export BlockId
+export GpuBarrierScope, GpuMemoryScope, GpuAtomicOpKind
+export VhdlProcessKind, VhdlClockDomain, VhdlClockEdge
+export VhdlSignalKind, VhdlPortDirection, VhdlSignalResolution, VhdlNumericKind
+export vhdl_clock_domain_name_from_metadata, vhdl_clock_domain_from_metadata
+export MirBorrowKind, MirProjection, MirPlace
+export MirBinOp, MirUnaryOp, AggregateKind
+export MirOperand, MirOperandKind
+export mir_operand_copy, mir_operand_move, mir_operand_const_int, mir_operand_const_float, mir_operand_const_bool
+export SwitchCase, MirAsmOperand, MirTerminator

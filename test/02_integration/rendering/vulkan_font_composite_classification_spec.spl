@@ -1,0 +1,68 @@
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.engine2d.backend.{RenderBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gc_async_mut.gpu.engine2d.backend_vulkan_font.{vulkan_font_runtime_classification}
+use std.gc_async_mut.gpu.engine2d.vulkan_session.{VulkanSession}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{vulkan_sffi_is_available, vulkan_sffi_fence_submission_supported}
+
+fn _integration_font_batch() -> FontRenderBatch:
+    FontRenderBatch(program_version: 1, font_identity: "integration-font", face_generation: 1,
+        valid: true, atlas_width: 1, atlas_height: 1, atlas_pixels: [0xffffffffu32],
+        quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0,
+            width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0xffffffffu32)],
+        atlas_generation: 1, dirty_rects: [])
+
+describe "Vulkan font composite conditional execution":
+    it "uses real runtime rungs and stops honestly at the first unavailable one":
+        step("Prove native submission and device readback")
+        val runtime_available = vulkan_sffi_is_available()
+        var backend = VulkanBackend.create()
+        if not runtime_available:
+            val evidence = backend.composite_font_batch(0, 0, _integration_font_batch())
+            expect(vulkan_font_runtime_classification(false, evidence)).to_equal("unavailable")
+            expect(evidence.reason).to_equal("font-pipeline-not-ready")
+            expect(evidence.device_executed).to_be(false)
+        else:
+            var session = VulkanSession.create()
+            val init_code = session.init()
+            if init_code != 0:
+                val evidence = backend.composite_font_batch(0, 0, _integration_font_batch())
+                expect(evidence.device_executed).to_be(false)
+                expect(evidence.promotion_ready).to_be(false)
+            else:
+                expect(backend.init_with_session(2, 2, session)).to_be(true)
+                val pipeline = backend.font_atlas_pipeline_evidence()
+                val evidence = backend.composite_font_batch(0, 0, _integration_font_batch())
+                if pipeline.status == "ready":
+                    expect(pipeline.artifact_mode).to_equal("precompiled-spirv")
+                    if pipeline.device_type == "cpu" or pipeline.device_type == "other":
+                        expect(evidence.promotion_ready).to_be(false)
+                        expect(evidence.device_executed).to_be(false)
+                        expect(evidence.reason).to_equal("accelerated-device-required")
+                    elif not vulkan_sffi_fence_submission_supported():
+                        expect(evidence.promotion_ready).to_be(false)
+                        expect(evidence.device_executed).to_be(false)
+                        expect(evidence.reason).to_equal("fenced-submit-required")
+                    else:
+                        expect(evidence.promotion_ready).to_be(true)
+                        expect(evidence.status).to_equal("promoted")
+                        expect(evidence.device_executed).to_be(true)
+                        expect(evidence.dispatch_count).to_equal(evidence.quad_count)
+                        expect(vulkan_sffi_fence_submission_supported()).to_be(true)
+                        expect(evidence.fence_handle).to_be_greater_than(0)
+                        expect(evidence.fence_evidence_available).to_be(true)
+                        expect(evidence.fence_destroyed).to_be(true)
+                        expect(evidence.completion_waited).to_be(true)
+                        expect(evidence.readback_byte_count).to_be_greater_than(0)
+                        expect(evidence.parity).to_be(true)
+                        expect(evidence.oracle_checksum).to_equal(-1242373024502763654)
+                        expect(evidence.device_checksum).to_equal(evidence.oracle_checksum)
+                        expect(evidence.device_name.len()).to_be_greater_than(0)
+                        expect(evidence.device_type == "discrete" or evidence.device_type == "integrated" or evidence.device_type == "virtual").to_be(true)
+                        expect(evidence.driver_identity.len()).to_be_greater_than(0)
+                else:
+                    expect(evidence.status).to_equal("unavailable")
+                    expect(evidence.device_executed).to_be(false)
+                backend.shutdown()
+                session.release()

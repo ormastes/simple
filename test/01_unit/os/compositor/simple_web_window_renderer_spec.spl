@@ -1,0 +1,595 @@
+use std.spec.*
+use app.io.mod.{file_read}
+use os.compositor.simple_web_window_renderer.{simple_web_content_frame_cached, simple_web_content_frame_cached_at_time, simple_web_content_full_html_with_theme, simple_web_content_full_html_with_install_wire, simple_web_content_full_html_matches_install_wire, simple_web_content_render_request_with_theme, simple_web_content_revision, simple_web_content_revision_with_theme, simple_web_external_content_frame, simple_web_external_content_frame_with_theme_receipt}
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.theme_package_wire.{theme_package_install_wire_v1_encode}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_web_provenance_valid}
+use common.ui.web_render_api.{WEB_RENDER_TARGET_SIMPLE_WEB, WebRenderRequest}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels,
+    simple_web_layout_render_html_software_result,
+    simple_web_layout_render_html_draw_ir_result
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_readback_engine2d_result}
+use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_pixel_artifact_cache, web_render_request_to_pixel_artifact}
+
+fn contains_pixel(pixels: [u32], value: u32) -> bool:
+    for pixel in pixels:
+        if pixel == value:
+            return true
+    false
+
+fn expect_no_published_web_frame(frame: WmContentFrame):
+    expect(frame.pixels.len()).to_equal(0)
+    expect(frame.checksum).to_equal(0u64)
+
+fn _web_provenance_frame(material_kind: text, material_reason: text, material_sha256: text, manifest_sha256: text) -> WmContentFrame:
+    WmContentFrame(
+        window_id: "provenance-contract",
+        scene_revision: 1,
+        content_revision: 1,
+        origin_kind: WM_CONTENT_ORIGIN_SIMPLE_WEB,
+        width: 1,
+        height: 1,
+        pixels: [0xFF000000u32],
+        checksum: 1u64,
+        parent_window_id: "",
+        offset_x: 0,
+        offset_y: 0,
+        engine2d_status: "engine2d_rendered",
+        engine2d_backend: "software",
+        material_fallback_kind: material_kind,
+        material_fallback_reason: material_reason,
+        material_fallback_sha256: material_sha256,
+        theme_id: "aetheric_dark",
+        theme_source_manifest_sha256: manifest_sha256
+    )
+
+describe "Simple Web compositor adapter":
+
+    it "projects exact accepted snapshot CSS and identity into hosted HTML":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        val html = simple_web_content_full_html_with_install_wire(
+            wire, 7, "Themed", "<main>glass</main>", 64, 48
+        )
+        expect(html).to_contain("data-wm-theme=\"aetheric_dark\"")
+        expect(html).to_contain("data-wm-theme-revision=\"7\"")
+        expect(html).to_contain(snapshot.source_manifest_sha256)
+        expect(html).to_contain(snapshot.material_sha256)
+        expect(html).to_contain(snapshot.composed_css)
+        expect(
+            simple_web_content_full_html_matches_install_wire(
+                wire, 7, html
+            )
+        ).to_be(true)
+        expect(
+            simple_web_content_full_html_matches_install_wire(
+                wire, 8, html
+            )
+        ).to_be(false)
+
+    it "accepts only exact solid, CPU, and Metal material provenance reasons":
+        val sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val solid = _web_provenance_frame(
+            "solid-material",
+            "cpu-raster-backdrop-sampling-unavailable",
+            sha256,
+            sha256
+        )
+        val cpu = _web_provenance_frame(
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            sha256,
+            sha256
+        )
+        val metal = _web_provenance_frame(
+            "metal-device-composited-material",
+            "metal-device-glass-dispatch",
+            sha256,
+            sha256
+        )
+        val wrong_solid = _web_provenance_frame(
+            "solid-material",
+            "some-other-reason",
+            sha256,
+            sha256
+        )
+        val wrong_cpu = _web_provenance_frame(
+            "cpu-composited-material",
+            "cpu-raster-backdrop-sampling-unavailable",
+            sha256,
+            sha256
+        )
+        val wrong_metal = _web_provenance_frame(
+            "metal-device-composited-material",
+            "native-device-backdrop-path-pending",
+            sha256,
+            sha256
+        )
+        expect(wm_content_frame_web_provenance_valid(solid)).to_be(true)
+        expect(wm_content_frame_web_provenance_valid(cpu)).to_be(true)
+        expect(wm_content_frame_web_provenance_valid(metal)).to_be(true)
+        expect(wm_content_frame_web_provenance_valid(wrong_solid)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(wrong_cpu)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(wrong_metal)).to_be(false)
+
+    it "rejects non-lowercase or nonhex material and manifest SHA-256 receipts":
+        val valid_sha256 = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val uppercase_sha256 = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF"
+        val nonhex_sha256 = "g123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        val uppercase_material = _web_provenance_frame(
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            uppercase_sha256,
+            valid_sha256
+        )
+        val nonhex_material = _web_provenance_frame(
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            nonhex_sha256,
+            valid_sha256
+        )
+        val uppercase_manifest = _web_provenance_frame(
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            valid_sha256,
+            uppercase_sha256
+        )
+        val nonhex_manifest = _web_provenance_frame(
+            "cpu-composited-material",
+            "native-device-backdrop-path-pending",
+            valid_sha256,
+            nonhex_sha256
+        )
+        expect(wm_content_frame_web_provenance_valid(uppercase_material)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(nonhex_material)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(uppercase_manifest)).to_be(false)
+        expect(wm_content_frame_web_provenance_valid(nonhex_manifest)).to_be(false)
+
+    it "uses the canonical Web Draw IR and Engine2D backend by default":
+        val renderer = file_read("src/os/compositor/simple_web_window_renderer.spl")
+        val host = file_read("src/os/compositor/host_compositor_core.spl")
+        val surface = file_read("src/os/compositor/web_render_surface.spl")
+        expect(renderer).to_contain("std.gc_async_mut.ui.web_render_pixel_backend")
+        expect(host).to_contain("std.gc_async_mut.ui.web_render_pixel_backend")
+        expect(surface).to_contain("std.gc_async_mut.ui.web_render_pixel_backend")
+        expect(surface).to_contain("web_render_request_to_pixel_artifact(req)")
+        expect(renderer.contains("web_render_pixel_software_backend")).to_be(false)
+        expect(host.contains("web_render_pixel_software_backend")).to_be(false)
+        expect(surface.contains("web_render_request_to_native_safe_pixel_artifact")).to_be(false)
+
+    it "produces an authoritative shared-WM frame from runtime HTML":
+        val cache = web_render_pixel_artifact_cache(36, 18, "software")
+        val body = "<p data-runtime='yes'>runtime-created content</p>"
+        val frame = simple_web_content_frame_cached(cache, "window-42", 9, 4, "glass_dark", "Arbitrary runtime title", body, 36, 18, 0)
+        expect(frame.window_id).to_equal("window-42")
+        expect(frame.scene_revision).to_equal(9)
+        expect(frame.content_revision).to_equal(4)
+        expect(frame.origin_kind).to_equal(WM_CONTENT_ORIGIN_SIMPLE_WEB)
+        expect(frame.width).to_equal(36)
+        expect(frame.height).to_equal(18)
+        expect(frame.pixels.len()).to_equal(36 * 18)
+        expect(frame.checksum).to_be_greater_than(0u64)
+        expect(frame.engine2d_status).to_equal("engine2d_rendered")
+        expect(frame.engine2d_backend.len()).to_be_greater_than(0)
+        assert_not_equal(frame.engine2d_backend, "native-safe-fallback")
+        expect(frame.material_fallback_kind).to_equal("cpu-composited-material")
+        expect(frame.material_fallback_reason).to_equal("native-device-backdrop-path-pending")
+        expect(frame.material_fallback_sha256.len()).to_equal(64)
+        expect(frame.theme_id).to_equal("glass_dark")
+        expect(frame.theme_source_manifest_sha256.len()).to_equal(64)
+        expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
+
+    it "turns validated external DrawIR execution into a web frame":
+        val html = simple_web_content_full_html_with_theme(
+            "glass_dark", "External", "<p>worker-owned</p>", 64, 48
+        )
+        val layout = simple_web_layout_render_html_draw_ir_result(html, 64, 48)
+        val raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val render = raster.render_draw_ir_composition(
+            layout.composition, []
+        )
+        val frame = simple_web_external_content_frame(
+            "external",
+            7,
+            "glass_dark",
+            64,
+            48,
+            render,
+            layout.material_witness.cpu_composited_count,
+            layout.material_witness.cpu_composited_sha256,
+            layout.material_witness.solid_material_count,
+            layout.material_witness.solid_material_sha256
+        )
+        expect(frame.pixels.len()).to_equal(64 * 48)
+        expect(frame.checksum).to_be_greater_than(0u64)
+        expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
+        raster.shutdown()
+
+    it "publishes no external frame for a mismatched theme receipt":
+        val snapshot = aetheric_dark_theme_render_snapshot()
+        val wire = theme_package_install_wire_v1_encode(
+            snapshot.id, snapshot.id, "active-wm-theme", snapshot
+        ).unwrap()
+        val html = simple_web_content_full_html_with_install_wire(
+            wire, 4, "Receipt", "<main>glass</main>", 64, 48
+        )
+        val layout = simple_web_layout_render_html_draw_ir_result(
+            html, 64, 48
+        )
+        val raster = Engine2dCompositorBackend.create_named(
+            64, 48, "software"
+        )
+        val render = raster.render_draw_ir_composition(
+            layout.composition, []
+        )
+        val valid = simple_web_external_content_frame_with_theme_receipt(
+            "receipt",
+            7,
+            4,
+            4,
+            wire,
+            snapshot.id,
+            snapshot.source_manifest_sha256,
+            snapshot.material_sha256,
+            64,
+            48,
+            render,
+            layout.material_witness.cpu_composited_count,
+            layout.material_witness.cpu_composited_sha256,
+            layout.material_witness.solid_material_count,
+            layout.material_witness.solid_material_sha256
+        )
+        expect(valid.pixels.len()).to_equal(64 * 48)
+        expect(valid.checksum).to_be_greater_than(0u64)
+
+        val wrong_source = (
+            simple_web_external_content_frame_with_theme_receipt(
+                "receipt", 7, 4, 4, wire, snapshot.id,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                snapshot.material_sha256, 64, 48, render,
+                layout.material_witness.cpu_composited_count,
+                layout.material_witness.cpu_composited_sha256,
+                layout.material_witness.solid_material_count,
+                layout.material_witness.solid_material_sha256
+            )
+        )
+        val wrong_material = (
+            simple_web_external_content_frame_with_theme_receipt(
+                "receipt", 7, 4, 4, wire, snapshot.id,
+                snapshot.source_manifest_sha256,
+                "0000000000000000000000000000000000000000000000000000000000000000",
+                64, 48, render,
+                layout.material_witness.cpu_composited_count,
+                layout.material_witness.cpu_composited_sha256,
+                layout.material_witness.solid_material_count,
+                layout.material_witness.solid_material_sha256
+            )
+        )
+        val wrong_revision = (
+            simple_web_external_content_frame_with_theme_receipt(
+                "receipt", 7, 5, 4, wire, snapshot.id,
+                snapshot.source_manifest_sha256,
+                snapshot.material_sha256, 64, 48, render,
+                layout.material_witness.cpu_composited_count,
+                layout.material_witness.cpu_composited_sha256,
+                layout.material_witness.solid_material_count,
+                layout.material_witness.solid_material_sha256
+            )
+        )
+        val wrong_id = (
+            simple_web_external_content_frame_with_theme_receipt(
+                "receipt", 7, 4, 4, wire, "wrong-theme",
+                snapshot.source_manifest_sha256,
+                snapshot.material_sha256, 64, 48, render,
+                layout.material_witness.cpu_composited_count,
+                layout.material_witness.cpu_composited_sha256,
+                layout.material_witness.solid_material_count,
+                layout.material_witness.solid_material_sha256
+            )
+        )
+        expect_no_published_web_frame(wrong_source)
+        expect_no_published_web_frame(wrong_material)
+        expect_no_published_web_frame(wrong_revision)
+        expect_no_published_web_frame(wrong_id)
+        raster.shutdown()
+
+    it "renders bounded CSS animation frames then becomes quiescent":
+        val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
+        val revision = simple_web_content_revision_with_theme(
+            "glass_dark", "Animation", body, 64, 48, 0
+        )
+        val cache = web_render_pixel_artifact_cache(64, 48, "software")
+        step("Prime a distinct static artifact in the retained pixel cache")
+        val stale_req = simple_web_content_render_request_with_theme(
+            "glass_dark", "Stale", "<p>old-static-cache-marker</p>", 64, 48
+        )
+        val stale = cache.request_to_pixel_artifact(stale_req)
+        expect(stale.pixels.len()).to_equal(64 * 48)
+        expect(cache.pixel_cache.last_html).to_contain(
+            "old-static-cache-marker"
+        )
+        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)
+        expect(cache.pixel_cache.last_render_mode).to_equal("untimed-static")
+        expect(cache.pixel_cache.last_content_revision).to_equal(-1)
+        expect(cache.stores()).to_equal(1)
+
+        step("Start the finite animation and invalidate the stale artifact")
+        val first = simple_web_content_frame_cached_at_time(
+            cache, "animated", 1, revision, "glass_dark", "Animation",
+            body, 64, 48, 0, 1000
+        )
+        expect(contains_pixel(first.pixels, 0xFFEF4444u32)).to_be(true)
+        expect(cache.pixel_cache.last_html).to_equal("")
+        expect(cache.pixel_cache.last_pixels.len()).to_equal(0)
+        expect(cache.pixel_cache.last_render_mode).to_equal("")
+        expect(cache.pixel_cache.last_content_revision).to_equal(-1)
+        expect(cache.stores()).to_equal(1)
+        expect(cache.animation_frame_due(1015)).to_be(false)
+        expect(cache.animation_frame_due(1016)).to_be(true)
+
+        step("Render the midpoint and retain the finite terminal artifact")
+        val middle = simple_web_content_frame_cached_at_time(
+            cache, "animated", 2, revision, "glass_dark", "Animation",
+            body, 64, 48, 0, 1500
+        )
+        assert_not_equal(middle.checksum, first.checksum)
+        val last = simple_web_content_frame_cached_at_time(
+            cache, "animated", 3, revision, "glass_dark", "Animation",
+            body, 64, 48, 0, 2000
+        )
+        expect(contains_pixel(last.pixels, 0xFF2563EBu32)).to_be(true)
+        assert_not_equal(last.checksum, middle.checksum)
+        expect(cache.pixel_cache.last_html).to_contain("animation:pulse")
+        expect(cache.pixel_cache.last_html.contains(
+            "old-static-cache-marker"
+        )).to_be(false)
+        expect(cache.pixel_cache.last_pixels.len()).to_equal(64 * 48)
+        expect(cache.pixel_cache.last_render_mode).to_equal("terminal")
+        expect(cache.pixel_cache.last_content_revision).to_equal(revision)
+        expect(cache.stores()).to_equal(2)
+        expect(cache.animation_frame_due(2001)).to_be(false)
+
+        step("Reuse the retained terminal artifact after unrelated damage")
+        val repeated = simple_web_content_frame_cached_at_time(
+            cache, "animated", 4, revision, "glass_dark", "Animation",
+            body, 64, 48, 0, 2000
+        )
+        expect(repeated.checksum).to_equal(last.checksum)
+        expect(repeated.pixels).to_equal(last.pixels)
+        expect(cache.stores()).to_equal(2)
+        expect(cache.hits()).to_equal(1)
+        expect(cache.animation_frame_due(2001)).to_be(false)
+
+    it "separates untimed and terminal animation cache identities":
+        val body = "<style>@keyframes pulse { from { background-color:#ef4444; } to { background-color:#2563eb; } } #stage { width:32px; height:24px; animation:pulse 1000ms linear forwards; }</style><div id='stage'></div>"
+        val req = simple_web_content_render_request_with_theme(
+            "glass_dark", "Animation", body, 64, 48
+        )
+        val revision = simple_web_content_revision_with_theme(
+            "glass_dark", "Animation", body, 64, 48, 0
+        )
+
+        step("Replace a timed terminal entry with an untimed static entry")
+        val timed_first_cache = web_render_pixel_artifact_cache(
+            64, 48, "software"
+        )
+        val _timed_start = simple_web_content_frame_cached_at_time(
+            timed_first_cache, "timed-first", 1, revision,
+            "glass_dark", "Animation", body, 64, 48, 0, 1000
+        )
+        val timed_terminal = simple_web_content_frame_cached_at_time(
+            timed_first_cache, "timed-first", 2, revision,
+            "glass_dark", "Animation", body, 64, 48, 0, 2000
+        )
+        expect(timed_first_cache.pixel_cache.last_render_mode).to_equal(
+            "terminal"
+        )
+        expect(
+            timed_first_cache.pixel_cache.last_content_revision
+        ).to_equal(revision)
+        val untimed = timed_first_cache.request_to_pixel_artifact(req)
+        assert_not_equal(untimed.pixels, timed_terminal.pixels)
+        expect(timed_first_cache.pixel_cache.last_render_mode).to_equal(
+            "untimed-static"
+        )
+        expect(
+            timed_first_cache.pixel_cache.last_content_revision
+        ).to_equal(-1)
+        expect(timed_first_cache.stores()).to_equal(2)
+        expect(timed_first_cache.hits()).to_equal(0)
+
+        step("Reject the untimed entry when the terminal frame is requested")
+        val terminal_after_untimed = simple_web_content_frame_cached_at_time(
+            timed_first_cache, "timed-first", 3, revision,
+            "glass_dark", "Animation", body, 64, 48, 0, 2000
+        )
+        expect(terminal_after_untimed.pixels).to_equal(timed_terminal.pixels)
+        expect(timed_first_cache.pixel_cache.last_render_mode).to_equal(
+            "terminal"
+        )
+        expect(
+            timed_first_cache.pixel_cache.last_content_revision
+        ).to_equal(revision)
+        expect(timed_first_cache.stores()).to_equal(3)
+        expect(timed_first_cache.hits()).to_equal(0)
+        val terminal_hit = simple_web_content_frame_cached_at_time(
+            timed_first_cache, "timed-first", 4, revision,
+            "glass_dark", "Animation", body, 64, 48, 0, 2000
+        )
+        expect(terminal_hit.pixels).to_equal(timed_terminal.pixels)
+        expect(timed_first_cache.stores()).to_equal(3)
+        expect(timed_first_cache.hits()).to_equal(1)
+
+        step("Reject an untimed entry when a fresh timed session reaches terminal")
+        val untimed_first_cache = web_render_pixel_artifact_cache(
+            64, 48, "software"
+        )
+        val untimed_first = untimed_first_cache.request_to_pixel_artifact(req)
+        expect(untimed_first_cache.pixel_cache.last_render_mode).to_equal(
+            "untimed-static"
+        )
+        expect(
+            untimed_first_cache.pixel_cache.last_content_revision
+        ).to_equal(-1)
+        val _fresh_start = simple_web_content_frame_cached_at_time(
+            untimed_first_cache, "untimed-first", 1, revision,
+            "glass_dark", "Animation", body, 64, 48, 0, 3000
+        )
+        expect(untimed_first_cache.pixel_cache.last_html).to_equal("")
+        val fresh_terminal = simple_web_content_frame_cached_at_time(
+            untimed_first_cache, "untimed-first", 2, revision,
+            "glass_dark", "Animation", body, 64, 48, 0, 4000
+        )
+        assert_not_equal(untimed_first.pixels, fresh_terminal.pixels)
+        expect(fresh_terminal.pixels).to_equal(timed_terminal.pixels)
+        expect(untimed_first_cache.pixel_cache.last_render_mode).to_equal(
+            "terminal"
+        )
+        expect(
+            untimed_first_cache.pixel_cache.last_content_revision
+        ).to_equal(revision)
+        expect(untimed_first_cache.stores()).to_equal(2)
+        expect(untimed_first_cache.hits()).to_equal(0)
+        val fresh_terminal_hit = simple_web_content_frame_cached_at_time(
+            untimed_first_cache, "untimed-first", 3, revision,
+            "glass_dark", "Animation", body, 64, 48, 0, 4000
+        )
+        expect(fresh_terminal_hit.pixels).to_equal(fresh_terminal.pixels)
+        expect(untimed_first_cache.stores()).to_equal(2)
+        expect(untimed_first_cache.hits()).to_equal(1)
+        expect(untimed_first_cache.animation_frame_due(4001)).to_be(false)
+
+    it "keeps shared-WM content requests free of a duplicate inner titlebar":
+        val req = simple_web_content_render_request_with_theme("glass_dark", "Runtime title", "<p>body</p>", 80, 40)
+        expect(req.body_html.contains("wm-app-titlebar")).to_be(false)
+        expect(req.body_html.contains("wm-app-content")).to_be(true)
+        expect(req.body_html.contains("widget-panel")).to_be(true)
+
+    it "composes Aetheric package CSS instead of a renderer-owned palette":
+        val req = simple_web_content_render_request_with_theme("aetheric_dark", "Runtime title", "<p>body</p>", 80, 40)
+        expect(req.css).to_contain("--ui-accent: #adc6ff")
+        expect(req.css).to_contain(".widget-panel")
+        expect(req.css).to_contain("--theme-icon-terminal")
+        expect(req.css).to_contain("backdrop-filter")
+        expect(req.body_html).to_contain("data-wm-theme-material-mode='engine2d-cpu-composited-material-v1'")
+        expect(req.body_html).to_contain("data-wm-theme-fallback='solid-material'")
+        expect(req.body_html).to_contain("data-wm-theme-bg='#1F1F21'")
+        expect(req.body_html).to_contain("data-wm-theme-fg='#E4E2E4'")
+        expect(req.css.contains("#dbeafe")).to_be(false)
+        expect(req.css.contains("#f8fafc")).to_be(false)
+
+    it "serializes production WM aliases through the canonical request":
+        val body = "<section class='wm-window focused'><header class='wm-titlebar'><h1 class='wm-title'>Aetheric</h1></header></section>"
+        val html = simple_web_content_full_html_with_theme("aetheric_dark", "Aetheric", body, 320, 200)
+        expect(html).to_contain("<html data-wm-theme=\"aetheric_dark\"")
+        expect(html).to_contain("data-wm-theme-fallback='solid-material'")
+        expect(html).to_contain(".widget-dialog, .wm-window")
+        expect(html).to_contain(".widget-label, .wm-title")
+        expect(html).to_contain(".widget-tab-bar, .wm-titlebar")
+        expect(html).to_contain(body)
+
+    it "does not overlay the legacy blue slate WM heuristic on themed content":
+        val cache = web_render_pixel_artifact_cache(80, 40, "software")
+        val revision = simple_web_content_revision_with_theme("aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
+        val frame = simple_web_content_frame_cached(cache, "theme-window", 1, revision, "aetheric_dark", "Theme", "<div>content</div>", 80, 40, 0)
+        expect(contains_pixel(frame.pixels, 0xFF1F1F21u32)).to_be(true)
+        expect(contains_pixel(frame.pixels, 0xFF2050A0u32)).to_be(false)
+        expect(contains_pixel(frame.pixels, 0xFF182230u32)).to_be(false)
+
+    it "realizes the declared solid fallback instead of the translucent surface RGB":
+        val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:rgba(255,0,0,0.2);color:#FFFFFF;backdrop-filter:blur(12px)'>fallback</div>"
+        val pixels = simple_web_layout_render_html_software_pixels(html, 24, 16)
+        expect(contains_pixel(pixels, 0xFF123456u32)).to_be(true)
+        expect(contains_pixel(pixels, 0xFFFEDCBAu32)).to_be(true)
+
+    it "clears an earlier multilayer background when realizing the WM fallback":
+        val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:radial-gradient(circle,#FF0000,#0000FF),rgba(255,0,0,0.2);backdrop-filter:blur(12px)'>fallback</div>"
+        val software = simple_web_layout_render_html_software_result(html, 24, 16)
+        val draw_ir = simple_web_layout_render_html_readback_engine2d_result(html, 24, 16, "software")
+        expect(contains_pixel(software.pixels, 0xFF123456u32)).to_be(true)
+        expect(software.material_fallback.kind).to_equal("solid-material")
+        expect(software.material_fallback.material_sha256.len()).to_equal(64)
+        expect(draw_ir.material_fallback.kind).to_equal("solid-material")
+        expect(draw_ir.material_fallback.material_sha256).to_equal(software.material_fallback.material_sha256)
+
+    it "honors a later background shorthand after background-image none":
+        val later_none = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background:radial-gradient(circle,#FF0000,#0000FF);background-image:none'>x</div>", 24, 16)
+        val later_gradient = simple_web_layout_render_html_software_pixels("<div style='width:24px;height:16px;background-image:none;background:radial-gradient(circle,#FF0000,#0000FF)'>x</div>", 24, 16)
+        assert_not_equal(later_gradient, later_none)
+
+    it "propagates stable realized fallback provenance through cache hits":
+        val req = simple_web_content_render_request_with_theme("aetheric_dark", "Theme", "<p>fallback</p>", 80, 40)
+        val cache = web_render_pixel_artifact_cache(80, 40, "software")
+        val first = cache.request_to_pixel_artifact(req)
+        val second = cache.request_to_pixel_artifact(req)
+        expect(first.material_fallback.kind).to_equal("cpu-composited-material")
+        expect(first.material_fallback.reason).to_equal("native-device-backdrop-path-pending")
+        expect(first.material_fallback.material_sha256.len()).to_equal(64)
+        expect(second.material_fallback.material_sha256).to_equal(first.material_fallback.material_sha256)
+        expect(cache.hits()).to_equal(1)
+
+    it "keeps Aetheric fallback provenance for an empty runtime window":
+        val cache = web_render_pixel_artifact_cache(80, 40, "software")
+        val revision = simple_web_content_revision_with_theme("aetheric_dark", "System Console", "", 80, 40, 0)
+        val frame = simple_web_content_frame_cached(cache, "empty-window", 1, revision, "aetheric_dark", "System Console", "", 80, 40, 0)
+        expect(frame.material_fallback_kind).to_equal("cpu-composited-material")
+        expect(frame.material_fallback_reason).to_equal("native-device-backdrop-path-pending")
+        expect(frame.material_fallback_sha256.len()).to_equal(64)
+        expect(wm_content_frame_web_provenance_valid(frame)).to_be(true)
+
+    it "hashes resolved fallback colors rather than CSS spelling":
+        val hex_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "hex", "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA'>x</div>", "", "", 24, 16)
+        val rgb_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "rgb", "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='rgb(18,52,86)' data-wm-theme-fg='rgb(254,220,186)'>x</div>", "", "", 24, 16)
+        val changed_req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "changed", "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#654321' data-wm-theme-fg='#FEDCBA'>x</div>", "", "", 24, 16)
+        val hex_artifact = web_render_request_to_pixel_artifact(hex_req)
+        val rgb_artifact = web_render_request_to_pixel_artifact(rgb_req)
+        val changed_artifact = web_render_request_to_pixel_artifact(changed_req)
+        expect(hex_artifact.material_fallback.kind).to_equal("solid-material")
+        expect(rgb_artifact.material_fallback.kind).to_equal("solid-material")
+        expect(hex_artifact.material_fallback.material_sha256.len()).to_equal(64)
+        expect(hex_artifact.material_fallback.material_sha256).to_equal(rgb_artifact.material_fallback.material_sha256)
+        assert_not_equal(hex_artifact.material_fallback.material_sha256, changed_artifact.material_fallback.material_sha256)
+
+    it "does not report fallback provenance for ordinary opaque HTML":
+        val req = WebRenderRequest.html(WEB_RENDER_TARGET_SIMPLE_WEB, "plain", "<div style='background:#123456;color:#FEDCBA'>x</div>", "", "", 24, 16)
+        val artifact = web_render_request_to_pixel_artifact(req)
+        expect(artifact.material_fallback.kind).to_equal("none")
+
+    it "uses the same realized fallback hash for software and Draw IR execution":
+        val html = "<div data-wm-theme-fallback='solid-material' data-wm-theme-bg='#123456' data-wm-theme-fg='#FEDCBA' style='width:24px;height:16px;background:rgba(255,0,0,0.2);color:#FFFFFF;backdrop-filter:blur(12px)'>fallback</div>"
+        val software = simple_web_layout_render_html_software_result(html, 24, 16)
+        val draw_ir = simple_web_layout_render_html_readback_engine2d_result(html, 24, 16, "software")
+        expect(software.material_fallback.kind).to_equal("solid-material")
+        expect(draw_ir.material_fallback.kind).to_equal("solid-material")
+        expect(software.material_fallback.material_sha256.len()).to_equal(64)
+        expect(draw_ir.material_fallback.material_sha256).to_equal(software.material_fallback.material_sha256)
+
+    it "keeps compatibility aliases package-owned and themes cache revisions":
+        val canonical = simple_web_content_revision_with_theme("aetheric_dark", "title", "<p>body</p>", 80, 40, 0)
+        val alias = simple_web_content_revision_with_theme("glass_light", "title", "<p>body</p>", 80, 40, 0)
+        val missing = simple_web_content_revision_with_theme("missing_theme_for_revision_test", "title", "<p>body</p>", 80, 40, 0)
+        expect(alias).to_equal(canonical)
+        assert_not_equal(missing, canonical)
+
+    it "keeps unchanged content identity stable and changes it on mutation":
+        val first_cache = web_render_pixel_artifact_cache(96, 48, "software")
+        val second_cache = web_render_pixel_artifact_cache(96, 48, "software")
+        val changed_cache = web_render_pixel_artifact_cache(96, 48, "software")
+        val stable_revision = simple_web_content_revision("动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val repeated_revision = simple_web_content_revision("动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val changed_revision = simple_web_content_revision("动态 title", "<b>changed pixels</b>", 96, 48, 0)
+        val first = simple_web_content_frame_cached(first_cache, "w", 1, stable_revision, "glass_dark", "动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val second = simple_web_content_frame_cached(second_cache, "w", 2, repeated_revision, "glass_dark", "动态 title", "<b>same pixels</b>", 96, 48, 0)
+        val changed = simple_web_content_frame_cached(changed_cache, "w", 3, changed_revision, "glass_dark", "动态 title", "<b>changed pixels</b>", 96, 48, 0)
+        expect(stable_revision).to_equal(repeated_revision)
+        assert_not_equal(stable_revision, changed_revision)
+        expect(first.checksum).to_equal(second.checksum)
+        expect(first.pixels).to_equal(second.pixels)
+        assert_not_equal(first.checksum, changed.checksum)

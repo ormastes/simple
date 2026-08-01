@@ -1,0 +1,356 @@
+# Stroke dashing — mirrors SkDashPathEffect.
+#
+# Given an input path, a dash pattern `[on, off, on, off, ...]` (floats in path-space units),
+# and a phase offset, produces a new path where only the "on" segments are present.
+# Curve verbs are first flattened to line segments via evenly spaced sampling before dashing.
+
+use std.skia.entity.path.{SkPath, SkPathSegment, SkPathVerb, sk_path_new}
+use std.skia.entity.geometry.{SkPoint}
+
+# ============================================================================
+# DashPattern
+# ============================================================================
+
+class DashPattern:
+    intervals: [f64]
+    phase: f64
+
+fn dash_pattern_new(intervals: [f64], phase: f64) -> DashPattern:
+    DashPattern(intervals: intervals, phase: phase)
+
+# ============================================================================
+# Internal helpers
+# ============================================================================
+
+# Newton 8-iteration sqrt for environments without a native sqrt on f64.
+fn _sqrt(x: f64) -> f64:
+    if x <= 0.0:
+        return 0.0
+    var g = x
+    if g > 1.0:
+        g = x * 0.5
+    var i = 0
+    while i < 8:
+        g = 0.5 * (g + x / g)
+        i = i + 1
+    g
+
+fn _segment_length(x0: f64, y0: f64, x1: f64, y1: f64) -> f64:
+    val dx = x1 - x0
+    val dy = y1 - y0
+    _sqrt(dx * dx + dy * dy)
+
+fn _interpolate(x0: f64, y0: f64, x1: f64, y1: f64, t: f64) -> (f64, f64):
+    val x = x0 + (x1 - x0) * t
+    val y = y0 + (y1 - y0) * t
+    (x, y)
+
+fn _pattern_total(pattern: DashPattern) -> f64:
+    var total = 0.0
+    var i = 0
+    while i < pattern.intervals.length():
+        val opt = pattern.intervals.at(i)
+        match opt:
+            Some(v):
+                total = total + v
+            None:
+                pass_do_nothing
+        i = i + 1
+    total
+
+fn _interval_at(pattern: DashPattern, i: i64) -> f64:
+    val opt = pattern.intervals.at(i)
+    match opt:
+        Some(v):
+            return v
+        None:
+            return 0.0
+
+# Normalize phase into [0, total) and compute the starting (interval_index, on_flag,
+# remaining_in_interval). Intervals alternate starting with "on" at index 0.
+fn _phase_start(pattern: DashPattern) -> (i64, bool, f64):
+    val n = pattern.intervals.length()
+    val total = _pattern_total(pattern)
+    if total <= 0.0:
+        return (0, false, 0.0)
+    # Reduce phase modulo total; support negative phases by shifting.
+    var p = pattern.phase
+    while p < 0.0:
+        p = p + total
+    while p >= total:
+        p = p - total
+    var i = 0
+    var acc = 0.0
+    while i < n:
+        val len = _interval_at(pattern, i)
+        if p < acc + len:
+            val consumed = p - acc
+            val remaining = len - consumed
+            val on_flag = (i % 2) == 0
+            return (i, on_flag, remaining)
+        acc = acc + len
+        i = i + 1
+    # Fallback — should not be reached because p < total.
+    (0, true, _interval_at(pattern, 0))
+
+# Flatten the input path into a flat array of [x0, y0, x1, y1] line segments.
+# Curves are sampled evenly with 16 samples.
+fn _flatten(input: SkPath) -> [(f64, f64, f64, f64)]:
+    var out: [(f64, f64, f64, f64)] = []
+    var cur_x = 0.0
+    var cur_y = 0.0
+    var start_x = 0.0
+    var start_y = 0.0
+    var has_cur = false
+    var i = 0
+    while i < input.segments.length():
+        val opt = input.segments.at(i)
+        match opt:
+            Some(seg):
+                match seg.verb:
+                    SkPathVerb.Move:
+                        val p_opt = seg.pts.at(0)
+                        match p_opt:
+                            Some(p):
+                                cur_x = p.x
+                                cur_y = p.y
+                                start_x = p.x
+                                start_y = p.y
+                                has_cur = true
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Line:
+                        val p_opt = seg.pts.at(0)
+                        match p_opt:
+                            Some(p):
+                                if has_cur:
+                                    out.append((cur_x, cur_y, p.x, p.y))
+                                cur_x = p.x
+                                cur_y = p.y
+                                has_cur = true
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Quad:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        if has_cur:
+                                            var k = 1
+                                            var px = cur_x
+                                            var py = cur_y
+                                            while k <= 16:
+                                                val t = (k as f64) / 16.0
+                                                val omt = 1.0 - t
+                                                val bx = omt * omt * cur_x + 2.0 * omt * t * p1.x + t * t * p2.x
+                                                val by = omt * omt * cur_y + 2.0 * omt * t * p1.y + t * t * p2.y
+                                                out.append((px, py, bx, by))
+                                                px = bx
+                                                py = by
+                                                k = k + 1
+                                        cur_x = p2.x
+                                        cur_y = p2.y
+                                        has_cur = true
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Conic:
+                        # Treat conic like a quad for flattening purposes.
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        if has_cur:
+                                            var k = 1
+                                            var px = cur_x
+                                            var py = cur_y
+                                            while k <= 16:
+                                                val t = (k as f64) / 16.0
+                                                val omt = 1.0 - t
+                                                val bx = omt * omt * cur_x + 2.0 * omt * t * p1.x + t * t * p2.x
+                                                val by = omt * omt * cur_y + 2.0 * omt * t * p1.y + t * t * p2.y
+                                                out.append((px, py, bx, by))
+                                                px = bx
+                                                py = by
+                                                k = k + 1
+                                        cur_x = p2.x
+                                        cur_y = p2.y
+                                        has_cur = true
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Cubic:
+                        val p1_opt = seg.pts.at(0)
+                        val p2_opt = seg.pts.at(1)
+                        val p3_opt = seg.pts.at(2)
+                        match p1_opt:
+                            Some(p1):
+                                match p2_opt:
+                                    Some(p2):
+                                        match p3_opt:
+                                            Some(p3):
+                                                if has_cur:
+                                                    var k = 1
+                                                    var px = cur_x
+                                                    var py = cur_y
+                                                    while k <= 16:
+                                                        val t = (k as f64) / 16.0
+                                                        val omt = 1.0 - t
+                                                        val b0 = omt * omt * omt
+                                                        val b1 = 3.0 * omt * omt * t
+                                                        val b2 = 3.0 * omt * t * t
+                                                        val b3 = t * t * t
+                                                        val bx = b0 * cur_x + b1 * p1.x + b2 * p2.x + b3 * p3.x
+                                                        val by = b0 * cur_y + b1 * p1.y + b2 * p2.y + b3 * p3.y
+                                                        out.append((px, py, bx, by))
+                                                        px = bx
+                                                        py = by
+                                                        k = k + 1
+                                                cur_x = p3.x
+                                                cur_y = p3.y
+                                                has_cur = true
+                                            None:
+                                                pass_do_nothing
+                                    None:
+                                        pass_do_nothing
+                            None:
+                                pass_do_nothing
+                    SkPathVerb.Close:
+                        if has_cur:
+                            out.append((cur_x, cur_y, start_x, start_y))
+                            cur_x = start_x
+                            cur_y = start_y
+            None:
+                pass_do_nothing
+        i = i + 1
+    out
+
+# ============================================================================
+# dash_path
+# ============================================================================
+#
+# Walks the flattened path, consuming the dash pattern along arc length.
+# Emits move_to + line_to into the output path during "on" intervals,
+# and advances (without emitting) during "off" intervals.
+
+fn dash_path(input: SkPath, pattern: DashPattern) -> SkPath:
+    val out_empty = sk_path_new()
+    if input.is_empty():
+        return out_empty
+    val n_intervals = pattern.intervals.length()
+    if n_intervals == 0:
+        return out_empty
+    val total = _pattern_total(pattern)
+    if total <= 0.0:
+        return out_empty
+
+    val segs = _flatten(input)
+    if segs.length() == 0:
+        return out_empty
+
+    val start = _phase_start(pattern)
+    var idx = start.0
+    var on_flag = start.1
+    var remaining = start.2
+
+    var out = out_empty
+    # Track an open "on" sub-segment — we emit a move_to when we enter an
+    # on-interval and line_to whenever we cross into a new line or exit.
+    var sub_open = false
+    var sub_sx = 0.0
+    var sub_sy = 0.0
+
+    var si = 0
+    while si < segs.length():
+        val tup_opt = segs.at(si)
+        match tup_opt:
+            Some(tup):
+                val x0 = tup.0
+                val y0 = tup.1
+                val x1 = tup.2
+                val y1 = tup.3
+                val seg_len = _segment_length(x0, y0, x1, y1)
+                if seg_len > 0.0:
+                    var consumed = 0.0
+                    var cx = x0
+                    var cy = y0
+                    # If we were in an on interval at the start, open a sub-seg
+                    # at (x0, y0). If no sub_open, we open now if on_flag.
+                    if on_flag and sub_open == false:
+                        sub_sx = cx
+                        sub_sy = cy
+                        sub_open = true
+                    while consumed < seg_len:
+                        val available = seg_len - consumed
+                        if remaining >= available:
+                            # Whole remainder of this line consumed inside the
+                            # current pattern interval.
+                            cx = x1
+                            cy = y1
+                            remaining = remaining - available
+                            consumed = seg_len
+                        else:
+                            # Advance by `remaining` along the line, then flip interval.
+                            val new_consumed = consumed + remaining
+                            val t = new_consumed / seg_len
+                            val pos = _interpolate(x0, y0, x1, y1, t)
+                            cx = pos.0
+                            cy = pos.1
+                            if on_flag:
+                                # Emit move_to + line_to from sub start to here,
+                                # then close the sub.
+                                out = out.move_to(sub_sx, sub_sy)
+                                out = out.line_to(cx, cy)
+                                sub_open = false
+                            consumed = new_consumed
+                            # Advance pattern pointer.
+                            idx = (idx + 1) % n_intervals
+                            remaining = _interval_at(pattern, idx)
+                            on_flag = (idx % 2) == 0
+                            if on_flag:
+                                sub_sx = cx
+                                sub_sy = cy
+                                sub_open = true
+                    # End of this line — if we are still in an on interval and
+                    # the sub is open, it stays open across the segment boundary.
+                    # If next segment is non-contiguous (different start point),
+                    # we simply emit now and reopen at the next segment's start.
+                    if sub_open:
+                        # Peek next segment start (if any) to decide whether to flush.
+                        if si + 1 < segs.length():
+                            val next_opt = segs.at(si + 1)
+                            match next_opt:
+                                Some(nxt):
+                                    val nx0 = nxt.0
+                                    val ny0 = nxt.1
+                                    if nx0 != cx or ny0 != cy:
+                                        out = out.move_to(sub_sx, sub_sy)
+                                        out = out.line_to(cx, cy)
+                                        sub_open = false
+                                None:
+                                    pass_do_nothing
+                        else:
+                            out = out.move_to(sub_sx, sub_sy)
+                            out = out.line_to(cx, cy)
+                            sub_open = false
+            None:
+                pass_do_nothing
+        si = si + 1
+
+    # Flush any still-open sub-segment (contiguous all the way through).
+    if sub_open:
+        # We need to emit from sub_sx/sub_sy to the last flattened endpoint.
+        val last_opt = segs.at(segs.length() - 1)
+        match last_opt:
+            Some(last):
+                out = out.move_to(sub_sx, sub_sy)
+                out = out.line_to(last.2, last.3)
+            None:
+                pass_do_nothing
+    out

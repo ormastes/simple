@@ -1,0 +1,154 @@
+"""No-GC Draw IR runtime queue dispatch helpers.
+
+This module owns the pure queue/payload side of Draw IR host-GPU dispatch.
+Concrete rendering remains in backend-specific Engine2D modules; this layer
+only decides whether a Draw IR batch becomes a runtime queue packet and records
+the drain/dispatch receipt.
+"""
+
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_GPU,
+    DrawIrBatch,
+    draw_ir_composition,
+    simple_2d_draw_ir_adv_plan
+}
+use common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.nogc_async_mut.gpu.engine2d.backend_lane.{
+    ENGINE2D_HOST_GPU_LANE_GPU,
+    ENGINE2D_HOST_GPU_LANE_HOST,
+    engine2d_host_gpu_lane_schedule
+}
+use std.nogc_async_mut.gpu.engine2d.host_gpu_event_queue.{
+    Engine2dHostGpuRuntimeDispatchResult,
+    Engine2dHostGpuRuntimeDrainResult,
+    Engine2dHostGpuRuntimeQueue,
+    Engine2dHostGpuRuntimeSubmitResult,
+    engine2d_host_gpu_event,
+    engine2d_host_gpu_event_handler_decision,
+    engine2d_host_gpu_event_submit_to_runtime_payload_text,
+    engine2d_host_gpu_runtime_submit_with_payload,
+    engine2d_host_gpu_runtime_drain,
+    engine2d_host_gpu_runtime_dispatch_draw_ir
+}
+use std.diag.{dbg_stage, dbg_stage_on, dbg_event_hop, dbg_events_on, dbg_count, dbg_provenance}
+
+struct Engine2dDrawIrPayloadSummary:
+    schema: text
+    batch_id: text
+    source_kind: text
+    source_id: text
+    surface_id: text
+    component_id: text
+    command_count: i32
+    packet_bytes: i64
+    command_checksum: i64
+    payload_sdn: text
+    payload_sdn_bytes: i64
+    summary: text
+
+struct Engine2dDrawIrQueueDispatchResult:
+    runtime_submit: Engine2dHostGpuRuntimeSubmitResult
+    runtime_drain: Engine2dHostGpuRuntimeDrainResult
+    runtime_dispatch: Engine2dHostGpuRuntimeDispatchResult
+    queued_for_gpu: bool
+    payload: Engine2dDrawIrPayloadSummary
+
+fn _engine2d_draw_ir_empty_submit(unit_id: text, status: text, diagnostic: text) -> Engine2dHostGpuRuntimeSubmitResult:
+    Engine2dHostGpuRuntimeSubmitResult(submitted: false, status: status, queue_handle: 0, event_id: unit_id, packet_id: 0, packet_bytes: 0, payload_summary: "", diagnostic: diagnostic)
+
+fn _engine2d_draw_ir_empty_drain(status: text, diagnostic: text) -> Engine2dHostGpuRuntimeDrainResult:
+    Engine2dHostGpuRuntimeDrainResult(drained: 0, status: status, queue_handle: 0, last_backend_handle: 0, last_payload_size: 0, last_payload_hash: 0, last_payload_text: "", submitted_count: 0, completed_count: 0, last_status_code: 0, diagnostic: diagnostic)
+
+fn _engine2d_draw_ir_empty_dispatch(status: text, diagnostic: text) -> Engine2dHostGpuRuntimeDispatchResult:
+    Engine2dHostGpuRuntimeDispatchResult(dispatched: false, status: status, backend_name: "", queue_handle: 0, backend_handle: 0, payload_hash: 0, payload_size: 0, payload_text: "", diagnostic: diagnostic)
+
+fn engine2d_draw_ir_payload_checksum(batch: DrawIrBatch) -> i64:
+    var checksum: i64 = 0
+    var i = 0
+    while i < batch.commands.len():
+        val command = batch.commands[i]
+        checksum = (checksum + (i.to_i64() + 1) * 17) % 2147483647
+        checksum = (checksum + command.kind.len().to_i64() * 31) % 2147483647
+        checksum = (checksum + command.component_id.len().to_i64() * 37) % 2147483647
+        checksum = (checksum + command.x.to_i64() * 41) % 2147483647
+        checksum = (checksum + command.y.to_i64() * 43) % 2147483647
+        checksum = (checksum + command.width.to_i64() * 47) % 2147483647
+        checksum = (checksum + command.height.to_i64() * 53) % 2147483647
+        checksum = (checksum + command.color.to_i64() * 59) % 2147483647
+        checksum = (checksum + command.text_value.len().to_i64() * 61) % 2147483647
+        i = i + 1
+    checksum
+
+fn engine2d_draw_ir_payload_summary(batch: DrawIrBatch, packet_bytes: i64) -> Engine2dDrawIrPayloadSummary:
+    val checksum = engine2d_draw_ir_payload_checksum(batch)
+    val payload_sdn = draw_ir_to_sdn(draw_ir_composition("runtime-{batch.batch_id}", batch.batch_id, batch.backend_target, [batch]))
+    val payload_sdn_bytes = payload_sdn.len().to_i64()
+    Engine2dDrawIrPayloadSummary(
+        schema: batch.schema,
+        batch_id: batch.batch_id,
+        source_kind: batch.source.source_kind,
+        source_id: batch.source.source_id,
+        surface_id: batch.embedding.surface_id,
+        component_id: batch.embedding.component_id,
+        command_count: batch.commands.len(),
+        packet_bytes: packet_bytes,
+        command_checksum: checksum,
+        payload_sdn: payload_sdn,
+        payload_sdn_bytes: payload_sdn_bytes,
+        summary: "schema={batch.schema};batch={batch.batch_id};source={batch.source.source_kind}:{batch.source.source_id};surface={batch.embedding.surface_id};component={batch.embedding.component_id};commands={batch.commands.len()};bytes={packet_bytes};checksum={checksum};sdn_bytes={payload_sdn_bytes}"
+    )
+
+fn engine2d_draw_ir_runtime_queue_dispatch(batch: DrawIrBatch, selected_backend: text, command_count: i64, packet_bytes: i64, payload: Engine2dDrawIrPayloadSummary, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrQueueDispatchResult:
+    var runtime_submit = _engine2d_draw_ir_empty_submit(batch.batch_id, "host", "Draw IR batch selected CPU path")
+    var runtime_drain = _engine2d_draw_ir_empty_drain("empty", "runtime queue not used")
+    var runtime_dispatch = _engine2d_draw_ir_empty_dispatch("host", "Draw IR batch selected CPU path")
+    var queued_for_gpu = false
+    if selected_backend == DRAW_IR_BACKEND_GPU:
+        val lane_result = engine2d_host_gpu_lane_schedule(
+            ENGINE2D_HOST_GPU_LANE_HOST,
+            ENGINE2D_HOST_GPU_LANE_GPU,
+            "draw_ir_delta",
+            packet_bytes,
+            queue.max_packet_bytes,
+            false,
+            false,
+            queue.runtime_available,
+            command_count
+        )
+        val event = engine2d_host_gpu_event(batch.batch_id, ENGINE2D_HOST_GPU_LANE_GPU, "draw_ir_delta", packet_bytes, queue.max_packet_bytes, false, false, false, queue.runtime_available)
+        val decision = engine2d_host_gpu_event_handler_decision(event, lane_result)
+        runtime_submit = engine2d_host_gpu_event_submit_to_runtime_payload_text(queue, decision, lane_result, payload.command_checksum, payload.payload_sdn)
+        runtime_submit = engine2d_host_gpu_runtime_submit_with_payload(runtime_submit, payload.payload_sdn)
+        queued_for_gpu = runtime_submit.submitted
+        if dbg_stage_on() or dbg_events_on():
+            dbg_stage("gpu_queue", "schedule")
+            dbg_event_hop(batch.batch_id, "schedule", "backend={selected_backend} target={decision.target_lane} queue_required={decision.queue_required}")
+            dbg_event_hop(batch.batch_id, "submit", "submitted={runtime_submit.submitted} status={runtime_submit.status} bytes={packet_bytes}")
+    if queued_for_gpu:
+        runtime_drain = engine2d_host_gpu_runtime_drain(queue, 1)
+        runtime_dispatch = engine2d_host_gpu_runtime_dispatch_draw_ir(queue, runtime_drain, payload.command_checksum)
+    if dbg_stage_on() or dbg_events_on():
+        dbg_event_hop(batch.batch_id, "complete", "dispatched={runtime_dispatch.dispatched} status={runtime_dispatch.status}")
+    if runtime_dispatch.dispatched:
+        dbg_count("host_gpu.dispatched", 1)
+    # Always-on provenance: claimed reflects our queue decision, actual reflects
+    # the real runtime dispatch receipt. Fires loud only on a silent host<->gpu
+    # divergence (e.g. queued for GPU but never dispatched). Reflects real state
+    # only — never the removed fabricated estimated_ms speedup.
+    val claimed_provenance = if queued_for_gpu: "gpu_batched" else: "host_committed"
+    val actual_provenance = if runtime_dispatch.dispatched: "gpu_batched" else: "host_committed"
+    dbg_provenance(claimed_provenance, actual_provenance, "engine2d_draw_ir_dispatch batch={batch.batch_id}")
+    Engine2dDrawIrQueueDispatchResult(runtime_submit: runtime_submit, runtime_drain: runtime_drain, runtime_dispatch: runtime_dispatch, queued_for_gpu: queued_for_gpu, payload: payload)
+
+fn engine2d_draw_ir_runtime_queue_dispatch_only(batch: DrawIrBatch, gpu_available: bool, queue: Engine2dHostGpuRuntimeQueue) -> Engine2dDrawIrQueueDispatchResult:
+    val plan = simple_2d_draw_ir_adv_plan(batch, gpu_available)
+    val packet_bytes = plan.command_count * 64
+    val payload = engine2d_draw_ir_payload_summary(batch, packet_bytes)
+    engine2d_draw_ir_runtime_queue_dispatch(batch, plan.selected_backend, plan.command_count, packet_bytes, payload, queue)
+
+export Engine2dDrawIrPayloadSummary
+export Engine2dDrawIrQueueDispatchResult
+export engine2d_draw_ir_payload_checksum
+export engine2d_draw_ir_payload_summary
+export engine2d_draw_ir_runtime_queue_dispatch
+export engine2d_draw_ir_runtime_queue_dispatch_only

@@ -1,0 +1,85 @@
+"""Metal-only provider for the macOS SimpleOS GPU host daemon."""
+
+use app.simpleos_gpu_host.platform_contract.{
+    SimpleOsGpuHostPlatform,
+    SimpleOsGpuHostProcessingResult,
+    simpleos_gpu_host_processing_result,
+    simpleos_gpu_host_processing_failure
+}
+use std.common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+}
+use std.common.processing.processing_ir.{
+    ProcessingIr,
+    processing_ir_fill_u32,
+    processing_ir_cpu_execute,
+    processing_ir_outputs_equal
+}
+use std.gc_async_mut.gpu.engine2d.draw_ir_target.{DrawIrRenderTarget}
+use std.gc_async_mut.gpu.engine2d.draw_ir_target_metal.{
+    metal_draw_ir_render_target_create,
+    metal_draw_ir_render_target_probe
+}
+use std.gc_async_mut.processing.metal_fill_u32.{
+    processing_ir_execute_metal,
+    processing_metal_device_identity
+}
+use std.nogc_sync_mut.io.metal_sffi.{metal_device_info}
+
+class SimpleOsGpuHostMacPlatform:
+    static fn create() -> SimpleOsGpuHostMacPlatform:
+        SimpleOsGpuHostMacPlatform()
+
+fn _macos_processing_result(ir: ProcessingIr) -> SimpleOsGpuHostProcessingResult:
+    val result = processing_ir_execute_metal(ir)
+    simpleos_gpu_host_processing_result(
+        result.completed,
+        result.reason,
+        result.values,
+        result.backend_handle,
+        result.device_identity)
+
+impl SimpleOsGpuHostPlatform for SimpleOsGpuHostMacPlatform:
+    fn create_render_target(width: i32, height: i32, backend: text) -> Result<DrawIrRenderTarget, text>:
+        if backend != "metal":
+            return Err("macos-host-daemon-requires-metal")
+        metal_draw_ir_render_target_create(width, height)
+
+    fn probe_render_backend(backend: text) -> Result<bool, text>:
+        if backend != "metal":
+            return Err("macos-host-daemon-requires-metal")
+        metal_draw_ir_render_target_probe()
+
+    fn render_device_identity(backend: text) -> i64:
+        if backend != "metal":
+            return 0
+        val info = metal_device_info(0)
+        if info.name == "" or info.total_memory <= 0:
+            return 0
+        processing_metal_device_identity(info.name, info.total_memory)
+
+    fn processing_backend_mask(requested: i64, selector: text) -> i64:
+        if selector != "auto" and selector != "metal":
+            return 0
+        val selected = requested & SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+        if selected == 0:
+            return 0
+        val probe_ir = processing_ir_fill_u32(1, 1u32)
+        val oracle = processing_ir_cpu_execute(probe_ir)
+        val probe = _macos_processing_result(probe_ir)
+        if (probe.completed and probe.reason == "ok" and probe.backend_handle > 0 and
+            probe.device_identity > 0 and
+            processing_ir_outputs_equal(probe.values, oracle)):
+            return SIMPLEOS_HOST_GPU_BACKEND_MASK_METAL
+        0
+
+    fn execute_processing(ir: ProcessingIr, backend: text) -> SimpleOsGpuHostProcessingResult:
+        if backend != "metal":
+            return simpleos_gpu_host_processing_failure(
+                "macos-host-daemon-requires-metal")
+        _macos_processing_result(ir)
+
+    fn shutdown():
+        pass
+
+export SimpleOsGpuHostMacPlatform

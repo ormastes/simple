@@ -1,0 +1,88 @@
+"""
+# VirtIO-GPU Error Recovery / Re-negotiation Specification
+
+**Feature IDs:** #OS-VIRTIO-GPU
+**Category:** Infrastructure
+**Difficulty:** 2/5
+
+## Overview
+
+Tests the pure retry/re-negotiate decision layer added on top of
+virtio_gpu_ops.spl's GPU command functions, all of which previously just
+logged and returned `Err(...)` with no caller recovering. The decision
+(`virtio_gpu_recovery_next_step`) is a pure function over
+(attempt, error kind, already-recreated?) so the whole retry/re-create
+algorithm is exercised here without a virtio-gpu device, via
+`virtio_gpu_recovery_run()` driving a scripted outcome sequence.
+"""
+
+use std.spec.*
+use os.drivers.virtio.virtio_gpu_ops.{
+    GpuErrorKind, GpuOpOutcome, RecoveryStep,
+    virtio_gpu_recovery_next_step, virtio_gpu_recovery_run,
+    GPU_RECOVERY_MAX_ATTEMPTS
+}
+
+# ============================================================================
+# Pure decision function
+# ============================================================================
+
+describe "virtio_gpu_recovery_next_step":
+    it "retries a transient failure while attempt is below the cap":
+        expect(virtio_gpu_recovery_next_step(1, GpuErrorKind.Transient, false)).to_equal(RecoveryStep.Retry)
+        expect(virtio_gpu_recovery_next_step(2, GpuErrorKind.Transient, false)).to_equal(RecoveryStep.Retry)
+
+    it "gives up once the transient attempt count reaches the cap":
+        expect(virtio_gpu_recovery_next_step(GPU_RECOVERY_MAX_ATTEMPTS, GpuErrorKind.Transient, false)).to_equal(RecoveryStep.GiveUp)
+
+    it "recreates on the first scanout failure":
+        expect(virtio_gpu_recovery_next_step(1, GpuErrorKind.ScanoutFailure, false)).to_equal(RecoveryStep.Recreate)
+
+    it "gives up on a scanout failure that recurs after a re-create":
+        expect(virtio_gpu_recovery_next_step(2, GpuErrorKind.ScanoutFailure, true)).to_equal(RecoveryStep.GiveUp)
+
+    it "never retries a fatal error":
+        expect(virtio_gpu_recovery_next_step(1, GpuErrorKind.Fatal, false)).to_equal(RecoveryStep.GiveUp)
+
+# ============================================================================
+# Full retry/re-negotiate loop (scripted device-free outcomes)
+# ============================================================================
+
+describe "virtio_gpu_recovery_run":
+    it "retries a transient error up to the cap, then surfaces failure":
+        val outcomes: [GpuOpOutcome] = [GpuOpOutcome.TransientErr, GpuOpOutcome.TransientErr, GpuOpOutcome.TransientErr]
+        val result = virtio_gpu_recovery_run(outcomes)
+        assert_false(result.ok)
+        expect(result.attempts_used).to_equal(3)
+
+    it "succeeds on attempt 2 after one transient retry":
+        val outcomes: [GpuOpOutcome] = [GpuOpOutcome.TransientErr, GpuOpOutcome.Success]
+        val result = virtio_gpu_recovery_run(outcomes)
+        expect(result.ok).to_equal(true)
+        expect(result.attempts_used).to_equal(2)
+
+    it "triggers exactly one re-create attempt on a scanout failure, then gives up if it recurs":
+        val outcomes: [GpuOpOutcome] = [GpuOpOutcome.ScanoutErr, GpuOpOutcome.ScanoutErr]
+        val result = virtio_gpu_recovery_run(outcomes)
+        assert_false(result.ok)
+        expect(result.recreated).to_equal(true)
+        expect(result.attempts_used).to_equal(2)
+
+    it "recovers via re-create when the scanout succeeds on the second attempt":
+        val outcomes: [GpuOpOutcome] = [GpuOpOutcome.ScanoutErr, GpuOpOutcome.Success]
+        val result = virtio_gpu_recovery_run(outcomes)
+        expect(result.ok).to_equal(true)
+        expect(result.recreated).to_equal(true)
+        expect(result.attempts_used).to_equal(2)
+
+    it "gives up immediately on a fatal error without retrying":
+        val outcomes: [GpuOpOutcome] = [GpuOpOutcome.FatalErr, GpuOpOutcome.Success]
+        val result = virtio_gpu_recovery_run(outcomes)
+        assert_false(result.ok)
+        expect(result.attempts_used).to_equal(1)
+
+    it "returns ok on the very first attempt when there is no failure":
+        val outcomes: [GpuOpOutcome] = [GpuOpOutcome.Success]
+        val result = virtio_gpu_recovery_run(outcomes)
+        expect(result.ok).to_equal(true)
+        expect(result.attempts_used).to_equal(1)

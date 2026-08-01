@@ -1,0 +1,811 @@
+# Backend-qualified measurement evidence for wm_compare.
+
+use std.gpu.engine2d.backend_probe.{BackendProbeResult, BackendStatus, backend_status_text}
+
+pub struct BackendMeasurementRecord:
+    requested_backend: text
+    selected_backend: text
+    status: text
+    command: text
+    host: text
+    warmup_count: i32
+    sample_count: i32
+    p50_us: i64
+    p95_us: i64
+    max_rss_kb: i64
+    binary_size_bytes: i64
+    baseline_binary_size_bytes: i64
+    render_readback_scope: text
+    scalar_baseline_compared: bool
+    fallback_used: bool
+    unavailable_reason: text
+
+pub struct BackendComparisonSample:
+    fixture_id: text
+    backend_family: text
+    shell: text
+    requested_backend: text
+    selected_backend: text
+    device_id: text
+    status: text
+    command: text
+    host: text
+    warmup_count: i32
+    sample_count: i32
+    cold_start_us: i64
+    warm_start_us: i64
+    p50_frame_us: i64
+    p95_frame_us: i64
+    p95_input_to_paint_us: i64
+    max_rss_kb: i64
+    binary_size_bytes: i64
+    baseline_binary_size_bytes: i64
+    package_size_bytes: i64
+    artifact_build_us: i64
+    artifact_load_us: i64
+    artifact_submit_us: i64
+    artifact_sync_us: i64
+    artifact_readback_us: i64
+    render_readback_scope: text
+    offload_tag_kind: text
+    operation_family: text
+    generated_operation: text
+    generated_entry_symbol: text
+    generated_source_format: text
+    generated_binary_format: text
+    generated_artifact_path_suffix: text
+    runtime_compute_target: text
+    runtime_execution_path: text
+    runtime_launch_api: text
+    runtime_entry_symbol: text
+    runtime_artifact_name: text
+    runtime_status: text
+    checksum: text
+    pixel_proof: text
+    scalar_baseline_compared: bool
+    fallback_used: bool
+    fallback_reason: text
+    unavailable_reason: text
+
+fn _sdn_escape(value: text) -> text:
+    val slash_escaped = value.replace("\\", "\\\\")
+    slash_escaped.replace("\"", "\\\"")
+
+fn _bool_text(value: bool) -> text:
+    if value:
+        return "true"
+    "false"
+
+fn _is_acceleration_lane(name: text) -> bool:
+    if name == "metal": return true
+    if name == "vulkan": return true
+    if name == "cuda": return true
+    if name == "opencl": return true
+    if name == "hip": return true
+    if name == "rocm": return true
+    if name == "cpu_simd": return true
+    if name == "cpu_simd_x86": return true
+    if name == "cpu_simd_arm": return true
+    if name == "cpu_simd_riscv":
+        return true
+    false
+
+fn _is_gpu_family(name: text) -> bool:
+    if name == "metal": return true
+    if name == "vulkan": return true
+    if name == "cuda": return true
+    if name == "opencl": return true
+    if name == "hip": return true
+    if name == "rocm": return true
+    if name == "gpu":
+        return true
+    false
+
+fn _comparison_identity_valid(sample: BackendComparisonSample) -> bool:
+    if sample.fixture_id == "":
+        return false
+    if sample.backend_family == "":
+        return false
+    if sample.shell == "":
+        return false
+    if sample.requested_backend == "":
+        return false
+    if sample.selected_backend == "":
+        return false
+    if sample.status == "":
+        return false
+    if sample.command == "":
+        return false
+    if sample.host == "":
+        return false
+    true
+
+fn _comparison_artifact_timings_valid(sample: BackendComparisonSample) -> bool:
+    val is_gpu = _is_gpu_family(sample.backend_family)
+    if not is_gpu:
+        return true
+    if sample.artifact_build_us <= 0:
+        return false
+    if sample.artifact_load_us < 0:
+        return false
+    if sample.artifact_submit_us <= 0:
+        return false
+    if sample.artifact_sync_us < 0:
+        return false
+    if sample.artifact_readback_us < 0:
+        return false
+    true
+
+pub fn backend_comparison_artifact_total_us(sample: BackendComparisonSample) -> i64:
+    sample.artifact_build_us + sample.artifact_load_us + sample.artifact_submit_us +
+        sample.artifact_sync_us + sample.artifact_readback_us
+
+pub fn backend_comparison_offload_overhead_verdict(sample: BackendComparisonSample) -> text:
+    if not _is_gpu_family(sample.backend_family):
+        return "not-gpu-offload"
+    if sample.status != "Initialized":
+        return "unavailable"
+    val artifact_total = backend_comparison_artifact_total_us(sample)
+    if artifact_total <= 0:
+        return "missing-artifact-timing"
+    if sample.p50_frame_us <= 0:
+        return "missing-frame-timing"
+    if artifact_total >= sample.p50_frame_us:
+        return "offload-overhead-dominates"
+    "offload-overhead-contained"
+
+pub fn backend_comparison_speed_verdict(sample: BackendComparisonSample, scalar_p50_frame_us: i64) -> text:
+    if sample.status != "Initialized":
+        return "unavailable"
+    if scalar_p50_frame_us <= 0:
+        return "missing-scalar-baseline"
+    if sample.p50_frame_us < scalar_p50_frame_us:
+        return "backend-faster-than-scalar"
+    if sample.p50_frame_us == scalar_p50_frame_us:
+        return "backend-equal-to-scalar"
+    "backend-slower-than-scalar"
+
+pub fn backend_comparison_offload_efficiency_verdict(sample: BackendComparisonSample, scalar_p50_frame_us: i64) -> text:
+    if not _is_gpu_family(sample.backend_family):
+        return "not-gpu-offload"
+    val speed = backend_comparison_speed_verdict(sample, scalar_p50_frame_us)
+    if speed == "unavailable" or speed == "missing-scalar-baseline":
+        return speed
+    val overhead = backend_comparison_offload_overhead_verdict(sample)
+    if overhead == "missing-artifact-timing" or overhead == "missing-frame-timing":
+        return overhead
+    if speed == "backend-faster-than-scalar":
+        if overhead == "offload-overhead-dominates":
+            return "offload-faster-but-overhead-dominates"
+        return "offload-useful"
+    if speed == "backend-equal-to-scalar":
+        return "offload-break-even"
+    if overhead == "offload-overhead-dominates":
+        return "offload-slower-communication-overhead"
+    "offload-slower-compute-bound"
+
+fn _is_scalar_baseline_family(name: text) -> bool:
+    if name == "software": return true
+    if name == "cpu": return true
+    if name == "scalar": return true
+    name == "cpu_scalar"
+
+pub fn backend_comparison_scalar_p50_us(samples: [BackendComparisonSample]) -> i64:
+    for sample in samples:
+        if sample.status == "Initialized":
+            if _is_scalar_baseline_family(sample.backend_family):
+                if sample.p50_frame_us > 0:
+                    return sample.p50_frame_us
+    0
+
+fn _comparison_speed_verdict_count(samples: [BackendComparisonSample], scalar_p50_frame_us: i64, verdict: text) -> i32:
+    var count = 0
+    for sample in samples:
+        if _is_gpu_family(sample.backend_family):
+            if sample.status == "Initialized":
+                if scalar_p50_frame_us > 0:
+                    if verdict == "backend-faster-than-scalar":
+                        if sample.p50_frame_us < scalar_p50_frame_us:
+                            count = count + 1
+                    if verdict == "backend-equal-to-scalar":
+                        if sample.p50_frame_us == scalar_p50_frame_us:
+                            count = count + 1
+                    if verdict == "backend-slower-than-scalar":
+                        if sample.p50_frame_us > scalar_p50_frame_us:
+                            count = count + 1
+    count
+
+fn _comparison_offload_overhead_verdict_count(samples: [BackendComparisonSample], verdict: text) -> i32:
+    var count = 0
+    for sample in samples:
+        if _is_gpu_family(sample.backend_family):
+            if sample.status == "Initialized":
+                val artifact_total = sample.artifact_build_us + sample.artifact_load_us + sample.artifact_submit_us +
+                    sample.artifact_sync_us + sample.artifact_readback_us
+                if artifact_total > 0:
+                    if sample.p50_frame_us > 0:
+                        if verdict == "offload-overhead-contained":
+                            if artifact_total < sample.p50_frame_us:
+                                count = count + 1
+                        if verdict == "offload-overhead-dominates":
+                            if artifact_total >= sample.p50_frame_us:
+                                count = count + 1
+    count
+
+fn _comparison_offload_efficiency_verdict_count(samples: [BackendComparisonSample], scalar_p50_frame_us: i64, verdict: text) -> i32:
+    var count = 0
+    for sample in samples:
+        if _is_gpu_family(sample.backend_family):
+            if sample.status == "Initialized":
+                val artifact_total = sample.artifact_build_us + sample.artifact_load_us + sample.artifact_submit_us +
+                    sample.artifact_sync_us + sample.artifact_readback_us
+                if scalar_p50_frame_us <= 0:
+                    if verdict == "missing-scalar-baseline":
+                        count = count + 1
+                if scalar_p50_frame_us > 0:
+                    if artifact_total <= 0:
+                        if verdict == "missing-artifact-timing":
+                            count = count + 1
+                    if artifact_total > 0:
+                        if sample.p50_frame_us <= 0:
+                            if verdict == "missing-frame-timing":
+                                count = count + 1
+                        if sample.p50_frame_us > 0:
+                            if sample.p50_frame_us < scalar_p50_frame_us:
+                                if artifact_total >= sample.p50_frame_us:
+                                    if verdict == "offload-faster-but-overhead-dominates":
+                                        count = count + 1
+                                if artifact_total < sample.p50_frame_us:
+                                    if verdict == "offload-useful":
+                                        count = count + 1
+                            if sample.p50_frame_us == scalar_p50_frame_us:
+                                if verdict == "offload-break-even":
+                                    count = count + 1
+                            if sample.p50_frame_us > scalar_p50_frame_us:
+                                if artifact_total >= sample.p50_frame_us:
+                                    if verdict == "offload-slower-communication-overhead":
+                                        count = count + 1
+                                if artifact_total < sample.p50_frame_us:
+                                    if verdict == "offload-slower-compute-bound":
+                                        count = count + 1
+    count
+
+fn _comparison_compiler_metadata_valid(sample: BackendComparisonSample) -> bool:
+    val is_gpu = _is_gpu_family(sample.backend_family)
+    if not is_gpu:
+        return true
+    if sample.offload_tag_kind == "":
+        return false
+    if sample.operation_family == "":
+        return false
+    if sample.generated_operation == "":
+        return false
+    if sample.generated_entry_symbol == "":
+        return false
+    if sample.generated_source_format == "":
+        return false
+    if sample.generated_binary_format == "":
+        return false
+    if sample.generated_artifact_path_suffix == "":
+        return false
+    true
+
+fn _comparison_runtime_metadata_valid(sample: BackendComparisonSample) -> bool:
+    val is_gpu = _is_gpu_family(sample.backend_family)
+    if not is_gpu:
+        return true
+    if sample.runtime_compute_target == "":
+        return false
+    if sample.runtime_execution_path == "":
+        return false
+    if sample.runtime_launch_api == "":
+        return false
+    if sample.runtime_entry_symbol == "":
+        return false
+    if sample.runtime_artifact_name == "":
+        return false
+    if sample.runtime_status != "ready":
+        return false
+    true
+
+pub fn backend_measurement_from_probe(probe: BackendProbeResult,
+                                      command: text, host: text,
+                                      warmup_count: i32, sample_count: i32,
+                                      p50_us: i64, p95_us: i64,
+                                      max_rss_kb: i64,
+                                      binary_size_bytes: i64,
+                                      baseline_binary_size_bytes: i64,
+                                      render_readback_scope: text,
+                                      scalar_baseline_compared: bool) -> BackendMeasurementRecord:
+    val fallback_used = probe.selected_name != probe.requested_name or probe.status == BackendStatus.Fallback
+    val reason = if probe.fallback_reason != "": probe.fallback_reason else: probe.reason
+    BackendMeasurementRecord(
+        requested_backend: probe.requested_name,
+        selected_backend: probe.selected_name,
+        status: backend_status_text(probe.status),
+        command: command,
+        host: host,
+        warmup_count: warmup_count,
+        sample_count: sample_count,
+        p50_us: p50_us,
+        p95_us: p95_us,
+        max_rss_kb: max_rss_kb,
+        binary_size_bytes: binary_size_bytes,
+        baseline_binary_size_bytes: baseline_binary_size_bytes,
+        render_readback_scope: render_readback_scope,
+        scalar_baseline_compared: scalar_baseline_compared,
+        fallback_used: fallback_used,
+        unavailable_reason: reason
+    )
+
+pub fn backend_comparison_from_measurement(record: BackendMeasurementRecord,
+                                           fixture_id: text,
+                                           backend_family: text,
+                                           shell: text,
+                                           cold_start_us: i64,
+                                           warm_start_us: i64,
+                                           package_size_bytes: i64,
+                                           p95_input_to_paint_us: i64,
+                                           artifact_build_us: i64,
+                                           artifact_load_us: i64,
+                                           artifact_submit_us: i64,
+                                           artifact_sync_us: i64,
+                                           artifact_readback_us: i64,
+                                           checksum: text,
+                                           pixel_proof: text,
+                                           device_id: text) -> BackendComparisonSample:
+    backend_comparison_from_measurement_with_compiler_metadata(
+        record,
+        fixture_id,
+        backend_family,
+        shell,
+        cold_start_us,
+        warm_start_us,
+        package_size_bytes,
+        p95_input_to_paint_us,
+        artifact_build_us,
+        artifact_load_us,
+        artifact_submit_us,
+        artifact_sync_us,
+        artifact_readback_us,
+        checksum,
+        pixel_proof,
+        device_id,
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+    )
+
+pub fn backend_comparison_from_measurement_with_compiler_metadata(record: BackendMeasurementRecord,
+                                                                  fixture_id: text,
+                                                                  backend_family: text,
+                                                                  shell: text,
+                                                                  cold_start_us: i64,
+                                                                  warm_start_us: i64,
+                                                                  package_size_bytes: i64,
+                                                                  p95_input_to_paint_us: i64,
+                                                                  artifact_build_us: i64,
+                                                                  artifact_load_us: i64,
+                                                                  artifact_submit_us: i64,
+                                                                  artifact_sync_us: i64,
+                                                                  artifact_readback_us: i64,
+                                                                  checksum: text,
+                                                                  pixel_proof: text,
+                                                                  device_id: text,
+                                                                  offload_tag_kind: text,
+                                                                  operation_family: text,
+                                                                  generated_operation: text,
+                                                                  generated_entry_symbol: text,
+                                                                  generated_source_format: text,
+                                                                  generated_binary_format: text,
+                                                                  generated_artifact_path_suffix: text) -> BackendComparisonSample:
+    backend_comparison_from_measurement_with_runtime_metadata(
+        record,
+        fixture_id,
+        backend_family,
+        shell,
+        cold_start_us,
+        warm_start_us,
+        package_size_bytes,
+        p95_input_to_paint_us,
+        artifact_build_us,
+        artifact_load_us,
+        artifact_submit_us,
+        artifact_sync_us,
+        artifact_readback_us,
+        checksum,
+        pixel_proof,
+        device_id,
+        offload_tag_kind,
+        operation_family,
+        generated_operation,
+        generated_entry_symbol,
+        generated_source_format,
+        generated_binary_format,
+        generated_artifact_path_suffix,
+        "",
+        "",
+        "",
+        "",
+        "",
+        ""
+    )
+
+pub fn backend_comparison_from_measurement_with_runtime_metadata(record: BackendMeasurementRecord,
+                                                                 fixture_id: text,
+                                                                 backend_family: text,
+                                                                 shell: text,
+                                                                 cold_start_us: i64,
+                                                                 warm_start_us: i64,
+                                                                 package_size_bytes: i64,
+                                                                 p95_input_to_paint_us: i64,
+                                                                 artifact_build_us: i64,
+                                                                 artifact_load_us: i64,
+                                                                 artifact_submit_us: i64,
+                                                                 artifact_sync_us: i64,
+                                                                 artifact_readback_us: i64,
+                                                                 checksum: text,
+                                                                 pixel_proof: text,
+                                                                 device_id: text,
+                                                                 offload_tag_kind: text,
+                                                                 operation_family: text,
+                                                                 generated_operation: text,
+                                                                 generated_entry_symbol: text,
+                                                                 generated_source_format: text,
+                                                                 generated_binary_format: text,
+                                                                 generated_artifact_path_suffix: text,
+                                                                 runtime_compute_target: text,
+                                                                 runtime_execution_path: text,
+                                                                 runtime_launch_api: text,
+                                                                 runtime_entry_symbol: text,
+                                                                 runtime_artifact_name: text,
+                                                                 runtime_status: text) -> BackendComparisonSample:
+    BackendComparisonSample(
+        fixture_id: fixture_id,
+        backend_family: backend_family,
+        shell: shell,
+        requested_backend: record.requested_backend,
+        selected_backend: record.selected_backend,
+        device_id: device_id,
+        status: record.status,
+        command: record.command,
+        host: record.host,
+        warmup_count: record.warmup_count,
+        sample_count: record.sample_count,
+        cold_start_us: cold_start_us,
+        warm_start_us: warm_start_us,
+        p50_frame_us: record.p50_us,
+        p95_frame_us: record.p95_us,
+        p95_input_to_paint_us: p95_input_to_paint_us,
+        max_rss_kb: record.max_rss_kb,
+        binary_size_bytes: record.binary_size_bytes,
+        baseline_binary_size_bytes: record.baseline_binary_size_bytes,
+        package_size_bytes: package_size_bytes,
+        artifact_build_us: artifact_build_us,
+        artifact_load_us: artifact_load_us,
+        artifact_submit_us: artifact_submit_us,
+        artifact_sync_us: artifact_sync_us,
+        artifact_readback_us: artifact_readback_us,
+        render_readback_scope: record.render_readback_scope,
+        offload_tag_kind: offload_tag_kind,
+        operation_family: operation_family,
+        generated_operation: generated_operation,
+        generated_entry_symbol: generated_entry_symbol,
+        generated_source_format: generated_source_format,
+        generated_binary_format: generated_binary_format,
+        generated_artifact_path_suffix: generated_artifact_path_suffix,
+        runtime_compute_target: runtime_compute_target,
+        runtime_execution_path: runtime_execution_path,
+        runtime_launch_api: runtime_launch_api,
+        runtime_entry_symbol: runtime_entry_symbol,
+        runtime_artifact_name: runtime_artifact_name,
+        runtime_status: runtime_status,
+        checksum: checksum,
+        pixel_proof: pixel_proof,
+        scalar_baseline_compared: record.scalar_baseline_compared,
+        fallback_used: record.fallback_used,
+        fallback_reason: if record.fallback_used: record.unavailable_reason else: "",
+        unavailable_reason: if record.status == "Unavailable" or record.status == "Failed": record.unavailable_reason else: ""
+    )
+
+pub fn backend_measurement_initialized_valid(record: BackendMeasurementRecord) -> bool:
+    if record.status != "Initialized":
+        return false
+    if record.command == "":
+        return false
+    if record.host == "":
+        return false
+    if record.render_readback_scope == "":
+        return false
+    if record.warmup_count < 0:
+        return false
+    if record.sample_count <= 0:
+        return false
+    if record.p50_us <= 0:
+        return false
+    if record.p95_us < record.p50_us:
+        return false
+    if record.max_rss_kb <= 0:
+        return false
+    if record.binary_size_bytes <= 0:
+        return false
+    if record.baseline_binary_size_bytes <= 0:
+        return false
+    if _is_acceleration_lane(record.requested_backend):
+        if not record.scalar_baseline_compared:
+            return false
+    if _is_acceleration_lane(record.requested_backend):
+        if record.fallback_used:
+            return false
+    true
+
+pub fn backend_measurement_unavailable_valid(record: BackendMeasurementRecord) -> bool:
+    if record.status != "Unavailable":
+        if record.status != "Failed":
+            return false
+    if record.unavailable_reason == "":
+        return false
+    if _is_acceleration_lane(record.requested_backend):
+        if record.fallback_used:
+            return false
+    true
+
+pub fn backend_measurement_satisfies_lane(record: BackendMeasurementRecord) -> bool:
+    val initialized_valid = backend_measurement_initialized_valid(record)
+    if initialized_valid:
+        return true
+    val unavailable_valid = backend_measurement_unavailable_valid(record)
+    if unavailable_valid:
+        return true
+    false
+
+pub fn backend_comparison_initialized_valid(sample: BackendComparisonSample) -> bool:
+    if sample.status != "Initialized":
+        return false
+    val identity_valid = _comparison_identity_valid(sample)
+    if not identity_valid:
+        return false
+    if sample.warmup_count < 0:
+        return false
+    if sample.sample_count <= 0:
+        return false
+    if sample.cold_start_us <= 0:
+        return false
+    if sample.warm_start_us <= 0:
+        return false
+    if sample.p50_frame_us <= 0:
+        return false
+    if sample.p95_frame_us < sample.p50_frame_us:
+        return false
+    if sample.p95_input_to_paint_us < sample.p95_frame_us:
+        return false
+    if sample.max_rss_kb <= 0:
+        return false
+    if sample.binary_size_bytes <= 0:
+        return false
+    if sample.baseline_binary_size_bytes <= 0:
+        return false
+    if sample.package_size_bytes <= 0:
+        return false
+    if sample.render_readback_scope == "":
+        return false
+    if sample.checksum == "":
+        return false
+    if sample.pixel_proof == "":
+        return false
+    if sample.fallback_used:
+        if sample.fallback_reason == "":
+            return false
+    val requested_is_accel = _is_acceleration_lane(sample.requested_backend)
+    if requested_is_accel:
+        if not sample.scalar_baseline_compared:
+            return false
+    val compiler_metadata_valid = _comparison_compiler_metadata_valid(sample)
+    if not compiler_metadata_valid:
+        return false
+    val runtime_metadata_valid = _comparison_runtime_metadata_valid(sample)
+    if not runtime_metadata_valid:
+        return false
+    val artifact_timings_valid = _comparison_artifact_timings_valid(sample)
+    if not artifact_timings_valid:
+        return false
+    true
+
+pub fn backend_comparison_unavailable_valid(sample: BackendComparisonSample) -> bool:
+    if sample.status != "Unavailable":
+        if sample.status != "Failed":
+            return false
+    val identity_valid = _comparison_identity_valid(sample)
+    if not identity_valid:
+        return false
+    if sample.unavailable_reason == "":
+        return false
+    if sample.fallback_used:
+        if sample.fallback_reason == "":
+            return false
+    true
+
+pub fn backend_comparison_sample_valid(sample: BackendComparisonSample) -> bool:
+    val initialized_valid = backend_comparison_initialized_valid(sample)
+    if initialized_valid:
+        return true
+    val unavailable_valid = backend_comparison_unavailable_valid(sample)
+    if unavailable_valid:
+        return true
+    false
+
+pub fn backend_comparison_samples_valid(samples: [BackendComparisonSample]) -> bool:
+    if samples.len() == 0:
+        return false
+    for sample in samples:
+        if not backend_comparison_sample_valid(sample):
+            return false
+    true
+
+pub fn backend_measurement_binary_size_delta_bytes(record: BackendMeasurementRecord) -> i64:
+    record.binary_size_bytes - record.baseline_binary_size_bytes
+
+pub fn backend_measurement_binary_size_delta_valid(record: BackendMeasurementRecord) -> bool:
+    if record.status != "Initialized":
+        return false
+    if record.binary_size_bytes <= 0:
+        return false
+    if record.baseline_binary_size_bytes <= 0:
+        return false
+    true
+
+pub fn backend_measurement_record_sdn(record: BackendMeasurementRecord) -> text:
+    "(backend_measurement " +
+        "requested: \"" + _sdn_escape(record.requested_backend) + "\" " +
+        "selected: \"" + _sdn_escape(record.selected_backend) + "\" " +
+        "status: \"" + record.status + "\" " +
+        "command: \"" + _sdn_escape(record.command) + "\" " +
+        "host: \"" + _sdn_escape(record.host) + "\" " +
+        "warmup_count: " + record.warmup_count.to_string() + " " +
+        "sample_count: " + record.sample_count.to_string() + " " +
+        "p50_us: " + record.p50_us.to_string() + " " +
+        "p95_us: " + record.p95_us.to_string() + " " +
+        "max_rss_kb: " + record.max_rss_kb.to_string() + " " +
+        "binary_size_bytes: " + record.binary_size_bytes.to_string() + " " +
+        "baseline_binary_size_bytes: " + record.baseline_binary_size_bytes.to_string() + " " +
+        "binary_size_delta_bytes: " + backend_measurement_binary_size_delta_bytes(record).to_string() + " " +
+        "render_readback_scope: \"" + _sdn_escape(record.render_readback_scope) + "\" " +
+        "scalar_baseline_compared: " + _bool_text(record.scalar_baseline_compared) + " " +
+        "fallback_used: " + _bool_text(record.fallback_used) + " " +
+        "reason: \"" + _sdn_escape(record.unavailable_reason) + "\")"
+
+fn _backend_comparison_sample_sdn_with_scalar(sample: BackendComparisonSample, scalar_p50_frame_us: i64) -> text:
+    "(backend_comparison_sample " +
+        "fixture_id: \"" + _sdn_escape(sample.fixture_id) + "\" " +
+        "backend_family: \"" + _sdn_escape(sample.backend_family) + "\" " +
+        "shell: \"" + _sdn_escape(sample.shell) + "\" " +
+        "requested: \"" + _sdn_escape(sample.requested_backend) + "\" " +
+        "selected: \"" + _sdn_escape(sample.selected_backend) + "\" " +
+        "device_id: \"" + _sdn_escape(sample.device_id) + "\" " +
+        "status: \"" + sample.status + "\" " +
+        "command: \"" + _sdn_escape(sample.command) + "\" " +
+        "host: \"" + _sdn_escape(sample.host) + "\" " +
+        "warmup_count: " + sample.warmup_count.to_string() + " " +
+        "sample_count: " + sample.sample_count.to_string() + " " +
+        "cold_start_us: " + sample.cold_start_us.to_string() + " " +
+        "warm_start_us: " + sample.warm_start_us.to_string() + " " +
+        "p50_frame_us: " + sample.p50_frame_us.to_string() + " " +
+        "p95_frame_us: " + sample.p95_frame_us.to_string() + " " +
+        "p95_input_to_paint_us: " + sample.p95_input_to_paint_us.to_string() + " " +
+        "max_rss_kb: " + sample.max_rss_kb.to_string() + " " +
+        "binary_size_bytes: " + sample.binary_size_bytes.to_string() + " " +
+        "baseline_binary_size_bytes: " + sample.baseline_binary_size_bytes.to_string() + " " +
+        "binary_size_delta_bytes: " + (sample.binary_size_bytes - sample.baseline_binary_size_bytes).to_string() + " " +
+        "package_size_bytes: " + sample.package_size_bytes.to_string() + " " +
+        "artifact_build_us: " + sample.artifact_build_us.to_string() + " " +
+        "artifact_load_us: " + sample.artifact_load_us.to_string() + " " +
+        "artifact_submit_us: " + sample.artifact_submit_us.to_string() + " " +
+        "artifact_sync_us: " + sample.artifact_sync_us.to_string() + " " +
+        "artifact_readback_us: " + sample.artifact_readback_us.to_string() + " " +
+        "artifact_total_us: " + backend_comparison_artifact_total_us(sample).to_string() + " " +
+        "offload_overhead_verdict: \"" + backend_comparison_offload_overhead_verdict(sample) + "\" " +
+        "speed_verdict: \"" + backend_comparison_speed_verdict(sample, scalar_p50_frame_us) + "\" " +
+        "offload_efficiency_verdict: \"" + backend_comparison_offload_efficiency_verdict(sample, scalar_p50_frame_us) + "\" " +
+        "render_readback_scope: \"" + _sdn_escape(sample.render_readback_scope) + "\" " +
+        "offload_tag_kind: \"" + _sdn_escape(sample.offload_tag_kind) + "\" " +
+        "operation_family: \"" + _sdn_escape(sample.operation_family) + "\" " +
+        "generated_operation: \"" + _sdn_escape(sample.generated_operation) + "\" " +
+        "generated_entry_symbol: \"" + _sdn_escape(sample.generated_entry_symbol) + "\" " +
+        "generated_source_format: \"" + _sdn_escape(sample.generated_source_format) + "\" " +
+        "generated_binary_format: \"" + _sdn_escape(sample.generated_binary_format) + "\" " +
+        "generated_artifact_path_suffix: \"" + _sdn_escape(sample.generated_artifact_path_suffix) + "\" " +
+        "runtime_compute_target: \"" + _sdn_escape(sample.runtime_compute_target) + "\" " +
+        "runtime_execution_path: \"" + _sdn_escape(sample.runtime_execution_path) + "\" " +
+        "runtime_launch_api: \"" + _sdn_escape(sample.runtime_launch_api) + "\" " +
+        "runtime_entry_symbol: \"" + _sdn_escape(sample.runtime_entry_symbol) + "\" " +
+        "runtime_artifact_name: \"" + _sdn_escape(sample.runtime_artifact_name) + "\" " +
+        "runtime_status: \"" + _sdn_escape(sample.runtime_status) + "\" " +
+        "checksum: \"" + _sdn_escape(sample.checksum) + "\" " +
+        "pixel_proof: \"" + _sdn_escape(sample.pixel_proof) + "\" " +
+        "scalar_baseline_compared: " + _bool_text(sample.scalar_baseline_compared) + " " +
+        "fallback_used: " + _bool_text(sample.fallback_used) + " " +
+        "fallback_reason: \"" + _sdn_escape(sample.fallback_reason) + "\" " +
+        "unavailable_reason: \"" + _sdn_escape(sample.unavailable_reason) + "\")"
+
+pub fn backend_comparison_sample_sdn(sample: BackendComparisonSample) -> text:
+    _backend_comparison_sample_sdn_with_scalar(sample, 0)
+
+pub fn backend_comparison_samples_sdn(samples: [BackendComparisonSample]) -> text:
+    var entries: [text] = []
+    val scalar_p50_frame_us = backend_comparison_scalar_p50_us(samples)
+    var i = 0
+    while i < samples.len():
+        entries.push("  " + _backend_comparison_sample_sdn_with_scalar(samples[i], scalar_p50_frame_us))
+        i = i + 1
+    "(backend_comparison_samples " +
+        "sample_count: " + samples.len().to_string() + " " +
+        "scalar_baseline_p50_us: " + scalar_p50_frame_us.to_string() + " " +
+        "backend_faster_than_scalar_count: " + _comparison_speed_verdict_count(samples, scalar_p50_frame_us, "backend-faster-than-scalar").to_string() + " " +
+        "backend_equal_to_scalar_count: " + _comparison_speed_verdict_count(samples, scalar_p50_frame_us, "backend-equal-to-scalar").to_string() + " " +
+        "backend_slower_than_scalar_count: " + _comparison_speed_verdict_count(samples, scalar_p50_frame_us, "backend-slower-than-scalar").to_string() + " " +
+        "offload_overhead_contained_count: " + _comparison_offload_overhead_verdict_count(samples, "offload-overhead-contained").to_string() + " " +
+        "offload_overhead_dominates_count: " + _comparison_offload_overhead_verdict_count(samples, "offload-overhead-dominates").to_string() + " " +
+        "offload_useful_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-useful").to_string() + " " +
+        "offload_faster_but_overhead_dominates_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-faster-but-overhead-dominates").to_string() + " " +
+        "offload_break_even_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-break-even").to_string() + " " +
+        "offload_slower_communication_overhead_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-slower-communication-overhead").to_string() + " " +
+        "offload_slower_compute_bound_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "offload-slower-compute-bound").to_string() + " " +
+        "offload_missing_scalar_baseline_count: " + _comparison_offload_efficiency_verdict_count(samples, scalar_p50_frame_us, "missing-scalar-baseline").to_string() + " " +
+        "valid: " + _bool_text(backend_comparison_samples_valid(samples)) + "\n" +
+        entries.join("\n") + "\n)"
+
+fn _status_for(records: [BackendMeasurementRecord], backend: text) -> text:
+    for record in records:
+        if record.requested_backend == backend:
+            return record.status
+    "Missing"
+
+fn _all_core_lanes_present(records: [BackendMeasurementRecord]) -> bool:
+    if _status_for(records, "metal") == "Missing":
+        return false
+    if _status_for(records, "vulkan") == "Missing":
+        return false
+    if _status_for(records, "cuda") == "Missing":
+        return false
+    if _status_for(records, "opencl") == "Missing":
+        return false
+    if _status_for(records, "rocm") == "Missing":
+        return false
+    if _status_for(records, "cpu_simd") != "Missing":
+        return true
+    if _status_for(records, "cpu_simd_x86") != "Missing":
+        return true
+    if _status_for(records, "cpu_simd_arm") != "Missing":
+        return true
+    if _status_for(records, "cpu_simd_riscv") != "Missing":
+        return true
+    false
+
+pub fn backend_measurement_matrix_valid(records: [BackendMeasurementRecord]) -> bool:
+    val core_lanes_present = _all_core_lanes_present(records)
+    if not core_lanes_present:
+        return false
+    for record in records:
+        if not backend_measurement_satisfies_lane(record):
+            return false
+    true
+
+pub fn backend_measurement_matrix_sdn(records: [BackendMeasurementRecord]) -> text:
+    var entries: [text] = []
+    var i = 0
+    while i < records.len():
+        entries.push("  " + backend_measurement_record_sdn(records[i]))
+        i = i + 1
+    "(backend_measurement_matrix " +
+        "metal_status: \"" + _status_for(records, "metal") + "\" " +
+        "vulkan_status: \"" + _status_for(records, "vulkan") + "\" " +
+        "cuda_status: \"" + _status_for(records, "cuda") + "\" " +
+        "opencl_status: \"" + _status_for(records, "opencl") + "\" " +
+        "hip_status: \"" + _status_for(records, "rocm") + "\" " +
+        "cpu_simd_status: \"" + _status_for(records, "cpu_simd") + "\" " +
+        "valid: " + _bool_text(backend_measurement_matrix_valid(records)) + "\n" +
+        entries.join("\n") + "\n)"

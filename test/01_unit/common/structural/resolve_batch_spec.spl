@@ -1,0 +1,218 @@
+# ============================================================================
+# resolve_batch spec — columnar flatten/rebuild for hybrid batch prep.
+#
+# Three claims:
+#   1. EXACT INVERSE — rebuild(flatten(x)) == x for names and both record
+#      kinds, including empty and max-positive fields.
+#   2. TOTAL REBUILD — malformed batches (offset discipline broken, ragged
+#      columns, non-UTF-8 blob) return ok=false, never trap.
+#   3. PARITY GATE — flatten -> rebuild -> encode through the FROZEN codec is
+#      byte-identical (wire_to_hex) to encoding the originals, over 3 mixed
+#      records including max-positive fields. The frozen wire codec stays the
+#      oracle; the columnar form adds no information loss.
+# ============================================================================
+
+use std.spec
+use std.common.structural.wire.{wire_to_hex}
+use std.common.structural.identity.entity_id.{entity_ref, hash128}
+use std.common.structural.resolve.resolve_types.{
+    DefinitionRecord,
+    ReferenceRecord,
+    definition_record,
+    definition_record_equal,
+    reference_record,
+    reference_record_equal,
+    resolve_key
+}
+use std.common.structural.resolve.resolve_codec.{
+    encode_definition_record,
+    encode_reference_record
+}
+use std.common.structural.resolve.resolve_batch.{
+    NameBatch,
+    batch_flatten_definitions,
+    batch_flatten_names,
+    batch_flatten_references,
+    batch_rebuild_definitions,
+    batch_rebuild_names,
+    batch_rebuild_references
+}
+
+fn sample_definitions() -> [DefinitionRecord]:
+    """3 mixed records: asymmetric golden-style, max-positive every field
+    (same bound the frozen golden vectors use), and all-zero."""
+    var defs: [DefinitionRecord] = []
+    defs.push(definition_record(
+        resolve_key(hash128(0x0102030405060708, 0x1112131415161718), 42),
+        entity_ref(7, 9),
+        0x00f0000000000001,
+        3))
+    defs.push(definition_record(
+        resolve_key(hash128(0x7fffffffffffffff, 0x7fffffffffffffff), 4294967295),
+        entity_ref(4294967295, 4294967295),
+        0x7fffffffffffffff,
+        0x7fffffffffffffff))
+    defs.push(definition_record(
+        resolve_key(hash128(0, 0), 0), entity_ref(0, 0), 0, 0))
+    defs
+
+fn sample_references() -> [ReferenceRecord]:
+    """3 mixed records mirroring sample_definitions with distinct values."""
+    var refs: [ReferenceRecord] = []
+    refs.push(reference_record(
+        resolve_key(hash128(0xaaaa, 0xbbbb), 5), entity_ref(11, 13), 17, 19))
+    refs.push(reference_record(
+        resolve_key(hash128(0x7fffffffffffffff, 0x7fffffffffffffff), 4294967295),
+        entity_ref(4294967295, 4294967295),
+        0x7fffffffffffffff,
+        0x7fffffffffffffff))
+    refs.push(reference_record(
+        resolve_key(hash128(1, 2), 3), entity_ref(4, 5), 6, 7))
+    refs
+
+describe "resolve_batch name blob":
+    it "flattens names to a byte blob with n+1 offsets":
+        var names: [text] = []
+        names.push("ab")
+        names.push("")
+        names.push("c")
+        val batch = batch_flatten_names(names)
+        expect(batch.ok).to_be(true)
+        expect(batch.blob.len()).to_equal(3)
+        expect(batch.offsets.len()).to_equal(4)
+        expect(batch.offsets[0] as i64).to_equal(0)
+        expect(batch.offsets[1] as i64).to_equal(2)
+        expect(batch.offsets[2] as i64).to_equal(2)
+        expect(batch.offsets[3] as i64).to_equal(3)
+        expect(batch.blob[0] as i64).to_equal(97)
+        expect(batch.blob[1] as i64).to_equal(98)
+        expect(batch.blob[2] as i64).to_equal(99)
+
+    it "rebuilds names exactly, including empty and multibyte entries":
+        var names: [text] = []
+        names.push("_start")
+        names.push("")
+        names.push("π")
+        names.push("link.reachable")
+        val out = batch_rebuild_names(batch_flatten_names(names))
+        expect(out.ok).to_be(true)
+        expect(out.names.len()).to_equal(4)
+        expect(out.names[0]).to_equal("_start")
+        expect(out.names[1]).to_equal("")
+        expect(out.names[2]).to_equal("π")
+        expect(out.names[3]).to_equal("link.reachable")
+
+    it "flattens the empty name list to one zero offset":
+        val none: [text] = []
+        val batch = batch_flatten_names(none)
+        expect(batch.blob.len()).to_equal(0)
+        expect(batch.offsets.len()).to_equal(1)
+        val out = batch_rebuild_names(batch)
+        expect(out.ok).to_be(true)
+        expect(out.names.len()).to_equal(0)
+
+    it "rejects a final offset that disagrees with the blob length":
+        var blob: [u8] = []
+        blob.push(97)
+        var offsets: [u32] = []
+        offsets.push(0 as u32)
+        offsets.push(2 as u32)
+        val out = batch_rebuild_names(NameBatch(ok: true, blob: blob, offsets: offsets))
+        expect(out.ok).to_be(false)
+        expect(out.names.len()).to_equal(0)
+
+    it "rejects non-monotonic offsets and an empty offsets array":
+        var blob: [u8] = []
+        blob.push(97)
+        blob.push(98)
+        var offsets: [u32] = []
+        offsets.push(0 as u32)
+        offsets.push(2 as u32)
+        offsets.push(1 as u32)
+        offsets.push(2 as u32)
+        expect(batch_rebuild_names(
+            NameBatch(ok: true, blob: blob, offsets: offsets)).ok).to_be(false)
+        val no_offsets: [u32] = []
+        expect(batch_rebuild_names(
+            NameBatch(ok: true, blob: blob, offsets: no_offsets)).ok).to_be(false)
+
+    it "rejects a blob segment that is not valid UTF-8":
+        var blob: [u8] = []
+        blob.push(0xff as u8)
+        var offsets: [u32] = []
+        offsets.push(0 as u32)
+        offsets.push(1 as u32)
+        val out = batch_rebuild_names(NameBatch(ok: true, blob: blob, offsets: offsets))
+        expect(out.ok).to_be(false)
+
+describe "resolve_batch columnar definitions":
+    it "flattens each frozen field into its own column":
+        val batch = batch_flatten_definitions(sample_definitions())
+        expect(batch.ok).to_be(true)
+        expect(batch.name_hash_hi.len()).to_equal(3)
+        expect(batch.name_hash_hi[0]).to_equal(0x0102030405060708)
+        expect(batch.name_hash_lo[0]).to_equal(0x1112131415161718)
+        expect(batch.space[0] as i64).to_equal(42)
+        expect(batch.owner_object_slot[0] as i64).to_equal(7)
+        expect(batch.owner_local_index[0] as i64).to_equal(9)
+        expect(batch.attributes[0]).to_equal(0x00f0000000000001)
+        expect(batch.order[0]).to_equal(3)
+        expect(batch.space[1] as i64).to_equal(4294967295)
+        expect(batch.order[1]).to_equal(0x7fffffffffffffff)
+        expect(batch.order[2]).to_equal(0)
+
+    it "rebuilds the exact original DefinitionRecords":
+        val defs = sample_definitions()
+        val out = batch_rebuild_definitions(batch_flatten_definitions(defs))
+        expect(out.ok).to_be(true)
+        expect(out.records.len()).to_equal(3)
+        var i = 0
+        while i < defs.len():
+            expect(definition_record_equal(out.records[i], defs[i])).to_be(true)
+            i = i + 1
+
+    it "rejects a ragged definition batch":
+        var batch = batch_flatten_definitions(sample_definitions())
+        batch.order.push(99)
+        val out = batch_rebuild_definitions(batch)
+        expect(out.ok).to_be(false)
+        expect(out.records.len()).to_equal(0)
+
+describe "resolve_batch columnar references":
+    it "rebuilds the exact original ReferenceRecords":
+        val refs = sample_references()
+        val out = batch_rebuild_references(batch_flatten_references(refs))
+        expect(out.ok).to_be(true)
+        expect(out.records.len()).to_equal(3)
+        var i = 0
+        while i < refs.len():
+            expect(reference_record_equal(out.records[i], refs[i])).to_be(true)
+            i = i + 1
+
+    it "rejects a ragged reference batch":
+        var batch = batch_flatten_references(sample_references())
+        batch.space.push(1 as u32)
+        val out = batch_rebuild_references(batch)
+        expect(out.ok).to_be(false)
+        expect(out.records.len()).to_equal(0)
+
+describe "resolve_batch parity gate against the frozen codec":
+    it "definition flatten->rebuild->encode is byte-identical to the originals":
+        val defs = sample_definitions()
+        val rebuilt = batch_rebuild_definitions(batch_flatten_definitions(defs))
+        expect(rebuilt.ok).to_be(true)
+        var i = 0
+        while i < defs.len():
+            expect(wire_to_hex(encode_definition_record(rebuilt.records[i])))
+                .to_equal(wire_to_hex(encode_definition_record(defs[i])))
+            i = i + 1
+
+    it "reference flatten->rebuild->encode is byte-identical to the originals":
+        val refs = sample_references()
+        val rebuilt = batch_rebuild_references(batch_flatten_references(refs))
+        expect(rebuilt.ok).to_be(true)
+        var i = 0
+        while i < refs.len():
+            expect(wire_to_hex(encode_reference_record(rebuilt.records[i])))
+                .to_equal(wire_to_hex(encode_reference_record(refs[i])))
+            i = i + 1

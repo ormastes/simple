@@ -1,0 +1,87 @@
+"""
+Tier-less std import ambiguity warning (stage 1, non-fatal).
+
+A tier-less `use std.<path>` whose <path> exists under 2+ of the 5 lib
+tiers resolves by directory-listing order; the resolver now warns
+(default-on, non-fatal, once per distinct path per resolver) naming the
+candidate tiers. Resolution itself must be unchanged. See
+doc/08_tracking/bug/tierless_std_import_ambiguity_resolves_by_registration_order_2026-07-29.md
+
+Lane note: `ModuleResolver.resolve` cannot execute in the unit-spec
+interpreter lane (its `rt_path_parent` extern is not registered there —
+same wall documented in allowed_families_spec.spl). The warning mechanism
+is exercised directly through `maybe_warn_tier_ambiguity` on a filesystem
+fixture; the hook's placement inside the resolve() tier-subdirectory loop
+(after Ok, non-fatal, before caching/return) is locked by source scans.
+"""
+
+use std.spec.*
+use compiler.loader.module_resolver.types.{ModuleResolver, ModulePath, moduleresolver_new}
+# Loads the impl block that defines the tier-ambiguity warning methods.
+use compiler.loader.module_resolver.resolution
+
+extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
+extern fn rt_env_set(key: text, value_str: text) -> bool
+
+val FIXTURE = "/tmp/simple_tier_ambiguity_fixture"
+val RESOLUTION_SRC = "src/compiler/99.loader/module_resolver/resolution.spl"
+
+fn setup_fixture():
+    # Two same-named modules in two tier dirs (ambiguous), one unambiguous.
+    val sh = "rm -rf {FIXTURE} && mkdir -p {FIXTURE}/src/lib/common/foo {FIXTURE}/src/lib/nogc_sync_mut/foo {FIXTURE}/src/lib/common/solo && printf 'fn amb_common() -> i64:\\n    1\\n' > {FIXTURE}/src/lib/common/foo/bar.spl && printf 'fn amb_sync() -> i64:\\n    2\\n' > {FIXTURE}/src/lib/nogc_sync_mut/foo/bar.spl && printf 'fn solo_fn() -> i64:\\n    3\\n' > {FIXTURE}/src/lib/common/solo/only.spl"
+    rt_process_run("/bin/sh", ["-c", sh])
+
+fn _scan(pattern: text) -> text:
+    val cmd = "rg -n '" + pattern + "' " + RESOLUTION_SRC + " || true"
+    val (stdout, _stderr, _code) = rt_process_run("/bin/sh", ["-c", cmd])
+    stdout.trim()
+
+describe "tier-less std import ambiguity warning":
+    it "warns once per distinct ambiguous path, across importing files":
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+        var resolver = moduleresolver_new(FIXTURE, "{FIXTURE}/src")
+        val lib_dir = "{FIXTURE}/src/lib"
+        resolver.maybe_warn_tier_ambiguity(lib_dir, ["foo", "bar"], "{FIXTURE}/src/main_a.spl")
+        expect(resolver.tier_warn_count).to_equal(1)
+        # Second occurrence (different importer) is deduplicated.
+        resolver.maybe_warn_tier_ambiguity(lib_dir, ["foo", "bar"], "{FIXTURE}/src/main_b.spl")
+        expect(resolver.tier_warn_count).to_equal(1)
+        # The multiplicity map recorded exactly the two fixture tiers.
+        expect(resolver.tier_multiplicity["foo.bar"].len()).to_equal(2)
+
+    it "emits nothing for an unambiguous tier-less path":
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+        var resolver = moduleresolver_new(FIXTURE, "{FIXTURE}/src")
+        resolver.maybe_warn_tier_ambiguity("{FIXTURE}/src/lib", ["solo", "only"], "{FIXTURE}/src/main_a.spl")
+        expect(resolver.tier_warn_count).to_equal(0)
+
+    it "SIMPLE_AMBIGUOUS_IMPORT_WARN=0 silences the warning":
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "0")
+        var resolver = moduleresolver_new(FIXTURE, "{FIXTURE}/src")
+        resolver.maybe_warn_tier_ambiguity("{FIXTURE}/src/lib", ["foo", "bar"], "{FIXTURE}/src/main_a.spl")
+        expect(resolver.tier_warn_count).to_equal(0)
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+
+    it "verbose mode warns on every occurrence":
+        setup_fixture()
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "verbose")
+        var resolver = moduleresolver_new(FIXTURE, "{FIXTURE}/src")
+        val lib_dir = "{FIXTURE}/src/lib"
+        resolver.maybe_warn_tier_ambiguity(lib_dir, ["foo", "bar"], "{FIXTURE}/src/main_a.spl")
+        resolver.maybe_warn_tier_ambiguity(lib_dir, ["foo", "bar"], "{FIXTURE}/src/main_b.spl")
+        expect(resolver.tier_warn_count).to_equal(2)
+        rt_env_set("SIMPLE_AMBIGUOUS_IMPORT_WARN", "1")
+
+    it "hook is wired inside the resolve tier-subdirectory loop, non-fatally":
+        # Placement: called on the Ok path of the lib/*/ subdir search,
+        # before the resolution cache write and return — so resolution
+        # behavior is unchanged and the diagnostic cannot become an error.
+        expect(_scan("self\\.maybe_warn_tier_ambiguity\\(lib_dir, inner_segments, from_file\\)").len() > 0).to_equal(true)
+        # Non-fatal: the warn method returns unit and only prints.
+        expect(_scan("fn maybe_warn_tier_ambiguity\\(lib_dir: text, inner_segments: \\[text\\], from_file: text\\):").len() > 0).to_equal(true)
+        expect(_scan("print \"warning: ambiguous import: std\\.").len() > 0).to_equal(true)
+        # Still returns the resolved module right after the hook.
+        expect(_scan("self\\.resolution_cache\\[cache_key\\] = Some\\(resolved\\.path\\)").len() > 0).to_equal(true)

@@ -1,0 +1,227 @@
+"""
+# `iso` (Isolated) capability -- real MIR-lowering move-through-the-pipeline specs
+
+**Lane:** ISO1 iso-real (2026-07-29, explicit user decision)
+
+Prior state (see borrow_check_spec.spl's header): `iso` parsed as a type but
+was erased to `HirTypeKind.Infer` at HIR type lowering
+(hir_lowering/types.spl), so `MirBuilder.emit_move` (mir_data.spl) had zero
+callers and the NLL checker's real, spec-proven Move handling was starved of
+Move facts for any real program -- only hand-built MIR exercised it
+(borrow_check_spec.spl).
+
+This lane's actual code changes:
+1. `HirTypeKind.Isolated(inner)` (src/compiler/20.hir/hir_types.spl) --
+   `iso T` is now carried through HIR instead of collapsing to `Infer`
+   (src/compiler/20.hir/hir_lowering/types.spl).
+2. `mir_hir_type_is_isolated` + the emit_move/emit_copy branch at the
+   variable-to-variable let-binding site
+   (src/compiler/50.mir/mir_lowering_stmts.spl, the new_local+emit_copy
+   fallback used for a PLACE read of an existing binding).
+3. Parameter binding now threads an iso-typed parameter's own HIR type into
+   `find_local_hir_type` via `remember_local_hir_type`
+   (src/compiler/50.mir/_MirLowering/function_lowering.spl), since a
+   parameter never called it before -- without this, `val b = <iso param>`
+   could not see that its source was iso-typed.
+
+## Why this spec hand-builds HIR instead of parsing `iso` source text
+
+An earlier version of this spec drove real `iso`/`mut` source text through
+`parse_full_frontend` (the same real parser `CompilerDriver` uses), matching
+the syntax shown throughout
+test/03_system/feature/usage/capability_system_spec.spl (e.g.
+`fn transfer(data: iso i64) -> i64:`). That is RED even after this lane's
+change, and RED the same way for `mut` too -- confirmed by direct repro:
+
+```
+$ fn take(a: iso i64) -> i64:\n    a\n   -> [parser_error] ... expected ), got Ident 'i64'
+$ fn take(a: mut i64) -> i64:\n    a\n   -> [parser_error] ... expected ), got Ident 'i64'
+```
+
+`parse_full_frontend`'s parameter-type grammar has no construction site for
+`TypeKind.Isolated`/`TypeKind.Atomic` at all (confirmed by repo-wide grep:
+zero non-declaration references to `TypeKind.Isolated`/`TypeKind.Atomic` in
+`src/compiler/10.frontend/**`, versus 2 references in the treesitter OUTLINE
+parser, a separate lighter-weight pass used for LSP/docs, not compilation).
+It parses the bare `iso`/`mut` token as an ordinary type NAME and then
+chokes on the following identifier. This is a **pre-existing parser-layer
+gap**, upstream of everything HIR/MIR/borrow-check touches, and out of this
+lane's scope (`.claude/rules` requires a bug record rather than silently
+working around a real gap -- filed as
+`doc/08_tracking/bug/iso_mut_capability_prefix_not_parsed_2026-07-29.md`).
+It also means `capability_system_spec.spl`'s "40/40 passed" does NOT
+exercise `parse_full_frontend` for its `iso`/`mut` examples (that spec's
+`it` bodies run through the test-runner's interpreter path, not the real
+compiler frontend) -- a separate testing-integrity finding recorded in the
+same bug doc.
+
+To prove this lane's own mechanism -- that a real (non-erased)
+`HirTypeKind.Isolated` on a parameter's type survives MIR lowering into a
+genuine `Move` instruction at a variable-to-variable let-binding, and that
+the real (non-hand-built) `check_mir_module` reports it -- this spec hand-
+builds a small HIR function directly (mirroring
+test/01_unit/compiler/mir/mir_span_thread_spec.spl's own justification for
+doing the same, there for a different pre-existing gap: AST span
+population). This isolates HIR/MIR-lowering-side correctness from the
+separately-broken parser-side gap.
+"""
+
+use std.spec
+use compiler.mir.mir_data.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.hir.hir_definitions.{HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirAssignOp}
+use compiler.hir.hir_types.{HirModule, HirType, HirTypeKind, SymbolId, SymbolTable}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.borrow.borrow_check.*
+use compiler.common.attributes.{FunctionAttr}
+
+fn mk_span(line: i64) -> Span:
+    Span(start: 0, end: 0, line: line, col: 1, file: "synthetic", length: 0)
+
+fn i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: mk_span(0))
+
+fn iso_i64_type() -> HirType:
+    HirType(kind: HirTypeKind.Isolated(i64_type()), span: mk_span(0))
+
+fn var_read(sym: SymbolId, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.Var(sym), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn int_lit(value: i64, line: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true, type_: i64_type(), span: mk_span(line))
+
+fn nil_expr() -> HirExpr:
+    HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: i64_type(), span: mk_span(0))
+
+fn iso_param(sym: SymbolId) -> HirParam:
+    HirParam(symbol: sym, name: "a", type_: iso_i64_type(), has_default: false, default: nil_expr(), span: mk_span(0), is_mutable: false)
+
+fn make_take_fn(body_stmts: [HirStmt], tail: HirExpr) -> HirFunction:
+    val body = HirBlock(stmts: body_stmts, has: true, value: tail, span: mk_span(1))
+    HirFunction(
+        symbol: SymbolId(id: 3),
+        name: "take",
+        type_params: [],
+        params: [iso_param(SymbolId(id: 1))],
+        return_type: i64_type(),
+        body: body,
+        effects: [],
+        visibility: Visibility.Public,
+        is_async: false,
+        is_static: false,
+        is_public: true,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: nil,
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: nil,
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: nil,
+        has_doc_comment: false,
+        doc_comment: "",
+        span: mk_span(1)
+    )
+
+fn make_hir_module(fn_: HirFunction) -> HirModule:
+    var functions: Dict<SymbolId, HirFunction> = {}
+    functions[fn_.symbol] = fn_
+    HirModule(
+        name: "iso_move_test",
+        path: "synthetic/iso_move_test.spl",
+        imports: [],
+        exports: [],
+        domain_blocks: [],
+        symbols: SymbolTable.new(),
+        functions: functions,
+        classes: {},
+        structs: {},
+        enums: {},
+        bitfields: {},
+        traits: {},
+        impls: [],
+        constants: {},
+        static_asserts: [],
+        aop_advices: [],
+        di_bindings: [],
+        arch_rules: [],
+        mock_decls: [],
+        types: []
+    )
+
+fn lower_and_check(fn_: HirFunction) -> [NLLError]:
+    val hir_module = make_hir_module(fn_)
+    var mir_lowering = MirLowering.new(hir_module.symbols)
+    val mir_module = mir_lowering.lower_module(hir_module)
+    check_mir_module(mir_module)
+
+describe "iso use-after-move (red-line probe)":
+    it "reports a borrow diagnostic for `fn take(a: iso i64) -> i64: val b = a; val c = a; 0` (real MIR lowering + real NLL checker, hand-built HIR)":
+        # val b = a   -- the move
+        val let_b = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 2), nil, var_read(SymbolId(id: 1), 10)), span: mk_span(10))
+        # val c = a   -- the use-after-move: a second place-read of the
+        # already-moved iso source. An iso place is move-only (it can never
+        # emit a plain Copy — see mir_lowering_stmts.spl's
+        # mir_hir_type_is_isolated wiring), so THIS, not a bare trailing
+        # `a` read (which the checker's terminator conversion does not see
+        # at all — MirTerminator.Return(_) drops its operand, a pre-
+        # existing, separate blind spot left as-is), is the real shape an
+        # iso use-after-move program lowers to.
+        val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(SymbolId(id: 1), 20)), span: mk_span(20))
+        val fn_ = make_take_fn([let_b, let_c], int_lit(0, 25))
+        val errors = lower_and_check(fn_)
+        assert_true(errors.len() > 0)
+
+describe "iso moved then reassigned then used (kill-on-reassign)":
+    it "reports no borrow diagnostic when the iso parameter is reassigned before its next use":
+        # val b = a
+        val let_b = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 2), nil, var_read(SymbolId(id: 1), 10)), span: mk_span(10))
+        # a = 2   (plain reassignment -- op: nil -- kills the moved state)
+        val assign_stmt = HirStmt(kind: HirStmtKind.Assign(var_read(SymbolId(id: 1), 15), nil, int_lit(2, 15)), span: mk_span(15))
+        # val c = a   -- read after re-init, must be clean
+        val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(SymbolId(id: 1), 20)), span: mk_span(20))
+        val fn_ = make_take_fn([let_b, assign_stmt, let_c], int_lit(0, 25))
+        val errors = lower_and_check(fn_)
+        assert_true(errors.len() == 0)
+
+describe "identical non-iso code is unaffected":
+    it "reports no borrow diagnostic for the same shape (`fn take(a: i64) -> i64: val b = a; val c = a; 0`) without `iso`":
+        val non_iso_param = HirParam(symbol: SymbolId(id: 1), name: "a", type_: i64_type(), has_default: false, default: nil_expr(), span: mk_span(0), is_mutable: false)
+        val let_b = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 2), nil, var_read(SymbolId(id: 1), 10)), span: mk_span(10))
+        val let_c = HirStmt(kind: HirStmtKind.Let(SymbolId(id: 4), nil, var_read(SymbolId(id: 1), 20)), span: mk_span(20))
+        val body = HirBlock(stmts: [let_b, let_c], has: true, value: int_lit(0, 25), span: mk_span(1))
+        val fn_ = HirFunction(
+            symbol: SymbolId(id: 3),
+            name: "take",
+            type_params: [],
+            params: [non_iso_param],
+            return_type: i64_type(),
+            body: body,
+            effects: [],
+            visibility: Visibility.Public,
+            is_async: false,
+            is_static: false,
+            is_public: true,
+            is_method: false,
+            is_mutable: false,
+            is_const: false,
+            is_extern: false,
+            func_attr: FunctionAttr.default(),
+            has_export_attr: false,
+            export_attr: nil,
+            has_driver_manifest_attr: false,
+            driver_manifest_attr: nil,
+            has_suspension: false,
+            has_vhdl_metadata: false,
+            vhdl_metadata: nil,
+            has_doc_comment: false,
+            doc_comment: "",
+            span: mk_span(1)
+        )
+        val errors = lower_and_check(fn_)
+        assert_true(errors.len() == 0)

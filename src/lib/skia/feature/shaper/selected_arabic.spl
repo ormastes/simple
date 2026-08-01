@@ -1,0 +1,443 @@
+# Bounded OpenType shaping for pinned Noto Sans and Noto Naskh Arabic witnesses.
+
+use std.common.encoding.sfnt.{parse_fvar_axes}
+use std.skia.feature.glyph.ot_parser.{OtFont, find_table, read_u16_be, read_i16_be, read_u32_be}
+use std.skia.feature.glyph.ot_parser_cmap.{cmap_glyph_id}
+use std.skia.feature.glyph.ot_parser_layout.{GsubLookup, GposLookup, parse_gsub_skeleton, parse_gpos_skeleton}
+use std.skia.feature.shaper.selected_complex.{selected_glyph_advance, selected_units_per_em}
+
+class SelectedArabicGlyph:
+    glyph_id: u32
+    source_index: i64
+    cluster: i64
+    x_advance: f64
+    x_offset: f64
+    y_offset: f64
+
+class _ArabicGlyph:
+    glyph_id: u32
+    source_index: i64
+    cluster: i64
+    form: i64
+    x_advance_units: i64
+    x_offset_units: i64
+    y_offset_units: i64
+
+fn _arabic_coverage_index(blob: [u8], coverage: i64, limit: i64, glyph: u32) -> i64:
+    if coverage < 0 or coverage + 4 > limit: return -2
+    val format = read_u16_be(blob, coverage)
+    val count = read_u16_be(blob, coverage + 2) as i64
+    if format == 1u32:
+        if coverage + 4 + count * 2 > limit: return -2
+        var previous: i64 = -1
+        var index: i64 = 0
+        while index < count:
+            val current = read_u16_be(blob, coverage + 4 + index * 2) as i64
+            if current <= previous: return -2
+            if current == glyph as i64: return index
+            previous = current
+            index = index + 1
+        return -1
+    if format == 2u32:
+        if coverage + 4 + count * 6 > limit: return -2
+        var previous_end: i64 = -1
+        var index: i64 = 0
+        while index < count:
+            val range = coverage + 4 + index * 6
+            val first = read_u16_be(blob, range) as i64
+            val last = read_u16_be(blob, range + 2) as i64
+            val first_index = read_u16_be(blob, range + 4) as i64
+            if first > last or first <= previous_end: return -2
+            if glyph as i64 >= first and glyph as i64 <= last: return first_index + glyph as i64 - first
+            previous_end = last
+            index = index + 1
+        return -1
+    -2
+
+fn _sans_default_axes(font: OtFont) -> bool:
+    val axes = parse_fvar_axes(font)
+    if axes.len() != 2: return false
+    var weight = false
+    var width = false
+    for axis in axes:
+        if axis.tag == 2003265652u32 and axis.default_value == 400.0: weight = true  # wght
+        if axis.tag == 2003072104u32 and axis.default_value == 100.0: width = true   # wdth
+    weight and width
+
+fn _naskh_default_axes(font: OtFont) -> bool:
+    val axes = parse_fvar_axes(font)
+    if axes.len() != 1: return false
+    val axis = axes[0]
+    (axis.tag == 2003265652u32 and axis.min_value == 400.0 and
+        axis.default_value == 400.0 and axis.max_value == 700.0)
+
+fn _langsys_has_no_required_feature(font: OtFont, table_tag: u32, language_tag: u32) -> bool:
+    val table = match find_table(font, table_tag):
+        Some(value): value
+        None: return false
+    val base = table.offset as i64
+    val limit = base + table.length as i64
+    if base < 0 or limit > font.blob.len() as i64 or base + 10 > limit: return false
+    val scripts = base + read_u16_be(font.blob, base + 4) as i64
+    if scripts <= base or scripts + 2 > limit: return false
+    val count = read_u16_be(font.blob, scripts) as i64
+    if scripts + 2 + count * 6 > limit: return false
+    var script: i64 = -1
+    var index: i64 = 0
+    while index < count:
+        val record = scripts + 2 + index * 6
+        val offset = read_u16_be(font.blob, record + 4) as i64
+        if read_u32_be(font.blob, record) == 1634885986u32: script = scripts + offset  # arab
+        index = index + 1
+    if script < scripts or script + 4 > limit: return false
+    val default_offset = read_u16_be(font.blob, script) as i64
+    val language_count = read_u16_be(font.blob, script + 2) as i64
+    if script + 4 + language_count * 6 > limit: return false
+    var langsys = if language_tag == 0u32 and default_offset > 0: script + default_offset else: -1
+    index = 0
+    while index < language_count:
+        val record = script + 4 + index * 6
+        val offset = read_u16_be(font.blob, record + 4) as i64
+        if read_u32_be(font.blob, record) == language_tag: langsys = script + offset
+        index = index + 1
+    langsys >= script and langsys + 6 <= limit and read_u16_be(font.blob, langsys) == 0u32 and read_u16_be(font.blob, langsys + 2) == 65535u32
+
+fn _sans_catalogs_valid(gsub: [GsubLookup], gpos: [GposLookup]) -> bool:
+    if gsub.len() <= 42 or gpos.len() <= 11: return false
+    val gsub_indices: [i64] = [19, 11, 13, 14, 15, 40, 42, 17, 22, 4, 21, 20, 25, 26, 28, 30, 32, 34, 35, 36]
+    val gsub_types: [u32] = [1u32, 6u32, 4u32, 2u32, 2u32, 6u32, 4u32, 1u32, 2u32, 1u32, 2u32, 2u32, 2u32, 6u32, 6u32, 6u32, 6u32, 5u32, 5u32, 4u32]
+    var index: i64 = 0
+    while index < gsub_indices.len():
+        if gsub[gsub_indices[index]].lookup_type != gsub_types[index]: return false
+        index = index + 1
+    val gpos_indices: [i64] = [0, 2, 4, 5, 6, 7, 8, 9, 10, 11]
+    val gpos_types: [u32] = [8u32, 2u32, 4u32, 4u32, 5u32, 6u32, 6u32, 6u32, 6u32, 6u32]
+    index = 0
+    while index < gpos_indices.len():
+        if gpos[gpos_indices[index]].lookup_type != gpos_types[index]: return false
+        index = index + 1
+    true
+
+fn _naskh_catalogs_valid(gsub: [GsubLookup], gpos: [GposLookup]) -> bool:
+    if gsub.len() <= 33 or gpos.len() <= 17: return false
+    val gsub_indices: [i64] = [15, 23, 24, 25, 32, 33]
+    val gsub_types: [u32] = [2u32, 2u32, 2u32, 2u32, 6u32, 1u32]
+    var index: i64 = 0
+    while index < gsub_indices.len():
+        if gsub[gsub_indices[index]].lookup_type != gsub_types[index]: return false
+        index = index + 1
+    gpos[5].lookup_type == 4u32 and gpos[17].lookup_type == 4u32
+
+fn _multiple(font: OtFont, lookup: GsubLookup, glyph: _ArabicGlyph) -> Option<[_ArabicGlyph]>:
+    if lookup.lookup_type != 2u32: return None
+    val limit = lookup.table_end as i64
+    for offset in lookup.subtable_offsets:
+        val subtable = offset as i64
+        if subtable + 6 > limit or read_u16_be(font.blob, subtable) != 1u32: return None
+        val covered = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, glyph.glyph_id)
+        if covered == -2: return None
+        if covered < 0: continue
+        val count = read_u16_be(font.blob, subtable + 4) as i64
+        if covered >= count or subtable + 6 + count * 2 > limit: return None
+        val sequence = subtable + read_u16_be(font.blob, subtable + 6 + covered * 2) as i64
+        if sequence < subtable or sequence + 2 > limit: return None
+        val replacement_count = read_u16_be(font.blob, sequence) as i64
+        if replacement_count == 0 or sequence + 2 + replacement_count * 2 > limit: return None
+        var result: [_ArabicGlyph] = []
+        var index: i64 = 0
+        while index < replacement_count:
+            result.push(_ArabicGlyph(glyph_id: read_u16_be(font.blob, sequence + 2 + index * 2), source_index: glyph.source_index,
+                cluster: glyph.cluster, form: glyph.form, x_advance_units: 0, x_offset_units: 0, y_offset_units: 0))
+            index = index + 1
+        return Some(result)
+    Some([glyph])
+
+fn _apply_multiple(font: OtFont, lookup: GsubLookup, glyphs: [_ArabicGlyph], form: i64) -> Option<[_ArabicGlyph]>:
+    var result: [_ArabicGlyph] = []
+    for glyph in glyphs:
+        if form >= 0 and glyph.form != form:
+            result.push(glyph)
+        else:
+            val replacement = match _multiple(font, lookup, glyph):
+                Some(value): value
+                None: return None
+            for item in replacement: result.push(item)
+    Some(result)
+
+fn _arabic_single(font: OtFont, lookup: GsubLookup, glyph: u32) -> Option<u32>:
+    if lookup.lookup_type != 1u32: return None
+    val limit = lookup.table_end as i64
+    for offset in lookup.subtable_offsets:
+        val subtable = offset as i64
+        if subtable + 6 > limit: return None
+        val format = read_u16_be(font.blob, subtable)
+        val covered = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, glyph)
+        if covered == -2: return None
+        if covered < 0: continue
+        if format == 1u32: return Some(((glyph as i64 + read_i16_be(font.blob, subtable + 4) as i64) & 65535) as u32)
+        return None
+    Some(glyph)
+
+fn _apply_chain_single(font: OtFont, lookup: GsubLookup, catalog: [GsubLookup], glyphs: [_ArabicGlyph]) -> Option<[_ArabicGlyph]>:
+    if lookup.lookup_type != 6u32 or (lookup.flag & 16u32) == 0u32: return None
+    val limit = lookup.table_end as i64
+    var result = glyphs
+    for offset in lookup.subtable_offsets:
+        val subtable = offset as i64
+        if subtable + 12 > limit or read_u16_be(font.blob, subtable) != 3u32: return None
+        var cursor = subtable + 2
+        val backtrack_count = read_u16_be(font.blob, cursor) as i64
+        cursor = cursor + 2 + backtrack_count * 2
+        if cursor + 2 > limit: return None
+        val input_count = read_u16_be(font.blob, cursor) as i64
+        cursor = cursor + 2
+        if input_count != 1 or cursor + 2 > limit: return None
+        val input_coverage = subtable + read_u16_be(font.blob, cursor) as i64
+        cursor = cursor + 2
+        if cursor + 2 > limit: return None
+        val lookahead_count = read_u16_be(font.blob, cursor) as i64
+        cursor = cursor + 2
+        if lookahead_count != 1 or cursor + 2 > limit: return None
+        val lookahead_coverage = subtable + read_u16_be(font.blob, cursor) as i64
+        cursor = cursor + 2
+        if cursor + 2 > limit: return None
+        val record_count = read_u16_be(font.blob, cursor) as i64
+        cursor = cursor + 2
+        if record_count != 1 or cursor + 4 > limit: return None
+        val sequence_index = read_u16_be(font.blob, cursor)
+        val nested_index = read_u16_be(font.blob, cursor + 2) as i64
+        if sequence_index != 0u32 or nested_index < 0 or nested_index >= catalog.len(): return None
+        var index: i64 = 0
+        while index + 1 < result.len():
+            val current = _arabic_coverage_index(font.blob, input_coverage, limit, result[index].glyph_id)
+            val next = _arabic_coverage_index(font.blob, lookahead_coverage, limit, result[index + 1].glyph_id)
+            if current == -2 or next == -2: return None
+            if current >= 0 and next >= 0:
+                val replacement = match _arabic_single(font, catalog[nested_index], result[index].glyph_id):
+                    Some(value): value
+                    None: return None
+                result[index].glyph_id = replacement
+            index = index + 1
+    Some(result)
+
+fn _record_size(format: u32) -> i64:
+    var size: i64 = 0
+    var bit = 1u32
+    while bit <= 32768u32:
+        if (format & bit) != 0u32: size = size + 2
+        bit = bit << 1
+    size
+
+fn _class(blob: [u8], offset: i64, limit: i64, glyph: u32) -> i64:
+    if offset < 0 or offset + 4 > limit: return -1
+    val format = read_u16_be(blob, offset)
+    if format == 1u32:
+        if offset + 6 > limit: return -1
+        val first = read_u16_be(blob, offset + 2)
+        val count = read_u16_be(blob, offset + 4) as i64
+        if offset + 6 + count * 2 > limit: return -1
+        if glyph < first or glyph as i64 >= first as i64 + count: return 0
+        return read_u16_be(blob, offset + 6 + (glyph - first) as i64 * 2) as i64
+    if format == 2u32:
+        val count = read_u16_be(blob, offset + 2) as i64
+        if offset + 4 + count * 6 > limit: return -1
+        var index: i64 = 0
+        while index < count:
+            val record = offset + 4 + index * 6
+            if glyph >= read_u16_be(blob, record) and glyph <= read_u16_be(blob, record + 2): return read_u16_be(blob, record + 4) as i64
+            index = index + 1
+        return 0
+    -1
+
+fn _pair_position(font: OtFont, lookup: GposLookup, glyphs: [_ArabicGlyph]) -> Option<[_ArabicGlyph]>:
+    if lookup.lookup_type != 2u32: return None
+    val limit = lookup.table_end as i64
+    var result = glyphs
+    for offset in lookup.subtable_offsets:
+        val subtable = offset as i64
+        if subtable + 10 > limit: return None
+        val format = read_u16_be(font.blob, subtable)
+        if format == 1u32: continue
+        if format != 2u32 or subtable + 16 > limit: return None
+        val value_1 = read_u16_be(font.blob, subtable + 4)
+        val value_2 = read_u16_be(font.blob, subtable + 6)
+        val count_1 = read_u16_be(font.blob, subtable + 12) as i64
+        val count_2 = read_u16_be(font.blob, subtable + 14) as i64
+        val record_size = _record_size(value_1) + _record_size(value_2)
+        if subtable + 16 + count_1 * count_2 * record_size > limit: return None
+        var index: i64 = 0
+        while index + 1 < result.len():
+            val covered = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, result[index].glyph_id)
+            val first = _class(font.blob, subtable + read_u16_be(font.blob, subtable + 8) as i64, limit, result[index].glyph_id)
+            val second = _class(font.blob, subtable + read_u16_be(font.blob, subtable + 10) as i64, limit, result[index + 1].glyph_id)
+            if covered == -2 or first < 0 or second < 0: return None
+            if covered >= 0 and first < count_1 and second < count_2:
+                var cursor = subtable + 16 + (first * count_2 + second) * record_size
+                if (value_1 & 1u32) != 0u32:
+                    val placement = read_i16_be(font.blob, cursor) as i64
+                    result[index].x_offset_units = result[index].x_offset_units + placement
+                    cursor = cursor + 2
+                if (value_1 & 2u32) != 0u32: cursor = cursor + 2
+                if (value_1 & 4u32) != 0u32:
+                    result[index].x_advance_units = result[index].x_advance_units + read_i16_be(font.blob, cursor) as i64
+            index = index + 1
+    Some(result)
+
+fn _anchor(font: OtFont, offset: i64, limit: i64) -> Option<(i64, i64)>:
+    if offset < 0 or offset + 6 > limit: return None
+    val format = read_u16_be(font.blob, offset)
+    if format < 1u32 or format > 3u32: return None
+    if format == 2u32 and offset + 8 > limit: return None
+    if format == 3u32:
+        if offset + 10 > limit: return None
+        val x_device = read_u16_be(font.blob, offset + 6) as i64
+        val y_device = read_u16_be(font.blob, offset + 8) as i64
+        if (x_device != 0 and offset + x_device + 6 > limit) or (y_device != 0 and offset + y_device + 6 > limit): return None
+    Some((read_i16_be(font.blob, offset + 2) as i64, read_i16_be(font.blob, offset + 4) as i64))
+
+fn _mark_base_position(font: OtFont, lookup: GposLookup, glyphs: [_ArabicGlyph]) -> Option<[_ArabicGlyph]>:
+    if lookup.lookup_type != 4u32: return None
+    val limit = lookup.table_end as i64
+    var result = glyphs
+    for offset in lookup.subtable_offsets:
+        val subtable = offset as i64
+        if subtable + 12 > limit or read_u16_be(font.blob, subtable) != 1u32: return None
+        val classes = read_u16_be(font.blob, subtable + 6) as i64
+        val mark_array = subtable + read_u16_be(font.blob, subtable + 8) as i64
+        val base_array = subtable + read_u16_be(font.blob, subtable + 10) as i64
+        if classes <= 0 or mark_array + 2 > limit or base_array + 2 > limit: return None
+        var mark_index: i64 = 1
+        while mark_index < result.len():
+            val mark_coverage = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 2) as i64, limit, result[mark_index].glyph_id)
+            if mark_coverage == -2: return None
+            if mark_coverage >= 0:
+                var base_index = mark_index - 1
+                while base_index >= 0 and result[base_index].x_advance_units == 0:
+                    base_index = base_index - 1
+                if base_index < 0: return None
+                val base_coverage = _arabic_coverage_index(font.blob, subtable + read_u16_be(font.blob, subtable + 4) as i64, limit, result[base_index].glyph_id)
+                if base_coverage == -2: return None
+                if base_coverage >= 0:
+                    val mark_count = read_u16_be(font.blob, mark_array) as i64
+                    val base_count = read_u16_be(font.blob, base_array) as i64
+                    if mark_coverage >= mark_count or base_coverage >= base_count or mark_array + 2 + mark_count * 4 > limit or base_array + 2 + base_count * classes * 2 > limit: return None
+                    val record = mark_array + 2 + mark_coverage * 4
+                    val cls = read_u16_be(font.blob, record) as i64
+                    if cls >= classes: return None
+                    val mark_anchor_offset = read_u16_be(font.blob, record + 2) as i64
+                    val base_anchor_offset = read_u16_be(font.blob, base_array + 2 + (base_coverage * classes + cls) * 2) as i64
+                    if mark_anchor_offset == 0 or base_anchor_offset == 0: return None
+                    val mark_anchor = match _anchor(font, mark_array + mark_anchor_offset, limit):
+                        Some(value): value
+                        None: return None
+                    val base_anchor = match _anchor(font, base_array + base_anchor_offset, limit):
+                        Some(value): value
+                        None: return None
+                    result[mark_index].x_offset_units = base_anchor.0 - mark_anchor.0
+                    result[mark_index].y_offset_units = base_anchor.1 - mark_anchor.1
+            mark_index = mark_index + 1
+    Some(result)
+
+fn selected_arabic_glyphs(codepoints: [u32], start: i64, end_idx: i64,
+                          language: text, font: Option<OtFont>, size: f64) -> [SelectedArabicGlyph]:
+    val arabic = [1575u32, 1604u32, 1593u32, 1585u32, 1576u32, 1610u32, 1577u32]
+    val urdu = [1575u32, 1585u32, 1583u32, 1608u32]
+    val witness = if language == "ar": arabic else if language == "ur": urdu else: []
+    if witness.len() == 0 or start < 0 or end_idx - start != witness.len() or end_idx > codepoints.len(): return []
+    var index: i64 = 0
+    while index < witness.len():
+        if codepoints[start + index] != witness[index]: return []
+        index = index + 1
+    val parsed = match font:
+        Some(value): value
+        None: return []
+    val language_tag = if language == "ur": 1431454752u32 else: 0u32  # URD / DFLT
+    val gsub = parse_gsub_skeleton(parsed)
+    val gpos = parse_gpos_skeleton(parsed)
+    val sans_profile = (_sans_default_axes(parsed) and _sans_catalogs_valid(gsub, gpos) and
+        _langsys_has_no_required_feature(parsed, 1196643650u32, language_tag) and
+        _langsys_has_no_required_feature(parsed, 1196445523u32, language_tag))
+    val naskh_profile = (_naskh_default_axes(parsed) and _naskh_catalogs_valid(gsub, gpos) and
+        _langsys_has_no_required_feature(parsed, 1196643650u32, 0u32) and
+        _langsys_has_no_required_feature(parsed, 1196643650u32, 1431454752u32) and
+        _langsys_has_no_required_feature(parsed, 1196445523u32, 0u32) and
+        _langsys_has_no_required_feature(parsed, 1196445523u32, 1431454752u32))
+    if not sans_profile and not naskh_profile: return []
+    val forms = if language == "ar": [0, 1, 2, 3, 1, 2, 3] else: [0, 0, 0, 0]
+    var working: [_ArabicGlyph] = []
+    index = 0
+    while index < witness.len():
+        val glyph = cmap_glyph_id(parsed, witness[index])
+        if glyph == 0u32: return []
+        working.push(_ArabicGlyph(glyph_id: glyph, source_index: start + index, cluster: start + index, form: forms[index],
+            x_advance_units: 0, x_offset_units: 0, y_offset_units: 0))
+        index = index + 1
+    if naskh_profile:
+        working = match _apply_multiple(parsed, gsub[15], working, -1):
+            Some(value): value
+            None: return []
+        working = match _apply_multiple(parsed, gsub[25], working, 3):
+            Some(value): value
+            None: return []
+        working = match _apply_multiple(parsed, gsub[24], working, 2):
+            Some(value): value
+            None: return []
+        working = match _apply_multiple(parsed, gsub[23], working, 1):
+            Some(value): value
+            None: return []
+        working = match _apply_chain_single(parsed, gsub[32], gsub, working):
+            Some(value): value
+            None: return []
+    else:
+        # Exact Noto Sans Arabic active order for the two pinned witnesses.
+        working = match _apply_multiple(parsed, gsub[14], working, -1):
+            Some(value): value
+            None: return []
+        working = match _apply_multiple(parsed, gsub[22], working, 3):
+            Some(value): value
+            None: return []
+        working = match _apply_multiple(parsed, gsub[21], working, 2):
+            Some(value): value
+            None: return []
+        working = match _apply_multiple(parsed, gsub[20], working, 1):
+            Some(value): value
+            None: return []
+        working = match _apply_chain_single(parsed, gsub[28], gsub, working):
+            Some(value): value
+            None: return []
+    index = 0
+    while index < working.len():
+        working[index].x_advance_units = (selected_glyph_advance(Some(parsed), working[index].glyph_id, 1000.0)) as i64
+        index = index + 1
+    if naskh_profile:
+        working = match _mark_base_position(parsed, gpos[5], working):
+            Some(value): value
+            None: return []
+        working = match _mark_base_position(parsed, gpos[17], working):
+            Some(value): value
+            None: return []
+    else:
+        working = match _pair_position(parsed, gpos[2], working):
+            Some(value): value
+            None: return []
+        working = match _mark_base_position(parsed, gpos[4], working):
+            Some(value): value
+            None: return []
+        working = match _mark_base_position(parsed, gpos[5], working):
+            Some(value): value
+            None: return []
+    val units = match selected_units_per_em(parsed):
+        Some(value): value
+        None: return []
+    var result: [SelectedArabicGlyph] = []
+    index = working.len() - 1
+    while index >= 0:
+        val glyph = working[index]
+        val scale = size / units as f64
+        result.push(SelectedArabicGlyph(glyph_id: glyph.glyph_id, source_index: glyph.source_index, cluster: glyph.cluster,
+            x_advance: glyph.x_advance_units as f64 * scale, x_offset: glyph.x_offset_units as f64 * scale,
+            y_offset: glyph.y_offset_units as f64 * scale))
+        index = index - 1
+    result
+
+export SelectedArabicGlyph, selected_arabic_glyphs

@@ -1,0 +1,237 @@
+#!/bin/sh
+
+# Shared producer/consumer identity contract for the source roots passed by
+# `_QemuRunner._build_sources` to the arm64-desktop-engine2d native build.
+
+arm64_guest_source_roots_text() {
+    printf '%s' 'build/os/generated|src/os|src/lib|examples/09_embedded/simple_os|scripts/os/make_os_disk.shs|scripts/os/make_os_disk.c|scripts/os/simpleos_font_bundle_companion.sha256|assets/fonts|scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs|scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs|scripts/check/lib/qemu-frozen-source-admission.shs'
+}
+
+arm64_guest_read_hex_bytes() {
+    arm64_guest_hex_offset="$2"
+    arm64_guest_hex_count="$3"
+    arm64_guest_hex_raw="$(
+        od -An -tx1 -j "$arm64_guest_hex_offset" \
+            -N "$arm64_guest_hex_count" "$1" 2>/dev/null
+    )" || return 1
+    set -- $arm64_guest_hex_raw
+    [ "$#" -eq "$arm64_guest_hex_count" ] || return 1
+    ARM64_GUEST_HEX_BYTES=""
+    for arm64_guest_hex_byte in "$@"
+    do
+        case "$arm64_guest_hex_byte" in
+            [0-9a-f][0-9a-f])
+                ARM64_GUEST_HEX_BYTES="${ARM64_GUEST_HEX_BYTES}${arm64_guest_hex_byte}"
+                ;;
+            *) return 1 ;;
+        esac
+    done
+}
+
+arm64_guest_validate_native_compiler() {
+    arm64_guest_compiler_path="$1"
+    ARM64_GUEST_COMPILER_FORMAT=""
+    ARM64_GUEST_COMPILER_ARCH=""
+    ARM64_GUEST_COMPILER_ADMISSION_REASON="binary-or-host-format-invalid"
+    [ -x "$arm64_guest_compiler_path" ] &&
+        [ -f "$arm64_guest_compiler_path" ] &&
+        [ ! -L "$arm64_guest_compiler_path" ] || return 1
+    case "$arm64_guest_compiler_path" in
+        *"/compiler_rust/"*|*"/target/debug/"*|*"/debug/simple")
+            ARM64_GUEST_COMPILER_ADMISSION_REASON="rust-seed-or-debug-forbidden"
+            return 1
+            ;;
+    esac
+    if LC_ALL=C grep -a -Eiq \
+            'Rust-built|bootstrap seed only|debug build' \
+            "$arm64_guest_compiler_path"; then
+        ARM64_GUEST_COMPILER_ADMISSION_REASON="rust-seed-or-debug-forbidden"
+        return 1
+    fi
+    arm64_guest_compiler_os="$(uname -s)" || return 1
+    arm64_guest_compiler_host_arch="$(uname -m)" || return 1
+    arm64_guest_read_hex_bytes "$arm64_guest_compiler_path" 0 4 || return 1
+    arm64_guest_compiler_magic="$ARM64_GUEST_HEX_BYTES"
+
+    case "$arm64_guest_compiler_os:$arm64_guest_compiler_host_arch" in
+        Darwin:arm64)
+            [ "$arm64_guest_compiler_magic" = cffaedfe ] || return 1
+            arm64_guest_read_hex_bytes "$arm64_guest_compiler_path" 4 4 ||
+                return 1
+            [ "$ARM64_GUEST_HEX_BYTES" = 0c000001 ] || return 1
+            ARM64_GUEST_COMPILER_FORMAT=mach-o-64
+            ARM64_GUEST_COMPILER_ARCH=aarch64
+            ;;
+        Darwin:x86_64)
+            [ "$arm64_guest_compiler_magic" = cffaedfe ] || return 1
+            arm64_guest_read_hex_bytes "$arm64_guest_compiler_path" 4 4 ||
+                return 1
+            [ "$ARM64_GUEST_HEX_BYTES" = 07000001 ] || return 1
+            ARM64_GUEST_COMPILER_FORMAT=mach-o-64
+            ARM64_GUEST_COMPILER_ARCH=x86_64
+            ;;
+        Linux:aarch64|Linux:arm64)
+            [ "$arm64_guest_compiler_magic" = 7f454c46 ] || return 1
+            arm64_guest_read_hex_bytes "$arm64_guest_compiler_path" 4 2 ||
+                return 1
+            [ "$ARM64_GUEST_HEX_BYTES" = 0201 ] || return 1
+            arm64_guest_read_hex_bytes "$arm64_guest_compiler_path" 18 2 ||
+                return 1
+            [ "$ARM64_GUEST_HEX_BYTES" = b700 ] || return 1
+            ARM64_GUEST_COMPILER_FORMAT=elf64
+            ARM64_GUEST_COMPILER_ARCH=aarch64
+            ;;
+        Linux:x86_64)
+            [ "$arm64_guest_compiler_magic" = 7f454c46 ] || return 1
+            arm64_guest_read_hex_bytes "$arm64_guest_compiler_path" 4 2 ||
+                return 1
+            [ "$ARM64_GUEST_HEX_BYTES" = 0201 ] || return 1
+            arm64_guest_read_hex_bytes "$arm64_guest_compiler_path" 18 2 ||
+                return 1
+            [ "$ARM64_GUEST_HEX_BYTES" = 3e00 ] || return 1
+            ARM64_GUEST_COMPILER_FORMAT=elf64
+            ARM64_GUEST_COMPILER_ARCH=x86_64
+            ;;
+        *) return 1 ;;
+    esac
+    ARM64_GUEST_COMPILER_ADMISSION_REASON="pass"
+}
+
+arm64_guest_source_dirty() {
+    arm64_guest_status_output="$(
+        git status --porcelain --untracked-files=all -- \
+            src/os src/lib examples/09_embedded/simple_os \
+            scripts/os/make_os_disk.shs scripts/os/make_os_disk.c \
+            scripts/os/simpleos_font_bundle_companion.sha256 assets/fonts \
+            scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs \
+            scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
+            scripts/check/lib/qemu-frozen-source-admission.shs
+    )"
+    arm64_guest_status_code=$?
+    [ "$arm64_guest_status_code" -eq 0 ] || return 2
+    [ -n "$arm64_guest_status_output" ]
+}
+
+arm64_guest_source_snapshot_cleanup() {
+    rm -f \
+        "${snapshot_paths:-}" \
+        "${snapshot_records:-}" \
+        "${snapshot_result:-}"
+}
+
+arm64_guest_source_snapshot() {
+    snapshot_paths="$(mktemp "${TMPDIR:-/tmp}/simpleos-arm64-source-paths.XXXXXX")" ||
+        return 1
+    snapshot_records="${snapshot_paths}.records"
+    snapshot_result="${snapshot_paths}.result"
+    : >"$snapshot_paths" || {
+        arm64_guest_source_snapshot_cleanup
+        return 1
+    }
+
+    for snapshot_root in \
+        build/os/generated \
+        src/os \
+        src/lib \
+        examples/09_embedded/simple_os \
+        scripts/os/make_os_disk.shs \
+        scripts/os/make_os_disk.c \
+        scripts/os/simpleos_font_bundle_companion.sha256 \
+        assets/fonts \
+        scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs \
+        scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs \
+        scripts/check/lib/qemu-frozen-source-admission.shs
+    do
+        if [ -d "$snapshot_root" ]; then
+            find "$snapshot_root" \( -type f -o -type l \) -print0 \
+                >>"$snapshot_paths" || {
+                arm64_guest_source_snapshot_cleanup
+                return 1
+            }
+        elif [ -f "$snapshot_root" ] || [ -L "$snapshot_root" ]; then
+            printf '%s\0' "$snapshot_root" >>"$snapshot_paths" || {
+                arm64_guest_source_snapshot_cleanup
+                return 1
+            }
+        else
+            arm64_guest_source_snapshot_cleanup
+            return 1
+        fi
+    done
+
+    # Keep legal Unix paths byte-exact: find emits NUL records, Python sorts
+    # raw path bytes, and the digest records remain NUL-delimited end to end.
+    python3 - "$snapshot_paths" "$snapshot_records" >"$snapshot_result" <<'PY' || {
+import hashlib
+import os
+import stat
+import sys
+
+paths_path = sys.argv[1]
+records_path = sys.argv[2]
+with open(paths_path, "rb") as stream:
+    encoded_paths = stream.read().split(b"\0")
+if not encoded_paths or encoded_paths[-1] != b"":
+    raise RuntimeError("source path stream is not NUL terminated")
+paths = sorted(set(encoded_paths[:-1]))
+if not paths or any(path == b"" for path in paths):
+    raise RuntimeError("source path stream is empty or malformed")
+
+digest = hashlib.sha256()
+with open(records_path, "wb") as records:
+    for path in paths:
+        mode = os.lstat(path).st_mode
+        if stat.S_ISLNK(mode):
+            kind = b"L"
+            payload = os.readlink(path)
+            if isinstance(payload, str):
+                payload = os.fsencode(payload)
+            size = len(payload)
+            content_hash = hashlib.sha256(payload).hexdigest().encode("ascii")
+        elif stat.S_ISREG(mode):
+            kind = b"F"
+            size = os.lstat(path).st_size
+            file_digest = hashlib.sha256()
+            with open(path, "rb") as source:
+                while True:
+                    chunk = source.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    file_digest.update(chunk)
+            content_hash = file_digest.hexdigest().encode("ascii")
+        else:
+            raise RuntimeError("enumerated source is not a file or symlink")
+        record = (
+            kind + b"\0" + path + b"\0" + str(size).encode("ascii") +
+            b"\0" + content_hash + b"\0"
+        )
+        records.write(record)
+        digest.update(record)
+
+print(digest.hexdigest())
+print(len(paths))
+PY
+        arm64_guest_source_snapshot_cleanup
+        return 1
+    }
+    ARM64_GUEST_SOURCE_FINGERPRINT="$(sed -n '1p' "$snapshot_result")" || {
+        arm64_guest_source_snapshot_cleanup
+        return 1
+    }
+    ARM64_GUEST_SOURCE_FILE_COUNT="$(sed -n '2p' "$snapshot_result")" || {
+        arm64_guest_source_snapshot_cleanup
+        return 1
+    }
+    ARM64_GUEST_SOURCE_ROOTS="$(arm64_guest_source_roots_text)" || {
+        arm64_guest_source_snapshot_cleanup
+        return 1
+    }
+    arm64_guest_source_snapshot_cleanup || return 1
+
+    [ "$ARM64_GUEST_SOURCE_FILE_COUNT" -gt 0 ] || return 1
+    [ "${#ARM64_GUEST_SOURCE_FINGERPRINT}" -eq 64 ] || return 1
+    case "$ARM64_GUEST_SOURCE_FINGERPRINT" in
+        *[!0-9a-f]*|"") return 1 ;;
+    esac
+    return 0
+}

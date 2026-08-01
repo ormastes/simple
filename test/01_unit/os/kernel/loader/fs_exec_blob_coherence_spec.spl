@@ -1,0 +1,56 @@
+# Blob-coherence contract for the x86_64 filesystem-exec ring-3 handoff.
+#
+# Locks the invariant this whole change exists to protect: the raw blob handed
+# to the ring-3 handoff is the SAME buffer the executable bytes were read from,
+# so the mapped user image matches the memory the loader validated. Also pins
+# the handoff-readiness predicate truth table and the shell -> arch-spawn route.
+#
+# Host-runnable: no QEMU, no baremetal execution. The predicate is pure and
+# imported directly; the coherence + routing invariants are asserted by source
+# inspection (the same host-safe pattern used by x86_64_fs_exec_spawn_spec.spl,
+# which cannot exercise the baremetal externs at run time).
+#
+# @req REQ-SIMPLEOS-FSEXEC-BLOB-COHERENCE-001
+
+use std.io_runtime.{file_read}
+use os.kernel.loader.x86_64_fs_exec_spawn.{x86_64_fs_exec_handoff_blob_ready}
+
+describe "x86_64 fs-exec handoff blob readiness predicate":
+    it "rejects a zero blob regardless of byte length":
+        assert_false(x86_64_fs_exec_handoff_blob_ready(0, 0.to_u64()))
+        assert_false(x86_64_fs_exec_handoff_blob_ready(5, 0.to_u64()))
+
+    it "rejects a too-small byte length even with a nonzero blob":
+        assert_false(x86_64_fs_exec_handoff_blob_ready(4, 1.to_u64()))
+
+    it "accepts a nonzero blob with a real byte length":
+        assert_true(x86_64_fs_exec_handoff_blob_ready(5, 1.to_u64()))
+
+describe "x86_64 fs-exec blob is coherent with the bytes handed to ring3":
+    it "returns the same buffer the executable bytes were read from":
+        val source = file_read("src/os/kernel/loader/x86_64_fs_exec_spawn.spl")
+        # bytes and raw_blob are BOTH `buf` (simpleos_fat32_path_read_buffer_addr,
+        # populated in place by simpleos_fat32_stream_read_at) -> one coherent
+        # buffer. This is exactly what a scratch-backed blob swap would have
+        # broken: bytes from `buf` but raw_blob from a different reader.
+        expect(source).to_contain("val buf = simpleos_fat32_path_read_buffer_addr()")
+        expect(source).to_contain("simpleos_fat32_stream_read_at(0.to_u64(), buf, fsize.to_u64())")
+        expect(source).to_contain("(rt_bytes_from_raw(buf as i64, fsize), buf)")
+        # The blob passed to the ring-3 handoff is that same raw blob.
+        expect(source).to_contain("x86_64_fs_exec_enter_image_ring3(image, raw_blob, argv, envp)")
+
+    it "gates the handoff on the readiness predicate and fails closed":
+        val source = file_read("src/os/kernel/loader/x86_64_fs_exec_spawn.spl")
+        expect(source).to_contain("x86_64_fs_exec_handoff_blob_ready(bytes.len(), raw_blob)")
+        # Handoff only returns on failure; a negative rc is surfaced, never a
+        # phantom-success pid.
+        expect(source).to_contain("return handoff_rc")
+
+describe "shell PATH exec routes to the arch-complete ring-3 spawn":
+    it "dispatches through the ring3 fs-exec bridge to x86_64_fs_exec_spawn":
+        val shell = file_read("src/os/apps/shell/exec.spl")
+        val bridge = file_read("src/os/kernel/loader/fs_exec_spawn.spl")
+        # exec.spl -> fs_exec_spawn_ring3 -> _fs_exec_spawn_ring3_active
+        #          -> (x86_64) x86_64_fs_exec_spawn -> real ring-3 handoff.
+        expect(shell).to_contain("fs_exec_spawn_ring3(resolved_path, argv, envp)")
+        expect(bridge).to_contain("x86_64_fs_exec_spawn(path, argv, envp)")

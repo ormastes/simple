@@ -1,0 +1,37 @@
+use std.spec
+use std.gc_sync_mut.sanitizer.tsan.{tsan_is_enabled as package_tsan_is_enabled}
+use std.gc_sync_mut.sanitizer.tsan.mod.{tsan_enable, tsan_is_enabled, tsan_set_thread, tsan_read, tsan_write, tsan_lock_acquire, tsan_error_count, tsan_get_events, tsan_reset}
+use std.gc_sync_mut.sanitizer.tsan.types.{data_race}
+
+describe "gc_sync_mut sanitizer tsan facade":
+
+    it "re-exports thread sanitizer race checks and records":
+        tsan_reset()
+        expect(tsan_is_enabled()).to_equal(false)
+        expect(package_tsan_is_enabled()).to_equal(false)
+        tsan_set_thread(1)
+        tsan_write("counter", "disabled")
+        expect(tsan_error_count()).to_equal(0)
+
+        tsan_enable()
+        expect(tsan_is_enabled()).to_equal(true)
+        tsan_write("counter", "main.spl:10")
+        tsan_set_thread(2)
+        tsan_read("counter", "worker.spl:20")
+        expect(tsan_error_count()).to_equal(1)
+        expect(tsan_get_events()[0].kind).to_equal("tsan")
+
+        val race = data_race("counter", 1, 2, "worker.spl:20")
+        expect(race.var_id).to_equal("counter")
+
+    it "re-exports lock order checks":
+        tsan_reset()
+        tsan_enable()
+        tsan_set_thread(1)
+        tsan_lock_acquire("a")
+        tsan_lock_acquire("b")
+        tsan_set_thread(2)
+        tsan_lock_acquire("b")
+        tsan_lock_acquire("a")
+        expect(tsan_error_count()).to_equal(1)
+        expect(tsan_get_events()[0].kind).to_equal("tsan")

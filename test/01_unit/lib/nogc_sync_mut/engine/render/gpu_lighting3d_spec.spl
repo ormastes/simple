@@ -1,0 +1,182 @@
+use std.spec
+use std.nogc_sync_mut.engine.render.gpu_lighting3d.{
+    LightUniform, GpuLightingState, gpu_lighting_init, gpu_lighting_upload, gpu_lighting_bind
+}
+use std.nogc_sync_mut.engine.render.backend3d.{
+    PipelineHandle, BufferHandle, TextureHandle, RenderPassHandle, TextureFormat3D
+}
+use std.nogc_sync_mut.engine.render.software_backend3d.{SoftwareRenderBackend3D}
+
+# ============================================================================
+# Module-level helpers
+# ============================================================================
+
+fn make_software_backend_inited() -> SoftwareRenderBackend3D:
+    var backend = SoftwareRenderBackend3D.create()
+    val _ = backend.init(320, 240)
+    backend
+
+fn make_directional_light() -> LightUniform:
+    LightUniform(
+        position_x: 0.0,
+        position_y: 10.0,
+        position_z: 0.0,
+        light_type: 0,
+        color_r: 1.0,
+        color_g: 1.0,
+        color_b: 1.0,
+        intensity: 1.0
+    )
+
+fn make_point_light() -> LightUniform:
+    LightUniform(
+        position_x: 5.0,
+        position_y: 5.0,
+        position_z: 5.0,
+        light_type: 1,
+        color_r: 0.8,
+        color_g: 0.6,
+        color_b: 0.4,
+        intensity: 2.0
+    )
+
+fn make_spot_light() -> LightUniform:
+    LightUniform(
+        position_x: 0.0,
+        position_y: 3.0,
+        position_z: 0.0,
+        light_type: 2,
+        color_r: 1.0,
+        color_g: 1.0,
+        color_b: 0.8,
+        intensity: 3.0
+    )
+
+fn make_render_pass(backend: SoftwareRenderBackend3D) -> RenderPassHandle:
+    val color_tex = backend.create_texture(320, 240, TextureFormat3D.Rgba8Unorm)
+    val depth_tex = backend.create_texture(320, 240, TextureFormat3D.Depth32Float)
+    backend.begin_render_pass(color_tex, depth_tex)
+
+# ============================================================================
+# Stream D — gpu_lighting3d.spl specs
+# AC-4
+# ============================================================================
+
+describe "Stream D: LightUniform construction":
+
+    describe "directional light":
+        it "AC-4: light_type is 0 for directional":
+            val light = make_directional_light()
+            expect(light.light_type).to_equal(0)
+
+        it "AC-4: intensity is stored":
+            val light = make_directional_light()
+            expect(light.intensity).to_equal(1.0)
+
+        it "AC-4: position_y is stored":
+            val light = make_directional_light()
+            expect(light.position_y).to_equal(10.0)
+
+        it "AC-4: color_r is stored":
+            val light = make_directional_light()
+            expect(light.color_r).to_equal(1.0)
+
+    describe "point light":
+        it "AC-4: light_type is 1 for point":
+            val light = make_point_light()
+            expect(light.light_type).to_equal(1)
+
+        it "AC-4: position_x is stored":
+            val light = make_point_light()
+            expect(light.position_x).to_equal(5.0)
+
+        it "AC-4: intensity is stored":
+            val light = make_point_light()
+            expect(light.intensity).to_equal(2.0)
+
+    describe "spot light":
+        it "AC-4: light_type is 2 for spot":
+            val light = make_spot_light()
+            expect(light.light_type).to_equal(2)
+
+describe "Stream D: GpuLightingState init":
+
+    describe "gpu_lighting_init":
+        it "AC-4: light_buf id is valid after init":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 8)
+            expect(state.light_buf.id).to_be_greater_than(-1)
+
+        it "AC-4: max_lights matches requested count":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 8)
+            expect(state.max_lights).to_equal(8)
+
+        it "AC-4: light_count starts at 0":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 8)
+            expect(state.light_count).to_equal(0)
+
+        it "AC-4: max_lights of 1 is valid":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 1)
+            expect(state.max_lights).to_equal(1)
+
+describe "Stream D: gpu_lighting_upload":
+
+    describe "upload single light":
+        it "AC-4: upload does not crash with one directional light":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 4)
+            val lights = [make_directional_light()]
+            val uploaded = gpu_lighting_upload(state, backend, lights)
+            expect(uploaded.light_count).to_equal(1)
+
+        it "AC-4: upload does not crash with one point light":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 4)
+            val lights = [make_point_light()]
+            val uploaded = gpu_lighting_upload(state, backend, lights)
+            expect(uploaded.light_count).to_equal(1)
+
+    describe "upload multiple lights":
+        it "AC-4: upload does not crash with two lights":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 4)
+            val lights = [make_directional_light(), make_point_light()]
+            val uploaded = gpu_lighting_upload(state, backend, lights)
+            expect(uploaded.light_count).to_equal(2)
+
+        it "AC-4: upload does not crash with three lights":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 4)
+            val lights = [make_directional_light(), make_point_light(), make_spot_light()]
+            val uploaded = gpu_lighting_upload(state, backend, lights)
+            expect(uploaded.light_count).to_equal(3)
+
+describe "Stream D: gpu_lighting_bind":
+
+    describe "bind to render pass":
+        it "AC-4: bind does not crash with initialized state":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 4)
+            val lights = [make_directional_light()]
+            val uploaded = gpu_lighting_upload(state, backend, lights)
+            backend.begin_frame()
+            val rph = make_render_pass(backend)
+            gpu_lighting_bind(uploaded, backend, rph)
+            expect(backend.active_pass.pass_id).to_equal(rph.id)
+            backend.end_render_pass(rph)
+            backend.end_frame()
+
+        it "AC-4: bind with empty light list does not crash":
+            var backend = make_software_backend_inited()
+            val state = gpu_lighting_init(backend, 4)
+            val empty_lights = [] as [LightUniform]
+            val uploaded = gpu_lighting_upload(state, backend, empty_lights)
+            backend.begin_frame()
+            val rph = make_render_pass(backend)
+            gpu_lighting_bind(uploaded, backend, rph)
+            backend.end_render_pass(rph)
+            backend.end_frame()
+            expect(backend.active_pass.pass_id).to_equal(-1)

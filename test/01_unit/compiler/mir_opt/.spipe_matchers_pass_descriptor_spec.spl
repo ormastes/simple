@@ -1,0 +1,59 @@
+use compiler.mir_opt.mir_opt.mod.{
+    mir_pass_descriptor_registry,
+    mir_pass_provider_registry,
+    mir_pass_descriptor_for_name,
+    mir_pass_provider_name,
+    mir_pass_uses_pipeline_provider
+}
+
+describe "MIR optimization pass descriptors":
+    it "exposes a reusable registry for optimization provider planning":
+        val descriptors = mir_pass_descriptor_registry()
+        val providers = mir_pass_provider_registry()
+        expect descriptors.len() > 10
+        expect providers.len() == descriptors.len()
+        expect (providers[0].name).starts_with("simple.opt.mir.")
+
+    it "preserves old short pass aliases through stable names":
+        val dce = mir_pass_descriptor_for_name("dce")
+        expect dce != nil
+        expect dce.unwrap().stable_name == "dead_code_elimination"
+
+        val const_fold = mir_pass_descriptor_for_name("const_fold")
+        expect const_fold != nil
+        expect const_fold.unwrap().stable_name == "constant_folding"
+
+    it "routes vectorization alias to the stable auto-vectorize provider":
+        val descriptor = mir_pass_descriptor_for_name("vectorization")
+        expect descriptor != nil
+        expect descriptor.unwrap().stable_name == "auto_vectorize"
+        expect mir_pass_provider_name("vectorization") == "simple.opt.mir.auto_vectorize"
+
+    it "routes legacy collection optimization alias to the collection provider":
+        val descriptor = mir_pass_descriptor_for_name("collection_optimization")
+        expect descriptor != nil
+        expect descriptor.unwrap().stable_name == "collection_opt"
+        expect mir_pass_provider_name("collection_optimization") == "simple.opt.collection.loop_access"
+        expect mir_pass_uses_pipeline_provider("collection_optimization") == true
+
+    it "exposes collection optimization as a hot pure Simple provider":
+        val descriptor = mir_pass_descriptor_for_name("collection_opt")
+        expect descriptor != nil
+        val provider = descriptor.unwrap().provider
+        expect provider.hot_path == true
+        expect (provider.required_facts).contains("loop_bounds")
+        expect (provider.required_facts).contains("collection_layout")
+        expect (provider.produced_facts).contains("canonical_collection_loops")
+        expect (provider.produced_facts).contains("loop_invariant_scalar_ops")
+
+    it "exposes strength reduction as a reusable optimization plugin provider":
+        val descriptor = mir_pass_descriptor_for_name("strength_reduction")
+        expect descriptor != nil
+        expect descriptor.unwrap().provider.name == "simple.opt.math.strength_reduce"
+        expect mir_pass_uses_pipeline_provider("strength_reduction") == true
+
+    it "returns nil or empty metadata for unknown passes":
+        val descriptor = mir_pass_descriptor_for_name("not_a_pass")
+        expect descriptor == nil
+        expect mir_pass_provider_name("not_a_pass") == ""
+        expect mir_pass_uses_pipeline_provider("not_a_pass") == false

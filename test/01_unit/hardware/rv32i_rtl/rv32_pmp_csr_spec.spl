@@ -1,0 +1,49 @@
+use std.spec.*
+use std.hardware.rv32i_rtl.pmp_csr.{pmp32_entries_reset, pmp32_cfg_normalize, pmp32_csr_read, pmp32_csr_write}
+
+describe "RV32 PMP CSRs":
+    it "resets sixteen entries and normalizes invalid configuration bits":
+        val entries = pmp32_entries_reset()
+        expect(entries.cfg_0).to_equal(0)
+        expect(entries.addr_15).to_equal(0)
+        expect(pmp32_cfg_normalize(0xFF)).to_equal(0x9F)
+        expect(pmp32_cfg_normalize(0xE2)).to_equal(0x80)
+
+    it "packs all four RV32 pmpcfg CSRs as four byte lanes":
+        val reset = pmp32_entries_reset()
+        val first = pmp32_csr_write(reset, 0x3A0, 0x18040101)
+        val second = pmp32_csr_write(first.entries, 0x3A1, 0x05030101)
+        val third = pmp32_csr_write(second.entries, 0x3A2, 0x01000080)
+        val last = pmp32_csr_write(third.entries, 0x3A3, 0x01000080)
+        val read_first = pmp32_csr_read(last.entries, 0x3A0)
+        val read_second = pmp32_csr_read(last.entries, 0x3A1)
+        val read_third = pmp32_csr_read(last.entries, 0x3A2)
+        val read_last = pmp32_csr_read(last.entries, 0x3A3)
+        expect(first.entries.cfg_0).to_equal(0x01)
+        expect(first.entries.cfg_3).to_equal(0x18)
+        expect(read_first.value).to_equal(0x18040101)
+        expect(read_second.value).to_equal(0x05030101)
+        expect(read_third.value).to_equal(0x01000080)
+        expect(read_last.value).to_equal(0x01000080)
+
+    it "keeps locked configuration immutable":
+        var entries = pmp32_entries_reset()
+        entries.cfg_0 = 0x80
+        val cfg_write = pmp32_csr_write(entries, 0x3A0, 0x0101)
+        expect(cfg_write.entries.cfg_0).to_equal(0x80)
+
+    it "locks a TOR entry predecessor address":
+        var entries = pmp32_entries_reset()
+        entries.addr_0 = 0x100
+        entries.cfg_1 = 0x88
+        val addr_write = pmp32_csr_write(entries, 0x3B0, 0x200)
+        expect(addr_write.entries.addr_0).to_equal(0x100)
+
+    it "masks pmpaddr writes and rejects unrelated CSRs":
+        val entries = pmp32_entries_reset()
+        val written = pmp32_csr_write(entries, 0x3BF, 0xFFFFFFFF)
+        val read = pmp32_csr_read(written.entries, 0x3BF)
+        val unrelated = pmp32_csr_write(entries, 0x300, 1)
+        expect(written.entries.addr_15).to_equal(0xFFFFFFFF)
+        expect(read.value).to_equal(0xFFFFFFFF)
+        expect(unrelated.handled).to_equal(false)

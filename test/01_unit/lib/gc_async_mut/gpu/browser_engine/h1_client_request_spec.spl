@@ -1,0 +1,205 @@
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
+    FetchRequest, RequestMode, browser_resource_size_allowed,
+    browser_subresource_count_allowed
+}
+use std.gc_async_mut.gpu.browser_engine.net.entity.url_types.{Url}
+use std.gc_async_mut.gpu.browser_engine.net.entity.tls_types.{TlsConfig, TlsVersion}
+use std.gc_async_mut.gpu.browser_engine.net.h1_client.{
+    H1Client, MockResponseRegistry, build_request_bytes, set_mock_registry,
+    h1_response_size_allowed, h1_write_complete,
+    h1_deadline_remaining_ms, h1_connect_address,
+    h1_content_length, h1_chunk_size_value,
+    read_response_body_bytes, parse_chunked_body_bytes,
+    parse_http_response_bytes
+}
+use std.gc_async_mut.gpu.browser_engine.net.h2_hpack.{build_h2_headers}
+use std.gc_async_mut.gpu.browser_engine.net.dns.{DnsResolver}
+use std.gc_async_mut.gpu.browser_engine.net.tls.{TlsManager}
+use std.gc_async_mut.gpu.browser_engine.shared.logging.{Logger, BrowserLogLevel}
+use std.js.types.pair.{Pair}
+
+extern fn rt_text_to_bytes(s: text) -> [u8]
+
+describe "Browser HTTP/1 request serialization":
+
+    it "uses one absolute request deadline instead of refreshing per read":
+        expect(h1_deadline_remaining_ms(1000, 6000)).to_equal(5000)
+        expect(h1_deadline_remaining_ms(5999, 6000)).to_equal(1)
+        expect(h1_deadline_remaining_ms(6000, 6000)).to_equal(0)
+        expect(h1_deadline_remaining_ms(7000, 6000)).to_equal(0)
+        expect(h1_connect_address("127.0.0.1", 80)).to_equal(
+            "127.0.0.1:80"
+        )
+        expect(h1_connect_address("::1", 443)).to_equal("[::1]:443")
+
+    it "bounds response accumulation at the cache-sized transport ceiling":
+        expect(browser_resource_size_allowed(50 * 1024 * 1024)).to_equal(true)
+        expect(browser_resource_size_allowed(50 * 1024 * 1024 + 1)).to_equal(false)
+        expect(browser_subresource_count_allowed(1024)).to_equal(true)
+        expect(browser_subresource_count_allowed(1025)).to_equal(false)
+        expect(h1_response_size_allowed(50 * 1024 * 1024 - 1, 1)).to_equal(true)
+        expect(h1_response_size_allowed(50 * 1024 * 1024, 1)).to_equal(false)
+
+    it "rejects short request writes":
+        expect(h1_write_complete(128, 128)).to_equal(true)
+        expect(h1_write_complete(127, 128)).to_equal(false)
+        expect(h1_write_complete(-1, 128)).to_equal(false)
+
+    it "rejects ambiguous invalid oversized and truncated response framing":
+        expect(h1_content_length([
+            Pair("Content-Length", "52428800")
+        ]).is_ok()).to_equal(true)
+        expect(h1_content_length([
+            Pair("Content-Length", "52428801")
+        ]).is_err()).to_equal(true)
+        expect(h1_content_length([
+            Pair("Content-Length", "2"),
+            Pair("content-length", "2")
+        ]).is_err()).to_equal(true)
+        expect(h1_content_length([
+            Pair("Content-Length", "nope")
+        ]).is_err()).to_equal(true)
+        expect(read_response_body_bytes(
+            [1u8],
+            [Pair("Content-Length", "2")]
+        ).is_err()).to_equal(true)
+
+    it "rejects obsolete folded response headers":
+        expect(parse_http_response_bytes(rt_text_to_bytes(
+            "HTTP/1.1 200 OK\r\nSet-Cookie: secret=x;\r\n HttpOnly\r\n\r\n"
+        )).is_err()).to_equal(true)
+        expect(read_response_body_bytes(
+            [48u8, 13u8, 10u8, 13u8, 10u8],
+            [
+                Pair("Transfer-Encoding", "chunked"),
+                Pair("Content-Length", "0")
+            ]
+        ).is_err()).to_equal(true)
+
+    it "decodes bounded complete chunks and rejects malformed chunks":
+        expect(h1_chunk_size_value("1;ext=yes")).to_equal(1)
+        expect(h1_chunk_size_value("xyz")).to_equal(-1)
+        val decoded = parse_chunked_body_bytes([
+            49u8, 13u8, 10u8, 97u8, 13u8, 10u8,
+            48u8, 13u8, 10u8, 13u8, 10u8
+        ])
+        match decoded:
+            Ok(body):
+                expect(body).to_equal([97u8])
+            Err(error):
+                fail("valid chunked body rejected: {error}")
+        expect(parse_chunked_body_bytes([
+            51u8, 13u8, 10u8, 97u8
+        ]).is_err()).to_equal(true)
+        expect(parse_chunked_body_bytes([
+            48u8, 13u8, 10u8
+        ]).is_err()).to_equal(true)
+
+    it "serializes raw request headers once and preserves the body":
+        val request = FetchRequest(
+            method: "POST",
+            url: Url.parse_or_opaque("https://example.test/submit?q=1"),
+            headers: "Accept: application/json\r\nX-Test: yes\r\n",
+            body: [111u8, 107u8],
+            mode: RequestMode.SameOrigin,
+            credentials: "same-origin"
+        )
+
+        val wire = build_request_bytes(request)
+
+        expect(wire).to_start_with("POST /submit?q=1 HTTP/1.1\r\nHost: example.test\r\n")
+        expect(wire).to_contain("Accept: application/json\r\n")
+        expect(wire).to_contain("X-Test: yes\r\n")
+        expect(wire).to_contain("Content-Length: 2\r\n")
+        expect(wire).to_end_with("\r\n\r\nok")
+
+    it "serializes the same raw headers for HTTP/2":
+        val request = FetchRequest(
+            method: "POST",
+            url: Url.parse_or_opaque("https://example.test/submit?q=1"),
+            headers: "Accept: application/json\r\nX-Test: yes\r\n",
+            body: [111u8, 107u8],
+            mode: RequestMode.SameOrigin,
+            credentials: "same-origin"
+        )
+
+        val headers = build_h2_headers(request)
+
+        expect(headers[0].first).to_equal(":method")
+        expect(headers[0].second).to_equal("POST")
+        expect(headers[4].first).to_equal("accept")
+        expect(headers[4].second).to_equal("application/json")
+        expect(headers[5].first).to_equal("x-test")
+        expect(headers[5].second).to_equal("yes")
+
+    it "includes a non-default port in HTTP authority":
+        val request = FetchRequest(
+            method: "GET",
+            url: Url.parse_or_opaque("https://example.test:8443/path"),
+            headers: "",
+            body: [],
+            mode: RequestMode.SameOrigin,
+            credentials: "same-origin"
+        )
+
+        expect(build_request_bytes(request)).to_contain(
+            "\r\nHost: example.test:8443\r\n"
+        )
+        expect(build_h2_headers(request)[2].second).to_equal(
+            "example.test:8443"
+        )
+
+    it "keeps request framing and authority transport-owned":
+        val request = FetchRequest(
+            method: "POST",
+            url: Url.parse_or_opaque("https://example.test/upload"),
+            headers: "Host: evil.test\r\nContent-Length: 999\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\nX-Test: yes\r\n",
+            body: [111u8, 107u8],
+            mode: RequestMode.SameOrigin,
+            credentials: "same-origin"
+        )
+
+        val wire = build_request_bytes(request)
+        expect(wire).to_contain("\r\nHost: example.test\r\n")
+        expect(wire).to_contain("\r\nConnection: close\r\n")
+        expect(wire).to_contain("\r\nContent-Length: 2\r\n")
+        expect(wire).to_contain("\r\nX-Test: yes\r\n")
+        expect(wire.contains("evil.test")).to_equal(false)
+        expect(wire.contains("Transfer-Encoding")).to_equal(false)
+        expect(wire.contains("keep-alive")).to_equal(false)
+
+        val h2_headers = build_h2_headers(request)
+        expect(h2_headers.len()).to_equal(7)
+        expect(h2_headers[4].first).to_equal("x-test")
+
+    it "returns an HTTPS mock without opening DNS or TLS":
+        var registry = MockResponseRegistry.create()
+        registry.register("https://offline.test/", 200, "ok")
+        set_mock_registry(registry)
+        val logger = Logger.new("h1-test", BrowserLogLevel.Error)
+        var client = H1Client.new(
+            logger,
+            DnsResolver.new(logger, 300),
+            TlsManager.new(logger, TlsConfig(
+                min_version: TlsVersion.Tls12,
+                verify_peer: true,
+                sni_hostname: ""
+            ))
+        )
+        val request = FetchRequest(
+            method: "GET",
+            url: Url.parse_or_opaque("https://offline.test/"),
+            headers: "",
+            body: [],
+            mode: RequestMode.SameOrigin,
+            credentials: "same-origin"
+        )
+
+        match client.request(request):
+            Ok(response):
+                expect(response.status).to_equal(200)
+                expect(response.body.len()).to_equal(2)
+            Err(error):
+                fail("HTTPS mock unexpectedly touched the live transport: {error}")

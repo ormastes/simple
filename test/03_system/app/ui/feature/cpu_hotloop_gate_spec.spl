@@ -1,0 +1,124 @@
+use std.spec.{describe, it, expect}
+use std.io_runtime.{read_file, file_exists}
+use std.process.{run}
+
+val FIX = "test/03_system/app/ui/feature/fixture/cpu_hotloop"
+
+fn _run_gate(args: [text]) -> (text, i64):
+    val result = run("sh", ["scripts/check/check-cpu-hotloop-idiom.shs"] + args)
+    (result.stdout, result.exit_code)
+
+# Every fixture control is ratcheted against an EMPTY baseline (/dev/null) so a
+# single detected construct deterministically surfaces as new=1, independent of
+# the real committed baseline.
+fn _run_fixture(list: text) -> (text, i64):
+    _run_gate(["--file-list", "{FIX}/{list}", "--baseline", "/dev/null"])
+
+describe "CPU-lane hot-loop enforcement gate (design §6.1 / plan W2)":
+    it "has a gate script":
+        expect(file_exists("scripts/check/check-cpu-hotloop-idiom.shs")).to_equal(true)
+
+    it "has a checked-in designated hot-path file set covering the real CPU hot paths":
+        expect(file_exists("scripts/check/cpu_lane_hotpath_files.txt")).to_equal(true)
+        val files = read_file("scripts/check/cpu_lane_hotpath_files.txt")
+        expect(files.contains("backend_software.spl")).to_equal(true)
+        expect(files.contains("backend_emu.spl")).to_equal(true)
+        expect(files.contains("compositor.spl")).to_equal(true)
+        expect(files.contains("helpers_text.spl")).to_equal(true)
+        expect(files.contains("famous_site_glyph_compositor.spl")).to_equal(false)
+        expect(files.contains("src/os/compositor/compositor.spl")).to_equal(true)
+
+    it "documents the four violation classes (LOOP / BYTE / SUBSTR / CHAIN)":
+        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(source.contains("LOOP_PATTERN")).to_equal(true)
+        expect(source.contains("SUBSTR_PATTERN")).to_equal(true)
+        expect(source.contains("U8_DECL_PATTERN")).to_equal(true)
+        expect(source.contains("CHAIN_PATTERN")).to_equal(true)
+        expect(source.contains("cpu-lane-loop-ok")).to_equal(true)
+
+    it "documents the recursion blind spot instead of pretending coverage":
+        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(source.contains("recursion")).to_equal(true)
+
+    it "supports a baseline ratchet with update, file-list and baseline overrides":
+        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(source.contains("cpu_lane_hotloop_baseline.txt")).to_equal(true)
+        expect(source.contains("--update-baseline")).to_equal(true)
+        expect(source.contains("--file-list")).to_equal(true)
+        expect(source.contains("--baseline")).to_equal(true)
+
+    it "reports machine-readable key=value status lines":
+        val source = read_file("scripts/check/check-cpu-hotloop-idiom.shs")
+        expect(source.contains("cpu_lane_hotloop_new=")).to_equal(true)
+        expect(source.contains("cpu_lane_hotloop_ok=")).to_equal(true)
+
+    it "keeps a content-keyed baseline (COUNT<TAB>CLASS<TAB>file<TAB>text, no line numbers)":
+        expect(file_exists("scripts/check/cpu_lane_hotloop_baseline.txt")).to_equal(true)
+        val baseline = read_file("scripts/check/cpu_lane_hotloop_baseline.txt")
+        expect(baseline.contains("LOOP")).to_equal(true)
+
+    # --- detection positive controls (each must flag new=1) ---
+
+    it "flags a fresh unannotated per-element loop (LOOP)":
+        val (out, code) = _run_fixture("offender_file_list.txt")
+        expect(code).to_equal(1)
+        expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
+        expect(out.contains("cpu_lane_hotloop_ok=false")).to_equal(true)
+        expect(out.contains("known_offender.spl")).to_equal(true)
+
+    it "flags an idiomatic .for_each/.map/.each escape chain (CHAIN)":
+        val (out, code) = _run_fixture("chain_file_list.txt")
+        expect(code).to_equal(1)
+        expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
+        expect(out.contains("chain_offender.spl")).to_equal(true)
+
+    it "flags a multi-line parenthesized loop condition (LOOP, colon on a later line)":
+        val (out, code) = _run_fixture("multiline_file_list.txt")
+        expect(code).to_equal(1)
+        expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
+        expect(out.contains("multiline_offender.spl")).to_equal(true)
+
+    it "flags byte indexing when the [u8] declaration is in the same file (BYTE)":
+        val (out, code) = _run_fixture("byte_offender_file_list.txt")
+        expect(code).to_equal(1)
+        expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
+        expect(out.contains("byte_offender.spl")).to_equal(true)
+
+    it "does not leak a [u8] name into another designated file":
+        val (out, code) = _run_fixture("byte_cross_file_list.txt")
+        expect(code).to_equal(0)
+        expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
+        expect(out.contains("cpu_lane_hotloop_ok=true")).to_equal(true)
+
+    # --- annotation semantics (header exempts; def line does NOT) ---
+
+    it "passes a clean fixture (loop annotated on its header + a loop-free fn)":
+        val (out, code) = _run_fixture("clean_file_list.txt")
+        expect(code).to_equal(0)
+        expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
+        expect(out.contains("cpu_lane_hotloop_ok=true")).to_equal(true)
+
+    it "exempts a loop annotated on its HEADER line (new=0)":
+        val (out, code) = _run_fixture("header_ok_file_list.txt")
+        expect(code).to_equal(0)
+        expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
+
+    it "does NOT exempt a loop when the annotation sits on the def line (new=1)":
+        val (out, code) = _run_fixture("def_annotated_file_list.txt")
+        expect(code).to_equal(1)
+        expect(out.contains("cpu_lane_hotloop_new=1")).to_equal(true)
+
+    # --- ratchet survives line shifts (content-keyed) ---
+
+    it "ratchets clean when a baselined loop has moved to a different line (new=0)":
+        val (out, code) = _run_gate(["--file-list", "{FIX}/shift_file_list.txt", "--baseline", "{FIX}/shift_baseline.txt"])
+        expect(code).to_equal(0)
+        expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
+
+    # --- ratchet is clean on the real designated set ---
+
+    it "ratchets clean on the real designated file set (baseline == current, new=0)":
+        val (out, code) = _run_gate([])
+        expect(code).to_equal(0)
+        expect(out.contains("cpu_lane_hotloop_new=0")).to_equal(true)
+        expect(out.contains("cpu_lane_hotloop_ok=true")).to_equal(true)

@@ -1,0 +1,434 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl 80%
+# @tag: unit, engine2d, cuda
+
+use std.gpu.engine2d.backend_cuda.{CudaBackend, cuda_2d_ptx_source, probe_cuda, probe_cuda_2d}
+use std.gpu.engine2d.backend_cuda_ext
+use std.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.gpu.engine2d.backend_cuda_font_ptx.{FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256, FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, cuda_font_atlas_composite_ptx, cuda_font_atlas_composite_ptx_trusted}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.helpers_text.{text_render_to_buf}
+use std.gc_async_mut.text_layout.font_renderer.{FontRenderBatch, FontRenderQuad}
+use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_ENTRY, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_read}
+
+describe "CudaBackend RenderBackend facade":
+
+    it "fences the atlas cache with CUDA target and session identity":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("font_atlas_composite_cache_identity(")
+        expect(source).to_contain("font_render_batch_atlas_owner_identity(batch), \"cuda\", device_features")
+        expect(source).to_contain("self.session.font_module_identity, dependency_identity")
+
+    it "declares explicit CUDA device and mirror authority":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("device_current: bool")
+        expect(source).to_contain("mirror_current: bool")
+        expect(source).to_contain("device_current: false,\n            mirror_current: true")
+        expect(source).to_contain("me _ensure_device_current() -> bool:")
+        expect(source).to_contain("me _ensure_mirror_current() -> bool:")
+        expect(source).to_contain("me _begin_cpu_path() -> bool:")
+        expect(source).to_contain("me _finish_cpu_path():")
+        expect(source).to_contain("me _mark_device_mutation():")
+
+    it "keeps GPU success and CPU fallback authority transitions explicit":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("self._mark_device_mutation()")
+        expect(source).to_contain("self._begin_cpu_path()")
+        expect(source).to_contain("self._finish_cpu_path()")
+        expect(source.contains("if rc == CUDA_SUCCESS:\n                self.mirror.")).to_equal(false)
+        expect(source).to_contain(
+            "me _finish_cpu_path():\n" +
+            "        self.cpu_fallback_used = true\n" +
+            "        self.mirror_current = true\n" +
+            "        self.device_current = false"
+        )
+        expect(source).to_contain(
+            "me _mark_device_mutation():\n" +
+            "        self.device_current = true\n" +
+            "        self.mirror_current = false"
+        )
+
+    it "does not fall through to a stale mirror on readback":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain("if self.mirror_current:")
+        expect(source).to_contain("engine2d_readback([], \"readback_failed\")")
+        expect(source.contains("engine2d_readback(self.mirror.read_pixels(), \"cpu_mirror\")")).to_equal(false)
+
+    it "defers device upload after a failed clear kernel":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain(
+            "        if not self._begin_cpu_path():\n" +
+            "            return\n" +
+            "        self.mirror.clear(color)\n" +
+            "        self._finish_cpu_path()\n" +
+            "    me draw_rect("
+        )
+        expect(source).to_contain(
+            "    me _ensure_device_current() -> bool:\n" +
+            "        if self.device_current:\n" +
+            "            return true\n" +
+            "        self._copy_mirror_to_device()"
+        )
+
+    it "never promotes an emptied mirror during CUDA surface cleanup":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain(
+            "me _cleanup_cuda_surface():\n" +
+            "        self.cpu_fallback_used = false\n" +
+            "        self.completion_unknown = false\n" +
+            "        self.device_current = false\n" +
+            "        self.mirror_current = false"
+        )
+
+    it "never labels CPU-rendered fallback pixels as device readback":
+        var backend = CudaBackend.create()
+        if backend.init(4, 4):
+            backend.clear(0xff010203u32)
+            val device_readback = backend.read_pixels_with_source()
+            expect(device_readback.source).to_equal("device_readback")
+            expect(device_readback.backend_handle).to_be_greater_than(0)
+            expect(device_readback.device_identity).to_be_greater_than(0)
+            val stable_readback = backend.read_pixels_with_source()
+            expect(stable_readback.device_identity).to_equal(device_readback.device_identity)
+            backend.cpu_fallback_used = true
+            val readback = backend.read_pixels_with_source()
+            expect(readback.source).to_equal("cpu_fallback")
+            expect(readback.backend_handle).to_equal(0)
+            expect(readback.device_identity).to_equal(0)
+            expect(readback.pixels.len()).to_equal(16)
+        else:
+            expect(backend.initialized).to_equal(false)
+        backend.shutdown()
+
+    it "keeps CUDA completion failure sticky across readbacks":
+        var backend = CudaBackend.create()
+        backend.completion_unknown = true
+        val first = backend.read_pixels_with_source()
+        val second = backend.read_pixels_with_source()
+        expect(first.source).to_equal("completion_unknown")
+        expect(second.source).to_equal("completion_unknown")
+        expect(first.pixels.len()).to_equal(0)
+        expect(second.pixels.len()).to_equal(0)
+
+    it "quarantines accepted image work instead of freeing or overwriting it":
+        val source = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(source).to_contain(
+            "cuda_backend_free(host_pixels, image_bytes)\n" +
+            "                    self._quarantine_completion_unknown()\n" +
+            "                    return false"
+        )
+        expect(source).to_contain(
+            "if self.completion_unknown:\n" +
+            "            return\n" +
+            "        if not self._begin_cpu_path():\n" +
+            "            return\n" +
+            "        self.mirror.draw_image("
+        )
+        expect(source).to_contain(
+            "if self.completion_unknown or self.session.completion_unknown:\n" +
+            "            self._quarantine_completion_unknown()\n" +
+            "            return"
+        )
+
+    it "propagates CUDA font completion state to facade readback":
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        expect(backend).to_contain(
+            "if self.session.sync() != CUDA_SUCCESS:\n" +
+            "                self._quarantine_completion_unknown()\n" +
+            "                return submitted"
+        )
+        val engine = file_read("src/lib/gc_async_mut/gpu/engine2d/engine.spl")
+        expect(engine).to_contain(
+            "quad_index = cuda.draw_font_batch(x, y, batch)\n" +
+            "                    self.cuda_backend = cuda\n" +
+            "                    if self.selected_backend_name == \"cuda\":\n" +
+            "                        self.backend = cuda"
+        )
+        expect(engine).to_contain(
+            "elif self.selected_backend_name == \"cuda\":\n" +
+            "            val cuda = self.cuda_backend.?\n" +
+            "            val readback = cuda.read_pixels_with_source()\n" +
+            "            self.cuda_backend = cuda\n" +
+            "            self.backend = cuda"
+        )
+
+    it "reports the cuda backend name":
+        val backend = CudaBackend.create()
+        expect(backend.name()).to_equal("cuda")
+
+    it "returns a typed probe result":
+        val probe = probe_cuda_2d()
+        val valid_status = probe.status == BackendStatus.Initialized or probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed
+        expect(probe.requested_name).to_equal("cuda")
+        expect(probe.api_name).to_equal("cuda")
+        expect(probe.shader_format).to_equal("ptx")
+        expect(valid_status).to_equal(true)
+
+    it "exports probe_cuda with the same typed result":
+        val probe = probe_cuda()
+        val valid_status = probe.status == BackendStatus.Initialized or probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed
+        expect(probe.requested_name).to_equal("cuda")
+        expect(probe.api_name).to_equal("cuda")
+        expect(probe.shader_format).to_equal("ptx")
+        expect(valid_status).to_equal(true)
+
+    it "exports generated fill and image blend entries in CUDA PTX module source":
+        val source = cuda_2d_ptx_source()
+
+        expect(source).to_contain("simple_2d_fill_u32")
+        expect(source).to_contain("kernel_draw_image_nonzero")
+        expect(source).to_contain("kernel_draw_image_blend")
+        expect(source).to_contain("param_width")
+        expect(source).to_contain("param_height")
+
+    it "routes both CUDA image blend interfaces through the native kernel":
+        val backend = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda.spl")
+        val extended = file_read("src/lib/gc_async_mut/gpu/engine2d/backend_cuda_ext.spl")
+        expect(backend).to_contain("self._draw_image_kernel(\"kernel_draw_image_blend\"")
+        expect(backend).to_contain("self._draw_image_blend_or_fallback(x, y, w, h, pixels)")
+        expect(extended).to_contain("self._draw_image_blend_or_fallback(x, y, w, h, pixels)")
+
+    it "keeps the generated font entry out of the default CUDA module":
+        val source = cuda_2d_ptx_source()
+        expect(source.contains(FONT_ATLAS_COMPOSITE_ENTRY)).to_equal(false)
+
+    it "pins an installed generated font companion by exact PTX identity":
+        val ptx = ".version 8.0\n.visible .entry simple_font_atlas_composite_v1_u32() { ret; }\n"
+        var session = CudaSession.create()
+        expect(session.install_font_module("")).to_equal(false)
+        expect(session.install_font_module(".version 8.0\n")).to_equal(false)
+        expect(session.install_font_module(".version 8.0\n.entry simple_font_atlas_composite_v1_u32_suffix() { ret; }\n")).to_equal(false)
+        session.module_cache = 9
+        expect(session.launch_font_kernel_args(1, 1, 1, 1, 1, 1, 1)).to_equal(1)
+        session.font_module_cache = 17
+        session.font_module_identity = "generated-ptx:" + sha256_text(ptx)
+        expect(session.install_font_module(ptx)).to_equal(true)
+        expect(session.install_font_module(ptx + " ")).to_equal(false)
+
+        var backend = CudaBackend.create()
+        backend.initialized = true
+        backend.font_atlas_generation = 9
+        backend.session = session
+        expect(backend.install_font_atlas_ptx(ptx)).to_equal(true)
+        expect(backend.font_atlas_generation).to_equal(9)
+        expect(backend.install_font_atlas_ptx(ptx + " ")).to_equal(false)
+        expect(backend.font_atlas_generation).to_equal(9)
+
+    it "rejects inconsistent caller-provided font artifacts without mutation":
+        val ptx = ".version 8.0\n.visible .entry simple_font_atlas_composite_v1_u32() { ret; }\n"
+        val artifact_sha256 = sha256_text(ptx)
+        var session = CudaSession.create()
+        session.font_module_cache = 17
+        session.font_module_identity = "generated-ptx:" + artifact_sha256
+        var cuda = CudaBackend.create()
+        cuda.initialized = true
+        cuda.session = session
+        var engine = Engine2D.create_with_backend(1, 1, "software")
+        engine.cuda_backend = cuda
+
+        val wrong_entry = ".version 8.0\n.visible .entry wrong_font_entry() { ret; }\n"
+        expect(engine.install_cuda_font_artifact("", sha256_text(""), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
+        expect(engine.install_cuda_font_artifact(ptx, "0000000000000000000000000000000000000000000000000000000000000000", FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
+        expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION + 1, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
+        expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION - 1)).to_equal(false)
+        expect(engine.install_cuda_font_artifact(wrong_entry, sha256_text(wrong_entry), FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(false)
+        expect(engine.cuda_backend.?.session.font_module_cache).to_equal(17)
+        expect(engine.cuda_backend.?.session.font_module_identity).to_equal("generated-ptx:" + artifact_sha256)
+        expect(engine.install_cuda_font_artifact(ptx, artifact_sha256, FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)).to_equal(true)
+        engine.cuda_backend = nil
+        engine.shutdown()
+
+    it "rejects the stale tracked CUDA font semantics without a device load":
+        val ptx = cuda_font_atlas_composite_ptx()
+        expect(FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256).to_equal(sha256_text(ptx))
+        expect(FONT_ATLAS_COMPOSITE_CUDA_PROGRAM_VERSION).to_equal(FONT_ATLAS_COMPOSITE_PROGRAM_VERSION)
+        assert_not_equal(FONT_ATLAS_COMPOSITE_CUDA_SEMANTICS_VERSION, FONT_ATLAS_COMPOSITE_SEMANTICS_VERSION)
+        expect(cuda_font_atlas_composite_ptx_trusted(ptx)).to_equal(false)
+        expect(cuda_font_atlas_composite_ptx_trusted(ptx + " ")).to_equal(false)
+
+        var session = CudaSession.create()
+        session.font_module_cache = 17
+        session.font_module_identity = "generated-ptx:" + FONT_ATLAS_COMPOSITE_CUDA_PTX_SHA256
+        var cuda = CudaBackend.create()
+        cuda.initialized = true
+        cuda.session = session
+        var engine = Engine2D.create_with_backend(1, 1, "software")
+        engine.cuda_backend = cuda
+        expect(engine.install_pinned_cuda_font_artifact()).to_equal(false)
+        engine.cuda_backend = nil
+        engine.shutdown()
+
+    it "fails closed for invalid font batches and invalidates atlas generations":
+        var backend = CudaBackend.create()
+        val invalid = FontRenderBatch(program_version: 1, font_identity: "test-font", face_generation: 1, valid: false, atlas_width: 0, atlas_height: 0, atlas_pixels: [], quads: [], atlas_generation: 0, dirty_rects: [])
+
+        expect(backend.draw_font_batch(0, 0, invalid)).to_equal(0)
+        backend.font_atlas_generation = 7
+        backend.font_atlas_owner_identity = "stale-owner"
+        backend.invalidate_font_atlas()
+        expect(backend.font_atlas_generation).to_equal(-1)
+        expect(backend.font_atlas_owner_identity).to_equal("")
+
+    it "rejects unsupported font programs before CUDA atlas mutation":
+        var backend = CudaBackend.create()
+        backend.font_atlas_generation = 7
+        backend.font_atlas_owner_identity = "stable-owner"
+        for version in [0, -1, 2]:
+            val batch = FontRenderBatch(program_version: version, font_identity: "test-font", face_generation: 1, valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [1u32], quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 0, dst_y: 0, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 1u32)], atlas_generation: 8, dirty_rects: [])
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
+            expect(backend.font_atlas_generation).to_equal(7)
+            expect(backend.font_atlas_owner_identity).to_equal("stable-owner")
+
+    it "requires the generated companion before CUDA font dispatch":
+        var backend = CudaBackend.create()
+        val ok = backend.init(4, 4)
+        if ok:
+            val batch = FontRenderBatch(
+                program_version: 1,
+                font_identity: "test-font", face_generation: 1,
+                valid: true, atlas_width: 1, atlas_height: 1,
+                atlas_pixels: [0x80000000u32],
+                quads: [FontRenderQuad(codepoint: 65, byte_offset: 0, dst_x: 1, dst_y: 1, width: 1, height: 1, atlas_x: 0, atlas_y: 0, color: 0x80ff0000u32)],
+                atlas_generation: 1, dirty_rects: []
+            )
+            expect(backend.session.font_module_cache).to_equal(0)
+            expect(backend.draw_font_batch(0, 0, batch)).to_equal(0)
+            expect(backend.font_atlas_generation).to_equal(-1)
+            expect(backend.font_atlas_owner_identity).to_equal("")
+        else:
+            expect(backend.initialized).to_equal(false)
+        backend.shutdown()
+
+    it "does not claim initialized when init fails":
+        var backend = CudaBackend.create()
+        val ok = backend.init(4, 4)
+        if ok:
+            expect(backend.width()).to_equal(4)
+            expect(backend.height()).to_equal(4)
+            backend.shutdown()
+        else:
+            expect(backend.initialized).to_equal(false)
+            expect(backend.owns_session).to_equal(false)
+
+    it "routes draw_text_bg through the shared text image path without CUDA hardware":
+        var backend = CudaBackend.create()
+        expect(backend.mirror.init(4, 4)).to_equal(true)
+
+        backend.draw_text_bg(0, 0, "I", 0xff111111u32, 0xff222222u32, 7)
+        val text_bg = backend.read_pixels()
+        val expected = text_render_to_buf("I", 0xff111111u32, 0xff222222u32, 7)
+
+        expect(text_bg[0]).to_equal(expected[0])
+        expect(text_bg[1]).to_equal(expected[1])
+        expect(text_bg[2]).to_equal(expected[2])
+        expect(text_bg[3]).to_equal(expected[3])
+        backend.shutdown()
+
+    it "routes foreground draw_text through transparent text image semantics without CUDA hardware":
+        var backend = CudaBackend.create()
+        val bg = 0xff333333u32
+        expect(backend.mirror.init(4, 4)).to_equal(true)
+        backend.mirror.clear(bg)
+
+        backend.draw_text(0, 0, "I", 0xff111111u32, 7)
+        val text_pixels = backend.read_pixels()
+        val expected = text_render_to_buf("I", 0xff111111u32, 0u32, 7)
+        var fg_count = 0
+        var bg_count = 0
+        var transparent_count = 0
+        var idx = 0
+        while idx < 16:
+            if text_pixels[idx] == 0xff111111u32:
+                fg_count = fg_count + 1
+            if text_pixels[idx] == bg:
+                bg_count = bg_count + 1
+            if expected[idx] == 0u32:
+                transparent_count = transparent_count + 1
+            idx = idx + 1
+
+        expect(fg_count > 0).to_equal(true)
+        expect(bg_count > 0).to_equal(true)
+        expect(transparent_count > 0).to_equal(true)
+        backend.shutdown()
+
+    it "rejects an invalid shared CUDA session with typed context diagnostics":
+        var backend = CudaBackend.create()
+        var session = CudaSession.create()
+        val ok = backend.init_with_session(4, 4, session)
+        expect(ok).to_equal(false)
+        expect(backend.initialized).to_equal(false)
+        expect(backend.owns_session).to_equal(false)
+        expect(backend.last_probe.requested_name).to_equal("cuda")
+        expect(backend.last_probe.api_name).to_equal("cuda")
+        expect(backend.last_probe.feature_gate).to_equal("cuda_context")
+        expect(backend.last_probe.status).to_equal(BackendStatus.Failed)
+
+    it "rejects active CUDA session replacement without mutating atlas ownership":
+        var backend = CudaBackend.create()
+        backend.initialized = true
+        backend.owns_session = true
+        backend.d_font_atlas = 77
+        backend.font_atlas_generation = 9
+        backend.font_atlas_owner_identity = "old"
+        var incoming = CudaSession.create()
+        incoming.is_initialized = true
+        incoming.ctx = 1
+        incoming.ref_count = 2
+        expect(backend.init_with_session(4, 4, incoming)).to_equal(false)
+        expect(incoming.ref_count).to_equal(2)
+        expect(backend.d_font_atlas).to_equal(77)
+        expect(backend.font_atlas_generation).to_equal(9)
+        expect(backend.font_atlas_owner_identity).to_equal("old")
+        expect(backend.owns_session).to_equal(true)
+        var invalid = CudaSession.create()
+        expect(backend.init_with_session(0, 4, invalid)).to_equal(false)
+        expect(backend.initialized).to_equal(true)
+        expect(backend.owns_session).to_equal(true)
+        expect(backend.d_font_atlas).to_equal(77)
+        expect(invalid.ref_count).to_equal(0)
+
+    it "reports CUDA 2D kernel readiness or the real kernel gap":
+        val probe = probe_cuda_2d()
+        if probe.status == BackendStatus.Initialized:
+            expect(probe.is_usable()).to_equal(true)
+            expect(probe.has_compute).to_equal(true)
+            expect(probe.has_graphics).to_equal(true)
+            expect(probe.has_present).to_equal(true)
+        else if probe.feature_gate == "cuda_2d_render":
+            expect(probe.status).to_equal(BackendStatus.Failed)
+            expect(probe.is_usable()).to_equal(false)
+            expect(probe.has_compute).to_equal(true)
+            expect(probe.has_graphics).to_equal(false)
+            expect(probe.has_present).to_equal(false)
+            expect(probe.fallback_reason).to_contain("simple_2d_fill_u32")
+            expect(probe.fallback_reason).to_contain("kernel_clear")
+            expect(probe.fallback_reason).to_contain("kernel_draw_rect_filled")
+            expect(probe.fallback_reason).to_contain("kernel_draw_rect_outline")
+            expect(probe.fallback_reason).to_contain("kernel_draw_image")
+            expect(probe.fallback_reason).to_contain("kernel_draw_gradient_rect")
+            expect(probe.fallback_reason).to_contain("kernel_draw_line")
+
+    it "does not mark CUDA usable when the PTX self-test fails":
+        val probe = probe_cuda_2d()
+        if probe.feature_gate == "cuda_2d_render_self_test":
+            expect(probe.status).to_equal(BackendStatus.Failed)
+            expect(probe.is_usable()).to_equal(false)
+            expect(probe.has_compute).to_equal(true)
+            expect(probe.has_graphics).to_equal(false)
+            expect(probe.has_present).to_equal(false)
+            expect(probe.fallback_reason).to_contain("self-test")
+
+    it "strict Engine2D cuda creation returns typed cuda failure instead of fallback":
+        val probe = probe_cuda_2d()
+        if probe.status != BackendStatus.Initialized:
+            val result = Engine2D.create_with_backend_strict(4, 4, "cuda")
+            expect(result.is_ok()).to_equal(false)
+            val diag = result.unwrap_err()
+            expect(diag.requested_name).to_equal("cuda")
+            expect(diag.selected_name).to_equal("cuda")
+            expect(diag.backend_name).to_equal("cuda")
+            expect(diag.status == BackendStatus.Unavailable or diag.status == BackendStatus.Failed).to_equal(true)
+            expect(diag.status).to_not_equal(BackendStatus.Fallback)

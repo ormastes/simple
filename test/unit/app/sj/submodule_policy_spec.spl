@@ -1,0 +1,115 @@
+"""
+# Submodule Policy Specification
+#
+# Tests the submodule detection, exclusive lease, warning,
+# and auto-pin behavior.
+"""
+
+use std.io_runtime
+
+# --- Inline constants ---
+val LEASE_EXCLUSIVE: i64 = 0i64
+val LEASE_SHARED: i64 = 1i64
+
+# --- Inline submodule types ---
+
+struct SubmodulePlan:
+    is_submodule: bool
+    lease_kind: i64
+    warning: text
+    auto_pin_cmd: text
+
+fn classify_submodule(argv: [text]) -> SubmodulePlan:
+    if argv.len() < 3i64:
+        return SubmodulePlan(is_submodule: false, lease_kind: LEASE_SHARED, warning: "", auto_pin_cmd: "")
+    if argv[0i64] != "git" or argv[1i64] != "submodule":
+        return SubmodulePlan(is_submodule: false, lease_kind: LEASE_SHARED, warning: "", auto_pin_cmd: "")
+    if argv[2i64] == "add":
+        val path = if argv.len() > 4i64:
+            argv[4i64]
+        else:
+            "submodule"
+        return SubmodulePlan(
+            is_submodule: true,
+            lease_kind: LEASE_EXCLUSIVE,
+            warning: "WARN[SUBMODULE]: submodule add is pinned immediately to preserve the gitlink in jj-managed repos",
+            auto_pin_cmd: "git commit --no-verify -m 'chore: pin submodule {path}'"
+        )
+    if argv[2i64] == "status":
+        return SubmodulePlan(
+            is_submodule: true,
+            lease_kind: LEASE_SHARED,
+            warning: "",
+            auto_pin_cmd: ""
+        )
+    if argv[2i64] == "update":
+        return SubmodulePlan(
+            is_submodule: true,
+            lease_kind: LEASE_EXCLUSIVE,
+            warning: "",
+            auto_pin_cmd: ""
+        )
+    SubmodulePlan(is_submodule: true, lease_kind: LEASE_EXCLUSIVE, warning: "", auto_pin_cmd: "")
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Submodule Policy - Detection":
+    it "detects git submodule add":
+        val plan = classify_submodule(["git", "submodule", "add", "https://example.com/repo", "vendor/lib"])
+        expect(plan.is_submodule).to_equal(true)
+
+    it "detects git submodule status":
+        val plan = classify_submodule(["git", "submodule", "status"])
+        expect(plan.is_submodule).to_equal(true)
+
+    it "does not flag non-submodule git commands":
+        val plan = classify_submodule(["git", "status"])
+        expect(plan.is_submodule).to_equal(false)
+
+    it "does not flag non-git commands":
+        val plan = classify_submodule(["describe", "-m", "test"])
+        expect(plan.is_submodule).to_equal(false)
+
+describe "Submodule Policy - Exclusive Lease":
+    it "submodule add uses exclusive lease":
+        val plan = classify_submodule(["git", "submodule", "add", "url", "path"])
+        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+
+    it "submodule status uses shared lease":
+        val plan = classify_submodule(["git", "submodule", "status"])
+        expect(plan.lease_kind).to_equal(LEASE_SHARED)
+
+    it "submodule update uses exclusive lease":
+        val plan = classify_submodule(["git", "submodule", "update"])
+        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+
+describe "Submodule Policy - Warning":
+    it "submodule add produces WARN":
+        val plan = classify_submodule(["git", "submodule", "add", "url", "vendor/lib"])
+        expect(plan.warning).to_contain("WARN[SUBMODULE]")
+        expect(plan.warning).to_contain("gitlink")
+
+    it "submodule status has no warning":
+        val plan = classify_submodule(["git", "submodule", "status"])
+        expect(plan.warning).to_equal("")
+
+describe "Submodule Policy - Auto-Pin":
+    it "submodule add produces auto-pin command":
+        val plan = classify_submodule(["git", "submodule", "add", "url", "vendor/lib"])
+        expect(plan.auto_pin_cmd).to_contain("git commit")
+        expect(plan.auto_pin_cmd).to_contain("pin submodule vendor/lib")
+
+    it "submodule status has no auto-pin":
+        val plan = classify_submodule(["git", "submodule", "status"])
+        expect(plan.auto_pin_cmd).to_equal("")
+
+describe "Submodule Policy - Read Negative":
+    it "short argv returns non-submodule":
+        val plan = classify_submodule(["git"])
+        expect(plan.is_submodule).to_equal(false)
+
+    it "empty argv returns non-submodule":
+        val plan = classify_submodule([])
+        expect(plan.is_submodule).to_equal(false)

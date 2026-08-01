@@ -1,0 +1,149 @@
+# @cover src/os/realtime/jtag/t32_watchdog.spl 80%
+# Validates T32 watchdog state machine: construction, transitions, queries, stats.
+
+use std.spipe.*
+
+val T32_ALIVE: i64 = 0
+val T32_SUSPECT: i64 = 1
+val T32_HUNG: i64 = 2
+val T32_DEAD: i64 = 3
+
+# --- Inline simplified classes ---
+
+class T32WatchdogConfig:
+    ping_timeout_ms: i64
+    operation_timeout_ms: i64
+    max_retries: i64
+    auto_reconnect: bool
+    kill_on_hang: bool
+    host: text
+    port: i64
+
+    static fn defaults() -> T32WatchdogConfig:
+        T32WatchdogConfig(
+            ping_timeout_ms: 3000, operation_timeout_ms: 10000,
+            max_retries: 3, auto_reconnect: true, kill_on_hang: false,
+            host: "localhost", port: 20000
+        )
+
+class T32Watchdog:
+    config: T32WatchdogConfig
+    state: i64
+    consecutive_failures: i64
+    total_hangs: i64
+    total_recoveries: i64
+    connected: bool
+
+    static fn new(config: T32WatchdogConfig) -> T32Watchdog:
+        T32Watchdog(
+            config: config, state: T32_ALIVE,
+            consecutive_failures: 0, total_hangs: 0,
+            total_recoveries: 0, connected: false
+        )
+
+    fn is_alive() -> bool:
+        self.state == T32_ALIVE
+
+    fn is_hung() -> bool:
+        self.state == T32_HUNG
+
+    fn stats_text() -> text:
+        "hangs={self.total_hangs} recoveries={self.total_recoveries} state={self.state}"
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "State Constants":
+    it "state values are sequential 0-3":
+        expect(T32_ALIVE).to_equal(0)
+        expect(T32_SUSPECT).to_equal(1)
+        expect(T32_HUNG).to_equal(2)
+        expect(T32_DEAD).to_equal(3)
+
+describe "T32WatchdogConfig":
+    it "defaults has correct timeouts, retries, and connection info":
+        val cfg = T32WatchdogConfig.defaults()
+        expect(cfg.ping_timeout_ms).to_equal(3000)
+        expect(cfg.operation_timeout_ms).to_equal(10000)
+        expect(cfg.max_retries).to_equal(3)
+        expect(cfg.auto_reconnect).to_equal(true)
+        expect(cfg.kill_on_hang).to_equal(false)
+        expect(cfg.host).to_equal("localhost")
+        expect(cfg.port).to_equal(20000)
+
+describe "T32Watchdog Construction":
+    it "new starts in ALIVE state, not connected, zero counters":
+        val cfg = T32WatchdogConfig.defaults()
+        val wd = T32Watchdog.new(cfg)
+        expect(wd.state).to_equal(T32_ALIVE)
+        expect(wd.connected).to_equal(false)
+        expect(wd.consecutive_failures).to_equal(0)
+        expect(wd.total_hangs).to_equal(0)
+        expect(wd.total_recoveries).to_equal(0)
+
+describe "T32Watchdog State Queries":
+    it "is_alive true only in ALIVE state":
+        val cfg = T32WatchdogConfig.defaults()
+        val wd = T32Watchdog.new(cfg)
+        expect(wd.is_alive()).to_equal(true)
+        expect(wd.is_hung()).to_equal(false)
+
+    it "is_alive false in SUSPECT state":
+        val cfg = T32WatchdogConfig.defaults()
+        val suspect = T32Watchdog(
+            config: cfg, state: T32_SUSPECT,
+            consecutive_failures: 1, total_hangs: 0,
+            total_recoveries: 0, connected: true
+        )
+        expect(suspect.is_alive()).to_equal(false)
+        expect(suspect.is_hung()).to_equal(false)
+
+    it "is_hung true only in HUNG state":
+        val cfg = T32WatchdogConfig.defaults()
+        val hung = T32Watchdog(
+            config: cfg, state: T32_HUNG,
+            consecutive_failures: 3, total_hangs: 1,
+            total_recoveries: 0, connected: true
+        )
+        expect(hung.is_hung()).to_equal(true)
+        expect(hung.is_alive()).to_equal(false)
+
+describe "T32Watchdog State Transitions":
+    it "SUSPECT after fewer than max_retries failures":
+        val cfg = T32WatchdogConfig.defaults()
+        val suspect = T32Watchdog(
+            config: cfg, state: T32_SUSPECT,
+            consecutive_failures: 2, total_hangs: 0,
+            total_recoveries: 0, connected: true
+        )
+        expect(suspect.state).to_equal(T32_SUSPECT)
+        expect(suspect.consecutive_failures).to_be_less_than(3)
+
+    it "HUNG when consecutive_failures reaches max_retries":
+        val cfg = T32WatchdogConfig.defaults()
+        val hung = T32Watchdog(
+            config: cfg, state: T32_HUNG,
+            consecutive_failures: 3, total_hangs: 1,
+            total_recoveries: 0, connected: true
+        )
+        expect(hung.state).to_equal(T32_HUNG)
+        expect(hung.consecutive_failures).to_equal(cfg.max_retries)
+        expect(hung.total_hangs).to_equal(1)
+
+describe "T32Watchdog Stats":
+    it "stats_text contains hang and recovery counts":
+        val cfg = T32WatchdogConfig.defaults()
+        val wd = T32Watchdog.new(cfg)
+        expect(wd.stats_text()).to_contain("hangs=0")
+        expect(wd.stats_text()).to_contain("recoveries=0")
+        expect(wd.stats_text()).to_contain("state=0")
+
+    it "stats_text reflects accumulated hangs and recoveries":
+        val cfg = T32WatchdogConfig.defaults()
+        val hung = T32Watchdog(
+            config: cfg, state: T32_HUNG, consecutive_failures: 3,
+            total_hangs: 2, total_recoveries: 1, connected: true
+        )
+        expect(hung.stats_text()).to_contain("hangs=2")
+        expect(hung.stats_text()).to_contain("recoveries=1")

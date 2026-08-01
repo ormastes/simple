@@ -1,0 +1,200 @@
+use std.spec.*
+
+use os.apps.sshd.ssh_auth.{sshd_create_default_users, ssh_parse_auth_request, ssh_build_auth_success}
+use os.apps.sshd.ssh_channel.{DEFAULT_MAX_PACKET, DEFAULT_WINDOW_SIZE, ssh_parse_channel_open, ssh_parse_channel_data, ssh_parse_channel_request, ssh_parse_channel_close, ssh_build_channel_open_confirmation, ssh_build_channel_data, ssh_build_channel_close, ssh_build_channel_success}
+use os.apps.sshd.ssh_kex.{SSH_MSG_KEX_ECDH_INIT, SSH_MSG_KEX_ECDH_REPLY, HostKeySet, ssh_build_kexinit_for_host_keys, ssh_parse_kex_ecdh_init, ssh_build_kex_ecdh_reply, ssh_build_newkeys, ssh_kex_public_from_private, ssh_kex_compute_shared, ssh_kex_compute_exchange_hash, ssh_build_ed25519_host_key_blob, ssh_sign_exchange_hash}
+use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_put_string, ssh_put_bool, ssh_get_u32, ssh_get_string, ssh_get_text}
+use os.apps.sshd.ssh_transport.{ssh_build_version_string, ssh_parse_version_string, ssh_parse_kexinit, ssh_negotiate_algorithms, ssh_parse_service_request, ssh_build_service_accept}
+use os.crypto.ed25519.{ed25519_keypair_from_seed, ed25519_verify}
+
+fn _ed25519_seed() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+fn _client_version_bytes() -> [u8]:
+    [0x53, 0x53, 0x48, 0x2D, 0x32, 0x2E, 0x30, 0x2D, 0x4F, 0x70, 0x65, 0x6E, 0x53, 0x53, 0x48, 0x5F, 0x39, 0x2E, 0x36]
+
+fn _server_version_bytes() -> [u8]:
+    [0x53, 0x53, 0x48, 0x2D, 0x32, 0x2E, 0x30, 0x2D, 0x53, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x4F, 0x53, 0x5F, 0x31, 0x2E, 0x30]
+
+fn _ssh_userauth_bytes() -> [u8]:
+    [0x73, 0x73, 0x68, 0x2D, 0x75, 0x73, 0x65, 0x72, 0x61, 0x75, 0x74, 0x68]
+
+fn _root_bytes() -> [u8]:
+    [0x72, 0x6F, 0x6F, 0x74]
+
+fn _ssh_connection_bytes() -> [u8]:
+    [0x73, 0x73, 0x68, 0x2D, 0x63, 0x6F, 0x6E, 0x6E, 0x65, 0x63, 0x74, 0x69, 0x6F, 0x6E]
+
+fn _password_bytes() -> [u8]:
+    [0x70, 0x61, 0x73, 0x73, 0x77, 0x6F, 0x72, 0x64]
+
+fn _simpleos_bytes() -> [u8]:
+    [0x73, 0x69, 0x6D, 0x70, 0x6C, 0x65, 0x6F, 0x73]
+
+fn _session_bytes() -> [u8]:
+    [0x73, 0x65, 0x73, 0x73, 0x69, 0x6F, 0x6E]
+
+fn _shell_bytes() -> [u8]:
+    [0x73, 0x68, 0x65, 0x6C, 0x6C]
+
+fn _echo_ssh_line() -> [u8]:
+    [0x65, 0x63, 0x68, 0x6F, 0x20, 0x73, 0x73, 0x68, 0x0A]
+
+fn _build_kex_ecdh_init(public_key: [u8]) -> [u8]:
+    var payload: [u8] = []
+    payload.push(SSH_MSG_KEX_ECDH_INIT)
+    ssh_put_string(payload, public_key)
+
+fn _build_service_request() -> [u8]:
+    var payload: [u8] = []
+    payload.push(5)
+    ssh_put_string(payload, _ssh_userauth_bytes())
+
+fn _build_password_auth_request(username: text, password: text) -> [u8]:
+    var payload: [u8] = []
+    payload.push(50)
+    payload = ssh_put_string(payload, _root_bytes())
+    payload = ssh_put_string(payload, _ssh_connection_bytes())
+    payload = ssh_put_string(payload, _password_bytes())
+    payload = ssh_put_bool(payload, false)
+    ssh_put_string(payload, _simpleos_bytes())
+
+fn _build_channel_open(sender: u32) -> [u8]:
+    var payload: [u8] = []
+    payload.push(90)
+    payload = ssh_put_string(payload, _session_bytes())
+    payload = ssh_put_u32(payload, sender)
+    payload = ssh_put_u32(payload, DEFAULT_WINDOW_SIZE)
+    ssh_put_u32(payload, DEFAULT_MAX_PACKET)
+
+fn _build_channel_request(recipient: u32, request_type: text, want_reply: bool) -> [u8]:
+    var payload: [u8] = []
+    payload.push(98)
+    payload = ssh_put_u32(payload, recipient)
+    payload = ssh_put_string(payload, _shell_bytes())
+    ssh_put_bool(payload, want_reply)
+
+fn _decode_signature_blob(blob: [u8]) -> (text, [u8]):
+    val r_algo = ssh_get_text(blob, 0)
+    if r_algo.is_err():
+        return ("", [])
+    val algo = r_algo.unwrap()
+    val r_sig = ssh_get_string(blob, algo.next_offset)
+    if r_sig.is_err():
+        return ("", [])
+    (algo.value, r_sig.unwrap().data)
+
+describe "SSHD production packet transcript":
+    it "walks version, KEX, NEWKEYS, service, password auth, and channel packets":
+        val seed = _ed25519_seed()
+        val pubkey = ed25519_keypair_from_seed(seed).1
+        val host_keys = HostKeySet(
+            ed25519_seed: seed,
+            rsa_pkcs8: nil,
+            rsa_public_blob: nil,
+            ecdsa_p256_pkcs8: nil
+        )
+        assert_not_equal(host_keys.ed25519_seed, nil)
+
+        val server_version = ssh_parse_version_string(ssh_build_version_string())
+        expect(server_version.is_ok()).to_equal(true)
+        expect(server_version.unwrap()).to_equal("SSH-2.0-SimpleOS_1.0")
+
+        val client_kexinit = ssh_build_kexinit_for_host_keys(host_keys)
+        val server_kexinit = ssh_build_kexinit_for_host_keys(host_keys)
+        val client_kex = ssh_parse_kexinit(client_kexinit)
+        val server_kex = ssh_parse_kexinit(server_kexinit)
+        expect(client_kex.is_ok()).to_equal(true)
+        expect(server_kex.is_ok()).to_equal(true)
+        val algos = ssh_negotiate_algorithms(client_kex.unwrap(), server_kex.unwrap())
+        expect(algos.is_ok()).to_equal(true)
+        expect(algos.unwrap().kex).to_equal("curve25519-sha256")
+        expect(algos.unwrap().host_key).to_equal("ssh-ed25519")
+        expect(algos.unwrap().cipher_s2c).to_equal("aes256-gcm@openssh.com")
+
+        val client_private = [
+            0x11u8, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+            0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+            0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
+            0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11
+        ]
+        val server_private = [
+            0x33u8, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
+            0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
+            0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33,
+            0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33, 0x33
+        ]
+        val client_public = ssh_kex_public_from_private(client_private)
+        val server_public = ssh_kex_public_from_private(server_private)
+        val kex_init_payload = _build_kex_ecdh_init(client_public)
+        val parsed_client_public = ssh_parse_kex_ecdh_init(kex_init_payload)
+        expect(parsed_client_public.is_ok()).to_equal(true)
+        expect(parsed_client_public.unwrap()).to_equal(client_public)
+
+        val shared = ssh_kex_compute_shared(server_private, client_public)
+        val host_key_blob = ssh_build_ed25519_host_key_blob(pubkey)
+        val exchange_hash = ssh_kex_compute_exchange_hash(
+            _client_version_bytes(),
+            _server_version_bytes(),
+            client_kexinit,
+            server_kexinit,
+            host_key_blob,
+            client_public,
+            server_public,
+            shared
+        )
+        val sig_blob = ssh_sign_exchange_hash("ssh-ed25519", host_keys, exchange_hash)
+        expect(sig_blob.is_ok()).to_equal(true)
+        val sig_parts = _decode_signature_blob(sig_blob.unwrap())
+        expect(sig_parts.0).to_equal("ssh-ed25519")
+        expect(ed25519_verify(pubkey, exchange_hash, sig_parts.1)).to_equal(true)
+
+        val reply = ssh_build_kex_ecdh_reply(host_key_blob, server_public, sig_blob.unwrap())
+        expect(reply[0]).to_equal(SSH_MSG_KEX_ECDH_REPLY)
+        val newkeys = ssh_build_newkeys()
+        expect(newkeys.len()).to_equal(1)
+        expect(newkeys[0]).to_equal(21)
+
+        val service = ssh_parse_service_request(_build_service_request())
+        expect(service.is_ok()).to_equal(true)
+        expect(service.unwrap()).to_equal("ssh-userauth")
+        val service_accept = ssh_build_service_accept("ssh-userauth")
+        expect(service_accept[0]).to_equal(6)
+
+        val users = sshd_create_default_users()
+        val auth = ssh_parse_auth_request(_build_password_auth_request("root", "simpleos"))
+        expect(auth.is_ok()).to_equal(true)
+        expect(auth.unwrap().username).to_equal("root")
+        expect(auth.unwrap().method).to_equal("password")
+        expect(users.authenticate_password("root", "simpleos")).to_equal(true)
+        expect(ssh_build_auth_success()[0]).to_equal(52)
+
+        val open = ssh_parse_channel_open(_build_channel_open(7))
+        expect(open.is_ok()).to_equal(true)
+        expect(open.unwrap().0).to_equal("session")
+        expect(open.unwrap().1).to_equal(7)
+        val open_confirm = ssh_build_channel_open_confirmation(7, 0, DEFAULT_WINDOW_SIZE, DEFAULT_MAX_PACKET)
+        expect(open_confirm[0]).to_equal(91)
+        expect(ssh_get_u32(open_confirm, 1)).to_equal(7)
+
+        val shell_request = ssh_parse_channel_request(_build_channel_request(0, "shell", true))
+        expect(shell_request.is_ok()).to_equal(true)
+        expect(shell_request.unwrap().1).to_equal("shell")
+        expect(shell_request.unwrap().2).to_equal(true)
+        expect(ssh_build_channel_success(7)[0]).to_equal(99)
+
+        val data_msg = ssh_build_channel_data(0, _echo_ssh_line())
+        val data = ssh_parse_channel_data(data_msg)
+        expect(data.is_ok()).to_equal(true)
+        expect(data.unwrap().0).to_equal(0)
+        expect(data.unwrap().1).to_equal(_echo_ssh_line())
+
+        val close_msg = ssh_build_channel_close(0)
+        val close = ssh_parse_channel_close(close_msg)
+        expect(close.is_ok()).to_equal(true)
+        expect(close.unwrap()).to_equal(0)

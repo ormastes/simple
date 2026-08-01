@@ -1,0 +1,109 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/bridge_game2d.spl 80%
+# @tag: unit, engine2d, game2d, bridge
+#
+# Proves the game2d 2D API paints genuine pixels through the SHARED Engine2D
+# RenderBackend lanes (the SIMD-CPU `cpu_simd` lane and the `software` lane),
+# not game2d's own SDL/headless backends.
+#
+# game2d's Canvas is a thin builder over a typed `RenderCommandBuffer`. This
+# spec hand-builds the EXACT `RenderCommand` values that `Canvas.clear()` and
+# `Canvas.rect(DrawMode.Fill, ...)` emit (see game2d/render/canvas.spl), then
+# replays them through the bridge and reads back the framebuffer to assert a
+# real pixel oracle: framebuffer length, an INSIDE-rect pixel, and an OUTSIDE
+# pixel.
+#
+# NOTE: We construct the command buffer directly rather than via
+# `Canvas.create()` because `Canvas.create()` calls `Font.default_font()`,
+# which is unrunnable under the bootstrap seed interpreter (pre-existing seed
+# bug `game2d_font_default_unknown_argument_id_seed_2026-06-15` — the
+# `Font { id: FontId(...) }` struct literal fails with `unknown argument 'id'`).
+# The Canvas-typed bridge entry (`game2d_render_canvas_on_engine2d`) is still
+# type-verified via `bin/simple check`; only its runtime exercise is blocked by
+# that seed gap. The hand-built buffer is byte-identical to what the Canvas API
+# records, so the pixel oracle genuinely proves game2d's command vocabulary
+# paints through the shared backend.
+
+use std.gc_async_mut.gpu.engine2d.bridge_game2d.{game2d_render_commands_on_engine2d, bridge_count_unmapped}
+use std.nogc_sync_mut.engine.render.command.{RenderCommand, RenderCommandBuffer}
+use std.common.engine.color.{EngineColor}
+use std.common.engine.rect.{Rect2}
+use std.common.engine.units.{ZIndex}
+
+# 16x16 framebuffer. Clear to opaque blue, fill an opaque red rect at (2,2)
+# sized 8x8. Integer-aligned coords keep inside/outside pixels unambiguous.
+val FB_W: i64 = 16
+val FB_H: i64 = 16
+
+# Build the command buffer game2d's Canvas would record for:
+#   canvas.clear(EngineColor.blue())
+#   canvas.rect(DrawMode.Fill, Rect2(2,2,8,8), EngineColor.red())
+fn _build_commands() -> RenderCommandBuffer:
+    var buf = RenderCommandBuffer.create()
+    buf.push(RenderCommand.Clear(color: EngineColor.blue()))
+    buf.push(RenderCommand.DrawRect(
+        rect: Rect2(x: 2.0, y: 2.0, width: 8.0, height: 8.0),
+        color: EngineColor.red(),
+        z_order: ZIndex(value: 0)))
+    buf
+
+# Pack an EngineColor to the ARGB u32 the shared backend stores (same path the
+# bridge uses): EngineColor.to_rgba8().to_u32().
+fn _u32_of(c: EngineColor) -> u32:
+    val rgba = c.to_rgba8()
+    rgba.to_u32() as u32
+
+# Row-major index into the [u32] framebuffer.
+fn _at(pixels: [u32], x: i64, y: i64) -> u32:
+    pixels[(y * FB_W + x) as i32]
+
+# Render a command buffer through the named shared backend and read back.
+fn _render(buf: RenderCommandBuffer, backend_name: text) -> [u32]:
+    game2d_render_commands_on_engine2d(buf, FB_W as i32, FB_H as i32, backend_name)
+
+describe "game2d commands bridged onto the shared Engine2D RenderBackend":
+
+    it "paints clear + filled rect through the cpu_simd (SIMD-CPU) lane":
+        val pixels = _render(_build_commands(), "cpu_simd")
+        val red_u32 = _u32_of(EngineColor.red())
+        val blue_u32 = _u32_of(EngineColor.blue())
+
+        # Framebuffer is the full 16x16 surface.
+        expect(pixels.len()).to_equal((FB_W * FB_H) as i32)
+        # A pixel INSIDE the rect (4,4) is the rect color.
+        expect(_at(pixels, 4, 4)).to_equal(red_u32)
+        # A pixel OUTSIDE the rect (14,14) keeps the clear color.
+        expect(_at(pixels, 14, 14)).to_equal(blue_u32)
+
+    it "paints the same content through the software lane":
+        val pixels = _render(_build_commands(), "software")
+        val red_u32 = _u32_of(EngineColor.red())
+        val blue_u32 = _u32_of(EngineColor.blue())
+
+        expect(pixels.len()).to_equal((FB_W * FB_H) as i32)
+        expect(_at(pixels, 4, 4)).to_equal(red_u32)
+        expect(_at(pixels, 14, 14)).to_equal(blue_u32)
+
+    it "maps clear + filled rect without skipping any command":
+        # Clear and DrawRect are both mapped; nothing is dropped.
+        expect(bridge_count_unmapped(_build_commands())).to_equal(0)
+
+    it "maps circle and line primitives, and counts the unmapped DrawTriangles":
+        var buf = RenderCommandBuffer.create()
+        buf.push(RenderCommand.Clear(color: EngineColor.blue()))
+        buf.push(RenderCommand.DrawCircle(
+            cx: 8.0, cy: 8.0, radius: 4.0,
+            color: EngineColor.green(), z_order: ZIndex(value: 0)))
+        buf.push(RenderCommand.DrawLine(
+            x1: 0.0, y1: 0.0, x2: 15.0, y2: 0.0, width: 1.0,
+            color: EngineColor.white(), z_order: ZIndex(value: 0)))
+        buf.push(RenderCommand.DrawTriangles(
+            vertices: [], indices: [],
+            color: EngineColor.red(), z_order: ZIndex(value: 0)))
+
+        # Clear/DrawCircle/DrawLine map; only DrawTriangles is unmapped.
+        expect(bridge_count_unmapped(buf)).to_equal(1)
+
+        # And the mapped circle genuinely paints: center pixel is the circle color.
+        val pixels = _render(buf, "cpu_simd")
+        val green_u32 = _u32_of(EngineColor.green())
+        expect(_at(pixels, 8, 8)).to_equal(green_u32)

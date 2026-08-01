@@ -1,0 +1,413 @@
+# simple mem — post-mortem memory snapshot inspection (M8 CLI skeleton).
+#
+# Usage:
+#   simple mem top --profile <file> [--n N]   Top-N owners/kinds by live bytes
+#   simple mem diff <a> <b>                    Diff two snapshot files
+#   simple mem snapshot -o <file>              Write an in-process snapshot
+#   simple mem gate                            Run the stage4 memory gate
+#   simple mem sample <pid> <out_csv> [ms]     Delegate to the memstat sampler
+#   simple mem help                            Show usage
+#
+# v1 is post-mortem file mode only (no live-process/TUI channel yet — see
+# doc/05_design/app/mem_cli/m8_simple_mem_cli_design.md). Snapshot files are
+# plain TSV, one row per line:
+#   simple-mem-snapshot	v1	<timestamp>
+#   KIND	<kind>	<live_bytes>	<peak_bytes>	<allocs>
+#   OWNER	<owner>	<live_bytes>	<peak_bytes>	<allocs>
+#   RSS	<rss_kb>	<pss_kb>	<pss_anon_kb>	<private_dirty_kb>	<swap_kb>
+# Rows are parsed leniently: missing/short/unknown rows are skipped rather
+# than failing the whole snapshot.
+
+use std.io_runtime.{get_args, file_read, file_exists, env_get, process_run}
+use std.nogc_sync_mut.mem.dump.{mem_dump_to}
+
+struct MemRow:
+    tag: text
+    name: text
+    live: i64
+    peak: i64
+    allocs: i64
+
+struct DiffRow:
+    tag: text
+    name: text
+    live_a: i64
+    live_b: i64
+    delta: i64
+
+# Workaround: native codegen string == is broken (length-only comparison),
+# matching the idiom already used in app/cli/_CliMain/main_and_help.spl.
+fn str_eq(a: text, b: text) -> bool:
+    a.len() == b.len() and a.starts_with(b)
+
+fn min_i64(a: i64, b: i64) -> i64:
+    if a < b:
+        a
+    else:
+        b
+
+# Decimal parser over short tokens. Deliberately avoids `parse_int() ?? -1`
+# style: `??` on a raw i64 corrupts the value 3 (nil sentinel collision).
+fn parse_dec(s: text) -> i64:
+    var i = 0
+    var n = 0
+    var found = false
+    val len = s.len()
+    while i < len:
+        val c = s.char_code_at(i)
+        if c >= 48 and c <= 57:
+            found = true
+            n = n * 10 + (c - 48)
+        elif found:
+            return n
+        i = i + 1
+    if found:
+        return n
+    -1
+
+# Positional args after the interpreter/script prelude. get_args() yields
+# [program, ..., script.spl, user args...]; take everything after the first
+# argument ending in ".spl", falling back to argv[1:] for compiled binaries.
+fn cli_positional_args() -> [text]:
+    val all = get_args()
+    var rest: [text] = []
+    var seen_script = false
+    var i = 1
+    while i < all.len():
+        val a = all[i]
+        if seen_script:
+            rest = rest.push(a)
+        elif a.ends_with(".spl"):
+            seen_script = true
+        i = i + 1
+    if not seen_script:
+        rest = []
+        i = 1
+        while i < all.len():
+            rest = rest.push(all[i])
+            i = i + 1
+    rest
+
+fn print_help():
+    print "simple mem — memory snapshot inspection (v1: post-mortem file mode)"
+    print ""
+    print "Usage:"
+    print "  simple mem top --profile <file> [--n N]   Top-N owners/kinds by live bytes"
+    print "  simple mem diff <a> <b>                    Diff two snapshot files"
+    print "  simple mem snapshot -o <file>              Write an in-process snapshot"
+    print "  simple mem gate                            Run the stage4 memory gate"
+    print "  simple mem sample <pid> <out_csv> [ms]     Delegate to the memstat sampler"
+    print "  simple mem help                            Show this help"
+
+fn pad_right(s: text, width: i64) -> text:
+    var out = s
+    while out.len() < width:
+        out = out + " "
+    out
+
+fn pad_left(s: text, width: i64) -> text:
+    var out = s
+    while out.len() < width:
+        out = " " + out
+    out
+
+# Parses a v1 snapshot TSV into a flat list of OWNER/KIND rows (RSS and the
+# header row are skipped — v1 top/diff only report OWNER/KIND live bytes).
+fn parse_snapshot(path: text) -> [MemRow]:
+    var rows: [MemRow] = []
+    if not file_exists(path):
+        return rows
+    val content = file_read(path)
+    for line in content.split("\n"):
+        if line.trim() == "":
+            continue
+        val parts = line.split("\t")
+        if parts.len() < 1:
+            continue
+        val tag = parts[0]
+        if str_eq(tag, "OWNER") or str_eq(tag, "KIND"):
+            if parts.len() < 5:
+                continue
+            rows = rows.push(MemRow(
+                tag: tag,
+                name: parts[1],
+                live: parse_dec(parts[2]),
+                peak: parse_dec(parts[3]),
+                allocs: parse_dec(parts[4])
+            ))
+    rows
+
+fn filter_tag(rows: [MemRow], tag: text) -> [MemRow]:
+    var out: [MemRow] = []
+    for r in rows:
+        if str_eq(r.tag, tag):
+            out = out.push(r)
+    out
+
+# In-place selection sort descending by live bytes. Snapshot row counts are
+# small (owner/kind cardinality), so O(n^2) is fine and avoids depending on
+# a generic sort_by that may not exist for struct arrays.
+fn sort_rows_desc(rows: [MemRow]) -> [MemRow]:
+    var arr = rows
+    val n = arr.len()
+    var i = 0
+    while i < n:
+        var max_idx = i
+        var j = i + 1
+        while j < n:
+            if arr[j].live > arr[max_idx].live:
+                max_idx = j
+            j = j + 1
+        if max_idx != i:
+            val tmp = arr[i]
+            arr[i] = arr[max_idx]
+            arr[max_idx] = tmp
+        i = i + 1
+    arr
+
+fn sort_diff_desc(rows: [DiffRow]) -> [DiffRow]:
+    var arr = rows
+    val n = arr.len()
+    var i = 0
+    while i < n:
+        var max_idx = i
+        var j = i + 1
+        while j < n:
+            if arr[j].delta > arr[max_idx].delta:
+                max_idx = j
+            j = j + 1
+        if max_idx != i:
+            val tmp = arr[i]
+            arr[i] = arr[max_idx]
+            arr[max_idx] = tmp
+        i = i + 1
+    arr
+
+fn print_rows_table(title: text, rows: [MemRow], top_n: i64):
+    print title
+    print pad_right("NAME", 32) + pad_left("LIVE", 12) + pad_left("PEAK", 12) + pad_left("ALLOCS", 8)
+    val limit = min_i64(top_n, rows.len())
+    var i = 0
+    while i < limit:
+        val r = rows[i]
+        val live_s = "{r.live}"
+        val peak_s = "{r.peak}"
+        val allocs_s = "{r.allocs}"
+        print pad_right(r.name, 32) + pad_left(live_s, 12) + pad_left(peak_s, 12) + pad_left(allocs_s, 8)
+        i = i + 1
+
+fn cmd_top(args: [text]) -> i64:
+    var profile = ""
+    var n = 20
+    var once = false
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if str_eq(a, "--profile") and i + 1 < args.len():
+            profile = args[i + 1]
+            i = i + 2
+        elif a.starts_with("--profile="):
+            profile = a.substring(10)
+            i = i + 1
+        elif str_eq(a, "--n") and i + 1 < args.len():
+            val parsed = parse_dec(args[i + 1])
+            if parsed > 0:
+                n = parsed
+            i = i + 2
+        elif a.starts_with("--n="):
+            val parsed = parse_dec(a.substring(4))
+            if parsed > 0:
+                n = parsed
+            i = i + 1
+        elif str_eq(a, "--once"):
+            once = true
+            i = i + 1
+        else:
+            i = i + 1
+    if profile == "":
+        print "simple mem top: missing --profile <file>"
+        print_help()
+        return 1
+    if not file_exists(profile):
+        print "simple mem top: profile not found: {profile}"
+        return 1
+    if once:
+        var top_tui_args: [text] = ["run", "src/app/mem/top_tui.spl", "--", "--profile", profile, "--n", "{n}"]
+        val (out, err, code) = process_run(resolve_simple_binary(), top_tui_args)
+        if out.len() > 0:
+            print out
+        if err.len() > 0:
+            print err
+        return code
+    val rows = parse_snapshot(profile)
+    val owners = sort_rows_desc(filter_tag(rows, "OWNER"))
+    val kinds = sort_rows_desc(filter_tag(rows, "KIND"))
+    print "Snapshot: {profile}"
+    print ""
+    print_rows_table("Top owners by live bytes:", owners, n)
+    print ""
+    print_rows_table("Kinds by live bytes:", kinds, n)
+    0
+
+fn build_live_map(rows: [MemRow]) -> Dict<text, i64>:
+    var m: Dict<text, i64> = {}
+    for r in rows:
+        val key = "{r.tag}:{r.name}"
+        m[key] = r.live
+    m
+
+# Joins OWNER+KIND rows across two parsed snapshots, keyed by "TAG:name" per
+# the design doc's diff algorithm (missing side treated as live=0).
+fn diff_rows(rows_a: [MemRow], rows_b: [MemRow]) -> [DiffRow]:
+    val map_a = build_live_map(rows_a)
+    val map_b = build_live_map(rows_b)
+    var seen: Dict<text, bool> = {}
+    var out: [DiffRow] = []
+    for r in rows_a:
+        val key = "{r.tag}:{r.name}"
+        if not seen.contains_key(key):
+            seen[key] = true
+            val live_a = r.live
+            val live_b = if map_b.contains_key(key):
+                map_b[key]
+            else:
+                0
+            out = out.push(DiffRow(tag: r.tag, name: r.name, live_a: live_a, live_b: live_b, delta: live_b - live_a))
+    for r in rows_b:
+        val key = "{r.tag}:{r.name}"
+        if not seen.contains_key(key):
+            seen[key] = true
+            val live_b = r.live
+            val live_a = if map_a.contains_key(key):
+                map_a[key]
+            else:
+                0
+            out = out.push(DiffRow(tag: r.tag, name: r.name, live_a: live_a, live_b: live_b, delta: live_b - live_a))
+    out
+
+fn cmd_diff(args: [text]) -> i64:
+    if args.len() < 2:
+        print "simple mem diff: requires <a> <b>"
+        print_help()
+        return 1
+    val path_a = args[0]
+    val path_b = args[1]
+    if not file_exists(path_a):
+        print "simple mem diff: not found: {path_a}"
+        return 1
+    if not file_exists(path_b):
+        print "simple mem diff: not found: {path_b}"
+        return 1
+    val rows_a = parse_snapshot(path_a)
+    val rows_b = parse_snapshot(path_b)
+    val diffs = sort_diff_desc(diff_rows(rows_a, rows_b))
+    print "Diff: {path_a} -> {path_b}"
+    print ""
+    print pad_right("TAG", 8) + pad_right("NAME", 32) + pad_left("A_LIVE", 12) + pad_left("B_LIVE", 12) + pad_left("DELTA", 12)
+    for d in diffs:
+        val sign = if d.delta >= 0:
+            "+"
+        else:
+            ""
+        val delta_s = "{sign}{d.delta}"
+        val a_s = "{d.live_a}"
+        val b_s = "{d.live_b}"
+        print pad_right(d.tag, 8) + pad_right(d.name, 32) + pad_left(a_s, 12) + pad_left(b_s, 12) + pad_left(delta_s, 12)
+    0
+
+# Last non-empty line of `text` (trailing newlines/blank lines skipped), or
+# "" when there is no non-empty line.
+fn last_nonempty_line(text: text) -> text:
+    var last = ""
+    for line in text.split("\n"):
+        if line.trim() != "":
+            last = line
+    last
+
+fn cmd_snapshot(args: [text]) -> i64:
+    var out_path = ""
+    var i = 0
+    while i < args.len():
+        val a = args[i]
+        if str_eq(a, "-o") and i + 1 < args.len():
+            out_path = args[i + 1]
+            i = i + 2
+        elif a.starts_with("-o="):
+            out_path = a.substring(3)
+            i = i + 1
+        elif str_eq(a, "--output") and i + 1 < args.len():
+            out_path = args[i + 1]
+            i = i + 2
+        else:
+            i = i + 1
+    if out_path == "":
+        print "simple mem snapshot: missing -o <file>"
+        print_help()
+        return 1
+    if mem_dump_to(out_path):
+        print "Snapshot written: {out_path}"
+        0
+    else:
+        print "simple mem snapshot: failed to write {out_path}"
+        1
+
+# Shells `scripts/check/check-stage4-memory-gate.shs` and relays its exit
+# code plus the last non-empty line of its output (the "stage4-memory-gate:
+# PASS|FAIL ..." verdict line).
+fn cmd_gate() -> i64:
+    val (out, err, code) = process_run("sh", ["scripts/check/check-stage4-memory-gate.shs"])
+    val verdict = last_nonempty_line(out)
+    if verdict != "":
+        print verdict
+    else:
+        print last_nonempty_line(err)
+    code
+
+# `bin/simple` binary to delegate to for `simple mem sample`. Honors
+# SIMPLE_BINARY (used by tests running against a non-default build) and
+# falls back to the repo-relative launcher.
+fn resolve_simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+# Delegates to the existing memstat sampler (src/app/memstat/main.spl):
+# `simple mem sample <pid> <out_csv> [interval_ms]`.
+fn cmd_sample(args: [text]) -> i64:
+    if args.len() < 2:
+        print "simple mem sample: requires <pid> <out_csv> [interval_ms]"
+        return 2
+    var run_args: [text] = ["run", "src/app/memstat/main.spl"]
+    for a in args:
+        run_args = run_args.push(a)
+    val (out, err, code) = process_run(resolve_simple_binary(), run_args)
+    if out.len() > 0:
+        print out
+    if err.len() > 0:
+        print err
+    code
+
+fn main() -> i64:
+    val args = cli_positional_args()
+    if args.len() == 0:
+        print_help()
+        return 1
+    val verb = args[0]
+    val rest = args[1:]
+    if str_eq(verb, "top"):
+        return cmd_top(rest)
+    elif str_eq(verb, "diff"):
+        return cmd_diff(rest)
+    elif str_eq(verb, "snapshot"):
+        return cmd_snapshot(rest)
+    elif str_eq(verb, "gate"):
+        return cmd_gate()
+    elif str_eq(verb, "sample"):
+        return cmd_sample(rest)
+    elif str_eq(verb, "help"):
+        print_help()
+        return 0
+    else:
+        print_help()
+        return 1
