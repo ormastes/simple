@@ -792,6 +792,8 @@ impl MirTextCodegen for MirToLlvm:
             case Ret(value):
                 # Decay-safe optional extraction, matching the call-dest path:
                 # compiled cross-module MirOperand? values can arrive flat.
+                if (rt_env_get("SIMPLE_LLVM_RET_TRACE") ?? "") == "1":
+                    print "[llvm-ret-top] fn={self.current_function_name} value_nil={value == nil}"
                 if value != nil:
                     val ret_operand: MirOperand = value ?? mir_operand_const_int(0)
                     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
@@ -818,6 +820,11 @@ impl MirTextCodegen for MirToLlvm:
                             # return value, so `ret <ty> %lN` used an undefined
                             # `%lN` and llc rejected it. Return a defined zero
                             # (the stub panics before this ret is reached).
+                            # Level-gated ret-lowering probe (default off). Set
+                            # SIMPLE_LLVM_RET_TRACE=1 to see, per `ret`, which
+                            # of the three zero-fallback conditions fired.
+                            if (rt_env_get("SIMPLE_LLVM_RET_TRACE") ?? "") == "1":
+                                print "[llvm-ret] fn={self.current_function_name} local={return_local_id} is_return_local={self.return_locals.has(return_local_id)} has_type={self.local_types.has(return_local_id)} defined={self.defined_locals.has(return_local_id)}"
                             if self.return_locals.has(return_local_id) or not self.local_types.has(return_local_id) or not self.defined_locals.has(return_local_id):
                                 self.builder.emit_ret(self.current_return_type, self.ret_value_for_type(self.current_return_type, "0"))
                                 return
@@ -992,6 +999,15 @@ impl MirTextCodegen for MirToLlvm:
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
         val dest_id = self.local_id_value(dest)
         val src_id = self.local_id_value(src)
+        # The Copy fast path in translate_instruction (disc-guarded
+        # pre-dispatch) `return`s before the trailing
+        # `mark_instruction_dest_defined(inst)` call ever runs, so a Copy
+        # destination was never recorded in `defined_locals`. Returning such a
+        # local (`val y = a + 1` then `return y` / bare tail `y`) then tripped
+        # translate_terminator's not-defined zero fallback and emitted
+        # `ret <ty> 0`. Mark it here, at the value-defining site, so both the
+        # fast path and the Move arm agree.
+        self.defined_locals[dest_id] = true
         val dest_name = self.get_local(dest_id)
         val src_name = self.local_value_text(src_id)
         # Bug #149: `get_local_type` checks the STICKY `ptr_locals`/

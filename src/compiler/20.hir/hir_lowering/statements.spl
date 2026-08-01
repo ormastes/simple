@@ -12,6 +12,7 @@ use compiler.hir.hir_lowering.expressions.*
 
 extern fn rt_enum_payload(value: StmtKind) -> Expr
 extern fn rt_enum_discriminant(value: StmtKind) -> i64
+extern fn rt_env_get(key: text) -> text
 
 fn hir_stmt_kind_disc(k: StmtKind) -> i64:
     rt_enum_discriminant(k)
@@ -406,9 +407,18 @@ impl HirLowering:
             # Bare-lift + if-val: explicit Some(...) here built the heap box
             # MIR lower_expr saw as <value:0x100000004>. This fast path
             # SHADOWS the StmtKind.Return arm below (bug doc 2026-07-23).
-            val rt_hir: HirExpr? = match rt_val:
-                case Some(rt_val_e): self.lower_hir_expr(rt_val_e)
-                case _: nil
+            # `match rt_val: case Some(...)` on a plain NULLABLE `Expr?` never
+            # matches on this lane (a nullable is not an Option box), so every
+            # `return <expr>` fell into `case _: nil` and the returned value was
+            # silently dropped -- the callee then lowered to `Ret(nil)` and the
+            # LLVM backend emitted `ret i64 0`, i.e. EVERY user function that
+            # used an explicit `return` returned 0 in native-build output. Bind
+            # with `if val`, the repo idiom for nullables.
+            var rt_hir: HirExpr? = nil
+            if val rt_val_e = rt_val:
+                rt_hir = self.lower_hir_expr(rt_val_e)
+            if (rt_env_get("SIMPLE_MIR_RET_TRACE") ?? "") == "1":
+                print "[hir-ret-fast] ast_nil={rt_val == nil} hir_nil={rt_hir == nil}"
             return HirStmt(kind: HirStmtKind.Expr(HirExpr(kind: HirExprKind.Return(rt_hir), type_: nil, span: s.span)), span: s.span)
         if sk_disc == hir_stmt_kind_disc(StmtKind.Assign(sk_dummy, nil, sk_dummy)):
             val as_target: Expr = match stmt_kind_value:
@@ -569,6 +579,8 @@ impl HirLowering:
                 # stage4 native lane; MIR lower_expr then sees the box header
                 # (<value:0x100000004>) instead of the expr (bug doc 2026-07-23).
                 val return_value: HirExpr? = self.lower_hir_expr(value)
+                if (rt_env_get("SIMPLE_MIR_RET_TRACE") ?? "") == "1":
+                    print "[hir-ret] StmtKind.Return ast_nil={value == nil} hir_nil={return_value == nil}"
                 HirStmtKind.Expr(HirExpr(
                     kind: HirExprKind.Return(return_value),
                     type_: nil,
