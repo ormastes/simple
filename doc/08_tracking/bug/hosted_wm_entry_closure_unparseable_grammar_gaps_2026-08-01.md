@@ -1,6 +1,8 @@
 # Hosted-WM entry closure was unparseable: two grammar gaps + three landed syntax errors
 
-**Status:** source repaired (this change); **both grammar gaps still OPEN.**
+**Status:** source repaired (the original change); **Gap A and Gap C are now
+CLOSED in the grammar** — see "Update 2026-08-01" at the end. Gap B
+(multi-line `match` as a struct-literal field value) is tracked separately.
 **Found:** while trying to calibrate `GLYPH_RGB_SHA256` for
 `scripts/check/check-linux-hosted-wm-live-window-evidence.shs` (showcase
 cells 4/5/6).
@@ -120,3 +122,52 @@ landed. A parse-only sweep over `src/os` + `src/lib` is the cheap guard:
   bracketed/parenthesized argument or field list, terminate the arm list at
   a `,` that belongs to the enclosing list rather than demanding another
   pattern.
+
+## Update 2026-08-01 — Gap A and Gap C are CLOSED (PROVED)
+
+Both were fixed in the seed parser shortly after this doc was written, and
+are re-verified closed at origin `b9341804e5`:
+
+| Gap | Shape | Fix | State at `b9341804e5` |
+|---|---|---|---|
+| A | `c =` ⏎ `a + 1`, `self.f =` ⏎ `x.y`, and every compound assign | `6587c9e8875` — `parse_expression_or_assignment` skips newlines/indents after the assign-op, with a deferred-dedent drain | **PARSES** |
+| C | `elif a and` ⏎ `b:` (and `==`, `>`, `or`, `else if`, chained `elif`, deep and shallow indent shapes) | `a7e5fbccf85` + the shared `parse_condition_block` drain in `parser_impl/core.rs` | **PARSES** |
+
+Evidence: a probe test built against the tip `simple-parser` crate parses
+all of the shapes above, including the exact real-world dispatch condition
+from `src/lib/gc_async_mut/web/browser_session_runtime.spl:2160`, while a
+deliberate syntax-error fixture in the same run still fails. The full
+`cargo test -p simple-parser` suite is green at that tip (0 failed).
+
+**Why this doc read as open longer than it was:** the deployed
+`bin/simple_seed` in this workspace is a **2026-07-25** binary — older than
+both fixes. Compiling the repro with it reproduces the original error
+strings verbatim (`expected expression, found Newline` for Gap A,
+`expected expression, found Indent` for Gap C), which is indistinguishable
+from the grammar still being broken. Any future check of a parser gap must
+probe the tip source (`cargo test -p simple-parser`) or a freshly built
+binary, never `bin/simple_seed` or `bin/simple` as deployed.
+
+**Consequence for the workarounds.** The paren workaround at
+`browser_session_runtime.spl:2160` and its 14 siblings, and the joined-onto-
+one-line assignment repairs listed above, are no longer required by the
+grammar. They are deliberately **not** unwound here: the deployed toolchain
+still predates the fixes, so removing them would make those files
+unparseable for anyone building with the currently deployed binary. Unwind
+them in the same change that redeploys a binary built at or after
+`6587c9e8875` + `a7e5fbccf85`.
+
+**Language-level regression coverage added:**
+`test/01_unit/compiler/parser_line_continuation_assign_elif_spec.spl` pins
+both shapes in Simple itself rather than only in Rust unit tests — the file
+is written in the shapes it pins, so a regression stops it loading.
+Non-vacuity, same command on the same file, two binaries:
+
+- pre-fix (2026-07-25) `simple_seed`: `FAIL ... parse: Unexpected token:
+  expected expression, found Newline` — `Results: 1 total, 0 passed, 1
+  failed`. A known-good control fixture compiles in the same run.
+- binary built from tip: `PASS` — `Results: 13 total, 13 passed, 0 failed`.
+
+The 13 assertions check evaluated *results*, not merely that the file
+loads, so a silent mis-association of a continued condition or RHS fails
+the spec rather than passing it.
