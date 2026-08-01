@@ -108,10 +108,22 @@
 #     the two have silently disagreed.
 #
 # NON-VACUITY: --selftest runs automatically before every scan and is FATAL. It
-# builds 14 throwaway fixtures in a temp repo — truncated tree, duplicate entry,
+# builds 15 throwaway fixtures in a temp repo — truncated tree, duplicate entry,
 # missing src/runtime, shrunken src/, oversize, inherited-wipe, band-jump, and
 # healthy controls — and asserts each verdict. A guard that cannot fail on its
 # motivating case is worse than none.
+#
+# ISOLATION: the fixtures are built in a temp repo of the selftest's OWN making
+# and MUST NOT touch the repo being guarded. Until 2026-08-01 they did: `git -C
+# <tmp>` does not override an inherited GIT_DIR, so running this guard from the
+# repo's own plumbing landing flow wrote the fixture identity into the SHARED
+# .git/config (main commit 30743ecd6749 is authored `selftest <selftest@local>`
+# because of it), flipped core.bare = true when GIT_DIR carried a trailing slash
+# — which makes THIS guard and both siblings ERROR out and pushes go unguarded —
+# and dumped every fixture object into the shared store as unreachable garbage.
+# Fixture 15 ('env-isolation') runs a fixture build under exactly that hostile
+# GIT_DIR against a decoy repo and fails if the decoy's config, core.bare or
+# object count moves by one byte.
 #
 # Usage:
 #   check-tree-size-push.shs                       # default range main@origin..@-
@@ -317,7 +329,71 @@ evaluate_commit() {
 # ===========================================================================
 # SELFTEST — runs before every scan, FATAL. 14 fixtures.
 # ===========================================================================
-SELFTEST_EXPECTED=14
+SELFTEST_EXPECTED=15
+
+# --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
+# Every git call that BUILDS a fixture must go through st_git/st_git_init.
+#
+# The fixtures used to be built with a bare `git -C "$st_dir" ...` plus
+#     git -C "$st_dir" config user.email selftest@local
+# which looks local but is not. `-C <dir>` only changes the working directory;
+# it does NOT override an inherited GIT_DIR. The mandated landing flow in this
+# repo exports GIT_DIR/GIT_INDEX_FILE, so a lane that ran this guard from such a
+# shell had EVERY fixture write redirected into the SHARED repo. Three separate
+# production symptoms, one cause (all reproduced 2026-08-01):
+#
+#   1. IDENTITY  — `git config user.*` wrote to the SHARED .git/config, so every
+#      later commit in that clone was authored `selftest <selftest@local>`.
+#      Commit 30743ecd6749 on main carries exactly that author.
+#   2. core.bare — with GIT_DIR ending in a slash ('.../.git/') or '/.', the
+#      `git init` below RE-INITIALISES the shared repo and writes
+#      core.bare = true. While true, `git rev-parse --is-inside-work-tree` is
+#      false in every worktree, so this guard and both sibling guards refuse to
+#      run ("ERROR — nothing was checked") and pushes go UNGUARDED.
+#   3. OBJECTS   — hash-object -w / commit-tree / mktree wrote every throwaway
+#      fixture object into the shared object store, where nothing references
+#      them: "too many unreachable loose objects" on fetch.
+#
+# So: strip every GIT_* variable that can RELOCATE a write, and pass the fixture
+# identity per-process so no config file is ever written. Fixture 15
+# ('env-isolation') proves this holds, by running a fixture build under a
+# deliberately hostile GIT_DIR and asserting the decoy repo is untouched.
+ST_ENV_STRIP='GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE GIT_CONFIG
+GIT_CONFIG_COUNT GIT_CEILING_DIRECTORIES GIT_ATTR_NOSYSTEM GIT_TEMPLATE_DIR
+GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE
+GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE'
+
+st_env() {
+    # Echo nothing; exec `env -u ... <identity> git "$@"` with a hermetic
+    # environment. ST_INDEX, when set, is the ONLY index the fixture may touch.
+    st_e_unset=''
+    for st_e_v in $ST_ENV_STRIP; do
+        st_e_unset="$st_e_unset -u $st_e_v"
+    done
+    # shellcheck disable=SC2086  # st_e_unset is a built list of -u FLAGS, not data
+    env $st_e_unset \
+        GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null \
+        GIT_AUTHOR_NAME=selftest   GIT_AUTHOR_EMAIL=selftest@local \
+        GIT_COMMITTER_NAME=selftest GIT_COMMITTER_EMAIL=selftest@local \
+        GIT_AUTHOR_DATE='@0 +0000' GIT_COMMITTER_DATE='@0 +0000' \
+        ${ST_INDEX:+GIT_INDEX_FILE="$ST_INDEX"} \
+        git "$@"
+}
+
+st_git() {
+    # st_git <repo> <git-args>...  — always operates on <repo>, never on an
+    # inherited GIT_DIR.
+    st_g_repo=$1
+    shift
+    st_env -C "$st_g_repo" "$@"
+}
+
+st_git_init() {
+    # st_git_init <dir> — creates a REAL repo at <dir>. Must not be `git -C`:
+    # `git init <path>` with GIT_DIR set re-inits the repo GIT_DIR names.
+    st_env init -q "$1"
+}
 
 st_mktree() {
     # st_mktree <repo> <files-per-dir> <dir>...   -> echoes a commit sha
@@ -326,25 +402,70 @@ st_mktree() {
     shift 2
     st_idx="$TMPROOT/st.index"
     rm -f "$st_idx"
-    st_blob=$(printf 'x\n' | git -C "$st_repo" hash-object -w --stdin) || return 1
+    st_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_repo" hash-object -w --stdin) || return 1
     for st_d in "$@"; do
         st_i=0
         while [ "$st_i" -lt "$st_n" ]; do
-            GIT_INDEX_FILE="$st_idx" git -C "$st_repo" update-index --add \
+            ST_INDEX="$st_idx" st_git "$st_repo" update-index --add \
                 --cacheinfo "100644,$st_blob,$st_d/f$st_i.txt" >/dev/null || return 1
             st_i=$(( st_i + 1 ))
         done
     done
-    st_tree=$(GIT_INDEX_FILE="$st_idx" git -C "$st_repo" write-tree) || return 1
-    git -C "$st_repo" commit-tree "$st_tree" -m fixture </dev/null
+    st_tree=$(ST_INDEX="$st_idx" st_git "$st_repo" write-tree) || return 1
+    st_git "$st_repo" commit-tree "$st_tree" -m fixture </dev/null
+}
+
+st_env_isolation_fixture() {
+    # Fixture 15. Build a DECOY repo, export a hostile GIT_DIR pointing at it in
+    # the exact shape proven to flip core.bare ('<path>/.git/', trailing slash),
+    # then build a fixture. If fixture writes are hermetic the decoy is byte-for
+    # byte untouched. Reverting st_env/st_git/st_git_init turns this RED.
+    ei_decoy="$TMPROOT/decoy"
+    ei_probe="$TMPROOT/probe"
+    rm -rf "$ei_decoy" "$ei_probe"
+    st_git_init "$ei_decoy" >/dev/null 2>&1 || return 1
+    ei_bare_before=$(st_git "$ei_decoy" config --get core.bare 2>&1)
+    ei_cfg_before=$(cksum <"$ei_decoy/.git/config") || return 1
+    ei_obj_before=$(find "$ei_decoy/.git/objects" -type f | wc -l) || return 1
+
+    # HOSTILE caller environment — exactly what the landing flow exports.
+    (
+        GIT_DIR="$ei_decoy/.git/"
+        GIT_INDEX_FILE="$ei_decoy/.git/hostile.index"
+        export GIT_DIR GIT_INDEX_FILE
+        TMPROOT="$TMPROOT" ST_NONCE="$ST_NONCE"
+        st_git_init "$ei_probe" >/dev/null 2>&1 || exit 1
+        st_mktree "$ei_probe" 2 src/runtime src/os >/dev/null || exit 1
+    ) || return 1
+
+    ei_bad=0
+    [ -d "$ei_probe/.git" ] || {
+        echo "  - fixture repo got NO .git of its own: writes were redirected" >&2; ei_bad=1; }
+    ei_bare_after=$(st_git "$ei_decoy" config --get core.bare 2>&1)
+    [ "$ei_bare_after" = "$ei_bare_before" ] || {
+        echo "  - decoy core.bare changed: '$ei_bare_before' -> '$ei_bare_after'" >&2; ei_bad=1; }
+    ei_cfg_after=$(cksum <"$ei_decoy/.git/config")
+    [ "$ei_cfg_after" = "$ei_cfg_before" ] || {
+        echo "  - decoy .git/config was MODIFIED by the fixture build" >&2
+        st_git "$ei_decoy" config --list >&2; ei_bad=1; }
+    ei_obj_after=$(find "$ei_decoy/.git/objects" -type f | wc -l)
+    [ "$ei_obj_after" -eq "$ei_obj_before" ] || {
+        echo "  - decoy object store grew: $ei_obj_before -> $ei_obj_after loose object(s)" >&2
+        ei_bad=1; }
+    return "$ei_bad"
 }
 
 selftest() {
+    # Unique per run, so a leak detected by fixture 15 is THIS run's leak and
+    # never a stale object from an earlier poisoned run.
+    ST_NONCE="$$-$(date +%s 2>/dev/null)-${RANDOM:-0}"
     st_dir="$TMPROOT/selftest"
     mkdir -p "$st_dir" || return 1
-    git init -q "$st_dir" >/dev/null 2>&1 || return 1
-    git -C "$st_dir" config user.email selftest@local >/dev/null 2>&1
-    git -C "$st_dir" config user.name selftest >/dev/null 2>&1
+    st_git_init "$st_dir" >/dev/null 2>&1 || return 1
+    [ -d "$st_dir/.git" ] || {
+        echo "SELFTEST FAIL: fixture repo '$st_dir' has no .git — git init was redirected" >&2
+        return 1
+    }
 
     # Fixture thresholds: small, so fixtures stay cheap and each one isolates the
     # check it is meant to prove. PRODUCTION thresholds are exercised by the real
@@ -396,10 +517,10 @@ selftest() {
     # duplicate-entry fixture: `src/lib` listed TWICE, mirroring the observed
     # corruption. `git mktree` writes the entries verbatim, duplicates included —
     # git's own plumbing will not otherwise produce an invalid tree.
-    st_lib=$(git -C "$st_dir" rev-parse "$st_healthy^{tree}:src/lib")     || return 1
-    st_run=$(git -C "$st_dir" rev-parse "$st_healthy^{tree}:src/runtime") || return 1
-    st_osd=$(git -C "$st_dir" rev-parse "$st_healthy^{tree}:src/os")      || return 1
-    st_std=$(git -C "$st_dir" rev-parse "$st_healthy^{tree}:src/std")     || return 1
+    st_lib=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/lib")     || return 1
+    st_run=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/runtime") || return 1
+    st_osd=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/os")      || return 1
+    st_std=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:src/std")     || return 1
     {
         printf '040000 tree %s\tlib\n'     "$st_lib"
         printf '040000 tree %s\tlib\n'     "$st_lib"
@@ -407,10 +528,10 @@ selftest() {
         printf '040000 tree %s\truntime\n' "$st_run"
         printf '040000 tree %s\tstd\n'     "$st_std"
     } >"$TMPROOT/mktree.src"
-    st_srctree=$(git -C "$st_dir" mktree <"$TMPROOT/mktree.src") || return 1
+    st_srctree=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.src") || return 1
     printf '040000 tree %s\tsrc\n' "$st_srctree" >"$TMPROOT/mktree.top"
-    st_toptree=$(git -C "$st_dir" mktree <"$TMPROOT/mktree.top") || return 1
-    st_dupc=$(git -C "$st_dir" commit-tree "$st_toptree" -m dupfixture </dev/null) || return 1
+    st_toptree=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.top") || return 1
+    st_dupc=$(st_git "$st_dir" commit-tree "$st_toptree" -m dupfixture </dev/null) || return 1
 
     # --- 11 fixtures that MUST FAIL ---------------------------------------
     st_assert truncated-tree      "$st_trunc"   -1  1   # the wipe, no base
@@ -430,6 +551,17 @@ selftest() {
     st_assert healthy-exact-base  "$st_healthy" 200 0
     st_assert healthy-small-churn "$st_healthy" 198 0   # delta 2 == tolerance 2
 
+    # --- 1 fixture that proves the HARNESS ITSELF cannot escape ------------
+    # Not a verdict fixture: it asserts the selftest cannot mutate a repo it
+    # does not own, under the exact hostile environment that produced the
+    # 2026-08-01 shared-config poisoning. Counts toward SELFTEST_EXPECTED so a
+    # harness that skips it is visible.
+    st_ran=$(( st_ran + 1 ))
+    if ! st_env_isolation_fixture; then
+        echo "SELFTEST FAIL: fixture 'env-isolation' — fixture writes ESCAPED into a repo the selftest does not own" >&2
+        st_fail=1
+    fi
+
     CFG_ABS_MIN=$st_s_min;  CFG_ABS_MAX=$st_s_max
     CFG_TOL_PERMILLE=$st_s_tol; CFG_PATHS=$st_s_paths
     CFG_SRC_MIN=$st_s_smin; CFG_SRC_MAX=$st_s_smax
@@ -439,7 +571,7 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (11 must-fail, 3 must-pass)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (11 must-fail, 3 must-pass, 1 env-isolation)"
     return 0
 }
 
@@ -449,10 +581,43 @@ selftest() {
 TMPROOT=$(mktemp -d) || { echo "$SELF: ERROR — cannot mktemp" >&2
                           echo "$SELF: ERROR — nothing was checked (exit 2)"; exit 2; }
 
-if ! selftest; then
+# Snapshot the settings of the REAL repo that a leaking selftest was PROVED to
+# corrupt (2026-08-01), so a regression is reported here and not discovered days
+# later in `git log`. Skipped, not faked, when cwd is not in a repo — the
+# hermetic decoy in fixture 15 covers that case unconditionally.
+real_gitdir=$(git rev-parse --git-common-dir 2>/dev/null) || real_gitdir=""
+real_bare_before=''; real_user_before=''
+if [ -n "$real_gitdir" ] && [ -e "$real_gitdir" ]; then
+    real_bare_before=$(git config --get core.bare 2>&1)
+    real_user_before=$(git config --get user.email 2>&1)/$(git config --get user.name 2>&1)
+fi
+
+# The selftest runs in a SUBSHELL with every GIT_* location variable unset. Two
+# reasons, both load-bearing:
+#   * `-C <dir>` does not override an inherited GIT_DIR, so a caller that
+#     exported one (the mandated plumbing landing flow does) would otherwise
+#     redirect fixture reads AND writes at the real repo.
+#   * selftest() temporarily overwrites the CFG_* thresholds; a subshell makes
+#     it impossible for a fixture threshold to survive into the real scan.
+if ! ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY \
+             GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_COMMON_DIR GIT_NAMESPACE \
+             GIT_CONFIG GIT_CONFIG_COUNT
+       selftest ); then
     echo "$SELF: ERROR — selftest failed; the detector is not trustworthy" >&2
     echo "$SELF: ERROR — nothing was checked (exit 2)"
     exit 2
+fi
+
+if [ -n "$real_bare_before" ] || [ -n "$real_user_before" ]; then
+    real_bare_after=$(git config --get core.bare 2>&1)
+    real_user_after=$(git config --get user.email 2>&1)/$(git config --get user.name 2>&1)
+    if [ "$real_bare_after" != "$real_bare_before" ] || [ "$real_user_after" != "$real_user_before" ]; then
+        echo "$SELF: ERROR — the selftest MUTATED the repository at $real_gitdir" >&2
+        echo "  core.bare: '$real_bare_before' -> '$real_bare_after'" >&2
+        echo "  user:      '$real_user_before' -> '$real_user_after'" >&2
+        echo "$SELF: ERROR — nothing was checked (exit 2)"
+        exit 2
+    fi
 fi
 
 if [ "${1:-}" = "--selftest" ]; then
