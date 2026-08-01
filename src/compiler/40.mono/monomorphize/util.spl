@@ -31,7 +31,7 @@ fn type_uses_param(ty: Type, param: text) -> bool:
         type_Simple(name):
             name == param
 
-        type_Generic(name, args):
+        Type.Generic(name, args):
             # Check both the name and all type arguments
             if name == param:
                 return true
@@ -40,16 +40,16 @@ fn type_uses_param(ty: Type, param: text) -> bool:
                     return true
             false
 
-        type_Array(element, _):
+        Type.Array(element, _):
             type_uses_param(element, param)
 
-        type_Tuple(elems):
+        Type.Tuple(elems):
             for elem in elems:
                 if type_uses_param(elem, param):
                     return true
             false
 
-        type_Function(params, ret):
+        Type.Function(params, ret):
             # Check all parameters
             for p in params:
                 if type_uses_param(p, param):
@@ -59,7 +59,7 @@ fn type_uses_param(ty: Type, param: text) -> bool:
                 return type_uses_param(r, param)
             false
 
-        type_Optional(inner):
+        Type.Optional(inner):
             type_uses_param(inner, param)
 
         type_Pointer(_, inner):
@@ -104,14 +104,14 @@ fn infer_concrete_type(expr: Expr, type_context: {text: ConcreteType}) -> has_Co
         Nil:
             ConcreteType.Nil
 
-        expr_Identifier(name):
+        Expr.Identifier(name):
             type_context_get(type_context, name)
 
-        expr_Array(elems):
+        Expr.Array(elems):
             # Infer from first element
             if val first = elems_first(elems):
                 if val elem_ty = infer_concrete_type(first, type_context):
-                    return concretetype_Array(elem_ty)
+                    return ConcreteType.Array(elem_ty)
             nil
 
         _:
@@ -175,7 +175,7 @@ fn ast_type_to_concrete(ty: Type, bindings: {text: ConcreteType}) -> ConcreteTyp
                     # Named type (struct, class, enum)
                     concretetype_Named(name)
 
-        type_Generic(name, args):
+        Type.Generic(name, args):
             # Check if the name itself is a type parameter
             if val concrete = bindings_get(bindings, name):
                 return concrete
@@ -185,20 +185,20 @@ fn ast_type_to_concrete(ty: Type, bindings: {text: ConcreteType}) -> ConcreteTyp
             for arg in args:
                 concrete_args_push(concrete_args, ast_type_to_concrete(arg, bindings))
 
-            concretetype_Specialized(name, concrete_args)
+            ConcreteType.Specialized(name, concrete_args)
 
-        type_Tuple(elems):
+        Type.Tuple(elems):
             var concrete_elems: [ConcreteType] = []
             for elem in elems:
                 concrete_elems_push(concrete_elems, ast_type_to_concrete(elem, bindings))
-            concretetype_Tuple(concrete_elems)
+            ConcreteType.Tuple(concrete_elems)
 
-        type_Array(element, _):
+        Type.Array(element, _):
             # Size is ignored for monomorphization (runtime info)
             val elem_ty = ast_type_to_concrete(element, bindings)
-            concretetype_Array(elem_ty)
+            ConcreteType.Array(elem_ty)
 
-        type_Function(params, ret):
+        Type.Function(params, ret):
             var param_types: [ConcreteType] = []
             for param in params:
                 param_types_push(param_types, ast_type_to_concrete(param, bindings))
@@ -207,11 +207,11 @@ fn ast_type_to_concrete(ty: Type, bindings: {text: ConcreteType}) -> ConcreteTyp
                 case r: ast_type_to_concrete(r, bindings)
                 case nil: ConcreteType.Nil
 
-            concretetype_Function(param_types, ret_ty)
+            ConcreteType.Function(param_types, ret_ty)
 
-        type_Optional(inner):
+        Type.Optional(inner):
             val inner_ty = ast_type_to_concrete(inner, bindings)
-            concretetype_Optional(inner_ty)
+            ConcreteType.Optional(inner_ty)
 
         type_Pointer(kind, inner):
             # Convert pointer kind
@@ -230,9 +230,9 @@ fn ast_type_to_concrete(ty: Type, bindings: {text: ConcreteType}) -> ConcreteTyp
                     ReferenceCapability.Shared
 
             val inner_ty = ast_type_to_concrete(inner, bindings)
-            concretetype_Pointer(concrete_kind, capability, inner_ty)
+            ConcreteType.Pointer(concrete_kind, capability, inner_ty)
 
-        type_Union(types):
+        Type.Union(types):
             # Convert each union member to a ConcreteType
             var concrete_members: [ConcreteType] = []
             for member in types:
@@ -246,22 +246,22 @@ fn ast_type_to_concrete(ty: Type, bindings: {text: ConcreteType}) -> ConcreteTyp
                 else:
                     ConcreteType.Union(concrete_members)
 
-        type_Constructor(target, _):
+        Type.Constructor(target, _):
             # Constructor types are used for factory patterns
             # Extract the target type
             ast_type_to_concrete(target, bindings)
 
-        type_Simd(lanes, element):
+        Type.Simd(lanes, element):
             # SIMD types are specialized arrays
             # Lanes count is runtime info, we only care about element type
             val elem_ty = ast_type_to_concrete(element, bindings)
-            concretetype_Array(elem_ty)
+            ConcreteType.Array(elem_ty)
 
-        type_Capability(inner, _):
+        Type.Capability(inner, _):
             # Capability is a compile-time wrapper, unwrap to get inner type
             ast_type_to_concrete(inner, bindings)
 
-        type_DynTrait(trait_name):
+        Type.DynTrait(trait_name):
             # dyn Trait - represents a trait object (fat pointer)
             concretetype_Named("dyn_{trait_name}")
 
@@ -277,11 +277,11 @@ fn ast_type_to_concrete(ty: Type, bindings: {text: ConcreteType}) -> ConcreteTyp
             # Type binding - extract the bound value type
             ast_type_to_concrete(value, bindings)
 
-        type_ConstKeySet(keys):
+        Type.ConstKeySet(keys):
             # Const key set for format string templates
             concretetype_Named("const_keys({keys.join(',')})")
 
-        type_DependentKeys(source):
+        Type.DependentKeys(source):
             # Dependent keys from a source expression
             concretetype_Named("{source}.keys")
 
@@ -327,48 +327,48 @@ fn concrete_to_ast_type(concrete: ConcreteType) -> Type:
         concretetype_Named(name):
             type_Simple(name)
 
-        concretetype_Array(elem):
+        ConcreteType.Array(elem):
             val elem_ty = concrete_to_ast_type(elem)
-            type_Array(elem_ty, nil)
+            Type.Array(elem_ty, nil)
 
-        concretetype_Tuple(elems):
+        ConcreteType.Tuple(elems):
             var ast_elems: [Type] = []
             for elem in elems:
                 ast_elems_push(ast_elems, concrete_to_ast_type(elem))
-            type_Tuple(ast_elems)
+            Type.Tuple(ast_elems)
 
-        concretetype_Dict(key, value):
+        ConcreteType.Dict(key, value):
             val key_ty = concrete_to_ast_type(key)
             val value_ty = concrete_to_ast_type(value)
             Type.Generic("Dict", [key_ty, value_ty])
 
-        concretetype_Function(params, ret):
+        ConcreteType.Function(params, ret):
             var param_types: [Type] = []
             for param in params:
                 param_types_push(param_types, concrete_to_ast_type(param))
 
             val ret_ty = concrete_to_ast_type(ret)
-            type_Function(param_types, ret_ty)
+            Type.Function(param_types, ret_ty)
 
-        concretetype_Optional(inner):
+        ConcreteType.Optional(inner):
             val inner_ty = concrete_to_ast_type(inner)
-            type_Optional(inner_ty)
+            Type.Optional(inner_ty)
 
-        concretetype_Pointer(kind, _, inner):
+        ConcreteType.Pointer(kind, _, inner):
             # Note: Capability is preserved in ConcreteType for monomorphization,
             # but AST Pointer doesn't have a capability field - it's derived from kind
             val ast_kind = concrete_pointer_kind_to_ast(kind)
             val inner_ty = concrete_to_ast_type(inner)
             type_Pointer(ast_kind, inner_ty)
 
-        concretetype_Union(members):
+        ConcreteType.Union(members):
             # Convert union members back to AST types
             var ast_members: [Type] = []
             for member in members:
                 ast_members.push(concrete_to_ast_type(member))
-            type_Union(ast_members)
+            Type.Union(ast_members)
 
-        concretetype_Specialized(name, _):
+        ConcreteType.Specialized(name, _):
             # Specialized types are already monomorphized
             # Collapse to the mangled name (Simple type)
             type_Simple(name)

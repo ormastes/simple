@@ -249,7 +249,7 @@ read as an identifier too, so the fallback minted a global literally named `_`.
 `parse failed` stays at 43, `files scanned` at 11,294 and `lowering failed` at
 980, so the edited files still parse.
 
-### Confirmed defect class 2: `enumname_Variant` constructors (63 names)
+### Confirmed defect class 2: `enumname_Variant` constructors (63 names) — 61 FIXED, 2 reclassified
 
 63 of the 393 have the shape `lowercase_Capitalized`, e.g.
 `binaryopresult_Error`, `predicate_Or`, `selector_Call`, `stmtkind_Expr`,
@@ -270,15 +270,126 @@ the self-hosted compiler's own source; the language spelling is
 the `check_no_fabricated_extern_definitions` guard, since a weak zero-size
 definition would have hidden exactly this.
 
+#### Root cause (PROVED)
+
+A mechanical Rust-to-Simple port artifact. The porter flattened `impl X:` blocks
+to free functions (`impl BinaryOpResult { fn int(..) }` -> `fn
+binaryopresult_int(..)`) and applied the *same* lowercasing rule to
+`Self::Int(v)` / `BinaryOpResult::Int(v)`, which are enum **constructors**, not
+methods. The result is a wrapper whose body calls a name nobody defines:
+
+```
+fn binaryopresult_int(v: i64) -> BinaryOpResult:
+        binaryopresult_Int(v)          # <- minted a lenient global
+```
+
+The correct spelling is `BinaryOpResult.Int(v)`. The identical error occurs in
+**pattern** position (`type_Simple(name):` as a match arm), which is why the
+class spans both expressions and patterns.
+
+#### Disposition, per name
+
+Resolution was done **per file**, not per name — the same prefix denotes
+different enums in different files (`type_*` is the inference `enum Type` in
+`src/compiler/30.types/type_system/`, but `parser_types_expr.Type` in
+`monomorphize/util.spl`). A name was rewritten only when exactly one enum with
+that lowercased name was in scope for that file *and* carried that exact
+variant.
+
+- **61 of 63 — spelling fix (disposition a).** Rewritten to `EnumName.Variant`.
+  Nullary variants drop the empty parens (`type_Bool()` -> `Type.Bool`), matching
+  the 28 pre-existing `Type.Bool` uses and zero `Type.Bool()` uses in the
+  pristine tree.
+- **2 of 63 — `type_Simple`, `type_Pointer`: NOT a spelling error (reclassified,
+  filed below).** Both occur only in `src/compiler/40.mono/monomorphize/util.spl`,
+  which does `use compiler.frontend.parser_types_expr.{Type, Expr}`. In that
+  module `Type` and `Expr` are **structs** (`parser_types_expr.spl:23` and `:204`),
+  not enums; the variant sets live on `TypeKind` and `ExprKind`. `Simple`,
+  `Pointer`, `UnitWithRepr` and `TypeBinding` exist on **neither**. The file is a
+  stale port matching against an AST type model that was removed. Rewriting these
+  to any existing variant would trade a link error for a silent wrong answer, so
+  they are left loud and filed as a separate defect.
+
+The sweep covered the whole family, not just the 63: the census masks any name
+that collides with a module-level definition elsewhere, so a direct source scan
+found **125** unresolved `enumname_Variant` names over 361 sites, a strict
+superset containing all 63. All 342 sites that resolved to a unique in-scope
+enum+variant were rewritten (341 token replacements over 26 files). The other 19
+sites are the 17 `util.spl` dead-model sites and 4 occurrences inside comments,
+all deliberately untouched.
+
+#### Validation (PROVED, census A/B at base `eada96016e2`)
+
+| Metric | before | after |
+|---|---|---|
+| files scanned | 11,294 | 11,294 |
+| parse failed | 43 | 43 |
+| lowering failed | 980 | 980 |
+| distinct names attributed | 2,064 | 2,003 |
+| **undefined tree-wide** | **574** | **513** |
+
+Compared by set: exactly **61 names removed, 0 added**. `parse failed`,
+`lowering failed` and `files scanned` are unchanged, so every edited file still
+parses and lowers.
+
+True-positive control: `type_Simple` and `type_Pointer` are **still reported**
+after the rewrite. Had the edit merely made the census blind to the
+`lowercase_Capitalized` shape, those two would have disappeared as well. The
+detector is still live on exactly this class.
+
+Note the 574 baseline, not the 578 quoted earlier in this document: 578 was
+measured before the `value (`-for-`val (` fix landed, and this section's A/B is
+based on the tip that already carries it.
+
+**Credit split after rebasing onto `50019920d61`.** While this A/B was running, a
+parallel lane deleted five files as dead code
+(`bidirectional.spl`, `expr_infer.spl`, `expr_infer_calls.spl`,
+`expr_infer_ops.spl`, `module_check.spl` under `30.types/type_system/`) and
+gutted `checker.spl`. Those edits of mine were dropped rather than resurrecting
+deleted files. Of the 61: **51 are fixed by this change** at the landed tip, and
+**10 were resolved by that deletion instead** (`infermode_Check`, `type_Bool`,
+`type_Borrow`, `type_BorrowMut`, `type_Dict`, `type_Float`, `type_Int`,
+`type_Named`, `type_Nil`, `type_Unit`). Either way all 61 are gone; the A/B table
+above is the measurement at its own base `eada96016e2` and is not re-attributed.
+`checker.spl` was re-derived from the new upstream blob, not from the pre-rebase
+local copy.
+
+### Filed: `monomorphize/util.spl` matches enum patterns against structs
+
+Separate defect, NOT fixed here. 17 sites across 13 lines in
+`src/compiler/40.mono/monomorphize/util.spl` destructure `Type` and `Expr` as if
+they were enums:
+
+```
+src/compiler/40.mono/monomorphize/util.spl:31,157,328,374   type_Simple
+src/compiler/40.mono/monomorphize/util.spl:65,216,362       type_Pointer
+src/compiler/40.mono/monomorphize/util.spl:268              type_UnitWithRepr
+src/compiler/40.mono/monomorphize/util.spl:276              type_TypeBinding
+src/compiler/40.mono/monomorphize/util.spl:92               expr_Integer, expr_TypedInteger
+src/compiler/40.mono/monomorphize/util.spl:95               expr_Float, expr_TypedFloat
+src/compiler/40.mono/monomorphize/util.spl:98               expr_Bool
+src/compiler/40.mono/monomorphize/util.spl:101              expr_String, expr_TypedString, expr_FString
+```
+
+The file is a port of `rust/compiler/src/monomorphize/util.rs`, whose `Type` was
+an enum with `Simple`/`Generic`/`Pointer`/... The Simple AST since moved to
+`struct Type` carrying a `TypeKind`, and none of these variant names survive on
+`TypeKind`/`ExprKind`. The file is not dead — `type_uses_param`,
+`infer_concrete_type`, `ast_type_to_concrete` and `concrete_to_ast_type` all have
+external callers, and `monomorphize/__init__.spl:99` re-exports from it. Fixing it
+means porting the four functions onto `ty.kind` / `expr.kind` plus the current
+`TypeKind`/`ExprKind` variant sets, which is a semantic port, not a rename.
+
 
 ## Follow-ups (not done here)
 
 - `Expr::Identifier` has no span, so attribution is function-granular. Giving
   identifiers a span would make it line-exact.
-- The remaining ~330 `UNDEFINED` names are untriaged beyond the class table.
-  Priority order: the 63 `enumname_Variant` constructors (one mechanical
-  rewrite), then the 116 names ending in a collection-op suffix
-  (`_push`/`_len`/`_get`/`_contains`/…), then the long tail.
+- The `enumname_Variant` class is done (61 rewritten, 2 reclassified and filed).
+  Census now stands at **513**. Next in priority order: the 116 names ending in a
+  collection-op suffix (`_push`/`_len`/`_get`/`_contains`/…), then the long tail.
+- Port the four `monomorphize/util.spl` functions onto the current
+  `struct Type` + `TypeKind` / `struct Expr` + `ExprKind` model (section above).
 - The census masks any unbound name that collides with a module-level
   definition elsewhere in the tree, so it is a lower bound for a second reason
   beyond the 980 lowering failures and 43 parse failures.

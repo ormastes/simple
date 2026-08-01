@@ -198,7 +198,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
         # Check if already loaded
         if self.modules.has(path):
             if not self.config.hot_reload:
-                return loadresult_AlreadyLoaded(module: self.modules[path])
+                return LoadResult.AlreadyLoaded(module: self.modules[path])
             else:
                 return moduleloader_replace_live(self, path)
 
@@ -214,7 +214,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
             # Fallback to direct file reader (legacy path)
             reader_result = SmfReaderImpl.open(path)
             if reader_result_is_err(reader_result):
-                return loadresult_Error(message: reader_result.unwrap_err())
+                return LoadResult.Error(message: reader_result.unwrap_err())
 
         val reader = reader_result_value
 
@@ -230,11 +230,11 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
                 for smf_sym in memory_reader.exported_symbols():
                     val code_result = memory_reader.read_code(smf_sym)
                     if code_result.is_err():
-                        return loadresult_Error(message: code_result.unwrap_err())
+                        return LoadResult.Error(message: code_result.unwrap_err())
                     val code = code_result.unwrap()
                     val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
                     if exec_addr == 0:
-                        return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                        return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
                     val loaded_sym = LoadedSymbol(
                         name: smf_sym.name,
                         address: exec_addr,
@@ -251,11 +251,11 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
             for smf_sym in reader_exports:
                 val code_result = reader.read_code(smf_sym)
                 if code_result_is_err(code_result):
-                    return loadresult_Error(message: code_result.unwrap_err())
+                    return LoadResult.Error(message: code_result.unwrap_err())
                 val code = code_result_value
                 val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
                 if exec_addr == 0:
-                    return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
                 val loaded_sym = LoadedSymbol(
                     name: smf_sym.name,
                     address: exec_addr,
@@ -270,19 +270,19 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
         if symbols.keys().len() == 0:
             val load_bytes_result = self.provider.get_module_bytes(path)
             if load_bytes_result.is_err():
-                return loadresult_Error(message: load_bytes_result.unwrap_err())
+                return LoadResult.Error(message: load_bytes_result.unwrap_err())
             val memory_reader_result = SmfReaderMemory.from_data(load_bytes_result.unwrap())
             if memory_reader_result.is_err():
-                return loadresult_Error(message: memory_reader_result.unwrap_err())
+                return LoadResult.Error(message: memory_reader_result.unwrap_err())
             val memory_reader = memory_reader_result.unwrap()
             for smf_sym in memory_reader.exported_symbols():
                 val code_result = memory_reader.read_code(smf_sym)
                 if code_result.is_err():
-                    return loadresult_Error(message: code_result.unwrap_err())
+                    return LoadResult.Error(message: code_result.unwrap_err())
                 val code = code_result.unwrap()
                 val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: smf_sym.name, code: code, allow_replace: false)
                 if exec_addr == 0:
-                    return loadresult_Error(message: "Failed to allocate executable memory for {smf_sym.name}")
+                    return LoadResult.Error(message: "Failed to allocate executable memory for {smf_sym.name}")
                 val loaded_sym = LoadedSymbol(
                     name: smf_sym.name,
                     address: exec_addr,
@@ -311,7 +311,7 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
         # that produced the reader.
         var smf_data_result = self.provider.get_module_bytes(path)
         if smf_data_result.is_err():
-            return loadresult_Error(message: smf_data_result.unwrap_err())
+            return LoadResult.Error(message: smf_data_result.unwrap_err())
         val smf_data = smf_data_result.unwrap()
         val reloc_result = moduleloader_apply_relocations(self, path, smf_data)
         if reloc_result.is_err():
@@ -319,12 +319,12 @@ fn moduleloader_load(self: ModuleLoader, path: text) -> LoadResult:
             if self.config.verbose:
                 print "[loader] relocation failed for {path}: {reloc_error}"
             moduleloader_unload(self, path)
-            return loadresult_Error(message: reloc_error)
+            return LoadResult.Error(message: reloc_error)
 
         if self.config.verbose:
             print "[loader] Loaded {symbols.keys().len()} symbols from {path}"
 
-        loadresult_Success(module: module)
+        LoadResult.Success(module: module)
 
 
 fn moduleloader_apply_relocations(self: ModuleLoader, path: text, smf_data: [u8]) -> Result<(), text>:
@@ -437,7 +437,7 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         if reader_result_is_err(reader_result):
             reader_result = SmfReaderImpl.open(path)
             if reader_result_is_err(reader_result):
-                return loadresult_Error(message: reader_result.unwrap_err())
+                return LoadResult.Error(message: reader_result.unwrap_err())
 
         val reader = reader_result_value
         var candidate_symbols: Dict<text, LoadedSymbol> = {}
@@ -446,14 +446,14 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         for smf_sym in reader.exported_symbols():
             val code_result = reader.read_code(smf_sym)
             if code_result_is_err(code_result):
-                return loadresult_Error(message: code_result.unwrap_err())
+                return LoadResult.Error(message: code_result.unwrap_err())
 
             val code = code_result_value
             val internal_name = candidate_prefix + smf_sym.name
             val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: internal_name, code: code, allow_replace: false)
             if exec_addr == 0:
                 moduleloader_unmap_internal_symbols(self, internal_symbols)
-                return loadresult_Error(message: "Failed to allocate replacement memory for {smf_sym.name}")
+                return LoadResult.Error(message: "Failed to allocate replacement memory for {smf_sym.name}")
 
             internal_symbols = internal_symbols.push(internal_name)
             candidate_symbols[smf_sym.name] = LoadedSymbol(
@@ -479,20 +479,20 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         if smf_data_result.is_err():
             self.modules[path] = old_module
             moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return loadresult_Error(message: smf_data_result.unwrap_err())
+            return LoadResult.Error(message: smf_data_result.unwrap_err())
 
         val reloc_result = moduleloader_apply_relocations(self, path, smf_data_result.unwrap())
         if reloc_result.is_err():
             self.modules[path] = old_module
             moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return loadresult_Error(message: reloc_result.unwrap_err())
+            return LoadResult.Error(message: reloc_result.unwrap_err())
 
         # Phase-2: mark relocation done, validate imports, then check readiness.
         candidate_map = candidate_map.complete_relocation().validate_imports()
         if not candidate_map.is_ready():
             self.modules[path] = old_module
             moduleloader_unmap_internal_symbols(self, internal_symbols)
-            return loadresult_Error(message: "Candidate not ready after relocation for {path}")
+            return LoadResult.Error(message: "Candidate not ready after relocation for {path}")
 
         # Promote candidate generation state.
         val gen_active = gen_candidate.promote()
@@ -517,7 +517,7 @@ fn moduleloader_replace_live(self: ModuleLoader, path: text) -> LoadResult:
         if self.config.verbose:
             print "[loader] Replaced {path} with generation {next_version} (gen_active={gen_active.to_text()})"
 
-        loadresult_Success(module: candidate)
+        LoadResult.Success(module: candidate)
 
 
 fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
@@ -531,7 +531,7 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
             val symbol = _destruct_0[1]
 
             # Return already-installed executable symbol
-            return symbolresult_Found(symbol: symbol, code: [])
+            return SymbolResult.Found(symbol: symbol, code: [])
 
         # Try JIT instantiation
         if self.config.enable_jit:
@@ -549,7 +549,7 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
                     else:
                         moduleloader_allocate_exec_jit(self, owner_id: owner_id, symbol: sym_name, code: code)
                     if exec_addr == 0:
-                        return symbolresult_Error(message: "Failed to allocate executable memory for {sym_name}")
+                        return SymbolResult.Error(message: "Failed to allocate executable memory for {sym_name}")
                     val loaded_sym = LoadedSymbol(
                         name: sym_name,
                         address: exec_addr,
@@ -561,17 +561,17 @@ fn moduleloader_resolve_symbol(self: ModuleLoader, name: text) -> SymbolResult:
                     self.global_symbols[sym_name] = (owner_id, loaded_sym)
                     # Track JIT symbol origin for lifecycle-aware unload.
                     lifecycle_on_jit_triggered(self.lifecycle, owner_id, sym_name)
-                    return symbolresult_JitCompiled(symbol: loaded_sym, code: code)
+                    return SymbolResult.JitCompiled(symbol: loaded_sym, code: code)
 
                 case NotFound(n):
-                    return symbolresult_NotFound(name: n)
+                    return SymbolResult.NotFound(name: n)
 
                 case CompilationError(msg):
-                    return symbolresult_Error(message: msg)
+                    return SymbolResult.Error(message: msg)
 
                 case _("loader returned unknown SymbolResult variant -> fall through to NotFound"):
 
-        symbolresult_NotFound(name: name)
+        SymbolResult.NotFound(name: name)
 
 
 fn moduleloader_execute_smf(path: text) -> Result<i64, text>:
@@ -624,7 +624,7 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                         case Code(bytes, sym, _):
                             val exec_addr = moduleloader_allocate_exec_module(self, owner_id: path, symbol: mangled, code: bytes, allow_replace: false)
                             if exec_addr == 0:
-                                return symbolresult_Error(message: "Failed to allocate executable memory for {mangled}")
+                                return SymbolResult.Error(message: "Failed to allocate executable memory for {mangled}")
                             val loaded_sym = LoadedSymbol(
                                 name: mangled,
                                 address: exec_addr,
@@ -637,14 +637,14 @@ fn moduleloader_resolve_generic(self: ModuleLoader, name: text, type_args: [Type
                             # Track generic instantiation for lifecycle-aware unload.
                             lifecycle_on_symbol_mapped(self.lifecycle, path, mangled)
                             lifecycle_on_jit_triggered(self.lifecycle, path, mangled)
-                            return symbolresult_JitCompiled(symbol: loaded_sym, code: bytes)
+                            return SymbolResult.JitCompiled(symbol: loaded_sym, code: bytes)
 
                         case Error(msg):
-                            return symbolresult_Error(message: msg)
+                            return SymbolResult.Error(message: msg)
 
                         case _("instantiate returned unknown ObjTaker variant -> fall through to NotFound"):
 
-        symbolresult_NotFound(name: mangled)
+        SymbolResult.NotFound(name: mangled)
 
 
 struct LoaderStats:
@@ -919,7 +919,7 @@ fn moduleloader_load_validated(self: ModuleLoader, path: text, backend: text, op
 
     val regen_result = get_or_generate_smf(path, path, backend, opt_level, release, debug_info, gc_off, profile, allowed_families)
     if regen_result.is_err():
-        return loadresult_Error(message: "Failed to regenerate SMF: {regen_result.unwrap_err()}")
+        return LoadResult.Error(message: "Failed to regenerate SMF: {regen_result.unwrap_err()}")
 
     # Load the freshly generated SMF
     moduleloader_load(self, regen_result.unwrap())
