@@ -1,5 +1,19 @@
 # Theme rendering and WM host/simpleOS sync state (2026-07-25)
 
+## 2026-08-01 renderer/IR rerun check (sync-verify)
+
+- Ran `git fetch --all --prune` and confirmed:
+  - no remote ref in this snapshot contains a `runderer`-style branch/tag name
+  - renderer/IR tracking ref remains `origin/sync-renderer-ir-spec-update` at `2a4bf46c9d`
+  - diff to `origin/main` remains the previously observed set:
+    - `2277b52949` (hosted theme receipts tests)
+    - `f7b8526aa8` (themed renderer restart preservation)
+    - `2a4bf46c9d` (renderer + DrawIR plan/spec artifact sync)
+- Cross-lane impact is unchanged for this WM/SimpleOS theme task:
+  - no direct edits to `host_wm_theme_bootstrap.spl`, `simpleos_wm_theme_bootstrap.spl`, or `wm_theme_css.spl`
+  - overlap remains only in hosted/web renderer protocol ownership (`src/os/hosted/hosted_entry.spl`, `src/os/hosted/hosted_browser_renderer*`, `src/os/compositor/simple_web_window_renderer.spl`, protocol/spec files)
+- Plan action: continue with host/SimpleOS theme input propagation, `/THEME.CSS` path, and capture/evidence parity; defer renderer-web protocol/doc merges unless scope explicitly expands.
+
 ## 2026-08-01 GH sync + runderer/IR recheck (latest)
 
 - `git fetch --all --prune` completed; working branch remains `tmp-docfix` with local WIP.
