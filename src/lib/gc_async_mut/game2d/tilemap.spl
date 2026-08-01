@@ -6,9 +6,18 @@
 #
 # Usage:
 #   use std.game2d.tilemap.{TileMap}
+#
+# Texture sampling: register the tileset's pixel strip in a TextureRegistry
+# and build the TileMap with `create_textured` to get real per-tile pixels
+# instead of the solid-color placeholder:
+#
+#   var reg = TextureRegistry.create()
+#   reg.register(tid, strip_w, tile_h, strip_pixels)
+#   val tm = TileMap.create_textured(tid, tile_w, tile_h, cells, reg)
 
 use std.gpu.engine2d.engine.{Engine2D}
 use std.game2d.camera.{Camera2D}
+use std.game2d.texture_registry.{TextureRegistry, RegisteredTexture}
 
 # ============================================================================
 # TileMap
@@ -29,9 +38,14 @@ class TileMap:
     cells: [[i32]]
     cols: i32
     rows: i32
+    registry: TextureRegistry?
 
     static fn create(tid: u64, tw: i32, th: i32, cells: [[i32]]) -> TileMap:
-        """Create a TileMap from a tile size and 2D cells of tile indices."""
+        """Create a TileMap from a tile size and 2D cells of tile indices.
+
+        No texture registry — render_tilemap falls back to the per-tile-index
+        solid-color placeholder. Use `create_textured` for real sampling.
+        """
         val r = cells.len()
         val c = if r > 0: cells[0].len() else: 0
         TileMap(
@@ -40,7 +54,26 @@ class TileMap:
             tile_h: th,
             cells: cells,
             cols: c,
-            rows: r
+            rows: r,
+            registry: nil
+        )
+
+    static fn create_textured(tid: u64, tw: i32, th: i32, cells: [[i32]], registry: TextureRegistry) -> TileMap:
+        """Create a TileMap that samples real pixels from `registry` for `tid`.
+
+        `registry` must have `tid` registered as a horizontal strip of
+        `tw`-wide, `th`-tall tiles (see module docstring).
+        """
+        val r = cells.len()
+        val c = if r > 0: cells[0].len() else: 0
+        TileMap(
+            tileset_texture_id: tid,
+            tile_w: tw,
+            tile_h: th,
+            cells: cells,
+            cols: c,
+            rows: r,
+            registry: Some(registry)
         )
 
     fn tile_at(row: i32, col: i32) -> i32:
@@ -54,11 +87,13 @@ class TileMap:
     me render_tilemap(engine: Engine2D, camera: Camera2D, origin_x: f64, origin_y: f64):
         """Draw all non-empty tiles onto engine, transformed through camera.
 
-        Each tile is drawn as a filled rectangle using a solid color derived
-        from the tile index (placeholder — real texture sampling would require
-        a TextureRegistry).  The tint encodes the tile index so tests can
-        distinguish tiles.
+        When `self.registry` has the tileset registered, each tile samples
+        its real pixels out of the horizontal strip texture. Otherwise (no
+        registry, or the id/geometry doesn't match) falls back to a solid
+        color derived from the tile index — the tint encodes the tile index
+        so tests can still distinguish tiles.
         """
+        val tex = self._lookup_texture()
         var row = 0
         while row < self.rows:
             var col = 0
@@ -72,21 +107,109 @@ class TileMap:
                     val py = sy.to_i32()
                     val tw = self.tile_w
                     val th = self.tile_h
-                    # Produce a recognizable per-tile color: pack tile index into blue channel
-                    val tile_color: u32 = _tile_color(idx)
-                    val total = tw * th
-                    var pixels: [u32] = [tile_color; total]
+                    val pixels: [u32] = _pixels_for_tile(tex, idx, tw, th)
                     engine.draw_image(px, py, tw, th, pixels)
                 col = col + 1
             row = row + 1
 
+    fn _lookup_texture() -> RegisteredTexture?:
+        """Resolve `self.tileset_texture_id` against `self.registry`, if any."""
+        if val Some(reg) = self.registry:
+            return reg.lookup(self.tileset_texture_id)
+        nil
+
+    me render_minimap(engine: Engine2D, dst_x: i32, dst_y: i32):
+        """Render this tilemap as a 1-pixel-per-tile minimap and composite it
+        onto `engine` at (dst_x, dst_y).
+
+        Real render-to-texture consumer: renders into its own offscreen
+        `Engine2D` (`create_offscreen`), one representative pixel per tile,
+        then blits the finished minimap into the parent via `draw_engine` —
+        the same "render into a texture, then composite" primitive
+        `draw_ir_create_offscreen`/`draw_ir_composite_readback` already
+        supported with no game-layer caller (DrawIR feature-gap audit,
+        doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md,
+        gap #12 / GAP-12).
+        """
+        if self.cols <= 0 or self.rows <= 0:
+            return
+        val tex = self._lookup_texture()
+        var mini = Engine2D.create_offscreen(self.cols, self.rows)
+        var row = 0
+        while row < self.rows:
+            var col = 0
+            while col < self.cols:
+                val idx = self.tile_at(row, col)
+                if idx >= 0:
+                    val color = _minimap_color_for_tile(tex, idx, self.tile_w)
+                    mini.draw_rect(col, row, 1, 1, color)
+                col = col + 1
+            row = row + 1
+        mini.present()
+        engine.draw_engine(dst_x, dst_y, mini)
+
 # ============================================================================
 # Helpers
 # ============================================================================
+
+fn _pixels_for_tile(tex: RegisteredTexture?, idx: i32, tw: i32, th: i32) -> [u32]:
+    """Real sample when `tex` is registered, placeholder color otherwise.
+
+    Written as an early-return statement (not `if val Some(x) = ...: EXPR
+    else: EXPR2` bound to a `val`) — the expression form was found to lose
+    field access on the bound value under the tree-walk interpreter (see
+    doc/08_tracking/bug/interp_if_val_some_expression_form_field_access_2026-07-31.md).
+    """
+    if val Some(t) = tex:
+        return tilemap_sample_tile(t, idx, tw, th)
+    _placeholder_tile_pixels(idx, tw, th)
+
+fn tilemap_sample_tile(tex: RegisteredTexture, tile_index: i32, tw: i32, th: i32) -> [u32]:
+    """Extract one `tw`x`th` tile from `tex`, a horizontal strip texture,
+    at `tile_index` (0-based column of tw-wide tiles).
+
+    Falls back to the solid-color placeholder when the tile would read
+    outside the registered texture's bounds (index/geometry mismatch),
+    so callers always get a `tw * th`-length buffer back.
+    """
+    val src_x0 = tile_index * tw
+    val fits = src_x0 >= 0 and src_x0 + tw <= tex.width and th <= tex.height
+    if not fits:
+        return _placeholder_tile_pixels(tile_index, tw, th)
+    val total = tw * th
+    var pixels: [u32] = [0; total]
+    var y = 0
+    while y < th:
+        var x = 0
+        while x < tw:
+            val src_idx = y * tex.width + (src_x0 + x)
+            val dst_idx = y * tw + x
+            pixels[dst_idx] = tex.pixels[src_idx]
+            x = x + 1
+        y = y + 1
+    pixels
+
+fn _placeholder_tile_pixels(idx: i32, tw: i32, th: i32) -> [u32]:
+    """Solid-color placeholder buffer used when no registry/texture is
+    available for this tile (see `_tile_color`)."""
+    val tile_color: u32 = _tile_color(idx)
+    val total = tw * th
+    val pixels: [u32] = [tile_color; total]
+    pixels
+
+fn _minimap_color_for_tile(tex: RegisteredTexture?, idx: i32, tw: i32) -> u32:
+    """One representative color for tile `idx` in the tileset strip: its
+    top-left pixel when a real texture is registered, else the same
+    placeholder `_tile_color` the full-size render falls back to."""
+    if val Some(t) = tex:
+        val src_x = idx * tw
+        if src_x >= 0 and src_x < t.width and t.height > 0:
+            return t.pixels[src_x]
+        return _tile_color(idx)
+    _tile_color(idx)
 
 fn _tile_color(idx: i32) -> u32:
     """Produce a distinct ARGB color for each tile index (for testing)."""
     val b: u32 = (idx & 0xFF).to_u32()
     val g: u32 = ((idx >> 8) & 0xFF).to_u32()
     0xFF000000 | (g << 8) | b
-
