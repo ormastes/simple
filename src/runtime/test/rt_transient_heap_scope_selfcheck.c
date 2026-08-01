@@ -117,6 +117,40 @@ int main(void) {
     check(rt_heap_registry_count() == baseline + 6,
           "later reclamation leaves the promoted registry bound unchanged");
 
+    /* CONTRACT (ast_arena_reset_inside_transient_scope_2026-08-01): an object
+     * born inside a scope and NOT promoted is DEAD after scope end -- and the
+     * death is SILENT, not a crash. A caller that parks process-lifetime state
+     * (e.g. the flat-AST arena globals stmt_tag, expr_tag, decl_tag) in a
+     * scope gets an
+     * array that reports no length forever, drops every push, and no-ops every
+     * clear. That is what produced the Stage 4 `[stmt_get_tag] OOB ...
+     * arena_len=0` flood: ast_reset() reallocated arena state while a transient
+     * parse scope was still active, and scope end then freed it. This case pins
+     * the behaviour so the hazard stays visible to anyone adding a new
+     * rt_transient_array_scope_begin() call site. The CONTROL array allocated
+     * outside the scope must stay healthy, so this cannot pass vacuously. */
+    SplArray* outside_control = rt_array_new(0);
+    check(rt_array_push(outside_control, 41) == 1 &&
+              rt_array_push(outside_control, 42) == 1 &&
+              rt_array_len(outside_control) == 2,
+          "scope-death CONTROL array (allocated outside) is healthy");
+    check(rt_transient_array_scope_begin() == 1, "scope-death scope begins");
+    SplArray* born_in_scope = rt_array_new(0);
+    check(born_in_scope != NULL && rt_array_push(born_in_scope, 7) == 1 &&
+              rt_array_len(born_in_scope) == 1,
+          "array born inside the scope is healthy WHILE the scope is open");
+    check(rt_transient_array_scope_end() == 1, "scope-death scope ends");
+    check(rt_array_len(born_in_scope) <= 0,
+          "unpromoted scope-born array reports no length after scope end");
+    check(rt_array_push(born_in_scope, 8) == 0,
+          "push into an unpromoted scope-born array is SILENTLY dropped");
+    check(rt_array_len(born_in_scope) <= 0,
+          "an unpromoted scope-born array can never grow again");
+    check(rt_array_clear(born_in_scope) == 0,
+          "clear on an unpromoted scope-born array is a SILENT no-op");
+    check(rt_array_len(outside_control) == 2 && rt_array_get(outside_control, 1) == 42,
+          "scope-death CONTROL array is unaffected by the scope");
+
     enum { PERSISTENT_STRINGS = 100000, PERSISTENT_ARRAYS = 20000, TIMED_SCOPES = 1024 };
     clock_t before_strings = time_empty_scopes(TIMED_SCOPES);
     int64_t persistent_base = rt_heap_registry_count();

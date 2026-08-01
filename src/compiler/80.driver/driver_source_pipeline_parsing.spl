@@ -38,8 +38,26 @@ pub fn dtrace(msg: text) -> ():
 
 pub fn driver_end_transient_parse_scope() -> bool:
     lexer_release_parse_source_globals()
+    # ORDER IS LOAD-BEARING. End the transient array scope BEFORE ast_reset().
+    #
+    # ast_reset() (re)allocates process-lifetime arena state: every
+    # `if X == nil: X = []` guard in ast_reset/expr_reset/stmt_reset/_ast_slots_
+    # ensure fires here in native binaries, which zero-initialise module arrays.
+    # rt_core_register_scoped_immortal() stamps EVERY array born while a
+    # transient array scope is active with that scope's id, and
+    # rt_transient_array_scope_end() then free()s those objects and erases them
+    # from the immortal pointer registry. Resetting first therefore handed the
+    # NEXT file a dead arena -- rt_array_len returns 0/-1, rt_array_push is
+    # silently dropped, rt_array_clear is a silent no-op -- for the rest of the
+    # process. That is the `[stmt_get_tag] OOB ... arena_len=0` /
+    # `[flat-bridge] missing stmt tag` flood that aborted Stage 4 phase 3.
+    # Ending the scope first means the reset's allocations are born OUTSIDE any
+    # scope and stay process-immortal, while the per-file parse garbage that the
+    # scope actually owns is still reclaimed exactly as before.
+    # See doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
+    val ended = rt_transient_array_scope_end()
     ast_reset()
-    rt_transient_array_scope_end()
+    ended
 
 impl CompilerDriver:
     me add_streaming_module_surface(

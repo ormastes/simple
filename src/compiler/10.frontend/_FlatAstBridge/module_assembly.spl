@@ -719,8 +719,15 @@ pub fn parse_and_build_module_scoped(source: text, path: text, streaming_scope: 
     if transient_scope:
         val _promoted = rt_transient_heap_promote(built_module)
         lexer_release_parse_source_globals()
-        ast_reset()
+        # ORDER IS LOAD-BEARING: end the scope BEFORE ast_reset(). Arrays that
+        # ast_reset() allocates while the scope is still active are stamped with
+        # the scope id and are free()d + unregistered by scope end, leaving the
+        # process-lifetime arena globals pointing at dead objects (len 0/-1,
+        # pushes silently dropped). Same defect and same fix as
+        # driver_end_transient_parse_scope(). See
+        # doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
         val _ended = rt_transient_array_scope_end()
+        ast_reset()
     else:
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
         rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)

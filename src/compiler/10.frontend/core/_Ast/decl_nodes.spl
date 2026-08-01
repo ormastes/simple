@@ -1303,7 +1303,22 @@ fn ast_module_decl_slot_push(value: i64):
     module_decl_slots.push(value)
 
 fn ast_module_decl_slots_clear():
-    module_decl_slots = []
+    # Clear IN PLACE -- never `module_decl_slots = []`.
+    #
+    # A rebinding form allocated a FRESH RtCoreArray on EVERY ast_reset().
+    # rt_core_register_scoped_immortal() stamps every array born while a
+    # transient array scope is active with that scope's id, and
+    # rt_transient_array_scope_end() then free()s it AND erases it from the
+    # immortal pointer registry. ast_reset() is called from inside such a scope
+    # on the stage4 streaming path, so this global was left pointing at a dead
+    # object: rt_array_len -> 0/-1, rt_array_push -> silently dropped,
+    # rt_array_clear -> silent no-op, permanently. Clearing in place keeps the
+    # original process-lifetime object (and its capacity) alive.
+    # See doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
+    if module_decl_slots == nil:
+        module_decl_slots = []
+    else:
+        module_decl_slots.clear()
 
 var lexer_state_core_pos_slot: [text] = ["0"]
 var lexer_state_core_line_slot: [text] = ["1"]
