@@ -1,6 +1,9 @@
 # Self-hosted stage3 "unresolved name": names that have NO import path at all, masked by the Rust seed's flat resolution
 
-Status: FIXED for the 6 files below (this commit). Census/attribution recorded for the rest.
+Status: All 545 unresolved-name errors of the 2026-08-01 census are now classified.
+319 closed (104 by 70bd64128eb; 215 by 5d3223e329e / b9940d8ca5b / e57d171eba2 / f93c9b26232),
+126 are class (A) and need no action, 66 remain as class (B) one-liners, 9 are separate defects.
+See the full-classification section at the end.
 Date: 2026-08-01
 Area: compiler / name resolution (HIR lowering), compiler source hygiene
 
@@ -173,3 +176,155 @@ Class-(A) members of that list and their glob hop, for the record:
 - A resolution-count census is blind to *swapped import winners*: a name that
   resolves to the wrong provider emits no `unresolved` line. Class (A) fixes that
   widen glob visibility need an identity check, not a count check.
+
+## 2026-08-01 — full classification of the 545 census (all 145 unique file/symbol pairs)
+
+Status of this pass: **all 545 errors classified**; 215 more closed (four scoped
+commits, below). Every number in this section comes from the **545 census**
+(`build/bootstrap/release_beta_verify/logs/x86_64-unknown-linux-gnu/stage3-native-build.log`,
+2026-08-01 03:44) — not from the separate later "161" census.
+
+### The 545 errors are only 145 unique `(file, symbol)` pairs
+
+That is the real work unit; the count column is just how many call sites each
+pair has. Method: a static reachability check per pair — find every declaring
+module in `src/`, then test whether the using file has (a) a named import of the
+symbol, (b) an `export use M.*` / `export use M.{sym}` re-export chain reaching a
+declaring module, or (c) neither.
+
+Distribution over the 545 error lines:
+
+| class | error lines | unique pairs | action |
+|---|---|---|---|
+| (A) reachable via a glob re-export hop | 126 | 51 | none — closed by `GLB1` + `3226faaf9eb` |
+| (B) no import path at all | 102 | 50 | add one named import per site |
+| already named-imported at tip | 308 | 36 | none — includes the 104 fixed by `70bd64128eb` and the 215 fixed here |
+| neither — a *different* defect | 9 | 8 | filed below |
+
+### Two class-(A) attributions in the section above are WRONG — corrected here
+
+The earlier note "`BackendKind` via `backend_api.spl`'s named import;
+`int_to_str` via `ast_stmt.spl:10`'s named import" is incorrect. Both are
+class **(B)**. A plain `use` inside a glob target is **not** a re-export, and one
+of the two module paths does not resolve to a file at all:
+
+- `BackendKind` — PROVED class (B). `vulkan_backend.spl` / `cuda_backend.spl` /
+  `lean_backend.spl` glob `compiler.backend.backend_api.*`, which maps to
+  `src/compiler/70.backend/backend_api.spl` — **that file does not exist**
+  (`git ls-tree -r --name-only $TIP | /usr/bin/grep backend_api.spl` returns
+  exactly one path, `src/compiler/70.backend/backend/backend_api.spl`, which is
+  the module `compiler.backend.backend.backend_api`). Even that file imports
+  `BackendKind` with a plain `use` at line 28, not `export use`, so it re-exports
+  nothing. The other globs (`compiler.mir.mir_data.*`,
+  `compiler.backend.vulkan_type_mapper.*`) do not contain the string.
+  **In-tree control:** 24 files in the same directory name
+  `compiler.backend.backend.backend_types.{BackendKind, ...}` explicitly —
+  including the structural analogues `hip_backend.spl` and `opencl_backend.spl`,
+  which have **zero** `unresolved name` lines in the same log.
+- `int_to_str` — PROVED class (B). `decl_nodes.spl` / `module_state.spl` glob
+  `compiler.core.ast_stmt.*`. `ast_stmt.spl:10` is
+  `use compiler.core.types.{int_to_str}` — a plain `use`, and `int_to_str` does
+  not appear in that module's explicit `export` lists (lines 537-545 export only
+  `STMT_*` / `stmt_*`). So the glob cannot carry it.
+  **In-tree control:** 17 compiler files import
+  `compiler.core.types.{int_to_str}` by name and none has an `int_to_str` error.
+  The two other in-tree declarations (`35.semantics/lint/stub_impl.spl:94`,
+  `35.semantics/lint/wide_public.spl:44`) are file-local private copies with an
+  identical `fn int_to_str(n: i64) -> text` signature and no importers, so naming
+  `compiler.core.types` cannot change behaviour under last-write-wins.
+
+`HirExprKind` (40) **is** genuine class (A), and the hop is nameable:
+`resolve.spl:16` globs `compiler.hir.hir.*`, and `20.hir/hir.spl:10` is
+`export use compiler.hir.hir_definitions.*`, where `HirExprKind` is declared
+(`hir_definitions.spl:437`). All 13 `Hir*` symbols in `resolve.spl` (59 error
+lines) ride that same hop. No action.
+
+### Class (B) closed in this pass — 215 error lines, four scoped commits
+
+| commit | files | symbols | error lines |
+|---|---|---|---|
+| `5d3223e329e` | `vulkan_backend.spl`, `cuda_backend.spl`, `lean_backend.spl` | `BackendKind`, `compileoptions_default_options` | 177 |
+| `b9940d8ca5b` | `_Ast/decl_nodes.spl`, `_Ast/module_state.spl` | `int_to_str` | 25 |
+| `e57d171eba2` | `treesitter/outline.spl`, `treesitter/outline_members.spl` | `blockoutlineinfo_opaque`, `prelexinfo_empty`, `span_empty` | 3 |
+| `f93c9b26232` | `placeholder_lambda.spl`, `effect_pass.spl`, `_MirLoweringExpr/{expr_dispatch,switch_operators_calls}.spl` | `EXPR_INTERPOLATED_STRING`, `effectsolver_create`, `effectsolver_solve`, `MirPlace` | 10 |
+
+Every edit names **one declaring module** and adds names to an import line the
+file already has (or, for `MirPlace`, the facade two sibling files already use),
+so no import winner can be swapped — consistent with the rule that
+`Function`/`Const`/`TypeAlias` are last-write-wins in `SymbolTable.define`.
+
+### Class (B) remaining — 66 error lines, sole declaring module each
+
+These are proved-unreachable and each has exactly one declaring module, so the
+fix is one named import. Left unlanded in this pass:
+
+| symbol | using file | declaring module | n |
+|---|---|---|---|
+| `expr_interpolated_string` | `10.frontend/desugar/placeholder_lambda.spl` | `compiler.core.ast_expr` (re-exports `_AstExpr/accessors.spl:16`) | 2 |
+| `parser_parse_type_with_union` | `10.frontend/core/parser_decls_use.spl` | `compiler.frontend.core.parser` — **check for an import cycle first** | 3 |
+| `parse_fn_lambda_after_kw` | `10.frontend/core/parser_stmts.spl` | `compiler.frontend.core._ParserPrimary.primary_expr` | 3 |
+| `CodegenMode`, `CodegenPipeline` | `70.backend/backend/compiler.spl` | `compiler.backend.codegen` | 4 |
+| `blockoutlineinfo_opaque` (2nd site) | `10.frontend/treesitter/outline.spl` | done | — |
+| `DriverManifestAttrKind` | `50.mir/_MirLowering/module_lowering.spl` | `compiler.common.attributes` (already imported for `FunctionAttr`) | 2 |
+| `MirPlace` (`switch_operators_calls`) | done | — | — |
+| `vhdl_clock_domain_from_metadata` | `70.backend/backend/_VhdlProcess/process_codegen.spl` | `compiler.mir.mir_instruction_support` | 1 |
+| `mir_fold_binop` | `60.mir_opt/_OptimizationPasses/engine.spl` | `compiler.mir.mir_instruction_graph` | 1 |
+| `GpuBarrierScope`, `GpuMemoryScope` | `50.mir/_MirLoweringExpr/method_calls_literals.spl` | `compiler.mir.mir_instruction_support` (`GpuBarrierScope` has 3 declaring modules — confirm before landing) | 2 |
+| `make_core_decl` | `10.frontend/core/_Ast/module_state.spl` | `compiler.core.ast_types` (already imported) | 1 |
+| `decl_aop_advice`, `decl_arch_rule` | `10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl` | `compiler.core._Ast.decl_nodes` | 2 |
+| `get_shb_interface_hash` | `80.driver/driver_aot_smf_output.spl` | `compiler.driver.cache.cache_validator` | 1 |
+| `CompileMode` | `80.driver/driver_source_pipeline_loading.spl` | `compiler.common.driver_core_modes` | 1 |
+| `effectsolver_*` | done | — | — |
+| `rt_file_delete`, `rt_getpid`, `rt_file_rename`, `rt_process_exists` | linker/codegen/daemon_sdk | `runtime/simple_core/*` — these are runtime externs; see "different defect" below | 5 |
+| `dir_walk`, `file_write_bytes` | `70.backend/linker/{smf_getter,link}.spl` | ambiguous (7-10 declaring modules) — **do not guess** | 2 |
+
+The remainder of the 66 is the long tail of one-off sole-module symbols with the
+same shape.
+
+### Neither (A) nor (B) — separate defects, filed here
+
+These are **not** import defects. Adding an import would be wrong.
+
+1. **`use lazy` named imports are not honoured by HIR lowering.** PROVED.
+   `80.driver/driver.spl:20` and `80.driver/driver_types.spl:19` both carry
+   `use lazy compiler.backend.backend.interpreter.{InterpreterBackendImpl}`, and
+   the census still reports `unresolved name: InterpreterBackendImpl` for both.
+   The name IS imported; the `lazy` modifier drops it. 2 error lines. This is a
+   resolver defect, not source hygiene.
+2. **`_` and `_1` are resolved as ordinary names.** 8 error lines across
+   `40.mono/monomorphize/engine.spl` (4), `70.backend/backend/vulkan/spirv_builder.spl`
+   (2 + one `_1`), `70.backend/linker/linker_wrapper_helpers.spl` (1),
+   `99.loader/loader/compiler_sffi.spl` (1). A wildcard pattern binding is
+   leaking into name resolution.
+3. **`error` and `panic` are treated as user names, not builtins.** 12 + 9 error
+   lines across six backend/type-mapper files. Their only in-tree declarations
+   are unrelated local functions in `src/app/**` and `src/runtime/**`. The
+   self-hosted front end is not pre-registering these intrinsics.
+4. **Block-DSL body identifiers escape into name resolution.** `15.blocks/blocks/builtin_blocks_math.spl`
+   (`x`, `y`, `pred`, `mse`, `model`, `target`, `test_data` — 7) and
+   `builtin_blocks_shell.spl` (`ls`, `la` — 2). These are tokens inside block
+   literals, never expressions.
+5. **`nilnilnilnilnilnil`** in `10.frontend/core/parser_preprocessor.spl` — a
+   concatenation artifact, declared nowhere. 1 error line. Likely an
+   interpolation/lowering bug producing a synthetic identifier.
+6. **`float`** in `src/std/common/format.spl` (2) — a builtin type name reaching
+   the value namespace.
+7. `selected` (`stage4_symbol_closure.spl`) and `pred`
+   (`builtin_blocks_math.spl`) are declared **in the same file** that reports
+   them unresolved — a scoping defect, not a missing import. 2 error lines.
+
+### Method notes (reusable)
+
+- The decisive discriminator between (A) and (B) is `export use` vs plain `use`
+  in the glob target. An analyzer that only greps `^use` misclassifies
+  `HirExprKind` as (B); one that treats any named import in a glob target as a
+  re-export misclassifies `BackendKind` and `int_to_str` as (A). Both mistakes
+  were made and corrected in this lane.
+- `use lazy M.{sym}` must be parsed as a named import or you will misreport
+  `InterpreterBackendImpl` as class (B) and "fix" an import that already exists.
+- Path-based counting double-counts: 17 `src/compiler/<name>` entries are
+  symlinks to the numbered layer dirs (`backend -> 70.backend`, `hir -> 20.hir`,
+  …). Canonicalise through the symlink before indexing declarations.
+- A module path that maps to no file is silent. `compiler.backend.backend_api`
+  has no file; the glob simply contributes nothing, and nothing warns.
+
