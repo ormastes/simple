@@ -168,6 +168,68 @@ describe "GPU web capacity manifest (Kernel C)":
         expect(verdict.reason.starts_with(GPU_WEB_CAPACITY_REJECT_CODE)).to_equal(true)
         expect(verdict.first_breach_bound).to_equal("max_route_depth")
 
+    it "should bound host effects per epoch at the documented default":
+        step("Read the per-epoch host-effect ceiling the default manifest commits to")
+        val manifest = gpu_web_capacity_manifest_compile_time_default()
+        expect(manifest.max_host_effects_per_epoch.to_i64()).to_equal(4)
+        step("An epoch asking for exactly the ceiling is accepted")
+        var at_bound = gpu_web_capacity_plan_zero()
+        at_bound.host_effects_per_epoch = 4u32
+        expect(gpu_web_capacity_verify(at_bound, manifest).accepted).to_equal(true)
+        step("One host effect past the ceiling is rejected by name")
+        var over = gpu_web_capacity_plan_zero()
+        over.host_effects_per_epoch = 5u32
+        val verdict = gpu_web_capacity_verify(over, manifest)
+        expect(verdict.accepted).to_equal(false)
+        expect(verdict.first_breach_bound).to_equal("max_host_effects_per_epoch")
+        expect(verdict.reason).to_equal("gpu_web_capacity_exceeded: max_host_effects_per_epoch requested=5 limit=4 over=1")
+
+    it "should bound patch operations at four per draw command":
+        step("The patch arena follows the draw-command ceiling it is derived from")
+        val manifest = gpu_web_capacity_manifest_compile_time_default()
+        expect(manifest.max_patch_operations.to_i64()).to_equal(manifest.max_draw_commands.to_i64() * 4)
+        expect(manifest.max_patch_operations.to_i64()).to_equal(4096)
+        step("A full patch stream at the derived bound is accepted")
+        var at_bound = gpu_web_capacity_plan_zero()
+        at_bound.patch_operations = 4096u32
+        expect(gpu_web_capacity_verify(at_bound, manifest).accepted).to_equal(true)
+        step("One operation more than the generator can emit is rejected")
+        var over = gpu_web_capacity_plan_zero()
+        over.patch_operations = 4097u32
+        val verdict = gpu_web_capacity_verify(over, manifest)
+        expect(verdict.accepted).to_equal(false)
+        expect(verdict.first_breach_bound).to_equal("max_patch_operations")
+        expect(verdict.reason).to_equal("gpu_web_capacity_exceeded: max_patch_operations requested=4097 limit=4096 over=1")
+
+    it "should still fail closed on path points, which have no repo-cited bound":
+        step("No constant in the repo bounds path points, so the default leaves it unset")
+        val manifest = gpu_web_capacity_manifest_compile_time_default()
+        expect(manifest.max_path_points.to_i64()).to_equal(0)
+        step("Asking for a single path point is a loud rejection, not a silent pass")
+        var plan = gpu_web_capacity_plan_zero()
+        plan.path_points = 1u32
+        val verdict = gpu_web_capacity_verify(plan, manifest)
+        expect(verdict.accepted).to_equal(false)
+        expect(verdict.first_breach_bound).to_equal("max_path_points")
+        expect(verdict.reason).to_equal("gpu_web_capacity_exceeded: max_path_points requested=1 limit=0 over=1")
+
+    it "should keep every uncited bound at zero so nothing is silently permitted":
+        step("Walk the bounds this pass found no repo basis for")
+        val m = gpu_web_capacity_manifest_compile_time_default()
+        expect(m.max_css_rules.to_i64()).to_equal(0)
+        expect(m.max_selectors.to_i64()).to_equal(0)
+        expect(m.max_selector_candidates.to_i64()).to_equal(0)
+        expect(m.max_custom_property_edges.to_i64()).to_equal(0)
+        expect(m.max_layout_boxes.to_i64()).to_equal(0)
+        expect(m.max_fragments.to_i64()).to_equal(0)
+        expect(m.max_line_boxes.to_i64()).to_equal(0)
+        expect(m.max_mutations_per_epoch.to_i64()).to_equal(0)
+        expect(m.parser_scratch_bytes.to_i64()).to_equal(0)
+        expect(m.style_scratch_bytes.to_i64()).to_equal(0)
+        expect(m.layout_scratch_bytes.to_i64()).to_equal(0)
+        expect(m.scan_scratch_bytes.to_i64()).to_equal(0)
+        expect(m.backend_preprocess_bytes.to_i64()).to_equal(0)
+
     it "should pin the frozen contract to a schema version":
         step("Read the contract version any consumer must agree on")
         expect(GPU_WEB_CAPACITY_MANIFEST_SCHEMA_VERSION).to_equal("simple-gpu-web-capacity-manifest-v1")

@@ -252,6 +252,24 @@ val _GWC_BASE_EVENTS_IN_FLIGHT: i64 = 64
 #   src/lib/gc_async_mut/gpu/browser_engine/dom_accessors.spl
 val _GWC_BASE_ROUTE_DEPTH: i64 = 512
 
+# Derived: the documented per-epoch host-effect default, stated by field name.
+#   doc/04_architecture/ui/gpu_web_scene_ports.md
+#     § "One Coalesced Packet Per Epoch":
+#     "Host effects: bounded count (default max_host_effects_per_epoch = 4)"
+val _GWC_BASE_HOST_EFFECTS_PER_EPOCH: i64 = 4
+
+# Derived: the patch generator's own emission arity, read off the code.
+#   src/lib/common/ui/draw_ir_patch.spl
+#     _draw_ir_patch_build_forward_ops emits, per command of the NEW
+#     composition, either one INSERT, or at most one each of
+#     UPDATE_GEOMETRY / UPDATE_STYLE / UPDATE_TEXT (REORDER is emitted only
+#     when none of those three fired), so at most 3.
+#     _draw_ir_patch_build_remove_ops emits at most one REMOVE per command of
+#     the OLD composition, so at most 1.
+#   Both compositions are bounded by max_draw_commands, giving 3 + 1 = 4
+#   operations per command as an exact upper bound.
+val _GWC_PATCH_OPS_PER_DRAW_COMMAND: i64 = 4
+
 fn gpu_web_capacity_manifest_zero() -> GpuWebCapacityManifest:
     return GpuWebCapacityManifest(
         max_input_bytes: 0u64,
@@ -324,6 +342,18 @@ fn gpu_web_capacity_plan_zero() -> GpuWebCapacityPlan:
 #   max_string_bytes    — interned strings are slices of the input, so max_input_bytes bounds them.
 #   max_computed_styles — at most one computed style per node.
 #   max_draw_batches    — every batch holds at least one command, so max_draw_commands bounds it.
+#   max_patch_operations— draw_ir_patch emits at most 4 operations per command
+#                         (see _GWC_PATCH_OPS_PER_DRAW_COMMAND), so
+#                         max_draw_commands bounds it.
+#
+# Still 0/UNSET after this pass, because no constant or exact structural
+# relation for them exists anywhere in the repo (searched: dom_limits.spl,
+# browser_renderer_protocol.spl, draw_ir_sdn.spl, draw_ir_v3*.spl, the
+# browser_engine style/ and gpu_web/layout/ trees, and the plan/architecture
+# docs): max_path_points, max_css_rules, max_selectors,
+# max_selector_candidates, max_custom_property_edges, max_layout_boxes,
+# max_fragments, max_line_boxes, max_mutations_per_epoch, and all five
+# *_scratch_bytes fields. Each stays a loud rejection rather than a guess.
 fn gpu_web_capacity_manifest_compile_time_default() -> GpuWebCapacityManifest:
     var m = gpu_web_capacity_manifest_zero()
     m.max_input_bytes = _GWC_BASE_INPUT_BYTES.to_u64()
@@ -335,8 +365,10 @@ fn gpu_web_capacity_manifest_compile_time_default() -> GpuWebCapacityManifest:
     m.max_glyphs = _GWC_BASE_GLYPHS.to_u32()
     m.max_events_in_flight = _GWC_BASE_EVENTS_IN_FLIGHT.to_u32()
     m.max_route_depth = _GWC_BASE_ROUTE_DEPTH.to_u16()
+    m.max_host_effects_per_epoch = _GWC_BASE_HOST_EFFECTS_PER_EPOCH.to_u32()
     m.max_draw_batches = _GWC_BASE_DRAW_COMMANDS.to_u32()
     m.max_draw_commands = _GWC_BASE_DRAW_COMMANDS.to_u32()
+    m.max_patch_operations = (_GWC_BASE_DRAW_COMMANDS * _GWC_PATCH_OPS_PER_DRAW_COMMAND).to_u32()
     return m
 
 # Tighten-or-set. A later manifest source may lower a bound or fill an unset
