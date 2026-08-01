@@ -69,6 +69,12 @@ BenchmarkEvidence -> AutoThresholds ------------^
 | Simple dialect | `src/compiler/10.frontend/structural_adapter/simple_dialect.spl` | Builds the declarative Simple `ParseDialect` |
 | Legacy bridge | `src/compiler/10.frontend/structural_adapter/legacy_bridge.spl` | Temporary parity conversion to current `ParserModule`; no grammar fork |
 
+## Current in-tree status
+
+- `src/lib/common/structural/parse/parse_types.spl` and `src/lib/common/structural/parse/parse_cpu_reference.spl` implement the current wave-1 CPU-reference foundation (schema, request/result types, action sink, and scalar oracle).
+- `src/lib/nogc_async_mut/structural/parse` executors and additional common modules (`contracts`, `model`, `dialect`, `output_plan`) are still documented as planned work in the architecture; they are not yet present in this worktree.
+- `doc/03_plan/platform/structural_compute/parser_framework_plan.md` owns the merge order for the planned follow-up waves.
+
 ## Dependency rules
 
 - `common.structural.identity` depends only on the existing content-addressed `ArtifactId`; parse model depends on identity and bytes/crypto helpers.

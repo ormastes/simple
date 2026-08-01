@@ -1,0 +1,238 @@
+# CPU-reference oracle properties for the browser incremental layout manager (W5, wave 1).
+#
+# The plan (doc/03_plan/platform/structural_compute/web_layout_manager_plan.md) is
+# silent on how the incremental/full equivalence oracle should be *expressed*; it
+# only states "incremental equals full for the WPT-derived corpus". Interpretation
+# used here: equivalence is asserted on observable geometry — boxes, fragments and
+# overflows — for a hand-built two-island document, and on the receipt's geometry
+# hash. No source-text assertions, no GPU path (this lane is cpu_reference only).
+
+use std.spec.*
+use std.common.structural.layout.{
+    LayoutBox,
+    LayoutExecutionProfile,
+    LayoutFragment,
+    LayoutOverflow,
+    layout_box,
+    layout_execution_profile,
+    layout_fragment,
+    layout_node_semantics_default,
+    layout_overflow
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.*
+
+fn cpu_reference_profile() -> LayoutExecutionProfile:
+    layout_execution_profile("cpu_reference", 1000, 0, 0, 0, 0, 0, 0, 0)
+
+fn flat_fingerprint(tag: text) -> WebLayoutStyleFingerprint:
+    web_layout_style_fingerprint(
+        "i-" + tag, "p-" + tag, "c-" + tag, "m-" + tag,
+        "l-" + tag, "s-" + tag, "f-" + tag, "g-" + tag
+    )
+
+fn node_snapshot(
+    id: i64, parent_id: i64, profile_id: text, boundary: bool
+) -> WebLayoutNodeSnapshot:
+    WebLayoutNodeSnapshot(
+        id: id,
+        arena_index: id - 1,
+        dom_route_id: id - 1,
+        parent_id: parent_id,
+        tag: "div",
+        profile_id: profile_id,
+        formatting_boundary: boundary,
+        layout_contained: false,
+        style: flat_fingerprint(profile_id + id.to_text()),
+        text_content: "",
+        font_family: "sans",
+        font_size: 16,
+        language: "",
+        text_metrics: WebLayoutResolvedTextMetrics(
+            available: true,
+            font_identity: "sans-16",
+            advances: [],
+            width: 0,
+            line_height: 0
+        ),
+        semantics: layout_node_semantics_default(profile_id),
+        estimated_work: 1,
+        text_measure_required: false
+    )
+
+# Two independent formatting-context islands rooted at node 1 and node 3.
+fn two_island_nodes() -> [WebLayoutNodeSnapshot]:
+    [
+        node_snapshot(1, 0, "block", true),
+        node_snapshot(2, 1, "block", false),
+        node_snapshot(3, 1, "flex", true),
+        node_snapshot(4, 3, "block", false)
+    ]
+
+fn two_island_boxes() -> [LayoutBox]:
+    [
+        layout_box(1, 0, 0, 800, 600),
+        layout_box(2, 0, 0, 800, 100),
+        layout_box(3, 0, 100, 800, 200),
+        layout_box(4, 0, 100, 400, 200)
+    ]
+
+fn principal_fragments(boxes: [LayoutBox]) -> [LayoutFragment]:
+    var fragments: [LayoutFragment] = []
+    for box in boxes:
+        fragments.push(layout_fragment(box.id, box.id, box, "principal", 0))
+    fragments
+
+fn principal_overflows(boxes: [LayoutBox]) -> [LayoutOverflow]:
+    var overflows: [LayoutOverflow] = []
+    for box in boxes:
+        overflows.push(layout_overflow(box.id, box, box.width, box.height))
+    overflows
+
+fn two_island_snapshot() -> WebLayoutSnapshot:
+    val boxes = two_island_boxes()
+    web_layout_snapshot(
+        7, "800x600", two_island_nodes(), [], cpu_reference_profile(), 8,
+        800, 600, [],
+        boxes, principal_fragments(boxes), [], principal_overflows(boxes)
+    )
+
+fn empty_snapshot() -> WebLayoutSnapshot:
+    web_layout_snapshot(7, "800x600", [], [], cpu_reference_profile(), 8)
+
+fn empty_frontier() -> WebLayoutFrontier:
+    web_layout_dirty_frontier([])
+
+# Only node 4 (and its containing context 3) changed: island 3, never island 1.
+fn leaf_frontier() -> WebLayoutFrontier:
+    web_layout_dirty_frontier([
+        web_layout_change(
+            WebLayoutMutationKind.Style, StyleDifference.LayoutSelf,
+            4, 3, [], [], [], [], [], [], []
+        )
+    ])
+
+fn boxes_text(boxes: [LayoutBox]) -> text:
+    var encoded = "boxes"
+    for box in boxes:
+        encoded = encoded + ";" + box.id.to_text() + ":" + box.x.to_text() +
+            "," + box.y.to_text() + "," + box.width.to_text() + "," +
+            box.height.to_text()
+    encoded
+
+fn fragments_text(fragments: [LayoutFragment]) -> text:
+    var encoded = "fragments"
+    for fragment in fragments:
+        encoded = encoded + ";" + fragment.node_id.to_text() + ":" +
+            fragment.kind + ":" + fragment.fragment_index.to_text() + ":" +
+            fragment.box.x.to_text() + "," + fragment.box.y.to_text() + "," +
+            fragment.box.width.to_text() + "," + fragment.box.height.to_text()
+    encoded
+
+fn overflows_text(overflows: [LayoutOverflow]) -> text:
+    var encoded = "overflows"
+    for overflow in overflows:
+        encoded = encoded + ";" + overflow.node_id.to_text() + ":" +
+            overflow.scroll_width.to_text() + "," +
+            overflow.scroll_height.to_text()
+    encoded
+
+describe "web layout manager cpu reference":
+    it "lays out an empty document without a fault":
+        val snapshot = empty_snapshot()
+        val step = web_layout_run_full(web_layout_manager(7), snapshot, empty_frontier())
+        expect(step.result.fault).to_equal("")
+        assert_false(step.result.stale)
+        expect(step.result.layout.boxes.len()).to_equal(0)
+        expect(step.result.hit_regions.len()).to_equal(0)
+        expect(step.result.epoch).to_equal(1)
+
+    it "runs an empty document incrementally without a fault":
+        val snapshot = empty_snapshot()
+        val step = web_layout_run_incremental(web_layout_manager(7), snapshot, empty_frontier())
+        expect(step.result.fault).to_equal("")
+        expect(step.result.layout.boxes.len()).to_equal(0)
+        expect(step.result.layout.receipt.mode).to_equal("incremental")
+
+    it "produces the same geometry incrementally as a full relayout":
+        val snapshot = two_island_snapshot()
+        val frontier = leaf_frontier()
+        val full = web_layout_run_full(web_layout_manager(7), snapshot, frontier)
+        val incremental = web_layout_run_incremental(web_layout_manager(7), snapshot, frontier)
+        expect(full.result.fault).to_equal("")
+        expect(incremental.result.fault).to_equal("")
+        expect(boxes_text(incremental.result.layout.boxes)).to_equal(
+            boxes_text(full.result.layout.boxes)
+        )
+        expect(fragments_text(incremental.result.layout.fragments)).to_equal(
+            fragments_text(full.result.layout.fragments)
+        )
+        expect(overflows_text(incremental.result.layout.overflows)).to_equal(
+            overflows_text(full.result.layout.overflows)
+        )
+        expect(incremental.result.layout.receipt.output_hash).to_equal(
+            full.result.layout.receipt.output_hash
+        )
+
+    it "visits only the invalidated island on an incremental pass":
+        val snapshot = two_island_snapshot()
+        val frontier = leaf_frontier()
+        val full = web_layout_run_full(web_layout_manager(7), snapshot, frontier)
+        val incremental = web_layout_run_incremental(web_layout_manager(7), snapshot, frontier)
+        expect(full.result.layout.visited_island_ids).to_equal([1, 3])
+        expect(incremental.result.layout.visited_island_ids).to_equal([3])
+        expect(incremental.result.layout.receipt.mode).to_equal("incremental")
+        expect(full.result.layout.receipt.mode).to_equal("full")
+
+    it "leaves the frontier empty when nothing layout-affecting changed":
+        val snapshot = two_island_snapshot()
+        val quiet = web_layout_dirty_frontier([
+            web_layout_change(
+                WebLayoutMutationKind.Style, StyleDifference.PaintOnly,
+                4, 3, [], [], [], [], [], [], []
+            )
+        ])
+        val incremental = web_layout_run_incremental(web_layout_manager(7), snapshot, quiet)
+        expect(incremental.result.fault).to_equal("")
+        expect(incremental.result.layout.visited_island_ids).to_equal([])
+        expect(boxes_text(incremental.result.layout.boxes)).to_equal(
+            boxes_text(two_island_boxes())
+        )
+
+    it "maps every laid-out box back to its dom route":
+        val snapshot = two_island_snapshot()
+        val step = web_layout_run_full(web_layout_manager(7), snapshot, leaf_frontier())
+        expect(step.result.hit_regions.len()).to_equal(4)
+        expect(step.result.hit_regions[0].dom_route_id).to_equal(0)
+        expect(step.result.hit_regions[3].dom_route_id).to_equal(3)
+        expect(step.result.hit_regions[3].epoch).to_equal(1)
+        expect(step.result.hit_mappings.len()).to_equal(4)
+
+    it "reports a stale dom generation instead of laying out":
+        val snapshot = two_island_snapshot()
+        val step = web_layout_run_full(web_layout_manager(9), snapshot, leaf_frontier())
+        expect(step.result.fault).to_equal("stale-dom-generation")
+        assert_true(step.result.stale)
+        expect(step.result.layout.boxes.len()).to_equal(0)
+        expect(step.result.epoch).to_equal(0)
+
+    it "refuses a snapshot whose profile the framework does not support":
+        val boxes = two_island_boxes()
+        var nodes = two_island_nodes()
+        nodes[1] = node_snapshot(2, 1, "mystery", false)
+        val snapshot = web_layout_snapshot(
+            7, "800x600", nodes, [], cpu_reference_profile(), 8,
+            800, 600, [],
+            boxes, principal_fragments(boxes), [], principal_overflows(boxes)
+        )
+        val step = web_layout_run_full(web_layout_manager(7), snapshot, empty_frontier())
+        expect(step.result.fault).to_equal("unsupported-profile:mystery")
+        expect(step.result.epoch).to_equal(0)
+
+    it "carries a reason receipt on every fallback it counts":
+        val snapshot = two_island_snapshot()
+        val step = web_layout_run_incremental(web_layout_manager(7), snapshot, leaf_frontier())
+        val receipt = step.result.layout.receipt
+        if receipt.fallback_count > 0:
+            assert_true(receipt.fallback_reason != "")
+        assert_true(step.result.gpu_line_break.reason != "")
+        assert_false(step.result.gpu_line_break.admitted)

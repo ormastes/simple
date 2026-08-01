@@ -20,6 +20,12 @@ Execution of follow-up plan
   deploy-gate refuses swap without probed seed.
 - AC-7: per-batch jj commits; orchestrator integrates + pushes to origin/main.
 
+## Raw Request
+gpu_backend.md
+
+## Phase
+dev-done
+
 ## Lane Ownership (parallel agents — disjoint file scopes)
 - A (P1): `scripts/setup/setup-directx-linux.shs`,
   `test/.../engine2d/backend_directx_spec.spl`, dx prefix dir
