@@ -152,6 +152,19 @@ from the repo root:
     ui_backend_isolation_new=31
     ui_backend_isolation_ok=false      (exit 1, 49 stale baseline entries)
 
+> **Follow-up (2026-08-01, same day):** triaged in
+> `doc/08_tracking/bug/ui_backend_isolation_gate_red_and_unreachable_2026-08-01.md`.
+> Three corrections to the paragraph below. (a) "CI-visible" was **wrong**: the
+> step is step 5 of `code-idiom-gates` and step 4 fails on every push, so it
+> reported `skipped` and had never executed — and `main` has no branch
+> protection, so no conclusion gates anything. (b) The debt is older than HEAD:
+> replaying the guard at `37cda4befdc` (2026-07-25) already gives `new=23`. (c) 7
+> of the 31 were false positives from bare-token matching (comments, docstrings,
+> error strings, and locals such as `val rt_nodes = ...`). After fixing the rule
+> and pruning 105 stale baseline entries (563 → 458, none added), the gate stands
+> at `new=24`, still exit 1. The pre-commit hook remains blocked, so the decision
+> below not to install it was correct.
+
 This guard is *already* wired into `.github/workflows/repo-hygiene.yml`, so the
 debt is pre-existing and CI-visible. It is also hand-listed in
 `scripts/hooks/pre-commit`. That is why this change does **not** make

@@ -48,10 +48,29 @@ jobs:
         run: |
           command -v rg >/dev/null 2>&1 || (sudo apt-get update && sudo apt-get install -y ripgrep)
 
+      # Every gate step below carries `if: ${{ !cancelled() }}`.
+      #
+      # Without it, steps run in sequence and the FIRST red gate aborts the job,
+      # so every later gate reports "skipped" and its signal is invisible. That
+      # is not hypothetical: on 2026-08-01 the CPU hot-loop gate below was red on
+      # every push to main, and as a direct result the UI backend-isolation, TUI
+      # standalone-closure, workspace root-guard, guard-wiring and extern-report
+      # gates had NOT EXECUTED ONCE. The UI gate in particular had been failing
+      # since at least 2026-07-25 (23 unbaselined violations at 37cda4befdc) and
+      # nobody could see it -- CI masked it and jj bypasses the pre-commit hook.
+      #
+      # This is the same masking bug the repo-hygiene job above was split out to
+      # avoid; putting five gates in one sequential job reintroduced it one step
+      # further down. `!cancelled()` makes each gate report its own pass/fail
+      # while the job still fails if ANY gate fails -- enforcement is unchanged,
+      # only visibility improves. Do NOT replace this with continue-on-error,
+      # which would make the gates advisory.
+      #
       # CPU-lane per-element-loop hot-path gate (design §6.1 / plan W2).
       # Relocated here from the repo-hygiene job so it actually runs (that job
       # aborted at its first step, leaving this gate dead). Command unchanged.
       - name: CPU-lane hot-loop hot-path gate
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-cpu-hotloop-idiom.shs
 
@@ -59,6 +78,7 @@ jobs:
       # never declare/call rt_* backend externs or construct backend classes.
       # Baseline-ratcheted (scripts/check/ui_backend_isolation_baseline.txt).
       - name: UI backend-isolation ratchet gate
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-ui-backend-isolation.shs
 
@@ -66,12 +86,14 @@ jobs:
       # the narrow app.ui.tui.screen facade and must not pull web/tauri/electron
       # or a hosted runtime bundle into the standalone binary.
       - name: TUI standalone-closure gate
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-tui-standalone-closure.shs
 
       # Workspace root write guard: enforces the root-directory placement policy
       # / FILE.md manifests across the tree (git + POSIX sh only, no rg needed).
       - name: Workspace root write guard
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check-workspace-root-guard.shs
 
@@ -86,6 +108,7 @@ jobs:
       # without any of that session's fail-open fixes.
       # See doc/08_tracking/bug/check_script_wiring_orphans_2026-08-01.md.
       - name: Guard-wiring ratchet gate
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-guard-wiring.shs
 
@@ -104,5 +127,6 @@ jobs:
       # here. Do NOT add an allowlist and do NOT weaken the guard's vacuity
       # bound or self-tests to shrink the number.
       - name: Unregistered-extern report (report-only, not yet enforcing)
+        if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-extern-registration.shs
