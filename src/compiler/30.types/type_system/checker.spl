@@ -7,17 +7,20 @@
 # Includes trait coherence checking, pattern binding, and FString key validation.
 #
 # Port of rust/type/src/checker_check.rs + checker_infer.rs + checker_builtins.rs
+#
+# !! SCOPE WARNING (2026-08-01) !!
+# The ONLY thing in this file with an external consumer is `enum TypeError`,
+# imported by src/compiler/90.tools/query_helpers.spl:8 as a type name.
+# `class TypeChecker` below has ZERO callers repo-wide and has never executed.
+# It is NOT the compiler's type checker. The live inference engine is
+# HmInferContext (src/compiler/30.types/type_infer/), driven by
+# run_typecheck_warn_pass() in 80.driver/driver_hir_pipeline_passes.spl under
+# SIMPLE_TYPECHECK_WARN=1. Do not cite TypeChecker behaviour as evidence about
+# how Simple type-checks anything.
 
 use compiler.hir.inference.types.{Type, TypeVarId, Constraint, UnifyError}
 use compiler.hir.inference.unify.{Unifier}
-use compiler.hir.inference.infer.{InferenceEngine}
-use compiler.types.type_system.expr_infer.{infer_expr}
-use compiler.types.type_system.stmt_check.{check_stmt, check_block}
-use compiler.types.type_system.module_check.{check_module as module_check_impl}
-use compiler.types.type_system.bidirectional.{infer_with_expected, InferMode}
 use compiler.common.suffix_registry.{SuffixRegistry}
-use compiler.frontend.ast.{AstModule, Node}
-use compiler.frontend.parser_types_expr.{Expr}
 
 # ============================================================================
 # Type Checker Error
@@ -310,53 +313,14 @@ impl TypeChecker:
             return nil
         Some(self.mixins[name])
 
-    # ========================================================================
-    # Integrated Type Inference (Full System)
-    # ========================================================================
-
-    me check_module(module: AstModule) -> Result<(), TypeError>:
-        """Type check a complete module using full inference system.
-
-        Integrates all phases:
-        - Phase 1: Expression inference
-        - Phase 2: Statement checking
-        - Phase 3: Module checking (two-pass)
-        - Phase 4: Bidirectional inference
-        """
-        module_check_impl(self, module)
-
-    me infer_expr_with_context(expr: Expr, expected: Type?) -> Result<Type, TypeError>:
-        """Infer expression type with optional expected type (bidirectional).
-
-        If expected type is provided, uses Check mode (top-down).
-        Otherwise uses Synthesize mode (bottom-up).
-        """
-        infer_with_expected(self.create_engine(), expr, expected, self.env)
-
-    me infer_expr_simple(expr: Expr) -> Result<Type, TypeError>:
-        """Infer expression type without expected type (bottom-up only)."""
-        infer_expr(self.create_engine(), expr, self.env)
-
-    me check_stmt_integrated(stmt: Node, current_fn_ret_type: Type?) -> Result<(), TypeError>:
-        """Type check a statement and update environment."""
-        val new_env = check_stmt(self.create_engine(), stmt, self.env, current_fn_ret_type)?
-        self.env = new_env
-        Ok(())
-
-    me check_block_integrated(block: ast.Block, current_fn_ret_type: Type?) -> Result<Type, TypeError>:
-        """Type check a block of statements."""
-        check_block(self.create_engine(), block, self.env, current_fn_ret_type)
-
-    # ========================================================================
-    # Helper: Create Inference Engine
-    # ========================================================================
-
-    fn create_engine() -> InferenceEngine:
-        """Create inference engine from current type checker state."""
-        var engine = InferenceEngine.create()
-        engine.unifier = self.unifier
-        engine.suffix_registry = self.suffix_registry
-        # Copy environment to engine
-        # Note: InferenceEngine uses TypeEnv, we use Dict<text, Type>
-        # For now, pass dict directly to inference functions
-        engine
+    # NOTE (2026-08-01): the "Integrated Type Inference (Full System)" methods
+    # that used to live here (check_module, infer_expr_with_context,
+    # infer_expr_simple, check_stmt_integrated, check_block_integrated,
+    # create_engine) were REMOVED together with the AST-based inference cluster
+    # they called (expr_infer / expr_infer_ops / expr_infer_calls /
+    # bidirectional / module_check / stmt_check / type_utils). That cluster was
+    # never wired into the driver and could not run. The live type-inference
+    # path is HmInferContext in src/compiler/30.types/type_infer/, invoked by
+    # run_typecheck_warn_pass() in
+    # src/compiler/80.driver/driver_hir_pipeline_passes.spl.
+    # History: see doc/09_report/compiler/type_system_dead_inference_cluster_removal_2026-08-01.md

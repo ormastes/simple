@@ -1,6 +1,10 @@
 # `type_system/expr_infer.spl` matches a STRUCT against enum-variant patterns — every arm is dead
 
-- **Status:** OPEN
+- **Status:** RESOLVED-BY-DELETION (2026-08-01). The file and its whole cluster
+  were removed; the live inference engine is `HmInferContext` in
+  `src/compiler/30.types/type_infer/`. Record + recovery shas:
+  `doc/09_report/compiler/type_system_dead_inference_cluster_removal_2026-08-01.md`
+- **Status (original):** OPEN
 - **Date:** 2026-08-01
 - **Severity:** HIGH (whole-module wrong-code) / **not currently shipping** — module is unwired
 - **Component:** compiler / `30.types/type_system` (AST-level Hindley-Milner port)

@@ -1,6 +1,10 @@
 # `type_system` siblings: struct-scrutinee audit (`bidirectional`, `module_check`, `expr_infer_ops`)
 
-- **Status:** OPEN (file-only; no repair attempted — see Decision)
+- **Status:** RESOLVED-BY-DELETION (2026-08-01). All audited files were removed;
+  the live inference engine is `HmInferContext` in
+  `src/compiler/30.types/type_infer/`. Record + recovery shas:
+  `doc/09_report/compiler/type_system_dead_inference_cluster_removal_2026-08-01.md`
+- **Status (original):** OPEN (file-only; no repair attempted — see Decision)
 - **Date:** 2026-08-01
 - **Severity:** HIGH (wrong-code shape) / **not currently shipping — all three are unwired**
 - **Component:** compiler / `30.types/type_system`
