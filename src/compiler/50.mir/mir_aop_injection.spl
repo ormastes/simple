@@ -90,11 +90,20 @@ fn inject_after_success_advice(func: MirFunction, advice_fn_name: text) -> MirFu
 # ============================================================================
 
 fn inject_after_error_advice(func: MirFunction, advice_fn_name: text) -> MirFunction:
-    """Insert a call to advice_fn at blocks that handle errors (Unwind terminators)."""
+    """Insert a call to advice_fn at blocks that terminate abnormally.
+
+    MirTerminator has no `Unwind` variant — the error exit is `Abort(message)`.
+    The historical `case Unwind:` here was a bare identifier, i.e. an
+    irrefutable BINDING pattern, so it matched EVERY terminator and this pass
+    injected the after-error advice into every block of the function.
+    `CallTerminator`'s `unwind` edge is deliberately not a join point here: the
+    error handler is the unwind TARGET block, not the calling block, and
+    injecting there would also run the advice on the normal-return path.
+    """
     var new_blocks: [MirBlock] = []
     for block in func.blocks:
         match block.terminator:
-            case Unwind:
+            case MirTerminator.Abort(_):
                 val call_inst = make_advice_call_inst(advice_fn_name)
                 var new_insts: [MirInst] = []
                 for inst in block.instructions:
