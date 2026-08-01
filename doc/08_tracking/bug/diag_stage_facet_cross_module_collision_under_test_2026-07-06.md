@@ -4,9 +4,11 @@
 **Severity:** medium — blocks writing `bin/simple test` specs that prove
 real `dbg_stage()` emission for task #15 remainder item 3 ([browser] stage
 logs); does not affect `bin/simple run` or production behavior.
-**Status:** OPEN — repro isolated, root cause not fixed (out of bounds for
-task #15 remainder: fix belongs in the compiler's cross-module symbol
-resolution, not in src/app/ui.browser/** or host_compositor).
+**Status:** OPEN — root cause (bare-name function registry) NOT fixed. As of
+2026-08-01 the original repro no longer reproduces on the Rust seed and the
+facet-on spec coverage is restored, but the name-keyed registry is unchanged and
+still armed; the collision *detector* was widened to public functions and
+methods. See "Resolution pass 2026-08-01" at the bottom.
 
 ## Symptom
 
@@ -325,4 +327,116 @@ and there are three concrete ways to mask real defects here:
   browser+spec composition. The bug is then invisible until production.
 
 None of these three fix anything. The green they produce is false green.
+
+---
+
+# Resolution pass 2026-08-01 — detector widened, repro no longer reproduces
+
+**Status change: OPEN → the original repro no longer reproduces; the underlying
+name-keyed registry is UNCHANGED and still armed.** Read both halves of that
+sentence — the second half is why this file stays open.
+
+## Engine measured
+
+`src/compiler_rust/target/bootstrap/simple test <spec>` (the Rust seed). It
+delegates the spec run to `src/compiler_rust/target/debug/simple` — the log line
+`child binary: .../target/debug/simple` records this. That is the engine that
+owns the `type mismatch: comparing string with integer` wording, so it is the
+right engine to re-measure on. **The pure-Simple binary could not be measured:
+the deployed `bin/simple` at HEAD has no `test` subcommand (`error: unknown
+command 'test'`), a separate known defect. The pure-Simple path remains
+UNVERIFIED, exactly as the triage above said.**
+
+## Re-measurement result
+
+Three escalating repros, all run from the repo root:
+
+1. The minimal 4-ingredient repro from the "Minimal repro" section — **passes**
+   (`Results: 1 total, 1 passed, 0 failed`), and `[probe] stage hello +0ms` is
+   emitted, i.e. `dbg_stage` really ran.
+2. Same plus `use app.ui.browser.app.{BrowserApp, browser_shared_wm_config}` —
+   **passes**.
+3. The full in-tree spec `test/01_unit/app/ui/browser_shared_wm_and_stage_log_spec.spl`
+   with the previously-omitted facet-forced-on `it` restored — **4 total, 4
+   passed**.
+
+The abort is gone on this engine. No claim is made about *which* change fixed
+it; nothing in this pass targeted it.
+
+## Masking A retired
+
+`test/01_unit/app/ui/browser_shared_wm_and_stage_log_spec.spl` now carries the
+facet-**on** assertion as a runnable `it`
+("records stage entries when the SIMPLE_DIAG stage facet is forced on"),
+replacing the comment that stood in for it. The facet-on emission path had zero
+automated coverage for a month; it now has an executing oracle.
+
+Verified to be a real oracle, not a false green: flipping
+`to_be_greater_than(0)` to `to_be_greater_than(9999)` in a scratch copy fails
+with `expected 1 to be greater than 9999`, `Results: 4 total, 3 passed, 1
+failed`, exit 1.
+
+Masking B and C were both avoided: nothing was renamed to make the spec pass,
+and `use std.spec.*` is still there, so the browser+spec composition is still
+covered.
+
+## The class fix that WAS made — detector blind spots closed
+
+The gap identified in "Why 'no collision warning was printed' proves nothing" is
+now closed on both engines. Three skips were removed:
+
+| Where | Was skipped | Now |
+|---|---|---|
+| `src/compiler_rust/compiler/src/pipeline/module_loader.rs` `warn_duplicate_private_signatures` | every name not starting with `_`; every name containing `.` | all top-level functions; message classifies `private helper` / `public function` / `method` |
+| `src/compiler_rust/compiler/src/pipeline/module_loader.rs` `warn_cross_impl_method_collisions` (new) | cross-impl-block method collisions had **no detector at all** — `find_method_arity_collisions` only looks inside one impl block | same `Type.method` key contributed by 2+ separate impl blocks with differing signatures → `[compiler_cross_module_method_collision]` |
+| `src/compiler/10.frontend/core/interpreter/eval_tables.spl` `_ftr_warn_collision` | `not name.starts_with("_")`; `name.contains("__")` (methods) | both removed; same three-way classification |
+
+The new method check is not dead code: a 12-line probe (two `impl Foo` blocks in
+two co-compiled files, `fn tag() -> text` vs `fn tag(n: i64) -> i64`) emits
+`warning: method `Foo.tag` is defined by 2 separate co-compiled impl blocks with
+2 differing signatures ((?)->text vs (?,i64)->i64) ...`.
+
+This is the class fix the triage asked for (item 3 of "Change I would make"). It
+is a **diagnostic**, not the resolver rework — item 2 (key the registry on
+(module path, bare name)) is still outstanding and is still the real fix.
+
+## Colliders it named immediately — all previously INVISIBLE
+
+Running the browser+`std.spec.*` compilation unit with the widened detector
+surfaces five public-function collisions that produced **no diagnostic at all**
+before this change:
+
+```
+public function `skip`           ([text],[text],[text],[text],[text],text,[text],[text],Dict<text,text>,[text],bool,[text],text)->Function  vs  (text,text)->()
+public function `shell`          (text)->ProcessResult    vs  (text)->ShellResult          [3 definitions]
+public function `shell_output`   (text)->text             vs  (text,text)->text            [3 definitions]
+public function `file_read_bytes`(text)->[i64]            vs  (text)->[u8]
+public function `dir_remove_all` (text)->bool             vs  (text)->i32
+```
+
+`skip` is the one the triage above flagged from the `std.spec.*` closure
+(`src/lib/nogc_sync_mut/spec.spl:216` `(name, reason)` vs the gpu_helpers
+`(reason)` family). It is armed inside the spec harness itself, on a
+last-write-wins slot, with a 13-parameter closure-returning sibling. A separate
+run over `src/compiler/10.frontend/core/interpreter/eval_tables.spl`'s closure
+also named `write_file` (`(String,String)->Result<Int,String>` vs
+`(text,text)->bool`).
+
+Noise check: five findings in a 275-module unit, zero method findings — the
+widened detector is signal, not a flood.
+
+## What is still open
+
+- **The registry is still bare-name keyed.** Item 2 above (module-qualified
+  resolution) is not done. Every pair listed here, plus the `Capability` /
+  `LayoutKind` / `Style`-vs-`CellStyle` instances, is still armed.
+- **The five named colliders are not renamed.** Deliberately: renaming them is
+  Masking B if presented as the fix. They are recorded here so the follow-up is
+  findable by name.
+- **Pure-Simple engine unverified.** `bin/simple` has no `test` subcommand at
+  HEAD. The pure-Simple mirror of the detector widening is code-reviewed and
+  parses (lint output byte-identical to the pre-change baseline, which itself
+  times out on this file — a pre-existing, unrelated hang), but has not been run.
+- **Promotion to a hard error under a gate** (the rest of item 3) is not done
+  and should wait until item 2 lands.
 

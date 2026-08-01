@@ -121,15 +121,24 @@ fn func_table_reset():
     mu_nexts = []
     must_use_critical_mode = false
 
-# Co-compiled private-helper signature-collision detection.
+# Co-compiled signature-collision detection.
 #
 # The interpreter func_table is a bare-name namespace, and the import loader
 # flattens all files into it, so two files that each define the same
-# `_`-prefixed helper with differing signatures silently mis-dispatch: the
+# helper with differing signatures silently mis-dispatch: the
 # second registration clobbers the first (last-write-wins), and a call to the
 # clobbered version dispatches to the wrong body — silent wrong-result or crash.
 # This is a non-breaking diagnostic only; the fix is to rename one helper.
 # See bug `compiler_cross_module_private_symbol_collision_2026-06-16`.
+#
+# Scope widened 2026-08-01: this used to skip every name not starting with `_`
+# and every method registration (`Type__method`). Both skips were blind spots,
+# not safety: a public free function lives in the SAME last-write-wins table as
+# a private one, and a `Type__method` key is unique per TYPE, not per MODULE —
+# two modules defining `impl Type` with the same method name clobber each other
+# identically. Because of those skips, "no collision warning was printed" was
+# routinely misread as "nothing collided". Do not reintroduce them. See
+# doc/08_tracking/bug/diag_stage_facet_cross_module_collision_under_test_2026-07-06.md
 var _ftr_collision_warned: [text] = []
 
 fn _ftr_sig_differs(a_did: i64, b_did: i64) -> bool:
@@ -146,13 +155,17 @@ fn _ftr_sig_differs(a_did: i64, b_did: i64) -> bool:
         i = i + 1
     false
 
-fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
-    # Only the private (`_`-prefixed) free-function convention; skip method
-    # registrations (mangled as `Type__method`) which can't collide on a bare name.
-    if not name.starts_with("_"):
-        return
+fn _ftr_collision_kind(name: text) -> text:
     if name.contains("__"):
-        return
+        return "method"
+    if name.starts_with("_"):
+        return "private helper"
+    "public function"
+
+fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
+    # Private helpers, public free functions and `Type__method` registrations all
+    # share this one flat table, so all three are checked. See the note above the
+    # `_ftr_collision_warned` declaration before narrowing this again.
     if existing_did == new_did:
         return
     if not _ftr_sig_differs(existing_did, new_did):
@@ -163,7 +176,8 @@ fn _ftr_warn_collision(name: text, existing_did: i64, new_did: i64):
             return
         j = j + 1
     _ftr_collision_warned.push(name)
-    print "[WARN] private helper '{name}' has co-compiled definitions with differing signatures; calls resolve by bare name (last-write-wins) and may dispatch to the wrong one — silent wrong-result or crash. Rename the conflicting helper(s). [compiler_cross_module_private_symbol_collision]"
+    val kind = _ftr_collision_kind(name)
+    print "[WARN] {kind} '{name}' has co-compiled definitions with differing signatures; calls resolve by bare name (last-write-wins) and may dispatch to the wrong one — silent wrong-result or crash. Rename the conflicting helper(s). [compiler_cross_module_private_symbol_collision]"
 
 fn func_table_register(name: text, decl_id: i64):
     val bucket = hm_hash_text(name) % HM_SIZE

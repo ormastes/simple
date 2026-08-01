@@ -31,28 +31,27 @@
 # this spec still proves the re-added tracer fires end-to-end without
 # needing to cross into the broken render path.
 #
-# A second, stricter `it` ("...when the stage facet is forced on") was
-# authored and manually verified to be TRUE (see below) but is NOT included
-# as a runnable assertion here: under `bin/simple test` specifically (not
-# `bin/simple run`), forcing any std.diag facet on and calling a real
-# dbg_stage() while `os.compositor.host_compositor_entry` (imported directly
-# above for HostBackendKind, and transitively by app.ui.browser.app itself)
-# is co-compiled alongside the `std.spec.*` wildcard used by every spec file
-# aborts with `semantic: type mismatch: comparing string with integer`
-# inside std.diag's dbg_stage — another instance of the same cross-module
-# symbol-collision class (repro isolated down to: `use std.spec.*` + any
-# import that pulls in the browser_engine/host_compositor module graph +
-# `dbg_force_facet(...)` + a real `dbg_stage(...)` call, independent of how
-# many names are explicitly imported from std.diag). This reproduces even
-# with zero BrowserApp/browser-app code involved — a minimal repro is just
-# those four ingredients in one spec file. Manually verified instead via
-# `SIMPLE_EXECUTION_MODE=interpret bin/simple run <script>` (not `test`,
-# which is unaffected by this collision) that BrowserApp.new_with_access_store_path
-# emits, in order: "[browser] stage parse_start", "parse_done",
-# "backend_create_start", "backend_create_done" with non-decreasing
-# monotonic deltas when SIMPLE_DIAG's stage facet is forced on — i.e. the
-# dbg_stage wiring added to app.spl is correct; only the `test`-runner-mode
-# proof of it is blocked by this out-of-bounds compiler bug.
+# HISTORY — facet-forced-on coverage restored 2026-08-01.
+# A second, stricter `it` ("...when the stage facet is forced on") used to be
+# omitted here because under `bin/simple test` (not `bin/simple run`) forcing
+# any std.diag facet on and calling a real dbg_stage() while
+# `os.compositor.host_compositor_entry` was co-compiled alongside the
+# `std.spec.*` wildcard aborted with
+# `semantic: type mismatch: comparing string with integer` — an instance of
+# the cross-module bare-name symbol-collision class tracked in
+# doc/08_tracking/bug/diag_stage_facet_cross_module_collision_under_test_2026-07-06.md.
+# That left the facet-ON emission path with ZERO automated coverage, proven
+# only by a hand-run `bin/simple run` recorded in a comment — which this repo
+# treats as non-evidence.
+#
+# Re-measured 2026-08-01 against the Rust seed
+# (src/compiler_rust/target/bootstrap/simple, which delegates the spec run to
+# src/compiler_rust/target/debug/simple — the engine that owns the
+# "type mismatch: comparing string with integer" wording): the abort no longer
+# reproduces, so the facet-ON `it` below is now a real runnable assertion
+# instead of a comment. Do NOT delete it to make an unrelated failure go away;
+# if it aborts again, that is the collision class regressing and belongs in the
+# bug doc above, not in this header.
 
 use std.spec.*
 use app.ui.browser.app.{BrowserApp, browser_shared_wm_config}
@@ -97,8 +96,15 @@ describe "[browser] stage logs via std.diag dbg_stage (task #15 remainder item 3
                 expect(app.file_path).to_equal(FIXTURE_PATH)
         expect(dbg_stage_history().len()).to_equal(0)
 
-    # "records [browser] parse/backend-create stages when the stage facet is
-    # forced on" is intentionally NOT an `it` here — see the file-header NOTE
-    # above for the precise repro of the out-of-bounds compiler bug that
-    # aborts the test process for this exact combination, and the manual
-    # `bin/simple run` verification that the underlying behavior is correct.
+    it "records stage entries when the SIMPLE_DIAG stage facet is forced on":
+        # The facet-ON half of the contract. This is the assertion that was
+        # missing for a month (see the file header): without it, any regression
+        # in dbg_stage emission lands silently, because the default-off `it`
+        # above passes precisely when nothing is emitted.
+        dbg_diag_reset()
+        dbg_force_facet("stage")
+        expect(dbg_stage_on()).to_equal(true)
+        dbg_stage("browser", "facet_on_probe")
+        expect(dbg_stage_history().len()).to_be_greater_than(0)
+        expect(dbg_last_emit()).to_contain("facet_on_probe")
+        dbg_diag_reset()

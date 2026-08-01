@@ -6,7 +6,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use simple_parser::ast::{
-    Argument, Capability, ConstStmt, Effect, Expr, ImplBlock, ImportTarget, Module, Node, Type, UseStmt, Visibility,
+    Argument, Capability, ConstStmt, Effect, Expr, FunctionDef, ImplBlock, ImportTarget, Module, Node, Type, UseStmt,
+    Visibility,
 };
 use simple_parser::error_recovery::{ErrorHint, ErrorHintLevel};
 use simple_parser::Parser;
@@ -1259,6 +1260,7 @@ pub fn load_module_with_imports_for_target(
     append_root_import_binding_markers(&mut module, path);
     warn_duplicate_private_signatures(&module);
     warn_method_arity_collisions(&module);
+    warn_cross_impl_method_collisions(&module);
     Ok(module)
 }
 
@@ -1297,19 +1299,60 @@ fn append_root_import_binding_markers(module: &mut Module, path: &Path) {
     module.items.splice(0..0, markers);
 }
 
-/// Diagnostic: warn when two or more co-compiled top-level free functions share a
-/// bare name but have differing signatures.
+/// Diagnostic: warn when two or more co-compiled top-level functions share a
+/// registry key but have differing signatures.
 ///
 /// Functions resolve by bare name (interpreter `HashMap<String, FunctionDef>`;
 /// codegen `func_ids`, last-write-wins), so once the import flattening merges two
 /// same-named definitions, a call may silently dispatch to the wrong one — nil /
 /// garbage in the interpreter, NULL-deref SIGSEGV under Cranelift (the
-/// `aes_gcm`/`hkdf` `_append_bytes` case). Methods are qualified (`Type.method`)
-/// and cannot collide on a bare name, so only top-level free functions are checked;
-/// the pattern in practice is the private (`_`-prefixed) per-file helper convention.
+/// `aes_gcm`/`hkdf` `_append_bytes` case).
 ///
-/// Non-breaking diagnostic only. The fix is to rename one of the colliding helpers
-/// to a unique name. See bug `compiler_cross_module_private_symbol_collision_2026-06-16`.
+/// **Scope widened 2026-08-01.** This check used to skip every name that did not
+/// start with `_`, and every qualified (`Type.method`) name, on the assumption that
+/// only the private per-file helper convention could collide and that "methods are
+/// qualified and cannot collide on a bare name". Both halves of that assumption are
+/// wrong in the same way:
+///
+/// - Public free functions live in the *same* flat last-write-wins table as private
+///   ones. Nothing about a leading `_` changes how the registry is keyed.
+/// - A qualified `Type.method` key is only unique per *type*, not per *module*. Two
+///   modules that both define `impl Type` with the same method name produce the same
+///   key and clobber each other exactly like the free-function case (the sibling
+///   check `find_method_arity_collisions` only sees collisions *within one* impl
+///   block, so the cross-module case had no detector at all).
+/// - Two same-name overloads in one file (e.g. `expect(value: bool)` alongside
+///   `expect(value)`) are the same hazard and are now reported too.
+///
+/// The consequence of the old narrow scope was that "no collision warning was
+/// printed" was routinely read as "nothing collided", when in fact the entire
+/// public and method half of the family was unwarned. See
+/// `doc/08_tracking/bug/diag_stage_facet_cross_module_collision_under_test_2026-07-06.md`
+/// ("Why 'no collision warning was printed' proves nothing").
+///
+/// Non-breaking diagnostic only. The real fix is to key the registry on
+/// (module path, name) rather than on the name alone; until then the workaround is
+/// to rename one of the colliding definitions. See bug
+/// `compiler_cross_module_private_symbol_collision_2026-06-16`.
+/// Render a function signature for collision comparison. `Debug` output is stable
+/// within a build; the common `Type` Debug forms are simplified for readability.
+fn render_signature(f: &FunctionDef) -> String {
+    let render = |t: &Type| -> String {
+        format!("{t:?}")
+            .replace("Array { element: ", "[")
+            .replace(", size: None }", "]")
+            .replace("Simple(\"", "")
+            .replace("\")", "")
+    };
+    let params: Vec<String> = f
+        .params
+        .iter()
+        .map(|p| p.ty.as_ref().map(&render).unwrap_or_else(|| "?".to_string()))
+        .collect();
+    let ret = f.return_type.as_ref().map(&render).unwrap_or_else(|| "()".to_string());
+    format!("({})->{ret}", params.join(","))
+}
+
 fn warn_duplicate_private_signatures(module: &Module) {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -1317,27 +1360,11 @@ fn warn_duplicate_private_signatures(module: &Module) {
     let mut by_name: HashMap<&str, Vec<String>> = HashMap::new();
     for item in &module.items {
         if let Node::Function(f) = item {
-            // bare names only (methods are `Type.method`); private-helper convention
-            if f.name.contains('.') || !f.name.starts_with('_') {
-                continue;
-            }
-            // Render the signature for comparison (Debug is stable within a build);
-            // simplify the common Type Debug forms for readability.
-            let render = |t: &Type| -> String {
-                format!("{t:?}")
-                    .replace("Array { element: ", "[")
-                    .replace(", size: None }", "]")
-                    .replace("Simple(\"", "")
-                    .replace("\")", "")
-            };
-            let params: Vec<String> = f
-                .params
-                .iter()
-                .map(|p| p.ty.as_ref().map(&render).unwrap_or_else(|| "?".to_string()))
-                .collect();
-            let ret = f.return_type.as_ref().map(&render).unwrap_or_else(|| "()".to_string());
-            let sig = format!("({})->{ret}", params.join(","));
-            by_name.entry(f.name.as_str()).or_default().push(sig);
+            // Every top-level function participates in the flat registry: private
+            // helpers, public free functions, and qualified `Type.method` entries
+            // alike. Do NOT reintroduce a `starts_with('_')` / `contains('.')` skip
+            // here — that is precisely the blind spot documented above.
+            by_name.entry(f.name.as_str()).or_default().push(render_signature(f));
         }
     }
 
@@ -1368,12 +1395,20 @@ fn warn_duplicate_private_signatures(module: &Module) {
                 continue;
             }
         }
+        let kind = if name.contains('.') {
+            "method"
+        } else if name.starts_with('_') {
+            "private helper"
+        } else {
+            "public function"
+        };
         eprintln!(
-            "warning: private helper `{}` has {} co-compiled definitions with {} differing \
+            "warning: {} `{}` has {} co-compiled definitions with {} differing \
              signatures ({}); JIT call sites resolve by exact arg-type match (mangled `$dupN` \
              variants), falling back to the last definition when types are ambiguous — a \
              fallback hit may still dispatch to the wrong one. Rename the conflicting helper(s) \
              to a unique name. [compiler_cross_module_private_symbol_collision]",
+            kind,
             name,
             sigs.len(),
             distinct.len(),
@@ -1385,8 +1420,8 @@ fn warn_duplicate_private_signatures(module: &Module) {
 /// Diagnostic: warn when a single `impl` block defines two or more methods that
 /// share a bare name but differ in parameter count (arity).
 ///
-/// `warn_duplicate_private_signatures` above only checks bare top-level free
-/// functions, on the documented assumption that "methods are qualified
+/// `warn_duplicate_private_signatures` above used to check only bare top-level
+/// free functions, on the documented assumption that "methods are qualified
 /// (`Type.method`) and cannot collide". That assumption is false: a real
 /// defect (`BeDomNode` with two `static fn element` definitions differing only
 /// in arity) showed that same-name methods *within one impl block* collide
@@ -1409,6 +1444,76 @@ fn warn_duplicate_private_signatures(module: &Module) {
 fn warn_method_arity_collisions(module: &Module) {
     for finding in find_method_arity_collisions(module) {
         eprintln!("{}", finding.render());
+    }
+}
+
+/// Diagnostic: warn when the same `Type.method` key is defined by two or more
+/// *different* co-compiled `impl` blocks with differing signatures.
+///
+/// `find_method_arity_collisions` only looks *inside one* impl block, so the
+/// cross-module case — two modules that each write `impl Foo` with a method of the
+/// same name — had no detector at all. That key is unique per *type*, not per
+/// *module*, so those two definitions land on the same registry slot and clobber
+/// each other exactly like the free-function case. This was the method half of the
+/// blind spot documented in
+/// `doc/08_tracking/bug/diag_stage_facet_cross_module_collision_under_test_2026-07-06.md`.
+///
+/// Same-arity-but-different-types overloads are included here (the arity check
+/// cannot see them). Non-breaking diagnostic only.
+fn warn_cross_impl_method_collisions(module: &Module) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    // (class, method) -> distinct signatures, and how many impl blocks contributed.
+    let mut by_key: HashMap<String, Vec<String>> = HashMap::new();
+    let mut blocks_for_key: HashMap<String, usize> = HashMap::new();
+    for item in &module.items {
+        if let Node::Impl(impl_block) = item {
+            let class_name = render_target_type(&impl_block.target_type);
+            let mut seen_here: HashSet<String> = HashSet::new();
+            for method in &impl_block.methods {
+                let key = format!("{class_name}.{}", method.name);
+                by_key.entry(key.clone()).or_default().push(render_signature(method));
+                if seen_here.insert(key.clone()) {
+                    *blocks_for_key.entry(key).or_default() += 1;
+                }
+            }
+        }
+    }
+
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let warned = WARNED.get_or_init(|| Mutex::new(HashSet::new()));
+
+    let mut keys: Vec<&String> = by_key.keys().collect();
+    keys.sort();
+    for key in keys {
+        // Only the cross-impl-block case; same-block overloads are the arity
+        // check's territory and would double-report here.
+        if blocks_for_key.get(key).copied().unwrap_or(0) < 2 {
+            continue;
+        }
+        let mut distinct: Vec<&String> = by_key[key].iter().collect();
+        distinct.sort();
+        distinct.dedup();
+        if distinct.len() < 2 {
+            continue; // identical redefinitions → harmless under last-write-wins
+        }
+        let sigs = distinct.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" vs ");
+        let dedup_key = format!("{key}|{sigs}");
+        if let Ok(mut set) = warned.lock() {
+            if !set.insert(dedup_key) {
+                continue;
+            }
+        }
+        eprintln!(
+            "warning: method `{key}` is defined by {} separate co-compiled impl blocks with \
+             {} differing signatures ({sigs}); a `Type.method` key is unique per type, not per \
+             module, so these share one last-write-wins registry slot and a call may silently \
+             dispatch to the wrong body. Rename the conflicting definition(s) or give the types \
+             distinct names. [compiler_cross_module_method_collision]",
+            blocks_for_key[key],
+            distinct.len(),
+        );
     }
 }
 
