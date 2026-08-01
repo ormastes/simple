@@ -78,6 +78,42 @@ impl MirLowering:
             i = i + 1
         -1
 
+    me enum_variant_miss_detail(enum_name: text, variant: text) -> text:
+        """Explain a variant-lookup miss by NAMING the colliding owner.
+
+        `enum_variant_index` is keyed by the BARE enum name and written
+        last-wins, so the overwhelmingly common cause of a miss is that a
+        same-bare-named enum declared in another module evicted the real one.
+        This returns the human-readable half of that story: the recorded
+        divergent overwrite (if any) plus every OTHER registered enum that does
+        declare `variant`. Callers prepend the site-specific context.
+
+        Deliberately does NOT re-key or repair anything -- this lane only makes
+        the miss loud (step b); dual-keying by runtime_name is step c."""
+        var detail = ""
+        if self.enum_bare_name_collisions.has(enum_name):
+            val collision = self.enum_bare_name_collisions[enum_name]
+            detail = "; bare enum name '{enum_name}' is declared by MORE THAN ONE enum with divergent variants: {collision}"
+        var others = ""
+        var other_count = 0
+        for ename in self.enum_variant_index.keys():
+            if ename != enum_name:
+                if enum_variant_disc(self.enum_variant_index[ename], variant) >= 0:
+                    other_count = other_count + 1
+                    if others == "":
+                        others = ename
+                    else:
+                        others = "{others}, {ename}"
+        if other_count > 0:
+            detail = "{detail}; variant '{variant}' IS declared by: {others}"
+        if detail == "":
+            if self.enum_variant_index.has(enum_name):
+                val known_text = self.enum_variant_index[enum_name].join(", ")
+                detail = "; registered variants for '{enum_name}': [{known_text}]"
+            else:
+                detail = "; no enum named '{enum_name}' is registered in this lowering unit"
+        detail
+
 fn enum_pat_binding_sym(payload: HirPatternPayload?) -> SymbolId?:
     """The single payload-binding symbol of `case Circle(r):` (Tuple([Binding(r)])),
     or nil for Unit variants / unsupported multi-field payloads."""
@@ -1695,6 +1731,18 @@ impl MirLowering:
                             d = self.enum_variant_discriminant(owner, variant)
                             if enum_name == "":
                                 enum_name = owner
+                            # The sole-owner search runs over the BARE-keyED,
+                            # last-wins enum_variant_index, so "exactly one
+                            # owner" is only trustworthy when that owner's bare
+                            # name was not contested. If it WAS, the real owner
+                            # may have been evicted before this search ran and
+                            # this arm silently borrows the survivor's
+                            # discriminant. Loud, non-fatal -- gated on a
+                            # recorded divergent collision so the ordinary
+                            # unqualified `case Circle(r)` stays quiet.
+                            if self.enum_bare_name_collisions.has(owner):
+                                val owner_collision = self.enum_bare_name_collisions[owner]
+                                self.error("enum variant lookup miss: bare pattern '{variant}' resolved to sole owner '{owner}', but that bare enum name is CONTESTED so the resolved owner may be the wrong enum: {owner_collision}", Some(arm.pattern.span))
                         elif owner_count > 1:
                             self.error("enum match: bare variant '{variant}' is ambiguous (declared in multiple enums); qualify it as EnumName.{variant}", Some(arm.pattern.span))
                         else:
@@ -2245,6 +2293,17 @@ impl MirLowering:
                     var none_disc = 1
                     if self.enum_variant_index.has("Option"):
                         none_disc = self.enum_variant_discriminant("Option", "None")
+                        if none_disc < 0:
+                            # Was a SILENT -1: if the bare name "Option" was
+                            # evicted by some OTHER enum also named Option, the
+                            # None key becomes -1 and this equality test can
+                            # never fire -- every `?` try-operator on a boxed
+                            # Option silently takes the Some lane. Restore the
+                            # reserved Some=0/None=1 default so the comparison
+                            # stays meaningful, and say so loudly.
+                            val miss_detail = self.enum_variant_miss_detail("Option", "None")
+                            self.error("enum variant lookup miss: 'Option.None' resolved to discriminant -1 while lowering the '?' try-operator; falling back to the reserved None=1{miss_detail}", nil)
+                            none_disc = 1
                     val none_key = b_boxed.emit_const_int(none_disc)
                     val is_boxed_none = b_boxed.emit_binop(MirBinOp.Eq, mir_operand_copy(disc_local), mir_operand_copy(none_key), MirType.bool())
                     val boxed_some_block = b_boxed.new_block(Some("try_opt_boxed_some"))
@@ -2421,6 +2480,14 @@ impl MirLowering:
             self.builder = be
             return te
         val disc = self.enum_variant_discriminant(enum_name, variant)
+        if disc < 0:
+            # Was a SILENT -1: the enum is registered but this variant is not
+            # among its (bare-name, last-wins) variant set, so a -1 discriminant
+            # was emitted as a constant and the constructed value could never
+            # match any arm. Loud, non-fatal warning -- see the prefix note on
+            # `enum_variant_miss_detail`.
+            val miss_detail = self.enum_variant_miss_detail(enum_name, variant)
+            self.error("enum variant lookup miss: constructing '{enum_name}.{variant}' resolved to discriminant -1{miss_detail}", nil)
         var b = self.builder
         # I64 (not I32): the cranelift lane is uniformly i64 (see the Bool
         # note in cranelift_codegen_adapter mir_type_to_cl); I32 consts here
@@ -2517,6 +2584,12 @@ impl MirLowering:
         is known by NAME (registered in enum_variant_index); the single tuple
         payload is args[0] (0 for Unit variants)."""
         val disc = self.enum_variant_discriminant(enum_name, variant)
+        if disc < 0:
+            # Was a FULLY SILENT -1 (this site had no guard at all, not even the
+            # unregistered-enum one `lower_enum_lit` carries): -1 went straight
+            # out as the emitted discriminant constant.
+            val miss_detail = self.enum_variant_miss_detail(enum_name, variant)
+            self.error("enum variant lookup miss: constructing '{enum_name}.{variant}' (method-call form) resolved to discriminant -1{miss_detail}", nil)
         var b = self.builder
         val enum_id_local = b.new_temp(MirType(kind: MirTypeKind.I32))
         b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType(kind: MirTypeKind.I32))
@@ -3389,6 +3462,9 @@ impl MirLowering:
                 lw.struct_method_return_is_array = self.struct_method_return_is_array
                 lw.enum_payload_struct_names = self.enum_payload_struct_names
                 lw.enum_variant_index = self.enum_variant_index
+                # Carry the collision registry into the sub-lowering too, or its
+                # miss diagnostics lose the colliding-owner half of the message.
+                lw.enum_bare_name_collisions = self.enum_bare_name_collisions
                 lw.enum_variant_discriminants = self.enum_variant_discriminants
                 lw.canonical_type_symbols = self.canonical_type_symbols
                 lw.next_canonical_type_symbol = self.next_canonical_type_symbol

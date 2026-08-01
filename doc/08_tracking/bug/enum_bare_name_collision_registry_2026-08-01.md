@@ -225,3 +225,97 @@ explicitly not performed here; 192 of the 332 are benign.
   the two have disagreed before.
 - Symlinked compiler layer directories were not followed, so no path
   double-counting.
+
+---
+
+## 8. Step (b) LANDED: the miss is now loud
+
+Sequencing recap: (a) restore a test-capable binary, **(b) make the miss loud
+and absorb the fallout**, (c) only then dual-key by `runtime_name`, (d)
+reconcile the Rust seed. (b) and (c) must not be combined — re-keying while the
+silent `-1` paths existed would have made ALL enums silently wrong instead of
+only the 140 divergent ones.
+
+This section records (b). **No map was re-keyed in this change.**
+
+### What was silent, and what it says now
+
+A collision registry is recorded at registration time in
+`register_enum_variants` (`50.mir/_MirLowering/module_lowering.spl`): when a
+bare enum name is overwritten by a registration whose variant set **differs**,
+the prior and new sets plus the new `runtime_name` are stored in the new
+`enum_bare_name_collisions` map. Identical re-registrations (the 192 benign
+duplicates) record nothing. `enum_variant_miss_detail`
+(`50.mir/_MirLoweringExpr/switch_operators_calls.spl`) turns that into a
+message naming the enum, the variant, and the colliding owner, plus every other
+registered enum that does declare the variant.
+
+Four previously-silent paths now emit it:
+
+| Site | Was | Now |
+|---|---|---|
+| `lower_enum_construct_named` | fully silent; `-1` emitted straight out as the discriminant constant, no guard at all | loud `enum variant lookup miss:` |
+| `lower_enum_lit` | guarded only for an *unregistered* enum; a registered enum missing the variant (the collision case) emitted `-1` silently | loud `enum variant lookup miss:` |
+| `?` try-operator `none_disc` | `Option.None` resolving to `-1` made the equality test unfireable, so every boxed Option silently took the Some lane | loud, and falls back to the reserved `None=1` |
+| bare-pattern sole-owner borrow | `owner_count == 1` borrowed an unrelated enum's discriminant with no diagnostic | loud **only when that owner's bare name is a recorded divergent collision**, so ordinary unqualified `case Circle(r)` stays quiet |
+
+Interpreter sibling (`10.frontend/core/interpreter/eval_tables.spl`):
+`enum_table_register` is bare-keyed **first-wins** and silently `return`ed on
+the second registration — the opposite resolution from MIR's last-wins, so the
+two engines pick *different* enums for the same source. It now reports a
+divergent drop via `_enum_warn_bare_name_collision`, mirroring the existing
+`_ftr_warn_collision` precedent in the same file (dedup list, divergence gate).
+
+### Deliberately NOT done
+
+- **Nothing was made fatal.** All new messages use the prefix
+  `enum variant lookup miss:`, which is absent from `_mir_error_is_fatal`'s
+  allowlist in `80.driver/driver_pipeline_lowering.spl`, so they land as
+  warnings. Note the pre-existing `enum match:` guards there ARE already fatal;
+  they were left exactly as-is. Promoting anything to fatal stays blocked on
+  resolving the 332 duplicated names.
+- **No re-keying.** That is step (c).
+- **The Rust seed was not touched.** It still derives a discriminant by hashing
+  the variant name alone with no enum identity, so it collapses every collision
+  by construction and disagrees numerically with both other engines even for
+  non-colliding enums. That is step (d) and remains open.
+
+### Evidence
+
+Regression spec:
+`test/01_unit/compiler/mir/enum_bare_name_collision_loud_miss_spec.spl`
+(11 examples). Run under the interpreter via
+`bin/simple_seed test <spec>`, which imports `compiler.mir.mir_lowering` and so
+genuinely executes `src/compiler/50.mir/**.spl` — it is **not** the seed's own
+Rust compile path.
+
+- **MIR `.spl` surface — PROVED.** True-positive control: the spec constructs
+  two divergent enums both named `Style`, and `lower_enum_construct_named`
+  records an error whose text contains the variant and the colliding owner.
+  RED control: deleting that one `self.error` call takes the suite to
+  10 passed / 1 failed; neutralising the collision-recording branch in
+  `register_enum_variants` takes it to 4 passed / 2 failed. A syntax fault
+  injected into `switch_operators_calls.spl` aborts the run entirely,
+  confirming the file is loaded from the tree under test.
+- **Interpreter surface — PROVED.** The warning was observed *emitted at
+  runtime*, not merely asserted in source: `[WARN] enum 'Style' has co-compiled
+  declarations with DIFFERENT variants ([Bold,Italic] vs [Plain,Reverse]) ...
+  [compiler_enum_bare_name_collision]`. The benign identical re-registration in
+  the same run produced no warning, so the divergence gate is real.
+- **Rust seed surface — NOT COVERED.** No control was run and none is claimed.
+
+### Fallout
+
+Measured on the interpreter surface, where the check is observable today:
+across the compiler module graphs loaded by the MIR/backend/semantics/borrow
+specs, **zero real divergent collisions fired**. This is a live-zero, not an
+inert-zero: the synthetic control warning fired in the *same process*.
+
+The repo-wide count remains **INFERRED**, bounded above by the 140 divergent
+names in `enum_bare_name_collision_enumeration_2026-08-01.tsv`. Measuring it
+properly needs the pure-Simple compiler to compile the whole repo. The binary
+at `bin/simple` is the **Rust-built driver** — it prints its own
+"bootstrap seed only" banner and does not embed the MIR `.spl` strings
+(`strings | grep "enum construction: unregistered enum"` returns 0 for it and 2
+for the bootstrap-stage binaries). It therefore cannot produce a repo-wide
+fallout number for this change.

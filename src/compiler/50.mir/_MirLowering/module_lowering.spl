@@ -35,6 +35,21 @@ extern fn rt_env_get(key: text) -> text
 fn mir_lower_env_get(key: text) -> text:
     rt_env_get(key)
 
+fn _text_list_eq(a: [text], b: [text]) -> bool:
+    """Order-sensitive equality for two variant-name lists.
+
+    Order matters: the declared order IS the discriminant assignment, so two
+    same-bare-named enums listing the same names in a different order are still
+    a divergent (hazardous) collision, not a benign duplicate."""
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
 fn mir_lower_trace_enabled() -> bool:
     val trace = mir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
     val phase = mir_lower_env_get("SIMPLE_COMPILER_PHASE_PROFILE") ?? ""
@@ -147,6 +162,7 @@ impl MirLowering:
             nil_locals: {},
             enum_variant_index: {},
             enum_variant_discriminants: {},
+            enum_bare_name_collisions: {},
             enum_runtime_id_index: {},
             enum_runtime_id_names: {},
             lambda_bindings: {},
@@ -237,6 +253,20 @@ impl MirLowering:
             discriminants.push(value)
             next_value = value + 1
             vi = vi + 1
+        # Bare-name collision registry (2026-08-01). enum_variant_index is keyed
+        # by the BARE enum name and this write is LAST-WINS, so a same-bare-named
+        # enum from another module evicts the set registered here. Record the
+        # eviction when the variant sets DIVERGE, so that a later lookup miss can
+        # NAME the colliding owner instead of returning a silent -1. Divergence
+        # only -- an identical re-registration is benign and stays quiet.
+        if self.enum_variant_index.has(enum_def.name):
+            val prior_names = self.enum_variant_index[enum_def.name]
+            if not _text_list_eq(prior_names, names):
+                val prior_text = prior_names.join(", ")
+                val new_text = names.join(", ")
+                var collisions = self.enum_bare_name_collisions
+                collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
+                self.enum_bare_name_collisions = collisions
         var variant_index = self.enum_variant_index
         variant_index[enum_def.name] = names
         self.enum_variant_index = variant_index

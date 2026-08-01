@@ -600,6 +600,28 @@ fn enum_table_reset():
     enum_hm_buckets = hm_make_global_buckets()
     enum_hm_nexts = []
 
+# Bare enum names already warned about, so a repeatedly re-registered enum
+# reports once instead of once per module. Mirrors `_ftr_collision_warned`.
+var _enum_collision_warned: [text] = []
+
+fn _enum_warn_bare_name_collision(name: text, existing_csv: text, new_csv: text):
+    """Report a DIVERGENT same-bare-name enum registration.
+
+    This table is keyed by the BARE enum name and is FIRST-WINS: the second
+    registration is dropped on the floor. (MIR's parallel table is LAST-wins —
+    the two engines resolve the same collision to opposite enums.) An identical
+    re-registration is benign and stays quiet; only a differing variant set is
+    reported, because only that can change which arm a `case` takes."""
+    if existing_csv == new_csv:
+        return
+    var j = 0
+    while j < _enum_collision_warned.len():
+        if _enum_collision_warned[j] == name:
+            return
+        j = j + 1
+    _enum_collision_warned.push(name)
+    print "[WARN] enum '{name}' has co-compiled declarations with DIFFERENT variants ([{existing_csv}] vs [{new_csv}]); this table is keyed by the bare name and first-wins, so the second declaration is dropped and `case` arms against it silently match nothing. Rename the conflicting enum(s). [compiler_enum_bare_name_collision]"
+
 fn enum_table_register(name: text, variants: [text]):
     if enum_hm_buckets.len() == 0:
         enum_hm_buckets = hm_make_global_buckets()
@@ -607,6 +629,7 @@ fn enum_table_register(name: text, variants: [text]):
     var idx = enum_hm_buckets[bucket]
     while idx != -1:
         if enum_reg_names[idx] == name:
+            _enum_warn_bare_name_collision(name, enum_reg_variants[idx], variants.join(","))
             return
         idx = enum_hm_nexts[idx]
     val new_idx = enum_reg_names.len()
