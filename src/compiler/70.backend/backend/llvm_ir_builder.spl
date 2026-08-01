@@ -540,24 +540,42 @@ class LlvmIRBuilder:
         Simple has strict typing with no type punning, enabling aggressive alias analysis.
         Hierarchy: root -> int/float/ptr/struct subtypes.
         """
-        # TBAA is optional. Keep it disabled until the text LLVM backend emits
-        # verifier-clean metadata on every supported LLVM version.
-        return
+        # Literal `{`/`}` MUST come from lb/rb locals, never from a bare `{`
+        # inside the text literal: a bare `{` opens a string interpolation, so
+        # the old `"!{base} = !{!\"Simple TBAA\"}"` had its `{!"Simple TBAA"}`
+        # evaluated as the expression `!"Simple TBAA"` and emitted
+        # `!100 = !false`, which llc rejects with "expected metadata type" --
+        # on EVERY module the pure-Simple LLVM lane produced. The sibling
+        # `!{base + 1} = ...` lines degraded the other way and emitted the
+        # un-substituted text `!{base}` verbatim.
+        #
+        # This body previously sat after a bare `return` meant to disable it.
+        # That guard never worked: a statement-level `return` does not terminate
+        # the function on the COMPILED lanes (JIT and native), because MIR
+        # lowering overwrites the block terminator instead of starting a new
+        # block. The tree-walking interpreter is correct. So there was never a
+        # "disabled" state -- only broken-metadata-always vs valid-always. See
+        # doc/08_tracking/bug/top_level_return_falls_through_2026-08-01.md.
+        # Emitting verifier-clean metadata is the resolution the old comment
+        # asked for, and it keeps llvm_opt_pipeline_spec's "Simple TBAA"
+        # expectation honest instead of green-by-accident.
         val base = self.tbaa_counter
+        val lb = "{"
+        val rb = "}"
         self.emit("")
         self.emit("; TBAA metadata")
-        self.emit("!{base} = !{!\"Simple TBAA\"}")
-        self.emit("!{base + 1} = !{!\"int\", !{base}, i64 0}")
-        self.emit("!{base + 2} = !{!\"float\", !{base}, i64 0}")
-        self.emit("!{base + 3} = !{!\"ptr\", !{base}, i64 0}")
-        self.emit("!{base + 4} = !{!\"bool\", !{base}, i64 0}")
-        self.emit("!{base + 5} = !{!\"struct\", !{base}, i64 0}")
+        self.emit("!{base} = !{lb}!\"Simple TBAA\"{rb}")
+        self.emit("!{base + 1} = !{lb}!\"int\", !{base}, i64 0{rb}")
+        self.emit("!{base + 2} = !{lb}!\"float\", !{base}, i64 0{rb}")
+        self.emit("!{base + 3} = !{lb}!\"ptr\", !{base}, i64 0{rb}")
+        self.emit("!{base + 4} = !{lb}!\"bool\", !{base}, i64 0{rb}")
+        self.emit("!{base + 5} = !{lb}!\"struct\", !{base}, i64 0{rb}")
         # Access tags (type, type, offset)
-        self.emit("!{base + 6} = !{!{base + 1}, !{base + 1}, i64 0}")
-        self.emit("!{base + 7} = !{!{base + 2}, !{base + 2}, i64 0}")
-        self.emit("!{base + 8} = !{!{base + 3}, !{base + 3}, i64 0}")
-        self.emit("!{base + 9} = !{!{base + 4}, !{base + 4}, i64 0}")
-        self.emit("!{base + 10} = !{!{base + 5}, !{base + 5}, i64 0}")
+        self.emit("!{base + 6} = !{lb}!{base + 1}, !{base + 1}, i64 0{rb}")
+        self.emit("!{base + 7} = !{lb}!{base + 2}, !{base + 2}, i64 0{rb}")
+        self.emit("!{base + 8} = !{lb}!{base + 3}, !{base + 3}, i64 0{rb}")
+        self.emit("!{base + 9} = !{lb}!{base + 4}, !{base + 4}, i64 0{rb}")
+        self.emit("!{base + 10} = !{lb}!{base + 5}, !{base + 5}, i64 0{rb}")
         self.tbaa_counter = base + 11
 
     fn tbaa_tag_for_type(ty: text) -> i64:
