@@ -322,7 +322,7 @@ impl MirLowering:
         if declared != nil:
             return declared
         val found_local_type = self.find_local_hir_type(local.id)
-        if found_local_type.?:
+        if found_local_type != nil:
             val local_type = found_local_type ?? HirType(kind: HirTypeKind.Error, span: receiver.span)
             match local_type.kind:
                 case HirTypeKind.Optional(inner_type): return Some(inner_type)
@@ -885,6 +885,7 @@ impl MirLowering:
         mutation because the receiver is loaded as a value copy into a
         temporary (pure-Simple equivalent of Rust seed bug #28).
         """
+        eprint("[mir-method-call] start method={method} argc={args.len()}\n")
         val resolution_disc = rt_enum_discriminant(resolution)
         val resolution_is_unresolved = resolution_disc == rt_enum_discriminant(MethodResolution.Unresolved)
         val resolution_is_free_function = resolution_disc == rt_enum_discriminant(MethodResolution.FreeFunction(SymbolId(id: -1)))
@@ -898,6 +899,7 @@ impl MirLowering:
             self.result_err_hir_type(receiver)
         else:
             nil
+        eprint("[mir-method-call] result-types method={method}\n")
 
         # Resolve a type-valued receiver once. The Unresolved arm below uses
         # this for static custom methods; predicate fallbacks also need it
@@ -918,6 +920,7 @@ impl MirLowering:
                             case Class | Struct | Enum | Import: static_receiver_name = static_def.name
                             case _: ()
                 case _: ()
+        eprint("[mir-method-call] static-owner method={method}\n")
 
         # Native entry lowering commonly has no MethodResolution, so probe
         # Option-like receivers once and reuse that local in the Unresolved
@@ -938,6 +941,7 @@ impl MirLowering:
             prelowered_method_receiver = self.lower_expr(receiver)
             has_prelowered_method_receiver = true
             option_method_receiver = self.method_receiver_is_option(receiver, prelowered_method_receiver)
+        eprint("[mir-method-call] option-probe method={method}\n")
 
         # Flat/native HIR can leave custom predicate methods unresolved. Probe
         # their owner before the text fallbacks below so a struct method named
@@ -974,6 +978,7 @@ impl MirLowering:
                     val predicate_owner = self.struct_value_syms.get(prelowered_method_receiver.id)
                     if predicate_owner != nil and predicate_owner != "":
                         predicate_has_custom_owner = self.struct_method_syms.contains("{predicate_owner}::{method}")
+        eprint("[mir-method-call] predicate-owner method={method}\n")
 
         # Integer chr/to_char is a language builtin, but an unresolved custom
         # struct method with the same name still owns its receiver. Resolve
@@ -1014,9 +1019,11 @@ impl MirLowering:
         if chr_method_shape and chr_primitive_resolution_allowed and not chr_has_custom_owner and not has_prelowered_method_receiver:
             prelowered_method_receiver = self.lower_expr(receiver)
             has_prelowered_method_receiver = true
+        eprint("[mir-method-call] chr-owner method={method}\n")
 
         if val option_result = self.try_lower_option_method(receiver, method, args, result_ok_type, result_err_type, option_method_receiver, prelowered_method_receiver):
             return option_result
+        eprint("[mir-method-call] option-dispatch method={method}\n")
 
         # Reclassify `Shape.Circle(7)` — parsed as a MethodCall — into enum
         # construction when the receiver names a registered enum and `method` is
@@ -1042,6 +1049,7 @@ impl MirLowering:
                     is_variant = true
             if is_variant:
                 return self.lower_enum_construct_named(recv_enum_name, method, args)
+        eprint("[mir-method-call] enum-owner method={method}\n")
 
         # Handle this.index() / this.thread_index() / this.group_index() for @simd
         match receiver.kind:
@@ -1071,6 +1079,7 @@ impl MirLowering:
                             return dest
                         case _: ()
             case _: ()
+        eprint("[mir-method-call] gpu-owner method={method}\n")
 
         # Pre-lower writeback origin for mutating methods on indexed/field receivers.
         # wb_kind: 0 = none, 1 = indexed (rt_array_set), 2 = field (emit_set_field)
@@ -2045,7 +2054,7 @@ impl MirLowering:
                 var b_ts = self.builder
                 val ts_res = b_ts.emit_call(ts_op, ts_ops, ts_dest_ty)
                 self.builder = b_ts
-                if ts_res.?:
+                if ts_res != nil:
                     val ts_local = ts_res ?? ts_recv
                     if method == "parse_f64":
                         self.mark_runtime_value_local(ts_local.id)
@@ -2809,7 +2818,7 @@ impl MirLowering:
         dest
 
     me bootstrap_symbol_name(symbol: SymbolId) -> text:
-        if not symbol.?:
+        if not symbol.is_valid():
             return ""
         val id = self.symbol_id_value(symbol)
         if id == 1:
@@ -2828,13 +2837,15 @@ impl MirLowering:
             return "bootstrap_output_from_args"
         if id == 8:
             return "rt_native_build"
-        ""
+        "" 
 
     me symbol_to_operand(symbol: SymbolId) -> MirOperand:
         """Convert a symbol to a function pointer operand."""
         # Look up function name from symbol table for direct calls
         val sym = self.symbols.get_symbol_raw(symbol.id)
-        var name = if sym.?: sym.name else: self.bootstrap_symbol_name(symbol)
+        var name = self.bootstrap_symbol_name(symbol)
+        if sym != nil:
+            name = sym.name
         name = name.replace("::", ".")
         if name == "":
             name = "unknown_{self.symbol_id_value(symbol)}"

@@ -544,3 +544,41 @@ rerun the pre-fix `typekind-cycle8-stage3` or its GDB command unchanged. If the
 guard clears SIGILL, remove or gate the temporary `[hir-field-type]`,
 `[mir-field-type]`, and `[mir-optional-inner]` diagnostics before the eventual
 Stage4/release gates.
+
+## 2026-08-01 method-call nullable guards and push frontier
+
+- Rebuilt the explicit enum-receiver nil guard through fresh Stage2/Stage3.
+  Stage2 passed version, unsupported-command, frontend smoke, and immutable
+  admission with SHA-256
+  `7e74b5bacf372a67058a7d43f1b464fc59658690db00576d2548448bbb3981b5`.
+  Stage3 still trapped in `lower_method_call`; evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle9-stage3/stage3.log`.
+- Audited the whole `method_calls_literals.spl` owner and removed every
+  executable TryOperator presence test: local HIR type, text-call result,
+  SymbolId validity, and nullable symbol lookup now use explicit guards.
+  Focused contract passed:
+  `build/mini_builds/mir-method-nullable-guards-cycle2.log`.
+- Cycle 2 Stage2 passed admission with SHA-256
+  `42b50dc3a3601accdadcf50da64d507d1d73087835446a82aa579afdb8472081`.
+  Stage3 still reached the same nil-field SIGILL; evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle10-stage3/stage3.log`.
+- Added temporary method-call phase receipts for the third bounded cycle.
+  Stage2 passed admission with SHA-256
+  `ee00e92592c0e48f71198ad23d7b4f0ae33f3c13f412ad01ea74c79f0255bfe0`.
+  The final Stage3 trace identifies the failing method as `push`; it completes
+  `result-types`, `static-owner`, `option-probe`, `predicate-owner`,
+  `chr-owner`, `option-dispatch`, `enum-owner`, and `gpu-owner`, then traps
+  before returning from the later receiver/writeback/resolution path. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle11-stage3/stage3.log`.
+- The mandatory three-cycle cap is exhausted. Stage3 produced no compiler;
+  Stage4, essential-tools smoke, and release verification were not run. Nothing
+  was pushed.
+
+Next: in a fresh session, add temporary receipts after receiver-type recovery,
+dict probing, text/slice builtins, mutating writeback preparation, resolution
+dispatch entry, unresolved receiver lowering, push value lowering, boxing, and
+emit/writeback. Run one fresh Stage2/Stage3 cycle to identify the exact `push`
+subregion. Inspect `receiver.has_type_` versus direct `receiver.type_` use and
+the unresolved receiver local before changing semantics. Remove all temporary
+`[mir-method-call]`, `[hir-field-type]`, `[mir-field-type]`, and
+`[mir-optional-inner]` receipts before eventual Stage4/release gates.
