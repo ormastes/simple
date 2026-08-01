@@ -22,12 +22,41 @@ fn stub_new_note_sdn() -> NoteSdnMetadata:
 # Rust SFFI Declarations
 # ============================================================================
 #
-# These extern functions are implemented in src/rust/loader/src/smf/ffi.rs
-# They handle low-level binary parsing for performance.
+# These extern functions were INTENDED to be implemented in
+# src/rust/loader/src/smf/ffi.rs to handle low-level binary parsing. That path
+# does not exist in this repo and never has; see the block below.
 
 # SmfReaderFfi - Rust SFFI handle for SMF file reading.
 # extern class not parseable by runtime (generics in signatures).
 # Stubs provided for runtime compatibility.
+#
+# !! NONE OF THE SIX rt_smf_reader_* EXTERNS BELOW ARE IMPLEMENTED. !!
+#
+# Verified 2026-08-01 over the whole tree: the only matches for each symbol are
+# these declarations and their call sites in this file. There is no definition
+# in src/runtime/, src/compiler_rust/, or any .rs/.c/.h/.cpp file, and no
+# name-variant (sffi_smf_*, ffi_smf_*) exists either. The header comment above
+# points at src/rust/loader/src/smf/ffi.rs -- that directory does not exist.
+#
+# An unregistered extern does NOT fail to link. Depending on lane it yields a
+# silent 0/nil, and the native link emits a weak zero-size definition so the
+# symbol never even shows up in `nm -u`. The practical consequence here is worse
+# than a crash: rt_smf_reader_open returns 0, `handle < 0` is false, so open()
+# reports Ok(..) for ANY path -- including one that does not exist -- and every
+# read below then returns hardcoded empty data. This reader silently claims that
+# every SMF file it is given parses fine and contains zero symbols.
+#
+# THERE IS ALREADY A WORKING PURE-SIMPLE SMF READER. `SmfReaderMemory`
+# (smf_reader_memory.spl -> _SmfReaderMemory/{header_parser,symbol_parser}.spl,
+# ~919 lines, no externs) does real magic detection, header parsing, string
+# table location, symbol parsing, code reads and relocations from a [u8]. The
+# intended resolution is to re-route SmfReaderImpl onto it -- read the file to
+# bytes, then SmfReaderMemory.from_data -- and delete these six externs, which
+# is the same shape as the ffi_regex_*/sffi_regex_* de-duplication. That rework
+# spans the SmfReaderImpl/SmfReaderMemory type seam and its consumers
+# (smf_cache, smf_getter, object_resolver, object_provider, link, module_loader)
+# and is the link owner's call, so it is filed rather than done here:
+#   doc/08_tracking/bug/smf_reader_bridge_silent_nil.md
 extern fn rt_smf_reader_open(path: text) -> i64
 extern fn rt_smf_reader_read_header(handle: i64) -> i64
 extern fn rt_smf_reader_read_section(handle: i64, index: i32) -> i64
@@ -40,6 +69,7 @@ struct SmfReaderFfi:
 
 impl SmfReaderFfi:
     static fn open(path: text) -> Result<SmfReaderFfi, text>:
+        pass_todo("rt_smf_reader_open has no implementation; it returns 0, so this reports Ok for any path including a nonexistent one. Re-route onto SmfReaderMemory.from_data", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
         val handle = rt_smf_reader_open(path)
         if handle < 0:
             Err("failed to open SMF reader: {path}")
@@ -47,6 +77,7 @@ impl SmfReaderFfi:
             Ok(SmfReaderFfi(handle: handle))
 
     fn read_header() -> SmfHeaderRaw:
+        pass_todo("returns a hardcoded zero header; the rt_smf_reader_read_header result is discarded. SmfReaderMemory.parse_header_from_bytes already does this for real", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
         val _ = rt_smf_reader_read_header(self.handle)
         SmfHeaderRaw(
             magic: [83, 77, 70, 0],
@@ -70,18 +101,22 @@ impl SmfReaderFfi:
         )
 
     fn read_section(index: i32) -> [u8]:
+        pass_todo("always returns []; rt_smf_reader_read_section is unimplemented so section data never reaches read_code/read_template_section/read_note_sdn", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
         val _ = rt_smf_reader_read_section(self.handle, index)
         []
 
     fn read_symbol_table() -> [SmfSymbolRaw]:
+        pass_todo("always returns []; this is the only path that populates SmfReaderImpl.symbols, so every lookup_symbol fails with 'Symbol not found'. SmfReaderMemory symbol_parser does this for real", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
         val _ = rt_smf_reader_read_symbol_table(self.handle)
         []
 
     fn read_string_table() -> [u8]:
+        pass_todo("always returns []; without it read_string_from_table yields empty names for every symbol", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
         val _ = rt_smf_reader_read_string_table(self.handle)
         []
 
     fn close():
+        pass_todo("rt_smf_reader_close is unimplemented; nothing is released because nothing was ever opened", "doc/08_tracking/bug/smf_reader_bridge_silent_nil.md")
         val _ = rt_smf_reader_close(self.handle)
 
 # ============================================================================
