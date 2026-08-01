@@ -186,7 +186,7 @@ the only engine the suite reaches; `bin/simple` has no `test` subcommand at HEAD
 `text_char_code_at_codepoint_spec.spl` (3/3) and `nested_string_split_spec.spl`
 (1/1) also green.
 
-## Adjacent gap found, NOT fixed here
+## Adjacent gap found, NOT fixed here — NOW FIXED, see the follow-up doc
 
 `eval_int_method` (`call_method_eval.spl:930`) is exported by neither
 `__init__.spl` nor `eval_ops.spl`, so an out-of-tree driver that reaches
@@ -195,6 +195,18 @@ int method (`(42).to_text()`). Pre-existing — it never lived in the deleted fi
 — and the same incompleteness that forces a driver to write 12 explicit wildcard
 imports. Out of scope for this fix; recorded so it is not rediscovered as a
 regression from the deletion.
+
+**FIXED 2026-08-01** in
+`doc/08_tracking/bug/2026-08-01_interpreter_evalops_export_gaps.md`, together
+with two related gaps that same doc surfaced:
+
+- text `.at` had no arm in the live table (or in the deleted copy) — it returned
+  the receiver unchanged; now byte-indexed and flat-Option, matching the C
+  runtime and array `.at` and deliberately NOT the seed;
+- `eval_int_method` was one of **7 of 33** `_EvalOps` functions that `__init__.spl`
+  did not export. Package-wide the figure is **171 of 437 (39%)** unexported,
+  with five modules at 100% — that is the systemic form of the "12 explicit
+  wildcard imports" note above, and it is quantified and left open there.
 
 ## Contamination audit of citing docs (2026-08-01)
 

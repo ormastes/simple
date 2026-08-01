@@ -286,6 +286,46 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             return val_make_text("")
         return val_make_text("")
 
+    # Text `at`: bounds-checked byte access returning Option in the FLAT
+    # encoding — a one-byte text is its own `Some`, `nil` is `None`. Deliberately
+    # NOT an alias of `char_at`, and deliberately NOT the seed's semantics:
+    #
+    #   | lane                                | index | out of range |
+    #   |-------------------------------------|-------|--------------|
+    #   | seed `interpreter_method/string.rs` | char  | `""`         |
+    #   |   (`"char_at" | "at"` share one arm)|       |              |
+    #   | C runtime `rt_string_char_at`       | byte  | `nil`        |
+    #   |   (what `s[i]` lowers to via rt_index_get)                  |
+    #   | live array `at` (call_method_eval)  | n/a   | `nil`        |
+    #   | THIS arm                            | byte  | `nil`        |
+    #
+    # Two properties are being preserved, and they both point the same way:
+    #   1. `.at` is this codebase's bounds-checked Option accessor. Array `.at`
+    #      returns flat-None for an out-of-range index, and 250+ call sites
+    #      `match x.at(i)` as Some/None. An `""` return would make every such
+    #      match take the Some branch on an out-of-range read.
+    #   2. Byte indexing keeps `at` composable with `len` / `index_of` / `slice`
+    #      / `char_at`, which all hand out byte offsets here, and keeps the
+    #      interpreter in agreement with native/JIT, which lower text indexing to
+    #      `rt_string_char_at`. Interpreter/native agreement is the property that
+    #      matters for a compiler lane — the same reasoning recorded on `char_at`
+    #      above and in
+    #      doc/08_tracking/bug/2026-08-01_interpreter_char_code_at_byte_indexed.md.
+    #
+    # So this arm agrees with the runtime on BOTH axes and diverges from the seed
+    # on both. Do not "fix" it toward the seed in isolation. Recorded in
+    # doc/08_tracking/bug/2026-08-01_interpreter_evalops_export_gaps.md.
+    if method_name == "at":
+        if arg_eids.len() == 0:
+            eval_set_error("at() requires an index argument")
+            return -1
+        val at_idx_val = eval_expr(arg_eids[0])
+        if eval_had_error: return -1
+        val at_idx = val_get_int(at_idx_val)
+        if at_idx >= 0 and at_idx < s.len():
+            return val_make_text(s.substring(at_idx, at_idx + 1))
+        return val_make_nil()
+
     if method_name == "parse_int":
         val parsed = s.parse_int()
         if parsed.?:
