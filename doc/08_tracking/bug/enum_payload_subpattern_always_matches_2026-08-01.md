@@ -1,7 +1,14 @@
 # Non-binding sub-patterns inside an enum payload always match and never bind
 
 **Date:** 2026-08-01
-**Status:** OPEN — root-caused, not fixed
+**Status:** PARTIALLY FIXED 2026-08-01 — the pure-Simple MIR lowering now
+implements nested payload tests + binds (was: silently skipped / loud-fail),
+and a silent no-op in the compiled stage2's in-process native lane is fixed.
+See "Fix" and the CRITICAL "Engine attribution correction" sections at the
+bottom: the compiled lanes users actually run (seed JIT AND `native-build
+--entry`, which is the seed's `rt_native_build` codegen, NOT this repo's MIR
+pipeline) REMAIN BROKEN and are Rust-side (seed not rebuildable on this host,
+btrfs ENOSPC). The tree-walking interpreter was always correct.
 **Severity:** CRITICAL — silent wrong values and silent wrong arm selection on the
 two *compiled* engines (JIT and native LLVM); no diagnostic, exit code 0
 **Affected:** `src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl`,
@@ -299,3 +306,86 @@ $ bin/simple_seed test <scratch>/repro/enum_payload_subpattern_spec.spl
    contains a non-`Binding`/non-`Wildcard` sub-pattern, so those arms route to
    `flatten_enum_match_arm` and hit its existing `self.error`. A compile error is
    strictly better than a silent wrong value, and this step is small and local.
+
+## Engine attribution correction (2026-08-01) — read before trusting the matrix above
+
+The engine matrix's third column, "stage2 pure-Simple native (LLVM)", is
+misattributed. `simple native-build --entry <f>` (and `--source ... --entry
+...`) routes through `run_rt_native_build` -> the `rt_native_build` extern
+(`src/app/cli/bootstrap_main.spl:112`), i.e. **the Rust seed's native
+codegen embedded in the runtime**, regardless of which stage binary you
+invoke. Proof: objects produced that way call `rt_enum_check_discriminant`,
+a symbol emitted ONLY by `src/compiler_rust/**` codegen — `src/compiler/**`
+has zero call-emission sites for it. That is why the "two compiled engines"
+fail on an IDENTICAL shape set: they are the same codegen. No change under
+`src/compiler/**` can affect that lane; its fix is Rust-side (seed
+unbuildable on this host, ENOSPC).
+
+The repo's ACTUAL pure-Simple MIR pipeline is reachable only via the
+in-process driver (bare single `.spl` positional, no `--entry`), and at this
+base:
+
+- from a compiled stage2 it silently NO-OPS: `options.mode` does not survive
+  the struct transport, `compile()` logs `[WARN] no mode matched, falling
+  through` and returns Success with NO binary, exit 0 (fixed below);
+- via the seed-interpreted driver (`simple_seed run
+  src/app/cli/bootstrap_main.spl native-build <f> -o <o> --backend llvm`) it
+  LOUD-FAILS nested payload sub-patterns (28 x `flatten_enum_match_arm`'s
+  self.error on the verification matrix, phase-3 abort) — so on this one
+  checked lane the defect was a hard error, not a silent wrong value.
+
+## Fix (2026-08-01) — pure-Simple MIR lowering + in-process lane
+
+Implemented at the MIR layer, where per-arm fallthrough already exists: each
+arm's discriminant compare falls through to `next_block` on mismatch, and the
+deep tests reuse exactly that target.
+
+- `lower_enum_match` (`switch_operators_calls.spl`): an arm whose payload
+  contains a nested `Enum`/`Literal` (per-arm `enum_deep_flags`, classified
+  inline — a bool-returning helper's result read wrong through the call
+  boundary on the seed-built stage2, the same recorded quirk that killed the
+  earlier flatten attempt) is entered through a per-arm `ematch_deep` block
+  chain emitted AFTER the outer discriminant compare passes; every failing
+  sub-test branches to the arm's `next_block`, preserving arm-to-arm
+  fallthrough. Arms with only Binding/Wildcard payloads keep the pre-existing
+  single-compare emission unchanged.
+- `emit_enum_payload_deep` / `emit_deep_subpattern` / `emit_deep_literal_test`
+  (new): recursive payload walk. Nested variant tests via
+  `rt_enum_discriminant` (an `rt_is_some` dual-ABI lane for nested `Option`),
+  literal slot compares (int/bool raw word; text by content via
+  `rt_text_eq_any`), nested binds installed from the extracted slot words
+  (`rt_enum_payload` / `rt_tuple_get`, the same layout the flat bind path
+  reads). Depth-1 Binding/Wildcard binds keep the pre-existing flat path
+  (text retag, struct-name registration) untouched.
+- `flatten_enum_match_arm` (`expressions.spl`): nested `Enum`/`Literal`
+  sub-patterns now pass through UNCHANGED to MIR instead of being flattened
+  into fresh always-matching bindings. Tuple/Struct flatten and the Range/Or
+  loud error remain.
+- `run_native_build_bootstrap` (`bootstrap_main.spl`): sets
+  `options.cli_mode_text = "aot"` (same idiom as `_CliCompile/
+  compile_targets.spl`), fixing the silent exit-0/no-binary no-op of the
+  in-process native lane from a compiled stage2.
+
+## Verification status — what is and is NOT proved
+
+PROVED:
+- The 28 loud phase-3 errors on the checked (interpreted-driver) lane are
+  gone with the fix; the same matrix at base aborts with them. Reverting the
+  two compiler files restores the errors.
+- No regression on any working lane: the `--entry` (seed-codegen) lane
+  produces byte-identical matrix output before/after; the 17-example spec
+  stays green under `simple_seed test` (interpreter lane — lane-limited
+  evidence by construction); stage2 rebuilds clean (728 compiled, 0 failed).
+
+NOT PROVED — blocked by PRE-EXISTING pure-Simple-lane defects (all verified
+present at base, on depth-1 controls the fix does not touch):
+- printed-value correctness of the new lowering. The in-process LLVM lane
+  currently miscompiles even `match 7: case 5/7` (`add void 7, 0` llc abort),
+  drops enum construction payloads (`rt_enum_new` called with payload 0 for
+  `Inner.A(41)`), and returns 0 from function calls (`d1_binding()` — a
+  control correct on every other lane — reads 0), after which -O3 folds arm
+  bodies away entirely. Until that lane is healed, no value-level assertion
+  can pass on it for ANY enum code, fixed or not.
+
+Nested `Range`/`Or` and depth>=2 `Tuple`/`Struct` sub-patterns remain
+unsupported and are a loud `self.error`, never an always-match.

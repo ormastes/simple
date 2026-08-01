@@ -1559,6 +1559,20 @@ impl HirLowering:
                                         ()
                                     case Binding(_, _):
                                         ()
+                                    case Enum(_, _, _):
+                                        # Lowered by MIR's emit_enum_payload_deep
+                                        # (switch_operators_calls.spl): real runtime
+                                        # discriminant tests + nested binds with
+                                        # fallthrough to the next arm. Pass through
+                                        # unchanged — do NOT flatten to a fresh
+                                        # binding (that erased the test and the
+                                        # binds; bug doc enum_payload_subpattern_
+                                        # always_matches_2026-08-01.md).
+                                        ()
+                                    case Literal(_):
+                                        # Same: MIR emits the payload-slot literal
+                                        # compare itself now.
+                                        ()
                                     case _:
                                         any_complex = true
                             if any_complex:
@@ -1569,6 +1583,16 @@ impl HirLowering:
                                         case Wildcard:
                                             new_patterns = new_patterns.push(pat)
                                         case Binding(_, _):
+                                            new_patterns = new_patterns.push(pat)
+                                        case Enum(_, _, _):
+                                            # Pass through UNCHANGED: MIR's
+                                            # emit_enum_payload_deep lowers the
+                                            # nested variant test + binds with
+                                            # real fallthrough-to-next-arm.
+                                            new_patterns = new_patterns.push(pat)
+                                        case Literal(_):
+                                            # Pass through UNCHANGED: MIR emits
+                                            # the payload-slot literal compare.
                                             new_patterns = new_patterns.push(pat)
                                         case _:
                                             val fresh = self.symbols.define("__mp_nested_flat", SymbolKind.Variable, nil, span, false, false, nil)
@@ -1602,7 +1626,7 @@ impl HirLowering:
                                                         prelude = prelude.push(sub_stmts2[si2])
                                                         si2 = si2 + 1
                                                 case _:
-                                                    self.error("nested match pattern kind not supported inside an enum payload here (only Tuple/Struct destructure, e.g. `Circle(Point(x, y))` or `Circle((a, b))`, are supported -- a nested Literal/Range/Or/Enum sub-pattern would need a runtime test with no fallthrough-to-next-arm semantics available) -- unsupported construct", pat.span)
+                                                    self.error("nested match pattern kind not supported inside an enum payload here (Tuple/Struct destructure is flattened here; nested Enum/Literal sub-patterns are lowered by MIR's emit_enum_payload_deep; a nested Range/Or sub-pattern remains unsupported) -- unsupported construct", pat.span)
                                 var new_body_stmts: [HirStmt] = []
                                 var pi = 0
                                 while pi < prelude.len():
