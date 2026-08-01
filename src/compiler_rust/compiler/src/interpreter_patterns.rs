@@ -228,6 +228,48 @@ pub(crate) fn pattern_matches(
             variant,
             payload,
         } => {
+            // Warn-only shape check (DEFAULT OFF), for
+            // doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+            //
+            // An `Option`/`Result` pattern tested against a value that is not an
+            // enum, not nil and not a class instance is a TYPE ERROR that the
+            // compiler currently accepts and then answers silently and
+            // differently per engine. Measured 2026-08-01 at 9349ff90f60:
+            // the interpreter falls through to the fallback arm, while the
+            // default (JIT) engine TAKES the `Some` arm and binds a corrupt
+            // value --- `i64 6` binds `<value:0x6>`, `[10,20,30].first()` binds
+            // a DENORMAL FLOAT (element bits reinterpreted as f64), `.get(1)`
+            // binds `<value:0x14>`, `bool` binds nil, `text` and array bind the
+            // whole receiver. Both exit 0 with no diagnostic.
+            //
+            // Checked on the VALUE, not on an inferred type, so it has no false
+            // positives: `Value::Enum` (any real enum, including Option/Result),
+            // `Value::Nil` (`None`) and `Value::Object` (positional class
+            // pattern, handled further down) are all excluded below.
+            //
+            // Default-off because promotion to a hard error must be staged: the
+            // tree carries ~2,746 Option-shaped and ~4,211 Result-shaped pattern
+            // sites across 620 owned files. Enable with
+            // SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1 to measure the true fallout
+            // before any promotion. Do NOT make this quieter --- the silence is
+            // the bug.
+            if matches!(variant.as_str(), "Some" | "None" | "Ok" | "Err")
+                && !matches!(
+                    value,
+                    Value::Enum { .. } | Value::Nil | Value::Object { .. }
+                )
+                && std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() == Ok("1")
+            {
+                eprintln!(
+                    "warning[option-pattern-shape]: `case {}(...)` tested against a \
+                     non-Option/non-Result value of runtime kind `{}`; this pattern can \
+                     never legitimately match and the compiler answers it silently \
+                     (the default engine binds a corrupt value)",
+                    variant,
+                    value.type_name()
+                );
+            }
+
             // Special case: Nil matches Option::None
             if matches!(value, Value::Nil)
                 && (enum_name == "Option" || enum_name == "_")

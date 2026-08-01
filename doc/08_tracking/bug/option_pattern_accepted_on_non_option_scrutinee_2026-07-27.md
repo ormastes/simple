@@ -293,3 +293,136 @@ accepting Option patterns on a non-Option scrutinee, not anything array-specific
 
 **Not a defect in `first`/`last`/`get`:** returning `T` is their defined
 contract. The defect is only that the Option pattern is accepted against them.
+
+## 2026-08-01 (lane OPTPAT): the hole is NOT array-shaped, and the JIT is not where anyone has been looking
+
+Base sha `9349ff90f60`. Driver built from that sha — the deployed `bin/simple`
+was built 14:48, **37 minutes before** the base commit (15:25), so it was used
+only for the baseline and never for verifying a change. Probes:
+`build/optpat/probe1.spl`, `probe2.spl`.
+
+### 1. Blast radius is EVERY type, not just the accessors (PROVED)
+
+The section above establishes array accessors as *a* trigger surface. They are
+not the boundary. Under the default engine an `Option` pattern is taken against
+a scrutinee of **any** type, and each type produces its own wrong binding:
+
+| scrutinee | default engine (JIT) | `SIMPLE_EXECUTION_MODE=interpreter` |
+|---|---|---|
+| `val n: i64 = 6` | `Some` taken, binds **`<value:0x6>`** | takes `_` |
+| `val t = "abc"` | `Some` taken, binds **the whole text** `abc` | takes `_` |
+| `val b = true` | `Some` taken, binds **`nil`** | takes `_` |
+| `val xs = [1,2]` | `Some` taken, binds **the whole array** | takes `_` |
+| `if val Some(k) = n` (`n=6`) | branch taken, `k=<value:0x6>` | not taken |
+
+So no grep over container accessors — or over any API surface — bounds this
+defect. Only a type check does. Text accessors behave identically
+(`s.index_of("l")` binds `0.0` under a pattern but returns `2` directly;
+`s.last_index_of("/")` binds `<value:0x5>` but returns `5` directly).
+
+### 2. Correction: the interpreter DOES take an explicit `_` arm
+
+This doc's opening table says the interpreter "matches neither arm — not even
+the `_` wildcard", and the section above reports "no arm taken, no output".
+Re-measured with an explicit `case _` present, the interpreter **takes it**
+every time (all 5 rows above). The earlier probes used `case None` as the
+fallback, which correctly does not match. The "wildcard is not unconditional"
+second defect therefore **does not reproduce** at this sha; next-step item 3
+below should be treated as closed unless re-demonstrated.
+
+### 3. Two different corruption shapes inside the same family (PROVED)
+
+On `xs = [10, 20, 30]`, matched as `case Some(v)` under the default engine:
+
+| accessor | bound value | direct call |
+|---|---|---|
+| `.first()` | **denormal float** (element i64 bits read as f64) | `10` correct |
+| `.min()` | **denormal float** | `10` correct |
+| `.last()` | **`<value:0x1e>`** tag box | `30` correct |
+| `.get(1)` | **`<value:0x14>`** tag box | `20` correct |
+| `.max()` | **`<value:0x1e>`** tag box | `30` correct |
+| `.at(0)` | **`10` — CORRECT** | — |
+
+The section above records `last` as denormal; at this sha it is a tag box. The
+manifestation is not stable per-accessor, which is another reason not to
+fingerprint this bug by its symptom. All five return the **correct** value when
+called directly — only the pattern corrupts.
+
+### 4. Value-3 control (the nil sentinel IS 3)
+
+- `val three: i64 = 3` → falls to `_` on **both** engines: `rt_is_some` means
+  only "not the nil sentinel", so a genuine 3 reads as absent.
+- `[3,7].first()` as `Some(v)` → falls to `_` (same collision).
+- `[3,7].at(0)` → **`Some(3)`, correct** — a real Option that silent-nil cannot
+  produce. This is the control that separates "`at` is genuinely `T?`" from
+  "everything else is not".
+
+### 5. Retyping the five to `T?` (option (b)) is rejected ON EVIDENCE
+
+Not on the strength of the in-tree comment — that comment
+(`hir/lower/expr/mod.rs:1281`, "Returns element type (or Option<element>)") is
+an unresolved hedge, not a stated decision, so it was verified rather than
+trusted. The **runtime ABI** settles it: `rt_array_first` / `rt_array_last` /
+`rt_array_get` are declared `int64_t rt_array_*(SplArray*, ...)`
+(`src/runtime/runtime.h:378-380`) and return the raw element word
+(`runtime_native.c:4600-4617`). `rt_array_at` is a **separate** Option producer
+that `runtime_native.c:5245-5265` documents as *deliberately* not built on
+`rt_array_get`, precisely because `rt_array_get` reports a miss as the raw nil
+sentinel 3. Bare `T` is correct for the five; retyping them would need a runtime
+ABI change plus every direct call site, and would still not touch the `text`,
+`bool` or array scrutinees in §1.
+
+### 6. The cited static locus is NOT on the path that produces the symptom (PROVED)
+
+- `hir/lower/expr/control.rs:566-603` (`lower_pattern_condition`,
+  `Pattern::Enum`) routes `Some`/`None` to `rt_is_some`/`rt_is_none` whenever
+  `!subject_enum_owns_variant` — i.e. for any non-enum scrutinee. This is a real
+  static hole, but an **unconditional debug print inserted into that arm emitted
+  zero output** for a probe that triggers the defect 8 times.
+- `simple compile` and `simple compile --backend=llvm` never reach it either:
+  both **fail closed** first with
+  `cannot compile to standalone SMF: main: [PatternMatch]`. The **native half of
+  this defect is unmeasurable, not merely unmeasured.**
+- `interpreter_patterns.rs` (`Pattern::Enum` arm) is the live decision point for
+  the interpreter: a non-`Value::Enum` value falls through to `Ok(false)`, which
+  is the `_`-arm behaviour in §2.
+
+### 7. There is a THIRD match implementation, and it is the default engine
+
+A default-off diagnostic added to `interpreter_patterns.rs` fires **8/8** on the
+interpreter for `probe1.spl` and **0/8** on the default engine for the identical
+program. So the JIT — the default for a bare `simple foo.spl`, and the half that
+binds garbage rather than falling through — uses neither `hir/lower` nor
+`interpreter_patterns`. **Locating that third implementation is the next step**;
+until it is found, no instrument and no fix covers the engine that actually
+produces the wrong values.
+
+### 8. Instrument landed — warn-only, DEFAULT OFF
+
+`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1` makes `interpreter_patterns.rs` report an
+`Option`/`Result` pattern tested against a non-enum, non-nil, non-object value.
+It discriminates on the **runtime value**, not an inferred type, so it has no
+false positives by construction: on `probe1.spl` it flagged exactly the 8 bad
+sites and neither of the 2 correct `.at()` sites.
+
+**Dynamic fallout, measured before landing:** a 1-in-180 sample of the spec
+tree (**104** specs, every 180th of 18,704; 68 rc=0, 28 rc=1, 8 timed out at
+12s) run under the interpreter with the gate ON emitted **0** warnings. So
+turning the gate on costs nothing on the sampled workload. This bounds the
+*runtime* fallout on the interpreter path only; it does **not** bound the static
+fallout of a compile-time reject, which is why no promotion is proposed here.
+
+Deliberately **not** promoted to an error. Measured fallout surface in owned
+`src/**` (excluding `build/` and `.claude/`): **2,746** Option-shaped pattern
+sites (`case Some(` 1,740 + `if val Some(` 997 + `while val Some(` 9) and
+**4,211** Result-shaped sites, across **620** files. Promoting now would be
+staged on the wrong half anyway, since the instrument cannot see the JIT (§7).
+
+### Next step (supersedes the list above)
+
+1. **Find the third match implementation** used by the default engine (§7) and
+   instrument it. Everything else is blocked on this.
+2. Then re-measure fallout with both engines instrumented, and only then decide
+   warn→error promotion.
+3. Item 3 of the old list ("fix the interpreter's wildcard arm") appears closed —
+   see §2.
