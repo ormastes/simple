@@ -106,3 +106,162 @@ naive ASCII probe can be quadratic itself.
   O(index). Both need the amortization above.
 - Measure before and after on BOTH lanes; they have different
   implementations and behaved differently in this baseline.
+
+---
+
+# Static re-audit 2026-08-01 (read-only; no timing — box under ENOSPC + high load)
+
+All complexity below is established by READING the four implementations, not
+by measurement. Four lanes exist, not two, and they disagree on both cost and
+**semantics**.
+
+## (a) The O(i) claim, confirmed per lane
+
+| Lane | File:line | ASCII cost | non-ASCII cost |
+|---|---|---|---|
+| Rust seed interpreter | `src/compiler_rust/compiler/src/interpreter_method/string.rs:386-408` | O(1) amortized (memo hit) / O(n) on memo miss | **O(index)** — `s.chars().nth(idx)` at :404 walks from byte 0 |
+| Hosted C runtime | `src/runtime/runtime_native.c:2303-2357` | O(1) after header flag set at :2329 | **O(index)** — decode walk :2338-2355 from `byte_index = 0` |
+| Freestanding `core_string` | `src/runtime/simple_core/core_string.spl:282-323` | **O(index)** — probe :299-301 | **O(index)** — walk :304-322 from byte 0 |
+| Pure-Simple interpreter | `src/compiler/10.frontend/core/interpreter/eval_methods.spl:329-341` | O(1) + 1 alloc/call | **WRONG ANSWER** — see (f) |
+
+What makes it linear: the fallback is a from-scratch UTF-8 decode loop that
+increments `byte_index` by the decoded `width` and `char_index` by 1 until
+`char_index == index`. Nothing is carried between calls, so an
+`i = 0..n` scan re-walks the prefix every iteration → O(n²).
+
+**Bonus defect found while reading:** `len()` is BYTE length on every lane
+(`string.rs:21`, `runtime_native.c:2126-2130`). So the canonical shape
+`while i < s.len(): s.char_code_at(i)` bounds a CHARACTER index with a BYTE
+count. On non-ASCII input the loop over-runs the codepoint count and the tail
+iterations return 0 (the out-of-range convention) — these scans are already
+subtly **wrong**, not merely slow. This is documented in-tree at
+`simple_web_html_layout_renderer_foundation.spl:317-327`.
+
+## (b) Call sites
+
+Counts by grep over `src/` (`.spl`, invocation form `.char_code_at(`,
+comment lines excluded):
+
+- **360 invocations across 164 files** (plus 118 in `test/`).
+- **120 of those sit inside a `while … .len()` loop** — i.e. 120 quadratic
+  scan sites. Top files: `font_cldr_rank.spl` (12),
+  `browser_engine/security/origin_policy.spl` (9),
+  `simple_web_html_layout_renderer.spl` (4), `office/sheets/formula.spl` (4).
+- The compiler's own lexer is **NOT** affected: it materializes
+  `source.chars()` once (`src/compiler/10.frontend/core/lexer_struct.spl:167`).
+  That is why the 0.03s lexer baseline above is stable and is *not* evidence
+  the defect is contained.
+
+**Worst offender by INPUT SIZE (not call count):**
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:86-96`,
+`_simple_web_html_source_admitted` — `while i < html.len(): html.char_code_at(i)`
+over an entire HTML payload capped at
+`BROWSER_RENDERER_MAX_PAYLOAD_BYTES = 1048576` (1 MiB,
+`src/lib/common/web/browser_renderer_protocol.spl:34`). On non-ASCII HTML —
+i.e. essentially any real web page — that is ~5.5e11 byte-steps. It is an
+**admission/DoS guard on attacker-controlled input that is itself the DoS
+amplifier**. Runner-up by input size: `font_renderer.spl:1436/1457/1482/1506`
+(`measure_text_width` etc.) — scans user-visible rendered text, i.e. the input
+most likely to be non-ASCII, which is exactly the branch with no fast path.
+
+## (c) Does a correct O(1) form exist today?
+
+Yes, two, and neither is a drop-in:
+
+1. **`byte_at`** — O(1) direct buffer read on all four lanes
+   (`string.rs:409-423`, `runtime_native.c:2363+`, `core_string.spl:337`,
+   `eval_methods.spl:359-365`). But it is **BYTE**-indexed. The in-tree
+   comments at all four sites explicitly warn the two disagree
+   (`"café,".byte_at(3) == 195` lead byte vs `char_code_at(3) == 233`).
+2. **`.chars()`** — one O(n) materialization, then O(1) per element. Used by
+   the lexer. Callers avoid it because it allocates N text values, which is
+   unacceptable for a 1 MiB payload and pointless for an early-exit scan.
+
+Why callers use neither: `for ch in <text>` is **broken** (corrupted loop
+bindings — `for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md`),
+and at least 12 call sites carry a comment saying they were forced into
+`char_code_at` indexing *because* of that bug. Fixing the for-loop is a
+prerequisite that keeps getting worked around instead.
+
+## (d) The ASCII probe — two different things, one helps and one is the problem
+
+- **Helps:** `first_non_ascii` (`interpreter_method/mod.rs:22-35`) and
+  `rt_str_first_non_ascii` (`runtime_native.c:~2265`) are word-at-a-time
+  (`w & 0x8080808080808080`), and the *result is cached* — C in the string
+  header bit `SIMD_CACHE_FLAG_IS_ASCII` (:2329), Rust in a 4-slot thread-local
+  `Arc`-identity memo (`mod.rs:47-73`). That is what makes the ASCII column
+  flat in the original measurement.
+- **Is the problem:** `core_string.spl:299-301` walks byte-by-byte from 0 to
+  `index` with **no word-at-a-time and no caching**. The file's own comment
+  (:276-281) admits it stays O(index) because the header bit "lands on the
+  sign bit … and is awkward to set safely from Simple". So on the freestanding
+  lane even pure-ASCII scans are quadratic. It is still strictly cheaper than
+  the decode walk (byte compare vs full decode), so it is a constant-factor
+  win, not a regression — do not revert it.
+- **Fragility in the Rust memo:** 4 slots, round-robin. A scan interleaving
+  >4 live strings thrashes; on a miss `char_code_at` pays `first_non_ascii`
+  **twice** (`string.rs:397` then `:400`), i.e. O(n) per call → ASCII goes
+  quadratic again. Not exercised by the original 2-string benchmark.
+
+## (e) Proposed change — NOT applied
+
+1. **Resume cursor, all three runtime lanes.** Cache
+   `(last_char_index, last_byte_offset)` next to the ASCII flag; when the
+   requested index >= `last_char_index`, resume the decode walk from
+   `last_byte_offset` instead of byte 0. Sequential scans → O(1) amortized;
+   random access degrades to today's O(index), never worse. This is pure
+   memoization of a pure function on immutable strings.
+2. **`core_string`: ride the new field.** Land the cursor in a *new* header
+   word so the ASCII flag can live there too, dodging the sign-bit/`reserved`
+   hazard called out at `runtime_native.c:2299-2302` and
+   `core_string.spl:276-281`. Also make the probe word-at-a-time (~8x).
+3. **Fix the pure-Simple interpreter lane** — see (f), this is a correctness
+   fix, not a perf fix.
+4. **Explicitly rejected:** bulk-migrating callers to `byte_at`. That silently
+   converts a character-indexed API into a byte-indexed one. It is valid ONLY
+   where the caller compares against an ASCII codepoint (<128) and treats the
+   index as a byte offset throughout — because no UTF-8 continuation or lead
+   byte is ever < 0x80, an ASCII-literal comparison cannot false-positive
+   inside a multi-byte sequence. `_simple_web_html_source_admitted` (counting
+   `<` == 60) meets that bar exactly and is the single highest-value caller
+   fix. The same team already did this migration deliberately elsewhere in
+   that file (:356-390) — follow that precedent, do not generalise it.
+
+**What the proposal does at a multi-byte codepoint (explicit):** the resume
+cursor is advanced only by the decoder's own `width`, so it always points at a
+codepoint **boundary**; resuming from it decodes exactly the codepoint a
+from-zero walk would return. `char_code_at(i)` keeps returning the i-th
+CODEPOINT, e.g. 233 for `"café,".char_code_at(3)`, never 195. No byte index is
+ever exposed. The proposal adds **no** new byte-slicing, so the
+byte-transparent-slice behaviour (`8151c391932`) is not relied on anywhere.
+The one place bytes are read directly is the ASCII fast path, which by
+construction has already proven every byte up to `index` is < 0x80.
+
+## (f) NEW correctness defect — pure-Simple interpreter `char_code_at` is byte-indexed
+
+`src/compiler/10.frontend/core/interpreter/eval_methods.spl:334-336`:
+
+```
+if idx >= 0 and idx < s.len():
+    val ch = s[idx:idx + 1]
+    return val_make_int(ch.char_code_at(0))
+```
+
+`s[idx:idx+1]` is **BYTE**-addressed — confirmed by the file's own comment at
+:346-349 and by `8151c391932` ("byte-transparent text slices"). It slices one
+byte out of a multi-byte codepoint and decodes that fragment as UTF-8, so this
+lane returns garbage/0 where the seed and both compiled lanes return the
+codepoint. This is the exact trap the byte-vs-char constraint warns about, and
+it is already in the tree. Fix: route to `rt_string_char_code_at` — the same
+extern `byte_at` already uses one branch below at :364 — which also removes a
+per-call string allocation. **Untested here** (no builds permitted under
+ENOSPC); flagged for verification before any fix lands.
+
+## Verification status of this section
+
+Read-only. Every claim above is a file:line citation, not a measurement. The
+original timing tables higher in this document are unchanged and were NOT
+re-run. Items needing a run once the box is healthy: (i) the >4-string memo
+thrash in (d); (ii) the pure-Simple interpreter divergence in (f), which needs
+a spec with a multi-byte codepoint — note that `simple test` silently
+delegates to the Rust seed child, so a green run there would NOT cover lane 4.
