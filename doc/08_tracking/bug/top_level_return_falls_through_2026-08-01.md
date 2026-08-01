@@ -1,7 +1,9 @@
 # A statement-level `return` does not terminate the function (compiled lanes)
 
 - **Date:** 2026-08-01
-- **Status:** OPEN — root cause LOCATED (below); one downstream manifestation fixed
+- **Status:** **FIXED in the Rust seed** by `3487c07ce41` (verified RED -> GREEN
+  on real native ELF binaries). The mirrored **pure-Simple** site in
+  `src/compiler/50.mir/` is still **OPEN**. See "Fix landed" below.
 - **Severity:** critical (silently changes control flow and return values)
 - **Engines affected:** the **compiled** lanes (JIT and native codegen), in both
   the Rust seed and the pure-Simple compiler. The **tree-walking interpreter is
@@ -14,6 +16,58 @@
 > interpreter. Run through the interpreter (`simple_seed test`) the same
 > assertions **pass 7/7** — see `test/01_unit/compiler/return_terminates_spec.spl`,
 > added with this entry. Always name the lane you measured.
+
+## Fix landed (Rust seed) — `3487c07ce41`
+
+Root cause is as located below. The fix adds `start_unreachable_block()` to
+`src/compiler_rust/compiler/src/mir/lower/lowering_core.rs` and calls it after
+the terminator write in **all three** of `HirStmt::Return`, `HirStmt::Break`
+and `HirStmt::Continue` in `lowering_stmt.rs`. The new block is unreachable by
+construction, so it costs nothing when no statements follow.
+
+### The defect has three members, not one
+
+`break` and `continue` write their `Jump` terminator the same way and were
+equally broken. `continue` is the **most severe of the three**, because the
+dead statements mutate a live variable that is read after the loop:
+
+```
+fn cont() -> i64:
+    var n = 0
+    for v in [1,2,3]:
+        continue
+        n = n + 100
+    n
+```
+
+Pre-fix this returned **300**; post-fix it returns **0**.
+
+### Verification (PROVED, native lane)
+
+Two release compilers built from the same tree differing only by this change;
+fixtures compiled to real stripped PIE ELFs with `compile --native` and run:
+
+| case | pre-fix | post-fix |
+|---|---|---|
+| two returns in a block | **3** | **1** |
+| dead code after `return` | ran | silent |
+| dead code after `break` | ran | silent |
+| dead code after `continue` | **300** | **0** |
+
+No-regression controls, byte-identical pre and post: early return out of an
+`if`, early return out of a `for`, nested `if`-in-`if` return, guarded
+fallthrough returns.
+
+### The spec here is non-gating — PROVED, not inferred
+
+`test/01_unit/compiler/return_terminates_spec.spl` passes **7/7 on the
+interpreter using the OLD, UNFIXED seed**. This file already said the
+interpreter is correct; measuring it confirms the consequence: **the spec
+cannot fail on the lane `simple test` runs**, so it is a statement of the
+contract, not a detector of this defect. `break`/`continue` cases were
+deliberately NOT added to it for that reason — they would be equally vacuous.
+The real gate is the native lane above. Anything that wants to catch a
+regression here must compile and run, not `simple test`.
 
 ## Symptom
 

@@ -1,5 +1,13 @@
 # `return` does not terminate its block: dead code after a `return` still executes and a later `return` overwrites the value
 
+> **This file duplicates an earlier, canonical entry.** The same defect was
+> already diagnosed in
+> [`top_level_return_falls_through_2026-08-01.md`](top_level_return_falls_through_2026-08-01.md),
+> which is what `test/01_unit/compiler/return_terminates_spec.spl` references.
+> **Read that one first** — status, the landed fix, the `break`/`continue`
+> family and the spec-vacuity finding are all recorded there. This entry is
+> kept only for the native-lane evidence table below.
+
 - **Date:** 2026-08-01
 - **Area:** MIR lowering of `HirStmt::Return` / `lower_return_expr`
   - Rust seed: `src/compiler_rust/compiler/src/mir/lower/lowering_stmt.rs:857-896`
@@ -156,11 +164,26 @@ Recorded so the next lane does not re-derive from a bad map:
 
 - `current_block_has_explicit_terminator()` is **not** unused. It has ~20
   live callers across `50.mir/`.
-- There is **no** landed regression spec at
-  `test/01_unit/compiler/return_terminates_spec.spl`, and commit
-  `edbea20a41c` is an unrelated LLVM TBAA-metadata change.
 - `mir_data.spl` is at `src/compiler/50.mir/mir_data.spl`, not under
   `_MirLoweringExpr/`.
+
+### RETRACTED — a correction of my own that was wrong
+
+An earlier revision of this file claimed there was **no** spec at
+`test/01_unit/compiler/return_terminates_spec.spl` and that `edbea20a41c`
+was "an unrelated LLVM TBAA change". **Both claims were false.** The spec
+exists (98 lines, added by that very commit), and `edbea20a41c` is TBAA
+work **plus** return-termination work — it also landed
+`top_level_return_falls_through_2026-08-01.md`.
+
+Two mistakes produced this, both worth avoiding:
+
+1. I checked the **filesystem** (`find`) instead of **git**. This clone is
+   sparse-checked-out, so the file is absent from disk while present in
+   the tree — the known "git diff LIES when the index is sparse" trap.
+   Existence questions must be answered with `git cat-file -e <rev>:<path>`.
+2. I judged the commit by its **subject line** alone instead of reading its
+   diffstat. The subject named only the TBAA half.
 - The bug is **not** a reachable-code miscompile. Every reachable-return
   case measured correct; only the dead region after a `return` is wrong.
 
