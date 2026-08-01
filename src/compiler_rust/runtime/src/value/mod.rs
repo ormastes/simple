@@ -157,7 +157,10 @@ pub use collections::{
     rt_typed_words_u64_store_known_data_at, rt_typed_words_u64_unchecked,
 };
 pub(crate) use collections::{byte_array_bytes, byte_array_write};
-pub use collections::{rt_any_add, rt_array_all, rt_array_any, rt_array_filter, rt_array_find};
+pub use collections::{
+    rt_any_add, rt_array_all, rt_array_any, rt_array_each, rt_array_filter, rt_array_find, rt_array_map,
+    rt_array_reduce,
+};
 pub use utf8_kernels::{
     rt_rank_query, rt_rank_select_build, rt_rank_select_free, rt_select_query, rt_swi_build, rt_swi_byte_to_char,
     rt_swi_char_to_byte, rt_swi_free, rt_text_count_codepoints, rt_utf8_count_codepoints, rt_utf8_find_invalid,

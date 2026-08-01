@@ -384,6 +384,11 @@ int8_t   rt_array_push(SplArray* array, int64_t value);
 int8_t   rt_array_clear(SplArray* array);
 int8_t   rt_array_push_i64_raw(SplArray* array, int64_t value);
 int64_t  rt_array_get_i64_raw(SplArray* array, int64_t index);
+/* Closure-invoking collection ops. rt_array_reduce takes `init` BEFORE the
+ * closure, matching the interpreter's `reduce(init, func)`. */
+int64_t  rt_array_map(SplArray* array, int64_t closure);
+int64_t  rt_array_each(SplArray* array, int64_t closure);
+int64_t  rt_array_reduce(SplArray* array, int64_t init, int64_t closure);
 SplArray* rt_array_concat(SplArray* a, SplArray* b);
 SplArray* rt_array_copy(SplArray* a);
 SplArray* rt_array_repeat(int64_t value, int64_t count);

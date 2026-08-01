@@ -5926,6 +5926,73 @@ int64_t rt_closure_func_ptr(int64_t closure_value) {
     return closure ? closure->func_ptr : 0;
 }
 
+/* Array collection ops that invoke a closure per element.
+ *
+ * The LLVM backend maps `("Array"|"array", "map"|"each"|"for_each"|
+ * "reduce"|"fold")` to rt_array_map / rt_array_each / rt_array_reduce
+ * (codegen/llvm/functions.rs) and emits `receiver + args` verbatim, so the
+ * call shapes are exactly the ones below. Before these existed, `arr.map(f)`
+ * under the LLVM backend failed at LINK time with `undefined reference to
+ * 'rt_array_map'` -- neither the Rust runtime archive nor this one defined
+ * the symbol.
+ *
+ * Closure ABI: identical to the Rust runtime's rt_array_filter/rt_array_find
+ * and to what MIR lowering emits for a general indirect call
+ * (50.mir/_MirLoweringExpr/switch_operators_calls.spl): the lifted target
+ * takes the closure handle first so it can reach its captures, then the
+ * element(s). A zero func_ptr means the value is not a registered closure;
+ * these bail rather than calling through an unvalidated address.
+ *
+ * Iteration is by INDEX, re-reading the length each step: the closure is
+ * arbitrary user code and may push to or clear the receiver, which would
+ * invalidate a data pointer cached up front. rt_array_get re-reads the header
+ * and honours the BYTES flag.
+ */
+typedef int64_t (*RtArrayElemFn)(int64_t, int64_t);
+typedef int64_t (*RtArrayFoldFn)(int64_t, int64_t, int64_t);
+
+int64_t rt_array_map(SplArray* array, int64_t closure_value) {
+    SplArray* result = rt_array_new(rt_array_len(array));
+    if (!result) return rt_core_nil();
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return (int64_t)(uintptr_t)result;
+    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        rt_array_push(result, func(closure_value, rt_array_get(array, i)));
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+/* Returns the RECEIVER so `arr.each(f)` is chainable and never yields nil --
+ * the call site is typed as returning i64 unconditionally, so a nil there
+ * would be indistinguishable from failure. */
+int64_t rt_array_each(SplArray* array, int64_t closure_value) {
+    int64_t receiver = (int64_t)(uintptr_t)array;
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return receiver;
+    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        func(closure_value, rt_array_get(array, i));
+    }
+    return receiver;
+}
+
+/* Left fold. `init` comes FIRST, matching the interpreter's `reduce(init,
+ * func)` (interpreter_method/collections.rs) which invokes the function as
+ * `(acc, item)` (interpreter_helpers/collections.rs). Reversing either order
+ * would be a silently wrong answer for any non-commutative combiner, so both
+ * are pinned to the interpreter rather than guessed. */
+int64_t rt_array_reduce(SplArray* array, int64_t init, int64_t closure_value) {
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return init;
+    RtArrayFoldFn func = (RtArrayFoldFn)(uintptr_t)func_ptr;
+    int64_t acc = init;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        acc = func(closure_value, acc, rt_array_get(array, i));
+    }
+    return acc;
+}
+
 static int64_t rt_bdd_passed = 0;
 static int64_t rt_bdd_failed = 0;
 static int rt_bdd_current_failed = 0;

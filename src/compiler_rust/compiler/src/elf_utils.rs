@@ -490,6 +490,9 @@ pub(crate) fn resolve_runtime_symbol(name: &str) -> Option<usize> {
         "rt_array_any" => simple_runtime::rt_array_any as *const () as usize,
         "rt_array_filter" => simple_runtime::rt_array_filter as *const () as usize,
         "rt_array_find" => simple_runtime::rt_array_find as *const () as usize,
+        "rt_array_map" => simple_runtime::rt_array_map as *const () as usize,
+        "rt_array_each" => simple_runtime::rt_array_each as *const () as usize,
+        "rt_array_reduce" => simple_runtime::rt_array_reduce as *const () as usize,
         "rt_array_extend_i64" => value::rt_array_extend_i64 as *const () as usize,
         "rt_len" => value::rt_len as *const () as usize,
 

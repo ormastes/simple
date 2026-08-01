@@ -251,6 +251,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_last", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_filter", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_find", &[I64, I64], &[I64]),
+    // rt_array_map(array, closure) -> array; rt_array_each(array, closure) -> receiver.
+    RuntimeFuncSpec::new("rt_array_map", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_each", &[I64, I64], &[I64]),
+    // rt_array_reduce(array, init, closure): `init` FIRST, matching the
+    // interpreter's `reduce(init, func)` argument order.
+    RuntimeFuncSpec::new("rt_array_reduce", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_reverse", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_sort", &[I64], &[I8]),
     // Bug seed_array_local_alias_cow_bypass_2026-07-17: private shallow copy

@@ -4083,6 +4083,105 @@ pub extern "C" fn rt_array_find(array: RuntimeValue, closure: RuntimeValue) -> R
     RuntimeValue::NIL
 }
 
+/// Apply `closure` to every element and return a NEW array of the results.
+///
+/// Codegen contract: the LLVM backend maps `("Array"|"array", "map")` to this
+/// symbol (`codegen/llvm/functions.rs`) and emits `receiver + args` verbatim, so
+/// the call shape is exactly `rt_array_map(array, closure)`. Before this
+/// existed, any `arr.map(f)` compiled under the LLVM backend failed at LINK time
+/// with `undefined reference to 'rt_array_map'`.
+///
+/// Closure ABI matches `rt_array_filter` / `rt_array_find` / `rt_option_map`:
+/// the lifted target takes the closure handle as its first argument so it can
+/// reach its captures, then the element.
+///
+/// Iteration is by INDEX rather than over a borrowed slice: the closure is
+/// arbitrary user code and may push to or clear the receiver, which would
+/// invalidate a slice taken once up front. `rt_array_get` re-reads the header
+/// each call and returns NIL past the end, so a shrinking receiver terminates
+/// instead of reading freed memory.
+#[no_mangle]
+pub extern "C" fn rt_array_map(array: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
+    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let result = rt_array_new(0);
+    if result.is_nil() {
+        return result;
+    }
+
+    let func_ptr = rt_closure_func_ptr(closure);
+    if func_ptr.is_null() {
+        return result;
+    }
+
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
+    let mut i: i64 = 0;
+    while i < rt_array_len(array) {
+        let item = rt_array_get(array, i);
+        rt_array_push(result, func(closure, item));
+        i += 1;
+    }
+    result
+}
+
+/// Apply `closure` to every element for its side effects and return the
+/// RECEIVER, so `arr.each(f)` is chainable and never yields nil.
+///
+/// Codegen contract: the LLVM backend maps both `each` and `for_each` to this
+/// symbol and emits `rt_array_each(array, closure)`. The call site is typed as
+/// returning i64 unconditionally, which is why the receiver is returned rather
+/// than a unit/nil value — a nil there would be indistinguishable from failure.
+#[no_mangle]
+pub extern "C" fn rt_array_each(array: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
+    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, RuntimeValue::NIL);
+    let func_ptr = rt_closure_func_ptr(closure);
+    if func_ptr.is_null() {
+        return array;
+    }
+
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
+    let mut i: i64 = 0;
+    while i < rt_array_len(array) {
+        let item = rt_array_get(array, i);
+        func(closure, item);
+        i += 1;
+    }
+    array
+}
+
+/// Left fold: seed the accumulator with `init` and combine each element with
+/// `closure(acc, item)`.
+///
+/// Codegen contract: the LLVM backend maps both `reduce` and `fold` to this
+/// symbol and emits `receiver + args` verbatim, so the call shape is
+/// `rt_array_reduce(array, init, closure)` — matching the interpreter, where
+/// `reduce`/`fold` take `(init, func)` in that order
+/// (`interpreter_method/collections.rs`) and invoke the function as
+/// `(acc, item)` (`interpreter_helpers/collections.rs`). Getting that order
+/// wrong would be a silently wrong answer for any non-commutative combiner, so
+/// it is pinned to the interpreter rather than guessed.
+///
+/// The lifted closure target therefore has THREE parameters: the closure handle
+/// (for captures), the accumulator, and the element.
+#[no_mangle]
+pub extern "C" fn rt_array_reduce(array: RuntimeValue, init: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
+    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, init);
+    let func_ptr = rt_closure_func_ptr(closure);
+    if func_ptr.is_null() {
+        return init;
+    }
+
+    let func: extern "C" fn(RuntimeValue, RuntimeValue, RuntimeValue) -> RuntimeValue =
+        unsafe { std::mem::transmute(func_ptr) };
+    let mut acc = init;
+    let mut i: i64 = 0;
+    while i < rt_array_len(array) {
+        let item = rt_array_get(array, i);
+        acc = func(closure, acc, item);
+        i += 1;
+    }
+    acc
+}
+
 /// Find the index of a value in an array
 /// Returns -1 if not found
 #[no_mangle]

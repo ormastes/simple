@@ -179,6 +179,100 @@ on such a module was measuring the interpreter.
   `Unexpected token: expected Indent, found Parallel`. Found incidentally while
   writing the probes; unrelated to `in`.
 
+## Follow-up: `rt_array_map` / `rt_array_each` / `rt_array_reduce` — FIXED
+
+The sibling this fix's family predicted (see the `rt_box_float` bullet above)
+turned out to have a larger relative: **three array collection ops the LLVM
+backend emits existed in NEITHER runtime**, so `arr.map(f)`, `arr.each(f)` /
+`arr.for_each(f)` and `arr.reduce(init, f)` / `arr.fold(init, f)` all failed at
+LINK time under the LLVM backend.
+
+**Emitter-operand check FIRST (the gate that decides whether a symbol may be
+implemented at all).** A missing symbol must stay a loud link error whenever its
+emitter discards its own operands — implementing it would trade a loud failure
+for a silently wrong answer. Both LLVM emitter sites
+(`codegen/llvm/functions.rs`) build the arg list as `receiver + args` verbatim
+via `get_vreg` + `coerce_value_to_type`, dropping nothing:
+
+| symbol | emitted call | operands faithful? | verdict |
+|---|---|---|---|
+| `rt_array_map` | `(array, closure)` | yes | implement |
+| `rt_array_each` | `(array, closure)` | yes | implement |
+| `rt_array_reduce` | `(array, init, closure)` | yes | implement |
+| `rt_par_map` / `rt_par_filter` / `rt_par_for_each` | emitter passes 2, spec declares 4 (`input_len` and `backend` dropped) | **NO** | leave loud |
+| `rt_par_reduce` | emitter passes 3, spec declares 5 | **NO** | leave loud |
+
+**Family enumeration (PROVED).** Every `rt_*` string in
+`compiler/src/codegen/**` diffed against the union of symbols defined in both
+runtime sources: on the array-collection-op axis exactly three names had no
+definition anywhere. `rt_index_of` and `rt_string_lines` showed as missing only
+against a *stale* archive and do exist in source — a reminder that archive-only
+absence must be confirmed against source. Everything else on that missing list
+is the latent-placeholder set (`rt_enum_unit`, `rt_pattern_test`,
+`rt_future_create`, …) whose emitters discard operands, plus the `rt_par_*` set
+above. None of those were implemented, deliberately.
+
+**Argument order is pinned to the interpreter, not guessed.** `reduce`/`fold`
+take `(init, func)` (`interpreter_method/collections.rs`) and invoke the
+function as `(acc, item)` (`interpreter_helpers/collections.rs`), so the
+runtime signature is `rt_array_reduce(array, init, closure)` with a
+three-parameter lifted target `func(closure, acc, item)`. Both are verified with
+a **non-commutative** fold (`acc*10 + item`), which a transposed order would
+answer differently.
+
+### Link-level evidence (codegen proves nothing; only the linker does)
+
+Absence was established against **built archives**, not source: `nm
+--defined-only` over both (1,637 exported `rt_*` in the Rust archive, 790 in the
+C one), with a true-positive control of nine known-real symbols to prove the
+scan works. All three targets: absent from both.
+
+Discrimination was RED-before-GREEN by sabotaging the **implementation** — the
+probe was linked against the runtime object built from the *base* sources, not
+against a shim or a stubbed test:
+
+| runtime | link vs BASE impl | link vs NEW impl |
+|---|---|---|
+| C (`runtime_native.c`) | rc=1, `undefined reference to 'rt_array_map' / '…each' / '…reduce'`, **no artifact** | rc=0 |
+| Rust (`libsimple_runtime.a`) | rc=1, same three undefined, **no artifact** | rc=0 |
+
+Positive artifact check on both GREEN builds: `file` reports an ELF 64-bit
+executable; `nm` resolves all three at real addresses (C static: `T rt_array_map
+@ 0x40241e`, `rt_array_each @ 0x4024a2`, `rt_array_reduce @ 0x402500`); and the
+binaries were **run**. Both runtimes produced byte-identical output —
+`map len=3 [10,20,30]`, receiver unmutated, `each side_sum=6` returning the
+receiver, `reduce init=7 -> 7123`, and the empty-array and non-closure edges
+returning the seed rather than crashing or lying.
+
+`nm -u` was not used as evidence anywhere: it is blind to weak zero-size
+definitions, and "no undefined symbols" is not proof.
+
+### Residuals recorded, not silently resolved
+
+- **`rt_array_any` / `rt_array_all` have an arity divergence.** The interpreter
+  takes a predicate (`any(f)`), but the Rust runtime is
+  `rt_array_any(array) -> i64` with no closure parameter, while the LLVM emitter
+  passes `(array, closure)`. One extra argument is ignored and the predicate is
+  never applied. Not touched here — it is a wrong-answer bug in its own right,
+  not a missing symbol.
+- **The C runtime has no `filter`/`find`/`any`/`all` at all.** Only the Rust
+  runtime defines them, so the two runtimes are not at parity on this axis even
+  after this change.
+- **Cranelift routes `.map()` to `rt_option_map`** (`instr/closures_structs.rs`)
+  with a comment claiming it "also works for arrays". It does not:
+  `rt_option_map` calls `rt_enum_payload` on its receiver, so an array receiver
+  is treated as an enum. That is a silent wrong answer on the Cranelift path and
+  is left filed rather than changed under a link-fix lane.
+- **`codegen/runtime_sffi.rs` has a pre-existing duplicate spec** for
+  `rt_dir_exists` (two byte-identical entries), which fails
+  `codegen::runtime_sffi::tests::all_funcs_have_unique_names`. Present at both
+  `e2240ed88cd` and `dcdde4c0a96` with this change absent; not introduced and
+  not absorbed here.
+- **`simple-runtime --lib` has 7 pre-existing failures** (executor thread spawn
+  ×2, package manifest trailer, native lib manager, dict invalid value, low-heap
+  tagged values, heap owner attribution). Identical list and identical
+  `1080 passed; 7 failed` at base sha `e2240ed88cd`.
+
 ## Residual risk
 
 `wrap_value` boxes based on `ctx.vreg_types`, i.e. STATIC type information. A
