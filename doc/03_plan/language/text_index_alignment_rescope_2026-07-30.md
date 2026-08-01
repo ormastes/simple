@@ -39,8 +39,14 @@ Reads only this pass; no code.
   `hir/lower/expr/mod.rs`.
 - **Self-hosted compiler tiers (9+):** `10.frontend/core/types.spl`
   (its own `str_index_of`), `cg_expr.spl`, `cg_helpers.spl`,
-  `c_codegen.spl`, `interpreter/eval_methods.spl`,
+  `c_codegen.spl`,
   `_EvalOps/{call_method_eval.spl,access_literal_assign_eval.spl}`,
+  <!-- 2026-08-01: `interpreter/eval_methods.spl` was also listed here. It was
+  a DEAD duplicate (shadowed by the two `_EvalOps` files above) and was deleted
+  in f97dfbbb8ee. Incidental citation only — no conclusion in this plan rested
+  on it, and the two live files were already listed. See
+  doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md -->
+
   `50.mir/_MirLoweringExpr/method_calls_literals.spl`,
   `70.backend/stage4_symbol_closure.spl`,
   `80.driver/driver_source_loading.spl`.

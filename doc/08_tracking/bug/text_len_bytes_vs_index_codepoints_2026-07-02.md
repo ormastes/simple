@@ -26,11 +26,34 @@ Verified 2026-07-02 on `bin/simple run` — identical on interpreter and JIT pat
 | Rust seed interpreter (`src/compiler_rust/compiler/src/interpreter_method/string.rs:21`; `interpreter/expr/collections.rs:98-127`) | **bytes** (`s.len()`) | **codepoint** (`chars().nth`) | codepoint (`chars().count()`) — panic msg at `collections.rs:91` | MISMATCH (len vs index) |
 | Rust seed pattern-match fallback (`interpreter_helpers/method_dispatch.rs:33`) | **codepoints** (`chars().count()`) | — | — | third, inconsistent `len` copy |
 | Rust seed runtime crate (`src/compiler_rust/runtime/src/value/collections.rs:1462` `rt_string_len`; `:1658-1681` `rt_string_char_at`) | **bytes** | **codepoint** (`chars().nth`) | **byte** length guard | doubly mixed; fails safe (NIL) for i in [cp_len, byte_len) |
-| Self-hosted interpreter (`src/compiler/10.frontend/core/interpreter/eval_access.spl:105-116`, `eval_methods.spl:394-402` `char_at`) | **bytes** | **codepoint** | **byte** (`idx < s.len()`) | MISMATCH; wrong-unit guard on a codepoint op |
+| Self-hosted interpreter (`src/compiler/10.frontend/core/interpreter/eval_access.spl:105-116`; `char_at` — see correction note ▼) | **bytes** | **byte** (was recorded as *codepoint* from dead code) | **byte** (`idx < s.len()`) | see correction note ▼ |
 | Self-hosted lowering (`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:250-258`; C backend `cg_expr.spl:607,616`) | **bytes** (`rt_string_len` / `spl_str_len`) | — | — | len is a byte intrinsic everywhere |
 | Native C runtime (`src/runtime/runtime_native.c:710` `rt_string_len`; `:726-730` `rt_string_char_at`) | **bytes** | **byte** (raw `data + index`, 1 byte) | byte | self-consistent (bytes/bytes) but DIVERGES from interp/JIT observed behavior |
 | Pure-Simple core runtime (`src/runtime/simple_core/core_string.spl:554-557`) | **bytes** | **byte** (comment: "byte-indexed (not UTF-8 codepoint-indexed like the Rust version)") | byte | self-consistent; divergence is documented in-code |
 | stdlib escape hatches (`src/lib/.../utf8.spl:249,253,268`) | `text_byte_len`, `text_codepoint_len` (cached), `text_codepoints` | — | — | explicit-unit API already exists |
+
+> **Correction note — self-hosted interpreter `char_at` row (audited
+> 2026-08-01).** The `char_at` half of that row was read from
+> `eval_methods.spl:394-402`, which was **dead code**: a duplicate shadowed by
+> the package-local `_EvalOps` copies (proven by sabotage in both directions),
+> deleted in `f97dfbbb8ee`. Two corrections follow. **(1) On 2026-07-02 the
+> live interpreter had no `char_at` arm at all** — the live
+> `eval_text_method` (`_EvalOps/access_literal_assign_eval.spl`) was a strict
+> subset, so `s.char_at(i)` fell through to `eval_set_error` and returned
+> `-1`/`VAL_NONE` silently. The row should have read "absent", not
+> "codepoint". **(2) The live `char_at` added by `f97dfbbb8ee`
+> (`_EvalOps/access_literal_assign_eval.spl:279-287`) is deliberately
+> BYTE-indexed**, matching `rt_string_char_at` in the C runtime
+> (`rt_string_new(s->data + index, 1)`), not the seed's `chars().nth(idx)`.
+> So the interpreter now agrees with runtime/native and diverges from the
+> seed — the opposite alignment from what this row recorded. That divergence
+> is between the SEED and the RUNTIME and is tracked separately in
+> `doc/08_tracking/bug/2026-08-01_interpreter_char_code_at_byte_indexed.md`;
+> do not "fix" one side in isolation. **What is unchanged:** the guard really
+> is byte-unit (`ca_idx < s.len()`), so step 2 of the migration plan below
+> still applies to the live file — the *guard*-unit defect survives, the
+> *op*-unit claim does not. The `eval_access.spl` half of the row was measured
+> on live code and is untouched.
 
 **Root cause:** `.len()` is lowered to a byte-count intrinsic in every layer, while the `[]` operator (and the interpreter `char_at`) decode UTF-8 codepoints. The observed panic ("index is N but length is N") comes from the codepoint-unit bounds check firing exactly when `i` reaches `chars().count()` while the loop bound is the larger byte count. Additionally, the interpreter/JIT (codepoint `[]`) and the native C / pure-Simple runtime (byte `[]`) disagree with each other — a second, latent divergence for AOT-compiled code.
 
@@ -60,7 +83,7 @@ Cost: codepoint-indexing users of `s[i]` on non-ASCII break — but such code is
 ## Migration plan (safe order)
 
 1. **Lint first (no behavior change):** add a lint flagging `s[i]` / `while i < s.len()` on `text` operands, suggesting `.chars()` (codepoint intent) or byte-explicit APIs. Burn down the ~760 text-ish loops.
-2. **Fix the wrong-unit guards** (contained, behavior-preserving for valid inputs): self-hosted `eval_access.spl:108-116` and `eval_methods.spl:394-402`, and seed `rt_string_char_at` (`compiler_rust/runtime/.../collections.rs:1658`) currently guard codepoint ops with byte length — make guard unit match the op's unit so out-of-range is reported consistently.
+2. **Fix the wrong-unit guards** (contained, behavior-preserving for valid inputs): self-hosted `eval_access.spl:108-116` and `_EvalOps/access_literal_assign_eval.spl:279-287` (was cited as `eval_methods.spl:394-402` — dead code, see correction note above), and seed `rt_string_char_at` (`compiler_rust/runtime/.../collections.rs:1658`) currently guard codepoint ops with byte length — make guard unit match the op's unit so out-of-range is reported consistently.
 3. **Switch `[]` to byte-based** in seed interpreter + self-hosted interpreter in one change, gated by full spec run + bootstrap (`bin/simple build bootstrap`), converging on the native runtime's semantics.
 4. **Land Phase-5 `Text`/`TextView`** (`len_bytes`/`len_codepoints`/`len_graphemes`/`cp_at`) and migrate user code to explicit units; eventually deprecate bare `s[i]` on `text`.
 5. Document the chosen semantics in `doc/07_guide/quick_reference/syntax_quick_reference.md` and `doc/glossary.md`.

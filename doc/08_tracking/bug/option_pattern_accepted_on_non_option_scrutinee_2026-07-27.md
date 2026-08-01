@@ -40,9 +40,34 @@ must be unconditional.
 
 ## Where
 
-- `src/compiler/10.frontend/core/interpreter/eval_methods.spl:107` — Option
+- ~~`src/compiler/10.frontend/core/interpreter/eval_methods.spl:107` — Option
   handling is gated on `kind == VAL_STRUCT`, so a raw `i64` misses every branch
-  and `unwrap_or` (:117) falls through returning the receiver.
+  and `unwrap_or` (:117) falls through returning the receiver.~~
+  **NOW-WRONG (2026-08-01) — this described DEAD CODE.** `eval_methods.spl` was
+  a duplicate shadowed by the package-local `_EvalOps` copies and was deleted in
+  `f97dfbbb8ee`. Re-derived against the live `eval_method_call`
+  (`_EvalOps/call_method_eval.spl:567-654`): it has **no Option/Result built-in
+  method block at all**. There is no `unwrap` / `unwrap_or` / `is_some` /
+  `is_none` / `unwrap_err` / `is_ok` / `is_err` arm anywhere in the live
+  interpreter (`grep '"unwrap"' src/compiler/10.frontend/core/interpreter/`
+  returns nothing). Its only `kind == VAL_STRUCT` branches are the `__dict`
+  table and a user-method `func_table_lookup`, after which it hits
+  `eval_set_error("no method '<name>' on struct")`. So the mechanism recorded
+  here — "gated on `VAL_STRUCT`, raw `i64` misses every branch, `unwrap_or`
+  returns the receiver" — is **not** the live pure-Simple behaviour. The live
+  behaviour for a *struct* Option is a hard error, and for a raw `i64` receiver
+  it is `no method 'unwrap_or' on int`. **The user-visible symptom this bug
+  reports (`<value:0x6>` leaking from `unwrap_or`) therefore comes from the MIR
+  lowering below, not from the interpreter** — which strengthens, not weakens,
+  the `rt_unwrap_or_self` root cause. Whether the deleted block ever ran is
+  UNKNOWN: the sabotage proof covered `eval_text_method`, whose sole call site
+  is inside `_EvalOps`; `eval_method_call`'s external caller is
+  `eval.spl:301`, so resolution there was never measured. **What would settle
+  it:** nothing anymore — only one definition survives. **What is actionable:**
+  if any Simple source calls `.unwrap()`/`.is_some()` on an Option struct under
+  the pure-Simple interpreter, it errors today. That gap should be filed and
+  fixed on `_EvalOps/call_method_eval.spl`, not rediscovered from the deleted
+  file.
 - `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:388-396` —
   `option_payload_or_self` emits **`rt_unwrap_or_self`** ("return the receiver if
   it is not an Option"), typed `i64` while the value stays tag-boxed, producing
@@ -109,10 +134,23 @@ for every probe, so on the current toolchain this defect is not engine-specific.
 
 **`text.last_index_of` / `rfind` are also plain `i64`.** `src/lib/text.spl:61`
 declares `-> i64?`, but the builtin intercepts first
-(`interpreter/eval_methods.spl:459` returns `val_make_int(… ?? -1)`;
-`compiler/cg_expr.spl:555` emits `spl_str_last_index_of`), so callers see a raw
-`i64`. Any earlier note calling `last_index_of` "correctly Option-shaped" is
-wrong.
+(`_EvalOps/access_literal_assign_eval.spl:259-268` returns
+`val_make_int(s.last_index_of(needle))`; `compiler/cg_expr.spl:555` emits
+`spl_str_last_index_of`), so callers see a raw `i64`. Any earlier note calling
+`last_index_of` "correctly Option-shaped" is wrong.
+
+> **Citation corrected 2026-08-01 — conclusion holds, history did not.** This
+> cited `eval_methods.spl:459`, which was dead code. Two corrections: (1) the
+> live arm lives in `_EvalOps/access_literal_assign_eval.spl`; (2) between
+> 2026-07-27 and 2026-08-01 the live text-method table had **no**
+> `last_index_of`/`rfind` arm at all — so "the builtin intercepts first" was
+> false for the interpreter lane during that window; `last_index_of` fell
+> through to `eval_set_error` and returned `-1`/`VAL_NONE`. It became true
+> when `f97dfbbb8ee` added the arm. The **raw-`i64`, `-1`-for-miss contract is
+> confirmed** on the live code, and the `?? -1` the old citation quoted was
+> deliberately dropped (it was dead on a miss and corrupted a genuine hit at
+> index 3, the nil sentinel). See
+> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 ### Repaired (lane IDXFIX2 — 28 files)
 

@@ -202,14 +202,23 @@ The only `at` binding anywhere in the seed is for **text**, not arrays:
 So `text.at(i)` works (it is `char_at`); `array.at(i)` does not exist.
 
 The pure-Simple compiler already has the correct implementation, added by an
-earlier lane, in both of its method-eval paths:
+earlier lane, in its live method-eval path:
 
 - `src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl:833`
-- `src/compiler/10.frontend/core/interpreter/eval_methods.spl:300`
 
-Both use the flat Option encoding (the element itself is `Some`, `nil` is
-`None`, per `eval.spl match_pattern`) and bounds-check `0 <= i < len`. That is
+It uses the flat Option encoding (the element itself is `Some`, `nil` is
+`None`, per `eval.spl match_pattern`) and bounds-checks `0 <= i < len`. That is
 the semantics to mirror into the seed.
+
+> **Path corrected 2026-08-01.** This originally read "in **both** of its
+> method-eval paths" and also listed
+> `interpreter/eval_methods.spl:300`. There was only ever **one** live path:
+> `eval_methods.spl` was a dead duplicate shadowed by the `_EvalOps` package
+> copies (sabotage-proven in both directions) and was deleted in
+> `f97dfbbb8ee`. The conclusion is **unchanged** — the surviving `_EvalOps`
+> copy is the one that carries the `at` arm, and it is a superset of the
+> deleted one. Only the "both paths" redundancy claim was false. See
+> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 ## Census — CORRECTS the previously recorded figure
 

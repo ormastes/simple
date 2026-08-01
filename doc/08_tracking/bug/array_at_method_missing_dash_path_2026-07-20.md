@@ -8,14 +8,35 @@
 ## Update 2026-08-01 — root cause, scope, and a worse sibling defect
 
 **Seed-only.** The pure-Simple interpreter ALREADY implements `.at()` correctly
-(`src/compiler/10.frontend/core/interpreter/eval_methods.spl:296` and
-`_EvalOps/call_method_eval.spl:830`, flat encoding, supported explicitly at
-`eval.spl:911-921`). The failing message is the Rust seed's wording, so the gap
-is in the bootstrap engine only. Root cause: the array-method dispatch in
+(`_EvalOps/call_method_eval.spl:833` in `eval_array_method`, flat encoding,
+supported explicitly at `eval.spl:911-921`). The failing message is the Rust
+seed's wording, so the gap is in the bootstrap engine only. Root cause: the
+array-method dispatch in
 `src/compiler_rust/compiler/src/interpreter_method/collections.rs` has
 `get`/`has`/`contains`/... but no `"at"` arm, so it falls through to the
 not-found error. Text `.at` is handled separately at
 `interpreter_method/string.rs:368`.
+
+> **Dead-code audit 2026-08-01 — the "seed-only" verdict SURVIVES, but the
+> citation that supported it was half dead code.** This paragraph originally
+> also cited `interpreter/eval_methods.spl:296`. That file was a DEAD
+> duplicate: all four of its functions (`eval_method_call`,
+> `eval_method_with_args`, `eval_array_method`, `eval_text_method`) were
+> shadowed by package-local `_EvalOps` copies, proven by sabotage in both
+> directions, and it was deleted in `f97dfbbb8ee`. **Re-derived against the
+> live file:** `_EvalOps/call_method_eval.spl` `eval_array_method` really does
+> carry the `at` arm (bounds-checked `0 <= i < len`, element-as-`Some`,
+> `val_make_nil()` as `None`) — and it is a strict superset of the dead copy
+> (it additionally has `map`/`filter`/`flat_map`/`any`). So "the pure-Simple
+> interpreter already implements `.at()` correctly" **still holds**, the
+> seed-only framing is intact, and the held patch is still the right patch.
+> Caveat: this covers **array** `.at()` only. The live *text* method table
+> (`_EvalOps/access_literal_assign_eval.spl`) has **no `at` arm at all**, in
+> neither the dead nor the live copy — `text.at(i)` in the pure-Simple
+> interpreter falls through to `eval_set_error`. The seed handles that case at
+> `interpreter_method/string.rs:368`, so on text `.at` the two engines diverge
+> in the *opposite* direction from the array case. See
+> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 **There are TWO defects, and the second is worse than the reported one.** Under
 the JIT, `[99,111,108].at(1)` does not error — it SILENTLY MATCHES `None`,

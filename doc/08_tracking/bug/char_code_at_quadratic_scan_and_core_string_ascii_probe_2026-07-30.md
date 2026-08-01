@@ -122,7 +122,7 @@ by measurement. Four lanes exist, not two, and they disagree on both cost and
 | Rust seed interpreter | `src/compiler_rust/compiler/src/interpreter_method/string.rs:386-408` | O(1) amortized (memo hit) / O(n) on memo miss | **O(index)** — `s.chars().nth(idx)` at :404 walks from byte 0 |
 | Hosted C runtime | `src/runtime/runtime_native.c:2303-2357` | O(1) after header flag set at :2329 | **O(index)** — decode walk :2338-2355 from `byte_index = 0` |
 | Freestanding `core_string` | `src/runtime/simple_core/core_string.spl:282-323` | **O(index)** — probe :299-301 | **O(index)** — walk :304-322 from byte 0 |
-| Pure-Simple interpreter | `src/compiler/10.frontend/core/interpreter/eval_methods.spl:329-341` | O(1) + 1 alloc/call | **WRONG ANSWER** — see (f) |
+| Pure-Simple interpreter | `.../interpreter/_EvalOps/access_literal_assign_eval.spl:78-84` (was cited as `eval_methods.spl:329-341`, dead code — see audit note) | O(1) + 1 alloc/call | **WRONG ANSWER** — see (f) |
 
 What makes it linear: the fallback is a from-scratch UTF-8 decode loop that
 increments `byte_index` by the decoded `width` and `char_index` by 1 until
@@ -170,9 +170,25 @@ Yes, two, and neither is a drop-in:
 
 1. **`byte_at`** — O(1) direct buffer read on all four lanes
    (`string.rs:409-423`, `runtime_native.c:2363+`, `core_string.spl:337`,
-   `eval_methods.spl:359-365`). But it is **BYTE**-indexed. The in-tree
-   comments at all four sites explicitly warn the two disagree
-   (`"café,".byte_at(3) == 195` lead byte vs `char_code_at(3) == 233`).
+   ~~`eval_methods.spl:359-365`~~ → `_EvalOps/access_literal_assign_eval.spl:101-107`).
+   But it is **BYTE**-indexed. The in-tree comments at all four sites explicitly
+   warn the two disagree (`"café,".byte_at(3) == 195` lead byte vs
+   `char_code_at(3) == 233`).
+
+   > **NOW-WRONG as originally written (audited 2026-08-01).** "O(1) direct
+   > buffer read on **all four** lanes" was **false for the pure-Simple
+   > interpreter lane on 2026-07-30**. The `byte_at` arm cited here lived only
+   > in `eval_methods.spl`, which was a **dead duplicate** shadowed by the
+   > package-local `_EvalOps` copy (sabotage-proven both directions) and was
+   > deleted in `f97dfbbb8ee`. The live text-method table had **no `byte_at`
+   > arm at all**, so `s.byte_at(i)` under the pure-Simple interpreter fell
+   > through to `eval_set_error` and returned `-1`/`VAL_NONE` — silently, since
+   > a missing arm does not fail at the call site. It became true only when
+   > `f97dfbbb8ee` added the arm to the live file. **Consequence for this
+   > document's recommendation:** "use `byte_at` instead of `char_code_at` to
+   > escape the quadratic scan" was **not viable on the interpreter lane** at
+   > the time it was written, and is viable only from `f97dfbbb8ee` forward.
+   > The recommendation for the other three lanes is unaffected.
 2. **`.chars()`** — one O(n) materialization, then O(1) per element. Used by
    the lexer. Callers avoid it because it allocates N text values, which is
    unacceptable for a 1 MiB payload and pointless for an early-exit scan.
@@ -239,13 +255,28 @@ construction has already proven every byte up to `index` is < 0x80.
 
 ## (f) NEW correctness defect — pure-Simple interpreter `char_code_at` is byte-indexed
 
-`src/compiler/10.frontend/core/interpreter/eval_methods.spl:334-336`:
+~~`src/compiler/10.frontend/core/interpreter/eval_methods.spl:334-336`~~ (dead
+duplicate — see audit note below):
 
 ```
 if idx >= 0 and idx < s.len():
     val ch = s[idx:idx + 1]
     return val_make_int(ch.char_code_at(0))
 ```
+
+> **CONTAMINATED evidence, but the verdict SURVIVES (audited 2026-08-01).**
+> The snippet above was read from `eval_methods.spl`, a dead duplicate deleted
+> in `f97dfbbb8ee`. Re-derived against the copy that actually ran
+> (`_EvalOps/access_literal_assign_eval.spl`): it had the **same defect in a
+> different shape** — `val ch = s.substring(idx, idx + 1)` then
+> `ch.char_code_at(0)`, likewise byte-addressed. So "(f) pure-Simple
+> interpreter `char_code_at` is byte-indexed" **still holds**; only the quoted
+> source line was from the wrong file. Both copies were subsequently repaired
+> to delegate straight to `s.char_code_at(idx)`; the live arm is now
+> `_EvalOps/access_literal_assign_eval.spl:78-84`. Full history:
+> `doc/08_tracking/bug/2026-08-01_interpreter_char_code_at_byte_indexed.md`
+> and
+> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 `s[idx:idx+1]` is **BYTE**-addressed — confirmed by the file's own comment at
 :346-349 and by `8151c391932` ("byte-transparent text slices"). It slices one

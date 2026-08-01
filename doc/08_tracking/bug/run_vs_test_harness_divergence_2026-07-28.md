@@ -182,6 +182,15 @@ arms, the latter 11). Neither is exercised by `bin/simple` today because
 `bin/simple` is the Rust seed, but the same sync-by-hand hazard applies once the
 pure-Simple binary is deployed.
 
+> **This warning was RIGHT, and the hazard fired (audited 2026-08-01).** The
+> duplication observed here was not limited to `eval_array_method`: **all four**
+> functions in `eval_methods.spl` were duplicated, and in every case the
+> `_EvalOps` copy is the one that runs (package-local definitions shadow the
+> `__init__.spl` re-export; proven by sabotage in both directions). The
+> `eval_methods.spl` copies never executed. It was deleted in `f97dfbbb8ee`.
+> The one arm-count in this document that was read off the **dead** file is
+> corrected below.
+
 ---
 
 ## 5. Method coverage vs. what exists
@@ -193,11 +202,24 @@ Dispatch-table arm counts, from reading the tables rather than guessing:
   `any`, `all`, `enumerate`. **10/11 probed** (`flat_map` not probed).
 - Self-hosted `eval_dict_method` (`call_method_eval.spl:594`): 7 arms — `len`,
   `keys`, `values`, `contains_key`, `get`, `get_or`, `insert`. **7/7 probed.**
-- Self-hosted `eval_text_method` (`eval_methods.spl:298`): 18 arms — `len`,
+- ~~Self-hosted `eval_text_method` (`eval_methods.spl:298`): 18 arms — `len`,
   `contains`, `char_code_at`, `substring`, `slice`, `starts_with`, `ends_with`,
   `replace`, `split`, `lines`, `strip`, `find_str`, `rfind`, `char_at`,
   `parse_int`, `to_upper`, `to_lower`, `to_string`, `index_of`.
-  **18/18 probed.**
+  **18/18 probed.**~~
+  **NOW-WRONG — counted from the dead file.** Corrected 2026-08-01. The live
+  `eval_text_method` is `_EvalOps/access_literal_assign_eval.spl:44`, and on
+  2026-07-28 it had **11** arms, not 18: `len`, `contains`, `char_code_at`,
+  `substring`, `starts_with`, `ends_with`, `replace`, `split`,
+  `split_lines`/`lines`, `trim`/`strip`, `index_of`. **Missing** were `slice`,
+  `find_str`, `rfind`, `char_at`, `parse_int`, `to_upper`, `to_lower`,
+  `to_string`, `byte_at`, `last_index_of` and `find` — each falling through to
+  `eval_set_error` and returning `-1`/`VAL_NONE` **silently**. The "18/18
+  probed" line is therefore not evidence about the pure-Simple lane; the probes
+  ran against `bin/simple`, i.e. the Rust seed, exactly as this section's own
+  preceding paragraph states. `f97dfbbb8ee` ported the 11 missing arms into the
+  live file and deleted the duplicate, so the live count is now ~20. See
+  `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 - Plus array methods that exist only in the Rust tables (`first`, `last`, `pop`,
   `sort`, `reverse`, `join`, `slice`, `is_empty`) — all probed.
 

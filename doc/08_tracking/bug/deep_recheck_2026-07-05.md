@@ -11,10 +11,32 @@ Priority key: **P0** = short + pinned + high-confidence (do now); **P1** = diffi
 high-impact (opus); **P2** = wide/risky (fix+verify after wall); **DOC** = feature/long/dead-code (plan).
 
 ## Interpreter (flat-AST, `bin/simple run` path) — `src/compiler/10.frontend/core/interpreter/`
-- **P0** [real] Result/Option payload read wrong field index: `unwrap()`/`match Ok(v)` return `__tag` (idx 0) not `__payload` (idx 1) → `Ok(42).unwrap()`=5. `eval_methods.spl:112` (construct site `eval_access.spl:482-504` uses `[__tag,__payload]`). Silent-wrong-value.
+- **P0** [~~real~~ **NOW-WRONG — derived from dead code, see note**] Result/Option payload read wrong field index: `unwrap()`/`match Ok(v)` return `__tag` (idx 0) not `__payload` (idx 1) → `Ok(42).unwrap()`=5. ~~`eval_methods.spl:112`~~ (construct site `eval_access.spl:482-504` uses `[__tag,__payload]`). Silent-wrong-value.
 - **P1** [real] f64 silently → 0.0 when a nested call's return flows into a **typed** fast-local slot (typed param / array-literal elem). `eval_calls.spl:280` + `resolve.spl:105-133` + `env.spl:212-232` (pooled-frame LOAD_FAST). Wide, unpinned.
-- **P1** [real] Trait **default** method calling `self.other_method()` → **SIGSEGV**. `eval_methods.spl` trait default dispatch. Wide, unpinned.
-- **DOC** [real] `Array.map`/`reduce` unimplemented (UFCS fails); `print(array)` shows raw pointer. `eval_methods.spl:230`. Feature.
+- **P1** [real] Trait **default** method calling `self.other_method()` → **SIGSEGV**. ~~`eval_methods.spl`~~ → live dispatch is `_EvalOps/call_method_eval.spl` (`eval_method_call` / `eval_method_with_args`). Wide, unpinned; the SIGSEGV was observed by *running*, so the symptom stands — only the file pointer was to the dead duplicate.
+- **DOC** [~~real~~ **PARTLY NOW-WRONG**] `Array.map`/`reduce` unimplemented (UFCS fails); `print(array)` shows raw pointer. ~~`eval_methods.spl:230`~~. Feature. Re-derived 2026-08-01 against the live `eval_array_method` (`_EvalOps/call_method_eval.spl:788-925`): `map`, `filter`, `flat_map`/`flatmap`, `any`, `all`, `enumerate` **are** implemented; `reduce` is **not** (falls through to `eval_set_error("no method 'reduce' on array")`). So half this item is stale.
+
+> **Dead-code audit 2026-08-01.** Every `eval_methods.spl` citation in the
+> Interpreter section above pointed at a file that was a **duplicate shadowed
+> by package-local `_EvalOps` copies**, deleted in `f97dfbbb8ee`. Re-derived
+> against the live `eval_method_call` (`_EvalOps/call_method_eval.spl:567-654`):
+> it contains **no Option/Result built-in method block whatsoever** — no
+> `unwrap`, `unwrap_or`, `is_some`, `is_none`, `unwrap_err`, `is_ok`, `is_err`
+> arm exists anywhere in `src/compiler/10.frontend/core/interpreter/`. The
+> `val_struct_get_field_idx(receiver, 1)` code the P0 quoted lived **only** in
+> the deleted file. Therefore the P0 as written ("`Ok(42).unwrap()` = 5,
+> silent-wrong-value") cannot be the live pure-Simple behaviour: the live path
+> falls through `func_table_lookup("Result::Ok__unwrap")` and the callable-field
+> fallback to `eval_set_error("no method 'unwrap' on struct")` — a **loud
+> error, not a silent wrong value**. Marked NOW-WRONG rather than deleted:
+> whether the deleted block ever executed is UNKNOWN, because the sabotage
+> proof covered `eval_text_method` (call site inside `_EvalOps`) and never
+> measured how `eval.spl:301` resolved `eval_method_call`. **What would settle
+> the historical question:** nothing — only one definition survives.
+> **What replaces this P0:** a new, differently-shaped defect —
+> *Option/Result built-in methods are entirely absent from the pure-Simple
+> interpreter*. See
+> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 - (stale-binary) `?` non-propagation — already fixed at source (b7fe9071/da6c4d0d), stale in deployed binary.
 
 ## Type system — `src/compiler/30.types` + `35.semantics` + driver

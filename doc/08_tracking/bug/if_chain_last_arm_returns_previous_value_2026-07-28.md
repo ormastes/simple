@@ -288,10 +288,19 @@ radix-dependent path.
 `src/compiler/10.frontend/core/interpreter/ops.spl` (13),
 `.../_EvalOps/access_literal_assign_eval.spl` (8), `.../eval_access.spl` (7),
 `.../eval_stmts.spl` (5), `.../_EvalOps/call_method_eval.spl` (4),
-`.../eval.spl` (3), `.../eval_methods.spl` (3) — all of the form
+`.../eval.spl` (3), ~~`.../eval_methods.spl` (3)~~ — all of the form
 `eval_set_error("...")` ⏎ `-1`, i.e. the error-sentinel return of the
 self-hosted interpreter becomes `eval_set_error(...) - 1`. Under the seed these
 error paths do not return `-1`.
+
+> **Count corrected 2026-08-01 (incidental, verdict unaffected).**
+> `eval_methods.spl` was a dead duplicate — all four of its functions were
+> shadowed by the package-local `_EvalOps` copies — and it was deleted in
+> `f97dfbbb8ee`. Its 3 occurrences never executed, so the live total is **40**,
+> not 43. This is a site-inventory line only; no conclusion in this document
+> rests on it, and the shapes it counted are also present in the surviving
+> `_EvalOps` files. See
+> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 ### Third cluster — OS/kernel
 

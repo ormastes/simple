@@ -50,10 +50,26 @@ Confirmed via source read: `src/compiler/50.mir/_MirLoweringExpr/*.spl`
 (the native MIR-lowering layer used by `native-build`) has no `to_upper`/
 `upper` dispatch arm anywhere, unlike `to_lower`/`lower`, which are handled
 alongside `trim`/`replace`/`split` (`method_calls_literals.spl` ~line 1736).
-`to_upper` **is** handled in the older `cg_expr.spl` codegen path and in the
-tree-walking interpreter (`eval_methods.spl` line 452), which is why it is
+`to_upper` **is** handled in the older `cg_expr.spl` codegen path ~~and in the
+tree-walking interpreter (`eval_methods.spl` line 452)~~, which is why it is
 absent specifically from the MIR/native-build path, not from the language as
 a whole.
+
+> **NOW-WRONG in part (audited 2026-08-01) — the interpreter half of this
+> claim was read from DEAD CODE.** `eval_methods.spl` was a duplicate shadowed
+> by the package-local `_EvalOps` copies (proven by sabotage in both
+> directions) and was deleted in `f97dfbbb8ee`. Re-derived against the live
+> `eval_text_method` (`_EvalOps/access_literal_assign_eval.spl`): on
+> 2026-07-17 it had **no `to_upper` arm at all** — `s.to_upper()` fell through
+> to `eval_set_error` and returned `-1`/`VAL_NONE`, silently. So `to_upper`
+> was missing from the MIR/native-build path **and** from the tree-walking
+> interpreter; only `cg_expr.spl` had it. **This widens the defect rather than
+> narrowing it**, and it removes the interpreter as the "it works elsewhere"
+> reference implementation this paragraph relied on. `f97dfbbb8ee` added
+> `to_upper`/`to_lower`/`to_string` to the live interpreter, so from that
+> commit forward the sentence is true as written. The MIR/native-build gap is
+> unaffected and remains open. See
+> `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 **Note on the oracle's own `.to_upper()`:** re-verified in isolation
 (`"Hello World".to_upper()` on `bin/simple run`) — the oracle prints `Hello

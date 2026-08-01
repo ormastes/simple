@@ -95,9 +95,19 @@ Result (PROVED):
   declarations rather than bodies — which is the point: each is a place
   the ABI contract is restated and could drift.
 - `index_of` additionally has **self-hosted compiler** implementations
-  (`src/compiler/10.frontend/core/interpreter/eval_methods.spl`,
+  (`src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl`,
   `.../cg_expr.spl`, `src/compiler/50.mir/...`), i.e. a whole lane family
   separate from the Rust seed.
+
+  > **Path corrected 2026-08-01.** This originally cited
+  > `interpreter/eval_methods.spl`. That file was a DEAD duplicate — every one
+  > of its four functions was shadowed by a package-local `_EvalOps` copy — and
+  > it was deleted in `f97dfbbb8ee`. The live `index_of` interpreter arm is in
+  > `_EvalOps/access_literal_assign_eval.spl`. Incidental citation; the census
+  > *count* of lanes is unaffected (one interpreter lane either way), but note
+  > that at census time the live arm did **not** honour the 2-arg `start`
+  > form — that was only added on 2026-08-01. See
+  > `doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md`.
 
 **Consequence for the plan:** "change a primitive across all lanes in one
 commit" now requires a per-primitive symbol census *before* each stage,

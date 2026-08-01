@@ -151,8 +151,17 @@ dispatcher that even looks at a second argument is
 and it "implements" the offset by re-calling
 `s.index_of(needle, start)` — the very 2-arg form that does not exist,
 i.e. it delegates to itself. All other sites are arity-1 only:
-`interpreter/eval_methods.spl:466-473`, `compiler/cg_expr.spl:527-530`
+~~`interpreter/eval_methods.spl:466-473`~~, `compiler/cg_expr.spl:527-530`
 (emits 2-param `spl_str_index_of`), `95.interp/mir_interp_intrinsics.spl:155-163`.
+
+> **Citation dropped 2026-08-01 — conclusion unchanged.** `eval_methods.spl`
+> was a dead duplicate shadowed by the `_EvalOps` copies and was deleted in
+> `f97dfbbb8ee`; it was never one of the "sites" in the sense this survey
+> means, because it never executed. Removing it does not change the finding:
+> the sole live 2-arg-aware dispatcher is still
+> `_EvalOps/access_literal_assign_eval.spl` (the arm has since moved to
+> :243-257 and still delegates to `s.index_of(needle, start)`), and every other
+> live site is still arity-1. The self-delegation defect stands.
 
 ## A semantics decision is required before any fix
 

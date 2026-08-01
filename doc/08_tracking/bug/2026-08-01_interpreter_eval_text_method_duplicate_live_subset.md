@@ -196,6 +196,84 @@ int method (`(42).to_text()`). Pre-existing — it never lived in the deleted fi
 imports. Out of scope for this fix; recorded so it is not rediscovered as a
 regression from the deletion.
 
+## Contamination audit of citing docs (2026-08-01)
+
+Every doc in the tree citing `eval_methods.spl` was re-derived against the live
+files. Anchored sweep: `/usr/bin/grep -rn "eval_methods" doc/` — **16 files**,
+which is more than the 10 originally suspected. Classification below; each
+corrected doc carries an inline note pointing back here.
+
+### NOW-WRONG — a claimed interpreter arm did not exist in the live copy
+
+| Doc | Claim | Live reality |
+|---|---|---|
+| `deep_recheck_2026-07-05.md` | **P0** `unwrap()` returns `__tag` not `__payload` → `Ok(42).unwrap()` = 5, "silent-wrong-value", at `eval_methods.spl:112` | The live `eval_method_call` (`_EvalOps/call_method_eval.spl:567-654`) has **no Option/Result built-in block at all** — no `unwrap`, `unwrap_or`, `is_some`, `is_none`, `unwrap_err`, `is_ok`, `is_err` anywhere under `interpreter/`. The live path errors loudly (`no method 'unwrap' on struct`); it does not return a wrong value. Same doc's `Array.map`/`reduce` item is half stale: `map`/`filter`/`flat_map`/`any`/`all`/`enumerate` exist live, `reduce` does not. |
+| `option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md` | "Option handling is gated on `kind == VAL_STRUCT`, `unwrap_or` falls through returning the receiver" | Same as above — the mechanism described never ran. **The bug's own symptom is unaffected**: it now points squarely at the `rt_unwrap_or_self` MIR lowering, which was measured on live code. Second citation (`last_index_of` "builtin intercepts first") was false during 07-27 → 08-01 (no live arm), true again after `f97dfbbb8ee`. |
+| `native_string_methods_unresolved_in_mir_2026-07-17.md` | "`to_upper` **is** handled in the tree-walking interpreter" — the reason the gap was scoped to MIR only | The live text table had **no `to_upper`** until `f97dfbbb8ee`. `to_upper` was missing from MIR *and* the interpreter; only `cg_expr.spl` had it. **Widens the defect**; removes the interpreter as the reference implementation that paragraph leaned on. MIR gap itself unaffected. |
+| `char_code_at_quadratic_scan_and_core_string_ascii_probe_2026-07-30.md` (§ mitigations) | "`byte_at` — O(1) direct buffer read on **all four** lanes" | The live text table had **no `byte_at`** on 2026-07-30. `s.byte_at(i)` fell through to `eval_set_error` → `-1`/`VAL_NONE`, silently. The document's own recommendation ("use `byte_at` to escape the quadratic scan") was **not viable on the interpreter lane** when written; viable only from `f97dfbbb8ee`. |
+| `run_vs_test_harness_divergence_2026-07-28.md` | "Self-hosted `eval_text_method`: **18 arms**, 18/18 probed" | The live table had **11** arms; 11 were missing and silently error-returning. The "18/18 probed" figure measured the Rust seed, as that section's own preceding paragraph states. That doc's *warning* about duplicate tables was right — it just under-counted the duplication (all four functions, not one). |
+| `text_len_bytes_vs_index_codepoints_2026-07-02.md` | self-hosted interpreter `char_at` = **codepoint**-indexed with a byte guard | (1) No live `char_at` existed on 2026-07-02 — the row should have read "absent". (2) The `char_at` added by `f97dfbbb8ee` is deliberately **BYTE**-indexed, agreeing with the C runtime and diverging from the seed — the opposite alignment. The *guard*-unit half of the finding survives and step 2 of its migration plan still applies. |
+
+### CONTAMINATED — evidence came from dead code, conclusion SURVIVES
+
+| Doc | Verdict |
+|---|---|
+| `array_at_method_missing_dash_path_2026-07-20.md` | **The "seed-only" framing does NOT collapse.** It cited `eval_methods.spl:296` *and* `_EvalOps/call_method_eval.spl:830`; the live `eval_array_method` genuinely carries the `at` arm and is a strict **superset** of the dead copy (adds `map`/`filter`/`flat_map`/`any`/`all`/`enumerate`). "The pure-Simple interpreter already implements `.at()` correctly" **holds**, and the held patch is still the right patch. New caveat recorded there: **text** `.at` is absent from the live table in *both* copies, so on text `.at` the engines diverge the other way. |
+| `array_at_returns_nil_for_every_index_2026-08-01.md` | Same — only the "in **both** of its method-eval paths" redundancy claim was false. There was one live path. |
+| `char_code_at_quadratic_scan_..._2026-07-30.md` § (f) | The byte-indexed `char_code_at` snippet was quoted from the dead file, but the live copy had the **same defect in a different shape** (`s.substring(idx, idx+1)` vs `s[idx:idx+1]`). Verdict "(f) pure-Simple `char_code_at` is byte-indexed" **survives**. |
+| `text_index_of_start_arg_dropped_..._2026-07-28.md` | `eval_methods.spl:466-473` appeared only in an "all other sites are arity-1" inventory. Dropping it changes nothing: the sole live 2-arg-aware dispatcher is still `_EvalOps/access_literal_assign_eval.spl`, still self-delegating. |
+| `2026-08-01_interpreter_char_code_at_byte_indexed.md` | Its history was already **accurate** — it is the doc that first measured "fixing `eval_methods.spl` changed nothing observable". Extended with the deletion, and its filed follow-up marked done. |
+| `open_bug_doc_staleness_audit_2026-07-27.md` | One row's `eval_methods.spl:107` evidence retracted; the `method_calls_literals.spl` half was live-measured, so the STILL-OPEN verdict stands. |
+
+### HARMLESS — incidental path in a file list or site count
+
+`text_index_alignment_rescope_2026-07-30.md` (lane file list),
+`text_index_census_stage1_2026-07-30.md` (lane family list — note added that
+the live arm did not honour the 2-arg `start` form at census time),
+`if_chain_last_arm_returns_previous_value_2026-07-28.md` (site count 43 → 40),
+`jit_string_length_var_control_flow_wrong_value_2026-07-17.md` (×3 sites struck).
+
+### `bug_db.sdn` — do NOT hand-edit
+
+`doc/08_tracking/bug/bug_db.sdn` carries a `#sdn-crc32:` integrity header and
+is regenerated by the `bin/simple bug-add` / `bin/simple bug-gen` tooling (see
+`.claude/rules/structure.md` § Auto-Generated Docs). Hand-editing invalidates
+the CRC. Its single stale citation is in the `text-split-limit-ignored`
+description, which says the splitn fix was applied to "the self-hosted .spl
+interpreter (`eval_methods.spl`)". **The stale path does NOT self-heal** — the
+description is free text captured at `bug-add` time and no regeneration pass
+rewrites it. **The conclusion is nevertheless intact**: verified that the
+splitn-semantics `limit` handling *is* present in the live
+`_EvalOps/access_literal_assign_eval.spl` split arm (`arg_eids.len() > 1`,
+keep first `limit-1`, rejoin remainder), so the recorded fix landed on live
+code. Correct the path via `bin/simple bug-add --id=text-split-limit-ignored`
+(or the equivalent update path), not by editing the `.sdn`.
+
+### One thing this audit did NOT settle (UNKNOWN)
+
+Whether the deleted `eval_method_call` ever executed. The sabotage proof
+covered `eval_text_method`, whose sole call site (`call_method_eval.spl:586`)
+is inside `_EvalOps` — package-local shadowing there is decisive.
+`eval_method_call`'s only external caller is `eval.spl:301`, **outside**
+`_EvalOps`, and how that resolved between the re-export and the package-local
+copy was never measured. **What would settle it: nothing anymore** — one
+definition survives. What matters going forward is the *current* state, which
+is measurable and is stated above.
+
+### Actionable gap this audit surfaced
+
+**Option/Result built-in methods are entirely absent from the pure-Simple
+interpreter.** `grep '"unwrap"' src/compiler/10.frontend/core/interpreter/`
+returns nothing; the only `Option::Some` mentions are in `eval.spl:116`
+(pattern matching) and `eval_access.spl:553` (construction). Any Simple source
+calling `.unwrap()` / `.unwrap_or()` / `.is_some()` / `.is_none()` /
+`.is_ok()` / `.is_err()` on an Option/Result **struct** value errors under the
+pure-Simple interpreter today. Whether this is a regression from the deletion
+or a long-standing gap is the UNKNOWN above; either way the fix belongs in
+`_EvalOps/call_method_eval.spl`, and it must not be rediscovered by reading
+the deleted file out of git history. Also still open: `Array.reduce` is
+unimplemented in the live `eval_array_method`.
+
 ## Lesson
 
 A structural spec must assert *dispatch liveness*, not just source content.
@@ -203,3 +281,11 @@ A structural spec must assert *dispatch liveness*, not just source content.
 Where a behavioural probe is possible (it was here, via `core_interpret_expr`),
 the behavioural probe is the evidence and the structural assertion is only a
 regression pin.
+
+**Corollary from the audit above:** a dead duplicate does not just waste space,
+it *manufactures false negatives across the doc tree*. Six separate
+investigations concluded "the interpreter already handles this" from a file
+that never ran, and in four of those the live interpreter had **no such arm at
+all** — so the true defect was consistently recorded as narrower than it was.
+When deleting a shadowed duplicate, sweep every doc that cites it in the same
+change.
