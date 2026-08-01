@@ -1,0 +1,113 @@
+# common.ui.draw_ir_v3_backend_enums — Vulkan-canonical numeric domains
+#
+# DrawIR v3 enum columns carry Vulkan values VERBATIM: format columns hold
+# `VkFormat`, blend fields hold `VkBlendFactor`/`VkBlendOp` (packed), image
+# usage masks hold `VkImageUsageFlagBits`. Metal/DX remap on READ via static
+# tables (S2); the Vulkan lane consumes these with zero conversion.
+# Decision + rationale:
+#   doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md §0, §2.4
+#   doc/03_plan/ui/draw_ir/draw_ir_backend_native_refactor_plan.md (S1)
+#
+# Keep this file flat: named constants + pure validation/packing fns only.
+
+# --- formats (VkFormat, verbatim) ----------------------------------------
+pub val DRAW_IR_FORMAT_UNDEFINED: u32 = 0u32
+pub val DRAW_IR_FORMAT_R8_UNORM: u32 = 9u32
+pub val DRAW_IR_FORMAT_R8G8B8A8_UNORM: u32 = 37u32
+pub val DRAW_IR_FORMAT_R8G8B8A8_SRGB: u32 = 43u32
+pub val DRAW_IR_FORMAT_B8G8R8A8_UNORM: u32 = 44u32
+pub val DRAW_IR_FORMAT_B8G8R8A8_SRGB: u32 = 50u32
+pub val DRAW_IR_FORMAT_D32_SFLOAT: u32 = 126u32
+
+# --- blend factors (VkBlendFactor, verbatim) ------------------------------
+pub val DRAW_IR_BLEND_FACTOR_ZERO: u32 = 0u32
+pub val DRAW_IR_BLEND_FACTOR_ONE: u32 = 1u32
+pub val DRAW_IR_BLEND_FACTOR_SRC_ALPHA: u32 = 6u32
+pub val DRAW_IR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA: u32 = 7u32
+pub val DRAW_IR_BLEND_FACTOR_DST_ALPHA: u32 = 8u32
+pub val DRAW_IR_BLEND_FACTOR_ONE_MINUS_DST_ALPHA: u32 = 9u32
+
+# --- blend ops (VkBlendOp, verbatim) --------------------------------------
+pub val DRAW_IR_BLEND_OP_ADD: u32 = 0u32
+pub val DRAW_IR_BLEND_OP_SUBTRACT: u32 = 1u32
+pub val DRAW_IR_BLEND_OP_REVERSE_SUBTRACT: u32 = 2u32
+pub val DRAW_IR_BLEND_OP_MIN: u32 = 3u32
+pub val DRAW_IR_BLEND_OP_MAX: u32 = 4u32
+
+# --- image usage (VkImageUsageFlagBits, verbatim) -------------------------
+pub val DRAW_IR_IMAGE_USAGE_TRANSFER_SRC: u32 = 0x1u32
+pub val DRAW_IR_IMAGE_USAGE_TRANSFER_DST: u32 = 0x2u32
+pub val DRAW_IR_IMAGE_USAGE_SAMPLED: u32 = 0x4u32
+pub val DRAW_IR_IMAGE_USAGE_STORAGE: u32 = 0x8u32
+pub val DRAW_IR_IMAGE_USAGE_COLOR_ATTACHMENT: u32 = 0x10u32
+pub val DRAW_IR_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT: u32 = 0x20u32
+
+# --- rt_vulkan_* extern ABI encodings (runtime-local, NOT Vk bit values) --
+# The existing Rust externs decode usage masks with their OWN bit layout,
+# which predates canonicalization and differs from the Vk flag bits above.
+# These constants mirror the Rust decode tables verbatim so call sites can
+# compose masks by NAME while keeping the wire values IDENTICAL:
+#   buffers: src/compiler_rust/runtime/src/vulkan_graphics_runtime_buffer.rs
+#   images:  src/compiler_rust/runtime/src/vulkan_graphics_runtime_graphics.rs
+# Do NOT mix these with DRAW_IR_IMAGE_USAGE_* — same names, different bits.
+pub val RT_VULKAN_BUFFER_USAGE_TRANSFER_SRC: i64 = 0x01
+pub val RT_VULKAN_BUFFER_USAGE_TRANSFER_DST: i64 = 0x02
+pub val RT_VULKAN_BUFFER_USAGE_UNIFORM: i64 = 0x10
+pub val RT_VULKAN_BUFFER_USAGE_INDEX: i64 = 0x20
+pub val RT_VULKAN_BUFFER_USAGE_VERTEX: i64 = 0x40
+pub val RT_VULKAN_BUFFER_USAGE_STORAGE: i64 = 0x80
+
+pub val RT_VULKAN_IMAGE_USAGE_SAMPLED: i64 = 0x01
+pub val RT_VULKAN_IMAGE_USAGE_STORAGE: i64 = 0x02
+pub val RT_VULKAN_IMAGE_USAGE_COLOR_ATTACHMENT: i64 = 0x04
+pub val RT_VULKAN_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT: i64 = 0x08
+pub val RT_VULKAN_IMAGE_USAGE_TRANSFER_SRC: i64 = 0x10
+pub val RT_VULKAN_IMAGE_USAGE_TRANSFER_DST: i64 = 0x20
+
+# --- packed blend mode ----------------------------------------------------
+# u16 layout: (src_factor << 10) | (dst_factor << 5) | op.
+# 5-bit fields hold every core VkBlendFactor (0..18) and VkBlendOp (0..4).
+
+struct DrawIrV3BlendParts:
+    src_factor: u32
+    dst_factor: u32
+    op: u32
+
+pub fn draw_ir_blend_pack(src_factor: u32, dst_factor: u32, op: u32) -> u16:
+    ((src_factor << 10u32) | (dst_factor << 5u32) | op).to_u16()
+
+pub fn draw_ir_blend_unpack(mode: u16) -> DrawIrV3BlendParts:
+    val m = mode.to_u32()
+    DrawIrV3BlendParts(
+        src_factor: (m >> 10u32) & 0x1fu32,
+        dst_factor: (m >> 5u32) & 0x1fu32,
+        op: m & 0x1fu32
+    )
+
+# --- domain validation ----------------------------------------------------
+# Membership in the named set above; closes the unvalidated
+# `vk::Format::from_raw` hole on the FFI boundary.
+
+pub fn draw_ir_format_is_valid(v: u32) -> bool:
+    (v == DRAW_IR_FORMAT_UNDEFINED or
+        v == DRAW_IR_FORMAT_R8_UNORM or
+        v == DRAW_IR_FORMAT_R8G8B8A8_UNORM or
+        v == DRAW_IR_FORMAT_R8G8B8A8_SRGB or
+        v == DRAW_IR_FORMAT_B8G8R8A8_UNORM or
+        v == DRAW_IR_FORMAT_B8G8R8A8_SRGB or
+        v == DRAW_IR_FORMAT_D32_SFLOAT)
+
+pub fn draw_ir_blend_factor_is_valid(v: u32) -> bool:
+    (v == DRAW_IR_BLEND_FACTOR_ZERO or
+        v == DRAW_IR_BLEND_FACTOR_ONE or
+        v == DRAW_IR_BLEND_FACTOR_SRC_ALPHA or
+        v == DRAW_IR_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA or
+        v == DRAW_IR_BLEND_FACTOR_DST_ALPHA or
+        v == DRAW_IR_BLEND_FACTOR_ONE_MINUS_DST_ALPHA)
+
+pub fn draw_ir_blend_op_is_valid(v: u32) -> bool:
+    (v == DRAW_IR_BLEND_OP_ADD or
+        v == DRAW_IR_BLEND_OP_SUBTRACT or
+        v == DRAW_IR_BLEND_OP_REVERSE_SUBTRACT or
+        v == DRAW_IR_BLEND_OP_MIN or
+        v == DRAW_IR_BLEND_OP_MAX)

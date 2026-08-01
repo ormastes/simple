@@ -60,6 +60,23 @@ use std.nogc_sync_mut.io.vulkan_sffi.{
     rt_vulkan_submit_graphics_and_wait_fence, rt_vulkan_wait_fence, rt_vulkan_destroy_fence,
     rt_vulkan_wait_idle
 }
+use common.ui.draw_ir_v3_backend_enums.{
+    DRAW_IR_FORMAT_R8_UNORM,
+    DRAW_IR_FORMAT_R8G8B8A8_UNORM,
+    DRAW_IR_FORMAT_R8G8B8A8_SRGB,
+    DRAW_IR_FORMAT_D32_SFLOAT,
+    draw_ir_format_is_valid,
+    RT_VULKAN_BUFFER_USAGE_TRANSFER_SRC,
+    RT_VULKAN_BUFFER_USAGE_TRANSFER_DST,
+    RT_VULKAN_BUFFER_USAGE_UNIFORM,
+    RT_VULKAN_BUFFER_USAGE_INDEX,
+    RT_VULKAN_BUFFER_USAGE_VERTEX,
+    RT_VULKAN_IMAGE_USAGE_SAMPLED,
+    RT_VULKAN_IMAGE_USAGE_COLOR_ATTACHMENT,
+    RT_VULKAN_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT,
+    RT_VULKAN_IMAGE_USAGE_TRANSFER_SRC,
+    RT_VULKAN_IMAGE_USAGE_TRANSFER_DST
+}
 
 # ============================================================================
 # Graphics ABI is owned by nogc_sync_mut.io.vulkan_sffi.  Keep this backend on
@@ -72,10 +89,10 @@ use std.nogc_sync_mut.io.vulkan_sffi.{
 
 fn _texture_format_to_i64(format: TextureFormat3D) -> i64:
     match format:
-        TextureFormat3D.Rgba8Unorm => 37
-        TextureFormat3D.Rgba8Srgb  => 43
-        TextureFormat3D.R8Unorm    => 9
-        TextureFormat3D.Depth32Float => 126
+        TextureFormat3D.Rgba8Unorm => DRAW_IR_FORMAT_R8G8B8A8_UNORM.to_i64()
+        TextureFormat3D.Rgba8Srgb  => DRAW_IR_FORMAT_R8G8B8A8_SRGB.to_i64()
+        TextureFormat3D.R8Unorm    => DRAW_IR_FORMAT_R8_UNORM.to_i64()
+        TextureFormat3D.Depth32Float => DRAW_IR_FORMAT_D32_SFLOAT.to_i64()
 
 class VulkanBackend3DDeviceEvidence:
     status: text
@@ -257,7 +274,11 @@ impl RenderBackend3D for VulkanRenderBackend3D:
                 self.blocker_reason = "vulkan-device-unavailable"
                 return false
             self.device_handle = rt_vulkan_get_device()
-        self.render_pass_handle = rt_vulkan_create_offscreen_render_pass(self.device_handle, 37, 126)
+        self.render_pass_handle = rt_vulkan_create_offscreen_render_pass(
+            self.device_handle,
+            DRAW_IR_FORMAT_R8G8B8A8_UNORM.to_i64(),
+            DRAW_IR_FORMAT_D32_SFLOAT.to_i64()
+        )
         self.sampler_handle = rt_vulkan_create_font_sampler(self.device_handle)
         if self.device_handle <= 0 or self.render_pass_handle <= 0 or self.sampler_handle <= 0:
             self.blocker_reason = "vulkan-base-resource-init-failed"
@@ -296,8 +317,11 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         PipelineHandle(id: id)
 
     fn create_vertex_buffer(self, byte_count: i64) -> BufferHandle:
-        # usage 0 = vertex buffer
-        val native = rt_vulkan_alloc_buffer(byte_count, 0x43)
+        # 0x43 = vertex | transfer_dst | transfer_src (rt_vulkan ABI bits)
+        val usage = (RT_VULKAN_BUFFER_USAGE_VERTEX
+            | RT_VULKAN_BUFFER_USAGE_TRANSFER_DST
+            | RT_VULKAN_BUFFER_USAGE_TRANSFER_SRC)
+        val native = rt_vulkan_alloc_buffer(byte_count, usage)
         val id = self.next_id
         self.next_id = self.next_id + 1
         self.buffer_ids.push(id)
@@ -305,8 +329,11 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         BufferHandle(id: id)
 
     fn create_index_buffer(self, byte_count: i64) -> BufferHandle:
-        # usage 1 = index buffer
-        val native = rt_vulkan_alloc_buffer(byte_count, 0x23)
+        # 0x23 = index | transfer_dst | transfer_src (rt_vulkan ABI bits)
+        val usage = (RT_VULKAN_BUFFER_USAGE_INDEX
+            | RT_VULKAN_BUFFER_USAGE_TRANSFER_DST
+            | RT_VULKAN_BUFFER_USAGE_TRANSFER_SRC)
+        val native = rt_vulkan_alloc_buffer(byte_count, usage)
         val id = self.next_id
         self.next_id = self.next_id + 1
         self.buffer_ids.push(id)
@@ -314,8 +341,10 @@ impl RenderBackend3D for VulkanRenderBackend3D:
         BufferHandle(id: id)
 
     fn create_uniform_buffer(self, byte_count: i64) -> BufferHandle:
-        # usage 2 = uniform buffer
-        val native = rt_vulkan_alloc_buffer(byte_count, 0x12)
+        # 0x12 = uniform | transfer_dst (rt_vulkan ABI bits)
+        val usage = (RT_VULKAN_BUFFER_USAGE_UNIFORM
+            | RT_VULKAN_BUFFER_USAGE_TRANSFER_DST)
+        val native = rt_vulkan_alloc_buffer(byte_count, usage)
         val id = self.next_id
         self.next_id = self.next_id + 1
         self.buffer_ids.push(id)
@@ -328,7 +357,24 @@ impl RenderBackend3D for VulkanRenderBackend3D:
 
     fn create_texture(self, width: i64, height: i64, format: TextureFormat3D) -> TextureHandle:
         val fmt = _texture_format_to_i64(format)
-        val usage = if format == TextureFormat3D.Depth32Float: 0x08 else: 0x35
+        # 0x35 = sampled | color_attachment | transfer_src | transfer_dst,
+        # 0x08 = depth_stencil_attachment (rt_vulkan ABI bits)
+        var usage = (RT_VULKAN_IMAGE_USAGE_SAMPLED
+            | RT_VULKAN_IMAGE_USAGE_COLOR_ATTACHMENT
+            | RT_VULKAN_IMAGE_USAGE_TRANSFER_SRC
+            | RT_VULKAN_IMAGE_USAGE_TRANSFER_DST)
+        if format == TextureFormat3D.Depth32Float:
+            usage = RT_VULKAN_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT
+        # Range-check before the FFI boundary: Rust decodes the format via
+        # vk::Format::from_raw() unvalidated, so reject out-of-domain values
+        # here instead of handing them to the driver.
+        if not draw_ir_format_is_valid(fmt.to_u32()):
+            self.blocker_reason = "texture-format-out-of-domain"
+            val bad_id = self.next_id
+            self.next_id = self.next_id + 1
+            self.texture_ids.push(bad_id)
+            self.texture_native.push(0)
+            return TextureHandle(id: bad_id)
         val native = rt_vulkan_create_image(self.device_handle, width, height, fmt, usage)
         val id = self.next_id
         self.next_id = self.next_id + 1
