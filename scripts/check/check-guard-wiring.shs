@@ -1,0 +1,369 @@
+#!/bin/sh
+# Guard against guards that nothing invokes.
+#
+# WHY THIS EXISTS
+# ---------------
+# A check script that no hook and no CI job runs is decoration. On 2026-08-01 an
+# audit of a8da6446 found 364 of 413 tracked shell guards (88.1%) unreachable
+# from any hook or workflow -- including check-extern-registration.shs, which had
+# been landed, hardened with a fixed extractor, a raised vacuity bound and named
+# sabotage controls, and wired into nothing at all.
+#
+# The cause is structural. The two places that list guards
+# (.github/workflows/*.yml and scripts/hooks/pre-commit) are HAND-MAINTAINED.
+# Every new guard must be remembered into them and nothing detects the omission,
+# so "deliberately not a gate" and "someone forgot" are indistinguishable states.
+# This script makes them distinguishable: a guard must either be reachable from a
+# root, or be listed in the opt-out file with a written reason. Adding a guard
+# now wires it automatically; SKIPPING one becomes the deliberate act that needs
+# justification.
+#
+# See doc/08_tracking/bug/check_script_wiring_orphans_2026-08-01.md.
+#
+# THIS IS A RATCHET, NOT AN AMNESTY
+# ---------------------------------
+# scripts/check/guard_wiring_optout.txt is seeded with the 364 orphans that
+# existed on 2026-08-01. That is an honest baseline of existing debt, in the same
+# style as ui_backend_isolation_baseline.txt and cpu_lane_hotloop_baseline.txt.
+# Shrinking it is a follow-up program. Do NOT add new entries to keep a build
+# green: an entry is a written statement that a guard is deliberately not a gate.
+#
+# Most of the seeded entries are heavyweight evidence producers -- QEMU boots,
+# GPU/Vulkan/DirectX readbacks, Electron and Bun browser bitmap captures, FPGA
+# and RISC-V hardware gates. They genuinely cannot run on a general-purpose CI
+# runner. That is a legitimate opt-out. "I forgot" is not.
+#
+# HOOKS MUST BE SYMLINKS, NEVER COPIES
+# ------------------------------------
+# Also checked here. On 2026-08-01 the shared repo's installed .git/hooks/pre-push
+# was a 2,668-byte COPY, two revisions behind the tracked script -- it predated
+# 5f1b96ad9a8, the commit that fixed three fail-opens in the conflict guards. So
+# every hardening landed that session was absent from the hook that actually ran.
+# A copy is a snapshot; it goes stale silently. A symlink cannot.
+#
+# OUTPUT CONTRACT
+# ---------------
+#   PASS  — <n> guard(s) checked          (n is ALWAYS > 0)
+#   FAIL  — unwired guards / stale opt-outs, exit 1
+#   ERROR — nothing was checked, exit 2
+# The count is what makes a vacuous run visible. Never read this script's status
+# from a pipeline: $? is the LAST command's.
+
+set -u
+
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
+
+# A tree this size always has hundreds of guards. Anything near zero means the
+# enumerator broke, not that the tree got clean. Raise as the tree grows; never
+# lower it to make a run pass.
+MIN_GUARDS=300
+
+# ---------------------------------------------------------------------------
+# scan_wiring <root> <optout-file> <workdir>
+#
+# Parameterised on <root> so the selftest can run the identical code path over
+# synthetic fixtures. Writes <workdir>/guards, /reached, /orphans.
+# ---------------------------------------------------------------------------
+scan_wiring() {
+    _root=$1
+    _optout=$2
+    _wd=$3
+
+    # 1. Enumerate guards. -print into `while IFS= read -r` (never `for f in
+    #    $list`): a bare for-loop word-splits on filenames containing spaces and
+    #    silently drops them, which has already hidden files from a check here.
+    : > "$_wd/guardpaths"
+    for _d in "$_root/scripts/check" "$_root/scripts/audit"; do
+        [ -d "$_d" ] || continue
+        find "$_d" -type f \( -name '*.shs' -o -name '*.sh' \) -print >> "$_wd/guardpaths"
+    done
+    if [ -d "$_root/scripts" ]; then
+        find "$_root/scripts" -maxdepth 1 -type f -name 'check-*.shs' -print \
+            >> "$_wd/guardpaths"
+    fi
+    sort -u "$_wd/guardpaths" -o "$_wd/guardpaths"
+    sed 's#.*/##' "$_wd/guardpaths" | sort -u > "$_wd/guards"
+
+    # 2. Roots. The installed pre-push hook is NOT under scripts/hooks/ -- it is
+    #    scripts/check/pre-push-conflict-tree-guard.shs, which setup.shs installs
+    #    into .git/hooks/pre-push. Omitting it would falsely orphan the three
+    #    push guards it drives.
+    : > "$_wd/roots"
+    [ -d "$_root/.github/workflows" ] &&
+        find "$_root/.github/workflows" -type f -print >> "$_wd/roots"
+    [ -d "$_root/scripts/hooks" ] &&
+        find "$_root/scripts/hooks" -type f -print >> "$_wd/roots"
+    [ -f "$_root/scripts/check/pre-push-conflict-tree-guard.shs" ] &&
+        echo "$_root/scripts/check/pre-push-conflict-tree-guard.shs" >> "$_wd/roots"
+    sort -u "$_wd/roots" -o "$_wd/roots"
+
+    # 3. Edges, referrer-path -> guard-basename.
+    #
+    #    Deliberately a BROAD textual model: any mention of the basename counts,
+    #    not just `sh <path>` call syntax. A narrow call-syntax model misses the
+    #    `var="$repo_root/scripts/check/x.shs"` assignment form -- which is
+    #    exactly how the pre-push hook names its three sub-guards -- and would
+    #    report them orphaned. Over-approximating reachability under-reports
+    #    orphans, so this errs toward NOT failing a build on a parse gap.
+    : > "$_wd/searchdirs"
+    for _d in scripts .github src bin tools config; do
+        [ -d "$_root/$_d" ] && echo "$_root/$_d" >> "$_wd/searchdirs"
+    done
+    : > "$_wd/hits"
+    if [ -s "$_wd/guards" ] && [ -s "$_wd/searchdirs" ]; then
+        # xargs -d is not portable; searchdirs are repo-relative and space-free.
+        # shellcheck disable=SC2046
+        $GREP -r -I -l -F -f "$_wd/guards" $(cat "$_wd/searchdirs") \
+            2>/dev/null > "$_wd/reffiles" || :
+        while IFS= read -r _f; do
+            $GREP -o -F -f "$_wd/guards" "$_f" 2>/dev/null | sort -u |
+                while IFS= read -r _b; do
+                    printf '%s\t%s\n' "$_f" "$_b"
+                done
+        done < "$_wd/reffiles" >> "$_wd/hits"
+    fi
+    # A file never counts as invoking itself.
+    awk -F'\t' '{n=$1; sub(/.*\//,"",n); if (n != $2) print}' "$_wd/hits" |
+        sort -u > "$_wd/edges"
+
+    # 4. BFS from the roots.
+    cp "$_wd/roots" "$_wd/frontier"
+    : > "$_wd/reached"
+    _i=0
+    while [ "$_i" -lt 12 ]; do
+        _i=$((_i + 1))
+        : > "$_wd/new"
+        while IFS= read -r _f; do
+            awk -F'\t' -v F="$_f" '$1==F{print $2}' "$_wd/edges" >> "$_wd/new"
+        done < "$_wd/frontier"
+        sort -u "$_wd/new" -o "$_wd/new"
+        comm -12 "$_wd/new" "$_wd/guards" > "$_wd/new2"
+        sort -u "$_wd/reached" > "$_wd/reached.s"
+        comm -23 "$_wd/new2" "$_wd/reached.s" > "$_wd/add"
+        [ -s "$_wd/add" ] || break
+        cat "$_wd/add" >> "$_wd/reached"
+        sort -u "$_wd/reached" -o "$_wd/reached"
+        : > "$_wd/frontier"
+        while IFS= read -r _b; do
+            $GREP -x ".*/$_b" "$_wd/guardpaths" >> "$_wd/frontier" 2>/dev/null || :
+        done < "$_wd/add"
+        sort -u "$_wd/frontier" -o "$_wd/frontier"
+    done
+    sort -u "$_wd/reached" -o "$_wd/reached"
+    comm -23 "$_wd/guards" "$_wd/reached" > "$_wd/orphans"
+
+    # 5. Opt-out list: "<basename><whitespace><reason>". A reason is REQUIRED --
+    #    a bare basename is an unexplained skip and is rejected below.
+    : > "$_wd/optout"
+    : > "$_wd/optout_noreason"
+    if [ -f "$_optout" ]; then
+        $GREP -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$_optout" \
+            > "$_wd/optout_raw" 2>/dev/null || :
+        awk '{print $1}' "$_wd/optout_raw" | sort -u > "$_wd/optout"
+        awk 'NF<2{print $1}' "$_wd/optout_raw" | sort -u > "$_wd/optout_noreason"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST. Fixtures exercise every verdict this script can reach. A sabotage
+# matrix is only as good as its fixture coverage: on 2026-08-01 one of eight
+# neutered-check sabotages of check-tree-size-push.shs initially passed green
+# because no fixture uniquely exercised it. Each fixture below is the ONLY one
+# that turns its verdict, so neutering any branch turns this selftest red.
+# ---------------------------------------------------------------------------
+selftest() {
+    _t=$(mktemp -d) || return 1
+    mkdir -p "$_t/scripts/check" "$_t/.github/workflows" "$_t/scripts/hooks"
+
+    # direct: named by a workflow.
+    echo '#!/bin/sh' > "$_t/scripts/check/st-direct.shs"
+    # indirect: named only by st-direct.shs, which is itself reachable.
+    echo '#!/bin/sh' > "$_t/scripts/check/st-indirect.shs"
+    echo 'sh scripts/check/st-indirect.shs' >> "$_t/scripts/check/st-direct.shs"
+    # orphan-justified: unreferenced, but listed in the opt-out with a reason.
+    echo '#!/bin/sh' > "$_t/scripts/check/st-optout.shs"
+    # orphan-unjustified: unreferenced and unlisted. MUST fail.
+    echo '#!/bin/sh' > "$_t/scripts/check/st-orphan.shs"
+    printf 'run: sh scripts/check/st-direct.shs\n' > "$_t/.github/workflows/w.yml"
+
+    printf '# fixture\nst-optout.shs  needs real hardware\n' > "$_t/optout.txt"
+
+    _w=$(mktemp -d) || return 1
+    scan_wiring "$_t" "$_t/optout.txt" "$_w"
+
+    _fail=0
+    _assert() { # <desc> <expect> <actual>
+        if [ "$2" != "$3" ]; then
+            echo "SELFTEST FAILED: $1 (expected '$2', got '$3')"
+            _fail=1
+        fi
+    }
+    _has() { $GREP -qx "$2" "$_w/$1" && echo yes || echo no; }
+
+    _assert "guards enumerated" 4 "$(wc -l < "$_w/guards" | tr -d ' ')"
+    _assert "direct guard reachable"   yes "$(_has reached st-direct.shs)"
+    _assert "indirect guard reachable" yes "$(_has reached st-indirect.shs)"
+    _assert "optout guard is an orphan" yes "$(_has orphans st-optout.shs)"
+    _assert "unlisted guard is an orphan" yes "$(_has orphans st-orphan.shs)"
+    _assert "reachable guard is NOT an orphan" no "$(_has orphans st-direct.shs)"
+
+    # The verdict the whole script exists to produce.
+    comm -23 "$_w/orphans" "$_w/optout" > "$_w/st_unjust"
+    _assert "unjustified set is exactly st-orphan.shs" \
+        "st-orphan.shs" "$(cat "$_w/st_unjust" | tr '\n' ' ' | sed 's/ *$//')"
+
+    # A bare basename with no reason must be rejected, not silently honoured.
+    printf 'st-orphan.shs\n' >> "$_t/optout.txt"
+    _w2=$(mktemp -d) || return 1
+    scan_wiring "$_t" "$_t/optout.txt" "$_w2"
+    _assert "reasonless opt-out detected" yes \
+        "$($GREP -qx 'st-orphan.shs' "$_w2/optout_noreason" && echo yes || echo no)"
+
+    rm -rf "$_t" "$_w" "$_w2"
+    if [ "$_fail" -ne 0 ]; then
+        echo "check-guard-wiring: SELFTEST FAILED -- the wiring scan is broken."
+        echo "Fix the scan. Do NOT delete these fixtures."
+        return 1
+    fi
+    echo "check-guard-wiring: selftest 8/8 fixtures correct"
+    return 0
+}
+
+selftest || exit 2
+[ "${1:-}" = "--selftest-only" ] && exit 0
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
+if [ -z "$ROOT" ]; then
+    echo "check-guard-wiring: ERROR — nothing was checked: not inside a git repository."
+    echo "Run this from the repo root. Both push guards once exited 0 from a"
+    echo "non-repo cwd while printing 'nothing to push'; this refuses instead."
+    exit 2
+fi
+OPTOUT="$ROOT/scripts/check/guard_wiring_optout.txt"
+
+WD=$(mktemp -d) || exit 2
+trap 'rm -rf "$WD"' EXIT
+scan_wiring "$ROOT" "$OPTOUT" "$WD"
+
+n_guards=$(wc -l < "$WD/guards" | tr -d ' ')
+if [ "$n_guards" -lt "$MIN_GUARDS" ]; then
+    echo "check-guard-wiring: ERROR — nothing was checked: only $n_guards guard(s)"
+    echo "enumerated (expected >= $MIN_GUARDS). The enumerator is broken -- most"
+    echo "likely a find(1) path or extension stopped matching. Fix it; do not"
+    echo "lower MIN_GUARDS."
+    exit 2
+fi
+
+n_reached=$(wc -l < "$WD/reached" | tr -d ' ')
+n_orphan=$(wc -l < "$WD/orphans" | tr -d ' ')
+
+comm -23 "$WD/orphans" "$WD/optout" > "$WD/unjustified"
+# Stale opt-outs: a listed guard that is now wired, or no longer exists. Both
+# mean the baseline is lying about the tree, so both fail.
+comm -12 "$WD/optout" "$WD/reached" > "$WD/optout_now_wired"
+comm -23 "$WD/optout" "$WD/guards" > "$WD/optout_gone"
+
+n_unjust=$(wc -l < "$WD/unjustified" | tr -d ' ')
+n_wired_now=$(wc -l < "$WD/optout_now_wired" | tr -d ' ')
+n_gone=$(wc -l < "$WD/optout_gone" | tr -d ' ')
+n_noreason=$(wc -l < "$WD/optout_noreason" | tr -d ' ')
+
+echo "guard_total=$n_guards"
+echo "guard_invoked=$n_reached"
+echo "guard_orphaned=$n_orphan"
+echo "guard_optout_listed=$(wc -l < "$WD/optout" | tr -d ' ')"
+
+# ---------------------------------------------------------------------------
+# Installed-hook shape. A copy goes stale silently; a symlink cannot.
+# ---------------------------------------------------------------------------
+n_hooks=0
+n_badhooks=0
+HOOKDIR="$ROOT/.git/hooks"
+if [ -d "$HOOKDIR" ]; then
+    # *.local is a pre-existing site-local hook that setup.shs deliberately
+    # preserved and chains; it is untracked by design, so it cannot be a symlink
+    # into the tree and is not a staleness hazard.
+    find "$HOOKDIR" -maxdepth 1 -type f ! -name '*.sample' ! -name '*.local' \
+        -print > "$WD/copyhooks" 2>/dev/null || :
+    find "$HOOKDIR" -maxdepth 1 ! -name '*.sample' ! -name '*.local' ! -name hooks \
+        -print > "$WD/allhooks" 2>/dev/null || :
+    n_hooks=$(wc -l < "$WD/allhooks" | tr -d ' ')
+    n_badhooks=$(wc -l < "$WD/copyhooks" | tr -d ' ')
+fi
+echo "installed_hooks=$n_hooks"
+echo "installed_hooks_not_symlink=$n_badhooks"
+if [ "$n_hooks" -eq 0 ]; then
+    echo "NOTE: no local hooks installed (normal on a CI runner) -- the hook-shape"
+    echo "check did not evaluate anything here. It is not a pass."
+fi
+
+status=0
+
+if [ "$n_unjust" -gt 0 ]; then
+    echo "guard_wiring_ok=false"
+    echo "== guards invoked by nothing and not listed in the opt-out =="
+    while IFS= read -r b; do
+        [ -n "$b" ] && echo "unwired_guard=$b"
+    done < "$WD/unjustified"
+    echo ""
+    echo "A guard that no hook and no CI job runs is decoration. Wire it into"
+    echo ".github/workflows/ or scripts/hooks/, or add it to"
+    echo "scripts/check/guard_wiring_optout.txt WITH A REASON. Do not weaken the"
+    echo "guard, and do not add an opt-out line merely to make this pass."
+    status=1
+fi
+
+if [ "$n_noreason" -gt 0 ]; then
+    echo "guard_wiring_ok=false"
+    echo "== opt-out entries with no reason =="
+    while IFS= read -r b; do
+        [ -n "$b" ] && echo "optout_without_reason=$b"
+    done < "$WD/optout_noreason"
+    echo "Every opt-out line must be '<script.shs>  <why it is not a gate>'."
+    status=1
+fi
+
+if [ "$n_wired_now" -gt 0 ]; then
+    echo "guard_wiring_ok=false"
+    echo "== opt-out entries that are now wired (ratchet: remove them) =="
+    while IFS= read -r b; do
+        [ -n "$b" ] && echo "stale_optout_now_wired=$b"
+    done < "$WD/optout_now_wired"
+    status=1
+fi
+
+if [ "$n_gone" -gt 0 ]; then
+    echo "guard_wiring_ok=false"
+    echo "== opt-out entries for scripts that no longer exist =="
+    while IFS= read -r b; do
+        [ -n "$b" ] && echo "stale_optout_missing=$b"
+    done < "$WD/optout_gone"
+    status=1
+fi
+
+if [ "$n_badhooks" -gt 0 ]; then
+    echo "guard_wiring_ok=false"
+    echo "== installed hooks that are COPIES, not symlinks =="
+    while IFS= read -r h; do
+        [ -n "$h" ] && echo "hook_is_a_copy=$h"
+    done < "$WD/copyhooks"
+    echo ""
+    echo "A copied hook is a snapshot: it goes stale the moment the tracked"
+    echo "guard is improved, and nothing reports the drift. On 2026-08-01 the"
+    echo "installed pre-push hook was a copy two revisions behind and was"
+    echo "missing every fail-open fix landed that session. Re-run"
+    echo "scripts/setup/setup.shs, which installs hooks as symlinks."
+    status=1
+fi
+
+if [ "$status" -ne 0 ]; then
+    echo "check-guard-wiring: FAIL — $n_guards guard(s) checked, $n_unjust unwired," \
+         "$((n_wired_now + n_gone + n_noreason)) bad opt-out(s), $n_badhooks copied hook(s)"
+    exit 1
+fi
+
+echo "guard_wiring_ok=true"
+echo "check-guard-wiring: PASS — $n_guards guard(s) checked, $n_reached invoked," \
+     "$n_orphan orphaned (all justified), $n_badhooks copied hook(s)"
+exit 0
