@@ -80,6 +80,15 @@ correlated keyboard and pointer input, authority revision, backend, font crop,
 and framebuffer evidence. Source inspection, demo markers, Rust-seed execution,
 fixed QEMU metadata, or unverified screenshots cannot satisfy the scenarios.
 
+For the hosted CSS-override parity lane, run
+`sh scripts/check/check-wm-host-css-override-evidence.shs`. It writes a stable
+six-token glass fixture and executes the canonical production host launcher for
+both default and override states. A pass requires the hosted override receipt,
+a changed effective material identity with the package source identity retained,
+and different presented-buffer pixels. Its FIFO commands are explicitly
+diagnostic synthetic compositor input, not Winit or physical interaction
+evidence.
+
 ## Current Verification Limits
 
 The 2026-07-24 focused live attempt used
