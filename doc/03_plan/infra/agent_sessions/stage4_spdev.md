@@ -426,3 +426,38 @@ when a staged enum payload reaches the unsupported-kind arm. Diagnose whether
 the value is a lost `MirTypeKind` nested payload or a missing supported kind,
 add focused type-registration coverage, then begin a new bounded Stage2/Stage3
 cycle. Do not rerun `braces-cycle3-stage3` unchanged.
+
+## 2026-08-01 optional-field MIR type registration frontier
+
+- Added fail-only flat type-registration context. The unsupported values are
+  exactly `BackendError.span: Span?` and `CompiledUnit.entry_point: text?`, not
+  anonymous nested MIR payloads. Focused contract evidence:
+  `build/mini_builds/stage4-type-registration-context-cycle2.log`.
+- Qualified the broad MIR-lowering match with `HirTypeKind` ownership, then
+  added discriminant-first isolated extraction for `HirTypeKind.Optional`,
+  mirroring the existing staged `Dict` workaround. The ownership/predispatch
+  contract passes; evidence:
+  `build/mini_builds/mir-hir-type-kind-ownership-cycle2.log`.
+- Discovered that `current-seed-cache` returned a byte-identical stale Stage2
+  binary after compiler-source edits (SHA-256 `b0552da1207246cd7249022793b4a63a951a4a4512d6e44e4fc9cfa115c4e5e6`).
+  Rejected it and used fresh per-cycle caches thereafter.
+- Fresh Stage2 candidates passed version, unsupported-command, frontend smoke,
+  and immutable-hash admission. Cycle 2 SHA-256:
+  `be886e82c0da5e97d6a944b72241fee5fbdb2c23beeb0f447d2deda5dde75836`;
+  cycle 3 SHA-256:
+  `a60175a216777ba050cc17fd74bd243053d7124d931a4cc9cc8f1e6c36a83174`.
+- Stage3 cycles 1 through 3 all fail on the same two optional fields. Owner
+  qualification and discriminant-first predispatch do not recognize these
+  staged values, indicating their `HirTypeKind` discriminants/payloads are
+  already malformed before `MirLowering.lower_type`. Final evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle3-stage3/stage3.log`.
+- The mandatory three-cycle cap is exhausted. Stage3 produced no compiler;
+  Stage4, essential-tools smoke, and release verification were not run. Nothing
+  was pushed.
+
+Next: in a fresh session, instrument `lower_struct_type` to print the numeric
+field-kind discriminant alongside reference discriminants for `Optional`,
+`Infer`, `Error`, and `Named`, and instrument HIR struct-field construction for
+these two owners. Determine where `Span?`/`text?` cease to be valid Optional
+values before changing MIR fallback semantics. Use fresh per-cycle Stage2
+caches; do not reuse `current-seed-cache` or rerun `typekind-cycle3-stage3`.

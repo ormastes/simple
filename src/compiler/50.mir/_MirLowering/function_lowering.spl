@@ -562,8 +562,22 @@ impl MirLowering:
                     return MirType(kind: MirTypeKind.Dict(self.lower_type(key), self.lower_type(value)))
                 case _:
                     pass
+        # Stage3's broad HirTypeKind match can fail to recognize Optional when
+        # overlapping enum variant names are present in MIR scope. Mirror the
+        # proven Dict predispatch above: discriminate first, then extract the
+        # payload in an isolated owner-qualified match.
+        val optional_type_disc = rt_enum_discriminant(HirTypeKind.Optional(type_))
+        if rt_enum_discriminant(type_.kind) == optional_type_disc:
+            match type_.kind:
+                case HirTypeKind.Optional(inner):
+                    return MirType(kind: MirTypeKind.Tuple([
+                        MirType(kind: MirTypeKind.Bool),
+                        self.lower_type(inner)
+                    ]))
+                case _:
+                    pass
         match type_.kind:
-            case Int(bits, signed):
+            case HirTypeKind.Int(bits, signed):
                 if signed:
                     match bits:
                         case 8: MirType(kind: MirTypeKind.I8)
@@ -576,54 +590,54 @@ impl MirLowering:
                         case 16: MirType(kind: MirTypeKind.U16)
                         case 32: MirType(kind: MirTypeKind.U32)
                         case _: MirType(kind: MirTypeKind.U64)
-            case Float(bits):
+            case HirTypeKind.Float(bits):
                 match bits:
                     case 32: MirType(kind: MirTypeKind.F32)
                     case _: MirType(kind: MirTypeKind.F64)
-            case Bool:
+            case HirTypeKind.Bool:
                 MirType(kind: MirTypeKind.Bool)
-            case Char:
+            case HirTypeKind.Char:
                 MirType(kind: MirTypeKind.Char)
-            case Str:
+            case HirTypeKind.Str:
                 # String is a fat pointer (ptr, len)
                 MirType(kind: MirTypeKind.Tuple([
                     MirType(kind: MirTypeKind.Ptr(MirType(kind: MirTypeKind.U8), false)),
                     MirType(kind: MirTypeKind.U64)
                 ]))
-            case Unit:
+            case HirTypeKind.Unit:
                 MirType(kind: MirTypeKind.Unit)
-            case Tuple(elements):
+            case HirTypeKind.Tuple(elements):
                 var mir_elements: [MirType] = []
                 for e in elements:
                     mir_elements = mir_elements.push(self.lower_type(e))
                 MirType(kind: MirTypeKind.Tuple(mir_elements))
-            case Array(element, size):
+            case HirTypeKind.Array(element, size):
                 val array_size = if size != nil: size else: 0
                 MirType(kind: MirTypeKind.Array(self.lower_type(element), array_size))
-            case Dict(key, value):
+            case HirTypeKind.Dict(key, value):
                 MirType(kind: MirTypeKind.Dict(self.lower_type(key), self.lower_type(value)))
-            case Ref(inner, mutable):
+            case HirTypeKind.Ref(inner, mutable):
                 MirType(kind: MirTypeKind.Ref(self.lower_type(inner), mutable))
-            case Ptr(inner, mutable):
+            case HirTypeKind.Ptr(inner, mutable):
                 MirType.ptr(self.lower_type(inner), mutable)
-            case Optional(inner):
+            case HirTypeKind.Optional(inner):
                 # Optional is enum { nil, Some(T) }
                 MirType(kind: MirTypeKind.Tuple([
                     MirType(kind: MirTypeKind.Bool),  # has_value
                     self.lower_type(inner)
                 ]))
-            case Result(_, _):
+            case HirTypeKind.Result(_, _):
                 # Result is a tagged runtime handle; retain its generic HIR
                 # payload type separately in the local HIR-type table.
                 MirType.i64()
-            case Union(members):
+            case HirTypeKind.Union(members):
                 # Union is a tagged union: [discriminant (I64), ...member types]
                 # At the MIR level, store all member types for backend layout
                 var mir_members: [MirType] = []
                 for m in members:
                     mir_members = mir_members.push(self.lower_type(m))
                 MirType(kind: MirTypeKind.Union(mir_members))
-            case Named(symbol, _):
+            case HirTypeKind.Named(symbol, _):
                 val underlying = custom_primitive_underlying_type_tag_by_symbol(self.symbol_id_value(symbol))
                 if underlying == TYPE_BOOL:
                     return MirType(kind: MirTypeKind.Bool)
@@ -633,12 +647,12 @@ impl MirLowering:
                     return MirType(kind: MirTypeKind.F64)
                 MirType(kind: MirTypeKind.Struct(
                     self.canonical_mir_type_symbol(symbol)))
-            case Infer(id, generation):
+            case HirTypeKind.Infer(id, generation):
                 self.error_fatal("unsupported MIR type kind: {type_.kind}", Some(type_.span))
                 MirType(kind: MirTypeKind.I64)
-            case Never:
+            case HirTypeKind.Never:
                 MirType(kind: MirTypeKind.Never)
-            case Error:
+            case HirTypeKind.Error:
                 # Fail-soft: HIR emits Error for types it could not resolve in
                 # fail-soft contexts (entry-closure import registration,
                 # recovered "unresolved type"). Registering such a type must
