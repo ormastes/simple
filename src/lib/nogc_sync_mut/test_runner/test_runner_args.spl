@@ -174,6 +174,10 @@ fn test_args_validation_error(args: [text]) -> text:
 
 fn parse_test_args(args: [text]) -> TestOptions:
     var path = ""
+    # Every positional target, in order. `path` keeps the first one for the
+    # many call sites that still reason about a single base path; `paths`
+    # carries the full set so nothing requested is silently discarded.
+    var paths: [text] = []
     var path_explicit = false
     var level = TestLevel.All
     var tag = ""
@@ -529,13 +533,21 @@ fn parse_test_args(args: [text]) -> TestOptions:
                 profile = normalize_profile_name(args[i])
         elif arg.starts_with("--profile="):
             profile = normalize_profile_name(arg.substring(10))
-        elif not arg.starts_with("-") and not path_explicit:
-            path = arg
-            path_explicit = true
+        elif not arg.starts_with("-"):
+            # Accumulate every positional target. Previously this arm was
+            # guarded by `and not path_explicit`, so the second and later
+            # targets matched no branch at all and vanished with no
+            # diagnostic — `simple test a.spl b.spl` silently ran only a.spl.
+            paths.push(arg)
+            if not path_explicit:
+                path = arg
+                path_explicit = true
         i = i + 1
 
     if path == "":
         path = "test/"
+    if paths.len() == 0:
+        paths = [path]
 
     if no_limits:
         max_mem_gb = 0
@@ -543,6 +555,7 @@ fn parse_test_args(args: [text]) -> TestOptions:
 
     TestOptions(
         path: path,
+        paths: paths,
         path_explicit: path_explicit,
         level: level,
         tag: tag,

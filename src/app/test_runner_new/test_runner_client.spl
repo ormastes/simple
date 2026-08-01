@@ -41,7 +41,11 @@ val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
 
 struct ClientRun:
+    # First requested path. Retained for error reporting only; execution
+    # iterates `paths` so that nothing requested is ever silently skipped.
     path: text
+    # Every positional spec path supplied on the command line, in order.
+    paths: [text]
     timeout_secs: i64
     valid: bool
     error: text
@@ -62,8 +66,29 @@ fn clean_args() -> [text]:
         i = i + 1
     args
 
+# Count positional (non-flag) arguments independently of parse_client_run.
+# main() cross-checks this against the number of paths parse_client_run
+# actually produced: if a future change reintroduces a "first path wins" latch,
+# the two counts diverge and the run fails loudly instead of silently testing a
+# subset. See doc/08_tracking/bug/
+# test_runner_multi_path_drops_all_but_first_2026-08-01.md.
+fn count_positional_args(args: [text]) -> i64:
+    var n = 0
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--timeout" and i + 1 < args.len():
+            i = i + 2
+            continue
+        if arg.starts_with("-"):
+            i = i + 1
+            continue
+        n = n + 1
+        i = i + 1
+    n
+
 fn parse_client_run(args: [text]) -> ClientRun:
-    var path = ""
+    var paths: [text] = []
     var timeout_secs = 120
     var i = 0
     while i < args.len():
@@ -76,16 +101,19 @@ fn parse_client_run(args: [text]) -> ClientRun:
             timeout_secs = to_int(arg[10:])
             i = i + 1
             continue
-        if not arg.starts_with("-") and path == "":
-            path = arg
+        if not arg.starts_with("-"):
+            paths.push(arg)
         i = i + 1
-    if path == "":
-        return ClientRun(path: "", timeout_secs: timeout_secs, valid: false, error: "missing test file")
-    if not path.ends_with(".spl"):
-        return ClientRun(path: path, timeout_secs: timeout_secs, valid: false, error: "expected .spl test file")
-    if not rt_file_exists(path):
-        return ClientRun(path: path, timeout_secs: timeout_secs, valid: false, error: "test file not found")
-    ClientRun(path: path, timeout_secs: timeout_secs, valid: true, error: "")
+    if paths.len() == 0:
+        return ClientRun(path: "", paths: [], timeout_secs: timeout_secs, valid: false, error: "missing test file")
+    # Validate every requested path, not just the first: an unusable path in
+    # any position must fail the run rather than be skipped over.
+    for p in paths:
+        if not p.ends_with(".spl"):
+            return ClientRun(path: p, paths: paths, timeout_secs: timeout_secs, valid: false, error: "expected .spl test file")
+        if not rt_file_exists(p):
+            return ClientRun(path: p, paths: paths, timeout_secs: timeout_secs, valid: false, error: "test file not found")
+    ClientRun(path: paths[0], paths: paths, timeout_secs: timeout_secs, valid: true, error: "")
 
 fn simple_binary() -> text:
     val raw = cli_get_args()
@@ -177,41 +205,32 @@ fn run_scoped_spl_doctest(args: [text]) -> i64:
         return 0
     1
 
-fn main() -> i64:
-    val cleaned = clean_args()
-    if has_spl_doctest_flag(cleaned):
-        return run_scoped_spl_doctest(cleaned)
-    val run = parse_client_run(cleaned)
-    if not run.valid:
-        print "Simple Test Runner client"
-        print "error: {run.error}: {run.path}"
-        return 1
-    val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
-    ensure_dirs()
-    if not ensure_daemon():
-        # The light daemon could not start (e.g. it relies on runtime methods
-        # the seed interpreter lacks). Degrade gracefully to direct execution
-        # via the single runner instead of refusing — `--no-session-daemon`
-        # routes to test_runner_single.spl (no daemon, no recursion).
-        print "WARNING: test daemon unavailable; running directly"
-        val binary = simple_binary()
-        val (out, err, code) = process_run_bounded(
-            binary,
-            ["test", "--no-session-daemon", run.path],
-            timeout_ms,
-            TEST_OUTPUT_CAPTURE_BYTES
-        )
-        if out != "":
-            print out
-        if err != "":
-            print err
-        return code
-    val id = "{rt_time_now_unix_micros()}-{rt_getpid()}.req"
+# Run one spec file directly, bypassing the daemon. `--no-session-daemon`
+# routes to test_runner_single.spl (no daemon, no recursion).
+fn run_one_direct(binary: text, path: text, timeout_ms: i64) -> i64:
+    val (out, err, code) = process_run_bounded(
+        binary,
+        ["test", "--no-session-daemon", path],
+        timeout_ms,
+        TEST_OUTPUT_CAPTURE_BYTES
+    )
+    if out != "":
+        print out
+    if err != "":
+        print err
+    code
+
+# Run one spec file through the light daemon. `seq` disambiguates request ids
+# within a single multi-path invocation: rt_time_now_unix_micros() can repeat
+# across two fast iterations, and a colliding id would make the second request
+# overwrite the first one's response file.
+fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
+    val id = "{rt_time_now_unix_micros()}-{rt_getpid()}-{seq}.req"
     val req_path = "{LIGHT_REQ_DIR}/{id}"
     val resp_path = "{LIGHT_RESP_DIR}/{id}.resp"
     val expiry_micros = light_request_expiry_micros(rt_time_now_unix_micros(), timeout_ms)
     rt_file_delete(resp_path)
-    if not atomic_write_text(req_path, light_request_encode(run.path, expiry_micros)):
+    if not atomic_write_text(req_path, light_request_encode(path, expiry_micros)):
         rt_file_delete(req_path)
         rt_file_delete(resp_path)
         print "ERROR: test daemon request write failed: {req_path}"
@@ -223,5 +242,56 @@ fn main() -> i64:
             rt_file_delete(resp_path)
             return print_response(content)
         rt_sleep_ms(100)
-    print "ERROR: test daemon timed out: {run.path}"
+    print "ERROR: test daemon timed out: {path}"
     1
+
+fn main() -> i64:
+    val cleaned = clean_args()
+    if has_spl_doctest_flag(cleaned):
+        return run_scoped_spl_doctest(cleaned)
+    val run = parse_client_run(cleaned)
+    if not run.valid:
+        print "Simple Test Runner client"
+        print "error: {run.error}: {run.path}"
+        return 1
+    val requested = run.paths
+    val requested_count = count_positional_args(cleaned)
+    # Fail closed: a positional path that never became a run target is a
+    # dropped spec, and a dropped spec must never report success.
+    if requested.len() != requested_count:
+        print "Simple Test Runner client"
+        print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {requested.len()} parsed"
+        return 1
+    val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
+    ensure_dirs()
+    # The light daemon may be unable to start (e.g. it relies on runtime
+    # methods the seed interpreter lacks). Degrade to direct execution rather
+    # than refusing, but decide once for the whole batch.
+    val daemon_ok = ensure_daemon()
+    var binary = ""
+    if not daemon_ok:
+        print "WARNING: test daemon unavailable; running directly"
+        binary = simple_binary()
+    var worst = 0
+    var executed = 0
+    var seq = 0
+    for p in requested:
+        var code = 0
+        if daemon_ok:
+            code = run_one_via_daemon(p, timeout_ms, seq)
+        else:
+            code = run_one_direct(binary, p, timeout_ms)
+        executed = executed + 1
+        seq = seq + 1
+        # Aggregate: any failing spec fails the whole run. Keep going so the
+        # report covers every requested file rather than stopping at the first.
+        if code != 0 and worst == 0:
+            worst = code
+    # Fail closed again on the execution side, and always report the counts so
+    # a shortfall is visible in the log even before the exit code is read.
+    if requested.len() > 1:
+        print "Requested {requested.len()} spec file(s); executed {executed}."
+    if executed != requested.len():
+        print "ERROR: executed {executed} of {requested.len()} requested spec file(s); some were skipped"
+        return 1
+    worst

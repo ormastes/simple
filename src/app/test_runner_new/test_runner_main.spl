@@ -110,6 +110,32 @@ pub fn generate_spipe_docs_for_results(results: [TestFileResult], options: TestO
         return 3
     0
 
+# Discover test files across EVERY requested target, not just the first.
+#
+# `simple test a/ b/` used to discover only `a/` because parse_test_args kept a
+# single scalar path; the remaining targets were dropped with no diagnostic.
+# Discovery now unions all of them, and the per-target counts are reported so a
+# target that contributes nothing is visible in the log rather than silent.
+fn discover_all_requested_files(options: TestOptions, use_cache: bool) -> [text]:
+    val requested = if options.paths.len() > 0: options.paths else: [options.path]
+    if requested.len() == 1:
+        return discover_test_files_fast(requested[0], options, use_cache)
+    var all_files: [text] = []
+    # contains_key + bracket assign only: Dict.len()/.get() are unreliable
+    # under native codegen (doc/07_guide/language/dict_native_pitfalls.md).
+    var seen: dict<text, bool> = {}
+    for rp in requested:
+        val found = discover_test_files_fast(rp, options, use_cache)
+        var added = 0
+        for f in found:
+            if not seen.contains_key(f):
+                seen[f] = true
+                all_files.push(f)
+                added = added + 1
+        print "  target {rp}: {found.len()} test file(s) discovered, {added} new"
+    print "Requested {requested.len()} target(s); {all_files.len()} distinct test file(s) to run."
+    all_files
+
 fn run_tests(options: TestOptions) -> TestRunResult:
     # CI mode override (config already loaded by main(), use options.ci_mode)
     # Apply CI mode overrides
@@ -159,7 +185,7 @@ fn run_tests(options: TestOptions) -> TestRunResult:
     val session_setup_start = time_now_unix_micros()
 
     val use_cache = not updated_options.no_cache
-    val all_files = discover_test_files_fast(updated_options.path, updated_options, use_cache)
+    val all_files = discover_all_requested_files(updated_options, use_cache)
 
     # Validate # @cover annotations for system tests
     if not updated_options.no_cover_check:
