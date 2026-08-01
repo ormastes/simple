@@ -21,7 +21,7 @@
 # Design: composition + a module-level override var (same idiom as
 # widget_store_ops.spl). No inheritance.
 
-use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
+use common.ui.theme_render_snapshot.{ThemeMaterialSemantics, ThemeRenderSnapshot, theme_material_sha256}
 
 struct WmChromeColors:
     desktop_bg: u32          # desktop backdrop (Aqua light default: 0xff5a7fb5)
@@ -191,6 +191,57 @@ fn wm_chrome_colors_from_render_snapshot(snapshot: ThemeRenderSnapshot) -> WmChr
 fn apply_theme_render_snapshot_to_wm_chrome(snapshot: ThemeRenderSnapshot):
     _active_theme_render_snapshot = [snapshot]
     register_wm_chrome_theme(wm_chrome_colors_from_render_snapshot(snapshot))
+
+fn theme_render_snapshot_with_wm_colors(
+    snapshot: ThemeRenderSnapshot,
+    colors: WmChromeColors
+) -> ThemeRenderSnapshot:
+    """Apply WM chrome colors to a snapshot's material fields and re-hash it.
+
+    This keeps an owned theme snapshot as the identity source while the
+    requested WM palette values flow to all chrome-capable pipelines that consume
+    the snapshot (theme wire, browser receipts, draw-ir material provenance).
+    Unspecified or invalid CSS tokens already fold to defaults at parse time;
+    this helper only reprojects whatever concrete `colors` object is passed."""
+    val base_material = snapshot.material
+    val material = ThemeMaterialSemantics(
+        desktop_fill_rgba: colors.desktop_bg,
+        window_fill_rgba: colors.window_body,
+        active_title_fill_rgba: colors.title_focused,
+        inactive_title_fill_rgba: colors.title_unfocused,
+        surface_alpha_milli: base_material.surface_alpha_milli,
+        backdrop_blur_px: base_material.backdrop_blur_px,
+        backdrop_saturation_milli: base_material.backdrop_saturation_milli,
+        border_width_px: base_material.border_width_px,
+        border_rgba: base_material.border_rgba,
+        corner_radius_px: base_material.corner_radius_px,
+        active_shadows: base_material.active_shadows,
+        inactive_shadows: base_material.inactive_shadows,
+        font_family: base_material.font_family,
+        font_size_px: base_material.font_size_px,
+        font_weight: base_material.font_weight,
+        text_rgba: colors.text_primary,
+        secondary_text_rgba: colors.text_primary,
+        solid_fallback_rgba: base_material.solid_fallback_rgba,
+        fallback_contrast_milli: base_material.fallback_contrast_milli,
+        window_gradient_available: base_material.window_gradient_available,
+        window_gradient_start_rgba: base_material.window_gradient_start_rgba,
+        window_gradient_end_rgba: base_material.window_gradient_end_rgba,
+        window_gradient_source_css: base_material.window_gradient_source_css
+    )
+    ThemeRenderSnapshot(
+        id: snapshot.id,
+        family_id: snapshot.family_id,
+        source_reference: snapshot.source_reference,
+        source_manifest_sha256: snapshot.source_manifest_sha256,
+        material_sha256: theme_material_sha256(material),
+        composed_css: snapshot.composed_css,
+        background_rgba: colors.desktop_bg,
+        foreground_rgba: colors.text_primary,
+        accent_rgba: colors.accent,
+        material: material,
+        semantic: snapshot.semantic
+    )
 
 # =========================================================================
 # GUI (CSS) theme bridge — the WM chrome shares the GUI theme's tokens.
