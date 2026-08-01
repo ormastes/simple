@@ -5,9 +5,12 @@
 behind a `Trait?`-typed module-level `var` and invoked via a trait-typed
 call; found while wiring `_wm_background_image_provider:
 BackgroundImageProvider?` in `src/lib/common/ui/window_scene.spl`.
-**Status:** OPEN — workaround is the established module-level-`var`-state
-convention (matches the existing `_*_compositor_override_*` pattern), not a
-fix.
+**Status:** CLOSED 2026-08-01 — misdiagnosed. Real defect, but **seed-only**,
+and **not** trait-, optional-, or module-slot-specific. See "2026-08-01
+re-diagnosis" below. The pure-Simple interpreter (the product) has been
+correct since #112 landed `29c2a91a030` on **2026-07-04, three days before
+this report was filed**; regression guard added to
+`test/01_unit/compiler/interp_object_store_ref_model_spec.spl`.
 
 ## Symptom
 
@@ -50,7 +53,65 @@ through the `Trait?` slot. State mutated via module-level `var` assignment
 persists correctly across calls; state mutated via `me` methods on the
 trait-slot-held object does not.
 
-## Next step
+## 2026-08-01 re-diagnosis (supersedes the analysis above)
+
+Reproduced on the Rust seed's **interpreter**
+(`SIMPLE_EXECUTION_MODE=interpreter src/compiler_rust/target/bootstrap/simple
+run`): the three-call repro yields `a=1 b=1 c=1` as reported. The seed's
+**JIT** cannot judge this shape at all — the trait form aborts on duck-typed
+dispatch, and the trait-free form returns nonsense (every `Impl()` reads as
+one shared object).
+
+### Not ADR-004
+
+ADR-004 is scoped to *indexed* access — a Dict index, or a tuple/struct field
+of an indexed element. Nothing here is indexed. The contract for `class` is
+the opposite: `doc/06_spec/feature/language/memory_spec.md:84-89` and
+`doc/06_spec/feature/language/data_structures_spec.md:97-98` specify class
+instances as **reference types** ("Assignment copies the reference, not the
+data"). So this is a genuine contract violation, not expected value
+semantics.
+
+### The three specifics in the original report are all wrong
+
+A trigger matrix (optional vs plain, trait- vs class-typed, module vs local)
+shows the copy is at **bind**, universally — nothing to do with traits,
+optionals, module slots, or "re-boxing per call":
+
+| shape | result |
+|---|---|
+| `val b = a; a.bump()` → `b.n` | **0** (expected 1) |
+| `val xs = [d]; d.bump()` → `xs[0].n` | **0** (expected 1) |
+| optional slot, trait- **or** class-typed, module **or** local | **1 1** |
+| any non-optional binding, re-read per call | 1 2 (ok) |
+| bind optional once, call twice on that binding | 1 2 (ok) |
+
+The non-optional cases "work" only because the mutation and the read go
+through the same slot. The one shape that does alias is passing an instance
+as a function argument. Prior art for the same universal defect:
+`data_structures_spec_remaining_2_failures_2026-05-30.md` (closed by
+weakening the test, not by fixing the engine).
+
+### Root cause (seed only)
+
+`src/compiler_rust/compiler/src/value.rs:1161` represents a class instance as
+`Object { class, fields: Arc<HashMap<String, Value>> }` — an `Arc` with no
+interior mutability — and
+`src/compiler_rust/compiler/src/interpreter/place.rs:132,176-177` mutate via
+`Arc::make_mut(fields)`. That is copy-on-write, i.e. value semantics: a write
+through one holder forks the map and is invisible to every other holder.
+
+### Why no fix here
+
+The seed is bootstrap-only, and the product interpreter already implements
+the correct model: `src/compiler/70.backend/backend_types.spl:218`
+(`ObjectValue{class_name, handle}`) plus
+`src/compiler/70.backend/backend/objects.spl` (`ObjectStore`, handle ==
+record index), so copying a `Value.Object` copies only an `i64` handle and
+all copies share one record. Repairing the seed's value model would be a
+refactor of a bootstrap-only engine, against the pure-Simple-first rule.
+
+## Next step (original, retained for history)
 
 Find where a `Some(x)`-wrapped trait object is unwrapped at each `Optional`
 slot read in the interpreter (likely the same Optional/Result value-copy

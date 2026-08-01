@@ -74,3 +74,37 @@ describe "Interpreter class reference model (Task #112)":
                 case Value.Object(ov2): eh2 = ov2.handle
                 case _: eh2 = -1
             expect(store.get_field(eh2, "val").unwrap().as_int()).to_equal(999)
+
+        it "optional-slot share: re-reading a Trait?-typed slot per call accumulates":
+            # Regression guard for
+            # doc/08_tracking/bug/interp_trait_slot_receiver_reboxed_per_call_mutation_loss_2026-07-07.md
+            # The report's shape: an instance parked in an OPTIONAL module slot
+            # (`var slot: SomeTrait? = nil`) whose call sites RE-READ and re-unwrap
+            # the slot on every invocation instead of binding it once. Under the
+            # Rust seed's Arc-copy-on-write object model that yielded 1,1,1 —
+            # every call saw the pristine instance. The handle model must give
+            # 1,2,3, because unwrapping an Option copies only the int handle.
+            var store = ObjectStore.new()
+            var f0: Dict<text, Value> = {}
+            f0["n"] = Value.Int(0)
+            val h = store.alloc("Provider", f0)
+            val slot = Value.some(Value.Object(ObjectValue(class_name: "Provider", handle: h)))
+            var seen: [i64] = []
+            var i = 0
+            while i < 3:
+                # Fresh re-read + fresh unwrap of the slot on EVERY iteration.
+                var payload: Value = Value.Nil
+                match slot:
+                    case Value.Option(inner): payload = inner.unwrap()
+                    case _: payload = Value.Nil
+                var hh: i64 = -1
+                match payload:
+                    case Value.Object(ov): hh = ov.handle
+                    case _: hh = -1
+                val cur = store.get_field(hh, "n").unwrap().as_int()
+                store.set_field(hh, "n", Value.Int(cur + 1))
+                seen = seen.push(store.get_field(hh, "n").unwrap().as_int())
+                i = i + 1
+            expect(seen[0]).to_equal(1)
+            expect(seen[1]).to_equal(2)
+            expect(seen[2]).to_equal(3)
