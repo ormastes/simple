@@ -149,3 +149,71 @@ array shapes (element widths from the frozen wire layouts), what stays CPU
 bracket each batch, and the parity gate (batch output must byte-match the
 CPU codec per contract §5.3). End with open questions for the freeze —
 freeze itself stays deferred per contract §6.
+
+# Phase wave 7 (4 parallel lanes, base 85c1338abfdd)
+
+Shared rules unchanged. Ownership DISJOINT; integration re-run at landing.
+
+## Lane STYLE2 — cycle detection wired into the style profile
+
+Owns: `src/lib/common/structural/resolve/style_link_profile.spl` +
+`test/01_unit/common/structural/style_link_profile_spec.spl` (append; never
+weaken existing 7). Build the custom-property dependency graph inside
+`style_link`: nodes = distinct ResolveKeys (custom-property space only),
+edges = definition-body references (extend `StyleSymbolInput` with
+`referenced_names: [text]` — a custom property whose VALUE contains var(--x)
+depends on --x), run `detect_cycles` from resolve_frontier (import; never
+reimplement), and for every resolution whose key is a cycle member set
+status Resolved -> Ambiguous? NO — per contract §3 semantics set status
+unchanged but reason CycleDetected ONLY when the record's key is a cycle
+member; also surface `cycle_property_names: [text]` (ascending, deduped) on
+StyleLinkResult. Non-custom-property spaces never enter the graph. Spec:
+2-cycle (--a<->--b), self-loop, cycle+tail (tail resolves clean, reason
+Unspecified), acyclic var() chain (no cycle flags), cross-space immunity,
+red sentinel.
+
+## Lane BATCH — CPU-side columnar batch flattening (hybrid prep)
+
+Owns: NEW `src/lib/common/structural/resolve/resolve_batch.spl` +
+`test/01_unit/common/structural/resolve_batch_spec.spl`. Per
+hybrid_batch_notes.md (read it), hybrid batches need columnar arrays. Deliver
+pure CPU transforms with `ok` result structs: `batch_flatten_names([text])
+-> { ok, blob: [u8]?, offsets: [u32] }`-style name-blob+offsets (u32
+offsets, blob is concatenated bytes, offsets.len = names.len+1),
+`batch_flatten_definitions/[references]([Record]) -> columnar struct` (one
+array per field, widths matching the frozen wire layout §3), and exact
+inverses. Parity gate: flatten -> rebuild -> encode via resolve_codec must
+be byte-identical to encoding the originals (assert via wire_to_hex on at
+least 3 mixed records including max-value fields). This is measurement
+groundwork for the batch-layout freeze — do NOT touch the contract doc; no
+new wire formats, in-memory only. Red sentinel.
+
+## Lane RELOC — relocation formula CPU oracle (L8 groundwork)
+
+Owns: NEW `src/compiler/70.backend/linker/gpu_smf/smf_reloc_formulas.spl` +
+`test/01_unit/compiler/linker/gpu_smf/smf_reloc_formulas_spec.spl`. Read
+`RelocationType` + `SmfRelocation` in `src/compiler/70.backend/linker/`
+(smf_writer.spl:148 area; find every variant and where existing code
+computes or documents each formula — cite in docstring). Deliver pure
+formula functions (i64 in/out, no memory writes): for each RelocationType
+variant the canonical formula (e.g. Abs64 = S+A, Pc32 = S+A-P truncated
+with explicit range check) as `smf_reloc_compute(reloc_type, s, a, p) ->
+{ ok, value }` — out-of-range PC32 (doesn't fit i32) rejects ok:false,
+never silent truncation. Unknown variant rejects. Spec: hand-computed
+fixtures per variant (positive, negative addend, PC-relative crossing zero,
+range-reject at exactly i32 boundary ±1), totality reject, red sentinel.
+This is the missing L8 CPU oracle flagged in hybrid_batch_notes.md — code
+only, no contract-doc edits.
+
+## Lane WIKI — LLM wiki entries (docs only, vcs.md rule)
+
+Owns: `doc/00_llm_process/feature_expert/link_manager/skill.md` (new) and,
+if a fitting layer dir exists or the template mandates one,
+`doc/00_llm_process/layer_expert/<layer>/skill.md` touched minimally. Use
+templates `.spipe/spipe/doc/00_llm_process/template/{feature,layer}_skill.md`
+and mirror an existing feature_expert entry's structure (read 1-2 siblings
+first). Content from: `.spipe/link_manager/state.md`, contract doc,
+smf_linker_map.md, style_resolver_map.md, hybrid_batch_notes.md. Cover: what
+the LINK lane is, frozen surfaces, oracle decisions (SMF externs bug, no CSS
+resolver), verification discipline (seed runner + red sentinels), file map.
+NO code. Keep it accurate to landed commits only (through 85c1338abfd).

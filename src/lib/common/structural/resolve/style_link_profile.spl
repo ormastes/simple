@@ -17,9 +17,10 @@
 # smf_link_profile.spl's collect/resolve structure.
 #
 # Cycle detection over the custom-property graph (--a: var(--b); --b:
-# var(--a)) is NOT wired this wave: Lane CYCLE lands `detect_cycles` in
-# resolve_frontier.spl concurrently; wave 7 wires it to
-# ResolveReason.CycleDetected.
+# var(--a)) is wired here (wave 7): `style_link` builds the dependency graph
+# from definition value bodies (`StyleSymbolInput.referenced_names`), runs
+# resolve_frontier's `detect_cycles`, and stamps ResolveReason.CycleDetected
+# onto resolutions whose key is a cycle member — status unchanged.
 #
 # Composition only, no inheritance (repo rule): plain value structs, free
 # functions, same discipline as resolve_core.spl / smf_link_profile.spl.
@@ -30,13 +31,16 @@ use std.common.structural.resolve.resolve_types.{
     DefinitionRecord,
     ReferenceRecord,
     ResolutionRecord,
+    ResolveReason,
     ResolveStatus,
     definition_record,
     reference_record,
     resolution_record,
     resolve_key,
+    resolve_reason_to_u8,
     resolve_status_to_u8
 }
+use std.common.structural.resolve.resolve_frontier.{ResolveEdge, detect_cycles}
 use std.common.structural.resolve.resolve_core.{
     group_sorted,
     intern_name,
@@ -81,10 +85,18 @@ struct StyleSymbolInput:
     @font-face block, an @keyframes block) and becomes a DefinitionRecord;
     false means the sheet only references it (`var(--x)`, `@import x;`,
     `font-family: x`, `animation-name: x`) and becomes a ReferenceRecord.
+
+    `referenced_names` are the names this symbol's VALUE BODY references —
+    for a defined custom property `--a: var(--b) var(--c);` it is
+    ["--b", "--c"]. Only defined custom-property symbols feed the
+    dependency graph `style_link` runs cycle detection over; for every
+    other symbol (references, imports, fonts, keyframes) the scanner may
+    leave it empty and `style_link` ignores it.
     """
     name: text
     space: u32
     defined: bool
+    referenced_names: [text]
 
 struct StyleLinkInputs:
     """One stylesheet's collected symbols plus the sheet identity used to
@@ -98,9 +110,15 @@ struct StyleLinkResult:
     40): one ResolutionRecord per reference in stable resolved order
     (ascending ResolveKey, then reference input order within a key), plus
     the distinct names of unresolved references in that same order (first
-    occurrence wins — each missing name appears exactly once)."""
+    occurrence wins — each missing name appears exactly once).
+
+    `cycle_property_names` lists every custom-property name that lies on at
+    least one var() dependency cycle, ascending (byte-wise lexicographic),
+    deduped. Resolutions whose key is one of these members carry reason
+    CycleDetected (status unchanged)."""
     resolutions: [ResolutionRecord]
     unresolved_names: [text]
+    cycle_property_names: [text]
 
 # ----------------------------------------------------------------------------
 # style_collect_records — §18 collect step (arenas as plain arrays, intern
@@ -175,14 +193,96 @@ fn style_resolve(defs: [DefinitionRecord], refs: [ReferenceRecord]) -> [Resoluti
 # StyleLinkResult the html_css_parser lane consumes.
 # ----------------------------------------------------------------------------
 
-fn _unresolved_name_seen(seen: [text], name: text) -> bool:
+fn _name_index(names: [text], name: text) -> i64:
+    """Index of `name` in `names`, -1 when absent (linear — arrays here are
+    per-sheet small)."""
     var i = 0
-    val n = seen.len()
+    val n = names.len()
     while i < n:
-        if seen[i] == name:
-            return true
+        if names[i] == name:
+            return i
         i = i + 1
-    false
+    -1
+
+fn _text_lt(a: text, b: text) -> bool:
+    """Byte-wise lexicographic a < b via explicit char-code compare (never
+    the raw `<` text operator — native codegen compares pointers)."""
+    val an = a.len()
+    val bn = b.len()
+    var i = 0
+    while i < an and i < bn:
+        val ac = a.char_code_at(i)
+        val bc = b.char_code_at(i)
+        if ac != bc:
+            return ac < bc
+        i = i + 1
+    an < bn
+
+fn _insert_sorted_unique(sorted: [text], name: text) -> [text]:
+    """Return `sorted` with `name` inserted at its ascending byte-wise
+    position; unchanged when already present (dedup). Rebuilds via push
+    (COLL019: no indexed-assign)."""
+    var out: [text] = []
+    var inserted = false
+    var i = 0
+    val n = sorted.len()
+    while i < n:
+        val cur = sorted[i]
+        if cur == name:
+            return sorted
+        if (not inserted) and _text_lt(name, cur):
+            out.push(name)
+            inserted = true
+        out.push(cur)
+        i = i + 1
+    if not inserted:
+        out.push(name)
+    out
+
+fn _style_cycle_property_names(inputs: StyleLinkInputs) -> [text]:
+    """Custom-property names on at least one var() dependency cycle,
+    ascending byte-wise, deduped.
+
+    Graph: nodes are the distinct custom-property-space ResolveKeys — within
+    one space `intern_name` is deterministic, so name equality is key
+    equality and names serve as node identities. Edges run from each DEFINED
+    custom-property symbol to every name in its `referenced_names` (a
+    property whose value contains var(--x) depends on --x). Reference-only
+    symbols contribute no edges (they have no value body), and symbols in
+    non-custom-property spaces never enter the graph. Node indices are minted
+    in first-appearance order, all edge endpoints in bounds by construction,
+    so `detect_cycles` always reports ok."""
+    var node_names: [text] = []
+    var edges: [ResolveEdge] = []
+    var i = 0
+    val n = inputs.symbols.len()
+    while i < n:
+        val sym = inputs.symbols[i]
+        if sym.space == STYLE_SPACE_CUSTOM_PROPERTY and sym.defined:
+            var from_idx = _name_index(node_names, sym.name)
+            if from_idx < 0:
+                node_names.push(sym.name)
+                from_idx = node_names.len() - 1
+            var j = 0
+            val m = sym.referenced_names.len()
+            while j < m:
+                val rn = sym.referenced_names[j]
+                var to_idx = _name_index(node_names, rn)
+                if to_idx < 0:
+                    node_names.push(rn)
+                    to_idx = node_names.len() - 1
+                edges.push(ResolveEdge(from_index: from_idx as u32, to_index: to_idx as u32))
+                j = j + 1
+        i = i + 1
+    val cycles = detect_cycles(node_names.len(), edges)
+    var cycle_names: [text] = []
+    var ci = 0
+    val cn = cycles.cycle_members.len()
+    while ci < cn:
+        val member_name = node_names[cycles.cycle_members[ci] as i64]
+        cycle_names = _insert_sorted_unique(cycle_names, member_name)
+        ci = ci + 1
+    cycle_names
 
 fn style_link(inputs: StyleLinkInputs) -> StyleLinkResult:
     """Run collect + resolve over one sheet and package the result.
@@ -191,21 +291,36 @@ fn style_link(inputs: StyleLinkInputs) -> StyleLinkResult:
     name via the reference owner's `local_index` (the symbol's position in
     `inputs.symbols` — valid because `style_collect_records` mints owners
     that way), deduplicated first-occurrence-wins in the stable order of
-    `resolutions`. Deterministic: same inputs always yield the same result
-    arrays in the same order.
+    `resolutions`. Resolutions whose key is a member of a var() dependency
+    cycle (see `_style_cycle_property_names`) carry reason CycleDetected
+    with status untouched — contract §3: cycles refine the reason, they do
+    not change resolvability. Deterministic: same inputs always yield the
+    same result arrays in the same order.
     """
     val (defs, refs) = style_collect_records(inputs)
-    val resolutions = style_resolve(defs, refs)
+    val raw_resolutions = style_resolve(defs, refs)
+    val cycle_property_names = _style_cycle_property_names(inputs)
+    val cycle_reason = resolve_reason_to_u8(ResolveReason.CycleDetected) as u32
     val unresolved_status = resolve_status_to_u8(ResolveStatus.Unresolved) as u32
+    var resolutions: [ResolutionRecord] = []
     var unresolved_names: [text] = []
     var i = 0
-    val n = resolutions.len()
+    val n = raw_resolutions.len()
     while i < n:
-        val res = resolutions[i]
+        val res = raw_resolutions[i]
+        val sym = inputs.symbols[res.reference.local_index as i64]
+        val in_cycle = (sym.space == STYLE_SPACE_CUSTOM_PROPERTY
+            and _name_index(cycle_property_names, sym.name) >= 0)
+        if in_cycle:
+            resolutions.push(resolution_record(res.reference, res.definition, res.status, cycle_reason))
+        else:
+            resolutions.push(res)
         if res.status == unresolved_status:
-            val sym_index = res.reference.local_index as i64
-            val name = inputs.symbols[sym_index].name
-            if not _unresolved_name_seen(unresolved_names, name):
-                unresolved_names.push(name)
+            if _name_index(unresolved_names, sym.name) < 0:
+                unresolved_names.push(sym.name)
         i = i + 1
-    StyleLinkResult(resolutions: resolutions, unresolved_names: unresolved_names)
+    StyleLinkResult(
+        resolutions: resolutions,
+        unresolved_names: unresolved_names,
+        cycle_property_names: cycle_property_names
+    )

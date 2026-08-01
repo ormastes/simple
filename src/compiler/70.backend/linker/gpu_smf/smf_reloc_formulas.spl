@@ -1,0 +1,131 @@
+# ============================================================================
+# compiler/70.backend/linker/gpu_smf/smf_reloc_formulas.spl — L8 relocation
+# CPU oracle: pure i64 formula functions (link_manager wave 7, Lane RELOC)
+#
+# Pure value computation ONLY — no memory writes, no byte patching. These are
+# the CPU-oracle formulas the GPU L8 relocation stage will be verified
+# against (.spipe/link_manager/hybrid_batch_notes.md, L8 groundwork).
+#
+# Variant -> formula table (frozen; one row per RelocationType variant,
+# src/compiler/70.backend/linker/smf_writer.spl:106-111, wire byte values
+# smf_writer.spl:113-121 and _SmfReaderMemory/header_parser.spl:336):
+#
+#   Variant   | Wire | Formula   | Width check          | Source
+#   ----------+------+-----------+----------------------+---------------------
+#   Abs64     |  1   | S + A     | none (full i64)      | SysV x86-64 psABI
+#             |      |           |                      | R_X86_64_64 "S + A";
+#             |      |           |                      | reloc_engine.spl:14,
+#             |      |           |                      | :140-141 (DEAD code,
+#             |      |           |                      | reference only)
+#   Rel32     |  2   | S + A - P | signed 32-bit        | psABI R_X86_64_PC32
+#             |      |           | [-2^31, 2^31 - 1]    | "S + A - P";
+#             |      |           |                      | reloc_engine.spl:15,
+#             |      |           |                      | :144-145 (DEAD)
+#   PltRel32  |  3   | S + A - P | signed 32-bit        | psABI R_X86_64_PLT32
+#             |      |           | [-2^31, 2^31 - 1]    | "L + A - P"; L == S
+#             |      |           |                      | for static SMF links
+#             |      |           |                      | (reloc_engine.spl:17
+#             |      |           |                      | note, :144-145, DEAD)
+#   GotRel32  |  4   | S + A - P | signed 32-bit        | psABI R_X86_64_
+#             |      |           | [-2^31, 2^31 - 1]    | GOTPCREL "G + GOT +
+#             |      |           |                      | A - P"; caller passes
+#             |      |           |                      | s = GOT-entry address
+#             |      |           |                      | (= G + GOT), matching
+#             |      |           |                      | reloc_engine.spl:156-
+#             |      |           |                      | 157 (DEAD)
+#   Abs32     |  5   | S + A     | unsigned 32-bit      | psABI R_X86_64_32
+#             |      |           | [0, 2^32 - 1]        | "S + A" zero-extended;
+#             |      |           |                      | reloc_engine.spl:18
+#             |      |           |                      | comments "truncated
+#             |      |           |                      | u32" (DEAD)
+#
+# No LIVE in-repo code applies SMF relocation formulas today: smf_writer.spl
+# only records SmfRelocation entries (smf_writer.spl:148-152, :215-216) and
+# reloc_engine.spl is known DEAD code (cited above as reference only). Where
+# reloc_engine.spl silently masks (`v & 0xffffffff`, reloc_engine.spl:150),
+# this oracle instead REJECTS out-of-width values (ok: false) — silent
+# truncation is exactly the class of defect the GPU/CPU L8 comparison must
+# surface, so the oracle must never hide it.
+# ============================================================================
+
+use compiler.backend.linker.smf_writer.{RelocationType}
+
+# ----------------------------------------------------------------------------
+# Result record
+# ----------------------------------------------------------------------------
+
+struct SmfRelocValue:
+    ok: bool
+    value: i64
+
+# ----------------------------------------------------------------------------
+# Width bounds
+# ----------------------------------------------------------------------------
+
+val SMF_RELOC_I32_MIN: i64 = -2147483648
+val SMF_RELOC_I32_MAX: i64 = 2147483647
+val SMF_RELOC_U32_MAX: i64 = 4294967295
+
+fn smf_reloc_fits_i32(v: i64) -> bool:
+    (v >= SMF_RELOC_I32_MIN) and (v <= SMF_RELOC_I32_MAX)
+
+fn smf_reloc_fits_u32(v: i64) -> bool:
+    (v >= 0) and (v <= SMF_RELOC_U32_MAX)
+
+fn smf_reloc_checked_i32(v: i64) -> SmfRelocValue:
+    """Accept v only if it fits a signed 32-bit field; never truncate."""
+    if smf_reloc_fits_i32(v):
+        SmfRelocValue(ok: true, value: v)
+    else:
+        SmfRelocValue(ok: false, value: 0)
+
+fn smf_reloc_checked_u32(v: i64) -> SmfRelocValue:
+    """Accept v only if it fits an unsigned 32-bit field; never truncate."""
+    if smf_reloc_fits_u32(v):
+        SmfRelocValue(ok: true, value: v)
+    else:
+        SmfRelocValue(ok: false, value: 0)
+
+# ----------------------------------------------------------------------------
+# Per-variant formula computation (total over RelocationType)
+# ----------------------------------------------------------------------------
+
+fn smf_reloc_compute(reloc_type: RelocationType, s: i64, a: i64, p: i64) -> SmfRelocValue:
+    """Compute the relocation value for one SmfRelocation.
+
+    s = resolved symbol address (for GotRel32: the GOT-entry address),
+    a = addend, p = address of the relocated field (place). Pure value
+    computation; the caller owns any byte patching. Out-of-width results
+    reject with ok: false — never silently truncated."""
+    match reloc_type:
+        case Abs64:
+            SmfRelocValue(ok: true, value: s + a)
+        case Rel32:
+            smf_reloc_checked_i32(s + a - p)
+        case PltRel32:
+            smf_reloc_checked_i32(s + a - p)
+        case GotRel32:
+            smf_reloc_checked_i32(s + a - p)
+        case Abs32:
+            smf_reloc_checked_u32(s + a)
+
+# ----------------------------------------------------------------------------
+# Wire-code entry point (rejects unknown/invalid codes)
+# ----------------------------------------------------------------------------
+
+fn smf_reloc_compute_wire(wire: i64, s: i64, a: i64, p: i64) -> SmfRelocValue:
+    """As smf_reloc_compute but keyed by the SMF wire byte value
+    (smf_writer.spl:113-121). Unknown or invalid wire codes reject with
+    ok: false rather than defaulting to any formula."""
+    if wire == 1:
+        smf_reloc_compute(RelocationType.Abs64, s, a, p)
+    elif wire == 2:
+        smf_reloc_compute(RelocationType.Rel32, s, a, p)
+    elif wire == 3:
+        smf_reloc_compute(RelocationType.PltRel32, s, a, p)
+    elif wire == 4:
+        smf_reloc_compute(RelocationType.GotRel32, s, a, p)
+    elif wire == 5:
+        smf_reloc_compute(RelocationType.Abs32, s, a, p)
+    else:
+        SmfRelocValue(ok: false, value: 0)

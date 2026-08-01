@@ -27,6 +27,15 @@
 #      `unresolved_names` exactly once each (dedup, first occurrence wins).
 #   5. DETERMINISM — style_link twice on the same input yields identical
 #      resolutions and unresolved_names.
+#   6. 2-CYCLE — --a: var(--b) and --b: var(--a) both surface in
+#      cycle_property_names (ascending) and their references carry reason
+#      CycleDetected with status still Resolved.
+#   7. SELF-LOOP — --s: var(--s) is a one-node cycle.
+#   8. CYCLE + TAIL — a property depending ON a cycle without being on one
+#      resolves clean (reason Unspecified) and is not listed.
+#   9. ACYCLIC CHAIN — a var() chain without cycles flags nothing.
+#  10. CROSS-SPACE IMMUNITY — referenced_names on non-custom-property
+#      symbols never enter the graph.
 # ============================================================================
 
 use std.spec
@@ -64,14 +73,14 @@ fn _glass_sheet_inputs() -> StyleLinkInputs:
     7 ref --glass-surface-elevated (KEYFRAMES space)   -> missing (space split)
     """
     StyleLinkInputs(sheet_index: 7, symbols: [
-        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true),
-        StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: true),
-        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false),
-        StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false),
-        StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false),
-        StyleSymbolInput(name: "theme.css", space: STYLE_SPACE_IMPORT, defined: false),
-        StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: false),
-        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_KEYFRAMES, defined: false)
+        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: []),
+        StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: true, referenced_names: []),
+        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: []),
+        StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: []),
+        StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: []),
+        StyleSymbolInput(name: "theme.css", space: STYLE_SPACE_IMPORT, defined: false, referenced_names: []),
+        StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: false, referenced_names: []),
+        StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_KEYFRAMES, defined: false, referenced_names: [])
     ])
 
 fn _corner_radius_sheet_inputs() -> StyleLinkInputs:
@@ -81,9 +90,9 @@ fn _corner_radius_sheet_inputs() -> StyleLinkInputs:
     2 ref --ui-corner-window-radius (var(--ui-corner-window-radius))
     """
     StyleLinkInputs(sheet_index: 3, symbols: [
-        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true),
-        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true),
-        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false)
+        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: []),
+        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: []),
+        StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: [])
     ])
 
 fn _find_result(results: [ResolutionRecord], local_index: u32) -> ResolutionRecord:
@@ -204,3 +213,93 @@ describe "style_link_profile determinism":
         while j < a.unresolved_names.len():
             expect(a.unresolved_names[j] == b.unresolved_names[j]).to_be(true)
             j = j + 1
+
+# ----------------------------------------------------------------------------
+# 6–10. Custom-property dependency cycles (wave 7: detect_cycles wiring)
+# ----------------------------------------------------------------------------
+
+fn _two_cycle_sheet_inputs() -> StyleLinkInputs:
+    """Sheet 11, the --a: var(--b); --b: var(--a) shape:
+    0 def --glass-accent          value var(--glass-accent-strong)
+    1 def --glass-accent-strong   value var(--glass-accent)
+    2 ref --glass-accent
+    3 ref --glass-accent-strong
+    """
+    StyleLinkInputs(sheet_index: 11, symbols: [
+        StyleSymbolInput(name: "--glass-accent", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: ["--glass-accent-strong"]),
+        StyleSymbolInput(name: "--glass-accent-strong", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: ["--glass-accent"]),
+        StyleSymbolInput(name: "--glass-accent", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: []),
+        StyleSymbolInput(name: "--glass-accent-strong", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: [])
+    ])
+
+describe "style_link_profile cycle detection":
+    it "flags a two-property var() cycle with reason CycleDetected and status unchanged":
+        val result = style_link(_two_cycle_sheet_inputs())
+        expect(result.cycle_property_names.len()).to_equal(2)
+        expect(result.cycle_property_names[0] == "--glass-accent").to_be(true)
+        expect(result.cycle_property_names[1] == "--glass-accent-strong").to_be(true)
+        val accent_ref = _find_result(result.resolutions, 2)
+        expect(accent_ref.status).to_equal(1)
+        expect(accent_ref.reason).to_equal(5)
+        val strong_ref = _find_result(result.resolutions, 3)
+        expect(strong_ref.status).to_equal(1)
+        expect(strong_ref.reason).to_equal(5)
+        expect(result.unresolved_names.len()).to_equal(0)
+
+    it "flags a self-referencing property as a one-node cycle":
+        val result = style_link(StyleLinkInputs(sheet_index: 12, symbols: [
+            StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: ["--glass-blur-elevated"]),
+            StyleSymbolInput(name: "--glass-blur-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: [])
+        ]))
+        expect(result.cycle_property_names.len()).to_equal(1)
+        expect(result.cycle_property_names[0] == "--glass-blur-elevated").to_be(true)
+        val blur_ref = _find_result(result.resolutions, 1)
+        expect(blur_ref.status).to_equal(1)
+        expect(blur_ref.reason).to_equal(5)
+
+    it "keeps a tail property depending on a cycle clean (reason Unspecified, not a member)":
+        val result = style_link(StyleLinkInputs(sheet_index: 13, symbols: [
+            StyleSymbolInput(name: "--glass-accent", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: ["--glass-accent-strong"]),
+            StyleSymbolInput(name: "--glass-accent-strong", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: ["--glass-accent"]),
+            StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: ["--glass-accent"]),
+            StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: [])
+        ]))
+        expect(result.cycle_property_names.len()).to_equal(2)
+        expect(result.cycle_property_names[0] == "--glass-accent").to_be(true)
+        expect(result.cycle_property_names[1] == "--glass-accent-strong").to_be(true)
+        expect(_contains_name(result.cycle_property_names, "--glass-surface-elevated")).to_be(false)
+        val tail_ref = _find_result(result.resolutions, 3)
+        expect(tail_ref.status).to_equal(1)
+        expect(tail_ref.reason).to_equal(0)
+
+    it "flags nothing on an acyclic var() chain":
+        val result = style_link(StyleLinkInputs(sheet_index: 14, symbols: [
+            StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: []),
+            StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: true, referenced_names: ["--ui-corner-window-radius"]),
+            StyleSymbolInput(name: "--glass-surface-elevated", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: []),
+            StyleSymbolInput(name: "--ui-corner-window-radius", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: [])
+        ]))
+        expect(result.cycle_property_names.len()).to_equal(0)
+        val surface_ref = _find_result(result.resolutions, 2)
+        expect(surface_ref.status).to_equal(1)
+        expect(surface_ref.reason).to_equal(0)
+        val radius_ref = _find_result(result.resolutions, 3)
+        expect(radius_ref.status).to_equal(1)
+        expect(radius_ref.reason).to_equal(0)
+
+    it "never enters non-custom-property symbols into the graph even with self-shaped referenced_names":
+        val result = style_link(StyleLinkInputs(sheet_index: 15, symbols: [
+            StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: true, referenced_names: ["toast-in"]),
+            StyleSymbolInput(name: "theme.css", space: STYLE_SPACE_IMPORT, defined: true, referenced_names: ["theme.css"]),
+            StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_KEYFRAMES, defined: false, referenced_names: []),
+            StyleSymbolInput(name: "toast-in", space: STYLE_SPACE_CUSTOM_PROPERTY, defined: false, referenced_names: [])
+        ]))
+        expect(result.cycle_property_names.len()).to_equal(0)
+        val toast_ref = _find_result(result.resolutions, 2)
+        expect(toast_ref.status).to_equal(1)
+        expect(toast_ref.reason).to_equal(0)
+        # The custom-property-space reference to the same NAME stays a plain
+        # MissingDefinition — the keyframes self-loop shape never leaks in.
+        val cross_ref = _find_result(result.resolutions, 3)
+        expect(cross_ref.status).to_equal(0)
+        expect(cross_ref.reason).to_equal(1)

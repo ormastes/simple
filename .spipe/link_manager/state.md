@@ -75,7 +75,7 @@ reader/writer as parity oracle. Contract doc:
 
 ## Phase
 
-implement-receipts-cycles-style-skeleton-done
+implement-cycles-batch-reloc-wiki-done
 
 ## Log
 
@@ -144,6 +144,25 @@ implement-receipts-cycles-style-skeleton-done
   frozen widths, 10 open questions incl. missing L7/L8 CPU oracles,
   nondeterministic elapsed_us). All lanes red-sentinel proven;
   integration re-run of all 7 specs in one tree: 79/79 green.
-- Next: wire detect_cycles into style_resolve (CycleDetected for
-  custom-property cycles); receipts for the style profile; begin hybrid
-  batch-layout freeze from the open-questions list.
+- 2026-08-01 implement (wave 7, base 85c1338abfdd, 4 parallel lanes):
+  STYLE2 — detect_cycles wired into style_link (edges from value-body
+  var() references; reason=CycleDetected on cycle members, status
+  untouched; cycle_property_names on StyleLinkResult, explicit char-code
+  compare instead of raw text `<`), spec 12/12. BATCH — resolve_batch.spl
+  columnar flatten/rebuild (name blob+u32 offsets, per-field arrays
+  mirroring frozen §3; total rebuilds reject ragged/broken-offset/bad-
+  UTF-8; parity gate: flatten->rebuild->encode hex-identical to encoding
+  originals incl. max-positive fields), spec 13/13. RELOC — L8 CPU oracle
+  smf_reloc_formulas.spl (all 5 RelocationType variants: Abs64 S+A,
+  Rel32/PltRel32/GotRel32 S+A-P signed-32-checked, Abs32 unsigned-32;
+  rejects where dead reloc_engine masked; wire-code entry rejects
+  unknown), spec 31/31. WIKI — feature_expert/link_manager/skill.md +
+  additive backend layer link (vcs.md LLM-wiki rule). All red-sentinel
+  proven; integrated re-run 72/72 green. Shared-WC clobber recurred
+  mid-wave (LANE_GUIDE wave-7 block reverted by parallel session) —
+  landed from object-store blobs per protocol, no loss.
+- Next: hybrid batch-layout freeze proper (batch shapes now measured by
+  resolve_batch.spl — answer the 10 open questions in
+  hybrid_batch_notes.md with the architecture owner); apply-side reloc
+  (formula oracle exists, no applier); style-profile receipts once stage
+  ids for non-SMF profiles are decided.

@@ -21,6 +21,9 @@ Default backend is LLVM llc; Cranelift JIT is opt-in.
   (struct/array/enum lowering, dispatch).
 - Native linker: [src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl](../../../../src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl)
   (link order, external symbol resolution).
+- LINK lane (GraphResolveCore + SmfLinkProfile, `src/compiler/70.backend/linker/gpu_smf/`):
+  see [link_manager](../../feature_expert/link_manager/skill.md) for the
+  frozen resolve contract v1, stage ids L0–L12, and parity-oracle decisions.
 - LLVM bridge: `src/compiler_rust/compiler/src/backend/llvm/` (seed LLVM codegen,
   not production after stage3).
 - Unit specs: `test/01_unit/compiler/70.backend/` (e.g. `core_codegen_spec.spl`).
