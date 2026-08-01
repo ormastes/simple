@@ -101,3 +101,34 @@ as a wrong variant set or a wrong arity rather than a missing-module error.
 - `src/compiler/70.backend/backend_types.spl:104-113` — same class,
   `CompiledSymbolKind`, with a hand-maintained "keep these identical" comment as
   the current mitigation.
+
+## Narrowed 2026-08-01: it is not registration order when a root `src/lib/<name>/` exists
+
+Measured for the `std.js.*` family and recorded in
+`tierless_std_js_imports_resolve_to_root_lib_js_not_common_2026-08-01.md`.
+
+The "resolves by registration order" framing does not hold for a tier-less path
+whose head segment is also a real directory directly under `src/lib/`.
+`_resolve_module_path_uncached` tries `src/` + the relative path (step 3)
+*before* the tier search (step 4), so `use std.js.types.js_types` lands on
+`src/lib/js/types/js_types.spl` deterministically, from every importer location
+— including from inside `src/lib/common/js/`. Proved with a sentinel probe that
+also reports `COMMON` and `NOGC_SYNC_MUT` when the import is tier-explicit, so
+the harness discriminates.
+
+Two consequences for the drain list:
+
+1. The ambiguity is **worse** than order-dependence for these paths: it is a
+   stable wrong answer, so it will not show up as flakiness and cannot be found
+   by re-running.
+2. The warning map in `99.loader/module_resolver/resolution.spl:262` walks only
+   the five tier directories, so a path that collides with a **root**
+   `src/lib/<name>/` module is never flagged at all. `std.js.*` is exactly that
+   case: `src/lib/js/` holds 10 modules that shadow their `common/` and
+   `nogc_sync_mut/` namesakes without warning.
+
+Suggested addition to remediation step (1): include root-level `src/lib/<name>/`
+directories in the multiplicity map, not just the five tiers.
+
+`src/lib/common/js/**` has been drained (30 files, 52 import lines) as part of
+that work.
