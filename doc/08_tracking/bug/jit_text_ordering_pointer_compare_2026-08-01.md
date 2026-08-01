@@ -169,5 +169,38 @@ family stayed invisible.
 - **Check the sibling operator.** `Eq` had the right shape (static fast path +
   dynamic tag-aware fallback) the whole time. The ordering arm was missing only
   the second half.
-- `SIMPLE_EXECUTION_MODE` takes `interpret`, not `interp`. An unrecognised value
-  falls back to the JIT **silently**, which makes an A/B look like agreement.
+- `SIMPLE_EXECUTION_MODE` takes `interpret` **or** `interpreter` — both are
+  accepted (`src/compiler_rust/driver/src/exec_core.rs:38`,
+  `"interpret" | "interpreter" => ExecutionMode::Interpret`). `interp` is NOT.
+  An unrecognised value falls back to the JIT **silently**
+  (`exec_core.rs:74-76`, `.unwrap_or(ExecutionMode::Jit)`), which makes an A/B
+  look like agreement. Cheapest self-check: if your two columns ever *disagree*
+  on any row, they genuinely ran different engines.
+
+## `to_text()` does NOT lie — the sibling bug report is FALSIFIED
+
+`case_bare_ident_is_irrefutable_binding_2026-08-01.md` recorded a second,
+scarier defect alongside this one: that `.to_text()` on the resulting bool
+"printed `false` for a comparison that is true", i.e. *a debug print here lies*.
+That would be far worse than the miscompile, because it would invalidate any
+evidence gathered by printing a bool.
+
+**It is not true.** Re-measured 2026-08-01 with a probe that prints a **branch
+side-effect** (distinct strings emitted from the `if` and the `else` arm)
+*alongside* `.to_text()` on the same value, across both engines, with a
+deliberately-failing sentinel row to prove the probe could report failure at all.
+
+`branch=` and `to_text=` **agreed on every row of every run — including every
+wrong row.** `to_text` faithfully reported `false`; the comparison had genuinely
+computed `false`. There is one bug here, not two.
+
+The original report reached the opposite conclusion by reasoning "the comparison
+is obviously true, therefore the printer must be lying" — correct semantics,
+wrong suspect. This is distinct from the known `to_text`-on-erased-`Any`-bool
+corruption (`reference_to_text_on_erased_any_bool_corrupt`), which is a real and
+still-open defect but does not apply to this shape.
+
+**Method note worth keeping:** "the output lies" and "the computation is wrong"
+produce identical printed evidence and demand completely different responses.
+Only a branch side-effect distinguishes them. Never let a printed bool be the
+sole signal when the bool itself is what is under suspicion.

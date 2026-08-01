@@ -421,6 +421,73 @@ Additionally, `.to_text()` on such a bool inside the function printed `false`
 for a comparison that is true — so a debug print here *lies*, which is how this
 nearly produced an inert lint that looked correct.
 
+### ROOT-CAUSED AND FIXED 2026-08-01 — and the triage above was wrong twice
+
+Fixed in `6469d70eb4e`
+(`src/compiler_rust/compiler/src/codegen/instr/core.rs:358-404`). Regression
+spec: `test/01_unit/bugs/text_ordering_cmp_spec.spl`.
+
+**Real cause.** Under the **Cranelift JIT only**, text ordering (`<` `<=` `>`
+`>=`) compared the operands' heap handle **ADDRESSES** instead of their byte
+content whenever codegen could not statically prove that BOTH operands were
+`TypeId::STRING`. The 2026-07-22 P0 fix had added the correct `rt_text_cmp_any`
+arm but guarded it with `&&`, so a runtime-produced text (a `.substring()`
+result, whose vreg type is not threaded) failed the guard and fell back into the
+raw-integer `icmp` arm. `==` was never affected, because `Eq`/`NotEq` already
+fall back to the tag-aware `rt_native_eq`; ordering had no counterpart. That
+asymmetry is exactly why the failure read as "`>=` behaving like `==`".
+
+**Two corrections to the triage above — both matter more than the fix.**
+
+1. **`and` and `.substring()` were red herrings.** Neither is required. Because
+   the comparison result depended on *allocation addresses*, it was deterministic
+   for a given program but flipped when unrelated, unconnected code was added or
+   removed. A single-call, no-`and`, no-helper repro fails; the *same* code with
+   one extra function present passes. That instability is what made the original
+   bisect land on `and`.
+
+2. **`.to_text()` does NOT lie. Bug #2 is FALSIFIED.** Re-measured with a probe
+   that prints a branch side-effect (distinct strings from the `if` and `else`
+   arms) *alongside* `.to_text()`, on both engines, with a deliberately-failing
+   sentinel row. `branch=` and `to_text=` **agreed on every row of every run,
+   including every wrong one**. `to_text` faithfully reported `false`; the
+   comparison had genuinely computed `false`. There is one bug here, not two, and
+   no evidence produced by printing a bool was invalidated.
+
+   This distinction is worth keeping: "the output lies" and "the computation is
+   wrong" demand completely different responses, and only a branch side-effect
+   can tell them apart. Note this is NOT the known
+   `to_text`-on-erased-`Any`-bool defect; that one is distinct and still open.
+
+**Verification** (seed rebuilt 2026-08-01 14:07, `SIMPLE_EXECUTION_MODE` =
+`interpreter` and `jit`): all previously-failing repros now agree across both
+engines, and the sentinel rows still report `FALSE`, so the probe stayed
+falsifiable.
+
+**Open follow-up — the regression spec cannot reach the engine that broke.**
+`test/01_unit/bugs/text_ordering_cmp_spec.spl` picks the right operand shapes
+(receiver arriving as a fn parameter, so no static typing survives), but it runs
+on the `bin/simple test` path, which hard-defaults to the tree-walk interpreter
+and has no JIT variant (`.claude/rules/testing.md`, "run and test are DIFFERENT
+ENGINES"). The interpreter was correct throughout this bug, so that spec would
+have stayed green for the entire defect window and would stay green through a
+reintroduction. A genuine guard needs a JIT-path
+(`SIMPLE_EXECUTION_MODE=jit bin/simple run`) assertion. Filed here rather than
+left implicit.
+
+**Blast radius and full root-cause writeup:**
+`doc/08_tracking/bug/jit_text_ordering_pointer_compare_2026-08-01.md` (~1,150
+`src/**` sites; that doc is authoritative). An independent narrower sweep
+(`/usr/bin/grep`, not the default ugrep; single-char-literal range checks across
+`src/` + `test/` + `scripts/`) found **811 sites across 389 files** — same
+population, tighter pattern. It lands in exactly the code that classifies
+characters: `src/lib/common/validation.spl` (15),
+`src/lib/common/json/parser.spl` (9), `src/lib/nogc_sync_mut/http/url.spl` (6),
+hex decoding in `src/lib/gc_async_mut/http/common.spl` and
+`src/lib/nogc_sync_mut/replay/process/checkpoint.spl`, the JS engine lexers, and
+the compiler's own `src/compiler/10.frontend/core/interpreter/eval_calls.spl:116`.
+All are fixed by the codegen change; no call-site edits are needed.
+
 `_mexh_is_suspect_case_name` therefore uses set membership
 (`"ABC...XYZ".contains(first)`), verified across `FAdd`, `Add`, `other`,
 `WS_OPCODE_TEXT`, `_`, and `""`. A comment at the call site forbids

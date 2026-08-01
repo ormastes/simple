@@ -600,11 +600,24 @@ fn _mexh_is_suspect_case_name(name: text) -> bool:
         return false
 
     # NOTE: written as set membership rather than `first >= "A" and first <= "Z"`.
-    # That range form silently evaluates to false when `first` comes from
-    # `.substring()` and is combined with `and` — measured 2026-08-01 on the
-    # bootstrap seed; see the "Adjacent defect" section of
-    # doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md.
-    # Do not "simplify" this back to a range comparison without re-measuring.
+    #
+    # Root-caused 2026-08-01 and FIXED in 6469d70eb4e. The original note here
+    # blamed `.substring()` plus `and`; both were red herrings. The real defect:
+    # under the Cranelift JIT, text ordering (`<` `<=` `>` `>=`) compared the
+    # operands' heap handle ADDRESSES instead of their byte content whenever
+    # codegen could not statically prove BOTH operands were TypeId::STRING.
+    # `==` was unaffected (Eq falls back to the tag-aware rt_native_eq), which
+    # is why the failure looked like `>=` behaving as `==`. The interpreter was
+    # always correct, so the two engines diverged silently. Because the result
+    # depended on allocation addresses, it was deterministic per program but
+    # flipped when unrelated code was added — which is what made it look like
+    # `and` mattered.
+    #
+    # The set-membership form is kept: it is equally clear and needs no
+    # ordering compare. A range comparison is now correct on both engines, so
+    # this is style, not a workaround.
+    # See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+    # ("Adjacent defect") and test/01_unit/bugs/text_ordering_cmp_spec.spl.
     val upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
     upper.contains(name.substring(0, 1))
 
