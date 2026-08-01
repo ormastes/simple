@@ -1,0 +1,138 @@
+# A swapped duplicate-`type` alias winner is INERT — the alias target is never stored
+
+- **Filed:** 2026-08-01
+- **Status:** OPEN (latent). No miscompile today; becomes a live miscompile the
+  moment aliases are made transparent.
+- **Severity:** LOW today / **BLOCKER for the alias-transparency work**
+- **Area:** `src/compiler/20.hir` name resolution
+- **Relates to:** `glob_ungate_swaps_import_winners_2026-08-01.md` (356 swaps /
+  164 names, 323 of them last-wins), `f7bfaf973de` (TAL2)
+
+## Summary
+
+`SymbolKind.TypeAlias` is last-write-wins in `SymbolTable.define`, so when two
+reachable modules provide the same alias name the traversal order decides the
+winner. That is real. **But for `TypeAlias` specifically the swap cannot change
+any lowered type, because the alias TARGET is never recorded anywhere.** Two
+providers of the same alias name are indistinguishable to every downstream
+consumer, so a swapped alias winner changes a symbol id and nothing else.
+
+This closes the `TypeAlias` slice of the 323 last-wins swaps. It says nothing
+about the `Function` / `Const` slice, which does carry a real type
+(`declared_surface_callable_type`) and is NOT covered by this argument.
+
+## Evidence (PROVED, `/usr/bin/grep` pinned, at tree 109,542)
+
+1. **Exactly two sites create a `TypeAlias` symbol, and both store `nil` for the
+   symbol's type:**
+
+       module_lowering.spl:632   name=local_name kind=SymbolKind.TypeAlias TYPE_ARG=nil
+       module_lowering.spl:1855  name=name       kind=SymbolKind.TypeAlias TYPE_ARG=nil
+
+   (632 = imported alias; 1855 = a module's own alias, added by TAL2.)
+
+2. **Nothing in `src/compiler/` ever reads `SymbolKind.TypeAlias` back.** A grep
+   for the constant across `src/compiler/` minus the two `define` calls returns
+   zero lines. The only reader in the whole tree is
+   `src/app/interpreter/collections/persistent_symbol_table.spl:283`, which maps
+   it to the display string `"type"` — a different symbol table, in a tree with
+   no external importers.
+
+3. **`lower_named_kind` never expands an alias.** `hir_lowering/types.spl:554`
+   resolves a named type with `self.symbols.lookup_or_invalid(name)` and builds
+   `HirTypeKind.Named(symbol_id, hir_args)`. There is no alias-expansion branch.
+
+4. **No name-keyed alias-target registry is consulted.** Every `type_aliases`
+   reference in `src/compiler/20.hir/` is a `.keys()` / `.contains_key(name)`
+   NAME operation; the alias VALUE is read at exactly one place,
+   `module_surface.spl:262`, purely to copy it into the surface struct, where
+   nothing consumes it. `src/compiler/30.types/` references `type_aliases`
+   **0** times.
+
+Corollary of 3 + 4: a parameter annotated `Bytes` where `type Bytes = List<u8>`
+does NOT lower to a list — it lowers to an opaque `Named`. Aliases are not
+transparent anywhere in HIR or the type layer.
+
+## Census (module-level `type X =` only, column 0)
+
+Counting any-indent `type X =` inflates the census by ~17%: trait associated
+types and doc-comment examples match too. `Item` looks like a 27-site duplicate
+that way and is in fact **not a module-level alias at all**.
+
+| metric | any-indent | module-level (correct) |
+|---|---|---|
+| alias declaration sites | 388 | **333** |
+| distinct alias names | 190 | **185** |
+| names declared in >1 file | 63 | **52** |
+
+Of the 52 duplicated names, **40 have providers that all agree on the target**
+(a swapped winner is harmless even under a future transparent-alias
+implementation). **12 have divergent targets** — the set that would become live:
+
+| name | divergent targets |
+|---|---|
+| `Symbol` | `HirSymbol` vs `text` |
+| `Bytes` | `i64` vs `List<u8>` |
+| `Count` | `i32` vs `i64` |
+| `LineNumber` | `i32` vs `i64` |
+| `Seconds` | `f64` vs `i32` |
+| `Vec2d` / `Vec4d` | `Array<f64,N>` vs `FixedVec<f64>` |
+| `Vector2` / `Vector3` / `Quaternion` / `Matrix3` / `Matrix4` | same underlying type via different module spellings (cosmetic) |
+
+Genuinely divergent underlying type: **7 names** (`Symbol`, `Bytes`, `Count`,
+`LineNumber`, `Seconds`, `Vec2d`, `Vec4d`).
+
+## `Symbol` is not a duplicate-alias conflict
+
+`Symbol` has 33 module-level declarations (32 × `= text`, 1 × `= HirSymbol`) and
+was the name this lane was opened on. It cannot be a duplicate conflict: the HIR
+symbol table is **per module** — `begin_module` reassigns `self.symbols` from a
+fresh table (`hir_lowering/types.spl:207`), and all three lowering call sites in
+`driver_hir_pipeline_lowering.spl` construct a fresh `HirLowering` per source. A
+direct-glob exposure scan finds **zero** modules receiving `Symbol` from two
+providers. The 315 `unresolved type: Symbol` errors seen at `f7bfaf973de` were
+an unrelated population — files under `src/compiler/driver/` that contain
+neither the token `Symbol` nor any `use` line, all reporting an identical
+error signature alongside `HirType` / `MirSignature` / `Span` — i.e. the
+import-surface layer, not aliases.
+
+## The thing that actually needs fixing, and its ordering constraint
+
+Aliases should be transparent. **Whoever implements that MUST make `TypeAlias`
+first-write-wins in `SymbolTable.define` in the same change**, or the 7
+divergent-target names above turn from inert into live miscompiles the instant
+the target starts being consulted. Today the last-wins ordering is invisible
+precisely because the target is discarded; transparency removes that shield.
+
+## Probe matrix (stage2 self-hosted, bare positional `native-build`)
+
+Seven shapes covering every outcome a duplicate alias could have — error, wrong
+pick, no pick, order dependence — plus controls:
+
+| case | shape | unresolved |
+|---|---|---|
+| `a` | same alias name, 2 modules, **different targets**, both used | none |
+| `s1` / `s2` | nominal `struct` vs same-named alias, **both load orders** | none |
+| `g` / `gs` | glob-injected private alias vs named-imported struct, both orders | none |
+| `own` | module's own alias shadowing a named-imported struct | none |
+| `fwd` | alias used **before** its `type` line (the `Node::Let` ordering analogue) | none |
+| `hello` | positive control, `fn main(): print(1)` | none |
+| `n` | negative control, undefined type | **`unresolved type: NoSuchTypeHere`** |
+
+`fwd` passing shows aliases do **not** share the module-level `val`/`var`
+ordering weakness: TAL2 registers from `module.type_aliases` in pass 1, which is
+order-independent.
+
+Harness note: every case including `hello` ends with `bootstrap entry lowered to
+0 MIR instructions (ret-0 stub module)`. That is a property of the single-file
+bare-positional lane, identical for a trivially correct program, so it is not a
+signal — the discriminating signal is the `unresolved` class, and the negative
+control confirms the gate still fires.
+
+## Not claimed
+
+- Nothing here covers the `Function` / `Const` half of the 323 last-wins swaps.
+  Those symbols DO carry a real type and this argument does not extend to them.
+- No stage3 error-count table is reported: the run at this tip exited 143
+  (SIGTERM), and per `glob_ungate_swaps_import_winners_2026-08-01.md` a count
+  census is structurally blind to winner swaps anyway.
