@@ -257,6 +257,55 @@ collect "BYTE" "$byte_hits"
 collect "SUBSTR" "$substr_hits"
 collect "CHAIN" "$chain_hits"
 
+# Prose guard: the BYTE/SUBSTR/CHAIN patterns are unanchored substring matches,
+# so before this filter they fired on any line MENTIONING the construct — a
+# comment (including one documenting this very rule, e.g.
+# `# Avoid buf.substring(pos, end) in hot loops.`) or a string literal
+# (`val doc = "call .map( to transform"`). Those are prose, not per-element
+# work, and scored as violations. Proven by sabotage probe on
+# backend_emu_adv.spl (2026-08-01): 4 prose-only lines added -> new 158 -> 162.
+#
+# Fix direction is STRICTER-CORRECT, never a relaxation: a hit survives only if
+# its construct still matches after comments and string CONTENT are removed,
+# i.e. only when it is real code. Zero real calls are lost — a genuine
+# `props.substring(pos, line_end)` sanitizes to itself and still matches.
+#
+# LOOP is deliberately NOT re-tested here: it is already line-start anchored
+# (`^[[:space:]]*(while|for)\b`), so a comment can never produce a LOOP hit
+# (verified: `# while comment_only_i < n:` is correctly ignored). Re-running the
+# sanitizer over LOOP is a no-op that would only risk perturbing its 363 hits.
+# Loop headers inside a triple-quoted multi-line string remain out of scope for
+# a line-local filter; that is the same documented grep limitation as recursion.
+filtered_code="$tmp_dir/filtered_code.txt"
+awk -F'\t' '
+    # Strip trailing comment and blank out string contents, so what remains is
+    # the code portion of the line. Quote state is tracked so a `#` inside a
+    # string is not treated as a comment start.
+    function code_only(s,   out, i, ch, n, instr, q) {
+        out = ""; instr = 0; q = ""; n = length(s);
+        for (i = 1; i <= n; i++) {
+            ch = substr(s, i, 1);
+            if (instr) {
+                if (ch == "\\") { i++; continue }
+                if (ch == q) { instr = 0; q = "" }
+                continue;
+            }
+            if (ch == "\"" || ch == "'"'"'") { instr = 1; q = ch; continue }
+            if (ch == "#") break;
+            out = out ch;
+        }
+        return out;
+    }
+    {
+        cls = $1; code = code_only($4);
+        if (cls == "LOOP") { print; next }
+        if (cls == "CHAIN"  && code ~ /\.(for_each|map|each)[ \t]*\(/) { print; next }
+        if (cls == "SUBSTR" && code ~ /\.substring\((pos|i|idx|j)[ \t]*[,+]/) { print; next }
+        if (cls == "BYTE"   && code ~ /\[/) { print; next }
+    }
+' "$filtered" >"$filtered_code"
+mv "$filtered_code" "$filtered"
+
 # Content-key: trim each rawcontent CONSISTENTLY (expand tabs -> single space,
 # strip leading/trailing whitespace, collapse internal whitespace runs) so a
 # key is (CLASS, file, normalized source text). Applied identically at
