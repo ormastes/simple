@@ -1,6 +1,6 @@
 # macOS Vulkan/Metal and SimpleOS QEMU Rendering Completion
 
-Updated: 2026-07-27
+Updated: 2026-08-01
 
 ## 2026-07-27 Stage 3 admission attempt
 
@@ -28,6 +28,20 @@ The overall goal remains **FAIL / INCOMPLETE**. No current-revision,
 manifest-bound Vulkan 2D live PASS exists, so no downstream lane may be marked
 complete from source review, retained diagnostics, CPU mirrors, or unretained
 peer reports.
+
+### Render design / IR alignment addendum (2026-08-01)
+
+- DrawIR/GPU design control changed in the local branch and is now the source
+  baseline for this lane:
+  - `doc/04_architecture/ui/gpu_web_scene_ports.md`
+  - `doc/05_design/ui/gpu_web_scene_contracts.md`
+  - `doc/03_plan/agent_tasks/gpu_web_scene/ownership.sdn`
+  - `doc/03_plan/ui/unified_2d_engine/drawir_feature_gap_2026-07-31.md`
+- The `src/compiler/50.mir/_MirLowering/module_lowering.spl` stabilization is a
+  build-integrity change (module-init lowering/name determinism) and does not
+  replace missing Vulkan/Metal runtime evidence.
+- Keep `gpu_web_scene` and DrawIR-v3 C0 contract files read-only unless a schema
+  bump is performed with an explicit version bump plan.
 
 The latest bounded producer work is recorded in cycles 25–27 below and
 supersedes the older diagnostic summaries. Parsing, cmap, tables, metrics,
@@ -130,6 +144,8 @@ fix.
    captures. Correct any unsupported PASS documentation before acceptance.
 10. Run the scoped verification/audit gates once, obtain `STATUS: PASS`, then
    linearly sync and push the isolated verified changes.
+11. Before accepting any new web/render/IR work on this lane, ensure C0 contract
+   scope and schema versioning constraints are enforced in source and plan.
 
 ### Agent lanes and acceptance ownership
 
@@ -142,6 +158,7 @@ fix.
 | Metal parity | Prepare source/contracts only until Vulkan host PASS, then run parity gates | Existing local comparison agent; primary integrates only committed isolated work | Highest-capability primary reviewer |
 | x86/ARM QEMU + WM | Audit contracts/evidence in parallel; live acceptance follows host-WM PASS | Primary rendering agent | Highest-capability primary reviewer |
 | Documentation/evidence audit | Remove unsupported PASS claims and bind reports to retained artifacts | Primary rendering agent | Highest-capability primary reviewer |
+| Contract control / DrawIR design | Enforce C0 freeze rules and route/fallback contract adherence while this lane is active | C0 contract owner + primary rendering merge owner | Highest-capability primary reviewer |
 
 Parallel agents may prepare independent source/contracts and audit retained
 evidence, but the live acceptance order is strict: Vulkan 2D → Vulkan web →
