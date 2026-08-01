@@ -407,3 +407,81 @@ and a 120 ms `nanosleep` still yields `delta=120`, so monotonic-delta semantics
 are preserved. `rt_time_now_ns` / `rt_time_now_nanos` / `rt_time_now_micros`
 were deliberately left absolute -- they are separately baselined and owned by
 another lane.
+
+## `check-dangling-references.shs`: 297 -> 171 (2026-08-01)
+
+### The static count IS the defect count -- corroborated two ways
+
+Before touching anything, the 297 findings were cross-checked against an
+**independently written** definition index (its own regex over `fn`/`me`/`val`/
+`var`/`const`/`struct`/`class`/`enum`/`trait`/`mixin`/`type`/`actor`/
+`extern fn`/`literal`, plus enum-variant and struct-field bodies, plus
+`export use ... as` aliases). Result: **297 findings, 297 confirmed undeclared,
+0 disagreements.** The guard is not over-reporting here.
+
+Runtime oracle on a representative, seed binary, `SIMPLE_EXECUTION_MODE=interpreter`:
+
+| probe | result |
+|---|---|
+| `use std.gc_async_mut.opencl.{opencl_available}` then `print "ok"` | rc=0, prints `ok` |
+| same import, then **call** `opencl_available()` | rc=1, `error[E1002]: function 'opencl_available' not found` |
+
+So the **module loader is fail-open on unresolved imports** -- a dangling import
+binds nothing and costs nothing until the name is actually called, at which
+point it is a hard error. That is exactly why the two incidents this guard was
+written for only surfaced at full bootstrap, and it means every one of these is
+a live landmine rather than dead weight.
+
+Note: **none** of the 297 pointed at the deleted `30.types/type_system`
+inference cluster or the `.spipe_matchers_*` artifacts (`grep -c` = 0 for both).
+That expectation did not hold; these are unrelated pre-existing debt.
+
+### Batch 1 -- case (b), target module exists nowhere and the facade is unused
+
+`src/lib/gc_async_mut/opencl.spl` and `src/lib/gc_async_mut/opencl/__init__.spl`
+were each nothing but a single `export use std.nogc_sync_mut.opencl.mod.{...}`
+of 19 names. `src/lib/nogc_sync_mut/opencl` does not exist, no file anywhere
+defines `opencl_available` or any sibling, and a tree-wide search found **zero**
+importers of either facade. Both files deleted. **-38 findings** (297 -> 259).
+
+### Batch 2 -- case (b), dangling import names the importing file never uses
+
+For each remaining SYMBOL finding, checked whether the name appears anywhere in
+its own file **outside** the `use` statements (multi-line braced `use` blocks
+tracked properly). A name that is declared nowhere AND read nowhere binds
+nothing and is read by nothing, so removing it cannot change behavior.
+
+**88 names removed across 33 files** (259 -> 171). 111 SYMBOL findings were
+**kept** because the file really does use the name -- those are case (a)/(c) and
+need a decision, not a deletion. Structural check on all 33: brace counts
+unchanged, no empty or malformed import lists introduced (the 4 trailing-comma
+lists flagged were pre-existing style, verified against `HEAD:<file>`).
+
+### Remaining: 171 = 48 MODULE + 111 SYMBOL + 12 METHOD
+
+Not silently absorbed. Split by whether the target module exists at all:
+
+**A. Module exists nowhere -- 96 findings / 28 clusters.** Whole import lines
+are pointed at modules that were never written or were deleted with their
+callers left behind. Largest: `std.async_core` (12 findings across 12 files),
+`std.common.unicode.codepoint` (9), `app.build.quality` (6),
+`std.math.bignum.bignat` (5), `common.display_protocol.display_protocol` (5),
+`host.common.io.fs_ffi` (4), `std.common.math.field.fe_p256` (4). Plus 12
+METHOD findings (`self.foo(...)` with no `fn foo`/`me foo` anywhere) across 7
+files -- same class as incident 1, the one that broke the bootstrap.
+
+**B. Module exists, the symbol does not -- 75 findings / 34 clusters.** These
+are the case-(a)/(c) split and need per-symbol judgement. Largest:
+`app.dashboard.main` (16 across 2 files), `common.window_protocol.window_protocol`
+(7 across 4 files -- `WM_STATUS_OK`, `WM_STATUS_ERROR`, `WM_EVENT_FOCUS`,
+`wm_input_event` are genuinely called; the module declares only 7 names and
+these are not among them, so this is case (c) "implement it": the request types
+exist without their response/status/event-kind counterparts),
+`std.{gc,nogc}_async_mut.js.engine.interpreter` (4 each),
+`compiler.tools.leak_check.types` (3), `host.common.io.types` (3).
+
+These 171 are a program with an owner, not a lane cleanup: each one is either a
+rename to chase or a missing implementation to write, and several sit in
+subsystems (`os/compositor`, `os/services/netstack`, `ui.*`, `app.dashboard`)
+that other lanes are live in. Filed here with exact counts so the next pass
+starts from a number rather than a re-scan.
