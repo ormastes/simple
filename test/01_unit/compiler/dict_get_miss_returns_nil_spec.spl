@@ -1,0 +1,94 @@
+"""
+# Dict.get() Miss Returns nil Specification
+
+**Feature IDs:** #MIR-DICT-GET-MISS
+**Category:** Compiler / MIR lowering
+**Difficulty:** 3/5
+**Status:** In Progress
+**Requirements:** N/A
+**Plan:** N/A
+**Design:** N/A
+**Research:** doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md
+
+## Overview
+
+`d.get(k)` must yield `nil` for a key that is not present, and must keep a
+stored zero / `false` distinguishable from that miss.
+
+## Lane coverage warning -- READ BEFORE TRUSTING A GREEN RUN
+
+The defect these examples describe is **native-codegen only**. `simple test`
+executes the tree-walking interpreter, which has always been CORRECT here, so
+**this spec is green on the interpreter both before and after the MIR fix and
+is NOT an active gate for the native lane.** It documents the contract and
+guards the interpreter against regressing to the native behaviour; the native
+lane is verified by building these same cases with `native-build` and running
+the resulting ELF (transcript in the bug doc above).
+"""
+
+use std.spec
+
+
+describe "Dict.get() miss vs stored zero":
+    """
+    ## Miss must not look like a stored zero
+
+    `rt_dict_get` signals a miss with the flat-Option nil sentinel. Every
+    decode arm that transforms the raw word used to destroy it natively.
+    """
+
+    it "returns nil for a missing i64 key":
+        var d: Dict<text, i64> = {}
+        d["a"] = 7
+        expect(d.get("zz") == nil).to_equal(true)
+
+    it "keeps a stored zero distinguishable from a miss":
+        var d: Dict<text, i64> = {}
+        d["zero"] = 0
+        expect(d.get("zero") == nil).to_equal(false)
+        expect(d.get("absent") == nil).to_equal(true)
+
+    it "applies ?? default only on a miss":
+        var d: Dict<text, i64> = {}
+        d["zero"] = 0
+        expect(d.get("absent") ?? -77).to_equal(-77)
+        expect(d.get("zero") ?? -77).to_equal(0)
+
+    it "returns nil for a missing text key":
+        var t: Dict<text, text> = {}
+        t["k"] = "yes"
+        expect(t.get("zz") == nil).to_equal(true)
+        expect(t.get("k") == nil).to_equal(false)
+
+    it "keeps a stored true distinguishable from a miss":
+        var b: Dict<text, bool> = {}
+        b["t"] = true
+        b["f"] = false
+        expect(b.get("t") == nil).to_equal(false)
+        expect(b.get("f") == nil).to_equal(false)
+        expect(b.get("zz") == nil).to_equal(true)
+
+
+describe "Dict.len() on the native lane":
+    """
+    ## Count must be the real entry count
+
+    `.len()` returned -1 natively for a while (see
+    doc/08_tracking/bug/native_dict_len_returns_minus_one_2026-07-27.md).
+    """
+
+    it "counts a local dict":
+        var d: Dict<text, i64> = {}
+        d["a"] = 7
+        d["b"] = 0
+        expect(d.len()).to_equal(2)
+
+    it "counts a dict passed as a parameter":
+        var d: Dict<text, i64> = {}
+        d["a"] = 7
+        d["b"] = 0
+        expect(dict_len_of(d)).to_equal(2)
+
+
+fn dict_len_of(d: Dict<text, i64>) -> i64:
+    d.len()

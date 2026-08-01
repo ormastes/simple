@@ -323,6 +323,16 @@ impl MirLowering:
                         # and adds only the element-is-an-array signal.
                         self.array_element_struct_syms[result.id] = element_name
 
+    fn mir_type_is_integer(t: MirType) -> bool:
+        """True for the MIR kinds `decode_runtime_value` unboxes with `>> 3`.
+
+        Kept in one place so the decode arm and the miss-sentinel guard in
+        `lower_dict_runtime_read` can never disagree about which value types
+        have their raw word transformed at read time.
+        """
+        val disc = rt_enum_discriminant(t.kind)
+        disc == rt_enum_discriminant(MirTypeKind.I8) or disc == rt_enum_discriminant(MirTypeKind.U8) or disc == rt_enum_discriminant(MirTypeKind.I16) or disc == rt_enum_discriminant(MirTypeKind.U16) or disc == rt_enum_discriminant(MirTypeKind.I32) or disc == rt_enum_discriminant(MirTypeKind.U32) or disc == rt_enum_discriminant(MirTypeKind.I64) or disc == rt_enum_discriminant(MirTypeKind.U64) or disc == rt_enum_discriminant(MirTypeKind.Char)
+
     fn mir_type_is_str(t: MirType) -> bool:
         """True for the native string MIR types: the fat-pointer struct
         Tuple([Ptr(U8), U64]) that `Str` lowers to (function_lowering.lower_type)
@@ -614,7 +624,7 @@ impl MirLowering:
     me decode_runtime_value(raw: LocalId, result_type: MirType) -> LocalId:
         var b = self.builder
         val disc = rt_enum_discriminant(result_type.kind)
-        val is_integer = disc == rt_enum_discriminant(MirTypeKind.I8) or disc == rt_enum_discriminant(MirTypeKind.U8) or disc == rt_enum_discriminant(MirTypeKind.I16) or disc == rt_enum_discriminant(MirTypeKind.U16) or disc == rt_enum_discriminant(MirTypeKind.I32) or disc == rt_enum_discriminant(MirTypeKind.U32) or disc == rt_enum_discriminant(MirTypeKind.I64) or disc == rt_enum_discriminant(MirTypeKind.U64) or disc == rt_enum_discriminant(MirTypeKind.Char)
+        val is_integer = self.mir_type_is_integer(result_type)
         if is_integer:
             val shift = b.emit_const_int(3)
             val value = b.emit_binop(MirBinOp.Shr, mir_operand_copy(raw), mir_operand_copy(shift), MirType.i64())
@@ -703,8 +713,70 @@ impl MirLowering:
         self.builder = b
         raw
 
+    me dict_get_preserve_flat_nil(raw: LocalId, decoded: LocalId, value_type: MirType) -> LocalId:
+        """Route `rt_dict_get`'s MISS sentinel around `decode_runtime_value`.
+
+        Bug `native_dict_get_miss_returns_zero_not_nil_2026-07-28`: on a miss
+        `rt_dict_get` returns the flat-Option nil sentinel `RT_NIL == 3`
+        (`rt_core_nil()`), and every decode arm that TRANSFORMS the raw word
+        destroys it -- `3 >> 3` -> `0` (integer), `3 == 11` -> `false` (bool),
+        `rt_interp_cstr(3)` -> `NULL` (str). Only the struct/default
+        passthrough arm preserved it. A missing key was therefore
+        indistinguishable from a stored zero, so `== nil`, `?? default` and
+        `val Some(x) = ... else:` every one of them took the PRESENT branch on
+        a miss -- silently, with nothing to crash on.
+
+        `d.get(k)` is a FLAT-Option producer by design (see the "Option
+        dual-ABI normalization" write-up in switch_operators_calls.spl): its
+        `nil` IS the raw word `3`. So the sentinel has to go around the
+        decode. `decoded` is already materialised in the current block and is
+        harmless on the nil lane (`0` / `NULL`), so this only needs a select,
+        not a re-ordering of the decode.
+        """
+        var merge_type = value_type
+        if val decoded_type = self.local_mir_type_of(decoded):
+            merge_type = decoded_type
+        var b = self.builder
+        val nil_key = b.emit_const_int(3)
+        val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(raw), mir_operand_copy(nil_key), MirType.bool())
+        val nil_block = b.new_block(Some("dict_get_miss_nil"))
+        val value_block = b.new_block(Some("dict_get_hit_value"))
+        val merge_block = b.new_block(Some("dict_get_merge"))
+        val result = b.new_temp(merge_type)
+        b.terminate_if(mir_operand_copy(is_nil), nil_block, value_block)
+        self.builder = b
+
+        var b_nil = self.builder
+        b_nil.switch_to_block(nil_block)
+        val nil_raw = b_nil.emit_const_int(3)
+        val nil_typed = b_nil.emit_cast(mir_operand_copy(nil_raw), merge_type)
+        b_nil.emit_copy(result, nil_typed)
+        b_nil.terminate_goto(merge_block)
+        self.builder = b_nil
+
+        var b_val = self.builder
+        b_val.switch_to_block(value_block)
+        b_val.emit_copy(result, decoded)
+        b_val.terminate_goto(merge_block)
+        self.builder = b_val
+
+        var b_merge = self.builder
+        b_merge.switch_to_block(merge_block)
+        self.builder = b_merge
+        self.mark_runtime_value_local(result.id)
+        result
+
     me lower_dict_runtime_get(base: HirExpr, base_local: LocalId, dict_key: LocalId) -> LocalId:
+        self.lower_dict_runtime_read(base, base_local, dict_key, false)
+
+    me lower_dict_runtime_read(base: HirExpr, base_local: LocalId, dict_key: LocalId, as_option: bool) -> LocalId:
         """The one `rt_dict_get` read shared by `d[k]` AND `d.get(k)`.
+
+        `as_option` is true only for `d.get(k)`, whose declared result is
+        `V?`: that path must preserve the MISS sentinel (see
+        `dict_get_preserve_flat_nil`). `d[k]` (as_option false) keeps its
+        existing raw-read behaviour byte for byte -- an index read has no
+        `Option` to return, so there is nowhere for a miss signal to go.
 
         Both forms hit the SAME runtime call, so they must resolve the value
         type and decode identically -- but they had drifted apart, and the
@@ -775,7 +847,32 @@ impl MirLowering:
         val get_res = b_dget.emit_call(get_op, [mir_operand_copy(base_local), mir_operand_copy(dict_key)], MirType.i64())
         self.builder = b_dget
         if val get_local = get_res:
-            val decoded = self.decode_runtime_value(get_local, dict_result_type)
+            var value_is_bool = false
+            match dict_result_type.kind:
+                case MirTypeKind.Bool: value_is_bool = true
+                case _: ()
+            if as_option and value_is_bool:
+                # `Option<bool>` has THREE states -- true, false and nil -- and
+                # an `i1` can hold two. The decode arm collapses the raw word
+                # to `raw == 11`, which both loses the miss sentinel AND made a
+                # present `true` compare equal to `nil`. The flat ABI already
+                # encodes all three in one word (11 / 0 / 3) and
+                # `option_bool_value` (switch_operators_calls.spl) is its
+                # matching decode, so hand the raw word back undecoded.
+                self.mark_runtime_value_local(get_local.id)
+                return get_local
+            var decoded = self.decode_runtime_value(get_local, dict_result_type)
+            # Only the decode arms that TRANSFORM the raw word destroy the miss
+            # sentinel, and only those may be guarded: the struct / enum /
+            # array / dict arms already pass `3` through untouched (so nil
+            # already survives), and re-casting the sentinel into one of their
+            # aggregate representations would be nonsense. f64 is deliberately
+            # excluded too -- `rt_value_as_float` cannot round-trip a sentinel,
+            # and an `Option<f64>` has no room for one in the flat ABI either
+            # (tracked with the bool case in the bug doc).
+            val guardable_value_type = self.mir_type_is_integer(dict_result_type) or self.mir_type_is_str(dict_result_type)
+            if as_option and guardable_value_type:
+                decoded = self.dict_get_preserve_flat_nil(get_local, decoded, dict_result_type)
             # Bug #189 (struct-valued Dict read misread): a struct-typed dict
             # result decodes via decode_runtime_value's default raw-passthrough
             # arm (no shift, correct bits), but that arm does not register the

@@ -1256,12 +1256,14 @@ impl MirLowering:
             self.builder = b_has
             return has_bool
 
-        # `.get(key)` -> rt_dict_get, decoded exactly like the `d[k]` Index
-        # case in expr_dispatch.spl (same runtime call, same decode_runtime_value
-        # unboxing). Missing-key behavior intentionally mirrors the existing
-        # `d[k]` raw-read path (pre-existing garbage-on-miss behavior documented
-        # in scratchpad/dict_native_report.md item 15 -- not introduced here,
-        # not fixed here, out of scope for this sweep).
+        # `.get(key)` -> rt_dict_get, resolved and decoded by the same shared
+        # helper as the `d[k]` Index case in expr_dispatch.spl -- but read as
+        # an OPTION (`as_option: true`), because `.get()`'s declared result is
+        # `V?` while `d[k]`'s is `V`. That flag is what preserves the MISS
+        # sentinel through the decode (bug
+        # native_dict_get_miss_returns_zero_not_nil_2026-07-28, which
+        # superseded the "missing-key behaviour intentionally mirrors `d[k]`"
+        # note that used to sit here).
         if receiver_is_dict and method == "get" and args.len() == 1:
             val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
             val key_local = self.lower_dict_key(args[0].value)
@@ -1280,7 +1282,7 @@ impl MirLowering:
             # because nil survives the shift as nil. Route through the shared
             # helper the `d[k]` index read uses, so both readers of rt_dict_get
             # resolve, decode and register identically.
-            return self.lower_dict_runtime_get(receiver, receiver_local, key_local)
+            return self.lower_dict_runtime_read(receiver, receiver_local, key_local, true)
 
         # `.remove(key)` / `.delete(key)` -> rt_dict_remove (mutates in place,
         # returns whether the key was present -- discarded here). The oracle

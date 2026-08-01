@@ -1,10 +1,32 @@
 # Bug: `Dict.len()` returns -1 in native codegen (locals and struct fields, empty or populated)
 
 - **Date:** 2026-07-27
-- **Status:** open
+- **Status:** NOT REPRODUCIBLE as of `8fdc21c67b5` (2026-08-01) — see "Re-measured" below
 - **Area:** native codegen — MIR `.len()` method lowering, dict receivers
 - **Severity:** high — silently defeats any `len() == 0` / `len() < 0` guard; caused a multi-hour misdiagnosis during stage-4 bootstrap debugging
 - **Found by:** isolated native-codegen probe (Probe A), one-binary build
+
+## Re-measured 2026-08-01 — does not reproduce
+
+Native ELF built from a clean `origin/main` at `8fdc21c67b5` (LLVM backend,
+`native-build --entry`, verified by running the produced binary directly):
+
+```
+local_len=2       <- Dict<text,i64> local, two entries
+param_len=2       <- same dict passed as `fn f(d: Dict<text,i64>)`
+```
+
+Both routes report the true entry count. The `rt_len` -> `rt_string_len`
+fallback described below is therefore no longer being taken for these two
+receiver shapes — `local_is_runtime_dict` now recovers dict-ness for both the
+local and the parameter (the parameter case was the `native_dict_param_no_dictness`
+follow-up already landed in `method_calls_literals.spl`).
+
+**Still unmeasured:** the STRUCT FIELD receiver from the original Probe A.
+Module-level `struct` declarations still make `native-build` fail with
+`MIR module has no functions` (the separate native-build defect noted in the
+`.get()` miss bug doc), so that row could not be re-run. Do not close this bug
+on the strength of the two rows above alone.
 
 ## Summary
 

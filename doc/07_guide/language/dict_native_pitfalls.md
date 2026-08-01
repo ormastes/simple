@@ -13,11 +13,22 @@ exposure — always also search for `: {`-style dict declarations.
 
 ## Truth table
 
+> **UPDATED 2026-08-01.** Two rows changed. `.len()` no longer reproduces as
+> `-1` — measured `2` for both a local `Dict<text,i64>` and a dict passed as a
+> function parameter, on a native ELF built from `8fdc21c67b5`. And the
+> `.get()` MISS row is now correct for `i64` and `bool` value types (fix:
+> `dict_get_preserve_flat_nil`, see
+> `doc/08_tracking/bug/native_dict_get_miss_returns_zero_not_nil_2026-07-28.md`).
+> **`text`-valued dicts are still broken on a miss** — the `contains_key(k)` +
+> `d[k]` replacement below is still mandatory for those.
+
 | Operation | Native codegen result | Safe to use? |
 |---|---|---|
-| `d.len()` / `d.length()` | **-1**, always — local or struct field, empty or populated | **NO** |
-| `d.get(k)` — **miss** | **zero VALUE of `V`, not `nil`** — `0` / `false` / non-nil text. `== nil` is **false**, `?? default` **never fires** | **NO** |
-| `d.get(k)` — hit, `V` = `bool`, value `true` | reads `true` but `== nil` is **true** — a present key looks missing | **NO** |
+| `d.len()` / `d.length()` | correct count since 2026-08-01 (measured: local **and** function parameter). The old **-1** does not reproduce; struct-field receivers remain unmeasured | yes for locals/params |
+| `d.get(k)` — miss, `V` = `i64` / `bool` | correct `nil` since 2026-08-01 — `== nil` true, `?? default` fires | yes |
+| `d.get(k)` — **miss, `V` = `text`** | **not `nil`** — `== nil` is **false**, a miss is indistinguishable from a hit | **NO** |
+| `d.get(k)` — miss, `V` = `f64` | unfixed and unmeasured — the flat Option ABI cannot carry a sentinel in a float word | **NO** |
+| `d.get(k)` — hit, `V` = `bool`, value `true` | correct since 2026-08-01 (`.get()` on a bool dict now returns the raw 3-state word) | yes |
 | `d.get(k)` — hit, `V` = `i64` / `text` | correct since `7e83e92ce314` (was `7`→`56`) | yes |
 | `d.get(k)` — hit, `V` = struct/class/enum | correct since `7e83e92ce314` (was a segfaulting corrupt `Option`) | yes |
 | `d.get(k).?` | **conflates a present `0` with empty** — reports empty for a stored zero | **NO** |
@@ -54,9 +65,11 @@ exposure — always also search for `: {`-style dict declarations.
   both take the present-value branch on a miss. Test `contains_key(k)` first and
   supply the default yourself. `.get(k).?` is also unsafe — it reports empty for a
   stored `0`.
-- **Count** — never `d.len()`. For cold paths use `d.keys().len()`. For hot
-  loops, maintain your own counter alongside the dict instead of recomputing
-  a length.
+- **Count** — `d.len()` is correct again as of 2026-08-01 for local and
+  parameter receivers; the `d.keys().len()` workaround is no longer required
+  for those, though it stays correct. Struct-field receivers have **not** been
+  re-measured, so leave existing `keys().len()` calls on fields alone until
+  they are.
 - **Value fetch** — use `contains_key(k)` then index-read `d[k]`, not `.get(k)`.
 - **Need an `Option`** — wrap the index read yourself: `Some(d[k])`, not `.get(k)`.
 

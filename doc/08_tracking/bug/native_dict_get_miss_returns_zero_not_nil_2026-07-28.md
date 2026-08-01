@@ -1,7 +1,7 @@
 # Bug: `Dict.get()` on a MISS returns a zero VALUE, not `nil` (native codegen) — silent wrong branch
 
 - **Date:** 2026-07-28
-- **Status:** open
+- **Status:** FIXED for `i64` and `bool` value types (2026-08-01); **still open for `text`**
 - **Area:** native codegen — MIR dict read lowering (`lower_dict_runtime_get` applies
   `decode_runtime_value` to `rt_dict_get`'s nil sentinel with no nil guard)
 - **Severity:** **critical** — silent-wrong-answer. Nothing crashes; a missing key is
@@ -9,6 +9,50 @@
   `.get()`-struct-segfault class, which at least fails loudly.
 - **Found by:** isolated native one-binary probes on a clean checkout of `origin/main`
   (`f1f75f0f81e`, which contains the `.get()` lowering fix `7e83e92ce314`)
+
+## Fix (2026-08-01) — integer and bool value types
+
+`lower_dict_runtime_get` was split into `lower_dict_runtime_read(..., as_option)`
+so the two readers of `rt_dict_get` can differ where they must:
+
+- `d[k]` (`as_option: false`) is byte-for-byte unchanged — an index read has
+  no `Option` to return, so there is nowhere for a miss signal to go.
+- `d.get(k)` (`as_option: true`) declares `V?`, so the MISS sentinel is now
+  routed **around** the decode by `dict_get_preserve_flat_nil`
+  (`select(raw == 3, 3, decode(raw))`, built with the same block/merge shape
+  the `Option.map` lowering already uses). Guarded to the value types whose
+  decode arm actually transforms the raw word — integer and str — via the new
+  shared `mir_type_is_integer` predicate, which `decode_runtime_value` now
+  also uses so the two can never disagree.
+- `Dict<_, bool>.get(k)` returns the **raw word undecoded**: an `Option<bool>`
+  has three states (`11` / `0` / `3`) and an `i1` holds two, and
+  `option_bool_value` is already the matching decode. That fixes the miss AND
+  the "a present `true` compares equal to `nil`" row in the same change.
+
+### Measured, native ELF, `Dict<text,i64>` / `Dict<text,bool>` / `Dict<text,text>`
+
+| probe | before | after | verdict |
+|---|---|---|---|
+| `i64` miss `== nil` | `false` | **`true`** | fixed |
+| `i64` miss `?? -77` | `0` | **`-77`** | fixed |
+| `i64` stored-zero `== nil` | `false` | `false` | unchanged, correct |
+| `bool` miss `== nil` | (was `false`) | **`true`** | fixed |
+| `bool` present-`true` `== nil` | (was `true`) | **`false`** | fixed |
+| **`text` miss `== nil`** | `false` | **`false`** | **STILL BROKEN** |
+| `text` hit `== nil` | `false` | `false` | unchanged, correct |
+| `.len()` local / param | `2` / `2` | `2` / `2` | unchanged, correct |
+
+**Residual — `text` value types.** The str guard is emitted but does not
+change the observed result; the sentinel is either not surviving
+`emit_cast(3, Opaque("str"))` or `== nil` on a str-typed local does not
+compare against the flat sentinel. Not diagnosed. `Dict<text, text>.get()`
+on a miss is still indistinguishable from a hit — keep using
+`contains_key(k)` + `d[k]` for text-valued dicts.
+
+**Also not fixed:** `f64` value types (the flat ABI has no room for a
+sentinel in a float word, same shape as the `bool` case but with no
+alternative encoding), and `d[k]`-on-a-miss, which is out of scope by
+design as described above.
 
 ## Summary
 
