@@ -1,11 +1,24 @@
 extern fn rt_file_read_text(path: text) -> text
 
+# The LIVE pure-Simple text-method dispatch table. Was
+# interpreter/eval_methods.spl until 2026-08-01; that file defined a SECOND,
+# strict-subset copy of eval_text_method that never ran, and this spec used to
+# assert against it -- green while the interpreter's byte_at returned 0 for
+# every index. See
+# doc/08_tracking/bug/2026-08-01_interpreter_eval_text_method_duplicate_live_subset.md
+val LIVE_DISPATCH_PATH = "src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl"
+val DEAD_DISPATCH_PATH = "src/compiler/10.frontend/core/interpreter/eval_methods.spl"
+
 describe "interpreter text.byte_at dispatch":
     it "is BYTE-indexed and disagrees with char_code_at on non-ASCII text":
+        # NOTE ON ENGINE: this block executes on whichever engine runs the
+        # suite -- today that is the Rust seed child, NOT the pure-Simple
+        # interpreter. It pins the cross-lane contract (seed / native / JIT all
+        # agree here). The pure-Simple interpreter's conformance to the same
+        # contract is measured separately, by driving core_interpret_expr; the
+        # structural blocks below are the regression pin for that.
+        #
         # "café," is 6 bytes / 5 chars: c(0) a(1) f(2) 0xC3(3) 0xA9(4) ,(5).
-        # byte_at is byte-indexed (raw UTF-8 buffer read); char_code_at is
-        # character-indexed (decoded codepoint). They must disagree at the
-        # multi-byte 'é'.
         val s = "café,"
         expect(s.byte_at(0)).to_equal(99)
         expect(s.byte_at(3)).to_equal(195)
@@ -17,15 +30,19 @@ describe "interpreter text.byte_at dispatch":
         expect(s.byte_at(99)).to_equal(0)
         expect(s.byte_at(-1)).to_equal(0)
 
-    it "the pure-Simple interpreter's byte_at arm reads raw bytes, not a UTF-8-decoded slice":
-        # Structural guard on the actual source: byte_at must NOT reuse
-        # char_code_at's `s[idx:idx+1]` + `.char_code_at(0)` shape. Slicing a
-        # single byte out of a multi-byte codepoint and then UTF-8-decoding
-        # it returns garbage (0xC3 alone decodes as 192, not the raw byte
-        # 195) — confirmed empirically before this arm was written. byte_at
-        # must instead read through rt_string_byte_at, the O(1) raw-byte
-        # extern registered for this engine in interpreter_extern/mod.rs.
-        val source = rt_file_read_text("src/compiler/10.frontend/core/interpreter/eval_methods.spl") ?? ""
+    it "the LIVE interpreter dispatch table has a byte_at arm reading raw bytes":
+        # Structural guard on the file that ACTUALLY RUNS. The sole call site
+        # of eval_text_method is _EvalOps/call_method_eval.spl:586, in this same
+        # _EvalOps package, so this package-local definition is the one that
+        # resolves. Proven by sabotage in both directions through
+        # core_interpret_expr: returning 4242 from the old eval_methods.spl
+        # `len` arm changed nothing; returning 7373 from THIS one returned 7373.
+        #
+        # byte_at must NOT reuse char_code_at's slice-then-decode shape:
+        # slicing one byte out of a multi-byte codepoint and UTF-8-decoding it
+        # returns the replacement char, not the raw byte. It must read through
+        # rt_string_byte_at, the O(1) raw-byte extern.
+        val source = rt_file_read_text(LIVE_DISPATCH_PATH) ?? ""
         expect(source).to_contain("extern fn rt_string_byte_at")
 
         val char_code_at_pos = source.index_of("if method_name == \"char_code_at\":")
@@ -38,9 +55,47 @@ describe "interpreter text.byte_at dispatch":
         expect(next_arm_pos).to_be_greater_than(-1)
         val byte_at_body = branch.substring(0, next_arm_pos)
 
-        expect(byte_at_body).to_contain("rt_string_byte_at(s, idx)")
+        expect(byte_at_body).to_contain("rt_string_byte_at(s, byte_idx)")
         expect(byte_at_body).to_not_contain("char_code_at(0)")
         # Must NOT fall back to rt_text_to_bytes: that materializes the whole
         # byte array per call, making a full scan O(n^2) -- the same quadratic
         # trap char_code_at was already fixed for.
         expect(byte_at_body).to_not_contain("rt_text_to_bytes")
+
+    it "keeps eval_text_method single-definition so no shadow copy can drift again":
+        # DISPATCH-LIVENESS GUARD. The defect this spec exists for was not a
+        # wrong arm -- it was a RIGHT arm in a file nothing called. A structural
+        # assertion is worthless if its file is off the live path, so pin the
+        # invariant that makes the file choice unambiguous: exactly one
+        # definition of eval_text_method in the interpreter tree.
+        #
+        # If someone re-splits this module and copies the block instead of
+        # moving it, this goes red instead of silently recreating a subset that
+        # a green spec then guards.
+        val dead = rt_file_read_text(DEAD_DISPATCH_PATH) ?? ""
+        expect(dead).to_equal("")
+
+        val live = rt_file_read_text(LIVE_DISPATCH_PATH) ?? ""
+        val first_def = live.index_of("fn eval_text_method(")
+        expect(first_def).to_be_greater_than(-1)
+        val second_def = live.index_of("fn eval_text_method(", first_def + 1)
+        expect(second_def).to_equal(-1)
+
+    it "the LIVE table carries every arm the dead subset had":
+        # The subset was missing byte_at, slice, char_at, parse_int, to_upper,
+        # to_lower, to_string, find, find_str, rfind and last_index_of, plus the
+        # splitn `limit` handling. All silently: a missing arm falls through to
+        # eval_set_error + -1, which reads back as 0 for ints and as the
+        # receiver unchanged for text.
+        val live = rt_file_read_text(LIVE_DISPATCH_PATH) ?? ""
+        expect(live).to_contain("if method_name == \"byte_at\":")
+        expect(live).to_contain("if method_name == \"slice\":")
+        expect(live).to_contain("if method_name == \"char_at\":")
+        expect(live).to_contain("if method_name == \"parse_int\":")
+        expect(live).to_contain("if method_name == \"to_upper\":")
+        expect(live).to_contain("if method_name == \"to_lower\":")
+        expect(live).to_contain("if method_name == \"to_string\":")
+        expect(live).to_contain("method_name == \"find\"")
+        expect(live).to_contain("method_name == \"find_str\"")
+        expect(live).to_contain("method_name == \"last_index_of\"")
+        expect(live).to_contain("method_name == \"rfind\"")
