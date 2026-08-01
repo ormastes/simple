@@ -26,6 +26,7 @@ This spec must run on the sspec TEST path (the path that was broken);
 """
 
 use std.spec
+use std.spec.engine_probe.{engine_stdout, is_known_engine}
 
 describe "text ordering comparison is lexicographic content compare":
     it "orders distinct words alphabetically":
@@ -137,3 +138,48 @@ describe "text ordering is content-based for runtime-produced (untyped) operands
         expect(_lower_lt("Zebra", "apple")).to_equal(false)
         expect(_lower_lt("apple", "Zebra")).to_equal(true)
         expect(_lower_lt("apple", "apple")).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# JIT-path assertion (out of process).
+#
+# Everything above this line runs on the TREE-WALK INTERPRETER and always did,
+# even before the fix — `describe`/`it`/`expect` are interpreter intrinsics
+# with no JIT lowering, and a spec file has no `fn main`, so
+# exec_core.rs:774-781 routes it to `evaluate_module` regardless of
+# SIMPLE_EXECUTION_MODE. The defect this file is named for was CRANELIFT JIT
+# ONLY. The assertions above therefore could not have caught it, and did not:
+# this spec passed 11/11 on a binary whose JIT was provably wrong.
+#
+# The block below spawns the runnable probe under an explicitly NAMED engine
+# and scores its self-reported verdict line. See
+# src/lib/nogc_sync_mut/spec/engine_probe.spl for the pattern.
+# ---------------------------------------------------------------------------
+
+val _PROBE = "test/01_unit/bugs/text_ordering_jit_probe.spl"
+val _PASS = "PROBE VERDICT: PASS"
+
+describe "text ordering is correct on the JIT path (out of process)":
+    """
+    As a compiler maintainer, I need the text-ordering guard to be pointed at
+    a NAMED engine, so that a JIT-only regression cannot pass review behind a
+    spec that only ever ran on the interpreter.
+
+    Pattern and adoption notes: doc/07_guide/infra/testing/spec_engine_reach.md
+    Helper tier (verified by sabotage): src/lib/nogc_sync_mut/spec/engine_probe.spl
+    """
+    it "passes the probe under the interpreter":
+        # Control column. The interpreter was correct throughout, so this
+        # arm failing means the probe or the harness broke, not codegen.
+        expect(engine_stdout(_PROBE, "interpret")).to_contain(_PASS)
+
+    it "passes the probe under the cranelift JIT":
+        # The arm that carries the weight. Observed RED against a binary
+        # missing the rt_native_cmp runtime symbol, GREEN once present.
+        expect(engine_stdout(_PROBE, "jit")).to_contain(_PASS)
+
+    it "rejects an unrecognised engine name instead of silently using the JIT":
+        # SIMPLE_EXECUTION_MODE falls back to JIT on any unknown value, which
+        # would make an A/B comparison look like agreement.
+        assert_false(is_known_engine("interp"))
+        assert_true(is_known_engine("jit"))
+        assert_true(is_known_engine("interpret"))
