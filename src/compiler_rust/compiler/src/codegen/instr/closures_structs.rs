@@ -1482,6 +1482,9 @@ fn try_compile_builtin_method_call<M: Module>(
         "chars" => "rt_string_chars",
         "lines" | "split_lines" => "rt_string_lines",
         "replace" => "rt_string_replace",
+        // See calls.rs: `.repeat()` had no runtime definition at all, so it
+        // silently produced the SPECIAL_ERROR sentinel instead of a string.
+        "repeat" => "rt_string_repeat",
         "to_upper" | "upper" => "rt_string_to_upper",
         "to_lower" | "lower" => "rt_string_to_lower",
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",

@@ -514,6 +514,7 @@ double   rt_math_pow(double base, double exponent);
 int8_t   rt_dict_insert(int64_t dict, int64_t key, int64_t value);
 int64_t  rt_dict_get_i64_raw(int64_t dict, int64_t key);
 int8_t   rt_dict_set_i64_raw(int64_t dict, int64_t key, int64_t value);
+int64_t  rt_string_repeat(int64_t value, int64_t count);
 int64_t  rt_string_replace(int64_t value, int64_t old_value, int64_t new_value);
 int64_t  rt_string_trim(int64_t value);
 int64_t  rt_string_trim_start(int64_t value);

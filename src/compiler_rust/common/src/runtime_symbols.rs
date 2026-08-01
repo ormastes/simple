@@ -490,6 +490,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_bytes",
     "rt_string_chars",
     "rt_string_lines",
+    "rt_string_repeat",
     "rt_string_replace",
     "rt_string_trim",
     "rt_string_trim_start",

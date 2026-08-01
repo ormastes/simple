@@ -328,8 +328,18 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(result));
         }
         "repeat" => {
-            let n = eval_arg_usize(args, 0, 1, env, functions, classes, enums, impl_methods)?;
-            return Ok(Value::text(s.repeat(n)));
+            // Read the count as a SIGNED integer and clamp. `eval_arg_usize`
+            // casts with `as usize`, so `"x".repeat(-2)` became a count of
+            // 18446744073709551614 and the interpreter PANICKED with
+            // "capacity overflow" instead of returning a value. Non-positive
+            // counts yield the empty string, matching the pure-Simple
+            // `str_repeat` (src/lib/common/string_core.spl) and
+            // `rt_string_repeat` in both runtimes.
+            let n = eval_arg_int(args, 0, 1, env, functions, classes, enums, impl_methods)?;
+            if n <= 0 {
+                return Ok(Value::text(String::new()));
+            }
+            return Ok(Value::text(s.repeat(n as usize)));
         }
         "rev" | "reverse" => {
             return Ok(Value::text(s.chars().rev().collect::<String>()));

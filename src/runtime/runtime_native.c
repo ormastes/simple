@@ -3514,6 +3514,40 @@ int8_t rt_is_some(int64_t value) {
     return !rt_is_none(value);
 }
 
+/* Repeat a string `count` times.
+ *
+ * Mirrors the tree-walking interpreter (interpreter_method/string.rs, arm
+ * "repeat") and the pure-Simple str_repeat in src/lib/common/string_core.spl:
+ * a non-positive count yields the empty string. Kept in step with
+ * rt_string_repeat in the Rust runtime (runtime/src/value/collections.rs) --
+ * the native lane links THIS file, so a Rust-only definition would leave
+ * native `.repeat()` unresolved. */
+int64_t rt_string_repeat(int64_t value, int64_t count) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    if (count <= 0 || s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    if (count == 1) return value;
+
+    uint64_t n = (uint64_t)count;
+    if (s->len != 0 && n > (uint64_t)SIZE_MAX / s->len) return rt_core_nil();
+    uint64_t out_len = s->len * n;
+
+    RtCoreString* out = (RtCoreString*)malloc(sizeof(RtCoreString) + (size_t)out_len + 1);
+    if (!out) return rt_core_nil();
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = out_len;
+    for (uint64_t i = 0; i < n; i++) {
+        memcpy(out->data + i * s->len, s->data, (size_t)s->len);
+    }
+    out->data[out_len] = '\0';
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
 int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* old_s = rt_core_as_string(old_value);

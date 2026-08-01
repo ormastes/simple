@@ -71,6 +71,7 @@ use super::{
     rt_string_char_at,
     rt_string_split,
     rt_text_find,
+    rt_string_repeat,
     rt_string_replace,
     rt_string_trim,
     rt_string_join,
@@ -1351,6 +1352,55 @@ fn test_string_split_invalid() {
 
     assert!(rt_string_split(not_a_string, s).is_nil());
     assert!(rt_string_split(s, not_a_string).is_nil());
+}
+
+#[test]
+fn test_string_repeat_basic() {
+    let s = rt_string_new("ab".as_ptr(), 2);
+    let result = rt_string_repeat(s, 3);
+    assert_eq!(rt_string_len(result), 6);
+    let data = rt_string_data(result);
+    assert_eq!(unsafe { std::slice::from_raw_parts(data, 6) }, b"ababab");
+}
+
+#[test]
+fn test_string_repeat_spaces_build_indentation() {
+    // The exact shape EasyFix uses to build replacement-text indentation.
+    let s = rt_string_new(" ".as_ptr(), 1);
+    let result = rt_string_repeat(s, 4);
+    assert_eq!(rt_string_len(result), 4);
+    let data = rt_string_data(result);
+    assert_eq!(unsafe { std::slice::from_raw_parts(data, 4) }, b"    ");
+}
+
+#[test]
+fn test_string_repeat_non_positive_counts_are_empty() {
+    let s = rt_string_new("x".as_ptr(), 1);
+    assert_eq!(rt_string_len(rt_string_repeat(s, 0)), 0);
+    // A negative count must not wrap into a huge allocation.
+    assert_eq!(rt_string_len(rt_string_repeat(s, -2)), 0);
+    assert_eq!(rt_string_len(rt_string_repeat(s, i64::MIN)), 0);
+}
+
+#[test]
+fn test_string_repeat_once_and_empty_receiver() {
+    let s = rt_string_new("q".as_ptr(), 1);
+    assert_eq!(rt_string_len(rt_string_repeat(s, 1)), 1);
+    let empty = rt_string_new("".as_ptr(), 0);
+    assert_eq!(rt_string_len(rt_string_repeat(empty, 5)), 0);
+}
+
+#[test]
+fn test_string_repeat_preserves_multibyte_utf8() {
+    // Byte-length arithmetic must not split a multi-byte character.
+    let s = rt_string_new("\u{e9}".as_bytes().as_ptr(), 2);
+    let result = rt_string_repeat(s, 3);
+    assert_eq!(rt_string_len(result), 6);
+    let data = rt_string_data(result);
+    assert_eq!(
+        unsafe { std::str::from_utf8(std::slice::from_raw_parts(data, 6)).unwrap() },
+        "\u{e9}\u{e9}\u{e9}"
+    );
 }
 
 #[test]

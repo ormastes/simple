@@ -3256,6 +3256,12 @@ pub fn compile_call<M: Module>(
                 "chars" => Some("rt_string_chars"),
                 "lines" | "split_lines" => Some("rt_string_lines"),
                 "replace" => Some("rt_string_replace"),
+                // `rt_string_repeat` had no definition in EITHER runtime, so
+                // `" ".repeat(n)` raised "Function 'str.repeat' not found",
+                // substituted the SPECIAL_ERROR sentinel (which stringifies as
+                // `error`), and still exited 0 -- corrupting every indentation
+                // string built that way, including EasyFix replacement text.
+                "repeat" => Some("rt_string_repeat"),
                 "to_upper" | "upper" => Some("rt_string_to_upper"),
                 "to_lower" | "lower" => Some("rt_string_to_lower"),
                 "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),

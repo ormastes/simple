@@ -2620,6 +2620,57 @@ pub extern "C" fn rt_string_replace(
     }
 }
 
+/// Repeat a string `count` times.
+///
+/// Mirrors the tree-walking interpreter (`interpreter_method/string.rs`, arm
+/// `"repeat"`) and the pure-Simple `str_repeat` in
+/// `src/lib/common/string_core.spl`: a non-positive `count` yields the empty
+/// string.
+///
+/// This function had no definition in EITHER runtime, so the Cranelift JIT's
+/// method table had nothing to route `.repeat()` to. `" ".repeat(n)` therefore
+/// raised `Function 'str.repeat' not found` and substituted the SPECIAL_ERROR
+/// sentinel, which stringifies as `error` -- silently corrupting every
+/// indentation string built that way (notably EasyFix replacement text).
+#[no_mangle]
+pub extern "C" fn rt_string_repeat(string: RuntimeValue, count: i64) -> RuntimeValue {
+    let str_len = rt_string_len(string);
+    if str_len < 0 {
+        // Not a text receiver: preserve the value rather than fabricating one.
+        return string;
+    }
+    if count <= 0 || str_len == 0 {
+        return rt_string_new(b"".as_ptr(), 0);
+    }
+    if count == 1 {
+        return string;
+    }
+
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return rt_string_new(b"".as_ptr(), 0);
+    }
+
+    // Refuse an allocation that cannot be expressed, instead of wrapping and
+    // returning a short string that would silently truncate caller output.
+    let total = match (str_len as u64).checked_mul(count as u64) {
+        Some(total) if total <= isize::MAX as u64 => total as usize,
+        _ => {
+            eprintln!("Runtime error: str.repeat overflow (len={str_len}, count={count})");
+            std::process::exit(70);
+        }
+    };
+
+    unsafe {
+        let bytes = std::slice::from_raw_parts(data, str_len as usize);
+        let mut out = Vec::with_capacity(total);
+        for _ in 0..count {
+            out.extend_from_slice(bytes);
+        }
+        rt_string_new(out.as_ptr(), out.len() as u64)
+    }
+}
+
 /// Trim whitespace from both ends of a string
 #[no_mangle]
 pub extern "C" fn rt_string_trim(string: RuntimeValue) -> RuntimeValue {
