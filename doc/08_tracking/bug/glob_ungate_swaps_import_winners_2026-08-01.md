@@ -121,6 +121,148 @@ is not a speedup over pristine, and the commit message reads as though it were.
    swaps are loud rather than silent.
 3. Correct the 52× claim wherever it is quoted.
 
+## The `Function` / `Const` slice: INERT on every normal lane, OBSERVABLE only under the entry-closure bootstrap
+
+Closes the half the `TypeAlias` note explicitly excluded. Measured at tree
+109,562 (`f93c9b26232`), simulation re-run and reproduced exactly: 356 swaps,
+of which **280 `callables` + 43 `constants` = 323 Function/Const rows**, 160
+distinct (name, providerA, providerB) pairs over 155 names. Glob expansion does
+register both categories (`register_glob_imported_symbols_depth`,
+`module_lowering.spl:943` callables, `:955` constants), so these are real, not a
+simulation artifact.
+
+### Divergence is real and large — that is NOT what makes it safe
+
+Of the 160 Function/Const provider pairs, comparing the two providers' actual
+source definitions: **99 genuinely diverge** (75 differing bodies, 24 differing
+signatures); 61 are byte-identical. This is a far higher divergence rate than the
+`TypeAlias` slice (7 of 52). Worst examples:
+
+| name | provider A | provider B |
+|---|---|---|
+| `LOG_TRACE` | `lib.nogc_sync_mut.log` = **6** | `lib.log` = **0** |
+| `LOG_INFO` | `lib.nogc_sync_mut.log` = **4** | `lib.log` = **2** |
+| `LOG_ERROR` | `lib.nogc_sync_mut.log` = **2** | `lib.log` = **4** |
+| `LOG_OFF` | `lib.nogc_sync_mut.log` = **0** | `lib.log` = **6** |
+| `_entry` | `wine_nt_dispatch_table` `(symbol, dll, category, implemented: bool) -> NtDispatchEntry` | `wine_nt_api_catalog` `(dll, symbol, category, state: text) -> WineNtApiCatalogEntry` |
+| `_md_parse_i64` | `md_language` `(value: text) -> i64` | `md_editing` `(raw: text, fallback: i64) -> i64` |
+
+The two `log` modules use flatly contradictory, near-reversed numbering. If the
+winner were observable this would be a live miscompile. It is not observable —
+for the reason below, not because the definitions agree.
+
+### Why it is inert (PROVED — four independent proofs, `/usr/bin/grep` pinned)
+
+Two competing import registrations of the same name are created by the SAME call
+(`register_imported_symbol`, `module_lowering.spl:601`) with the SAME arguments
+except the source surface. Field by field, the resulting `HirSymbol`s differ in
+**exactly one place**: `defining_module`. (`name` = `local_name`, `kind`,
+`visibility` = `Public`, `is_mutable` = `false` are literals; `span` is the
+import statement's, diagnostics only.)
+
+1. **`type_` is `nil` for both candidates, always.** `declared_surface_callable_type`
+   returns `nil` when `registering_import_symbols` is set
+   (`module_lowering.spl:359-360`), and that flag wraps the entire import pass
+   (`:1350-1353`). So the Function registration at `:635` stores `nil`. The Const
+   registration at `:638` passes a `nil` literal. Same shape as `TypeAlias`.
+   The prior lane's refuted ordering-fix observation applies here directly: import
+   registration lowers no signatures at all.
+
+2. **`defining_module` — the only differing field — has ZERO Function/Const readers.**
+   `/usr/bin/grep -rn "\.defining_module" src/compiler/` (excluding the
+   constructor keyword `defining_module:`) yields exactly five reader sites, and
+   every one is unreachable for a Function or Const symbol:
+
+       vhdl_design_catalog.spl:368   guarded by `case Struct | Enum:`      (:366-370)
+       vhdl_design_catalog.spl:381   guarded by `case Variable:`            (:379-383)
+       50.mir/_MirLowering/module_lowering.spl:166  composite_layout_key -- all six
+           callers (:541 :552 :575 :604 :615 :825) obtain the symbol from
+           struct_def.symbol / class_def.symbol / a HirTypeKind.Named payload
+       50.mir/_MirLowering/module_lowering.spl:176  canonical_mir_type_symbol -- type ids only
+       35.semantics/value_struct_layout.spl:74      struct layout
+       20.hir/hir_types.spl:475                     method_symbol_name(type_id, ...)
+
+   Not one is reached by a name lookup that could return a Function or Const.
+
+3. **Every consumer of a looked-up Function symbol reduces it to `sym.name`, and
+   `sym.name` is identical for both candidates.** MIR emits a call as a NAME
+   STRING, not a symbol id: `switch_operators_calls.spl:3711-3721` builds
+   `MirOperand ... MirConstValue.Str(resolved_name)` where
+   `resolved_name = direct_name` carried on `HirExprKind.NamedVar(symbol, name)`,
+   baked at HIR lowering by `symbol_display_name` (`hir_types.spl:394-398`,
+   returns `sym.name`). The symbol-id fallback `bootstrap_resolved_call_name`
+   (`switch_operators_calls.spl:976`) also returns `found_sym.name`; so does
+   `const_eval.spl:376-378`. Since `register_imported_symbol` defines every
+   candidate under the same `local_name`, the emitted string is the same
+   whichever provider wins. Which body actually answers that string is decided by
+   the flat name registry — the pre-existing bare-name collision — and the swap
+   does not move it.
+
+4. **An imported `Const` is never materialized.** `register_imported_symbol`
+   copies enum bodies (`imported_enums`, `:623`) and trait bodies
+   (`imported_traits`, `:629`), but for `constants` (`:637-638`) it stores only a
+   nil-typed symbol; there is no `imported_constants` map anywhere (`grep` = 0
+   hits). `global_symbol_ids` / `global_const_exprs` / `module.constants` are
+   keyed by the DECLARATION's `const_.symbol.id`
+   (`50.mir/_MirLowering/function_lowering.spl:512-522`), never by an import id,
+   so `try_lower_global_read` (`expr_dispatch.spl:169`) returns `nil` for both
+   candidates identically. The `LOG_*` value contradictions above therefore
+   cannot reach codegen through this mechanism.
+
+Lanes covered: interpreter, JIT and native — the argument is at HIR/MIR
+lowering, upstream of all three.
+
+### The one exception: `qualify_imported_function_symbol` (PROVED mechanism)
+
+`qualify_imported_function_symbol` (`module_lowering.spl:880-900`) calls
+`rename_symbol(sym_id, "{imported_mod_name}.{imported_name}")` — but **only**
+when `SIMPLE_BOOTSTRAP=1` AND `SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`. On that lane
+`sym.name` becomes provider-dependent, and by proof 3 that string IS the emitted
+callee. Because `Function` is last-write-wins, the scope binding always points at
+the last registration, so the rename lands on the winner: a swap redirects the
+call from `{A}.foo` to `{B}.foo`, i.e. to the other provider's body.
+
+Exposure: **239 of the 323 Function/Const swap rows are divergent**, over 52
+distinct roots — 153 `lib.*`, 72 `compiler.*`, 14 `app.*`. The `compiler.*` roots
+are `compiler.driver.driver`, `compiler.frontend.flat_ast_bridge`,
+`compiler.loader.loader.module_loader`,
+`compiler.loader.loader.module_loader_lib_support`,
+`compiler.tools.fix.rules.impl_.impl`, `compiler.tools.fix.rules.registry` — i.e.
+modules that are inside the bootstrap closure. `Const` is unaffected even here
+(`:638` never calls `qualify_imported_function_symbol`).
+
+No miscompile has been observed on that lane; stage3 built clean on both arms per
+the measurement above. The mechanism is PROVED; a resulting defect is INFERRED
+and unobserved.
+
+### Consequences for the standing "is the ungate wanted" decision
+
+Stated plainly, as requested:
+
+- The memo (A) causes **0** swaps, is behaviour-identical to pristine, and is 3x
+  cheaper. It is free and should be kept.
+- The ungate (B) causes **345 of the 356** swaps and its stated justification
+  (`MirOperand` / `MirType` leakage) was **never an observed failure** — neither
+  symbol was unresolved at this tip.
+- On every normal lane the Function/Const half of that cost is provably zero.
+  The residual cost is the 33 TYPE swaps (already documented above, first-wins,
+  they move type identity) plus the entry-closure Function exposure just
+  described — which lands on the bootstrap's own driver and loader modules.
+- **Recommendation: revert the ungate, keep the memo.** It buys no measured fix,
+  and its only measurable effects are winner swaps — two classes of which are
+  observable. This is a decision for the owner; nothing has been reverted here.
+
+**Not fixed, deliberately.** Making `Function`/`Const` first-write-wins was
+considered and rejected: `define`'s last-wins branch is what makes shadowing and
+overloading work (`hir_types.spl:254-255`), so flipping it is a far larger
+semantic change than the defect it would close.
+
+### Reproduction
+
+`/dev/shm/globsim/sim_fable.py` (sim.py + a Function/Const categoriser) and
+`diverge.py` (provider-definition differ). Outputs `fable_swaps_full.json`,
+`fable_fnconst_pairs.json`, `fable_divergence.json`. Scratch, not durable.
+
 ## Artifacts
 
 Simulation sources and full result sets: `/dev/shm/globsim/` (`extract.py`,

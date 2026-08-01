@@ -21,6 +21,17 @@ This closes the `TypeAlias` slice of the 323 last-wins swaps. It says nothing
 about the `Function` / `Const` slice, which does carry a real type
 (`declared_surface_callable_type`) and is NOT covered by this argument.
 
+**Update 2026-08-01 — the `Function` / `Const` slice is now also closed**, by a
+different argument, in `glob_ungate_swaps_import_winners_2026-08-01.md`. Short
+version: `declared_surface_callable_type` returns `nil` under
+`registering_import_symbols`, so an imported `Function` stores no type either;
+`defining_module` is the only field that differs between two candidates and has
+zero Function/Const readers; and MIR emits calls by NAME STRING
+(`symbol_display_name` -> `sym.name` = the shared `local_name`), not by symbol
+id. Inert on interpreter, JIT and native. The one exception is the
+entry-closure bootstrap lane, where `qualify_imported_function_symbol` renames
+the winner to `{module}.{name}` and the swap therefore IS observable.
+
 ## Evidence (PROVED, `/usr/bin/grep` pinned, at tree 109,542)
 
 1. **Exactly two sites create a `TypeAlias` symbol, and both store `nil` for the
@@ -154,8 +165,11 @@ control confirms the gate still fires.
 
 ## Not claimed
 
-- Nothing here covers the `Function` / `Const` half of the 323 last-wins swaps.
-  Those symbols DO carry a real type and this argument does not extend to them.
+- Nothing *here* covers the `Function` / `Const` half of the 323 last-wins
+  swaps; this argument does not extend to them. That half is closed separately
+  in `glob_ungate_swaps_import_winners_2026-08-01.md` (four independent proofs;
+  323 rows = 280 callables + 43 constants; 99 of 160 provider pairs genuinely
+  divergent yet still unobservable on every normal lane).
 - No stage3 error-count table is reported: the run at this tip exited 143
   (SIGTERM), and per `glob_ungate_swaps_import_winners_2026-08-01.md` a count
   census is structurally blind to winner swaps anyway.
