@@ -16,7 +16,7 @@
 # and native, so any divergence is a real index-space defect.
 
 use std.spec.*
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{find_from, text_matches_at, text_index_of, skip_wrap_spaces}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{find_from, text_matches_at, text_index_of, skip_wrap_spaces, _simple_web_html_source_admitted, SIMPLE_WEB_MAX_HTML_BYTES}
 
 describe "web renderer scanners are byte-indexed end to end":
 
@@ -136,6 +136,43 @@ describe "skip_wrap_spaces returns byte offsets":
     it "is a no-op when the offset is already non-space":
         expect(skip_wrap_spaces("abc", 0)).to_be(0)
         expect(skip_wrap_spaces("  abc", 0)).to_be(2)
+
+describe "the HTML admission guard scans in byte index space":
+
+    # `_simple_web_html_source_admitted` used to bound its loop with `len()`
+    # (BYTES) while probing with `char_code_at` (CHARACTERS). It now uses
+    # `byte_at`, which shares `len()`'s index space.
+    #
+    # The migration is ANSWER-preserving specifically because the compared
+    # literal is `<` (60), which is < 128: no UTF-8 lead byte (0xC2-0xF4) or
+    # continuation byte (0x80-0xBF) is ever < 0x80, so byte 60 occurs exactly
+    # where the character `<` occurs and nowhere else. That reasoning does NOT
+    # extend to a comparison against a codepoint >= 128 — do not generalise it.
+
+    it "proves len() is bytes while char_code_at is characters":
+        # The mismatch the guard used to have, stated as an executable fact:
+        # 6 bytes, 5 characters, so a len()-bounded character scan runs one
+        # index past the end and reads a character that does not exist.
+        val doc = "café,"
+        expect(doc.len()).to_be(6)
+        expect(doc.char_code_at(3)).to_be(233)     # 'é' as a CODEPOINT
+        expect(doc.byte_at(3)).to_be(195)          # 0xC3 lead byte at the same index
+        expect(doc.char_code_at(5)).to_be(0)       # phantom: the over-run tail
+        expect(doc.byte_at(5)).to_be(44)           # the real last byte, ','
+
+    it "admits an ASCII document (control)":
+        assert_true(_simple_web_html_source_admitted("<html><body>hi</body></html>", SIMPLE_WEB_MAX_HTML_BYTES))
+
+    it "admits a multi-byte document without over-running its index space":
+        assert_true(_simple_web_html_source_admitted("<p>café — naïve 中文</p>", SIMPLE_WEB_MAX_HTML_BYTES))
+
+    it "still rejects a payload over the byte limit":
+        # The limit is a BYTE limit and is compared against `len()`, so a
+        # multi-byte document is measured in bytes, not characters.
+        val doc = "<p>café</p>"
+        expect(doc.len()).to_be(12)
+        assert_false(_simple_web_html_source_admitted(doc, 11))
+        assert_true(_simple_web_html_source_admitted(doc, 12))
 
 # ---------------------------------------------------------------------------
 # ENGINE DIVERGENCE (found while writing this spec, filed separately)

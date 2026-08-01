@@ -86,10 +86,29 @@ val SIMPLE_WEB_MAX_HTML_PARTS: i32 = 262144
 fn _simple_web_html_source_admitted(html: text, byte_limit: i64) -> bool:
     if html.len() > byte_limit:
         return false
+    # BYTE-indexed, same rationale as text_matches_at/skip_wrap_spaces below.
+    # This loop is bounded by `len()` (BYTES) and previously probed with
+    # `char_code_at` (CHARACTERS), so on any non-ASCII document it ran past the
+    # codepoint count; the tail iterations returned 0 for characters that do not
+    # exist (proved: `"café,".len()` is 6 but the string has 5 characters, and
+    # `char_code_at(5)` yields a phantom 0). Worse, `char_code_at` re-walks the
+    # UTF-8 from byte 0 on every call, and the out-of-range calls walk the WHOLE
+    # buffer before returning 0 — so this admission guard, which runs on
+    # attacker-controlled input capped at BROWSER_RENDERER_MAX_PAYLOAD_BYTES
+    # (1 MiB), was itself the DoS amplifier it exists to prevent.
+    #
+    # `byte_at` is O(1) and its index space matches `len()`. Switching is
+    # answer-preserving HERE specifically because the compared literal is `<`
+    # (60), which is < 128: no UTF-8 lead byte (0xC2-0xF4) or continuation byte
+    # (0x80-0xBF) is ever < 0x80, so byte 60 can only ever occur as a genuine
+    # ASCII `<` and never inside a multi-byte sequence. Do NOT generalise this
+    # to call sites that compare against a codepoint >= 128 or that feed the
+    # index to a character-indexed API.
     var part_count = 1
     var i = 0
-    while i < html.len():
-        if html.char_code_at(i) == 60:
+    val n = html.len()
+    while i < n:
+        if html.byte_at(i) == 60:
             part_count = part_count + 1
             if part_count > SIMPLE_WEB_MAX_HTML_PARTS:
                 return false

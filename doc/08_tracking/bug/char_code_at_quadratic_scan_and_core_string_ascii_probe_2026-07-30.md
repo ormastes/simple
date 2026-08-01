@@ -265,3 +265,151 @@ re-run. Items needing a run once the box is healthy: (i) the >4-string memo
 thrash in (d); (ii) the pure-Simple interpreter divergence in (f), which needs
 a spec with a multi-byte codepoint — note that `simple test` silently
 delegates to the Rust seed child, so a green run there would NOT cover lane 4.
+
+---
+
+# Executed verification + first caller fix 2026-08-01
+
+Binary: `src/compiler_rust/target/bootstrap/simple` (154 MB, the canonical
+LLVM-enabled seed). Everything below was RUN, not read.
+
+## (g) The byte-vs-char mismatch is confirmed, and it is EXECUTABLE
+
+Source confirmation of the (a) "bonus defect", re-checked at the cited lines:
+
+- `src/compiler_rust/compiler/src/interpreter_method/string.rs:21`
+  `"len" | "length" => Value::Int(s.len() as i64)` — Rust `String::len()`, i.e.
+  BYTES. `char_count` is a *separate* method one line below (`:22`).
+- `src/runtime/runtime_native.c:2125-2130` `rt_string_len` returns `s->len`
+  (the byte-count header field) or `strlen`. BYTES.
+- `char_code_at` is CHARACTER-indexed on both: `string.rs:404` `s.chars().nth(idx)`,
+  `runtime_native.c:2338-2355` walks `char_index` against `index`.
+
+Executed proof (`"café,"` — 6 bytes, 5 characters):
+
+```
+byte_len(len())=6
+char_code_at scan bounded by len(): 0:99 1:97 2:102 3:233 4:44 5:0
+byte_at      scan bounded by len(): 0:99 1:97 2:102 3:195 4:169 5:44
+```
+
+Index 5 is a **phantom character that does not exist in the string** — the
+canonical `while i < s.len(): s.char_code_at(i)` shape reads it and gets 0. The
+over-run is real and executable, not a reading.
+
+**Refinement the static audit did not have:** for a predicate that only tests
+`== <some ASCII code>`, the over-run does not change the *answer* — the character
+indices `0..char_count-1` still cover every character, and the phantom tail
+returns 0, which matches no ASCII literal. So a *counting* caller is
+accidentally answer-correct. It is not correct for any caller that consumes the
+returned value, or that treats the index as a position. And the phantom
+iterations are the **most expensive calls in the loop**: an out-of-range index
+walks the entire buffer before returning 0.
+
+## (h) FIXED — `_simple_web_html_source_admitted` migrated to `byte_at`
+
+`src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation.spl:86`.
+The `<`-counting loop now uses `byte_at` with `len()` hoisted. The (e)(4)
+validity argument was re-derived before relying on it and holds: the compared
+literal is `<` == 60 < 128, and no UTF-8 lead byte (0xC2-0xF4) or continuation
+byte (0x80-0xBF) is ever < 0x80, so byte 60 occurs exactly where the character
+`<` occurs and nowhere else. Follows the precedent already set in the same file
+at `text_matches_at` / `skip_wrap_spaces` / `find_from`.
+
+Measured, non-ASCII payload (`"<p>café — naïve 中文</p>"` repeated), wall clock
+per process, same binary:
+
+| bytes | `char_code_at` | `byte_at` |
+|---|---|---|
+| 12,000 | 0.28s | 0.07s |
+| 24,000 | 0.81s | 0.07s |
+| 48,000 | **3.27s** | 0.15s |
+
+Doubling quadruples the old form (quadratic, matching the 2026-07-30 table) and
+is flat/linear for the new one. Extrapolating the quadratic to the 1 MiB
+`BROWSER_RENDERER_MAX_PAYLOAD_BYTES` cap: ~21.8x more input → ~476x more work →
+**~26 minutes of CPU inside the admission guard**, on attacker-controlled input,
+before the renderer has parsed a single tag. That is the DoS the guard exists to
+prevent.
+
+Answer-equivalence was verified before and after on the same payloads (old and
+new forms both count 800 `<` in a 12,000-byte non-ASCII document, 6 in an ASCII
+document, and both reject over-limit input identically).
+
+Regression guard added to the existing index-space spec:
+`test/01_unit/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_scan_index_space_spec.spl`
+— `20 total, 20 passed, 0 failed`. The new block was confirmed to actually
+execute by sabotaging one oracle (→ `20 total, 19 passed, 1 failed`) and
+restoring it; a green `describe` is not by itself evidence the body ran.
+
+## (i) Remaining 120 sites — the criterion, NOT a bulk sweep
+
+A blanket `char_code_at` → `byte_at` migration is a regression generator and is
+still rejected. A site is safe to migrate **only if ALL FOUR** hold:
+
+1. The loop is bounded by `.len()` (or another byte quantity) — i.e. it is
+   already in byte index space and the character probe is the odd one out.
+2. Every literal the probe is compared against is **< 128**. One comparison
+   against a codepoint >= 128 disqualifies the site outright, because that
+   codepoint is multi-byte and can never equal a single byte.
+3. The index is not passed to a CHARACTER-indexed API, and is not reported to a
+   caller that will treat it as a character position. Feeding it to
+   `substring`/`slice`/`index_of`/`bytes()[i]` is fine — those are byte-indexed.
+4. The loop does not *consume* the probed value as a character (e.g. append it
+   to a text, or pass it to something expecting a codepoint). Counting,
+   comparing, and classifying against ASCII literals are fine.
+
+Sites failing (2) or (4) need the (e)(1) resume cursor instead — that is a
+runtime fix, not a caller fix, and it is still unimplemented.
+
+Highest-value remaining candidates, in order, all **UNVERIFIED against the four
+criteria** (each needs the check above run on it individually):
+
+- `src/lib/nogc_sync_mut/text_layout/font_renderer.spl:1436,1457,1482,1506`
+  (`measure_text_width` and friends) — the runner-up by input size, and the one
+  most likely to see non-ASCII, since it scans user-visible rendered text.
+  **Likely FAILS criterion 4** (it needs actual codepoints for glyph metrics),
+  so this one probably needs the resume cursor, not `byte_at`.
+- `src/lib/gc_async_mut/gpu/browser_engine/security/origin_policy.spl` (9
+  invocations) — URL/origin scanning against ASCII delimiters; a plausible
+  candidate for (2) and likely worth doing next.
+- `src/lib/.../office/sheets/formula.spl` (4) — formula tokenizing against
+  ASCII operators; plausible candidate.
+- `font_cldr_rank.spl` (12) — highest raw call count but small inputs, so low
+  value; and rank keys may be non-ASCII, so check (2) carefully.
+
+## (j) `for ch in <text>` is byte-bounded AND binds a broken value — PROVED
+
+This is the prerequisite (c) says keeps getting worked around, and it is worse
+than the "corrupted loop bindings" note suggests. Executed:
+
+```
+val s = "café,"          # 6 bytes, 5 characters
+for ch in s: n = n + 1; acc = acc + "<" + ch + ">"
+  -> n   = 6      (BYTE count — expected 5)
+  -> acc = ""     (empty: the bound `ch` contributes nothing to a concat)
+
+for ch in s.chars(): m = m + 1
+  -> m = 5        (correct)
+```
+
+So `for ch in <text>` is the **same** `len()`-is-bytes defect one level up: it
+iterates the byte count while purporting to yield characters, and the value it
+binds is unusable. On pure ASCII (`"abc"` → 3) it looks fine, which is why it
+survives.
+
+**Proposed clean fix (NOT applied — needs the desugar/lowering owner):** lower
+`for <v> in <text-typed expr>` to `for <v> in <expr>.chars()`. `.chars()` is
+already correct on every lane and is what the lexer uses
+(`lexer_struct.spl:167`). That is a single lowering site rather than 120 caller
+edits, it removes the reason ≥12 sites were forced onto `char_code_at`, and it
+makes the idiomatic form the correct one. The cost is `.chars()`'s N-value
+allocation, which is acceptable for a `for` loop (it is inherently a full
+traversal) and is exactly the case where `.chars()` is the right tool — unlike
+the early-exit/1 MiB scans in (i), where it is not.
+
+Also noted while looking: `src/compiler_rust/compiler/src/interpreter_control.rs:937-995`
+is a superoptimizer for precisely the `while i < s.len(): if s.char_code_at(i) == <ascii>`
+shape, and it is gated on `value.is_ascii()` (`:961`). That is an additional
+reason the ASCII column measured flat in the 2026-07-30 table, and it means the
+ASCII half of that table is not evidence about the general path at all.
