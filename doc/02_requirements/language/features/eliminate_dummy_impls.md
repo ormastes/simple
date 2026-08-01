@@ -20,7 +20,20 @@ The compiler codebase contains ~15 dummy/stub/placeholder implementations that s
 
 #### STUB-002: Effect Inference Not Wired
 - **File:** `src/compiler/80.driver/driver.spl`
-- **Status:** Fixed — wired `run_effect_pass(self.ctx.hir_modules)`
+- **Status:** NOT FIXED — reopened 2026-08-01. The previous "Fixed — wired
+  `run_effect_pass(self.ctx.hir_modules)`" claim does not match the tree:
+  1. The only call site is
+     `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:204`, and it passes
+     `bootstrap_hir_modules` on the **bootstrap-only** branch — the main
+     compilation path never calls the pass at all.
+  2. `run_effect_pass` (`src/compiler/30.types/type_system/effect_pass.spl`)
+     begins with an **unconditional** early return, so its 367-line body has
+     never executed on any build.
+  The guarding spec
+  `test/02_integration/compiler/driver/effect_inference_wiring_spec.spl` passes
+  **vacuously** (empty dict in, empty warnings out) and therefore never detected
+  either problem.
+- **Details:** `doc/08_tracking/bug/effect_pass_dead_and_stub002_falsely_fixed_2026-08-01.md`
 
 #### STUB-003: Literal Converter Stubs
 - **File:** `src/compiler/70.backend/backend/common/literal_converter.spl`
