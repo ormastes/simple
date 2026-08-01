@@ -474,10 +474,29 @@ class MirToWat:
             self.emit_operand(builder, arg)
 
         # Emit call
-        match func_op:
-            case Constant(name):
-                builder.emit("call ${name}")
-            case Use(local_id):
+        # NOTE: this used to `match func_op:` (the MirOperand STRUCT, not its
+        # kind) against `Constant`/`Use`, neither of which is a MirOperandKind
+        # variant. With no `case _:` the match fell through for every real
+        # callee, so translate_call emitted the argument pushes and then NO
+        # call at all. Match `func_op.kind` against the real variants
+        # (Copy/Move/Const), and destructure the constant in a SECOND match --
+        # a nested enum sub-pattern in a payload position always matches and
+        # never binds on the native/JIT lanes.
+        match func_op.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        builder.emit("call ${name}")
+                    case _:
+                        # No WAT lowering exists for a non-symbol constant
+                        # callee. Emitting a plausible call target here would
+                        # silently call the wrong function, so trap instead.
+                        builder.emit(";; UNSUPPORTED: non-symbol constant callee")
+                        builder.emit("unreachable")
+            case Copy(local_id):
+                builder.emit_local_named_get("_l{local_id.id}")
+                builder.emit("call_indirect")
+            case Move(local_id):
                 builder.emit_local_named_get("_l{local_id.id}")
                 builder.emit("call_indirect")
 
@@ -517,16 +536,39 @@ class MirToWat:
 
     me emit_operand(builder: WatBuilder, operand: MirOperand):
         """Emit a MIR operand (push value onto stack)."""
-        match operand:
-            case Use(local_id):
+        # Same defect as translate_call: this matched the MirOperand STRUCT
+        # against `Use`/`Constant` (not MirOperandKind variants), so even the
+        # `Move` arm never fired and every operand fell to the comment-only
+        # default -- pushing NOTHING onto the WASM value stack while callers
+        # (binop/call/store) assume a push happened.
+        match operand.kind:
+            case Copy(local_id):
                 builder.emit_local_named_get("_l{local_id.id}")
-            case Constant(value):
-                builder.emit(";; const operand: {value}")
             case Move(local_id):
                 builder.emit_local_named_get("_l{local_id.id}")
-
-            case _:
-                builder.emit(";; unhandled operand")
+            case Const(value, type_):
+                match value:
+                    case Int(n):
+                        match type_.kind:
+                            case I32:
+                                builder.emit("i32.const {n}")
+                            case _:
+                                builder.emit("i64.const {n}")
+                    case Float(f):
+                        builder.emit("f64.const {f}")
+                    case Bool(b):
+                        val bool_int = if b: 1 else: 0
+                        builder.emit("i32.const {bool_int}")
+                    case Str(s):
+                        val offset = self.memory.add_string(s)
+                        builder.emit("i32.const {offset}")
+                    case _:
+                        # Array/Tuple/Struct/Zero constants have no direct
+                        # push lowering. Trapping is mandatory: silently
+                        # pushing nothing leaves the value stack short, which
+                        # mis-binds every later operand instead of failing.
+                        builder.emit(";; UNSUPPORTED: aggregate constant operand")
+                        builder.emit("unreachable")
 
     fn mir_type_to_wasm_type(ty: MirType) -> WasmType:
         """Map MIR type to WASM type."""
