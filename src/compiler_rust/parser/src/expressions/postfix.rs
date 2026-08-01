@@ -6,6 +6,40 @@ use crate::parser_impl::core::Parser;
 use crate::token::TokenKind;
 
 impl<'a> Parser<'a> {
+    /// If the current token is a `Symbol(name)` literal, rewrite it in place into
+    /// an `Identifier` token and return true; otherwise leave the stream alone and
+    /// return false.
+    ///
+    /// The lexer fuses `:` immediately followed by an identifier character into a
+    /// single symbol-literal token, so inside a subscript the colon that opens a
+    /// slice bound is swallowed: `xs[:end]` arrives as `Symbol("end")` rather than
+    /// `Colon` + `Identifier`, and `xs[a:end]` likewise. Handing the name back as an
+    /// identifier lets `parse_expression` parse the full bound (including binary
+    /// operators and postfix, e.g. `xs[a:n - 1]` or `xs[:obj.len]`).
+    fn rewrite_symbol_as_identifier(&mut self) -> bool {
+        let TokenKind::Symbol(name) = &self.current.kind else {
+            return false;
+        };
+        let name = name.clone();
+        let span = self.current.span;
+        self.advance(); // consume the Symbol token
+
+        use crate::token::NamePattern;
+        let ident_token = crate::token::Token {
+            kind: TokenKind::Identifier {
+                name: name.clone(),
+                pattern: NamePattern::Immutable,
+            },
+            lexeme: name,
+            span,
+        };
+        // Push what advance() made current back into pending, then install the
+        // rewritten identifier as current so parse_expression sees `name ...`.
+        self.pending_tokens.push_front(self.current.clone());
+        self.current = ident_token;
+        true
+    }
+
     fn transform_placeholder_args_for_call(&self, callee: &Expr, args: &mut [Argument]) {
         if Self::expr_is_higher_order_callee(callee) {
             for arg in args {
@@ -186,6 +220,25 @@ impl<'a> Parser<'a> {
                         let step = self.parse_optional_expr_before_bracket()?;
                         self.expect(&TokenKind::RBracket)?;
                         expr = self.make_slice_expr(expr, None, None, step);
+                    } else if matches!(&self.current.kind, TokenKind::Symbol(_)) {
+                        // Slice starting with : (no start) whose end bound begins with
+                        // an identifier: `xs[:end]`. The lexer fused the opening colon
+                        // into a symbol literal (`:end` -> Symbol("end")), so this never
+                        // reached the Colon branch below and instead fell through to the
+                        // plain-index path — silently turning `xs[:end]` into `xs[end]`.
+                        // Mirrors the same rewrite on the `xs[start:end]` path.
+                        self.rewrite_symbol_as_identifier();
+                        let end = Some(Box::new(self.parse_expression()?));
+                        self.validate_optional_bracket_operand(&end, "slice end")?;
+                        let step = self.parse_optional_step()?;
+                        self.validate_optional_bracket_operand(&step, "slice step")?;
+                        self.expect(&TokenKind::RBracket)?;
+                        expr = Expr::Slice {
+                            receiver: Box::new(expr),
+                            start: None,
+                            end,
+                            step,
+                        };
                     } else if self.check(&TokenKind::Colon) {
                         // Slice starting with : (no start)
                         self.advance();
@@ -228,29 +281,11 @@ impl<'a> Parser<'a> {
                             // Handle Symbol tokens as :identifier (e.g., arr[start:end] where :end is Symbol("end"))
                             // Note: Symbol tokens like :self may be followed by postfix operators (e.g., :self.pos)
                             // so we need to parse them as full expressions
-                            let end = if let TokenKind::Symbol(name) = &self.current.kind.clone() {
-                                // Symbol like :name means the colon was absorbed into the token
-                                // Convert Symbol(name) back to Identifier so parse_expression can handle it
-                                // This allows binary operators like `arr[0:n - 1]` to work
-                                let name = name.clone();
-                                let span = self.current.span;
-                                self.advance(); // consume the Symbol token
-
-                                // Create an identifier token and set it as current
-                                use crate::token::NamePattern;
-                                let ident_token = crate::token::Token {
-                                    kind: TokenKind::Identifier {
-                                        name: name.clone(),
-                                        pattern: NamePattern::Immutable,
-                                    },
-                                    lexeme: name,
-                                    span,
-                                };
-                                // Put what was going to be current into pending, then set ident as current
-                                self.pending_tokens.push_front(self.current.clone());
-                                self.current = ident_token;
-
-                                // Now let parse_expression handle the full expression including binary ops
+                            let end = if self.rewrite_symbol_as_identifier() {
+                                // Symbol like :name means the colon was absorbed into the
+                                // token; it has been handed back as an identifier, so let
+                                // parse_expression handle the full bound including binary
+                                // ops (e.g. `arr[0:n - 1]`).
                                 Some(Box::new(self.parse_expression()?))
                             } else {
                                 self.advance(); // consume the colon
