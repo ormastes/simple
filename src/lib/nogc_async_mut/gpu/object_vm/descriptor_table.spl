@@ -1,0 +1,444 @@
+"""CPU-reference Object VM descriptor table: handles, generations, leases.
+
+PLACE lane phase 1 ("Handles + leases. Descriptor table, generations,
+stale-handle faults; CPU-only simulation backend for tests") of
+`doc/03_plan/platform/structural_compute/gpu_mmu_plan.md`.
+
+This file allocates NOTHING on a device. Device addresses are simulated from a
+monotonic counter so placement and eviction decisions are observable and
+testable on CPU. It is the oracle a real Vulkan / GPUDirect backend must match,
+per shared rule 3 ("CPU reference is the oracle and is never deleted").
+
+Structure conventions mirror `src/lib/common/ui/draw_ir_v3.spl`: flat parallel
+columns indexed by slot, no text keys in the hot structure, no nested dynamic
+arrays, an explicit absent-id sentinel (PLACEMENT_NO_SLOT / PLACEMENT_NO_EPOCH).
+Granularity is per-arena, never per-node, as the plan requires.
+
+INTERPRETATION (the plan is silent on all three; recorded, not decided here):
+  * The plan fixes descriptor SIZE ("32-48 B hot descriptor per arena") but not
+    the descriptor FIELD SET. The columns below are the minimum needed to make
+    generation faults, lease faults and eviction decisions observable.
+  * The plan says stale handles "fault deterministically" but does not say
+    whether a fault traps or returns. This model RETURNS a total result struct
+    with an `ok` flag and a reason receipt, following the ID-TAG convention
+    that decoders are total and never trap.
+  * `home_tier` (the tier an object falls back to when evicted from the device)
+    has no name in the plan. Without it an eviction cannot state where the
+    bytes went, which shared rule 4 forbids.
+"""
+
+use common.compute.placement_contracts.schema.{PLACEMENT_NO_SLOT, PLACEMENT_NO_EPOCH, residency_tier_is_device, residency_tier_name, residency_tier_valid}
+
+# Simulated device address base. Any non-zero base works; a non-zero base means
+# "address 0" is unambiguously "no device address" in every receipt.
+val OBJECT_VM_SIM_DEVICE_BASE: i64 = 1048576
+
+# Reason-receipt codes. Every non-ok result names exactly one of these first,
+# so a caller can branch on a stable prefix instead of parsing prose.
+val OBJECT_VM_UNKNOWN_SLOT: text = "object_vm_unknown_slot"
+val OBJECT_VM_STALE_GENERATION: text = "object_vm_stale_generation"
+val OBJECT_VM_STALE_LEASE: text = "object_vm_stale_lease"
+val OBJECT_VM_NOT_RESIDENT: text = "object_vm_not_resident"
+val OBJECT_VM_PROTECTED: text = "object_vm_protected"
+val OBJECT_VM_INVALID_TIER: text = "object_vm_invalid_tier"
+
+pub enum ObjectVmFault:
+    NoFault
+    UnknownSlot
+    StaleGeneration
+    StaleLease
+    NotResident
+    Protected
+    InvalidTier
+
+fn object_vm_fault_to_u8(f: ObjectVmFault) -> i64:
+    match f:
+        case ObjectVmFault.NoFault: 0
+        case ObjectVmFault.UnknownSlot: 1
+        case ObjectVmFault.StaleGeneration: 2
+        case ObjectVmFault.StaleLease: 3
+        case ObjectVmFault.NotResident: 4
+        case ObjectVmFault.Protected: 5
+        case ObjectVmFault.InvalidTier: 6
+
+# Flat columns indexed by slot. All widths are i64 on purpose: the frozen
+# contract declares u32/u64 on the wire, but this in-memory reference model
+# keeps signed 64-bit lanes so the shift/width landmines that bit the sibling
+# contract lane cannot reach the placement decisions. Conversion to the frozen
+# widths happens only at the ResidentView bridge.
+struct ObjectVmDescriptorTable:
+    live: [i64]
+    generation: [i64]
+    tier: [i64]
+    home_tier: [i64]
+    byte_len: [i64]
+    device_address: [i64]
+    lease_epoch: [i64]
+    lease_count: [i64]
+    pinned: [i64]
+    retain_score: [i64]
+    next_epoch: i64
+    next_address: i64
+
+# Result of a slot-defining mutation. Carries the new table by value because
+# arrays are value types in this language.
+struct ObjectVmDefineResult:
+    table: ObjectVmDescriptorTable
+    ok: bool
+    slot: i64
+    generation: i64
+    reason: text
+
+# Total resolution result. `reason` is empty exactly when `ok` is true, and
+# `fault` is ObjectVmFault.NoFault exactly when `ok` is true.
+struct ObjectVmResolve:
+    ok: bool
+    fault: ObjectVmFault
+    slot: i64
+    device_address: i64
+    length: i64
+    lease_epoch: i64
+    reason: text
+
+struct ObjectVmLeaseResult:
+    table: ObjectVmDescriptorTable
+    resolve: ObjectVmResolve
+
+fn object_vm_table_empty() -> ObjectVmDescriptorTable:
+    return ObjectVmDescriptorTable(
+        live: [],
+        generation: [],
+        tier: [],
+        home_tier: [],
+        byte_len: [],
+        device_address: [],
+        lease_epoch: [],
+        lease_count: [],
+        pinned: [],
+        retain_score: [],
+        next_epoch: 1,
+        next_address: OBJECT_VM_SIM_DEVICE_BASE
+    )
+
+fn object_vm_slot_count(t: ObjectVmDescriptorTable) -> i64:
+    return t.live.len()
+
+fn object_vm_slot_exists(t: ObjectVmDescriptorTable, slot: i64) -> bool:
+    if slot < 0 or slot >= t.live.len(): return false
+    return t.live[slot] == 1
+
+fn _ovm_ok_resolve(slot: i64, address: i64, length: i64, epoch: i64) -> ObjectVmResolve:
+    return ObjectVmResolve(
+        ok: true,
+        fault: ObjectVmFault.NoFault,
+        slot: slot,
+        device_address: address,
+        length: length,
+        lease_epoch: epoch,
+        reason: ""
+    )
+
+fn _ovm_fault(fault: ObjectVmFault, slot: i64, reason: text) -> ObjectVmResolve:
+    return ObjectVmResolve(
+        ok: false,
+        fault: fault,
+        slot: slot,
+        device_address: 0,
+        length: 0,
+        lease_epoch: PLACEMENT_NO_EPOCH,
+        reason: reason
+    )
+
+# Classify a handle. A slot index outside the table is UnknownSlot; a slot that
+# is inside the table but retired is StaleGeneration, NOT UnknownSlot —
+# retirement bumps the generation, and the plan requires a stale handle to fault
+# as a stale handle. Collapsing the two would tell a caller that an arena it
+# legitimately held never existed.
+fn _ovm_handle_fault(t: ObjectVmDescriptorTable, slot: i64, generation: i64) -> ObjectVmResolve:
+    if slot < 0 or slot >= t.live.len():
+        return _ovm_fault(ObjectVmFault.UnknownSlot, slot,
+            OBJECT_VM_UNKNOWN_SLOT + ": slot=" + slot.to_text()
+                + " slot_count=" + t.live.len().to_text())
+    if t.generation[slot] != generation:
+        return _ovm_fault(ObjectVmFault.StaleGeneration, slot,
+            OBJECT_VM_STALE_GENERATION + ": slot=" + slot.to_text()
+                + " handle_generation=" + generation.to_text()
+                + " table_generation=" + t.generation[slot].to_text())
+    if t.live[slot] != 1:
+        return _ovm_fault(ObjectVmFault.StaleGeneration, slot,
+            OBJECT_VM_STALE_GENERATION + ": slot=" + slot.to_text()
+                + " handle_generation=" + generation.to_text()
+                + " slot retired")
+    return _ovm_ok_resolve(slot, 0, 0, PLACEMENT_NO_EPOCH)
+
+# Define a new arena descriptor. `home_tier` is the tier the arena falls back
+# to when it is evicted from the device; `tier` is where it starts.
+fn object_vm_define(t: ObjectVmDescriptorTable,
+                    tier: i64,
+                    home_tier: i64,
+                    byte_len: i64,
+                    retain_score: i64) -> ObjectVmDefineResult:
+    if not residency_tier_valid(tier) or not residency_tier_valid(home_tier):
+        return ObjectVmDefineResult(
+            table: t,
+            ok: false,
+            slot: PLACEMENT_NO_SLOT,
+            generation: 0,
+            reason: OBJECT_VM_INVALID_TIER + ": tier=" + tier.to_text()
+                + " home_tier=" + home_tier.to_text()
+        )
+    if byte_len < 0:
+        return ObjectVmDefineResult(
+            table: t,
+            ok: false,
+            slot: PLACEMENT_NO_SLOT,
+            generation: 0,
+            reason: OBJECT_VM_INVALID_TIER + ": byte_len=" + byte_len.to_text() + " is negative"
+        )
+
+    var live = t.live
+    var generation = t.generation
+    var tiers = t.tier
+    var homes = t.home_tier
+    var lens = t.byte_len
+    var addrs = t.device_address
+    var epochs = t.lease_epoch
+    var counts = t.lease_count
+    var pins = t.pinned
+    var scores = t.retain_score
+    var next_address = t.next_address
+
+    val slot = live.len()
+    var address = 0
+    if residency_tier_is_device(tier):
+        address = next_address
+        next_address = next_address + byte_len
+
+    live = live.push(1)
+    generation = generation.push(1)
+    tiers = tiers.push(tier)
+    homes = homes.push(home_tier)
+    lens = lens.push(byte_len)
+    addrs = addrs.push(address)
+    epochs = epochs.push(PLACEMENT_NO_EPOCH)
+    counts = counts.push(0)
+    pins = pins.push(0)
+    scores = scores.push(retain_score)
+
+    return ObjectVmDefineResult(
+        table: ObjectVmDescriptorTable(
+            live: live,
+            generation: generation,
+            tier: tiers,
+            home_tier: homes,
+            byte_len: lens,
+            device_address: addrs,
+            lease_epoch: epochs,
+            lease_count: counts,
+            pinned: pins,
+            retain_score: scores,
+            next_epoch: t.next_epoch,
+            next_address: next_address
+        ),
+        ok: true,
+        slot: slot,
+        generation: 1,
+        reason: ""
+    )
+
+# Retire a slot. Bumps the generation so every outstanding handle to it becomes
+# a deterministic StaleGeneration fault. Refuses while leases are outstanding.
+fn object_vm_retire(t: ObjectVmDescriptorTable, slot: i64, generation: i64) -> ObjectVmLeaseResult:
+    val handle = _ovm_handle_fault(t, slot, generation)
+    if not handle.ok:
+        return ObjectVmLeaseResult(table: t, resolve: handle)
+    if t.lease_count[slot] > 0 or t.pinned[slot] == 1:
+        return ObjectVmLeaseResult(
+            table: t,
+            resolve: _ovm_fault(ObjectVmFault.Protected, slot,
+                OBJECT_VM_PROTECTED + ": slot=" + slot.to_text()
+                    + " lease_count=" + t.lease_count[slot].to_text()
+                    + " pinned=" + t.pinned[slot].to_text()
+                    + " retire refused while in flight")
+        )
+
+    var live = t.live
+    var generations = t.generation
+    var addrs = t.device_address
+    var epochs = t.lease_epoch
+    live[slot] = 0
+    generations[slot] = generations[slot] + 1
+    addrs[slot] = 0
+    epochs[slot] = PLACEMENT_NO_EPOCH
+
+    return ObjectVmLeaseResult(
+        table: ObjectVmDescriptorTable(
+            live: live,
+            generation: generations,
+            tier: t.tier,
+            home_tier: t.home_tier,
+            byte_len: t.byte_len,
+            device_address: addrs,
+            lease_epoch: epochs,
+            lease_count: t.lease_count,
+            pinned: t.pinned,
+            retain_score: t.retain_score,
+            next_epoch: t.next_epoch,
+            next_address: t.next_address
+        ),
+        resolve: _ovm_ok_resolve(slot, 0, 0, PLACEMENT_NO_EPOCH)
+    )
+
+# Acquire a lease. Only a device-resident arena can be leased; a lease over a
+# non-resident arena is a residency MISS and is reported as one, never silently
+# staged. The planner is what turns a miss into a transfer.
+fn object_vm_acquire_lease(t: ObjectVmDescriptorTable, slot: i64, generation: i64) -> ObjectVmLeaseResult:
+    val handle = _ovm_handle_fault(t, slot, generation)
+    if not handle.ok:
+        return ObjectVmLeaseResult(table: t, resolve: handle)
+    if not residency_tier_is_device(t.tier[slot]):
+        return ObjectVmLeaseResult(
+            table: t,
+            resolve: _ovm_fault(ObjectVmFault.NotResident, slot,
+                OBJECT_VM_NOT_RESIDENT + ": slot=" + slot.to_text()
+                    + " tier=" + residency_tier_name(t.tier[slot])
+                    + " lease requires a device tier")
+        )
+
+    var epochs = t.lease_epoch
+    var counts = t.lease_count
+    val epoch = t.next_epoch
+    epochs[slot] = epoch
+    counts[slot] = counts[slot] + 1
+
+    return ObjectVmLeaseResult(
+        table: ObjectVmDescriptorTable(
+            live: t.live,
+            generation: t.generation,
+            tier: t.tier,
+            home_tier: t.home_tier,
+            byte_len: t.byte_len,
+            device_address: t.device_address,
+            lease_epoch: epochs,
+            lease_count: counts,
+            pinned: t.pinned,
+            retain_score: t.retain_score,
+            next_epoch: t.next_epoch + 1,
+            next_address: t.next_address
+        ),
+        resolve: _ovm_ok_resolve(slot, t.device_address[slot], t.byte_len[slot], epoch)
+    )
+
+fn object_vm_release_lease(t: ObjectVmDescriptorTable, slot: i64, lease_epoch: i64) -> ObjectVmLeaseResult:
+    if not object_vm_slot_exists(t, slot):
+        return ObjectVmLeaseResult(
+            table: t,
+            resolve: _ovm_fault(ObjectVmFault.UnknownSlot, slot,
+                OBJECT_VM_UNKNOWN_SLOT + ": slot=" + slot.to_text()
+                    + " slot_count=" + t.live.len().to_text())
+        )
+    if t.lease_epoch[slot] != lease_epoch or t.lease_count[slot] <= 0:
+        return ObjectVmLeaseResult(
+            table: t,
+            resolve: _ovm_fault(ObjectVmFault.StaleLease, slot,
+                OBJECT_VM_STALE_LEASE + ": slot=" + slot.to_text()
+                    + " handle_epoch=" + lease_epoch.to_text()
+                    + " table_epoch=" + t.lease_epoch[slot].to_text()
+                    + " lease_count=" + t.lease_count[slot].to_text())
+        )
+
+    var epochs = t.lease_epoch
+    var counts = t.lease_count
+    counts[slot] = counts[slot] - 1
+    if counts[slot] == 0:
+        epochs[slot] = PLACEMENT_NO_EPOCH
+
+    return ObjectVmLeaseResult(
+        table: ObjectVmDescriptorTable(
+            live: t.live,
+            generation: t.generation,
+            tier: t.tier,
+            home_tier: t.home_tier,
+            byte_len: t.byte_len,
+            device_address: t.device_address,
+            lease_epoch: epochs,
+            lease_count: counts,
+            pinned: t.pinned,
+            retain_score: t.retain_score,
+            next_epoch: t.next_epoch,
+            next_address: t.next_address
+        ),
+        resolve: _ovm_ok_resolve(slot, 0, 0, PLACEMENT_NO_EPOCH)
+    )
+
+# Read through a handle plus the lease it was obtained under. A lease epoch that
+# is no longer the slot's current epoch is a StaleLease fault: the plan requires
+# a raw address to be valid only inside its lease.
+fn object_vm_resolve(t: ObjectVmDescriptorTable, slot: i64, generation: i64, lease_epoch: i64) -> ObjectVmResolve:
+    val handle = _ovm_handle_fault(t, slot, generation)
+    if not handle.ok:
+        return handle
+    if t.lease_epoch[slot] == PLACEMENT_NO_EPOCH or t.lease_epoch[slot] != lease_epoch:
+        return _ovm_fault(ObjectVmFault.StaleLease, slot,
+            OBJECT_VM_STALE_LEASE + ": slot=" + slot.to_text()
+                + " handle_epoch=" + lease_epoch.to_text()
+                + " table_epoch=" + t.lease_epoch[slot].to_text())
+    if not residency_tier_is_device(t.tier[slot]):
+        return _ovm_fault(ObjectVmFault.NotResident, slot,
+            OBJECT_VM_NOT_RESIDENT + ": slot=" + slot.to_text()
+                + " tier=" + residency_tier_name(t.tier[slot]))
+    return _ovm_ok_resolve(slot, t.device_address[slot], t.byte_len[slot], lease_epoch)
+
+# Explicit pin / unpin. A pinned arena is never an eviction victim, which is a
+# stated acceptance criterion of the plan.
+fn object_vm_set_pinned(t: ObjectVmDescriptorTable, slot: i64, pinned: bool) -> ObjectVmLeaseResult:
+    if not object_vm_slot_exists(t, slot):
+        return ObjectVmLeaseResult(
+            table: t,
+            resolve: _ovm_fault(ObjectVmFault.UnknownSlot, slot,
+                OBJECT_VM_UNKNOWN_SLOT + ": slot=" + slot.to_text()
+                    + " slot_count=" + t.live.len().to_text())
+        )
+    var pins = t.pinned
+    if pinned:
+        pins[slot] = 1
+    else:
+        pins[slot] = 0
+    return ObjectVmLeaseResult(
+        table: ObjectVmDescriptorTable(
+            live: t.live,
+            generation: t.generation,
+            tier: t.tier,
+            home_tier: t.home_tier,
+            byte_len: t.byte_len,
+            device_address: t.device_address,
+            lease_epoch: t.lease_epoch,
+            lease_count: t.lease_count,
+            pinned: pins,
+            retain_score: t.retain_score,
+            next_epoch: t.next_epoch,
+            next_address: t.next_address
+        ),
+        resolve: _ovm_ok_resolve(slot, 0, 0, PLACEMENT_NO_EPOCH)
+    )
+
+# Total device-resident byte count. Loops the columns rather than caching a
+# counter so the oracle can never disagree with its own table.
+fn object_vm_device_bytes(t: ObjectVmDescriptorTable) -> i64:
+    var total = 0
+    var i = 0
+    while i < t.live.len():
+        if t.live[i] == 1 and residency_tier_is_device(t.tier[i]):
+            total = total + t.byte_len[i]
+        i = i + 1
+    return total
+
+export ObjectVmFault, ObjectVmDescriptorTable, ObjectVmDefineResult
+export ObjectVmResolve, ObjectVmLeaseResult
+export OBJECT_VM_SIM_DEVICE_BASE
+export OBJECT_VM_UNKNOWN_SLOT, OBJECT_VM_STALE_GENERATION, OBJECT_VM_STALE_LEASE
+export OBJECT_VM_NOT_RESIDENT, OBJECT_VM_PROTECTED, OBJECT_VM_INVALID_TIER
+export object_vm_fault_to_u8, object_vm_table_empty, object_vm_slot_count
+export object_vm_slot_exists, object_vm_define, object_vm_retire
+export object_vm_acquire_lease, object_vm_release_lease, object_vm_resolve
+export object_vm_set_pinned, object_vm_device_bytes
