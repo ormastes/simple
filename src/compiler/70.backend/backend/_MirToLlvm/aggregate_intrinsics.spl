@@ -154,8 +154,15 @@ impl MirToLlvm:
         val dest_id = self.local_id_value(dest)
         val dest_name = self.get_local(dest_id)
         val raw_base_val = self.translate_operand(base)
-        val base_val = self.untag_aggregate_base_ptr(
-            self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr"))
+        # HOIST (duplicate %tN SSA definition): `value_as_type` EMITS and bumps
+        # the builder's fresh-local counter. Inlined in the argument position of
+        # a receiver-method call, that counter bump is lost across the call
+        # boundary (copy-modify-reassign `self` semantics on this lane), so
+        # `untag_aggregate_base_ptr`'s first `fresh_local()` re-issues the same
+        # name -- `%t7 = ptrtoint ptr %t7 ...`, which llc rejects. Bind the
+        # emitting call to its own `val` first so the bump is observed.
+        val base_as_ptr = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
+        val base_val = self.untag_aggregate_base_ptr(base_as_ptr)
         val nit = self.native_int()
         val field_ptr = self.builder.fresh_local()
         self.builder.emit("  {field_ptr} = getelementptr inbounds {nit}, ptr {base_val}, i32 {field}")
@@ -216,8 +223,9 @@ impl MirToLlvm:
 
     me translate_set_field(base: MirOperand, field: i64, value: MirOperand):
         val raw_base_val = self.translate_operand(base)
-        val base_val = self.untag_aggregate_base_ptr(
-            self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr"))
+        # Same hoist as translate_get_field -- see the comment there.
+        val set_base_as_ptr = self.value_as_type(raw_base_val, self.get_operand_type(base), "ptr")
+        val base_val = self.untag_aggregate_base_ptr(set_base_as_ptr)
         val raw_value_val = self.translate_operand(value)
         val nit = self.native_int()
         val value_val = self.store_field_bits(raw_value_val, self.get_operand_type(value), nit)

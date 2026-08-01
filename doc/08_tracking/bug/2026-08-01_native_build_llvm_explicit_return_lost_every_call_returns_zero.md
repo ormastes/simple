@@ -187,3 +187,119 @@ loudly (see below).
   `core_codegen.spl`: whether the backend saw a value on `Ret`, and which of the
   three zero-fallback conditions fired.
 - `SIMPLE_KEEP_LLVM_IR=1` (pre-existing) keeps `/tmp/simple_llvm_<pid>.ll`.
+
+---
+
+# Follow-up lane: `#189` fixed, and the hoist landed with it
+
+- **Date:** 2026-08-01 (same day, follow-up lane)
+- **Status:** FIXED — smoke case 19 (`dict_struct_value`) now BUILDS and returns **73**
+- **Area:** `src/compiler/50.mir/_MirLoweringExpr/`,
+  `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl`
+- **Engine scope:** native LLVM only. The seed's JIT and interpreter were
+  measured clean on every shape below (see the engine matrix).
+
+The section above deliberately left the `%tN` hoist unlanded, because applying
+it alone turned a loud `llc` rejection into a silent wrong answer (63 instead of
+73). That trade is now unnecessary: `#189` is fixed, so the hoist and the fix
+land together and case 19 both builds and returns the right value.
+
+## Reproduction of the handoff state (PROVED)
+
+Measured in an isolated scratch extraction of pristine origin `5ca84bcefe5`
+(`git archive` into a scratch dir; `bin/simple_seed native-build` resolves
+`src/compiler/**` relative to CWD, so this is a fully isolated A/B lane and the
+shared working copy was never touched).
+
+| tree state | case 19 result |
+|---|---|
+| pristine origin `5ca84bcefe5` | **build-fail**: `llc-18: error: multiple definition of local value named 't7'`, exit 1, no ELF |
+| + hoist only | builds, exit 0, real ELF, returns **63** (`.y` read `.x`) |
+| + hoist + `#189` fix | builds, exit 0, real ELF, returns **73** |
+
+## Root cause of `#189`
+
+`resolve_field_index` (`50.mir/_MirLowering/function_lowering.spl`) ends in
+`0  # Default fallback when type is unknown`. When its whole lookup chain misses,
+**every** field of the struct resolves to index 0, so the backend GEPs to word 0
+for `.x` AND `.y`. The LLVM `getelementptr` in `translate_get_field` is correct
+and *is* field-index-aware — the wrong index was handed to it.
+
+The chain missed for a dict-read result for a precise reason. A level-gated probe
+(`SIMPLE_MIR_FIELD_TRACE=1`) on the fixed lane shows it:
+
+    [dict-read] base=3 decoded=33 arm=true sym_id=1000000000 sym_found=false ... aes='Point'
+    [field-idx-fallback0] field=y base_local=38 in_svs=false
+
+- `arm=true` — `lower_dict_runtime_read`'s existing `#189` guard
+  (`case MirTypeKind.Struct(struct_symbol)`) DID match and bind. The dict value
+  TYPE resolves correctly, which is why `decode_runtime_value` took its correct
+  raw-passthrough arm and the struct's bits survived intact — and therefore why
+  `.x` (field 0) always looked right and only `.y` was visibly wrong.
+- `sym_id=1000000000`, `sym_found=false` — the numeric `SymbolId` carried in the
+  MIR type does **not** resolve back to a named symbol via `get_symbol_raw` at
+  this point in lowering. So the name was never written to `struct_value_syms`.
+- `in_svs=false` — `resolve_field_index` consequently found no name-keyed
+  provenance and fell through to `0`.
+
+The previous `#189` attempt was therefore *present but inert*: it looked correct
+and never fired. This is precisely the hazard `resolve_field_index`'s own leading
+comment already warns about — "Numeric SymbolIds are local to each module and can
+collide ... A lowered local's name-keyed provenance is therefore authoritative
+when available."
+
+## Fix
+
+Use the name-keyed provenance the codebase already maintains.
+
+1. **`expr_dispatch.spl`, `lower_dict_runtime_read`** — when the `Struct(symbol)`
+   lookup yields no name, fall back to
+   `array_element_struct_syms[<container local>]`. `note_container_elem_type`
+   already writes the value's struct NAME there at every `d[k] = v` store, and
+   the array Index-read path already consumes it; the dict read simply never did.
+   (`aes='Point'` in the probe above: the right answer was sitting there unused.)
+
+2. **`literals.spl` + `method_calls_literals.spl`, `lower_dict_lit`** — a dict
+   born as a LITERAL (`{"k": Point(...)}`) is never stored into, so step 1 had
+   nothing to read and `{"k": P(...)}["k"].y` was still wrong (**60**, want 70)
+   even with step 1 applied. Capture the value's struct name off the raw local
+   (before `box_runtime_value`, mirroring how `value_type` is already read) and
+   register it on the dict local, exactly as `lower_array_lit` does for arrays.
+   **These two `lower_dict_lit` definitions are byte-identical duplicates** —
+   patched both so whichever wins dispatch carries the fix.
+
+3. **`aggregate_intrinsics.spl`** — the hoist described in the section above,
+   in BOTH `translate_get_field` and `translate_set_field`.
+
+## Family sweep (enumerated, not sampled)
+
+Native LLVM lane, `bin/simple_seed native-build --backend llvm`, each built and
+RUN as a real ELF:
+
+| shape | before | after |
+|---|---|---|
+| 2-field struct, `d[k] = v` store (case 19) | build-fail / 63 with hoist | **73** |
+| 4-field struct, all four fields read | 229 (= 8421 mod 256) | **229 (= 8421 mod 256)** correct |
+| nested struct `m[k].inner.q` | 40 | **40** correct |
+| struct read via a local (`val p = m[k]; p.y`) | 70 | **70** correct |
+| **dict LITERAL `{"k": Point(...)}`** | **60 (wrong)** | **70** |
+
+The 4-field case is reported through the process exit code, which is mod 256:
+`8421 mod 256 == 229`. The all-fields-read-as-field-0 wrong answer would be
+`1+10+100+1000 = 1111`, i.e. `87` — so 229 distinguishes correct from wrong.
+
+**Engine matrix.** The same five shapes (2-field, 4-field, nested, int-key,
+text-field) were run on the seed's JIT (default `run`) and on the forced
+interpreter (`SIMPLE_NO_JIT=1 run`): **all correct on both, before any fix**.
+`#189` is native-LLVM-only — the interpreter never goes through
+`resolve_field_index`. The standing rule "never call `.get()` on a dict whose
+value type is a struct/class/enum" was written for this defect's neighbourhood;
+the index-read half (`d[k]`) is what this change fixes.
+
+## Debug probes added (level-gated, default OFF)
+
+- `SIMPLE_MIR_FIELD_TRACE=1` — `[dict-read]` in `expr_dispatch.spl`
+  (which resolution arm fired, the symbol id, whether it resolved, and the final
+  struct name) and `[field-idx-fallback0]` in `function_lowering.spl` (every time
+  `resolve_field_index` silently defaults a field to index 0 — the exact silent
+  failure mode of this bug).

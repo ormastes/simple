@@ -887,12 +887,48 @@ impl MirLowering:
             # dict_result_type is already the correctly-resolved
             # Struct(symbol) here, so just look up its name and propagate it
             # the same way the array path does.
+            var dict_struct_name = ""
+            var dbg_arm_taken = false
+            var dbg_sym_id = -1
+            var dbg_sym_found = false
             match dict_result_type.kind:
                 case MirTypeKind.Struct(struct_symbol):
+                    dbg_arm_taken = true
+                    dbg_sym_id = struct_symbol.id
                     if val struct_type_sym = self.symbols.get_symbol_raw(struct_symbol.id):
+                        dbg_sym_found = true
                         if struct_type_sym.name != "":
-                            self.struct_value_syms[decoded.id] = struct_type_sym.name
+                            dict_struct_name = struct_type_sym.name
                 case _: ()
+            # Bug #189, second half. The `Struct(symbol)` resolution above gets
+            # the TYPE right -- decode_runtime_value takes the correct
+            # raw-passthrough arm and the struct's bits survive intact, which is
+            # why `.x` (field 0) always looked fine. But the numeric SymbolId
+            # carried in the MIR type does NOT reliably resolve back to a named
+            # symbol at this point in lowering, so `struct_value_syms` was never
+            # written and `resolve_field_index` fell through its whole chain to
+            # `0  # Default fallback` -- making EVERY field read return field 0's
+            # word. `m["k"].y` returned `x` (invisible for a single-field
+            # struct, where field 0 is the only field).
+            #
+            # `resolve_field_index`'s own leading comment states the rule this
+            # restores: "Numeric SymbolIds are local to each module and can
+            # collide ... A lowered local's name-keyed provenance is therefore
+            # authoritative when available." The store side already recorded
+            # exactly that name: `note_container_elem_type` runs at every
+            # `d[k] = v` / push site and writes the value's struct NAME into
+            # `array_element_struct_syms` keyed by the CONTAINER local. The
+            # array Index-read path consumes it; the dict read never did. Use it
+            # as the name-keyed fallback so both container reads agree.
+            if dict_struct_name == "":
+                val store_seen_name = self.array_element_struct_syms.get(base_local.id) ?? ""
+                if store_seen_name != "" and store_seen_name != "__runtime_array__":
+                    dict_struct_name = store_seen_name
+            if dict_struct_name != "":
+                self.struct_value_syms[decoded.id] = dict_struct_name
+            if (mir_expr_env_get("SIMPLE_MIR_FIELD_TRACE") ?? "") == "1":
+                val dbg_aes = self.array_element_struct_syms.get(base_local.id) ?? "<none>"
+                print "[dict-read] base={base_local.id} decoded={decoded.id} arm={dbg_arm_taken} sym_id={dbg_sym_id} sym_found={dbg_sym_found} from_local={resolved_from_local} name='{dict_struct_name}' aes='{dbg_aes}'"
             return decoded
         base_local
 

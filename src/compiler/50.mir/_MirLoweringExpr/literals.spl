@@ -123,6 +123,15 @@ impl MirLowering:
         var key_type = MirType.i64()
         var value_type = MirType.i64()
         var first_entry = true
+        # Bug #189 sibling (dict LITERAL). A struct-valued dict learns its
+        # element struct NAME from exactly one of two places, and a literal hit
+        # neither: `lower_array_lit` records it for arrays, and
+        # `note_container_elem_type` records it at every `d[k] = v` store. A
+        # dict born fully-formed as `{"k": Point(...)}` is never stored into, so
+        # `array_element_struct_syms` stayed empty and the Index read had no
+        # name-keyed provenance to fall back on -- `{"k": P(...)}["k"].y` still
+        # read field 0 (`x`) after the store-side half of #189 was fixed.
+        var value_struct_name = ""
         var b_new = self.builder
         val new_res = b_new.emit_call(new_op, [cap_hint], MirType.i64())
         self.builder = b_new
@@ -156,6 +165,12 @@ impl MirLowering:
                 if first_entry:
                     value_type = self.local_mir_type_of(value_local) ?? value_type
                     first_entry = false
+                # Capture BEFORE box_runtime_value, mirroring how value_type is
+                # read off the raw local just above: struct construction
+                # registers struct_value_syms on the value local, and boxing
+                # would hand back a different local id.
+                if value_struct_name == "":
+                    value_struct_name = self.struct_value_syms.get(value_local.id) ?? ""
                 val boxed_value = self.box_runtime_value(value_local)
                 val set_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str("rt_dict_set"),
@@ -171,6 +186,8 @@ impl MirLowering:
             self.builder = b_typed
             self.runtime_dict_locals[typed.id] = true
             self.mark_runtime_value_local(typed.id)
+            if value_struct_name != "" and value_struct_name != "__runtime_array__":
+                self.array_element_struct_syms[typed.id] = value_struct_name
             return typed
         # rt_dict_new always returns a local; fall back to a const 0 handle only
         # if the call somehow produced no result, to keep this total.
