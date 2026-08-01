@@ -483,7 +483,10 @@ fn _like_prefix_str(where_expr: SqlExpr?) -> text:
     # Reject if any _ wildcard appears before the %
     var i: i64 = 0
     while i < pat.len():
-        val ch = pat.char_at(i)
+        # byte-consistent scan: i is used as a byte offset in slice(0, i), and %/_
+        # are ASCII, so read the byte-char via slice(i, i+1) (char_at is CHAR-indexed
+        # and would desync from the byte slice on multibyte prefixes).
+        val ch = pat.slice(i, i + 1)
         if ch == "%":
             return pat.slice(0, i)
         if ch == "_":
@@ -506,7 +509,9 @@ fn _like_any_prefix(where_expr: SqlExpr?) -> text:
         pat = pat.slice(1, pat.len() - 1)
     var i: i64 = 0
     while i < pat.len():
-        val ch = pat.char_at(i)
+        # byte-consistent scan (see _like_starts_with_prefix): slice(i, i+1) keeps i
+        # a byte offset so slice(0, i) stays aligned on multibyte prefixes.
+        val ch = pat.slice(i, i + 1)
         if ch == "%" or ch == "_":
             return pat.slice(0, i)
         i = i + 1
@@ -1232,8 +1237,13 @@ fn _check_where_fast(where_expr: SqlExpr?, cm: Dict<text, i32>, vals: [DbValue],
 # % matches any sequence, _ matches single character.
 
 fn _like_match(pattern: text, value: text) -> bool:
-    val plen = pattern.len()
-    val vlen = value.len()
+    # char-array indexing: pattern.len()/value.len() are BYTE counts but char_at is
+    # CHAR-indexed, so byte-bounded pi/vi mis-match on multibyte (e.g. `_` failed to
+    # match a multibyte char). Iterate over chars() so indices are char-consistent.
+    val ps = pattern.chars()
+    val vs = value.chars()
+    val plen = ps.len()
+    val vlen = vs.len()
     var pi: i64 = 0
     var vi: i64 = 0
     var star_pi: i64 = -1
@@ -1242,7 +1252,7 @@ fn _like_match(pattern: text, value: text) -> bool:
     while vi < vlen and ok:
         var done = false
         if pi < plen and not done:
-            val pc = pattern.char_at(pi)
+            val pc = ps[pi]
             if pc == "_" and not done:
                 pi = pi + 1
                 vi = vi + 1
@@ -1253,7 +1263,7 @@ fn _like_match(pattern: text, value: text) -> bool:
                 pi = pi + 1
                 done = true
             if not done:
-                val vc = value.char_at(vi)
+                val vc = vs[vi]
                 if pc == vc:
                     pi = pi + 1
                     vi = vi + 1
@@ -1269,7 +1279,7 @@ fn _like_match(pattern: text, value: text) -> bool:
     if not ok:
         return false
     while pi < plen:
-        if pattern.char_at(pi) != "%":
+        if ps[pi] != "%":
             return false
         pi = pi + 1
     true
