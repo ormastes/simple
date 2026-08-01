@@ -6,6 +6,22 @@
 - **Found by:** GRADIENT-DRAWIR lane Boot B, 2026-07-20
 
 ## Evidence
+
+## 2026-08-01 host and render-identity remediation
+
+The host and shared rendering defect is fixed locally: a valid CSS override
+now derives an effective active `ThemeRenderSnapshot`, so DrawIR, theme-install
+wire, backend clear color, browser cache keys, and Simple Web retained-content
+revisions observe the override material hash rather than the original package
+snapshot. The exact chrome register is retained for CSS-only slots such as
+`--wm-error`.
+
+Focused self-hosted tests passed: CSS wiring 7/7, SimpleOS bootstrap 3/3,
+hosted bootstrap contract 11/11, Simple Web compositor 24/24, and browser
+theme-cache identity 3/3. The bug remains OPEN only for real guest QEMU
+pixel/event capture across `/THEME.CSS` boot paths; that work is assigned to
+the QEMU plan/host rather than this hosted renderer lane.
+
 Boot B (OVMF, fat32-theme.img carrying the slate_dark palette
 `#0f172a`/`#1e293b`/`#2050a0` as /THEME.CSS): serial prints
 `[desktop-gui] theme bytes=1276 loaded=1` — the VFS allowlist fix works,

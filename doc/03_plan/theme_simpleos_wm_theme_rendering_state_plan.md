@@ -434,6 +434,27 @@ Current upstream tip noted in this branch as `63c362526c` (latest checked).
 
 ## Historical upstream renderer/IR context tracked
 
+## 2026-08-01 effective theme snapshot propagation landed
+
+- Completed the local WM override identity seam without consuming the separate
+  hosted/web renderer protocol branch:
+  - `apply_wm_css_theme_text()` now derives and installs an effective
+    `ThemeRenderSnapshot` when a baseline snapshot is active, then preserves
+    the exact CSS chrome register for slots not represented in the snapshot.
+  - Hosted startup refreshes its snapshot after a valid
+    `SIMPLE_WM_THEME_FILE` override before encoding the install wire, creating
+    the backend clear color, and emitting evidence.
+  - Browser DrawIR/cache identity and Simple Web retained-content revisions
+    now use the matching active snapshot material hash rather than a stale
+    package-only fingerprint.
+- Focused evidence (current macOS self-hosted runtime): CSS wiring 7/7,
+  SimpleOS bootstrap 3/3, hosted bootstrap contract 11/11, Simple Web
+  compositor 24/24, and browser cache identity 3/3 passed.
+- Remaining QEMU work is environment-owned: boot each guest architecture with
+  `/THEME.CSS`, capture pixels plus event handling, and attach the evidence to
+  `simpleos_qemu_wm_real_screen.md`; do not block this host/IR fix on absent
+  guest tooling.
+
 - `fe481ab069` `refactor(ui): S1 DrawIR Vulkan-canonical enums + ResourceTable.formats u32`
   - `src/lib/common/ui/draw_ir_v3.spl`
   - `src/lib/common/ui/draw_ir_v3_backend_enums.spl`
