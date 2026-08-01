@@ -223,7 +223,7 @@ over tiers the census does **not** scan (`src/os`, `src/unit`, `src/type`,
 Class counts are INFERRED from static indexes. The two findings below were then
 confirmed against real source and are PROVED.
 
-### Confirmed defect class 1: `value` written for `val` (5 sites)
+### Confirmed defect class 1: `value` written for `val` (5 sites) — FIXED
 
 `"val" => TokenKind::Val` is in the lexer keyword table; `"value"` has **no**
 keyword mapping (PROVED). So `value (a, b) = expr` is not a binding at all — the
@@ -240,6 +240,14 @@ ten names bound across those five sites, only `block_size`, `curr_offset` and
 `curr_size` reach the census. `k`, `v`, `offset` and `size` are masked because
 those names happen to be defined at module level *somewhere else* in the tree,
 so `is_defined` clears them even though they are unbound here.
+
+Validated by the same census A/B used for the `interp_list` fix: **578 undefined
+before, 574 after** (attributed 2,069 → 2,064). Compared by set, exactly four
+names are removed and **none** added — `block_size`, `curr_offset`, `curr_size`
+and `_`. The `_` was not predicted: in `value (offset, _) = ..` the wildcard is
+read as an identifier too, so the fallback minted a global literally named `_`.
+`parse failed` stays at 43, `files scanned` at 11,294 and `lowering failed` at
+980, so the edited files still parse.
 
 ### Confirmed defect class 2: `enumname_Variant` constructors (63 names)
 
