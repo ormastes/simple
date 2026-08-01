@@ -1,5 +1,5 @@
 # @cover src/compiler/20.hir/hir_lowering/types.spl 4%
-# @tag: unit, compiler, hir, types, seed-parity, tuple, dict
+# @tag: unit, compiler, hir, types, seed-parity, self, tuple, dict
 
 # Seed-parity regression for `HirLowering.lower_named_kind`
 # (src/compiler/20.hir/hir_lowering/types.spl), continuing the campaign started
@@ -9,6 +9,7 @@
 # (src/compiler_rust/compiler/src/hir/lower/type_resolver.rs) accepts several
 # further spellings that this compiler's strict gate rejected outright:
 #
+#   * `Self`               -> the enclosing class / trait-impl type   (seed:8)
 #   * `has_X`              -> Optional(X)                             (seed:128)
 #   * a single uppercase   -> Any                                     (seed:141)
 #     letter (T / K / V)
@@ -36,7 +37,7 @@ use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
 use compiler.hir.hir_definitions.{HirFunction}
 
-describe "seed-parity bare container type names lower without error":
+describe "seed-parity container and Self type names lower without error":
     it "resolves a bare tuple annotation to the empty tuple type":
         # Seed: `"tuple" => register(HirType::Tuple(vec![]))`. The annotation
         # carries no element types, so an EMPTY element list is the faithful
@@ -105,6 +106,19 @@ describe "seed-parity bare container type names lower without error":
                     expect(false).to_equal(true)
         else:
             expect(false).to_equal(true)
+
+    it "resolves Self inside a class method to the enclosing class type":
+        # Seed: resolve_self_type() returns current_class_type. This layer
+        # already tracks the identical context in `current_method_self_type`,
+        # so this is real self-type resolution rather than a scalar table entry.
+        val source = "class Widget:\n    val n: i64\n\n    me clone_it() -> Self:\n        me\n"
+        val parsed = parse_full_frontend(source, "widget.spl", "widget", Logger(level: 0))
+        var lowering = HirLowering.with_filename("widget.spl")
+        lowering.lower_module(parsed)
+
+        expect(lowering.errors.len()).to_equal(0)
+        for e in lowering.errors:
+            expect(e.message.contains("unresolved type")).to_equal(false)
 
     it "still rejects a type name that is genuinely declared nowhere":
         # LIVE CONTROL. Without it, every example above would pass just as well

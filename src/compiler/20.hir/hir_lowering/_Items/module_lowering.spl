@@ -1938,17 +1938,44 @@ impl HirLowering:
             val impl_ = module.impls[impl_idx]
             val owner_name = parser_type_kind_named_name(impl_.type_.kind)
             val meth_keys = impl_.methods.keys()
+            # SEED-PARITY (2026-08-01): make `Self` resolvable in an impl
+            # method's SIGNATURE, not just in its body.
+            #
+            # This up-front signature-declaration pass runs at MODULE scope,
+            # where `current_method_self_type` is still nil, so a `-> Self`
+            # return annotation reached lower_named_kind with no enclosing type
+            # and died as "unresolved type: Self". The class-body scope set at
+            # declaration_lowering.spl:528 and the impl scope at
+            # trait_impl_lowering.spl:199 both come LATER and so could not help.
+            #
+            # The trigger is not limited to hand-written `impl` blocks: the
+            # parser desugars a method-carrying `class C:` into a class with an
+            # EMPTY method dict plus a synthetic impl block (verified by
+            # dumping the parsed module -- classes["Widget"].methods was empty
+            # while module.impls.len() was 1), so ordinary class methods land
+            # here too. That is why `Self` failed even for a plain class.
+            #
+            # The owner symbol this needs was already being computed a few
+            # lines down for `method_symbol_name`; it is simply hoisted so the
+            # self-type can be published for the duration of the method loop.
+            # Saved and restored around the loop exactly like the two existing
+            # scopes do, so nothing leaks into sibling declarations.
+            val impl_owner_symbol = self.symbols.lookup_or_invalid(owner_name)
+            val previous_impl_self_type = self.current_method_self_type
+            if impl_owner_symbol.is_valid():
+                self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(impl_owner_symbol, []), span: decl_span))
             var mi = 0
             while mi < meth_keys.len():
                 val name = meth_keys[mi]
                 val method = impl_.methods[name]
-                val owner_symbol = self.symbols.lookup_or_invalid(owner_name)
+                val owner_symbol = impl_owner_symbol
                 val symbol_name = if owner_symbol.is_valid(): self.symbols.method_symbol_name(owner_symbol, name) else: name
                 val symbol_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
                 val owner_context: SymbolId? = if owner_symbol.is_valid(): Some(owner_symbol) else: nil
                 val method_type = self.declared_callable_type(method, owner_context)
                 self.symbols.define(symbol_name, symbol_kind, method_type, decl_span, decl_visibility, false, mod_name)
                 mi = mi + 1
+            self.current_method_self_type = previous_impl_self_type
             impl_idx = impl_idx + 1
 
     me lower_import(imp: ParserImport) -> HirImport:

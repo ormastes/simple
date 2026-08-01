@@ -539,6 +539,22 @@ impl HirLowering:
         if name.starts_with("has_") and name.len() > 4:
             val has_base = name[4:]
             return HirTypeKind.Optional(HirType(kind: self.lower_named_kind(has_base, [], span), span: span))
+        # SEED-PARITY (2026-08-01): `Self` resolves to the enclosing class /
+        # trait-impl type. The seed (type_resolver.rs:8 resolve_self_type)
+        # returns `current_class_type`, falling back to ANY under lenient_types.
+        # This layer already tracks the identical context in
+        # `current_method_self_type` (set by _Items/declaration_lowering.spl:528
+        # for a class body and _Items/trait_impl_lowering.spl:199 for an impl
+        # block), so this is real self-type resolution, not a scalar table entry.
+        #
+        # Outside any class/impl `Self` is genuinely meaningless; recover to Any
+        # (mirroring the seed's lenient branch, which is the mode the
+        # bootstrap/native-build path runs in) rather than hard-erroring.
+        if name == "Self":
+            if val self_ty = self.current_method_self_type:
+                return self_ty.kind
+            self.recovered("unresolved type: Self", span)
+            return HirTypeKind.Any
         match name:
             case "i8": HirTypeKind.Int(8, true)
             case "i16": HirTypeKind.Int(16, true)

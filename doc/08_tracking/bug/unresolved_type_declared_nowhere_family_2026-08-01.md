@@ -1,8 +1,13 @@
 # "Unresolved type" family: lower_named_kind whitelist drift, not source defects
 
 **Date:** 2026-08-01
-**Status:** partially fixed (`usize`/`isize`/`u128`/`i128`/`unit` landed in `085dfec41`)
+**Status:** Class A **closed except the cross-module struct fallback**.
+Scalars (`usize`/`isize`/`u128`/`i128`/`unit`) landed in `085dfec41`;
+`Self`, `tuple`, `Map`/`HashMap`/`dict`/`set`, the single-uppercase-letter rule
+and `has_X` landed in the follow-up commit that added this paragraph.
+Class B remains blocked on an owner decision.
 **Component:** `src/compiler/20.hir/hir_lowering/types.spl` — `HirLowering.lower_named_kind`
+(plus `20.hir/hir_lowering/_Items/module_lowering.spl` for the `Self` scope fix)
 
 ## Summary
 
@@ -42,16 +47,16 @@ comments stripped:
 | name      | all uses | all files | src uses | src files | in seed? | in pure-Simple (before fix)? |
 |-----------|---------:|----------:|---------:|----------:|----------|------------------------------|
 | `usize`   |     1303 |       146 |     1194 |       131 | yes      | **no** -> FIXED              |
-| `Int`     |     1093 |       167 |      599 |       108 | **no**   | **no** -> open               |
-| `Self`    |      517 |        48 |      485 |        34 | yes      | **no** -> open               |
-| `Bool`    |      352 |       103 |      297 |        76 | **no**   | **no** -> open               |
-| `tuple`   |      313 |        65 |      220 |        58 | yes      | **no** -> open               |
-| `dict`    |      101 |        21 |       36 |        10 | yes      | **no** -> open               |
-| `Map`     |       56 |        21 |       40 |        13 | yes      | **no** -> open               |
-| `HashMap` |       37 |        12 |       27 |         8 | yes      | **no** -> open               |
-| `Vec`     |       37 |        11 |       35 |         9 | **no**   | **no** -> open               |
+| `Int`     |     1093 |       167 |      599 |       108 | **no**   | **no** -> open (Class B)     |
+| `Self`    |      517 |        48 |      485 |        34 | yes      | **no** -> FIXED              |
+| `Bool`    |      352 |       103 |      297 |        76 | **no**   | **no** -> open (Class B)     |
+| `tuple`   |      313 |        65 |      220 |        58 | yes      | **no** -> FIXED              |
+| `dict`    |      101 |        21 |       36 |        10 | yes      | **no** -> FIXED              |
+| `Map`     |       56 |        21 |       40 |        13 | yes      | **no** -> FIXED              |
+| `HashMap` |       37 |        12 |       27 |         8 | yes      | **no** -> FIXED              |
+| `Vec`     |       37 |        11 |       35 |         9 | **no**   | **no** -> open (Class B)     |
 | `u128`    |       36 |         7 |       18 |         2 | yes      | **no** -> FIXED              |
-| `set`     |       23 |        14 |       11 |        10 | yes      | **no** -> open               |
+| `set`     |       23 |        14 |       11 |        10 | yes      | **no** -> FIXED              |
 | `unit`    |       16 |        15 |        7 |         6 | yes      | **no** -> FIXED              |
 | `Float`   |       12 |         9 |        5 |         4 | **no**   | **no** -> open               |
 | `Char`    |        9 |         5 |        9 |         5 | **no**   | **no** -> open               |
@@ -79,16 +84,72 @@ further layers of *this* compiler already handle it:
 Only `lower_named_kind` lacked the arm. **Fixed in `085dfec41`** for the scalar
 subset (`usize`/`isize`/`u128`/`i128`/`unit`).
 
-**Still open:** `tuple` (313 uses), `Self` (517 uses), `Map`/`HashMap`/`dict`/`set`
-(217 uses). These need more than a scalar arm — `Self` requires real self-type
-resolution (the seed calls `resolve_self_type()`), and the container names need a
-decision between `Any` (seed behaviour) and a real `Dict`/`Tuple` kind. Not
-attempted here.
+### Follow-up: remaining Class A gaps closed
 
-Also unported from the seed: the single-uppercase-letter rule
-(`name.len() == 1 && all ascii uppercase -> ANY`, which covers bare `T`/`K`/`V`
-type params), the `has_X` / `X_opt` -> `Optional<X>` normalizations, and the
-`global_struct_defs` cross-module struct fallback.
+Every remaining Class A name now resolves. Each arm below states the type it
+maps to and whether that matches the seed:
+
+| spelling | maps to | seed parity |
+|----------|---------|-------------|
+| `Self` | the enclosing class / impl type, `HirTypeKind.Named(owner, [])` | **exact** — seed `resolve_self_type()` returns `current_class_type` |
+| `tuple` | `HirTypeKind.Tuple([])` (empty element list) | **exact** — seed registers `HirType::Tuple(vec![])` |
+| `Map` / `HashMap` with 2 args | `HirTypeKind.Dict(k, v)` | **exact** — seed `type_resolver.rs:459` |
+| `Map` / `HashMap` argless | `HirTypeKind.Any` | **exact** — seed `:182` / `:464` |
+| `dict` / `set` | `HirTypeKind.Any` | **exact** — seed `:182` |
+| single uppercase letter (`T`/`K`/`V`) | `HirTypeKind.Any` | **exact** — seed `:141` |
+| `has_X` | `HirTypeKind.Optional(lower(X))` | **exact** — seed `:128` |
+
+No arm changes signedness or width, so the divergence recorded below stays
+confined to `usize`/`isize`.
+
+**Ordering is load-bearing, not incidental.** In the seed, `tuple`, the bare
+container names and the single-letter rule all sit **after**
+`self.module.types.lookup(name)`; only `has_X` (and the `?` suffix) run before
+it. That order is reproduced exactly, because this tree really does declare
+types named `Map` (1 struct), `HashMap` (2 classes + 1 struct) and `Set`
+(2 structs) — hoisting those names into the match above the symbol lookup would
+shadow real user types and silently retype their annotations to `Any`. A
+regression spec (`lets a really declared Map struct win over the bare-container
+rule`) pins this. `has_X` is safe to run before the lookup only because **no**
+type in the tree is declared `has_*` (verified by declaration grep).
+
+### `Self` was not a table entry — root cause
+
+`Self` needed a second fix, in a different file. `lower_named_kind` already had
+the context it needed (`current_method_self_type`, the exact analogue of the
+seed's `current_class_type`), but the annotation was being resolved **before**
+any class/impl scope was entered.
+
+The mechanism, **PROVED** by dumping the parsed module rather than inferred: the
+parser desugars a method-carrying `class C:` into a class whose method dict is
+**empty**, plus a synthetic `impl` block (`classes["Widget"].methods` empty while
+`module.impls.len() == 1`). Class methods therefore flow through the impl-method
+branch of the up-front signature-declaration pass in
+`module_lowering.spl`, which runs at **module scope** where
+`current_method_self_type` is still nil. The class-body scope
+(`declaration_lowering.spl:528`) and the impl scope
+(`trait_impl_lowering.spl:199`) are both established later and so could never
+help a `-> Self` in a *signature*.
+
+Fix: publish the self-type around that signature loop, reusing the owner symbol
+the loop already computed for `method_symbol_name`, saved/restored exactly like
+the two existing scopes. A single instrumented run confirmed `Self` was reached
+exactly once and with a nil context, which is what localised this.
+
+**Still open — the cross-module struct fallback.** The seed falls back to
+`global_struct_defs` for a struct used by name without an explicit `use`
+(`type_resolver.rs:151`). This is the one rule that is **not** portable as a
+table entry: pure-Simple HIR lowering has **no `global_struct_defs` equivalent
+at all** (grep for `global_struct`/`global_defs` over `src/compiler/**` returns
+nothing). Porting it means building and threading a cross-module struct
+registry, which is a design change rather than a parity patch, so it is left
+open deliberately rather than approximated.
+
+Correction to the previous revision of this doc: there is **no seed `X_opt`
+normalization**. The seed has exactly two name rewrites, a `?` *suffix*
+(`:119`) and a `has_` *prefix* (`:128`); `resolve_type_opt` (`:502`) is an
+unrelated helper that resolves an absent `Option<Type>` AST annotation to
+`VOID`. The earlier `X_opt` claim was a misreading of that function name.
 
 ## Class B — genuine source defects (capitalized-primitive dialect)
 
@@ -149,6 +210,47 @@ control asserting an undeclared name is still rejected, matched by **error
 identity** rather than a count (the same annotation is reported once per
 lowering pass, so a fixed count is brittle — the first draft of that control
 asserted `1` and saw `2`).
+
+### Follow-up evidence (`Self`/`tuple`/containers/single-letter/`has_X`)
+
+`test/01_unit/compiler/hir/seed_parity_container_and_self_types_spec.spl`,
+in-process A/B, **both directions**:
+
+- with fix: **8 passed, 0 failed**
+- without fix (both implementation files reverted to the base commit, spec
+  unchanged): **3 passed, 5 failed** — and the 3 that stay green are exactly
+  the three controls (undeclared name still rejected, `TK` still rejected,
+  declared `Map` struct still wins). Every parity example goes red; no control
+  moves in either direction.
+- the pre-existing scalar spec still reports **5 passed, 0 failed** with the
+  follow-up applied, so `085dfec41` is not regressed.
+
+Three controls, not one, because two distinct weakenings had to be excluded:
+accepting any unknown name (the `lenient_types` failure mode), and implementing
+the single-letter rule without its `len() == 1` guard — which would have erased
+whole undeclared type names like `TK` to `Any` while still passing the original
+control.
+
+**Harness non-vacuity was proved by sabotage before any of the above was
+believed.** Renaming the landed `case "usize"` arm to a dead label turned the
+scalar spec red (`3 passed, 2 failed`, exit 1), confirming the runner really
+recompiles the edited pure-Simple source rather than serving a cached or seed
+-resolved result.
+
+**Two measurement traps hit and documented, so the next lane does not repeat
+them:**
+
+1. *Seed-as-host is fine; seed-as-oracle is the trap.* These specs are executed
+   by the Rust seed binary, but the resolver under test is the pure-Simple
+   `lower_named_kind` driven in-process — the seed only interprets the spec. That
+   is not the false-green described above, and the sabotage run proves it.
+2. *Directory-mode runs are void here.* `simple test test/01_unit/compiler/hir/`
+   reports `44 total, 0 passed, 44 failed` with **no per-example `✗` lines** —
+   and reports **exactly the same at the base commit**, unchanged by any edit.
+   It is a pre-existing harness artifact of running many specs in one process
+   (`parse_module_silent_checked` does not reset state between files), not a
+   regression signal. Per-file verdicts require **one process per file**; the
+   directory number must never be quoted as a result.
 
 ## Known divergence left open
 
