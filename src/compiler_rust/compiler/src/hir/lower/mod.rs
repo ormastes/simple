@@ -8,6 +8,7 @@ mod lowerer;
 mod memory_check;
 pub mod memory_warning;
 mod module_lowering;
+pub(crate) mod option_pattern_shape_diag;
 pub mod parallel;
 mod stmt_lowering;
 mod type_registration;

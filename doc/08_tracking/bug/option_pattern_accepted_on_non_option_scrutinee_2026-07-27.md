@@ -418,11 +418,154 @@ sites (`case Some(` 1,740 + `if val Some(` 997 + `while val Some(` 9) and
 **4,211** Result-shaped sites, across **620** files. Promoting now would be
 staged on the wrong half anyway, since the instrument cannot see the JIT (§7).
 
-### Next step (supersedes the list above)
+### Next step (superseded by the 2026-08-01 lane below)
 
-1. **Find the third match implementation** used by the default engine (§7) and
-   instrument it. Everything else is blocked on this.
+1. ~~**Find the third match implementation**~~ — **DONE**, see §9.
 2. Then re-measure fallout with both engines instrumented, and only then decide
    warn→error promotion.
 3. Item 3 of the old list ("fix the interpreter's wildcard arm") appears closed —
    see §2.
+
+## 2026-08-01 lane OPTPAT-JIT (base `f7b68068a3e854023f06d92beb3071854d85973c`)
+
+### 9. The third implementation is `hir/lower/stmt_lowering.rs` (PROVED by instrumentation)
+
+Not by reading — by four simultaneous **unconditional** `eprintln!` probes, one
+per candidate match implementation, in a single build, run against an 11-site
+probe (`match xs.first()/last()/get(1)/max()/min()`, bare `i64`/`text`/`bool`
+scrutinees, plus two correct `.at()` controls and the value-3 control):
+
+| probe site | default engine (JIT) | `SIMPLE_EXECUTION_MODE=interpret` |
+|---|---|---|
+| `hir/lower/stmt_lowering.rs` `lower_pattern_condition_stmt` (`Pattern::Enum`) | **11** | 0 |
+| `interpreter_patterns.rs` `Pattern::Enum` | 0 | **11** |
+| `hir/lower/expr/control.rs` `lower_pattern_condition` (`Pattern::Enum`) | 0 | 0 |
+| `codegen/instr/pattern.rs` `compile_pattern_test` (`MirPattern::Variant`) | 0 | 0 |
+
+`[jit-fallback]` count on the JIT run: **0**, so the JIT was genuinely the engine
+under test.
+
+The prior lane's elimination of `hir/lower/expr/control.rs` was **correct but
+mislabelled**: that file is the *expression*-form twin, and the probe used
+statement-position `match`. The JIT path is
+`parse -> hir::lower -> lower_to_mir -> JitCompiler` (`driver/src/exec_core.rs`
+`run_source_in_memory_native`), so HIR lowering *is* on the JIT path — just the
+statement half of it. `codegen/instr/pattern.rs` never fires because the match is
+already lowered to `HirStmt::If` + `rt_is_some` before MIR sees it; MIR pattern
+codegen (and its LLVM/bytecode `MirPattern` consumers) is dead for this shape.
+
+### 10. There is a FOURTH — and `while val` checks nothing at all (PROVED)
+
+Attributing each surface form separately, with all four probes live:
+
+| form | probe that fired | JIT result on a value that is not an Option |
+|---|---|---|
+| `match subj: case Some(v)` (statement) | `stmt_lowering.rs` | arm taken, binds garbage |
+| `if val Some(k) = subj` | `stmt_lowering.rs` | branch taken, `k = <value:0x6>` |
+| `val r = match subj: case Some(v)` | `expr/control.rs` | arm taken, `r = <value:0x6>` |
+| `while val Some(w) = xs.first()` | **none of the four** | loop entered, `w = 0` |
+
+`while val` reaches **no** pattern-condition lowering at all: `Node::While` in
+`hir/lower/stmt_lowering.rs` lowers only `while_stmt.condition` through
+`lower_condition` and never emits a pattern test or a payload extraction, so the
+let-pattern is silently dropped. That is a **separate, unfixed defect** — filed
+here rather than fixed in this lane — and it means the 9 `while val Some(` sites
+counted in §8 are not merely mis-typed, they are unchecked.
+
+### 11. Nullability is NOT erased by HIR — a sound static check is possible (PROVED)
+
+The resolved `HirType` of the scrutinee at the decision point, printed from the
+`stmt_lowering.rs` probe:
+
+| probe site | resolved subject type | outcome |
+|---|---|---|
+| `.first()/.last()/.get(1)/.max()/.min()`, bare `i64` | `Int { bits: 64 }` | corrupt |
+| bare `text` | `String` | corrupt |
+| bare `bool` | `Bool` | corrupt |
+| `.at(0)` (both controls) | `Pointer { inner: i64 }` | **correct** |
+| `fn f() -> i64?` and `val x: i64? = 6` | `Pointer { inner: i64 }` | **correct** |
+
+A nullable `T?` resolves to `HirType::Pointer`, a bare `T` to
+`Int`/`Float`/`Bool`/`Char`/`String`. The separation is exact on the probe: all 9
+statically-impossible sites are bare scalars/text, both legitimate Option sites
+are `Pointer`. So the JIT half **can** be instrumented soundly on the static
+type, which the runtime cannot do (`i64 6` and `i64? = 6` are bit-identical at
+runtime — see §13).
+
+### 12. Instrument landed on the JIT path — warn-only, DEFAULT OFF
+
+`src/compiler_rust/compiler/src/hir/lower/option_pattern_shape_diag.rs`, called
+from **both** HIR twins (`stmt_lowering.rs` statement form, `expr/control.rs`
+expression form). Same switch as the interpreter check —
+`SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1` — so one run now instruments both engines.
+
+Reports only when the resolved subject type is `Int`/`Float`/`Bool`/`Char`/
+`String`. `Pointer`, `Enum`, `Struct`, `Any`, `Unknown`, arrays, tuples and dicts
+are deliberately **not** reported: an under-report is correct here, a false
+positive is not (nullable arrays/tuples were not measured, so they stay silent).
+
+Verified at this sha with the shipped binary:
+
+- gate OFF on the 11-site probe: **0** warnings; stdout byte-identical to the
+  gate-ON run, so the diagnostic changes no behaviour.
+- gate ON on the 11-site probe: **9** warnings — exactly the 9 bare-scalar/text
+  sites; the 2 `.at()` sites are not flagged.
+- gate ON on the nullable probe (`fn f() -> i64?`, `val x: i64? = 6`): **0**
+  warnings, and all three rows answer correctly under the JIT.
+- gate ON on the expression form: fires, tagged `expression form`.
+
+**Nothing was promoted to an error.** The JIT still binds the corrupt value; this
+lane makes that visible, it does not change it.
+
+### 13. The interpreter's own check has a FALSE POSITIVE, and the interpreter is wrong for `val x: i64?` (PROVED)
+
+§8 claimed the interpreter check has "no false positives by construction". That
+is **not true for a nullable local**. Measured on the same binary:
+
+| row | JIT | interpreter | interpreter, gate ON |
+|---|---|---|---|
+| `fn f() -> i64?` returning 6 | `Some 6` | `Some 6` | silent |
+| `fn f() -> i64?` returning nil | `_` | `_` | silent |
+| `val x: i64? = 6` | `Some 6` | **`_` — WRONG** | **warns** |
+
+A locally-declared `i64?` stays a raw `Value::Int` in the interpreter, so
+`case Some(v)` does not match it and the value-keyed check flags it. Two
+consequences: the interpreter is the wrong engine for `val x: T?` locals, and no
+*runtime*-keyed check can be sound for scalars, because `i64 6` and `i64? = 6`
+are the same bits. The static check in §12 is sound precisely because HIR has not
+yet erased the distinction.
+
+### 14. Next step (supersedes §"Next step" above)
+
+1. Re-measure fallout with **both** engines instrumented (this lane's sample is
+   in §15) and only then decide warn→error promotion.
+2. Fix `Node::While` to lower the let-pattern (§10). Until then `while val
+   Some(x) = ...` is unchecked on the JIT.
+3. Fix the interpreter's handling of `val x: T?` locals (§13), which currently
+   answers `_` where the JIT answers `Some`.
+
+### 15. Fallout of the JIT-path instrument, measured (not estimated)
+
+Sample: every 300th `*_spec.spl` of 18,704 = **62** specs, run under the
+**default (JIT)** engine with `SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1` and a 15 s
+timeout, at base `f7b68068a3e`.
+
+| outcome | count |
+|---|---|
+| rc = 0 | 45 |
+| rc != 0 | 13 |
+| timed out at 15 s | 4 |
+| **`option-pattern-shape` warnings** | **8, in 2 files** |
+
+- `test/01_unit/lib/gc_async_mut/gpu/browser_engine/tmp_51to74_spec.spl` — 6
+- `test/03_system/stdlib/dynload/dynload_macos_system_spec.spl` — 2
+
+Neither spec file contains a `Some(` of its own: the warnings come from the
+**imported library closure** those specs pull in, which is lowered in the same
+run. So unlike the interpreter half (§8: 0 warnings on 104 specs), the JIT half
+has live hits in ordinary library code, which is consistent with §7 — the
+interpreter instrument was measuring the engine that does not have the bug.
+
+**Known gap in the instrument:** the warning carries no source span, so a hit
+names the *run*, not the offending line. Adding a span is the obvious next
+improvement and is required before any warn→error promotion can be triaged.

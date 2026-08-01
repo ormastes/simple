@@ -564,6 +564,15 @@ impl Lowerer {
                 })
             }
             Pattern::Enum { name: _, variant, .. } => {
+                // Warn-only, DEFAULT OFF. Expression-form twin of the statement
+                // check in hir/lower/stmt_lowering.rs; reached for
+                // `val x = match subj: case Some(v)`. See
+                // hir/lower/option_pattern_shape_diag.rs.
+                crate::hir::lower::option_pattern_shape_diag::report_if_never_option(
+                    variant,
+                    self.module.types.get(subject_ty),
+                    "expression form",
+                );
                 // Does the subject's own enum type declare this variant name?
                 // This must be decided BEFORE the `Some`/`None` fast paths below:
                 // a user-defined enum is free to name its variants `Some`/`None`
