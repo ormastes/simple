@@ -683,7 +683,8 @@ static void write_desktop_font_image(
     struct bytes font_corpus_payload,
     struct bytes cldr_license_payload,
     struct bytes simple_license_payload,
-    struct bytes third_party_notices_payload)
+    struct bytes third_party_notices_payload,
+    struct bytes theme_payload)
 {
     enum { FONT_ASSET_COUNT = 16 };
     int sys_cluster = alloc_directory();
@@ -701,6 +702,7 @@ static void write_desktop_font_image(
     int cldr_license_cluster = alloc_clusters(cldr_license_payload.data, cldr_license_payload.len);
     int simple_license_cluster = alloc_clusters(simple_license_payload.data, simple_license_payload.len);
     int notices_cluster = alloc_clusters(third_party_notices_payload.data, third_party_notices_payload.len);
+    int theme_cluster = theme_payload.len ? alloc_clusters(theme_payload.data, theme_payload.len) : 0;
 
     unsigned char root[DIRECTORY_BYTES] = {0};
     unsigned char sys[DIRECTORY_BYTES] = {0};
@@ -712,6 +714,8 @@ static void write_desktop_font_image(
      * 'SIMPLEOS', but there is no volume label in root directory". */
     put_dir_entry(root, &root_n, "SIMPLEOS   ", 0, 0, 0x08);
     put_dir_entry(root, &root_n, "SYS        ", sys_cluster, 0, 0x10);
+    if (theme_cluster)
+        put_dir_entry(root, &root_n, "THEME   CSS", theme_cluster, theme_payload.len, 0x20);
     put_dot_entries(sys, &sys_n, sys_cluster, 0);
     put_dir_entry(sys, &sys_n, "FONTS      ", fonts_cluster, 0, 0x10);
     put_dot_entries(fonts, &fonts_n, fonts_cluster, sys_cluster);
@@ -881,6 +885,12 @@ int main(int argc, char **argv)
     struct bytes cldr_license_payload = read_file("assets/fonts/cldr/release-48-2/LICENSE");
     struct bytes simple_license_payload = read_file("LICENSE");
     struct bytes third_party_notices_payload = read_file("THIRD_PARTY_NOTICES.md");
+    const char *theme_path = getenv("SIMPLEOS_WM_THEME_FILE");
+    struct bytes theme_payload = read_file(theme_path);
+    if (theme_path && theme_path[0] != '\0' && !theme_payload.len) {
+        fprintf(stderr, "SIMPLEOS_WM_THEME_FILE could not be read: %s\n", theme_path);
+        return 1;
+    }
     if (!font_copyright_payload.len || !font_corpus_payload.len || !cldr_license_payload.len ||
         !simple_license_payload.len || !third_party_notices_payload.len)
         die("SimpleOS font bundle global notice could not be read");
@@ -889,7 +899,7 @@ int main(int argc, char **argv)
             img_path, font_fat_names, font_long_names, font_payloads,
             font_metadata_payloads, font_license_payloads, font_copyright_payload,
             font_corpus_payload, cldr_license_payload, simple_license_payload,
-            third_party_notices_payload);
+            third_party_notices_payload, theme_payload);
         return 0;
     }
     int efi_cluster = alloc_directory();
@@ -1059,6 +1069,7 @@ int main(int argc, char **argv)
     int steam_cluster = alloc_clusters(steam_app.data, steam_app.len);
     int cfat4k_cluster = cfat4k.len ? alloc_clusters(cfat4k.data, cfat4k.len) : 0;
     int fat4k_cluster = alloc_clusters(fat4k.data, fat4k.len);
+    int theme_cluster = theme_payload.len ? alloc_clusters(theme_payload.data, theme_payload.len) : 0;
 
     /* `tmp` was once the one directory given a cluster and a root entry but NO
      * content buffer, so its cluster was never written and fsck reported
@@ -1082,6 +1093,8 @@ int main(int argc, char **argv)
     put_dir_entry(root, &root_n, "BIN        ", bin_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "SYSRT      ", sysrt_cluster, 0, 0x10);
     put_dir_entry(root, &root_n, "TMP        ", tmp_cluster, 0, 0x10);
+    if (theme_cluster)
+        put_dir_entry(root, &root_n, "THEME   CSS", theme_cluster, theme_payload.len, 0x20);
     /* Lane BA: root-level staging of the cross-built interpreter so the arm64
      * board gate reads it via the proven root directory-scan path (avoids the
      * /SYS/APPS subdirectory descent). Placed early so the dirent stays within
