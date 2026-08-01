@@ -21,10 +21,20 @@
 - Remaining checks to run:
   - Re-run `check-simpleos-wm-visible-display-evidence` once grub tooling is available.
   - Re-run host + qemu WM render parity checks after this commit.
+
+## 2026-08-01 sync-gh follow-up on renderer-runner + IR-spec branch drift
+
+- Pulled `origin` and reviewed `origin/sync-renderer-ir-spec-update` against `origin/main`.
+- Notable committed deltas on that branch are:
+  - `f7b8526aa8` / `2277b52949`: hosted/web renderer protocol receipt and themed restart hardening
+    - Files: `src/os/compositor/simple_web_window_renderer.spl`, `src/os/hosted/hosted_browser_renderer_*.spl`, `src/lib/common/web/browser_renderer_protocol.spl`, plus renderer worker/entry test specs.
+  - `2a4bf46c9d`: documentation/spec artifact refresh for renderer+IR spec set.
+- I did not merge those commits here because this lane is still focused on SimpleOS WM/theme snapshot + root-attr propagation and host/simpleOS evidence parity; these renderer-runner edits are best consumed by the renderer/backend task owner unless that lane is being merged now.
+- Plan impact: no immediate task shift for this lane; keep current local evidence plan and theme-propagation checks.
 ## 2026-08-01 GH sync and renderer/IR check
 
 Ran `git fetch` and synced `tmp-docfix` context against `origin/main`.
-Current upstream tip noted in this branch as `31c858cab9` (latest checked).
+Current upstream tip noted in this branch as `63c362526c` (latest checked).
 - New upstream commit since the last recorded sync:
   - `57923b8259` `fix(hir): keep the operator when lowering augmented assignment`
     - `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs`
@@ -32,7 +42,7 @@ Current upstream tip noted in this branch as `31c858cab9` (latest checked).
     - `doc/08_tracking/bug/jit_struct_field_compound_assign_loads_zero_2026-07-27.md`
 - "runderer"/runner search against upstream branch refs/docs/code returned no new match.
 - IR-spec check:
-  - No new `*_spec.spl` changes related to renderer backend runners were included in `31c858cab9`; IR/spec-impact remains from existing DrawIR work already tracked in prior runs.
+  - No new `*_spec.spl` changes related to renderer backend runners were included through `63c362526c`; IR/spec-impact remains from existing DrawIR work already tracked in prior runs.
   - Plan impact: upstream change is compiler-HIR scope only (non-blocking for current WM/theme rendering lane). Keep local theme-state and capture/evidence tasks as-is.
   - Continue focusing on:
     - hosted theme input (`SIMPLE_WM_THEME_FILE`)
@@ -44,13 +54,32 @@ Current upstream tip noted in this branch as `31c858cab9` (latest checked).
   - `f80696b851` (hosted-wm unparseable source fixes) is advisory for hosted-runner stability only.
 
 - 2026-08-01 follow-up "runderer/IR" check (latest range refresh):
-  - Compared upstream window: `57923b8259..31c858cab9`.
+  - Compared upstream window: `31c858cab9..63c362526c`.
   - New commit:
-    - `31c858cab9` `refactor(ui): S2 DrawIR backend accessor seam (VK identity, MTL/DXGI remap)`
-      - `src/lib/common/ui/draw_ir_v3_backend_access.spl` (new file)
-      - `src/lib/common/ui/draw_ir_v3_backend_enums.spl` (minor access change)
-  - IR-spec impact: no `_spec.spl` files changed in this commit.
+    - `4755c8ab52` `feat(ui): S5 backend-stride capacity sizing for one-time GUI IR allocation`
+      - `src/lib/common/ui/gpu_web_capacity_strides.spl`
+      - `test/01_unit/lib/common/ui/gpu_web_capacity_strides_spec.spl`
+    - `61bb1f1fea` `fix(repo): restore full tree wiped by bad plumbing commit + land GAP-2 wiring`
+      - `src/lib/common/ui/gpu_web_capacity_strides.spl`
+      - `test/01_unit/lib/common/ui/gpu_web_capacity_strides_spec.spl`
+      - `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl`
+      - `src/lib/gc_async_mut/gpu/browser_engine/*.spl` family
+    - `63c362526c` `fix(repo): reland 3 commits clobbered by the 61bb1f1feaed tree restore`
+      - repeat of the same GAP-2/GPU IR files plus corrected `.mcp.json` state
+  - "runderer"/runner search against this range returned no new match.
+  - IR-spec impact:
+    - no renderer/backend-IR `_spec.spl` protocol behavior changes in this window.
+    - one touched unit spec is `test/01_unit/lib/common/ui/gpu_web_capacity_strides_spec.spl` (capacity accounting, not runner dispatch protocol).
   - Plan impact: current lane still unchanged; keep focus on hosted/simpleOS theme propagation and web-window payload fidelity while this DrawIR seam is consumed where needed by backend implementers.
+
+- Additional renderer/IR branch scan (2026-08-01):
+  - Checked `origin/sync-renderer-ir-spec-update` for out-of-band renderer runner + IR/spec updates.
+  - Notable commit set includes:
+    - `f7b8526aa8` `fix(web): preserve themed renderer restarts` and `2277b52949` `test(web): enforce hosted theme receipts` (theme/restart behavior in
+      `src/os/compositor/simple_web_window_renderer.spl`, `src/os/hosted/hosted_browser_renderer_*.spl`, and related worker/runtime specs).
+    - `2a4bf46c9d` docs+spec synchronization for renderer IR artifacts.
+  - Result for this lane: no changes were auto-merged; branch mainly updates host/web renderer docs/specs and protocol hardening.
+  - Plan impact: no immediate plan delta for the current SimpleOS theme-state tracking lane; if we expand this task to fully own hosted-web renderer protocol parity, merge/cherry-pick from this branch first.
 
 ## Historical upstream renderer/IR context tracked
 
