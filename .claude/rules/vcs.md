@@ -37,6 +37,25 @@ Side policy is per-path: paths whose latest truth is local restore from the pre-
 
 ## Pre-push guards
 
+**Run them from the REPO ROOT of a real clone.** Until 2026-08-01 both guards
+failed open on the working directory: from a `git archive` worktree under
+`/dev/shm` or `/run/user/1000` (no `.git`) they printed `nothing to push` and
+**exited 0 without checking anything**. They now exit **2** instead. Read the
+verdict line, which is always the last line of stdout:
+
+| verdict | exit | meaning |
+|---------|------|---------|
+| `PASS — <n> commit(s)/file(s) checked ...` | 0 | safe; `n` is always > 0 |
+| `FAIL — ...` | 1 | do not push |
+| `ERROR — nothing was checked` | 2 | could not determine; do not push |
+
+`OK` is no longer emitted — a passing run always states how many commits or
+files it actually examined, so a vacuous run cannot be mistaken for a real one.
+An explicitly-supplied range that resolves to 0 commits is an ERROR, not a pass.
+A bare revision (no `..`) is rejected rather than silently reinterpreted.
+Details and the fixture-based proofs:
+`doc/08_tracking/bug/pre_push_guards_fail_open_on_cwd_2026-08-01.md`.
+
 - **No `.jjconflict-*` trees in the outgoing range — run `sh scripts/check/check-no-conflict-tree-push.shs` (exit 0 = safe).** With no argument it checks `main@origin..@-`, exactly what `jj git push --bookmark main` sends. **`jj git push` does NOT block a conflict commit**; on 2026-07-25 one was pushed and `main` carried no source files at all across two commits until it was repaired. A jj conflict commit's git tree contains *only* `.jjconflict-base-0/` and `.jjconflict-side-N/`, so a clone gets an empty repo. Symptom to recognise: `git cat-file -p <sha>:<path>` says *"exists on disk, but not in <sha>"* — that reads like one missing file but means the whole tree is gone; confirm with `git ls-tree --name-only <sha>`. Range only — never `main@{0}` (that sweeps the whole reflog).
 - **No literal conflict-marker text in pushed file content — run `sh scripts/check/check-no-conflict-markers-push.shs` (exit 0 = safe).** Same default range as the tree guard. This catches a different failure than the one above: a `jj rebase` can inject conflict-marker text into file CONTENT (both jj's `<<<<<<< conflict N of M` / `%%%%%%%` / `>>>>>>> ... ends` style and git's classic `<<<<<<< HEAD` / `=======` / `>>>>>>>` style) without the commit being tree-conflicted, so the tree guard misses it. On 2026-07-30 exactly this happened: a rebase wrote markers into 38 tracked files, including the Rust seed `src/compiler_rust/runtime/src/value/mod.rs`, breaking every seed build. The guard flags a file only when it has a matching open+close marker pair, so prose that merely mentions marker syntax (e.g. this file, jj's own vendored docs) doesn't false-positive.
 - No leaked markers in previously-conflicted files: `git grep -c '^<<<<<<<' $TIP -- <paths>` must be 0.

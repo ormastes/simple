@@ -23,46 +23,99 @@
 # guard's real exit status AND scan its text for the refusal marker, and fail
 # closed if either says stop.
 
+# 2026-08-01: this hook previously ran ONLY the conflict-TREE guard, so literal
+# conflict-MARKER text in file content could still be pushed through it. Both
+# guards now run on every ref. The file keeps its original name because other
+# docs reference it by path.
+#
+# 2026-08-01: `repo_root=... || exit 0` used to let a push through whenever
+# `git rev-parse` failed — the same fail-open class this hook exists to close.
+# It now refuses.
+
 set -u
 
-repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
-guard="$repo_root/scripts/check/check-no-conflict-tree-push.shs"
+GREP=grep
+[ -x /usr/bin/grep ] && GREP=/usr/bin/grep
 
-[ -f "$guard" ] || {
-    echo "pre-push: guard script missing at $guard — refusing to push blind" >&2
+repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || repo_root=""
+if [ -z "$repo_root" ]; then
+    echo "pre-push: cannot locate the repository toplevel — refusing to push blind" >&2
     exit 1
-}
+fi
+
+tree_guard="$repo_root/scripts/check/check-no-conflict-tree-push.shs"
+markers_guard="$repo_root/scripts/check/check-no-conflict-markers-push.shs"
+
+for g in "$tree_guard" "$markers_guard"; do
+    [ -f "$g" ] || {
+        echo "pre-push: guard script missing at $g — refusing to push blind" >&2
+        exit 1
+    }
+done
 
 zero='0000000000000000000000000000000000000000'
 status=0
+
+# Run one guard, capture to a FILE (never a pipe — a pipeline's $? is the last
+# command's, which has already caused an agent to record GUARD_EXIT=0 while the
+# guard was printing DO NOT PUSH). Sets `status` on any refusal.
+run_guard() {
+    _g=$1
+    _range=$2
+    shift 2
+    _out=$(mktemp) || exit 1
+    sh "$_g" "$@" >"$_out" 2>&1
+    _st=$?
+    # Belt and braces: trust neither signal alone. Fail closed on either.
+    if "$GREP" -q -e 'DO NOT PUSH' -e 'ERROR —' "$_out" || [ "$_st" -ne 0 ]; then
+        cat "$_out" >&2
+        echo "" >&2
+        echo "pre-push: BLOCKED by $(basename "$_g") (status $_st) for range $_range" >&2
+        echo "pre-push: override only if you have read the guard output above:" >&2
+        echo "  git push --no-verify ..." >&2
+        status=1
+    fi
+    rm -f "$_out"
+}
 
 while read -r _local_ref local_sha _remote_ref remote_sha; do
     # Deleting a remote ref: nothing to inspect.
     [ "$local_sha" = "$zero" ] && continue
 
     if [ "$remote_sha" = "$zero" ]; then
-        # New ref: bound the range by whatever the remote already has, so we do
+        # New ref: bound the walk by whatever the remote already has, so we do
         # not walk the entire history of the repository.
-        range="--not --remotes=origin $local_sha"
+        #
+        # ORDER IS LOAD-BEARING. This used to be
+        #     range="--not --remotes=origin $local_sha"
+        # which puts $local_sha AFTER --not, so git rev-list EXCLUDES it and
+        # walks ZERO commits. Paired with the old guard's "0 commits => nothing
+        # to push => exit 0", every new-ref push was waved through unchecked.
+        # PROVED 2026-08-01 against a conflict-tree fixture commit. The
+        # positive rev must come FIRST.
+        remotes=$(git rev-parse --remotes=origin 2>/dev/null | tr '\n' ' ')
+        markers_range=""
+        if [ -n "$remotes" ]; then
+            # shellcheck disable=SC2086
+            mb=$(git merge-base --octopus "$local_sha" $remotes 2>/dev/null) || mb=""
+            [ -n "$mb" ] && markers_range="$mb..$local_sha"
+        fi
+        run_guard "$tree_guard" "new ref $local_sha (not on origin)" \
+            --rev-list-args "$local_sha" --not --remotes=origin
     else
-        range="$remote_sha..$local_sha"
+        markers_range="$remote_sha..$local_sha"
+        run_guard "$tree_guard" "$remote_sha..$local_sha" "$remote_sha..$local_sha"
     fi
 
-    out=$(mktemp) || exit 1
-    # No pipe: $? below is the guard's own status, not a downstream command's.
-    sh "$guard" "$range" >"$out" 2>&1
-    guard_status=$?
-
-    # Belt and braces: trust neither signal alone. Fail closed on either.
-    if grep -q 'DO NOT PUSH' "$out" || [ "$guard_status" -ne 0 ]; then
-        cat "$out" >&2
-        echo "" >&2
-        echo "pre-push: BLOCKED (guard status $guard_status) for range $range" >&2
-        echo "pre-push: override only if you have read the guard output above:" >&2
-        echo "  git push --no-verify ..." >&2
+    if [ -z "$markers_range" ]; then
+        echo "pre-push: cannot derive a two-endpoint range for the conflict-marker" >&2
+        echo "  guard on a brand-new ref with no shared origin history — refusing" >&2
+        echo "  to push unverified. Fetch origin first, or push with --no-verify" >&2
+        echo "  only after checking the content by hand." >&2
         status=1
+    else
+        run_guard "$markers_guard" "$markers_range" "$markers_range"
     fi
-    rm -f "$out"
 done
 
 exit $status
