@@ -14,6 +14,7 @@ use common.ui.draw_ir.{
     DRAW_IR_COMMAND_RECT,
     DRAW_IR_COMMAND_TEXT,
     DRAW_IR_EDGE_ORTHOGONAL,
+    DRAW_IR_EDGE_STRAIGHT,
     DRAW_IR_SCHEMA_VERSION,
     DRAW_IR_SOURCE_GUI_AST,
     DRAW_IR_SOURCE_HTML_AST,
@@ -33,6 +34,7 @@ use common.ui.draw_ir.{
     draw_ir_point,
     draw_ir_port_command,
     draw_ir_rect_bounds,
+    draw_ir_rect_clipped,
     draw_ir_rect_intersection,
     draw_ir_rect_translate,
     draw_ir_event_target_context,
@@ -41,9 +43,11 @@ use common.ui.draw_ir.{
     draw_ir_source_html_ast,
     draw_ir_style_prop,
     draw_ir_text,
+    draw_ir_empty_glyph_run_payload,
     draw_ir_glyph_run_payload,
     draw_ir_text_resolved_font,
     draw_ir_text_shaped_font,
+    draw_ir_text_styled,
     simple_2d_draw_ir_adv_plan,
     simple_2d_draw_ir_adv_composition_plan
 }
@@ -314,3 +318,53 @@ describe "shared Draw IR advanced Simple 2D contract":
         expect(port.kind).to_equal(DRAW_IR_COMMAND_PORT)
         expect(port.parent_id).to_equal("group-1")
         expect(port.hit_rect.x).to_equal(12)
+
+    it "defaults parent_id to empty and threads a caller-supplied parent_id through every builder":
+        # Every DrawIrCommand builder defaults parent_id to "" when the
+        # caller does not know its owning node (matching the pre-existing
+        # draw_ir_group_command/draw_ir_port_command contract), and now
+        # accepts a real parent_id as a trailing optional argument.
+        val plain_rect = draw_ir_rect("leaf-rect", 0, 0, 10, 10, 0u32)
+        val plain_text = draw_ir_text("leaf-text", 0, 0, "x", 0u32)
+        expect(plain_rect.parent_id).to_equal("")
+        expect(plain_text.parent_id).to_equal("")
+
+        val parented_rect = draw_ir_rect("child-rect", 0, 0, 10, 10, 0u32, "owner-1")
+        val parented_rect_clipped = draw_ir_rect_clipped("child-rect-2", 0, 0, 10, 10, 0u32, draw_ir_no_rect(), "owner-1")
+        val parented_text = draw_ir_text("child-text", 0, 0, "x", 0u32, "owner-1")
+        val parented_text_styled = draw_ir_text_styled("child-text-styled", 0, 0, "x", 0u32, [], "owner-1")
+        val parented_box = draw_ir_box_with_style(
+            "child-box", 0, 0, 10, 10, 0u32,
+            draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), draw_ir_no_rect(), [], "owner-1"
+        )
+        val parented_path = draw_ir_path_command("child-path", [], [], "owner-1")
+        val parented_image = draw_ir_image_command("child-image", 0, 0, 10, 10, "asset://x", [], "owner-1")
+        val parented_edge = draw_ir_edge_command(
+            draw_edge("edge-2", "a", "b", DRAW_IR_EDGE_STRAIGHT, [], []), "owner-1"
+        )
+
+        expect(parented_rect.parent_id).to_equal("owner-1")
+        expect(parented_rect_clipped.parent_id).to_equal("owner-1")
+        expect(parented_text.parent_id).to_equal("owner-1")
+        expect(parented_text_styled.parent_id).to_equal("owner-1")
+        expect(parented_box.parent_id).to_equal("owner-1")
+        expect(parented_path.parent_id).to_equal("owner-1")
+        expect(parented_image.parent_id).to_equal("owner-1")
+        expect(parented_edge.parent_id).to_equal("owner-1")
+
+        # draw_ir_text_resolved_font/draw_ir_text_shaped_font must forward
+        # parent_id through every return path, including the early-return
+        # fallback to draw_ir_text when the measured metrics do not qualify.
+        val resolved_fallback = draw_ir_text_resolved_font(
+            "font-fallback", 0, 0, "x", 0u32, "sans", "", [], 0, 0, 0, "owner-2"
+        )
+        expect(resolved_fallback.parent_id).to_equal("owner-2")
+        val resolved_measured = draw_ir_text_resolved_font(
+            "font-measured", 0, 0, "AB", 0u32, "sans", "font-id", [5, 5], 10, 12, 12, "owner-2"
+        )
+        expect(resolved_measured.parent_id).to_equal("owner-2")
+        val shaped = draw_ir_text_shaped_font(
+            "font-shaped", 0, 0, "AB", 0u32, "sans", "font-id", [5, 5], 10, 12, 12,
+            draw_ir_empty_glyph_run_payload(), "owner-2"
+        )
+        expect(shaped.parent_id).to_equal("owner-2")
