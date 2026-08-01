@@ -8,6 +8,23 @@ use super::context::FunctionContext;
 use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 
+/// Map an augmented-assignment operator to the binary operator it desugars to.
+///
+/// Returns `None` for a plain `=` (nothing to desugar). The suspension forms
+/// (`~=`, `~+=`, ...) are deliberately left alone here: their await semantics are
+/// handled by the effects pass, and folding them in unverified would change async
+/// lowering. That remaining gap is tracked in the bug doc for this fix.
+fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
+    match op {
+        ast::ast::AssignOp::AddAssign => Some(BinOp::Add),
+        ast::ast::AssignOp::SubAssign => Some(BinOp::Sub),
+        ast::ast::AssignOp::MulAssign => Some(BinOp::Mul),
+        ast::ast::AssignOp::DivAssign => Some(BinOp::Div),
+        ast::ast::AssignOp::ModAssign => Some(BinOp::Mod),
+        _ => None,
+    }
+}
+
 impl Lowerer {
     /// Lower a list of contract clauses to HIR contract clauses
     fn lower_contract_clauses(
@@ -285,6 +302,27 @@ impl Lowerer {
                         }
                     }
                 }
+
+                // Augmented assignment (`x += v`, `x -= v`, ...) must be desugared to
+                // `x = x <op> v`. HirStmt::Assign carries no operator, so without this
+                // the operator was silently DROPPED and `x += v` stored a bare `v`
+                // (bug: jit_struct_field_compound_assign_loads_zero_2026-07-27). The
+                // tree-walking interpreter has its own path and was unaffected, which is
+                // why no spec ever caught it.
+                //
+                // Applied after the checks above so every existing diagnostic still sees
+                // the user-written right-hand side rather than the synthesized binary op.
+                let value = match compound_assign_binop(assign.op) {
+                    Some(op) => HirExpr {
+                        ty: target.ty,
+                        kind: HirExprKind::Binary {
+                            op,
+                            left: Box::new(target.clone()),
+                            right: Box::new(value),
+                        },
+                    },
+                    None => value,
+                };
 
                 Ok(vec![HirStmt::Assign { target, value }])
             }
