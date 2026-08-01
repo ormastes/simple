@@ -230,10 +230,89 @@ impl<'a> Parser<'a> {
             }
 
             if !args.is_empty() {
-                return Ok(self.make_call_expr(expr, args));
+                let call = self.make_call_expr(expr, args);
+                return self.parse_matcher_word_suffix(call);
             }
         }
         Ok(expr)
+    }
+
+    /// Matcher words known to the BDD `.to_*()` matcher chain
+    /// (`interpreter_method/mod.rs`). Only these names are folded — anything
+    /// else keeps its current meaning (and keeps failing loudly if undefined).
+    const BDD_MATCHER_WORDS: &'static [&'static str] = &[
+        "to_equal",
+        "to_be",
+        "to_contain",
+        "to_include",
+        "to_be_truthy",
+        "to_be_falsy",
+        "to_be_true",
+        "to_be_false",
+        "to_be_nil",
+        "to_be_none",
+        "to_be_greater_than",
+        "to_be_less_than",
+        "to_be_greater_than_or_equal",
+        "to_be_gte",
+        "to_be_less_than_or_equal",
+        "to_be_lte",
+        "to_start_with",
+        "to_end_with",
+        "to_not_equal",
+        "to_not_contain",
+        "to_not_include",
+        "to_not_be_nil",
+    ];
+
+    /// Fold the parenthesis-free matcher-word form
+    ///     `expect <subject> to_equal <expected>`
+    /// into the method form the BDD matcher chain actually evaluates:
+    ///     `expect(<subject>).to_equal(<expected>)`
+    ///
+    /// Without this, `expect 1 to_equal 2` parsed as TWO unrelated
+    /// expression-statements — `expect(1)` (truthy, passes) followed by an
+    /// orphan `to_equal(2)` whose matcher value is built and discarded. The
+    /// subject and the matcher were never connected, so no assertion was ever
+    /// registered and the example could not fail on the `simple run` path.
+    /// `simple test` only scored these because its test-runner applies a
+    /// *textual* pre-pass (`rewrite_infix_expect_line` in
+    /// driver/src/cli/test_runner/execution.rs) that `simple run` never runs —
+    /// that divergence is what this fold removes at the AST level.
+    /// See doc/08_tracking/bug/test_runner_multi_path_drops_all_but_first_2026-08-01.md.
+    fn parse_matcher_word_suffix(&mut self, call: Expr) -> Result<Expr, ParseError> {
+        let is_bare_expect = matches!(
+            &call,
+            Expr::Call { callee, args }
+                if matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
+                    && args.len() == 1
+                    && args[0].name.is_none()
+        );
+        if !is_bare_expect {
+            return Ok(call);
+        }
+        let matcher = match &self.current.kind {
+            TokenKind::Identifier { name, .. } if Self::BDD_MATCHER_WORDS.contains(&name.as_str()) => name.clone(),
+            _ => return Ok(call),
+        };
+        self.advance(); // consume the matcher word
+
+        // Zero-argument matchers (`expect x to_be_nil`) have nothing after the
+        // matcher word; argument-taking ones parse exactly one expression.
+        let args = if self.can_start_argument() && !self.check(&TokenKind::Colon) {
+            let arg_expr = self.parse_expression()?;
+            let arg_expr = self.parse_with_no_paren_calls(arg_expr)?;
+            vec![Argument::new(None, arg_expr)]
+        } else {
+            vec![]
+        };
+
+        Ok(Expr::MethodCall {
+            receiver: Box::new(call),
+            method: matcher,
+            args,
+            generic_args: vec![],
+        })
     }
 
     /// Parse infix keywords (to, not_to) as method calls

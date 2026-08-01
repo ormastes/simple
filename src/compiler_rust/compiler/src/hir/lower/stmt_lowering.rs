@@ -1954,11 +1954,102 @@ impl Lowerer {
         }
     }
 
+    /// Lower `expect(<subject>).<matcher>(<expected>)` into the same
+    /// `rt_bdd_expect_*` builtins the operator form uses, by rewriting the
+    /// matcher into its equivalent comparison expression.
+    ///
+    /// Mirrors the *textual* mapping the test runner applies in
+    /// `driver/src/cli/test_runner/execution.rs::rewrite_method_expect_line`,
+    /// but at the AST level so it also covers the `simple run` / compile paths
+    /// that never see that pre-pass. Unknown matchers return `None` and keep
+    /// their previous (non-BDD) lowering rather than being silently dropped
+    /// into a passing assertion.
+    fn try_lower_bdd_matcher_statement(
+        &mut self,
+        expr: &Expr,
+        ctx: &mut FunctionContext,
+    ) -> LowerResult<Option<Vec<HirStmt>>> {
+        let Expr::MethodCall {
+            receiver, method, args, ..
+        } = expr
+        else {
+            return Ok(None);
+        };
+        let Expr::Call {
+            callee,
+            args: recv_args,
+        } = receiver.as_ref()
+        else {
+            return Ok(None);
+        };
+        if !matches!(callee.as_ref(), Expr::Identifier(n) if n == "expect")
+            || recv_args.len() != 1
+            || recv_args[0].name.is_some()
+        {
+            return Ok(None);
+        }
+        let subject = &recv_args[0].value;
+        let expected = args.first().map(|a| &a.value);
+
+        use simple_parser::BinOp;
+        // (op, needs_expected). `to_equal`/`to_be` map onto the dedicated
+        // equality builtin; ordered comparisons lower through the generic
+        // truthiness builtin over a synthesized comparison.
+        let cmp_op = match (method.as_str(), expected) {
+            ("to_equal" | "to_be", Some(_)) => Some(BinOp::Eq),
+            ("to_not_equal", Some(_)) => Some(BinOp::NotEq),
+            ("to_be_greater_than", Some(_)) => Some(BinOp::Gt),
+            ("to_be_less_than", Some(_)) => Some(BinOp::Lt),
+            ("to_be_greater_than_or_equal" | "to_be_gte", Some(_)) => Some(BinOp::GtEq),
+            ("to_be_less_than_or_equal" | "to_be_lte", Some(_)) => Some(BinOp::LtEq),
+            _ => None,
+        };
+        let Some(op) = cmp_op else {
+            return Ok(None);
+        };
+        let expected = expected.expect("cmp_op only matches when an expected value is present");
+
+        if op == BinOp::Eq {
+            let left_hir = self.lower_expr(subject, ctx)?;
+            let right_hir = self.lower_expr(expected, ctx)?;
+            return Ok(Some(vec![HirStmt::Expr(HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_bdd_expect_eq_rv".to_string(),
+                    args: vec![left_hir, right_hir],
+                },
+                ty: TypeId::NIL,
+            })]));
+        }
+
+        let comparison = Expr::Binary {
+            op,
+            left: Box::new(subject.clone()),
+            right: Box::new(expected.clone()),
+        };
+        let cmp_hir = self.lower_expr(&comparison, ctx)?;
+        Ok(Some(vec![HirStmt::Expr(HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_bdd_expect_truthy_rv".to_string(),
+                args: vec![cmp_hir],
+            },
+            ty: TypeId::NIL,
+        })]))
+    }
+
     /// Try to lower a BDD/SPipe call expression as a statement sequence.
     /// Returns Some(stmts) if the expression is a BDD call, None otherwise.
     ///
     /// Handles: describe, context, it, test, expect, before_each, after_each
     fn try_lower_bdd_statement(&mut self, expr: &Expr, ctx: &mut FunctionContext) -> LowerResult<Option<Vec<HirStmt>>> {
+        // `expect(<subject>).<matcher>(<expected>)` — the method/matcher form,
+        // which the parser also folds `expect <subject> to_equal <expected>`
+        // into (parser/src/expressions/no_paren.rs). Without this arm the whole
+        // matcher form fell through to a generic method call and emitted NO BDD
+        // assertion at all in compiled mode.
+        if let Some(stmts) = self.try_lower_bdd_matcher_statement(expr, ctx)? {
+            return Ok(Some(stmts));
+        }
+
         let (name, args) = match expr {
             Expr::Call { callee, args } => {
                 if let Expr::Identifier(name) = callee.as_ref() {

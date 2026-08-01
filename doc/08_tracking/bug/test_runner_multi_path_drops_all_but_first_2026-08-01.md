@@ -356,13 +356,146 @@ pre-existing assertions in the same block stayed GREEN**. Restored and
 hash-verified; suites then GREEN — `cli::basic` 13/13, `interpreter_bdd` 6/6,
 `runner_tests` 51/51.
 
-### Adjacent defect found, NOT fixed here (still open)
+### Adjacent defect found — root-caused and FIXED 2026-08-01 (matcher-word lane)
 
-`expect <a> to_equal <b>` — the **matcher-word form** — is a silent no-op under
-`simple run`. `expect 1 to_equal 2` reports `✓` and `1 example, 0 failures`,
+`expect <a> to_equal <b>` — the **matcher-word form** — was a silent no-op under
+`simple run`. `expect 1 to_equal 2` reported `✓` and `1 example, 0 failures`,
 where the operator form `expect 1 == 2` and `raise` both correctly report a
 failure. The same spec under `simple test` correctly reports 1 failed, so this is
-specific to the `run` path's BDD evaluation, not to the exit code. It is a
-second, independent fail-open of the same family: an exit-code fix cannot rescue
-an example that was never scored as failing. PROVED with `bin/simple_seed`,
-interpreter evidence only.
+specific to the `run` path, not to the exit code. It is a second, independent
+fail-open of the same family: an exit-code fix cannot rescue an example that was
+never scored as failing. Root cause, fix and blast radius are in the section
+below.
+
+## `expect <a> to_equal <b>` matcher-word form never scored a failure on `run` (2026-08-01)
+
+**Status:** fixed. **Engine:** debug driver build from origin tip `002015e0f31`.
+Every binary on this path self-identifies as `WARNING: this Rust-built Simple
+binary is a bootstrap seed only`, so **every result below is interpreter
+evidence only** — no spec here reaches the JIT or native lanes. The deployed
+pure-Simple `bin/simple` has neither `run` nor `test` (`error: unknown command
+'run'`, PROVED), so the seed is the only exercisable spec path today.
+
+### Root cause — the FIRST of the three possible bug classes (PROVED)
+
+It is **not** "parses but never evaluates" and **not** "evaluates but never
+records into `BDD_TEST_RESULTS`". The matcher expression **never parsed into an
+assertion at all**.
+
+`expect 1 to_equal 2` parsed into **two unrelated top-level statements**, proved
+by dumping the AST straight out of `simple_parser::Parser::parse()`:
+
+    Expression(Call { callee: Identifier("expect"), args: [Integer(1)] })
+    Expression(Call { callee: Identifier("to_equal"), args: [Integer(2)] })
+
+Statement 1 is a bare `expect(1)` over a truthy literal — passes. Statement 2 is
+an orphan call that `interpreter_call/bdd.rs:1439` answers by building a
+`Value::Matcher(Exact(2))` and throwing it away. Subject and matcher were never
+connected, so nothing was registered and the example could not fail.
+
+`parse_with_no_paren_calls` (`parser/src/expressions/no_paren.rs`) stops the
+no-paren argument list after the subject; the statement parser then starts a
+fresh statement at the matcher word. The `expect` handler in `bdd.rs:800` only
+ever inspects `args[0]`, so even a second argument would have been dropped.
+
+Two corollaries, both confirmed by probe:
+
+- `expect truthy() to_equal 99` **passed** — the matcher is never applied.
+- `expect false to_equal true` **passed** — even a literal-false subject passes.
+- The failure it *did* sometimes produce was for the wrong reason: a falsy
+  *call* subject tripped the unrelated hollow-call heuristic
+  (`expected call result to be truthy, got 0`), so `expect xs.len() to_equal 0`
+  was a **false RED** while `expect tree.theme to_equal "dark"` was a false
+  GREEN. The form was wrong in both directions.
+- `expect a to_not_equal b` "failed" only because statement 2 was
+  `semantic: function to_not_equal not found` — a loud error, not a scored
+  assertion.
+
+### Why `simple test` scored these and `simple run` did not (PROVED)
+
+`simple test` applies a **textual** pre-pass before compiling —
+`rewrite_infix_expect_line` (`driver/src/cli/test_runner/execution.rs:954`)
+rewrites `expect a to_equal b` into `expect(a).to_equal(b)`, and
+`rewrite_method_expect_line` then folds that into `expect (a) == b`. `simple run`
+never runs that pre-pass; the raw source goes straight to the parser. The
+divergence was a source-text rewrite that only one of the two entry points
+performed.
+
+### Fix
+
+- `src/compiler_rust/parser/src/expressions/no_paren.rs` —
+  `parse_matcher_word_suffix()` folds `expect <subject> <matcher> <expected>`
+  into `expect(<subject>).<matcher>(<expected>)` at the AST level, so both
+  entry points now produce the identical tree and the existing (already
+  correct) `.to_*()` matcher chain in `interpreter_method/mod.rs` records the
+  result. Only the 22 matcher words that chain already knows are folded; any
+  other identifier keeps its current meaning and keeps erroring loudly, so
+  nothing is silently reinterpreted into a passing assertion.
+- `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs` —
+  `try_lower_bdd_matcher_statement()` lowers the method/matcher form into the
+  same `rt_bdd_expect_eq_rv` / `rt_bdd_expect_truthy_rv` builtins the operator
+  form uses. Without it the folded form would have emitted **no** BDD assertion
+  in compiled mode; this arm also covers the pre-existing
+  `expect(a).to_equal(b)` form, which had no BDD lowering at all before.
+
+No matcher table was duplicated: the parser's list is the same list
+`interpreter_method/mod.rs` dispatches on, and the HIR mapping mirrors
+`rewrite_method_expect_line`.
+
+### Matcher word x `run` outcome matrix (PROVED)
+
+OLD and NEW are both debug driver builds from `002015e0f31`, differing only by
+this fix. Exit codes read from a file, never a pipe.
+
+| probe | OLD exit / failures | NEW exit / failures |
+|---|---|---|
+| `expect 1 == 2` | 1 / 1 failure | 1 / 1 failure |
+| `expect 1 == 1` | 0 / 0 | 0 / 0 |
+| `expect(1).to_equal(2)` | 1 / 1 failure | 1 / 1 failure |
+| `expect(1).to_equal(1)` | 0 / 0 | 0 / 0 |
+| `raise "boom"` | 1 / 1 failure | 1 / 1 failure |
+| `expect 1 to_equal 2` | **0 / 0 failures** | **1 / 1 failure** |
+| `expect 1 to_equal 1` | 0 / 0 | 0 / 0 |
+| `expect 1 to_be 2` | **0 / 0 failures** | **1 / 1 failure** |
+| `expect "abc" to_contain "zz"` | **0 / 0 failures** | **1 / 1 failure** |
+| `expect 1 to_be_greater_than 5` | **0 / 0 failures** | **1 / 1 failure** |
+| `expect 5 to_be_less_than 1` | **0 / 0 failures** | **1 / 1 failure** |
+| `expect 1 to_not_equal 1` | 1 / `function to_not_equal not found` | 1 / `expected 1 to not equal 1` |
+| `expect 1 not_to_equal 1` | 1 / `function not_to_equal not found` | unchanged (not a matcher word) |
+
+Six matcher words were silently unscored; the seventh failed for the wrong
+reason. `simple test` rows are unaffected by construction — the fix touches the
+parser and HIR, not the test runner's textual pre-pass — and the `test` column
+measured before the change was `1` for every failing probe and `0` for every
+passing one.
+
+### Regression coverage, proved RED-before-GREEN
+
+`src/compiler_rust/parser/tests/expect_matcher_word.rs` — 4 tests covering the
+fold across 10 matcher words, the zero-argument matcher (`to_be_nil`), the
+untouched operator and method forms, and the deliberately-unfolded
+`not_to_equal`.
+
+Non-vacuity: sabotaging the **implementation** (gating the matcher-word match
+arm off inside `parse_matcher_word_suffix`) took the **2 folding tests RED**
+while the 2 non-folding tests in the same file and **all 254 + 201 + ... = every
+pre-existing test in the other 13 parser test binaries stayed GREEN** (0 failed
+in each). Restored from a pristine copy; the suite is green again.
+
+### Blast radius (repo-wide, `/usr/bin/grep` + a Python scan, not ugrep)
+
+Scan of all 35,136 owned `.spl` files (vendor trees excluded) at
+origin tip `002015e0f31`:
+
+| measure | count |
+|---|---|
+| matcher-word assertion lines (`expect <a> <matcher> <b>`) | **4,628** |
+| files containing at least one | **157** (all `*_spec.spl`) |
+| spec files whose **only** assertions are matcher-word form | **137** |
+| `expect(` lines (method/paren form) | 327,572 |
+| bare/comparison `expect` lines with no matcher word | 26,352 |
+
+The premise that the matcher-word form is the dominant idiom does **not** hold
+at this tip: it is ~1.4% of assertion lines. What is true is that **137 spec
+files consist entirely of it and therefore could never fail on the `run`
+path** — their green was structural, not earned.
