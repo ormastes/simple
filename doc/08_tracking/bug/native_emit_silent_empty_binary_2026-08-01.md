@@ -211,3 +211,82 @@ output without it. Any `--native` probe run under that env measures nothing.
 - Re-measure the native AOT row in
   `doc/08_tracking/bug/for_in_text_iterates_bytes_not_chars_2026-08-01.md` on the
   canonical seed; it is currently inference, not measurement.
+
+---
+
+## T3 redeploy attempt 2026-08-01 14:44 — BLOCKED (task #18 stays open)
+
+SIGILL baseline re-confirmed on the deployed binary immediately before the
+attempt, so the bug is live and unchanged:
+
+```
+$ bin/simple compile hello.spl --format=smf -o hello.smf
+runtime error: field access on nil receiver
+Illegal instruction (core dumped)          # exit 132
+```
+
+`bin/simple --help` still prints only the banner — no `run`/`test`/`lint`/`check`.
+
+**The deploy is gated shut, and the gate is correct.** Attempt:
+`scripts/bootstrap/bootstrap-from-scratch.sh --deploy --output=<scratch> --jobs=8`
+(deliberately no `--full-bootstrap`, to leave the shared Rust seed alone). It
+exited after ~3 min:
+
+```
+WARNING: Seed/runtime stale, but this is not --full-bootstrap; reusing the existing Rust seed.
+error: full CLI bootstrap refuses a stale compiler backfill; re-run with --full-bootstrap
+```
+
+Chain, verified in the script:
+
+1. `--deploy` forces `full_cli=1` (bootstrap-from-scratch.sh:163-165).
+2. `full_cli=1 && seed_stale=1` is a hard refusal (:908-911).
+3. `seed_stale` is **genuinely** set, not a bookkeeping artifact. The stamp
+   `src/compiler_rust/target/bootstrap/simple.inputs.sha256` (written 14:04)
+   records `inputs_fingerprint=c2c8364a0829…`, but recomputing it now via
+   `bootstrap_stage3_seed_inputs_fingerprint` yields `816e7212aeb2…`. Rust
+   source content changed after the stamp, so the 14:04 backfill archive
+   (`libsimple_compiler_backfill.a`) really is out of sync with the seed binary
+   (relinked 14:44 by a parallel lane, `da702cc5…` vs the stamped `d1c66eb1…`).
+
+So a correct redeploy **requires `--full-bootstrap`, i.e. rebuilding the shared
+Rust seed.** There is no partial path: the missing `run`/`test`/`lint`/`check`
+subcommands are exactly what the full-CLI relink supplies (":1591" —
+`use --full-cli, --deploy, or --mode=one-binary to relink`), so a
+non-full-CLI stage3 build cannot clear the acceptance bar either.
+
+**Why the seed rebuild was not forced.** At the decision point the shared tree
+was heavily contended:
+
+- **six** live processes were executing the shared seed
+  `src/compiler_rust/target/bootstrap/simple` (other lanes' `test` and `lint`
+  runs) — a relink swaps the binary out from under them mid-measurement;
+- a parallel lane was already running `cargo build --profile bootstrap` against
+  the same `target/bootstrap` directory;
+- load average had climbed 14.7 → **23.5**, available RAM 53 GB → **48 GB**, with
+  **swap fully exhausted** — the condition under which the OOM killer fires
+  before the 64 GB monitor cap.
+
+This is not hypothetical: **L7 Stage-4 Pass A died today of exactly this race**,
+with `error: Rust runtime authority changed during private admission` — that
+check (:1126) compares the runtime authority before/after private admission and
+aborts when another lane rebuilds the seed mid-run.
+
+**What would make it safe** (all four, then re-run *with* `--full-bootstrap`):
+
+1. no processes executing `src/compiler_rust/target/bootstrap/simple`;
+2. no other `cargo build --profile bootstrap` touching that target dir;
+3. load average back near idle and swap no longer exhausted;
+4. no concurrent bootstrap lane in its private-admission window.
+
+Use `cargo build --profile bootstrap --features llvm` from `src/compiler_rust/`
+if the seed is rebuilt by hand — omitting `--features llvm` yields a no-LLVM
+seed.
+
+**Verified good, and reusable next window:** the fix commit `2cb9636309cf` is
+intact in the working tree (`git diff 2cb9636309c` over the three touched files
+is empty), and the current seed is LLVM-capable *by positive test* — it compiled
+the hello-world control to a 3,043,288-byte binary that printed
+`HELLO_FROM_DEPLOYED_SIMPLE_42`. Note this seed is **32 MB**, which independently
+re-confirms that the 57 MB/154 MB "has LLVM" size heuristic is worthless; test
+capability, never size.
