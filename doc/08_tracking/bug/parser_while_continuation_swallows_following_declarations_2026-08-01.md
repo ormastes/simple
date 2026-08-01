@@ -210,8 +210,158 @@ follow-up 1 lands — then the spec should be added and this note removed.
 2. `simple compile <file>` reports success for a module whose `main` was
    swallowed. The no-op guard covers the RUN paths; the COMPILE path should
    grow an equivalent check.
-3. `parse_condition_block`'s flat-body path parses only ONE statement, so an
+3. ~~`parse_condition_block`'s flat-body path parses only ONE statement, so an
    `if` with a multi-statement equal-column body silently drops the rest. Same
-   family of silence, separate mechanism — needs its own reproducer.
+   family of silence, separate mechanism — needs its own reproducer.~~
+   **FIXED — see "Follow-up 3 resolved" below.** The filed guess that it was
+   *silent* turned out to be wrong for the equal-column shape; it is a hard
+   parse error. The silent variant is a different shape. Both are characterised
+   below.
 4. `test-runner: no examples executed` should name the module and say whether it
    loaded, rather than being the sole symptom of a load failure.
+
+## Follow-up 3 resolved — `if`/`elif` equal-column continuation (2026-08-01)
+
+### Correction to the filed guess (PROVED)
+
+Follow-up 3 predicted a *silent* drop. Measured on the pristine tree at
+`a6b56173fda`, the equal-column `if` shape is **not** silent — it is a **hard
+parse error**, typically `expected "expression", found "Dedent"` or
+`expected "Indent", found "Var"`, reported at a line well past the real fault.
+Valid code is rejected; nothing is silently dropped. The correction matters
+because "silent" and "loud but mislocated" call for different verification.
+
+There IS a silent shape in the same function, but it is a different one — see
+"The other flat body" below.
+
+### Minimal reproducer (PROVED, pristine `a6b56173fda`)
+
+```
+fn f(n: i64) -> i64:
+    if n
+        > 0:
+        var a = 1
+        var b = 2
+        return a + b
+    return 0
+```
+
+Pristine: `ERR UnexpectedToken { expected: "expression", found: "Dedent",
+line: 8, column: 1 }` — the fault is the `if` on line 2, the error points at
+EOF. The single-line control (`if n > 0:`) parses to 1 top-level item with a
+3-statement `then` block. Reducing the body to ONE statement makes the repro
+parse correctly, which is the tell: the limit is the statement count, not the
+grammar of the continuation.
+
+### Root cause (PROVED)
+
+`parse_condition_block` (`parser_impl/core.rs`) delegated to
+`parse_block_after_newline`. That function's documented "flat body" path
+(`if cond:` with the body on the next line at the SAME column as the `if`)
+deliberately parses exactly **one** statement via `parse_item`.
+
+In the equal-column continuation shape the lexer emits **no fresh `Indent`** for
+the body — the continuation line's pseudo-INDENT already opened the block — so a
+genuinely indented multi-statement body is indistinguishable, at that one token,
+from a flat body. `parse_condition_block` took the flat path, kept statement 1,
+let statements 2..n leak to the enclosing block, and then still owed a deferred
+DEDENT that had in fact already been spent. The desynchronisation surfaces later
+as the mislocated error.
+
+`while`/`for`/`match` do not reach this: their header parsers detect the shape
+themselves (`header_continuation_is_equal_column`) and call `parse_block_body`,
+which loops until `Dedent`. `if`/`elif` reach their block through
+`parse_condition_block`, which did not — so the earlier fix did not cover them.
+
+### Fix
+
+`parse_condition_block` now uses the same two shared helpers as the loop headers:
+when `header_continuation_is_equal_column(deferred_before)` holds it calls
+`parse_block_body()` directly (multi-statement, terminates on `Dedent`) instead
+of `parse_block_after_newline()`, and reconciles the deferred count through
+`header_continuation_dedents_to_reconcile(deferred_before, equal_column)`. One
+site, +28/-3 lines in `parser/src/parser_impl/core.rs`; no lexer change.
+
+### The family (PROVED by probe, pristine vs fixed)
+
+Fixed by this change (pristine = parse error, fixed = identical tree to the
+single-line control):
+
+- `if` equal-column continuation, multi-statement body — in a function, nested
+  inside another `if`, and at module top level
+- `elif` equal-column continuation, including two `elif`s in one chain
+- `else if` equal-column continuation
+- `if` equal-column continuation followed by `elif`/`else` branches
+- **match-arm guards** (`case x if x\n    > 0:`) — they reach the same funnel
+  through `parse_inline_or_block`, and were broken pristine
+
+Already correct, unchanged by this change (verified both states):
+
+- the **deep** continuation shape (continuation column deeper than the body) —
+  covered by `drain_available_deferred_dedents`
+- `else:` bodies of any length — no condition, so no continuation, so
+  `deferred_before` is 0 and the equal-column branch is never taken
+- a **single-statement** equal-column body — the one case the flat path got right
+- `while`/`for`/`match` equal-column bodies — fixed earlier in this document
+
+### The other flat body — genuinely silent, deliberately NOT changed
+
+```
+fn f(n: i64) -> i64:
+    if n > 0:
+    var a = 1
+    var b = 2
+    return a + b
+```
+
+Body at the `if`'s OWN column, no header continuation. This parses `Ok` on both
+trees, the `if` gets **one** statement, and `var b` / `return` are silently
+re-parented into the enclosing function — they now run unconditionally. That is
+the documented flat-body rule (`parse_block_after_newline`'s comment gives
+exactly this shape), and making it greedy would swallow the remainder of the
+enclosing block, i.e. trade one silent mis-parenting for a worse one. The fix
+here is gated on `deferred_before > 0`, so this shape is untouched; the gate test
+pins it with `true_flat_body_stays_single_statement` so a future change to it is
+a deliberate act.
+
+Two open questions recorded rather than answered: (a) whether this shape should
+be a parse error instead of a silent re-parent, and (b) that `while`/`for` reject
+it outright (`expected "Indent", found "Var"`) while `if` accepts it — an
+inconsistency between the loop and condition families.
+
+### Evidence (this change)
+
+Pristine and fixed binaries built from the **same tree and same profile**
+(`cargo test -p simple-parser`, `test` profile) — the only delta is
+`parser/src/parser_impl/core.rs`.
+
+Gate: `parser/tests/if_condition_block_equal_column_gate.rs`, 10 tests. Pristine
+**6 fail / 4 pass**; fixed **10 pass**. Comparison is a **span-free structural
+digest** of the whole statement tree, not a top-level item count, so it detects a
+statement moving between blocks inside a function. The 4 that pass pristine are
+the deliberate controls: the loop family, the single-statement body, the
+true-flat-body guard, and a non-vacuity assertion that every repro fixture
+differs from its control.
+
+Full `simple-parser` suite, `--no-fail-fast`, both states:
+pristine **44 test binaries / 936 passed / 0 failed**, fixed **45 / 946 / 0**
+(+1 binary, +10 tests = the new gate exactly).
+
+Corpus A/B over **12,883** `.spl` files under `src/lib`, `src/app` and
+`src/compiler` (a superset of the 9,769 used above), run under both binaries:
+
+- `parser/tests/corpus_item_count_dump.rs` — 12,882 data lines,
+  **byte-identical**, same 43 pre-existing parse failures
+- a deeper scratch harness emitting a **full nested structural digest per file**
+  (fn/if/elif/else/while/for/loop/match-arm/class-method block sizes) — also
+  **byte-identical**. This is strictly stronger than the item count: it would
+  catch a statement moving between blocks *inside* a function, which the item
+  count cannot.
+
+Blast radius on real code is zero.
+
+No `.spl` spec is added, for the same reason as above: the pure-Simple parser
+still rejects the leading-operator form outright (follow-up 1). **Condition for
+adding one:** when follow-up 1 lands and the pure-Simple parser accepts the
+leading-operator continuation, add a spec covering the `if`/`elif`/`else if`/
+match-arm-guard equal-column shapes and delete this note.

@@ -898,6 +898,21 @@ impl<'a> Parser<'a> {
     /// seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md
     /// for the full mechanism. Draining at both points is safe: whichever
     /// point doesn't have a real DEDENT waiting is simply a no-op there.
+    ///
+    /// Equal-column headers are handled explicitly rather than through
+    /// `parse_block_after_newline`'s flat-body path. When the condition's
+    /// continuation line sits at the body's column the lexer emits no fresh
+    /// `Indent` — the continuation's pseudo-INDENT IS the block's own INDENT —
+    /// so the body looks exactly like a "flat body", and the flat-body path
+    /// parses only ONE statement. Every further statement of a genuinely
+    /// indented body then leaks out to the enclosing block and the surplus
+    /// deferred DEDENT desynchronises the rest of the file. `while`/`for`/
+    /// `match` already special-case this shape in their own header parsers
+    /// (`header_continuation_is_equal_column` /
+    /// `header_continuation_dedents_to_reconcile` in `parser_helpers.rs`);
+    /// `if`/`elif` reach it through here, so the same reconciliation lives
+    /// here. See doc/08_tracking/bug/
+    /// parser_while_continuation_swallows_following_declarations_2026-08-01.md.
     pub(crate) fn parse_condition_block(&mut self) -> Result<Block, ParseError> {
         self.expect(&TokenKind::Newline)?;
 
@@ -907,12 +922,23 @@ impl<'a> Parser<'a> {
         let deferred_before = self.deferred_dedent_count;
         self.deferred_dedent_count = 0;
 
-        let block = self.parse_block_after_newline()?;
+        // Equal-column shape: no fresh `Indent` because the continuation's
+        // pseudo-INDENT already opened this block. `parse_block_body` does not
+        // require the `Indent` to have been physically consumed — it just loops
+        // until `Dedent` — so the body parses in full, and the `Dedent` it eats
+        // as the terminator IS the pseudo-INDENT's compensating one (hence the
+        // `saturating_sub(1)` inside `header_continuation_dedents_to_reconcile`).
+        let equal_column = self.header_continuation_is_equal_column(deferred_before);
+        let block = if equal_column {
+            self.parse_block_body()?
+        } else {
+            self.parse_block_after_newline()?
+        };
 
         // Shallow shape: the compensating DEDENT(s) don't appear until after
         // the whole block body, alongside the block's own terminating DEDENT.
-        let deferred = self.deferred_dedent_count + deferred_before;
-        self.deferred_dedent_count = 0;
+        let deferred =
+            self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
         self.consume_dedents_for_method_chain(deferred);
 
         Ok(block)
