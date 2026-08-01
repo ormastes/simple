@@ -503,3 +503,44 @@ references for Named/Infer/Error/Str before recursing, plus the `SymbolId` only
 when the inner discriminant is proven Named. Compare `Span?` against `text?`.
 Fix the first proven inner-payload boundary; do not add an i64/error fallback.
 Use fresh per-cycle caches and do not rerun `typekind-cycle6-stage3` unchanged.
+
+## 2026-08-01 Any lowering and method-call nil frontier
+
+- Optional-owner diagnostics proved `BackendError.span` carries inner
+  discriminant `80134736`, while `CompiledUnit.entry_point` carries Str
+  discriminant `3560734392`. The former is the documented bare-flat-Option
+  representation `HirTypeKind.Any`, not a malformed Named payload. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle7-stage3/stage3.log`.
+- Added explicit discriminant-first `HirTypeKind.Any -> MirType.i64()` lowering,
+  matching the compiler's established pointer-width type-erasure slot. Focused
+  contract passed:
+  `build/mini_builds/mir-optional-inner-discriminant-cycle2.log`.
+- Fresh Stage2 candidates passed version, unsupported-command, frontend smoke,
+  and immutable-hash admission. Diagnostic SHA-256:
+  `075bd12a966323a4e7ec50e3214f532d5424df7dae91f330135f73fbfc9be6fc`;
+  Any-fix SHA-256:
+  `571c6a25da5f44b4ea08669677a3e41d5d7d2490897ad6c194010c2f26c5a191`.
+- The Any fix clears flat MIR type registration completely. Stage3 advances to
+  a new `field access on nil receiver` / SIGILL during method-call lowering.
+  Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle8-stage3/stage3.log`.
+- The third bounded cycle reran the exact admitted compiler under GDB with a
+  fresh cache. The top frame is
+  `MirLowering.lower_method_call`, followed by expression/block/if lowering;
+  evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle8-gdb-stage3/gdb.log`.
+- The localized function contained the known staged-native TryOperator hazard:
+  enum-constructor recovery used `if rs.?` and then read `rs.name`. Replaced it
+  with explicit `if rs != nil` guarding. Focused contract passed:
+  `build/mini_builds/mir-method-enum-receiver-nil-guard.log`.
+- The mandatory three-cycle cap is exhausted. The nil-guard source fix has not
+  yet been rebuilt into Stage2/Stage3. Stage3 produced no compiler; Stage4,
+  essential-tools smoke, and release verification were not run. Nothing was
+  pushed.
+
+Next: in a fresh session, build Stage2 from a fresh per-cycle cache with the
+explicit enum-receiver nil guard, admit it, and run one Stage3 attempt. Do not
+rerun the pre-fix `typekind-cycle8-stage3` or its GDB command unchanged. If the
+guard clears SIGILL, remove or gate the temporary `[hir-field-type]`,
+`[mir-field-type]`, and `[mir-optional-inner]` diagnostics before the eventual
+Stage4/release gates.

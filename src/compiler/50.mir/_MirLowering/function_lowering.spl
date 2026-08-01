@@ -577,6 +577,12 @@ impl MirLowering:
                         self.canonical_mir_type_symbol(symbol)))
                 case _:
                     pass
+        # A bare flat-protocol Option has no recoverable inner tag and is
+        # intentionally represented by HIR as Optional(Any). Any is the
+        # compiler's existing pointer-width type-erasure slot at MIR level.
+        val any_type_disc = rt_enum_discriminant(HirTypeKind.Any)
+        if rt_enum_discriminant(type_.kind) == any_type_disc:
+            return MirType.i64()
         # Stage3's broad HirTypeKind match can fail to recognize Optional when
         # overlapping enum variant names are present in MIR scope. Mirror the
         # proven Dict predispatch above: discriminate first, then extract the
@@ -585,6 +591,20 @@ impl MirLowering:
         if rt_enum_discriminant(type_.kind) == optional_type_disc:
             match type_.kind:
                 case HirTypeKind.Optional(inner):
+                    val inner_actual_disc = rt_enum_discriminant(inner.kind)
+                    val inner_named_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
+                    val inner_infer_disc = rt_enum_discriminant(HirTypeKind.Infer(0, 0))
+                    val inner_error_disc = rt_enum_discriminant(HirTypeKind.Error)
+                    val inner_str_disc = rt_enum_discriminant(HirTypeKind.Str)
+                    val inner_any_disc = rt_enum_discriminant(HirTypeKind.Any)
+                    var inner_symbol_id: i64 = -1
+                    if inner_actual_disc == inner_named_disc:
+                        match inner.kind:
+                            case HirTypeKind.Named(inner_symbol, _):
+                                inner_symbol_id = self.symbol_id_value(inner_symbol)
+                            case _:
+                                pass
+                    eprint("[mir-optional-inner] actual={inner_actual_disc} named={inner_named_disc} infer={inner_infer_disc} error={inner_error_disc} str={inner_str_disc} any={inner_any_disc} symbol={inner_symbol_id}\n")
                     return MirType(kind: MirTypeKind.Tuple([
                         MirType(kind: MirTypeKind.Bool),
                         self.lower_type(inner)
