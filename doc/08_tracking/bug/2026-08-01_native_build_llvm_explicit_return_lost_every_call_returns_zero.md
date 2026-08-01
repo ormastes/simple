@@ -110,9 +110,27 @@ exited 0.
 `native-build` (`runtime error: field access on nil receiver`), so the default
 invocation reports nothing about this lane. With the seed it is very slow
 (~5 min/case, each case rebuilds the pure-Simple compiler under the seed
-interpreter with `--clean`). Cases 1-2 PASS on the fixed tree
-(`arith_fn_call` rc=7, `if_elif_else` rc=3, 0 interpreter-fallback hits); case 3
-`while_sum` fails to build, pre-existing (see below).
+interpreter with `--clean`). Full run on the fixed tree, **15 PASS / 8 build-fail**,
+`fallback_hits=0` on every case:
+
+    PASS  1 arith_fn_call(7)   2 if_elif_else(3)   5 array_index_rw(71)
+          6 struct_field(71)   7 enum_construct(42) 9 string_concat_len(6)
+         10 string_interp(7)  11 nested_fn_3deep(7) 13 dict_index(7)
+         14 option_nil_check(7) 16 match_value_position(7)
+         17 match_value_position_return(7) 18 trait_default(42)
+         21 tuple_return_across_call(42) 23 parse_f64(42)
+    FAIL  3 while_sum   4 for_in_array   8 enum_match*   12 closure_lambda*
+         15 result_try_op*  19 dict_struct_value  20 enum_f64_payload_precision
+         22 hyphenated_module_init      (* = documented XFAIL in the script header)
+
+Every PASS case above checks a value carried out of `fn main() -> i64` by an
+explicit `return`; all of them would have exited 0 before this fix.
+
+Cases 3, 4, 20 and 22 were re-measured on pristine pre-fix content and fail
+IDENTICALLY (`build-failed`) there — pre-existing, not regressions. Case 19 is
+the one behaviour change, and it moves in the safe direction: pre-fix it BUILT
+and returned **0** (silent wrong answer, want 73); post-fix it fails to build
+loudly (see below).
 
 ## Adjacent gaps found, NOT caused by this bug (pre-existing, reproduced on
 ## pristine origin content)
@@ -127,6 +145,32 @@ interpreter with `--clean`). Cases 1-2 PASS on the fixed tree
   A `while` loop on its own is fine (`var i = 0; while i < 3: i = i + 1` builds
   and prints 3), and so is a returned mutated `var` without a loop
   (`var t = 0; t = t + 5; return t` exits 5), so it is the combination.
+- **Duplicate `%tN` SSA definition on a tagged aggregate base (NOT FIXED —
+  deliberately left loud).** Smoke case 19 (`dict_struct_value`, `#189`) now
+  fails with `llc-18: error: multiple definition of local value named 't7'`. The
+  emitted IR is:
+
+      %t7 = inttoptr i64 %l33 to ptr
+      %t7 = ptrtoint ptr %t7 to i64        ; same %tN defined twice
+
+  Root cause (PROVED by fixing it experimentally): in
+  `_MirToLlvm/aggregate_intrinsics.spl`, `translate_get_field` (and
+  `translate_set_field`) inline an EMITTING call in the argument position —
+  `self.untag_aggregate_base_ptr(self.value_as_type(...))`. `value_as_type`
+  emits the `inttoptr` and advances the builder's fresh-local counter, but that
+  counter bump is lost across the receiver-method call boundary
+  (copy-modify-reassign `self` semantics on this lane), so
+  `untag_aggregate_base_ptr`'s first `fresh_local()` hands back the same `%t7`.
+  Hoisting the argument into its own `val` before the call makes case 19 build.
+
+  **Not landed on purpose.** With the hoist applied, case 19 builds and returns
+  **63 instead of 73** — `.y` reads `.x`'s word, i.e. the separate, already-known
+  struct-valued-`Dict` field-offset defect (`#189`, and the standing "never call
+  `.get()` on a dict whose value type is a struct" rule). Landing the hoist alone
+  would convert a loud `llc` rejection into a silent wrong answer, which is the
+  wrong direction. Whoever fixes `#189` should apply the hoist in the same change;
+  it is regression-free on its own (`f1..f5` and struct construct + field read
+  stay correct with it applied).
 - Lambdas/closures fail this lane with `MIR lowering error: undefined variable: z`.
 - `--backend c` is rejected outright: "native-build backend 'c' is not available
   in the pure Simple command path". LLVM is the only usable native-build backend
