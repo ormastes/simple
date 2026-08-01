@@ -1360,6 +1360,84 @@ impl Lowerer {
                                 value: Some(value),
                             });
                         }
+                    } else if self.is_real_enum_variant_name(nested_variant_name) {
+                        // Nested ENUM-variant pattern inside an enum payload:
+                        // `case Const(MirConstValue.Str(name), _):`. The branch
+                        // above only ever handled a nested *struct* pattern
+                        // (`struct_info`); a genuine nested variant fell out of
+                        // the `if let Some(..)` and emitted no initializer at
+                        // all, so `collect_pattern_bindings`' pre-registered
+                        // local kept whatever zero was on the stack — the
+                        // "never binds" half of the defect. (The "always
+                        // matches" half is fixed in `nested_payload_condition`
+                        // in hir/lower/expr/control.rs.)
+                        let outer_payload = HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_payload".to_string(),
+                                args: vec![HirExpr {
+                                    kind: HirExprKind::Local(subject_idx),
+                                    ty: subject_ty,
+                                }],
+                            },
+                            ty: TypeId::ANY,
+                        };
+                        // Slot `i` of the outer variant: single-field variants
+                        // carry the value directly, multi-field wrap in an array.
+                        let slot_expr = if payload_patterns.len() == 1 {
+                            outer_payload
+                        } else {
+                            HirExpr {
+                                kind: HirExprKind::Index {
+                                    receiver: Box::new(outer_payload),
+                                    index: Box::new(HirExpr {
+                                        kind: HirExprKind::Integer(i as i64),
+                                        ty: TypeId::I64,
+                                    }),
+                                },
+                                ty: TypeId::ANY,
+                            }
+                        };
+                        // Unwrap the inner variant's own payload.
+                        let inner_payload = HirExpr {
+                            kind: HirExprKind::BuiltinCall {
+                                name: "rt_enum_payload".to_string(),
+                                args: vec![slot_expr],
+                            },
+                            ty: TypeId::ANY,
+                        };
+                        for (j, inner_pattern) in nested_patterns.iter().enumerate() {
+                            let (Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name)) =
+                                inner_pattern
+                            else {
+                                continue;
+                            };
+                            let Some(&local_idx) = ctx.local_map.get(bound_name) else {
+                                continue;
+                            };
+                            let bound_ty = binding_type_map.get(bound_name).copied().unwrap_or(TypeId::ANY);
+                            let value = if nested_patterns.len() == 1 {
+                                HirExpr {
+                                    kind: inner_payload.kind.clone(),
+                                    ty: bound_ty,
+                                }
+                            } else {
+                                HirExpr {
+                                    kind: HirExprKind::Index {
+                                        receiver: Box::new(inner_payload.clone()),
+                                        index: Box::new(HirExpr {
+                                            kind: HirExprKind::Integer(j as i64),
+                                            ty: TypeId::I64,
+                                        }),
+                                    },
+                                    ty: bound_ty,
+                                }
+                            };
+                            binding_stmts.push(HirStmt::Let {
+                                local_index: local_idx,
+                                ty: bound_ty,
+                                value: Some(value),
+                            });
+                        }
                     }
                 }
             }
@@ -1686,8 +1764,21 @@ impl Lowerer {
                 ty: TypeId::BOOL,
             }),
             Pattern::Enum { name: _, variant, .. } => {
+                // Does the subject's own enum type declare this variant name?
+                // Decided BEFORE the `Some`/`None` fast paths: a user-defined
+                // enum may name its variants `Some`/`None`, and `rt_is_some` is
+                // merely "not the nil sentinel" — true for every value of a real
+                // enum, which made `case Some(x)` irrefutable and bound x = 3.
+                // Kept in sync with the expression-form twin in
+                // hir/lower/expr/control.rs.
+                let subject_enum_owns_variant = matches!(
+                    self.module.types.get(subject_ty),
+                    Some(HirType::Enum { variants, .. })
+                        if variants.iter().any(|(name, _)| name == variant)
+                );
+
                 // Special handling for None - check both nil and enum None
-                if variant == "None" {
+                if variant == "None" && !subject_enum_owns_variant {
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -1697,7 +1788,7 @@ impl Lowerer {
                     });
                 }
                 // Special handling for Some - check not-none
-                if variant == "Some" {
+                if variant == "Some" && !subject_enum_owns_variant {
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_some".to_string(),
@@ -1767,12 +1858,36 @@ impl Lowerer {
                     ty: TypeId::I64,
                 };
 
-                Ok(HirExpr {
+                let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
                         name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref, expected_val],
+                        args: vec![subject_ref.clone(), expected_val],
                     },
                     ty: TypeId::BOOL,
+                };
+
+                // Match arms route through THIS statement-form lowering, so the
+                // nested payload sub-pattern test has to be applied here as well
+                // as in the expression-form twin — testing only the outer tag
+                // left a nested variant sub-pattern irrefutable.
+                let nested = match pattern {
+                    Pattern::Enum {
+                        payload: Some(payload_patterns),
+                        ..
+                    } => self.nested_payload_condition(&subject_ref, payload_patterns),
+                    _ => None,
+                };
+
+                Ok(match nested {
+                    None => tag_test,
+                    Some(nested_test) => HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::And,
+                            left: Box::new(tag_test),
+                            right: Box::new(nested_test),
+                        },
+                        ty: TypeId::BOOL,
+                    },
                 })
             }
             // Fallback: treat unsupported patterns as a tautology so lowering can proceed.

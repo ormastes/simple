@@ -564,8 +564,25 @@ impl Lowerer {
                 })
             }
             Pattern::Enum { name: _, variant, .. } => {
+                // Does the subject's own enum type declare this variant name?
+                // This must be decided BEFORE the `Some`/`None` fast paths below:
+                // a user-defined enum is free to name its variants `Some`/`None`
+                // (`enum Opt: Some(x: i64); None`), and for such a subject the
+                // optional-shaped `rt_is_some`/`rt_is_none` probes are wrong.
+                // `rt_is_some` is "not the nil sentinel", so it returns TRUE for
+                // *every* value of a real enum — including `Opt.None` — making
+                // `case Some(x)` an irrefutable arm that then bound x = 3 (the
+                // nil tag). Only the built-in `T?` optional representation, whose
+                // subject type is a Pointer/Option rather than an Enum owning
+                // these names, may take the fast paths.
+                let subject_enum_owns_variant = matches!(
+                    self.module.types.get(subject_ty),
+                    Some(HirType::Enum { variants, .. })
+                        if variants.iter().any(|(name, _)| name == variant)
+                );
+
                 // Special handling for None - check both nil and enum None
-                if variant == "None" {
+                if variant == "None" && !subject_enum_owns_variant {
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_none".to_string(),
@@ -575,7 +592,7 @@ impl Lowerer {
                     });
                 }
                 // Special handling for Some - check not-none
-                if variant == "Some" {
+                if variant == "Some" && !subject_enum_owns_variant {
                     return Ok(HirExpr {
                         kind: HirExprKind::BuiltinCall {
                             name: "rt_is_some".to_string(),
@@ -594,11 +611,6 @@ impl Lowerer {
                 // The type system already guarantees the object is of that class at the
                 // call site, so the condition is always true unless the subject enum
                 // itself owns this variant name.
-                let subject_enum_owns_variant = matches!(
-                    self.module.types.get(subject_ty),
-                    Some(HirType::Enum { variants, .. })
-                        if variants.iter().any(|(name, _)| name == variant)
-                );
                 let is_class_pattern = !subject_enum_owns_variant
                     && self.module.types.lookup(variant.as_str()).map_or(false, |tid| {
                         matches!(self.module.types.get(tid), Some(HirType::Struct { .. }))
@@ -625,12 +637,35 @@ impl Lowerer {
                     ty: TypeId::I64,
                 };
 
-                Ok(HirExpr {
+                let tag_test = HirExpr {
                     kind: HirExprKind::BuiltinCall {
                         name: "rt_enum_check_discriminant".to_string(),
-                        args: vec![subject_ref, expected_val],
+                        args: vec![subject_ref.clone(), expected_val],
                     },
                     ty: TypeId::BOOL,
+                };
+
+                // Test refutable payload sub-patterns too. Testing only the outer
+                // tag made a nested variant sub-pattern irrefutable — see
+                // `nested_payload_condition`.
+                let nested = match pattern {
+                    Pattern::Enum {
+                        payload: Some(payload_patterns),
+                        ..
+                    } => self.nested_payload_condition(&subject_ref, payload_patterns),
+                    _ => None,
+                };
+
+                Ok(match nested {
+                    None => tag_test,
+                    Some(nested_test) => HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::And,
+                            left: Box::new(tag_test),
+                            right: Box::new(nested_test),
+                        },
+                        ty: TypeId::BOOL,
+                    },
                 })
             }
             Pattern::MutIdentifier(_) | Pattern::MoveIdentifier(_) | Pattern::Rest => Ok(HirExpr {
@@ -643,6 +678,124 @@ impl Lowerer {
                 ty: TypeId::BOOL,
             }),
         }
+    }
+
+    /// Is `variant` a genuine enum-variant name (as opposed to a class/struct
+    /// name that the parser also spells as `Pattern::Enum`)?
+    ///
+    /// The parser cannot tell `Shape.Circle(..)` from `Point(x, y)` at parse
+    /// time, so both arrive as `Pattern::Enum`. Only the former is refutable;
+    /// emitting a discriminant check for a struct pattern would test an object
+    /// pointer's enum header and never match.
+    pub(crate) fn is_real_enum_variant_name(&self, variant: &str) -> bool {
+        let resolves_to_struct = self
+            .module
+            .types
+            .lookup(variant)
+            .map_or(false, |tid| matches!(self.module.types.get(tid), Some(HirType::Struct { .. })));
+        if resolves_to_struct {
+            return false;
+        }
+        self.module.types.iter().any(|(_, ty)| {
+            matches!(ty, HirType::Enum { variants, .. }
+                if variants.iter().any(|(v, _)| v == variant))
+        })
+    }
+
+    /// Build the refutability test for an enum variant pattern's payload
+    /// sub-patterns, or `None` when every sub-pattern is irrefutable.
+    ///
+    /// Historically `lower_pattern_condition` tested only the OUTER variant tag
+    /// and discarded `payload`, so a nested variant sub-pattern such as
+    /// `Const(MirConstValue.Str(name), _)` was treated as a wildcard: the arm
+    /// matched no matter what the inner variant actually was, and the binder
+    /// inside it read zero. The tree-walk interpreter recurses correctly
+    /// (`interpreter_patterns.rs`), so no interpreter-run spec caught this.
+    ///
+    /// Scope: one level of nesting with a variant sub-pattern, which is the
+    /// shape that blocks native pattern-match staging. Literal and tuple/struct
+    /// sub-patterns in payload position remain irrefutable here and are tracked
+    /// separately.
+    pub(crate) fn nested_payload_condition(
+        &mut self,
+        subject_ref: &HirExpr,
+        payload_patterns: &[Pattern],
+    ) -> Option<HirExpr> {
+        let arity = payload_patterns.len();
+        let mut combined: Option<HirExpr> = None;
+
+        for (i, p) in payload_patterns.iter().enumerate() {
+            let Pattern::Enum {
+                variant: nested_variant,
+                ..
+            } = p
+            else {
+                continue;
+            };
+            if !self.is_real_enum_variant_name(nested_variant) {
+                continue;
+            }
+
+            // Extract payload slot `i`. Mirrors the extraction in
+            // `build_pattern_binding_stmts`: a single-field variant's payload is
+            // the value itself; multi-field variants wrap it in an array.
+            let payload_expr = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_payload".to_string(),
+                    args: vec![subject_ref.clone()],
+                },
+                ty: TypeId::ANY,
+            };
+            let slot_expr = if arity == 1 {
+                payload_expr
+            } else {
+                HirExpr {
+                    kind: HirExprKind::Index {
+                        receiver: Box::new(payload_expr),
+                        index: Box::new(HirExpr {
+                            kind: HirExprKind::Integer(i as i64),
+                            ty: TypeId::I64,
+                        }),
+                    },
+                    ty: TypeId::ANY,
+                }
+            };
+
+            let expected_disc: i64 = {
+                use std::collections::hash_map::DefaultHasher;
+                use std::hash::{Hash, Hasher};
+                let mut hasher = DefaultHasher::new();
+                nested_variant.hash(&mut hasher);
+                (hasher.finish() & 0xFFFFFFFF) as i64
+            };
+            let test = HirExpr {
+                kind: HirExprKind::BuiltinCall {
+                    name: "rt_enum_check_discriminant".to_string(),
+                    args: vec![
+                        slot_expr,
+                        HirExpr {
+                            kind: HirExprKind::Integer(expected_disc),
+                            ty: TypeId::I64,
+                        },
+                    ],
+                },
+                ty: TypeId::BOOL,
+            };
+
+            combined = Some(match combined {
+                None => test,
+                Some(prev) => HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(prev),
+                        right: Box::new(test),
+                    },
+                    ty: TypeId::BOOL,
+                },
+            });
+        }
+
+        combined
     }
 
     /// Look up the field types for an enum variant.
