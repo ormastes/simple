@@ -1,5 +1,14 @@
 # Theme rendering and WM host/simpleOS sync state (2026-07-25)
 
+## 2026-08-01 quick sync/IR-plan refresh
+
+- `git fetch --all` complete; `tmp-docfix` is at `55115a8241` and `origin/main` is at the same commit for this workspace snapshot.
+- Checked `origin/sync-renderer-ir-spec-update` and `sync-renderer-ir-spec-update` for renderer/IR-related changes:
+  - Docs/spec additions and backend-native refactor updates are present there (`doc/03_plan/ui/draw_ir/*`, `doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md`, browser renderer command/capability specs), mostly about hosted/web renderer protocol and evidence artifacts.
+  - Additional hosted web restart/theme receipt commits are present in that branch (`f7b8526aa8`, `2277b52949`, `f0899c8620`) but are not yet merged into this lane.
+- I confirmed no newly touched files in that diff directly affect `src/app/ui.web/*`, `src/os/compositor/*simpleos*`, `SIMPLE_WM_THEME_FILE`, or `THEME.CSS` capture for this WM theme lane.
+- Plan status: keep current plan focus unchanged (hosted env theme file + SimpleOS guest `/THEME.CSS` propagation + themed render envelope/capture checks), and defer hosted/web protocol merge actions to the renderer lane owner.
+
 ## Current code changes in progress
 - Fixed WM/theme IDs to use active WM theme snapshots (with default fallback) instead of hardcoded `dark` / `aetheric_dark` in:
   - `src/app/ui.web/wm_bridge.spl`
@@ -182,3 +191,15 @@ Plan impact: upstream introduced parser/HIR and DrawIR architecture updates plus
 - Plan impact:
   - No immediate plan shift for this WM-host theme lane.
   - Continue with host/simpleOS theme propagation and evidence capture checks; defer renderer/IR protocol consumption to the hosted/web owner lane unless scope is explicitly expanded.
+
+## 2026-08-01 sync-go update (second pass)
+
+- Synchronized this lane with GitHub now (`git pull --ff-only origin tmp-docfix`).
+- Current head is `88fff6c09b...` and matches `origin/tmp-docfix` (`tmp-docfix` and `origin/main` are still `55115a8241...` as their remote common ancestry point in this repo view).
+- Focused remote checks performed:
+  - `origin/sync-renderer-ir-spec-update`: no additional renderer/runner runtime behavior changes that target `simpleos_wm_theme_bootstrap`, `host_wm_theme_bootstrap`, or `/THEME.CSS` flow.
+  - `doc/06_spec` and test diffs remain concentrated in hosted/browser renderer protocol and DrawIR artifact/docs; no newly introduced evidence/spec failures are blocking this SimpleOS WM theme lane.
+- Plan action:
+  - keep current scope on SimpleOS host/WM theme capture and envelope fidelity tasks,
+  - watch hosted/web renderer protocol updates in their owning lane,
+  - sync once that lane marks a merge point.
