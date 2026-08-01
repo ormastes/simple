@@ -1232,10 +1232,12 @@ else
       "SIMPLE_BINARY=${stage2_admitted_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
+      --entry-closure \
       --threads "${selfhost_jobs}" \
       --cache-dir "${stage3_cache_absolute}" --mode "${bootstrap_mode}" \
       --runtime-path "${stage_runtime_absolute}" \
-      -o "${stage3_bin}" src/app/cli/bootstrap_main.spl
+      --entry src/app/cli/bootstrap_main.spl \
+      -o "${stage3_bin}"
   )
   rm -f "${stage2_bin}" "${stage3_bin}"
   bootstrap_stage3_directory_snapshot \
@@ -1359,12 +1361,13 @@ else
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
+    --entry-closure \
     --threads "${selfhost_jobs}" \
     --cache-dir "${stage3_cache_absolute}" \
     --mode "${bootstrap_mode}" \
     --runtime-path "${stage_runtime_absolute}" \
-    -o "${stage3_bin}" \
-    src/app/cli/bootstrap_main.spl
+    --entry src/app/cli/bootstrap_main.spl \
+    -o "${stage3_bin}"
   stage3_status=$?
   set -e
   if [ "${stage2_admitted_sha_before_stage3}" != absent ]; then
