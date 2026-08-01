@@ -101,15 +101,32 @@ built ELF printing distinctive non-zero values derived through function calls
 Family sweep on the fixed lane (all correct): 5-argument function, `bool`, `f64`,
 `text`, struct-by-value return, direct recursion (`fact(5)=120`), nested calls,
 class methods (`me` and non-mutating), and both explicit-`return` and
-tail-expression forms.
+tail-expression forms. `fn main() -> i64` now propagates its returned value to
+the process exit code (`return t` where `t==5` exits 5); before the fix it
+exited 0.
+
+`scripts/check/native-smoke-matrix.shs` must be run with
+`SIMPLE_BINARY=bin/simple_seed` — its default `bin/simple` crashes on
+`native-build` (`runtime error: field access on nil receiver`), so the default
+invocation reports nothing about this lane. With the seed it is very slow
+(~5 min/case, each case rebuilds the pure-Simple compiler under the seed
+interpreter with `--clean`). Cases 1-2 PASS on the fixed tree
+(`arith_fn_call` rc=7, `if_elif_else` rc=3, 0 interpreter-fallback hits); case 3
+`while_sum` fails to build, pre-existing (see below).
 
 ## Adjacent gaps found, NOT caused by this bug (pre-existing, reproduced on
 ## pristine origin content)
 
-- A `me` method that MUTATES a field and then returns it
-  (`self.n = self.n + d; return self.n`) fails MIR lowering with
-  `unresolved method call: merge`. Reproduced identically on origin source —
-  pre-existing, not a regression.
+- `unresolved method call: merge` in MIR lowering. Reproduced identically on
+  pristine origin content in every case below — pre-existing, not a regression.
+  Two shapes hit it:
+  - a `me` method that MUTATES a field and then returns it
+    (`self.n = self.n + d; return self.n`);
+  - a `while` loop whose accumulator is then returned — this is exactly
+    `native-smoke-matrix.shs` case 3 (`while_sum`), which fails to BUILD.
+  A `while` loop on its own is fine (`var i = 0; while i < 3: i = i + 1` builds
+  and prints 3), and so is a returned mutated `var` without a loop
+  (`var t = 0; t = t + 5; return t` exits 5), so it is the combination.
 - Lambdas/closures fail this lane with `MIR lowering error: undefined variable: z`.
 - `--backend c` is rejected outright: "native-build backend 'c' is not available
   in the pure Simple command path". LLVM is the only usable native-build backend
