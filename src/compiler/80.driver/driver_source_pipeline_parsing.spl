@@ -30,14 +30,6 @@ extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
 
-fn _driver_text_list_index(items: [text], item: text) -> i64:
-    var i = 0
-    while i < items.len():
-        if items[i] == item:
-            return i
-        i = i + 1
-    -1
-
 # Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
 pub fn dtrace(msg: text) -> ():
@@ -143,7 +135,14 @@ impl CompilerDriver:
                 entry_sources)
             log_phase(
                 "phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
-            var parsed_entry_paths: [text] = []
+            # Physical key -> index into `parsed_entry_modules`. Built once here
+            # so the alias fan-out loop below is a Dict lookup instead of the
+            # now-removed `_driver_text_list_index` linear scan, which was
+            # O(entry_sources x unique_entry_sources) (~8.9e7 full-path text
+            # compares on a whole-tree closure). Value type is deliberately
+            # `i64` — see doc/07_guide/language/dict_native_pitfalls.md; a
+            # struct-valued dict would corrupt under native `.get()`.
+            var parsed_entry_index: Dict<text, i64> = {}
             var parsed_entry_modules: [ParserModule] = []
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
@@ -168,12 +167,15 @@ impl CompilerDriver:
                     (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
                     dtrace(
                         "[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
-                parsed_entry_paths = parsed_entry_paths.push(physical_key)
+                # Bracket assignment only — `.set()` silently fails on builtin
+                # Dicts under native codegen (see the NOTE below).
+                parsed_entry_index[physical_key] = parsed_entry_modules.len()
                 parsed_entry_modules = parsed_entry_modules.push(entry_module)
             for source in entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
-                val parsed_idx = _driver_text_list_index(
-                    parsed_entry_paths, physical_key)
+                var parsed_idx: i64 = -1
+                if parsed_entry_index.contains_key(physical_key):
+                    parsed_idx = parsed_entry_index[physical_key]
                 if parsed_idx < 0:
                     self.ctx.errors.push(
                         "internal entry-closure parse cache miss for {source.path}")
