@@ -1,5 +1,20 @@
 # Theme rendering and WM host/simpleOS sync state (2026-07-25)
 
+## 2026-08-01 sync-gh + runderer/IR latest snapshot
+
+- Synced `tmp-docfix` to `origin/tmp-docfix` (`1e0209f4b7`) and confirmed clean working tree (`0 0` ahead/behind).
+- Remote scan for `runderer` branch/tag/name in this repository found none.
+- Compared against `origin/sync-renderer-ir-spec-update`:
+  - only protocol/renderer/DrawIR paths changed there.
+  - changed files are scoped to `src/os/hosted/*`, `src/os/compositor/simple_web_window_renderer.spl`, `src/lib/common/web/browser_renderer_protocol.spl`, and web/renderer spec docs.
+  - there is still no direct file overlap with host/SimpleOS WM payload files:
+    - `src/os/compositor/host_wm_theme_bootstrap.spl`
+    - `src/os/compositor/simpleos_wm_theme_bootstrap.spl`
+    - `src/lib/common/ui/wm_theme_css.spl`
+    - `examples/09_embedded/simple_os/arch/*/gui_entry_desktop.spl`
+    - `scripts/os/make_os_disk.c`
+- Plan impact: continue this lane unchanged (host/SimpleOS theme snapshot fidelity + capture parity); renderer-IR protocol/doc merges stay owned by hosted/web protocol lane.
+
 ## 2026-08-01 renderer/IR rerun check (sync-verify)
 
 - Ran `git fetch --all --prune` and confirmed:
