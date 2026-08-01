@@ -3232,7 +3232,12 @@ pub fn compile_call<M: Module>(
                 "starts_with" => Some("rt_string_starts_with"),
                 "ends_with" => Some("rt_string_ends_with"),
                 "concat" => Some("rt_string_concat"),
-                "char_at" | "at" => Some("rt_string_char_at"),
+                "char_at" => Some("rt_string_char_at"),
+                // `at` must NOT go straight to the text path: with an array
+                // receiver that silently returned `nil` for every index.
+                // `rt_at` tests the receiver and returns a real `Option` for
+                // arrays while leaving text behaviour unchanged.
+                "at" => Some("rt_at"),
                 "char_code_at" => Some("rt_string_char_code_at"),
                 "byte_at" => Some("rt_string_byte_at"),
                 "push" => Some("rt_array_push"),

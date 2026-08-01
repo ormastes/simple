@@ -1360,7 +1360,10 @@ fn try_compile_builtin_method_call<M: Module>(
         "ends_with" => "rt_string_ends_with",
         "concat" => "rt_string_concat",
         "contains" => "rt_contains",
-        "char_at" | "at" => "rt_string_char_at",
+        "char_at" => "rt_string_char_at",
+        // See calls.rs: `at` is receiver-dispatched via `rt_at` so an array
+        // receiver yields a real `Option` instead of a silent `nil`.
+        "at" => "rt_at",
         "char_code_at" => "rt_string_char_code_at",
         "byte_at" => "rt_string_byte_at",
         "hash" => "rt_hash_text",

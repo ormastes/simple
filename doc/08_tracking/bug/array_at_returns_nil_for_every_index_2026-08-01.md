@@ -1,17 +1,99 @@
 # Array `.at(i)` returns `nil` for EVERY index — all Option call sites take the None branch
 
 **Date:** 2026-08-01
-**Status:** interpreter lane FIXED; JIT and native lanes still OPEN
-**Severity:** CRITICAL on JIT/native — silent wrong answer, no error, no crash
+**Status:** interpreter lane FIXED; **JIT lane FIXED**; native LLVM still OPEN
+**Severity:** CRITICAL on native — silent wrong answer, no error, no crash
 
 ### Lane table (all rows PROVED by transcript)
 
 | Lane | How to select | Behaviour before fix | After fix |
 |---|---|---|---|
 | Rust-seed tree-walking interpreter | `SIMPLE_EXECUTION_MODE=interpret` | **loud** — `method 'at' not found on type 'array'` | correct Option |
-| Rust-seed JIT (**the default** for `simple foo.spl`) | default | **silent `nil` for every index** | still broken |
-| Native LLVM | `simple compile --native` | **silent `nil` for every index** | still broken |
+| Rust-seed JIT (**the default** for `simple foo.spl`) | default | **silent `nil` for every index** | **correct Option** (11 examples 6 failures → 11/0) |
+| Native LLVM | `simple compile --native` | **silent `nil` for every index** | still broken — NOT verified here, see below |
 | Pure-Simple compiler's own interpreter | n/a — cannot self-host at HEAD | implements `at` (source read; **INFERRED**, not run) | — |
+
+### JIT lane fix — what it actually took
+
+The "map `at` to a runtime call" half was the easy part. Three separate defects
+had to be fixed together before a single in-range read was correct, and each one
+was only visible by rebuilding and RUNNING; none was reviewable:
+
+1. **Dispatch (the reported cause).** `"char_at" | "at" => rt_string_char_at` in
+   `codegen/instr/calls.rs` and `codegen/instr/closures_structs.rs` sent an array
+   receiver down the *text* path. `at` now maps to a new receiver-dispatching
+   `rt_at`, which tests the receiver and calls `rt_array_at` for arrays and
+   `rt_string_char_at` otherwise. **Text `.at()` behaviour is unchanged** — it
+   still yields a raw character, not an `Option`.
+
+2. **Result typing — this one is why fixing only the dispatch is not enough.**
+   `at` was missing from the array method return-type table in
+   `hir/lower/expr/mod.rs`, so `xs.at(i)` typed as `TypeId::ANY`. `case Some(v)`
+   desugars to an `rt_enum_payload` builtin whose HIR type gates whether MIR
+   emits `UnboxInt`; with `ANY` no unbox was emitted and the binding stayed
+   tag-boxed. Measured: `xs.at(0)` on `[10, …]` bound `v = 80` (10 << 3), and
+   `at(3)` on `[0,1,2,3,4]` bound `24` (3 << 3). `at` now types as `T?`
+   (`HirType::Pointer`), which is what `get_enum_variant_field_types_with_hint`
+   needs to recover the element type.
+
+3. **`case nil:` could not see a boxed `Option::None`.** `case nil` is a
+   `Pattern::Literal(Expr::Nil)` and lowered to a raw `subject == nil`
+   comparison, while `case None:` (a `Pattern::Enum`) already lowered to
+   `rt_is_none`. A boxed `Option::None` is a heap object, never raw-equal to
+   `nil`, so with the boxed representation the `nil` arm did not match — and
+   since the `Some` arm did not match either, the whole `match` **fell through
+   and bound nothing**, silently. `Pattern::Literal(Expr::Nil)` now also lowers
+   to `rt_is_none`, so the two spellings agree on every representation.
+
+### Why boxed `Option` and not the raw/flat form
+
+`stmt_lowering.rs` supports two optional representations and picks between them
+at runtime with `rt_enum_id(subj) >= 0`, deliberately passing a *raw* payload
+through untouched — so a raw payload has to be an untagged `i64`. **The nil
+sentinel is the untagged word 3**, so a raw optional holding the value 3 is
+indistinguishable from absence by construction. `xs.at(3)` on `[0,1,2,3,4]` is
+exactly that case, which is why the spec pins both index 3 and element value 3.
+The boxed form has no collision: `Some(3)` is a heap object whose payload is the
+tag-boxed `3 << 3` = 24, and absence is a distinct `Option::None` object.
+
+This is the same "the two encodings are not interchangeable" trap recorded for
+the interpreter fix, in its second form: there the seed needed a real
+`Value::some`/`Value::none` rather than the pure-Simple flat encoding; here the
+seed needed the *boxed* `Option` rather than the raw migration form. Both times
+the wrong choice produced a silent no-match, not an error.
+
+### Verification (JIT lane)
+
+`simple test` CANNOT verify this lane: the test-runner apps are pinned to the
+interpreter by `run_file_with_interpreter_mode`
+(`driver/src/main.rs`), so a green spec run proves only the interpreter. The JIT
+lane was verified with the same assertions run as a plain program (a bare
+`simple foo.spl` selects the JIT), 11 checks mirroring
+`test/01_unit/lib/common/array_at_option_spec.spl`:
+
+```
+unpatched seed (bin/release/.../simple.pre-segv-fix-20260731):  11 examples, 6 failures
+patched seed:                                                   11 examples, 0 failures
+```
+
+Non-vacuity is exactly the 6: every failure was an in-range hit or the
+index-3/value-3 case — the only assertions that distinguish "absent" from
+"unimplemented". The 5 that passed unpatched (out-of-range, negative, empty)
+passed *vacuously*, because an unimplemented `.at()` returns `nil` and `nil`
+reads as absent. Both `case nil:` and `case None:` spellings were checked.
+
+Regression-checked on the same binary: `text.at(i)` and `text.char_at(i)` keep
+their raw-character results, `case nil` still matches a plain nil subject, still
+does NOT match a non-nil value, non-nil literal patterns still work, and a
+user-written `fn f() -> i64?` still matches `Some`/`None` correctly.
+
+**Native LLVM remains OPEN and was NOT verified.** The remaining
+`"char_at" | "at" => Some("rt_string_char_at")` mappings under
+`codegen/llvm/**` (`functions/calls.rs`, `emitter.rs`, `functions.rs`) still
+need the same `rt_at` redirect. They were deliberately left alone rather than
+edited blind: this build was made without the `llvm` feature, so that lane could
+not be run here, and the three defects above show that the dispatch edit alone
+does not make a lane correct.
 
 Two corrections to the first draft of this document, both worth stating because
 they change what the bug *is*:

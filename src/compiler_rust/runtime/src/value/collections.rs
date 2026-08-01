@@ -17,7 +17,7 @@ use super::heap::{
     unregister_heap_ptr_checked,
     HeapHeader, HeapObjectType,
 };
-use super::objects::{rt_closure_func_ptr, RuntimeClosure, RuntimeEnum, RuntimeObject};
+use super::objects::{rt_closure_func_ptr, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject};
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
 
@@ -613,6 +613,78 @@ pub extern "C" fn rt_array_get_i64_raw(array: RuntimeValue, index: i64) -> i64 {
 #[no_mangle]
 pub extern "C" fn rt_array_get_text(array: RuntimeValue, index: i64) -> RuntimeValue {
     rt_array_get(array, index)
+}
+
+/// Array `at`: bounds-checked element access with an optional (`T?`) result.
+///
+/// This is deliberately NOT `rt_array_get`: that one *normalizes* the index
+/// (Python-style negatives), so `at(-1)` would silently wrap to the last
+/// element instead of reporting absence. Bounds here are checked SIGNED and
+/// unnormalized, matching the tree-walking interpreter's array `at` arm added
+/// in f18c5963132 (`interpreter_method/collections.rs`), which is the reference
+/// semantics: present iff `0 <= index < len`.
+///
+/// ENCODING -- the part that is easy to get wrong, and the reason this returns
+/// a BOXED `Option` (`rt_option_some`/`rt_option_none`) rather than the "raw
+/// migration form" (bare payload for present, `NIL` for absent).
+///
+/// The raw form cannot express this operation safely. `stmt_lowering.rs`
+/// discriminates the two forms at runtime with `rt_enum_id(subj) >= 0`, and
+/// deliberately passes a raw payload through UNTOUCHED -- so a raw payload must
+/// be an untagged `i64`. But the nil sentinel IS the untagged word 3
+/// (`SPECIAL_NIL` | `TAG_SPECIAL`), so a raw optional holding the value 3 would
+/// be indistinguishable from absence BY CONSTRUCTION. `xs.at(3)` on
+/// `[0, 1, 2, 3, 4]` is exactly that case.
+///
+/// The boxed form has no such collision: `Some(3)` is a heap `Option` object
+/// whose payload is the tag-boxed `3 << 3` = 24, and absence is a distinct
+/// `Option::None` object. The boxed path also gets the correct post-processing
+/// for free -- `rt_enum_payload` followed by the tag-aware `UnboxInt`.
+///
+/// This does require `case nil:` to recognise a boxed `Option::None`; that is
+/// what the `Pattern::Literal(Expr::Nil)` -> `rt_is_none` lowering in
+/// `stmt_lowering.rs` provides. `case None:` already used `rt_is_none`.
+#[no_mangle]
+pub extern "C" fn rt_array_at(array: RuntimeValue, index: i64) -> RuntimeValue {
+    let arr = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, rt_option_none());
+    unsafe {
+        let len = (*arr).len as i64;
+        if index < 0 || index >= len {
+            return rt_option_none();
+        }
+        let elem = if (*arr).is_byte_packed() {
+            RuntimeValue::from_int(*((*arr).data as *const u8).add(index as usize) as i64)
+        } else if (*arr).is_u64_packed() {
+            RuntimeValue::from_int(*((*arr).data as *const u64).add(index as usize) as i64)
+        } else {
+            (*arr).as_slice()[index as usize]
+        };
+        rt_option_some(elem)
+    }
+}
+
+/// Receiver-dispatching `at`.
+///
+/// The compiled lanes used to map the method name `at` straight to
+/// `rt_string_char_at` by name, with no receiver-type test, so `arr.at(i)` took
+/// the *text* path and silently produced `nil` for EVERY index -- in-range hits
+/// included, with no error and no crash. See
+/// doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
+///
+/// The test is done here, at runtime, rather than at the five codegen sites
+/// because those sites dispatch purely on the method name and do not all have a
+/// reliable static receiver type available.
+///
+/// Text behaviour is intentionally left exactly as it was: `text.at(i)` still
+/// yields a raw single-character string (or `nil`), NOT an `Option`. Only the
+/// array receiver -- which previously had no implementation at all on these
+/// lanes -- gains the `Option` result.
+#[no_mangle]
+pub extern "C" fn rt_at(receiver: RuntimeValue, index: i64) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        return rt_array_at(receiver, index);
+    }
+    rt_string_char_at(receiver, index)
 }
 
 /// Set an element in an array

@@ -1558,6 +1558,32 @@ impl Lowerer {
                 }
             }
             Pattern::Literal(lit_expr) => {
+                // `case nil:` is a Pattern::Literal, not a Pattern::Enum, so it
+                // used to lower to a raw `subject == nil` comparison. That test
+                // only recognises the *raw* nil sentinel, so it silently failed
+                // to match a BOXED `Option::None` heap object -- the arm was
+                // skipped, and with the `Some` arm also not matching, the whole
+                // `match` fell through and bound nothing.
+                //
+                // `case None:` (Pattern::Enum) already routes to `rt_is_none`,
+                // which accepts BOTH the raw nil sentinel and a boxed
+                // `Option::None`. Using it here too makes `case nil:` and
+                // `case None:` agree on every optional representation instead
+                // of `case nil:` quietly handling only one of them. It stays
+                // correct for a plain non-optional nil subject, since
+                // `rt_is_none` returns true for raw nil.
+                //
+                // See doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
+                if matches!(**lit_expr, Expr::Nil) {
+                    return Ok(HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_is_none".to_string(),
+                            args: vec![subject_ref],
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+
                 // Compare subject == literal
                 let lit_hir = self.lower_expr(lit_expr, ctx)?;
 

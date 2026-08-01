@@ -1219,6 +1219,37 @@ impl Lowerer {
                 // when `i` is out of range) — see the MIR expansion in
                 // lowering_expr_method.rs.
                 "take" | "skip" | "drop" | "insert" => Some(receiver.ty),
+                // `[T].at(i)` is the bounds-checked accessor and is the ONE
+                // array method here whose result is genuinely optional, so it
+                // types as `T?` (`HirType::Pointer`) rather than bare `T`.
+                //
+                // This is load-bearing, not cosmetic. `case Some(v)` desugars to
+                // a `rt_enum_payload` builtin call whose HIR type decides
+                // whether MIR emits `UnboxInt` (lowering_expr_builtin.rs: the
+                // `needs_int_unbox` gate fires only for a concrete scalar
+                // TypeId). The payload recovery in
+                // `get_enum_variant_field_types_with_hint` only reaches `T`
+                // when the subject is `HirType::Pointer { inner }`. With `at`
+                // missing from this table the subject was `TypeId::ANY`, the
+                // binding type was `ANY`, no `UnboxInt` was emitted, and the
+                // bound value stayed tag-boxed — `xs.at(0)` on `[10, ...]`
+                // bound `v = 80` (10 << 3) instead of `10`.
+                //
+                // See doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
+                "at" => {
+                    let element_ty = match self.module.types.get(receiver.ty) {
+                        Some(HirType::Array { element, .. }) => Some(*element),
+                        _ => None,
+                    };
+                    match element_ty {
+                        Some(elem) => Some(self.module.types.register(HirType::Pointer {
+                            kind: PointerKind::Shared,
+                            capability: ReferenceCapability::Shared,
+                            inner: elem,
+                        })),
+                        None => Some(TypeId::ANY),
+                    }
+                }
                 "first" | "last" | "get" | "max" | "min" => {
                     // Returns element type (or Option<element>)
                     if let Some(HirType::Array { element, .. }) = self.module.types.get(receiver.ty) {

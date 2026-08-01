@@ -398,6 +398,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]), // RuntimeValue string -> raw ptr
     RuntimeFuncSpec::new("rt_string_char_at", &[I64, I64], &[I64]),
+    // Receiver-dispatching `at`. Arrays get a real `Option`; text keeps the
+    // historical raw-character result. Mapping `at` straight to
+    // `rt_string_char_at` made `arr.at(i)` silently `nil` at every index.
+    RuntimeFuncSpec::new("rt_at", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_char_code_at", &[I64, I64], &[I64]),
     // Byte-indexed (not char-indexed) raw byte read; see rt_string_char_code_at.
     RuntimeFuncSpec::new("rt_string_byte_at", &[I64, I64], &[I64]),
