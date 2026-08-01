@@ -697,6 +697,28 @@ particular is shared with the tag and query groups — freezing them from inside
 the mapping group would pre-empt the StageReceipt and QueryIR artifact groups.
 They are recorded here so the gap stays tracked.
 
+**`SourceOriginSet` ownership is resolved here: it belongs to MAP.** Three
+separate freeze waves each examined it and each declined, on three different
+grounds — MAP-versus-QUERY looked ambiguous, no receipt field references it, and
+§18.2 separates layout from resolution. Each of those is a correct answer to
+"is it *mine*?" and none of them is an answer to "whose *only* reference site is
+it?". Enumerating the reference sites decides it: `SourceOriginSet` occurs
+exactly once in this document, as the return of a `MappingReadPort` method, and
+occurs in no QueryIR field, no receipt field and no resolution signature. That is
+the identical argument that placed `MappingKindSet` with MAP two paragraphs
+above — sole occurrence in a `MappingReadPort` signature — so it must reach the
+same owner. Ambiguity between two lanes is not established by neither lane
+claiming a type; it is established by two lanes *referencing* it, and only one
+does.
+
+Ownership being decided does not by itself make the type freezable, and the
+deferral above still stands for a different and narrower reason: three of
+`MappingReadPort`'s four methods return `EntitySetView`, and `trace_to_source` is
+the fourth. `SourceOriginSet` is that port's return-shape specialised to carry
+origin attribution, so it is frozen **in the same wave as `EntitySetView`, by
+MAP** — not by whichever lane needs it first. Freezing it before `EntitySetView`
+would fix a view representation the other three methods must then match.
+
 ### 6.5 Transformation preservation rules
 
 Every transformation declares one policy:
@@ -806,7 +828,7 @@ struct QueryRequest:
     program: QueryProgramRef
     universe: EntitySetView
     params: QueryParamBlock
-    execution: ExecutionProfile
+    execution: StageExecutionProfile
 
 struct QueryResult:
     entities: ObjectRef<EntitySetArena>
@@ -991,7 +1013,7 @@ AOP advice ordering uses its established priority semantics but emits a normaliz
 struct MutationReceipt:
     input_snapshot: SnapshotId
     output_snapshot: SnapshotId
-    plan_hash: Hash256
+    plan_hash: Hash128
     matched_entities: u64
     applied_ops: u64
     skipped_ops: u64
@@ -1001,6 +1023,36 @@ struct MutationReceipt:
     invalidation: InvalidationSetRef
     verification: VerificationReceipt
 ```
+
+`plan_hash` read `Hash256` until this ratification and is now **`Hash128`**. The
+MutationIR freeze encoded it that way and reported the deviation rather than
+silently narrowing it; the narrowing is ratified here, with the reasoning stated
+so it is not re-litigated per lane.
+
+Two facts force it. `Hash256` exists in this tree only as a `text` wrapper with
+no wire encoding at all, so no lane can encode a 256-bit `plan_hash` today
+without first minting a hash width. `Hash128` is already **the** content hash of
+the structural wire — frozen by ID-TAG as `hi u64 | lo u64`, 16 bytes, and
+already reused by the receipts wave for `MappingShardRef.content_hash` rather
+than introducing a second width. Minting a second hash width to serve one field
+is the cost side; what is bought is the question.
+
+Nothing is bought here, because of what this field is for. `plan_hash` identifies
+a `MutationPlan` for equality and de-duplication **within a snapshot lineage** —
+§8.6 `validate`/`apply` compare a plan against a snapshot they already hold. It
+is not an external attestation and no adversary chooses its input, so the
+relevant bound is birthday collision among plans in one build, and 2^64 is far
+past any plan count a build produces. A 256-bit width would buy resistance to a
+threat this field is not exposed to.
+
+This is deliberately **not** a general statement that 128 bits replaces 256
+across the document. §21.3 keeps `Hash256` for `input_root`, `output_root` and
+`deterministic_hash`: those are cross-build reproducibility commitments that get
+published and compared between machines, which is exactly the case `plan_hash`
+is not. That `Hash256` still has no wire encoding is a real and separate gap,
+owned by the receipts lane and tracked as such — it is not repaired by this
+ratification. Should `plan_hash` ever become externally attested, widening it is
+a v2 field change, not a reinterpretation of the v1 bytes.
 
 ### 8.6 Mutation engine API
 
@@ -1012,7 +1064,7 @@ interface MutationPlanningPort:
 interface MutationCommitPort:
     fn validate(plan: MutationPlanRef, snapshot: SnapshotId) -> ValidationReceipt
     fn apply(plan: MutationPlanRef, snapshot: SnapshotId,
-             execution: ExecutionProfile) -> MutationReceipt
+             execution: StageExecutionProfile) -> MutationReceipt
     fn publish(receipt: MutationReceipt) -> Result<SnapshotId, CommitError>
 ```
 
@@ -1125,6 +1177,55 @@ flags DirtyMask:
     Accessibility
     Resource
 ```
+
+`DirtyMask` is a **`u32` bitset, and the declaration order above is the wire bit
+numbering**: `Source` is bit 0 through `Resource` at bit 20. Twenty-one bits do
+not fit a `u16`, so `u32` is the smallest fixed width that holds the frozen set,
+leaving bits 21..31 reserved and hard-rejected on the same rule as every other
+reserved bit in this document.
+
+The order is load-bearing and not merely conventional. It runs the compiler
+pipeline (`Source`..`Link`) and then the document/render pipeline
+(`DomStructure`..`Accessibility`), so a stage's bit index is monotone in the
+order work actually happens, and `mask < (1 << n)` therefore reads as "nothing
+past stage *n* is dirty". Bit positions are wire values: a bit is never reused
+and never renumbered, and a new stage takes the next free bit with a version
+bump.
+
+**A live divergence is recorded here, with the renumbering that resolves it.**
+The layout lane's shorthand constants predate this contract and pack the four
+stages that lane cared about into the low bits — `DIRTY_INTRINSIC_MEASURE`,
+`DIRTY_LAYOUT`, `DIRTY_HIT_TEST`, `DIRTY_RESOURCE` at 1/2/4/8, i.e. bits 0..3.
+Those are **not** the §9.1 positions. The collision is not a near-miss: bit 0
+means `IntrinsicMeasure` to the layout lane and `Source` on the wire, so the two
+numberings disagree most sharply about the cheapest and the most expensive
+invalidation there is.
+
+| Constant | Layout-lane value (bit) | Canonical §9.1 value (bit) |
+|---|---|---|
+| `DIRTY_INTRINSIC_MEASURE` | 1 (0) | 16384 (14) |
+| `DIRTY_LAYOUT` | 2 (1) | 32768 (15) |
+| `DIRTY_HIT_TEST` | 4 (2) | 262144 (18) |
+| `DIRTY_RESOURCE` | 8 (3) | 1048576 (20) |
+
+The right-hand column is normative; the shorthand constants must be renumbered
+onto it.
+
+This is a trap rather than a present defect, and the distinction is worth
+recording because it sets how urgently the renumbering must land. It is
+currently harmless on three independent counts, each checked rather than
+assumed: the layout invalidation contract carries **no encoder** — nothing
+serialises those bits, so no divergent bytes exist; every call site consumes the
+constants **symbolically**, by name, through `DirtyMask.from_bits` and the
+exported identifiers; and a repository-wide search for a numeric dirty literal
+reaching `from_bits` or a `dirty_bits` field returns nothing, so no site has
+hardcoded a position that renumbering would silently change meaning under.
+
+What makes it a trap is precisely that combination: the two numberings can never
+disagree *until* the first byte is written, and at that moment every existing
+symbolic call site keeps compiling and keeps passing. The renumbering is
+therefore safe to do now and must land **before** anything serialises a
+`DirtyMask` — after that point it stops being a rename and becomes a wire break.
 
 ### 9.2 Change event
 
@@ -1275,7 +1376,7 @@ struct ParseRequest:
     entry_rule: GrammarRuleId
     outputs: ParseOutputMask
     tag_demand: TagDemand
-    execution: ExecutionProfile
+    execution: StageExecutionProfile
     placement: PlacementPolicyRef
 
 struct ParseResult:
@@ -1636,10 +1737,39 @@ struct ClangAdapterCapability:
     matcher_adapter_version: u16
     transformer_adapter_version: u16
     llvm_ir_schema: u16
-    supported_features: CapabilitySet
+    supported_features: ClangFeatureSet
 ```
 
 Build and test one adapter per supported Clang major. Reject unknown majors rather than silently assuming ABI compatibility.
+
+`supported_features` was declared `CapabilitySet`, a type this document never
+defined. It is ratified as **`ClangFeatureSet`, a `u32` bitset with one bit per
+component that §12.1 enumerates**, and the field is renamed accordingly above.
+Both halves of that — the rename and the vocabulary — were forced, not chosen.
+
+The rename is forced because `CapabilitySet` is not an undefined name, it is a
+*taken* one: it is a live kernel type (`src/os/kernel/types/capability_types.spl`)
+carrying capability tokens and pledge state, used at over a hundred sites across
+the kernel's IPC, session and container code. A Clang adapter feature bitset and
+a kernel capability set share nothing but the word "capability". Keeping the
+collision would mean the one name resolves to two unrelated types depending on
+which lane imports it, which is the same-name-different-meaning failure the
+freeze rules exist to prevent.
+
+The vocabulary is forced because §12.1 already enumerates the members — this
+ratification does not invent a feature list, it reads the one this chapter
+states. §12.1 names exactly five components, and `ClangFeatureSet` defines
+exactly one bit per component, in §12.1's order: `simple-clang-export`,
+`simple-clang-query`, `simple-clang-transform`, `simple-llvm-pass`,
+`simple-clang-profile`, at bits 0..4. Each bit asserts that this adapter build
+ships that component — nothing broader, so the set cannot drift into a general
+capability vocabulary that §12.1 does not back.
+
+Bits 5..31 are reserved and must be zero, hard-rejected like every other
+reserved bit here. The consequence is specific enough to state: a reader that
+masked an unknown bit off would conclude an adapter *lacks* a capability it is
+advertising, and would then select a fallback path with no reason to record for
+it — the unexplained degradation §21.4 forbids.
 
 ---
 
@@ -1779,7 +1909,7 @@ struct DomMutationBatch:
 interface DomMutationPort:
     fn validate(batch: DomMutationBatch) -> DomValidationReceipt
     fn apply(batch: DomMutationBatch,
-             execution: ExecutionProfile) -> MutationReceipt
+             execution: StageExecutionProfile) -> MutationReceipt
 ```
 
 Script and event code append commands to a bounded mutation buffer. Commit occurs at defined event-loop checkpoints, producing one new DOM snapshot and one invalidation batch.
@@ -2008,7 +2138,7 @@ Text shaping is a separate port:
 ```simple
 interface TextMeasurePort:
     fn shape(requests: TextShapeRequestArenaRef,
-             execution: ExecutionProfile) -> TextShapeResultArenaRef
+             execution: StageExecutionProfile) -> TextShapeResultArenaRef
 ```
 
 Do not approximate complex-script shaping merely to keep layout on GPU. GPU layout may consume CPU-produced glyph metrics until a verified GPU text backend exists.
@@ -2299,7 +2429,7 @@ enum ExecutionMode:
     HybridVectorGpu
     ResidentGpu
 
-struct ExecutionProfile:
+struct StageExecutionProfile:
     mode: ExecutionMode
     deterministic: bool
     host_memory_budget: u64
@@ -2311,15 +2441,57 @@ struct ExecutionProfile:
     allowed_devices: DeviceMask
 ```
 
-### 21.1 Stage backend
+This record was written `ExecutionProfile` and is renamed **`StageExecutionProfile`**
+here, matching the name the EXEC freeze gave it on the wire. The rename is
+ratified into the architecture so the document and the frozen encoder agree; the
+frozen name is not changed to match the document, because the document's name was
+the one that was already taken.
+
+`ExecutionProfile` names a different and unrelated record in this tree
+(`common/structural/execution/contracts.spl`): it carries `cpu_us`,
+`gpu_kernel_us`, `scheduling_us`, `transfer_us_per_kib` and `sync_us` — that is
+**measured cost, after the fact**. The §21 record carries determinism, budgets,
+targets and policies — **what was requested, before the fact**. They share no
+field but `mode`. The two are not merely different, they are the two halves of
+the no-silent-fallback guarantee: §21.3's receipt records what a stage actually
+did, and this record records what it was permitted to do, so comparing them is
+how a forced degradation is told apart from a cost-policy CPU choice. Collapsing
+them onto one name would erase exactly that distinction.
+
+`Stage` is the right qualifier rather than an arbitrary disambiguator: §21.1's
+`estimate(request, profile)` is a per-stage call, and the frozen `Stage*` family
+already contains `StageReceipt` and `StageFallbackReason`.
+
+The measured-cost record keeps its name for now. Freeing the bare
+`ExecutionProfile` would mean renaming it to `ExecutionCostProfile` across the
+modules that read it — a real mechanical change, not a cosmetic one — and it
+buys a name that nothing needs any more, since §21's record is now distinctly
+named at both the document and the wire. That rename is therefore recorded as
+**tracked and optional, not blocking**: no consumer lane is waiting on it, and it
+touches no wire layout, because the measured-cost record has no encoder.
+
+One consumer is already mis-pointed by exactly this collision, and it is the
+reason the collision is worth ratifying rather than tolerating. The compiler's
+per-stage offload profile declares a field as "budgets/devices from the EXEC
+owner" and types it `ExecutionProfile` — but the record it names has no budget
+field and no device field, so the comment describes `StageExecutionProfile` while
+the type resolves to the measured-cost record. The field is meant to carry what
+the stage was *permitted* to use, so it must be re-pointed at
+`StageExecutionProfile`; its constructors change with it. That is a code change,
+specified and reported here, not made by this ratification.
+
+The failure mode this illustrates is the general one: the collision does not
+produce a compile error, it produces a field that type-checks, carries plausible
+zeros, and silently answers "what was this stage allowed to do?" with a record
+that cannot express the question.
 
 ```simple
 interface StageBackend<Request, Result>:
     fn capabilities() -> StageCapabilities
     fn estimate(request: Request,
-                profile: ExecutionProfile) -> CostEstimate
+                profile: StageExecutionProfile) -> CostEstimate
     fn plan(request: Request,
-            profile: ExecutionProfile,
+            profile: StageExecutionProfile,
             placement: PlacementSnapshot) -> StagePlan
     fn execute(plan: StagePlan) -> Result
     fn verify(result: Result,
@@ -2343,6 +2515,44 @@ struct CostEstimate:
 ```
 
 The scheduler chooses GPU only when expected total cost, including transfer and synchronization, beats the CPU path under the requested latency/throughput objective.
+
+**This is the one and only `CostEstimate` in this document, and its byte layout
+is frozen.** Fields in the order above, little-endian, no padding: seven `u64`
+work and byte counters (56 B), `synchronization_points` `u32` (4 B),
+`predicted_latency_us` `u64` (8 B), `confidence_milli` `u16` (2 B) — **70 bytes**.
+
+That layout is not negotiable per lane, because §20.3 embeds `CostEstimate`
+**by value** in `PlacementPlan`. An embedded record has no indirection to hide a
+disagreement behind: if the EXEC lane's `estimate` returned a differently-shaped
+`CostEstimate`, a `PlacementPlan` produced by PLACE and a cost produced by a
+stage backend would be two different records wearing one name, and the
+embedding is what makes that undetectable rather than a type error. **EXEC must
+adopt this exact 70-byte layout**; the freeze that PLACE performed is normative
+for both.
+
+Both `estimate` signatures in this document return this record — §21.1's
+`StageBackend.estimate` and §17.3's `SpatialLayoutProfile.estimate`. §17.3 was
+never given a second definition and does not get one.
+
+A divergence exists in the tree and is recorded here rather than left to be
+rediscovered by each of the consumer lanes. The structural-layout contract
+declares its own `CostEstimate` — `island_root_id`, `estimated_work`, `cpu_us`,
+`gpu_kernel_us`, `scheduling_us`, `host_to_device_bytes`, `device_to_host_bytes`,
+`synchronization_points`, `predicted_gpu_us`, all `i64`. It shares only
+`synchronization_points` and the two transfer-byte fields with the record above,
+and it is a *different kind* of quantity: it is per-island and denominated in
+elapsed microseconds already attributed to a stage, where §21.2 is per-request
+and denominated in abstract work plus a predicted latency. It is a genuine and
+useful record; it is simply not this one. It must be renamed — `LayoutIslandCost`
+is the accurate name — so that §17.3's `estimate` can return the §21.2 record it
+is declared to return. That is a code change, tracked and reported, not made by
+this ratification.
+
+One further declaration of the name exists, in the MIR auto-vectorisation cost
+model. It is unrelated to §20/§21 entirely — it costs loop vectorisation
+decisions inside the optimiser and never crosses a structural-compute boundary —
+so it is out of scope here and needs no rename beyond noting that a repository
+search for `CostEstimate` returns three declarations, not two.
 
 `CostEstimate` must stay converged with the compiler's collection cost algebra
 (`CostExpr`/`MemoryExpr`/`CardinalityExpr` and the REG1 operation-cost registry
