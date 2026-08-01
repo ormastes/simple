@@ -788,6 +788,110 @@ fn check_match_exhaustive(arm_ids: [i64], type_name: text):
             mi = mi + 1
         eval_warnings.push(msg)
 
+# ===== Match Fall-Through Diagnostic (BUG-2026-08-01-match-fallthrough) =====
+#
+# A `match` on an enum where NO arm fires used to take no branch and emit no
+# diagnostic: the statement form was a silent no-op, the expression form
+# silently produced nil (which reads back as the integer 3 under the nil-sentinel
+# encoding). That made a real layout bug invisible for a whole lane — the
+# frontier was built by a match that matched nothing, so every downstream stage
+# correctly reported "nothing dirty" and the first isolation blamed the wrong
+# component.
+#
+# The static exhaustiveness check CANNOT catch the important case. In the
+# reproduced instance the arms textually covered every variant; the value's
+# variant tag came from a DIFFERENT enum of the same bare name, resolved through
+# the global bare-name registry. Any compile-time checker built on that same
+# registry is looking at the wrong enum. So the runtime report is the
+# load-bearing half, and it must say so out loud — hence the collision note.
+#
+# Default mode is WARN (behaviour unchanged, diagnostic added). Callers that
+# want a hard stop opt in via match_fallthrough_set_abort(true).
+
+var match_fallthrough_abort: bool = false
+
+fn match_fallthrough_set_abort(enabled: bool):
+    """Opt in to hard-failing on a match fall-through instead of warning."""
+    match_fallthrough_abort = enabled
+
+fn match_fallthrough_get_abort() -> bool:
+    match_fallthrough_abort
+
+fn match_fallthrough_message(
+    type_name: text,
+    variant: text,
+    kind_name: text,
+    covered: [text],
+    where_path: text
+) -> text:
+    """Build the fall-through diagnostic.
+
+    Names the enum, the runtime value, the source location and the arms that
+    WERE covered. A message that only said "no arm matched" would not have
+    shortened the investigation this defect caused, so all four are required.
+    """
+    var enum_label = type_name
+    if enum_label == "":
+        enum_label = "<unresolved enum>"
+    var value_label = variant
+    if value_label == "":
+        value_label = "<" + kind_name + " value>"
+
+    var msg = "error: non-exhaustive match: no arm matched value '" + value_label
+    msg = msg + "' of enum '" + enum_label + "' (runtime kind: " + kind_name + ")"
+    if where_path != "":
+        msg = msg + " at " + where_path
+    if covered.len() > 0:
+        var ci: i64 = 0
+        msg = msg + "; arms cover: "
+        for cv in covered:
+            if ci > 0:
+                msg = msg + ", "
+            msg = msg + cv
+            ci = ci + 1
+    else:
+        msg = msg + "; no arm covered any variant"
+
+    # The collision hint. When the variant NAME appears in the covered list the
+    # arms are textually exhaustive, so the mismatch is one of identity, not
+    # coverage — that is the bare-name-registry collision, and saying it here is
+    # the whole point of this diagnostic.
+    var textually_covered: bool = false
+    for cv2 in covered:
+        if cv2 == value_label:
+            textually_covered = true
+    if textually_covered:
+        msg = msg + "\n  = note: '" + value_label + "' IS named by an arm, so this is a"
+        msg = msg + " bare-name collision: the value's enum is not the enum the arms name."
+        msg = msg + " Check for another declaration of '" + enum_label + "' or of '"
+        msg = msg + value_label + "' reachable through the global name registry."
+    else:
+        msg = msg + "\n  = help: add 'case " + value_label + ":' or a wildcard 'case _:' arm"
+    msg
+
+fn match_arm_covered_variants(arm_ids: [i64]) -> [text]:
+    """Variant names named by the match arms, for the fall-through diagnostic."""
+    var covered: [text] = []
+    for arm_id in arm_ids:
+        val pattern_eid = arm_get_pattern(arm_id)
+        val variant = match_arm_get_variant_name(pattern_eid)
+        if variant != "":
+            covered.push(variant)
+    covered
+
+fn report_match_fallthrough(
+    type_name: text,
+    variant: text,
+    kind_name: text,
+    arm_ids: [i64]
+):
+    """Emit the fall-through diagnostic through the interpreter warning channel."""
+    val covered = match_arm_covered_variants(arm_ids)
+    val msg = match_fallthrough_message(
+        type_name, variant, kind_name, covered, module_get_path()
+    )
+    eval_warnings.push(msg)
+
 fn infer_match_enum_type(arm_ids: [i64]) -> text:
     # Try to infer enum type from match arms by looking for EXPR_FIELD_ACCESS patterns
     for arm_id in arm_ids:

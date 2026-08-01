@@ -767,10 +767,15 @@ fn eval_match_expr(eid: i64) -> i64:
             return last_val
         env_pop_scope()
 
-    # No arm matched — emit exhaustiveness warning
+    # No arm matched. The old diagnostic named only the runtime KIND ("enum"),
+    # which is not enough to find the bug — report the enum, the value, the
+    # covered arms and the location. See report_match_fallthrough.
     val kind = val_get_kind(scrutinee)
     val val_name = val_kind_name(kind)
-    eval_warnings.push("warning: non-exhaustive match - no arm matched value of type " + val_name)
+    report_match_fallthrough(inferred_type, val_enum_variant_name(scrutinee), val_name, arm_ids)
+    if match_fallthrough_get_abort():
+        eval_set_error(eval_warnings[eval_warnings.len() - 1])
+        return -1
     val_make_nil()
 
 fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
@@ -853,6 +858,17 @@ fn match_pattern(value_id: i64, pattern_eid: i64) -> bool:
     val pattern_val = eval_expr(pattern_eid)
     if eval_had_error: return false
     val_equals(value_id, pattern_val)
+
+fn val_enum_variant_name(value_id: i64) -> text:
+    """Variant name of a boxed enum value, or "" when it is not one.
+
+    Used by the match fall-through diagnostic so the report can name the value
+    that matched nothing, not just its runtime kind.
+    """
+    if val_is_boxed_enum(value_id) == false: return ""
+    val tag_idx = val_struct_find_field_idx(value_id, "__tag")
+    if tag_idx < 0: return ""
+    val_get_text(val_struct_get_field_idx(value_id, tag_idx))
 
 fn val_is_boxed_enum(value_id: i64) -> bool:
     """True when `value_id` is the boxed [__tag, __payload] struct that

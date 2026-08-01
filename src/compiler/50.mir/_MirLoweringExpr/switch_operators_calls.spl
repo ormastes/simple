@@ -2060,6 +2060,59 @@ impl MirLowering:
             self.builder = b_n
             ci = ci + 1
 
+        # Fall-through diagnostic (BUG-2026-08-01-match-fallthrough).
+        #
+        # With no default arm, the last `next_block` simply gotos merge_block
+        # and merge emits `const 0` for the result: a match that fires NO arm
+        # takes no branch, yields a placeholder, and says nothing. That is the
+        # `error_fatal` docstring's own description of a fail-open placeholder,
+        # and it made a real layout defect invisible for a whole lane.
+        #
+        # Reported through `self.error` (NON-fatal: the message deliberately
+        # does NOT start with "enum match:", which is on the
+        # `_mir_error_is_fatal` allowlist in 80.driver). Warn-only is a
+        # measured choice, not timidity: 286 non-exhaustive enum matches exist
+        # in-tree today, so `error_fatal` here would fail the build at 286
+        # sites. See doc/08_tracking/bug/match_enum_fallthrough_silent_2026-08-01.md
+        # for the enumeration and the promotion plan.
+        if not has_default:
+            var missing_v: [text] = []
+            if self.enum_variant_index.has(enum_name):
+                for known_v in self.enum_variant_index[enum_name]:
+                    var seen_v = false
+                    for arm_v in enum_variants:
+                        if arm_v == known_v:
+                            seen_v = true
+                    if not seen_v:
+                        missing_v = missing_v.push(known_v)
+            var covered_txt = ""
+            var cvi = 0
+            for cv3 in enum_variants:
+                if cvi > 0:
+                    covered_txt = covered_txt + ", "
+                covered_txt = covered_txt + cv3
+                cvi = cvi + 1
+            if covered_txt == "":
+                covered_txt = "<none>"
+            var miss_txt = ""
+            var mvi = 0
+            for mv3 in missing_v:
+                if mvi > 0:
+                    miss_txt = miss_txt + ", "
+                miss_txt = miss_txt + mv3
+                mvi = mvi + 1
+            var fmsg = "non-exhaustive enum match on '" + enum_name
+            fmsg = fmsg + "': no default arm, so an unmatched value takes NO branch"
+            fmsg = fmsg + " and yields a placeholder 0. Arms cover: " + covered_txt + "."
+            if miss_txt != "":
+                fmsg = fmsg + " Missing: " + miss_txt + "."
+            else:
+                fmsg = fmsg + " Arms are textually exhaustive, so any fall-through here"
+                fmsg = fmsg + " is a bare-name collision: the value's enum is not the enum"
+                fmsg = fmsg + " these arms name."
+            fmsg = fmsg + " Add 'case _:' to make the fall-through explicit."
+            self.error(fmsg, Some(scrutinee.span))
+
         if has_default:
             val dres = self.lower_block_expected(default_body, expected_type)
             var b_d2 = self.builder
