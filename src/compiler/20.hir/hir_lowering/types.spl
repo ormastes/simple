@@ -21,6 +21,15 @@ extern fn rt_enum_discriminant(value: TypeKind) -> i64
 fn hir_type_env_get(key: text) -> text:
     rt_env_get(key)
 
+# SEED-PARITY helper (2026-08-01): the seed spells this
+# `name.chars().all(|ch| ch.is_ascii_uppercase())` (type_resolver.rs:141),
+# guarded by `name.len() == 1`. ASCII 'A'..'Z' only -- deliberately NOT a
+# Unicode-uppercase test, so a non-ASCII single-character type name still
+# reaches the strict unresolved-type gate instead of being erased to Any.
+fn _seed_parity_is_ascii_upper(name: text) -> bool:
+    val code = name.char_code_at(0)
+    code >= 65 and code <= 90
+
 fn hir_type_kind_disc(k: TypeKind) -> i64:
     rt_enum_discriminant(k)
 
@@ -499,6 +508,7 @@ impl HirLowering:
         HirType(kind: kind, span: lt.span)
 
     me lower_named_kind(name: text, hir_args: [HirType], span: Span) -> HirTypeKind:
+        # (helper `_seed_parity_is_ascii_upper` is defined at module scope below)
         # bug: native_result_unwrap silent-wrong tail -- `T?` optional
         # annotations arrive from the flat-AST bridge as Named("Option", [T])
         # (convert_nodes.spl TYPE_OPTION_I64/F64/TEXT/BOOL tags), NOT as
@@ -516,6 +526,19 @@ impl HirLowering:
         # deliberately keeps the pre-existing fall-through behavior.
         if name == "Option" and hir_args.len() == 1:
             return HirTypeKind.Optional(hir_args[0])
+        # SEED-PARITY (2026-08-01): `has_X` spells an optional X.
+        # The seed (type_resolver.rs:128) strips a `has_` prefix and re-resolves
+        # the base as `Type::Optional(base)`. Legacy compiler sources use this
+        # spelling; without the rule every `has_*` annotation reached the strict
+        # gate below and hard-errored.
+        #
+        # Placed BEFORE the symbol lookup to match the seed's order exactly.
+        # That ordering is only safe because NO type in this tree is declared
+        # `has_*` (verified by declaration grep over src/**/*.spl), so the rule
+        # cannot shadow a real user type here.
+        if name.starts_with("has_") and name.len() > 4:
+            val has_base = name[4:]
+            return HirTypeKind.Optional(HirType(kind: self.lower_named_kind(has_base, [], span), span: span))
         match name:
             case "i8": HirTypeKind.Int(8, true)
             case "i16": HirTypeKind.Int(16, true)
@@ -601,6 +624,41 @@ impl HirLowering:
                     if custom_primitive_is_name(name):
                         custom_primitive_bind_symbol(name, symbol_id.id)
                     HirTypeKind.Named(symbol_id, hir_args)
+                # SEED-PARITY (2026-08-01): the three rules below all sit AFTER
+                # the symbol lookup, exactly where the seed puts them
+                # (type_resolver.rs:141 single-letter, :178 tuple, :182 bare
+                # containers -- all after `self.module.types.lookup(name)` at
+                # :138). The ordering is load-bearing, NOT incidental: this tree
+                # really does declare `Map` (1 struct), `HashMap` (2 classes +
+                # 1 struct) and `Set` (2 structs), so hoisting these into the
+                # match above would shadow those real user types and silently
+                # retype their annotations to Any. A declared type must win.
+                #
+                # Bare single uppercase letter (`T`, `K`, `V`) -> Any. These are
+                # type-parameter spellings that reach here when the generic
+                # binder did not register them; the seed erases them to ANY.
+                elif name.len() == 1 and _seed_parity_is_ascii_upper(name):
+                    HirTypeKind.Any
+                # Bare `tuple` -> the empty tuple type. Seed: registers
+                # `HirType::Tuple(vec![])` (type_resolver.rs:178). Element types
+                # are genuinely unknown at this point -- the annotation carried
+                # none -- so an empty element list is the faithful mapping, not
+                # a widening to Any.
+                elif name == "tuple":
+                    HirTypeKind.Tuple([])
+                # Bare container names left over from annotations that dropped
+                # their generic arguments. Seed maps `Map`/`HashMap` WITH two
+                # arguments to a real dict (type_resolver.rs:459) and every
+                # argless spelling to ANY (:182). Mirror both halves; the
+                # 2-arg form reuses the same HirTypeKind.Dict the existing
+                # `Dict` arm above builds.
+                elif name == "Map" or name == "HashMap":
+                    if hir_args.len() == 2:
+                        HirTypeKind.Dict(hir_args[0], hir_args[1])
+                    else:
+                        HirTypeKind.Any
+                elif name == "dict" or name == "set":
+                    HirTypeKind.Any
                 else:
                     if name == "Any" or (name == "Option" and hir_args.len() == 0):
                         self.recovered("unresolved type: {name}", span)
