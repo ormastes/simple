@@ -205,14 +205,56 @@ Verified: all eight shapes above correct on cranelift after the fix, interpreter
 output unchanged, and self-referencing (`n += n` -> 10, `m *= m` -> 49) and
 index (`xs[i] += 10`) targets correct.
 
-### Known remaining gap — suspension compound assignment
+### Suspension compound assignment — FIXED 2026-08-01 (was the remaining gap)
 
 `AssignOp::SuspendAddAssign` / `SuspendSubAssign` / `SuspendMulAssign` /
-`SuspendDivAssign` (`~+=`, `~-=`, `~*=`, `~/=`) are **still dropped to a plain
-store** by this same site. They were deliberately left alone: their await
-semantics are handled by the effects pass and folding them in unverified would
-change async lowering. Anyone touching async assignment should fix these next —
-the shape of the defect is identical.
+`SuspendDivAssign` (`~+=`, `~-=`, `~*=`, `~/=`) were **still dropped to a plain
+store** by this same site after the original fix, which mapped only the five
+plain forms. The shape of the defect was identical, so this was a sibling left
+behind by an incomplete sweep, not a separate bug.
+
+**Measured at `19f3241f568` before the fix** (release build of `simple-driver`,
+`SIMPLE_EXECUTION_MODE=jit`, 0 JIT fallbacks, exit 0, no diagnostic):
+
+| expression | start | want | JIT before | interpreter |
+|---|---|---|---|---|
+| `s.n ~+= 2` | 5 | 7 | **2** | 7 |
+| `s.n ~-= 2` | 5 | 3 | **2** | 3 |
+| `s.n ~*= 3` | 5 | 15 | **3** | 15 |
+| `s.n ~/= 4` | 20 | 5 | **4** | 5 |
+| `x ~+= 2` (plain local) | 5 | 7 | **2** | 7 |
+
+Every wrong value is exactly the right-hand side — the operator-dropped
+signature, not a load returning zero.
+
+**The deferral reason did not survive checking.** Folding these does *not*
+change async lowering: suspension is a separate axis carried by `assign.op`
+itself, which `compound_assign_binop` only reads and never rewrites. The
+tree-walking interpreter has folded all four to the same `BinOp`s since before
+this bug was filed — `interpreter/node_exec.rs::exec_augmented_assignment`
+computes its `is_suspend` await decision *independently* of `bin_op`. The fix
+therefore makes the JIT match an existing reference behaviour rather than
+inventing one. `~=` (`SuspendAssign`) stays unfolded: it is a bare
+await-assignment with no arithmetic operator, exactly like plain `=`.
+
+The `_ => None` catch-all was also replaced with an **exhaustive** match, so a
+future `AssignOp` variant is now a compile error instead of another silently
+dropped operator. That is the class of change that prevents a third sibling.
+
+Standing coverage: `test/fixtures/jit_differential/suspend_compound_assign.spl`,
+registered `known_good: "both"`. **Non-vacuity proved against the
+implementation** (not a shim): the harness reports `unexpected failures: 1 /
+REGRESSION` on the unfixed origin-tip binary and `0` on the fixed one.
+
+### Interpreter gap found while probing — `xs[i] += v` (LOUD, not silent)
+
+Separate and pre-existing at `19f3241f568`: the **interpreter** rejects an
+indexed compound-assignment target outright —
+`error: semantic: invalid assignment: unsupported augmented assignment target`,
+rc=1 — for `arr[1] += 10`, which the JIT computes correctly (12). This is the
+mirror image of the bug above and is recorded rather than smoothed over. It
+**fails loudly**, so it is not a silent-wrong-answer defect and was left
+unfixed here; it is out of scope for this bug and needs its own entry.
 
 ### Specs cannot gate this — read before trusting a green run
 

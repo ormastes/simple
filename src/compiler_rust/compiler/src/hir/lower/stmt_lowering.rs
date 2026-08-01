@@ -10,18 +10,32 @@ use super::lowerer::Lowerer;
 
 /// Map an augmented-assignment operator to the binary operator it desugars to.
 ///
-/// Returns `None` for a plain `=` (nothing to desugar). The suspension forms
-/// (`~=`, `~+=`, ...) are deliberately left alone here: their await semantics are
-/// handled by the effects pass, and folding them in unverified would change async
-/// lowering. That remaining gap is tracked in the bug doc for this fix.
+/// Returns `None` for a plain `=` and for `~=` — neither carries an arithmetic
+/// operator to fold (`~=` is a bare await-assignment).
+///
+/// The suspension *compound* forms (`~+=`, `~-=`, `~*=`, `~/=`) DO fold, exactly
+/// like their plain counterparts. Leaving them out was the sibling half of
+/// `jit_struct_field_compound_assign_loads_zero_2026-07-27`: `HirStmt::Assign`
+/// has no operator field, so an unfolded `x ~+= v` silently stored a bare `v`
+/// on the JIT/native path (measured: `n=5; n ~+= 2` gave 2, exit 0, no
+/// diagnostic) while the interpreter was correct.
+///
+/// Folding here does NOT change await semantics: suspension is a separate axis
+/// carried by `assign.op` itself, which this function only reads. The
+/// tree-walking interpreter has mapped these four to the same `BinOp`s all
+/// along (`interpreter/node_exec.rs`, `exec_augmented_assignment`), where the
+/// `is_suspend` await decision is computed independently of `bin_op` — so this
+/// makes the JIT match the reference behaviour rather than inventing one.
 fn compound_assign_binop(op: ast::ast::AssignOp) -> Option<BinOp> {
     match op {
-        ast::ast::AssignOp::AddAssign => Some(BinOp::Add),
-        ast::ast::AssignOp::SubAssign => Some(BinOp::Sub),
-        ast::ast::AssignOp::MulAssign => Some(BinOp::Mul),
-        ast::ast::AssignOp::DivAssign => Some(BinOp::Div),
+        ast::ast::AssignOp::AddAssign | ast::ast::AssignOp::SuspendAddAssign => Some(BinOp::Add),
+        ast::ast::AssignOp::SubAssign | ast::ast::AssignOp::SuspendSubAssign => Some(BinOp::Sub),
+        ast::ast::AssignOp::MulAssign | ast::ast::AssignOp::SuspendMulAssign => Some(BinOp::Mul),
+        ast::ast::AssignOp::DivAssign | ast::ast::AssignOp::SuspendDivAssign => Some(BinOp::Div),
         ast::ast::AssignOp::ModAssign => Some(BinOp::Mod),
-        _ => None,
+        // `AssignOp::Assign` (`=`) and `AssignOp::SuspendAssign` (`~=`) carry no
+        // operator. There is no `~%=` token, so `ModAssign` has no suspend twin.
+        ast::ast::AssignOp::Assign | ast::ast::AssignOp::SuspendAssign => None,
     }
 }
 
