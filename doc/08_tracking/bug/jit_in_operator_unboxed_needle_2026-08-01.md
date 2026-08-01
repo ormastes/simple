@@ -319,3 +319,183 @@ and the Cranelift fix. On a 32-bit target the C runtime's `int64_t` return also
 cannot fit the `i32` tagged `RuntimeValue`. The 32-bit tagged-float
 representation is under-specified across the two runtimes; a build that actually
 links the C runtime on a 32-bit target would need this reconciled first.
+
+## Disposition of the 36-symbol sweep (2026-08-01, follow-up lane)
+
+The sweep in §5 above was reproduced independently and then dispositioned per
+symbol. Reproduction agreed exactly: cross-referencing every `rt_*` token in
+`codegen/llvm/` against both runtimes yields 54 raw hits, of which 18 are
+non-callees (Rust locals `rt_args`/`rt_fn`/`rt_func`/`rt_name`/`rt_fn_name`/
+`rt_enum_disc`, LLVM *value* names `rt_len_inline`/`rt_pool_join_tagged`/
+`rt_redirect`, error-message strings `rt_bytes_le_at`/`rt_typed_bytes_le_at`/
+`rt_typed_words_at`/`rt_string_substring`, prefix fragments `rt_builtin_`/
+`rt_fault_`, test names `rt_value_bool_raw_bits`/
+`rt_value_bool_calls_receive_raw_boolean_bits`, and `rt_unbox_float` which now
+survives only inside the previous lane's NEGATIVE assertions). That leaves the
+same 36 real candidates.
+
+### Absence re-established at the BINARY level — PROVED
+
+The previous lane established absence by `git grep` at a remote sha. That was
+re-done one layer lower, against the **built artifacts**, which cannot be fooled
+by a definition my regex failed to shape-match:
+
+- `nm --defined-only src/compiler_rust/target/release/libsimple_runtime.a` →
+  1,679 exported `rt_*`
+- `nm --defined-only build/simple-core/libsimple_runtime.a` → 790 exported `rt_*`
+- **All 36 candidates are absent from both.**
+- True-positive control: `rt_value_int`, `rt_value_float`, `rt_array_push`,
+  `rt_dict_get`, `rt_array_len`, `rt_dict_contains`, `rt_coverage_path_probe`,
+  `rt_enum_new`, `rt_generator_next` are all PRESENT. Without this control an
+  extraction bug would report every symbol as missing.
+
+### Link-level discrimination — PROVED, and it is the only layer that sees it
+
+Same method as the `rt_box_float` fix, applied against the real Rust runtime
+archive rather than a synthetic object:
+
+| probe | result |
+|---|---|
+| object referencing `rt_coverage_path` | `rc=1`, ``undefined reference to `rt_coverage_path' `` |
+| object referencing `rt_path_probe` | `rc=0`, ELF 64-bit executable, `nm` shows `T rt_path_probe` at `0x8fa90` |
+| object referencing `rt_dict_contains_key` | `rc=1`, ``undefined reference to `rt_dict_contains_key' `` |
+| object referencing `rt_dict_contains` | `rc=0`, ELF 64-bit executable, `nm` shows `T rt_dict_contains` at `0x3050a0` |
+
+Compilation never discriminates; only linking does.
+
+### CORRECTION to the premise: 29 of the 36 are LATENT, not live — PROVED
+
+§5 said these are "reachable — each has a corresponding `MirInst` that lowering
+actually produces", and inferred from that that they fire on every LLVM target.
+The first half is true; the conclusion is **not**, and this is the single most
+important finding of this lane.
+
+`MirInst` lowering does produce these instructions. But the LLVM backend has TWO
+instruction paths, and the one containing these emissions is almost entirely
+unreachable:
+
+- `codegen/llvm/functions.rs` `compile_instruction` is the real body compiler.
+  It has its own arm for every one of these instructions — verified individually
+  for `OptionSome`, `OptionNone`, `ResultOk`, `ResultErr`, `ContractCheck`,
+  `PatternTest`, `EnumUnit`, `EnumWith`, `UnionWrap`, `PointerNew`,
+  `FutureCreate`, `GeneratorCreate`, `ParMap`, `TryUnwrap`, `FStringFormat`,
+  `MethodCallVirtual`, `UnitBoundCheck`.
+- `codegen/llvm/emitter.rs` (`LlvmEmitter`, the `CodegenEmitter` impl) is reached
+  **only** through `compile_emitter_simd_instruction`, whose sole caller is
+  `functions.rs:1116` — a match arm listing **`Vec*` SIMD instructions only**.
+- The three coverage probes never even get that far: `functions.rs:1739` handles
+  `DecisionProbe | ConditionProbe | PathProbe` as an explicit no-op
+  ("Coverage instrumentation not yet implemented").
+
+So the ~29 `emitter.rs` emissions are a **latent** landmine, not a live outage.
+They arm the moment anything routes a non-`Vec*` instruction through
+`LlvmEmitter`. The genuinely live breakage is much smaller — see the table.
+
+### Third spelling found
+
+`codegen/common_backend.rs:428-434` declares the codegen roots for these MIR
+instructions as `rt_decision_probe` / `rt_condition_probe` / `rt_path_probe`.
+Those three **do exist** in the Rust runtime. So the repo held three spellings of
+one concept: the correct one in the roots list and in Cranelift
+(`codegen/instr/coverage.rs`), and a dead one in `emitter.rs`.
+
+### Per-symbol disposition (all 36)
+
+**(a) FIXED — renamed to the symbol that exists.** Landed in `9349ff9`.
+
+| symbol | now emits | path | note |
+|---|---|---|---|
+| `rt_dict_contains_key` | `rt_dict_contains` | **LIVE** | exported by both runtimes; `Dict.contains_key` under LLVM previously failed at link |
+| `rt_coverage_path` | `rt_path_probe` | latent | exact arity/order match |
+| `rt_coverage_decision` | `rt_decision_probe` | latent | **+ operands reordered** |
+| `rt_coverage_condition` | `rt_condition_probe` | latent | **+ operands reordered** |
+
+The reorder is not cosmetic. The runtime takes
+`rt_decision_probe(decision_id: u64, result: bool)` and
+`rt_condition_probe(decision_id: u64, condition_id: u32, result: bool)` — ids
+first, result last, which is how Cranelift passes them — while `emitter.rs`
+passed `result` FIRST. Renaming alone would have converted a loud link error
+into a silently transposed call.
+
+**(FALSE POSITIVE) — not backend-emitted callees at all (3).**
+`rt_typed_bytes_u8_at`, `rt_typed_bytes_u8_set`,
+`rt_typed_bytes_u32_le_unchecked` appear in `functions/calls.rs` as
+`if sffi_name == "..."` guards that trigger **inline expansion** and return
+early. They match an incoming user-declared `@extern` name; the backend never
+emits them as callees. No action.
+
+**(b) NEEDS RUNTIME IMPLEMENTATION — live path, no equivalent exists (3).**
+`rt_array_map`, `rt_array_each`, `rt_array_reduce`, from the method-name mapping
+table in `functions.rs` (the LIVE path, same table as the `Dict` entry above).
+The runtime exports `rt_array_filter`, `rt_array_find`, `rt_array_any`,
+`rt_array_all` — closure-taking helpers — but **no** `map`/`each`/`reduce`/
+`fold`. So `arr.map(f)` / `arr.each(f)` / `arr.reduce(f)` currently fail at LINK
+under the LLVM backend. This is a real gap and the highest-value remaining item;
+it is a genuine runtime feature addition (closure invocation), not a rename, so
+it is filed rather than guessed at here.
+
+**(c) LATENT placeholder lowerings — 26.**
+`rt_contract_check`, `rt_option_some`, `rt_option_none`, `rt_result_ok`,
+`rt_result_err`, `rt_try_unwrap`, `rt_pattern_test`, `rt_pattern_bind`,
+`rt_enum_unit`, `rt_enum_with`, `rt_union_wrap`, `rt_union_payload`,
+`rt_union_discriminant`, `rt_pointer_new`, `rt_pointer_ref`, `rt_pointer_deref`,
+`rt_future_create`, `rt_generator_create`, `rt_generator_yield`,
+`rt_fstring_format`, `rt_vtable_lookup`, `rt_unit_bound_check`, `rt_par_map`,
+`rt_par_filter`, `rt_par_reduce`, `rt_par_for_each`.
+
+These are NOT simply "a helper that needs writing". Read the emitter bodies: they
+**discard their own semantic operands**.
+
+- `emit_enum_unit(dest, _enum_name, _variant_name)` calls
+  `rt_enum_unit(i64_const(0))` — a literal constant. Every unit variant of every
+  enum would produce the same value.
+- `emit_pattern_test(dest, subject, _pattern)` calls `rt_pattern_test(subj)` —
+  the pattern is dropped, so the test tests nothing.
+- `emit_union_wrap`, `emit_future_create`, `emit_generator_create` and the rest
+  follow the same shape.
+
+Implementing a runtime helper behind these would convert a link error into a
+**silently wrong answer**, which is strictly worse. Their correct disposition is
+therefore: either thread the real operands and lower properly, or make the
+emitter return a hard `Err` so a future routing change fails loudly at compile
+time instead of emitting a call to a symbol that does not exist. Not done in
+this lane because it is a behaviour decision across 26 methods, and because
+nothing reaches them today.
+
+Note for whoever takes them: several LOOK like renames and are not.
+`rt_enum_unit`/`rt_enum_with` → `rt_enum_new(enum_id: u32, discriminant: u32,
+payload)` needs ids the emitter never receives; `rt_future_create` →
+`rt_future_new(body_func, ctx)` and `rt_generator_create` →
+`rt_generator_new(body_func, slots, ctx)` are arity mismatches against a single
+`block_id` argument. `rt_pattern_*`, `rt_union_*`, `rt_pointer_*`, `rt_par_map/
+filter/reduce/for_each` and `rt_fstring_format` have no counterpart of any name
+in either runtime.
+
+### Residual (recorded, not silently resolved)
+
+`call_runtime_void` declares every parameter as `runtime_int_type()` (i64 on
+64-bit) regardless of the real signature, so the three probe calls now declare
+`void(i64, i64[, i64])` against runtime symbols taking `(u64, u32)` /
+`(u64, u32, bool)`. The low bits are correct on the SysV and AArch64 ABIs the
+values actually travel over, and this predates and outlives the rename, so it is
+recorded rather than papered over — the same treatment §6 gives the divergent
+`rt_value_float` signature.
+
+### Verification for the landed change
+
+- `cargo test -p simple-compiler --features llvm --lib codegen::llvm::` →
+  **24 passed, 1 failed**.
+- The one failure, `rt_value_bool_calls_receive_raw_boolean_bits`, is **PROVED
+  pre-existing**: the two touched files were reverted to their base-sha content
+  and the suite re-run, giving **22 passed / 1 failed** with that identical test
+  failing. It is a different path (`rt_value_bool` on x86_64) and is not absorbed
+  into this result. It remains open — see §4 above, where the previous lane
+  recorded it independently.
+- Two regression guards added, each pairing negative assertions ("the dead name
+  is gone") with positive ones ("the real emission is still there"), so deleting
+  an emission cannot satisfy them — the same true-positive-control discipline as
+  `test_x86_64_float_boxing_is_inline_not_a_runtime_call`. Both search only the
+  non-test region of their file so they cannot match their own text.
+- **Non-vacuity PROVED by sabotage of the implementation, not a shim:** the four
+  callee names were reverted (and the two operand orders un-swapped) with the
+  test bodies left untouched; both guards went RED. Restoring turned them GREEN.
