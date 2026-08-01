@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use simple_parser::ast::{BinOp, Block, Expr, FunctionDef, Node, Type, UnaryOp};
+use simple_parser::ast::{
+    BinOp, Block, Expr, FunctionDef, MatchArm, Node, Pattern, Type, UnaryOp,
+};
 
 use crate::value::{ACTOR_BUILTINS, BLOCKING_BUILTINS, GENERATOR_BUILTINS};
 
@@ -218,6 +220,45 @@ pub fn analyze_function(f: &FunctionDef, mode: CompilabilityMode) -> Compilabili
     }
 }
 
+/// Stage 1 of native `match` support: is every arm a payload-free enum variant
+/// test (or a wildcard), with no guard?
+///
+/// Such a match is lowered by HIR into a `rt_enum_discriminant` call plus an
+/// `Eq` / `Terminator::If` chain — every one of which native isel already
+/// emits — so flagging it as interpreter-only is a stale over-approximation.
+///
+/// Deliberately NOT accepted here (see
+/// `doc/03_plan/compiler/native_pattern_match_staging.md`):
+///
+/// * `Pattern::Identifier` / `MutIdentifier` / `MoveIdentifier` — a bare
+///   identifier in `case` position is an **irrefutable binding**, not a variant
+///   test. Accepting it would make the native lane inherit that defect.
+/// * Any payload at all (`Some(x)`, `Const(Str(x), _)`) — nested payload
+///   sub-patterns currently always-match and never-bind on the compiled lanes.
+/// * `Struct` / `Tuple` / `Array` / `Or` / `Range` / `Typed` / `Rest` /
+///   `Literal` — no verified native lowering yet.
+fn is_native_payload_free_enum_match(arms: &[MatchArm]) -> bool {
+    let mut saw_variant = false;
+    for arm in arms {
+        if arm.guard.is_some() {
+            return false;
+        }
+        match &arm.pattern {
+            Pattern::Enum { payload, .. } => {
+                // `Color.Red` (None) and `Color.Red()` (empty) are both
+                // payload-free; anything that binds is out of scope.
+                if payload.as_ref().is_some_and(|p| !p.is_empty()) {
+                    return false;
+                }
+                saw_variant = true;
+            }
+            Pattern::Wildcard => {}
+            _ => return false,
+        }
+    }
+    saw_variant
+}
+
 /// Analyze a block of statements (Block contains Vec<Node>)
 fn analyze_block(block: &Block, reasons: &mut Vec<FallbackReason>, mode: CompilabilityMode) {
     for node in &block.statements {
@@ -273,7 +314,17 @@ fn analyze_node(node: &Node, reasons: &mut Vec<FallbackReason>, mode: Compilabil
         Node::Break(_) | Node::Continue(_) => {}
         Node::Match(match_stmt) => {
             analyze_expr(&match_stmt.subject, reasons, mode);
-            add_reason(reasons, FallbackReason::PatternMatch);
+            // Arm bodies were previously never walked: the blanket
+            // `PatternMatch` reason made it moot. Now that a match can be
+            // accepted natively, their contents must be analyzed too.
+            for arm in &match_stmt.arms {
+                analyze_block(&arm.body, reasons, mode);
+            }
+            if !(mode == CompilabilityMode::AotNative
+                && is_native_payload_free_enum_match(&match_stmt.arms))
+            {
+                add_reason(reasons, FallbackReason::PatternMatch);
+            }
         }
         Node::With(with_stmt) => {
             analyze_expr(&with_stmt.resource, reasons, mode);
@@ -501,9 +552,16 @@ fn analyze_expr(expr: &Expr, reasons: &mut Vec<FallbackReason>, mode: Compilabil
         }
 
         // Match expressions
-        Expr::Match { subject, .. } => {
+        Expr::Match { subject, arms } => {
             analyze_expr(subject, reasons, mode);
-            add_reason(reasons, FallbackReason::PatternMatch);
+            for arm in arms {
+                analyze_block(&arm.body, reasons, mode);
+            }
+            if !(mode == CompilabilityMode::AotNative
+                && is_native_payload_free_enum_match(arms))
+            {
+                add_reason(reasons, FallbackReason::PatternMatch);
+            }
         }
 
         // Struct/class initialization lowers to MIR StructInit and is part of
