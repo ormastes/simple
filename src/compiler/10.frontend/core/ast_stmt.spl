@@ -334,19 +334,74 @@ fn stmt_get_tag(idx: i64) -> i64:
         print "[stmt_get_tag] idx={idx} arena={fallback}"
     fallback
 
+# Sibling bounds guards for the rest of the statement accessor family.
+#
+# `stmt_get_tag` above has been guarded since the stage-4 work, but its
+# siblings were not — and a guard on the dispatcher alone does not stop the
+# crash. A walker asks for the tag (gets -1 plus a loud OOB line), falls
+# through to its default branch, and then still reads `stmt_get_span/expr/
+# name/type/body` with the SAME stale index. That unguarded read is what
+# actually kills the process.
+#
+# Measured on `src/compiler_rust/lib/std/src/tooling/misc_commands.spl` under
+# `simple lint` on the interpreter route:
+#
+#     [stmt_get_tag] OOB idx=149 arena_len=79 arena_gen=1 -> -1
+#     error: semantic: array index out of bounds: index is 149 but length is 79
+#
+# Same index, same length, one line apart — the guard fired and the very next
+# read of the same stale index was fatal. The process ended there: no summary,
+# no verdict, no NOT-LINTED count, so the file simply vanished from the run.
+# The JIT reaches the identical stale index (149 and 158) and survives it,
+# which is the whole reason the two engines disagreed on this file. Neither
+# verdict is trustworthy for such a file; what is fixed here is only that the
+# interpreter no longer dies silently instead of reporting.
+# See doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
+#
+# These return the neutral values an absent node carries, matching the
+# established precedent in this arena family (`decl_get`, `expr_contains_yield`,
+# `stmt_contains_yield`, `stmt_get_tag`). This is containment, not a root-cause
+# fix: WHY a stale index reaches these accessors at arena_gen=1 — when no
+# second ast_reset has run — is still open and tracked in that bug file.
+#
+# The loud, always-on OOB report stays on `stmt_get_tag`, which any walk
+# reaching a stale node passes through first, so completing the family removes
+# the crash without silencing the diagnosis. The per-accessor line is gated
+# behind SIMPLE_TRACE_AST_OOB (default off) so a walk over a stale subtree
+# cannot flood the output with one line per field.
+fn stmt_oob_trace(accessor: text, idx: i64, arena_len: i64):
+    val trace_ast_oob = rt_env_get("SIMPLE_TRACE_AST_OOB") ?? ""
+    if trace_ast_oob != "":
+        print "[{accessor}] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()}"
+
 fn stmt_get_span(idx: i64) -> i64:
+    if idx < 0 or idx >= stmt_span.len():
+        stmt_oob_trace("stmt_get_span", idx, stmt_span.len())
+        return -1
     stmt_span[idx]
 
 fn stmt_get_expr(idx: i64) -> i64:
+    if idx < 0 or idx >= stmt_expr.len():
+        stmt_oob_trace("stmt_get_expr", idx, stmt_expr.len())
+        return -1
     stmt_expr[idx]
 
 fn stmt_get_name(idx: i64) -> text:
+    if idx < 0 or idx >= stmt_name.len():
+        stmt_oob_trace("stmt_get_name", idx, stmt_name.len())
+        return ""
     stmt_name[idx]
 
 fn stmt_get_type(idx: i64) -> i64:
+    if idx < 0 or idx >= stmt_type_tag.len():
+        stmt_oob_trace("stmt_get_type", idx, stmt_type_tag.len())
+        return 0
     stmt_type_tag[idx]
 
 fn stmt_get_body(idx: i64) -> [i64]:
+    if idx < 0 or idx >= stmt_body.len():
+        stmt_oob_trace("stmt_get_body", idx, stmt_body.len())
+        return []
     stmt_body[idx]
 
 export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN

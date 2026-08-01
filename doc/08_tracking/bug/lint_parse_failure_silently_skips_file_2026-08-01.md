@@ -910,3 +910,119 @@ And it is a harness, not a gate: nothing yet runs it in CI.
 so a crashed lint file fails a gate rather than only a manual sweep. Until then
 this is opt-in, and `repo_verification_layer_is_fail_open_2026-07-28.md` still
 applies.**
+
+## The interpreter CRASH on misc_commands.spl — CONTAINED (not root-caused)
+
+**Reproduced and fixed 2026-08-01.** Instrument:
+`bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731` (Jul 30),
+tree = a private `git archive` of origin `5ca84bcefe5`, never the shared working
+copy. One process per file throughout.
+
+### RED — measured, both engines, same file, same binary
+
+`simple lint src/compiler_rust/lib/std/src/tooling/misc_commands.spl`
+
+Interpreter route (the default — `lint_entry.spl` mentions `get_cli_args`, so
+`should_prefer_interpreter_for_source` routes it to the interpreter; no
+`[jit-fallback]` marker fires because it is a deliberate pre-JIT decision):
+
+    [stmt_get_tag] OOB idx=149 arena_len=79 arena_gen=1 -> -1
+    error: semantic: array index out of bounds: index is 149 but length is 79
+    rc=1, summary lines: 0
+
+`SIMPLE_EXECUTION_MODE=jit`, same file, same binary:
+
+    [stmt_get_tag] OOB idx=149 arena_len=79 arena_gen=1 -> -1
+    [stmt_get_tag] OOB idx=158 arena_len=79 arena_gen=1 -> -1
+    ... 5 warnings ...
+    Found 0 error(s), 5 warning(s), 0 auto-fix(es) available
+    Lint passed: all files clean
+    rc=0
+
+### The mechanism: the guard was on the dispatcher, not on its siblings
+
+The two lines above are one line apart and carry the **same index and the same
+length**. `stmt_get_tag` bounds-checks, prints, and returns -1; the walker takes
+its default branch and then reads the SAME stale index through
+`stmt_get_span/expr/name/type/body`, none of which were bounds-checked. That
+unguarded read is what killed the process.
+
+Earlier lanes guarded `decl_get`, `expr_contains_yield`, `stmt_contains_yield`,
+`expr_get_tag` and `stmt_get_tag` — the dispatchers and the recursive walkers —
+and left every plain field accessor in the same two arenas unguarded. This is
+the "a sweep that does not enumerate the family leaves siblings" shape.
+
+Fixed by completing the family, as pure additions (55 + 63 + 13 + 15 lines
+added, **0 lines removed**):
+
+* `src/compiler/10.frontend/core/ast_stmt.spl` — `stmt_get_span`,
+  `stmt_get_expr`, `stmt_get_name`, `stmt_get_type`, `stmt_get_body`
+* `src/compiler/10.frontend/core/_AstExpr/accessors.spl` — `expr_get_span`,
+  `_int`, `_float`, `_str`, `_left`, `_right`, `_extra`, `_args`, `_arg_names`,
+  `_stmts`
+* `src/compiler/10.frontend/core/_Ast/module_state.spl` — the two struct
+  builders `expr_get` and `stmt_get`, which read eleven and seven arena arrays
+  respectively and are the widest single crash surfaces in the family
+
+Neutral returns match the precedent already set by `decl_get` (-1 / "" / 0 /
+`[]`, and tag 0 for the struct builders, since no real `EXPR_*` or `STMT_*`
+constant is 0). The loud, always-on OOB line stays on `stmt_get_tag` /
+`expr_get_tag`, which any walk reaching a stale node passes through first, so
+the diagnosis is not silenced. The new per-accessor line is gated behind
+`SIMPLE_TRACE_AST_OOB` (default off) so a walk over a stale subtree cannot flood
+the output with one line per field.
+
+### GREEN — same census, same binary, same tree, patched
+
+    census: inputs=2 verdicts=2 linted=2 not_linted=0 crash=0 timeout=0
+    PASS: 2 file(s) all produced a lint summary (2 linted, 0 not linted)
+    LINTED  lane_probe/clean_control.spl                                rc=0
+    LINTED  src/compiler_rust/lib/std/src/tooling/misc_commands.spl     rc=0
+
+against the identical RED census on the identical tree before the patch:
+
+    census: inputs=2 verdicts=2 linted=1 not_linted=0 crash=1 timeout=0
+    CRASH   src/compiler_rust/lib/std/src/tooling/misc_commands.spl     rc=1
+
+The positive control is `LINTED` in **both** runs, so the change did not simply
+make everything pass. The three edited files are themselves compiled as part of
+the lint tool's own module graph on every one of these runs, so a GREEN census
+is also a compile check of the edit.
+
+### This is CONTAINMENT, and the root cause is STILL OPEN
+
+**Do not read this as "the arena desync is fixed."** What is fixed is that the
+interpreter now reports instead of dying. The stale index is still stale, and a
+walk that touches it still gets neutral data rather than the real node, so:
+
+* **Neither engine's verdict on such a file is trustworthy.** The JIT's
+  `Lint passed: all files clean` was never evidence the file is clean; it is
+  evidence the JIT survived the same corruption. `neither_engine_trustworthy`
+  applies to both sides here.
+* The five warnings the JIT reports and the warnings the interpreter now reports
+  after this change are computed over a partly-neutral AST.
+
+The unexplained part is specific and should be the next question asked:
+**`arena_gen=1`**. The generation counter is bumped by `ast_reset()` before it
+clears, so a stale index minted in a previous compilation unit would report a
+generation ahead of the one it was minted in. At generation 1 no second
+`ast_reset()` has run, so this index did not survive a reset — the mechanism
+that the guards on `stmt_get_tag`, `expr_contains_yield` and `decl_get` were all
+written for does not explain this instance. Candidate explanations not yet
+distinguished: an index from a different arena (a decl or expr id used as a stmt
+id), an arena cleared without the generation being bumped, or two live copies of
+the `compiler.core.ast_stmt` module state under different module spellings.
+
+**TODO(compiler,P1): explain how a stmt index of 149 reaches an accessor while
+the live stmt arena holds 79 entries at `arena_gen=1`, i.e. with no intervening
+`ast_reset()`. Reproducer: `simple lint
+src/compiler_rust/lib/std/src/tooling/misc_commands.spl` with
+`SIMPLE_TRACE_AST_OOB=1`; the guards added above name the exact accessor that
+receives the stale index. Until this is answered, lint results for any file that
+prints an arena OOB line must be treated as unverified on BOTH engines.**
+
+### Incidental, unrelated to the OOB, seen in the same runs
+
+`Runtime error: Function 'str.repeat' not found` printed six times in the JIT
+run — the same `text.repeat()` defect already recorded above, reached here
+through the easy-fix indenter. It does not affect the crash or its fix.

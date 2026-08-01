@@ -89,34 +89,97 @@ fn expr_get_tag(idx: i64) -> i64:
         print "[expr_get_tag] idx={idx} arena={fallback}"
     fallback
 
+# Sibling bounds guards for the rest of the expression accessor family.
+#
+# `expr_get_tag` above has been guarded since the stage-4 work; its siblings
+# were not. Guarding only the dispatcher does not prevent the crash: a walker
+# reads the tag (gets -1 plus a loud OOB line), takes its default branch, and
+# then still reads `expr_get_span/int/.../stmts` with the SAME stale index,
+# and that unguarded read is what kills the process.
+#
+# The statement half of this family is the measured reproducer — see the
+# matching comment in `core/ast_stmt.spl` and
+# doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
+# The expression half is the identical shape, reached by the same walks over
+# the same stale subtrees, and is closed here rather than left as the next
+# sibling to be discovered by a crash: a sweep that does not enumerate the
+# whole family just relocates the defect.
+#
+# Neutral returns match the established precedent in this arena family
+# (`decl_get`, `expr_contains_yield`, `stmt_contains_yield`, `expr_get_tag`);
+# -1 is already the "no expr" sentinel these fields carry. This is containment,
+# not a root-cause fix — why a stale index reaches an accessor at all is still
+# open in that bug file.
+#
+# The loud, always-on report stays on `expr_get_tag`; the per-accessor line is
+# gated behind SIMPLE_TRACE_AST_OOB (default off) so a stale subtree cannot
+# flood the output with one line per field read.
+fn expr_oob_trace(accessor: text, idx: i64, arena_len: i64):
+    val trace_ast_oob = rt_env_get("SIMPLE_TRACE_AST_OOB") ?? ""
+    if trace_ast_oob != "":
+        print "[{accessor}] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()}"
+
+fn expr_idx_is_live(idx: i64) -> bool:
+    idx >= 0 and idx < expr_owner_len()
+
 fn expr_get_span(idx: i64) -> i64:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_span", idx, expr_owner_len())
+        return -1
     expr_owner_span(idx)
 
 fn expr_get_int(idx: i64) -> i64:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_int", idx, expr_owner_len())
+        return 0
     expr_owner_int(idx)
 
 fn expr_get_float(idx: i64) -> text:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_float", idx, expr_owner_len())
+        return ""
     expr_owner_float(idx)
 
 fn expr_get_str(idx: i64) -> text:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_str", idx, expr_owner_len())
+        return ""
     expr_owner_str(idx)
 
 fn expr_get_left(idx: i64) -> i64:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_left", idx, expr_owner_len())
+        return -1
     expr_owner_left(idx)
 
 fn expr_get_right(idx: i64) -> i64:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_right", idx, expr_owner_len())
+        return -1
     expr_owner_right(idx)
 
 fn expr_get_extra(idx: i64) -> i64:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_extra", idx, expr_owner_len())
+        return -1
     expr_owner_extra(idx)
 
 fn expr_get_args(idx: i64) -> [i64]:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_args", idx, expr_owner_len())
+        return []
     expr_owner_args(idx)
 
 fn expr_get_arg_names(idx: i64) -> [text]:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_arg_names", idx, expr_owner_len())
+        return []
     expr_owner_arg_names(idx)
 
 fn expr_get_stmts(idx: i64) -> [i64]:
+    if not expr_idx_is_live(idx):
+        expr_oob_trace("expr_get_stmts", idx, expr_owner_len())
+        return []
     expr_owner_stmts(idx)
 
 # ===== Expression Kind Names (for debugging) =====
