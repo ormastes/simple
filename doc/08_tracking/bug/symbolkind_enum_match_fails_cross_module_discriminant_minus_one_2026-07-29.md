@@ -679,3 +679,150 @@ this lane exists to eliminate. The analysis is therefore landed as-is, and the
 `test`/`lint`-capable binary; (b) land item 4 (loud reader miss) alone and
 absorb the fallout; (c) only then dual-key. Steps (b) and (c) must not be
 combined — a silent reader hides the re-key's own regressions.
+
+## RK1 CORRECTION (2026-08-01, same day): two existence refutations above are WRONG — retracted
+
+**The previous RK1 section contains two false claims. They are retracted here.**
+Cause: that survey was run with `find`/`ls`/`grep` against the **working copy
+on disk**. This clone is **sparse-checked-out**, and the shared working copy is
+**behind origin and off-main** (local HEAD is a local-only commit with a
+structurally corrupt tree). Existence questions answered against that tree
+produce false negatives. All findings below are re-verified against the tip
+rev `36f5e286ad6` using `git cat-file -e <rev>:<path>` and
+`git grep <rev> -- 'src/**'`.
+
+**Standing rule for this area: never answer an existence question with
+`find`/`ls`/`grep` on disk, and never against local HEAD. Use
+`git cat-file -e <rev>:<path>` or `git grep <pat> <rev>`.** Two lanes made
+this same mistake on 2026-08-01.
+
+### RETRACTED — "the enumeration artifact does not exist"
+
+**False.** At `36f5e286ad6` both files exist:
+- `doc/08_tracking/bug/enum_bare_name_collision_enumeration_2026-08-01.tsv` — **333 lines** (332 rows + header)
+- `doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md` — 227 lines
+
+Commit `027d374919a` is an ancestor. **The 192 identical / 140 divergent / 84
+cross-subsystem split is backed.** Use the TSV; do not re-derive it.
+
+### RETRACTED — "the `StyleMutation` workaround was never landed"
+
+**False.** At `36f5e286ad6`:
+- `src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/contracts.spl:94` — `StyleMutation`
+- `src/lib/gc_async_mut/gpu/browser_engine/gpu_web/layout/invalidation.spl:99` — `WebLayoutMutationKind.StyleMutation:`
+
+The stale working copy still reads `Style`, which is what produced the false
+claim. The rename **is** landed and remains the live workaround; a correct
+re-key should make it unnecessary.
+
+### CONFIRMED at tip — the central technical finding stands unchanged
+
+Re-read at `36f5e286ad6`. Note the line numbers in the previous section were
+also stale; the **task's original citations were right and my "corrections"
+to them were wrong**:
+
+- **Bare-keyed, unconditional, last-wins write** — `module_lowering.spl:241,244`
+  (`variant_index[enum_def.name] = names`,
+  `variant_discriminants[enum_def.name] = discriminants`). *The task's 241/244
+  was correct; the previous section's "actually 236-241" was a stale artifact.*
+- **`enum_runtime_id_index` is bare-keyed too** — `module_lowering.spl:203`
+  (`self.enum_runtime_id_index[enum_name] = runtime_id`). The adjacent
+  collision error guards `enum_runtime_id_names`, keyed by
+  `"{hm_hash_text(runtime_name) % ...}"`, which detects **hash** collisions
+  between *distinct* runtime names and **cannot fire on a bare-name
+  collision**. **Three defective maps, zero correct patterns to copy.** This
+  refutation is confirmed and is the load-bearing result.
+- **Reader is silent on a miss** — `switch_operators_calls.spl:67-79`, three
+  separate `return -1` paths (enum absent / discriminants absent / variant not
+  found), none distinguishable by the caller.
+- **Interpreter is first-wins** — `eval_tables.spl:603-613`, early `return`
+  when the name is already registered. Opposite policy to MIR's last-wins.
+- **`HirEnum.runtime_name`** — `_Items/declaration_lowering.spl:755`
+  (`if owner_module != "": "{owner_module}.{name}" else: name`). *Task cited
+  720; tip is 755.*
+
+### CORRECTED read-side survey (tip `36f5e286ad6`, `git grep`) — the estimate was 2.5x too low
+
+The previous section's "~40 read sites / ~12 hardcoded / 3 scans" was measured
+on the stale sparse tree and **understates the work substantially**:
+
+| Measure | Stale-WC claim | **Tip actual** |
+|---|---|---|
+| Total hits | ~40 | **110** (102 code + 8 comment/doc) |
+| Literal `"Option"`/`"Result"` code lines | ~12 | **41** |
+| Unkeyable `.keys()` scans | 3 | **4** |
+| Rust-side sites | 0 (not seen) | **7** |
+
+Per file (code lines): `switch_operators_calls.spl` 35,
+`module_lowering.spl` 24, `bootstrap_globals.spl` 20, `expr_dispatch.spl` 10,
+`mir_lowering_types.spl` 3, `method_calls_literals.spl` 2, plus the Rust files
+below.
+
+**The four unkeyable scans** — a bare `case Circle(r):` has no module to key
+on, so these resolve an owner by scanning *every* registered enum. They cannot
+be converted to a `runtime_name` key by construction:
+- `module_lowering.spl:1249`
+- `expr_dispatch.spl:3157`
+- `switch_operators_calls.spl:1394`
+- `switch_operators_calls.spl:1690`  *(this file has TWO; the previous section found only one, and cited a stale line 1429)*
+
+### NEW — a third engine surface the stale survey missed entirely
+
+`git grep` at tip finds enum-discriminant logic in the **Rust seed**, absent
+from the sparse working copy:
+
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs:125,226`
+- `src/compiler_rust/compiler/src/mir/lower/lowering_expr_call.rs:368`
+- `src/compiler_rust/compiler/src/hir/lower/expr/access.rs:666,716`
+- `src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:150,439`
+
+(`src/runtime/runtime_native.c:2634` is a comment reference only.)
+
+**These implement a third, more degenerate policy.** At least three
+independent copies compute the discriminant from the **variant name alone,
+with no enum identity whatsoever** — e.g.
+`lowering_expr_method.rs:125-132`:
+
+    pub(super) fn enum_variant_discriminant(variant_name: &str) -> i64 {
+        let mut hasher = DefaultHasher::new();
+        variant_name.hash(&mut hasher);
+        (hasher.finish() & 0xFFFF_FFFF) as i64
+    }
+
+So a variant named `Style` receives the **same** discriminant in every enum
+that declares it — collapsing all 332 collisions by construction, not merely
+when names collide. It also yields a **hash**, not the declared ordinal the
+`.spl` MIR path assigns (0, 1, 2, …), so the two engines' discriminants do not
+even agree numerically for non-colliding enums. This is consistent with the
+`native_enum_eq_always_false` / `native_enum_runtime_type_identity` family.
+
+**Net effect on the plan: there are three policies to reconcile, not two.**
+MIR (bare-keyed, last-wins, declared ordinals), interpreter (bare-keyed,
+first-wins), Rust seed (variant-name-hash, no enum identity). Any
+"the engines now agree" criterion must cover all three, and must carry a
+true-positive control that still fires on each — a fix that silenced one would
+satisfy a diff-only test identically.
+
+### Recommendation is UNCHANGED and now better supported
+
+The corrected numbers **strengthen** the previous section's conclusion:
+
+1. A straight re-key by `runtime_name` is **not** cheap — 102 `.spl` read
+   sites, 41 hardcoded `"Option"`/`"Result"` lines, 4 structurally unkeyable
+   scans, and a Rust surface with no enum identity at all.
+2. **Item 4 (make the reader's miss loud) is a PREREQUISITE, not a
+   follow-on.** With three silent `-1` paths, re-keying without it converts
+   every unconverted lookup into a silent wrong answer for *all* enums, not
+   just the 140 divergent ones. This remains the key insight to carry forward.
+3. **Dual-key + ambiguity-flag** (per the previous section's 5-step design) is
+   the recommendation, extended with: reconcile the Rust seed's
+   variant-name-only hash as a fourth work item, and gate any cross-engine
+   agreement claim on a true-positive control.
+4. Sequencing stands: (a) restore a `test`/`lint`-capable binary — a separate
+   lane owns this; (b) land the loud miss alone and absorb the fallout;
+   (c) only then dual-key. (b) and (c) must not be combined.
+
+**Verification blocker re-confirmed at tip:** `./bin/simple --help` exits 0
+printing five lines offering only `--opt-level` / `--list-optimizations` — no
+`test`, `run`, `lint`, `check`, or `build`. No `src/` change was made in this
+lane.

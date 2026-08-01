@@ -246,3 +246,10 @@ the interpreter's equivalent table is **first-wins**, and the reader answers a
 miss with a silent `-1`. No `src/` change was made: the deployed binary exposes
 no `test`/`lint`/`check` subcommand, so a change to enum lowering cannot be
 verified at this tip.
+
+**Correction (2026-08-01):** the RK1 section referenced above also carries a
+same-day `RK1 CORRECTION` retracting two false existence claims (the
+enumeration TSV and the `StyleMutation` rename **both do exist** at tip — they
+were missed by surveying a stale sparse working copy instead of `git grep
+<rev>`). The three-defective-maps root cause is unaffected and confirmed at
+tip. Read the correction section, not the original, for the read-site counts.
