@@ -15,6 +15,7 @@ use simple_parser::{self as ast, ast::ReferenceCapability, Expr};
 
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
+use crate::hir::lower::lenient_global_diag::LenientGlobalKind;
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::*;
 use crate::value::BUILTIN_SPAWN;
@@ -265,6 +266,10 @@ impl Lowerer {
                     ty,
                 });
             } else if self.lenient_types {
+                // Attributed: an unregistered `@extern` links against a weak
+                // `return 0` stub instead of failing, so without this record
+                // there is no signal of any kind.
+                self.record_lenient_global(name, LenientGlobalKind::UnresolvedSffiExtern);
                 return Ok(HirExpr {
                     kind: HirExprKind::Global(name.to_string()),
                     ty: TypeId::ANY,
@@ -312,7 +317,14 @@ impl Lowerer {
                 return Err(LowerError::SelfInStatic);
             }
             if self.lenient_types {
-                // In lenient mode, treat unknown variables as globals with type ANY
+                // In lenient mode, treat unknown variables as globals with type ANY.
+                //
+                // This is the site that turns a typo or an HIR scope bug into a
+                // link-time undefined symbol with no source location. The
+                // fallback has to stay (cross-module names are legitimately
+                // unresolvable while lowering one file at a time), so instead of
+                // erroring we attribute it -- see `lenient_global_diag`.
+                self.record_lenient_global(name, LenientGlobalKind::UnresolvedIdentifier);
                 Ok(HirExpr {
                     kind: HirExprKind::Global(name.to_string()),
                     ty: TypeId::ANY,
@@ -1408,8 +1420,10 @@ impl Lowerer {
             // Special case: ClassName.new() should be ClassName()
             if method_name == "new" {
                 if self.lenient_types {
+                    let qualified = format!("{}.{}", class_name, method_name);
+                    self.record_lenient_global(&qualified, LenientGlobalKind::ConstructorAsGlobal);
                     return Ok(HirExpr {
-                        kind: HirExprKind::Global(format!("{}.{}", class_name, method_name)),
+                        kind: HirExprKind::Global(qualified),
                         ty: TypeId::ANY,
                     });
                 }
@@ -1436,8 +1450,10 @@ impl Lowerer {
         }
 
         if self.lenient_types {
+            let joined = segments.join(".");
+            self.record_lenient_global(&joined, LenientGlobalKind::UnresolvedPath);
             return Ok(HirExpr {
-                kind: HirExprKind::Global(segments.join(".")),
+                kind: HirExprKind::Global(joined),
                 ty: TypeId::ANY,
             });
         }

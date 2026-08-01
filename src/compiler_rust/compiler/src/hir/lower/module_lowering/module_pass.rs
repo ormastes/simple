@@ -2045,12 +2045,16 @@ impl Lowerer {
             });
         }
 
-        Ok(super::super::LoweringOutput::with_lifetime(
+        let mut output = super::super::LoweringOutput::with_lifetime(
             module,
             warnings,
             lifetime_lean4,
             lifetime_violations,
-        ))
+        );
+        // Carry out the attribution index for names that `lenient_types`
+        // lowered to globals, so a link-time undefined symbol is traceable.
+        output.lenient_globals = self.lenient_globals.clone();
+        Ok(output)
     }
 }
 

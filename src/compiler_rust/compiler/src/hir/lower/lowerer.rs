@@ -7,6 +7,7 @@ use super::super::capability::CapabilityEnv;
 use super::super::lifetime::LifetimeContext;
 use super::super::types::{HirModule, TypeId};
 use super::deprecation_warning::DeprecationWarningCollector;
+use super::lenient_global_diag::{LenientGlobal, LenientGlobalCollector, LenientGlobalKind};
 use super::memory_warning::MemoryWarningCollector;
 use crate::module_resolver::ModuleResolver;
 use crate::type_inference_config::TypeInferenceConfig;
@@ -39,6 +40,10 @@ pub struct Lowerer {
     pub(super) current_class_type: Option<TypeId>,
     /// Current function/method name being lowered, used to enrich lowering diagnostics.
     pub(super) current_function_name: Option<String>,
+    /// Declaration line of the function currently being lowered. Recorded so the
+    /// `lenient_types` unresolved-name fallback can attribute the global it
+    /// emits to a source location; `Expr::Identifier` carries no span of its own.
+    pub(super) current_function_line: Option<usize>,
     /// Module resolver for loading types from imports (optional for backward compatibility)
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
@@ -85,6 +90,12 @@ pub struct Lowerer {
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
+    /// Names that `lenient_types` lowered to `HirExprKind::Global` because they
+    /// resolved to nothing. Each becomes a `GlobalLoad` and, if no other module
+    /// defines it, an undeclared symbol that only fails at LINK time with no
+    /// source location. Collected so such a failure is attributable; see
+    /// `lenient_global_diag`.
+    pub(super) lenient_globals: LenientGlobalCollector,
     /// Names of extern function declarations for codegen
     pub(super) extern_fn_names: HashSet<String>,
     /// Function names imported via `use` statements (should not become globals in MIR)
@@ -136,6 +147,7 @@ impl Lowerer {
             pure_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            current_function_line: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
@@ -154,6 +166,7 @@ impl Lowerer {
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             lenient_types: false,
+            lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
@@ -180,6 +193,7 @@ impl Lowerer {
             pure_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            current_function_line: None,
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
@@ -198,6 +212,7 @@ impl Lowerer {
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             lenient_types: false,
+            lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
@@ -247,6 +262,7 @@ impl Lowerer {
             pure_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            current_function_line: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
@@ -265,6 +281,7 @@ impl Lowerer {
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
             lenient_types: false,
+            lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
             imported_function_names: HashSet::new(),
             global_struct_defs: None,
@@ -295,6 +312,35 @@ impl Lowerer {
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub fn set_lenient_types(&mut self, lenient: bool) {
         self.lenient_types = lenient;
+    }
+
+    /// Attribute a name that the `lenient_types` fallback is about to lower to
+    /// `HirExprKind::Global`.
+    ///
+    /// This does not change what is compiled -- the fallback is load-bearing for
+    /// cross-module references, which are genuinely unresolvable while lowering
+    /// one file at a time. It records *where the name came from* so that a
+    /// link-time "undefined symbol" can be traced back to a file and function
+    /// instead of appearing with no source location at all.
+    pub(super) fn record_lenient_global(&mut self, name: &str, kind: LenientGlobalKind) {
+        self.lenient_globals.record(LenientGlobal {
+            file: self
+                .current_file
+                .as_ref()
+                .map(|path| path.display().to_string()),
+            function: self.current_function_name.clone(),
+            function_line: self.current_function_line,
+            name: name.to_string(),
+            kind,
+        });
+    }
+
+    /// Names lowered as globals by the `lenient_types` fallback, dedup'd.
+    ///
+    /// The count is the population of symbols that can only fail at link time;
+    /// `attributions_for` maps a linker-reported symbol back to its source.
+    pub fn lenient_globals(&self) -> &LenientGlobalCollector {
+        &self.lenient_globals
     }
 
     /// Pre-register global struct definitions from all compilation units.

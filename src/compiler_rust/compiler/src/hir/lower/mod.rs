@@ -3,6 +3,7 @@ pub mod deprecation_warning;
 mod error;
 pub(crate) mod expr;
 mod import_loader;
+pub mod lenient_global_diag;
 mod lowerer;
 mod memory_check;
 pub mod memory_warning;
@@ -32,6 +33,15 @@ pub struct LoweringOutput {
     pub lifetime_lean4: Option<String>,
     /// Lifetime violations detected (stored for reporting even if lowering succeeds)
     pub lifetime_violations: Vec<LifetimeViolation>,
+    /// Names that `lenient_types` lowered to `HirExprKind::Global` because they
+    /// resolved to nothing during this lowering run.
+    ///
+    /// Each of these becomes a `GlobalLoad` and, unless some other module
+    /// defines the symbol, an undeclared symbol that fails at LINK time with no
+    /// source location at all. Surfaced here so a linker-reported symbol can be
+    /// mapped back to the file and function that emitted it, and so the
+    /// population can be counted. See `lenient_global_diag`.
+    pub lenient_globals: lenient_global_diag::LenientGlobalCollector,
 }
 
 impl LoweringOutput {
@@ -42,6 +52,7 @@ impl LoweringOutput {
             warnings,
             lifetime_lean4: None,
             lifetime_violations: Vec::new(),
+            lenient_globals: lenient_global_diag::LenientGlobalCollector::new(),
         }
     }
 
@@ -57,6 +68,7 @@ impl LoweringOutput {
             warnings,
             lifetime_lean4: Some(lifetime_lean4),
             lifetime_violations,
+            lenient_globals: lenient_global_diag::LenientGlobalCollector::new(),
         }
     }
 

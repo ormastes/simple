@@ -509,7 +509,12 @@ impl Lowerer {
             f.name.clone()
         };
         let previous_function_name = self.current_function_name.clone();
+        let previous_function_line = self.current_function_line;
         self.current_function_name = Some(func_name.clone());
+        // Attribution anchor for the `lenient_types` unresolved-name fallback:
+        // `Expr::Identifier` has no span, so the enclosing function's
+        // declaration line is the tightest source location available.
+        self.current_function_line = Some(f.span.line);
         self.lifetime_context.set_function(&func_name);
 
         // Enter function scope for lifetime tracking
@@ -768,6 +773,7 @@ impl Lowerer {
         // Restore previous class type
         self.current_class_type = previous_class_type;
         self.current_function_name = previous_function_name;
+        self.current_function_line = previous_function_line;
 
         // Use qualified name for methods (ClassName.method) for DI compatibility
         let name = if let Some(owner) = owner_type {
