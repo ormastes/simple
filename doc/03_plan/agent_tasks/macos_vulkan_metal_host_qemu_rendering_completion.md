@@ -54,6 +54,20 @@ peer reports.
   manifest-bound vector-font 300-DPI runtime evidence; QEMU remains blocked by those
   upstream dependencies.
 
+### 2026-08-01 incremental host-gate checkpoint
+
+- The Vulkan readback gate reached source execution but failed fail-closed because
+  the deployed pure-Simple binary predates `rt_is_interpreter_runtime`; its source
+  declaration and both hosted runtime implementations exist, but the deployed
+  binary exports neither symbol. This is a stale deployment/linkage blocker, not
+  Vulkan evidence or a renderer-source defect.
+- The supported repair is the incremental dynload Stage2/Stage3/Stage4 redeploy
+  with provenance, not an ad-hoc native-build and not a Rust-seed tool fallback.
+  A separate bootstrap/redeploy owner is already active, so this lane must wait
+  for its admitted artifact rather than duplicate the build.
+- Metal host prerequisites are present (Apple Metal toolchain), but its canonical
+  build refuses to run until the same manifest-bound Stage3 artifact exists.
+
 ### Render design / IR alignment addendum (2026-08-01)
 
 - DrawIR/GPU design control changed in the local branch and is now the source
@@ -86,6 +100,10 @@ peer reports.
   - Vulkan/Metal/host WM execution work must continue to treat route/classification
     evidence (`GPU_ROUTE_*`, `DrawIrV3ExecutionRoute`) as hard requirements, not
     optional diagnostics.
+  - The canonical text path remains `DrawIrComposition` →
+    `Engine2D.draw_text` → transient `FontRenderer`/`FontRenderBatch` material.
+    Atlas/cache state must not enter Draw IR, and this lane must not add a
+    private parallel font draw path.
 
 The latest bounded producer work is recorded in cycles 25–27 below and
 supersedes the older diagnostic summaries. Parsing, cmap, tables, metrics,
