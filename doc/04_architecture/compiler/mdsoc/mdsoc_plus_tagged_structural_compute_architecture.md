@@ -2599,6 +2599,92 @@ cost-model chooses CPU
 
 A fallback does not silently change semantics. It emits a reason and preserves stable ordering and hashes.
 
+**The reason list above is frozen as `StageFallbackReason`, and it is the only
+sanctioned cross-lane reason vocabulary — but it is not the only reason space
+in the tree, and the second one is legitimate.** The DrawIR v3 lane
+(`common/ui/draw_ir_v3_execution_route.spl`) carries its own numeric reason
+codes, partitioned `100..199` policy / `200..299` denial, precisely to enforce
+the `cpu_selected != gpu_fallback` distinction §21.4 is short on. That lane
+declined to adopt a cross-lane profile and was right to, for a reason its own
+comment did not state; the resolution is recorded here so no consumer lane
+re-litigates it.
+
+`DrawIrV3ExecutionProfile` and `StageExecutionProfile` are **not** the same
+record and must not be merged. Apply §21.1's own test — the one that kept the
+measured-cost `ExecutionProfile` separate — and it returns the same answer
+twice: they share no field but `mode`. `StageExecutionProfile` carries
+`deterministic`, host and device memory budgets, latency and throughput
+targets, `fallback`, `verification` and `allowed_devices`, none of which the v3
+record has; the v3 record carries `strict`, `cost_policy_enabled`,
+`cost_threshold_commands` and `required_capabilities`, none of which the §21
+record has. `required_capabilities` in particular is the DrawIR **backend-tier**
+bitset — tier 0 compute passes, tier 1 indirect dispatch — and is a different
+vocabulary from the frozen `DeviceMask` bits (scalar CPU, SIMD CPU, GPU,
+storage), so it is not even substitutable field-for-field. The v3 record is a
+per-submission GPU-offload policy; the §21 record is a per-stage execution
+permission. A merge would produce a third record that answers neither question.
+
+`DrawIrV3RouteDecision` is likewise not a profile at all — it is the *after*
+half, and its natural counterpart is §21.3's receipt, not §21.1's profile.
+It cannot be re-typed onto `StageFallbackReason`, because that enum is closed
+at nine variants by the §26 freeze and two of the v3 reasons have no variant in
+it: `empty scene` (a policy CPU route with no cost model involved) and
+`no device present` (never present, which is not `GPU/device loss` — that
+variant means present-then-faulted). A third, `capacity overflow`, maps
+ambiguously to either `queue overflow` or `resource budget exceeded`. Forcing
+the adoption would be lossy in exactly the direction §21.4 forbids: it would
+turn a stated reason into an approximated one.
+
+**What does converge, and is ratified as normative here:** the v3 mode
+discriminants and `ExecutionMode` are already byte-identical —
+`cpu_reference = 0`, `hybrid_vector_gpu = 1`, `resident_gpu = 2` — in both the
+v3 constants and `ExecutionMode`'s frozen variant order. That agreement is
+currently a coincidence of two independent numberings and is hereby made a
+requirement: **neither side may renumber**, because the boundary crossing
+below depends on the identity holding without a translation table.
+
+At the boundary where a DrawIR v3 receipt becomes a `StageReceipt`, the reason
+translation is fixed as follows, so seventeen lanes do not each invent one:
+
+| DrawIR v3 reason | `StageFallbackReason` | `requested_mode` vs `mode` |
+|---|---|---|
+| `none` (0) | `None` | equal |
+| `mode is cpu_reference` (100) | `None` | both `CpuReference` |
+| `cost below threshold` (101) | `CostModelSelectedCpu` | differ |
+| `empty scene` (102) | *no variant* — see below | differ |
+| `no device` (200) | *no variant* — see below | differ |
+| `missing capability` (201) | `UnsupportedFeature` | differ |
+| `capacity overflow` (202) | `ResourceBudgetExceeded` | differ |
+| `device fault` (203) | `DeviceLost` | differ |
+
+`capacity overflow` is pinned to `ResourceBudgetExceeded` rather than
+`queue overflow` because the DrawIR denial is raised against a declared
+capacity limit, not against a full submission queue.
+
+The two gaps are reported, not papered over. `empty scene` and `no device` need
+either two added `StageFallbackReason` variants — a wire change to a frozen
+enum, which this ratification does not make — or an explicit decision that the
+DrawIR receipt is the authoritative record for those two cases and the
+`StageReceipt` projection is lossy by design. **Until that decision is taken, a
+DrawIR v3 route decision must not be projected onto a `StageReceipt` at all**,
+because a lossy projection of a denial reason is the silent fallback §21.4
+exists to prevent. That is a decision for the EXEC lane owner.
+
+Layering note, since it is the practical reason the adoption is not merely
+undesirable but expensive: `src/lib/common/ui/**` imports nothing from
+`common/structural/**` today. Adopting `StageExecutionProfile` would create the
+first such edge and would transitively pull in
+`common/compute/placement_contracts/semantic.spl` and
+`common/structural/receipt/receipt_types.spl` — which itself imports
+`contracts.spl` — a substantial dependency cone acquired for one shared field.
+
+Derived from: `common/ui/draw_ir_v3_execution_route.spl` (v3 profile, route
+decision and reason constants), `common/structural/execution/profile_types.spl`
+(`StageExecutionProfile`, `StageFallbackPolicy`, device/mode bit vocabulary),
+`common/structural/receipt/receipt_types.spl` (`StageFallbackReason` and the
+selection-provenance fields), and `common/compute/placement_contracts/semantic.spl`
+(`ExecutionMode` variant order). Read at origin, not from a lane report.
+
 ### 21.5 Cross-domain mode matrix
 
 | Domain | CPU reference | Hybrid | Resident GPU |
