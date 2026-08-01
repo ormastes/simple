@@ -169,13 +169,13 @@ emits
 ## Current counts
 
 ```
-extern_decl_total=164
-extern_registered=33
+extern_decl_total=137
+extern_registered=31
 extern_bare_exempt=30      (legitimate freestanding class)
-extern_unregistered=20     (actionable)
+extern_unregistered=4      (actionable)
 ```
 
-## The backlog — 20 unregistered non-`bare` extern symbols remaining
+## The backlog — 4 unregistered non-`bare` extern symbols remaining
 
 By group:
 
@@ -200,9 +200,37 @@ By group:
 
   So it was an abandoned alternative binding approach, never wired to anything —
   dead code, deleted per the repo's no-unused-code rule rather than exempted.
-- **21 in `src/compiler_rust/lib/std/src/tooling/`** — watch/reload/dashboard
-  helpers (`rt_fsevents_*`, `rt_http_*`, `rt_websocket_*`, `rt_dir_entries`,
-  `rt_execute_command`).
+- ~~**16 in `src/compiler_rust/lib/std/src/tooling/watch/`**~~ — **RETIRED
+  2026-08-01 by deleting the `watch/` subpackage** (`watcher.spl`, `reload.spl`,
+  `reload_apply.spl`, `__init__.spl`) and the two re-export lines it fed in
+  `tooling/__init__.spl`. It was a dead second copy of the file watcher:
+  1. Zero importers outside its own directory. The only references were
+     `tooling/__init__.spl:39,41`, and nothing imports the `std.tooling` root.
+  2. `WatchConfig` and `FileChange` *do* appear elsewhere, but resolve to
+     unrelated modules: `struct WatchConfig` is defined in
+     `src/app/watch/runner.spl:13`, `struct FileChange` in
+     `src/app/jj/status.spl:9`. Module-scoped resolution means those are
+     name collisions, not consumers — the same trap that made a same-named
+     `fn _cos` look like a definition for `transform.spl`'s extern.
+  3. The live watcher is `src/app/watch/watcher.spl` (consumed by
+     `src/compiler/80.driver/watcher/watcher_daemon.spl:24`,
+     `src/app/watch/runner.spl:6`, `src/app/io/_CliCommands/*`), and it uses
+     only registered symbols (`rt_file_exists`, `rt_dir_walk`).
+  4. Every one of the 16 was a genuine no-implementation gap — inotify, FSEvents,
+     HTTP server, websocket, dynamic module load exist in no runtime — so the
+     alternative was building whole subsystems for code nothing imports.
+
+  Worth recording, because it is the defect this whole bug is about: the dead
+  copy's error handling could not have caught the failure either. Every guard
+  tests `< 0` (`watcher.spl:325` `inotify_fd < 0`, `:359` `wd < 0`, `:428`
+  `fsevents_handle < 0`, `reload.spl:309`, `:314`), but an unregistered extern
+  yields a silent `0`, which is not `< 0`. So the polling fallback would never
+  have triggered and the watcher would have run on a bogus fd — and the polling
+  path was equally dead, since `rt_dir_entries` and `rt_file_mtime` are
+  unregistered too.
+- **1 remaining in `src/compiler_rust/lib/std/src/tooling/dashboard/`** —
+  `rt_execute_command` (a registered `rt_process_run` equivalent exists at
+  `runtime/src/value/sffi/env_process.rs:547`).
 - ~~**12 in `src/app/interpreter/extern/`**~~ — **RETIRED 2026-08-01 by deleting
   the `src/app/interpreter/extern/` package (25 files, 178 `@extern` decls).**
   The package is dead code, and the tree says so itself:
@@ -267,26 +295,10 @@ Full machine-readable list, `symbol<TAB>file:line`:
 
 <!-- BEGIN unregistered-extern-list -->
 ```
-rt_dir_entries	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:13
 rt_execute_command	src/compiler_rust/lib/std/src/tooling/dashboard/collectors/vcs_collector.spl:81
-rt_fsevents_close	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:420
-rt_fsevents_create	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:414
-rt_fsevents_read	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:417
-rt_http_request_path	src/compiler_rust/lib/std/src/tooling/watch/reload.spl:302
-rt_http_response_send	src/compiler_rust/lib/std/src/tooling/watch/reload.spl:305
-rt_http_server_accept	src/compiler_rust/lib/std/src/tooling/watch/reload.spl:299
-rt_http_server_start	src/compiler_rust/lib/std/src/tooling/watch/reload.spl:296
-rt_inotify_add_watch	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:313
-rt_inotify_add_watch	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:358
-rt_inotify_close	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:319
-rt_inotify_init	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:310
-rt_inotify_read	src/compiler_rust/lib/std/src/tooling/watch/watcher.spl:316
-rt_module_load	src/compiler_rust/lib/std/src/tooling/watch/reload_apply.spl:168
-rt_module_unload	src/compiler_rust/lib/std/src/tooling/watch/reload_apply.spl:145
 rt_reflect_function_name	src/compiler_rust/lib/std/src/spec/snapshot/runner.spl:197
 rt_reflect_source_file	src/compiler_rust/lib/std/src/spec/snapshot/runner.spl:185
 rt_sha256	src/compiler_rust/lib/std/src/tooling/core/incremental.spl:38
-rt_websocket_send	src/compiler_rust/lib/std/src/tooling/watch/reload.spl:383
 ```
 <!-- END unregistered-extern-list -->
 
