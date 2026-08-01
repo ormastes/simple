@@ -470,6 +470,20 @@ Current upstream tip noted in this branch as `63c362526c` (latest checked).
 - Focused current-runtime evidence: Simple Web compositor 26/26,
   BrowserBackend cache/CSS 3/3, and hosted bootstrap source contract 12/12.
 
+## 2026-08-01 host CSS evidence admission attempt
+
+- Added `scripts/check/check-wm-host-css-override-evidence.shs`, which runs the
+  canonical production Winit launcher for baseline and six-token override and
+  fails closed unless override installation, effective material change,
+  preserved package source identity, and presented-buffer pixel delta all
+  occur. FIFO commands remain labelled diagnostic synthetic input.
+- One bounded macOS attempt stopped before native compilation:
+  `bin/release/aarch64-apple-darwin-macho/simple` lacks the required external
+  provider-link diagnostic (`simple-bin-external-provider-link-support-missing`).
+  No window/frame/capture was produced, so this is a compiler deployment gate,
+  not a CSS-render failure. Resume with a provenance-qualified self-hosted
+  binary carrying the provider-link support, then run the wrapper once.
+
 - `fe481ab069` `refactor(ui): S1 DrawIR Vulkan-canonical enums + ResourceTable.formats u32`
   - `src/lib/common/ui/draw_ir_v3.spl`
   - `src/lib/common/ui/draw_ir_v3_backend_enums.spl`
