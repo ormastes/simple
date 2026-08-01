@@ -166,6 +166,69 @@ does not satisfy admission; both are required.
     runner exists. See the amended admission table under `### L7` above,
     which supersedes this bullet and the pre-run-10 "Admission criteria
     unchanged" wording it replaces.
+  - **Run 11 (2026-08-01) — preflight measured, Pass A LAUNCHED.** The four
+    standing blockers were re-measured rather than assumed; none survived:
+    1. **LLVM seed capability: NOT a blocker (run 1's failure mode is gone).**
+       `src/compiler_rust/target/bootstrap/simple` is 32MB, which *looks* like
+       the no-LLVM build (the 154MB/57MB size heuristic in memory says so) —
+       **the size heuristic is wrong here.** Measured positively instead:
+       `native-build t.spl --backend=llvm` exits 0, emits a 25,208-byte
+       `ELF 64-bit LSB pie executable`, and running it prints `2`.
+       LLVM 18 (`/usr/lib/llvm-18`) is picked up by the bootstrap script.
+       Do not re-derive LLVM capability from binary size; assert an artifact.
+    2. **Parse/self-host: not reproduced.** The run-4..run-9 blocker was
+       already dissolved by run 10 (stale `.simple/native_cache`). At HEAD the
+       cache is empty (0 bytes) and `prepare_native_cache` self-clears on a
+       build-context hash change, so the stale-artifact hazard is not armed.
+    3. **The gates are REAL, but the plan's metric name is not.**
+       `SIMPLE_AST_GEN_CHECK` is genuinely implemented in
+       `src/compiler/10.frontend/core/_Ast/module_state.spl` and
+       `src/compiler/10.frontend/core/_AstExpr/nodes.spl` (plus
+       `src/lib/common/mem_infra/config.spl`), so Pass A is not vacuous.
+       **However the literal string `stale_generation_reads` — the Pass A gate
+       metric as written in the admission table above — appears NOWHERE in
+       `src/**` or `scripts/**`.** Grepping for it will therefore always return
+       zero and read as a PASS. That is a false-green trap: Pass A must be
+       scored on the diagnostics the compiler actually emits (the
+       stale-generation line from `ast_gen_check_index`, and
+       `[stmt_get_tag] OOB` / `[flat-bridge] missing (stmt|expr) tag`, which is
+       the pair `bootstrap-from-scratch.sh:1626` itself greps for), not on the
+       plan's invented metric name. **Zero output is only a pass if the run
+       also reached stage 4** — see the scoring rule below.
+    4. **Resource-monitor cap: still live, but does NOT apply the way run 10
+       was killed.** `kill_simple_monitor.shs` (PID 2063) is running.
+       `is_simple_run_or_test()` matches only an adjacent `simple run` /
+       `simple test` argv pair, so a stage `simple native-build` process falls
+       to the **generic** branch: **no CPU/60s guard at all**, and only
+       `KILL_ANY_MEM_MB` = **64000 MB** RSS. The 24000 MB `KILL_SIMPLE_MEM_MB`
+       guard does not apply. Both thresholds are read from the *monitor's own*
+       env at daemon start, so they cannot be raised live without restarting
+       the daemon (which would disturb parallel lanes).
+       **The real ceiling today is the host, not the cap:** at launch
+       `free -g` showed 125 GB total / 1 GB free / **54 GB available** with
+       **swap 7/7 GB fully consumed**. 54 GB available sits *below* the 64 GB
+       kill threshold, so a genuine balloon will OOM or thrash the host before
+       the monitor ever fires. If Pass A dies without a `[kill_monitor]` line
+       in its log, suspect host memory pressure, not the cap.
+    - **Launched:** `SIMPLE_BOOTSTRAP_STAGE4=1 SIMPLE_AST_GEN_CHECK=1
+      SIMPLE_TIMEOUT_SECONDS=0 sh scripts/bootstrap/bootstrap-from-scratch.sh
+      --backend=llvm --output=<scratch>/passA/out --no-mcp`, detached via
+      `setsid nohup`. Deliberately **no `--deploy`** (must not clobber
+      `bin/simple`) and **no `--full-bootstrap`** (must not rebuild the Rust
+      seed and break other lanes). Log: `<scratch>/l7/passA/passA.log`, stage
+      logs under `<scratch>/l7/passA/out/logs/x86_64-unknown-linux-gnu/`.
+    - **How to score it (Pass A):** a PASS requires **all** of —
+      (i) the run actually reached and completed **stage 4** (`stage4-native-build`
+      log present, and the stage4 smoke `-c 'print(1+1)'` → `2`); (ii) **zero**
+      `[stmt_get_tag] OOB` / `[flat-bridge] missing (stmt|expr) tag` lines;
+      (iii) **zero** stale-generation diagnostics; (iv) coverage of **≥300
+      modules** in build order. **False green to reject:** a grep returning
+      zero because the run died in stage 2/3 and never exercised the gate, or
+      because it was scored on `stale_generation_reads` (a string the compiler
+      never prints). Always confirm the module count and the stage-4 artifact
+      before reading zero diagnostics as a pass.
+    - Pass B (gates OFF, full ~1494 modules, `check-stage4-memory-gate.shs`)
+      is **not** started; it is only meaningful after Pass A is scored.
   - Successor plan for the M-milestones:
     doc/03_plan/runtime/memory_analysis/memory_infra_next_phase_plan_2026-07-29.md.
 
