@@ -1430,6 +1430,37 @@ impl<'a> MirLowerer<'a> {
                 // Lower the iterable expression
                 let collection_reg = self.lower_expr(iterable)?;
 
+                // Text iterables must yield one UTF-8 CODEPOINT per step, not
+                // one byte. `rt_for_iterable` cannot do this for us here: its
+                // string branch is gated on `rt_core_as_string`, which requires
+                // string-registry membership, and the handles reaching it on
+                // the JIT/native paths are not registered core strings — so the
+                // backstop never fires and the loop falls through to
+                // `rt_array_len` + `IndexGet`, i.e. BYTE indexing. `"café,"`
+                // (6 bytes / 5 codepoints) then ran 6 times and bound raw bytes
+                // whose concat produced a corrupt text with `len() == -1`.
+                //
+                // Split the codepoints up front instead, exactly as the
+                // pure-Simple lowering already does — see
+                // `src/compiler/50.mir/mir_lowering_stmts.spl:1988` ("Do not
+                // index bytes here"). `rt_string_chars` returns an array of
+                // 1-codepoint texts, so the counted `rt_array_len`/`IndexGet`
+                // loop below is then correct unchanged.
+                //
+                // NOT fixable at the desugar level: `collection_desugar.spl`
+                // Pattern F rewrites `for x in s.chars()` -> `for x in s`, the
+                // opposite direction, and would undo it.
+                let iterable_is_text = self
+                    .type_registry
+                    .and_then(|registry| registry.get(iterable.ty))
+                    .is_some_and(|ty| match ty {
+                        HirType::String => true,
+                        HirType::Struct { name, .. } => {
+                            name == "String" || name == "text" || name == "str"
+                        }
+                        _ => false,
+                    });
+
                 // Normalize the iterable for index-based iteration. Dicts are
                 // converted to an array of (key, value) tuples at runtime
                 // (rt_for_iterable is a pass-through for everything else).
@@ -1437,12 +1468,17 @@ impl<'a> MirLowerer<'a> {
                 // below silently treat the dict handle as an array: the loop
                 // body sees nil/garbage items (stage4 SIGSEGV in
                 // `desugar_module` iterating `module.functions`).
+                let normalize_fn = if iterable_is_text {
+                    "rt_string_chars"
+                } else {
+                    "rt_for_iterable"
+                };
                 let collection_reg = self.with_func(|func, current_block| {
                     let dest = func.new_vreg();
                     let block = func.block_mut(current_block).unwrap();
                     block.instructions.push(MirInst::Call {
                         dest: Some(dest),
-                        target: crate::mir::CallTarget::from_name("rt_for_iterable"),
+                        target: crate::mir::CallTarget::from_name(normalize_fn),
                         args: vec![collection_reg],
                     });
                     dest
