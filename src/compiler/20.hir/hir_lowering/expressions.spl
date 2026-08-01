@@ -790,6 +790,10 @@ impl HirLowering:
                 HirExprKind.MethodCall(self.lower_hir_expr(method_receiver_t), method_name_t, hir_args, MethodResolution.Unresolved)
 
             case ExprKind.MatchCase(scrutinee, arms):
+                # The scrutinee is lowered FIRST and OUTSIDE every arm scope:
+                # it is evaluated before any pattern matches, so it must never
+                # see an arm's pattern bindings.
+                val hir_scrutinee = self.lower_hir_expr(scrutinee)
                 var hir_arms: [HirMatchArm] = []
                 for arm in arms:
                     # Typed rebind: without it the deployed seed interpreter
@@ -799,14 +803,42 @@ impl HirLowering:
                     # (40.mono, 30.types) does the same rebind. guard is a
                     # DESUGARED (has_guard, guard) pair — not an Option.
                     val typed_arm: MatchArm = arm
+
+                    # Every arm gets its OWN scope. `lower_pattern` calls
+                    # `symbols.define` for each `Binding` sub-pattern, so the
+                    # arm's bindings land in THIS scope and are therefore
+                    # visible to the arm's guard and body — and only to them.
+                    # Without the scope the bindings leaked into (or were lost
+                    # from) the enclosing function scope, and an arm body that
+                    # referenced its own binding failed HIR lowering with
+                    # "unresolved name: <binding>" unless a same-named
+                    # parameter or outer local happened to exist. Popping the
+                    # scope keeps arm N's bindings out of arm N+1.
+                    self.symbols.push_scope(ScopeKind.Block)
+
+                    # Pattern, guard and body are lowered as SEQUENCED
+                    # STATEMENTS rather than as sibling named arguments of the
+                    # `HirMatchArm(...)` literal. Struct-literal arguments are
+                    # not a reliable sequence point here: each argument
+                    # expression can be evaluated more than once, so the
+                    # `define` side effects of `lower_pattern` were not
+                    # dependably ordered before the body's name lookups.
+                    # Lowering in explicit order makes "pattern binds, then
+                    # guard and body resolve" the only possible schedule.
+                    val arm_pattern = self.lower_pattern(typed_arm.pattern)
+                    val arm_guard = self.lower_hir_expr(typed_arm.guard)
+                    val arm_body = self.lower_hir_block(typed_arm.body)
+
+                    self.symbols.pop_scope()
+
                     hir_arms = hir_arms.push(HirMatchArm(
-                        pattern: self.lower_pattern(typed_arm.pattern),
+                        pattern: arm_pattern,
                         has_guard: typed_arm.has_guard,
-                        guard: self.lower_hir_expr(typed_arm.guard),
-                        body: self.lower_hir_block(typed_arm.body),
+                        guard: arm_guard,
+                        body: arm_body,
                         span: typed_arm.span
                     ))
-                self.build_match_expr(self.lower_hir_expr(scrutinee), hir_arms, scrutinee.span)
+                self.build_match_expr(hir_scrutinee, hir_arms, scrutinee.span)
 
             case ExprKind.Lambda(params, body):
                 self.symbols.push_scope(ScopeKind.Function)
@@ -1059,6 +1091,12 @@ impl HirLowering:
 
             case Binding(name, mutable):
                 val symbol = self.symbols.define(name, SymbolKind.Variable, nil, p.span, false, mutable, nil)
+                # Level-gated (default off): traces every pattern binding that
+                # is actually entered into the current scope. A binding that
+                # the arm body cannot resolve but that never appears here was
+                # dropped by the FRONTEND pattern conversion, not by this pass.
+                if (hir_expr_env_get("SIMPLE_DEBUG_MATCH_PAT") ?? "") == "1":
+                    eprint("[match-pat] define binding: {name}")
                 HirPatternKind.Binding(symbol, mutable)
 
             case Tuple(elements):
@@ -1133,6 +1171,24 @@ impl HirLowering:
                         sfi = sfi + 1
                     HirPatternKind.Struct(struct_hir_type, struct_hir_fields)
                 else:
+                    # Level-gated (default off): traces the enum-pattern path,
+                    # including whether a payload was seen at all. An arm whose
+                    # payload bindings never reach the Binding case above will
+                    # show no `payload-tuple` line here.
+                    val dbg_on = (hir_expr_env_get("SIMPLE_DEBUG_MATCH_PAT") ?? "") == "1"
+                    if dbg_on:
+                        eprint("[match-pat] enum pattern: {enum_}.{variant}")
+                        if val dbg_pl = payload:
+                            eprint("[match-pat]   payload present")
+                            match dbg_pl:
+                                case Tuple(dbg_pats):
+                                    val dbg_n: i64 = dbg_pats.len()
+                                    eprint("[match-pat]   payload-tuple n={dbg_n}")
+                                case Struct(dbg_flds):
+                                    val dbg_m: i64 = dbg_flds.len()
+                                    eprint("[match-pat]   payload-struct n={dbg_m}")
+                        else:
+                            eprint("[match-pat]   payload absent")
                     val symbol = self.symbols.lookup_or_invalid(enum_)
                     val hir_type = if symbol.is_valid():
                         HirType(kind: HirTypeKind.Named(symbol, []), span: p.span)
@@ -1141,20 +1197,39 @@ impl HirLowering:
                     # No `.map(\pl: ...)` lambda here: the seed interpreter does not
                     # bind `self` inside a lambda body, so `self.lower_pattern` in a
                     # closure fails native-build with "variable `self` not found".
-                    val hir_payload: HirPatternPayload? = match payload:
-                        case Some(pl):
-                            match pl:
-                                case Tuple(patterns):
-                                    val hir_patterns: [HirPattern] = []
-                                    for pat in patterns:
-                                        hir_patterns.push(self.lower_pattern(pat))
-                                    HirPatternPayload.Tuple(hir_patterns)
-                                case Struct(fields):
-                                    val hir_fields: [(text, HirPattern)] = []
-                                    for (fname, fpat) in fields:
-                                        hir_fields.push((fname, self.lower_pattern(fpat)))
-                                    HirPatternPayload.Struct(hir_fields)
-                        case _: nil
+                    #
+                    # The payload is destructured with the `if val` idiom, NOT
+                    # with `match payload: case Some(pl): ...`. On this lane a
+                    # `case Some(binding)` arm over an OPTIONAL (`T?`, which is
+                    # a nullable -- not the `Option` enum) does not run its
+                    # body, so the whole payload sub-pattern walk below was
+                    # skipped silently: `lower_pattern` was never called on the
+                    # payload's sub-patterns, so none of their `Binding` names
+                    # were ever entered into scope via `symbols.define`, and
+                    # every arm body that used one failed HIR lowering with
+                    # "unresolved name: <binding>" -- unless a same-named
+                    # parameter or outer local happened to exist and absorb the
+                    # lookup. The sibling `if val pl_s = payload:` read in the
+                    # struct-positional branch above already uses this idiom;
+                    # this makes the two consistent.
+                    #
+                    # The sub-pattern lists are built with explicit
+                    # reassignment (`xs = xs.push(..)`) rather than a bare
+                    # `xs.push(..)` whose result is discarded, so the result
+                    # does not depend on `.push` happening to mutate in place.
+                    var hir_payload: HirPatternPayload? = nil
+                    if val pl = payload:
+                        match pl:
+                            case Tuple(patterns):
+                                var hir_patterns: [HirPattern] = []
+                                for pat in patterns:
+                                    hir_patterns = hir_patterns.push(self.lower_pattern(pat))
+                                hir_payload = HirPatternPayload.Tuple(hir_patterns)
+                            case Struct(fields):
+                                var hir_fields: [(text, HirPattern)] = []
+                                for (fname, fpat) in fields:
+                                    hir_fields = hir_fields.push((fname, self.lower_pattern(fpat)))
+                                hir_payload = HirPatternPayload.Struct(hir_fields)
                     HirPatternKind.Enum(hir_type, variant, hir_payload)
 
             case Or(patterns):
