@@ -139,7 +139,23 @@ Repo-wide sweep with `/usr/bin/grep` (not ugrep):
   `doc/09_report/2026/**`, and `doc/07_guide/testing/*`. The one real evidence
   claim is
   `doc/03_plan/app/spipe/sspec_traceability_reorg_plan.md:226`, which cites a
-  two-spec invocation as verification — that evidence is void.
+  two-spec invocation as verification — that evidence was void. **Corrected
+  2026-08-01:** the line now records the original claim as void and cites a
+  fresh per-file re-run —
+  `test/01_unit/app/stats/benchmark_ledger_spec.spl` 8 examples / 0 failures and
+  `test/01_unit/app/stats/inventory_classifier_spec.spl` 9 examples / 0 failures,
+  each invoked with a single path. The original conclusion survives
+  re-verification, but it was not supported by the evidence originally cited.
+
+  The remaining multi-path documentation lines are **illustrative, not
+  evidentiary, and need no correction**: post-fix, a multi-path or multi-glob
+  invocation does exactly what those lines say it does, so they are now simply
+  accurate. (Re-checked with `/usr/bin/grep`: of the lines matching a two-`.spl`
+  invocation, the `doc/03_plan/gui/` hits are false positives — they are
+  `simple run src/app/spipe_docgen/main.spl <spec>`, an app plus its argument,
+  never a multi-path test run — and the rest sit in `doc/09_report/`,
+  `doc/10_metrics/`, `doc/11_archive/` and `doc/08_tracking/`, which are
+  temporal or auto-generated trees marked DO NOT refactor.)
 - **4 guard specs were vacuous — now de-vacuumed** (see next section):
   `test/01_unit/app/cli_dispatch_unit_spec.spl:157`
   ("parses multiple file paths") and

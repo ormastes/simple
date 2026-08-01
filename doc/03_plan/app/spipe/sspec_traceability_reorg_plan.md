@@ -223,7 +223,24 @@ Generated/manual SPipe docs mirror executable test paths:
 - Smoke alias cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/03_system/smoke/compile_smoke_spec.spl`
 - Verifier fixture cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/02_integration/app/verify_test_quality_gate_spec.spl`
 - Generic repro cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/03_system/feature/language/generic_repro_spec.spl`
-- Small-root cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/01_unit/app/stats/benchmark_ledger_spec.spl test/01_unit/app/stats/inventory_classifier_spec.spl`
+- Small-root cleanup — **original evidence VOID, re-verified 2026-08-01.** The
+  line as originally recorded was
+  `SIMPLE_LIB=src bin/simple test --force-rebuild test/01_unit/app/stats/benchmark_ledger_spec.spl test/01_unit/app/stats/inventory_classifier_spec.spl`,
+  a two-path invocation. The runner dropped every path after the first, so
+  `inventory_classifier_spec.spl` was never executed and the run reported
+  success covering `benchmark_ledger_spec.spl` alone. See
+  `doc/08_tracking/bug/test_runner_multi_path_drops_all_but_first_2026-08-01.md`
+  (fixed 2026-08-01). Both specs have now been re-run **individually** and both
+  pass:
+  - `test/01_unit/app/stats/benchmark_ledger_spec.spl` — 8 examples, 0 failures
+  - `test/01_unit/app/stats/inventory_classifier_spec.spl` — 9 examples, 0 failures
+
+  Engine: `simple.pre-segv-fix-20260731` via `run`, which self-identifies as a
+  Rust-built bootstrap seed, so this is interpreter evidence only. Pass/fail was
+  read from the per-file failure counts in the report, not from the exit code:
+  `simple run <spec>` exits 0 even when examples fail (recorded in the bug doc).
+  The original conclusion happens to survive re-verification, but it was not
+  supported by the evidence originally cited.
 - System alias cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/03_system/simpleos/driver_acceleration_perf_spec.spl`
 - System alias cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/03_system/simpleos/display_dma_contract_spec.spl`
 - System alias cleanup: `SIMPLE_LIB=src bin/simple test --force-rebuild test/03_system/wm_compare/html_compat_spec.spl`
