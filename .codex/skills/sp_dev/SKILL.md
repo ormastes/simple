@@ -127,6 +127,18 @@ Postponement is not completion: it cannot move the row into exclusions, close
 its TODO, or permit a phase, verify report, or goal to be marked done. Postpone
 only native execution that genuinely requires another prepared host; keep all
 host-independent and current-host rows active until finished.
+
+A user may explicitly re-scope completion to a narrower development,
+documentation, or handoff lane after all work in that scope is done. In that
+case, completion applies only to the named lane: keep the umbrella feature,
+verification, release qualification, and every affected acceptance criterion
+open in one authoritative TODO. Update the TODO database with the exact commit,
+remaining commands, prerequisites, retained artifacts, owner, and final
+reviewer before closing the narrower thread goal. The final report must say
+`development lane complete` and list the postponed gates; it must not claim
+`STATUS: PASS`, release completion, or artifact qualification. A generic request
+to postpone work is not implicit re-scoping—require an explicit completion
+instruction.
 Keep every unavailable row visible in executable and generated-manual evidence
 as `unsupported` or `blocked`; never omit it, convert it to `skip()`, or count
 it as PASS. `Current-host scope complete` is narrower than feature completion.

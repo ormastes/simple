@@ -115,6 +115,15 @@ acceptance-criterion IDs: a postponed row stays out of exclusions, keeps its
 TODO open, and blocks any phase, verify report, or goal whose acceptance depends
 on it until resumed and proved.
 
+If the user explicitly re-scopes completion to a narrower development,
+documentation, or handoff lane, that named lane may close after all of its work
+is done. Before closing it, update one authoritative TODO/database row with the
+exact commit plus every remaining command, prerequisite, retained artifact,
+owner, and reviewer. Keep the umbrella feature, verify, release qualification,
+and affected acceptance criteria open. Report `development lane complete`, not
+`STATUS: PASS` or release complete. Merely asking to postpone a gate does not
+re-scope the goal; completion must be explicit.
+
 For Cosmos+ NVMe physical evidence, accept BT-001..BT-006 only after
 `scripts/check/check-nvme-firmware-remaining-gates.shs --board-evidence DIR`
 passes. A result summary alone is invalid: each BT row binds a retained raw log

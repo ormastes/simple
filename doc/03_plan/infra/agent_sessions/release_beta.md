@@ -1,6 +1,8 @@
 # Lane: 1.0.0 beta release (ex-codex 019fb160)
 Goal: next 1.0.0 beta (beta2 if version unchanged): local release process, fix memory/perf bugs, full bootstrap for all platforms (except mac), GH Actions release must actually succeed.
-Status: Stage 2 is freshly admitted; Stage 3 remains release-blocking and no beta publication is permitted.
+Status: development/documentation lane complete in draft PR 21; strict bootstrap,
+final verification, tag, and publication remain open under TODO 652. No beta
+publication is permitted from the partial evidence below.
 
 Latest fresh rebuild: `scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload --output=build/bootstrap/release_beta_verify --no-mcp --jobs=min`
 - Stage 2: PASS (`build/bootstrap/release_beta_verify/logs/x86_64-unknown-linux-gnu/stage2-native-build.log` ends with `Build complete: 728 compiled, 0 cached, 0 failed`; binary at `build/bootstrap/release_beta_verify/stage2/x86_64-unknown-linux-gnu/simple`).
@@ -46,3 +48,9 @@ Blocked audit: this shared-authority condition persisted for three consecutive g
 - The implementation/documentation lane is complete and may be published as a draft PR.
 - Strict bootstrap qualification and final `/verify` are explicitly postponed in `doc/08_tracking/todo/release_beta_bootstrap_verify_postponed_2026-08-01.md`; postponement is not PASS evidence.
 - Stage 2/3 CLI evidence may be used for bounded diagnostics only. It cannot qualify the release, generate the final Stage-4 manual, create a tag, or publish artifacts.
+
+2026-08-01 final development-lane handoff:
+- Draft PR 21 is mergeable at `847e879c2e7`; the Windows-invalid duplicate paths are removed and Windows checkout succeeds.
+- Focused release checker/platform contracts and the guard-wiring registry pass. Red PR checks inspected during handoff are current-main baseline failures outside the release-beta delta; they are not release qualification evidence in either direction.
+- The thread goal was closed only after the user explicitly scoped completion to the development lane and required all remaining qualification work to stay in the TODO database.
+- TODO 652 is the authoritative resume boundary: exact source-matched Stage 2→3→4 with stub fallback disabled and timing/RSS receipts, exact Stage-4 SPipe/manual generation, `/verify STATUS: PASS`, then tag, prerelease, artifacts, and final GitHub attestation.
