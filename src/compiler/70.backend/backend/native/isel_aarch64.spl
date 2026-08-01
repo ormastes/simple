@@ -595,10 +595,23 @@ fn a64_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [Mi
 
     # Emit call
     match func_op.kind:
-        case Const(mirconstvalue_Str(name), _):
-            # Direct call to named function: BL symbol
-            current_ctx = isel_add_extern(current_ctx, name)
-            insts.push(new_mach_inst(A64_OP_BL, [op_sym(name)]))
+        case Const(const_value, _):
+            # `mirconstvalue_Str(name)` was written here as a nested pattern.
+            # No such symbol exists anywhere in the tree -- and even the
+            # correct spelling `MirConstValue.Str(name)` would be wrong in a
+            # payload position, because a nested enum sub-pattern always
+            # matches and never binds on the native/JIT lanes. Destructure the
+            # constant with a second, top-level match.
+            match const_value:
+                case Str(name):
+                    # Direct call to named function: BL symbol
+                    current_ctx = isel_add_extern(current_ctx, name)
+                    insts.push(new_mach_inst(A64_OP_BL, [op_sym(name)]))
+                case _:
+                    # A non-symbol constant callee has no call lowering.
+                    # Emitting a NOP here would silently drop the call and
+                    # then read whatever stale value x0 holds as the result.
+                    panic("aarch64 isel: call through non-symbol constant callee has no lowering")
         case Copy(local):
             # Indirect call through register: BLR xN
             insts.push(new_mach_inst(A64_OP_BL, [local_vreg_op(local.id)]))
