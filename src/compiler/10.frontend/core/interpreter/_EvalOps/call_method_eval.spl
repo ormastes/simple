@@ -577,6 +577,30 @@ fn eval_method_call(eid: i64) -> i64:
     # Built-in methods on types
     val kind = val_get_kind(receiver)
 
+    # Option/Result accessor methods.
+    #
+    # These run BEFORE the per-kind dispatch below because an Option has no
+    # value kind of its own. There is no VAL_ENUM in this interpreter: an
+    # Option/Result is either
+    #   (a) BOXED  — a VAL_STRUCT carrying a `__tag` text field at index 0 and
+    #       the payload at index 1 (what val_is_boxed_enum detects), or
+    #   (b) FLAT   — the raw payload word itself, with nil meaning None
+    #       (see match_enum_variant_pattern in eval.spl).
+    # Under (b) a `Some("x")` is indistinguishable from a plain text, so it
+    # would otherwise be routed into eval_text_method and rejected there.
+    #
+    # The struct NAME is deliberately NOT used as the discriminator: the two
+    # producers disagree on it. eval_enum_variant_call names the struct
+    # "Option::Some"/"Result::Ok" (Type::Variant) while eval_text_method's
+    # parse_int names it plain "Option". Only `__tag` is reliable.
+    #
+    # A non-enum VAL_STRUCT is left alone so a user-defined `Type__unwrap`
+    # still wins on the struct-method path further down.
+    if is_option_result_method(method_name):
+        val is_plain_struct = kind == VAL_STRUCT and val_is_boxed_enum(receiver) == false
+        if is_plain_struct == false:
+            return eval_option_result_method(receiver, method_name, arg_eids)
+
     # Array methods
     if kind == VAL_ARRAY:
         return eval_array_method(receiver, method_name, arg_eids)
@@ -783,6 +807,86 @@ fn eval_method_with_args(decl_id: i64, arg_values: [i64], arg_eids: [i64], arg_n
 
     last_val
 
+# ===== Option / Result Methods =====
+
+fn is_option_result_method(method_name: text) -> bool:
+    """True for the Option/Result accessor methods handled by
+    eval_option_result_method. Kept as an explicit list so an unrelated method
+    name never gets diverted off the normal per-kind dispatch."""
+    if method_name == "unwrap": return true
+    if method_name == "unwrap_or": return true
+    if method_name == "unwrap_err": return true
+    if method_name == "is_some": return true
+    if method_name == "is_none": return true
+    if method_name == "is_ok": return true
+    if method_name == "is_err": return true
+    false
+
+fn option_result_tag(receiver: i64) -> text:
+    """Variant tag of an Option/Result value.
+
+    Boxed form: the `__tag` field. Flat form: nil is None, and any other raw
+    word is its own Some payload. Returns "" for a value that is a boxed enum
+    of some OTHER (user-declared) enum type, so callers can reject it."""
+    if val_is_boxed_enum(receiver):
+        val tag = val_get_text(val_struct_get_field_idx(receiver, 0))
+        if tag == "Some" or tag == "None" or tag == "Ok" or tag == "Err":
+            return tag
+        return ""
+    if val_is_nil(receiver): return "None"
+    "Some"
+
+fn option_result_payload(receiver: i64) -> i64:
+    """Payload of an Option/Result value. Under the flat encoding the receiver
+    IS its own payload."""
+    if val_is_boxed_enum(receiver):
+        return val_struct_get_field_idx(receiver, 1)
+    receiver
+
+fn eval_option_result_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
+    val tag = option_result_tag(receiver)
+    if tag == "":
+        eval_set_error("no method '" + method_name + "' on enum "
+            + val_get_struct_name(receiver))
+        return -1
+
+    val is_present = tag == "Some" or tag == "Ok"
+
+    if method_name == "is_some": return val_make_bool(tag == "Some" or tag == "Ok")
+    if method_name == "is_none": return val_make_bool(tag == "None" or tag == "Err")
+    if method_name == "is_ok": return val_make_bool(is_present)
+    if method_name == "is_err": return val_make_bool(is_present == false)
+
+    if method_name == "unwrap":
+        if is_present: return option_result_payload(receiver)
+        # NEVER return a plausible default here. An unwrap of None/Err is a
+        # program bug and must surface as a diagnostic, not as 0/nil/receiver.
+        if tag == "Err":
+            eval_set_error("called unwrap on Err: "
+                + val_to_text(option_result_payload(receiver)))
+            return -1
+        eval_set_error("called unwrap on None")
+        return -1
+
+    if method_name == "unwrap_err":
+        if tag == "Err": return option_result_payload(receiver)
+        if tag == "Ok" or tag == "Some":
+            eval_set_error("called unwrap_err on Ok: "
+                + val_to_text(option_result_payload(receiver)))
+            return -1
+        eval_set_error("called unwrap_err on None")
+        return -1
+
+    if method_name == "unwrap_or":
+        if is_present: return option_result_payload(receiver)
+        if arg_eids.len() == 0:
+            eval_set_error("unwrap_or expects a default value argument")
+            return -1
+        return eval_expr(arg_eids[0])
+
+    eval_set_error("no method '" + method_name + "' on Option/Result")
+    -1
+
 # ===== Array Methods =====
 
 fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
@@ -887,6 +991,25 @@ fn eval_array_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
                         flat_result.push(sub)
                 return val_make_array(flat_result)
         return val_make_array(elements)
+
+    if method_name == "reduce" or method_name == "fold":
+        # reduce(initial, fn(acc, item)) — same closure convention as map/filter
+        # above, but the callback takes two params, so eval_method_with_args
+        # receives [acc, item].
+        if arg_eids.len() >= 2:
+            val init_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            val reduce_fn_vid = eval_expr(arg_eids[1])
+            if eval_had_error: return -1
+            if val_is_function(reduce_fn_vid):
+                val reduce_decl = val_get_func_decl(reduce_fn_vid)
+                var acc = init_val
+                for item in elements:
+                    acc = eval_method_with_args(reduce_decl, [acc, item], [], [])
+                    if eval_had_error: return -1
+                return acc
+        eval_set_error("'" + method_name + "' expects (initial, fn(acc, item))")
+        return -1
 
     if method_name == "any":
         if arg_eids.len() > 0:

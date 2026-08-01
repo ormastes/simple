@@ -68,6 +68,32 @@ must be unconditional.
   the pure-Simple interpreter, it errors today. That gap should be filed and
   fixed on `_EvalOps/call_method_eval.spl`, not rediscovered from the deleted
   file.
+  **DONE (2026-08-01, second pass) — and it STRENGTHENS the `rt_unwrap_or_self`
+  root cause below.** The gap was confirmed by *running* the pure-Simple
+  interpreter (`core_interpret_expr` driven with the Rust seed as HOST ONLY over
+  working-copy source, with a deliberately-failing SENTINEL row), then closed:
+  `eval_option_result_method` in `_EvalOps/call_method_eval.spl` now implements
+  `unwrap`, `unwrap_or`, `unwrap_err`, `is_some`, `is_none`, `is_ok`, `is_err`.
+  Two consequences for THIS bug:
+  1. **The interpreter is now eliminated as a suspect by construction.** Its
+     `unwrap_or` returns the payload for `Some`/`Ok` and evaluates the default
+     argument otherwise; it **never** returns the receiver. There is no
+     `_or_self` fallback anywhere on the interpreter path. So any surviving
+     `<value:0x6>` leak from `unwrap_or` is the MIR lowering — the diagnosis
+     below is confirmed, not merely inferred from the interpreter's silence.
+  2. The `VAL_STRUCT` gating story is superseded but its *shape* was
+     half-right, and the reason matters. Measured encoding: there is **no
+     `VAL_ENUM`** in this interpreter; an Option is either BOXED (a
+     `VAL_STRUCT` with `__tag` at field 0) or FLAT (the raw word, `nil` =
+     `None`). A raw `i64` receiver really does miss any `VAL_STRUCT`-gated
+     branch — which is exactly why the new arm is gated **before** the per-kind
+     dispatch and discriminates on `__tag`, never on `kind` or on the struct
+     name. (The struct name is unusable: `eval_enum_variant_call` produces
+     `"Option::Some"` while `parse_int` produces plain `"Option"`.)
+  Regression pin:
+  `test/01_unit/compiler/interpreter/option_result_method_dispatch_spec.spl`.
+  Nothing here retracts the `rt_unwrap_or_self` item; fix #2 in the plan below
+  still stands.
 - `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:388-396` —
   `option_payload_or_self` emits **`rt_unwrap_or_self`** ("return the receiver if
   it is not an Option"), typed `i64` while the value stays tag-boxed, producing
