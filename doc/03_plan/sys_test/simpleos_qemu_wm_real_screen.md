@@ -808,3 +808,15 @@ new provenance-qualified self-hosted deployment exists, then run once:
 sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs --self-test
 sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
 ```
+
+### Q-NIL source mitigation (2026-08-01)
+
+The Engine2D owner-helper consumers that returned `FontRenderer` through the
+known aggregate ABI route were changed to initialize and read
+`font_owner.active[0]` directly. This covers `fonts`, selected identity,
+load/select paths, cache statistics, and `draw_text_bg`, matching the already
+safe `draw_text` access. The focused source contract passes, but this is not
+native or guest proof: the public `fonts() -> FontRenderer` return and its
+external callers remain a separately tracked ABI boundary. Keep Q-NIL and
+Q-FONT pending until the exact native regression can be built/run with a
+current admitted compiler.
