@@ -506,33 +506,117 @@ census to this name shape, they would have disappeared with the rest. The
 detector is still live on exactly this class inside an edited file.
 
 
-### Filed: mangled float literals — `0[0]` written for `0.0` (7 executable lines)
+### Confirmed defect class 4: mangled float literals — `0[0]` written for `0.0` — FIXED
 
-Found while reading this cluster; a different mechanism, same porter. A float
-literal lost its decimal point and became an **index expression**, which the
-lenient path accepts silently:
+Same porter, different mechanism, and the worst of the four: this one is a
+**silent wrong answer**, not a link error.
+
+#### Root cause (PROVED)
+
+The porter translated Rust **tuple-field access** `x.0` into Simple index syntax
+`x[0]` — a correct rule — and then applied it to *any* `<digits>.<digits>` token,
+including float literals and version numbers in prose. `0.0` became `0[0]`: a
+valid-parsing index expression on the integer literal `0`.
+
+The mechanism is visible in the wild at `vulkan_backend.spl:99`, where a
+porter-generated tuple temporary `_tup_0` and a mangled comment `# Vulkan 1[3]`
+sit on the same line.
+
+This predicts the family exactly, and the prediction was checked: no other shape
+exists. Scans for `1[0]f64`-style suffixed literals, trailing-dot `1[]`, and
+chained `1[2][3]` all return **zero** hits across `src/**`. Leading-dot floats
+(`.5`) cannot occur because Rust's grammar does not accept them.
+
+#### What `0[0]` actually evaluates to (PROVED, per engine)
+
+Measured with the `x86_64-unknown-linux-gnu` binary copied to a scratch name,
+via `SIMPLE_EXECUTION_MODE`:
+
+| engine | result |
+|---|---|
+| `interpreter` | **fails closed**: `error: semantic: invalid operation: cannot index value of type i64` |
+| `jit` (and default) | garbage denormal ~`1.5e-322`, **identical for `0[0]`, `1[0]` and `0[0001]`**; `== 0.0` is false, `!= 0.0` is true |
+| `--native` | prints as `0.0` but `== 0.0` is **false** and `!= 0.0` is **true** |
+
+So on JIT and native every `<int>[<int>]` literal collapses to the *same*
+not-equal-to-anything value, and any `x != <mangled>` test is **constant true**.
+Note the engine split: the interpreter would refuse to load these modules at all,
+so this defect also blocks any interpreter-driven self-host path.
+
+#### Blast radius (PROVED by RED/GREEN on the real function body)
+
+A harness wrapping `binaryopsemantics_eval_float_float` verbatim (lines 128–154)
+with a local `BinOp` enum:
 
 ```
-src/compiler/35.semantics/semantics/binary_ops.spl:148-151
-    case And: binaryopresult_bool(left != 0[0] and right != 0[0])
-src/compiler/35.semantics/semantics/cast_rules.spl:95
-    CastNumericResult.Float(if value: 1[0] else: 0[0])
-src/compiler/35.semantics/semantics/cast_rules.spl:117
-    f != 0[0]
-src/compiler/55.borrow/gc_analysis/escape.spl:265
-    0[0]                       # in `fn stack_allocation_ratio() -> f64`
-src/compiler/15.blocks/blocks/testing.spl:381
-    return diff < 0[0001]      # intended epsilon 0.0001
+RED  (mangled):  And(0.0,0.0) = Bool(true)   Or(0.0,0.0) = Bool(true)
+GREEN (0.0):     And(0.0,0.0) = Bool(false)  Or(0.0,0.0) = Bool(false)
 ```
 
-This is strictly worse than the class above: it is a **silent wrong answer**
-today, not a link error. `binary_ops.spl` is the float `and`/`or` evaluator and
-`cast_rules.spl` is bool→float casting. A tree-wide scan for `\b[0-9]+\[[0-9]+\]`
-finds 25 hits, of which 7 lines are executable (the rest are inside docstrings —
-"Phase 3[3]", "2[5]x faster" — plus two real tuple-index expressions in
-`src/lib/common/yaml/validate.spl`). NOT fixed here: numeric semantics deserve
-their own evidence rather than riding on a spelling sweep.
+GREEN reproduces on both `jit` and `interpreter`. Per site:
 
+- `binary_ops.spl:148-151` — float `and`/`or`/`AndSuspend`/`OrSuspend` returned
+  **`true` for every input pair**. Float truthiness was a constant.
+- `cast_rules.spl:95` — bool→float cast returned the **same garbage for `true`
+  and `false`**; the branch distinction was destroyed entirely.
+- `cast_rules.spl:117` — float→bool returned `true` for **every** float,
+  including `0.0` and `-0.0`.
+- `testing.spl:381` — the epsilon in approximate float equality became ~`1.5e-322`
+  instead of `1e-4`, so float `assert_equal` reported "not equal" for any
+  non-identical pair.
+- `escape.spl:265` — `stack_allocation_ratio()` returned garbage instead of `0.0`
+  on the zero-allocations path.
+
+**This is a behaviour change.** Any code that relied on float `and`/`or` being
+unconditionally true, or on float→bool always being true, will now see correct
+results and may change outcome. That is intended.
+
+#### Enumeration and discrimination method
+
+Scan: `git grep -nE '(^|[^]A-Za-z0-9_.)])[0-9]+\[[0-9]+\]'` over `src`. The
+leading class excludes an identifier, `.`, `)` or `]` before the digits — i.e. it
+keeps only an **integer-literal receiver**. Real indexing always has an
+identifier, call, or subscript receiver (`_for_item_3[0]` in the very same
+`escape.spl` is correctly excluded), so receiver kind is a sound discriminator.
+
+Note the bracket expression must be written `[^]A-Za-z0-9_.)]` with `]` first —
+POSIX brackets do not honour `\]`, and the escaped form silently matches nothing.
+An earlier attempt returned 0 hits for this reason.
+
+Results: **71 raw hits**; 51 in `src/compiler_rust/vendor/**` (out of owned-code
+scope, and all genuine Rust tuple/array indexing); **20 owned `.spl` lines**.
+
+Of those 20, exactly **1 false positive**: `riscv_rvv.spl:141`, where `1[25]` and
+`010[14:12]` are legitimate RVV bit-field notation inside a comment. **False
+positive rate 1/20 = 5%** on owned code. No mangled site was missed by the filter
+and no real index expression was rewritten.
+
+#### Disposition, per site
+
+Executable, value-changing — **fixed**:
+
+| site | was | now |
+|---|---|---|
+| `binary_ops.spl:148-151` | `0[0]` ×8 | `0.0` |
+| `cast_rules.spl:95` | `1[0]`, `0[0]` | `1.0`, `0.0` |
+| `cast_rules.spl:117` | `0[0]` | `0.0` |
+| `escape.spl:265` | `0[0]` | `0.0` |
+| `testing.spl:381` | `0[0001]` | `0.0001` |
+
+Executable but inside a string literal (wrong user-facing text, not a wrong
+value) — **fixed**: `validators.spl:180` `"version 3[35]+"` → `"3.35+"`.
+
+Comment/docstring prose, zero runtime risk — **fixed** because two of them
+document the very semantics at issue: `cast_rules.spl:91-92`
+(`1 or 1[0]` / `0 or 0[0]`), `truthiness.spl:17` (`` `0[0]` (float) ``),
+`validators.spl:77,128` (`Phase 2[2]`), `parser_types.spl:92` (`Phase 3[3]`),
+`backend_helpers.spl:160` (`2[5]x`), `vulkan_backend.spl:99` (`Vulkan 1[3]`).
+
+**Left alone (false positive):** `riscv_rvv.spl:141` — bit-field notation, not a
+float. Rewriting it would have corrupted a correct encoding comment.
+
+No regex sweep was used; every site was edited by line number after reading its
+receiver.
 
 ## Follow-ups (not done here)
 
@@ -547,6 +631,9 @@ their own evidence rather than riding on a spelling sweep.
   the same shape whose receiver type is still unproven, and the 15 whose method
   genuinely does not exist on the named class — the latter are real gaps, not
   spellings.
+- The mangled-float class (`0[0]` for `0.0`) is done: 19 of 20 owned sites
+  corrected, 1 left alone as a verified false positive (`riscv_rvv.spl:141`,
+  RVV bit-field notation). The vendored Rust hits are out of owned-code scope.
 - Give `Dict` an `items()`/`entries()` method and `text` a `clone()`, or decide
   they are deliberately absent; three sites are blocked on that answer.
 - Make two-argument `Dict.get(k, default)` either work or fail loudly. It
