@@ -635,3 +635,25 @@ paths from this design are reached unchanged through the facades:
 The `SimpleWebHeuristicSurface` micro-fast-path (`simple_web_engine2d_renderer.spl:808`) is a known
 intentional Engine2D bypass in the backend layer; the isolation lint special-cases it (it is not an
 app-layer violation).
+
+## 12. Backend-native internal layout decision (2026-08-01)
+
+Decided in `doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md`
+(staged plan: `doc/03_plan/ui/draw_ir/draw_ir_backend_native_refactor_plan.md`):
+
+- v3 API-facing numeric domains (formats, blend, usage) become **named
+  constants with Vulkan-canonical values** — promoting the existing raw-VK
+  magic numbers (`vulkan_backend3d.spl:73-78`) to a checked contract.
+  `ResourceTable.formats` widens u16→u32 (VK extension formats overflow u16).
+- Vulkan lane reads columns with **zero conversion** and, on native, passes
+  **packed Vk records + direct SFFI to libvulkan** (Rust `ash` layer shrinks
+  to interpreter shims + instance/device bootstrap). Metal/DX read the same
+  columns through static remap accessor tables (their enum values genuinely
+  differ per API). No property-wrapper language feature is required or
+  assumed — writes stay emit-kernel-only.
+- Per-primitive descriptor-set/command-buffer/fence churn is replaced by
+  persistent descriptors + per-frame batch submission, with v3 SoA columns
+  uploaded as SSBOs as-is.
+- The capacity manifest gains a per-backend stride profile so one-time
+  allocation is sized by the selected (or embedded-target) backend.
+- v2 remains the frozen CPU oracle, unchanged — consistent with §11.
