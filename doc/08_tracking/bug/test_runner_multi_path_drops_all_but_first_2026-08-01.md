@@ -215,9 +215,8 @@ report.
 - `simple compile` invoked by absolute path exits 0 without compiling.
 - The default JIT exits 0 while printing "whole module dropped to the
   interpreter".
-- **`simple run <spec>` exits 0 even when examples FAIL** (found 2026-08-01 by
-  the spec lane while proving the sabotage above — PROVED, not yet fixed).
-  Minimal repro with `simple.pre-segv-fix-20260731`:
+- **`simple run <spec>` exits 0 even when examples FAIL** — **FIXED 2026-08-01**,
+  see the section below. Minimal repro with `simple.pre-segv-fix-20260731`:
 
       # probe_exit_spec.spl
       describe "exit code probe":
@@ -232,3 +231,138 @@ report.
   gates on the exit code of `run` reads GREEN. This is why the RED above is
   evidenced by **failure counts parsed out of the report**, never by exit code.
   Note this is `run`, not `test`; the `test` path exits non-zero correctly.
+
+## `simple run <spec>` exit-code fail-open — root cause and fix (2026-08-01)
+
+**Status:** fixed. **Engine:** reproduced with `bin/simple_seed` (rebuilt today
+from origin tip `f93c9b2623`) and with a debug build of the driver at origin tip
+`0d2b5ff20`. Both self-identify as `WARNING: this Rust-built Simple binary is a
+bootstrap seed only` — so this is **interpreter evidence only**. No spec on this
+path reaches the JIT or native lanes.
+
+### Root cause (PROVED)
+
+Shape: *the run path reports results but never propagates a failure count into
+the process exit.* Not an unconditional-success aggregator, and not a count
+computed after the exit decision — the count was simply never read.
+
+`cli/basic.rs::run_file_with_args` returned the interpreted module's own exit
+code (`Ok(code) => code`). A spec file has no explicit `main`, so the module
+returns 0 and the BDD failure state never reached the process status. The
+counters existed and had no production consumer:
+
+- `runtime/src/value/bdd_sffi.rs::rt_bdd_format_results()` returns the failure
+  total and its doc comment literally says *"Returns the total number of failures
+  (for exit code)"*. Zero production callers — only its own unit test.
+- `rt_bdd_has_failure()` is registered as a runtime symbol in
+  `runtime_sffi.rs` and `runtime_symbols.rs`. Also zero production callers.
+
+There is a second trap that makes the naive fix a *fresh* fail-open: the
+`(passed, failed)` pair behind the printed `"N examples, M failures"` line is
+`interpreter_call/bdd.rs::BDD_COUNTS`, and it is **reset to `(0, 0)` at the end of
+every top-level describe block**. Reading it after the run always yields zero.
+The correct source is `BDD_TEST_RESULTS`, which accumulates per-example records
+across the whole file — and is already what `simple test` trusts, via
+`simple_compiler::interpreter::get_test_results()`
+(`cli/test_runner/execution.rs:610`).
+
+This also shows the printed summary itself under-reports: a two-describe spec
+with one failure in the second block prints `1 example, 1 failure` (last block
+only) while the accumulated record correctly gives `1 of 2 example(s) failed`.
+
+### Fix
+
+`src/compiler_rust/driver/src/cli/basic.rs` — `bdd_example_counts()` +
+`bdd_failure_exit_code()`, consuming `get_test_results()`. Fail-closed rules:
+no examples ran -> module status untouched (non-spec programs share this path);
+any example failed -> exit 1; a non-zero module status is always preserved so a
+real error is never masked or downgraded. Skipped examples count as neither.
+The failure *mode* is distinguishable via a `spec failure: M of N example(s)
+failed (exit 1)` diagnostic on stderr; exit 1 was chosen over a novel code so
+`run` and `test` agree and ordinary `if ! simple run x` checks behave.
+
+This composes with `1cfed202c53` (the `count_positional_args()` fail-closed guard
+for multi-path `simple test`) rather than duplicating it: that guard is in client
+argument parsing, this is in the `run` exit path. **All `simple test` rows of the
+matrix below are byte-identical before and after.**
+
+### Invocation x outcome x exit-code matrix (PROVED)
+
+OLD = `bin/simple_seed` at origin tip; NEW = debug driver build with the fix.
+
+| invocation | outcome | OLD | NEW |
+|---|---|---|---|
+| `run <spec>` | all examples pass | 0 | 0 |
+| `run <spec>` | assertion failure (`expect 1 == 2`) | **0** | **1** |
+| `run <spec>` | semantic error inside an example | **0** | **1** |
+| `run <spec>` | parse error | 1 | 1 |
+| `run <spec>` | no examples (plain program) | 0 | 0 |
+| `run <spec>` | failure in 2nd of 2 describe blocks | **0** | **1** |
+| `test <spec>` | all examples pass | 0 | 0 |
+| `test <spec>` | assertion failure | 1 | 1 |
+| `test <spec>` | semantic error | 1 | 1 |
+| `test <spec>` | parse error | 1 | 1 |
+| `test a.spl b.spl` | 2nd path fails | 1 | 1 |
+
+### Newly-visible pre-existing failures — NOT caused by this fix
+
+Sample of the first 60 specs under `test/01_unit`, run via `simple run`,
+old binary vs new:
+
+| transition | count |
+|---|---|
+| `0 -> 0` (still green) | 30 |
+| `0 -> 1` (newly RED) | 27 |
+| `1 -> 1` (already red: parse errors) | 2 |
+| `0 -> 124` (timeout) | 1 |
+
+All 27 newly-RED specs carry the `spec failure:` marker, meaning the **old binary
+already printed failures for them and exited 0 anyway**. Spot-checked directly:
+
+    $ simple_seed run test/01_unit/.../branch_coverage_10_spec.spl
+    6 examples, 2 failures
+    rc=0
+
+So roughly **45% of sampled specs were already failing and `simple run` was
+hiding it**. These are pre-existing failures made newly visible, not regressions
+introduced here. The single `0 -> 124` case
+(`test/01_unit/app/cli/cli_os_spec.spl`) is a 60s timeout under an unoptimised
+**debug** build versus a release seed, unrelated to exit-code accounting.
+
+Cost of full enforcement: if the whole spec tree behaves like this sample,
+on the order of ~45% of specs would newly report non-zero under `simple run`.
+Nothing was weakened to keep them green, and no spec was skipped or retimed.
+
+### Regression coverage, proved RED-before-GREEN
+
+- `cli/basic.rs` unit tests: `bdd_exit_code_is_non_zero_when_any_example_failed`,
+  `bdd_exit_code_tracks_failures_across_multiple_describe_blocks`,
+  `bdd_exit_code_stays_zero_for_clean_specs`,
+  `bdd_exit_code_ignores_programs_with_no_examples`,
+  `bdd_exit_code_treats_skipped_examples_as_neither_pass_nor_fail`,
+  `bdd_exit_code_never_masks_a_real_error_status`.
+- End-to-end: `driver/tests/interpreter_bdd.rs`. Three assertions there read
+  `.success()` on specs whose own stdout said `1 example, 1 failure` — they had
+  **encoded the fail-open**. Tightened to `.code(1)`:
+  `bdd_matcher_pass_after_failure_keeps_example_failed`,
+  `bdd_bare_falsy_call_without_matcher_still_fails`, and
+  `mutual_recursion_diagnoses_cleanly_instead_of_crashing` (which was using
+  `.success()` as a proxy for "not killed by a signal").
+
+Non-vacuity, matching the standard used earlier in this report: sabotaging the
+**implementation** (forcing `bdd_failure_exit_code` to always return the module
+status) took the 2 new failure-detecting assertions RED while all **7
+pre-existing assertions in the same block stayed GREEN**. Restored and
+hash-verified; suites then GREEN — `cli::basic` 13/13, `interpreter_bdd` 6/6,
+`runner_tests` 51/51.
+
+### Adjacent defect found, NOT fixed here (still open)
+
+`expect <a> to_equal <b>` — the **matcher-word form** — is a silent no-op under
+`simple run`. `expect 1 to_equal 2` reports `✓` and `1 example, 0 failures`,
+where the operator form `expect 1 == 2` and `raise` both correctly report a
+failure. The same spec under `simple test` correctly reports 1 failed, so this is
+specific to the `run` path's BDD evaluation, not to the exit code. It is a
+second, independent fail-open of the same family: an exit-code fix cannot rescue
+an example that was never scored as failing. PROVED with `bin/simple_seed`,
+interpreter evidence only.
