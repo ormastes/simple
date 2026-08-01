@@ -21,6 +21,8 @@ use std.spec.*
 use lib.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels,
     simple_web_layout_last_render_degraded}
+use lib.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_readback_engine2d_result}
 
 val W: i32 = 96
 val H: i32 = 64
@@ -68,6 +70,23 @@ describe "Simple Web engine budget + quota hardening":
         step("Assert graceful degradation: still a full-sized buffer, and the flag honestly reports the trip")
         expect(degraded.len()).to_equal(W * H)
         expect(simple_web_layout_last_render_degraded()).to_equal(true)
+
+    it "carries the degraded verdict onto the readback result so font evidence can fail closed":
+        # Regression guard for
+        # doc/08_tracking/bug/web_showcase_vector_font_evidence_style_budget_truncation_2026-08-01.md
+        # The style cascade breaks on budget expiry and leaves unreached nodes on
+        # renderer_default_style() (sans-serif/16px). Before this field existed the
+        # readback result still published vector_font_* as if it were complete
+        # evidence, so a TRUNCATED render was indistinguishable from a genuine font
+        # mismatch. The verdict must travel WITH the result, not just in a global.
+        val html = "<html><body><p style=\"font-family: Bungee; font-size: 100px\">Hi</p></body></html>"
+        step("Render a page whose text node carries an explicit non-default font, under the default budget")
+        val complete = simple_web_layout_render_html_readback_engine2d_result(html, W, H, "software")
+        step("Assert a completed render reports render_degraded=false and publishes a non-empty font identity")
+        expect(complete.render_degraded).to_equal(false)
+        expect(complete.vector_font_identity == "").to_equal(false)
+        step("Assert the completed render resolved the DECLARED font size, not the 16px CSS default")
+        expect(complete.vector_font_pixel_size).to_equal(100)
 
     it "keeps the first stylesheet rule effective when total rules exceed the quota":
         step("Render body background #3050a0 followed by 4300 distinct junk rules (over the 4096 quota)")

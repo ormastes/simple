@@ -13,6 +13,7 @@
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     SimpleWebLayoutMaterialWitness,
+    simple_web_layout_last_render_degraded,
     simple_web_layout_material_provenance_after_backend_execution,
     simple_web_layout_render_html_draw_ir_result_with_images,
     simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
@@ -45,6 +46,14 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 class SimpleWebLayoutEngine2DExecutionResult:
     render: Engine2dDrawIrAdvResult
     material_fallback: WebRenderMaterialFallbackProvenance
+    # True iff the layout/style pass that produced this result tripped its
+    # wall-clock budget and stopped early (see
+    # simple_web_layout_last_render_degraded). Every vector_font_* field below
+    # is then derived from an INCOMPLETE cascade and must not be read as
+    # evidence -- nodes the cascade never reached keep renderer_default_style()
+    # (sans-serif/16px), so the reported identity and pixel size describe the
+    # default face rather than the document's. Consumers gate on this FIRST.
+    render_degraded: bool
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -59,6 +68,10 @@ class SimpleWebLayoutEngine2DExecutionResult:
 class SimpleWebLayoutEngine2DReadbackResult:
     readback: Engine2DReadback
     material_fallback: WebRenderMaterialFallbackProvenance
+    # See SimpleWebLayoutEngine2DExecutionResult.render_degraded -- carried
+    # through so readback consumers can fail closed on a truncated cascade
+    # instead of trusting fabricated vector_font_* evidence.
+    render_degraded: bool
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -196,6 +209,10 @@ fn _simple_web_layout_execute_draw_ir_composition(
     )
     SimpleWebLayoutEngine2DExecutionResult(
         render: render, material_fallback: material_fallback,
+        # Captured AFTER the layout/style pass has run, so it reflects any
+        # budget break in that pass; the vector_font_* fields below are only
+        # trustworthy when this is false.
+        render_degraded: simple_web_layout_last_render_degraded(),
         vector_font_identity: render.font_identity,
         vector_font_pixel_size:
             _simple_web_draw_ir_last_text_font_pixel_size(
@@ -609,6 +626,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
         return SimpleWebLayoutEngine2DReadbackResult(
             readback: engine2d_readback([], "unavailable"),
             material_fallback: WebRenderMaterialFallbackProvenance.none(),
+            render_degraded: false,
             vector_font_identity: "", vector_font_pixel_size: 0,
             vector_font_execution_target: "", vector_font_batch_identity: "",
             vector_font_readback_source: "", vector_font_device_checksum: 0,
@@ -624,6 +642,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
         return SimpleWebLayoutEngine2DReadbackResult(
             readback: engine2d_readback([], "unavailable"),
             material_fallback: execution.material_fallback,
+            render_degraded: execution.render_degraded,
             vector_font_identity: execution.vector_font_identity,
             vector_font_pixel_size: execution.vector_font_pixel_size,
             vector_font_execution_target: execution.vector_font_execution_target,
@@ -642,6 +661,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
         pixel_count: pixel_count, checksum: execution.render.readback_checksum)
     SimpleWebLayoutEngine2DReadbackResult(
         readback: readback, material_fallback: execution.material_fallback,
+        render_degraded: execution.render_degraded,
         vector_font_identity: execution.vector_font_identity,
         vector_font_pixel_size: execution.vector_font_pixel_size,
         vector_font_execution_target: execution.vector_font_execution_target,
