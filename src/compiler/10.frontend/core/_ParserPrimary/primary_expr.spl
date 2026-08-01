@@ -527,10 +527,24 @@ fn parse_primary_expr() -> i64:
             parser_expect(145)
             return expr_list_comp(comp_iter_var, comp_iterable, first_elem, comp_cond, 0)
         # Regular array literal: [first, second, ...]
+        #
+        # This loop must be UNBOUNDED. It used to be `for i in 0..10000`, which
+        # capped the literal at 10000 consumed commas. Past that the loop merely
+        # fell out with the cursor still parked on a comma, so the
+        # `parser_expect(145)` below reported `expected ], got , ','` against a
+        # perfectly well-formed comma and gave no hint that a size limit had
+        # been reached. Generated tables trip this: the public-suffix table in
+        # src/lib/common/web/public_suffix_data.spl failed at exactly line
+        # 10012 column 25, the comma after its 10001st entry. See
+        # doc/08_tracking/bug/parser_array_literal_element_cap_2026-08-01.md
+        #
+        # Termination is structural, not counted. The loop is entered only when
+        # the cursor is on a comma (160) and unconditionally consumes it via
+        # parser_advance(), so every pass retires at least one token from a
+        # finite stream even when the parse_expr() below consumes nothing. At
+        # EOF the kind is 190, never 160, so the loop exits.
         var elements: [i64] = [first_elem]
-        for i in 0..10000:
-            if par_kind_get() != 160:
-                break
+        while par_kind_get() == 160:
             parser_advance()
             if par_kind_get() == 145:
                 break
@@ -749,8 +763,18 @@ fn parse_primary_expr() -> i64:
         key_exprs.push(key)
         value_exprs.push(value)
 
-        # Parse remaining key-value pairs
-        for i in 0..10000:
+        # Parse remaining key-value pairs.
+        #
+        # Unbounded for the same reason as the array-literal loop above: a
+        # `for i in 0..10000` bound here truncated a dict literal at 10000
+        # consumed commas and then returned the dict with the remaining
+        # `, k: v ...}` tokens still in the stream, producing cascading
+        # diagnostics far from the real cause. Termination is structural — every
+        # path through the body either breaks outright or consumes the comma via
+        # parser_advance(), so one token is retired from a finite stream per
+        # pass. At EOF the kind is neither 160 nor 143, so the else branch below
+        # reports and breaks.
+        while true:
             # Check for comma or closing brace
             if par_kind_get() == 160:
                 parser_advance()
