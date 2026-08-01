@@ -389,6 +389,16 @@ int64_t  rt_array_get_i64_raw(SplArray* array, int64_t index);
 int64_t  rt_array_map(SplArray* array, int64_t closure);
 int64_t  rt_array_each(SplArray* array, int64_t closure);
 int64_t  rt_array_reduce(SplArray* array, int64_t init, int64_t closure);
+/* Predicate-driven collection ops. `any`/`all` take the predicate as a REAL
+ * operand -- the Rust runtime once declared them (array)-only and discarded it
+ * silently (f835ee71522). The predicate-less spellings are separate symbols,
+ * NOT defaulted arguments. */
+int64_t  rt_array_filter(SplArray* array, int64_t closure);
+int64_t  rt_array_find(SplArray* array, int64_t closure);
+int64_t  rt_array_any(SplArray* array, int64_t closure);
+int64_t  rt_array_all(SplArray* array, int64_t closure);
+int64_t  rt_array_any_truthy(SplArray* array);
+int64_t  rt_array_all_truthy(SplArray* array);
 SplArray* rt_array_concat(SplArray* a, SplArray* b);
 SplArray* rt_array_copy(SplArray* a);
 SplArray* rt_array_repeat(int64_t value, int64_t count);

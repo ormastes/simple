@@ -5993,6 +5993,139 @@ int64_t rt_array_reduce(SplArray* array, int64_t init, int64_t closure_value) {
     return acc;
 }
 
+/* Truthiness, mirroring the Rust runtime's RuntimeValue::truthy()
+ * (runtime/src/value/core.rs) branch for branch. The two runtimes MUST agree
+ * on how a predicate's RESULT is judged: a divergence here is not a link error
+ * but a silently different answer, visible only on whichever runtime a given
+ * link happens to pull in.
+ *
+ * The float test comes FIRST, exactly as it does in Rust: a heap-boxed 0.0
+ * carries RT_VALUE_TAG_HEAP, so judged by tag alone it would be "truthy
+ * because the pointer exists". rt_core_is_float covers both the heap-boxed
+ * form and the legacy inline RT_VALUE_TAG_FLOAT form, so both of Rust's float
+ * arms are subsumed by the one test. */
+static inline int rt_core_value_truthy(int64_t value) {
+    if (rt_core_is_float(value)) return rt_core_as_float(value) != 0.0;
+    switch (((uint64_t)value) & RT_VALUE_TAG_MASK) {
+    case RT_VALUE_TAG_INT:
+        return rt_core_as_int(value) != 0;
+    case RT_VALUE_TAG_SPECIAL:
+        return rt_core_special_payload(value) == RT_VALUE_SPECIAL_TRUE;
+    case RT_VALUE_TAG_HEAP:
+        return (((uint64_t)value) & ~RT_VALUE_TAG_MASK) != 0;
+    default:
+        return 0;
+    }
+}
+
+/* Predicate-driven collection ops.
+ *
+ * Until now this runtime defined NONE of these six while the Rust runtime
+ * defined all six, so the two runtimes were not at parity: whether
+ * `arr.filter(f)` linked at all depended purely on which runtime a given link
+ * pulled in. Measured against the built objects with a true-positive control
+ * (rt_array_map / rt_array_each / rt_array_reduce / rt_array_get present,
+ * these six absent) and confirmed at source level across every src/runtime
+ * *.c, since archive-absence alone is not proof.
+ *
+ * Semantics are pinned to the INTERPRETER (interpreter_helpers/collections.rs
+ * eval_array_filter / eval_array_find / eval_array_any / eval_array_all), not
+ * guessed, and mirror the Rust runtime (runtime/src/value/collections.rs):
+ *
+ *   filter -> NEW array of the elements whose predicate result is truthy
+ *   find   -> the FIRST element whose predicate result is truthy, else nil
+ *   any    -> 1 on the FIRST truthy result (short-circuit); empty -> 0
+ *   all    -> 0 on the FIRST falsy result (short-circuit); empty -> 1
+ *
+ * rt_array_any / rt_array_all take the predicate as a REAL operand. The Rust
+ * runtime used to declare them as (array) only and forward to the _truthy
+ * form, so the predicate operand was accepted by the ABI and then DISCARDED --
+ * `[1,2,3].all(x => x > 10)` answered true and the predicate was never invoked
+ * (fixed in f835ee71522). This runtime is written at the correct arity from
+ * the start so that divergence is not reintroduced here.
+ *
+ * The zero-predicate spellings are SEPARATE symbols, not defaulted arguments:
+ * `arr.all_truthy()` lowers to rt_array_all_truthy(array) through its own MIR
+ * arm (mir/lower/lowering_expr_method.rs). A defaulted closure operand could
+ * not be told apart from a real one, so the split is deliberate.
+ *
+ * A zero func_ptr means the operand is not a registered closure; like the Rust
+ * runtime these degrade to element truthiness rather than calling through an
+ * unvalidated address.
+ *
+ * Iteration is by INDEX, re-reading the length each step, for the same reason
+ * rt_array_map does it: the predicate is arbitrary user code and may push to
+ * or clear the receiver. */
+int64_t rt_array_filter(SplArray* array, int64_t closure_value) {
+    if (!rt_core_array_ptr(array)) return rt_core_nil();
+    SplArray* result = rt_array_new(0);
+    if (!result) return rt_core_nil();
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return (int64_t)(uintptr_t)result;
+    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        int64_t item = rt_array_get(array, i);
+        if (rt_core_value_truthy(func(closure_value, item))) {
+            rt_array_push(result, item);
+        }
+    }
+    return (int64_t)(uintptr_t)result;
+}
+
+int64_t rt_array_find(SplArray* array, int64_t closure_value) {
+    if (!rt_core_array_ptr(array)) return rt_core_nil();
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return rt_core_nil();
+    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        int64_t item = rt_array_get(array, i);
+        if (rt_core_value_truthy(func(closure_value, item))) return item;
+    }
+    return rt_core_nil();
+}
+
+/* Non-array receiver answers 0 for BOTH _truthy forms, matching the Rust
+ * as_typed_ptr! bail-out default. Note this is deliberately NOT the vacuous
+ * `true` an empty loop would produce for all_truthy: "not an array" and "an
+ * array all of whose elements are truthy" must not share an answer. */
+int64_t rt_array_all_truthy(SplArray* array) {
+    if (!rt_core_array_ptr(array)) return 0;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        if (!rt_core_value_truthy(rt_array_get(array, i))) return 0;
+    }
+    return 1;
+}
+
+int64_t rt_array_any_truthy(SplArray* array) {
+    if (!rt_core_array_ptr(array)) return 0;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        if (rt_core_value_truthy(rt_array_get(array, i))) return 1;
+    }
+    return 0;
+}
+
+int64_t rt_array_all(SplArray* array, int64_t closure_value) {
+    if (!rt_core_array_ptr(array)) return 0;
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return rt_array_all_truthy(array);
+    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        if (!rt_core_value_truthy(func(closure_value, rt_array_get(array, i)))) return 0;
+    }
+    return 1;
+}
+
+int64_t rt_array_any(SplArray* array, int64_t closure_value) {
+    if (!rt_core_array_ptr(array)) return 0;
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return rt_array_any_truthy(array);
+    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        if (rt_core_value_truthy(func(closure_value, rt_array_get(array, i)))) return 1;
+    }
+    return 0;
+}
+
 static int64_t rt_bdd_passed = 0;
 static int64_t rt_bdd_failed = 0;
 static int rt_bdd_current_failed = 0;
