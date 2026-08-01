@@ -202,6 +202,190 @@ that continues past the error and emits a placeholder operand (a const 0/3...)")
 Step 2 is the blocker, and it is the same global bare-name registry implicated
 in the originating layout bug.
 
+
+## 2026-08-01 follow-up: worklist re-scan and owned-`src/` fixes
+
+### The original blast scan's wildcard predicate was wrong (PROVED)
+
+The 286-site scan counted a match as having no wildcard unless it saw `case _`.
+Three arm forms it missed are real, working catch-alls. Measured on the seed
+(`bin/simple_seed`, rebuilt from origin tip `f93c9b2623`), each with a positive
+control proving the probe was live, across `run`, `run --interpret` and bare
+positional lanes:
+
+| Form | Verdict | Probe |
+|---|---|---|
+| `_:` (no `case` keyword) | **real wildcard**, statement *and* expression form | `probe_wildcard.spl`, `probe_else.spl` |
+| bare lowercase binder, e.g. `other:` | **real wildcard** | `probe_binder.spl` |
+| `_ => expr` (arrow arm) | **real wildcard** | re-scan delta |
+| `else:` | **PARSE ERROR** in a match arm, not a wildcard | `probe_else.spl` |
+
+**Consequence: every named finding in the original worklist was a false
+positive.** All 11 `redis/client.spl` sites already carry a `_:` arm; so do
+`bencode.spl`, `context_manager.spl` and `word_app.spl:157`. None were changed
+— changing them would have been churn on correct code.
+
+`fs_driver/instance.spl:45` was a false positive of a different kind: it is the
+"Example dispatch" block inside the enum's **docstring**, not code. The real
+`impl DriverInstance` methods all cover `DbFs`.
+
+### Corrected scan
+
+Re-scanned the same tree with a corrected predicate (wildcard forms above;
+`pub enum` / `export enum` declarations recognised — the original missed these,
+which is why `TaskKind` and `ExecutionMode` resolved to the *wrong* same-named
+enum; docstrings masked; `|` alternation and `=>` arms parsed paren-aware).
+
+| Metric | Original | Corrected |
+|---|---|---|
+| `.spl` files scanned | 33,104 | 33,148 |
+| `match` blocks | 34,136 | 30,341 |
+| Non-exhaustive enum match, no wildcard | 286 | **477** |
+| ...enum name declared more than once (unreliable) | 223 | **421** |
+| ...enum name unique (reliable) | 63 | **56** |
+| ...owned `src/`, actionable | 24 | **0 remaining** (10 found, 10 fixed) |
+
+The corrected total is *higher* (477 vs 286) because recognising `pub enum`
+raised the known-variant sets. The reliable slice is smaller and different.
+
+### Measured fall-through behaviour by return type
+
+The bug doc's `expr_result=3` holds for an `i64` expression context. Other
+contexts differ, and the difference matters when judging severity:
+
+| Return type | Fall-through result (seed interpreter) |
+|---|---|
+| `i64` expression | integer `3` (nil sentinel) |
+| `bool` | `false` — control: a covered arm returned `true` |
+| `text` | interpolation collapses; the **entire** surrounding string prints empty |
+| struct | nil, then **faults** on first field access ("field access on nil receiver", SIGILL) |
+| statement form | no-op; prior variable values retained |
+
+### Fixed — 14 match sites across 10 files, all explicit variant arms, no wildcards added
+
+| File | Enum | Added |
+|---|---|---|
+| `src/lib/nogc_sync_mut/ui/session.spl` | `UIEvent` | `CompositionUpdate`, `CompositionCommit` |
+| `src/lib/common/ui/web_render_api.spl` | `UIEvent` | `CompositionUpdate`, `CompositionCommit` |
+| `src/lib/nogc_async_mut/mcp/dispatch.spl` | `GateDecision` | `Hold` -> `"gated"` |
+| `src/os/machine_profile.spl` | `SimpleOsFirmwareContractKind` | `BareMetal` -> `"bare-metal"` |
+| `src/app/office/slides/render.spl` (x2) | `SlideElementKind` | `TableEl` |
+| `src/app/llm_dashboard/data/agent_position.spl` (x2) | `RoomKind` | total `_room_key`, replacing two partial matches |
+| `src/app/llm_dashboard/tui/colors.spl` (x2) | `RoomKind` | `Tasks` |
+| `src/app/llm_dashboard/tui/room_map.spl` (x2) | `RoomKind` | `Tasks` (+ `tasks_room_furniture` in `office_furniture.spl`) |
+| `src/app/llm_dashboard/gui/room_map_html.spl` (x2) | `RoomKind` | `Tasks` (+ `.room-tasks` CSS) |
+
+Two of these are **live, exercised** fall-throughs, not latent:
+
+- `UIEvent.CompositionCommit` is dispatched into `session.dispatch` from
+  `src/os/compositor/compositor.spl:757` and
+  `src/os/compositor/host_gui_event_router.spl:211`. The handler match at
+  `session.spl:338` had no arm for it, so every IME commit took no branch.
+- `SimpleOsFirmwareContractKind.BareMetal` is constructed at three lanes in
+  `src/os/port/_SimpleosMultiplatformBuild/platform_target_catalog.spl`.
+
+`RoomKind` behaviour was measured, not assumed: `_same_room(Skills, Skills)`
+returned **false** (control `_same_room(Chat, Chat)` returned true), so
+`pos_agents_in_room` returned an empty list for four of the seven rooms. An
+earlier draft of this note claimed the fall-through was *truthy* and merged
+different rooms; that was **wrong** and the probe disproved it.
+
+### Verification
+
+- All 10 edited files parse on the seed. **Sabotage control:** removing a colon
+  from one added arm turns the gate RED with a parse error; restoring it returns
+  it to GREEN. The gate is not vacuous.
+- Corrected re-scan after the edits: actionable owned-`src/` sites **10 -> 2**,
+  and both survivors are the collision-blocked ones below.
+- **NOT verified by execution:** the edited modules were not run end-to-end;
+  their imports do not resolve standalone, and no binary at this tip detects a
+  missing enum variant. Parse + scan-delta + targeted behavioural probes on
+  extracted enum shapes are the evidence. Claims above are labelled accordingly.
+
+### Blocked, not fixed — the duplicate-name problem
+
+**421 of the 477** sites name one of the **387 enum names declared more than
+once** (of 1,590). Which enum's variant set applies cannot be determined without
+resolving the collision, so these are **left untouched by design**. Guessing
+would be exactly the failure mode this bug documents.
+
+Two owned-`src/` sites are blocked for the same reason even though their enum
+name looked unique — the arms name variants that do not exist in the only
+declared enum of that name, so the site is resolving to some other `enum`:
+
+- `src/app/interpreter/expr/advanced.spl:27` — matches `FStringPart.ExprFormatted`,
+  but the sole declared `FStringPart` has `ExprWithFormat` and no `ExprFormatted`.
+- `src/app/interpreter/module/evaluator.spl:81` — matches `Node.ArchitectureRule`,
+  `Node.LeanBlock`, `Node.HandlePool` etc., none of which exist in
+  `src/compiler/10.frontend/ast.spl`'s `Node`.
+
+### Tracked list — all 56 unique-enum-name sites
+
+Every remaining reliable site, enumerated rather than sampled. All owned-`src/`
+production sites are fixed; the remainder are test fixtures and the two blocked
+sites above.
+
+| # | Site | Enum | Missing variants | Disposition |
+|---|---|---|---|---|
+| 1 | `src/app/interpreter/expr/advanced.spl:27` | FStringPart | ExprWithFormat | BLOCKED - bare-name collision (arms name variants absent from the only declared enum) |
+| 2 | `src/app/interpreter/module/evaluator.spl:81` | Node | Other | BLOCKED - bare-name collision (arms name variants absent from the only declared enum) |
+| 3 | `test/01_unit/common/ui/input_event_conformance_spec.spl:72` | UIEvent | CompositionCommit, CompositionUpdate, Copy, Cut, DragDrop, DragMove, DragStart, FetchResult, FocusEvent, InputChange, MouseEvent, Paste, PasteFromHistory, ScrollEvent | NOT FIXED - test fixture, intentionally partial |
+| 4 | `test/01_unit/doctest/parser_spec.spl:27` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 5 | `test/01_unit/doctest/parser_spec.spl:48` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 6 | `test/01_unit/doctest/parser_spec.spl:57` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 7 | `test/01_unit/doctest/parser_spec.spl:101` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 8 | `test/01_unit/doctest/parser_spec.spl:131` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 9 | `test/01_unit/doctest/parser_spec.spl:139` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 10 | `test/01_unit/doctest/parser_spec.spl:147` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 11 | `test/01_unit/doctest/parser_spec.spl:156` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 12 | `test/01_unit/lib/common/compress_shared_helpers_spec.spl:23` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 13 | `test/01_unit/lib/common/compress_utilities_spec.spl:28` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 14 | `test/01_unit/lib/common/lz4_spec.spl:15` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 15 | `test/01_unit/lib/common/xz_lzma2_spec.spl:17` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 16 | `test/01_unit/lib/common/zstd_bits_spec.spl:15` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 17 | `test/01_unit/lib/common/zstd_compressed_block_spec.spl:6` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 18 | `test/01_unit/lib/common/zstd_dictionary_spec.spl:209` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 19 | `test/01_unit/lib/common/zstd_fse_spec.spl:13` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 20 | `test/01_unit/lib/common/zstd_fse_weights_spec.spl:47` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 21 | `test/01_unit/lib/common/zstd_huf_spec.spl:14` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 22 | `test/01_unit/lib/common/zstd_sequence_fse_execution_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 23 | `test/01_unit/lib/common/zstd_sequence_fse_tables_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 24 | `test/01_unit/lib/common/zstd_sequence_header_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 25 | `test/01_unit/lib/common/zstd_sequence_rle_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 26 | `test/01_unit/lib/common/zstd_single_sequence_compress_spec.spl:118` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 27 | `test/01_unit/lib/nogc_sync_mut/compression/brotli/brotli_negative_large_edge_spec.spl:32` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 28 | `test/02_integration/core/common_compression_framework_facade_spec.spl:35` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 29 | `test/cert/tool_qual/known_defects/nonexhaustive_match.spl:10` | E | B | NOT FIXED - test fixture, intentionally partial |
+| 30 | `test/integration/core/common_compression_framework_facade_spec.spl:35` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 31 | `test/unit/common/ui/input_event_conformance_spec.spl:72` | UIEvent | CompositionCommit, CompositionUpdate, Copy, Cut, DragDrop, DragMove, DragStart, FetchResult, FocusEvent, InputChange, MouseEvent, Paste, PasteFromHistory, ScrollEvent | NOT FIXED - test fixture, intentionally partial |
+| 32 | `test/unit/doctest/parser_spec.spl:27` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 33 | `test/unit/doctest/parser_spec.spl:43` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 34 | `test/unit/doctest/parser_spec.spl:52` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 35 | `test/unit/doctest/parser_spec.spl:95` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 36 | `test/unit/doctest/parser_spec.spl:129` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 37 | `test/unit/doctest/parser_spec.spl:137` | Expected | Empty, Exception | NOT FIXED - test fixture, intentionally partial |
+| 38 | `test/unit/doctest/parser_spec.spl:145` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 39 | `test/unit/doctest/parser_spec.spl:154` | Expected | Empty, Output | NOT FIXED - test fixture, intentionally partial |
+| 40 | `test/unit/lib/common/compress_shared_helpers_spec.spl:23` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 41 | `test/unit/lib/common/compress_utilities_spec.spl:28` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 42 | `test/unit/lib/common/lz4_spec.spl:15` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 43 | `test/unit/lib/common/xz_lzma2_spec.spl:17` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 44 | `test/unit/lib/common/zstd_bits_spec.spl:15` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 45 | `test/unit/lib/common/zstd_compressed_block_spec.spl:6` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 46 | `test/unit/lib/common/zstd_dictionary_spec.spl:209` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 47 | `test/unit/lib/common/zstd_fse_spec.spl:13` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 48 | `test/unit/lib/common/zstd_fse_weights_spec.spl:47` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 49 | `test/unit/lib/common/zstd_fse_weights_spec.spl:114` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 50 | `test/unit/lib/common/zstd_huf_spec.spl:14` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 51 | `test/unit/lib/common/zstd_sequence_fse_execution_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 52 | `test/unit/lib/common/zstd_sequence_fse_tables_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 53 | `test/unit/lib/common/zstd_sequence_header_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 54 | `test/unit/lib/common/zstd_sequence_rle_spec.spl:5` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 55 | `test/unit/lib/common/zstd_single_sequence_compress_spec.spl:118` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+| 56 | `test/unit/lib/nogc_sync_mut/compression/brotli/brotli_negative_large_edge_spec.spl:32` | CompressionError | CorruptData, Other, OutputTooSmall, Unsupported | NOT FIXED - test fixture, intentionally partial |
+
+By area: src/app 2, test/01_unit 25, test/02_integration 1, test/cert 1, test/integration 1, test/unit 26
+
 ## Related
 
 - `doc/08_tracking/bug/` — enum payload sub-pattern always-matches (separate defect)
