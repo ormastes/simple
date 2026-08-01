@@ -55,6 +55,7 @@ fn is_interp_builtin_fn(name: text) -> bool:
      name == "type_of" or name == "clone" or name == "file_exists" or
      name == "file_read" or name == "file_write" or name == "file_delete" or
      name == "env_get" or name == "env_set" or name == "int" or
+     name == "float" or name == "bool" or name == "panic" or
      name == "str" or name == "text")
 
 fn primitive_cast_type_kind(name: text) -> HirTypeKind?:
@@ -369,6 +370,10 @@ impl HirLowering:
             val bsym = self.symbols.define(name, SymbolKind.Function, symbol_type, span, false, false, nil)
             HirExprKind.NamedVar(bsym, name)
         else:
+            if self.try_register_bootstrap_global_symbol(name, span):
+                val global_sym = self.symbols.lookup_or_invalid(name)
+                if global_sym.is_valid():
+                    return HirExprKind.NamedVar(global_sym, name)
             self.error("unresolved name: {name}", span)
             HirExprKind.Error
 
@@ -389,6 +394,7 @@ impl HirLowering:
         # kind_disc=823890719) — and the direct read shows the same garbage, so
         # `e` itself is corrupted upstream (bug doc iteration 17).
         val expr_kind_value: ExprKind = e.kind
+        val expr_kind_discriminant: i64 = hir_expr_kind_disc(expr_kind_value)
         val host_gpu_lane = self.try_lower_host_gpu_lane_expr(e)
         if val lowered_host_gpu_lane = host_gpu_lane:
             return lowered_host_gpu_lane
@@ -427,8 +433,6 @@ impl HirLowering:
                 return HirExpr(kind: HirExprKind.Call(self.lower_hir_expr(call_callee_t), hir_args, []), type_: nil, span: e.span)
             case _:
                 pass
-        if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] lower_expr:kind")
         # SEED PATTERN HAZARD (bug doc iteration 18): when a variant pattern's
         # name is ALSO a struct name in scope (`struct Field` in
         # parser_types.spl, `struct Block` in parser_types_expr.spl), the seed
@@ -440,7 +444,7 @@ impl HirLowering:
         # Field). Pre-dispatch these variants by explicit discriminant
         # (rt_enum_discriminant = DefaultHasher(variant name) truncated to u32)
         # and keep them OUT of the big match.
-        val kind_disc_v: i64 = hir_expr_kind_disc(expr_kind_value)
+        val kind_disc_v: i64 = expr_kind_discriminant
         val kind_disc_dummy = Expr(kind: ExprKind.NilLit, span: e.span)
         if kind_disc_v == hir_expr_kind_disc(ExprKind.MethodCall(kind_disc_dummy, "", [])):
             match expr_kind_value:
@@ -620,16 +624,12 @@ impl HirLowering:
                     pass
         val kind = match expr_kind_value:
             case ExprKind.IntLit(value):
-                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_expr:int")
                 HirExprKind.IntLit(value, nil)
 
             case ExprKind.FloatLit(value):
                 HirExprKind.FloatLit(value, nil)
 
             case ExprKind.StringLit(value, interps):
-                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_expr:string")
                 # Bug bootstrap_mir_interpolation_literal_braces: same #130
                 # fix as the Call/MethodCall arms above -- the former
                 # SIMPLE_BOOTSTRAP branch unconditionally wiped an
@@ -646,8 +646,6 @@ impl HirLowering:
                 HirExprKind.StringLit(value, hir_interps)
 
             case ExprKind.BoolLit(value):
-                if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-                    eprint("[hir-lower] lower_expr:bool")
                 HirExprKind.BoolLit(value)
 
             case ExprKind.ArrayLit(elements):
@@ -1809,7 +1807,6 @@ impl HirLowering:
     # known ANY-extraction limitation, documented in the bug tracker).
     me lower_hir_block_unit(b: Block) -> HirBlock:
         if (hir_expr_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
-            eprint("[hir-lower] lower_block_unit:start")
             self.symbols.push_scope(ScopeKind.Block)
             var boot_stmts: [HirStmt] = []
             var boot_idx = 0
@@ -1820,7 +1817,6 @@ impl HirLowering:
                     boot_stmts = boot_stmts.push(boot_lowered_list[boot_li])
                     boot_li = boot_li + 1
                 boot_idx = boot_idx + 1
-            eprint("[hir-lower] lower_block_unit:done")
             self.symbols.pop_scope()
             return HirBlock(stmts: boot_stmts, has: false, value: HirExpr(kind: HirExprKind.NilLit, type_: nil, span: b.span), span: b.span)
 

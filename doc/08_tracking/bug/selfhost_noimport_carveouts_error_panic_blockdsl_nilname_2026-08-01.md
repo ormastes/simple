@@ -181,6 +181,6 @@ front end from a compiled binary so the whole file fits in a run.
 | 6 | `float` | **FIXED** — seed/self-host cast divergence |
 | 3 | `panic` | OPEN — real resolver gap, needs `rt_panic` lowering |
 | 3 | `error` | OPEN — **source defect**, not a resolver defect |
-| 4 | block-DSL names | OPEN — raw-docstring interpolation suspected, unproved |
+| 4 | block-DSL names | OPEN — Stage3 proved the active trigger is the ordinary strings returned by `examples()`; `\{` does not suppress bootstrap interpolation |
 | 5 | `nilnilnilnilnilnil` | OPEN — 4 hypotheses refuted, upstream nil suspected |
 | 7 | `pred` | OPEN — folds into 4, not into the fixed 7 |

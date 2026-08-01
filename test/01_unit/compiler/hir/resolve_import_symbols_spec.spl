@@ -14,6 +14,8 @@ use compiler.frontend.parser_types.{Module}
 use compiler.common.driver_core_types.{SourceFile}
 use compiler.common.config.{Logger}
 
+extern fn rt_env_set(key: text, value: text)
+
 fn make_logger() -> Logger:
     Logger(level: 0)
 
@@ -52,6 +54,32 @@ describe "resolve_import_symbols 2-pass import resolver":
         var lowering = hirlowering_for_module("consumer_fn", surfaces)
         val hir = lowering.lower_module(consumer)
         expect(hir.symbols.lookup("answer").?).to_be_truthy()
+
+    it "bootstrap resolves one uniquely owned flat-global declaration":
+        val log = make_logger()
+        val src_provider = "struct FlatType:\n    value: i64\npub fn flat_answer() -> i64:\n    42"
+        val provider = parse_full_frontend(
+            src_provider, "flat.provider", "flat.provider", log)
+        val consumer = parse_full_frontend(
+            "type LocalText = text\nfn consume(value: FlatType) -> i64:\n    flat_answer()\nfn inferred_answer():\n    flat_answer()\nfn local_alias(value: LocalText) -> LocalText:\n    value\nfn maybe(value: FlatType?) -> FlatType?:\n    value\nfn parse_float(value: text) -> f64:\n    if value == \"panic\":\n        panic(value)\n    float(value)",
+            "flat.consumer", "flat.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["flat.provider"] = provider
+        val sources = [SourceFile(
+            path: "flat.provider", content: src_provider,
+            module_name: "flat.provider")]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+        rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "1")
+        var lowering = hirlowering_for_module("flat.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        rt_env_set("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "")
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
+
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("FlatType").?).to_be_truthy()
+        expect(hir.symbols.lookup("flat_answer").?).to_be_truthy()
 
     it "named import from module A wins over same-named symbol from module B":
         val log = make_logger()

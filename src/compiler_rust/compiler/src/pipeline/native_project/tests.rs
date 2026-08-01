@@ -81,6 +81,73 @@ fn enum_runtime_identity_qualification_preserves_builtins_and_custom_shadows() {
 }
 
 #[test]
+fn enum_runtime_identity_uses_unique_global_enum_suffix() {
+    use crate::hir::TypeId;
+    use crate::mir::{BlockId, MirFunction, MirInst, MirModule};
+    use simple_parser::Visibility;
+
+    let mut mir = MirModule::new();
+    let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
+    let dest = function.new_vreg();
+    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
+        dest,
+        enum_name: "FixConfidence".to_string(),
+        variant_name: "Safe".to_string(),
+    });
+    mir.functions.push(function);
+
+    let runtime_names = std::collections::HashMap::from([(
+        "compiler__common__diagnostics__diagnostic_v1__FixConfidence".to_string(),
+        "compiler.common.diagnostics.diagnostic_v1.FixConfidence".to_string(),
+    )]);
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "consumer",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &runtime_names,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &mir.functions[0].blocks[0].instructions[0],
+        MirInst::EnumUnit { enum_name, .. }
+            if enum_name == "compiler.common.diagnostics.diagnostic_v1.FixConfidence"
+    ));
+}
+
+#[test]
+fn enum_runtime_identity_preserves_unlisted_external_owner() {
+    use crate::hir::TypeId;
+    use crate::mir::{BlockId, MirFunction, MirInst, MirModule};
+    use simple_parser::Visibility;
+
+    let mut mir = MirModule::new();
+    let mut function = MirFunction::new("probe".to_string(), TypeId::I64, Visibility::Private);
+    let dest = function.new_vreg();
+    function.block_mut(BlockId(0)).unwrap().instructions.push(MirInst::EnumUnit {
+        dest,
+        enum_name: "ByteOrder".to_string(),
+        variant_name: "LittleEndian".to_string(),
+    });
+    mir.functions.push(function);
+
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "consumer",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        &mir.functions[0].blocks[0].instructions[0],
+        MirInst::EnumUnit { enum_name, .. } if enum_name == "ByteOrder"
+    ));
+}
+
+#[test]
 fn enum_runtime_identity_collision_is_reported_before_codegen() {
     let root = std::path::PathBuf::from("/tmp/enum-runtime-identity/src");
     let file_sources = vec![(

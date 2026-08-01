@@ -75,6 +75,18 @@ class SpirvBuilder:
         """Format ID as SPIR-V string."""
         "%{id}"
 
+    me join_raw_ids(ids: [i64], separator: text) -> text:
+        var parts: [text] = []
+        for id in ids:
+            parts = parts.push("{id}")
+        parts.join(separator)
+
+    me join_id_strs(ids: [i64], separator: text) -> text:
+        var parts: [text] = []
+        for id in ids:
+            parts = parts.push(self.id_str(id))
+        parts.join(separator)
+
     # === Module Structure ===
 
     me emit_header():
@@ -120,7 +132,7 @@ class SpirvBuilder:
 
     me emit_entry_point(name: text, id: i64, interface_ids: [i64]):
         """Emit entry point declaration for compute shader."""
-        val interface_str = interface_ids.map(self.id_str(_)).join(" ")
+        val interface_str = self.join_id_strs(interface_ids, " ")
         self.emit("OpEntryPoint GLCompute {self.id_str(id)} \"{name}\" {interface_str}")
 
     me emit_execution_mode(entry_id: i64, local_size: [i64]):
@@ -207,9 +219,9 @@ class SpirvBuilder:
 
     me emit_type_struct(member_ids: [i64]) -> i64:
         """Emit struct type."""
-        val member_key = member_ids.map("{_}").join("_")
+        val member_key = self.join_raw_ids(member_ids, "_")
         val type_repr ="struct_{member_key}"
-        val members = member_ids.map(self.id_str(_)).join(" ")
+        val members = self.join_id_strs(member_ids, " ")
         self.get_or_create_type(type_repr, "OpTypeStruct {members}")
 
     me emit_type_pointer(storage_class: text, pointee_id: i64) -> i64:
@@ -219,9 +231,9 @@ class SpirvBuilder:
 
     me emit_type_function(return_id: i64, param_ids: [i64]) -> i64:
         """Emit function type."""
-        val param_key = param_ids.map("{_}").join("_")
+        val param_key = self.join_raw_ids(param_ids, "_")
         val type_repr ="fn_{return_id}_{param_key}"
-        val params = param_ids.map(self.id_str(_)).join(" ")
+        val params = self.join_id_strs(param_ids, " ")
         self.get_or_create_type(type_repr, "OpTypeFunction {self.id_str(return_id)} {params}")
 
     # === Constants ===
@@ -343,7 +355,7 @@ class SpirvBuilder:
     me emit_access_chain(result_type_id: i64, base_id: i64, indices: [i64]) -> i64:
         """Emit access chain (pointer arithmetic)."""
         val id = self.alloc_id()
-        val idx_str = indices.map(self.id_str(_)).join(" ")
+        val idx_str = self.join_id_strs(indices, " ")
         self.emit("{self.id_str(id)} = OpAccessChain {self.id_str(result_type_id)} {self.id_str(base_id)} {idx_str}")
         id
 
@@ -563,14 +575,14 @@ class SpirvBuilder:
     me emit_composite_extract(type_id: i64, composite_id: i64, indices: [i64]) -> i64:
         """Extract element from composite."""
         val id = self.alloc_id()
-        val idx_str = indices.map("{_}").join(" ")
+        val idx_str = self.join_raw_ids(indices, " ")
         self.emit("{self.id_str(id)} = OpCompositeExtract {self.id_str(type_id)} {self.id_str(composite_id)} {idx_str}")
         id
 
     me emit_composite_construct(type_id: i64, constituent_ids: [i64]) -> i64:
         """Construct composite from constituents."""
         val id = self.alloc_id()
-        val constituents = constituent_ids.map(self.id_str(_)).join(" ")
+        val constituents = self.join_id_strs(constituent_ids, " ")
         self.emit("{self.id_str(id)} = OpCompositeConstruct {self.id_str(type_id)} {constituents}")
         id
 
@@ -588,12 +600,13 @@ class SpirvBuilder:
         """Build final SPIR-V assembly."""
         # Replace bound placeholder with actual value
         val bound_line = "; Bound: {self.next_id}"
-        self.output.map(
-            if _1 == "; Bound: <bound>":
-                bound_line
+        var rendered: [text] = []
+        for output_line in self.output:
+            if output_line == "; Bound: <bound>":
+                rendered = rendered.push(bound_line)
             else:
-                _1
-        ).join("\n")
+                rendered = rendered.push(output_line)
+        rendered.join("\n")
 
     fn get_output() -> [text]:
         """Get output lines."""

@@ -294,6 +294,16 @@ fn sanitized_enum_unit_global_lowers_to_enum_unit() {
     )));
 }
 
+#[test]
+fn lowercase_option_constructor_aliases_lower_to_builtin_mir() {
+    let mir = compile_to_mir(
+        "fn some_value() -> Option<i64>:\n    Option.some(7)\n\nfn no_value() -> Option<i64>:\n    Option.none()\n",
+    )
+    .unwrap();
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::OptionSome { .. })));
+    assert!(has_inst(&mir, |i| matches!(i, MirInst::OptionNone { .. })));
+}
+
 // =============================================================================
 // Lambda / closure (lowering_expr.rs - ClosureCreate, IndirectCall)
 // =============================================================================

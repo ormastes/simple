@@ -299,6 +299,10 @@ impl HirLowering:
         if not scan.found_value_return:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or not scan.resolved_name.?:
+            if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
+                # The bootstrap route has no whole-program inference pass.
+                # Preserve the value dynamically; Unit would discard it.
+                return HirType(kind: HirTypeKind.Any, span: fn_decl.span)
             if not self.registering_import_symbols:
                 self.error("untyped function returns a value: function '{fn_decl.name}' returns a value but declares no return type; add '-> T'", fn_decl.span)
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
@@ -651,6 +655,27 @@ impl HirLowering:
                 val source_mod = hir_module_surface_get(self.module_surfaces, hop.module_name)
                 if source_mod != nil:
                     self.register_imported_symbol(source_mod.unwrap(), hop.module_name, hop.item_name, local_name, import_span)
+
+    me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
+        """Resolve one uniquely owned flat-global bootstrap declaration."""
+        if (hir_module_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1":
+            return false
+        if self.symbols.lookup(name).?:
+            return true
+        var matching_index: i64 = -1
+        var surface_index: i64 = 0
+        while surface_index < self.module_surfaces.surfaces.len():
+            val surface = self.module_surfaces.surfaces[surface_index]
+            if hir_module_declares_item(surface, name):
+                if matching_index >= 0:
+                    return false
+                matching_index = surface_index
+            surface_index = surface_index + 1
+        if matching_index < 0:
+            return false
+        val owner = self.module_surfaces.surfaces[matching_index]
+        self.register_imported_symbol(owner, owner.module_name, name, name, span)
+        self.symbols.lookup(name).?
 
     me resolve_module_key(name: text) -> text:
         """Canonical modules_by_name key for an import path, or "".
@@ -2013,8 +2038,8 @@ impl HirLowering:
         if is_dict_tag(tag):
             val dict_id = dict_tag_to_id(tag)
             return HirType(kind: HirTypeKind.Dict(
-                bootstrap_hir_type_from_tag(dict_type_get_key(dict_id)),
-                bootstrap_hir_type_from_tag(dict_type_get_value(dict_id))
+                self.bootstrap_hir_type_from_tag(dict_type_get_key(dict_id)),
+                self.bootstrap_hir_type_from_tag(dict_type_get_value(dict_id))
             ), span: span)
         if tag == TYPE_TEXT:
             return HirType(kind: HirTypeKind.Str, span: span)

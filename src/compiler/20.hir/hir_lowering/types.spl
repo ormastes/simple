@@ -524,8 +524,12 @@ impl HirLowering:
         # `Option` (the parser only threads i64/f64/text/bool inners through
         # dedicated tags; every other `T?` collapses to plain TYPE_OPTION)
         # deliberately keeps the pre-existing fall-through behavior.
-        if name == "Option" and hir_args.len() == 1:
-            return HirTypeKind.Optional(hir_args[0])
+        if name == "Option":
+            if hir_args.len() == 1:
+                return HirTypeKind.Optional(hir_args[0])
+            if hir_args.len() == 0:
+                return HirTypeKind.Optional(HirType(
+                    kind: HirTypeKind.Any, span: span))
         # SEED-PARITY (2026-08-01): `has_X` spells an optional X.
         # The seed (type_resolver.rs:128) strips a `has_` prefix and re-resolves
         # the base as `Type::Optional(base)`. Legacy compiler sources use this
@@ -594,11 +598,13 @@ impl HirLowering:
             case "u128" | "i128": HirTypeKind.Int(64, true)
             case "f32": HirTypeKind.Float(32)
             case "f64": HirTypeKind.Float(64)
+            case "float": HirTypeKind.Float(64)
             case "bool": HirTypeKind.Bool
             # Seed parity: `"unit" => TypeId::VOID`. Bare `unit` annotations
             # come from inference / cross-module signatures.
             case "unit": HirTypeKind.Unit
             case "char": HirTypeKind.Char
+            case "Any" | "any": HirTypeKind.Any
             case "text" | "str" | "String": HirTypeKind.Str
             case "list": HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: span), nil)
             # `fn(T,...) -> R` param annotations reach here as Named("fn")
@@ -635,6 +641,8 @@ impl HirLowering:
                     self.error("Dict type expects 2 type arguments", span)
                     HirTypeKind.Error
             case _:
+                if not self.symbols.lookup(name).?:
+                    val _registered_global = self.try_register_bootstrap_global_symbol(name, span)
                 val symbol_id = self.symbols.lookup_or_invalid(name)
                 if symbol_id.is_valid():
                     if custom_primitive_is_name(name):

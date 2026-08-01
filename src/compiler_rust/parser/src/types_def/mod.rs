@@ -69,6 +69,12 @@ impl<'a> Parser<'a> {
             None
         };
 
+        // Structs and classes share the same explicit mixin syntax:
+        // `struct Name with Mixin1, Mixin2<T>:`. Structs with mixins are
+        // represented by ClassDef with `is_value_type` set so the existing
+        // mixin expansion pipeline is reused without losing struct semantics.
+        let explicit_mixins = self.parse_explicit_mixins()?;
+
         let where_clause = self.parse_where_clause()?;
 
         // Check for empty struct (no body)
@@ -80,6 +86,29 @@ impl<'a> Parser<'a> {
             // Parse fields, optional inline methods, optional invariant, and doc comment
             self.parse_indented_fields_and_methods()?
         };
+
+        if !explicit_mixins.is_empty() {
+            return Ok(Node::Class(ClassDef {
+                span: self.make_span(start_span),
+                name,
+                generic_params: generic_params.clone(),
+                where_clause,
+                fields,
+                methods,
+                parent: implements_trait,
+                visibility: Visibility::Private,
+                effects: Vec::new(),
+                attributes,
+                doc_comment,
+                is_generic_template: !generic_params.is_empty(),
+                specialization_of: None,
+                type_bindings: HashMap::new(),
+                invariant,
+                macro_invocations: Vec::new(),
+                mixins: explicit_mixins,
+                is_value_type: true,
+            }));
+        }
 
         let struct_def = StructDef {
             span: self.make_span(start_span),
@@ -107,6 +136,35 @@ impl<'a> Parser<'a> {
         } else {
             Ok(Node::Struct(struct_def))
         }
+    }
+
+    fn parse_explicit_mixins(&mut self) -> Result<Vec<MixinRef>, ParseError> {
+        let mut explicit_mixins = Vec::new();
+        if self.check(&TokenKind::With) {
+            self.advance();
+            loop {
+                let span = self.current.span;
+                let mixin_name = self.expect_identifier()?;
+                let type_args = if self.check(&TokenKind::Lt) {
+                    self.parse_generic_args()?
+                } else {
+                    Vec::new()
+                };
+
+                explicit_mixins.push(MixinRef {
+                    span,
+                    name: mixin_name,
+                    type_args,
+                    overrides: Vec::new(),
+                });
+
+                if !self.check(&TokenKind::Comma) {
+                    break;
+                }
+                self.advance();
+            }
+        }
+        Ok(explicit_mixins)
     }
 
     // === Class ===
@@ -137,30 +195,7 @@ impl<'a> Parser<'a> {
         };
 
         // Parse mixin application: class Name with Mixin1, Mixin2<T>:
-        let mut explicit_mixins = Vec::new();
-        if self.check(&TokenKind::With) {
-            self.advance();
-            loop {
-                let mixin_name = self.expect_identifier()?;
-                let type_args = if self.check(&TokenKind::Lt) {
-                    self.parse_generic_args()?
-                } else {
-                    Vec::new()
-                };
-
-                explicit_mixins.push(MixinRef {
-                    span: self.current.span,
-                    name: mixin_name,
-                    type_args,
-                    overrides: Vec::new(),
-                });
-
-                if !self.check(&TokenKind::Comma) {
-                    break;
-                }
-                self.advance();
-            }
-        }
+        let explicit_mixins = self.parse_explicit_mixins()?;
 
         let where_clause = self.parse_where_clause()?;
 

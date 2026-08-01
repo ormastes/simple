@@ -15,6 +15,7 @@ use compiler.hir.hir_lowering.module_surface.{
 use compiler.driver.driver_source_loading.{
     _driver_is_bootstrap_entry_source,
     _driver_physical_source_key,
+    _driver_text_bucket_index,
     _driver_unique_physical_sources
 }
 use compiler.driver.driver_log_helpers.{
@@ -29,6 +30,12 @@ extern fn rt_env_get(key: text) -> text
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
+
+class ParsedEntryModuleBox:
+    value: ParserModule
+
+    static fn new(value: ParserModule) -> ParsedEntryModuleBox:
+        ParsedEntryModuleBox(value: value)
 
 # Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
 # [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
@@ -153,15 +160,16 @@ impl CompilerDriver:
                 entry_sources)
             log_phase(
                 "phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
-            # Physical key -> index into `parsed_entry_modules`. Built once here
-            # so the alias fan-out loop below is a Dict lookup instead of the
-            # now-removed `_driver_text_list_index` linear scan, which was
-            # O(entry_sources x unique_entry_sources) (~8.9e7 full-path text
-            # compares on a whole-tree closure). Value type is deliberately
-            # `i64` — see doc/07_guide/language/dict_native_pitfalls.md; a
-            # struct-valued dict would corrupt under native `.get()`.
-            var parsed_entry_index: Dict<text, i64> = {}
-            var parsed_entry_modules: [ParserModule] = []
+            # Avoid native Dict bracket-read corruption with a scalar
+            # open-addressed table. Keep ParserModule values behind class
+            # handles because large staged-native value arrays also corrupt.
+            val parsed_entry_index_capacity = unique_entry_sources.len() * 2 + 1
+            var parsed_entry_index_keys: [text] = []
+            var parsed_entry_index_values: [i64] = []
+            while parsed_entry_index_keys.len() < parsed_entry_index_capacity:
+                parsed_entry_index_keys = parsed_entry_index_keys.push("")
+                parsed_entry_index_values = parsed_entry_index_values.push(-1)
+            var parsed_entry_modules: [ParsedEntryModuleBox] = []
             for source in unique_entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
                 if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
@@ -185,15 +193,25 @@ impl CompilerDriver:
                     (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
                     dtrace(
                         "[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
-                # Bracket assignment only — `.set()` silently fails on builtin
-                # Dicts under native codegen (see the NOTE below).
-                parsed_entry_index[physical_key] = parsed_entry_modules.len()
-                parsed_entry_modules = parsed_entry_modules.push(entry_module)
+                var parsed_slot = _driver_text_bucket_index(
+                    physical_key, parsed_entry_index_capacity)
+                while (parsed_entry_index_keys[parsed_slot] != "" and
+                       parsed_entry_index_keys[parsed_slot] != physical_key):
+                    parsed_slot = (parsed_slot + 1) % parsed_entry_index_capacity
+                parsed_entry_index_keys[parsed_slot] = physical_key
+                parsed_entry_index_values[parsed_slot] = parsed_entry_modules.len()
+                parsed_entry_modules = parsed_entry_modules.push(
+                    ParsedEntryModuleBox.new(entry_module))
             for source in entry_sources:
                 val physical_key = _driver_physical_source_key(source.path)
                 var parsed_idx: i64 = -1
-                if parsed_entry_index.contains_key(physical_key):
-                    parsed_idx = parsed_entry_index[physical_key]
+                var parsed_slot = _driver_text_bucket_index(
+                    physical_key, parsed_entry_index_capacity)
+                while parsed_entry_index_keys[parsed_slot] != "":
+                    if parsed_entry_index_keys[parsed_slot] == physical_key:
+                        parsed_idx = parsed_entry_index_values[parsed_slot]
+                        break
+                    parsed_slot = (parsed_slot + 1) % parsed_entry_index_capacity
                 if parsed_idx < 0:
                     self.ctx.errors.push(
                         "internal entry-closure parse cache miss for {source.path}")
@@ -206,7 +224,12 @@ impl CompilerDriver:
                 # site (e.g. module_surfaces_add_name, the SIMPLE_BOOTSTRAP
                 # branch just below) uses bracket assignment, which works.
                 # See doc/07_guide/language/dict_native_pitfalls.md.
-                entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
+                val parsed_box = parsed_entry_modules[parsed_idx]
+                if parsed_box == nil:
+                    self.ctx.errors.push(
+                        "internal entry-closure parsed module box missing for {source.path}")
+                    return (self.ctx, false)
+                entry_modules[source.module_name] = parsed_box.value
             var entry_ctx: CompileContext = self.ctx
             entry_ctx.modules = entry_modules
             entry_ctx.sources = unique_entry_sources

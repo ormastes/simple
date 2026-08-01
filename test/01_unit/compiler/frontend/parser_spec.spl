@@ -26,7 +26,167 @@ fn parser_if_elif_result(x: i64) -> text:
         result = "zero"
     result
 
+trait ParserComparable<T>:
+    fn compare(other: T) -> i64
+
+struct ParserReverse<T>:
+    inner: T
+
+impl ParserComparable<ParserReverse<T>> for ParserReverse<T>:
+    fn compare(other: ParserReverse<T>) -> i64:
+        0
+
+fn parser_i64_chunk_size(values: [i64]) -> i64:
+    len(values)
+
+fn parser_apply_chunk<T>(values: [T], processor: fn([T]) -> i64) -> i64:
+    processor(values)
+
+fn parser_apply_zero_arg(producer: fn() -> i64) -> i64:
+    producer()
+
 describe "Parse Declarations":
+    it "parse generic trait implementation for a generic type":
+        val left = ParserReverse<i64>(inner: 1)
+        val right = ParserReverse<i64>(inner: 2)
+        expect(left.compare(right)).to_equal(0)
+
+    it "keeps the union keyword out of graph helper calls":
+        val graph_source = parser_source(
+            "src/compiler_rust/lib/std/src/core/graph.spl")
+        expect(graph_source).to_contain("fn union_components(")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/core/graph.spl", "fn union(")
+
+    it "keeps block doc comments out of trait method slots":
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/infra/parallel.spl",
+            "trait ParIter<T>:\n    /**")
+
+    it "parses a callable that accepts a generic list":
+        expect(parser_apply_chunk([1, 2, 3], parser_i64_chunk_size)).to_equal(3)
+        val parallel_source = parser_source(
+            "src/compiler_rust/lib/std/src/infra/parallel.spl")
+        expect(parallel_source).to_contain("processor: fn([T]) -> R")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/infra/parallel.spl", "fn(<T>)")
+
+    it "keeps block doc comments out of synchronization member slots":
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/infra/synchronization.spl",
+            "    /**")
+
+    it "keeps Python compiler implementation signatures terminated":
+        val python_source = parser_source(
+            "src/compiler_rust/lib/std/src/tooling/compiler/python.spl")
+        expect(python_source).to_contain(
+            "incremental: bool) -> CompilationResult:")
+        expect(python_source).to_contain("fn get_language() -> Language:")
+        expect(python_source).to_contain("fn supports_incremental() -> bool:")
+
+    it "parses deployment tuple return signatures":
+        val deployment_source = parser_source(
+            "src/compiler_rust/lib/std/src/tooling/deployment/automation.spl")
+        expect(deployment_source).to_contain(
+            "pub fn parse_platform(self) -> (text, text):")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/tooling/deployment/automation.spl",
+            "parse_platform(self): (text, text):")
+
+    it "keeps escaped quotes out of raw spec generator regexes":
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/tooling/spec_gen.spl",
+            "captures(r\"context")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/tooling/spec_gen.spl",
+            "captures(r\"it")
+
+    it "keeps C-style braces out of testing filter loops":
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/tooling/testing/filter.spl",
+            "return type_mod_path\n            }")
+
+    it "parses canonical zero-argument lambdas":
+        expect(parser_apply_zero_arg(\: 42)).to_equal(42)
+        val parallel_source = parser_source(
+            "src/compiler_rust/lib/std/src/tooling/testing/parallel.spl")
+        expect(parallel_source).to_contain(
+            "val work_fn = \\: runner(item.suite)")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/tooling/testing/parallel.spl", "||")
+
+    it "keeps reserved actor out of parameter names":
+        val parallel_source = parser_source(
+            "src/compiler_rust/lib/std/src/tooling/testing/parallel.spl")
+        expect(parallel_source).to_contain(
+            "fn _rt_actor_send(actor_handle: i64, message: Any)")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/tooling/testing/parallel.spl",
+            "fn _rt_actor_send(actor:")
+
+    it "parses tuple-destructuring header filter lambdas":
+        val http_source = parser_source(
+            "src/compiler_rust/lib/std/src/host/common/net/http.spl")
+        expect(http_source).to_contain("filter(\\(n, _):")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/host/common/net/http.spl",
+            "filter(|(n, _)|")
+
+    it "converts interpolated HTTP header values explicitly":
+        val http_source = parser_source(
+            "src/compiler_rust/lib/std/src/host/common/net/http.spl")
+        expect(http_source).to_contain("HeaderValue.from_str(")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/host/common/net/http.spl", "}_hval")
+
+    it "uses postfix filesystem staging varargs":
+        val nogc_file = parser_source(
+            "src/compiler_rust/lib/std/src/host/async_nogc_mut/io/fs/file.spl")
+        val nogc_process = parser_source(
+            "src/compiler_rust/lib/std/src/host/async_nogc_mut/io/fs/process.spl")
+        val gc_process = parser_source(
+            "src/compiler_rust/lib/std/src/host/async_gc_mut/io/fs/process.spl")
+        expect(nogc_file).to_contain("files: FilePath...")
+        expect(nogc_process).to_contain("files: FilePath...")
+        expect(gc_process).to_contain("files: FilePath...")
+        expect(nogc_file.contains("...files:")).to_equal(false)
+        expect(nogc_process.contains("...files:")).to_equal(false)
+        expect(gc_process.contains("...files:")).to_equal(false)
+
+    it "terminates empty Error implementation headers":
+        val http_error = parser_source(
+            "src/compiler_rust/lib/std/src/host/common/net/http_error.spl")
+        val net_error = parser_source(
+            "src/compiler_rust/lib/std/src/host/common/net/net_error.spl")
+        val static_vec = parser_source(
+            "src/compiler_rust/lib/std/src/core_nogc_immut/static_vec.spl")
+        val static_string = parser_source(
+            "src/compiler_rust/lib/std/src/core_nogc_immut/static_string.spl")
+        val fixed_vec = parser_source(
+            "src/compiler_rust/lib/std/src/core_nogc/fixed_vec.spl")
+        expect(http_error).to_contain("impl Error for HttpError:")
+        expect(net_error).to_contain("impl Error for NetError:")
+        expect(static_vec).to_contain("impl Error for StaticVecError:")
+        expect(static_string).to_contain("impl Error for StaticStringError:")
+        expect(fixed_vec).to_contain("impl Error for FixedVecError:")
+
+    it "uses supported callable types for monoio runtime wrappers":
+        val runtime_source = parser_source(
+            "src/compiler_rust/lib/std/src/host/common/net/runtime.spl")
+        expect(runtime_source).to_contain("spawn<T>(task: fn() -> T)")
+        expect(runtime_source).to_contain("block_on<T>(future: fn() -> T)")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/host/common/net/runtime.spl",
+            ": async fn()")
+
+    it "uses the declared SDN text variant":
+        val sdn_parser = parser_source(
+            "src/compiler_rust/lib/std/src/sdn/parser.spl")
+        expect(sdn_parser).to_contain("SdnValue.text(combined)")
+        expect_source_omits(
+            "src/compiler_rust/lib/std/src/sdn/parser.spl",
+            "SdnValue.String(combined)")
+
     it "parse val declaration":
         val x = 42
         check(x == 42)
@@ -141,6 +301,12 @@ describe "Parse Expressions":
     it "parse placeholder lambda":
         val f = _ * 2
         check(f(21) == 42)
+
+    it "parse placeholder lambda nested in a call argument":
+        fn double_nested(value: i64) -> i64:
+            value * 2
+        val values = [1, 2, 3].map(double_nested(_))
+        check(values[2] == 6)
 
     it "parse method reference":
         val words = ["hello", "world"]

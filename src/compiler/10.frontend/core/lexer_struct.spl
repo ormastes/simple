@@ -153,6 +153,9 @@ struct CoreLexer:
     cur_line: i64
     cur_col: i64
     cur_start: i64
+    # Source provenance for string tokens. Position reconstruction is only a
+    # fallback: staged-native source slicing can lose the raw `r` prefix.
+    cur_no_interp: bool
     # Stack of paren_depth values recorded by enable_forced_indentation(): a
     # block-bodied construct (e.g. a `\x:` block lambda) that appears inside a
     # call's parentheses needs real NEWLINE/INDENT/DEDENT tokens for its own
@@ -178,6 +181,7 @@ fn make_core_lexer(source: text) -> CoreLexer:
         cur_line: 0,
         cur_col: 0,
         cur_start: 0,
+        cur_no_interp: false,
         force_indent_bracket_depths: []
     )
 
@@ -663,6 +667,7 @@ impl CoreLexer:
         val start_col: i64 = self.col
         self.cur_start = self.pos
         val quote: text = self.advance()
+        self.cur_no_interp = quote == "'"
 
         # Triple-quoted string: """ or ''' — content may span newlines.
         # Mirrors lex_scan_string in lexer_scanners.spl; without this branch
@@ -673,6 +678,7 @@ impl CoreLexer:
         val is_tq1: bool = tq1 == quote
         val is_tq2: bool = tq2 == quote
         if is_tq1 and is_tq2:
+            self.cur_no_interp = true
             self.advance()
             self.advance()
             val seg_start: i64 = self.pos
@@ -966,6 +972,7 @@ impl CoreLexer:
     # ----- Raw String Scanning (r"...") -----
 
     me scan_raw_string(start_line: i64, start_col: i64):
+        self.cur_no_interp = true
         # Consume the opening double-quote (the `r` was already consumed by scan_ident).
         self.advance()  # consume opening "
         # Raw triple strings preserve backslashes/interpolation markers and may
@@ -1202,6 +1209,7 @@ impl CoreLexer:
         self.scan_token()
 
     me scan_token():
+        self.cur_no_interp = false
         # Skip spaces (not newlines) - but NOT at line start (indentation needs them)
         if not self.at_line_start:
             self.skip_spaces()

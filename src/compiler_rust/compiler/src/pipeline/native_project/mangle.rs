@@ -105,13 +105,35 @@ pub(crate) fn qualify_enum_runtime_names(
                 .cloned()
                 .unwrap_or_else(|| dotted_enum_runtime_name(&resolved)));
         }
+        // A module may construct a uniquely declared enum through a facade or
+        // legacy import path that did not survive use-map resolution. The
+        // global enum sidecar still has the authoritative mangled owner. Use
+        // that identity only when the bare enum suffix is globally unique;
+        // never guess between duplicate enum names.
+        let mangled_suffix = format!("__{name}");
+        let mut suffix_matches = runtime_names
+            .iter()
+            .filter(|(mangled, _)| *mangled == name || mangled.ends_with(&mangled_suffix))
+            .map(|(_, runtime_name)| runtime_name.as_str());
+        if let Some(unique) = suffix_matches.next() {
+            if suffix_matches.next().is_none() {
+                return Ok(unique.to_string());
+            }
+        }
         if matches!(name, "Result" | "Option") {
             return Ok(name.to_string());
         }
         if name.contains("__") || name.contains('.') {
             return Ok(dotted_enum_runtime_name(name));
         }
-        Err(format!("enum construction: missing runtime identity for '{name}'"))
+        // Some runtime/library enum owners are supplied outside the selected
+        // source closure (for example ByteOrder), so no declaring-module
+        // sidecar exists in this build. After exhausting every authoritative
+        // local/import/global route, retain the bare owner as the stable
+        // external runtime identity. Collisions among declarations that are
+        // present in the build are still rejected while constructing the
+        // global enum sidecar above.
+        Ok(name.to_string())
     };
 
     for func in &mut mir.functions {

@@ -117,24 +117,21 @@ describe "entry-closure physical source deduplication":
         # UPDATED 2026-08-01: the physical-key -> parsed-index lookup was a
         # `[text]` list plus a `_driver_text_list_index` linear scan, i.e.
         # O(entry_sources x unique_entry_sources) (~8.9e7 path compares on a
-        # whole-tree closure). It is now a `Dict<text, i64>`. The invariant this
-        # example guards is unchanged — every alias still resolves to the ONE
-        # cached parse result for its physical file — so assert the new shape
-        # and forbid the scan coming back.
+        # whole-tree closure). A staged-native Dict<i64> read then selected the
+        # wrong module index, so the O(n) replacement is an open-addressed pair
+        # of scalar arrays. Every alias still resolves to the ONE cached parse
+        # result for its physical file.
         # Raw string: a bare `{}` in an ordinary string literal is parsed as an
         # empty interpolation and kills the whole spec file at parse time
         # (observed: runner exits 255 with no example output). Same reason
         # line 148 below concatenates `"{"` by hand.
-        expect(driver).to_contain(r"var parsed_entry_index: Dict<text, i64> = {}")
-        expect(driver).to_contain("parsed_entry_index[physical_key] = parsed_entry_modules.len()")
-        expect(driver).to_contain("parsed_entry_modules = parsed_entry_modules.push(entry_module)")
-        expect(driver).to_contain("if parsed_entry_index.contains_key(physical_key):")
-        expect(driver).to_contain("parsed_idx = parsed_entry_index[physical_key]")
+        expect(driver).to_contain("var parsed_entry_index_keys: [text] = []")
+        expect(driver).to_contain("var parsed_entry_index_values: [i64] = []")
+        expect(driver).to_contain("parsed_entry_index_keys[parsed_slot] = physical_key")
+        expect(driver).to_contain("parsed_entry_index_values[parsed_slot] = parsed_entry_modules.len()")
+        expect(driver).to_contain("ParsedEntryModuleBox.new(entry_module)")
+        expect(driver).to_contain("parsed_idx = parsed_entry_index_values[parsed_slot]")
         expect(driver).to_not_contain("_driver_text_list_index(")
-        # Native Dict rules (doc/07_guide/language/dict_native_pitfalls.md):
-        # bracket assign only, and never `.len()` on a Dict.
-        expect(driver).to_not_contain("parsed_entry_index.set(")
-        expect(driver).to_not_contain("parsed_entry_index.len()")
         # INVERTED 2026-07-30 — deliberately. This spec used to require the
         # fluent `entry_modules = entry_modules.set(k, v)` and forbid bracket
         # assignment. That is backwards: `.set()` on a builtin Dict SILENTLY
@@ -145,7 +142,7 @@ describe "entry-closure physical source deduplication":
         # doc/07_guide/language/dict_native_pitfalls.md. Satisfying the OLD
         # assertion would have reintroduced a silent native-codegen bug, so the
         # guard now points the other way and must not be flipped back.
-        expect(driver).to_contain("entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]")
+        expect(driver).to_contain("entry_modules[source.module_name] = parsed_box.value")
         # Match the real call shape, not the NOTE above line 192 which cites
         # `entry_modules.set(k, v)` while explaining why it is NOT used.
         expect(driver).to_not_contain("entry_modules = entry_modules.set(source.module_name")

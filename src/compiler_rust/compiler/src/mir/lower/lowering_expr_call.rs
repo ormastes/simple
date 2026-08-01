@@ -383,7 +383,7 @@ impl<'a> MirLowerer<'a> {
                 }
 
                 match (enum_name, variant_name, arg_regs.as_slice()) {
-                    ("Option", "Some", [value]) => {
+                    ("Option", "Some" | "some", [value]) => {
                         let arg_ty = args.first().map(|a| a.ty).unwrap_or(TypeId::ANY);
                         let value = self.box_enum_payload_if_needed(*value, arg_ty)?;
                         return self.with_func(|func, current_block| {
@@ -393,7 +393,7 @@ impl<'a> MirLowerer<'a> {
                             dest
                         });
                     }
-                    ("Option", "None", []) => {
+                    ("Option", "None" | "none", []) => {
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
                             let block = func.block_mut(current_block).unwrap();

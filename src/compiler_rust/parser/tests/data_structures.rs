@@ -30,6 +30,36 @@ fn parse_generic_struct() {
 }
 
 #[test]
+fn parse_struct_with_single_mixin_as_value_type() {
+    let items = parse("struct Socket with LeakTracked:\n    handle: i64");
+    match &items[0] {
+        Node::Class(s) => {
+            assert_eq!(s.name, "Socket");
+            assert!(s.is_value_type);
+            assert_eq!(s.mixins.len(), 1);
+            assert_eq!(s.mixins[0].name, "LeakTracked");
+        }
+        other => panic!("expected value-type class for mixed-in struct, got {other:?}"),
+    }
+}
+
+#[test]
+fn parse_struct_with_multiple_and_generic_mixins() {
+    let items = parse("struct Box<T> with Read, Convert<T>:\n    value: T");
+    match &items[0] {
+        Node::Class(s) => {
+            assert!(s.is_value_type);
+            assert_eq!(s.generic_params, vec!["T"]);
+            assert_eq!(s.mixins.len(), 2);
+            assert_eq!(s.mixins[0].name, "Read");
+            assert_eq!(s.mixins[1].name, "Convert");
+            assert_eq!(s.mixins[1].type_args, vec![Type::Simple("T".to_string())]);
+        }
+        other => panic!("expected value-type class for mixed-in struct, got {other:?}"),
+    }
+}
+
+#[test]
 fn parse_struct_where_clause() {
     let items = parse("struct Container<T> where T: Clone:\n    value: T");
     assert_eq!(items.len(), 1);

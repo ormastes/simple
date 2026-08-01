@@ -820,6 +820,44 @@ fn ssa_instructions_supported_for_phi(blocks: [MirBlock]) -> bool:
                 return false
     true
 
+fn ssa_operand_local_payload_valid(operand: MirOperand) -> bool:
+    match operand.kind:
+        case Copy(local): local != nil
+        case Move(local): local != nil
+        case Const(_, _): true
+
+fn ssa_operand_list_payloads_valid(operands: [MirOperand]) -> bool:
+    for operand in operands:
+        if not ssa_operand_local_payload_valid(operand):
+            return false
+    true
+
+fn ssa_inst_operand_payloads_valid(inst: MirInst) -> bool:
+    match inst.kind:
+        case BinOp(_, _, left, right):
+            ssa_operand_local_payload_valid(left) and ssa_operand_local_payload_valid(right)
+        case UnaryOp(_, _, operand): ssa_operand_local_payload_valid(operand)
+        case CheckedBinOp(_, _, left, right):
+            ssa_operand_local_payload_valid(left) and ssa_operand_local_payload_valid(right)
+        case Load(_, ptr): ssa_operand_local_payload_valid(ptr)
+        case Store(ptr, value):
+            ssa_operand_local_payload_valid(ptr) and ssa_operand_local_payload_valid(value)
+        case GetElementPtr(_, base, indices):
+            ssa_operand_local_payload_valid(base) and ssa_operand_list_payloads_valid(indices)
+        case Aggregate(_, _, operands): ssa_operand_list_payloads_valid(operands)
+        case GetField(_, base, _): ssa_operand_local_payload_valid(base)
+        case SetField(base, _, value):
+            ssa_operand_local_payload_valid(base) and ssa_operand_local_payload_valid(value)
+        case Cast(_, operand, _): ssa_operand_local_payload_valid(operand)
+        case Bitcast(_, operand, _): ssa_operand_local_payload_valid(operand)
+        case Call(_, func, args):
+            ssa_operand_local_payload_valid(func) and ssa_operand_list_payloads_valid(args)
+        case CallIndirect(_, ptr, args, _):
+            ssa_operand_local_payload_valid(ptr) and ssa_operand_list_payloads_valid(args)
+        case Intrinsic(_, _, args): ssa_operand_list_payloads_valid(args)
+        case StoreGlobal(_, value): ssa_operand_local_payload_valid(value)
+        case _: true
+
 fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
     """Alloca-slot gate: superset of the phi gate. CallIndirect is safe for the
     slot transform (its dest is a plain def -> store; its ptr/args are plain
@@ -828,6 +866,8 @@ fn ssa_instructions_supported_for_alloca(blocks: [MirBlock]) -> bool:
     reassigned local un-slotted -> duplicate `%lN` SSA defs at llc (#135)."""
     for block in blocks:
         for inst in block.instructions:
+            if not ssa_inst_operand_payloads_valid(inst):
+                return false
             if not ssa_var_transform_inst_supported(inst):
                 match inst.kind:
                     case CallIndirect(_, _, _, _):
@@ -1092,9 +1132,12 @@ fn ssa_operand_push_local(locals: [i64], operand: MirOperand) -> [i64]:
     # nil for Const operands, nil-poisoning the caller's accumulator list.
     match operand.kind:
         case Copy(local):
-            local_list_push_unique(locals, var_reassign_local_id_value(local))
+            # Keep nested MirOperand -> LocalId payload decoding in this
+            # module. The staged-native ABI can lose the value-type payload
+            # when it crosses into var_reassign_analysis, yielding nil there.
+            local_list_push_unique(locals, ssa_local_id_value(local))
         case Move(local):
-            local_list_push_unique(locals, var_reassign_local_id_value(local))
+            local_list_push_unique(locals, ssa_local_id_value(local))
         case Const(_, _):
             locals
 
