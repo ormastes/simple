@@ -1,0 +1,223 @@
+#!/bin/sh
+# Clean, reproducible Cosmos+ OpenSSD ARM image build.
+set -eu
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/../../../../../.." && pwd)"
+RECEIPT_HELPER="$SCRIPT_DIR/cosmos_build_receipt.shs"
+PROFILE_HEADER="$SCRIPT_DIR/cosmos_profile_openssd2_8ch8way_v300.h"
+[ -f "$RECEIPT_HELPER" ] || {
+    echo "missing receipt helper: $RECEIPT_HELPER" >&2
+    exit 2
+}
+. "$RECEIPT_HELPER"
+
+PROFILE_SELECTOR="$(cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_SELECTOR)"
+PROFILE_NAME="$(cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_NAME)"
+PROFILE_SYMBOL="$(cosmos_profile_define "$PROFILE_HEADER" COSMOS_PROFILE_ELF_SYMBOL)"
+PROFILE_RECEIPT_FORMAT="$(
+    cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_BUILD_RECEIPT_FORMAT
+)"
+PROFILE_SOURCE_COMMIT="$(
+    cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_SOURCE_COMMIT
+)"
+PROFILE_BITSTREAM_SHA256="$(
+    cosmos_profile_string "$PROFILE_HEADER" COSMOS_PROFILE_BITSTREAM_SHA256
+)"
+COSMOS_FIRMWARE_BASE="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_FIRMWARE_IDENTITY_BASE
+)"
+COSMOS_FIRMWARE_END="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_FIRMWARE_IDENTITY_END
+)"
+COSMOS_DMA_BASE="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_NFC_DMA_IDENTITY_BASE
+)"
+COSMOS_DMA_END="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_NFC_DMA_IDENTITY_END
+)"
+COSMOS_MMIO_BASE="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_MMIO_IDENTITY_BASE
+)"
+COSMOS_MMIO_END="$(
+    cosmos_profile_u32 "$PROFILE_HEADER" COSMOS_MMIO_IDENTITY_END
+)"
+[ "$PROFILE_RECEIPT_FORMAT" = "$COSMOS_RECEIPT_FORMAT" ] || {
+    echo "profile/receipt schema mismatch" >&2
+    exit 2
+}
+
+MODE="${COSMOS_BUILD_MODE:-qemu}"
+PROFILE="${COSMOS_SILICON_PROFILE:-}"
+case "${COSMOS_OUT:-}" in
+    "") OUT="$ROOT/build/os" ;;
+    /*) OUT="$COSMOS_OUT" ;;
+    *) OUT="$ROOT/$COSMOS_OUT" ;;
+esac
+[ "$OUT" != / ] || {
+    echo "invalid COSMOS_OUT" >&2
+    exit 2
+}
+
+case "$MODE" in
+    qemu)
+        [ -z "$PROFILE" ] || {
+            echo "QEMU builds cannot select a silicon profile" >&2
+            exit 2
+        }
+        ELF="$OUT/simpleos_cosmos_openssd.elf"
+        RECEIPT_PROFILE=unbound
+        RECEIPT_SELECTOR=unbound
+        ;;
+    silicon)
+        [ "$PROFILE" = "$PROFILE_SELECTOR" ] || {
+            echo "silicon builds require COSMOS_SILICON_PROFILE=$PROFILE_SELECTOR" >&2
+            exit 2
+        }
+        ELF="$OUT/simpleos_cosmos_openssd_silicon.elf"
+        RECEIPT_PROFILE="$PROFILE_NAME"
+        RECEIPT_SELECTOR="$PROFILE_SELECTOR"
+        ;;
+    *)
+        echo "invalid COSMOS_BUILD_MODE: $MODE (expected qemu or silicon)" >&2
+        exit 2
+        ;;
+esac
+
+case "${1:-}" in
+    "") ;;
+    --run) ;;
+    *) echo "usage: $0 [--run]" >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || {
+    echo "usage: $0 [--run]" >&2
+    exit 2
+}
+
+CLANG="${CLANG:-clang}"
+LLD="${LLD:-ld.lld}"
+READELF="${READELF:-readelf}"
+for tool in "$CLANG" "$LLD" "$READELF" awk sed grep cmp; do
+    command -v "$tool" >/dev/null 2>&1 || {
+        echo "missing-tool: $tool" >&2
+        exit 2
+    }
+done
+
+OBJ="$OUT/cosmos-$MODE"
+RECEIPT="$ELF.receipt"
+ELF_TMP="$ELF.tmp.$$"
+RECEIPT_TMP="$RECEIPT.tmp.$$"
+LOADS_TMP="$RECEIPT.loads.$$"
+SOURCES_BEFORE="$RECEIPT.sources-before.$$"
+SOURCES_AFTER="$RECEIPT.sources-after.$$"
+cleanup() {
+    rm -f "$ELF_TMP" "$RECEIPT_TMP" "$LOADS_TMP" \
+        "$SOURCES_BEFORE" "$SOURCES_AFTER"
+}
+trap cleanup EXIT HUP INT TERM
+
+mkdir -p "$OUT"
+rm -rf "$OBJ"
+mkdir -p "$OBJ"
+rm -f "$ELF" "$RECEIPT"
+cosmos_write_source_manifest "$SCRIPT_DIR" "$SOURCES_BEFORE" || {
+    echo "cannot capture build inputs" >&2
+    exit 1
+}
+
+CFLAGS="--target=armv7-none-eabi -mcpu=cortex-a9 -marm -ffreestanding -nostdlib -fno-builtin -Wall -Wextra -Werror"
+if [ "$MODE" = silicon ]; then
+    CFLAGS="$CFLAGS -DCOSMOS_SILICON -include $PROFILE_HEADER"
+fi
+
+"$CLANG" $CFLAGS -c "$SCRIPT_DIR/cosmos_start.S" -o "$OBJ/cosmos_start.o"
+"$CLANG" $CFLAGS -O0 -c "$SCRIPT_DIR/cosmos_uart.c" -o "$OBJ/cosmos_uart.o"
+OBJECTS="$OBJ/cosmos_start.o $OBJ/cosmos_uart.o"
+for unit in cosmos_runtime cosmos_mmu_cache cosmos_smp_gic cosmos_fsbl \
+    cosmos_nfc cosmos_pcie cosmos_nvme_firmware cosmos_nvme_pcie_adapter \
+    cosmos_nvme_admin cosmos_nvme_dispatch cosmos_ftl \
+    cosmos_ftl_nfc_backend cosmos_nvme_ftl_media cosmos_storage
+do
+    "$CLANG" $CFLAGS -O2 -c "$SCRIPT_DIR/$unit.c" -o "$OBJ/$unit.o"
+    OBJECTS="$OBJECTS $OBJ/$unit.o"
+done
+"$LLD" -T "$SCRIPT_DIR/cosmos_linker.ld" $OBJECTS -o "$ELF_TMP"
+cosmos_write_source_manifest "$SCRIPT_DIR" "$SOURCES_AFTER" || {
+    echo "cannot recapture build inputs" >&2
+    exit 1
+}
+cmp -s "$SOURCES_BEFORE" "$SOURCES_AFTER" || {
+    echo "invalid-artifact: build inputs changed during clean build" >&2
+    exit 1
+}
+
+cosmos_validate_firmware_elf "$ELF_TMP" "$LOADS_TMP" || {
+    echo "invalid-artifact: firmware ELF policy failed" >&2
+    exit 1
+}
+
+SECTIONS="$("$READELF" -SW "$ELF_TMP")"
+SYMBOLS="$("$READELF" -sW "$ELF_TMP")"
+case "$MODE" in
+    qemu)
+        if printf '%s\n' "$SECTIONS" |
+                grep -Eq '\.note\.cosmos\.profile[[:space:]]+NOTE' ||
+           printf '%s\n' "$SYMBOLS" | grep -Fq "$PROFILE_SYMBOL"; then
+            echo "invalid-artifact: QEMU image is bound to a silicon profile" >&2
+            exit 1
+        fi
+        ;;
+    silicon)
+        printf '%s\n' "$SECTIONS" |
+            grep -Eq '\.note\.cosmos\.profile[[:space:]]+NOTE' || {
+            echo "invalid-artifact: silicon image lacks Cosmos profile note" >&2
+            exit 1
+        }
+        printf '%s\n' "$SYMBOLS" |
+            awk -v symbol="$PROFILE_SYMBOL" \
+                '$4 == "OBJECT" && $5 == "GLOBAL" && $8 == symbol { found = 1 }
+                 END { exit !found }' || {
+            echo "invalid-artifact: silicon image lacks exact Cosmos profile symbol" >&2
+            exit 1
+        }
+        ;;
+esac
+
+cosmos_write_receipt "$SCRIPT_DIR" "$MODE" "$RECEIPT_PROFILE" \
+    "$RECEIPT_SELECTOR" "$ELF_TMP" "$LOADS_TMP" "$RECEIPT_TMP" \
+    "$SOURCES_BEFORE" || {
+    echo "invalid-artifact: failed to write build receipt" >&2
+    exit 1
+}
+mv "$ELF_TMP" "$ELF"
+mv "$RECEIPT_TMP" "$RECEIPT"
+ENTRY="$(sed -n 's/^entry=//p' "$LOADS_TMP")"
+if [ "$MODE" = silicon ]; then
+    echo "built $ELF (clean, profile=$PROFILE, entry=$ENTRY, receipt=$RECEIPT)"
+else
+    echo "built $ELF (clean, unbound, entry=$ENTRY, receipt=$RECEIPT)"
+fi
+
+if [ "${1:-}" = "--run" ]; then
+    [ "$MODE" = qemu ] || {
+        echo "--run requires COSMOS_BUILD_MODE=qemu" >&2
+        exit 2
+    }
+    for tool in timeout qemu-system-arm; do
+        command -v "$tool" >/dev/null 2>&1 || {
+            echo "missing-tool: $tool" >&2
+            exit 2
+        }
+    done
+    echo "=== boot on qemu xilinx-zynq-a9 (UART1 -> stdio) ==="
+    set +e
+    timeout 6 qemu-system-arm -M xilinx-zynq-a9 -display none \
+        -serial null -serial stdio -kernel "$ELF"
+    QEMU_STATUS=$?
+    set -e
+    case "$QEMU_STATUS" in
+        0|124) ;;
+        *) echo "QEMU boot failed with exit $QEMU_STATUS" >&2; exit 1 ;;
+    esac
+fi

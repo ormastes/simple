@@ -1,0 +1,58 @@
+#!/bin/sh
+# clang_argv_tokenize_probe_run.shs — fast isolated repro for the Phase 2e
+# Inc 2 sshd.spl _sshd_tokenize_command() space-split failure (see
+# doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md).
+#
+# Usage: sh scripts/os/clang_argv_tokenize_probe_run.shs [cranelift|llvm]
+
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BACKEND="${1:-cranelift}"
+SEED="src/compiler_rust/target/bootstrap/simple"
+ENTRY="examples/09_embedded/simple_os/arch/x86_64/clang_argv_tokenize_probe_entry.spl"
+LINKER_SCRIPT="examples/09_embedded/simple_os/arch/x86_64/linker.ld"
+OUT_ELF="build/os/clang_argv_tokenize_probe_${BACKEND}.elf"
+SERIAL_LOG="build/os/clang_argv_tokenize_probe_${BACKEND}.serial.log"
+QEMU_TIMEOUT="${QEMU_TIMEOUT:-20}"
+
+[ -x "$SEED" ] || { echo "[probe] missing seed binary $SEED"; exit 1; }
+
+mkdir -p build/os
+
+LLVM_PATH=""
+for d in /usr/lib/llvm-20/bin /usr/lib/llvm-19/bin /usr/lib/llvm-18/bin /usr/local/opt/llvm/bin; do
+    [ -d "$d" ] && LLVM_PATH="$d" && break
+done
+
+echo "[probe] 1/2 native-build ($BACKEND) $ENTRY"
+SIMPLE_BOOTSTRAP=1 SIMPLE_LIB="$ROOT_DIR/src" SIMPLE_OS_LOG_MODE=off \
+SIMPLE_ALLOW_FREESTANDING_STUBS=1 SIMPLE_TRACE_STUBS=1 PATH="$LLVM_PATH:$PATH" \
+"$SEED" native-build \
+    --source build/os/generated --source src/os --source src/lib \
+    --source examples/09_embedded/simple_os/arch/x86_64 \
+    --backend "$BACKEND" --cpu x86-64-v1 --opt-level=aggressive --log off \
+    --entry-closure --entry "$ENTRY" \
+    --target x86_64-unknown-none -o "$OUT_ELF" \
+    --linker-script "$LINKER_SCRIPT"
+
+[ -f "$OUT_ELF" ] || { echo "[probe] build failed: no $OUT_ELF"; exit 1; }
+
+echo "[probe] 2/2 boot under QEMU (timeout ${QEMU_TIMEOUT}s)"
+rm -f "$SERIAL_LOG"
+timeout "$QEMU_TIMEOUT" qemu-system-x86_64 \
+    -no-user-config -monitor none -net none -machine q35 -cpu qemu64 \
+    -m 256M -serial file:"$SERIAL_LOG" -display none -no-reboot \
+    -kernel "$OUT_ELF" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    || true
+
+echo "[probe] ---- serial log ($BACKEND) ----"
+if [ -f "$SERIAL_LOG" ]; then
+    grep -aE '^\[probe\]|^PROBE' "$SERIAL_LOG" || cat "$SERIAL_LOG"
+else
+    echo "[probe] no serial log produced"
+    exit 1
+fi

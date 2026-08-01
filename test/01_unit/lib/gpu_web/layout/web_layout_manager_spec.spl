@@ -1,0 +1,86 @@
+use std.spec.*
+use std.common.structural.invalidation.contracts.{
+    DIRTY_INTRINSIC_MEASURE, DIRTY_LAYOUT, DIRTY_HIT_TEST, DIRTY_RESOURCE
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.*
+
+fn style_fingerprint(
+    inherited: text, paint: text, composite: text, intrinsic: text,
+    own: text, subtree: text, context: text
+) -> WebLayoutStyleFingerprint:
+    web_layout_style_fingerprint(
+        inherited, paint, composite, intrinsic, own, subtree, context, "g"
+    )
+
+fn expect_style_difference(
+    base: WebLayoutStyleFingerprint,
+    changed: WebLayoutStyleFingerprint,
+    expected: StyleDifference
+):
+    expect(web_layout_classify_style(base, changed)).to_equal(expected)
+
+fn change(
+    kind: WebLayoutMutationKind,
+    difference: StyleDifference,
+    node_id: i64,
+    context_id: i64,
+    downstream: [i64],
+    subtree: [i64],
+    lines: [i64],
+    ancestors: [i64],
+    inserted: [i64],
+    fonts: [i64],
+    viewport: [i64]
+) -> WebLayoutChange:
+    web_layout_change(
+        kind, difference, node_id, context_id, downstream, subtree, lines,
+        ancestors, inserted, fonts, viewport
+    )
+
+describe "web layout invalidation":
+    it "classifies style fingerprints strongest first":
+        val base = style_fingerprint("i", "p", "c", "m", "l", "s", "f")
+        expect_style_difference(base, base, StyleDifference.NoChange)
+        expect_style_difference(base, style_fingerprint("I", "p", "c", "m", "l", "s", "f"), StyleDifference.InheritedOnly)
+        expect_style_difference(base, style_fingerprint("i", "P", "c", "m", "l", "s", "f"), StyleDifference.PaintOnly)
+        expect_style_difference(base, style_fingerprint("i", "p", "C", "m", "l", "s", "f"), StyleDifference.CompositeOnly)
+        expect_style_difference(base, style_fingerprint("i", "p", "c", "M", "l", "s", "f"), StyleDifference.IntrinsicMeasure)
+        expect_style_difference(base, style_fingerprint("i", "p", "c", "m", "L", "s", "f"), StyleDifference.LayoutSelf)
+        expect_style_difference(base, style_fingerprint("i", "p", "c", "m", "l", "S", "f"), StyleDifference.LayoutSubtree)
+        expect_style_difference(base, style_fingerprint("i", "p", "c", "m", "l", "s", "F"), StyleDifference.RebuildFormattingContext)
+
+    it "admits every supported browser profile explicitly":
+        expect(web_layout_admit_profile("div", "block", false, false, false, false).profile_id).to_equal("block")
+        expect(web_layout_admit_profile("span", "inline", false, false, false, false).profile_id).to_equal("inline")
+        expect(web_layout_admit_profile("#text", "block", false, false, false, false).profile_id).to_equal("inline")
+        expect(web_layout_admit_profile("div", "flex", false, false, false, false).profile_id).to_equal("flex")
+        expect(web_layout_admit_profile("div", "grid", false, false, false, false).profile_id).to_equal("grid")
+        expect(web_layout_admit_profile("td", "table-cell", false, false, false, false).profile_id).to_equal("table")
+        expect(web_layout_admit_profile("div", "block", true, false, false, false).profile_id).to_equal("absolute-sticky")
+        expect(web_layout_admit_profile("div", "block", false, false, true, false).profile_id).to_equal("scroll")
+        expect(web_layout_admit_profile("img", "block", false, false, false, false).profile_id).to_equal("replaced")
+        expect(web_layout_admit_profile("img", "block", true, false, false, false).supported).to_equal(false)
+        expect(web_layout_admit_profile("div", "mystery", false, false, false, false).supported).to_equal(false)
+
+    it "keeps no-layout changes out of the frontier":
+        val frontier = web_layout_dirty_frontier([
+            change(WebLayoutMutationKind.Style, StyleDifference.PaintOnly, 1, 1, [], [], [], [], [], [], []),
+            change(WebLayoutMutationKind.Style, StyleDifference.CompositeOnly, 2, 1, [], [], [], [], [], [], [])
+        ])
+        expect(frontier.invalidated_ids).to_equal([])
+
+    it "merges mixed changes per id in stable order":
+        val frontier = web_layout_dirty_frontier([
+            change(WebLayoutMutationKind.Style, StyleDifference.IntrinsicMeasure, 2, 1, [], [], [3], [1], [], [], []),
+            change(WebLayoutMutationKind.Insert, StyleDifference.NoChange, 0, 1, [5], [], [], [], [4], [], []),
+            change(WebLayoutMutationKind.FontResource, StyleDifference.NoChange, 0, 0, [], [], [3], [1], [], [2], []),
+            change(WebLayoutMutationKind.Viewport, StyleDifference.NoChange, 0, 0, [], [], [], [], [], [], [6])
+        ])
+        expect(frontier.invalidated_ids).to_equal([2, 1, 3, 4, 5, 6])
+        expect(frontier.dirty_nodes[0].dirty_bits).to_equal(
+            DIRTY_RESOURCE | DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT | DIRTY_HIT_TEST
+        )
+        expect(frontier.dirty_nodes[1].dirty_bits).to_equal(
+            DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT | DIRTY_HIT_TEST
+        )
+        expect(frontier.dirty_nodes[5].dirty_bits).to_equal(DIRTY_LAYOUT | DIRTY_HIT_TEST)

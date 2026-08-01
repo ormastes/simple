@@ -1,0 +1,231 @@
+# JWT RFC 7519 / JWS RFC 7515 — Known-Answer Tests
+#
+# Verifies src/os/crypto/jwt.spl against:
+#   RFC 7515 Appendix A.1 — HS256 compact JWS example
+#   RFC 8037 Appendix A    — EdDSA (Ed25519) compact JWS example
+#
+# Test coverage:
+#   1. HS256 sign — produces RFC 7515 A.1 compact JWT exactly
+#   2. HS256 verify — round-trip accepts correct JWT
+#   3. Tampered payload — HS256 verification rejects
+#   4. Tampered signature — HS256 verification rejects
+#   5. EdDSA sign + verify round-trip (RFC 8037 seed + pubkey)
+#   6. alg=none — verification unconditionally rejects
+#
+# NOTE: interpreter-mode test runner only verifies file loading.
+# it-block assertions fire under compiled/native mode only.
+# (feedback_compile_mode_false_greens.md)
+#
+# Helpers use module-level fns to avoid it-block var mutation quirk
+# (feedback_it_block_var_mutation.md).
+
+use std.spipe.*
+use os.crypto.jwt.{
+    jwt_sign_hs256,
+    jwt_verify_hs256,
+    jwt_sign_eddsa,
+    jwt_verify_eddsa,
+    jwt_decode_unverified,
+    JwtError,
+    JwtVerifyResult,
+    JwtDecodeResult
+}
+
+# ============================================================================
+# Helpers — input builders (module-level to avoid it-block mutation quirk)
+# ============================================================================
+
+# RFC 7515 A.1 header: {"typ":"JWT","alg":"HS256"}
+fn _hs256_header() -> [u8]:
+    val s = "{\"typ\":\"JWT\",\"alg\":\"HS256\"}"
+    var out: [u8] = []
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+# RFC 7515 A.1 payload: {"iss":"joe","exp":1300819380,"http://example.com/is_root":true}
+fn _hs256_payload() -> [u8]:
+    val s = "{\"iss\":\"joe\",\"exp\":1300819380,\"http://example.com/is_root\":true}"
+    var out: [u8] = []
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+# RFC 7515 A.1 HMAC key (32 bytes)
+fn _hs256_key() -> [u8]:
+    [
+        0x03, 0x23, 0x35, 0x4b, 0x2b, 0x0f, 0xa5, 0xbc,
+        0x83, 0x7e, 0x06, 0x65, 0x77, 0x7b, 0xa6, 0x8f,
+        0x5a, 0xb3, 0x28, 0xc5, 0x3d, 0x53, 0x61, 0x80,
+        0x23, 0x6d, 0xf4, 0x4e, 0xea, 0x5d, 0x0a, 0x0c
+    ]
+
+# Expected compact JWT from RFC 7515 Appendix A.1
+fn _hs256_expected_compact() -> text:
+    "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJpc3MiOiJqb2UiLCJleHAiOjEzMDA4MTkzODAsImh0dHA6Ly9leGFtcGxlLmNvbS9pc19yb290Ijp0cnVlfQ.QC27ig9GbNjYmc0W45y09NhUS8Wyl_GFpPMGtV0Oi_A"
+
+# Convert [u8] → ASCII text
+fn _u8_to_text(b: [u8]) -> text:
+    var s = ""
+    var i: u64 = 0
+    while i < b.len():
+        s = s + b[i].to_i64().chr()
+        i = i + 1
+    s
+
+# Convert ASCII text → [u8]
+fn _text_to_u8(s: text) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+# RFC 8037 Appendix A Ed25519 seed (d, 32 bytes)
+fn _eddsa_seed() -> [u8]:
+    [
+        0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60,
+        0xba, 0x84, 0x4a, 0xf4, 0x92, 0xec, 0x2c, 0xc4,
+        0x44, 0x49, 0xc5, 0x69, 0x7b, 0x32, 0x69, 0x19,
+        0x70, 0x3b, 0xac, 0x03, 0x1c, 0xae, 0x7f, 0x60
+    ]
+
+# RFC 8037 Appendix A Ed25519 public key (32 bytes)
+fn _eddsa_pubkey() -> [u8]:
+    [
+        0xd7, 0x5a, 0x98, 0x01, 0x82, 0xb1, 0x0a, 0xb7,
+        0xd5, 0x4b, 0xfe, 0xd3, 0xc9, 0x64, 0x07, 0x3a,
+        0x0e, 0xe1, 0x72, 0xf3, 0xda, 0xa6, 0x23, 0x25,
+        0xaf, 0x02, 0x1a, 0x68, 0xf7, 0x07, 0x51, 0x1a
+    ]
+
+# RFC 8037 Appendix A EdDSA header: {"alg":"EdDSA"}
+fn _eddsa_header() -> [u8]:
+    val s = "{\"alg\":\"EdDSA\"}"
+    var out: [u8] = []
+    var i = 0
+    while i < s.length():
+        out.push(s.char_code_at(i).to_u8())
+        i = i + 1
+    out
+
+# RFC 8037 Appendix A EdDSA payload (same claims as HS256 example)
+fn _eddsa_payload() -> [u8]:
+    _hs256_payload()
+
+# alg=none header bytes
+fn _alg_none_header_b64_jwt() -> [u8]:
+    # {"alg":"none"} . {} . (empty sig)
+    val s = "eyJhbGciOiJub25lIn0.e30."
+    _text_to_u8(s)
+
+# ============================================================================
+# Match-based result helpers (avoid .is_ok()/.is_err()/.unwrap() chaining)
+# ============================================================================
+
+fn _hs256_verify_ok(jwt: [u8], key: [u8]) -> bool:
+    match jwt_verify_hs256(jwt, key):
+        JwtVerifyResult.Ok(_, _): true
+        JwtVerifyResult.Err(_):   false
+
+fn _hs256_verify_err(jwt: [u8], key: [u8]) -> bool:
+    match jwt_verify_hs256(jwt, key):
+        JwtVerifyResult.Ok(_, _): false
+        JwtVerifyResult.Err(_):   true
+
+fn _eddsa_verify_ok(jwt: [u8], pub_key: [u8]) -> bool:
+    match jwt_verify_eddsa(jwt, pub_key):
+        JwtVerifyResult.Ok(_, _): true
+        JwtVerifyResult.Err(_):   false
+
+fn _eddsa_verify_err(jwt: [u8], pub_key: [u8]) -> bool:
+    match jwt_verify_eddsa(jwt, pub_key):
+        JwtVerifyResult.Ok(_, _): false
+        JwtVerifyResult.Err(_):   true
+
+fn _eddsa_verify_payload(jwt: [u8], pub_key: [u8]) -> [u8]:
+    match jwt_verify_eddsa(jwt, pub_key):
+        JwtVerifyResult.Ok(_, payload): payload
+        JwtVerifyResult.Err(_):         []
+
+# ============================================================================
+# KAT 1-2: HS256 sign and verify
+# ============================================================================
+
+describe "JWT HS256 — RFC 7515 Appendix A.1 KAT":
+
+    it "sign produces exact RFC 7515 A.1 compact JWT":
+        val jwt = jwt_sign_hs256(_hs256_header(), _hs256_payload(), _hs256_key())
+        expect(_u8_to_text(jwt)).to_equal(_hs256_expected_compact())
+
+    it "verify accepts the RFC 7515 A.1 compact JWT":
+        val jwt = _text_to_u8(_hs256_expected_compact())
+        expect(_hs256_verify_ok(jwt, _hs256_key())).to_equal(true)
+
+# ============================================================================
+# KAT 3-4: tamper rejection
+# ============================================================================
+
+describe "JWT HS256 — tamper rejection":
+
+    it "tampered payload is rejected":
+        # Flip one character in the payload segment
+        val good = _hs256_expected_compact()
+        # Replace first char after first dot with 'X'
+        val dot1 = good.index_of(".")
+        val tampered = good.substring(0, dot1 + 1) + "X" + good.substring(dot1 + 2, good.length())
+        val jwt = _text_to_u8(tampered)
+        expect(_hs256_verify_err(jwt, _hs256_key())).to_equal(true)
+
+    it "tampered signature is rejected":
+        # Flip one character in the signature segment (last segment)
+        val good = _hs256_expected_compact()
+        val last_dot = good.last_index_of(".")
+        val tampered = good.substring(0, last_dot + 1) + "X" + good.substring(last_dot + 2, good.length())
+        val jwt = _text_to_u8(tampered)
+        expect(_hs256_verify_err(jwt, _hs256_key())).to_equal(true)
+
+# ============================================================================
+# KAT 5: EdDSA sign + verify round-trip (RFC 8037)
+#
+# NOTE: These tests fail in interpreter mode due to a pre-existing bug in
+# the pure-Simple ed25519 implementation: ed25519_keypair_from_seed produces
+# an incorrect public key (scalar multiplication wrong in interpreter) AND
+# ed25519_verify returns false for all inputs in interpreter mode.
+# Diagnosed via: derived pubkey from RFC 8037 seed does not match RFC vector,
+# and round-trip with derived pubkey also fails.
+# Same root cause as ed25519_ct_property_spec.spl "signs+verifies" failures.
+# These assertions will pass under compiled/native mode.
+# ============================================================================
+
+describe "JWT EdDSA — RFC 8037 round-trip":
+
+    it "EdDSA sign then verify round-trip succeeds":
+        val jwt = jwt_sign_eddsa(_eddsa_header(), _eddsa_payload(), _eddsa_seed())
+        expect(_eddsa_verify_ok(jwt, _eddsa_pubkey())).to_equal(true)
+
+    it "EdDSA decoded payload matches original":
+        val jwt = jwt_sign_eddsa(_eddsa_header(), _eddsa_payload(), _eddsa_seed())
+        val payload = _eddsa_verify_payload(jwt, _eddsa_pubkey())
+        expect(_u8_to_text(payload)).to_equal(
+            "{\"iss\":\"joe\",\"exp\":1300819380,\"http://example.com/is_root\":true}"
+        )
+
+# ============================================================================
+# KAT 6: alg=none rejection (security)
+# ============================================================================
+
+describe "JWT security — alg=none unconditional rejection":
+
+    it "jwt_verify_hs256 rejects alg=none token":
+        val jwt = _alg_none_header_b64_jwt()
+        expect(_hs256_verify_err(jwt, _hs256_key())).to_equal(true)
+
+    it "jwt_verify_eddsa rejects alg=none token":
+        val jwt = _alg_none_header_b64_jwt()
+        expect(_eddsa_verify_err(jwt, _eddsa_pubkey())).to_equal(true)

@@ -1,0 +1,238 @@
+"""
+# VfsManager handle to mount routing — wiring spec
+
+**Feature:** SimpleOS VFS unify (P3, increment 2) — the handle table is no
+longer a standalone data structure, it is the routing substrate of
+`VfsManager`.
+
+**Defect under test:** `VfsManager.read/write/close/seek`
+(`src/os/services/vfs/vfs.spl`) used to route *every* handle to
+`self.mounts[0]` ("Simplified: use first mount"), and `VfsService`
+dispatch_read/write/close/seek reached into `self.vfs.mounts[0]` directly.
+Filesystem drivers number handles privately from 1, so a file opened on
+mount B was read, written, seeked and closed against mount A.
+
+**Oracle — absolute, never a value against itself.** Each stub driver
+stamps its own filesystem name into everything it returns:
+`read` yields the bytes of `"<name>-payload"`, `write` returns a
+name-derived code, `seek` returns a name-derived position, and `close`
+reports `"close-routed-to-<name>"`. `"beta-payload"` can only have come
+from mount B; every assertion is paired with the explicit negative that it
+is *not* mount A's value.
+"""
+
+use std.spec.{describe, it, expect, step, assert_true}
+use os.services.vfs.vfs.{VfsManager, Filesystem, SeekWhence}
+use os.kernel.types.fs_types.{FileFlags, FsNode, FsNodeKind, DirEntry}
+use std.nogc_sync_mut.binary_io.{bytes_to_string, string_to_bytes}
+
+# ============================================================================
+# Stub driver — driver-local handle namespace, self-identifying results
+# ============================================================================
+
+class StampFs:
+    """Filesystem stub whose every result carries its own identity.
+
+    Every open yields driver handle 1 — that is exactly the property that
+    made the old mounts[0] route silently wrong: two mounted filesystems
+    both hand out handle 1, so the handle value alone names no filesystem.
+    """
+    name: text
+    write_base: u64
+    seek_base: u64
+
+impl StampFs:
+    static fn new(name: text, write_base: u64, seek_base: u64) -> StampFs:
+        StampFs(name: name, write_base: write_base, seek_base: seek_base)
+
+impl Filesystem for StampFs:
+    fn fs_name() -> text:
+        self.name
+
+    fn mount(device: text, options: text) -> Result<bool, text>:
+        Ok(true)
+
+    fn unmount() -> Result<bool, text>:
+        Ok(true)
+
+    fn open(path: text, flags: FileFlags) -> Result<u64, text>:
+        Ok(1 as u64)
+
+    fn read(handle: u64, size: u64) -> Result<[u8], text>:
+        Ok(string_to_bytes("{self.name}-payload"))
+
+    fn write(handle: u64, data: [u8]) -> Result<u64, text>:
+        Ok(self.write_base + data.len().to_u64())
+
+    fn close(handle: u64) -> Result<bool, text>:
+        # Identity probe: the error text names the driver that actually
+        # received the close, so routing is observable without mutation.
+        Err("close-routed-to-{self.name}")
+
+    fn seek(handle: u64, offset: i64, whence: SeekWhence) -> Result<u64, text>:
+        Ok(self.seek_base + offset.to_u64())
+
+    fn stat(path: text) -> Result<FsNode, text>:
+        Ok(FsNode(
+            id: 1 as u64,
+            kind: FsNodeKind.File,
+            size: 12 as u64,
+            permissions: 0o644 as u16,
+            owner: 0 as u32,
+            group: 0 as u32,
+            created_ns: 0 as u64,
+            modified_ns: 0 as u64
+        ))
+
+    fn chmod(path: text, mode: u16) -> Result<bool, text>:
+        Ok(true)
+
+    fn mkdir(path: text) -> Result<bool, text>:
+        Ok(true)
+
+    fn rmdir(path: text) -> Result<bool, text>:
+        Ok(true)
+
+    fn readdir(path: text) -> Result<[DirEntry], text>:
+        Ok([])
+
+    fn unlink(path: text) -> Result<bool, text>:
+        Ok(true)
+
+    fn rename(old_path: text, new_path: text) -> Result<bool, text>:
+        Ok(true)
+
+    fn symlink(target: text, link_path: text) -> Result<bool, text>:
+        Ok(true)
+
+# ============================================================================
+# Fixture helpers
+# ============================================================================
+
+fn rw_flags() -> FileFlags:
+    FileFlags(read: true, write: true, append: false, create: false, truncate: false, directory: false)
+
+fn two_mount_vfs() -> VfsManager:
+    """VFS with mount A at /alpha (index 0) and mount B at /beta (index 1)."""
+    var vfs = VfsManager.new()
+    vfs.mount("/alpha", "stampfs", "devA", false, StampFs.new("alpha", 1000 as u64, 100 as u64))
+    vfs.mount("/beta", "stampfs", "devB", false, StampFs.new("beta", 2000 as u64, 200 as u64))
+    vfs
+
+describe("VfsManager routes handle ops to the mount that opened them", fn():
+
+    it("registers the opening mount and returns a table handle", fn():
+        step("mount alpha at index 0 and beta at index 1")
+        var vfs = two_mount_vfs()
+        expect(vfs.open_handle_count()).to_equal(0)
+
+        step("open a file on the SECOND mount")
+        val opened = vfs.open("/beta/report.txt", rw_flags())
+        expect(opened.is_ok()).to_equal(true)
+        val fd = opened.unwrap()
+
+        step("the descriptor carries a VFS handle bound to mount B")
+        expect(vfs.open_handle_count()).to_equal(1)
+        expect(vfs.handle_mount_index(fd.node)).to_equal(1)
+        expect(vfs.handle_mount_path(fd.node)).to_equal("/beta")
+
+        step("the driver-local handle underneath is 1 — the ambiguous value")
+        expect(vfs.handle_driver_handle(fd.node)).to_equal(1 as u64)
+    )
+
+    it("reads from mount B, not from mount A", fn():
+        var vfs = two_mount_vfs()
+        val fd = vfs.open("/beta/report.txt", rw_flags()).unwrap()
+
+        step("read returns beta's stamped payload")
+        val got = vfs.read(fd.node, 32 as u64)
+        expect(got.is_ok()).to_equal(true)
+        expect(bytes_to_string(got.unwrap())).to_equal("beta-payload")
+
+        step("negative: it is NOT alpha's payload (the mounts[0] answer)")
+        expect(bytes_to_string(got.unwrap())).to_contain("beta")
+        # Bind the open first: a mutating call nested inside another call's
+        # argument list loses the receiver's write (self-hosted defect).
+        val alpha_fd = vfs.open("/alpha/other.txt", rw_flags()).unwrap()
+        val alpha_read = vfs.read(alpha_fd.node, 32 as u64)
+        expect(bytes_to_string(alpha_read.unwrap())).to_equal("alpha-payload")
+    )
+
+    it("writes to mount B, not to mount A", fn():
+        var vfs = two_mount_vfs()
+        val fd = vfs.open("/beta/report.txt", rw_flags()).unwrap()
+
+        step("write returns beta's base code 2000 plus the byte count")
+        val wrote = vfs.write(fd.node, string_to_bytes("abcde"))
+        expect(wrote.is_ok()).to_equal(true)
+        expect(wrote.unwrap()).to_equal(2005 as u64)
+
+        step("negative: alpha would have answered 1005")
+        val alpha_fd = vfs.open("/alpha/other.txt", rw_flags()).unwrap()
+        expect(vfs.write(alpha_fd.node, string_to_bytes("abcde")).unwrap()).to_equal(1005 as u64)
+    )
+
+    it("seeks on mount B, not on mount A", fn():
+        var vfs = two_mount_vfs()
+        val fd = vfs.open("/beta/report.txt", rw_flags()).unwrap()
+
+        step("seek returns beta's base position 200 plus the offset")
+        val pos = vfs.seek(fd.node, 7, SeekWhence.Set)
+        expect(pos.is_ok()).to_equal(true)
+        expect(pos.unwrap()).to_equal(207 as u64)
+
+        step("negative: alpha would have answered 107")
+        val alpha_fd = vfs.open("/alpha/other.txt", rw_flags()).unwrap()
+        expect(vfs.seek(alpha_fd.node, 7, SeekWhence.Set).unwrap()).to_equal(107 as u64)
+    )
+
+    it("closes on mount B and retires the handle", fn():
+        var vfs = two_mount_vfs()
+        val fd = vfs.open("/beta/report.txt", rw_flags()).unwrap()
+        expect(vfs.open_handle_count()).to_equal(1)
+
+        step("close is delivered to beta's driver")
+        val closed = vfs.close(fd.node)
+        expect(closed.is_err()).to_equal(true)
+        expect(closed.unwrap_err()).to_equal("close-routed-to-beta")
+
+        step("the VFS handle is retired even though the driver reported an error")
+        expect(vfs.open_handle_count()).to_equal(0)
+
+        step("negative: a second close cannot be re-routed to mount A")
+        val again = vfs.close(fd.node)
+        expect(again.is_err()).to_equal(true)
+        expect(again.unwrap_err()).to_contain("unknown VFS handle")
+    )
+
+    it("keeps two same-numbered driver handles apart", fn():
+        step("both drivers hand out driver handle 1 for their first open")
+        var vfs = two_mount_vfs()
+        val a = vfs.open("/alpha/one.txt", rw_flags()).unwrap()
+        val b = vfs.open("/beta/one.txt", rw_flags()).unwrap()
+        expect(vfs.handle_driver_handle(a.node)).to_equal(vfs.handle_driver_handle(b.node))
+
+        step("but the VFS handles are distinct and resolve to different mounts")
+        assert_true(a.node != b.node)
+        expect(vfs.handle_mount_path(a.node)).to_equal("/alpha")
+        expect(vfs.handle_mount_path(b.node)).to_equal("/beta")
+
+        step("and the payloads follow the mount, not the shared driver handle")
+        expect(bytes_to_string(vfs.read(a.node, 32 as u64).unwrap())).to_equal("alpha-payload")
+        expect(bytes_to_string(vfs.read(b.node, 32 as u64).unwrap())).to_equal("beta-payload")
+    )
+
+    it("rejects a handle whose mount was unmounted", fn():
+        var vfs = two_mount_vfs()
+        val fd = vfs.open("/beta/report.txt", rw_flags()).unwrap()
+
+        step("unmounting beta drops its open descriptions")
+        expect(vfs.unmount("/beta").is_ok()).to_equal(true)
+        expect(vfs.open_handle_count()).to_equal(0)
+
+        step("the stale handle errors instead of falling through to alpha")
+        val stale = vfs.read(fd.node, 32 as u64)
+        expect(stale.is_err()).to_equal(true)
+        expect(stale.unwrap_err()).to_contain("unknown VFS handle")
+    )
+)

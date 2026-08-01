@@ -1,0 +1,175 @@
+"""
+# Spawn Authority ENFORCEMENT Wiring Specification
+
+**Feature IDs:** #OS-P2-SPAWN-AUTH-ENFORCE
+**Category:** Runtime / Security
+**Difficulty:** 3/5
+**Status:** Implemented
+**Requirements:** N/A
+**Plan:** doc/03_plan/agent_tasks/simpleos_production_harden_parallel.md (lane INT-1)
+**Design:** doc/01_research/domain/simpleos_production_host_master_plan.md (5.4)
+**Research:** doc/01_research/domain/simpleos_production_host_master_plan.md
+
+## Overview
+
+The spawn-authority guard (`src/os/kernel/loader/spawn_authority.spl`) already
+had a proven contract, but it was UNARMED: nothing sealed the bootstrap window
+and the three ambient `spawn_full()` sites in `syscall_process.spl` bypassed it
+entirely. A guard nobody calls denies nothing.
+
+This spec is the enforcement half. It proves two things:
+
+  - the enforcement STATE MACHINE, exercised through the guard's public API
+    directly (no kernel boot required): open window admits everyone, sealing
+    admits only the declared root task, reopening admits everyone again, and
+    every refusal is counted so a gate can observe it;
+  - the WIRING, i.e. that the boot path actually arms the guard and that each of
+    the three ambient spawn sites actually asks it before handing out authority.
+
+Guard state lives in scalar module vars (freestanding discipline: no
+module-level array initializers, no classes, no trait-object dispatch on the
+ring-0 path), and module vars mutated inside fns are not readable from an `it`
+block, so every state assertion goes through an accessor fn.
+"""
+
+use std.spec.{describe, it, expect, step, assert_true, assert_false}
+use std.io_runtime.{file_read}
+use os.kernel.loader.spawn_authority.{
+    SPAWN_AUTHORITY_EPERM,
+    spawn_authority_seal_bootstrap, spawn_authority_reopen_bootstrap,
+    spawn_authority_set_root_task, spawn_authority_bootstrap_sealed,
+    spawn_authority_root_task, spawn_authority_is_root,
+    spawn_authority_check_ambient, spawn_authority_ambient_caps,
+    spawn_authority_denial_count
+}
+
+# Task ids used by the state-machine cases. 0 is the kernel-origin/root sentinel
+# the boot path installs; 4242 stands in for an ordinary userland task.
+val ROOT_CALLER: i64 = 0
+val USER_CALLER: i64 = 4242
+
+val SYSCALL_PROCESS_PATH: text = "src/os/kernel/ipc/syscall_process.spl"
+val INIT_SERVICES_PATH: text = "src/os/kernel/boot/init_services.spl"
+
+describe("spawn authority enforcement wiring (master plan 5.4)"):
+
+    it("admits every caller while the bootstrap window is open"):
+        step("open the bootstrap window and declare task 0 as root")
+        spawn_authority_reopen_bootstrap()
+        spawn_authority_set_root_task(ROOT_CALLER)
+        assert_false(spawn_authority_bootstrap_sealed())
+        expect(spawn_authority_root_task()).to_equal(0)
+
+        step("root and non-root both pass the ambient check during bootstrap")
+        expect(spawn_authority_check_ambient(ROOT_CALLER)).to_equal(0)
+        expect(spawn_authority_check_ambient(USER_CALLER)).to_equal(0)
+
+        step("the granted set is the ambient full set, not the pledged deny-all")
+        val boot_caps = spawn_authority_ambient_caps(USER_CALLER)
+        assert_false(boot_caps.is_pledged)
+
+    it("denies a non-root caller once the bootstrap window is sealed"):
+        step("arm the guard exactly as init_all_services does at end of boot")
+        spawn_authority_reopen_bootstrap()
+        spawn_authority_set_root_task(ROOT_CALLER)
+        spawn_authority_seal_bootstrap()
+        assert_true(spawn_authority_bootstrap_sealed())
+
+        step("the root task keeps ambient authority")
+        assert_true(spawn_authority_is_root(ROOT_CALLER))
+        expect(spawn_authority_check_ambient(ROOT_CALLER)).to_equal(0)
+        val root_caps = spawn_authority_ambient_caps(ROOT_CALLER)
+        assert_false(root_caps.is_pledged)
+
+        step("every other caller is refused EPERM and gets the deny-all set")
+        assert_false(spawn_authority_is_root(USER_CALLER))
+        expect(spawn_authority_check_ambient(USER_CALLER)).to_equal(-1)
+        expect(spawn_authority_check_ambient(USER_CALLER)).to_equal(SPAWN_AUTHORITY_EPERM)
+        val denied_caps = spawn_authority_ambient_caps(USER_CALLER)
+        assert_true(denied_caps.is_pledged)
+
+    it("counts each refused ambient spawn so a gate can observe it"):
+        step("seal the window with task 0 as root")
+        spawn_authority_reopen_bootstrap()
+        spawn_authority_set_root_task(ROOT_CALLER)
+        spawn_authority_seal_bootstrap()
+
+        step("an allowed ambient grant does not move the denial counter")
+        val before_allowed = spawn_authority_denial_count()
+        val allowed = spawn_authority_ambient_caps(ROOT_CALLER)
+        assert_false(allowed.is_pledged)
+        expect(spawn_authority_denial_count() - before_allowed).to_equal(0)
+
+        step("each refused ambient grant increments the counter by exactly one")
+        val before_denied = spawn_authority_denial_count()
+        val refused = spawn_authority_ambient_caps(USER_CALLER)
+        assert_true(refused.is_pledged)
+        expect(spawn_authority_denial_count() - before_denied).to_equal(1)
+        val refused_again = spawn_authority_ambient_caps(USER_CALLER)
+        assert_true(refused_again.is_pledged)
+        expect(spawn_authority_denial_count() - before_denied).to_equal(2)
+
+    it("readmits every caller when the bootstrap window is reopened"):
+        step("seal, then reopen the window (boot-phase restart / harness reset)")
+        spawn_authority_set_root_task(ROOT_CALLER)
+        spawn_authority_seal_bootstrap()
+        expect(spawn_authority_check_ambient(USER_CALLER)).to_equal(-1)
+        spawn_authority_reopen_bootstrap()
+
+        step("the previously denied caller passes again and the count is frozen")
+        val frozen = spawn_authority_denial_count()
+        assert_false(spawn_authority_bootstrap_sealed())
+        expect(spawn_authority_check_ambient(USER_CALLER)).to_equal(0)
+        val reopened_caps = spawn_authority_ambient_caps(USER_CALLER)
+        assert_false(reopened_caps.is_pledged)
+        expect(spawn_authority_denial_count() - frozen).to_equal(0)
+
+    it("routes all three ambient spawn sites in syscall_process through the guard"):
+        step("the syscall module imports the guard, not the raw ambient grant")
+        val syscalls = file_read(SYSCALL_PROCESS_PATH)
+        expect(syscalls).to_contain("use os.kernel.loader.spawn_authority.")
+        expect(syscalls).to_contain("spawn_authority_check_ambient")
+        expect(syscalls).to_contain("spawn_authority_ambient_caps")
+
+        step("no ambient spawn site still calls spawn_full() directly")
+        val direct_grant = syscalls.index_of("val caps = spawn_full()")
+        expect(direct_grant).to_equal(-1)
+
+        step("all three sites take their caps from the guard")
+        val guarded_caps = syscalls.split("val caps = spawn_authority_ambient_caps(caller)")
+        expect(guarded_caps.len()).to_equal(4)
+
+        step("all three sites ask the guard before spawning")
+        val checks = syscalls.split("if _ambient_spawn_denied(caller):")
+        expect(checks.len()).to_equal(4)
+
+        step("a refused caller gets a permission-denied result, never a task")
+        expect(syscalls).to_contain("return SyscallResult(value: 0 - EACCES as i64)")
+        expect(syscalls).to_contain("return SpawnBinaryDirectState(pid: 0 - EACCES as i64, scheduler: scheduler)")
+
+        step("the caller id comes from the scheduler, never a fabricated value")
+        expect(syscalls).to_contain("fn _ambient_spawn_caller(scheduler: Scheduler) -> i64:")
+        expect(syscalls).to_contain("scheduler.get_current().id.to_i64()")
+
+    it("arms the guard at the end of boot service initialization"):
+        step("init_services imports the seal entry points")
+        val init_services = file_read(INIT_SERVICES_PATH)
+        expect(init_services).to_contain("use os.kernel.loader.spawn_authority.")
+        expect(init_services).to_contain("spawn_authority_set_root_task")
+        expect(init_services).to_contain("spawn_authority_seal_bootstrap")
+
+        step("boot declares the root task before sealing")
+        val set_root_pos = init_services.index_of("spawn_authority_set_root_task(BOOT_ROOT_TASK_ID)")
+        val seal_pos = init_services.index_of("spawn_authority_seal_bootstrap()")
+        expect(set_root_pos).to_be_greater_than(-1)
+        expect(seal_pos).to_be_greater_than(set_root_pos)
+
+        step("the root task id is the kernel-origin sentinel 0")
+        expect(init_services).to_contain("val BOOT_ROOT_TASK_ID: i64 = 0")
+
+        step("sealing happens after the essential services are up")
+        val storage_pos = init_services.index_of("svc_storage_ok = vfs_boot_init_production()")
+        val display_pos = init_services.index_of("svc_display_ok = _init_display_service()")
+        expect(storage_pos).to_be_greater_than(-1)
+        expect(seal_pos).to_be_greater_than(storage_pos)
+        expect(seal_pos).to_be_greater_than(display_pos)

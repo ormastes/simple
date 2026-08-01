@@ -1,0 +1,131 @@
+"""
+Borrow-checker move revival granularity + false-positive avoidance
+(lane SF1, 2026-07-28).
+
+BorrowGraph.record_assign kills forward-propagated moved state so a
+re-initialized place is usable again, but the kill is scoped by whether
+the WRITE is a whole-local write or a projected (field) write:
+  - a whole-local write (`place.projections.len() == 0`) revives the
+    local and everything under it (place_base_equals on the base alone);
+  - a projected write revives only the EXACT place it targets
+    (place_equals, full path match).
+That asymmetry is the part most likely to regress silently, so it gets
+dedicated coverage here alongside the MIR-level Copy/Const/Assign wiring
+in borrow_check/mod.spl (each of those instruction kinds must record an
+ASSIGN of its destination, never a USE — recording a use would flag
+ordinary re-initialization as use-after-move).
+"""
+
+use std.spec
+use compiler.borrow.borrow_check.*
+use compiler.mir.mir_data.*
+
+fn field_of(base: Place, idx: i64) -> Place:
+    Place(base: base.base, projections: base.projections.push(PlaceElem.Field(idx)))
+
+fn mk_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn mk_body(insts: [MirInst]) -> MirBody:
+    val block = MirBlock(
+        id: BlockId.new(0),
+        label: nil,
+        instructions: insts,
+        terminator: MirTerminator.Ret(nil)
+    )
+    MirBody(
+        name: "move_revival_fn",
+        blocks: [block],
+        locals: [],
+        arg_count: 0,
+        return_ty: MirType.i64()
+    )
+
+fn body_has_errors(insts: [MirInst]) -> bool:
+    var checker = BorrowChecker.create()
+    checker.check_function(mk_body(insts))
+    checker.errors.len() > 0
+
+describe "BorrowGraph move revival — whole-local vs projected writes":
+    it "a whole-local reassign revives a previously-moved FIELD":
+        var graph = BorrowGraph.create()
+        val whole: Place = Place.local(0)
+        val field0: Place = field_of(whole, 0)
+        graph.record_move(3, field0)
+        graph.record_assign(5, whole)
+        graph.record_use(7, field0)
+        assert_false(graph.has_errors())
+
+    it "a projected (field) reassign does NOT revive the whole moved local":
+        # Writing only x.f0 must not make a later read of plain `x` look
+        # safe -- the rest of x may still be moved-out.
+        var graph = BorrowGraph.create()
+        val whole: Place = Place.local(0)
+        val field0: Place = field_of(whole, 0)
+        graph.record_move(3, whole)
+        graph.record_assign(5, field0)
+        graph.record_use(7, whole)
+        assert_true(graph.has_errors())
+
+    it "a projected (field) reassign DOES revive that exact field":
+        # Here the MOVE itself targets the field (not the whole local), so
+        # the field-projected reassign is an EXACT place_equals match
+        # against the moved entry and kills it.
+        var graph = BorrowGraph.create()
+        val whole: Place = Place.local(0)
+        val field0: Place = field_of(whole, 0)
+        graph.record_move(3, field0)
+        graph.record_assign(5, field0)
+        graph.record_use(7, field0)
+        assert_false(graph.has_errors())
+
+    it "reassignment kills moved state (re-init revives the place)":
+        var graph = BorrowGraph.create()
+        val p = Place.local(0)
+        graph.record_move(3, p)
+        graph.record_assign(5, p)
+        graph.record_use(7, p)
+        assert_false(graph.has_errors())
+
+    it "does not flag use of a different local after a move":
+        var graph = BorrowGraph.create()
+        graph.record_move(3, Place.local(0))
+        graph.record_use(7, Place.local(1))
+        assert_false(graph.has_errors())
+
+describe "BorrowChecker MIR wiring — Copy/Const/Assign never record a USE":
+    it "Copy's destination is reinitialized, not used: no false positive":
+        # Move(l1, l0) moves l0. Copy(l0, l2) then writes INTO l0 (dest),
+        # reinitializing it -- if the Copy case wrongly recorded a USE of
+        # its destination this would false-positive as use-after-move.
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val l2 = LocalId(id: 2)
+        val l3 = LocalId(id: 3)
+        val insts = [
+            mk_inst(MirInstKind.Move(l1, l0)),
+            mk_inst(MirInstKind.Copy(l0, l2)),
+            mk_inst(MirInstKind.Copy(l3, l0))
+        ]
+        assert_false(body_has_errors(insts))
+
+    it "Const rewrite of a moved-out local is not a false positive":
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val l2 = LocalId(id: 2)
+        val insts = [
+            mk_inst(MirInstKind.Move(l1, l0)),
+            mk_inst(MirInstKind.Const(l0, MirConstValue.Int(9), MirType.i64())),
+            mk_inst(MirInstKind.Copy(l2, l0))
+        ]
+        assert_false(body_has_errors(insts))
+
+    it "still detects use-after-move when no reinitialization occurs":
+        val l0 = LocalId(id: 0)
+        val l1 = LocalId(id: 1)
+        val l2 = LocalId(id: 2)
+        val insts = [
+            mk_inst(MirInstKind.Move(l1, l0)),
+            mk_inst(MirInstKind.Copy(l2, l0))
+        ]
+        assert_true(body_has_errors(insts))

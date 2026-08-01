@@ -1,0 +1,216 @@
+#!/bin/sh
+# Lightweight traceability gate from the WHATWG HTML element inventory and the
+# implemented Simple Web CSS subset to rendered Electron/Simple layout fixtures.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+
+BUILD_DIR="${BUILD_DIR:-build/html_css_rendering_manifest_traceability}"
+REPORT_PATH="${REPORT_PATH:-doc/09_report/html_css_rendering_manifest_traceability_$(date -u +%F).md}"
+OUT_ENV="$BUILD_DIR/evidence.env"
+
+mkdir -p "$BUILD_DIR" "$(dirname -- "$REPORT_PATH")"
+
+python3 - <<'PY' >"$OUT_ENV"
+from pathlib import Path
+from urllib.request import Request, urlopen
+import os
+import re
+import sys
+
+ROOT = Path.cwd()
+MANIFEST = ROOT / os.environ.get(
+    "HTML_CSS_RENDERING_MANIFEST_PATH",
+    "tools/electron-live-bitmap/simple_web_layout_capture_manifest.txt",
+)
+FIXTURE = ROOT / os.environ.get(
+    "HTML_CSS_RENDERING_FIXTURE_PATH",
+    "scripts/check/check-electron-simple-web-layout-bitmap-evidence.shs",
+)
+CSS_SUPPORTED_SOURCE = ROOT / os.environ.get(
+    "HTML_CSS_RENDERING_IMPLEMENTED_CSS_SOURCE",
+    "scripts/check/check-html-css-sspec-traceability.shs",
+)
+REQUIRED_MANIFEST_CASE_COUNT = int(os.environ.get("HTML_CSS_RENDERING_REQUIRED_MANIFEST_CASE_COUNT", "50"))
+HTML_URL = "https://html.spec.whatwg.org/multipage/indices.html"
+
+FALLBACK_HTML_TAGS = """
+a abbr address area article aside audio b base bdi bdo blockquote body br button
+canvas caption cite code col colgroup data datalist dd del details dfn dialog div
+dl dt em embed fieldset figcaption figure footer form head header hgroup hr html i
+iframe img input ins kbd label legend li link main map mark menu meta meter nav
+noscript object ol optgroup option output p picture pre progress q rp rt ruby s
+samp script search section select selectedcontent slot small source span strong
+style summary table tbody td template textarea tfoot th thead time title tr track
+u ul var video wbr
+""".split()
+
+def emit(key: str, value) -> None:
+    text = "" if value is None else str(value)
+    print(f"{key}={text.replace(chr(10), ' ')}")
+
+
+def rel(path: Path) -> str:
+    try:
+        return str(path.relative_to(ROOT))
+    except ValueError:
+        return str(path)
+
+
+def fetch_html_tags() -> tuple[list[str], str]:
+    if os.environ.get("HTML_CSS_RENDERING_MANIFEST_FETCH", "1") == "0":
+        return sorted(FALLBACK_HTML_TAGS), "fallback-disabled-fetch"
+    try:
+        req = Request(HTML_URL, headers={"User-Agent": "simple-html-css-rendering-manifest-traceability"})
+        source = urlopen(req, timeout=30).read().decode("utf-8", "replace")
+        tags = sorted(set(
+            match.group(2)
+            for match in re.finditer(
+                r"<code id=elements-3:the-([a-z0-9-]+)-element><a [^>]*>([a-z0-9-]+)</a></code>",
+                source,
+            )
+        ))
+        if len(tags) >= 100:
+            return tags, "whatwg-live"
+    except Exception:
+        pass
+    return sorted(FALLBACK_HTML_TAGS), "fallback"
+
+
+def decode_shell_string(value: str) -> str:
+    try:
+        return bytes(value, "utf-8").decode("unicode_escape")
+    except Exception:
+        return value
+
+
+def manifest_cases(text: str) -> list[tuple[str, str, str, str]]:
+    cases = []
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split("|", 5)
+        if len(parts) >= 6:
+            cases.append((parts[0], parts[1], parts[4], parts[5]))
+    return cases
+
+
+def load_css_supported(path: Path) -> tuple[set[str], str]:
+    if not path.exists():
+        return set(), "missing"
+    text = path.read_text(encoding="utf-8", errors="ignore")
+    match = re.search(r"CSS_SUPPORTED\s*=\s*\{(?P<body>.*?)\n\}", text, re.S)
+    if not match:
+        return set(), "missing-css-supported-set"
+    props = set(re.findall(r'"([^"]+)"', match.group("body")))
+    if not props:
+        return set(), "empty-css-supported-set"
+    return props, "pass"
+
+
+def fixture_html_by_scene(text: str) -> dict[str, str]:
+    out = {}
+    pattern = re.compile(r'if "\$SCENE" == "([^"]+)":\n\s*html = "((?:[^"\\]|\\.)*)"', re.M)
+    for match in pattern.finditer(text):
+        out[match.group(1)] = decode_shell_string(match.group(2))
+    return out
+
+
+def has_html_tag(blob: str, tag: str) -> bool:
+    return re.search(rf"<{re.escape(tag)}(?:\s|>|/)", blob, re.I) is not None
+
+
+def has_css_property(blob: str, prop: str) -> bool:
+    return re.search(rf"(?<![a-zA-Z-]){re.escape(prop)}\s*:", blob, re.I) is not None
+
+
+manifest_text = MANIFEST.read_text(encoding="utf-8", errors="ignore")
+fixture_text = FIXTURE.read_text(encoding="utf-8", errors="ignore")
+css_supported, css_supported_source_status = load_css_supported(CSS_SUPPORTED_SOURCE)
+cases = manifest_cases(manifest_text)
+fixtures = fixture_html_by_scene(fixture_text)
+
+manifest_scenes = [scene for _, scene, _, _ in cases]
+missing_fixture = [scene for scene in manifest_scenes if scene not in fixtures]
+fixture_blob = "\n".join(fixtures.get(scene, "") for scene in manifest_scenes)
+
+html_tags, tag_source = fetch_html_tags()
+fixture_html_tags = [tag for tag in html_tags if has_html_tag(fixture_blob, tag)]
+missing_html = [tag for tag in html_tags if tag not in fixture_html_tags]
+manifest_only_html = [
+    tag for tag in html_tags
+    if tag not in fixture_html_tags
+    and re.search(rf"(?<![a-z0-9-]){re.escape(tag)}(?![a-z0-9-])", manifest_text, re.I) is not None
+]
+
+missing_css = [prop for prop in sorted(css_supported) if not has_css_property(fixture_blob, prop)]
+
+status = "pass"
+reason = "pass"
+if css_supported_source_status != "pass":
+    status = "fail"
+    reason = "implemented-css-source-unavailable"
+elif len(cases) != REQUIRED_MANIFEST_CASE_COUNT:
+    status = "fail"
+    reason = "unexpected-manifest-case-count"
+elif missing_fixture:
+    status = "fail"
+    reason = "manifest-scenes-missing-fixture-html"
+elif missing_html:
+    status = "fail"
+    reason = "html-tags-missing-rendering-fixture"
+elif missing_css:
+    status = "fail"
+    reason = "css-properties-missing-rendering-fixture"
+
+emit("html_css_rendering_manifest_traceability_status", status)
+emit("html_css_rendering_manifest_traceability_reason", reason)
+emit("html_css_rendering_manifest_traceability_manifest", rel(MANIFEST))
+emit("html_css_rendering_manifest_traceability_fixture", rel(FIXTURE))
+emit("html_css_rendering_manifest_traceability_css_property_source", rel(CSS_SUPPORTED_SOURCE))
+emit("html_css_rendering_manifest_traceability_css_property_source_status", css_supported_source_status)
+emit("html_css_rendering_manifest_traceability_css_property_source_count", len(css_supported))
+emit("html_css_rendering_manifest_traceability_tag_source", tag_source)
+emit("html_css_rendering_manifest_traceability_html_tag_count", len(html_tags))
+emit("html_css_rendering_manifest_traceability_html_tag_covered_count", len(html_tags) - len(missing_html))
+emit("html_css_rendering_manifest_traceability_html_tag_covered", ",".join(fixture_html_tags))
+emit("html_css_rendering_manifest_traceability_html_tag_fixture_covered_count", len(fixture_html_tags))
+emit("html_css_rendering_manifest_traceability_html_tag_manifest_only_count", len(manifest_only_html))
+emit("html_css_rendering_manifest_traceability_html_tag_manifest_only", ",".join(manifest_only_html))
+emit("html_css_rendering_manifest_traceability_html_tag_missing", ",".join(missing_html))
+emit("html_css_rendering_manifest_traceability_css_property_count", len(css_supported))
+emit("html_css_rendering_manifest_traceability_css_property_covered_count", len(css_supported) - len(missing_css))
+emit("html_css_rendering_manifest_traceability_css_property_covered", ",".join(prop for prop in sorted(css_supported) if prop not in missing_css))
+emit("html_css_rendering_manifest_traceability_css_property_missing", ",".join(missing_css))
+emit("html_css_rendering_manifest_traceability_manifest_case_count", len(cases))
+emit("html_css_rendering_manifest_traceability_required_manifest_case_count", REQUIRED_MANIFEST_CASE_COUNT)
+emit("html_css_rendering_manifest_traceability_fixture_scene_count", len(fixtures))
+emit("html_css_rendering_manifest_traceability_manifest_missing_fixture", ",".join(missing_fixture))
+
+if status != "pass":
+    sys.exit(1)
+PY
+
+status="$(sed -n 's/^html_css_rendering_manifest_traceability_status=//p' "$OUT_ENV" | tail -n 1)"
+reason="$(sed -n 's/^html_css_rendering_manifest_traceability_reason=//p' "$OUT_ENV" | tail -n 1)"
+
+{
+    echo "# HTML/CSS Rendering Manifest Traceability"
+    echo
+    echo "- status: $status"
+    echo "- reason: $reason"
+    echo "- HTML tags: $(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_html_tag_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- implemented CSS properties: $(sed -n 's/^html_css_rendering_manifest_traceability_css_property_covered_count=//p' "$OUT_ENV" | tail -n 1)/$(sed -n 's/^html_css_rendering_manifest_traceability_css_property_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo "- manifest cases: $(sed -n 's/^html_css_rendering_manifest_traceability_manifest_case_count=//p' "$OUT_ENV" | tail -n 1)"
+    echo
+    echo "## Raw Evidence"
+    sed 's/^/- /' "$OUT_ENV"
+} >"$REPORT_PATH"
+
+cat "$OUT_ENV"
+
+if [ "$status" = "pass" ]; then
+    exit 0
+fi
+exit 1

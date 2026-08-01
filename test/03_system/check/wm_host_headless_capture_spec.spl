@@ -1,0 +1,100 @@
+"""
+# Host-WM Headless Capture Lane Contract
+
+Pins the headless capture lane added to the three host-WM showcase wrappers
+(widget, graphics-2D, web-standards) so the matrix's `widget x host-WM`,
+`2D x host-WM`, and `web x host-WM` cells can collect evidence without owning
+the single physical-window capture lane (see
+`doc/08_tracking/bug/wm_showcase_no_headless_lane_2026-07-25.md`).
+
+Static-contract style, matching
+`test/03_system/check/wm_production_fullscreen_evidence_spec.spl`: it greps
+each wrapper source for the exact env gate, the reused (not reinvented)
+compose/blit/PPM-encode calls, and the honest-fail status keys, so a future
+edit that silently drops the gate or swaps in fabricated pixels fails this
+spec instead of only showing up as a missing matrix cell.
+"""
+
+# @tag: system, gui, wm, headless, evidence, pure-simple
+
+use std.io_runtime.{file_read}
+use std.spec.*
+
+fn expect_headless_lane_contract(script: text, prefix: text):
+    # Gate: headless mode is checked before the window-only SIMPLE_GUI gate,
+    # so it never needs GuiRenderer.create / a physical window.
+    expect(script).to_contain("SIMPLE_WM_HEADLESS_CAPTURE")
+    expect(script).to_contain("run_headless_capture")
+    expect(script).to_contain("if (env_get(\"SIMPLE_WM_HEADLESS_CAPTURE\") ?? \"\") == \"1\":")
+
+    # Reuse, not reinvention: same wm-pixel-compositor scene + the same real
+    # showcase child content the windowed lane presents (blit_child_frame_pixels
+    # pulls in the actual child app's rendered frame — never a synthetic fill).
+    expect(script).to_contain("compose_pixels(comp, trace_path)")
+    expect(script).to_contain("blit_child_frame_pixels(base_pixels, comp, child.pixels, child.w, child.h)")
+    expect(script).to_contain("wait_for_first_child_frame")
+
+    # PPM output goes through the same encoder/writer the child showcase
+    # itself already uses (std.common.image.ppm_decode.encode_ppm_p6 +
+    # std.io_runtime.file_write_bytes) — not a bespoke/ad-hoc byte dump.
+    # NOTE: expected literals that themselves contain `{...}` MUST use raw
+    # single-quoted strings. In a normal "..." literal Simple interpolates the
+    # braces, so the assertion never compiles and the whole gate goes vacuous
+    # (this spec failed 3/3 with `variable \`key\` not found` until 2026-07-26).
+    expect(script).to_contain('use std.common.image.ppm_decode.{decode_ppm_to_argb, encode_ppm_p6}')
+    expect(script).to_contain('use std.io_runtime.{env_get, file_exists, file_read, file_read_bytes, file_write, file_write_bytes')
+    expect(script).to_contain("encode_ppm_p6(W.to_u32(), H.to_u32(), present_pixels)")
+    expect(script).to_contain("file_write_bytes(ppm_path, ppm_bytes)")
+
+    # Honest-fail gates: fail-closed reasons for every way the lane can fail
+    # to produce real pixels, never a fabricated pass.
+    expect(script).to_contain("child-spawn-failed")
+    expect(script).to_contain("child-bridge-timeout")
+    expect(script).to_contain("compositor-window-count")
+    expect(script).to_contain("child-frame-timeout")
+    expect(script).to_contain("compose-short")
+    expect(script).to_contain("ppm-write-failed")
+    expect(script).to_contain("blank-or-uniform")
+    expect(script).to_contain("HeadlessCaptureMetrics")
+    expect(script).to_contain("metrics.varied")
+    expect(script).to_contain("metrics.nonzero")
+    expect(script).to_contain("metrics.checksum")
+
+    # Status/reason/metrics/provenance are all emitted through the shared
+    # `headless_status(prefix, key, value)` helper, which prints
+    # "{prefix}_{key}={value}" — the wrapper-specific prefix (asserted by the
+    # caller below) fans out to every key at runtime, so the source only needs
+    # to route each concern through this one emitter, not spell out every
+    # concatenated key literally.
+    expect(script).to_contain("fn headless_status(prefix: text, key: text, value: text):")
+    # Raw single-quoted literal — see NOTE above; `{prefix}_{key}={value}` is
+    # the marker shape the harness parses, and must be compared verbatim.
+    expect(script).to_contain('print "{prefix}_{key}={value}"')
+    expect(script).to_contain("headless_status(prefix, \"status\", \"fail\")")
+    expect(script).to_contain("headless_status(prefix, \"status\", \"pass\")")
+    expect(script).to_contain("headless_status(prefix, \"reason\", \"blank-or-uniform\")")
+    expect(script).to_contain("headless_status(prefix, \"pixels\", present_pixels.len().to_text())")
+    expect(script).to_contain("headless_status(prefix, \"nonzero\", metrics.nonzero.to_text())")
+    expect(script).to_contain("headless_status(prefix, \"checksum\", metrics.checksum.to_text())")
+    expect(script).to_contain("headless_status(prefix, \"ppm_path\", ppm_path)")
+    expect(script).to_contain("headless_status(prefix, \"provenance\", \"host-wm-headless-compose\")")
+
+describe "Host-WM headless capture lane contract":
+
+    it "widget showcase host-WM wrapper implements the headless capture lane":
+        step("Inspect the widget showcase host-WM wrapper source")
+        val script = file_read("examples/06_io/ui/wm_widget_showcase_gui.spl")
+        expect_headless_lane_contract(script, "wm_widget_showcase_host_headless")
+        expect(script).to_contain("val prefix = \"wm_widget_showcase_host_headless\"")
+
+    it "graphics 2D showcase host-WM wrapper implements the headless capture lane":
+        step("Inspect the graphics 2D showcase host-WM wrapper source")
+        val script = file_read("examples/06_io/ui/wm_graphics_2d_showcase_gui.spl")
+        expect_headless_lane_contract(script, "wm_graphics_2d_showcase_host_headless")
+        expect(script).to_contain("val prefix = \"wm_graphics_2d_showcase_host_headless\"")
+
+    it "web standards showcase host-WM wrapper implements the headless capture lane":
+        step("Inspect the web standards showcase host-WM wrapper source")
+        val script = file_read("examples/06_io/ui/wm_web_standards_showcase_gui.spl")
+        expect_headless_lane_contract(script, "wm_web_standards_showcase_host_headless")
+        expect(script).to_contain("val prefix = \"wm_web_standards_showcase_host_headless\"")

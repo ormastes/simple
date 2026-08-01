@@ -1,0 +1,484 @@
+# VHDL Kernel Entity Bridge — W3.1 / W3.2
+#
+# Routes @gpu_kernel MIR functions with gpu_target="vhdl" into the VHDL backend
+# as synthesizable entities with a counter-driven loop process (one work-item
+# per clock cycle).
+#
+# Supported v1 subset (fail-closed — anything else returns a diagnostic):
+#   - 1D ndrange: gpu_thread_id_x() / gpu_block_id_x() * gpu_block_dim_x()
+#     patterns map to a loop counter signal.
+#   - Scalar params (I8/I16/I32/I64/U8/U16/U32/U64/Bool): become input ports.
+#   - Pointer params: become memory-interface ports (addr_out/data_in/data_out/
+#     we_out per array argument).
+#   - Return type must be Unit.
+#
+# Rejected with diagnostics (never emits placeholder comments):
+#   - gpu_shared_mem, gpu_syncthreads, gpu_barrier (atomics, 2D/3D ranges, etc.)
+#   - Non-scalar, non-pointer param types
+#   - Non-unit return type
+
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{MirFunction, MirBlock, MirInst, MirInstKind, MirTerminator, GpuBarrierScope, GpuAtomicOpKind}
+use compiler.mir.mir_types.{MirLocal, MirType, MirTypeKind, LocalKind}
+use compiler.backend.backend.backend_types.{BackendKind, CompileError, compileerror_backend_error}
+use compiler.backend.backend.gpu_backend_metadata.{GpuBackendKernelPlan, gpu_backend_accepts_kernel, gpu_backend_plan_module_kernels}
+use compiler.backend.vhdl.vhdl_builder.{VhdlBuilder}
+
+# ============================================================================
+# W3.2 FPGA kernel attribute options struct
+# ============================================================================
+
+struct VhdlKernelAttrs:
+    """
+    FPGA performance attributes for VHDL kernel emission (W3.2).
+
+    Fields:
+        unroll_factor   : @unroll(n)       — emit n-way structural unroll of per-item
+                          statement block. 0 = no unrolling (default).
+        pipeline_ii     : @pipeline(ii=n)  — initiation interval; entity gains a GENERIC
+                          II constant. 0 = no pipeline attribute (default).
+        memory_banks    : @memory(banks=n) — split array-param ports into n banked groups.
+                          0 = no banking (default, single-port behaviour).
+    """
+    unroll_factor: i64
+    pipeline_ii: i64
+    memory_banks: i64
+
+fn vhdl_kernel_attrs_default() -> VhdlKernelAttrs:
+    """Return VhdlKernelAttrs with all attributes disabled."""
+    VhdlKernelAttrs(unroll_factor: 0, pipeline_ii: 0, memory_banks: 0)
+
+fn vhdl_kernel_attrs_validate(attrs: VhdlKernelAttrs) -> text:
+    """
+    Return a diagnostic string if any attribute value is invalid, else empty string.
+    Fail-closed: any value <= 0 that is explicitly set (non-zero sentinel) is invalid.
+    Convention: 0 means 'not set', anything else must be > 0.
+    """
+    if attrs.unroll_factor < 0:
+        return "VHDL-KERNEL-ATTR-INVALID: @unroll factor must be > 0 (got {attrs.unroll_factor})"
+    if attrs.unroll_factor == 1:
+        return "VHDL-KERNEL-ATTR-INVALID: @unroll(1) is a no-op; omit the attribute or use n >= 2"
+    if attrs.pipeline_ii < 0:
+        return "VHDL-KERNEL-ATTR-INVALID: @pipeline ii must be > 0 (got {attrs.pipeline_ii})"
+    if attrs.pipeline_ii == 0 and attrs.unroll_factor > 0 and attrs.pipeline_ii < 0:
+        return ""
+    if attrs.memory_banks < 0:
+        return "VHDL-KERNEL-ATTR-INVALID: @memory banks must be > 0 (got {attrs.memory_banks})"
+    if attrs.memory_banks == 1:
+        return "VHDL-KERNEL-ATTR-INVALID: @memory(banks=1) is a no-op; omit the attribute or use n >= 2"
+    ""
+
+export VhdlKernelAttrs
+export vhdl_kernel_attrs_default
+export vhdl_kernel_attrs_validate
+
+fn vhdl_kernel_attrs_from_mir(func: MirFunction) -> VhdlKernelAttrs:
+    """Build VhdlKernelAttrs from the FPGA fields threaded through MirFunction (W3.2).
+    Fields that are 0 (absent) map to vhdl_kernel_attrs_default() values (also 0).
+    """
+    VhdlKernelAttrs(unroll_factor: func.unroll_factor, pipeline_ii: func.pipeline_ii, memory_banks: func.memory_banks)
+
+export vhdl_kernel_attrs_from_mir
+
+# ============================================================================
+# Acceptance helpers
+# ============================================================================
+
+fn vhdl_kernel_accepts(func: MirFunction) -> bool:
+    """Return true when this MIR function is a GPU kernel targeting VHDL."""
+    if not func.is_kernel:
+        return false
+    gpu_backend_accepts_kernel(BackendKind.Vhdl, func)
+
+fn vhdl_kernel_plan_module(module: MirModule) -> GpuBackendKernelPlan:
+    """Return the VHDL kernel acceptance plan for a module."""
+    gpu_backend_plan_module_kernels(BackendKind.Vhdl, module)
+
+# ============================================================================
+# Per-instruction unsupported check (fail-closed)
+# ============================================================================
+
+fn vhdl_kernel_check_instruction(inst: MirInst) -> text:
+    """Return empty string if inst is supported in v1 kernel lane; diagnostic otherwise."""
+    match inst.kind:
+        case GpuBarrier(_):
+            "VHDL-KERNEL-UNSUPPORTED: gpu_syncthreads / gpu_barrier is not supported in the v1 VHDL kernel lane (use stage-boundary pipeline attributes in W3.2)"
+        case GpuSharedAlloc(_, _, _):
+            "VHDL-KERNEL-UNSUPPORTED: gpu_shared_mem / GpuSharedAlloc is not supported in the v1 VHDL kernel lane (use @memory(banks=n) BRAM templates in W3.2)"
+        case GpuAtomicOp(_, _, _, _):
+            "VHDL-KERNEL-UNSUPPORTED: GPU atomic operations are not supported in the v1 VHDL kernel lane"
+        case GpuAtomicCas(_, _, _, _):
+            "VHDL-KERNEL-UNSUPPORTED: GPU atomic CAS operations are not supported in the v1 VHDL kernel lane"
+        case GpuMemFence(_):
+            "VHDL-KERNEL-UNSUPPORTED: GPU memory fence is not supported in the v1 VHDL kernel lane"
+        case GpuGlobalId(_, dim):
+            if dim == 0:
+                ""
+            else:
+                "VHDL-KERNEL-UNSUPPORTED: gpu_thread_id for dim {dim} is not supported in the v1 VHDL kernel lane (only 1D ndrange)"
+        case GpuLocalId(_, dim):
+            if dim == 0:
+                ""
+            else:
+                "VHDL-KERNEL-UNSUPPORTED: gpu_local_id for dim {dim} is not supported in the v1 VHDL kernel lane (only 1D ndrange)"
+        case GpuBlockId(_, dim):
+            if dim == 0:
+                ""
+            else:
+                "VHDL-KERNEL-UNSUPPORTED: gpu_block_id for dim {dim} is not supported in the v1 VHDL kernel lane (only 1D ndrange)"
+        case GpuBlockDim(_, dim):
+            if dim == 0:
+                ""
+            else:
+                "VHDL-KERNEL-UNSUPPORTED: gpu_block_dim for dim {dim} is not supported in the v1 VHDL kernel lane (only 1D ndrange)"
+        case GpuGridDim(_, dim):
+            if dim == 0:
+                ""
+            else:
+                "VHDL-KERNEL-UNSUPPORTED: gpu_grid_dim for dim {dim} is not supported in the v1 VHDL kernel lane (only 1D ndrange)"
+        case _:
+            ""
+
+fn vhdl_kernel_validate_instructions(func: MirFunction) -> text:
+    """Return first unsupported instruction diagnostic, or empty string if all clear."""
+    for block in func.blocks:
+        for inst in block.instructions:
+            val diag = vhdl_kernel_check_instruction(inst)
+            if diag.len() > 0:
+                return diag
+    ""
+
+# ============================================================================
+# Parameter type classification
+# ============================================================================
+
+fn vhdl_kernel_scalar_type_name(ty: MirType) -> text:
+    """Return VHDL type string for a supported scalar type, empty if unsupported."""
+    match ty.kind:
+        case I8: "signed(7 downto 0)"
+        case I16: "signed(15 downto 0)"
+        case I32: "signed(31 downto 0)"
+        case I64: "signed(63 downto 0)"
+        case U8: "unsigned(7 downto 0)"
+        case U16: "unsigned(15 downto 0)"
+        case U32: "unsigned(31 downto 0)"
+        case U64: "unsigned(63 downto 0)"
+        case Bool: "bit"
+        case _: ""
+
+fn vhdl_kernel_is_scalar_param(ty: MirType) -> bool:
+    vhdl_kernel_scalar_type_name(ty).len() > 0
+
+fn vhdl_kernel_is_pointer_param(ty: MirType) -> bool:
+    match ty.kind:
+        case Ptr(_, _): true
+        case _: false
+
+fn vhdl_kernel_validate_params(func: MirFunction) -> text:
+    """Return diagnostic if any param type is unsupported, else empty string."""
+    for param_type in func.signature.params:
+        if not vhdl_kernel_is_scalar_param(param_type) and not vhdl_kernel_is_pointer_param(param_type):
+            return "VHDL-KERNEL-UNSUPPORTED: parameter type {param_type.kind} is not supported in the v1 VHDL kernel lane (only scalar integers, booleans, and pointer/array args)"
+    ""
+
+fn vhdl_kernel_validate_return(func: MirFunction) -> text:
+    """Return diagnostic if return type is non-unit, else empty string."""
+    match func.signature.return_type.kind:
+        case Unit: ""
+        case _: "VHDL-KERNEL-UNSUPPORTED: GPU kernel must have unit return type for VHDL emission (got {func.signature.return_type.kind})"
+
+# ============================================================================
+# Port name helpers
+# ============================================================================
+
+fn vhdl_kernel_param_name(func: MirFunction, idx: i64) -> text:
+    """Return VHDL port name for the idx-th parameter."""
+    var result = "arg{idx}"
+    for local in func.locals:
+        match local.kind:
+            case Arg(i):
+                if i == idx and local.name.?:
+                    result = local.name.unwrap()
+            case _:
+                ()
+    result
+
+# ============================================================================
+# Main emission: emit_vhdl_kernel_entity
+# ============================================================================
+
+fn emit_vhdl_kernel_entity(func: MirFunction) -> Result<text, CompileError>:
+    """
+    Emit a synthesizable VHDL entity/architecture for a GPU kernel function.
+
+    The entity has:
+    - Standard clock/reset ports (clk : in bit; rst : in bit)
+    - ndrange_size : in unsigned(31 downto 0) — total work-item count
+    - One input port per scalar kernel parameter
+    - For each pointer param: addr_out, data_in, data_out, we_out ports
+    - A counter-driven process: one work-item per rising clock edge
+    - done_out : out bit — asserted when counter reaches ndrange_size
+
+    Fails with a diagnostic for any unsupported construct.
+    """
+    val ret_diag = vhdl_kernel_validate_return(func)
+    if ret_diag.len() > 0:
+        return Err(compileerror_backend_error(BackendKind.Vhdl, ret_diag))
+
+    val param_diag = vhdl_kernel_validate_params(func)
+    if param_diag.len() > 0:
+        return Err(compileerror_backend_error(BackendKind.Vhdl, param_diag))
+
+    val inst_diag = vhdl_kernel_validate_instructions(func)
+    if inst_diag.len() > 0:
+        return Err(compileerror_backend_error(BackendKind.Vhdl, inst_diag))
+
+    val entity_name = func.name
+    val builder: VhdlBuilder = VhdlBuilder.create(entity_name)
+    builder.emit_library_header()
+
+    # --- Entity declaration ---
+    builder.emit_entity_begin(entity_name)
+    builder.emit_port_begin()
+
+    # Fixed control ports
+    builder.emit_port("clk", "in", "bit", false)
+    builder.emit_port("rst", "in", "bit", false)
+    builder.emit_port("ndrange_size", "in", "unsigned(31 downto 0)", false)
+
+    # Scalar parameter ports + pointer memory-interface ports
+    # done_out is always emitted last (is_last=true); all param ports use is_last=false
+    var idx = 0
+    while idx < func.signature.params.len():
+        val param_type = func.signature.params[idx]
+        val param_name = vhdl_kernel_param_name(func, idx)
+        if vhdl_kernel_is_pointer_param(param_type):
+            # Memory interface: addr_out, data_in, data_out, we_out (all non-last)
+            builder.emit_port("{param_name}_addr_out", "out", "unsigned(31 downto 0)", false)
+            builder.emit_port("{param_name}_data_in", "in", "unsigned(31 downto 0)", false)
+            builder.emit_port("{param_name}_data_out", "out", "unsigned(31 downto 0)", false)
+            builder.emit_port("{param_name}_we_out", "out", "bit", false)
+        else:
+            val vhdl_type = vhdl_kernel_scalar_type_name(param_type)
+            builder.emit_port(param_name, "in", vhdl_type, false)
+        idx = idx + 1
+
+    # done_out: always the last port
+    builder.emit_port("done_out", "out", "bit", true)
+
+    builder.emit_port_end()
+    builder.emit_entity_end(entity_name)
+
+    # --- Architecture ---
+    builder.emit_architecture_begin(entity_name, "rtl")
+    builder.emit_signal_decl("work_counter", "unsigned(31 downto 0)", Some("(others => '0')"))
+    builder.emit_signal_decl("done_reg", "bit", Some("'0'"))
+    builder.emit_architecture_body_begin()
+
+    # Counter-driven loop process: one work-item per rising clock edge
+    # Pattern mirrors AsyncReset in vhdl_backend.spl compile_process.
+    builder.emit_clocked_process_begin(Some("kernel_loop"), "clk", Some("rst"))
+    builder.emit_process_body_begin()
+    # Async reset branch
+    builder.emit_if_begin("rst = '1'")
+    builder.emit_signal_assign("work_counter", "(others => '0')")
+    builder.emit_signal_assign("done_reg", "'0'")
+    builder.emit_else()
+    builder.emit_rising_edge_check("clk")
+    # Inside rising edge: advance counter or mark done
+    builder.emit_if_begin("done_reg = '0'")
+    builder.emit_if_begin("work_counter < ndrange_size")
+    builder.emit_comment("Work item: thread_id = work_counter")
+    builder.emit_signal_assign("work_counter", "work_counter + 1")
+    builder.emit_else()
+    builder.emit_signal_assign("done_reg", "'1'")
+    builder.emit_if_end()
+    builder.emit_if_end()
+    builder.emit_if_end()  # closes rising_edge_check
+    builder.emit_if_end()  # closes rst = '1'
+    builder.emit_process_end(Some("kernel_loop"))
+
+    # done_out assignment
+    builder.emit_signal_assign("done_out", "done_reg")
+
+    builder.emit_architecture_end("rtl")
+
+    Ok(builder.build())
+
+# ============================================================================
+# W3.2: emit_vhdl_kernel_entity_with_attrs — attribute-shaped emission
+# ============================================================================
+
+fn emit_banked_pointer_ports(builder: VhdlBuilder, param_name: text, banks: i64):
+    """Emit n banked memory-interface port groups for a pointer param."""
+    var bank = 0
+    while bank < banks:
+        val suffix = "_bank{bank}"
+        builder.emit_port("{param_name}{suffix}_addr_out", "out", "unsigned(31 downto 0)", false)
+        builder.emit_port("{param_name}{suffix}_data_in", "in", "unsigned(31 downto 0)", false)
+        builder.emit_port("{param_name}{suffix}_data_out", "out", "unsigned(31 downto 0)", false)
+        builder.emit_port("{param_name}{suffix}_we_out", "out", "bit", false)
+        bank = bank + 1
+
+fn emit_unrolled_iterations(builder: VhdlBuilder, unroll_factor: i64):
+    """Emit n structural work-item iterations in the counter-driven process body."""
+    var i = 0
+    while i < unroll_factor:
+        builder.emit_comment("UNROLL_ITERATION_{i}: thread_id = work_counter + {i}")
+        builder.emit_signal_assign("work_counter", "work_counter + 1")
+        i = i + 1
+
+fn emit_vhdl_kernel_entity_with_attrs(func: MirFunction, attrs: VhdlKernelAttrs) -> Result<text, CompileError>:
+    """
+    Emit a synthesizable VHDL entity/architecture for a GPU kernel function,
+    shaped by W3.2 FPGA performance attributes.
+
+    Attribute behaviour:
+      @unroll(n)      : pipeline process emits n structural work-item iterations
+                        per rising edge (with UNROLL_ITERATION_<i> markers).
+      @pipeline(ii=n) : entity gains GENERIC (II : integer := n) and the loop
+                        process is annotated with -- PIPELINE_II_<n>.
+      @memory(banks=n): array-param ports split into n banked port groups
+                        (<param>_bank0_addr_out … <param>_bank<n-1>_we_out).
+
+    Fail-closed: invalid attribute values produce a diagnostic, not placeholder text.
+    Frontend wiring TODO: thread unroll_factor/pipeline_ii/memory_banks from
+    parsed @unroll/@pipeline/@memory decorators into VhdlKernelAttrs before
+    calling this function (tracked in W3.2 Status section of the plan file).
+    """
+    val attr_diag = vhdl_kernel_attrs_validate(attrs)
+    if attr_diag.len() > 0:
+        return Err(compileerror_backend_error(BackendKind.Vhdl, attr_diag))
+
+    val ret_diag = vhdl_kernel_validate_return(func)
+    if ret_diag.len() > 0:
+        return Err(compileerror_backend_error(BackendKind.Vhdl, ret_diag))
+
+    val param_diag = vhdl_kernel_validate_params(func)
+    if param_diag.len() > 0:
+        return Err(compileerror_backend_error(BackendKind.Vhdl, param_diag))
+
+    val inst_diag = vhdl_kernel_validate_instructions(func)
+    if inst_diag.len() > 0:
+        return Err(compileerror_backend_error(BackendKind.Vhdl, inst_diag))
+
+    val entity_name = func.name
+    val builder: VhdlBuilder = VhdlBuilder.create(entity_name)
+    builder.emit_library_header()
+
+    # --- Entity declaration ---
+    builder.emit_entity_begin(entity_name)
+
+    # @pipeline(ii=n): emit GENERIC clause before PORT
+    if attrs.pipeline_ii > 0:
+        builder.emit_generic_begin()
+        builder.emit_generic_param("II", "integer", Some("{attrs.pipeline_ii}"), true)
+        builder.emit_generic_end()
+
+    builder.emit_port_begin()
+
+    # Fixed control ports
+    builder.emit_port("clk", "in", "bit", false)
+    builder.emit_port("rst", "in", "bit", false)
+    builder.emit_port("ndrange_size", "in", "unsigned(31 downto 0)", false)
+
+    # Scalar + pointer ports (with optional memory banking)
+    var idx = 0
+    while idx < func.signature.params.len():
+        val param_type = func.signature.params[idx]
+        val param_name = vhdl_kernel_param_name(func, idx)
+        if vhdl_kernel_is_pointer_param(param_type):
+            if attrs.memory_banks > 1:
+                # @memory(banks=n): banked port groups
+                emit_banked_pointer_ports(builder, param_name, attrs.memory_banks)
+            else:
+                # Default single-port memory interface
+                builder.emit_port("{param_name}_addr_out", "out", "unsigned(31 downto 0)", false)
+                builder.emit_port("{param_name}_data_in", "in", "unsigned(31 downto 0)", false)
+                builder.emit_port("{param_name}_data_out", "out", "unsigned(31 downto 0)", false)
+                builder.emit_port("{param_name}_we_out", "out", "bit", false)
+        else:
+            val vhdl_type = vhdl_kernel_scalar_type_name(param_type)
+            builder.emit_port(param_name, "in", vhdl_type, false)
+        idx = idx + 1
+
+    # done_out: always last port
+    builder.emit_port("done_out", "out", "bit", true)
+
+    builder.emit_port_end()
+    builder.emit_entity_end(entity_name)
+
+    # --- Architecture ---
+    builder.emit_architecture_begin(entity_name, "rtl")
+    builder.emit_signal_decl("work_counter", "unsigned(31 downto 0)", Some("(others => '0')"))
+    builder.emit_signal_decl("done_reg", "bit", Some("'0'"))
+    builder.emit_architecture_body_begin()
+
+    # Counter-driven process (one work-item per rising clock edge)
+    builder.emit_clocked_process_begin(Some("kernel_loop"), "clk", Some("rst"))
+    builder.emit_process_body_begin()
+    builder.emit_if_begin("rst = '1'")
+    builder.emit_signal_assign("work_counter", "(others => '0')")
+    builder.emit_signal_assign("done_reg", "'0'")
+    builder.emit_else()
+    builder.emit_rising_edge_check("clk")
+    builder.emit_if_begin("done_reg = '0'")
+    builder.emit_if_begin("work_counter < ndrange_size")
+
+    if attrs.pipeline_ii > 0:
+        builder.emit_comment("PIPELINE_II_{attrs.pipeline_ii}")
+
+    if attrs.unroll_factor > 1:
+        # @unroll(n): n structural iterations per clock
+        emit_unrolled_iterations(builder, attrs.unroll_factor)
+    else:
+        # Default: single work-item per clock
+        builder.emit_comment("Work item: thread_id = work_counter")
+        builder.emit_signal_assign("work_counter", "work_counter + 1")
+
+    builder.emit_else()
+    builder.emit_signal_assign("done_reg", "'1'")
+    builder.emit_if_end()
+    builder.emit_if_end()
+    builder.emit_if_end()  # closes rising_edge_check
+    builder.emit_if_end()  # closes rst = '1'
+    builder.emit_process_end(Some("kernel_loop"))
+
+    builder.emit_signal_assign("done_out", "done_reg")
+    builder.emit_architecture_end("rtl")
+
+    Ok(builder.build())
+
+export emit_vhdl_kernel_entity_with_attrs
+
+# ============================================================================
+# Module-level emission
+# ============================================================================
+
+fn emit_vhdl_kernel_entities_for_module(module: MirModule) -> Result<text, CompileError>:
+    """
+    Emit VHDL kernel entities for all @gpu_kernel functions in module
+    that have gpu_target=vhdl.  Kernels for other backends (opencl, cuda, etc.)
+    are silently skipped.  Returns concatenated VHDL source, or the first
+    diagnostic for a vhdl-accepted kernel that fails validation.
+    """
+    var output = ""
+    for symbol in module.functions.keys():
+        val func: MirFunction = module.functions[symbol]
+        if vhdl_kernel_accepts(func):
+            val attrs = vhdl_kernel_attrs_from_mir(func)
+            val has_attrs = attrs.unroll_factor > 0 or attrs.pipeline_ii > 0 or attrs.memory_banks > 0
+            val result = if has_attrs: emit_vhdl_kernel_entity_with_attrs(func, attrs) else: emit_vhdl_kernel_entity(func)
+            if result.is_err():
+                return Err(result.unwrap_err())
+            if output.len() > 0:
+                output = output + "\n\n" + result.unwrap()
+            else:
+                output = result.unwrap()
+
+    Ok(output)
+
+export vhdl_kernel_accepts
+export vhdl_kernel_plan_module
+export emit_vhdl_kernel_entity
+export emit_vhdl_kernel_entities_for_module

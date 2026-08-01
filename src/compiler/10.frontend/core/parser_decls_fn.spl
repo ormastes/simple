@@ -1,0 +1,220 @@
+# Parser — Function Declaration Module
+#
+# Extracted from parser_decls.spl: fn/extern fn declarations and generic type param parsing.
+
+use compiler.core.tokens.{TOK_IDENT, TOK_KW_FN, TOK_KW_SELF}
+use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
+use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_STAR}
+use compiler.core.tokens.{TOK_ARROW, TOK_EOF}
+use compiler.core.tokens.{TOK_KW_WHERE, TOK_KW_LIMITS, TOK_KW_CANDIDATES}
+use compiler.core.types.{TYPE_VOID}
+use compiler.core.ast.{decl_fn, decl_extern_fn}
+use compiler.core.parser.{par_kind_get, par_text_get}
+use compiler.core.parser.{parser_advance, parser_expect, parser_error}
+use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
+use compiler.core.parser_expr.{parse_expr}
+use compiler.core.parser_stmts.{parse_block}
+use compiler.core.parser_decls.{parser_skip_tilde_if_present, parser_expect_param_name}
+
+# ===== Generic Type Parameter Parsing =====
+
+# Module-level generic constraint declarations (populated by `val generic T limits [...]`)
+var file_generic_constraints: {text: [text]} = {}
+var file_generic_constraint_modes: {text: text} = {}
+
+fn parse_type_param_constraint_list() -> [text]:
+    # Parses [f32, i32, f64, i64] or [f32, i32, *] constraint list
+    var types: [text] = []
+    if par_kind_get() != TOK_LBRACKET:
+        return types
+    parser_advance()
+    for ci in 0..100:
+        if par_kind_get() == TOK_RBRACKET:
+            break
+        if ci > 0:
+            if par_kind_get() != TOK_COMMA:
+                break
+            parser_advance()
+        if par_kind_get() == TOK_IDENT:
+            types.push(par_text_get())
+            parser_advance()
+        elif par_kind_get() == TOK_STAR:
+            types.push("*")
+            parser_advance()
+        else:
+            break
+    parser_expect(TOK_RBRACKET)
+    types
+
+fn parse_type_params() -> [text]:
+    # Parses <T>, <T, U>, <T limits [f32, i32]>, <T: [f32, i32]>, etc.
+    # Returns list of type parameter names (e.g., ["T", "U"])
+    # Side effect: populates last_type_param_constraints and last_type_param_modes
+    var type_params: [text] = []
+
+    # Check for < token (either TOK_LT or TOK_LT_GENERIC)
+    val has_lt: bool = par_kind_get() == TOK_LT
+    val has_lt_gen: bool = par_kind_get() == TOK_LT_GENERIC
+    val has_generic: bool = has_lt or has_lt_gen
+    if not has_generic:
+        return type_params
+
+    parser_advance()
+
+    # Parse type parameters with optional inline constraints
+    for pi in 0..100:
+        if pi > 0:
+            if par_kind_get() != TOK_COMMA:
+                break
+            parser_advance()
+
+        if par_kind_get() != TOK_IDENT:
+            if pi == 0:
+                parser_error("expected type parameter name")
+            break
+
+        val param_name = par_text_get()
+        type_params.push(param_name)
+        parser_advance()
+
+        # Check for inline constraint: `T limits [...]` or `T: [...]`
+        val is_limits: bool = par_kind_get() == TOK_KW_LIMITS
+        val is_candidates: bool = par_kind_get() == TOK_KW_CANDIDATES
+        val is_colon_constraint: bool = par_kind_get() == TOK_COLON
+        if is_limits or is_candidates or is_colon_constraint:
+            parser_advance()
+            val constraint_types = parse_type_param_constraint_list()
+            if constraint_types.len() > 0:
+                # Check for * (candidate mode marker)
+                var has_star = false
+                var filtered: [text] = []
+                for ct in constraint_types:
+                    if ct == "*":
+                        has_star = true
+                    else:
+                        filtered.push(ct)
+                val mode_str = if is_candidates or has_star: "candidate" else: "limit"
+                file_generic_constraints[param_name] = filtered
+                file_generic_constraint_modes[param_name] = mode_str
+
+    # Expect closing >
+    parser_expect(TOK_GT)
+
+    type_params
+
+# ===== Function Declarations =====
+
+fn parse_fn_decl(is_async: i64) -> i64:
+    parser_advance()
+    val fn_name = par_text_get()
+    parser_expect(TOK_IDENT)
+
+    # Parse optional type parameters: fn name<T, U>(...)
+    val type_params = parse_type_params()
+
+    parser_expect(TOK_LPAREN)
+
+    var param_names: [text] = []
+    var param_types: [i64] = []
+
+    if par_kind_get() != TOK_RPAREN:
+        # First parameter (skip ~ keyword-only marker if present)
+        parser_skip_tilde_if_present()
+        val pname = par_text_get()
+        parser_expect_param_name()
+        param_names.push(pname)
+        var ptype = 0
+        if par_kind_get() == TOK_COLON:
+            parser_advance()
+            ptype = parser_parse_type_with_union()
+        param_types.push(ptype)
+
+        for i in 0..100:
+            if par_kind_get() != TOK_COMMA:
+                break
+            parser_advance()
+            if par_kind_get() == TOK_RPAREN:
+                break
+            parser_skip_tilde_if_present()
+            val pn = par_text_get()
+            parser_expect_param_name()
+            param_names.push(pn)
+            var pt = 0
+            if par_kind_get() == TOK_COLON:
+                parser_advance()
+                pt = parser_parse_type_with_union()
+            param_types.push(pt)
+
+    parser_expect(TOK_RPAREN)
+
+    # Return type
+    var ret_type = TYPE_VOID
+    if par_kind_get() == TOK_ARROW:
+        parser_advance()
+        ret_type = parser_parse_type_with_union()
+
+    # Skip optional where clause: where T: Bound
+    if par_kind_get() == TOK_KW_WHERE:
+        parser_advance()
+        # Skip until the body colon
+        for where_i in 0..200:
+            val at_colon: bool = par_kind_get() == TOK_COLON
+            val at_eof: bool = par_kind_get() == TOK_EOF
+            if at_colon or at_eof:
+                break
+            parser_advance()
+
+    # Function body
+    parser_expect(TOK_COLON)
+    val body = parse_block()
+
+    decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, 0)
+
+fn parse_extern_fn_decl() -> i64:
+    # Already consumed 'extern'
+    parser_expect(TOK_KW_FN)
+    val fn_name = par_text_get()
+    parser_expect(TOK_IDENT)
+
+    # Parse optional type parameters: extern fn name<T>(...)
+    val type_params = parse_type_params()
+
+    parser_expect(TOK_LPAREN)
+
+    var param_names: [text] = []
+    var param_types: [i64] = []
+
+    if par_kind_get() != TOK_RPAREN:
+        val pname = par_text_get()
+        parser_expect_param_name()
+        param_names.push(pname)
+        var ptype = 0
+        if par_kind_get() == TOK_COLON:
+            parser_advance()
+            ptype = parser_parse_type()
+        param_types.push(ptype)
+
+        for i in 0..100:
+            if par_kind_get() != TOK_COMMA:
+                break
+            parser_advance()
+            if par_kind_get() == TOK_RPAREN:
+                break
+            val pn = par_text_get()
+            parser_expect_param_name()
+            param_names.push(pn)
+            var pt = 0
+            if par_kind_get() == TOK_COLON:
+                parser_advance()
+                pt = parser_parse_type()
+            param_types.push(pt)
+
+    parser_expect(TOK_RPAREN)
+
+    var ret_type = TYPE_VOID
+    if par_kind_get() == TOK_ARROW:
+        parser_advance()
+        ret_type = parser_parse_type()
+
+    decl_extern_fn(fn_name, param_names, param_types, ret_type, type_params, 0)

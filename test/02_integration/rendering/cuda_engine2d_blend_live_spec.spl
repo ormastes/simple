@@ -1,0 +1,36 @@
+"""CUDA Engine2D image blend live qualification.
+
+Requires an NVIDIA CUDA device. Proves that the production backend completes
+the blend without its CPU fallback and returns byte-exact device pixels.
+"""
+
+use std.spec.{describe, it, expect}
+use std.gpu.engine2d.backend_cuda.{CudaBackend, probe_cuda}
+use std.gpu.engine2d.color.{blend}
+
+describe "CUDA Engine2D image blend live qualification":
+    it "blends exact pixels on the device without CPU fallback":
+        val probe = probe_cuda()
+        if probe.is_usable():
+            var backend = CudaBackend.create()
+            expect(backend.init(4, 4)).to_equal(true)
+            val dst = 0x40102030 as u32
+            val src: [u32] = [
+                0x00010203 as u32,
+                0xFF112233 as u32,
+                0x80406080 as u32,
+                0x40224466 as u32
+            ]
+            backend.clear(dst)
+            backend.draw_image_blend(1, 1, 2, 2, src)
+            val readback = backend.read_pixels_with_source()
+            expect(readback.source).to_equal("device_readback")
+            expect(readback.backend_handle).to_be_greater_than(0)
+            expect(backend.cpu_fallback_used).to_equal(false)
+            expect(readback.pixels.len()).to_equal(16)
+            if readback.pixels.len() == 16:
+                expect(readback.pixels[1 * 4 + 1]).to_equal(blend(src[0], dst))
+                expect(readback.pixels[1 * 4 + 2]).to_equal(blend(src[1], dst))
+                expect(readback.pixels[2 * 4 + 1]).to_equal(blend(src[2], dst))
+                expect(readback.pixels[2 * 4 + 2]).to_equal(blend(src[3], dst))
+            backend.shutdown()

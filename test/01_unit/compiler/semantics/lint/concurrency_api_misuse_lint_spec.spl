@@ -1,0 +1,607 @@
+# Concurrency API Misuse Lint Specification
+#
+# Tests for E-PAR-001..005: concurrency API misuse rules ported from the Rust seed.
+#
+# E-PAR-001: task_spawn imported from std.concurrent.thread (wrong surface)
+# E-PAR-002: numbered-suffix alias (e.g. thread_spawn2) used instead of public API
+# E-PAR-003: concurrency symbol imported from wrong module surface
+# E-PAR-004: call-shape violation — wrong arity OR non-closure/non-integer first arg
+# E-PAR-005: direct use of internal rt_pool_* extern symbol outside facade
+#
+# Convention: text-based heuristic mirror (no AST dependency) — same as
+# concurrency_share_nothing_spec.spl and closure_capture_spec.spl.
+#
+# Note: code strings that contain { } use single-quote raw strings for the
+# import line to avoid interpreter string interpolation, then join with "\n".
+
+use std.spec.*
+
+# ============================================================================
+# Inline re-implementation of the text-heuristic lint
+# ============================================================================
+
+fn _tc_is_ident_char(c: text) -> bool:
+    val alpha = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    alpha.contains(c)
+
+fn _tc_is_digit(c: text) -> bool:
+    val digits = "0123456789"
+    digits.contains(c)
+
+fn _tc_find_substr(haystack: text, needle: text) -> i64:
+    val nlen = needle.len()
+    val hlen = haystack.len()
+    var i = 0
+    while i <= hlen - nlen:
+        if haystack.substring(i, i + nlen) == needle:
+            return i
+        i = i + 1
+    -1
+
+fn _tc_rfind_char(s: text, ch: text) -> i64:
+    val len = s.len()
+    var i = len - 1
+    while i >= 0:
+        if s.substring(i, i + 1) == ch:
+            return i
+        i = i - 1
+    -1
+
+fn _tc_extract_name(after_kw: text) -> text:
+    var i = 0
+    val len = after_kw.len()
+    while i < len:
+        if not _tc_is_ident_char(after_kw.substring(i, i + 1)):
+            break
+        i = i + 1
+    after_kw.substring(0, i)
+
+fn _tc_is_thread_path(path: text) -> bool:
+    (path == "std.concurrent.thread" or
+     path == "std.nogc_async_mut.concurrent.thread" or
+     path == "std.nogc_sync_mut.concurrent.thread" or
+     path == "concurrency.threads" or
+     path == "std.concurrency.threads")
+
+fn _tc_is_green_thread_path(path: text) -> bool:
+    (path == "std.concurrent.green_thread" or
+     path == "std.nogc_async_mut.concurrent.green_thread")
+
+fn _tc_is_cooperative_green_path(path: text) -> bool:
+    (path == "std.concurrent.cooperative_green" or
+     path == "std.nogc_async_mut.concurrent.cooperative_green")
+
+fn _tc_is_multicore_green_path(path: text) -> bool:
+    (path == "std.concurrent.multicore_green" or
+     path == "std.nogc_async_mut.concurrent.multicore_green")
+
+fn _tc_numbered_replacement(name: text) -> text:
+    if name == "thread_spawn2": return "thread_spawn_with_args"
+    if name == "spawn_isolated2": return "spawn_isolated_with_args"
+    if name == "spawn_limited2": return "spawn_limited_with_args"
+    ""
+
+fn _tc_expected_owner(name: text) -> text:
+    if name == "thread_spawn" or name == "thread_spawn_with_args":
+        return "std.concurrent.thread"
+    if name == "green_spawn":
+        return "std.concurrent.green_thread"
+    if (name == "cooperative_green_spawn" or name == "cooperative_green_spawn_value" or
+        name == "cooperative_green_run_one" or name == "cooperative_green_run_all"):
+        return "std.concurrent.cooperative_green"
+    if name == "multicore_green_spawn" or name == "multicore_green_set_parallelism":
+        return "std.concurrent.multicore_green"
+    if name == "task_spawn":
+        return "std.nogc_async_mut.thread_pool"
+    ""
+
+fn _tc_owner_accepts(owner: text, name: text) -> bool:
+    if name == "thread_spawn" or name == "thread_spawn_with_args":
+        return _tc_is_thread_path(owner)
+    if name == "green_spawn":
+        return _tc_is_green_thread_path(owner) or _tc_is_cooperative_green_path(owner)
+    if (name == "cooperative_green_spawn" or name == "cooperative_green_spawn_value"):
+        return _tc_is_cooperative_green_path(owner)
+    if name == "multicore_green_spawn" or name == "multicore_green_set_parallelism":
+        return _tc_is_multicore_green_path(owner)
+    if name == "task_spawn":
+        return owner == "std.nogc_async_mut.thread_pool" or owner == "nogc_async_mut.thread_pool"
+    true
+
+fn _tc_parse_use_line(line: text) -> [text]:
+    val t = line.trim()
+    if not t.starts_with("use "):
+        return []
+    val rest = t.substring(4).trim()
+    val brace_pos = _tc_find_substr(rest, "{")
+    if brace_pos >= 0:
+        val path_part = rest.substring(0, brace_pos)
+        var owner = path_part
+        val plen = path_part.len()
+        if plen > 0 and path_part.substring(plen - 1) == ".":
+            owner = path_part.substring(0, plen - 1)
+        owner = owner.trim()
+        val close = _tc_find_substr(rest, "}")
+        val syms_text = if close >= 0: rest.substring(brace_pos + 1, close) else rest.substring(brace_pos + 1)
+        val syms_raw = syms_text.split(",")
+        var result: [text] = [owner]
+        for s in syms_raw:
+            val stripped = s.trim()
+            val as_pos = _tc_find_substr(stripped, " as ")
+            val sym_name = if as_pos >= 0: stripped.substring(0, as_pos).trim() else stripped
+            if sym_name != "":
+                result.push(sym_name)
+        return result
+    val last_dot = _tc_rfind_char(rest, ".")
+    if last_dot >= 0:
+        val owner = rest.substring(0, last_dot)
+        val sym = rest.substring(last_dot + 1)
+        val sym_clean = _tc_extract_name(sym.trim())
+        if sym_clean != "":
+            return [owner, sym_clean]
+    []
+
+fn _tc_count_call_args(line: text, callee: text) -> i64:
+    val call_start = _tc_find_substr(line, callee + "(")
+    if call_start < 0: return -1
+    val after = line.substring(call_start + callee.len() + 1)
+    var depth = 1
+    var i = 0
+    var commas = 0
+    var has_content = false
+    val len = after.len()
+    while i < len and depth > 0:
+        val c = after.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+            has_content = true
+        elif c == ")":
+            depth = depth - 1
+            if depth != 0:
+                has_content = true
+        elif c == "," and depth == 1:
+            commas = commas + 1
+            has_content = true
+        elif c != " " and c != "\t":
+            has_content = true
+        if depth > 0:
+            i = i + 1
+    if not has_content: return 0
+    commas + 1
+
+fn _tc_first_arg_text(line: text, callee: text) -> text:
+    val call_start = _tc_find_substr(line, callee + "(")
+    if call_start < 0: return ""
+    val after = line.substring(call_start + callee.len() + 1)
+    var depth = 1
+    var i = 0
+    val len = after.len()
+    while i < len and depth > 0:
+        val c = after.substring(i, i + 1)
+        if c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+            if depth == 0:
+                return after.substring(0, i).trim()
+        elif c == "," and depth == 1:
+            return after.substring(0, i).trim()
+        i = i + 1
+    after.trim()
+
+fn _tc_first_arg_is_closure(arg: text) -> bool:
+    val t = arg.trim()
+    t.starts_with("\\:") or t.starts_with("\\")
+
+fn _tc_first_arg_is_integer(arg: text) -> bool:
+    val t = arg.trim()
+    if t.len() == 0: return false
+    var i = 0
+    val len = t.len()
+    if t.substring(0, 1) == "-":
+        i = 1
+    if i >= len: return false
+    while i < len:
+        if not _tc_is_digit(t.substring(i, i + 1)):
+            return false
+        i = i + 1
+    true
+
+val _tc_rt_pool_symbols = [
+    "rt_pool_submit",
+    "rt_pool_join",
+    "rt_pool_is_done",
+    "rt_pool_set_parallelism",
+    "rt_pool_get_parallelism"
+]
+
+val _tc_exempt_path_suffixes = [
+    "src/lib/nogc_async_mut/concurrent/multicore_green.spl",
+    "src/lib/gc_async_mut/concurrent/multicore_green.spl",
+    "src/lib/nogc_sync_mut/concurrent/multicore_green.spl",
+    "src/lib/gc_sync_mut/concurrent/multicore_green.spl"
+]
+
+fn _tc_is_exempt_path(file_path: text) -> bool:
+    for suffix in _tc_exempt_path_suffixes:
+        if file_path.ends_with(suffix):
+            return true
+    false
+
+fn _tc_is_token(line: text, token: text) -> bool:
+    val tlen = token.len()
+    val llen = line.len()
+    var i = 0
+    while i <= llen - tlen:
+        if line.substring(i, i + tlen) == token:
+            var after_ok = true
+            var before_ok = true
+            if i + tlen < llen:
+                val ac = line.substring(i + tlen, i + tlen + 1)
+                if _tc_is_ident_char(ac):
+                    after_ok = false
+            if i > 0:
+                val bc = line.substring(i - 1, i)
+                if _tc_is_ident_char(bc):
+                    before_ok = false
+            if after_ok and before_ok:
+                return true
+        i = i + 1
+    false
+
+fn check_concurrency_misuse_text(source: text, file_path: text) -> [text]:
+    """Text-based heuristic for E-PAR-001..005. Returns finding strings like 'E-PAR-002:message'.
+    file_path is used for E-PAR-005 path exemption; pass empty string when unknown."""
+    var msgs: [text] = []
+    val spawn_callees = [
+        "thread_spawn",
+        "green_spawn",
+        "cooperative_green_spawn",
+        "multicore_green_spawn",
+        "multicore_green_set_parallelism"
+    ]
+
+    val lines = source.split("\n")
+    for line in lines:
+        val t = line.trim()
+
+        # Import checks
+        val parts = _tc_parse_use_line(line)
+        if parts.len() >= 2:
+            val owner = parts[0]
+            var pi = 1
+            while pi < parts.len():
+                val sym = parts[pi]
+                # E-PAR-002
+                val repl = _tc_numbered_replacement(sym)
+                if repl != "":
+                    msgs.push("E-PAR-002:" + sym + " is a numbered name and is not a public API")
+                elif _tc_is_thread_path(owner) and sym == "task_spawn":
+                    # E-PAR-001
+                    msgs.push("E-PAR-001:task_spawn is not part of the OS-thread facade")
+                else:
+                    val expected = _tc_expected_owner(sym)
+                    if expected != "" and not _tc_owner_accepts(owner, sym):
+                        # E-PAR-003
+                        msgs.push("E-PAR-003:" + sym + " belongs to " + expected + ", not " + owner)
+                pi = pi + 1
+
+        # Call-shape checks (E-PAR-004: wrong arity OR wrong arg type)
+        for callee in spawn_callees:
+            if t.contains(callee + "("):
+                val argc = _tc_count_call_args(t, callee)
+                if argc >= 0:
+                    if argc != 1:
+                        # E-PAR-004: wrong arity
+                        msgs.push("E-PAR-004:" + callee + " must be called with a single zero-argument value closure (found: {argc} argument(s))")
+                    else:
+                        val arg = _tc_first_arg_text(t, callee)
+                        if callee == "multicore_green_set_parallelism":
+                            if not _tc_first_arg_is_integer(arg):
+                                # E-PAR-004: not an integer
+                                msgs.push("E-PAR-004:" + callee + " must be called with a single integer worker count")
+                        else:
+                            if not _tc_first_arg_is_closure(arg):
+                                # E-PAR-004: not a closure
+                                msgs.push("E-PAR-004:" + callee + " requires you to pass a closure as the first argument")
+
+        # E-PAR-005: rt_pool extern fn direct access
+        if t.starts_with("extern fn ") and not _tc_is_exempt_path(file_path):
+            for sym in _tc_rt_pool_symbols:
+                if _tc_is_token(t, sym):
+                    msgs.push("E-PAR-005:" + sym + " is an internal runtime-pool symbol and is not a public API")
+
+    msgs
+
+fn tc_has_code(msgs: [text], code: text) -> bool:
+    for m in msgs:
+        if m.starts_with(code + ":"):
+            return true
+    false
+
+fn tc_any_contains(msgs: [text], fragment: text) -> bool:
+    for m in msgs:
+        if m.contains(fragment):
+            return true
+    false
+
+# ============================================================================
+# E-PAR-001: task_spawn imported from OS-thread surface
+# ============================================================================
+
+describe "E-PAR-001 task_spawn wrong surface":
+    context "task_spawn imported from std.concurrent.thread":
+        it "flags task_spawn imported from thread path":
+            val code = 'use std.concurrent.thread.{task_spawn}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-001")).to_equal(true)
+
+        it "message contains 'task_spawn is not part of the OS-thread facade'":
+            val code = 'use std.concurrent.thread.{task_spawn}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "task_spawn is not part of the OS-thread facade")).to_equal(true)
+
+    context "negative — correct import":
+        it "does not flag task_spawn from std.nogc_async_mut.thread_pool":
+            val code = 'use std.nogc_async_mut.thread_pool.{task_spawn}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-001")).to_equal(false)
+
+# ============================================================================
+# E-PAR-002: numbered concurrency alias
+# ============================================================================
+
+describe "E-PAR-002 numbered concurrency alias":
+    context "thread_spawn2 imported":
+        it "flags thread_spawn2 as a numbered alias":
+            val code = 'use std.concurrent.thread.{thread_spawn2}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-002")).to_equal(true)
+
+        it "message contains 'is a numbered name'":
+            val code = 'use std.concurrent.thread.{thread_spawn2}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "is a numbered name")).to_equal(true)
+
+        it "message contains the symbol name thread_spawn2":
+            val code = 'use std.concurrent.thread.{thread_spawn2}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "thread_spawn2")).to_equal(true)
+
+    context "spawn_isolated2 imported":
+        it "flags spawn_isolated2 as a numbered alias":
+            val code = 'use std.concurrent.thread.{spawn_isolated2}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-002")).to_equal(true)
+
+    context "negative — correct alias name":
+        it "does not flag thread_spawn_with_args":
+            val code = 'use std.concurrent.thread.{thread_spawn_with_args}' + "\n\nfn main():\n    val x = 1\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-002")).to_equal(false)
+
+# ============================================================================
+# E-PAR-003: wrong surface import
+# ============================================================================
+
+describe "E-PAR-003 wrong surface import":
+    context "cooperative_green_spawn from thread surface":
+        it "flags cooperative_green_spawn imported from std.concurrent.thread":
+            val code = 'use std.concurrent.thread.{cooperative_green_spawn}' + "\n\nfn main():\n    val h = cooperative_green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-003")).to_equal(true)
+
+        it "message contains the symbol name":
+            val code = 'use std.concurrent.thread.{cooperative_green_spawn}' + "\n\nfn main():\n    val h = cooperative_green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "cooperative_green_spawn")).to_equal(true)
+
+        it "message contains expected owner std.concurrent.cooperative_green":
+            val code = 'use std.concurrent.thread.{cooperative_green_spawn}' + "\n\nfn main():\n    val h = cooperative_green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "std.concurrent.cooperative_green")).to_equal(true)
+
+    context "multicore_green_spawn from thread surface":
+        it "flags multicore_green_spawn imported from std.concurrent.thread":
+            val code = 'use std.concurrent.thread.{multicore_green_spawn}' + "\n\nfn main():\n    val h = multicore_green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-003")).to_equal(true)
+
+    context "thread_spawn from cooperative_green surface":
+        it "flags thread_spawn imported from std.concurrent.cooperative_green":
+            val code = 'use std.concurrent.cooperative_green.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-003")).to_equal(true)
+
+    context "green_spawn from thread surface":
+        it "flags green_spawn imported from std.concurrent.thread":
+            val code = 'use std.concurrent.thread.{green_spawn}' + "\n\nfn main():\n    val h = green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-003")).to_equal(true)
+
+    context "negative — correct surface":
+        it "does not flag cooperative_green_spawn from correct surface":
+            val code = 'use std.concurrent.cooperative_green.{cooperative_green_spawn}' + "\n\nfn main():\n    val h = cooperative_green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-003")).to_equal(false)
+
+        it "does not flag thread_spawn from std.concurrent.thread":
+            val code = 'use std.concurrent.thread.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-003")).to_equal(false)
+
+        it "does not flag multicore_green_spawn from std.concurrent.multicore_green":
+            val code = 'use std.concurrent.multicore_green.{multicore_green_spawn}' + "\n\nfn main():\n    val h = multicore_green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-003")).to_equal(false)
+
+# ============================================================================
+# E-PAR-004: bad argument type
+# ============================================================================
+
+describe "E-PAR-004 invalid argument type":
+    context "thread_spawn called with integer literal":
+        it "flags thread_spawn(42) — integer is not a closure":
+            val code = 'use std.concurrent.thread.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(42)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+        it "message contains 'pass a closure'":
+            val code = 'use std.concurrent.thread.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(42)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "pass a closure")).to_equal(true)
+
+    context "green_spawn called with integer literal":
+        it "flags green_spawn(42)":
+            val code = 'use std.concurrent.green_thread.{green_spawn}' + "\n\nfn main():\n    val h = green_spawn(42)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+    context "cooperative_green_spawn called with integer literal":
+        it "flags cooperative_green_spawn(42)":
+            val code = 'use std.concurrent.cooperative_green.{cooperative_green_spawn}' + "\n\nfn main():\n    val h = cooperative_green_spawn(42)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+    context "multicore_green_spawn called with integer literal":
+        it "flags multicore_green_spawn(42)":
+            val code = 'use std.concurrent.multicore_green.{multicore_green_spawn}' + "\n\nfn main():\n    val h = multicore_green_spawn(42)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+    context "multicore_green_set_parallelism called with text arg":
+        it "flags multicore_green_set_parallelism with a text argument":
+            val code = 'use std.concurrent.multicore_green.{multicore_green_set_parallelism}' + "\n\nfn main():\n    multicore_green_set_parallelism(\"4\")\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+    context "negative — correct arg types":
+        it "does not flag thread_spawn with closure arg":
+            val code = 'use std.concurrent.thread.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(false)
+
+        it "does not flag multicore_green_set_parallelism with integer arg":
+            val code = 'use std.concurrent.multicore_green.{multicore_green_set_parallelism}' + "\n\nfn main():\n    multicore_green_set_parallelism(4)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(false)
+
+        it "does not flag green_spawn with closure arg":
+            val code = 'use std.concurrent.green_thread.{green_spawn}' + "\n\nfn main():\n    val h = green_spawn(\\: 42)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(false)
+
+# ============================================================================
+# E-PAR-004: wrong arity (moved from old E-PAR-005)
+# ============================================================================
+
+describe "E-PAR-004 wrong arity":
+    context "thread_spawn called with two args":
+        it "flags thread_spawn(closure, closure) — two args instead of one":
+            val code = 'use std.concurrent.thread.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(\\: 1, \\: 2)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+        it "message contains 'single zero-argument value closure'":
+            val code = 'use std.concurrent.thread.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(\\: 1, \\: 2)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "single zero-argument value closure")).to_equal(true)
+
+    context "green_spawn called with two args":
+        it "flags green_spawn(closure, closure) — E-PAR-004":
+            val code = 'use std.concurrent.green_thread.{green_spawn}' + "\n\nfn main():\n    val h = green_spawn(\\: 1, \\: 2)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+    context "cooperative_green_spawn called with two args":
+        it "flags cooperative_green_spawn(closure, closure) — E-PAR-004":
+            val code = 'use std.concurrent.cooperative_green.{cooperative_green_spawn}' + "\n\nfn main():\n    val h = cooperative_green_spawn(\\: 1, \\: 2)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+    context "multicore_green_spawn called with two args":
+        it "flags multicore_green_spawn(closure, closure) — E-PAR-004":
+            val code = 'use std.concurrent.multicore_green.{multicore_green_spawn}' + "\n\nfn main():\n    val h = multicore_green_spawn(\\: 1, \\: 2)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(true)
+
+    context "negative — correct arity, does not emit E-PAR-004 for arity":
+        it "does not flag thread_spawn with exactly one arg":
+            val code = 'use std.concurrent.thread.{thread_spawn}' + "\n\nfn main():\n    val h = thread_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            # Correct call — no E-PAR-004 at all
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(false)
+
+        it "does not flag multicore_green_spawn with one closure arg":
+            val code = 'use std.concurrent.multicore_green.{multicore_green_spawn}' + "\n\nfn main():\n    val h = multicore_green_spawn(\\: 1)\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-004")).to_equal(false)
+
+# ============================================================================
+# E-PAR-005: direct rt_pool_* access outside facade
+# ============================================================================
+
+describe "E-PAR-005 direct rt_pool access":
+    context "rt_pool_submit in extern fn":
+        it "flags extern fn containing rt_pool_submit":
+            val code = "extern fn rt_pool_submit(task: fn() -> void) -> void\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(true)
+
+        it "message contains 'internal runtime-pool symbol'":
+            val code = "extern fn rt_pool_submit(task: fn() -> void) -> void\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "internal runtime-pool symbol")).to_equal(true)
+
+        it "message contains the symbol name rt_pool_submit":
+            val code = "extern fn rt_pool_submit(task: fn() -> void) -> void\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_any_contains(msgs, "rt_pool_submit")).to_equal(true)
+
+    context "rt_pool_join in extern fn":
+        it "flags extern fn containing rt_pool_join":
+            val code = "extern fn rt_pool_join() -> void\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(true)
+
+    context "rt_pool_set_parallelism in extern fn":
+        it "flags extern fn containing rt_pool_set_parallelism":
+            val code = "extern fn rt_pool_set_parallelism(n: i64) -> void\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(true)
+
+    context "rt_pool_get_parallelism in extern fn":
+        it "flags extern fn containing rt_pool_get_parallelism":
+            val code = "extern fn rt_pool_get_parallelism() -> i64\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(true)
+
+    context "rt_pool_is_done in extern fn":
+        it "flags extern fn containing rt_pool_is_done":
+            val code = "extern fn rt_pool_is_done() -> bool\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(true)
+
+    context "negative — only extern fn lines trigger, not call sites or comments":
+        it "does not flag rt_pool_submit in a comment line":
+            val code = "# use rt_pool_submit for low-level access\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(false)
+
+        it "does not flag rt_pool_submit as a plain call (no extern fn)":
+            val code = "fn main():\n    rt_pool_submit(\\: do_work())\n"
+            val msgs = check_concurrency_misuse_text(code, "")
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(false)
+
+    context "negative — exempt facade path":
+        it "does not flag rt_pool_submit inside the nogc_async_mut facade path":
+            val code = "extern fn rt_pool_submit(task: fn() -> void) -> void\n"
+            val path = "src/lib/nogc_async_mut/concurrent/multicore_green.spl"
+            val msgs = check_concurrency_misuse_text(code, path)
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(false)
+
+        it "does not flag rt_pool_join inside the gc_async_mut facade path":
+            val code = "extern fn rt_pool_join() -> void\n"
+            val path = "src/lib/gc_async_mut/concurrent/multicore_green.spl"
+            val msgs = check_concurrency_misuse_text(code, path)
+            expect(tc_has_code(msgs, "E-PAR-005")).to_equal(false)

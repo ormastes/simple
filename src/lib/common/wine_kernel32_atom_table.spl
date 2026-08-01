@@ -1,0 +1,105 @@
+"""Bounded KERNEL32 global atom table bridge for Wine startup probes."""
+
+use common.wine_nt_api_catalog.{wine_nt_api_kernel32_atom_table_dispatch_gate}
+
+class WineKernel32Atom:
+    atom: i64
+    name: text
+
+class WineKernel32AtomTable:
+    atoms: [WineKernel32Atom]
+    next_atom: i64
+
+class WineKernel32AtomResult:
+    ok: bool
+    error: text
+    table: WineKernel32AtomTable
+    atom: i64
+    name: text
+    operations: text
+
+fn _atom(atom: i64, name: text) -> WineKernel32Atom:
+    WineKernel32Atom(atom: atom, name: name)
+
+fn _table(atoms: [WineKernel32Atom], next_atom: i64) -> WineKernel32AtomTable:
+    WineKernel32AtomTable(atoms: atoms, next_atom: next_atom)
+
+fn _result(ok: bool, error: text, table: WineKernel32AtomTable, atom: i64, name: text, operations: text) -> WineKernel32AtomResult:
+    WineKernel32AtomResult(ok: ok, error: error, table: table, atom: atom, name: name, operations: operations)
+
+fn _find_by_name(table: WineKernel32AtomTable, name: text) -> WineKernel32Atom:
+    for item in table.atoms:
+        if item.name == name:
+            return item
+    _atom(0, "")
+
+fn _find_by_atom(table: WineKernel32AtomTable, atom: i64) -> WineKernel32Atom:
+    for item in table.atoms:
+        if item.atom == atom:
+            return item
+    _atom(0, "")
+
+fn _remove_atom(table: WineKernel32AtomTable, atom: i64) -> WineKernel32AtomTable:
+    var atoms: [WineKernel32Atom] = []
+    for item in table.atoms:
+        if item.atom != atom:
+            atoms.push(item)
+    _table(atoms, table.next_atom)
+
+fn _sequence_gate(symbols: [text]) -> text:
+    val dispatch_state = wine_nt_api_kernel32_atom_table_dispatch_gate(symbols)
+    if dispatch_state != "ready":
+        return dispatch_state
+    if symbols.len() != 3:
+        return "kernel32-atom-table-sequence-count-mismatch"
+    if symbols[0] != "GlobalAddAtomW":
+        return "kernel32-atom-table-sequence-expected:GlobalAddAtomW"
+    if symbols[1] != "GlobalFindAtomW":
+        return "kernel32-atom-table-sequence-expected:GlobalFindAtomW"
+    if symbols[2] != "GlobalDeleteAtom":
+        return "kernel32-atom-table-sequence-expected:GlobalDeleteAtom"
+    "ready"
+
+pub fn wine_kernel32_atom_table_new() -> WineKernel32AtomTable:
+    _table([], 0xc000)
+
+pub fn wine_kernel32_global_add_atom_w(table: WineKernel32AtomTable, name: text) -> WineKernel32AtomResult:
+    if name == "":
+        return _result(false, "GlobalAddAtomW:invalid-name", table, 0, "", "")
+    val existing = _find_by_name(table, name)
+    if existing.atom != 0:
+        return _result(true, "", table, existing.atom, existing.name, "GlobalAddAtomW")
+    val atom_id = table.next_atom
+    var atoms = table.atoms
+    atoms.push(_atom(atom_id, name))
+    val updated = _table(atoms, atom_id + 1)
+    _result(true, "", updated, atom_id, name, "GlobalAddAtomW")
+
+pub fn wine_kernel32_global_find_atom_w(table: WineKernel32AtomTable, name: text) -> WineKernel32AtomResult:
+    if name == "":
+        return _result(false, "GlobalFindAtomW:invalid-name", table, 0, "", "")
+    val existing = _find_by_name(table, name)
+    if existing.atom == 0:
+        return _result(false, "GlobalFindAtomW:not-found", table, 0, name, "")
+    _result(true, "", table, existing.atom, existing.name, "GlobalFindAtomW")
+
+pub fn wine_kernel32_global_delete_atom(table: WineKernel32AtomTable, atom: i64) -> WineKernel32AtomResult:
+    val existing = _find_by_atom(table, atom)
+    if existing.atom == 0:
+        return _result(false, "GlobalDeleteAtom:invalid-atom", table, atom, "", "")
+    _result(true, "", _remove_atom(table, atom), atom, existing.name, "GlobalDeleteAtom")
+
+pub fn wine_kernel32_execute_atom_table(symbols: [text], table: WineKernel32AtomTable, name: text) -> WineKernel32AtomResult:
+    val sequence_state = _sequence_gate(symbols)
+    if sequence_state != "ready":
+        return _result(false, sequence_state, table, 0, "", "")
+    val added = wine_kernel32_global_add_atom_w(table, name)
+    if not added.ok:
+        return added
+    val found = wine_kernel32_global_find_atom_w(added.table, name)
+    if not found.ok:
+        return _result(false, found.error, found.table, added.atom, name, "GlobalAddAtomW")
+    val deleted = wine_kernel32_global_delete_atom(found.table, found.atom)
+    if not deleted.ok:
+        return _result(false, deleted.error, deleted.table, found.atom, name, "GlobalAddAtomW GlobalFindAtomW")
+    _result(true, "", deleted.table, found.atom, name, "GlobalAddAtomW GlobalFindAtomW GlobalDeleteAtom")

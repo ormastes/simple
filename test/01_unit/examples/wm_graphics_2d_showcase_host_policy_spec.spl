@@ -1,0 +1,68 @@
+use std.io_runtime.{file_read}
+
+val ENTRY: text = "examples/06_io/ui/wm_graphics_2d_showcase_gui.spl"
+
+fn source() -> text:
+    file_read(ENTRY)
+
+describe "host WM graphics 2D showcase correctness policy":
+
+    it "uses the scale-8 default while preserving explicit overrides":
+        val s = source()
+        expect(s).to_contain("fn wm_graphics_2d_child_frame_scale()")
+        expect(s).to_contain("if requested_scale != \"\":")
+        expect(s).to_contain("return requested_scale")
+        expect(s).to_contain("env[\"SHOWCASE_PPM_SCALE\"] = wm_graphics_2d_child_frame_scale()")
+
+    it "forwards backend and opt-in diagnostics to the child":
+        val s = source()
+        expect(s).to_contain("env[\"SIMPLE_GUI_BACKEND\"] = requested_backend")
+        expect(s).to_contain("\"SIMPLE_GUI_BACKEND=\{requested_backend\}\"")
+        expect(s).to_contain("env[\"SIMPLE_DIAG\"] = simple_diag")
+        expect(s).to_contain("\"SIMPLE_DIAG=\{simple_diag\}\"")
+        expect(s).to_contain("env[\"SIMPLE_DIAG_FILE\"] = simple_diag_file")
+        expect(s).to_contain("\"SIMPLE_DIAG_FILE=\{simple_diag_file\}\"")
+
+    it "uses native mouse identity and forwards presses across the whole child":
+        val s = source()
+        expect(s).to_contain("mouse_native_id: i64")
+        expect(s).to_contain("mouse_native_id = ev.native_id")
+        expect(s).to_contain("if input.mouse_native_id != 0:")
+        expect(s.contains("fn child_needs_press_stream(")).to_be(false)
+        expect(s).to_contain("if loc_down.ok:\n                    child_drag_forwarding = true")
+        expect(s).to_contain("write_child_pointer_event(event_path, child_seq, \"down\"")
+        expect(s).to_contain("write_child_pointer_event(event_path, child_seq, \"move\"")
+        expect(s).to_contain("write_child_pointer_event(event_path, child_seq, \"up\"")
+
+    it "preserves and forwards ordered keyboard down and up edges":
+        val s = source()
+        expect(s).to_contain("key_native_ids: [i64]")
+        expect(s).to_contain("keycodes: [i64]")
+        expect(s).to_contain("key_pressed: [bool]")
+        expect(s).to_contain("key_native_ids.push(ev.native_id)")
+        expect(s).to_contain("keycodes.push(ev.keycode)")
+        expect(s).to_contain("key_pressed.push(ev.pressed)")
+        expect(s).to_contain("val ev = wm_fs_key_event(next_seq, keycode, pressed)")
+        expect(s).to_contain(
+            "if file_write(seq_path, encoded) and file_write(event_path, encoded):")
+        expect(s).to_contain("\"host_key_event\"")
+        expect(s).to_contain("val key_native_id = input.key_native_ids[ki]")
+        expect(s).to_contain(
+            "native_id=\{key_native_id\} keycode=\{keycode\} pressed=\{pressed\}")
+        expect(s).to_contain(
+            "child_seq = write_child_key_event(\n" +
+            "            event_path, child_seq, keycode, pressed)")
+        expect(s).to_contain(
+            "if child_seq > before_key_seq:\n" +
+            "            child_refresh_pending = true\n" +
+            "            child_refresh_deadline = 0")
+
+    it "validates exact receipts and presents only a cached validated frame":
+        val s = source()
+        expect(s).to_contain("fn validate_child_frame_receipt(")
+        expect(s).to_contain("wm_fs_frame_receipt_correlation(receipt.event_seq")
+        expect(s).to_contain("wm_fs_frame_receipt_valid(receipt")
+        expect(s).to_contain("wm_fs_frame_checksum(child.pixels) != receipt.checksum")
+        expect(s).to_contain("validated_child = validation.frame")
+        expect(s).to_contain("render_and_present(gui, state.comp, frame_w, frame_h, validated_child")
+        expect(s.contains("load_child_frame(frame_path)\n    write_wm_trace(trace_path, \"render_child_load_done\")")).to_be(false)

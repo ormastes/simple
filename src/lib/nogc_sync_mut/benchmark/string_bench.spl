@@ -1,0 +1,124 @@
+# String Performance Benchmark Suite
+#
+# Measures throughput of SIMD-accelerated text operations vs scalar baselines.
+# Run: bin/simple run src/lib/nogc_sync_mut/benchmark/string_bench.spl
+
+use std.encoding.simd_text_sffi.{
+    rt_text_count_codepoints_cached, rt_text_is_ascii,
+    rt_text_validate_utf8, rt_simd_str_search,
+    rt_text_to_upper_ascii, rt_text_to_lower_ascii
+}
+extern fn rt_time_now_unix_micros() -> i64
+
+fn now_ns() -> i64:
+    rt_time_now_unix_micros() * 1000
+
+fn repeat_text(base: text, count: i64) -> text:
+    var result = ""
+    var i = 0
+    while i < count:
+        result = result + base
+        i = i + 1
+    result
+
+fn make_ascii_corpus(size_kb: i64) -> text:
+    val line = "The quick brown fox jumps over the lazy dog. 0123456789 ABCDEFGHIJKLMNOP\n"
+    val repeats = (size_kb * 1024) / line.len()
+    repeat_text(line, repeats)
+
+fn make_mixed_utf8_corpus(size_kb: i64) -> text:
+    val line = "Hello 世界! Emoji: 🎉🚀 Korean: 안녕하세요 日本語テスト café résumé naïve\n"
+    val repeats = (size_kb * 1024) / line.len()
+    repeat_text(line, repeats)
+
+fn make_adversarial_corpus(size_kb: i64) -> text:
+    val line = "a🎉b世c🚀d界e🎊f안g🌟h녕i🎈j하k🎆l세m🎇n요o🎃p"
+    val repeats = (size_kb * 1024) / line.len()
+    repeat_text(line, repeats)
+
+fn bench_op(name: text, corpus_name: text, corpus: text, iterations: i64, op: fn(text) -> i64):
+    val start = now_ns()
+    var i = 0
+    var dummy = 0
+    while i < iterations:
+        dummy = dummy + op(corpus)
+        i = i + 1
+    val elapsed_ns = now_ns() - start
+    val ns_per_op = elapsed_ns / iterations
+    val mb_per_sec = if ns_per_op > 0:
+        (corpus.len() * 1000) / ns_per_op
+    else:
+        0
+    print("[{name}] {corpus_name} ({corpus.len()} bytes): {ns_per_op} ns/op, ~{mb_per_sec} MB/s ({iterations} iters, dummy={dummy})")
+
+fn run_count_codepoints_bench(corpus: text, corpus_name: text, iters: i64):
+    bench_op("count_codepoints_cached", corpus_name, corpus, iters, fn(s: text) -> i64:
+        rt_text_count_codepoints_cached(s)
+    )
+
+fn run_is_ascii_bench(corpus: text, corpus_name: text, iters: i64):
+    bench_op("is_ascii", corpus_name, corpus, iters, fn(s: text) -> i64:
+        if rt_text_is_ascii(s): 1 else: 0
+    )
+
+fn run_validate_bench(corpus: text, corpus_name: text, iters: i64):
+    bench_op("validate_utf8", corpus_name, corpus, iters, fn(s: text) -> i64:
+        if rt_text_validate_utf8(s): 1 else: 0
+    )
+
+fn run_search_bench(corpus: text, corpus_name: text, iters: i64):
+    bench_op("search_found", corpus_name, corpus, iters, fn(s: text) -> i64:
+        rt_simd_str_search(s, "lazy dog")
+    )
+    bench_op("search_not_found", corpus_name, corpus, iters, fn(s: text) -> i64:
+        rt_simd_str_search(s, "ZZZZNOTFOUND")
+    )
+
+fn run_case_bench(corpus: text, corpus_name: text, iters: i64):
+    bench_op("to_upper", corpus_name, corpus, iters, fn(s: text) -> i64:
+        val u = rt_text_to_upper_ascii(s)
+        u.len()
+    )
+    bench_op("to_lower", corpus_name, corpus, iters, fn(s: text) -> i64:
+        val l = rt_text_to_lower_ascii(s)
+        l.len()
+    )
+
+fn main():
+    print("=== String SIMD Benchmark Suite ===\n")
+
+    val ascii_1k = make_ascii_corpus(1)
+    val ascii_10k = make_ascii_corpus(10)
+    val mixed_1k = make_mixed_utf8_corpus(1)
+    val mixed_10k = make_mixed_utf8_corpus(10)
+    val adv_1k = make_adversarial_corpus(1)
+
+    val iters_1k = 10000
+    val iters_10k = 1000
+
+    print("--- Codepoint Counting ---")
+    run_count_codepoints_bench(ascii_1k, "ASCII-1K", iters_1k)
+    run_count_codepoints_bench(ascii_10k, "ASCII-10K", iters_10k)
+    run_count_codepoints_bench(mixed_1k, "Mixed-1K", iters_1k)
+    run_count_codepoints_bench(mixed_10k, "Mixed-10K", iters_10k)
+    run_count_codepoints_bench(adv_1k, "Adversarial-1K", iters_1k)
+
+    print("\n--- ASCII Detection ---")
+    run_is_ascii_bench(ascii_1k, "ASCII-1K", iters_1k)
+    run_is_ascii_bench(ascii_10k, "ASCII-10K", iters_10k)
+    run_is_ascii_bench(mixed_1k, "Mixed-1K", iters_1k)
+
+    print("\n--- UTF-8 Validation ---")
+    run_validate_bench(ascii_1k, "ASCII-1K", iters_1k)
+    run_validate_bench(ascii_10k, "ASCII-10K", iters_10k)
+    run_validate_bench(mixed_1k, "Mixed-1K", iters_1k)
+
+    print("\n--- Substring Search ---")
+    run_search_bench(ascii_1k, "ASCII-1K", iters_1k)
+    run_search_bench(ascii_10k, "ASCII-10K", iters_10k)
+
+    print("\n--- Case Conversion ---")
+    run_case_bench(ascii_1k, "ASCII-1K", iters_1k)
+    run_case_bench(ascii_10k, "ASCII-10K", iters_10k)
+
+    print("\n=== Benchmark Complete ===")

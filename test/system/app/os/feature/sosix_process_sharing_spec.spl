@@ -1,0 +1,87 @@
+# codex-system-test
+# System-spec checks for SOSIX immutable process-sharing behavior.
+
+use std.spec
+use os.posix.errno.{EINVAL}
+use os.sosix.share.{
+    SOSIX_NO_DATASET,
+    SOSIX_POLL_READ,
+    SOSIX_POLL_WRITE,
+    sosix_share_init,
+    sosix_dataset_create,
+    sosix_dataset_write,
+    sosix_dataset_seal,
+    sosix_dataset_is_sealed,
+    sosix_dataset_read_byte,
+    sosix_queue_create,
+    sosix_queue_send,
+    sosix_queue_recv,
+    sosix_queue_poll
+}
+
+describe "sosix_process_sharing feature spec":
+    describe "REQ-SOSIX-SHARE-001 immutable datasets":
+        it "should seal a dataset before it becomes readable shared data":
+            sosix_share_init()
+            val dataset = sosix_dataset_create(3u64, 0)
+
+            expect(sosix_dataset_write(dataset as u64, 0u64, [1u8, 2u8, 3u8])).to_equal(3)
+            expect(sosix_dataset_seal(dataset as u64)).to_equal(0)
+            expect(sosix_dataset_is_sealed(dataset as u64)).to_equal(true)
+            expect(sosix_dataset_read_byte(dataset as u64, 2u64)).to_equal(3)
+
+        it "should reject writes after a dataset is sealed":
+            sosix_share_init()
+            val dataset = sosix_dataset_create(2u64, 0)
+
+            expect(sosix_dataset_write(dataset as u64, 0u64, [4u8, 5u8])).to_equal(2)
+            expect(sosix_dataset_seal(dataset as u64)).to_equal(0)
+            expect(sosix_dataset_write(dataset as u64, 1u64, [6u8])).to_equal(0 - EINVAL as i64)
+            expect(sosix_dataset_read_byte(dataset as u64, 1u64)).to_equal(5)
+
+    describe "REQ-SOSIX-SHARE-002 queue transfer":
+        it "should deliver message payloads through a bounded SOSIX queue":
+            sosix_share_init()
+            val queue = sosix_queue_create(1u64, 8u64, 0)
+
+            expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(SOSIX_POLL_WRITE)
+            expect(sosix_queue_send(queue as u64, [10u8, 20u8], SOSIX_NO_DATASET)).to_equal(2)
+            expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_READ).to_equal(SOSIX_POLL_READ)
+
+            val recv = sosix_queue_recv(queue as u64)
+            expect(recv.status).to_equal(2)
+            expect(recv.data[0]).to_equal(10u8)
+            expect(recv.data[1]).to_equal(20u8)
+            expect(recv.attached_dataset).to_equal(SOSIX_NO_DATASET)
+
+        it "should restore write readiness after the queued message is received":
+            sosix_share_init()
+            val queue = sosix_queue_create(1u64, 8u64, 0)
+
+            expect(sosix_queue_send(queue as u64, [1u8], SOSIX_NO_DATASET)).to_equal(1)
+            expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(0u32)
+            expect(sosix_queue_recv(queue as u64).status).to_equal(1)
+            expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_WRITE).to_equal(SOSIX_POLL_WRITE)
+
+    describe "REQ-SOSIX-SHARE-003 dataset attachment":
+        it "should transfer a sealed dataset handle with a queue message":
+            sosix_share_init()
+            val dataset = sosix_dataset_create(2u64, 0)
+            val queue = sosix_queue_create(1u64, 8u64, 0)
+
+            expect(sosix_dataset_write(dataset as u64, 0u64, [77u8, 88u8])).to_equal(2)
+            expect(sosix_dataset_seal(dataset as u64)).to_equal(0)
+            expect(sosix_queue_send(queue as u64, [9u8], dataset as u64)).to_equal(1)
+
+            val recv = sosix_queue_recv(queue as u64)
+            expect(recv.status).to_equal(1)
+            expect(recv.attached_dataset).to_equal(dataset as u64)
+            expect(sosix_dataset_read_byte(recv.attached_dataset, 1u64)).to_equal(88)
+
+        it "should reject unsealed dataset handles as queue attachments":
+            sosix_share_init()
+            val dataset = sosix_dataset_create(1u64, 0)
+            val queue = sosix_queue_create(1u64, 8u64, 0)
+
+            expect(sosix_queue_send(queue as u64, [3u8], dataset as u64)).to_equal(0 - EINVAL as i64)
+            expect(sosix_queue_poll(queue as u64) & SOSIX_POLL_READ).to_equal(0u32)

@@ -1,0 +1,73 @@
+use compiler.tools.lint.main.{Linter, LintLevel, lint_cli_source}
+use compiler.semantics.lint.stub_impl.{check_stub_impl}
+use compiler.core.ast.{ast_reset, decl_fn}
+use compiler.core.ast_expr.{expr_int_lit}
+use compiler.core.ast_stmt.{stmt_expr_stmt}
+
+extern fn rt_exit(code: i32)
+
+val source = "# decoy: fn ignored(value: i64): 0\nval decoy = \"fn ignored(value: i64): 0\"\n\nfn stub_one(value: i64) -> i64:\n    0\n\nfn stub_two() -> i64:\n    0\n"
+var generic_has_ast_stub = false
+var stub001_count = 0
+var stub002_count = 0
+var stub001_line = 0
+var stub002_line = 0
+var default_deny = true
+var has_hints = true
+val linter = Linter.new()
+
+for result in linter.lint_source("/tmp/lint_stub_generic.spl", source):
+    if result.lint.code == "STUB001" or result.lint.code == "STUB002":
+        generic_has_ast_stub = true
+for result in lint_cli_source(linter, "/tmp/lint_stub_cli.spl", source):
+    if result.lint.code == "STUB001":
+        stub001_count = stub001_count + 1
+        stub001_line = result.line
+        if result.lint.level != LintLevel.Deny:
+            default_deny = false
+        if not result.format().contains("hint:"):
+            has_hints = false
+    if result.lint.code == "STUB002":
+        stub002_count = stub002_count + 1
+        stub002_line = result.line
+        if result.lint.level != LintLevel.Deny:
+            default_deny = false
+        if not result.format().contains("hint:"):
+            has_hints = false
+
+var warn_is_warning = false
+var warn_default_is_warning = false
+for result in lint_cli_source(linter, "/tmp/lint_stub_warn.spl", "@warn(stub_impl)\nfn warned(value: i64) -> i64:\n    0\n\nfn warned_default() -> i64:\n    0\n"):
+    if result.lint.code == "STUB001" and result.lint.level == LintLevel.Warn:
+        warn_is_warning = true
+    if result.lint.code == "STUB002" and result.lint.level == LintLevel.Warn:
+        warn_default_is_warning = true
+
+var allow_has_stub = false
+for result in lint_cli_source(linter, "/tmp/lint_stub_allow.spl", "@allow(stub_impl)\nfn allowed(value: i64) -> i64:\n    0\n\nfn allowed_default() -> i64:\n    0\n"):
+    if result.lint.code == "STUB001" or result.lint.code == "STUB002":
+        allow_has_stub = true
+
+val placeholder_source = "fn unfinished() -> i64:\n    pass_todo(\"implement\", \"SIMPLE-1\")\n"
+var generic_stub003_count = 0
+var cli_stub003_count = 0
+for result in linter.lint_source("/tmp/lint_stub_placeholder.spl", placeholder_source):
+    if result.lint.code == "STUB003":
+        generic_stub003_count = generic_stub003_count + 1
+for result in lint_cli_source(linter, "/tmp/lint_stub_placeholder.spl", placeholder_source):
+    if result.lint.code == "STUB003":
+        cli_stub003_count = cli_stub003_count + 1
+
+ast_reset()
+val invalid_expr = expr_int_lit(0, 0)
+val invalid_stmt = stmt_expr_stmt(invalid_expr, 0)
+val invalid_decl = decl_fn("invalid_span", ["value"], [], 0, [invalid_stmt], 0, [], 999999)
+val invalid_warnings = check_stub_impl([invalid_decl])
+val invalid_span_safe = invalid_warnings.len() == 1 and invalid_warnings[0].line == 0
+
+if generic_has_ast_stub or stub001_count != 1 or stub002_count != 1 or stub001_line != 4 or stub002_line != 7 or not default_deny or not has_hints or not warn_is_warning or not warn_default_is_warning or allow_has_stub or generic_stub003_count != 1 or cli_stub003_count != 1 or not invalid_span_safe:
+    print "FAIL: STUB CLI parity changed generic ownership, span, configuration, or placeholder behavior"
+    rt_exit(1)
+
+print "PASS: CLI owner adds STUB001/STUB002 once with AST spans and config parity"
+rt_exit(0)

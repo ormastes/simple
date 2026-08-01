@@ -1,0 +1,224 @@
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebInputTextHitMap,
+    simple_web_layout_hit_test_index,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_time
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_cpu.{
+    simple_web_render_draw_ir_composition_with_cpu_backend
+}
+use std.common.encoding.utf8.{text_is_valid_utf8}
+
+extern fn rt_bytes_to_text(bytes: [u8]) -> text
+
+fn _overlay(
+    target_key: text, anchor: i64, focus: i64,
+    view_start: i64, caret_visible: bool
+) -> BrowserTextInputOverlay:
+    BrowserTextInputOverlay(
+        target_key: target_key,
+        anchor_byte: anchor,
+        focus_byte: focus,
+        view_start_byte: view_start,
+        caret_visible: caret_visible
+    )
+
+fn _command_index(commands: [DrawIrCommand], component_id: text) -> i32:
+    var i = 0
+    while i < commands.len():
+        if commands[i].component_id == component_id:
+            return i
+        i = i + 1
+    -1
+
+fn _input_hit(
+    hits: [SimpleWebInputTextHitMap], target_key: text
+) -> SimpleWebInputTextHitMap:
+    for hit in hits:
+        if hit.target_key == target_key:
+            return hit
+    hits[0]
+
+describe "Simple web input overlay":
+
+    it "emits clipped selection before canonical text and clipped caret after it":
+        val html = "<style>html,body{margin:0}#q{width:80px;height:18px;padding:2px;color:#111827;caret-color:#ef4444}</style><input id='q' value='abc'>"
+        val selected = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 100, 30, 0, _overlay("path:0", 0, 2, 0, false)
+        )
+        val selected_commands = selected.composition.batches[0].commands
+        val selection_index = _command_index(selected_commands, "q_selection")
+        val text_index = _command_index(selected_commands, "q_value")
+        expect(selection_index).to_be_greater_than(-1)
+        expect(text_index).to_be_greater_than(selection_index)
+        expect(selected_commands[selection_index].clip_rect.present).to_be(true)
+
+        val collapsed = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 100, 30, 0, _overlay("path:0", 2, 2, 0, true)
+        )
+        val collapsed_commands = collapsed.composition.batches[0].commands
+        val collapsed_text_index = _command_index(collapsed_commands, "q_value")
+        val caret_index = _command_index(collapsed_commands, "q_caret")
+        expect(caret_index).to_be_greater_than(collapsed_text_index)
+        expect(collapsed_commands[caret_index].color).to_equal(0xFFEF4444u32)
+        expect(collapsed_commands[caret_index].clip_rect.present).to_be(true)
+
+    it "derives selection RGB from CSS caret color with fixed named alpha":
+        val red = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            "<style>#q{width:80px;height:18px;caret-color:#ef4444}</style><input id='q' value='abc'>",
+            100, 30, 0, _overlay("path:0", 0, 2, 0, false)
+        )
+        val green = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            "<style>#q{width:80px;height:18px;color:#22c55e}</style><input id='q' value='abc'>",
+            100, 30, 0, _overlay("path:0", 0, 2, 0, false)
+        )
+        val red_commands = red.composition.batches[0].commands
+        val green_commands = green.composition.batches[0].commands
+        val red_color = red_commands[
+            _command_index(red_commands, "q_selection")
+        ].color
+        val green_color = green_commands[
+            _command_index(green_commands, "q_selection")
+        ].color
+        expect(red_color).to_equal(0x66EF4444u32)
+        expect(green_color).to_equal(0x6622C55Eu32)
+        expect(red_color).not.to_equal(green_color)
+        expect((red_color >> 24) & 0xFFu32).to_equal(0x66u32)
+        expect((green_color >> 24) & 0xFFu32).to_equal(0x66u32)
+
+    it "keeps password cleartext out while preserving UTF-8 source boundaries":
+        val html = "<style>html,body{margin:0}#secret{width:80px;height:18px}</style><input id='secret' type='password' value='éx'>"
+        val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 100, 30, 0, _overlay("path:0", 2, 2, 0, true)
+        )
+        val commands = result.composition.batches[0].commands
+        val text_index = _command_index(commands, "secret_value")
+        val hit = _input_hit(result.hit_index.input_text_hits, "path:0")
+        expect(commands[text_index].text_value).to_equal("**")
+        expect(commands[text_index].text_value).not.to_contain("é")
+        expect(hit.source_boundary_bytes.len()).to_equal(3)
+        expect(hit.source_boundary_bytes[0]).to_equal(0)
+        expect(hit.source_boundary_bytes[1]).to_equal(2)
+        expect(hit.source_boundary_bytes[2]).to_equal(3)
+
+    it "maps uppercase expansion to source scalar boundaries":
+        val html = "<style>html,body{margin:0}#q{width:100px;height:18px;text-transform:uppercase}</style><input id='q' value='ßa'>"
+        val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 120, 30, 0, _overlay("path:0", 2, 2, 0, true)
+        )
+        val commands = result.composition.batches[0].commands
+        val hit = _input_hit(result.hit_index.input_text_hits, "path:0")
+        expect(commands[_command_index(commands, "q_value")].text_value).to_equal("SSA")
+        expect(hit.source_boundary_bytes.len()).to_equal(3)
+        expect(hit.source_boundary_bytes[1]).to_equal(2)
+        expect(hit.boundary_x_px[1]).to_be_greater_than(hit.boundary_x_px[0])
+
+    it "maps RTL source boundaries to descending visual x":
+        val html = "<style>html,body{margin:0}#q{width:80px;height:18px;direction:rtl}</style><input id='q' value='abé'>"
+        val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 100, 30, 0, _overlay("path:0", 0, 0, 0, true)
+        )
+        val hit = _input_hit(result.hit_index.input_text_hits, "path:0")
+        expect(hit.boundary_x_px[0]).to_be_greater_than(hit.boundary_x_px[1])
+        expect(hit.boundary_x_px[1]).to_be_greater_than(hit.boundary_x_px[2])
+        expect(hit.boundary_x_px[2]).to_be_greater_than(hit.boundary_x_px[3])
+
+    it "omits disabled controls from overlay hit geometry":
+        val html = "<style>html,body{margin:0}#q{width:80px;height:18px}</style><input id='q' value='abc' disabled>"
+        val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 100, 30, 0, _overlay("path:0", 1, 1, 0, true)
+        )
+        expect(result.hit_index.input_text_hits.len()).to_equal(0)
+        expect(_command_index(
+            result.composition.batches[0].commands, "q_caret"
+        )).to_equal(-1)
+
+        val followed = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            "<style>#q{width:80px;height:18px}</style><input disabled class='x' id='q' value='abc'>",
+            100, 30, 0, _overlay("path:0", 0, 2, 0, true)
+        )
+        val followed_commands = followed.composition.batches[0].commands
+        expect(followed.hit_index.input_text_hits.len()).to_equal(0)
+        expect(_command_index(
+            followed_commands, "q_selection"
+        )).to_equal(-1)
+        expect(_command_index(
+            followed_commands, "q_caret"
+        )).to_equal(-1)
+
+    it "fails closed on malformed and truncated raw input values":
+        val invalid_continuation = rt_bytes_to_text([
+            0xE2u8, 0x28u8, 0xA1u8
+        ])
+        val truncated = rt_bytes_to_text([0xE2u8, 0x82u8])
+        expect(text_is_valid_utf8(invalid_continuation)).to_be(false)
+        expect(text_is_valid_utf8(truncated)).to_be(false)
+        val invalid = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            "<input id='q' value='" + invalid_continuation + "'>",
+            100, 30, 0, _overlay("path:0", 0, 0, 0, true)
+        )
+        val invalid_commands = invalid.composition.batches[0].commands
+        expect(invalid.hit_index.input_text_hits.len()).to_equal(0)
+        expect(_command_index(invalid_commands, "q_value")).to_equal(-1)
+        expect(_command_index(invalid_commands, "q_caret")).to_equal(-1)
+
+        val truncated_result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            "<input id='q' value='" + truncated + "'>",
+            100, 30, 0, _overlay("path:0", 0, 0, 0, true)
+        )
+        val truncated_commands = (
+            truncated_result.composition.batches[0].commands
+        )
+        expect(truncated_result.hit_index.input_text_hits.len()).to_equal(0)
+        expect(_command_index(
+            truncated_commands, "q_value"
+        )).to_equal(-1)
+        expect(_command_index(
+            truncated_commands, "q_caret"
+        )).to_equal(-1)
+
+    it "reveals a long suffix without splitting a source scalar":
+        val html = "<style>html,body{margin:0}#q{width:24px;height:18px;padding:1px}</style><input id='q' value='abcdeéfghij'>"
+        val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 50, 30, 0, _overlay("path:0", 12, 12, 0, true)
+        )
+        val hit = _input_hit(result.hit_index.input_text_hits, "path:0")
+        expect(result.resolved_input_view_start_byte).to_be_greater_than(0)
+        expect(hit.source_boundary_bytes).to_contain(
+            result.resolved_input_view_start_byte
+        )
+
+    it "clips CPU Draw IR overlay pixels and restores following commands":
+        val html = "<style>html,body{margin:0;background:#fff}#q{width:24px;height:18px;padding:1px;caret-color:#3b82f6}</style><input id='q' value='abcdef'>"
+        val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 50, 30, 0, _overlay("path:0", 0, 4, 0, false)
+        )
+        val pixels = simple_web_render_draw_ir_composition_with_cpu_backend(
+            result.composition, 50, 30
+        )
+        expect(pixels.len()).to_equal(1500)
+        expect(pixels).to_contain(0x663B82F6u32)
+        expect(pixels[49]).to_equal(0xFFFFFFFFu32)
+
+    it "keeps duplicate author IDs distinct through canonical path keys":
+        val html = "<style>html,body{margin:0}input{display:block;width:80px;height:18px}</style><input id='dup' value='first'><input id='dup' value='second'>"
+        val result = simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
+            html, 100, 50, 0, _overlay("path:1", 0, 3, 0, false)
+        )
+        val hits = result.hit_index.input_text_hits
+        expect(hits.len()).to_equal(2)
+        expect(hits[0].target_key).to_equal("path:0")
+        expect(hits[1].target_key).to_equal("path:1")
+        expect(simple_web_layout_hit_test_index(
+            result.hit_index, hits[0].x + 1, hits[0].y + 1
+        )).to_equal("path:0")
+        expect(simple_web_layout_hit_test_index(
+            result.hit_index, hits[1].x + 1, hits[1].y + 1
+        )).to_equal("path:1")
+        val commands = result.composition.batches[0].commands
+        val selection_index = _command_index(commands, "dup_selection")
+        expect(selection_index).to_be_greater_than(-1)
+        val selection = commands[selection_index]
+        expect(selection.clip_rect.y).to_equal(hits[1].y)

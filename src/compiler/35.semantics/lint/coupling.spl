@@ -1,0 +1,270 @@
+# ============================================================================
+# Coupling Lint Rules (W0501 - W0510)
+# ============================================================================
+#
+# Lint rules for architectural coupling, cohesion, and duplication detection.
+# Integrates with the coupling analysis tool (src/compiler/90.tools/coupling/).
+#
+# W0501 — High CBO (Coupling Between Objects)
+# W0502 — Circular dependency (SCC with >1 member)
+# W0503 — Layer violation (backward dependency in compiler layers)
+# W0504 — Instability inversion (stable depends on unstable)
+# W0505 — High LCOM (low cohesion)
+# W0506 — High public surface ratio
+# W0507 — Dead public API (low EUR)
+# W0508 — High API complexity index
+# W0509 — Similar function signatures (ATSS)
+# W0510 — Structural code duplication (relaxed token match)
+# ============================================================================
+
+# ============================================================================
+# Warning Structs
+# ============================================================================
+
+struct CouplingWarning:
+    code: text
+    severity: text
+    message: text
+    module_name: text
+    metric_value: f64
+    threshold: f64
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} (module: {self.module_name}, value: {self.metric_value}, threshold: {self.threshold})"
+
+struct CycleWarning:
+    code: text
+    severity: text
+    message: text
+    cycle_modules: [text]
+
+    fn fmt() -> text:
+        val mods = self.cycle_modules.join(", ")
+        "[{self.code}] {self.severity}: {self.message} [{mods}]"
+
+struct LayerViolationWarning:
+    code: text
+    severity: text
+    message: text
+    from_module: text
+    to_module: text
+    from_layer: i64
+    to_layer: i64
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} ({self.from_module} layer {self.from_layer} -> {self.to_module} layer {self.to_layer})"
+
+struct InstabilityInversionWarning:
+    code: text
+    severity: text
+    message: text
+    stable_module: text
+    unstable_module: text
+    stable_instability: f64
+    unstable_instability: f64
+
+    fn fmt() -> text:
+        "[{self.code}] {self.severity}: {self.message} ({self.stable_module} I={self.stable_instability} depends on {self.unstable_module} I={self.unstable_instability})"
+
+# ============================================================================
+# Default Thresholds
+# ============================================================================
+
+val DEFAULT_CBO_THRESHOLD: i64 = 15
+val DEFAULT_LCOM_THRESHOLD: i64 = 3
+val DEFAULT_PUBLIC_RATIO_THRESHOLD: f64 = 0.7
+val DEFAULT_EUR_THRESHOLD: f64 = 0.3
+val DEFAULT_API_COMPLEXITY_THRESHOLD: f64 = 0.8
+
+# ============================================================================
+# W0501 — High CBO
+# ============================================================================
+
+fn check_high_cbo(module_name: text, cbo: i64, threshold: i64) -> Option<CouplingWarning>:
+    if cbo > threshold:
+        val msg = "Module '{module_name}' has high coupling (CBO={cbo}, threshold={threshold})"
+        Option.Some(CouplingWarning(
+            code: "W0501",
+            severity: "WARNING",
+            message: msg,
+            module_name: module_name,
+            metric_value: cbo.to_f64(),
+            threshold: threshold.to_f64()
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# W0502 — Circular Dependency
+# ============================================================================
+
+fn check_circular_dependency(cycle: [text]) -> Option<CycleWarning>:
+    if cycle.len() > 1:
+        val count = cycle.len()
+        val msg = "Circular dependency detected ({count} modules in cycle)"
+        Option.Some(CycleWarning(
+            code: "W0502",
+            severity: "WARNING",
+            message: msg,
+            cycle_modules: cycle
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# W0503 — Layer Violation
+# ============================================================================
+
+fn check_layer_violation(from_module: text, to_module: text, from_layer: i64, to_layer: i64) -> Option<LayerViolationWarning>:
+    # Violation: lower-numbered layer depends on higher-numbered layer
+    if from_layer < to_layer:
+        val msg = "Layer violation: '{from_module}' (layer {from_layer}) depends on '{to_module}' (layer {to_layer})"
+        Option.Some(LayerViolationWarning(
+            code: "W0503",
+            severity: "WARNING",
+            message: msg,
+            from_module: from_module,
+            to_module: to_module,
+            from_layer: from_layer,
+            to_layer: to_layer
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# W0504 — Instability Inversion
+# ============================================================================
+
+fn check_instability_inversion(stable_module: text, unstable_module: text, stable_i: f64, unstable_i: f64) -> Option<InstabilityInversionWarning>:
+    # Warn when a stable module (low I) depends on an unstable module (high I)
+    if stable_i < 0.5 and unstable_i > 0.7:
+        val msg = "Instability inversion: stable '{stable_module}' depends on unstable '{unstable_module}'"
+        Option.Some(InstabilityInversionWarning(
+            code: "W0504",
+            severity: "WARNING",
+            message: msg,
+            stable_module: stable_module,
+            unstable_module: unstable_module,
+            stable_instability: stable_i,
+            unstable_instability: unstable_i
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# W0505 — High LCOM
+# ============================================================================
+
+fn check_high_lcom(class_name: text, lcom4: i64, threshold: i64) -> Option<CouplingWarning>:
+    if lcom4 > threshold:
+        val msg = "Class '{class_name}' has low cohesion (LCOM4={lcom4}, threshold={threshold})"
+        Option.Some(CouplingWarning(
+            code: "W0505",
+            severity: "WARNING",
+            message: msg,
+            module_name: class_name,
+            metric_value: lcom4.to_f64(),
+            threshold: threshold.to_f64()
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# W0506 — High Public Surface Ratio
+# ============================================================================
+
+fn check_high_public_ratio(module_name: text, ratio: f64, threshold: f64) -> Option<CouplingWarning>:
+    if ratio > threshold:
+        val pct = (ratio * 100.0).to_i64()
+        val msg = "Module '{module_name}' has high public surface ratio ({pct}%, threshold={(threshold * 100.0).to_i64()}%)"
+        Option.Some(CouplingWarning(
+            code: "W0506",
+            severity: "WARNING",
+            message: msg,
+            module_name: module_name,
+            metric_value: ratio,
+            threshold: threshold
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# W0507 — Dead Public API (Low EUR)
+# ============================================================================
+
+fn check_dead_public_api(module_name: text, eur: f64, threshold: f64) -> Option<CouplingWarning>:
+    if eur < threshold:
+        val pct = (eur * 100.0).to_i64()
+        val msg = "Module '{module_name}' has low external usage ratio (EUR={pct}%, threshold={(threshold * 100.0).to_i64()}%)"
+        Option.Some(CouplingWarning(
+            code: "W0507",
+            severity: "WARNING",
+            message: msg,
+            module_name: module_name,
+            metric_value: eur,
+            threshold: threshold
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# W0508 — High API Complexity
+# ============================================================================
+
+fn check_high_api_complexity(module_name: text, complexity: f64, threshold: f64) -> Option<CouplingWarning>:
+    if complexity > threshold:
+        val msg = "Module '{module_name}' has high API complexity index ({complexity}, threshold={threshold})"
+        Option.Some(CouplingWarning(
+            code: "W0508",
+            severity: "WARNING",
+            message: msg,
+            module_name: module_name,
+            metric_value: complexity,
+            threshold: threshold
+        ))
+    else:
+        Option.None
+
+# ============================================================================
+# Batch Checking Functions
+# ============================================================================
+
+struct CouplingLintConfig:
+    cbo_threshold: i64
+    lcom_threshold: i64
+    public_ratio_threshold: f64
+    eur_threshold: f64
+    api_complexity_threshold: f64
+
+fn default_coupling_lint_config() -> CouplingLintConfig:
+    CouplingLintConfig(
+        cbo_threshold: DEFAULT_CBO_THRESHOLD,
+        lcom_threshold: DEFAULT_LCOM_THRESHOLD,
+        public_ratio_threshold: DEFAULT_PUBLIC_RATIO_THRESHOLD,
+        eur_threshold: DEFAULT_EUR_THRESHOLD,
+        api_complexity_threshold: DEFAULT_API_COMPLEXITY_THRESHOLD
+    )
+
+# ============================================================================
+# Exports
+# ============================================================================
+
+export CouplingWarning
+export CycleWarning
+export LayerViolationWarning
+export InstabilityInversionWarning
+export CouplingLintConfig
+export default_coupling_lint_config
+export check_high_cbo
+export check_circular_dependency
+export check_layer_violation
+export check_instability_inversion
+export check_high_lcom
+export check_high_public_ratio
+export check_dead_public_api
+export check_high_api_complexity
+export DEFAULT_CBO_THRESHOLD
+export DEFAULT_LCOM_THRESHOLD
+export DEFAULT_PUBLIC_RATIO_THRESHOLD
+export DEFAULT_EUR_THRESHOLD
+export DEFAULT_API_COMPLEXITY_THRESHOLD

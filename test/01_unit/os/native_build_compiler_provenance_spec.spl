@@ -1,0 +1,65 @@
+use std.spec.*
+use std.io_runtime.{rt_file_read_text}
+
+describe "SimpleOS cross-build compiler provenance":
+    it "defaults architecture wrappers to the pure-Simple compiler":
+        val aarch64 = rt_file_read_text("scripts/os/simpleos-native-build-aarch64.shs") ?? ""
+        val riscv64 = rt_file_read_text("scripts/os/simpleos-native-build-riscv64.shs") ?? ""
+        val core_archive = rt_file_read_text("scripts/os/simpleos-core-archive.shs") ?? ""
+
+        expect(aarch64).to_contain("SIMPLE_BUILD_COMPILER:-bin/release/simple")
+        expect(riscv64).to_contain("SIMPLE_BUILD_COMPILER:-bin/release/simple")
+        expect(aarch64.contains("SIMPLE_BUILD_COMPILER:-src/compiler_rust")).to_be(false)
+        expect(riscv64.contains("SIMPLE_BUILD_COMPILER:-src/compiler_rust")).to_be(false)
+        expect(core_archive).to_contain("SIMPLE_BINARY:-bin/release/simple")
+        expect(core_archive.contains("SIMPLE_BINARY:-src/compiler_rust")).to_be(false)
+
+    it "fails closed for stale, partial, or wrong-architecture artifacts":
+        val riscv64 = rt_file_read_text("scripts/os/simpleos-native-build-riscv64.shs") ?? ""
+        val core_archive = rt_file_read_text("scripts/os/simpleos-core-archive.shs") ?? ""
+        val freebsd_bootstrap = rt_file_read_text("scripts/check/check-freebsd-bootstrap-qemu.shs") ?? ""
+
+        expect(core_archive).to_contain("rm -rf \"$PART_DIR/objects\"")
+        expect(core_archive).to_contain("rm -f \"$part_archive\" \"$part_log\"")
+        expect(core_archive).to_contain("[ \"$FAILED\" -ne 0 ] || [ \"$BUILT\" -eq 0 ]")
+        expect(riscv64).to_contain("expected a static RISC-V ELF")
+        expect(riscv64).to_contain("ELF 64-bit")
+        expect(riscv64).to_contain("Class:[[:space:]]+ELF64")
+        expect(riscv64).to_contain("readelf -h \"$OUTPUT\"")
+        expect(freebsd_bootstrap).to_contain("check-core-runtime-smoke.shs")
+        expect(freebsd_bootstrap).to_contain("STAGE_BIN")
+        expect(freebsd_bootstrap).to_contain("FreeBSD stage3 core runtime smoke failed")
+
+    it "runs the strict default-LLVM language matrix on FreeBSD":
+        val freebsd_bootstrap = rt_file_read_text("scripts/check/check-freebsd-bootstrap-qemu.shs") ?? ""
+        val matrix = rt_file_read_text("scripts/check/native-smoke-matrix.shs") ?? ""
+
+        expect(freebsd_bootstrap).to_contain("NATIVE_SMOKE_BACKEND=llvm")
+        expect(freebsd_bootstrap).to_contain("Expected FreeBSD guest, got:")
+        expect(freebsd_bootstrap).to_contain("sh scripts/check/native-smoke-matrix.shs")
+        expect(freebsd_bootstrap).to_contain("grep -qx 'native_smoke_matrix=true'")
+        expect(freebsd_bootstrap).to_not_contain("total=15 pass=15")
+        expect(matrix).to_contain("[ \"$TOTAL\" -eq 0 ] || [ \"$FAIL_N\" -gt 0 ] || [ \"$XPASS_N\" -gt 0 ] || [ \"$FALLBACK_TOTAL\" -gt 0 ]")
+        expect(matrix).to_contain("require_nonempty_target_object")
+        expect(matrix).to_contain("require_runtime_exit")
+        expect(matrix).to_contain("platform_case")
+
+    it "fails closed on cross-architecture object and runtime evidence":
+        val assertions = rt_file_read_text("scripts/check/native-target-assertions.shs") ?? ""
+        val llvm = rt_file_read_text("scripts/check/check-llvm-simd-row-native-arch.shs") ?? ""
+        val cranelift = rt_file_read_text("scripts/check/check-cranelift-aot-aggregate-cross.shs") ?? ""
+
+        expect(assertions).to_contain("require_nonempty_target_object")
+        expect(assertions).to_contain("require_target_machine() (")
+        expect(assertions).to_contain("require_coff_machine() (")
+        expect(assertions).to_contain("OptionalHeaderSize:[[:space:]]+0")
+        expect(assertions).to_contain("IMAGE_FILE_EXECUTABLE_IMAGE")
+        expect(assertions).to_contain("require_runtime_exit() (")
+        expect(llvm).to_contain(". scripts/check/native-target-assertions.shs")
+        expect(llvm).to_contain("SIMPLE_NO_STUB_FALLBACK=1")
+        expect(llvm).to_contain("aarch64-pc-windows-msvc")
+        expect(llvm).to_contain("COFF-ARM64")
+        expect(llvm).to_contain("IMAGE_FILE_MACHINE_ARM64 (0xAA64)")
+        expect(llvm).to_contain("rt_char_from_code")
+        expect(cranelift).to_contain(". scripts/check/native-target-assertions.shs")
+        expect(cranelift).to_contain("env -u SIMPLE_BOOTSTRAP SIMPLE_NO_STUB_FALLBACK=1 \"$SIMPLE_BIN\" native-build")

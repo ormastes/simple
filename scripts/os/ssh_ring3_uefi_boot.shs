@@ -1,0 +1,168 @@
+#!/bin/sh
+# ssh_ring3_uefi_boot.shs — boot the SSH+ring-3 SimpleOS kernel under REAL UEFI
+# firmware (OVMF in QEMU, the board proxy) instead of QEMU's `-kernel` fast path.
+#
+# Board-representative boot chain:
+#   OVMF (UEFI firmware)  ->  EFI System Partition  ->  EFI/BOOT/BOOTX64.EFI
+#   (a self-contained standalone GRUB EFI app with the multiboot1 kernel + its
+#   grub.cfg embedded in an in-memory memdisk)  ->  multiboot -> kernel _start.
+#
+# Unlike QEMU `-kernel` (which is NOT how a physical mini-PC boots), this runs
+# the entire UEFI -> bootloader -> ExitBootServices -> multiboot handoff, so it
+# proves the kernel survives a real firmware memory-map handoff.
+#
+# The kernel's multiboot1 header (magic 0x1BADB002) is confirmed at ELF off 0x1000.
+# We reuse the working demo's device topology: NVMe /FSEXEC.ELF image + virtio-net
+# hostfwd 2222->22, so devices enumerate exactly as under `-kernel`.
+#
+# GATE (primary): serial reaches "[sshd] accept loop start" under OVMF.
+# BONUS:          `ssh root@127.0.0.1 /FSEXEC.ELF` -> hello + [user] exit rc=42.
+#
+# NO xorriso / mtools / root needed: grub-mkstandalone builds BOOTX64.EFI and
+# QEMU's vvfat (`fat:rw:`) synthesizes the ESP FAT filesystem from a directory.
+#
+# Env: KERNEL / HELLO_IMG override artifact paths (default worktree build/os),
+#      SKIP_KERNEL=1 reuse kernel, QEMU_MEM (2G), BOOT_WAIT (40s), SSH_PORT.
+set -eu
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$ROOT"
+
+KERNEL="${KERNEL:-build/os/simpleos_ssh_ring3.elf}"
+HELLO_IMG="${HELLO_IMG:-build/os/hello/fat32-hello.img}"
+BUILD="build/os/uefi"
+ESP="$BUILD/esp"
+EFIAPP="$ESP/EFI/BOOT/BOOTX64.EFI"
+SERIAL="build/os/ssh_ring3_uefi.serial.log"
+OVMF_CODE="${OVMF_CODE:-/usr/share/OVMF/OVMF_CODE_4M.fd}"
+OVMF_VARS_SRC="${OVMF_VARS_SRC:-/usr/share/OVMF/OVMF_VARS_4M.fd}"
+OVMF_VARS="$BUILD/OVMF_VARS_4M.fd"
+QEMU_MEM="${QEMU_MEM:-2G}"
+BOOT_WAIT="${BOOT_WAIT:-40}"
+
+# ---- 0. Toolchain / firmware preflight -----------------------------------
+command -v grub-mkstandalone >/dev/null 2>&1 || { echo "FAIL: grub-mkstandalone missing"; exit 1; }
+command -v qemu-system-x86_64 >/dev/null 2>&1 || { echo "FAIL: qemu-system-x86_64 missing"; exit 1; }
+[ -f "$OVMF_CODE" ] || { echo "FAIL: OVMF_CODE not found at $OVMF_CODE"; exit 1; }
+[ -f "$OVMF_VARS_SRC" ] || { echo "FAIL: OVMF_VARS not found at $OVMF_VARS_SRC"; exit 1; }
+
+# ---- 1. Locate / build the merged SSH+ring-3 kernel ----------------------
+if [ "${SKIP_KERNEL:-0}" != "1" ] && [ ! -f "$KERNEL" ]; then
+    echo "[uefi] kernel missing -> delegating to ssh_clang_hello_ring3.shs build"
+    SKIP_STAGE=1 sh scripts/os/ssh_clang_hello_ring3.shs >/dev/null 2>&1 || true
+fi
+[ -f "$KERNEL" ] || { echo "FAIL: missing $KERNEL (build the SSH+ring3 kernel first)"; exit 1; }
+[ -f "$HELLO_IMG" ] || { echo "FAIL: missing $HELLO_IMG (run build_clang_hello_ring3.shs)"; exit 1; }
+echo "[uefi] kernel=$KERNEL ($(stat -c%s "$KERNEL") bytes), hello=$HELLO_IMG"
+
+# ---- 2. Assemble the EFI System Partition tree ---------------------------
+rm -rf "$BUILD"
+mkdir -p "$ESP/EFI/BOOT"
+cp "$OVMF_VARS_SRC" "$OVMF_VARS"          # writable NVRAM copy (CODE stays RO)
+
+cat > "$BUILD/grub.cfg" <<'CFG'
+set timeout=0
+set default=0
+insmod multiboot
+insmod normal
+menuentry "SimpleOS SSH ring-3 (UEFI/multiboot)" {
+    echo "[grub-uefi] multiboot loading /boot/kernel.elf ..."
+    multiboot /boot/kernel.elf
+    boot
+}
+CFG
+
+# Embed BOTH the grub.cfg and the kernel into BOOTX64.EFI's memdisk, so the boot
+# path never depends on GRUB re-reading the ESP filesystem (robust over vvfat).
+echo "[uefi] building self-contained BOOTX64.EFI (embeds kernel via memdisk) ..."
+grub-mkstandalone \
+    --format=x86_64-efi \
+    --output="$EFIAPP" \
+    --modules="multiboot normal echo part_gpt fat" \
+    "boot/grub/grub.cfg=$BUILD/grub.cfg" \
+    "boot/kernel.elf=$KERNEL"
+[ -f "$EFIAPP" ] || { echo "FAIL: grub-mkstandalone did not produce $EFIAPP"; exit 1; }
+echo "[uefi] BOOTX64.EFI = $(stat -c%s "$EFIAPP") bytes"
+
+# ---- 3. Pick a free host SSH port ----------------------------------------
+SSH_PORT="${SSH_PORT:-2222}"
+if ss -ltn 2>/dev/null | grep -q ":$SSH_PORT "; then
+    for p in 22222 23222 24222 25222; do
+        ss -ltn 2>/dev/null | grep -q ":$p " || { SSH_PORT=$p; break; }
+    done
+fi
+echo "[uefi] host ssh port = $SSH_PORT -> guest 22"
+
+# ---- 4. Boot under OVMF UEFI firmware (serial -> FILE) --------------------
+# ESP served to OVMF via vvfat (virtio-blk boot disk). NVMe + virtio-net reuse
+# the proven `-kernel` demo topology so device enumeration is identical.
+rm -f "$SERIAL"
+qemu-system-x86_64 -no-user-config -monitor none -nographic -no-reboot \
+    -machine q35 -cpu qemu64 -m "$QEMU_MEM" \
+    -drive "if=pflash,format=raw,readonly=on,file=$OVMF_CODE" \
+    -drive "if=pflash,format=raw,file=$OVMF_VARS" \
+    -drive "file=fat:rw:$ESP,format=raw,id=esp,if=none" \
+    -device virtio-blk-pci,drive=esp,bootindex=0 \
+    -serial "file:$SERIAL" \
+    -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+    -drive "file=$HELLO_IMG,if=none,id=nvm,format=raw" -device nvme,serial=deadbeef,drive=nvm \
+    -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22" -device virtio-net-pci,netdev=n0 &
+QEMU_PID=$!
+trap 'kill "$QEMU_PID" 2>/dev/null || true' EXIT
+
+# ---- 5. Ladder gate: localize any failure (per advisor) ------------------
+i=0
+while [ $i -lt "$BOOT_WAIT" ]; do
+    grep -qa "accept loop start" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1; i=$((i+1))
+done
+
+rung() { grep -qa "$1" "$SERIAL" 2>/dev/null && echo "  [ok]   $2" || echo "  [MISS] $2"; }
+echo "===== UEFI boot ladder ====="
+rung "\[grub-uefi\] multiboot loading" "GRUB EFI app ran (OVMF -> bootloader OK)"
+rung "call _start\|SimpleOS Boot"       "multiboot handoff -> kernel _start"
+rung "nvme_pci=present\|nvme"            "NVMe enumerated under UEFI"
+rung "accept loop start"                "PRIMARY GATE: sshd accept loop start"
+
+if ! grep -qa "accept loop start" "$SERIAL" 2>/dev/null; then
+    echo "===== RESULT: accept loop NOT reached under OVMF ====="
+    echo "--- last 25 serial lines (ANSI-stripped) ---"
+    sed 's/\x1b\[[0-9;]*[A-Za-z]//g' "$SERIAL" 2>/dev/null | grep -a . | tail -25
+    kill "$QEMU_PID" 2>/dev/null || true
+    exit 1
+fi
+echo "[uefi] PRIMARY GATE PASS: sshd accept loop started under OVMF"
+
+# ---- 6. BONUS: full hello-over-ssh against the UEFI-booted instance -------
+echo "[uefi] bonus: ssh -p $SSH_PORT root@127.0.0.1 /FSEXEC.ELF"
+if command -v sshpass >/dev/null 2>&1; then
+    sshpass -p simpleos ssh -p "$SSH_PORT" -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+        root@127.0.0.1 /FSEXEC.ELF || true
+else
+    echo "[uefi] sshpass unavailable; skipping ssh exec bonus"
+fi
+
+j=0
+while [ $j -lt 15 ]; do
+    grep -qa "\[user\] exit rc=42" "$SERIAL" 2>/dev/null && break
+    kill -0 "$QEMU_PID" 2>/dev/null || break
+    sleep 1; j=$((j+1))
+done
+kill "$QEMU_PID" 2>/dev/null || true
+sleep 1
+
+echo "===== bonus gate ====="
+BONUS=1
+grep -qa "hello from clang on simpleos" "$SERIAL" 2>/dev/null \
+    && echo "PASS print: $(grep -a 'hello from clang on simpleos' "$SERIAL" | head -1)" \
+    || { echo "MISS: no 'hello from clang on simpleos'"; BONUS=0; }
+grep -qa "\[user\] exit rc=42" "$SERIAL" 2>/dev/null \
+    && echo "PASS exit:  $(grep -a '\[user\] exit rc=42' "$SERIAL" | head -1)" \
+    || { echo "MISS: no '[user] exit rc=42'"; BONUS=0; }
+
+if [ "$BONUS" = "1" ]; then
+    echo "UEFI BOOT VERIFIED: full hello+rc=42 over SSH under OVMF"
+else
+    echo "UEFI BOOT VERIFIED: reached sshd accept loop under OVMF (ssh-exec bonus incomplete)"
+fi

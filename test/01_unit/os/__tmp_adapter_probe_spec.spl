@@ -1,0 +1,81 @@
+use std.spec.*
+use os.kernel.memory.memory_leveling_manager.{memory_leveling_manager_new, simpleos_memory_leveling_config_default}
+use os.kernel.memory.memory_leveling_device_adapters.{
+    DmaLayoutProof,
+    _device_mapping as device_mapping,
+    memory_leveling_device_migration_unavailable,
+}
+use std.io.dma.{DmaDir, DmaCachePolicy, DmaOwner, SharedDmaBuffer, dma_segment, dma_contiguous_layout, dma_scatter_layout, dma_shared_mapping}
+
+fn _device_probe_mapping(allocation_id: u64, owner_id: u64, virt_addr: u64, phys_addr: u64, byte_length: u64, contiguous: bool) -> SharedDmaMapping:
+    val buffer = SharedDmaBuffer(
+        cpu_virt_addr: virt_addr,
+        host_phys_addr: phys_addr,
+        device_addr: phys_addr,
+        byte_len: byte_length,
+        cache_policy: DmaCachePolicy.Coherent,
+        owner: DmaOwner(task_id: owner_id, bdf_bus: 0, bdf_device: 1, bdf_function: 0),
+        allocation_id: allocation_id
+    )
+    val segment = dma_segment(virt_addr, phys_addr, phys_addr, byte_length)
+    val layout: DmaLayoutProof = if contiguous: dma_contiguous_layout(segment) else: dma_scatter_layout([segment])
+    dma_shared_mapping(buffer, DmaDir.Bidirectional, layout, allocation_id).unwrap()
+
+describe "memory-leveling adapter probe":
+
+    it "probe first registration path":
+        val config = simpleos_memory_leveling_config_default()
+        config.gpu_capacity_bytes = 65536
+        val manager = memory_leveling_manager_new(config)
+        val gpu = manager.register_gpu_queue(_device_probe_mapping(301, 9, 0x18000, 0x8000, 4096, true))
+        if not gpu.ok:
+            print "probe1 registration failed " + gpu.reason + " " + gpu.allocation_id.to_string()
+            expect(gpu.ok).to_equal(true)
+        val submit = manager.device_submit(301, 9)
+        if not submit.ok:
+            print "probe1 submit failed " + submit.reason + " " + submit.state + " id " + submit.allocation_id.to_string()
+            expect(submit.ok).to_equal(true)
+        val complete = manager.device_complete(301, 9)
+        if not complete.ok:
+            print "probe1 complete failed " + complete.reason + " " + complete.state + " id " + complete.allocation_id.to_string()
+            expect(complete.ok).to_equal(true)
+
+    it "probe second NIC buffer path":
+        val config = simpleos_memory_leveling_config_default()
+        config.nic_capacity_bytes = 65536
+        config.nic_reserved_bytes = 0
+        config.nic_low_watermark_bytes = 8192
+        config.nic_high_watermark_bytes = 16384
+        val manager = memory_leveling_manager_new(config)
+        val reg = manager.register_nic_buffer(_device_probe_mapping(401, 10, 0x1A000, 0xA000, 2048, false))
+        if not reg.ok:
+            print "probe2 register failed " + reg.reason + " " + reg.allocation_id.to_string()
+            expect(reg.ok).to_equal(true)
+        val submit = manager.device_submit(reg.allocation_id, 10)
+        if not submit.ok:
+            print "probe2 submit failed " + submit.reason + " " + submit.state
+            expect(submit.ok).to_equal(true)
+        val complete = manager.device_complete(reg.allocation_id, 10)
+        if not complete.ok:
+            print "probe2 complete failed " + complete.reason + " " + complete.state
+            expect(complete.ok).to_equal(true)
+        val unmap = manager.device_unmap(reg.allocation_id, 10)
+        if not unmap.ok:
+            print "probe2 unmap failed " + unmap.reason + " " + unmap.state
+            expect(unmap.ok).to_equal(true)
+        val release = manager.release(reg.allocation_id, 10)
+        if not release.ok:
+            print "probe2 release failed " + release.reason + " " + release.state
+            expect(release.ok).to_equal(true)
+        expect(memory_leveling_device_migration_unavailable(reg.allocation_id).reason).to_equal("migration-unavailable")
+
+    it "probe contiguous proof rejection path":
+        val config = simpleos_memory_leveling_config_default()
+        config.nic_capacity_bytes = 65536
+        config.nic_reserved_bytes = 0
+        config.nic_low_watermark_bytes = 8192
+        config.nic_high_watermark_bytes = 16384
+        val manager = memory_leveling_manager_new(config)
+        val reg = manager.register_nic_ring(_device_probe_mapping(402, 10, 0x1A000, 0xA000, 2048, false))
+        print "probe3 reason " + reg.reason
+        expect(reg.ok).to_equal(false)

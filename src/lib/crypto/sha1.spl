@@ -1,0 +1,143 @@
+# SHA-1 implementation — pure Simple, RFC 3174 / FIPS 180-4.
+# WARNING: SHA-1 is cryptographically broken. Use SHA-256 or better for new code.
+# Provided for legacy protocol interoperability only.
+
+# SHA-1 of a byte list. Returns 20-byte list.
+fn sha1_bytes(data: [i64]) -> [i64]:
+    use std.crypto.types.{rotr32}
+    val mask32 = 4294967295
+
+    var h0 = 1732584193   # 0x67452301
+    var h1 = 4023233417   # 0xEFCDAB89
+    var h2 = 2562383102   # 0x98BADCFE
+    var h3 =  271733878   # 0x10325476
+    var h4 = 3285377520   # 0xC3D2E1F0
+
+    val data_len = data.len()
+    var padded: [i64] = []
+    var pi = 0
+    while pi < data_len:
+        padded.push(data[pi] & 255)
+        pi = pi + 1
+    padded.push(128)
+    while padded.len() % 64 != 56:
+        padded.push(0)
+    val bit_len = data_len * 8
+    padded.push((bit_len >> 56) & 255)
+    padded.push((bit_len >> 48) & 255)
+    padded.push((bit_len >> 40) & 255)
+    padded.push((bit_len >> 32) & 255)
+    padded.push((bit_len >> 24) & 255)
+    padded.push((bit_len >> 16) & 255)
+    padded.push((bit_len >>  8) & 255)
+    padded.push( bit_len        & 255)
+
+    val total_len = padded.len()
+    var block_offset = 0
+    while block_offset < total_len:
+        var w: [i64] = []
+        var wi = 0
+        while wi < 16:
+            val base = block_offset + wi * 4
+            val word = (
+                ((padded[base    ] & 255) << 24) |
+                ((padded[base + 1] & 255) << 16) |
+                ((padded[base + 2] & 255) <<  8) |
+                 (padded[base + 3] & 255)
+            ) & mask32
+            w.push(word)
+            wi = wi + 1
+        wi = 16
+        while wi < 80:
+            val xw = (w[wi-3] ^ w[wi-8] ^ w[wi-14] ^ w[wi-16]) & mask32
+            w.push(((xw << 1) | (xw >> 31)) & mask32)
+            wi = wi + 1
+
+        var a = h0
+        var b = h1
+        var c = h2
+        var d = h3
+        var e = h4
+
+        var ri = 0
+        while ri < 80:
+            var ff = 0
+            var kk = 0
+            if ri < 20:
+                ff = ((b & c) | ((b ^ mask32) & d)) & mask32
+                kk = 1518500249
+            elif ri < 40:
+                ff = (b ^ c ^ d) & mask32
+                kk = 1859775393
+            elif ri < 60:
+                ff = ((b & c) | (b & d) | (c & d)) & mask32
+                kk = 2400959708
+            else:
+                ff = (b ^ c ^ d) & mask32
+                kk = 3395469782
+            val a5 = ((a << 5) | (a >> 27)) & mask32
+            val temp = (a5 + ff + e + kk + w[ri]) & mask32
+            e = d
+            d = c
+            c = ((b << 30) | (b >> 2)) & mask32
+            b = a
+            a = temp
+            ri = ri + 1
+
+        h0 = (h0 + a) & mask32
+        h1 = (h1 + b) & mask32
+        h2 = (h2 + c) & mask32
+        h3 = (h3 + d) & mask32
+        h4 = (h4 + e) & mask32
+        block_offset = block_offset + 64
+
+    var result: [i64] = []
+    val words = [h0, h1, h2, h3, h4]
+    var wi2 = 0
+    while wi2 < 5:
+        val wd = words[wi2]
+        result.push((wd >> 24) & 255)
+        result.push((wd >> 16) & 255)
+        result.push((wd >>  8) & 255)
+        result.push( wd        & 255)
+        wi2 = wi2 + 1
+    result
+
+# SHA-1 hex digest of a text string. Returns 40-char lowercase hex string.
+fn sha1_hex(msg: text) -> text:
+    use std.crypto.types.{text_to_bytes, bytes_to_hex}
+    bytes_to_hex(sha1_bytes(text_to_bytes(msg)))
+
+# SHA-1 streaming context.
+class Sha1Context:
+    buf: [i64]
+
+# Initialise a fresh SHA-1 streaming context.
+fn sha1_init() -> Sha1Context:
+    Sha1Context(buf: [])
+
+# Alias for sha1_init.
+fn create_sha1_context() -> Sha1Context:
+    sha1_init()
+
+# Feed bytes into a streaming SHA-1 context. Returns updated context.
+fn sha1_update(ctx: Sha1Context, data: [i64]) -> Sha1Context:
+    var buf = ctx.buf
+    var i = 0
+    val n = data.len()
+    while i < n:
+        buf.push(data[i] & 255)
+        i = i + 1
+    Sha1Context(buf: buf)
+
+# Finalise a streaming SHA-1 context. Returns 20-byte digest list.
+fn sha1_finalize(ctx: Sha1Context) -> [i64]:
+    sha1_bytes(ctx.buf)
+
+# Alias for sha1_finalize.
+fn sha1_final(ctx: Sha1Context) -> [i64]:
+    sha1_finalize(ctx)
+
+# sha1 — alias for sha1_bytes (for API compatibility).
+fn sha1(data: [i64]) -> [i64]:
+    sha1_bytes(data)

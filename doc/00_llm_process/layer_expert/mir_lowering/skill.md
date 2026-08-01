@@ -1,0 +1,113 @@
+# mir_lowering Layer Expert
+
+## Role
+
+Own layer-specific process knowledge for MIR construction and lowering
+(`src/compiler/50.mir/`). MIR is the intermediate representation between HIR
+(typed AST) and backend (LLVM IR). Key phases: HIR→MIR lowering
+(`_MirLowering/`), MIR SSA cleanup (`mir_opt/`), and MIR→LLVM codegen
+(`backend/_MirToLlvm/`). This layer owns method-call/literal lowering, array
+handling, struct construction, and intrinsic dispatch.
+
+## Pipeline Links
+
+- [verify skill](../../../../.claude/skills/verify/SKILL.md)
+- [impl skill](../../../../.claude/skills/impl/IMPL.md)
+
+## Layer Links
+
+- HIR→MIR lowering: [src/compiler/50.mir/_MirLowering/](../../../../src/compiler/50.mir/_MirLowering/)
+  (expr/stmt/item lowering).
+- Method calls & literals: [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
+  (array construct/push/read/write, method dispatch).
+- MIR SSA opt: [src/compiler/60.mir_opt/mir_opt/](../../../../src/compiler/60.mir_opt/mir_opt/)
+  (var_reassign_ssa.spl, dead-code elimination).
+- Backend codegen: [src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl](../../../../src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl).
+- Unit specs: `test/01_unit/compiler/50.mir/` (e.g. `method_calls_literals_spec.spl`).
+
+## Known Patterns (2026-07-10)
+
+### Value-Array Discarded Push (silent no-op)
+
+**Symptom:** `x.push(v)` in statement position (not assigned to a var) is a
+silent no-op on native backend — array is val-bound (immutable by value), so
+native codegen discards the result.
+
+**Fix:** Rebind to a `var` and reassign:
+```
+var x = [1, 2]
+x.push(3)  // native: silent no-op (x still [1, 2])
+// Correct:
+var x = [1, 2]
+x = x.push(3)  // x now [1, 2, 3]
+```
+
+**File refs:**
+- [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
+  (array_push lowering).
+
+### runtime_array_locals Registry (id-keyed)
+
+**Pattern:** Native path array construct/read/write uses `runtime_array_locals`
+(module-global id-keyed registry in `src/runtime/`) to track array buffers.
+Each construct gets a unique id; read/write/push marshal through that registry.
+
+**Gotcha:** Parallel expr_dispatch/method_calls_literals rewrites can DROP
+registry hunk presence. After any expr_dispatch refactor, re-verify:
+- Construct: `make id -> runtime_array_locals.insert(id, buf)`.
+- Read/Write: `runtime_array_locals.get(id) -> buf[i]`.
+- Always check spec results — registry is NOT auto-verified by type-checker.
+
+**File refs:**
+- [src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl](../../../../src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl)
+  (construct/read/write codegen).
+
+## Gotchas
+
+1. **Arrays are value types:** passed by copy, so `.push()` / `.pop()` /
+   `.reverse()` return a new array (not mutating in-place). Statement-position
+   calls are discarded on native (no side effect). Always assign or use in
+   expression.
+2. **Method dispatch collision:** if same method name has >1 candidate
+   (`CODEGEN-AMBIGUOUS-METHOD`), typed local `val ct: T = x` in same function
+   works; FOR-LOOP VAR annotations are ignored (need separate typed val in
+   body). Local dict indexing erases to ANY. See
+   [doc/00_llm_process/feature_expert/codegen_ambiguous_method/skill.md](../../feature_expert/codegen_ambiguous_method/skill.md).
+
+3. **Empty-literal element-type erasure:** `var d = {}` / `var a = []` fix the
+   container's MIR element type at the i64 default; stores box by VALUE type
+   but reads/print/`==` decode by CONTAINER type, so a later f64 store leaked
+   the heap-box pointer as an int. `runtime_elem_value_type` (id-keyed, reset
+   with `runtime_dict_locals`) records the store-observed F64/F32 type; reads
+   consult it only when the static element type is the erased i64 default
+   (see `note_container_elem_type` in expr_dispatch.spl). Text values through
+   the same path SIGSEGV — pre-existing, see
+   `doc/08_tracking/bug/native_empty_dict_text_value_sigsegv_2026-07-20.md`.
+4. **Never hand-duplicate the `MirLowering(...)` ctor** (driver_pipeline did,
+   twice): the seed interpreter silently nil-fills omitted struct-init fields,
+   so a drifted copy crashes with `method has not found on type nil` — native
+   path only. Always call `MirLowering.new_for_target`.
+
+## Update Rule
+
+After changes to method lowering, array handling, or runtime_array_locals
+registry, refresh this skill with new patterns and any regressions found.
+
+## Array-loss RCA pinpoints + pending fix drafts (2026-07-26)
+
+The freestanding array-loss class is pinpointed: array-typed module globals
+emit no `MirStatic` (`module_lowering.spl:62-81` rejects array types) →
+writes degrade to SSA locals (`mir_lowering_stmts.spl:794` write hook needs
+`find_global_static`) → reads RE-LOWER the initializer
+(`expr_dispatch.spl:190-192`, 952d2ca34d7's immutable-only fallback
+violated by mutation). Nested-array returns lose runtime-array identity for
+array-typed elements (`expr_dispatch.spl:1094-1139` registers named structs
+only); `SIMPLE_BOOTSTRAP=1` forces underivable element types to `text`
+(`:1084-1085`). Also: `match case Some(x)` never learned Option's FLAT
+raw-or-nil lane (`Dict.get` is correct; the decoder is not) and the
+interpreter's `match_pattern` had no enum-variant case at all. Fix drafts
+(A1+B2, match-decoder) exist in the 2026-07-26 session scratchpad — each
+needs bootstrap + extended smoke. Full evidence:
+`doc/08_tracking/bug/cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md`.
+
+Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

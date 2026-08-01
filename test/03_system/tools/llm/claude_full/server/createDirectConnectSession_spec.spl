@@ -1,0 +1,66 @@
+"""
+# Claude Full Create Direct Connect Session
+
+Checks direct-connect request construction and error handling.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.server.createDirectConnectSession.*
+
+describe "Claude full createDirectConnectSession":
+    it "should construct DirectConnectError with stable name":
+        step("Create a direct-connect error")
+        val error = DirectConnectError.new("bad")
+        expect(error.name).to_equal("DirectConnectError")
+        expect(error.message).to_equal("bad")
+
+    it "should create successful direct connect config":
+        step("Create session from a valid response")
+        val request = directConnectRequest("https://server", "tok", "/repo", true)
+        val result = createDirectConnectSession(request, true, true, 200, "OK", "sess-1", "wss://server/ws", "/work", true, "")
+        expect(result.ok).to_equal(true)
+        expect(result.requestUrl).to_equal("https://server/sessions")
+        expect(result.requestBody).to_equal("{\"cwd\":\"/repo\",\"dangerously_skip_permissions\":true}")
+        expect(result.authorizationHeader).to_equal("Bearer tok")
+        expect(result.config.sessionId).to_equal("sess-1")
+        expect(result.config.wsUrl).to_equal("wss://server/ws")
+        expect(result.workDir).to_equal("/work")
+
+    it "should omit auth and skip-permission fields when absent":
+        step("Create request without optional fields")
+        val request = directConnectRequest("http://localhost:8000", "", "/repo", false)
+        val result = createDirectConnectSession(request, true, true, 201, "Created", "s", "ws://x", "", true, "")
+        expect(result.requestBody).to_equal("{\"cwd\":\"/repo\"}")
+        expect(result.authorizationHeader).to_equal("")
+        expect(result.config.authToken).to_equal("")
+
+    it "should fail on network errors":
+        step("Simulate fetch failure")
+        val request = directConnectRequest("https://server", "", "/repo", false)
+        val result = createDirectConnectSession(request, false, false, 0, "", "", "", "", false, "ECONNREFUSED")
+        expect(result.ok).to_equal(false)
+        if val Some(error) = result.error:
+            expect(error.message).to_equal("Failed to connect to server at https://server: ECONNREFUSED")
+        else:
+            expect("missing").to_equal("error")
+
+    it "should fail on non-ok HTTP responses":
+        step("Simulate HTTP failure")
+        val request = directConnectRequest("https://server", "", "/repo", false)
+        val result = createDirectConnectSession(request, true, false, 500, "Server Error", "", "", "", false, "")
+        expect(result.ok).to_equal(false)
+        if val Some(error) = result.error:
+            expect(error.message).to_equal("Failed to create session: 500 Server Error")
+        else:
+            expect("missing").to_equal("error")
+
+    it "should fail on invalid response schema":
+        step("Simulate invalid response")
+        val request = directConnectRequest("https://server", "", "/repo", false)
+        val result = createDirectConnectSession(request, true, true, 200, "OK", "", "", "", false, "")
+        expect(result.ok).to_equal(false)
+        if val Some(error) = result.error:
+            expect(error.message).to_equal("Invalid session response: schema validation failed")
+        else:
+            expect("missing").to_equal("error")
+        expect(createDirectConnectSessionSourceLinesModeled()).to_equal(88)

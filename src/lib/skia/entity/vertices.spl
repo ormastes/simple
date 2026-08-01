@@ -1,0 +1,160 @@
+# SkVertices — immutable triangle-mesh primitive.
+#
+# Mirrors Skia's SkVertices. Holds positions + optional per-vertex colors + optional UV
+# coordinates + optional index list for indexed triangle topology.
+#
+# Used by Canvas.drawVertices for custom geometry (sprite batches, emoji colored
+# bitmaps, SVG <polygon> fills with per-vertex gradients).
+
+use std.skia.entity.geometry.{SkPoint, SkRect}
+use std.skia.entity.color.{SkColor4f}
+
+# ============================================================================
+# VertexMode — triangle topology
+# ============================================================================
+
+enum VertexMode:
+    Triangles
+    TriangleStrip
+    TriangleFan
+
+# ============================================================================
+# SkVertices — immutable triangle mesh
+# ============================================================================
+
+class SkVertices:
+    mode: VertexMode
+    positions: [SkPoint]
+    texcoords: [SkPoint]   # empty if no UVs
+    colors: [SkColor4f]    # empty if no per-vertex colors
+    indices: [i64]         # empty = non-indexed; otherwise triangle indices into positions
+    bounds: SkRect
+
+impl SkVertices:
+    fn triangle_count() -> i64:
+        # Per-mode triangle math. When indexed, the triangle count is derived
+        # from the index list; otherwise from the position list.
+        val n = if self.indices.len() > 0:
+            self.indices.len()
+        else:
+            self.positions.len()
+        if self.mode == VertexMode.Triangles:
+            n / 3
+        else:
+            if self.mode == VertexMode.TriangleStrip:
+                if n < 2:
+                    0
+                else:
+                    n - 2
+            else:
+                # TriangleFan
+                if n < 2:
+                    0
+                else:
+                    n - 2
+
+    fn is_indexed() -> bool:
+        self.indices.len() > 0
+
+# ============================================================================
+# SkVerticesBuilder — mutable builder that produces an immutable SkVertices
+# ============================================================================
+
+class SkVerticesBuilder:
+    mode: VertexMode
+    positions: [SkPoint]
+    texcoords: [SkPoint]
+    colors: [SkColor4f]
+    indices: [i64]
+
+impl SkVerticesBuilder:
+    me set_mode(m: VertexMode):
+        me.mode = m
+
+    me add_vertex(x: f64, y: f64):
+        me.positions.push(SkPoint(x: x, y: y))
+
+    me add_vertex_with_uv(x: f64, y: f64, u: f64, v: f64):
+        me.positions.push(SkPoint(x: x, y: y))
+        me.texcoords.push(SkPoint(x: u, y: v))
+
+    me add_vertex_with_color(x: f64, y: f64, c: SkColor4f):
+        me.positions.push(SkPoint(x: x, y: y))
+        me.colors.push(c)
+
+    me add_index(i: i64):
+        me.indices.push(i)
+
+    fn build() -> SkVertices:
+        # Compute axis-aligned bounding box from positions.
+        # Empty position list yields a degenerate (0,0,0,0) rect.
+        var has_any: bool = false
+        var min_x: f64 = 0.0
+        var min_y: f64 = 0.0
+        var max_x: f64 = 0.0
+        var max_y: f64 = 0.0
+        var i: i64 = 0
+        val n = self.positions.len()
+        while i < n:
+            val p = self.positions[i]
+            if has_any:
+                if p.x < min_x:
+                    min_x = p.x
+                if p.x > max_x:
+                    max_x = p.x
+                if p.y < min_y:
+                    min_y = p.y
+                if p.y > max_y:
+                    max_y = p.y
+            else:
+                min_x = p.x
+                max_x = p.x
+                min_y = p.y
+                max_y = p.y
+                has_any = true
+            i = i + 1
+        val bounds = if has_any:
+            SkRect(left: min_x, top: min_y, right: max_x, bottom: max_y)
+        else:
+            SkRect(left: 0.0, top: 0.0, right: 0.0, bottom: 0.0)
+        SkVertices(
+            mode: self.mode,
+            positions: self.positions,
+            texcoords: self.texcoords,
+            colors: self.colors,
+            indices: self.indices,
+            bounds: bounds
+        )
+
+# ============================================================================
+# Free functions
+# ============================================================================
+
+fn sk_vertices_builder_new() -> SkVerticesBuilder:
+    SkVerticesBuilder(
+        mode: VertexMode.Triangles,
+        positions: [],
+        texcoords: [],
+        colors: [],
+        indices: []
+    )
+
+fn sk_vertices_triangles(positions: [SkPoint], colors: [SkColor4f], texcoords: [SkPoint]) -> SkVertices:
+    # Convenience constructor for non-indexed triangle lists. Caller supplies
+    # parallel arrays; pass empty arrays for missing channels.
+    var b = sk_vertices_builder_new()
+    b.set_mode(VertexMode.Triangles)
+    var i: i64 = 0
+    val n = positions.len()
+    val has_colors = colors.len() == n
+    val has_uvs = texcoords.len() == n
+    while i < n:
+        val p = positions[i]
+        b.positions.push(SkPoint(x: p.x, y: p.y))
+        if has_colors:
+            b.colors.push(colors[i])
+        if has_uvs:
+            val t = texcoords[i]
+            b.texcoords.push(SkPoint(x: t.x, y: t.y))
+        i = i + 1
+    b.build()

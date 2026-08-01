@@ -1,0 +1,125 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+"""# Legacy CSS Transform Subset
+
+Proves only the existing isolated translate, uniform-scale, and quarter-turn
+subset through Web style/layout, canonical Draw IR, and exact expected-color
+Engine2D coverage/count. The admitted `transform-origin: 0 0` declaration is
+preserved; nonzero origin application, post-layout subtree transforms,
+transform-list composition, percentage bases, transformed hit testing, and
+rotated/scaled text remain RED.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+val WIDTH: i32 = 40
+val HEIGHT: i32 = 32
+
+fn _transform_html(declarations: text) -> text:
+    (
+        "<style>html,body{margin:0}#box{" + declarations +
+        "}</style><div id='box'></div>"
+    )
+
+fn _transform_color_count(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+fn _transform_fingerprint(html: text, color: u32) -> text:
+    val semantic = (
+        simple_web_layout_debug_style_by_id(
+            html, "box", "display"
+        ) + "|" +
+        simple_web_layout_debug_style_by_id(
+            html, "box", "transform_origin"
+        )
+    )
+    val layout = (
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "x"
+        ) + "," +
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "y"
+        ) + "," +
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "w"
+        ) + "," +
+        simple_web_layout_debug_layout_by_id(
+            html, WIDTH, HEIGHT, "box", "h"
+        )
+    )
+    val composition = simple_web_layout_render_html_draw_ir(
+        html, WIDTH, HEIGHT
+    )
+    var draw = "missing"
+    for command in composition.batches[0].commands:
+        if command.component_id == "box":
+            draw = (
+                command.component_id + ":" + command.x.to_string() + "," +
+                command.y.to_string() + "," + command.width.to_string() +
+                "," + command.height.to_string()
+            )
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val rendered = raster.render_draw_ir_composition(composition, [])
+    raster.shutdown()
+    (
+        semantic + "|" + layout + "|" +
+        composition.batches[0].source.source_kind + "|" + draw + "|" +
+        rendered.skipped_command_count.to_string() + "|" +
+        _transform_color_count(rendered.pixels, color).to_string()
+    )
+
+describe "REQ-WEB-BROWSER-003/004: legacy CSS transform subset":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should retain isolated axis translation":
+        step("Resolve the admitted isolated translation through Web semantics")
+        step("Render its exact legacy bounds through Draw IR and Engine2D")
+        val html = _transform_html(
+            "width:4px;height:4px;background:#16a34a;" +
+            "transform-origin:0 0;transform:translateX(5px)"
+        )
+        expect(_transform_fingerprint(
+            html, 0xFF16A34Au32
+        )).to_equal("block|0 0|5,0,4,4|html_ast|box:5,0,4,4|0|16")
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should retain isolated uniform scale bounds":
+        step("Resolve the admitted isolated scale through Web semantics")
+        step("Render its exact legacy bounds through Draw IR and Engine2D")
+        val html = _transform_html(
+            "width:4px;height:3px;background:#2563eb;" +
+            "transform-origin:0 0;transform:scale(2)"
+        )
+        expect(_transform_fingerprint(
+            html, 0xFF2563EBu32
+        )).to_equal("block|0 0|0,0,8,6|html_ast|box:0,0,8,6|0|48")
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should retain isolated quarter-turn bounds":
+        step("Resolve the admitted isolated quarter turn through Web semantics")
+        step("Render its exact legacy bounds through Draw IR and Engine2D")
+        val html = _transform_html(
+            "width:6px;height:4px;background:#7c3aed;" +
+            "transform-origin:0 0;transform:rotate(90deg)"
+        )
+        expect(_transform_fingerprint(
+            html, 0xFF7C3AEDu32
+        )).to_equal("block|0 0|0,0,4,6|html_ast|box:0,0,4,6|0|24")

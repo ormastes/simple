@@ -1,0 +1,41 @@
+"""
+# Claude Full Bash AST Slice
+
+Focused compatibility coverage for bash AST security parse triage and semantic
+route checks from utils/bash/ast.ts.
+"""
+
+use std.spec.*
+use app.llm_caret.claude_full.utils.bash.ast.*
+
+describe "Claude full bash ast parity":
+    it "should model parse security triage":
+        step("Check parse routes")
+        expect(parseForSecurityRoute("", true)).to_equal("simple")
+        expect(parseForSecurityRoute("   ", true)).to_equal("simple")
+        expect(parseForSecurityRoute("echo hi", false)).to_equal("parse unavailable")
+        expect(parseForSecurityRoute("echo hi", true)).to_equal("parse ast")
+        expect(parseForSecurityFromAstRoute("echo hi", "PARSE_ABORTED")).to_contain("parse aborted")
+        expect(parseForSecurityFromAstRoute("echo", "CONTROL_CHAR")).to_equal("too complex control char")
+        expect(parseForSecurityFromAstRoute("echo", "UNICODE_WHITESPACE")).to_equal("too complex unicode whitespace")
+        expect(parseForSecurityFromAstRoute("echo hello\\ world", "root")).to_equal("too complex escaped whitespace")
+        expect(parseForSecurityFromAstRoute("echo", "ZSH_EXPANSION")).to_equal("too complex zsh expansion")
+        expect(parseForSecurityFromAstRoute("echo {\"x\"}", "root")).to_equal("too complex brace quote")
+
+    it "should model node type ids":
+        step("Check node identifiers")
+        expect(nodeTypeIdRoute("")).to_equal(-2)
+        expect(nodeTypeIdRoute("ERROR")).to_equal(-1)
+        expect(nodeTypeIdRoute("word")).to_equal(0)
+        expect(nodeTypeIdRoute("command_substitution")).to_be_greater_than(0)
+
+    it "should model semantic safety routes":
+        step("Check semantic routes")
+        expect(checkSemanticsRoute("")).to_equal("ok")
+        expect(checkSemanticsRoute("timeout 5 eval id")).to_equal("reject wrapper command")
+        expect(checkSemanticsRoute("timeout 5")).to_equal("ok")
+        expect(checkSemanticsRoute("eval echo")).to_equal("reject dangerous command")
+        expect(checkSemanticsRoute("[[ -v x")).to_equal("reject unsafe test")
+        expect(checkSemanticsRoute("jq 'system(\"id\")'")).to_equal("reject jq system")
+        expect(checkSemanticsRoute("if")).to_equal("reject shell keyword")
+        expect(bashAstSourceLinesModeled()).to_equal(2679)

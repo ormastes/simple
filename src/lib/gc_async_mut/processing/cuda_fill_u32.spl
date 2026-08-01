@@ -1,0 +1,137 @@
+"""CUDA executor for the validated ProcessingIR FillU32 operation."""
+
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_reason}
+use std.gc_async_mut.cuda.{
+    cuda_memcpy_dtoh,
+    CUDA_SUCCESS
+}
+use std.gc_async_mut.gpu_ffi.{cuda_device_identity}
+use std.gc_async_mut.gpu.engine2d.cuda_session.{CudaSession}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_write_i64}
+
+# Canonical runtime-owned bulk conversion shared with Metal/Processing readback.
+extern fn rt_u32s_from_raw(data_ptr: i64, count: i64) -> [u32]
+
+val PROCESSING_CUDA_BLOCK_SIZE: i64 = 256
+val PROCESSING_CUDA_ARG_BYTES: i64 = 24
+
+struct ProcessingCudaResult:
+    completed: bool
+    reason: text
+    values: [u32]
+    backend_handle: i64
+    device_identity: i64
+
+fn _processing_cuda_ptx() -> text:
+    ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry processing_fill_u32(\n    .param .u64 output,\n    .param .u32 value,\n    .param .u32 count\n) {\n    .reg .pred %p;\n    .reg .b32 %r<6>;\n    .reg .b64 %rd<4>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [count];\n    setp.ge.u32 %p, %r3, %r4;\n    @%p bra done;\n    ld.param.u64 %rd0, [output];\n    mul.wide.u32 %rd1, %r3, 4;\n    add.u64 %rd2, %rd0, %rd1;\n    ld.param.u32 %r5, [value];\n    st.global.u32 [%rd2], %r5;\ndone:\n    ret;\n}\n"
+
+fn _processing_cuda_cleanup(session: CudaSession, device: i64, values_ptr: i64, args_ptr: i64, host_ptr: i64, byte_count: i64):
+    if device > 0:
+        session.free(device)
+    if values_ptr != 0:
+        raw_free(values_ptr, PROCESSING_CUDA_ARG_BYTES)
+    if args_ptr != 0:
+        raw_free(args_ptr, PROCESSING_CUDA_ARG_BYTES)
+    if host_ptr != 0:
+        raw_free(host_ptr, byte_count)
+
+class ProcessingCudaExecutor:
+    session: CudaSession
+    closed: bool
+
+    static fn create() -> ProcessingCudaExecutor:
+        ProcessingCudaExecutor(session: CudaSession.create(), closed: false)
+
+    me _ensure_ready() -> text:
+        if self.closed:
+            return "cuda-executor-closed"
+        if not self.session.is_valid() and self.session.init() != CUDA_SUCCESS:
+            return "cuda-init-failed"
+        if self.session.activate() != CUDA_SUCCESS:
+            self.session.shutdown()
+            return "cuda-context-activate-failed"
+        if self.session.module_cache > 0:
+            return ""
+        if self.session.load_module(_processing_cuda_ptx()) <= 0:
+            self.session.shutdown()
+            return "cuda-module-load-failed"
+        ""
+
+    me shutdown():
+        self.closed = true
+        self.session.shutdown()
+
+fn processing_ir_execute_cuda_with_executor(executor: ProcessingCudaExecutor, ir: ProcessingIr) -> ProcessingCudaResult:
+    val valid = processing_ir_validate(ir)
+    if not valid.valid:
+        return ProcessingCudaResult(completed: false, reason: valid.reason, values: [], backend_handle: 0, device_identity: 0)
+    val unavailable_fault = processing_ir_fault_reason("cuda", "unavailable")
+    if unavailable_fault != "":
+        return ProcessingCudaResult(completed: false, reason: unavailable_fault, values: [], backend_handle: 0, device_identity: 0)
+    val init_fault = processing_ir_fault_reason("cuda", "init")
+    if init_fault != "":
+        return ProcessingCudaResult(completed: false, reason: init_fault, values: [], backend_handle: 0, device_identity: 0)
+    val ready_reason = executor._ensure_ready()
+    if ready_reason != "":
+        return ProcessingCudaResult(completed: false, reason: ready_reason, values: [], backend_handle: 0, device_identity: 0)
+    val device_handle = executor.session.device
+
+    val byte_count = ir.element_count * 4
+    val device = executor.session.alloc(byte_count)
+    val values_ptr = raw_alloc(PROCESSING_CUDA_ARG_BYTES)
+    val args_ptr = raw_alloc(PROCESSING_CUDA_ARG_BYTES)
+    val host_ptr = raw_alloc(byte_count)
+    if device <= 0 or values_ptr == 0 or args_ptr == 0 or host_ptr == 0:
+        _processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)
+        return ProcessingCudaResult(completed: false, reason: "cuda-allocation-failed", values: [], backend_handle: 0, device_identity: 0)
+
+    raw_write_i64(values_ptr, 0, device)
+    raw_write_i64(values_ptr, 8, ir.value.to_i64())
+    raw_write_i64(values_ptr, 16, ir.element_count)
+    raw_write_i64(args_ptr, 0, values_ptr)
+    raw_write_i64(args_ptr, 8, values_ptr + 8)
+    raw_write_i64(args_ptr, 16, values_ptr + 16)
+    val submit_fault = processing_ir_fault_reason("cuda", "submit")
+    if submit_fault != "":
+        _processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)
+        return ProcessingCudaResult(completed: false, reason: submit_fault, values: [], backend_handle: 0, device_identity: 0)
+    val launched = executor.session.launch_kernel_args("processing_fill_u32", (ir.element_count + PROCESSING_CUDA_BLOCK_SIZE - 1) / PROCESSING_CUDA_BLOCK_SIZE, 1, 1, PROCESSING_CUDA_BLOCK_SIZE, 1, 1, args_ptr) == CUDA_SUCCESS
+    val synced = launched and executor.session.sync() == CUDA_SUCCESS
+    val readback_fault = processing_ir_fault_reason("cuda", "readback")
+    if synced and readback_fault != "":
+        _processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)
+        return ProcessingCudaResult(completed: false, reason: readback_fault, values: [], backend_handle: 0, device_identity: 0)
+    val dispatch_ok = launched and synced
+    val copied = dispatch_ok and cuda_memcpy_dtoh(host_ptr, device, byte_count) == CUDA_SUCCESS
+    val values: [u32] = if copied:
+        rt_u32s_from_raw(host_ptr, ir.element_count)
+    else:
+        []
+    val mismatch_fault = processing_ir_fault_reason("cuda", "mismatch")
+    if copied and mismatch_fault != "":
+        _processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)
+        return ProcessingCudaResult(completed: false, reason: mismatch_fault, values: [], backend_handle: 0, device_identity: 0)
+    val handle = device_handle + 1
+    val identity = cuda_device_identity(device_handle)
+    _processing_cuda_cleanup(executor.session, device, values_ptr, args_ptr, host_ptr, byte_count)
+    if not dispatch_ok:
+        executor.session.shutdown()
+        return ProcessingCudaResult(completed: false, reason: "cuda-dispatch-failed", values: [], backend_handle: 0, device_identity: 0)
+    if not copied:
+        executor.session.shutdown()
+        return ProcessingCudaResult(completed: false, reason: "cuda-readback-failed", values: [], backend_handle: 0, device_identity: 0)
+    if values.len().to_i64() != ir.element_count:
+        return ProcessingCudaResult(completed: false, reason: "cuda-readback-size-mismatch", values: [], backend_handle: 0, device_identity: 0)
+    if identity <= 0:
+        return ProcessingCudaResult(completed: false, reason: "cuda-device-identity-unavailable", values: [], backend_handle: 0, device_identity: 0)
+    ProcessingCudaResult(completed: true, reason: "ok", values: values, backend_handle: handle, device_identity: identity)
+
+fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
+    var executor = ProcessingCudaExecutor.create()
+    val result = processing_ir_execute_cuda_with_executor(executor, ir)
+    executor.shutdown()
+    result
+
+export ProcessingCudaResult, ProcessingCudaExecutor
+export processing_ir_execute_cuda, processing_ir_execute_cuda_with_executor

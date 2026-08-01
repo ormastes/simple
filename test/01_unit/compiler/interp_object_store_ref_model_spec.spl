@@ -1,0 +1,76 @@
+# Interpreter class reference model — ObjectStore unit spec (Task #112)
+#
+# Drives the 70.backend HIR interpreter's class reference model directly from
+# SOURCE (spec imports resolve from source — precedent #31/#45), independent of
+# the stage4 binary (which cannot be observed this session). Exercises the store
+# + handle-carrying Value.Object that give CLASS instances reference semantics
+# while STRUCT (Value.Struct) instances keep value semantics.
+#
+# @cover src/compiler/70.backend/backend/objects.spl 90%
+
+use compiler.backend.backend.objects.*
+use compiler.backend.backend_types.*
+
+describe "Interpreter class reference model (Task #112)":
+
+    context "ObjectStore reference semantics":
+
+        it "class-share: two handle holders observe the same mutation":
+            var store = ObjectStore.new()
+            var f0: Dict<text, Value> = {}
+            f0["val"] = Value.Int(42)
+            val h = store.alloc("Counter", f0)
+            # Two Value.Object copies of the SAME handle model `var c = arr[0]`:
+            # copying a Value.Object copies the int handle, so both alias one
+            # store record.
+            val v1 = Value.Object(ObjectValue(class_name: "Counter", handle: h))
+            val v2 = Value.Object(ObjectValue(class_name: "Counter", handle: h))
+            var hv1: i64 = -1
+            match v1:
+                case Value.Object(ov): hv1 = ov.handle
+                case _: hv1 = -1
+            store.set_field(hv1, "val", Value.Int(777))
+            # Read it back through the OTHER holder's handle: it sees 777.
+            var hv2: i64 = -1
+            match v2:
+                case Value.Object(ov2): hv2 = ov2.handle
+                case _: hv2 = -1
+            val got = store.get_field(hv2, "val")
+            expect(got.unwrap().as_int()).to_equal(777)
+
+        it "struct-isolation: distinct class instances do not alias":
+            var store = ObjectStore.new()
+            var fa: Dict<text, Value> = {}
+            fa["x"] = Value.Int(10)
+            var fb: Dict<text, Value> = {}
+            fb["x"] = Value.Int(20)
+            val ha = store.alloc("Box", fa)
+            val hb = store.alloc("Box", fb)
+            # Mutating one record must not touch the other (each instance is its
+            # own slot; the model is not a single global blob).
+            store.set_field(ha, "x", Value.Int(999))
+            expect(store.get_field(ha, "x").unwrap().as_int()).to_equal(999)
+            expect(store.get_field(hb, "x").unwrap().as_int()).to_equal(20)
+
+        it "class-in-array share: mutation through a handle is visible via the array slot":
+            var store = ObjectStore.new()
+            var f0: Dict<text, Value> = {}
+            f0["val"] = Value.Int(42)
+            val h = store.alloc("Counter", f0)
+            var arr: [Value] = [Value.Object(ObjectValue(class_name: "Counter", handle: h))]
+            # Read a class element out of the array (a value copy of the
+            # handle-carrying Value) and mutate the shared store record.
+            val elem = arr[0]
+            var eh: i64 = -1
+            match elem:
+                case Value.Object(ov): eh = ov.handle
+                case _: eh = -1
+            store.set_field(eh, "val", Value.Int(999))
+            # Re-read the ORIGINAL array slot: it shares the same record (this is
+            # the exact #112 symptom — mutation must NOT be dropped).
+            val elem2 = arr[0]
+            var eh2: i64 = -1
+            match elem2:
+                case Value.Object(ov2): eh2 = ov2.handle
+                case _: eh2 = -1
+            expect(store.get_field(eh2, "val").unwrap().as_int()).to_equal(999)

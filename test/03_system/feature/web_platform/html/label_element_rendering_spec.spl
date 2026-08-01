@@ -1,0 +1,192 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003
+# @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""Selected `<label>` UA inline flow through Web semantics, Draw IR, and Engine2D.
+
+Plan: `doc/03_plan/sys_test/html_css_spec_traceability.md`
+"""
+
+use std.spec.*
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_tag, be_dom_path_for_route
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    HNode, simple_web_layout_render_html_draw_ir_result
+}
+use test.system.browser_dom_identity_helpers.{
+    system_dom_identity_index, system_dom_route
+}
+
+val WIDTH: i32 = 128
+val HEIGHT: i32 = 40
+val RED: u32 = 0xFFDC2626u32
+
+fn _label_node_index(nodes: [HNode], component_id: text) -> i32:
+    var index = 0
+    for node in nodes:
+        if node.id_attr == component_id:
+            return index
+        index = index + 1
+    fail("missing label Web semantic node: {component_id}")
+    -1
+
+fn _label_command(
+    composition: DrawIrComposition, component_id: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.component_id == component_id:
+                return command
+    fail("missing label Draw IR command: {component_id}")
+    composition.batches[0].commands[0]
+
+fn _label_text_command(
+    composition: DrawIrComposition, value: text
+) -> DrawIrCommand:
+    for batch in composition.batches:
+        for command in batch.commands:
+            if command.kind == "text" and command.text_value == value:
+                return command
+    fail("missing label Draw IR text command: {value}")
+    composition.batches[0].commands[0]
+
+fn _label_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing label Draw IR computed style: {key}")
+    ""
+
+fn _label_geometry(command: DrawIrCommand) -> [i32]:
+    [command.x, command.y, command.width, command.height]
+
+fn _label_pixels(composition: DrawIrComposition) -> [u32]:
+    val raster = Engine2dCompositorBackend.create_named(
+        WIDTH, HEIGHT, "software"
+    )
+    val frame = raster.render_draw_ir_composition(composition, [])
+    raster.shutdown()
+    expect(frame.skipped_command_count).to_equal(0)
+    frame.pixels
+
+describe "Production label element rendering":
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    # @capture(gui)
+    # @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003
+    # @req REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+    it "should lower the label UA inline flow through Draw IR to pixels":
+        val common = (
+            "<style>html,body{margin:0;padding:0;background:#fff}" +
+            "body{padding-top:8px}#row{font-size:16px;color:#111827}" +
+            "</style><body id='body'><div id='row'>"
+        )
+        val suffix = "</div></body>"
+        val label_html = (
+            common + "LEFT<label id='term' style='background:#dc2626'>" +
+            "MID</label>RIGHT" + suffix
+        )
+        val inline_html = (
+            common + "LEFT<span id='term' style='" +
+            "display:inline;background:#dc2626'>MID</span>RIGHT" + suffix
+        )
+        val block_html = (
+            common + "LEFT<span id='term' style='" +
+            "display:block;background:#dc2626'>MID</span>RIGHT" + suffix
+        )
+        val override_html = (
+            common + "LEFT<label id='term' style='" +
+            "display:block;background:#dc2626'>MID</label>RIGHT" + suffix
+        )
+
+        step("Parse label with the row as its immediate parent")
+        val root = html_tree_builder_build(label_html)
+        val identity_index = system_dom_identity_index(root)
+        val row_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "row")
+        )
+        val label_path = be_dom_path_for_route(
+            root, identity_index, system_dom_route(identity_index, "term")
+        )
+        expect(label_path.len()).to_be_greater_than(1)
+        expect(row_path.len()).to_be_greater_than(0)
+        expect(be_dom_get_tag(label_path[label_path.len() - 1])).to_equal(
+            "label"
+        )
+        expect(label_path[label_path.len() - 2].node_id).to_equal(
+            row_path[row_path.len() - 1].node_id
+        )
+
+        step("Apply the inline label default before author CSS")
+        val label = simple_web_layout_render_html_draw_ir_result(
+            label_html, WIDTH, HEIGHT
+        )
+        val inline = simple_web_layout_render_html_draw_ir_result(
+            inline_html, WIDTH, HEIGHT
+        )
+        val block = simple_web_layout_render_html_draw_ir_result(
+            block_html, WIDTH, HEIGHT
+        )
+        val override = simple_web_layout_render_html_draw_ir_result(
+            override_html, WIDTH, HEIGHT
+        )
+        val label_index = _label_node_index(label.hit_index.nodes, "term")
+        val override_index = _label_node_index(
+            override.hit_index.nodes, "term"
+        )
+        expect(label.hit_index.styles[label_index].display).to_equal("inline")
+        expect(label.hit_index.styles[label_index].bg).to_equal(RED)
+        expect(override.hit_index.styles[override_index].display).to_equal(
+            "block"
+        )
+
+        step("Lower label and following text to exact inline Draw IR geometry")
+        val label_term = _label_command(label.composition, "term")
+        val inline_term = _label_command(inline.composition, "term")
+        val block_term = _label_command(block.composition, "term")
+        val label_mid = _label_text_command(label.composition, "MID")
+        val inline_mid = _label_text_command(inline.composition, "MID")
+        val label_right = _label_text_command(label.composition, "RIGHT")
+        val inline_right = _label_text_command(inline.composition, "RIGHT")
+        val block_right = _label_text_command(block.composition, "RIGHT")
+        expect(_label_geometry(label_term)).to_equal([32, 8, 24, 16])
+        expect(_label_geometry(label_mid)).to_equal([32, 8, 24, 16])
+        expect(_label_geometry(label_right)).to_equal([56, 8, 40, 16])
+        expect(_label_geometry(label_term)).to_equal(
+            _label_geometry(inline_term)
+        )
+        expect(_label_geometry(label_mid)).to_equal(
+            _label_geometry(inline_mid)
+        )
+        expect(_label_geometry(label_right)).to_equal(
+            _label_geometry(inline_right)
+        )
+        expect(_label_geometry(label_term)).not.to_equal(
+            _label_geometry(block_term)
+        )
+        expect(_label_geometry(label_right)).not.to_equal(
+            _label_geometry(block_right)
+        )
+        expect(label_mid.advance_widths).to_equal(inline_mid.advance_widths)
+        expect(label_right.advance_widths).to_equal(
+            inline_right.advance_widths
+        )
+        expect(_label_style(label_term, "tag")).to_equal("label")
+        expect(_label_style(label_term, "display")).to_equal("inline")
+
+        step("Rasterize exact label pixels and discriminating controls")
+        val label_pixels = _label_pixels(label.composition)
+        val inline_pixels = _label_pixels(inline.composition)
+        val block_pixels = _label_pixels(block.composition)
+        val override_pixels = _label_pixels(override.composition)
+        expect(label_pixels.len()).to_equal(WIDTH * HEIGHT)
+        expect(label_pixels).to_equal(inline_pixels)
+        expect(label_pixels).not.to_equal(block_pixels)
+        expect(label_pixels).not.to_equal(override_pixels)
+        expect(label_pixels[23 * WIDTH + 55]).to_equal(RED)

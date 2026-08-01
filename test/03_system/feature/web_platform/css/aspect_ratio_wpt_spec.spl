@@ -1,0 +1,91 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004 REQ-WEB-BROWSER-021
+"""# CSS `aspect-ratio` Canonical Rendering
+
+This bounded scenario exercises the production HTML/CSS path for both width-led
+and height-led aspect ratios: HTML semantics, resolved layout, Draw IR, and
+Engine2D pixels. It is source/spec/manual evidence only until an admitted
+pure-Simple runner executes it.
+"""
+
+use std.spec.*
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_render_html_draw_ir_result
+}
+use os.compositor.compositor_engine2d.{Engine2dCompositorBackend}
+
+val ASPECT_RATIO_HTML = (
+    "<style>html,body{margin:0}" +
+    "#wide{display:block;width:32px;aspect-ratio:2 / 1;" +
+    "background-color:#2563eb}" +
+    "#tall{display:block;height:24px;aspect-ratio:1 / 2;" +
+    "background-color:#dc2626}</style>" +
+    "<div id='wide'></div><div id='tall'></div>"
+)
+
+fn _aspect_command(
+    result: SimpleWebLayoutDrawIrResult, component_id: text
+) -> DrawIrCommand:
+    for command in result.composition.batches[0].commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing aspect-ratio Draw IR command: {component_id}")
+    result.composition.batches[0].commands[0]
+
+fn _aspect_style(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing aspect-ratio style: {key}")
+    ""
+
+fn _aspect_color_count(pixels: [u32], color: u32) -> i32:
+    var count = 0
+    for pixel in pixels:
+        if pixel == color:
+            count = count + 1
+    count
+
+describe "REQ-WEB-BROWSER-003/004/021: CSS aspect-ratio":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should resolve width-led and height-led ratios through Engine2D":
+        step("Resolve width-led and height-led ratios in canonical web layout")
+        expect(simple_web_layout_debug_layout_by_id(
+            ASPECT_RATIO_HTML, 64, 64, "wide", "w"
+        )).to_equal("32")
+        expect(simple_web_layout_debug_layout_by_id(
+            ASPECT_RATIO_HTML, 64, 64, "wide", "h"
+        )).to_equal("16")
+        expect(simple_web_layout_debug_layout_by_id(
+            ASPECT_RATIO_HTML, 64, 64, "tall", "w"
+        )).to_equal("12")
+        expect(simple_web_layout_debug_layout_by_id(
+            ASPECT_RATIO_HTML, 64, 64, "tall", "h"
+        )).to_equal("24")
+
+        step("Retain both ratio boxes in canonical HTML semantics and Draw IR")
+        val result = simple_web_layout_render_html_draw_ir_result(
+            ASPECT_RATIO_HTML, 64, 64
+        )
+        val wide = _aspect_command(result, "wide")
+        val tall = _aspect_command(result, "tall")
+        expect(result.composition.batches[0].source.source_kind).to_equal("html_ast")
+        expect([wide.x, wide.y, wide.width, wide.height]).to_equal([0, 0, 32, 16])
+        expect([tall.x, tall.y, tall.width, tall.height]).to_equal([0, 16, 12, 24])
+        expect(_aspect_style(wide, "aspect-ratio")).to_equal("2 / 1")
+        expect(_aspect_style(tall, "aspect-ratio")).to_equal("1 / 2")
+
+        step("Render ratio-resolved Draw IR through the canonical Engine2D backend")
+        val raster = Engine2dCompositorBackend.create_named(64, 64, "software")
+        val rendered = raster.render_draw_ir_composition(
+            result.composition, []
+        )
+        raster.shutdown()
+        expect(rendered.skipped_command_count).to_equal(0)
+        expect(_aspect_color_count(rendered.pixels, 0xFF2563EBu32)).to_equal(512)
+        expect(_aspect_color_count(rendered.pixels, 0xFFDC2626u32)).to_equal(288)

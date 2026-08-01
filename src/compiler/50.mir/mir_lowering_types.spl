@@ -1,0 +1,418 @@
+# MIR Lowering - Type Definitions
+#
+# Core struct definitions for MIR lowering.
+# This file exists to break circular dependencies between
+# mir_lowering.spl and its split modules (expr, stmts, ml).
+
+use compiler.mir.mir_data.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.mir_target_context.{MirTargetContext}
+
+# ============================================================================
+# MIR Lowering Types
+# ============================================================================
+
+struct MirLowering:
+    """Lowers HIR to MIR."""
+    builder: MirBuilder
+    symbols: SymbolTable
+    local_map: Dict<i64, LocalId>
+    # Native-safe authoritative bindings. Stage4 cannot reliably persist
+    # mutations to a Dict stored inside MirLowering.
+    local_symbol_ids: [i64]
+    local_symbol_values: [LocalId]
+    # MIR local ID -> declared HIR value type for erased generic call results.
+    # Parallel arrays are authoritative for the same Stage4 reason as
+    # local_symbol_ids/local_symbol_values above.
+    local_hir_type_ids: [i64]
+    local_hir_type_values: [HirType]
+    # Function symbol ID -> declared HIR return type, recorded straight from
+    # the HirFunction declarations in a lower_module pre-pass. The symbol
+    # table's type_ for fn symbols is NOT reliably a Function(...) kind on
+    # every path (unresolved infer var observed), which collapsed every user
+    # call's return type to the i64 fallback (text returns printed as
+    # decimals under the numeric print coercion).
+    fn_return_types: Dict<i64, HirType>
+    current_function_symbols: [SymbolId]
+    current_function_names: [text]
+    loop_stack: [(BlockId, BlockId)]  # (continue_block, break_block)
+    errors: [MirError]
+    field_map: Dict<i64, [text]>  # type symbol ID -> ordered field names
+    bitfield_map: Dict<i64, [HirBitfieldField]>  # type symbol ID -> bitfield fields
+    # MIR local ID -> bitfield type symbol ID, for locals holding a value
+    # produced by `BitfieldType(raw)` construction. Needed because this
+    # pipeline has no expression type-inference pass: expr_type_symbol only
+    # works when HIR annotated the expr, which plain `val inst = ...`
+    # bindings never are.
+    bitfield_value_syms: Dict<i64, i64>
+    # Struct NAME -> ordered field names. Keyed by name (not symbol id) because
+    # symbol_id_value's match-destructure returns -1 in the interpreter (same
+    # reason bitfield_map keys by .id), which would collapse every struct to one
+    # key and make the `>= 0` construction guard skip interception entirely.
+    struct_field_order: Dict<text, [text]>
+    # Struct/class NAME -> per-field "has a declared default value" flags,
+    # parallel to struct_field_order. Bug (native_struct_omitted_field_default_
+    # not_applied / jit 0x890 SIGSEGV): when a constructor OMITS a field that
+    # has a `= <expr>` default (e.g. `vulkan_backend: VulkanBackend? = nil`),
+    # the omitted-field fill in switch_operators_calls.spl used a blanket
+    # `Const(Int(0))`. For an Option field, raw 0 is NOT the nil sentinel (3),
+    # so `if val Some(x) = field` matched on 0 and dereferenced address 0 ->
+    # KERN_INVALID_ADDRESS at the field offset (observed 0x890). These two
+    # parallel maps carry the field's real default expression so an omitted
+    # field is filled with its actual default (`nil`->sentinel 3, `false`->0,
+    # `""`->empty, `[]`->empty array) instead of a wrong raw 0.
+    struct_field_has_default: Dict<text, [bool]>
+    struct_field_default_expr: Dict<text, [HirExpr]>
+    # Named-aggregate (class) NAME -> true, for types declared with `class`
+    # (not `struct`). Populated from `module.classes` alongside
+    # `struct_field_order` (fed from both `module.structs` and
+    # `module.classes` -- see module_lowering.spl's class loop) so a class
+    # instance still gets `struct_value_syms` field/method-dispatch
+    # bookkeeping like a struct does, but function_lowering.spl's param
+    # binding can tell the two apart: a `class` param must keep reference
+    # semantics (mutation visible to the caller) unconditionally, while a
+    # plain (non-`mut`, non-`me`) `struct` param keeps Bug #167's value-copy.
+    # See bug s19_class_free_fn_mutation_dropped_native_2026-07-17.
+    class_type_names: Dict<text, bool>
+    # Struct NAME -> ordered field TYPE names (parallels struct_field_order;
+    # "" when the field's type is not itself a Named struct/class). Bug #166:
+    # a chained field access `r.origin.y` lowers the inner Field's `base`
+    # (`r.origin`) with no HIR type annotation and no struct_value_syms entry,
+    # so resolve_field_index silently fell back to index 0 for the SECOND
+    # level of nesting no matter which field name was requested (`y` read
+    # `x`'s slot). This map lets a field-access result register itself in
+    # struct_value_syms (see lower_expr's Field arm) so a further `.field`
+    # on that result can resolve correctly.
+    struct_field_type_name: Dict<text, [text]>
+    # Struct NAME -> ordered field representation markers. `"str"` marks a
+    # declared `text` field whose projected MIR local must remain
+    # Opaque("str"); leaving it as the generic i64 fallback breaks native
+    # string equality/interpolation after an otherwise-correct struct load.
+    struct_field_repr_name: Dict<text, [text]>
+    # Struct/class NAME -> full declared field HIR types. Optional fields use
+    # this owner to normalize constructor, projection, and assignment values.
+    struct_field_hir_type: Dict<text, [HirType]>
+    # Struct NAME -> ordered array-element struct names for fields such as
+    # `commands: [DrawIrCommand]`. Field loads use this to preserve both the
+    # runtime-array identity and the decoded element layout.
+    struct_field_array_element_type_name: Dict<text, [text]>
+    # Struct/class NAME -> ordered field ELEMENT types (parallels
+    # struct_field_order; HirTypeKind.Error sentinel when the field itself is
+    # not an Array/Slice). Bug (native_class_array_field_mutation_segfault /
+    # native_bool_array_element_interpolation_special_garbage, 2026-07-17):
+    # struct_field_array_element_type_name above only records a NAME
+    # ("__runtime_array__" sentinel, or a struct/class symbol name) -- enough
+    # to recover a struct-typed element's field layout, but not enough to
+    # distinguish a PRIMITIVE element's own scalar kind (bool vs i64 vs text
+    # vs f64 all collapse to the same sentinel). Without that, a field read's
+    # `field_type` still defaulted to a bare i64 for any primitive-element
+    # array field, so a bool element printed its raw tag int instead of
+    # true/false and a text element printed its raw heap-handle number
+    # instead of the string. This map keeps the field's declared element
+    # HirType (not just its name) so the Field-access lowering can build the
+    # field-read result's MIR type as a real `Array(elem)` with the correct
+    # primitive element type, exactly like the split-array fix
+    # (commit 4539b364955) does for its result local.
+    struct_field_array_elem_type: Dict<text, [HirType]>
+    # MIR local ID -> struct NAME, for locals holding a value produced by struct
+    # construction. Same role as bitfield_value_syms: the pipeline has no expr
+    # type-inference, so a bare `p` Var carries no `.type_` and resolve_field_index
+    # cannot recover the struct's field ordering otherwise.
+    struct_value_syms: Dict<i64, text>
+    # "{struct NAME}::{method name}" -> the method's real SymbolId, built from
+    # module.impls in lower_module. Bug #138/#156: a receiver with no HIR type
+    # inference (receiver.type_ nil) makes MethodResolver return Unresolved for
+    # every user struct instance method on the native-build path, since
+    # try_instance_method requires a typed receiver. struct_value_syms already
+    # recovers the receiver's struct NAME from the lowered local (populated for
+    # locals/params/constructions); this map lets the Unresolved fallback in
+    # method_calls_literals.spl look up the real method symbol by
+    # (struct_name, method_name) and dispatch a direct call instead of failing.
+    # Static methods additionally use "static::{struct NAME}::{method name}" so
+    # an unresolved type receiver is never lowered as an instance value.
+    struct_method_syms: Dict<text, SymbolId>
+    # Unqualified method names that collide with a free function or a method
+    # on another struct in the same module and therefore cannot be dispatched
+    # through the unqualified fallback.
+    struct_method_ambiguous: Dict<text, bool>
+    # "{struct NAME}::{method name}" -> the method's declared return type's
+    # struct NAME ("" when not a known Named struct). Methchain lane fix: a
+    # chained `obj.foo().bar()` needs to know foo()'s RESULT is a Pt so the
+    # second hop `bar` can look itself up in struct_method_syms, but
+    # struct_value_syms is only ever seeded for locals/params/constructions,
+    # never for a method call's result. Sourced from HirImpl.
+    # method_return_struct_names (built during HIR lowering, where the
+    # method's `-> Pt` annotation IS resolved regardless of native-vs-
+    # interpreted path) and consumed in method_calls_literals.spl's Unresolved
+    # arm to extend struct_value_syms to the call result local.
+    struct_method_return_names: Dict<text, text>
+    # "{struct NAME}::{method name}" -> true when the method's declared return
+    # type is Array/Slice. Methchain lane construct #5 (`obj.items()[0]`):
+    # sourced from HirImpl.method_return_is_array, consumed in
+    # method_calls_literals.spl's Unresolved arm to register the call result
+    # local into runtime_array_locals so a chained `[idx]` indexes through the
+    # runtime array path instead of misreading the raw boxed handle.
+    struct_method_return_is_array: Dict<text, bool>
+    # "{enum NAME}::{variant name}" -> the struct NAME held by that variant's
+    # SINGLE-field payload, when it was constructed from a value already known
+    # to be that struct (see struct_value_syms.get(payload_local.id) at the
+    # construction site in lower_enum_construct_named/lower_enum_lit). Mirrors
+    # struct_method_return_names's role for method-call results: `case
+    # Ok(p): print(p.y)` / `case Circle(p): print(p.y)` binds `p` to the raw
+    # i64 payload word via rt_enum_payload with no HIR type info at all (enum
+    # payloads are untyped generic i64 slots at this layer), so
+    # resolve_field_index's struct_value_syms fallback found nothing and
+    # silently defaulted `p.y` to field 0. Consumed in lower_enum_match's
+    # single-payload bind arm to register struct_value_syms for the bound
+    # local, keyed by the SAME enum_name/variant this map was written under
+    # at construction time.
+    enum_payload_struct_names: Dict<text, text>
+    # "{enum}::{variant}::{slot}" -> true for tuple-payload slots observed
+    # TEXT at the construction site (multi-field retag, agent_enumslots).
+    enum_tuple_text_slots: Dict<text, bool>
+    # MIR local ID -> true, for locals holding a runtime array value. Explicit
+    # id-keyed set (mirrors struct_value_syms) because the native flat-bridge
+    # path does not reliably thread the local's Array/Slice MIR type, so the
+    # type-based local_is_runtime_array scan returns false for `xs`.
+    runtime_array_locals: Dict<i64, bool>
+    # id-keyed set of locals that hold a runtime dict handle (rt_dict_new).
+    # Mirrors runtime_array_locals: dict handles are tagged i64 values, not raw
+    # element pointers, so `d[k]` reads must route to rt_dict_get instead of a
+    # raw getelementptr. The flat-bridge path does not thread a Dict MIR type,
+    # so this id-keyed tag is authoritative.
+    runtime_dict_locals: Dict<i64, bool>
+    # Container local id (array OR dict) -> the f64/f32 element MIR type
+    # observed at a store (`d[k] = 0.1`, `a.push(0.1)`, `a[i] = 0.1`). An
+    # empty `{}`/`[]` literal fixes the declared element type at the i64
+    # default and stores never retype the local, so without this the read
+    # side decodes the heap-boxed float via the integer `>>3` arm and leaks
+    # the box POINTER as an int (`var d = {}; d["k"] = 0.1; d["k"]` printed
+    # 13668775811778). Reads consult this map only when their statically
+    # resolved element type is the erased i64 default. Reset wherever
+    # runtime_dict_locals is reset (same local-id-collision lifecycle).
+    runtime_elem_value_type: Dict<i64, MirType>
+    # MIR local ID of an ARRAY value -> the struct NAME of its elements, when
+    # every element's struct name was known at literal-build time (see
+    # lower_array_lit in method_calls_literals.spl). Bug (array-of-structs
+    # field misread): `pts[i].y` on `[Point(x:1,y:2), Point(x:3,y:4)]` always
+    # read field 0 (x) no matter which field name was requested -- reading an
+    # array element has no HIR type annotation (same erased-type gap as
+    # struct_value_syms elsewhere) AND no existing mechanism registered the
+    # DECODED element local's struct name in struct_value_syms either, so
+    # resolve_field_index's fallback chain found nothing and defaulted to
+    # index 0. This map lets the Index case (expr_dispatch.spl) look up the
+    # ARRAY's element struct name by the array's own local id and register it
+    # on the decoded per-element result, mirroring struct_field_type_name's
+    # existing role for nested single-struct field chains.
+    array_element_struct_syms: Dict<i64, text>
+    # MIR locals whose i64 bits already use the tagged RuntimeValue ABI.
+    runtime_value_local_ids: [i64]
+    # MIR locals that hold the canonical Option enum handle (enum id 1).
+    # Kept separate from runtime_value_locals so other enum/boxed handles are
+    # never mistaken for Option and an existing Option is not double-wrapped.
+    option_value_locals: Dict<i64, bool>
+    # Raw nil locals (0) that become tagged RuntimeValue nil (3) at collection boundaries.
+    nil_locals: Dict<i64, bool>
+    # Enum NAME -> ordered variant names. The variant's index is its runtime
+    # discriminant (rt_enum_new / rt_enum_check_discriminant). Name-keyed for the
+    # same symbol_id_value(-1) interpreter landmine as struct_field_order.
+    enum_variant_index: Dict<text, [text]>
+    # Enum NAME -> runtime discriminants, parallel to enum_variant_index.
+    enum_variant_discriminants: Dict<text, [i64]>
+    # Active-module enum name -> runtime ID, plus a shared collision registry.
+    enum_runtime_id_index: Dict<text, i64>
+    enum_runtime_id_names: Dict<text, text>
+    # Let-symbol id -> the bound Lambda HirExpr, for `val f = \x: ...` bindings.
+    # Direct calls `f(args)` are inlined by beta-reduction at the call site
+    # (lambda-lift). Capturing-by-read works incidentally because the body is
+    # lowered in the enclosing scope; lambdas used as first-class values
+    # (passed/stored, not directly called) are a known gap.
+    lambda_bindings: Dict<i64, HirExpr>
+    # Let-symbol id -> a snapshot of `local_map` taken at the exact moment the
+    # lambda was bound (`val f = \x: ...`). Oracle semantics for a capturing
+    # lambda are by-VALUE capture: mutating the captured variable after the
+    # `val f = ...` binding must not change what `f` sees. try_inline_lambda_call
+    # swaps this snapshot in for the duration of the beta-reduced body lowering
+    # so free-variable references resolve to their bind-time LocalId, not the
+    # live (possibly SSA-reassigned) one.
+    lambda_capture_snapshot: Dict<i64, Dict<i64, LocalId>>
+    current_has_vhdl_metadata: bool
+    # Normalized @gpu target while lowering one function body.
+    current_gpu_kernel_target: text
+    # True while lowering the body of a function declared `-> bool`.
+    # lower_return_expr needs the DECLARED return type to put a bare `.?`
+    # in bool position, and resolved_call_hir_return_type only answers for
+    # symbols present in the symbol table -- it returns nil for locally
+    # lowered functions, which silently skipped the coercion. lower_function
+    # has fn_.return_type in hand, so it records the answer here instead.
+    current_fn_returns_bool: bool
+    # Compilation-wide identity for named types. HIR SymbolIds are local to
+    # each module, so cross-module Struct/Enum references need one shared key.
+    canonical_type_symbols: Dict<text, i64>
+    next_canonical_type_symbol: i64
+    # mutglobal2 lane (module-level `var`/`val` mutation end-to-end, see
+    # scratchpad/mutglobal_plan.md + scratchpad/mutglobal2 report). Module
+    # symbol id -> true, for EVERY module-level binding (`var` OR `val`).
+    # Populated once per module (function_lowering.spl's `lower_const`,
+    # called from module_lowering.spl's `lower_module` BEFORE any function
+    # body is lowered -- see the reordering there). i64-keyed bool set
+    # (mirrors `runtime_array_locals`/`nil_locals` above) deliberately, NOT
+    # `Dict<SymbolId, MirType>`/`Dict<SymbolId, MirConstant>`: this file's own
+    # `struct_value_syms`/`bitfield_map` comments already document the
+    # symbol-id-vs-struct-key interpreter landmine, and empirically a
+    # `Dict<i64, MirType>` struct FIELD (as opposed to a local var or a
+    # function parameter of type MirType, both of which are used all over
+    # this compiler already) made the seed interpreter's struct-literal
+    # construction silently leave the field as `Value::Nil` instead of an
+    # empty dict (`MirLowering(..., global_static_ids: {}, ...)` failed at
+    # the first `self.global_static_ids[id] = ...` with "cannot index assign
+    # to field `global_static_ids` of type nil" even though the field WAS
+    # present in the constructor call) -- a plain bool-set sidesteps that
+    # entirely (proven pattern, several other bool-set fields already exist
+    # on this exact struct). The actual MirStatic/MirConstant data for a
+    # member of this set is fetched on demand from the already-populated
+    # `self.builder.module.statics`/`.constants` (Dict<SymbolId, ...>) by
+    # VALUE iteration (`.values()`), matching on `.symbol.id` -- iterating a
+    # dict's values list does not hit the struct-key lookup landmine, only
+    # constructing a fresh key to probe `.has()`/`[]` on that dict would.
+    # Consulted by expr_dispatch.spl's NamedVar/Var read hook (to emit
+    # `LoadGlobal`/inline a `Const` instead of erroring) and
+    # mir_lowering_stmts.spl's `lower_assign_var` write hook (to emit
+    # `StoreGlobal` for the mutable subset).
+    global_symbol_ids: Dict<i64, bool>
+    # array_global_2026-07-25: companion map, symbol id -> the module-level
+    # `val`/`var` binding's ORIGINAL HIR initializer expression. Populated
+    # alongside `global_symbol_ids` (see `lower_const`, function_lowering.spl).
+    # Consulted only as a fallback by `try_lower_global_read` (expr_dispatch.spl)
+    # for an immutable `val` whose folded MIR constant is a COMPOUND value
+    # (Array/Tuple/Struct/...): neither `emit_const` (only renders a scalar
+    # LLVM literal -- inlining a compound value through it produced a bad
+    # LLVM constant and crashed at runtime, confirmed empirically with
+    # `val SIZES = [10,20,30]`) nor real `MirModule.statics` storage (the
+    # cranelift backend's `declare_module_statics` only accepts scalar
+    # Int/Bool/Zero inits, and the module-init-constructor auto-call wiring
+    # that could otherwise runtime-construct+StoreGlobal it only exists for
+    # the LLVM/C backends -- see `llvm_native_link.spl`) can represent it.
+    # Instead, re-lower the ORIGINAL initializer expression fresh at each
+    # reference site (`self.lower_expr(hir_expr)`), exactly as if the
+    # literal had been written inline at the use site (already proven to
+    # work). Safe because the binding is immutable: every reference
+    # constructs an equal, independent value. i64-keyed (not
+    # `Dict<SymbolId, ...>`) deliberately, matching `global_symbol_ids` --
+    # see its doc comment for the struct-keyed-dict interpreter lookup
+    # landmine this sidesteps.
+    global_const_exprs: Dict<i64, HirExpr>
+    # Bug cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26:
+    # dedupe set for `report_mutable_array_global` (expr_dispatch.spl) so the
+    # "mutable array global has no backing static" diagnostic is emitted once
+    # per symbol instead of once per reference site.
+    array_global_mutation_warned: Dict<i64, bool>
+    target_context: MirTargetContext
+
+impl MirLowering:
+    me bind_local(symbol_id: i64, local: LocalId):
+        if symbol_id < 0 or local.id < 0:
+            return
+        var ids = self.local_symbol_ids
+        var values = self.local_symbol_values
+        var i = 0
+        while i < ids.len():
+            if ids[i] == symbol_id:
+                values[i] = local
+                self.local_symbol_values = values
+                return
+            i = i + 1
+        ids.push(symbol_id)
+        values.push(local)
+        self.local_symbol_ids = ids
+        self.local_symbol_values = values
+
+    fn find_local(symbol_id: i64) -> LocalId:
+        var i = self.local_symbol_ids.len() - 1
+        while i >= 0:
+            if self.local_symbol_ids[i] == symbol_id:
+                return self.local_symbol_values[i]
+            i = i - 1
+        LocalId(id: -1)
+
+    me remember_local_hir_type(local_id: i64, type_: HirType):
+        var ids = self.local_hir_type_ids
+        var values = self.local_hir_type_values
+        var i = 0
+        while i < ids.len():
+            if ids[i] == local_id:
+                values[i] = type_
+                self.local_hir_type_values = values
+                return
+            i = i + 1
+        ids.push(local_id)
+        values.push(type_)
+        self.local_hir_type_ids = ids
+        self.local_hir_type_values = values
+
+    fn find_local_hir_type(local_id: i64) -> HirType?:
+        var i = self.local_hir_type_ids.len() - 1
+        while i >= 0:
+            if self.local_hir_type_ids[i] == local_id:
+                return Some(self.local_hir_type_values[i])
+            i = i - 1
+        nil
+
+    me forget_local_hir_type(local_id: i64):
+        var ids: [i64] = []
+        var values: [HirType] = []
+        var i = 0
+        while i < self.local_hir_type_ids.len():
+            if self.local_hir_type_ids[i] != local_id:
+                ids.push(self.local_hir_type_ids[i])
+                values.push(self.local_hir_type_values[i])
+            i = i + 1
+        self.local_hir_type_ids = ids
+        self.local_hir_type_values = values
+
+    me mark_runtime_value_local(local_id: i64):
+        if self.is_runtime_value_local(local_id):
+            return
+        var ids = self.runtime_value_local_ids
+        ids.push(local_id)
+        self.runtime_value_local_ids = ids
+
+    fn is_runtime_value_local(local_id: i64) -> bool:
+        var i = self.runtime_value_local_ids.len() - 1
+        while i >= 0:
+            if self.runtime_value_local_ids[i] == local_id:
+                return true
+            i = i - 1
+        false
+
+    me unmark_runtime_value_local(local_id: i64):
+        var ids: [i64] = []
+        for id in self.runtime_value_local_ids:
+            if id != local_id:
+                ids.push(id)
+        self.runtime_value_local_ids = ids
+
+struct MirError:
+    """MIR lowering error.
+
+    `fatal` is the call site's own declaration that this error must abort the
+    build before codegen. It exists so that fatality is a property the site
+    states explicitly, instead of being re-derived in 80.driver by matching the
+    message text against a prefix allowlist (`_mir_error_is_fatal`). Message
+    text is a display concern; when it was also the control-flow signal, any
+    reworded diagnostic silently changed build semantics -- e.g. the site that
+    emits "unsupported Result {operation} payload type" was fatal for `unwrap`
+    and fail-open for `unwrap_err`, purely because `_err` broke `starts_with`.
+
+    Set it with `self.error_fatal(...)` rather than `self.error(...)`. Sites
+    that record a genuinely advisory diagnostic keep using `self.error(...)`.
+    """
+    message: text
+    span: Span?
+    fatal: bool
+
+# ============================================================================
+# Exports
+# ============================================================================

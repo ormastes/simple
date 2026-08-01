@@ -1,0 +1,66 @@
+use std.io_runtime.{file_read, process_run}
+use std.spec.*
+
+val SHELL_OPEN = "$" + "{"
+
+describe "macOS GUI strict launcher contract":
+
+    it "has no caller-authored host-neutral admission bypass":
+        val launcher = file_read("scripts/gui/macos-gui-run.shs")
+        expect(launcher.contains("SIMPLE_GUI_STRICT_CONTRACT_PROBE")).to_equal(false)
+        expect(launcher.contains("SIMPLE_GUI_STRICT_PROBE_ADMISSION_PATH")).to_equal(false)
+        expect(launcher).to_contain("selected binary changed during bundle copy")
+        expect(launcher).to_contain("bundled binary hash differs from selected binary")
+        expect(launcher.contains("assert_no_simple_seed_descendant")).to_equal(false)
+        expect(launcher.contains("*/bootstrap/*")).to_equal(false)
+        expect(launcher).to_contain("strict_admitted_gui_driver")
+
+    it "records strict binary and process identities in a versioned receipt":
+        val launcher = file_read("scripts/gui/macos-gui-run.shs")
+        expect(launcher).to_contain("SIMPLE_NO_BOOTSTRAP_DELEGATE")
+        expect(launcher).to_contain(
+            "no_bootstrap_delegate=\"" + SHELL_OPEN +
+                "SIMPLE_NO_BOOTSTRAP_DELEGATE:-0}\""
+        )
+        expect(launcher).to_contain("schema=macos_gui_run_pid_receipt_v3")
+        expect(launcher).to_contain("selected_binary_hash")
+        expect(launcher).to_contain("bundled_binary_hash")
+        expect(launcher).to_contain("trusted_manifest_hash")
+        expect(launcher).to_contain("trusted_gui_driver_source_kind")
+        expect(launcher).to_contain("trusted_gui_driver_sha256")
+        expect(launcher).to_contain("launcher_executable")
+        expect(launcher).to_contain("window_owner_executable")
+
+    it "requires real manifest admission in strict launch mode":
+        val launcher = file_read("scripts/gui/macos-gui-run.shs")
+        expect(launcher).to_contain(
+            "scripts/check/lib/macos-gpu-trusted-build-admission.shs"
+        )
+        expect(launcher).to_contain("macos_gpu_full_cli_gui_admit")
+        expect(launcher).to_contain(
+            "build/bootstrap/full/$platform/provenance/gui-driver.env"
+        )
+        expect(launcher).to_contain("SIMPLE_GUI_TRUSTED_MANIFEST_PATH")
+        expect(launcher).to_contain(
+            "[[ \"$override_candidate\" = \"$strict_admitted_gui_driver\" ]]"
+        )
+        expect(launcher).to_contain(
+            "\"$strict_admitted_gui_driver_hash\""
+        )
+        expect(launcher).to_contain(
+            "MACOS_GPU_ADMISSION_GUI_DRIVER_SHA256"
+        )
+        expect(launcher).to_contain(
+            "MACOS_GPU_ADMISSION_MANIFEST_SHA256"
+        )
+        expect(launcher).to_contain(
+            "assert_strict_admitted_inputs_unchanged"
+        )
+
+    it "fails closed on a host without bypassing canonical admission":
+        val command = "SIMPLE_GUI_STRICT_EVIDENCE=1 " +
+            "SIMPLE_NO_BOOTSTRAP_DELEGATE=1 SIMPLE_GUI_BINARY=/usr/bin/env " +
+            "bash scripts/gui/macos-gui-run.shs"
+        val (_out, _err, code) = process_run("/bin/sh", ["-c", command])
+        expect(code).to_equal(1)
+end

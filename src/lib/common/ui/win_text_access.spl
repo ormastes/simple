@@ -1,0 +1,307 @@
+# Common window-to-text access model.
+#
+# Normalizes TRACE32 text windows, Simple UI access snapshots, and host WM
+# top-level windows into one in-memory snapshot/query/action core.
+
+use common.ui.access_types.{
+    UiAccessProp,
+    UiAccessNode,
+    UiAccessSurface,
+    UiAccessEvent,
+    UiAccessSnapshot,
+    ui_access_canonical_id
+}
+use common.ui.access_query.{ui_access_find_nodes, ui_access_find_node}
+use common.hash.djb2.{djb2_hash_text}
+
+val WIN_TEXT_SOURCE_TRACE32 = "trace32"
+val WIN_TEXT_SOURCE_SIMPLE_UI = "simple_ui"
+val WIN_TEXT_SOURCE_HOST_WM = "host_wm"
+val WIN_TEXT_SOURCE_COMPOSITOR = "compositor"
+
+val WIN_TEXT_CONFIDENCE_HIGH = "high"
+val WIN_TEXT_CONFIDENCE_MEDIUM = "medium"
+val WIN_TEXT_CONFIDENCE_LOW = "low"
+
+val WIN_TEXT_ACTION_UNSUPPORTED = "unsupported_operation"
+val WIN_TEXT_ACTION_TARGET_NOT_FOUND = "target_not_found"
+
+pub struct WinTextSource:
+    source_id: text
+    source_kind: text
+    confidence: text
+    capabilities: [text]
+    captured_at_ms: i64
+    max_age_ms: i64
+    stale: bool
+
+pub struct WinTextSnapshot:
+    access: UiAccessSnapshot
+    sources: [WinTextSource]
+
+pub struct WinTextActionRequest:
+    target_id: text
+    action: text
+    text_value: text
+    x: i64
+    y: i64
+
+pub struct WinTextActionResult:
+    ok: bool
+    code: text
+    message: text
+    source_id: text
+    target_id: text
+    action: text
+
+pub fn win_text_source(source_id: text, source_kind: text, confidence: text, capabilities: [text], captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSource:
+    WinTextSource(
+        source_id: source_id,
+        source_kind: source_kind,
+        confidence: confidence,
+        capabilities: capabilities,
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        stale: win_text_is_stale(captured_at_ms: captured_at_ms, max_age_ms: max_age_ms, now_ms: now_ms)
+    )
+
+pub fn win_text_is_stale(captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> bool:
+    if max_age_ms <= 0:
+        return false
+    if captured_at_ms <= 0:
+        return true
+    now_ms - captured_at_ms > max_age_ms
+
+pub fn win_text_trace32_snapshot(window_key: text, title: text, open_command: text, capture_command: text, capture_mode: text, captured_text: text, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val surface_id = "trace32:{window_key}"
+    val source = win_text_source(
+        source_id: "trace32",
+        source_kind: "remote_semantic",
+        confidence: "high",
+        capabilities: ["open", "capture", "query_text", "act_catalog"],
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+    val surface = UiAccessSurface(
+        surface_id: surface_id,
+        title: title,
+        active: false,
+        window_id: window_key,
+        app_id: "trace32",
+        root_canonical_id: ui_access_canonical_id(surface_id, "root")
+    )
+    var nodes: [UiAccessNode] = []
+    nodes = nodes.push(win_text_make_node(surface_id: surface_id, widget_id: "root", kind: "trace32_window", text_value: title, action_names: ["open", "capture"], props: [
+        UiAccessProp(key: "source", value: "trace32"),
+        UiAccessProp(key: "open_command", value: open_command),
+        UiAccessProp(key: "capture_command", value: capture_command),
+        UiAccessProp(key: "capture_mode", value: capture_mode)
+    ]))
+    val lines = captured_text.split("\n")
+    var i = 0
+    for line in lines:
+        if line != "":
+            val widget_id = "line_{i}"
+            nodes = nodes.push(win_text_make_node(surface_id: surface_id, widget_id: widget_id, kind: "text", text_value: line, action_names: [], props: [
+                UiAccessProp(key: "source", value: "trace32"),
+                UiAccessProp(key: "line", value: "{i}")
+            ]))
+        i = i + 1
+    win_text_snapshot_from_parts(mode: "trace32", active_surface: surface_id, surfaces: [surface], nodes: nodes, sources: [source])
+
+pub fn win_text_simple_ui_snapshot(snapshot: UiAccessSnapshot, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val source = win_text_source(
+        source_id: "simple_ui",
+        source_kind: "in_process_semantic",
+        confidence: "high",
+        capabilities: ["query_text", "act_node", "value_read", "value_write"],
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+    WinTextSnapshot(access: snapshot, sources: [source])
+
+pub fn win_text_host_wm_single_window_snapshot(window_id: text, target_id: text, title: text, url: text, x: i64, y: i64, width: i64, height: i64, focused: bool, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val generation = djb2_hash_text(window_id + "\n" + target_id + "\n" + title + "\n" + url + "\n" + x.to_text() + "," + y.to_text() + " " + width.to_text() + "x" + height.to_text()).to_text()
+    val source = win_text_source(
+        source_id: "host_wm",
+        source_kind: "top_level_wm",
+        confidence: "medium",
+        capabilities: ["list", "focus", "type_text"],
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+    var surfaces: [UiAccessSurface] = []
+    var nodes: [UiAccessNode] = []
+    val surface_id = "wm:{window_id}"
+    surfaces = surfaces.push(UiAccessSurface(
+        surface_id: surface_id,
+        title: title,
+        active: focused,
+        window_id: window_id,
+        app_id: "host_wm",
+        root_canonical_id: ui_access_canonical_id(surface_id, "root")
+    ))
+    nodes = nodes.push(UiAccessNode(
+        canonical_id: ui_access_canonical_id(surface_id, "root"),
+        surface_id: surface_id,
+        widget_id: "root",
+        kind: "host_window",
+        visible: true,
+        focused: focused,
+        enabled: true,
+        selected: false,
+        text_value: title,
+        props: [
+            UiAccessProp(key: "source", value: "host_wm"),
+            UiAccessProp(key: "surface_kind", value: "host_window"),
+            UiAccessProp(key: "target_id", value: target_id),
+            UiAccessProp(key: "generation", value: generation),
+            UiAccessProp(key: "url", value: url),
+            UiAccessProp(key: "x", value: "{x}"),
+            UiAccessProp(key: "y", value: "{y}"),
+            UiAccessProp(key: "width", value: "{width}"),
+            UiAccessProp(key: "height", value: "{height}"),
+            UiAccessProp(key: "captured_at", value: captured_at_ms.to_text()),
+            UiAccessProp(key: "stale", value: if source.stale: "true" else: "false")
+        ],
+        child_ids: [],
+        action_names: ["focus", "type_text"]
+    ))
+    val active_surface = if focused: surface_id else: ""
+    win_text_snapshot_from_parts(mode: "host_wm", active_surface: active_surface, surfaces: surfaces, nodes: nodes, sources: [source])
+
+pub fn win_text_snapshot_from_parts(mode: text, active_surface: text, surfaces: [UiAccessSurface], nodes: [UiAccessNode], sources: [WinTextSource]) -> WinTextSnapshot:
+    WinTextSnapshot(
+        access: UiAccessSnapshot(
+            protocol_version: 1,
+            snapshot_revision: 0,
+            mode: mode,
+            active_surface: active_surface,
+            surfaces: surfaces,
+            nodes: nodes,
+            recent_events: []
+        ),
+        sources: sources
+    )
+
+pub fn win_text_make_node(surface_id: text, widget_id: text, kind: text, text_value: text, action_names: [text], props: [UiAccessProp]) -> UiAccessNode:
+    UiAccessNode(
+        canonical_id: ui_access_canonical_id(surface_id, widget_id),
+        surface_id: surface_id,
+        widget_id: widget_id,
+        kind: kind,
+        visible: true,
+        focused: false,
+        enabled: true,
+        selected: false,
+        text_value: text_value,
+        props: props,
+        child_ids: [],
+        action_names: action_names
+    )
+
+pub fn win_text_find_nodes(snapshot: WinTextSnapshot, surface_id: text, kind: text, text_query: text, limit: i32) -> [UiAccessNode]:
+    ui_access_find_nodes(snapshot.access, surface_id, kind, text_query, limit)
+
+pub fn win_text_route_action(snapshot: WinTextSnapshot, request: WinTextActionRequest) -> WinTextActionResult:
+    val node = ui_access_find_node(snapshot.access, request.target_id)
+    if node == nil:
+        return win_text_action_result(ok: false, code: "target_not_found", message: "target not found", source_id: "", target_id: request.target_id, action: request.action)
+    val resolved = if request.action == "": win_text_default_action(node) else: request.action
+    if not win_text_node_supports_action(node, resolved):
+        return win_text_action_result(ok: false, code: "unsupported_operation", message: "unsupported action '{resolved}' for {node.kind}", source_id: win_text_node_source(node), target_id: request.target_id, action: resolved)
+    win_text_action_result(ok: true, code: "ok", message: "routed action '{resolved}'", source_id: win_text_node_source(node), target_id: request.target_id, action: resolved)
+
+pub fn win_text_default_action(node: UiAccessNode) -> text:
+    if node.action_names.len() > 0:
+        return node.action_names[0]
+    ""
+
+pub fn win_text_node_supports_action(node: UiAccessNode, action: text) -> bool:
+    if action == "":
+        return false
+    for name in node.action_names:
+        if name == action:
+            return true
+    false
+
+pub fn win_text_node_source(node: UiAccessNode) -> text:
+    for prop in node.props:
+        if prop.key == "source":
+            return prop.value
+    ""
+
+pub fn win_text_action_result(ok: bool, code: text, message: text, source_id: text, target_id: text, action: text) -> WinTextActionResult:
+    WinTextActionResult(
+        ok: ok,
+        code: code,
+        message: message,
+        source_id: source_id,
+        target_id: target_id,
+        action: action
+    )
+
+pub fn win_text_merge_snapshots(mode: text, snapshots: [WinTextSnapshot]) -> WinTextSnapshot:
+    var surfaces: [UiAccessSurface] = []
+    var nodes: [UiAccessNode] = []
+    var sources: [WinTextSource] = []
+    for snapshot in snapshots:
+        for surface in snapshot.access.surfaces:
+            surfaces = surfaces.push(surface)
+        for node in snapshot.access.nodes:
+            nodes = nodes.push(node)
+        for source in snapshot.sources:
+            sources = sources.push(source)
+    var active_surface = ""
+    for surface in surfaces:
+        if active_surface == "" and surface.active:
+            active_surface = surface.surface_id
+    win_text_snapshot_from_parts(mode: mode, active_surface: active_surface, surfaces: surfaces, nodes: nodes, sources: sources)
+
+pub struct GttiSurface:
+    window_id: text
+    title: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+    visible: bool
+    focused: bool
+    app_id: text
+
+pub fn win_text_compositor_snapshot(gtti_surfaces: [GttiSurface], wm_mode: text, captured_at_ms: i64, max_age_ms: i64, now_ms: i64) -> WinTextSnapshot:
+    val source = win_text_source(
+        source_id: "compositor",
+        source_kind: "simpleos_compositor",
+        confidence: "high",
+        capabilities: ["list", "focus", "query_text", "screenshot"],
+        captured_at_ms: captured_at_ms,
+        max_age_ms: max_age_ms,
+        now_ms: now_ms
+    )
+    var surfaces: [UiAccessSurface] = []
+    var nodes: [UiAccessNode] = []
+    for gs in gtti_surfaces:
+        val surface_id = "compositor:{gs.window_id}"
+        surfaces = surfaces.push(UiAccessSurface(
+            surface_id: surface_id,
+            title: gs.title,
+            active: gs.focused,
+            window_id: gs.window_id,
+            app_id: if gs.app_id != "": gs.app_id else: "compositor",
+            root_canonical_id: ui_access_canonical_id(surface_id, "root")
+        ))
+        nodes = nodes.push(win_text_make_node(surface_id: surface_id, widget_id: "root", kind: "compositor_window", text_value: gs.title, action_names: ["focus", "screenshot"], props: [
+            UiAccessProp(key: "source", value: "compositor"),
+            UiAccessProp(key: "wm_mode", value: wm_mode),
+            UiAccessProp(key: "x", value: "{gs.x}"),
+            UiAccessProp(key: "y", value: "{gs.y}"),
+            UiAccessProp(key: "width", value: "{gs.width}"),
+            UiAccessProp(key: "height", value: "{gs.height}"),
+            UiAccessProp(key: "visible", value: if gs.visible: "true" else: "false")
+        ]))
+    val active_surface = if surfaces.len() > 0: surfaces[0].surface_id else: ""
+    win_text_snapshot_from_parts(mode: "compositor", active_surface: active_surface, surfaces: surfaces, nodes: nodes, sources: [source])

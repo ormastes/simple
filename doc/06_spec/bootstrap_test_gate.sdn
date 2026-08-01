@@ -1,0 +1,199 @@
+# Bootstrap Pipeline Test Gate
+# Feature Request: Prevent silent bootstrap failures through staged verification gates
+# Date: 2026-03-24
+
+feature:
+  title: "Bootstrap Pipeline Test Gate"
+  status: proposed
+  priority: critical
+  category: Infrastructure
+  date: 2026-03-24
+  author: "Bootstrap hardening initiative"
+
+problem:
+  summary: "The bootstrap pipeline has no verification between stages, allowing broken binaries to propagate silently"
+  incident: """
+    The Rust seed successfully built bootstrap_main.spl, but the full main.spl binary
+    segfaulted with 5468 unresolved stubs. No test verified the built binary actually
+    worked. The remote JIT exec module had 12 bugs (diff markers, missing classes,
+    wrong imports, zero-capacity memory maps) that were invisible because no tests ran
+    between build stages.
+  """
+  impact: """
+    Broken binaries propagate through the pipeline undetected. Developers discover
+    failures only at the final stage (hardware test or manual run), wasting hours of
+    debugging time. Root causes are obscured because the failure point is far from
+    the introduction point.
+  """
+
+  failure_timeline:
+    - stage: "Rust seed builds bootstrap binary (bootstrap_main.spl)"
+      result: "Success"
+    - stage: "Rust seed builds full binary (main.spl)"
+      result: "Segfault - 5468 unresolved stubs"
+    - stage: "No smoke test on built binary"
+      result: "Failure undetected"
+    - stage: "Remote JIT exec module has 12 bugs"
+      result: "Invisible - no host-side tests ran"
+
+requirements:
+  - id: "REQ-001"
+    title: "Binary smoke test after each native-build stage"
+    priority: critical
+    description: """
+      After each native-build stage completes, the pipeline runs a smoke test on
+      the produced binary before proceeding to the next stage. The smoke test
+      verifies the binary is not corrupted, can initialize its runtime, and can
+      perform basic operations.
+    """
+    acceptance_criteria:
+      - "Binary executes --version without segfault and returns exit code 0"
+      - "Binary can parse a trivial .spl file (e.g., 'val x = 1') without error"
+      - "Binary returns exit code 0 for the trivial parse"
+      - "Smoke test completes in under 5 seconds"
+      - "Failure at any smoke test stage halts the pipeline immediately"
+      - "Error message identifies which stage produced the broken binary"
+    test_file: "val x = 1\nprint(x)"
+    stages_covered:
+      - "Stage 2: Rust seed compiles Simple compiler (bootstrap_main.spl)"
+      - "Stage 3: Simple compiler self-hosts (main.spl)"
+      - "Any future intermediate stages"
+
+  - id: "REQ-002"
+    title: "Stub count regression gate"
+    priority: high
+    description: """
+      Track the number of unresolved stubs per build stage. The pipeline records
+      the stub count after each compilation and compares it against a stored
+      baseline. If the stub count increases beyond a configurable threshold, the
+      build fails. The baseline decreases over time as stubs are resolved.
+    """
+    acceptance_criteria:
+      - "Stub count is extracted from compiler output after each native-build"
+      - "Baseline file (build/bootstrap/stub_baseline.sdn) stores per-stage counts"
+      - "Build fails if stub count exceeds baseline + threshold (default: 0)"
+      - "Baseline can be updated with --update-stub-baseline flag"
+      - "CI reports show stub count trend over time"
+      - "Warning emitted when stub count is within 10% of threshold"
+    current_baseline:
+      main_spl: 5468
+      bootstrap_main_spl: 0
+    direction: "Stub count must decrease or remain stable over time, never increase"
+
+  - id: "REQ-003"
+    title: "Host-side exec module test gate"
+    priority: high
+    description: """
+      Before running any hardware or QEMU tests, the pipeline runs the full
+      host-side exec module test suite. These tests require no hardware, no
+      emulator, and no special permissions. They catch the majority of bugs
+      (90% in the incident that motivated this feature) at near-zero cost.
+    """
+    acceptance_criteria:
+      - "MemoryMap tests pass: allocation, read/write, bounds checking"
+      - "Allocator tests pass: arena allocator, slab allocator, page allocator"
+      - "Register name tests pass: all target architectures validated"
+      - "Compiler bridge tests pass: compilation, linking, error handling"
+      - "Workload tests pass: load, execute, verify on host"
+      - "All host-side tests complete in under 30 seconds"
+      - "Failure in any host-side test blocks hardware/QEMU test stage"
+    test_categories:
+      - name: "MemoryMap"
+        description: "Virtual memory mapping, allocation, permissions"
+        catches: "Zero-capacity memory maps, invalid page sizes"
+      - name: "Allocator"
+        description: "Memory allocator correctness"
+        catches: "Double-free, use-after-free, fragmentation"
+      - name: "RegisterNames"
+        description: "Target register name resolution"
+        catches: "Wrong register names for target architecture"
+      - name: "CompilerBridge"
+        description: "Host-side compilation and linking"
+        catches: "Return-zero stubs, missing symbols, link errors"
+      - name: "Workload"
+        description: "End-to-end workload execution on host"
+        catches: "Runtime crashes, incorrect output, hangs"
+
+  - id: "REQ-004"
+    title: "Source lint gate before build"
+    priority: high
+    description: """
+      Before any compilation begins, the pipeline runs source-level lint checks
+      that detect common corruption patterns. These checks are fast (pure text
+      analysis) and catch issues that would otherwise produce confusing compiler
+      errors or silent runtime bugs.
+    """
+    acceptance_criteria:
+      - "No diff markers (<<<<<<, ======, >>>>>>) in any .spl source file"
+      - "No leading space corruption (mixed tabs/spaces causing parse errors)"
+      - "No undefined exports (export declarations without matching definitions)"
+      - "No shell imports in lib code (use std.io_runtime not app.io)"
+      - "No zero-capacity memory maps (MemoryMap(capacity: 0) is always a bug)"
+      - "Lint gate runs in under 10 seconds on full source tree"
+      - "Each violation includes file path, line number, and fix suggestion"
+    lint_checks |id, pattern, severity, description|
+      LINT-001, "diff_markers", error, "Git merge conflict markers left in source"
+      LINT-002, "leading_space_corruption", error, "Inconsistent indentation (mixed tabs/spaces)"
+      LINT-003, "undefined_exports", error, "Export without matching definition"
+      LINT-004, "shell_imports_in_lib", warning, "Shell/app imports in library code"
+      LINT-005, "zero_capacity_mmap", error, "MemoryMap with zero capacity"
+
+  - id: "REQ-005"
+    title: "CI integration for all gates"
+    priority: high
+    description: """
+      All four gates (smoke test, stub regression, host-side tests, source lint)
+      are integrated into the CI pipeline and run on every commit. The gates
+      execute in dependency order: lint first, then build with smoke tests,
+      then host-side tests, then hardware/QEMU tests. Each gate must pass
+      before the next begins.
+    """
+    acceptance_criteria:
+      - "CI pipeline includes all four gates in correct order"
+      - "Gate execution order: lint -> build+smoke -> host-side -> hardware/QEMU"
+      - "Each gate produces structured output (exit code + summary)"
+      - "CI dashboard shows per-gate pass/fail status"
+      - "Total gate overhead is under 60 seconds (excluding actual build time)"
+      - "Gates run on every push to main and every PR"
+      - "Gate failures block merge"
+    pipeline_stages:
+      - order: 1
+        name: "source-lint"
+        gate: "REQ-004"
+        timeout: 10s
+        requires: "nothing"
+      - order: 2
+        name: "build-and-smoke"
+        gate: "REQ-001 + REQ-002"
+        timeout: 300s
+        requires: "source-lint"
+      - order: 3
+        name: "host-side-tests"
+        gate: "REQ-003"
+        timeout: 30s
+        requires: "build-and-smoke"
+      - order: 4
+        name: "hardware-qemu-tests"
+        gate: "existing test suite"
+        timeout: 600s
+        requires: "host-side-tests"
+
+implementation_notes:
+  approach: """
+    Implement as a Simple script (src/app/cli/bootstrap_gate.spl) that the CI
+    pipeline calls. Each gate is a function that returns Result<GateReport, Error>.
+    The script runs gates in order, short-circuiting on first failure.
+  """
+  key_files:
+    - "src/app/cli/bootstrap_gate.spl — gate runner entry point"
+    - "src/lib/common/bootstrap/smoke_test.spl — binary smoke test logic"
+    - "src/lib/common/bootstrap/stub_tracker.spl — stub count tracking"
+    - "src/lib/common/bootstrap/source_lint.spl — lint checks"
+    - "build/bootstrap/stub_baseline.sdn — stub count baseline data"
+  estimated_effort: "2-3 days for core gates, 1 day for CI integration"
+
+related_documents:
+  - "doc/feature/remote_jit_exec_hardening.sdn — hardening the exec module itself"
+  - "scripts/bootstrap/bootstrap-from-scratch.sh — current bootstrap script"
+  - "src/app/cli/bootstrap_main.spl — bootstrap entry point"
+  - "src/app/cli/main.spl — full CLI entry point"

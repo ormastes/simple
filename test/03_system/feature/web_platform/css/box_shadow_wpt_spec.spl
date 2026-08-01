@@ -1,0 +1,253 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-003 REQ-WEB-BROWSER-004
+"""# CSS Box Shadow Rendering
+
+Proves admitted outer, multi-outer, and single-inset box shadows through the
+existing web semantic/layout owner, Draw IR metadata, and Engine2D pixels.
+Mixed inset/outer stacks, multiple inset layers, and full filter-equivalent
+blur remain outside this bounded profile.
+"""
+
+use std.spec.*
+
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir
+}
+use common.ui.draw_ir.{DrawIrCommand, DrawIrComposition}
+use common.ui.web_render_api.{
+    WEB_RENDER_ENGINE2D_STATUS_RENDERED,
+    WEB_RENDER_TARGET_PURE_SIMPLE,
+    web_render_adapter_request
+}
+use std.gc_async_mut.ui.web_render_pixel_backend.{
+    web_render_draw_ir_request_to_pixel_artifact
+}
+
+val WIDTH: i32 = 40
+val HEIGHT: i32 = 30
+
+fn _command_by_id(
+    commands: [DrawIrCommand], component_id: text
+) -> DrawIrCommand:
+    for command in commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing Draw IR command: {component_id}")
+    commands[0]
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing Draw IR computed style: {key}")
+    ""
+
+fn _shadow_html(shadow: text, color: text) -> text:
+    (
+        "<html><head><style>html,body{margin:0;background:#fff}" +
+        "#panel{width:8px;height:6px;background:#fff;color:" + color +
+        ";box-shadow:" + shadow + "}</style></head>" +
+        "<body><div id='panel'></div></body></html>"
+    )
+
+fn _expect_web_layout(html: text):
+    expect(simple_web_layout_debug_style_by_id(
+        html, "panel", "display"
+    )).to_equal("block")
+    expect(simple_web_layout_debug_layout_by_id(
+        html, WIDTH, HEIGHT, "panel", "w"
+    )).to_equal("8")
+    expect(simple_web_layout_debug_layout_by_id(
+        html, WIDTH, HEIGHT, "panel", "h"
+    )).to_equal("6")
+
+fn _draw_ir_panel(
+    composition: DrawIrComposition,
+    raw_shadow: text, layer_count: text
+) -> DrawIrCommand:
+    val panel = _command_by_id(
+        composition.batches[0].commands, "panel"
+    )
+    expect(panel.x).to_equal(0)
+    expect(panel.y).to_equal(0)
+    expect(panel.width).to_equal(8)
+    expect(panel.height).to_equal(6)
+    expect(_style_value(panel, "box-shadow-raw")).to_equal(raw_shadow)
+    expect(_style_value(
+        panel, "box-shadow-layer-count"
+    )).to_equal(layer_count)
+    panel
+
+fn _shadow_composition(html: text) -> DrawIrComposition:
+    simple_web_layout_render_html_draw_ir(html, WIDTH, HEIGHT)
+
+fn _pixels(html: text, composition: DrawIrComposition) -> [u32]:
+    val request = web_render_adapter_request(
+        WEB_RENDER_TARGET_PURE_SIMPLE,
+        "css-box-shadow",
+        "CSS box shadow",
+        html,
+        "",
+        "",
+        WIDTH,
+        HEIGHT
+    ).with_pixel_output()
+    val artifact = web_render_draw_ir_request_to_pixel_artifact(
+        request, composition, "cpu"
+    )
+    expect(artifact.engine2d_status).to_equal(
+        WEB_RENDER_ENGINE2D_STATUS_RENDERED
+    )
+    artifact.pixels
+
+describe "REQ-WEB-BROWSER-003/004: CSS box-shadow lowering":
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should paint an offset outer shadow behind the border box":
+        val shadow = "4px 3px 0 #16a34a"
+        val html = _shadow_html(shadow, "#111827")
+
+        step("Resolve the shadowed box in canonical web semantic and layout state")
+        _expect_web_layout(html)
+
+        step("Render HTML and CSS through canonical Draw IR")
+        val composition = _shadow_composition(html)
+        _draw_ir_panel(composition, shadow, "1")
+
+        step("Read exact outer-shadow ordering pixels through Engine2D")
+        val pixels = _pixels(html, composition)
+        expect(pixels[10 + 4 * WIDTH]).to_equal(0xFF16A34Au32)
+        expect(pixels[2 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
+        expect(pixels[14 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should preserve blur and spread length order":
+        val blur_shadow = "0px 0px 2px #dc2626"
+        val spread_shadow = "0px 0px 0px 2px #2563eb"
+        val blur_html = _shadow_html(blur_shadow, "#111827")
+        val spread_html = _shadow_html(spread_shadow, "#111827")
+
+        step("Resolve blur and spread boxes in canonical web semantic and layout state")
+        _expect_web_layout(blur_html)
+        _expect_web_layout(spread_html)
+
+        step("Render HTML and CSS through canonical Draw IR")
+        val blur_composition = _shadow_composition(blur_html)
+        val spread_composition = _shadow_composition(spread_html)
+        val blur_panel = _draw_ir_panel(
+            blur_composition, blur_shadow, "1"
+        )
+        val spread_panel = _draw_ir_panel(
+            spread_composition, spread_shadow, "1"
+        )
+        expect(_style_value(
+            blur_panel, "box-shadow-blur-radius"
+        )).to_equal("2")
+        expect(_style_value(
+            spread_panel, "box-shadow-blur-radius"
+        )).to_equal("0")
+
+        step("Read exact blur and spread coverage pixels through Engine2D")
+        expect(_pixels(
+            blur_html, blur_composition
+        )[9 + WIDTH]).to_equal(0xFFDC2626u32)
+        expect(_pixels(
+            spread_html, spread_composition
+        )[9 + WIDTH]).to_equal(0xFF2563EBu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should resolve admitted shadow color syntaxes before Draw IR":
+        val rgb_shadow = "0px 0px 0px 2px rgb(37, 99, 235)"
+        val rgba_shadow = "0px 0px 0px 2px rgba(37, 99, 235, 0.5)"
+        val named_shadow = "0px 0px 0px 2px rebeccapurple"
+        val hsl_shadow = "0px 0px 0px 2px hsl(120, 100%, 50%)"
+        val current_shadow = "0px 0px 0px 2px currentColor"
+        val rgb_html = _shadow_html(rgb_shadow, "#111827")
+        val rgba_html = _shadow_html(rgba_shadow, "#111827")
+        val named_html = _shadow_html(named_shadow, "#111827")
+        val hsl_html = _shadow_html(hsl_shadow, "#111827")
+        val current_html = _shadow_html(current_shadow, "#db2777")
+
+        step("Resolve color-bearing boxes in canonical web semantic and layout state")
+        _expect_web_layout(rgb_html)
+        _expect_web_layout(rgba_html)
+        _expect_web_layout(named_html)
+        _expect_web_layout(hsl_html)
+        _expect_web_layout(current_html)
+
+        step("Render HTML and CSS through canonical Draw IR")
+        val rgb_composition = _shadow_composition(rgb_html)
+        val rgba_composition = _shadow_composition(rgba_html)
+        val named_composition = _shadow_composition(named_html)
+        val hsl_composition = _shadow_composition(hsl_html)
+        val current_composition = _shadow_composition(current_html)
+        _draw_ir_panel(rgb_composition, rgb_shadow, "1")
+        _draw_ir_panel(rgba_composition, rgba_shadow, "1")
+        _draw_ir_panel(named_composition, named_shadow, "1")
+        _draw_ir_panel(hsl_composition, hsl_shadow, "1")
+        _draw_ir_panel(current_composition, current_shadow, "1")
+
+        step("Read exact resolved shadow colors through Engine2D")
+        expect(_pixels(
+            rgb_html, rgb_composition
+        )[9 + WIDTH]).to_equal(0xFF2563EBu32)
+        expect(_pixels(
+            rgba_html, rgba_composition
+        )[9 + WIDTH]).to_equal(0xFF92B1F5u32)
+        expect(_pixels(
+            named_html, named_composition
+        )[9 + WIDTH]).to_equal(0xFF663399u32)
+        expect(_pixels(
+            hsl_html, hsl_composition
+        )[9 + WIDTH]).to_equal(0xFF00FF00u32)
+        expect(_pixels(
+            current_html, current_composition
+        )[9 + WIDTH]).to_equal(0xFFDB2777u32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should paint both admitted outer shadow layers":
+        val shadow = (
+            "4px 0px 0px #dc2626, 0px 4px 0px #2563eb"
+        )
+        val html = _shadow_html(shadow, "#111827")
+
+        step("Resolve the layered shadow box in canonical web semantic and layout state")
+        _expect_web_layout(html)
+
+        step("Render HTML and CSS through canonical Draw IR")
+        val composition = _shadow_composition(html)
+        _draw_ir_panel(composition, shadow, "2")
+
+        step("Read one exact pixel from each shadow layer through Engine2D")
+        val pixels = _pixels(html, composition)
+        expect(pixels[10 + WIDTH]).to_equal(0xFFDC2626u32)
+        expect(pixels[1 + 8 * WIDTH]).to_equal(0xFF2563EBu32)
+        expect(pixels[2 + 2 * WIDTH]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(artifact)
+    it "should paint a single inset shadow before the center fill":
+        val shadow = "inset 0px 0px 0px 2px #16a34a"
+        val html = _shadow_html(shadow, "#111827")
+
+        step("Resolve the inset shadow box in canonical web semantic and layout state")
+        _expect_web_layout(html)
+
+        step("Render HTML and CSS through canonical Draw IR")
+        val composition = _shadow_composition(html)
+        _draw_ir_panel(composition, shadow, "1")
+
+        step("Read exact inset-edge and center pixels through Engine2D")
+        val pixels = _pixels(html, composition)
+        expect(pixels[1]).to_equal(0xFF16A34Au32)
+        expect(pixels[4 + 3 * WIDTH]).to_equal(0xFFFFFFFFu32)

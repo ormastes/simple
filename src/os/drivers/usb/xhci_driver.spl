@@ -1,0 +1,446 @@
+# XHCI Driver — USB 3.x Host Controller Init and Ring Management
+#
+# MDSOC: feature dimension, drivers layer
+# xHCI spec §4.2 initialization sequence.
+#
+# Assumes T6a-provided xhci_regs.spl and xhci_trb.spl define:
+#   - Register offset constants (XHCI_CAP_*, XHCI_OP_*, XHCI_RT_*, etc.)
+#   - TrbRing class: { base: u64, size: u32, enqueue: u32, cycle: bool }
+#   - trb_ring_new(base: u64) -> TrbRing
+#   - trb_write(ring: TrbRing, trb_type: u32, param: u64, status: u32, control: u32)
+#
+# 64-bit MMIO writes (mmio_write64, mmio_read64) used for DCBAAP, CRCR, ERDP, ERSTBA.
+
+use os.kernel.boot.mmio.{mmio_read32, mmio_write32, mmio_read64, mmio_write64}
+use os.kernel.memory.pmm.{pmm_alloc_pages}
+use os.drivers.pci.pci.*
+use os.drivers.usb.xhci_regs.*
+use os.drivers.usb.xhci_trb.*
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val XHCI_CLASS: u8    = 0x0C
+val XHCI_SUBCLASS: u8 = 0x03
+val XHCI_PROGIF: u8   = 0x30
+
+val XHCI_PAGE_SIZE: u64 = 4096
+
+# USBCMD bit offsets
+val USBCMD_RS: u32    = 1        # Run/Stop
+val USBCMD_HCRST: u32 = 2        # Host Controller Reset
+val USBCMD_INTE: u32  = 4        # Interrupter Enable
+
+# USBSTS bit offsets
+val USBSTS_HCH: u32   = 1        # Host Controller Halted
+
+# IMAN interrupter bit
+val IMAN_IE: u32      = 2        # Interrupt Enable
+
+# ERST entry size in bytes (base_lo, base_hi, size, rsvd = 4*u32 = 16 bytes)
+val ERST_ENTRY_SIZE: u64 = 16
+
+# Event ring segment size (number of TRBs per segment)
+val EVENT_RING_SEGMENT_SIZE: u32 = 64
+
+# Poll iteration limits
+val POLL_STOP_ITERS: u32   = 500
+val POLL_RESET_ITERS: u32  = 500
+val POLL_START_ITERS: u32  = 500
+val POLL_CMD_ITERS: u32    = 100000
+
+# TRB completion event type
+val TRB_TYPE_CMD_COMPLETION: u32 = 33
+
+# ============================================================================
+# Data Structures
+# ============================================================================
+
+class XhciEventRing:
+    """xHCI event ring segment."""
+    base: u64       # Physical address of event TRB segment
+    size: u32       # Number of TRB slots
+    dequeue: u32    # Current dequeue index (0-based)
+    cycle: bool     # Current consumer cycle bit
+
+class XhciController:
+    """xHCI host controller state."""
+    mmio_base: u64          # BAR0/BAR1 MMIO physical base
+    cap_length: u32         # Capability register length (CAPLENGTH)
+    op_base: u64            # Operational registers base
+    rt_base: u64            # Runtime registers base
+    db_base: u64            # Doorbell array base
+    max_slots: u32          # Max device slots (HCSPARAMS1[7:0])
+    max_ports: u32          # Max ports (HCSPARAMS1[31:24])
+    # Command ring state is kept as scalar fields, NOT a nested TrbRing class
+    # field: reading a class-typed field back off another class instance in
+    # seed freestanding builds mangles the inner object (trb_write through
+    # ctrl.cmd_ring faulted in rt_mmio_write_* on a garbage ring base, while
+    # every scalar u64 field on ctrl read back correctly).
+    cmd_ring_base: u64      # Command ring physical base
+    cmd_ring_enqueue: u32   # Command ring producer enqueue index
+    cmd_ring_cycle: bool    # Command ring producer cycle state
+    event_ring_base: u64    # Event ring segment physical address
+    event_ring_cycle: bool  # Event ring consumer cycle state
+    event_ring_dequeue: u32 # Event ring consumer dequeue index (0-based)
+    dcbaa_phys: u64         # DCBAA physical address
+
+# ============================================================================
+# PCI Probe
+# ============================================================================
+
+fn xhci_probe() -> XhciController?:
+    """Scan PCI bus for an xHCI controller (class=0x0C, sub=0x03, progif=0x30).
+
+    Reads BAR0+BAR1 as a 64-bit MMIO base per PCI spec for 64-bit BARs.
+    Returns nil if no controller found.
+    """
+    var bus: u16 = 0
+    while bus < 256:
+        var dev: u8 = 0
+        while dev < 32:
+            val bus_u8 = bus.to_u8()
+            val vendor = pci_read_vendor(bus_u8, dev, 0)
+            if vendor != 0xFFFF:
+                var func: u8 = 0
+                while func < 8:
+                    val fvendor = pci_read_vendor(bus_u8, dev, func)
+                    if fvendor != 0xFFFF:
+                        val class_info = pci_read_class(bus_u8, dev, func)
+                        val cc = ((class_info >> 24) & 0xFF).to_u8()
+                        val sc = ((class_info >> 16) & 0xFF).to_u8()
+                        val pi = ((class_info >> 8) & 0xFF).to_u8()
+                        if cc == XHCI_CLASS and sc == XHCI_SUBCLASS and pi == XHCI_PROGIF:
+                            # Found xHCI: read 64-bit BAR (BAR0 low, BAR1 high)
+                            val bar0 = pci_read_bar(bus_u8, dev, func, 0).to_u64()
+                            val bar1 = pci_read_bar(bus_u8, dev, func, 1).to_u64()
+                            # BAR0 bits[2:1] = 10 means 64-bit; mask off flags (low 4 bits)
+                            val mmio_base = (bar1 << 32) | (bar0 & 0xFFFFFFF0.to_u64())
+                            val ctrl = XhciController(
+                                mmio_base: mmio_base,
+                                cap_length: 0,
+                                op_base: 0,
+                                rt_base: 0,
+                                db_base: 0,
+                                max_slots: 0,
+                                max_ports: 0,
+                                cmd_ring_base: 0,
+                                cmd_ring_enqueue: 0,
+                                cmd_ring_cycle: true,
+                                event_ring_base: 0,
+                                event_ring_cycle: true,
+                                event_ring_dequeue: 0,
+                                dcbaa_phys: 0
+                            )
+                            return ctrl
+                    func = func + 1
+            dev = dev + 1
+        bus = bus + 1
+    nil
+
+# ============================================================================
+# Capability / Operational / Runtime Register Helpers
+# ============================================================================
+
+fn xhci_cap_read32(ctrl: XhciController, offset: u64) -> u32:
+    mmio_read32(ctrl.mmio_base + offset)
+
+fn xhci_op_read32(ctrl: XhciController, offset: u64) -> u32:
+    mmio_read32(ctrl.op_base + offset)
+
+fn xhci_op_write32(ctrl: XhciController, offset: u64, value: u32):
+    mmio_write32(ctrl.op_base + offset, value)
+
+fn xhci_op_write64(ctrl: XhciController, offset: u64, value: u64):
+    mmio_write64(ctrl.op_base + offset, value)
+
+fn xhci_rt_write32(ctrl: XhciController, interrupter: u32, offset: u64, value: u32):
+    # Interrupter register set at RT_BASE + 0x20 + interrupter*0x20
+    val ir_base = ctrl.rt_base + 0x20 + (interrupter * 0x20).to_u64()
+    mmio_write32(ir_base + offset, value)
+
+fn xhci_rt_write64(ctrl: XhciController, interrupter: u32, offset: u64, value: u64):
+    val ir_base = ctrl.rt_base + 0x20 + (interrupter * 0x20).to_u64()
+    mmio_write64(ir_base + offset, value)
+
+fn xhci_rt_read32(ctrl: XhciController, interrupter: u32, offset: u64) -> u32:
+    val ir_base = ctrl.rt_base + 0x20 + (interrupter * 0x20).to_u64()
+    mmio_read32(ir_base + offset)
+
+# ============================================================================
+# Initialization — xHCI §4.2 Sequence
+# ============================================================================
+
+fn xhci_init(ctrl: XhciController) -> Result<bool, text>:
+    """Initialize xHCI controller following spec §4.2.
+
+    Mutates ctrl in place: sets op_base, rt_base, db_base, max_slots,
+    max_ports, dcbaa_phys, cmd_ring, event_ring_base, event_ring_cycle.
+    """
+
+    # Step 1: Read CAPLENGTH → op_base
+    val caplength_raw = xhci_cap_read32(ctrl, XHCI_CAP_CAPLENGTH)
+    ctrl.cap_length = caplength_raw & 0xFF
+    ctrl.op_base = ctrl.mmio_base + ctrl.cap_length.to_u64()
+
+    # Step 2: Read RTSOFF → rt_base (mask low 5 bits per spec)
+    val rtsoff = xhci_cap_read32(ctrl, XHCI_CAP_RTSOFF)
+    ctrl.rt_base = ctrl.mmio_base + (rtsoff & 0xFFFFFFE0).to_u64()
+
+    # Step 3: Read DBOFF → db_base (mask low 2 bits per spec)
+    val dboff = xhci_cap_read32(ctrl, XHCI_CAP_DBOFF)
+    ctrl.db_base = ctrl.mmio_base + (dboff & 0xFFFFFFFC).to_u64()
+
+    # Step 4: Read HCSPARAMS1 → max_slots, max_ports
+    val hcsparams1 = xhci_cap_read32(ctrl, XHCI_CAP_HCSPARAMS1)
+    ctrl.max_slots = hcsparams1 & 0xFF
+    ctrl.max_ports = (hcsparams1 >> 24) & 0xFF
+
+    # Step 5: Stop controller — clear USBCMD.R/S, poll USBSTS.HCH=1
+    val usbcmd = xhci_op_read32(ctrl, XHCI_OP_USBCMD)
+    xhci_op_write32(ctrl, XHCI_OP_USBCMD, usbcmd & (0xFFFFFFFF - USBCMD_RS))
+    var stop_iter: u32 = 0
+    var halted = false
+    while stop_iter < POLL_STOP_ITERS and not halted:
+        val sts = xhci_op_read32(ctrl, XHCI_OP_USBSTS)
+        if (sts & USBSTS_HCH) != 0:
+            halted = true
+        stop_iter = stop_iter + 1
+    if not halted:
+        return Result.Err("xhci: controller did not halt")
+
+    # Step 6: Reset — set USBCMD.HCRST, poll until clear
+    val cmd_before_reset = xhci_op_read32(ctrl, XHCI_OP_USBCMD)
+    xhci_op_write32(ctrl, XHCI_OP_USBCMD, cmd_before_reset | USBCMD_HCRST)
+    var reset_iter: u32 = 0
+    var reset_done = false
+    while reset_iter < POLL_RESET_ITERS and not reset_done:
+        val cmd_poll = xhci_op_read32(ctrl, XHCI_OP_USBCMD)
+        if (cmd_poll & USBCMD_HCRST) == 0:
+            reset_done = true
+        reset_iter = reset_iter + 1
+    if not reset_done:
+        return Result.Err("xhci: reset did not complete")
+
+    # Step 7: Set CONFIG.MaxSlotsEn = max_slots
+    xhci_op_write32(ctrl, XHCI_OP_CONFIG, ctrl.max_slots)
+
+    # Step 8: Alloc DCBAA (1 page), zero 256*8 bytes, write to DCBAAP
+    # NOTE: allocation results are consumed via `if val Some(...)` bindings, not
+    # `.?` + `.unwrap()` — the latter misfires on Option<PhysAddr> in seed
+    # freestanding native builds (took the error branch even though the PMM
+    # allocation had succeeded; same class of problem as the documented seed
+    # lane-Option poison in scenario_catalog.spl).
+    var dcbaa_phys: u64 = 0
+    if val Some(dcbaa_page) = pmm_alloc_pages(1):
+        dcbaa_phys = dcbaa_page.addr
+    else:
+        return Result.Err("xhci: failed to alloc DCBAA page")
+    ctrl.dcbaa_phys = dcbaa_phys
+    # Zero 256 slot pointers (8 bytes each = 2048 bytes)
+    var slot_i: u32 = 0
+    while slot_i < 256:
+        mmio_write64(dcbaa_phys + (slot_i * 8).to_u64(), 0)
+        slot_i = slot_i + 1
+    xhci_op_write64(ctrl, XHCI_OP_DCBAAP, dcbaa_phys)
+
+    # Step 9: Alloc command ring (1 page), zero it, write CRCR = phys | RCS(1)
+    var cmd_ring_phys: u64 = 0
+    if val Some(cmd_ring_page) = pmm_alloc_pages(1):
+        cmd_ring_phys = cmd_ring_page.addr
+    else:
+        return Result.Err("xhci: failed to alloc command ring page")
+    # Zero the ring so stale memory can never carry a valid producer cycle bit.
+    var cz: u64 = 0
+    while cz < 512:
+        mmio_write64(cmd_ring_phys + (cz * 8), 0)
+        cz = cz + 1
+    ctrl.cmd_ring_base = cmd_ring_phys
+    ctrl.cmd_ring_enqueue = 0
+    ctrl.cmd_ring_cycle = true
+    # CRCR: physical address with RCS (bit 0) = 1
+    xhci_op_write64(ctrl, XHCI_OP_CRCR, cmd_ring_phys | 1)
+
+    # Step 10: Alloc event ring segment (1 page) + ERST (1 page)
+    var evt_seg_phys: u64 = 0
+    if val Some(evt_seg_page) = pmm_alloc_pages(1):
+        evt_seg_phys = evt_seg_page.addr
+    else:
+        return Result.Err("xhci: failed to alloc event ring page")
+    ctrl.event_ring_base = evt_seg_phys
+    ctrl.event_ring_cycle = true
+    ctrl.event_ring_dequeue = 0
+    # Zero the event ring segment so no stale memory can alias a valid
+    # cycle-bit-matching event TRB before the controller writes real events.
+    var ez: u64 = 0
+    while ez < 512:
+        mmio_write64(evt_seg_phys + (ez * 8), 0)
+        ez = ez + 1
+
+    var erst_phys: u64 = 0
+    if val Some(erst_page) = pmm_alloc_pages(1):
+        erst_phys = erst_page.addr
+    else:
+        return Result.Err("xhci: failed to alloc ERST page")
+
+    # Write ERST entry: [segment_base_lo, segment_base_hi, segment_size, 0]
+    mmio_write32(erst_phys,      (evt_seg_phys & 0xFFFFFFFF).to_u32())
+    mmio_write32(erst_phys + 4,  (evt_seg_phys >> 32).to_u32())
+    mmio_write32(erst_phys + 8,  EVENT_RING_SEGMENT_SIZE)
+    mmio_write32(erst_phys + 12, 0)
+
+    # Interrupter 0 runtime registers: ERSTSZ, ERSTBA, ERDP
+    # ERSTSZ at interrupter offset 0x08, ERSTBA at 0x10, ERDP at 0x18
+    xhci_rt_write32(ctrl, 0, 0x08, 1)
+    xhci_rt_write64(ctrl, 0, 0x10, erst_phys)
+    xhci_rt_write64(ctrl, 0, 0x18, evt_seg_phys)
+
+    # Step 11: Enable interrupts — IMAN.IE=1, USBCMD.INTE=1
+    val iman = xhci_rt_read32(ctrl, 0, 0x00)
+    xhci_rt_write32(ctrl, 0, 0x00, iman | IMAN_IE)
+    val cmd_inte = xhci_op_read32(ctrl, XHCI_OP_USBCMD)
+    xhci_op_write32(ctrl, XHCI_OP_USBCMD, cmd_inte | USBCMD_INTE)
+
+    # Step 12: Start — set USBCMD.R/S, poll USBSTS.HCH=0
+    val cmd_start = xhci_op_read32(ctrl, XHCI_OP_USBCMD)
+    xhci_op_write32(ctrl, XHCI_OP_USBCMD, cmd_start | USBCMD_RS)
+    var start_iter: u32 = 0
+    var running = false
+    while start_iter < POLL_START_ITERS and not running:
+        val sts2 = xhci_op_read32(ctrl, XHCI_OP_USBSTS)
+        if (sts2 & USBSTS_HCH) == 0:
+            running = true
+        start_iter = start_iter + 1
+    if not running:
+        return Result.Err("xhci: controller did not start")
+
+    Result.Ok(true)
+
+# ============================================================================
+# Doorbell
+# ============================================================================
+
+fn xhci_ring_doorbell(ctrl: XhciController, slot: u32, target: u32):
+    """Ring doorbell for given slot. slot=0 is host controller."""
+    mmio_write32(ctrl.db_base + (slot * 4).to_u64(), target)
+
+# ============================================================================
+# Command Submission
+# ============================================================================
+
+# Result type for commands that return both completion code and slot ID
+class CmdCompletionResult:
+    """Result of an xHCI command completion event."""
+    completion_code: u32   # Completion code from event status bits [31:24]
+    slot_id: u32           # Slot ID from event control bits [31:24]
+
+# ============================================================================
+# Command Ring Producer
+# ============================================================================
+
+# Number of 16-byte TRB slots in the one-page command ring (4096 / 16).
+val CMD_RING_TRBS: u32 = 256
+
+fn _xhci_cmd_ring_push(ctrl: XhciController, param: u64, status: u32, control: u32):
+    """Enqueue one TRB onto the command ring using scalar ring state.
+
+    Applies the producer cycle bit, writes the TRB, advances the enqueue
+    index, and installs a toggling Link TRB when the last usable slot is
+    reached (same protocol as xhci_trb.trb_write, but without routing the
+    ring through a nested class field — see the note on XhciController).
+    """
+    val last_slot = CMD_RING_TRBS - 1
+    var ctrl_word = control & (0xFFFFFFFF - TRB_CYCLE)
+    if ctrl.cmd_ring_cycle:
+        ctrl_word = ctrl_word | TRB_CYCLE
+    trb_write_raw(ctrl.cmd_ring_base, ctrl.cmd_ring_enqueue, param, status, ctrl_word)
+    ctrl.cmd_ring_enqueue = ctrl.cmd_ring_enqueue + 1
+    if ctrl.cmd_ring_enqueue >= last_slot:
+        var link_ctrl = (TRB_TYPE_LINK << TRB_TYPE_SHIFT) | TRB_TOGGLE_CYCLE
+        if ctrl.cmd_ring_cycle:
+            link_ctrl = link_ctrl | TRB_CYCLE
+        trb_write_raw(ctrl.cmd_ring_base, last_slot, ctrl.cmd_ring_base, 0, link_ctrl)
+        ctrl.cmd_ring_cycle = not ctrl.cmd_ring_cycle
+        ctrl.cmd_ring_enqueue = 0
+
+# ============================================================================
+# Event Ring Consumer
+# ============================================================================
+
+fn xhci_wait_for_event_type(ctrl: XhciController, want_type: u32, max_iters: u32) -> CmdCompletionResult?:
+    """Consume event TRBs in ring order until one of `want_type` is found.
+
+    Tracks a persistent dequeue index + consumer cycle state on the controller
+    (the previous implementation rescanned the whole segment from slot 0 on
+    every call, so an already-consumed completion event — whose cycle bit
+    still matches — satisfied the NEXT command instantly and raced real
+    hardware completion). Events of other types (e.g. Port Status Change on
+    attach) are consumed and skipped. ERDP is advanced (with EHB write-1-to-
+    clear) after every consumed event.
+
+    Returns CmdCompletionResult(status field bits [31:24] as completion_code,
+    control bits [31:24] as slot_id) or nil on timeout.
+    """
+    var iters: u32 = 0
+    while iters < max_iters:
+        val idx = ctrl.event_ring_dequeue
+        val trb_addr = ctrl.event_ring_base + (idx * 16).to_u64()
+        val status = mmio_read32(trb_addr + 8)
+        val control_word = mmio_read32(trb_addr + 12)
+        val evt_cycle = control_word & 1
+        val expected_cycle: u32 = if ctrl.event_ring_cycle: 1 else: 0
+        if evt_cycle == expected_cycle:
+            # Consume this event: advance dequeue, toggle cycle on wrap
+            var next = idx + 1
+            if next >= EVENT_RING_SEGMENT_SIZE:
+                next = 0
+                ctrl.event_ring_cycle = not ctrl.event_ring_cycle
+            ctrl.event_ring_dequeue = next
+            val erdp = ctrl.event_ring_base + (next * 16).to_u64()
+            # Bit 3 = EHB (Event Handler Busy), write-1-to-clear
+            xhci_rt_write64(ctrl, 0, 0x18, erdp | 8)
+            val evt_type = (control_word >> 10) & 0x3F
+            if evt_type == want_type:
+                return CmdCompletionResult(
+                    completion_code: (status >> 24) & 0xFF,
+                    slot_id: (control_word >> 24) & 0xFF
+                )
+        iters = iters + 1
+    nil
+
+fn xhci_send_command(ctrl: XhciController, trb_type: u32, param: u64, slot: u32) -> Result<u32, text>:
+    """Enqueue a command TRB, ring doorbell, poll event ring for completion.
+
+    Returns the completion code from the command completion event status field.
+    Updates ERDP after consuming the event.
+    """
+    # Build control word: trb_type in bits [15:10], slot in bits [31:24]
+    # (Address Device / Configure Endpoint carry the slot ID in the control
+    # word), cycle bit applied by trb_write.
+    val control = (trb_type << 10) | (slot << 24)
+    _xhci_cmd_ring_push(ctrl, param, 0, control)
+
+    # Ring host-controller doorbell (slot=0, target=0)
+    xhci_ring_doorbell(ctrl, 0, 0)
+
+    if val Some(evt) = xhci_wait_for_event_type(ctrl, TRB_TYPE_CMD_COMPLETION, POLL_CMD_ITERS):
+        return Result.Ok(evt.completion_code)
+    Result.Err("xhci: command timeout — no completion event")
+
+fn xhci_send_command_with_slot(ctrl: XhciController, trb_type: u32, param: u64, slot: u32) -> Result<CmdCompletionResult, text>:
+    """Enqueue a command TRB, ring doorbell, poll event ring for completion.
+
+    Like xhci_send_command, but returns both the completion code and the
+    slot ID from the command completion event (bits [31:24] of control word).
+    Used for Enable Slot commands where the hardware assigns a slot ID.
+    """
+    val control = (trb_type << 10) | (slot << 24)
+    _xhci_cmd_ring_push(ctrl, param, 0, control)
+
+    # Ring host-controller doorbell (slot=0, target=0)
+    xhci_ring_doorbell(ctrl, 0, 0)
+
+    if val Some(evt) = xhci_wait_for_event_type(ctrl, TRB_TYPE_CMD_COMPLETION, POLL_CMD_ITERS):
+        return Result.Ok(evt)
+    Result.Err("xhci: command timeout — no completion event")

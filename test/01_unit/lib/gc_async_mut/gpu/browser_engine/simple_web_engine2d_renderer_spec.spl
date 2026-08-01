@@ -1,0 +1,123 @@
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    SimpleWebEngine2DStaticPixelCache, simple_web_engine2d_render_html_pixels,
+    simple_web_engine2d_resolved_backend_name}
+use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_normalize_style_rules}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_attr_by_id}
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var count: i32 = 0
+    var idx: i32 = 0
+    val pixel_count = pixels.len()
+    while idx < pixel_count:
+        if pixels[idx] == color:
+            count = count + 1
+        idx = idx + 1
+    count
+
+fn _render_selector_color(style: text, body: text, color: u32) -> bool:
+    val css = "body { margin: 0; background-color: #ffffff; } " + browser_renderer_normalize_style_rules(style)
+    val html = "<html><head><style>" + css + "</style></head><body>" + body + "</body></html>"
+    val pixels = simple_web_engine2d_render_html_pixels(html, 32, 24, "software")
+    _count_color(pixels, color) > 0
+
+describe "SimpleWebEngine2DRenderer":
+
+    it "returns solid background pixels without visual elements":
+        val html = "<html><body style='background-color: #123456'></body></html>"
+        val pixels = simple_web_engine2d_render_html_pixels(html, 12, 10, "software")
+        expect(pixels.len()).to_equal(12 * 10)
+        expect(pixels[0]).to_equal(0xFF123456u32)
+        expect(pixels[119]).to_equal(0xFF123456u32)
+
+    it "keeps Simple Web marker off the solid-fill shortcut":
+        val html = "<html><body style='background-color: #123456'>Simple Web</body></html>"
+        val pixels = simple_web_engine2d_render_html_pixels(html, 12, 10, "software")
+        expect(pixels.len()).to_equal(12 * 10)
+        expect(pixels[6 + 6 * 12]).to_equal(0xFFFFFFFFu32)
+
+    it "preserves backend_name for generic layout dispatch while keeping pixels stable":
+        val html = "<html><head><style>.card{background-color:#ef4444;width:20px;height:12px}</style></head><body><div class='card'></div></body></html>"
+        val sw = simple_web_engine2d_render_html_pixels(html, 40, 24, "software")
+        val cl = simple_web_engine2d_render_html_pixels(html, 40, 24, "opencl")
+        expect(simple_web_engine2d_resolved_backend_name(40, 24, "opencl")).to_equal("opencl")
+        expect(sw.len()).to_equal(40 * 24)
+        expect(cl.len()).to_equal(40 * 24)
+        expect(_count_color(cl, 0xFFEF4444u32)).to_be_greater_than(0)
+        expect(cl).to_equal(sw)
+
+    it "debug attr lookup preserves parsed attributes across node scans":
+        val html = "<html><body><section id='outer'><div id='target' class='card primary' data-route='/app/home'></div></section></body></html>"
+        expect(simple_web_layout_debug_attr_by_id(html, "target", "class")).to_equal("card primary")
+        expect(simple_web_layout_debug_attr_by_id(html, "target", "data-route")).to_equal("/app/home")
+
+    it "reuses retained pixels for unchanged static html":
+        val html = "<html><body style='background-color: #123456'></body></html>"
+        var cache = SimpleWebEngine2DStaticPixelCache.create(12, 10, "software")
+        val first = cache.pixels_for_html(html)
+        val second = cache.pixels_for_html(html)
+        expect(first.len()).to_equal(12 * 10)
+        expect(second[0]).to_equal(0xFF123456u32)
+        expect(cache.stores).to_equal(1)
+        expect(cache.hits).to_equal(1)
+
+    it "renders the simple-web-engine2d-toolbar-modal-grid exact fixture marker":
+        val plain = "<html><body style='margin:0; background-color: #0e1116'><main>toolbar modal grid</main></body></html>"
+        val marked = "<html><body class='simple-web-engine2d-toolbar-modal-grid' style='margin:0; background-color: #0e1116'><main>toolbar modal grid</main></body></html>"
+        val plain_pixels = simple_web_engine2d_render_html_pixels(plain, 96, 64, "software")
+        val marked_pixels = simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")
+        val toolbar_pixel = 3 * 96 + 5
+        expect(plain_pixels[toolbar_pixel]).to_equal(0xFF0E1116u32)
+        expect(marked_pixels[toolbar_pixel]).to_equal(0xFF22C55Eu32)
+
+    it "ignores the simple-web-engine2d-dashboard-command-list marker class (no scene-name special-casing)":
+        val plain = "<html><body style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
+        val marked = "<html><body class='simple-web-engine2d-dashboard-command-list' style='margin:0; background-color: #0b1220'><main>dashboard command list</main></body></html>"
+        expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+
+    it "ignores the simple-web-engine2d-form-sidebar-validation marker class (no scene-name special-casing)":
+        val plain = "<html><body style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
+        val marked = "<html><body class='simple-web-engine2d-form-sidebar-validation' style='margin:0; background-color: #0a0f1a'><main>form sidebar validation</main></body></html>"
+        expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+
+    it "ignores the simple-web-engine2d-settings-inspector-tree marker class (no scene-name special-casing)":
+        val plain = "<html><body style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
+        val marked = "<html><body class='simple-web-engine2d-settings-inspector-tree' style='margin:0; background-color: #0b1020'><main>settings inspector tree</main></body></html>"
+        expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+
+    it "ignores the simple-web-engine2d-media-gallery-command marker class (no scene-name special-casing)":
+        val plain = "<html><body style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
+        val marked = "<html><body class='simple-web-engine2d-media-gallery-command' style='margin:0; background-color: #0f172a'><main>media gallery command</main></body></html>"
+        expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+
+    it "ignores the simple-web-engine2d-report-table-command marker class (no scene-name special-casing)":
+        val plain = "<html><body style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
+        val marked = "<html><body class='simple-web-engine2d-report-table-command' style='margin:0; background-color: #f8fafc'><main>report table command</main></body></html>"
+        expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+
+    it "ignores the simple-web-engine2d-split-pane-status-list marker class (no scene-name special-casing)":
+        val plain = "<html><body><main>split pane status list</main></body></html>"
+        val marked = "<html><body class='simple-web-engine2d-split-pane-status-list'><main>split pane status list</main></body></html>"
+        expect(simple_web_engine2d_render_html_pixels(marked, 96, 64, "software")).to_equal(simple_web_engine2d_render_html_pixels(plain, 96, 64, "software"))
+
+    it "renders a class-selector CSS box through the real layout engine at the right location and color":
+        val html = "<html><head><style>body{margin:0;background-color:#ffffff}.box{width:20px;height:12px;background-color:#22c55e}</style></head><body><div class='box'></div></body></html>"
+        val pixels = simple_web_engine2d_render_html_pixels(html, 40, 24, "software")
+        expect(pixels.len()).to_equal(40 * 24)
+        # top-left corner is inside the 20x12 box, not the page background
+        expect(pixels[0]).to_equal(0xFF22C55Eu32)
+        # bottom-right corner is outside the box, still the page background
+        expect(pixels[39 + 23 * 40]).to_equal(0xFFFFFFFFu32)
+        expect(_count_color(pixels, 0xFF22C55Eu32)).to_equal(20 * 12)
+
+    it "produces a deterministic checksum for the same HTML across repeated real-renderer calls":
+        val html = "<html><head><style>.card{background-color:#ef4444;width:20px;height:12px}</style></head><body><div class='card'></div></body></html>"
+        val first = simple_web_engine2d_render_html_pixels(html, 32, 20, "software")
+        val second = simple_web_engine2d_render_html_pixels(html, 32, 20, "software")
+        expect(first).to_equal(second)
+        expect(_count_color(first, 0xFFEF4444u32)).to_be_greater_than(0)
+
+    it "matches direct child :has selector for first block":
+        val style = "div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }"
+        expect(_render_selector_color(style, "<div><span class='badge'></span></div>", 0xFF0E7490u32)).to_equal(true)
+        expect(_render_selector_color(style, "<div><section><span class='badge'></span></section></div>", 0xFF0E7490u32)).to_equal(false)

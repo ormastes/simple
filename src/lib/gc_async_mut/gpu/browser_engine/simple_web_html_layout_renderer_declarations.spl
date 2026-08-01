@@ -1,0 +1,1125 @@
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_css_box_effects.*
+export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_decl_apply.*
+
+fn sticky_top_inset_value(
+    raw: text, parsed: i32, position_sticky: bool
+) -> i32:
+    val parts = raw.trim().lower().split(" ")
+    if (
+        position_sticky and parts.len() > 0 and
+        parts[0] == "auto"
+    ):
+        return SIMPLE_WEB_STICKY_TOP_AUTO
+    parsed
+
+fn border_spacing_px(raw: text) -> i32:
+    val value = raw.trim().lower()
+    if value == "0":
+        return 0
+    if not value.ends_with("px") or value.len() <= 2:
+        return -1
+    val digits = value.substring(0, value.len() - 2)
+    var index = 0
+    while index < digits.len():
+        val ch = digits.char_at(index)
+        if ch < "0" or ch > "9":
+            return -1
+        index = index + 1
+    parse_int(digits)
+
+fn _background_has_image_syntax(raw: text) -> bool:
+    val lower = raw.trim().lower()
+    (
+        lower.contains("gradient(") or
+        lower.contains("url(") or
+        lower.contains("image(") or
+        lower.contains("image-set(") or
+        lower.contains("cross-fade(") or
+        lower.contains("element(") or
+        lower.contains("paint(")
+    )
+
+fn _background_is_exact_typed_linear_layer(raw: text, gradient_from: u32, gradient_to: u32, allow_base_color_layer: bool) -> bool:
+    if gradient_from == 0u32 or gradient_to == 0u32:
+        return false
+    val layers = split_top_level_commas(raw.trim().lower())
+    if layers.len() < 1 or layers.len() > 2:
+        return false
+    val image_layer = layers[0].trim()
+    if not image_layer.starts_with("linear-gradient("):
+        return false
+    val open = find_from(image_layer, "(", 0)
+    if open != "linear-gradient".len():
+        return false
+    val close = paren_matching_close(image_layer, open)
+    if close != image_layer.len() - 1:
+        return false
+    if layers.len() == 1:
+        return true
+    allow_base_color_layer and parse_color_any(layers[1].trim()) != 0u32
+
+fn _background_exact_single_url(raw: text) -> text:
+    val value = raw.trim()
+    val lower = value.lower()
+    # A comma inside rgb()/rgba() is a color argument, not a second image
+    # layer. Only a top-level comma makes this shorthand unrepresentable.
+    if split_top_level_commas(value).len() > 1 or lower.contains("gradient(") or lower.contains("image-set("):
+        return ""
+    val start = find_from(lower, "url(", 0)
+    if start < 0:
+        return ""
+    val open = start + 3
+    val close = paren_matching_close(value, open)
+    if close < 0 or find_from(lower, "url(", close + 1) >= 0:
+        return ""
+    var uri = value.substring(open + 1, close).trim()
+    if uri.len() >= 2:
+        if (uri.starts_with("\"") and uri.ends_with("\"")) or (uri.starts_with("'") and uri.ends_with("'")):
+            uri = uri.substring(1, uri.len() - 1).trim()
+    if uri == "":
+        return ""
+    uri
+
+fn _padding_integer_px(token: text) -> i32:
+    val value = token.trim().lower()
+    if value == "0":
+        return 0
+    if not value.ends_with("px") or value.len() <= 2:
+        return -1
+    val digits = value.substring(0, value.len() - 2)
+    var number = 0
+    var index = 0
+    while index < digits.len():
+        val digit = dec_val(digits.char_at(index))
+        if digit >= 10 or number > (1000000 - digit) / 10:
+            return -1
+        number = number * 10 + digit
+        index = index + 1
+    number
+
+fn _padding_integer_px_values(raw: text, maximum: i32) -> [i32]:
+    val tokens = ws_tokens(raw.trim().lower())
+    var values: [i32] = []
+    if tokens.len() == 0 or tokens.len() > maximum:
+        return values
+    for token in tokens:
+        val value = _padding_integer_px(token)
+        if value < 0:
+            return []
+        values.push(value)
+    values
+
+fn _resolve_authored_padding(
+    decl_tbl: [text], initial_top: i32, initial_right: i32,
+    initial_bottom: i32, initial_left: i32
+) -> (i32, i32, i32, i32):
+    var top = initial_top
+    var right = initial_right
+    var bottom = initial_bottom
+    var left = initial_left
+    var index = 0
+    while index < decl_tbl.len():
+        val name = decl_tbl[index]
+        val raw = decl_tbl[index + 1]
+        if name == "padding":
+            val values = _padding_integer_px_values(raw, 4)
+            if values.len() > 0:
+                top = values[0]
+                right = values[0]
+                bottom = values[0]
+                left = values[0]
+                if values.len() == 2:
+                    right = values[1]
+                    left = values[1]
+                elif values.len() == 3:
+                    right = values[1]
+                    left = values[1]
+                    bottom = values[2]
+                elif values.len() == 4:
+                    right = values[1]
+                    bottom = values[2]
+                    left = values[3]
+        elif name == "padding-top":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                top = values[0]
+        elif name == "padding-right":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                right = values[0]
+        elif name == "padding-bottom":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                bottom = values[0]
+        elif name == "padding-left":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                left = values[0]
+        elif name == "padding-block":
+            val values = _padding_integer_px_values(raw, 2)
+            if values.len() > 0:
+                top = values[0]
+                bottom = if values.len() == 2: values[1] else: values[0]
+        elif name == "padding-block-start":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                top = values[0]
+        elif name == "padding-block-end":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                bottom = values[0]
+        elif name == "padding-inline":
+            val values = _padding_integer_px_values(raw, 2)
+            if values.len() > 0:
+                left = values[0]
+                right = if values.len() == 2: values[1] else: values[0]
+        elif name == "padding-inline-start":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                left = values[0]
+        elif name == "padding-inline-end":
+            val values = _padding_integer_px_values(raw, 1)
+            if values.len() == 1:
+                right = values[0]
+        index = index + 2
+    (top, right, bottom, left)
+
+fn _background_exact_url_value(raw: text) -> text:
+    val value = raw.trim()
+    val lower = value.lower()
+    if not lower.starts_with("url("):
+        return ""
+    val close = paren_matching_close(value, 3)
+    if close != value.len() - 1:
+        return ""
+    _background_exact_single_url(value)
+
+# A compact internal plan keeps the existing Style shape intact. Newlines are
+# safe delimiters because admitted image URLs reject control bytes and every
+# other field below is normalized before serialization.
+fn _background_two_url_plan(
+    image: text, repeat: text, size_raw: text, position_raw: text,
+    size_w: i32, size_h: i32, position_x: i32, position_y: i32,
+    origin: text, clip: text, attachment: text
+) -> text:
+    val images = split_top_level_commas(image.trim())
+    if images.len() != 2:
+        return ""
+    val first_uri = _background_exact_url_value(images[0])
+    val second_uri = _background_exact_url_value(images[1])
+    if first_uri == "" or second_uri == "":
+        return ""
+    if (split_top_level_commas(repeat.trim()).len() > 1 or
+        split_top_level_commas(size_raw.trim()).len() > 1 or
+        split_top_level_commas(position_raw.trim()).len() > 1 or
+        split_top_level_commas(origin.trim()).len() > 1 or
+        split_top_level_commas(clip.trim()).len() > 1 or
+        split_top_level_commas(attachment.trim()).len() > 1 or
+        split_top_level_commas(image.trim()).len() != 2 or attachment == "local"):
+        return ""
+    (
+        "two-url-v1\n{first_uri}\n{second_uri}\n{repeat}\n{size_w}\n" +
+        "{size_h}\n{position_x}\n{position_y}\n{origin}\n{clip}\n{attachment}"
+    )
+
+fn _background_position_value(raw: text, horizontal: bool) -> i32:
+    val value = raw.trim().lower()
+    if value == "left" or value == "top":
+        return -1000
+    if value == "center":
+        return -1050
+    if value == "right" or value == "bottom":
+        return -1100
+    if value.ends_with("%"):
+        val pct = parse_int(value)
+        if pct >= 0 and pct <= 100:
+            return -1000 - pct
+        return 0
+    parse_int(value)
+
+class BackgroundShorthand:
+    valid: bool
+    color: u32
+    image_uri: text
+    repeat: text
+    size_w: i32
+    size_h: i32
+    position_x: i32
+    position_y: i32
+    origin: text
+    clip: text
+
+fn _background_shorthand_tokens(raw: text) -> [text]:
+    var tokens: [text] = []
+    var current = ""
+    var depth = 0
+    var i = 0
+    while i < raw.len():
+        val c = raw.char_at(i)
+        if c == "(":
+            depth = depth + 1
+            current = current + c
+        elif c == ")":
+            if depth > 0:
+                depth = depth - 1
+            current = current + c
+        elif depth == 0 and c == "/":
+            if current != "":
+                tokens.push(current)
+                current = ""
+            tokens.push("/")
+        elif depth == 0 and (c == " " or c == "\t" or c == "\n" or c == "\r"):
+            if current != "":
+                tokens.push(current)
+                current = ""
+        else:
+            current = current + c
+        i = i + 1
+    if current != "":
+        tokens.push(current)
+    tokens
+
+fn _background_box_token(token: text) -> bool:
+    val value = token.lower()
+    value == "border-box" or value == "padding-box" or value == "content-box"
+
+fn _background_position_token(token: text) -> bool:
+    val value = token.lower()
+    if value == "left" or value == "right" or value == "top" or value == "bottom" or value == "center":
+        return true
+    (value.ends_with("px") and value.len() > 2) or (value.ends_with("%") and value.len() > 1)
+
+fn _background_size_token(token: text) -> bool:
+    val value = token.lower()
+    value == "auto" or (value.ends_with("px") and value.len() > 2)
+
+fn _background_color_token(token: text) -> bool:
+    val value = token.trim().lower()
+    value == "transparent" or value == "none" or parse_color_alpha(value) != 0u32
+
+fn _background_position_pair(first: text, second: text) -> [i32]:
+    val first_lower = first.lower()
+    val second_lower = second.lower()
+    val first_vertical = first_lower == "top" or first_lower == "bottom"
+    val second_horizontal = second_lower == "left" or second_lower == "right"
+    if first_vertical:
+        return [_background_position_value(second, true), _background_position_value(first, false)]
+    if first_lower == "center" and second_horizontal:
+        return [_background_position_value(second, true), -1050]
+    [_background_position_value(first, true), _background_position_value(second, false)]
+
+# The renderer has one typed image layer. Parse only the corresponding useful
+# CSS subset; anything lossy stays as the raw witness and is not rendered.
+fn _parse_background_shorthand(raw: text) -> BackgroundShorthand:
+    val empty = BackgroundShorthand(valid: false, color: 0u32, image_uri: "", repeat: "repeat", size_w: 0, size_h: 0, position_x: -1000, position_y: -1000, origin: "padding-box", clip: "border-box")
+    val value = raw.trim()
+    val lower = value.lower()
+    if value == "" or split_top_level_commas(value).len() > 1 or lower.contains("gradient(") or lower.contains("image-set(") or lower.contains("cross-fade(") or lower.contains("element(") or lower.contains("paint("):
+        return empty
+    val tokens = _background_shorthand_tokens(value)
+    var color = 0u32
+    var color_seen = false
+    var image_uri = ""
+    var repeat = "repeat"
+    var repeat_seen = false
+    var attachment_seen = false
+    var origin = "padding-box"
+    var clip = "border-box"
+    var box_count = 0
+    var positions: [text] = []
+    var sizes: [text] = []
+    var after_slash = false
+    var slash_seen = false
+    for token in tokens:
+        val norm = token.trim().lower()
+        if norm == "":
+            continue
+        if norm == "/":
+            if slash_seen or positions.len() == 0:
+                return empty
+            slash_seen = true
+            after_slash = true
+        elif after_slash:
+            if not _background_size_token(norm) or sizes.len() >= 2:
+                return empty
+            sizes.push(norm)
+        elif norm == "fixed" or norm == "local":
+            return empty
+        elif norm == "scroll":
+            if attachment_seen:
+                return empty
+            attachment_seen = true
+        elif norm == "repeat" or norm == "repeat-x" or norm == "repeat-y" or norm == "no-repeat":
+            if repeat_seen:
+                return empty
+            repeat = norm
+            repeat_seen = true
+        elif _background_box_token(norm):
+            if box_count >= 2:
+                return empty
+            if box_count == 0:
+                origin = norm
+                clip = norm
+            else:
+                clip = norm
+            box_count = box_count + 1
+        elif _background_position_token(norm):
+            if positions.len() >= 2:
+                return empty
+            positions.push(norm)
+        elif norm.starts_with("url("):
+            val uri = _background_exact_url_value(norm)
+            if image_uri != "" or uri == "":
+                return empty
+            image_uri = uri
+        elif _background_color_token(norm):
+            if color_seen:
+                return empty
+            color = parse_color_alpha(norm)
+            color_seen = true
+        else:
+            return empty
+    if slash_seen and sizes.len() == 0:
+        return empty
+    var position_x = -1000
+    var position_y = -1000
+    if positions.len() == 1:
+        val only = positions[0].lower()
+        if only == "top" or only == "bottom":
+            position_x = -1050
+            position_y = _background_position_value(positions[0], false)
+        else:
+            position_x = _background_position_value(positions[0], true)
+            position_y = -1050
+    elif positions.len() == 2:
+        val pair = _background_position_pair(positions[0], positions[1])
+        position_x = pair[0]
+        position_y = pair[1]
+    val size_w = if sizes.len() > 0 and sizes[0] != "auto": parse_int(sizes[0]) else: 0
+    val size_h = if sizes.len() > 1 and sizes[1] != "auto": parse_int(sizes[1]) else: 0
+    BackgroundShorthand(valid: true, color: color, image_uri: image_uri, repeat: repeat, size_w: size_w, size_h: size_h, position_x: position_x, position_y: position_y, origin: origin, clip: clip)
+
+# Stage 1 of the apply_decls loop-inversion fix (see doc/08_tracking/bug/
+# web_style_producer_4s_per_node_interpreted_lane_2026-07-29.md, "Staging").
+# apply_decls' full body below probes ~283 known property names against
+# the rule's small decl table on every call. When every property in a
+# call's decl_tbl is one we understand well enough to update Style
+# directly (no cross-property shorthand interactions we haven't traced),
+# _apply_decls_dispatch below applies them directly via a `mut` Style
+# parameter -- true in-place field mutation (verified: a `mut x: SomeClass`
+# parameter's field writes are visible to the caller, not a local-only
+# copy), so this path pays neither the 176-field copy-in/copy-out nor the
+# 283-probe scan. Any decl_tbl entry NOT in this list falls back to the
+# full probe body unchanged -- this list only grows once a property's full
+# consequences (including any "if some other resolved field now has value
+# X, also do Y" coupling elsewhere in apply_decls) have been traced; get
+# this wrong and it is a silent rendering bug, not a crash.
+val _APPLY_DECLS_DISPATCH_PROPS: [text] = [
+    "box-sizing", "color", "width", "height", "min-height", "margin-left",
+    "z-index", "display",
+    # The Grid fields are applied by apply_grid_decls after either base path.
+    # Listing them here avoids the full 283-property probe for Grid-only rules.
+    "grid-template-columns", "grid-template-rows",
+    "grid-column", "grid-row",
+    "border-collapse",
+    # Stage 2: most entries are independent. The border-radius family is the
+    # deliberate exception: both paths call the same authored-order resolver.
+    # Other shorthand/longhand families still fall back to the full probe.
+    "justify-content", "align-items", "gap", "flex-basis", "text-align",
+    "font-style", "cursor",
+    "outline", "overflow", "box-shadow", "padding", "margin",
+    "border-radius",
+    "border-top-left-radius", "border-top-right-radius",
+    "border-bottom-right-radius", "border-bottom-left-radius",
+    "border-start-start-radius", "border-start-end-radius",
+    "border-end-start-radius", "border-end-end-radius",
+]
+
+fn _decl_tbl_all_dispatch_handled(decl_tbl: [text]) -> bool:
+    var i = 0
+    while i < decl_tbl.len():
+        val prop = decl_tbl[i]
+        var found = false
+        var j = 0
+        while j < _APPLY_DECLS_DISPATCH_PROPS.len():
+            if _APPLY_DECLS_DISPATCH_PROPS[j] == prop:
+                found = true
+                j = _APPLY_DECLS_DISPATCH_PROPS.len()
+            else:
+                j = j + 1
+        if not found:
+            return false
+        i = i + 2
+    true
+
+fn _decl_tbl_resolve_writing_mode(current: text, decl_tbl: [text]) -> text:
+    val raw = decl_tbl_get(decl_tbl, "writing-mode")
+    if raw.len() == 0:
+        return current
+    val value = raw.trim().lower()
+    if value == "horizontal-tb" or value == "vertical-rl" or value == "vertical-lr" or value == "sideways-rl" or value == "sideways-lr":
+        return value
+    current
+
+fn parse_supported_nonnegative_px(raw: text) -> i32:
+    val value = raw.trim().lower()
+    val digits = if value.ends_with("px"):
+        value.substring(0, value.len() - 2)
+    else:
+        value
+    if digits.len() == 0:
+        return -1
+    var digit_index = 0
+    while digit_index < digits.len():
+        val ch = digits.char_at(digit_index)
+        if ch < "0" or ch > "9":
+            return -1
+        digit_index = digit_index + 1
+    if val Some(parsed) = digits.parse_i64():
+        if parsed >= 0 and parsed <= 2147483647:
+            return parsed.to_i32()
+    -1
+
+fn decl_tbl_get_last_valid_nonnegative_px(
+    decl_tbl: [text], prop: text
+) -> text?:
+    var i = (decl_tbl.len() as i32) - 2
+    while i >= 0:
+        if decl_tbl[i] == prop:
+            val value = decl_tbl[i + 1].trim().lower()
+            if (
+                parse_supported_nonnegative_px(value) >= 0 or
+                value == "initial" or value == "unset" or
+                value == "inherit"
+            ):
+                return Some(value)
+        i = i - 2
+    nil
+
+fn parse_supported_outline_shorthand_width_px(raw: text) -> i32:
+    val value = raw.trim().lower()
+    if value == "0" or value == "0px":
+        return 0
+    val parsed = parse_int(value)
+    if parsed > 0:
+        return parsed
+    -1
+
+fn resolve_writing_mode_decls(current: text, decls: text) -> text:
+    if (
+        decls.len() == 0 or not decls.contains("writing-mode") or
+        _decl_over_quota(decls)
+    ):
+        return current
+    _decl_tbl_resolve_writing_mode(current, decl_table_build(decls))
+
+fn _apply_decls_dispatch(
+    mut st: Style, decl_tbl: [text], em_base: i32, apply_display: bool
+) -> Style:
+    # apply_decls' Style(...) reconstruction always resets these four
+    # resolved-font-cache fields, unconditionally, on every successful
+    # call -- not gated on which properties are present. Must match here
+    # too or the dispatch path would leave stale cached font-resolution
+    # data that the full-probe path always clears.
+    st.resolved_font_identity = ""
+    st.resolved_font_advances = []
+    st.resolved_font_width = 0
+    st.resolved_font_line_height = 0
+
+    val box_sizing = decl_tbl_get(decl_tbl, "box-sizing")
+    if box_sizing.len() > 0:
+        st.border_box = box_sizing == "border-box"
+    val border_collapse = decl_tbl_get(decl_tbl, "border-collapse").trim().lower()
+    if border_collapse == "collapse" or border_collapse == "separate":
+        st.border_collapse = border_collapse
+    elif border_collapse == "initial":
+        st.border_collapse = "separate"
+    val border_radius_shorthand = parse_border_radius_shorthand(
+        decl_tbl_get(decl_tbl, "border-radius"))
+    if border_radius_shorthand.valid:
+        st.border_radius_px = border_radius_shorthand.top_left_px
+    val resolved_radii = resolve_authored_border_radii(
+        decl_tbl, st.border_radius_tl_px, st.border_radius_tr_px,
+        st.border_radius_br_px, st.border_radius_bl_px)
+    if resolved_radii.valid:
+        st.border_radius_tl_px = resolved_radii.top_left_px
+        st.border_radius_tr_px = resolved_radii.top_right_px
+        st.border_radius_br_px = resolved_radii.bottom_right_px
+        st.border_radius_bl_px = resolved_radii.bottom_left_px
+    val col = decl_tbl_get(decl_tbl, "color")
+    if col.len() > 0:
+        val cv = parse_color(col)
+        if cv != 0u32:
+            st.fg = cv
+    val width = decl_tbl_get(decl_tbl, "width")
+    if width.len() > 0:
+        if width.ends_with("%"):
+            val wp = parse_int(width)
+            st.width_px = if wp > 0: 0 - wp else: 0
+        elif width.ends_with("vw"):
+            val wv = parse_int(width)
+            st.width_px = if wv > 0: 0 - wv else: 0
+        else:
+            st.width_px = parse_int(width)
+    val height = decl_tbl_get(decl_tbl, "height")
+    if height.len() > 0:
+        if height.ends_with("%"):
+            val hp = parse_int(height)
+            st.height_px = if hp > 0: 0 - hp else: 0
+        else:
+            st.height_px = parse_int(height)
+    val min_height = decl_tbl_get(decl_tbl, "min-height")
+    if min_height.len() > 0:
+        if min_height.contains("vh"):
+            st.min_height_vh = true
+        else:
+            st.min_height_vh = false
+            st.min_height_px = parse_int(min_height)
+    # "margin" (shorthand) must be applied BEFORE "margin-left" (longhand)
+    # to match the full-probe body's fixed processing order (margin's
+    # block precedes margin-left's block there; margin-left unconditionally
+    # overrides afterward when present -- this is not a source-order/
+    # decl_tbl-position comparison, so preserving code order here is
+    # sufficient, unlike the background shorthand in the full-probe body).
+    val margin = decl_tbl_get(decl_tbl, "margin")
+    if margin.len() > 0:
+        val mtoks = ws_tokens(margin.trim().lower())
+        val mn = mtoks.len()
+        if mn > 0:
+            var t_tok = mtoks[0]
+            var r_tok = mtoks[0]
+            var b_tok = mtoks[0]
+            var l_tok = mtoks[0]
+            if mn == 2:
+                r_tok = mtoks[1]
+                l_tok = mtoks[1]
+            elif mn == 3:
+                r_tok = mtoks[1]
+                l_tok = mtoks[1]
+                b_tok = mtoks[2]
+            elif mn >= 4:
+                r_tok = mtoks[1]
+                b_tok = mtoks[2]
+                l_tok = mtoks[3]
+            st.margin_t_auto = t_tok == "auto"
+            st.margin_r_auto = r_tok == "auto"
+            st.margin_b_auto = b_tok == "auto"
+            st.margin_l_auto = l_tok == "auto"
+            st.margin_t = if t_tok == "auto": 0 else: margin_token_vh_px(t_tok)
+            st.margin_r = if r_tok == "auto": 0 else: margin_token_px(r_tok)
+            st.margin_b = if b_tok == "auto": 0 else: margin_token_vh_px(b_tok)
+            st.margin_l = if l_tok == "auto": 0 else: margin_token_px(l_tok)
+    val ml = decl_tbl_get(decl_tbl, "margin-left")
+    if ml.len() > 0:
+        if ml == "auto":
+            st.margin_l = 0
+            st.margin_l_auto = true
+        else:
+            st.margin_l = if ml.ends_with("%"): 0 - parse_int(ml) else: parse_int(ml)
+            st.margin_l_auto = false
+    val z_index_decl = decl_tbl_get(decl_tbl, "z-index")
+    if z_index_decl.len() > 0:
+        st.z_index = parse_int(z_index_decl)
+    val justify_content_decl = decl_tbl_get(decl_tbl, "justify-content")
+    if justify_content_decl.len() > 0:
+        val normalized_justify_content = normalize_overflow_box_alignment(justify_content_decl)
+        if supports_content_distribution_alignment(normalized_justify_content):
+            st.justify_content = normalized_justify_content
+    val align_items_decl = decl_tbl_get(decl_tbl, "align-items")
+    if align_items_decl.len() > 0:
+        st.align_items = align_items_decl
+    val gap = decl_tbl_get_last_valid_nonnegative_px(decl_tbl, "gap")
+    if val Some(gap_value) = gap:
+        if (
+            gap_value == "initial" or gap_value == "unset" or
+            gap_value == "inherit"
+        ):
+            st.gap_px = 0
+            st.row_gap_px = 0
+            st.column_gap_px = 0
+        else:
+            val gv = parse_supported_nonnegative_px(gap_value)
+            st.gap_px = gv
+            st.row_gap_px = gv
+            st.column_gap_px = gv
+    val flex_basis_decl = decl_tbl_get(decl_tbl, "flex-basis")
+    if flex_basis_decl.len() > 0:
+        val basis_v = parse_supported_nonnegative_px(flex_basis_decl)
+        if basis_v >= 0:
+            st.flex_basis_px = basis_v
+    val ta = decl_tbl_get(decl_tbl, "text-align")
+    if ta.len() > 0:
+        st.text_align = ta
+    val font_style_decl = decl_tbl_get(decl_tbl, "font-style").trim().lower()
+    if font_style_decl == "normal":
+        st.font_style_italic = false
+    elif font_style_decl == "italic" or font_style_decl == "oblique":
+        st.font_style_italic = true
+    val cursor_decl = decl_tbl_get(decl_tbl, "cursor")
+    if cursor_decl.len() > 0:
+        val cursor_norm = cursor_decl.trim().lower()
+        if cursor_norm.len() > 0:
+            st.cursor = cursor_norm
+    val outline = decl_tbl_get(decl_tbl, "outline")
+    if outline.len() > 0:
+        val ow = parse_supported_outline_shorthand_width_px(outline)
+        if ow >= 0:
+            st.outline_w = ow
+        val oc = parse_color_any(outline)
+        if oc != 0u32:
+            st.outline_color = oc
+        if border_style_disables_paint(outline):
+            st.outline_w = 0
+    val overflow_decl = decl_tbl_get(decl_tbl, "overflow")
+    if overflow_decl.len() > 0:
+        st.overflow_hidden = overflow_decl == "hidden"
+        st.overflow_auto_y = (
+            overflow_decl == "auto" or overflow_decl == "scroll"
+        )
+        st.overflow_scroll_y = overflow_decl == "scroll"
+    val box_shadow_decl = decl_tbl_get(decl_tbl, "box-shadow")
+    if box_shadow_decl.len() > 0:
+        val box_shadow_norm = box_shadow_decl.trim().lower()
+        if box_shadow_norm == "none":
+            st.box_shadow_x_px = 0
+            st.box_shadow_y_px = 0
+            st.box_shadow_color = 0u32
+            st.box_shadow_blur_px = 0
+            st.box_shadow_alpha = 255
+            st.box_shadow_raw = ""
+        else:
+            st.box_shadow_raw = box_shadow_norm
+            val agg = parse_box_shadow_agg(box_shadow_norm)
+            if agg.found:
+                st.box_shadow_x_px = agg.x
+                st.box_shadow_y_px = agg.y
+                st.box_shadow_blur_px = agg.blur
+                st.box_shadow_alpha = agg.alpha
+                st.box_shadow_color = agg.color
+    val (resolved_pad_t, resolved_pad_r, resolved_pad_b, resolved_pad_l) = _resolve_authored_padding(
+        decl_tbl, st.pad_t, st.pad_r, st.pad_b, st.pad_l
+    )
+    st.pad_t = resolved_pad_t
+    st.pad_r = resolved_pad_r
+    st.pad_b = resolved_pad_b
+    st.pad_l = resolved_pad_l
+    val display_decl = decl_tbl_get_last_valid_display(decl_tbl)
+    if apply_display and display_decl.len() > 0:
+        if display_decl == "none":
+            st.display = "none"
+        elif display_decl == "inline":
+            st.display = "inline"
+        elif display_decl == "inline-block":
+            st.display = "inline-block"
+        elif display_decl == "list-item":
+            st.display = "list-item"
+        elif display_decl == "flex":
+            st.display = "flex"
+        elif display_decl == "grid":
+            st.display = "grid"
+        elif display_decl == "contents":
+            st.display = "contents"
+        elif display_decl == "block":
+            st.display = "block"
+    # Unconditional in the full-probe path too: it checks the FINAL
+    # display_v, which can already be "contents" from inheritance even
+    # when this call's decls never mention "display" at all.
+    if apply_display and st.display == "contents":
+        st.bg = 0u32
+        st.width_px = 0
+        st.height_px = 0
+        st.pad_l = 0
+        st.pad_t = 0
+        st.pad_r = 0
+        st.pad_b = 0
+        st.border_w = 0
+        st.border_l = 0
+        st.border_t = 0
+        st.border_r = 0
+        st.border_b = 0
+        st.border_color = 0u32
+        st.border_color_l = 0u32
+        st.border_color_t = 0u32
+        st.border_color_r = 0u32
+        st.border_color_b = 0u32
+        st.outline_w = 0
+        st.outline_color = 0u32
+        st.margin_l = 0
+        st.margin_t = 0
+        st.margin_r = 0
+        st.margin_b = 0
+        st.margin_l_auto = false
+        st.margin_r_auto = false
+        st.margin_t_auto = false
+        st.margin_b_auto = false
+    st
+
+fn normalized_grid_positive_int(raw: text) -> i32:
+    val value = raw.trim()
+    if value == "":
+        return 0
+    var index = 0
+    while index < value.len():
+        val ch = value.char_at(index)
+        if ch < "0" or ch > "9":
+            return 0
+        index = index + 1
+    parse_int(value)
+
+fn normalized_grid_track_list(raw: text) -> text:
+    val parts = raw.trim().split(" ")
+    var normalized = ""
+    for part in parts:
+        val token = part.trim().lower()
+        if token == "":
+            continue
+        if not token.ends_with("px") or token.len() <= 2:
+            return ""
+        val size = normalized_grid_positive_int(
+            token.substring(0, token.len() - 2)
+        )
+        if size <= 0:
+            return ""
+        if normalized != "":
+            normalized = normalized + " "
+        normalized = normalized + size.to_string() + "px"
+    normalized
+
+fn normalized_grid_placement(raw: text) -> text:
+    val value = raw.trim().lower()
+    val slash = find_from(value, "/", 0)
+    val start_raw = if slash >= 0:
+        value.substring(0, slash).trim()
+    else:
+        value
+    val start = normalized_grid_positive_int(start_raw)
+    if start <= 0:
+        return ""
+    if slash < 0:
+        return start.to_string()
+    val tail = value.substring(slash + 1, value.len()).trim()
+    if tail.starts_with("span "):
+        val span = normalized_grid_positive_int(
+            tail.substring(5, tail.len()).trim()
+        )
+        if span > 0:
+            return "{start} / span {span}"
+        return ""
+    val end_line = normalized_grid_positive_int(tail)
+    if end_line > start:
+        return "{start} / {end_line}"
+    ""
+
+fn apply_grid_decls(mut st: Style, table: [text]):
+    val columns = normalized_grid_track_list(
+        decl_tbl_get(table, "grid-template-columns")
+    )
+    if columns != "":
+        st.grid_template_columns = columns
+    val rows = normalized_grid_track_list(
+        decl_tbl_get(table, "grid-template-rows")
+    )
+    if rows != "":
+        st.grid_template_rows = rows
+    val column = normalized_grid_placement(
+        decl_tbl_get(table, "grid-column")
+    )
+    if column != "":
+        st.grid_column = column
+    val row = normalized_grid_placement(decl_tbl_get(table, "grid-row"))
+    if row != "":
+        st.grid_row = row
+
+fn apply_authored_style_metadata(
+    mut st: Style, previous: Style, table: [text],
+    logical_writing_mode: text
+) -> Style:
+    # The integer used-size channel deliberately maps both `auto` and `0px`
+    # to zero. Retain declaration identity beside it so alignment can tell
+    # automatic sizing from an authored zero without reparsing in layout.
+    st.height_auto = previous.height_auto
+    st.align_items_authored = previous.align_items_authored
+    st.scrollbar_width_none = previous.scrollbar_width_none
+    # Match ordinary logical sizing exactly: the cascade owner supplies the
+    # already-final cross-phase writing mode. Only standalone apply_decls calls
+    # resolve this phase locally from the incoming computed value.
+    val sizing_writing_mode = if logical_writing_mode.len() > 0:
+        logical_writing_mode
+    else:
+        _decl_tbl_resolve_writing_mode(previous.writing_mode, table)
+    val logical_inline_is_height = sizing_writing_mode != "horizontal-tb"
+    var winning_property = "height"
+    var winning_position = decl_tbl_last_index(table, winning_property)
+    val logical_property = if logical_inline_is_height:
+        "inline-size"
+    else:
+        "block-size"
+    val logical_position = decl_tbl_last_index(table, logical_property)
+    if logical_position > winning_position:
+        winning_property = logical_property
+        winning_position = logical_position
+    if winning_position >= 0:
+        val winning_value = decl_tbl_get(
+            table, winning_property
+        ).trim().lower()
+        st.height_auto = (
+            winning_value == "auto" or winning_value == "initial" or
+            winning_value == "unset" or winning_value == "revert"
+        )
+    if (
+        decl_tbl_last_index(table, "align-items") >= 0 or
+        decl_tbl_last_index(table, "place-items") >= 0
+    ):
+        st.align_items_authored = true
+    st
+
+fn _apply_decls_on_writing_mode(
+    st: Style, decls: text, em_base: i32, logical_writing_mode: text,
+    apply_display: bool
+) -> Style:
+    # Preserve the declaration trust boundary before the Grid side path.
+    if decls.len() == 0 or _decl_over_quota(decls):
+        return st
+    # One table owns ordinary values, Grid values, and authored metadata.
+    val table = decl_table_build(decls)
+    val has_grid_declaration = (
+        decl_tbl_last_index(table, "grid-template-columns") >= 0 or
+        decl_tbl_last_index(table, "grid-template-rows") >= 0 or
+        decl_tbl_last_index(table, "grid-column") >= 0 or
+        decl_tbl_last_index(table, "grid-row") >= 0
+    )
+    if not has_grid_declaration:
+        val ordinary = _apply_decls_without_grid(
+            st, decls, table, em_base, logical_writing_mode, apply_display
+        )
+        return apply_authored_style_metadata(
+            ordinary, st, table, logical_writing_mode
+        )
+    val columns = st.grid_template_columns
+    val rows = st.grid_template_rows
+    val column = st.grid_column
+    val row = st.grid_row
+    var result = _apply_decls_without_grid(
+        st, decls, table, em_base, logical_writing_mode, apply_display
+    )
+    result.grid_template_columns = columns
+    result.grid_template_rows = rows
+    result.grid_column = column
+    result.grid_row = row
+    apply_grid_decls(result, table)
+    apply_authored_style_metadata(result, st, table, logical_writing_mode)
+
+fn apply_decls_on_writing_mode(
+    st: Style, decls: text, em_base: i32, logical_writing_mode: text
+) -> Style:
+    _apply_decls_on_writing_mode(
+        st, decls, em_base, logical_writing_mode, true
+    )
+
+fn apply_decls_without_display_on_writing_mode(
+    st: Style, decls: text, em_base: i32, logical_writing_mode: text
+) -> Style:
+    _apply_decls_on_writing_mode(
+        st, decls, em_base, logical_writing_mode, false
+    )
+
+fn apply_decls(st: Style, decls: text, em_base: i32) -> Style:
+    apply_decls_on_writing_mode(st, decls, em_base, "")
+
+# default per-tag tweaks (block/inline, heading sizes, spacing)
+fn _tag_defaults_without_metadata(st: Style, tag: text) -> Style:
+    var display_v = st.display
+    var font_size_v = st.font_size
+    var font_family_v = st.font_family
+    var pad_l_v = st.pad_l
+    var pad_t_v = st.pad_t
+    var pad_r_v = st.pad_r
+    var pad_b_v = st.pad_b
+    var margin_l_v = st.margin_l
+    var margin_t_v = st.margin_t
+    var margin_r_v = st.margin_r
+    var margin_b_v = st.margin_b
+    var border_box_v = st.border_box
+    var bold_v = st.bold
+    var fg_v = st.fg
+    var underline_v = st.text_decoration_underline
+    var white_space_nowrap_v = st.white_space_nowrap
+    var vertical_align_v = st.vertical_align
+    var line_height_v = st.line_height_px
+    var text_align_v = st.text_align
+    if is_non_rendered_tag(tag):
+        return Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: st.fg, font_size: font_size_v, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: st.line_height_px, width_px: st.width_px, height_px: st.height_px, border_box: st.border_box, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: st.pad_l, pad_t: st.pad_t, pad_r: st.pad_r, pad_b: st.pad_b, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: st.margin_l, margin_t: margin_t_v, margin_r: st.margin_r, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: "none", overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: st.text_align, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: st.text_decoration_underline, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: st.white_space_nowrap, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: st.vertical_align, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
+    if is_inline_tag(tag):
+        display_v = "inline"
+    if tag == "h1":
+        font_size_v = 32
+        bold_v = true
+        margin_t_v = 21
+        margin_b_v = 21
+    elif tag == "h2":
+        font_size_v = 24
+        bold_v = true
+        margin_t_v = 20
+        margin_b_v = 20
+    elif tag == "h3":
+        font_size_v = 19
+        bold_v = true
+        margin_t_v = 19
+        margin_b_v = 19
+    elif tag == "h4":
+        font_size_v = 16
+        bold_v = true
+        margin_t_v = 21
+        margin_b_v = 21
+    elif tag == "h5":
+        font_size_v = 13
+        bold_v = true
+        margin_t_v = 22
+        margin_b_v = 22
+    elif tag == "h6":
+        font_size_v = 11
+        bold_v = true
+        margin_t_v = 26
+        margin_b_v = 26
+    elif tag == "small":
+        font_size_v = (st.font_size * 5 + 3) / 6
+    elif tag == "code" or tag == "kbd" or tag == "samp":
+        font_family_v = "monospace"
+    elif tag == "var":
+        st.font_style_italic = true
+    elif tag == "address":
+        display_v = "block"
+        st.font_style_italic = true
+    elif tag == "mark":
+        display_v = "inline"
+        st.bg = argb(255, 255, 0)
+        fg_v = argb(0, 0, 0)
+    elif tag == "sub" or tag == "sup":
+        # Selected medium-UA profile: `smaller` is 5/6 of the inherited size,
+        # rounded half up. The inherited zero line-height sentinel stays normal.
+        font_size_v = (st.font_size * 5 + 3) / 6
+        line_height_v = 0
+        vertical_align_v = if tag == "sub": "sub" else: "super"
+    elif tag == "hr":
+        var rule = st
+        val rule_color = argb(128, 128, 128)
+        rule.display = if st.display == "none": "none" else: "block"
+        rule.margin_t = 8
+        rule.margin_b = 8
+        rule.border_w = 1
+        rule.border_color = rule_color
+        rule.border_l = 1
+        rule.border_t = 1
+        rule.border_r = 1
+        rule.border_b = 1
+        rule.border_color_l = rule_color
+        rule.border_color_t = rule_color
+        rule.border_color_r = rule_color
+        rule.border_color_b = rule_color
+        rule.border_style_l = "solid"
+        rule.border_style_r = "solid"
+        rule.overflow_hidden = true
+        return rule
+    elif tag == "p":
+        margin_t_v = 16
+        margin_b_v = 16
+    elif tag == "dl":
+        margin_t_v = 16
+        margin_b_v = 16
+    elif tag == "dd":
+        margin_l_v = 40
+    elif tag == "blockquote" or tag == "figure":
+        margin_l_v = 40
+        margin_t_v = 16
+        margin_r_v = 40
+        margin_b_v = 16
+    elif tag == "pre":
+        font_family_v = "monospace"
+        margin_t_v = 16
+        margin_b_v = 16
+        white_space_nowrap_v = true
+    elif tag == "body":
+        display_v = "block"
+        margin_l_v = 8
+        margin_t_v = 8
+        margin_r_v = 8
+        margin_b_v = 8
+    elif tag == "fieldset":
+        display_v = "block"
+        margin_l_v = 2
+        margin_r_v = 2
+        pad_l_v = 12
+        pad_t_v = 6
+        pad_r_v = 12
+        pad_b_v = 10
+        st.border_w = 2
+        st.border_l = 2
+        st.border_t = 2
+        st.border_r = 2
+        st.border_b = 2
+        st.border_color = argb(118, 118, 118)
+        st.border_color_l = st.border_color
+        st.border_color_t = st.border_color
+        st.border_color_r = st.border_color
+        st.border_color_b = st.border_color
+        st.border_style_l = "solid"
+        st.border_style_r = "solid"
+    elif tag == "legend":
+        # ponytail: generic shrink-to-content fallback; replace only when the
+        # fieldset owner implements legend cutout and special formatting.
+        display_v = "inline-block"
+        pad_l_v = 2
+        pad_r_v = 2
+    elif tag == "input":
+        display_v = "inline"
+        pad_l_v = 2
+        pad_r_v = 2
+        pad_t_v = 1
+        pad_b_v = 1
+    elif tag == "button":
+        display_v = "inline"
+        border_box_v = true
+        pad_l_v = 6
+        pad_r_v = 6
+        pad_t_v = 1
+        pad_b_v = 1
+        margin_b_v = 3
+    elif tag == "a":
+        fg_v = argb(0, 0, 238)
+        underline_v = true
+    elif tag == "ul" or tag == "ol" or tag == "menu":
+        display_v = "block"
+        pad_l_v = 40
+        margin_t_v = 16
+        margin_b_v = 16
+    elif tag == "table":
+        display_v = "table"
+    elif tag == "caption":
+        display_v = "table-caption"
+        text_align_v = "center"
+    elif tag == "thead" or tag == "tbody" or tag == "tfoot":
+        display_v = "table-row-group"
+    elif tag == "tr":
+        display_v = "table-row"
+    elif tag == "td" or tag == "th":
+        display_v = "table-cell"
+        if tag == "th":
+            bold_v = true
+            text_align_v = "center"
+    elif tag == "summary":
+        display_v = "list-item"
+    elif tag == "details" or tag == "article" or tag == "header" or tag == "footer" or tag == "nav" or tag == "section" or tag == "div" or tag == "li" or tag == "center":
+        display_v = "block"
+    Style(bg: st.bg, background_gradient_from: st.background_gradient_from, background_gradient_to: st.background_gradient_to, background_repeat: st.background_repeat, background_size_w_px: st.background_size_w_px, background_size_h_px: st.background_size_h_px, background_position_x_px: st.background_position_x_px, background_position_y_px: st.background_position_y_px, background_clip: st.background_clip, background_origin: st.background_origin, background_attachment: st.background_attachment, background_image_uri: st.background_image_uri, fg: fg_v, font_size: font_size_v, font_family: font_family_v, resolved_font_identity: "", resolved_font_advances: [], resolved_font_width: 0, resolved_font_line_height: 0, line_height_px: line_height_v, width_px: st.width_px, height_px: st.height_px, border_box: border_box_v, min_width_px: st.min_width_px, max_width_px: st.max_width_px, min_height_px: st.min_height_px, max_height_px: st.max_height_px, min_height_vh: st.min_height_vh, flex_fill: st.flex_fill, flex_grow: st.flex_grow, flex_shrink: st.flex_shrink, flex_basis_px: st.flex_basis_px, order: st.order, flex_wrap: st.flex_wrap, justify_content: st.justify_content, align_items: st.align_items, align_self: st.align_self, align_content: st.align_content, pad_l: pad_l_v, pad_t: pad_t_v, pad_r: pad_r_v, pad_b: pad_b_v, border_w: st.border_w, border_color: st.border_color, border_l: st.border_l, border_t: st.border_t, border_r: st.border_r, border_b: st.border_b, border_color_l: st.border_color_l, border_color_t: st.border_color_t, border_color_r: st.border_color_r, border_color_b: st.border_color_b, border_style_l: st.border_style_l, border_style_r: st.border_style_r, outline_w: st.outline_w, outline_color: st.outline_color, outline_offset_px: st.outline_offset_px, box_shadow_x_px: st.box_shadow_x_px, box_shadow_y_px: st.box_shadow_y_px, box_shadow_color: st.box_shadow_color, box_shadow_blur_px: st.box_shadow_blur_px, box_shadow_alpha: st.box_shadow_alpha, box_shadow_raw: st.box_shadow_raw, bg_layers_raw: st.bg_layers_raw, backdrop_filter_raw: st.backdrop_filter_raw, border_radius_px: st.border_radius_px, border_radius_tl_px: st.border_radius_tl_px, border_radius_tr_px: st.border_radius_tr_px, border_radius_br_px: st.border_radius_br_px, border_radius_bl_px: st.border_radius_bl_px, gap_px: st.gap_px, row_gap_px: st.row_gap_px, column_gap_px: st.column_gap_px, margin_l: margin_l_v, margin_t: margin_t_v, margin_r: margin_r_v, margin_b: margin_b_v, margin_l_auto: st.margin_l_auto, margin_r_auto: st.margin_r_auto, margin_t_auto: st.margin_t_auto, margin_b_auto: st.margin_b_auto, display: display_v, overflow_hidden: st.overflow_hidden, overflow_auto_y: st.overflow_auto_y, overflow_scroll_y: st.overflow_scroll_y, scrollbar_thumb_color: st.scrollbar_thumb_color, scrollbar_track_color: st.scrollbar_track_color, text_overflow_ellipsis: st.text_overflow_ellipsis, visibility_hidden: st.visibility_hidden, content_visibility_hidden: st.content_visibility_hidden, will_change: st.will_change, color_adjust: st.color_adjust, forced_color_adjust: st.forced_color_adjust, print_color_adjust: st.print_color_adjust, orphans: st.orphans, widows: st.widows, position_relative: st.position_relative, position_absolute: st.position_absolute, position_sticky: st.position_sticky, left_px: st.left_px, top_px: st.top_px, right_px: st.right_px, bottom_px: st.bottom_px, z_index: st.z_index, opacity_pct: st.opacity_pct, flex_direction: st.flex_direction, text_align: text_align_v, text_align_last: st.text_align_last, text_justify: st.text_justify, text_transform: st.text_transform, text_indent_px: st.text_indent_px, letter_spacing_px: st.letter_spacing_px, word_spacing_px: st.word_spacing_px, font_size_adjust: st.font_size_adjust, font_palette: st.font_palette, font_feature_settings: st.font_feature_settings, font_language_override: st.font_language_override, font_variation_settings: st.font_variation_settings, font_variant: st.font_variant, font_variant_alternates: st.font_variant_alternates, font_variant_caps: st.font_variant_caps, font_variant_east_asian: st.font_variant_east_asian, font_variant_emoji: st.font_variant_emoji, font_variant_ligatures: st.font_variant_ligatures, font_variant_numeric: st.font_variant_numeric, font_variant_position: st.font_variant_position, font_style_italic: st.font_style_italic, font_kerning: st.font_kerning, font_optical_sizing: st.font_optical_sizing, font_stretch: st.font_stretch, font_width: st.font_width, font_synthesis: st.font_synthesis, font_synthesis_small_caps: st.font_synthesis_small_caps, font_synthesis_position: st.font_synthesis_position, font_synthesis_style: st.font_synthesis_style, font_synthesis_weight: st.font_synthesis_weight, direction_rtl: st.direction_rtl, writing_mode: st.writing_mode, text_orientation: st.text_orientation, text_combine_upright: st.text_combine_upright, text_shadow_x_px: st.text_shadow_x_px, text_shadow_y_px: st.text_shadow_y_px, text_shadow_color: st.text_shadow_color, text_decoration_color: st.text_decoration_color, text_decoration_underline: underline_v, text_decoration_style: st.text_decoration_style, text_decoration_thickness_px: st.text_decoration_thickness_px, text_underline_offset_px: st.text_underline_offset_px, text_underline_position: st.text_underline_position, white_space_nowrap: white_space_nowrap_v, overflow_wrap: st.overflow_wrap, line_break: st.line_break, hyphens: st.hyphens, word_break: st.word_break, cursor: st.cursor, resize: st.resize, table_layout: st.table_layout, border_collapse: st.border_collapse, border_spacing_x_px: st.border_spacing_x_px, border_spacing_y_px: st.border_spacing_y_px, caption_side: st.caption_side, vertical_align: vertical_align_v, caret_color: st.caret_color, accent_color: st.accent_color, tab_size: st.tab_size, unicode_bidi: st.unicode_bidi, transition_property: st.transition_property, transition_duration_ms: st.transition_duration_ms, transition_delay_ms: st.transition_delay_ms, transition_timing_function: st.transition_timing_function, animation_name: st.animation_name, animation_duration_ms: st.animation_duration_ms, animation_delay_ms: st.animation_delay_ms, animation_timing_function: st.animation_timing_function, animation_iteration_count: st.animation_iteration_count, animation_direction: st.animation_direction, animation_fill_mode: st.animation_fill_mode, animation_play_state: st.animation_play_state, transform_origin: st.transform_origin, transform_box: st.transform_box, transform_style: st.transform_style, image_rendering: st.image_rendering, object_fit: st.object_fit, object_position: st.object_position, bold: bold_v)
+
+fn tag_defaults(st: Style, tag: text) -> Style:
+    val out = _tag_defaults_without_metadata(st, tag)
+    out.height_auto = st.height_auto
+    out.align_items_authored = st.align_items_authored
+    out.scrollbar_width_none = st.scrollbar_width_none
+    out
+
+# ---------------------------------------------------------------------------
+# CSS rules from <style> blocks
+# ---------------------------------------------------------------------------

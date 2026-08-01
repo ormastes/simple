@@ -1,0 +1,146 @@
+# Proves the registry-driven (ptr, len) extern-ABI fix (`text_arg_indices`
+# in `50.mir/text_extern_abi.spl` + `expand_text_abi_args` in
+# `_MirLoweringExpr/switch_operators_calls.spl`'s `emit_resolved_direct_call`)
+# through the REAL end-to-end pipeline: source text -> parser
+# (`parse_full_frontend`) -> HIR (`HirLowering`) -> MIR (`MirLowering`,
+# where the fix lives) -> LLVM `.spl` backend (`MirToLlvm.translate_module`).
+# This is the same pattern `llvm_mutable_global_static_spec.spl`'s
+# `translate_literal_globals`/`runtime_initializer_store_names` use to drive
+# real HIR/MIR lowering in a unit spec.
+#
+# `rt_panic` is one of the confirmed-broken names from
+# doc/08_tracking/bug/pure_simple_text_extern_abi_audit_2026-07-30.md and is
+# registered as `text_arg_indices("rt_panic") == Some([0])`. The source
+# below builds its `text` argument from concatenation + `.to_text()` -- a
+# NON-LITERAL value -- so the split must go through the general
+# `rt_string_data`/`rt_string_len` runtime-call path, not a literal's
+# compile-time-known length.
+#
+# CAVEAT that must stay attached to this spec (see the fix-plan and audit
+# docs): `bin/simple test` runs specs through the Rust seed's tree-walk
+# INTERPRETER. This spec calls the real production
+# `compiler.frontend.frontend.parse_full_frontend` / `HirLowering` /
+# `MirLowering` / `compiler.backend.MirToLlvm` .spl sources and inspects the
+# LLVM IR text they emit, so it DOES exercise the actual fix's logic
+# (the MIR-level split + the LLVM backend's Call-argument encoding of the
+# result) -- but by INTERPRETING those .spl sources, not by running them
+# compiled to native code. It is NOT proof that a native-codegen-compiled
+# build of this pure-Simple compiler produces a correct (ptr, len) call at
+# runtime, nor that the real `rt_panic`/`rt_string_data`/`rt_string_len` C
+# functions receive the right bytes when actually executed -- only a
+# native-build smoke test (compile a fixture through `native-build` and run
+# the resulting binary) could prove that, and the currently deployed
+# `bin/simple` is the Rust seed, not the pure-Simple redeploy this fix
+# targets.
+
+use compiler.backend.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.mir.mir_lowering_types.{MirLowering}
+
+fn find_call_line(output: text, marker: text) -> text:
+    for line in output.split("\n"):
+        if line.contains(marker) and line.contains("call "):
+            return line
+    ""
+
+fn top_level_call_arg_count(call_line: text, marker: text) -> i64:
+    """Depth-aware count of a call's own top-level arguments (depth-1
+    commas). See text_extern_abi_ptr_len_divergence_spec.spl's identical
+    helper for why a naive substring/comma search is wrong here (nested GEP
+    index lists inside one argument are not additional arguments)."""
+    val start_idx = call_line.find(marker)
+    if start_idx < 0:
+        return -1
+    val body = call_line.substring(start_idx + marker.len())
+    var depth = 1
+    var comma_count = 0
+    var saw_content = false
+    var i = 0
+    while i < body.len():
+        val ch = body[i]
+        if ch == "(":
+            depth = depth + 1
+            saw_content = true
+        elif ch == ")":
+            depth = depth - 1
+            if depth == 0:
+                if not saw_content:
+                    return 0
+                return comma_count + 1
+        elif ch == "," and depth == 1:
+            comma_count = comma_count + 1
+        elif ch != " ":
+            saw_content = true
+        i = i + 1
+    -1
+
+fn compile_registry_fixture() -> text:
+    val source = "extern fn rt_panic(message: text)\n\nfn boom(n: i64):\n    val msg: text = \"err:\" + n.to_text()\n    rt_panic(msg)\n"
+    val ast = parse_full_frontend(source, "text_abi_registry_fixture.spl", "text_abi_registry_fixture.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("text_abi_registry_fixture.spl")
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors = ""
+    for err in mir_lowering.errors:
+        errors = errors + err.message + "\n"
+    if errors != "":
+        return "MIR_LOWERING_ERRORS:\n" + errors
+    MirToLlvm.create("test.llvm.text_abi_registry", CodegenTarget.X86_64, nil).translate_module(mir)
+
+describe "pure-Simple compiler: text-extern-ABI registry fix (end-to-end)":
+    it "splits a non-literal text arg to a registry-listed extern into (ptr, len)":
+        val output = compile_registry_fixture()
+        print("[text_extern_abi_registry] mir_lowering_errors_guard = " + (if output.starts_with("MIR_LOWERING_ERRORS:"): output else: "none"))
+        assert_true(not output.starts_with("MIR_LOWERING_ERRORS:"), "fixture failed to lower to MIR: " + output)
+
+        # The split must have inserted calls to the existing rt_string_data/
+        # rt_string_len externs (proves the split fired, not just that the
+        # final call happens to carry 2 args for some unrelated reason).
+        val data_call_line = find_call_line(output, "rt_string_data(")
+        val len_call_line = find_call_line(output, "rt_string_len(")
+        print("[text_extern_abi_registry] data_call_line = " + data_call_line)
+        print("[text_extern_abi_registry] len_call_line = " + len_call_line)
+        assert_true(data_call_line != "", "expected an inserted call to rt_string_data before the rt_panic call")
+        assert_true(len_call_line != "", "expected an inserted call to rt_string_len before the rt_panic call")
+
+        val call_line = find_call_line(output, "rt_panic(")
+        print("[text_extern_abi_registry] call_line = " + call_line)
+        assert_true(call_line != "", "expected a call to rt_panic in the emitted LLVM IR")
+
+        val arg_count = top_level_call_arg_count(call_line, "rt_panic(")
+        print("[text_extern_abi_registry] top_level_call_arg_count = " + arg_count.to_text())
+        assert_true(arg_count >= 0, "failed to parse the call's argument list (line: " + call_line + ")")
+
+        # THE fix assertion: rt_panic is text_arg_indices([0]), so its single
+        # (non-literal) text argument must arrive as the (ptr, len) pair.
+        assert_equal(2, arg_count, "registry split did not fire: rt_panic call emitted " + arg_count.to_text() + " argument(s), expected 2 (ptr, len) -- line: " + call_line)
+
+    it "leaves an unregistered extern's text arg untouched (no over-application)":
+        # Guard against the split firing for names NOT in the registry --
+        # `rt_unregistered_text_probe` is not in text_arg_indices, so its
+        # text argument must reach the call site as the single collapsed
+        # operand, unchanged from today's (broken-for-registry-names,
+        # unaffected-for-everything-else) behavior.
+        val source = "extern fn rt_unregistered_text_probe(message: text) -> i64\n\nfn probe(n: i64) -> i64:\n    val msg: text = \"n=\" + n.to_text()\n    rt_unregistered_text_probe(msg)\n"
+        val ast = parse_full_frontend(source, "text_abi_unregistered_fixture.spl", "text_abi_unregistered_fixture.spl", Logger(level: 0))
+        var hir_lowering = HirLowering.with_filename("text_abi_unregistered_fixture.spl")
+        val hir = hir_lowering.lower_module(ast)
+        var mir_lowering = MirLowering.new(hir.symbols)
+        val mir = mir_lowering.lower_module(hir)
+        var errors = ""
+        for err in mir_lowering.errors:
+            errors = errors + err.message + "\n"
+        assert_equal("", errors, "fixture failed to lower to MIR")
+        val output = MirToLlvm.create("test.llvm.text_abi_unregistered", CodegenTarget.X86_64, nil).translate_module(mir)
+
+        val call_line = find_call_line(output, "rt_unregistered_text_probe(")
+        print("[text_extern_abi_registry] unregistered_call_line = " + call_line)
+        assert_true(call_line != "", "expected a call to rt_unregistered_text_probe in the emitted LLVM IR")
+
+        val arg_count = top_level_call_arg_count(call_line, "rt_unregistered_text_probe(")
+        print("[text_extern_abi_registry] unregistered_arg_count = " + arg_count.to_text())
+        assert_equal(1, arg_count, "over-application: an unregistered extern's text arg was split even though it is not in text_arg_indices")

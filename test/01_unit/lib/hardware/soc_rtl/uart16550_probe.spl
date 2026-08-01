@@ -1,0 +1,99 @@
+# Probe: full 16550 register model in soc_rtl/uart16550.spl.
+# Drives the MMIO interface like a real ns16550a driver init would:
+# DLAB banking (DLL/DLM divisor -> computed baud), FCR FIFO enable/reset,
+# THR/TX FIFO + THRE/TEMT, RX push -> LSR.DR + IIR RX-avail + irq line,
+# RBR drain, SCR scratch, MCR loopback -> MSR reflection + delta latch.
+# Prints PASS/FAIL per check and a final ALL PASS / n FAIL line.
+use std.hardware.soc_rtl.uart16550.{
+    Uart16550State, uart_create, uart_mmio_read, uart_mmio_read_update,
+    uart_mmio_write, uart_rx_push, uart_tx_pop, uart_compute_lsr,
+    uart_compute_iir, uart_irq_line, uart_divisor, uart_baud, uart_word_length
+}
+
+fn check(name: text, ok: bool) -> i64:
+    if ok:
+        print("PASS {name}")
+        return 0
+    print("FAIL {name}")
+    1
+
+fn main() -> i64:
+    var fails: i64 = 0
+    var u = uart_create()
+
+    # --- 1. Divisor latch via DLAB banking ---
+    # LCR = 0x83: 8N1 + DLAB set
+    u = uart_mmio_write(u, 3, 0x83)
+    u = uart_mmio_write(u, 0, 0x1B)   # DLL = 27
+    u = uart_mmio_write(u, 1, 0x00)   # DLM = 0
+    fails = fails + check("dlab_dll_readback", uart_mmio_read(u, 0) == 0x1B)
+    fails = fails + check("divisor_27", uart_divisor(u) == 27)
+    # 50 MHz clock / (16 * 27) = 115740 (~115200 baud)
+    fails = fails + check("baud_50mhz_div27", uart_baud(u, 50000000) == 115740)
+
+    # Clear DLAB -> LCR = 0x03 (8N1); offset 0 is now RBR/THR, not DLL
+    u = uart_mmio_write(u, 3, 0x03)
+    fails = fails + check("lcr_readback_8n1", uart_mmio_read(u, 3) == 0x03)
+    fails = fails + check("word_length_8", uart_word_length(u) == 8)
+
+    # --- 2. FCR FIFO enable -> IIR bits 7:6 ---
+    u = uart_mmio_write(u, 2, 0x07)   # enable FIFO + reset both
+    fails = fails + check("iir_fifo_enabled_bits", (uart_mmio_read(u, 2) & 0xC0) == 0xC0)
+
+    # --- 3. TX: three THR writes land in tx FIFO; THRE/TEMT behavior ---
+    fails = fails + check("thre_temt_idle", (uart_compute_lsr(u) & 0x60) == 0x60)
+    u = uart_mmio_write(u, 0, 0x41)   # 'A'
+    u = uart_mmio_write(u, 0, 0x42)   # 'B'
+    u = uart_mmio_write(u, 0, 0x43)   # 'C'
+    fails = fails + check("tx_fifo_count_3", u.tx_count == 3)
+    fails = fails + check("thre_clear_when_tx_pending", (uart_compute_lsr(u) & 0x20) == 0)
+
+    # Drain TX FIFO in order via testbench-side pop
+    val p1 = uart_tx_pop(u)
+    val p2 = uart_tx_pop(p1.state)
+    val p3 = uart_tx_pop(p2.state)
+    u = p3.state
+    val order_ok = p1.valid and p2.valid and p3.valid and
+        p1.byte_val == 0x41 and p2.byte_val == 0x42 and p3.byte_val == 0x43
+    fails = fails + check("tx_fifo_drain_order_ABC", order_ok)
+    fails = fails + check("thre_temt_after_drain", (uart_compute_lsr(u) & 0x60) == 0x60)
+
+    # --- 4. RX: push -> DR + IIR RX-avail + irq line; RBR read drains ---
+    u = uart_mmio_write(u, 1, 0x01)   # IER = RDI (RX data available interrupt)
+    u = uart_rx_push(u, 0x68)         # 'h'
+    u = uart_rx_push(u, 0x69)         # 'i'
+    fails = fails + check("lsr_dr_set_on_rx", (uart_compute_lsr(u) & 0x01) == 0x01)
+    fails = fails + check("iir_rx_avail", (uart_compute_iir(u) & 0x0F) == 0x04)
+    fails = fails + check("irq_line_asserted", uart_irq_line(u))
+
+    val b1 = uart_mmio_read(u, 0)
+    u = uart_mmio_read_update(u, 0)
+    val b2 = uart_mmio_read(u, 0)
+    u = uart_mmio_read_update(u, 0)
+    fails = fails + check("rbr_drain_bytes_hi", b1 == 0x68 and b2 == 0x69)
+    fails = fails + check("dr_clear_after_drain", (uart_compute_lsr(u) & 0x01) == 0)
+    fails = fails + check("irq_line_deasserted", uart_irq_line(u) == false)
+
+    # --- 5. SCR scratch ---
+    u = uart_mmio_write(u, 7, 0x5A)
+    fails = fails + check("scr_readback", uart_mmio_read(u, 7) == 0x5A)
+
+    # --- 6. MCR loopback -> MSR line reflection + delta latch/clear ---
+    u = uart_mmio_write(u, 4, 0x1F)   # LOOP + OUT2 + OUT1 + RTS + DTR
+    fails = fails + check("mcr_readback", uart_mmio_read(u, 4) == 0x1F)
+    val msr1 = uart_mmio_read(u, 6)
+    fails = fails + check("msr_loopback_lines", (msr1 & 0xF0) == 0xF0)
+    fails = fails + check("msr_delta_latched", (msr1 & 0x0F) == 0x0F)
+    u = uart_mmio_read_update(u, 6)   # MSR read clears delta bits
+    fails = fails + check("msr_delta_cleared_on_read", (uart_mmio_read(u, 6) & 0x0F) == 0)
+
+    # --- 7. FCR RX-reset clears pending RX bytes ---
+    u = uart_rx_push(u, 0x21)
+    u = uart_mmio_write(u, 2, 0x03)   # FIFO enable + RX reset
+    fails = fails + check("fcr_rx_reset_clears_fifo", u.rx_count == 0)
+
+    if fails == 0:
+        print("UART16550 PROBE: ALL PASS")
+        return 0
+    print("UART16550 PROBE: {fails} FAIL")
+    1

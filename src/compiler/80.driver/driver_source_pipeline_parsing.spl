@@ -1,0 +1,278 @@
+# CompilerDriver phase-2 source parsing.
+
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
+use compiler.core.ast.{ast_reset}
+use compiler.core.parser.{par_had_error_get}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurfaceBuilder,
+    module_surface_promote
+}
+use compiler.driver.driver_source_loading.{
+    _driver_is_bootstrap_entry_source,
+    _driver_physical_source_key,
+    _driver_unique_physical_sources
+}
+use compiler.driver.driver_log_helpers.{
+    log_debug,
+    log_phase,
+    log_module_surface_released
+}
+use compiler.driver.driver_orchestration.{driver_streaming_surface_enabled}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+
+extern fn rt_env_get(key: text) -> text
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+
+fn _driver_text_list_index(items: [text], item: text) -> i64:
+    var i = 0
+    while i < items.len():
+        if items[i] == item:
+            return i
+        i = i + 1
+    -1
+
+# Env-gated driver trace probe. Set SIMPLE_INTERP_TRACE=1 to enable the
+# [DRV]/[BOOTSTRAP-PHASE] loading/lowering probe trail.
+pub fn dtrace(msg: text) -> ():
+    if (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1":
+        eprint(msg)
+
+pub fn driver_end_transient_parse_scope() -> bool:
+    lexer_release_parse_source_globals()
+    ast_reset()
+    rt_transient_array_scope_end()
+
+impl CompilerDriver:
+    me add_streaming_module_surface(
+        builder: ModuleSurfaceBuilder,
+        source: SourceFile,
+        source_index: i64
+    ) -> Result<ModuleSurfaceBuilder, text>:
+        if not rt_transient_array_scope_begin():
+            return Err("transient parser scope unavailable for {source.path}")
+        val module = parse_full_frontend(
+            source.content, source.path, source.module_name, self.ctx.logger)
+        if par_had_error_get():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("parse error in {source.path} (see [parser_error] output above)")
+        if not rt_transient_array_scope_pause():
+            val _ended = driver_end_transient_parse_scope()
+            return Err("transient parser scope pause failed for {source.path}")
+        val add_result = builder.add_parsed(module, source, source_index)
+        if add_result.is_err():
+            val _ended = driver_end_transient_parse_scope()
+            return Err(add_result.unwrap_err())
+        val surface_index = builder.surfaces.len() - 1
+        if surface_index < 0 or not module_surface_promote(
+            builder.surfaces[surface_index]
+        ):
+            val _ended = driver_end_transient_parse_scope()
+            return Err("module surface promotion failed for {source.path}")
+        if not driver_end_transient_parse_scope():
+            return Err("transient parser scope end failed for {source.path}")
+        Ok(builder)
+
+    me parse_all_streaming_surfaces_impl() -> (CompileContext, bool):
+        self.ctx.modules = {}
+        self.ctx.module_surfaces = nil
+        var builder = ModuleSurfaceBuilder.new()
+        var source_index = 0
+        var release_seq: i64 = 0
+        while source_index < self.ctx.sources.len():
+            val source = self.ctx.sources[source_index]
+            if builder.has_path(source.path):
+                val alias_result = builder.add_alias(source)
+                if alias_result.is_err():
+                    self.ctx.add_error(
+                        "Module surface extraction error: {alias_result.unwrap_err()}")
+                    return (self.ctx, false)
+            else:
+                val parsed_result = self.add_streaming_module_surface(
+                    builder, source, source_index)
+                if parsed_result.is_err():
+                    self.ctx.add_error(
+                        "Module surface extraction error: {parsed_result.unwrap_err()}")
+                    return (self.ctx, false)
+                builder = parsed_result.unwrap()
+                release_seq = release_seq + 1
+                log_module_surface_released(source.path, release_seq)
+            source_index = source_index + 1
+
+        var streaming_ctx = self.ctx
+        streaming_ctx.module_surfaces = Some(builder.finish())
+        streaming_ctx.modules = {}
+        (streaming_ctx, streaming_ctx.errors.len() == 0)
+
+    me parse_all_impl() -> (CompileContext, bool):
+        if driver_streaming_surface_enabled(self.ctx):
+            return self.parse_all_streaming_surfaces_impl()
+        val log = self.ctx.logger
+        val sources = self.ctx.sources
+        log_debug("parsing sources")
+        val native_entry_closure = (
+            rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? "") == "1"
+        val native_entry = rt_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
+        if native_entry_closure or native_entry != "":
+            var entry_modules: Dict<text, ParserModule> = self.ctx.modules
+            var entry_sources: [SourceFile] = []
+            var entry_idx = 0
+            while entry_idx < sources.len():
+                val source = sources[entry_idx]
+                val requested_entry_match = native_entry != "" and (
+                    source.path == native_entry or
+                    source.path.ends_with("/" + native_entry))
+                if (native_entry_closure or requested_entry_match or
+                    _driver_is_bootstrap_entry_source(
+                        source.path, source.module_name)):
+                    # Refuse a stale substitute when one exact entry was requested.
+                    if native_entry != "" and not native_entry_closure:
+                        if not requested_entry_match:
+                            self.ctx.errors.push(
+                                "native-build entry mismatch: requested entry '{native_entry}' but resolver also selected '{source.path}' (module {source.module_name}) — refusing silent substitution")
+                            return (self.ctx, false)
+                    entry_sources = entry_sources.push(source)
+                entry_idx = entry_idx + 1
+            val unique_entry_sources = _driver_unique_physical_sources(
+                entry_sources)
+            log_phase(
+                "phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
+            var parsed_entry_paths: [text] = []
+            var parsed_entry_modules: [ParserModule] = []
+            for source in unique_entry_sources:
+                val physical_key = _driver_physical_source_key(source.path)
+                if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
+                    (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
+                    dtrace(
+                        "[BOOTSTRAP-PHASE] phase2:parse:entry {source.path} module={source.module_name}")
+                log_phase(
+                    "phase2:parse:file:start {source.path} chars={source.content.len()}")
+                val entry_module = parse_full_frontend(
+                    source.content,
+                    source.path,
+                    source.module_name,
+                    self.ctx.logger
+                )
+                log_phase("phase2:parse:file:done {source.path}")
+                if par_had_error_get():
+                    self.ctx.errors.push(
+                        "parse error in {source.path} (see [parser_error] output above)")
+                    return (self.ctx, false)
+                if ((rt_env_get("SIMPLE_COMPILER_TRACE") ?? "") == "1" or
+                    (rt_env_get("SIMPLE_INTERP_TRACE") ?? "") == "1"):
+                    dtrace(
+                        "[BOOTSTRAP-PHASE] phase2:parse:entry:done {source.path}")
+                parsed_entry_paths = parsed_entry_paths.push(physical_key)
+                parsed_entry_modules = parsed_entry_modules.push(entry_module)
+            for source in entry_sources:
+                val physical_key = _driver_physical_source_key(source.path)
+                val parsed_idx = _driver_text_list_index(
+                    parsed_entry_paths, physical_key)
+                if parsed_idx < 0:
+                    self.ctx.errors.push(
+                        "internal entry-closure parse cache miss for {source.path}")
+                    return (self.ctx, false)
+                # NOTE: `entry_modules = entry_modules.set(k, v)` (fluent-style
+                # re-assign) silently failed to insert under native codegen —
+                # `entry_modules.keys().len()` and `.contains_key(k)` both read
+                # back empty/false immediately after the call. This is the only
+                # `.set()` call site on a builtin Dict in 80.driver; every other
+                # site (e.g. module_surfaces_add_name, the SIMPLE_BOOTSTRAP
+                # branch just below) uses bracket assignment, which works.
+                # See doc/07_guide/language/dict_native_pitfalls.md.
+                entry_modules[source.module_name] = parsed_entry_modules[parsed_idx]
+            var entry_ctx: CompileContext = self.ctx
+            entry_ctx.modules = entry_modules
+            entry_ctx.sources = unique_entry_sources
+            if entry_sources.len() == 0:
+                entry_ctx.errors.push(
+                    "native entry source not found: {native_entry}")
+            return (entry_ctx, entry_ctx.errors.len() == 0)
+        if ((rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+            (rt_env_get("SIMPLE_BOOTSTRAP_STAGE4") ?? "") != "1"):
+            var bootstrap_modules: Dict<text, ParserModule> = self.ctx.modules
+            var boot_idx = 0
+            while boot_idx < sources.len():
+                val source = sources[boot_idx]
+                if _driver_is_bootstrap_entry_source(
+                    source.path, source.module_name
+                ):
+                    val entry_module = parse_full_frontend(
+                        source.content,
+                        source.path,
+                        source.module_name,
+                        self.ctx.logger
+                    )
+                    bootstrap_modules[source.module_name] = entry_module
+                boot_idx = boot_idx + 1
+            boot_idx = 0
+            while boot_idx < sources.len():
+                val source = sources[boot_idx]
+                if not _driver_is_bootstrap_entry_source(
+                    source.path, source.module_name
+                ):
+                    bootstrap_modules[source.module_name] = parser_module_new(
+                        name: source.module_name,
+                        imports: [],
+                        exports: [],
+                        domain_blocks: [],
+                        functions: {},
+                        function_order: [],
+                        classes: {},
+                        actors: {},
+                        actor_order: [],
+                        structs: {},
+                        enums: {},
+                        bitfields: {},
+                        traits: {},
+                        impls: [],
+                        type_aliases: {},
+                        constants: {},
+                        static_asserts: [],
+                        aop_advices: [],
+                        di_bindings: [],
+                        arch_rules: [],
+                        mock_decls: []
+                    )
+                boot_idx = boot_idx + 1
+            var bootstrap_parse_ctx: CompileContext = self.ctx
+            bootstrap_parse_ctx.modules = bootstrap_modules
+            return (
+                bootstrap_parse_ctx,
+                bootstrap_parse_ctx.errors.len() == 0
+            )
+
+        var parsed_modules: Dict<text, ParserModule> = self.ctx.modules
+        var src_idx = 0
+        while src_idx < sources.len():
+            val source = sources[src_idx]
+            val module = parse_full_frontend(
+                source.content,
+                source.path,
+                source.module_name,
+                self.ctx.logger
+            )
+            parsed_modules[source.module_name] = module
+            src_idx = src_idx + 1
+
+        log_debug("parsing done")
+        var parsed_all_ctx: CompileContext = self.ctx
+        parsed_all_ctx.modules = parsed_modules
+        (parsed_all_ctx, parsed_all_ctx.errors.len() == 0)
+
+    fn parse_source(source: SourceFile) -> ParserModule:
+        print "[parse_source] start {source.path} module {source.module_name} len {source.content.len()}"
+        val module = parse_full_frontend(
+            source.content,
+            source.path,
+            source.module_name,
+            self.ctx.logger
+        )
+        print "[parse_source] done {source.path}"
+        module

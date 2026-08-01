@@ -1,0 +1,218 @@
+# codex-system-test
+# @req REQ-WEB-BROWSER-002 REQ-WEB-BROWSER-003
+"""# CSS Inline-Block Formatting
+
+Proves the production HTML/CSS layout owner preserves `display:inline-block`,
+places atomic boxes beside each other in one inline formatting run, and emits
+their exact border boxes through canonical Draw IR before pixel execution.
+"""
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_debug_style_by_id,
+    simple_web_layout_render_html_draw_ir
+}
+use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
+use common.ui.draw_ir.{DrawIrCommand}
+
+val INLINE_BLOCK_HTML = (
+    "<html><head><style>" +
+    "html,body{margin:0;padding:0;width:80px}" +
+    "#row{display:block;width:80px;margin:0;padding:0}" +
+    ".item{display:inline-block;width:20px;height:12px;" +
+    "padding:2px;border:1px solid #111827;margin:0}" +
+    "#first{background:#dc2626}#second{background:#2563eb}" +
+    "#after{display:block;width:8px;height:4px;background:#16a34a}" +
+    "</style></head><body><div id='row'>" +
+    "<span id='first' class='item'>A</span>" +
+    "<span id='second' class='item'>B</span>" +
+    "</div><div id='after'></div></body></html>"
+)
+
+fn _command_by_id(commands: [DrawIrCommand], component_id: text) -> DrawIrCommand:
+    for command in commands:
+        if command.component_id == component_id:
+            return command
+    fail("missing Draw IR command: {component_id}")
+    commands[0]
+
+fn _style_value(command: DrawIrCommand, key: text) -> text:
+    for property in command.computed_style:
+        if property.key == key:
+            return property.value
+    fail("missing Draw IR computed style: {key}")
+    ""
+
+describe "Production Simple Web inline-block formatting":
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    it "should keep inline-block border boxes in one atomic inline run":
+        step("Resolve inline-block as the computed display value")
+        expect(simple_web_layout_debug_style_by_id(
+            INLINE_BLOCK_HTML, "first", "display"
+        )).to_equal("inline-block")
+        expect(simple_web_layout_debug_style_by_id(
+            INLINE_BLOCK_HTML, "second", "display"
+        )).to_equal("inline-block")
+
+        step("Lay out exact atomic border boxes on one line")
+        expect(simple_web_layout_debug_layout_by_id(
+            INLINE_BLOCK_HTML, 80, 48, "first", "x"
+        )).to_equal("0")
+        expect(simple_web_layout_debug_layout_by_id(
+            INLINE_BLOCK_HTML, 80, 48, "first", "y"
+        )).to_equal("0")
+        expect(simple_web_layout_debug_layout_by_id(
+            INLINE_BLOCK_HTML, 80, 48, "first", "w"
+        )).to_equal("26")
+        expect(simple_web_layout_debug_layout_by_id(
+            INLINE_BLOCK_HTML, 80, 48, "first", "h"
+        )).to_equal("18")
+        expect(simple_web_layout_debug_layout_by_id(
+            INLINE_BLOCK_HTML, 80, 48, "second", "x"
+        )).to_equal("26")
+        expect(simple_web_layout_debug_layout_by_id(
+            INLINE_BLOCK_HTML, 80, 48, "second", "y"
+        )).to_equal("0")
+        expect(simple_web_layout_debug_layout_by_id(
+            INLINE_BLOCK_HTML, 80, 48, "after", "y"
+        )).to_equal("18")
+
+        step("Lower the same absolute boxes through canonical Draw IR")
+        val composition = simple_web_layout_render_html_draw_ir(
+            INLINE_BLOCK_HTML, 80, 48
+        )
+        val first = _command_by_id(
+            composition.batches[0].commands, "first"
+        )
+        val second = _command_by_id(
+            composition.batches[0].commands, "second"
+        )
+        expect(_style_value(first, "display")).to_equal("inline-block")
+        expect(first.x).to_equal(0)
+        expect(first.y).to_equal(0)
+        expect(first.width).to_equal(26)
+        expect(first.height).to_equal(18)
+        expect(second.x).to_equal(26)
+        expect(second.y).to_equal(0)
+        expect(second.width).to_equal(26)
+        expect(second.height).to_equal(18)
+
+        step("Read exact interior and control pixels through Engine2D")
+        val pixels = BrowserRenderer.create(80, 48).render_html_to_pixels(
+            INLINE_BLOCK_HTML
+        ).pixel_data
+        expect(pixels[20 + 12 * 80]).to_equal(0xFFDC2626u32)
+        expect(pixels[46 + 12 * 80]).to_equal(0xFF2563EBu32)
+        expect(pixels[60 + 3 * 80]).to_equal(0xFFFFFFFFu32)
+        expect(pixels[10 + 21 * 80]).to_equal(0xFFFFFFFFu32)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    it "should align empty baseline inline-block bottom edges through canonical Draw IR":
+        step("Render HTML and CSS through canonical Draw IR")
+        val html = (
+            "<style>html,body{margin:0;padding:0;width:64px}" +
+            ".item{display:inline-block;width:8px;margin:0;padding:0;" +
+            "border:0;vertical-align:baseline}" +
+            "#short{height:8px;background:#dc2626}" +
+            "#tall{height:20px;background:#2563eb}" +
+            "#after{display:block;width:8px;height:4px;background:#16a34a}" +
+            "</style><span id='short' class='item'></span>" +
+            "<span id='tall' class='item'></span><div id='after'></div>"
+        )
+
+        step("Resolve baseline alignment in computed Style")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "short", "vertical-align"
+        )).to_equal("baseline")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "tall", "vertical-align"
+        )).to_equal("baseline")
+
+        step("Lay out empty atomic inline-blocks on their shared baseline")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "short", "h"
+        )).to_equal("8")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "tall", "h"
+        )).to_equal("20")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "tall", "y"
+        )).to_equal("0")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "short", "y"
+        )).to_equal("12")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "after", "y"
+        )).to_equal("23")
+
+        step("Preserve baseline geometry in canonical Draw IR before pixels")
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 48)
+        val short = _command_by_id(composition.batches[0].commands, "short")
+        val tall = _command_by_id(composition.batches[0].commands, "tall")
+        val after = _command_by_id(composition.batches[0].commands, "after")
+        expect(_style_value(short, "vertical-align")).to_equal("baseline")
+        expect(_style_value(tall, "vertical-align")).to_equal("baseline")
+        expect(_style_value(short, "line-height")).to_equal("18")
+        expect(short.y).to_equal(12)
+        expect(tall.y).to_equal(0)
+        expect(short.y + short.height).to_equal(20)
+        expect(tall.y + tall.height).to_equal(20)
+        expect(after.y).to_equal(23)
+
+    # @manual: show
+    # @capture(html)
+    # @capture(protocol)
+    it "should include the parent strut text and vertical margins in an empty inline-block baseline line":
+        step("Render HTML and CSS through canonical Draw IR")
+        val html = (
+            "<style>html,body{margin:0;padding:0;width:64px;font-size:16px;" +
+            "line-height:12px}.item{display:inline-block;width:8px;padding:0;" +
+            "border:0;vertical-align:baseline}#short{height:8px;margin:2px 0 3px;" +
+            "background:#dc2626}#tall{height:20px;margin:1px 0 4px;" +
+            "background:#2563eb}#label{background:#facc15}#after{display:block;" +
+            "width:8px;height:4px;background:#16a34a}</style>" +
+            "<span id='short' class='item'></span><span id='tall' class='item'></span>" +
+            "<span id='label'>X</span><div id='after'></div>"
+        )
+
+        step("Resolve parent and atomic baseline semantics in computed Style")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "short", "vertical-align"
+        )).to_equal("baseline")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "tall", "vertical-align"
+        )).to_equal("baseline")
+        expect(simple_web_layout_debug_style_by_id(
+            html, "label", "vertical-align"
+        )).to_equal("baseline")
+
+        step("Lay out the shared strut baseline and bottom margin edges")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "short", "y"
+        )).to_equal("14")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "tall", "y"
+        )).to_equal("1")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "label", "y"
+        )).to_equal("13")
+        expect(simple_web_layout_debug_layout_by_id(
+            html, 64, 48, "after", "y"
+        )).to_equal("25")
+
+        step("Preserve the shared baseline geometry in canonical Draw IR")
+        val composition = simple_web_layout_render_html_draw_ir(html, 64, 48)
+        val short = _command_by_id(composition.batches[0].commands, "short")
+        val tall = _command_by_id(composition.batches[0].commands, "tall")
+        val label = _command_by_id(composition.batches[0].commands, "label")
+        expect(_style_value(label, "line-height")).to_equal("12")
+        expect(short.y).to_equal(14)
+        expect(tall.y).to_equal(1)
+        expect(label.y).to_equal(13)
+        expect(short.y + short.height + 3).to_equal(25)
+        expect(tall.y + tall.height + 4).to_equal(25)

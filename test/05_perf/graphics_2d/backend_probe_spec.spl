@@ -1,0 +1,105 @@
+# @tag: gpu, rendering, backend, probe, strict
+# @cover src/lib/gc_async_mut/gpu/engine2d/engine.spl
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_probe.spl
+
+use std.spec.{describe, context, it, slow_it, expect}
+use std.gpu.engine2d.engine.{Engine2D}
+use std.gpu.engine2d.backend_probe.{BackendStatus}
+use std.gpu.engine2d.color.{rgb, color_r, color_g, color_b}
+use std.nogc_sync_mut.env.platform.{is_macos}
+
+fn paint_vulkan_probe_scene(engine: Engine2D):
+    engine.clear(rgb(3, 5, 7))
+    engine.draw_rect_filled(1, 1, 8, 5, rgb(40, 70, 100))
+    engine.draw_line(0, 12, 31, 12, rgb(220, 220, 40), 1)
+    engine.draw_circle(24, 7, 4, rgb(10, 200, 30))
+    engine.draw_circle_filled(6, 18, 3, rgb(200, 60, 20))
+    engine.draw_triangle_filled(18, 15, 14, 22, 25, 22, rgb(90, 160, 230))
+    engine.draw_gradient_rect(26, 14, 5, 8, rgb(255, 0, 0), rgb(0, 0, 255))
+    engine.set_clip(25, 0, 7, 7)
+    engine.draw_rect_filled(22, 0, 10, 10, rgb(8, 180, 200))
+    engine.clear_clip()
+
+fn assert_strict_backend(name: text, shader_format: text):
+    val probe = Engine2D.probe_backend(16, 16, name)
+    print(probe.diagnostic_text())
+    expect(probe.requested_name).to_equal(name)
+    expect(probe.selected_name).to_equal(name)
+    expect(probe.api_name).to_equal(name)
+    expect(probe.shader_format).to_equal(shader_format)
+
+    val strict = Engine2D.create_with_backend_strict(16, 16, name)
+    if probe.status == BackendStatus.Initialized:
+        expect(probe.available).to_equal(true)
+        expect(strict.is_ok()).to_equal(true)
+        if strict.is_ok():
+            var engine = strict.unwrap()
+            expect(engine.backend_name()).to_equal(name)
+            engine.clear(rgb(0, 0, 0))
+            engine.draw_rect_filled(4, 4, 8, 8, rgb(255, 0, 0))
+            val readback = engine.read_pixels_with_source()
+            expect(readback.pixels.len()).to_equal(16 * 16)
+            if name != "cpu":
+                expect(readback.source).to_equal("device_readback")
+                expect(readback.backend_handle).to_be_greater_than(0)
+                expect(readback.device_identity).to_be_greater_than(0)
+            expect(color_r(readback.pixels[8 * 16 + 8])).to_equal(255)
+            expect(color_g(readback.pixels[8 * 16 + 8])).to_equal(0)
+            expect(color_b(readback.pixels[8 * 16 + 8])).to_equal(0)
+            expect(color_r(readback.pixels[0])).to_equal(0)
+            engine.shutdown()
+    else:
+        expect(probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed).to_equal(true)
+        expect(probe.available).to_equal(false)
+        expect(probe.fallback_reason.len()).to_be_greater_than(0)
+        expect(strict.is_ok()).to_equal(false)
+        if not strict.is_ok():
+            val failure = strict.unwrap_err()
+            expect(failure.selected_name == "cpu" or failure.selected_name == "software").to_equal(false)
+
+describe "Engine2D strict backend probe":
+
+    context "portable CPU baseline":
+        it "initializes, renders, and reads back without fallback":
+            assert_strict_backend("cpu", "none")
+
+    context "native GPU backends":
+        slow_it "executes CUDA when initialized or reports structured unavailability":
+            assert_strict_backend("cuda", "ptx")
+
+        slow_it "executes Vulkan SPIR-V when initialized or reports structured unavailability":
+            assert_strict_backend("vulkan", "spirv")
+
+        slow_it "keeps a multi-primitive Vulkan frame exact and device-backed":
+            val probe = Engine2D.probe_backend(32, 24, "vulkan")
+            if probe.status == BackendStatus.Initialized:
+                val strict = Engine2D.create_with_backend_strict(32, 24, "vulkan")
+                expect(strict.is_ok()).to_equal(true)
+                if strict.is_ok():
+                    var vulkan = strict.unwrap()
+                    var cpu = Engine2D.create_with_backend(32, 24, "cpu")
+                    paint_vulkan_probe_scene(cpu)
+                    paint_vulkan_probe_scene(vulkan)
+                    val expected = cpu.read_pixels()
+                    val actual = vulkan.read_pixels_with_source()
+                    expect(actual.source).to_equal("device_readback")
+                    expect(actual.backend_handle).to_be_greater_than(0)
+                    expect(actual.device_identity).to_be_greater_than(0)
+                    expect(actual.pixels.len()).to_equal(expected.len())
+                    var i = 0
+                    while i < expected.len():
+                        expect(actual.pixels[i]).to_equal(expected[i])
+                        i = i + 1
+                    cpu.shutdown()
+                    vulkan.shutdown()
+            else:
+                expect(probe.status == BackendStatus.Unavailable or probe.status == BackendStatus.Failed).to_equal(true)
+
+        slow_it "executes Metal MSL when initialized or reports structured unavailability":
+            assert_strict_backend("metal", "msl")
+
+        it "reports the macOS Metal gate without emulation on non-macOS hosts":
+            if not is_macos():
+                val probe = Engine2D.probe_backend(16, 16, "metal")
+                expect(probe.status).to_equal(BackendStatus.Unavailable)
+                expect(probe.feature_gate).to_equal("macos")

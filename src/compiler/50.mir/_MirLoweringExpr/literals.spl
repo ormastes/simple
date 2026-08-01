@@ -1,0 +1,682 @@
+# Part of src/compiler/50.mir/mir_lowering_expr.spl: array, tuple, set, and constant literal lowering
+use compiler.mir.mir_lowering_expr.*
+use compiler.mir.mir_data.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.blocks.value.BlockValue
+use compiler.mir.mir_lowering_types.{MirLowering, MirError}
+use compiler.backend.gpu_intrinsics.{is_gpu_intrinsic}
+
+# std.alloc.sffi only exists in the seed lib tree; the stage4 strict lane
+# cannot resolve it — declare the runtime extern directly.
+extern fn rt_dict_contains(dict: i64, key: Any) -> bool
+extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: Any) -> i64
+
+impl MirLowering:
+    me lower_array_lit(elements: [HirExpr]) -> LocalId:
+        """Lower array literal."""
+        var operands: [MirOperand] = []
+        var lowered_elem_type = MirType.i64()
+        # Bug (array-of-structs field misread): `pts[i].y` on
+        # `[Point(x:1,y:2), Point(x:3,y:4)]` always read field 0 (x) no
+        # matter which field name was requested, because reading an array
+        # element back out (expr_dispatch.spl's Index case) has no way to
+        # learn the element's struct NAME -- resolve_field_index's fallback
+        # chain (HIR type annotation, then struct_value_syms) finds nothing
+        # for a freshly-decoded array-element local and silently defaults to
+        # index 0. Each element's own local IS registered in
+        # struct_value_syms at construction time (StructLit lowering), so
+        # capture the FIRST element's struct name here (elements of a single
+        # array literal are expected to share one struct type) and stash it
+        # keyed by the ARRAY's own local id in array_element_struct_syms; the
+        # Index case then re-attaches it to each decoded per-element result.
+        var elem_struct_name = ""
+        for elem in elements:
+            # A Lambda literal element (`[\x: x+1, \x: x*2]`) is a first-class
+            # function VALUE -- `self.lower_expr` has no generic Lambda case and
+            # returns nil, which then crashed on `local.id` below (an internal
+            # "undefined field 'id' on nil" instead of a clean diagnostic).
+            # NOTE: lifting it to a fnptr via #165's `lower_lambda_value` (as
+            # the struct-field-initializer fix above does) was tried here too
+            # and made the BUILD succeed, but the resulting binary then
+            # SIGSEGV'd at runtime the first time an element was called back
+            # out of the array -- box_runtime_value/array-element tagging does
+            # not round-trip a raw fnptr constant correctly. A silent-successful
+            # build that crashes at runtime is strictly worse than today's
+            # build-time failure, so that path is NOT taken here; this is a
+            # guard-only fix (still a clean loud build failure, never a crash).
+            val local = self.lower_expr(elem)
+            if local == nil:
+                self.error_fatal("unsupported array element (cannot lower to a value)", nil)
+                operands = operands.push(MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64())))
+            else:
+                if operands.len() == 0:
+                    # Bug (array_index_rw native-build failure): `local_mir_type_of`
+                    # returns `MirType?` via an explicit `Some(item.type_)`/`nil`
+                    # construction (mir_lowering_stmts.spl), not a bare
+                    # value-or-nil. A plain `if local_type != nil: lowered_elem_type
+                    # = local_type` never unwraps that Option -- `Some(...)` is
+                    # itself non-nil, so the whole `Enum{Option,Some,payload}`
+                    # got assigned straight into `lowered_elem_type` (declared
+                    # plain `MirType`, no `?`). That corrupted value then got
+                    # embedded as the array's element type
+                    # (`MirTypeKind.Array(elem_type, ...)`), and every later
+                    # `arr[i]` read/write derived its pointee type from it,
+                    # reaching `MirType.ptr(pointee, mutable)` with an
+                    # Option-wrapped `pointee` -- the interpreter's static-method
+                    # overload matcher (constructor_value_matches_type) rejects
+                    # the shape mismatch and reports the misleading "unknown
+                    # static method ptr on class MirType". Use the same `??`
+                    # unwrap already used by every other safe caller of
+                    # `local_mir_type_of` in this file (e.g. lower_dict_lit's
+                    # key_type/value_type a few dozen lines below).
+                    lowered_elem_type = self.local_mir_type_of(local) ?? lowered_elem_type
+                    val elem_vname = self.struct_value_syms.get(local.id)
+                    if elem_vname != nil:
+                        elem_struct_name = elem_vname ?? ""
+                val boxed = self.box_runtime_value(local)
+                operands = operands.push(mir_operand_copy(boxed))
+
+        # The lowered local is authoritative. Flat HIR expression metadata may
+        # still carry the parser's default i64 for typed variables.
+        val elem_type = lowered_elem_type
+        val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
+
+        val arr_local = self.builder.emit_aggregate(
+            AggregateKind.Array(elem_type),
+            operands,
+            array_type
+        )
+        self.runtime_array_locals[arr_local.id] = true
+        self.mark_runtime_value_local(arr_local.id)
+        if elem_struct_name != "":
+            self.array_element_struct_syms[arr_local.id] = elem_struct_name
+        arr_local
+
+    me lower_dict_key(key_expr: HirExpr) -> LocalId:
+        """Lower a dict key to the runtime ABI (i64).
+
+        A plain string literal lowers to a RAW char* pointer (getelementptr into
+        a [N x i8] global), but the runtime dict compares keys as tagged heap
+        strings via rt_native_eq. Tag plain string-literal keys with
+        rt_string_new(ptr, rt_strlen(ptr)); pass everything else (already-tagged
+        string variables, int keys) through unchanged.
+        """
+        val key_local = self.lower_expr(key_expr)
+        self.box_runtime_value(key_local)
+
+    me lower_dict_lit(entries: [(HirExpr, HirExpr)]) -> LocalId:
+        """Lower a dict literal `{k: v, ...}` to rt_dict_new + rt_dict_set calls.
+
+        The result is a tagged i64 dict handle; the local is registered in
+        runtime_dict_locals so a later `d[k]` read routes to rt_dict_get (see
+        expr_dispatch `case Index`). All keys/values use the flat i64 runtime
+        ABI; string-literal keys are tagged via lower_dict_key.
+        """
+        val new_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_dict_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ))
+        val cap_hint = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
+        var key_type = MirType.i64()
+        var value_type = MirType.i64()
+        var first_entry = true
+        var b_new = self.builder
+        val new_res = b_new.emit_call(new_op, [cap_hint], MirType.i64())
+        self.builder = b_new
+        if val dict_local = new_res:
+            for entry in entries:
+                val (key_expr, value_expr) = entry
+                # Bug (native_dict_keys_iter_index): capture the key's type
+                # from the RAW (pre-box) lowered local, mirroring how
+                # `value_type` below already reads `value_local` BEFORE
+                # `box_runtime_value(value_local)` runs. `lower_dict_key`
+                # lowers AND boxes in one step (`self.box_runtime_value(self.
+                # lower_expr(key_expr))`), so reading its type straight off
+                # its return value picked up the BOXED representation's MIR
+                # type instead -- for a string-literal key that box step is
+                # `rt_string_new`, an `emit_call` typed i64 (the runtime
+                # symbol's declared return type), so `key_type` silently
+                # became `I64` for every string-keyed dict literal (a
+                # `Dict<text,i64>` recorded its OWN type as `Dict(I64,I64)`).
+                # That corrupted every consumer of the dict's recorded key
+                # type -- specifically `.keys()`'s result-array element type
+                # fix just above, which decoded each TAGGED heap-string key
+                # as an INTEGER (right-shift-by-3) instead of a string,
+                # producing a garbage `d[k]` lookup key and a silently-wrong
+                # sum. Lower the key raw first (capturing its true type), box
+                # it after, exactly like the value already does.
+                val key_local_raw = self.lower_expr(key_expr)
+                if first_entry:
+                    key_type = self.local_mir_type_of(key_local_raw) ?? key_type
+                val key_local = self.box_runtime_value(key_local_raw)
+                val value_local = self.lower_expr(value_expr)
+                if first_entry:
+                    value_type = self.local_mir_type_of(value_local) ?? value_type
+                    first_entry = false
+                val boxed_value = self.box_runtime_value(value_local)
+                val set_op = MirOperand(kind: MirOperandKind.Const(
+                    MirConstValue.Str("rt_dict_set"),
+                    MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+                ))
+                var b_set = self.builder
+                b_set.emit_call(set_op, [mir_operand_copy(dict_local), mir_operand_copy(key_local), mir_operand_copy(boxed_value)], MirType.i64())
+                self.builder = b_set
+            val dict_type = MirType(kind: MirTypeKind.Dict(key_type, value_type))
+            var b_typed = self.builder
+            val typed = b_typed.new_temp(dict_type)
+            b_typed.emit_copy(typed, dict_local)
+            self.builder = b_typed
+            self.runtime_dict_locals[typed.id] = true
+            self.mark_runtime_value_local(typed.id)
+            return typed
+        # rt_dict_new always returns a local; fall back to a const 0 handle only
+        # if the call somehow produced no result, to keep this total.
+        var b_fb = self.builder
+        val fb = b_fb.new_temp(MirType.i64())
+        b_fb.emit_const(fb, MirConstValue.Int(0), MirType.i64())
+        self.builder = b_fb
+        fb
+
+    me lower_array_repeat(value: HirExpr, count: HirExpr) -> LocalId:
+        """Lower array-repeat `[value; count]` to `rt_array_repeat(value, count)`.
+
+        The runtime stores `count` raw i64 copies of `value` and returns a tagged
+        heap-array handle. Both operands are coerced to the i64 runtime ABI. The
+        result local is typed as an Array so later `[i]` reads route through
+        `rt_array_get` (see expr_dispatch `local_is_runtime_array`/Array-type
+        branch) rather than an inline aggregate GEP.
+        """
+        # Element type from the repeated value (default i64). Redundant nil
+        # re-check guards against lower_type(nil) -- same pattern as lower_array_lit.
+        var elem_type = MirType.i64()
+        val value_type = value.type_
+        if val vt = value_type:
+            if vt != nil:
+                elem_type = self.lower_type(vt)
+
+        # Lower and coerce operands to the RuntimeValue array ABI.
+        val value_local = self.lower_expr(value)
+        val count_local = self.lower_expr(count)
+        val value_i64 = self.box_runtime_value(value_local)
+        var cb = self.builder
+        val count_i64 = cb.emit_cast(mir_operand_copy(count_local), MirType.i64())
+        self.builder = cb
+
+        # Static size when the count is a literal, else 0. The heap array carries
+        # its own runtime length; this only annotates the MIR type for routing.
+        var static_size: i64 = 0
+        match count.kind:
+            case IntLit(cv, _): static_size = cv
+            case _: static_size = 0
+        val array_type = MirType(kind: MirTypeKind.Array(elem_type, static_size))
+
+        # Bug #149: the FuncPtr's declared `return_type` here is what
+        # `translate_operand`/`remember_function_return_type` registers as
+        # `rt_array_repeat`'s KNOWN return type at codegen time -- it must
+        # match `array_type` (Array kind -> "ptr"), the type this call's
+        # DESTINATION local is actually declared with below. Declaring it
+        # `i64` here (as before) registered a return type that disagreed
+        # with the destination local's MIR-declared (and therefore
+        # `ptr_locals`-primed) type, leaving the call itself emitted as
+        # `i64` while later consumers (a copy, or a `.len()`/index call
+        # argument) still saw the stale `ptr_locals` flag and treated the
+        # i64-defined value as a pointer -- invalid IR. `rt_array_repeat`
+        # genuinely returns `SplArray*` in C (same as rt_array_new), so
+        # `array_type` (-> ptr) is correct here, matching the static
+        # `declare ptr @rt_array_repeat(i64, i64)` in
+        # asm_constraints_helpers.spl's emit_runtime_declarations.
+        val repeat_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_repeat"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.i64(), MirType.i64()],
+                return_type: array_type,
+                is_variadic: false
+            )))
+        ))
+        var b = self.builder
+        val result = b.emit_call(
+            repeat_fn,
+            [mir_operand_copy(value_i64), mir_operand_copy(count_i64)],
+            array_type
+        )
+        self.builder = b
+        val result_local = result ?? self.builder.new_temp(array_type)
+        self.runtime_array_locals[result_local.id] = true
+        self.mark_runtime_value_local(result_local.id)
+        result_local
+
+    me rt_array_len_operand() -> MirOperand:
+        MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_len"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
+    me rt_array_get_operand() -> MirOperand:
+        MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_get"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)))
+        ))
+
+    me rt_array_push_operand() -> MirOperand:
+        MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_push"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                return_type: MirType(kind: MirTypeKind.I8),
+                is_variadic: false
+            )))
+        ))
+
+    me lower_array_map(arr: LocalId, map_params: [HirParam], map_body: HirExpr) -> LocalId:
+        """Lower `arr.map(\\x: expr)` for a runtime `[i64]` array.
+
+        Emits a counted index loop (same shape as
+        mir_lowering_stmts.lower_for_array_indexed): builds a fresh result
+        array via rt_array_new/rt_array_push. Inline the callback so its input
+        and result keep their MIR types instead of losing text tags through a
+        forced i64 function-pointer ABI.
+        """
+        val loop_ty = MirType.i64()
+        var elem_type = MirType.i64()
+        var mapped_elem_type = MirType.i64()
+        if val arr_type = self.local_mir_type_of(arr):
+            match arr_type.kind:
+                case MirTypeKind.Array(found_elem_type, _): elem_type = found_elem_type
+                case MirTypeKind.Slice(found_elem_type): elem_type = found_elem_type
+                case _: ()
+
+        var b_len = self.builder
+        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
+        val len_local = len_call ?? b_len.new_temp(MirType.i64())
+        self.builder = b_len
+
+        val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        var b_new = self.builder
+        val zero_cap = b_new.emit_const_int(0)
+        val new_call = b_new.emit_call(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: array_type, is_variadic: false)))
+        )), [mir_operand_copy(zero_cap)], array_type)
+        val result_arr = new_call ?? b_new.new_temp(array_type)
+        self.builder = b_new
+        self.runtime_array_locals[result_arr.id] = true
+        self.mark_runtime_value_local(result_arr.id)
+
+        var b_init = self.builder
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val zero = b_init.new_temp(loop_ty)
+        b_init.emit_const(zero, MirConstValue.Int(0), loop_ty)
+        b_init.emit_copy(counter, zero)
+        val one = b_init.new_temp(loop_ty)
+        b_init.emit_const(one, MirConstValue.Int(1), loop_ty)
+        self.builder = b_init
+
+        var b_blocks = self.builder
+        val cond_block = b_blocks.new_block(Some("map_cond"))
+        val body_block = b_blocks.new_block(Some("map_body"))
+        val inc_block = b_blocks.new_block(Some("map_inc"))
+        val exit_block = b_blocks.new_block(Some("map_exit"))
+        self.builder = b_blocks
+
+        var b_goto = self.builder
+        b_goto.terminate_goto(cond_block)
+        b_goto.switch_to_block(cond_block)
+        self.builder = b_goto
+
+        var b_cond = self.builder
+        val cond_result = b_cond.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        b_cond.switch_to_block(body_block)
+        self.builder = b_cond
+
+        var b_get = self.builder
+        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(counter)], MirType.i64())
+        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        self.builder = b_get
+        val elem_raw = self.decode_runtime_value(elem_tagged, elem_type)
+        val mapped_raw = self.lower_inline_lambda_with_locals(map_params, map_body, [elem_raw])
+        if val found_mapped_type = self.local_mir_type_of(mapped_raw):
+            mapped_elem_type = found_mapped_type
+        val mapped_tagged = self.box_runtime_value(mapped_raw)
+
+        var b_push = self.builder
+        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_arr), mir_operand_copy(mapped_tagged)], MirType(kind: MirTypeKind.I8))
+        self.builder = b_push
+
+        var b_body_end = self.builder
+        if not b_body_end.current_block_has_explicit_terminator():
+            b_body_end.terminate_goto(inc_block)
+        self.builder = b_body_end
+
+        var b_inc = self.builder
+        b_inc.switch_to_block(inc_block)
+        val incremented = b_inc.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_inc.emit_copy(counter, incremented)
+        self.builder = b_inc
+        var b_back = self.builder
+        b_back.terminate_goto(cond_block)
+        self.builder = b_back
+
+        var b_exit = self.builder
+        b_exit.switch_to_block(exit_block)
+        val mapped_array_type = MirType(kind: MirTypeKind.Array(mapped_elem_type, 0))
+        val typed_result_arr = b_exit.new_temp(mapped_array_type)
+        b_exit.emit_copy(typed_result_arr, result_arr)
+        self.builder = b_exit
+        self.runtime_array_locals[typed_result_arr.id] = true
+        self.mark_runtime_value_local(typed_result_arr.id)
+        typed_result_arr
+
+    me lower_array_filter(arr: LocalId, lam_op: MirOperand) -> LocalId:
+        """Lower `arr.filter(\\x: predicate)` for a runtime `[i64]` array.
+
+        Same counted-loop shape as `lower_array_map`, but the lambda's raw i64
+        result is treated as a boolean predicate (!= 0 -- the backend's `Ret`
+        terminator already zero-extends a bool-typed lambda body to the
+        lifted function's forced i64 return, see core_codegen.spl's
+        `value_as_type` coercion on `Ret`) and, when true, the ORIGINAL tagged
+        element (not the decoded raw value) is pushed into the result array
+        unchanged, since filter must preserve element values, only select a
+        subset.
+        """
+        val loop_ty = MirType.i64()
+
+        var b_len = self.builder
+        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
+        val len_local = len_call ?? b_len.new_temp(MirType.i64())
+        self.builder = b_len
+
+        val array_type = MirType(kind: MirTypeKind.Array(MirType.i64(), 0))
+        var b_new = self.builder
+        val zero_cap = b_new.emit_const_int(0)
+        val new_call = b_new.emit_call(MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: array_type, is_variadic: false)))
+        )), [mir_operand_copy(zero_cap)], array_type)
+        val result_arr = new_call ?? b_new.new_temp(array_type)
+        self.builder = b_new
+        self.runtime_array_locals[result_arr.id] = true
+        self.mark_runtime_value_local(result_arr.id)
+
+        var b_init = self.builder
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val zero = b_init.new_temp(loop_ty)
+        b_init.emit_const(zero, MirConstValue.Int(0), loop_ty)
+        b_init.emit_copy(counter, zero)
+        val one = b_init.new_temp(loop_ty)
+        b_init.emit_const(one, MirConstValue.Int(1), loop_ty)
+        self.builder = b_init
+
+        var b_blocks = self.builder
+        val cond_block = b_blocks.new_block(Some("filter_cond"))
+        val body_block = b_blocks.new_block(Some("filter_body"))
+        val push_block = b_blocks.new_block(Some("filter_push"))
+        val inc_block = b_blocks.new_block(Some("filter_inc"))
+        val exit_block = b_blocks.new_block(Some("filter_exit"))
+        self.builder = b_blocks
+
+        var b_goto = self.builder
+        b_goto.terminate_goto(cond_block)
+        b_goto.switch_to_block(cond_block)
+        self.builder = b_goto
+
+        var b_cond = self.builder
+        val cond_result = b_cond.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        b_cond.switch_to_block(body_block)
+        self.builder = b_cond
+
+        var b_get = self.builder
+        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(counter)], MirType.i64())
+        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        self.builder = b_get
+        val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
+
+        var b_call = self.builder
+        val call_result = b_call.emit_call(lam_op, [mir_operand_copy(elem_raw)], MirType.i64())
+        val pred_raw = call_result ?? b_call.new_temp(MirType.i64())
+        val zero_pred = b_call.emit_const_int(0)
+        val keep = b_call.emit_binop(MirBinOp.Ne, mir_operand_copy(pred_raw), mir_operand_copy(zero_pred), MirType.bool())
+        b_call.terminate_if(mir_operand_copy(keep), push_block, inc_block)
+        b_call.switch_to_block(push_block)
+        self.builder = b_call
+
+        var b_push = self.builder
+        b_push.emit_call(self.rt_array_push_operand(), [mir_operand_copy(result_arr), mir_operand_copy(elem_tagged)], MirType(kind: MirTypeKind.I8))
+        b_push.terminate_goto(inc_block)
+        self.builder = b_push
+
+        var b_inc = self.builder
+        b_inc.switch_to_block(inc_block)
+        val incremented = b_inc.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_inc.emit_copy(counter, incremented)
+        self.builder = b_inc
+        var b_back = self.builder
+        b_back.terminate_goto(cond_block)
+        self.builder = b_back
+
+        var b_exit = self.builder
+        b_exit.switch_to_block(exit_block)
+        self.builder = b_exit
+        result_arr
+
+    me lower_array_fold(arr: LocalId, init: LocalId, lam_op: MirOperand) -> LocalId:
+        """Lower `arr.fold(init, \\acc, x: expr)` for a runtime `[i64]` array.
+
+        Same counted-loop shape as `lower_array_map`/`lower_array_filter`, but
+        accumulates into a mutable `acc` Var local (initialized from `init`,
+        already the raw i64 ABI value since it comes from a plain expression,
+        not an array element) instead of building a result array. Each
+        iteration calls the 2-arg lifted lambda as `lam(acc, elem_raw)` and
+        stores the raw i64 result back into `acc`; the final `acc` is
+        returned once the loop exits.
+        """
+        val loop_ty = MirType.i64()
+
+        var b_len = self.builder
+        val len_call = b_len.emit_call(self.rt_array_len_operand(), [mir_operand_copy(arr)], MirType.i64())
+        val len_local = len_call ?? b_len.new_temp(MirType.i64())
+        self.builder = b_len
+
+        var b_init = self.builder
+        val acc = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val init_i64 = b_init.emit_cast(mir_operand_copy(init), loop_ty)
+        b_init.emit_copy(acc, init_i64)
+        val counter = b_init.new_local(nil, loop_ty, LocalKind.Var)
+        val zero = b_init.new_temp(loop_ty)
+        b_init.emit_const(zero, MirConstValue.Int(0), loop_ty)
+        b_init.emit_copy(counter, zero)
+        val one = b_init.new_temp(loop_ty)
+        b_init.emit_const(one, MirConstValue.Int(1), loop_ty)
+        self.builder = b_init
+
+        var b_blocks = self.builder
+        val cond_block = b_blocks.new_block(Some("fold_cond"))
+        val body_block = b_blocks.new_block(Some("fold_body"))
+        val inc_block = b_blocks.new_block(Some("fold_inc"))
+        val exit_block = b_blocks.new_block(Some("fold_exit"))
+        self.builder = b_blocks
+
+        var b_goto = self.builder
+        b_goto.terminate_goto(cond_block)
+        b_goto.switch_to_block(cond_block)
+        self.builder = b_goto
+
+        var b_cond = self.builder
+        val cond_result = b_cond.emit_binop(MirBinOp.Lt, mir_operand_copy(counter), mir_operand_copy(len_local), MirType.bool())
+        b_cond.terminate_if(mir_operand_copy(cond_result), body_block, exit_block)
+        b_cond.switch_to_block(body_block)
+        self.builder = b_cond
+
+        var b_get = self.builder
+        val get_call = b_get.emit_call(self.rt_array_get_operand(), [mir_operand_copy(arr), mir_operand_copy(counter)], MirType.i64())
+        val elem_tagged = get_call ?? b_get.new_temp(MirType.i64())
+        self.builder = b_get
+        val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
+
+        var b_call = self.builder
+        val call_result = b_call.emit_call(lam_op, [mir_operand_copy(acc), mir_operand_copy(elem_raw)], MirType.i64())
+        val new_acc = call_result ?? b_call.new_temp(MirType.i64())
+        b_call.emit_copy(acc, new_acc)
+        self.builder = b_call
+
+        var b_body_end = self.builder
+        if not b_body_end.current_block_has_explicit_terminator():
+            b_body_end.terminate_goto(inc_block)
+        self.builder = b_body_end
+
+        var b_inc = self.builder
+        b_inc.switch_to_block(inc_block)
+        val incremented = b_inc.emit_binop(MirBinOp.Add, mir_operand_copy(counter), mir_operand_copy(one), loop_ty)
+        b_inc.emit_copy(counter, incremented)
+        self.builder = b_inc
+        var b_back = self.builder
+        b_back.terminate_goto(cond_block)
+        self.builder = b_back
+
+        var b_exit = self.builder
+        b_exit.switch_to_block(exit_block)
+        self.builder = b_exit
+        acc
+
+    me lower_tuple_lit(elements: [HirExpr]) -> LocalId:
+        """Lower tuple literal."""
+        var operands: [MirOperand] = []
+        var types: [MirType] = []
+        for elem in elements:
+            val local = self.lower_expr(elem)
+            operands = operands.push(mir_operand_copy(local))
+            var elem_ty = MirType.i64()
+            val maybe_elem_type = elem.type_
+            if val elem_type = maybe_elem_type:
+                if elem_type != nil:
+                    elem_ty = self.lower_type(elem_type)
+            types = types.push(elem_ty)
+
+        val tuple_type = MirType(kind: MirTypeKind.Tuple(types))
+        self.builder.emit_aggregate(AggregateKind.Tuple, operands, tuple_type)
+
+    me lower_set_lit(elements: [HirExpr]) -> LocalId:
+        """Lower set literal to Set.from() call.
+
+        Transforms: s{1, 2, 3}
+        Into: Set.from([1, 2, 3])
+
+        This is simpler than Set.new() + insert() and works with current runtime.
+        Future optimization: emit direct Set.new() + insert() calls.
+        """
+        # Infer element type from first element, or default to i64
+        # NOTE: `if val first_type = elements[0].type_:` is not sufficient
+        # here -- confirmed by isolated repro that the seed interpreter's
+        # `if val` presence check can still enter the true branch with
+        # `first_type` bound to nil for this indexed+field-chained Option
+        # (elements[0] here is often un-type-inferred the first time this
+        # array/set literal is reached via a fresh, non-entry-closure code
+        # path). A redundant explicit nil re-check on the bound value guards
+        # against calling lower_type(nil), which crashes with "undefined
+        # field 'kind': cannot access field on value of type 'nil'".
+        val elem_type = if elements.len() > 0:
+            val first_elem = elements[0]
+            val first_elem_type = first_elem.type_
+            if val first_type = first_elem_type:
+                if first_type == nil:
+                    MirType.i64()
+                else:
+                    self.lower_type(first_type)
+            else:
+                MirType.i64()
+        else:
+            MirType.i64()
+
+        # Lower elements to array literal
+        var elem_operands: [MirOperand] = []
+        for elem in elements:
+            val elem_local = self.lower_expr(elem)
+            val boxed = self.box_runtime_value(elem_local)
+            elem_operands = elem_operands.push(mir_operand_copy(boxed))
+
+        # Create array from elements
+        val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
+        val array_local = self.builder.emit_aggregate(
+            AggregateKind.Array(elem_type),
+            elem_operands,
+            array_type
+        )
+
+        # Call Set.from(array) - using runtime function placeholder
+        # In a real implementation, this would resolve Set.from symbol from symbol table
+        # For now, create a function operand that will be resolved by codegen
+        val set_from_operand = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Int(0),  # Placeholder - codegen will resolve "Set.from"
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [array_type],
+                return_type: MirType(kind: MirTypeKind.Opaque("Set")),
+                is_variadic: false
+            )))
+        ))
+
+        val set_type = MirType(kind: MirTypeKind.Opaque("Set"))
+        val result = self.builder.emit_call(
+            set_from_operand,
+            [mir_operand_copy(array_local)],
+            set_type
+        )
+
+        result ?? self.builder.new_temp(set_type)
+
+    me lower_const_expr(expr: HirExpr) -> MirConstValue?:
+        """Lower constant expression."""
+        match expr.kind:
+            case IntLit(value, _):
+                Some(MirConstValue.Int(value))
+            case FloatLit(value, _):
+                Some(MirConstValue.Float(value))
+            case BoolLit(value):
+                Some(MirConstValue.Bool(value))
+            case StringLit(value, interps):
+                if val parts = interps:
+                    if parts.len() > 0:
+                        return nil
+                Some(MirConstValue.Str(value))
+            case Binary(bin_op, bin_left, bin_right):
+                # Fold integer arithmetic so module `val`s like
+                # `val CAP: i64 = 1024 * 1024` register as constants instead
+                # of silently dropping (uninitialized-alloca reads,
+                # native_module_val_globals 2026-07-23). Int-only, recursive;
+                # anything else stays nil (loud compile error downstream).
+                val fold_l = self.lower_const_expr(bin_left)
+                val fold_r = self.lower_const_expr(bin_right)
+                if fold_l == nil or fold_r == nil:
+                    return nil
+                var li: i64 = 0
+                var ri: i64 = 0
+                var fold_ints = true
+                match fold_l ?? MirConstValue.Zero:
+                    case Int(lv): li = lv
+                    case _: fold_ints = false
+                match fold_r ?? MirConstValue.Zero:
+                    case Int(rv): ri = rv
+                    case _: fold_ints = false
+                if not fold_ints:
+                    return nil
+                match bin_op:
+                    case Add: Some(MirConstValue.Int(li + ri))
+                    case Sub: Some(MirConstValue.Int(li - ri))
+                    case Mul: Some(MirConstValue.Int(li * ri))
+                    case Div:
+                        if ri == 0: return nil
+                        Some(MirConstValue.Int(li / ri))
+                    case Mod:
+                        if ri == 0: return nil
+                        Some(MirConstValue.Int(li % ri))
+                    case Shl: Some(MirConstValue.Int(li << ri))
+                    case Shr: Some(MirConstValue.Int(li >> ri))
+                    case BitAnd: Some(MirConstValue.Int(li & ri))
+                    case BitOr: Some(MirConstValue.Int(li | ri))
+                    case BitXor: Some(MirConstValue.Int(li ^ ri))
+                    case _: nil
+            case _:
+                nil

@@ -1,0 +1,323 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT_DIR"
+. scripts/check/riscv-fpga-preflight-common.shs
+PREFLIGHT_FAILURES=0
+
+SIMPLE_BINARY="${SIMPLE_BINARY:-bin/simple}"
+VIVADO="${VIVADO:-/home/ormastes/Xilinx/2025.2/Vivado/bin/vivado}"
+OPENFPGALOADER="${OPENFPGALOADER:-openFPGALoader}"
+OPENOCD="${OPENOCD:-openocd}"
+UART_BAUD="${UART_BAUD:-115200}"
+UART_SAMPLE_SECONDS="${UART_SAMPLE_SECONDS:-3}"
+FTDI_USB_PATH="${FTDI_USB_PATH:-3-2:1.0}"
+LOCAL_ONLY=0
+
+if [ "${1:-}" = "--local-only" ]; then
+    LOCAL_ONLY=1
+fi
+
+pass() {
+    printf 'PASS %s\n' "$1"
+}
+
+fail() {
+    printf 'FAIL %s\n' "$1"
+    PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+}
+
+info() {
+    printf 'INFO %s\n' "$1"
+}
+
+blocked() {
+    printf 'BLOCKED %s\n' "$1"
+}
+
+tool_runs() {
+    "$@" >/dev/null 2>&1
+}
+
+# --- 1. Board USB detection (0403:6011 FT4232H) ---
+ft4232h_present=0
+if lsusb >/tmp/rv64fpga_lsusb.$$ 2>&1; then
+    if grep -q '0403:6011' /tmp/rv64fpga_lsusb.$$; then
+        ft4232h_present=1
+        pass "ft4232h_usb_present"
+        usb_line="$(grep '0403:6011' /tmp/rv64fpga_lsusb.$$ | head -n 1)"
+        info "ft4232h_lsusb=$usb_line"
+    else
+        fail "ft4232h_usb_present"
+    fi
+else
+    fail "lsusb_available"
+fi
+rm -f /tmp/rv64fpga_lsusb.$$
+
+if [ "$ft4232h_present" = "0" ]; then
+    blocked "ft4232h_usb_present: no FT4232H USB device found (lsusb 0403:6011 absent)"
+fi
+
+# --- 2. Serial ports (/dev/ttyUSB*) ---
+ttyusb_count=0
+for dev in /dev/ttyUSB0 /dev/ttyUSB1 /dev/ttyUSB2 /dev/ttyUSB3 /dev/ttyUSB4 /dev/ttyUSB5 /dev/ttyUSB6; do
+    if [ -e "$dev" ]; then
+        ttyusb_count=$((ttyusb_count + 1))
+        info "serial_port=$dev"
+    fi
+done
+if [ "$ttyusb_count" -gt 0 ]; then
+    pass "serial_ports_present"
+else
+    fail "serial_ports_present"
+fi
+info "serial_port_count=$ttyusb_count"
+
+# --- 3. FT4232H channel map (interface→ttyUSB) ---
+# Interface 0 (Channel A) = JTAG MPSSE  — sysfs path 3-2:1.0 (no ttyUSB when unbound)
+# Interface 1 (Channel B) = active merged USB PS UART on current ML carrier host
+# Interface 2/3 are exposed as spare serial candidates; current RV64 PL image routes UART to PMOD.
+info "ft4232h_channel_a=JTAG_MPSSE (3-2:1.0, no ttyUSB when bound to ftdi_sio)"
+for link in /dev/serial/by-id/usb-Xilinx_ML_Carrier_Card_*-port0; do
+    if [ -e "$link" ]; then
+        info "ft4232h_serial_link=$link -> $(readlink -f "$link")"
+    fi
+done
+info "ft4232h_channel_b=merged_usb_ps_uart verified through ZynqMP UART1"
+info "ft4232h_pl_uart=current_xilinx_kv260_bitstream_routes_to_pmod_H12_E10"
+
+# --- 4. JTAG claim status (is ftdi_sio bound to interface 0?) ---
+jtag_iface_path="/sys/bus/usb/drivers/ftdi_sio/$FTDI_USB_PATH"
+if [ -e "$jtag_iface_path" ]; then
+    fail "jtag_interface_free"
+    info "jtag_ftdi_sio_bound=true (unbind required before JTAG use)"
+    info "jtag_unbind_cmd=sh scripts/jtag-ftdi-unbind.shs"
+else
+    pass "jtag_interface_free"
+    info "jtag_ftdi_sio_bound=false (interface 0 available for JTAG)"
+fi
+
+# --- 5. Tool availability ---
+if command -v "$OPENFPGALOADER" >/dev/null 2>&1; then
+    ver="$(${OPENFPGALOADER} --version 2>&1 | head -n 1 || true)"
+    pass "tool_openfpgaloader"
+    info "openfpgaloader_version=$ver"
+else
+    fail "tool_openfpgaloader"
+fi
+
+if command -v "$OPENOCD" >/dev/null 2>&1; then
+    ver="$(${OPENOCD} --version 2>&1 | head -n 1 || true)"
+    pass "tool_openocd"
+    info "openocd_version=$ver"
+else
+    fail "tool_openocd"
+fi
+
+if [ -x "$VIVADO" ]; then
+    pass "tool_vivado"
+    info "vivado_path=$VIVADO"
+else
+    fail "tool_vivado"
+fi
+
+if command -v yosys >/dev/null 2>&1 && tool_runs yosys -V; then
+    ver="$(yosys --version 2>&1 | head -n 1 || true)"
+    pass "tool_yosys"
+    info "yosys_version=$ver"
+else
+    info "tool_yosys=not-installed-or-unusable"
+    info "tool_yosys_context=optional; Vivado synthesis/route/DRC/bitgen is the FPGA gate"
+fi
+
+# --- 6. RISC-V cross compilers ---
+if command -v riscv64-unknown-elf-gcc >/dev/null 2>&1; then
+    ver="$(riscv64-unknown-elf-gcc --version 2>&1 | head -n 1)"
+    pass "cross_riscv64_unknown_elf_gcc"
+    info "riscv64_unknown_elf_gcc_version=$ver"
+else
+    fail "cross_riscv64_unknown_elf_gcc"
+fi
+
+if command -v riscv64-linux-gnu-gcc >/dev/null 2>&1; then
+    ver="$(riscv64-linux-gnu-gcc --version 2>&1 | head -n 1)"
+    pass "cross_riscv64_linux_gnu_gcc"
+    info "riscv64_linux_gnu_gcc_version=$ver"
+else
+    fail "cross_riscv64_linux_gnu_gcc"
+fi
+
+# --- 7. Existing SimpleOS RV64 build artifacts ---
+rv64_elf="${RV64_FPGA_ELF:-build/os/simpleos_riscv64_fpga.elf}"
+rv64_bin="${RV64_FPGA_BIN:-build/vhdl/rv64/simpleos_riscv64_fpga.bin}"
+rv64_bit="${RV64_FPGA_BIT:-build/build/xilinx_kv260/gateware/xilinx_kv260.bit}"
+rv64_vhdl_dir="${RV64_VHDL_DIR:-build/vhdl/rv64}"
+rv64_product_core_vhdl="${RV64_FPGA_PRODUCT_CORE_VHDL:-$rv64_vhdl_dir/rv64imac_core_product.vhd}"
+rv64_product_wb_vhdl="${RV64_FPGA_PRODUCT_WB_VHDL:-$rv64_vhdl_dir/rv64imac_core_product_wb.vhd}"
+rv64_external_ddr_vhdl="${RV64_FPGA_EXTERNAL_DDR_VHDL:-$rv64_vhdl_dir/soc_top_rv64_external_ddr.vhd}"
+rv64_k26_pl_vhdl="${RV64_FPGA_K26_PL_VHDL:-$rv64_vhdl_dir/soc_top_rv64_k26_pl.vhd}"
+rv64_wb64_axi_vhdl="${RV64_FPGA_WB64_AXI_VHDL:-$rv64_vhdl_dir/wb64_axi_hp_bridge.vhd}"
+rv64_load_log="${RV64_FPGA_LOAD_LOG:-build/fpga/k26/load_elf_k26.log}"
+rv64_synth_util="${RV64_FPGA_SYNTH_UTIL:-build/fpga/k26/k26_rv64_product/k26_rv64_product.runs/synth_1/k26_ps_bd_wrapper_utilization_synth.rpt}"
+rv64_run_log="${RV64_FPGA_RUN_LOG:-build/fpga/k26/rv64_simpleos_run.log}"
+rv64_root_fixture="${RV64_FPGA_ROOT_FIXTURE:-SIMPLE_RISCV_LINUX_LOGIN_LS_PASS}"
+rv64_ghdl_log="${RV64_FPGA_GHDL_LOG:-build/fpga/k26/rv64_simpleos_ghdl.log}"
+rv64_product_pmp_log="${RV64_PRODUCT_PMP_GHDL_LOG:-build/ghdl/rv64_product_sv39_pmp/sim.log}"
+rv64_product_pmp_provenance="${RV64_PRODUCT_PMP_PROVENANCE:-build/ghdl/rv64_product_sv39_pmp/provenance.sha256}"
+rv64_product_pmp_tb="test/01_unit/lib/hardware/fpga_linux/rv64_product_sv39_pmp_ghdl/tb_rv64_product_sv39_pmp.vhd"
+rv64_product_pmp_fixture="test/01_unit/lib/hardware/fpga_linux/rv64_product_sv39_pmp_ghdl/rv64_product_sv39_pmp.S"
+
+if [ -s "$rv64_elf" ]; then
+    sz="$(wc -c <"$rv64_elf" | tr -d ' ')"
+    pass "artifact_simpleos_elf"
+    info "simpleos_elf_bytes=$sz"
+else
+    fail "artifact_simpleos_elf"
+fi
+
+if [ -s "$rv64_bin" ]; then
+    sz="$(wc -c <"$rv64_bin" | tr -d ' ')"
+    pass "artifact_simpleos_bin"
+    info "simpleos_bin_bytes=$sz"
+else
+    fail "artifact_simpleos_bin"
+fi
+
+if [ -s "$rv64_bit" ]; then
+    sz="$(wc -c <"$rv64_bit" | tr -d ' ')"
+    pass "artifact_simpleos_bitstream"
+    info "simpleos_bit_bytes=$sz"
+else
+    fail "artifact_simpleos_bitstream"
+fi
+
+newer_rv64_dep=""
+for dep in "$rv64_product_core_vhdl" "$rv64_product_wb_vhdl" "$rv64_external_ddr_vhdl" "$rv64_k26_pl_vhdl" "$rv64_wb64_axi_vhdl"; do
+    if [ -s "$rv64_bit" ] && [ -s "$dep" ] && [ -n "$(find "$dep" -newer "$rv64_bit" -print -quit 2>/dev/null)" ]; then
+        newer_rv64_dep="$dep"
+        break
+    fi
+done
+if [ -z "$newer_rv64_dep" ] && [ -s "$rv64_bit" ]; then
+    pass "rv64_fpga_bitstream_freshness"
+    info "rv64_fpga_bitstream=$rv64_bit"
+else
+    fail "rv64_fpga_bitstream_freshness"
+    info "rv64_fpga_bitstream=$rv64_bit"
+    info "rv64_fpga_newer_input=$newer_rv64_dep"
+    info "rv64_fpga_bitstream_reason=older-than-generated-input"
+fi
+
+if [ -s "$rv64_product_core_vhdl" ] &&
+    grep -q 'entity core64_imac_product_entry is' "$rv64_product_core_vhdl" &&
+    [ -s "$rv64_product_wb_vhdl" ] && grep -q 'entity rv64imac_core_product_wb is' "$rv64_product_wb_vhdl" &&
+    [ -s "$rv64_external_ddr_vhdl" ] && grep -q 'entity soc_top_rv64_external_ddr is' "$rv64_external_ddr_vhdl" &&
+    [ -s "$rv64_k26_pl_vhdl" ] && grep -q 'entity soc_top_rv64_k26_pl is' "$rv64_k26_pl_vhdl" &&
+    [ -s "$rv64_wb64_axi_vhdl" ] && grep -q 'entity wb64_axi_hp_bridge is' "$rv64_wb64_axi_vhdl"; then
+    pass "rv64_fpga_product_ps_ddr"
+    info "rv64_fpga_product_core_vhdl=$rv64_product_core_vhdl"
+    info "rv64_fpga_product_wb_vhdl=$rv64_product_wb_vhdl"
+    info "rv64_fpga_external_ddr_vhdl=$rv64_external_ddr_vhdl"
+    info "rv64_fpga_k26_pl_vhdl=$rv64_k26_pl_vhdl"
+    info "rv64_fpga_wb64_axi_vhdl=$rv64_wb64_axi_vhdl"
+else
+    fail "rv64_fpga_product_ps_ddr"
+    info "rv64_fpga_product_reason=missing-required-product-ps-ddr-rtl"
+fi
+
+if preflight_bound_marker "$rv64_product_pmp_log" "$rv64_product_pmp_provenance" RV64_PRODUCT_SV39_PMP_GHDL_PASS \
+    "$rv64_product_core_vhdl" "$rv64_product_wb_vhdl" \
+    "$rv64_product_pmp_tb" "$rv64_product_pmp_fixture" \
+    scripts/fpga/ghdl_rv64_product_sv39_pmp.shs; then
+    pass "rv64_product_sv39_pmp_ghdl"
+    info "rv64_product_sv39_pmp_log=$rv64_product_pmp_log"
+    info "rv64_product_sv39_pmp_provenance=$rv64_product_pmp_provenance"
+else
+    fail "rv64_product_sv39_pmp_ghdl"
+    info "rv64_product_sv39_pmp_log=$rv64_product_pmp_log"
+    info "rv64_product_sv39_pmp_provenance=$rv64_product_pmp_provenance"
+    info "rv64_product_sv39_pmp_reason=missing-failed-or-stale-real-dut-proof"
+fi
+
+if preflight_nonzero_luts "$rv64_synth_util"; then
+    pass "rv64_fpga_synth_logic"
+    info "rv64_fpga_synth_util=$rv64_synth_util"
+else
+    fail "rv64_fpga_synth_logic"
+    info "rv64_fpga_synth_util=$rv64_synth_util"
+    info "rv64_fpga_synth_reason=missing-malformed-or-zero-utilization"
+fi
+
+if [ -f "$rv64_load_log" ] &&
+    grep -q 'DDR_LOAD' "$rv64_load_log" &&
+    grep -q 'DDR_FIRST_WORD' "$rv64_load_log" &&
+    grep -q 'RISC-V core started from translated DDR' "$rv64_load_log" &&
+    ! grep -Eiq 'error|Invalid context' "$rv64_load_log" &&
+    ! preflight_has_legacy_physical_evidence "$rv64_load_log"; then
+    pass "rv64_fpga_elf_load_context"
+    info "rv64_fpga_load_context=xsdb-ps-ddr"
+    info "rv64_fpga_load_log=$rv64_load_log"
+else
+    fail "rv64_fpga_elf_load_context"
+    info "rv64_fpga_load_log=$rv64_load_log"
+    info "rv64_fpga_load_context=missing-ddr-load-or-xsdb-error"
+fi
+
+if preflight_ordered_terminal "$rv64_run_log" "$rv64_root_fixture" &&
+    ! preflight_has_legacy_physical_evidence "$rv64_run_log"; then
+    pass "rv64_fpga_simpleos_run"
+    info "rv64_fpga_run_log=$rv64_run_log"
+    info "rv64_fpga_root_fixture=$rv64_root_fixture"
+else
+    fail "rv64_fpga_simpleos_run"
+    info "rv64_fpga_run_log=$rv64_run_log"
+    info "rv64_fpga_root_fixture=$rv64_root_fixture"
+    info "rv64_fpga_run_context=missing-bidirectional-login-shell-ls-root-fixture"
+fi
+
+if [ -f "$rv64_ghdl_log" ] &&
+    grep -q 'RV64_UART_MARKER_SEEN' "$rv64_ghdl_log" &&
+    grep -q 'Simulation PASSED' "$rv64_ghdl_log"; then
+    pass "rv64_fpga_ghdl_marker"
+    info "rv64_fpga_ghdl_log=$rv64_ghdl_log"
+    info "rv64_fpga_ghdl_marker=RV64_UART_MARKER_SEEN"
+else
+    fail "rv64_fpga_ghdl_marker"
+    info "rv64_fpga_ghdl_log=$rv64_ghdl_log"
+    info "rv64_fpga_ghdl_marker=RV64_UART_MARKER_SEEN"
+    info "rv64_fpga_ghdl_context=missing-decoded-marker"
+fi
+
+# --- 8. Simple binary sanity check ---
+hello_output="$(timeout 60s "$SIMPLE_BINARY" run examples/01_getting_started/hello_native.spl 2>/tmp/rv64fpga_simple_hello.$$ | grep -v 'WARN\|simple_compiler\|ThreadId\|evalu' | tail -n 1 || true)"
+if [ "$hello_output" = "Hello World" ]; then
+    pass "simple_hello_world"
+else
+    fail "simple_hello_world"
+    info "simple_hello_output=$hello_output"
+fi
+rm -f /tmp/rv64fpga_simple_hello.$$
+
+# --- 9. Hardware-gated summary ---
+if [ "$ft4232h_present" = "0" ]; then
+    blocked "hardware_inventory: BLOCKED: no FT4232H USB device found (lsusb 0403:6011 absent)"
+    blocked "jtag_unbind: BLOCKED: JTAG unbind requires connected FT4232H device"
+    blocked "uart_console_probe: BLOCKED: hardware inventory requires connected board"
+fi
+
+if [ "$LOCAL_ONLY" = "1" ]; then
+    info "local_only=true"
+    if [ "$PREFLIGHT_FAILURES" -ne 0 ]; then
+        info "preflight_failures=$PREFLIGHT_FAILURES"
+        exit 1
+    fi
+    exit 0
+fi
+
+info "preflight_complete=true"
+if [ "$PREFLIGHT_FAILURES" -ne 0 ]; then
+    info "preflight_failures=$PREFLIGHT_FAILURES"
+    exit 1
+fi

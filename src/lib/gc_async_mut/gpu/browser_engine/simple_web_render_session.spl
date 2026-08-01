@@ -1,0 +1,448 @@
+"""Revision-driven retained owner for canonical Simple Web semantic results."""
+
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource
+}
+use std.common.web.browser_renderer_protocol.{BrowserTextInputOverlay}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
+    simple_web_layout_animation_needs_layout,
+    simple_web_layout_compose_prepared,
+    simple_web_layout_empty_retained,
+    simple_web_layout_prepare_retained,
+    simple_web_layout_rerender_retained
+}
+use std.gc_async_mut.gpu.browser_engine.style.animation.{
+    BrowserCssAnimationInstance
+}
+use std.common.structural.invalidation.contracts.{
+    DIRTY_INTRINSIC_MEASURE, DIRTY_LAYOUT, DIRTY_HIT_TEST, DIRTY_RESOURCE
+}
+use std.common.structural.layout.{
+    LayoutExecutionProfile, layout_execution_profile
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.{
+    StyleDifference,
+    WebLayoutDirtyNode,
+    WebLayoutFrontier,
+    WebLayoutManager,
+    WebLayoutNodeSnapshot,
+    WebLayoutRunResult,
+    WebLayoutSnapshot,
+    web_layout_adapt_prepared,
+    web_layout_classify_style,
+    web_layout_manager,
+    web_layout_manager_run_full_with_ports,
+    web_layout_manager_run_incremental_with_ports
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cpu_execution_port.{
+    browser_cpu_layout_execution_port, browser_cpu_layout_full,
+    browser_cpu_layout_reconstruct
+}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.cuda_execution_port.{
+    web_cuda_layout_execution_port
+}
+use std.gc_async_mut.web.browser_session.{BrowserRenderSnapshot}
+use std.common.ui.draw_ir_sdn.{draw_ir_to_sdn}
+use std.common.crypto.sha256.{sha256_text}
+
+val SIMPLE_WEB_LAYOUT_FIXED_POINT_CAP: i64 = 4
+
+fn _simple_web_layout_execution_profile(
+    node_count: i64
+) -> LayoutExecutionProfile:
+    layout_execution_profile(
+        "hybrid_vector_gpu",
+        node_count * 8,
+        node_count * 2,
+        80,
+        node_count * 128,
+        node_count * 32,
+        1,
+        2,
+        20
+    )
+
+fn _simple_web_layout_prior_node(
+    snapshot: WebLayoutSnapshot, id: i64
+) -> WebLayoutNodeSnapshot?:
+    for node in snapshot.nodes:
+        if node.id == id:
+            return Some(node)
+    nil
+
+fn _simple_web_layout_style_dirty_bits(
+    prior: WebLayoutNodeSnapshot, current: WebLayoutNodeSnapshot
+) -> i64:
+    match web_layout_classify_style(prior.style, current.style):
+        StyleDifference.IntrinsicMeasure:
+            DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT | DIRTY_HIT_TEST
+        StyleDifference.LayoutSelf: DIRTY_LAYOUT | DIRTY_HIT_TEST
+        StyleDifference.LayoutSubtree: DIRTY_LAYOUT | DIRTY_HIT_TEST
+        StyleDifference.RebuildFormattingContext:
+            DIRTY_LAYOUT | DIRTY_HIT_TEST
+        _:
+            # Geometry is authoritative when a newly covered style field is
+            # not yet represented by the narrower change hashes.
+            DIRTY_LAYOUT | DIRTY_HIT_TEST
+
+fn _simple_web_layout_pre_frontier(
+    prior: WebLayoutSnapshot,
+    current: WebLayoutSnapshot,
+    style_changed: bool,
+    resource_changed: bool,
+    viewport_changed: bool
+) -> WebLayoutFrontier:
+    var dirty_nodes: [WebLayoutDirtyNode] = []
+    var invalidated_ids: [i64] = []
+    for node in current.nodes:
+        if val Some(previous) = _simple_web_layout_prior_node(prior, node.id):
+            if (
+                previous.style.geometry_hash == node.style.geometry_hash and
+                not viewport_changed and
+                not (resource_changed and node.text_measure_required)
+            ):
+                continue
+            var dirty_bits = DIRTY_LAYOUT | DIRTY_HIT_TEST
+            if resource_changed:
+                dirty_bits = (
+                    dirty_bits | DIRTY_INTRINSIC_MEASURE | DIRTY_RESOURCE
+                )
+            elif style_changed:
+                dirty_bits = _simple_web_layout_style_dirty_bits(
+                    previous, node
+                )
+            dirty_nodes.push(WebLayoutDirtyNode(
+                id: node.id, dirty_bits: dirty_bits
+            ))
+            invalidated_ids.push(node.id)
+        else:
+            val dirty_bits = if resource_changed:
+                DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT |
+                DIRTY_HIT_TEST | DIRTY_RESOURCE
+            else:
+                DIRTY_LAYOUT | DIRTY_HIT_TEST
+            dirty_nodes.push(WebLayoutDirtyNode(
+                id: node.id, dirty_bits: dirty_bits
+            ))
+            invalidated_ids.push(node.id)
+    WebLayoutFrontier(
+        dirty_nodes: dirty_nodes,
+        invalidated_ids: invalidated_ids,
+        fault: ""
+    )
+
+fn _simple_web_render_counter_next(value: i64) -> i64:
+    if value >= 9223372036854775806: 9223372036854775806
+    else: value + 1
+
+fn _simple_web_render_command_count(
+    result: SimpleWebLayoutDrawIrResult
+) -> i64:
+    var count: i64 = 0
+    for batch in result.composition.batches:
+        count = count + batch.commands.len().to_i64()
+    count
+
+pub class SimpleWebRenderCounters:
+    serialize_count: i64
+    parse_count: i64
+    css_count: i64
+    style_count: i64
+    layout_count: i64
+    paint_count: i64
+    reuse_count: i64
+    composition_revision: i64
+    retained_node_count: i64
+    retained_style_count: i64
+    retained_box_count: i64
+    retained_command_count: i64
+
+    static fn create() -> SimpleWebRenderCounters:
+        SimpleWebRenderCounters(
+            serialize_count: 0,
+            parse_count: 0,
+            css_count: 0,
+            style_count: 0,
+            layout_count: 0,
+            paint_count: 0,
+            reuse_count: 0,
+            composition_revision: 0,
+            retained_node_count: 0,
+            retained_style_count: 0,
+            retained_box_count: 0,
+            retained_command_count: 0
+        )
+
+pub class SimpleWebRenderSession:
+    document_revision: i64
+    style_revision: i64
+    resource_revision: i64
+    width: i32
+    height: i32
+    scroll_y: i32
+    overlay_target_key: text
+    overlay_anchor_byte: i64
+    overlay_focus_byte: i64
+    overlay_view_start_byte: i64
+    overlay_caret_visible: bool
+    animation_time_ms: i64
+    document_html: text
+    current_result: SimpleWebLayoutDrawIrResult?
+    web_layout_manager_state: WebLayoutManager?
+    current_web_layout_snapshot: WebLayoutSnapshot?
+    current_web_layout_run: WebLayoutRunResult?
+    counters: SimpleWebRenderCounters
+    checksum_revision: i64
+    checksum_cache: text
+
+    static fn create() -> SimpleWebRenderSession:
+        SimpleWebRenderSession(
+            document_revision: -1,
+            style_revision: -1,
+            resource_revision: -1,
+            width: 0,
+            height: 0,
+            scroll_y: 0,
+            overlay_target_key: "",
+            overlay_anchor_byte: 0,
+            overlay_focus_byte: 0,
+            overlay_view_start_byte: 0,
+            overlay_caret_visible: false,
+            animation_time_ms: -1,
+            document_html: "",
+            current_result: nil,
+            web_layout_manager_state: nil,
+            current_web_layout_snapshot: nil,
+            current_web_layout_run: nil,
+            counters: SimpleWebRenderCounters.create(),
+            checksum_revision: -1,
+            checksum_cache: ""
+        )
+
+    me render(
+        snapshot: BrowserRenderSnapshot,
+        width: i32,
+        height: i32,
+        animation_time_ms: i64,
+        scroll_y: i32,
+        overlay: BrowserTextInputOverlay,
+        animation_instances: [BrowserCssAnimationInstance],
+        images: [SimpleOsHostGpuImageResource]
+    ) -> SimpleWebLayoutDrawIrResult:
+        val revisions = snapshot.revisions
+        val has_prior = self.current_result != nil
+        val document_changed = (
+            revisions.document_revision != self.document_revision
+        )
+        val style_changed = revisions.style_revision != self.style_revision
+        val resource_changed = (
+            revisions.resource_revision != self.resource_revision
+        )
+        val generation_changed = match self.web_layout_manager_state:
+            Some(manager): manager.generation != snapshot.document_generation
+            nil: false
+        val viewport_changed = width != self.width or height != self.height
+        val scroll_changed = scroll_y != self.scroll_y
+        val overlay_changed = (
+            overlay.target_key != self.overlay_target_key or
+            overlay.anchor_byte != self.overlay_anchor_byte or
+            overlay.focus_byte != self.overlay_focus_byte or
+            overlay.view_start_byte != self.overlay_view_start_byte or
+            overlay.caret_visible != self.overlay_caret_visible
+        )
+        var animation_unchanged = animation_time_ms == self.animation_time_ms
+        if (
+            not animation_unchanged and
+            self.current_result != nil and
+            self.current_result.unwrap().animation_next_ms < 0
+        ):
+            animation_unchanged = true
+        val reusable = (
+            has_prior and
+            snapshot.document_html == nil and
+            not document_changed and not style_changed and
+            not resource_changed and not generation_changed and
+            not viewport_changed and
+            not scroll_changed and not overlay_changed and
+            animation_unchanged
+        )
+        if reusable:
+            self.counters.reuse_count = _simple_web_render_counter_next(
+                self.counters.reuse_count
+            )
+            self.animation_time_ms = animation_time_ms
+            return self.current_result.unwrap()
+
+        if val Some(html) = snapshot.document_html:
+            self.document_html = html
+            self.counters.serialize_count = _simple_web_render_counter_next(
+                self.counters.serialize_count
+            )
+        val dirty_stage = if (
+            not has_prior or document_changed or style_changed or
+            generation_changed
+        ):
+            "full"
+        elif viewport_changed:
+            "css"
+        elif not animation_unchanged:
+            if simple_web_layout_animation_needs_layout(
+                self.current_result.unwrap()
+            ):
+                "style"
+            else:
+                "animation-paint"
+        else:
+            "paint"
+        val layout_changed = (
+            dirty_stage == "full" or dirty_stage == "css" or
+            dirty_stage == "style"
+        )
+        val result = if layout_changed:
+            val prepared = simple_web_layout_prepare_retained(
+                self.document_html, width, height, true,
+                animation_time_ms, scroll_y, overlay,
+                animation_instances, images
+            )
+            val retained = if (
+                self.current_result != nil and not document_changed and
+                not generation_changed and
+                self.current_web_layout_snapshot != nil
+            ):
+                self.current_result.unwrap().raw_boxes
+            else:
+                simple_web_layout_empty_retained()
+            val adapted = web_layout_adapt_prepared(
+                prepared, retained, snapshot.document_generation,
+                _simple_web_layout_execution_profile(prepared.nodes.len()),
+                SIMPLE_WEB_LAYOUT_FIXED_POINT_CAP
+            )
+            val manager = match self.web_layout_manager_state:
+                Some(retained):
+                    if retained.generation == snapshot.document_generation:
+                        retained
+                    else:
+                        web_layout_manager(snapshot.document_generation)
+                nil: web_layout_manager(snapshot.document_generation)
+            var frontier = WebLayoutFrontier(
+                dirty_nodes: [],
+                invalidated_ids: [],
+                fault: adapted.fault
+            )
+            val needs_framework_full = (
+                self.current_web_layout_snapshot == nil or
+                generation_changed or document_changed
+            )
+            if not needs_framework_full and adapted.fault == "":
+                frontier = _simple_web_layout_pre_frontier(
+                    self.current_web_layout_snapshot.unwrap(),
+                    adapted.snapshot,
+                    style_changed or dirty_stage == "style",
+                    resource_changed,
+                    viewport_changed
+                )
+            val cpu_port = browser_cpu_layout_execution_port(prepared, retained)
+            val gpu_port = web_cuda_layout_execution_port([])
+            val manager_step = if needs_framework_full:
+                web_layout_manager_run_full_with_ports(
+                    manager, adapted.snapshot, frontier, cpu_port, gpu_port
+                )
+            else:
+                web_layout_manager_run_incremental_with_ports(
+                    manager, adapted.snapshot, frontier, cpu_port, gpu_port
+                )
+            self.web_layout_manager_state = Some(manager_step.manager)
+            self.current_web_layout_run = Some(manager_step.result)
+            val raw_layout = if manager_step.result.fault != "":
+                browser_cpu_layout_full(prepared, retained)
+            else:
+                self.current_web_layout_snapshot = Some(adapted.snapshot)
+                browser_cpu_layout_reconstruct(
+                    prepared, retained, manager_step.result.layout
+                )
+            simple_web_layout_compose_prepared(
+                prepared, raw_layout
+            )
+        else:
+            simple_web_layout_rerender_retained(
+                self.current_result.unwrap(), dirty_stage, width, height,
+                animation_time_ms, scroll_y, overlay, animation_instances,
+                images
+            )
+        self.document_revision = revisions.document_revision
+        self.style_revision = revisions.style_revision
+        self.resource_revision = revisions.resource_revision
+        self.width = width
+        self.height = height
+        self.scroll_y = scroll_y
+        self.overlay_target_key = overlay.target_key
+        self.overlay_anchor_byte = overlay.anchor_byte
+        self.overlay_focus_byte = overlay.focus_byte
+        self.overlay_view_start_byte = overlay.view_start_byte
+        self.overlay_caret_visible = overlay.caret_visible
+        self.animation_time_ms = animation_time_ms
+        self.current_result = Some(result)
+        if dirty_stage == "full":
+            self.counters.parse_count = _simple_web_render_counter_next(
+                self.counters.parse_count
+            )
+        if dirty_stage == "full" or dirty_stage == "css":
+            self.counters.css_count = _simple_web_render_counter_next(
+                self.counters.css_count
+            )
+        if (
+            dirty_stage == "full" or dirty_stage == "css" or
+            dirty_stage == "style" or dirty_stage == "animation-paint"
+        ):
+            self.counters.style_count = _simple_web_render_counter_next(
+                self.counters.style_count
+            )
+        if (
+            dirty_stage == "full" or dirty_stage == "css" or
+            dirty_stage == "style"
+        ):
+            self.counters.layout_count = _simple_web_render_counter_next(
+                self.counters.layout_count
+            )
+        self.counters.paint_count = _simple_web_render_counter_next(
+            self.counters.paint_count
+        )
+        self.counters.composition_revision = _simple_web_render_counter_next(
+            self.counters.composition_revision
+        )
+        self.checksum_revision = -1
+        self.checksum_cache = ""
+        self.counters.retained_node_count = result.hit_index.nodes.len().to_i64()
+        self.counters.retained_style_count = result.hit_index.styles.len().to_i64()
+        self.counters.retained_box_count = result.hit_index.boxes.bx.len().to_i64()
+        self.counters.retained_command_count = (
+            _simple_web_render_command_count(result)
+        )
+        result
+
+    me composition_checksum() -> text:
+        if self.current_result == nil:
+            return ""
+        if self.checksum_revision != self.counters.composition_revision:
+            self.checksum_cache = sha256_text(
+                draw_ir_to_sdn(self.current_result.unwrap().composition)
+            )
+            self.checksum_revision = self.counters.composition_revision
+        self.checksum_cache
+
+    me close():
+        self.document_revision = -1
+        self.style_revision = -1
+        self.resource_revision = -1
+        self.document_html = ""
+        self.current_result = nil
+        self.web_layout_manager_state = nil
+        self.current_web_layout_snapshot = nil
+        self.current_web_layout_run = nil
+        self.counters.retained_node_count = 0
+        self.counters.retained_style_count = 0
+        self.counters.retained_box_count = 0
+        self.counters.retained_command_count = 0
+        self.checksum_revision = -1
+        self.checksum_cache = ""

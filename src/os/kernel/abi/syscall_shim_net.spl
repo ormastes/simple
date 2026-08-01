@@ -1,0 +1,193 @@
+# Network syscall shims — split from syscall_shim.spl (Wave 10F).
+# Contains spl_handle_* for network syscalls 70–77.
+
+use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
+use os.kernel.socket_compat.{posix_socket}
+use os.kernel.ipc.syscall.{_handle_net_bind}
+use os.kernel.ipc.syscall.{_handle_net_listen}
+use os.kernel.ipc.syscall.{_handle_net_connect}
+use os.kernel.ipc.syscall.{_handle_net_accept}
+use os.kernel.ipc.syscall.{_handle_net_send_to}
+use os.kernel.ipc.syscall.{_handle_net_recv_from}
+use os.kernel.ipc.syscall.{_handle_net_if_config}
+use os.kernel.abi.syscall_shim.{_make_args}
+
+# ===========================================================================
+# syscall 70 — net_socket   [IMPLEMENTED]
+#
+# a0 = domain (AF_INET=2, AF_INET6=10, etc.)
+# a1 = type (SOCK_STREAM=1, SOCK_DGRAM=2, etc.)
+# a2 = protocol (0 = auto)
+# a3..a5 unused
+# returns socket fd on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_socket")
+fn spl_handle_net_socket(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_socket stub.
+
+    Routes directly to posix_socket() in socket_compat.spl, which allocates
+    a local POSIX fd without depending on netstack IPC or a NIC driver
+    (loopback traffic on 127.0.0.1 is served entirely by
+    os.kernel.net.loopback_socket; see posix_bind/posix_connect).
+
+    Previously forwarded to _handle_net_socket() -> _forward_net_ipc() in
+    os.kernel.ipc.syscall_net.spl, which unconditionally returned -ENOSYS
+    ("kernel forwarding path is not fully wired" -- see that file's comment).
+    That was the exact bug: the app-facing socket() syscall always failed
+    with ENOSYS regardless of destination. Syscall number 70: create a
+    network socket.
+    """
+    posix_socket(a0 as i32, a1 as i32, a2 as i32)
+
+# ===========================================================================
+# syscall 71 — net_bind   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to sockaddr struct (user VA)
+# a2 = sockaddr length
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_bind")
+fn spl_handle_net_bind(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_bind stub.
+
+    Forwards to _handle_net_bind() in syscall.spl, which still returns
+    -ENOSYS (kernel forwarding path stub in os.kernel.ipc.syscall_net.spl,
+    outside this module's ownership).
+
+    # ponytail: bind()/connect()/send()/recv() at the raw syscall ABI still
+    # need the user-space sockaddr (a1 pointer) parsed via mmio into
+    # SockaddrIn before they can route to posix_bind/posix_connect in
+    # socket_compat.spl (which now has a working loopback path -- see
+    # os.kernel.net.loopback_socket). socket() itself (syscall 70, scalar
+    # args only) is fixed above; the pointer-marshaling work for these
+    # syscalls is deferred as a separate bounded change.
+    Syscall number 71: bind a socket to a local address and port.
+    """
+    val args = _make_args(71, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_bind(args)
+    result.value
+
+# ===========================================================================
+# syscall 72 — net_listen   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = backlog (max pending connections)
+# a2..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_listen")
+fn spl_handle_net_listen(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_listen stub.
+
+    Forwards to _handle_net_listen() in syscall.spl.
+    Syscall number 72: mark a socket as passive (listening for connections).
+    """
+    val args = _make_args(72, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_listen(args)
+    result.value
+
+# ===========================================================================
+# syscall 73 — net_connect   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to sockaddr struct (user VA)
+# a2 = sockaddr length
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_connect")
+fn spl_handle_net_connect(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_connect stub.
+
+    Forwards to _handle_net_connect() in syscall.spl.
+    Syscall number 73: initiate a connection to a remote address.
+    """
+    val args = _make_args(73, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_connect(args)
+    result.value
+
+# ===========================================================================
+# syscall 74 — net_accept   [IMPLEMENTED]
+#
+# a0 = listening socket fd
+# a1 = pointer to sockaddr output buffer (user VA, may be 0)
+# a2 = pointer to sockaddr length output (user VA, may be 0)
+# a3..a5 unused
+# returns new connected socket fd on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_accept")
+fn spl_handle_net_accept(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_accept stub.
+
+    Forwards to _handle_net_accept() in syscall.spl.
+    Syscall number 74: accept an incoming connection on a listening socket.
+    """
+    val args = _make_args(74, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_accept(args)
+    result.value
+
+# ===========================================================================
+# syscall 75 — net_send_to   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to data buffer (user VA)
+# a2 = data length in bytes
+# a3 = pointer to destination sockaddr (user VA, 0 for connected sockets)
+# a4 = sockaddr length (0 for connected sockets)
+# a5 = flags
+# returns bytes sent on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_send_to")
+fn spl_handle_net_send_to(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_send_to stub.
+
+    Forwards to _handle_net_send_to() in syscall.spl.
+    Syscall number 75: send data through a socket to a specified address.
+    """
+    val args = _make_args(75, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_send_to(args)
+    result.value
+
+# ===========================================================================
+# syscall 76 — net_recv_from   [IMPLEMENTED]
+#
+# a0 = socket fd
+# a1 = pointer to receive buffer (user VA)
+# a2 = buffer capacity in bytes
+# a3 = pointer to source sockaddr output (user VA, may be 0)
+# a4 = pointer to sockaddr length output (user VA, may be 0)
+# a5 = flags
+# returns bytes received on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_recv_from")
+fn spl_handle_net_recv_from(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_recv_from stub.
+
+    Forwards to _handle_net_recv_from() in syscall.spl.
+    Syscall number 76: receive data from a socket along with source address.
+    """
+    val args = _make_args(76, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_recv_from(args)
+    result.value
+
+# ===========================================================================
+# syscall 77 — net_if_config   [IMPLEMENTED]
+#
+# a0 = pointer to interface name string (user VA)
+# a1 = interface name length
+# a2 = pointer to config struct (user VA)
+# a3..a5 unused
+# returns 0 on success, negative errno on failure
+# ===========================================================================
+@export("C", name: "spl_handle_net_if_config")
+fn spl_handle_net_if_config(a0: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64:
+    """Strong override for the weak spl_handle_net_if_config stub.
+
+    Forwards to _handle_net_if_config() in syscall.spl.
+    Syscall number 77: configure a network interface (IP, MTU, flags).
+    """
+    val args = _make_args(77, a0, a1, a2, a3, a4, a5)
+    val result = _handle_net_if_config(args)
+    result.value

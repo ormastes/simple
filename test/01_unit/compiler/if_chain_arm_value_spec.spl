@@ -1,0 +1,181 @@
+# Regression spec — same-indent leading `-`/`+` must NOT continue the previous statement.
+#
+# Bug: doc/08_tracking/bug/if_chain_last_arm_returns_previous_value_2026-07-28.md
+# Root cause: src/compiler_rust/parser/src/expressions/binary.rs:68-90 ("Case 2",
+# leading-operator line continuation) peeks through NEWLINE/INDENT without ever
+# comparing indentation, so a statement-leading `-`/`+` on the NEXT line at the
+# SAME indent is absorbed as a BINARY operator on the previous expression.
+#
+# Originally reported as "the last arm of a long if-chain returns the previous
+# arm's value" (`if c == "f": return 15` yielding 14). That framing is wrong:
+# `if` and chain length are irrelevant. The swallowed token is the bare `-1`
+# sentinel tail, and `return 15` <NL> `-1` parses as `return (15 - 1)`.
+#
+# EXPECTED (and what the pure-Simple parser already does): two statements.
+# CURRENT seed behaviour: one binary expression. These cases FAIL on the Rust
+# seed until binary.rs is fixed; they are the gate for that fix.
+
+use std.spec
+
+
+# ---------------------------------------------------------------------------
+# Shape 1 — the pure form. No `if`, no chain. Two statements at the same indent.
+# ---------------------------------------------------------------------------
+fn pure_form() -> i64:
+    15
+    -1
+
+
+# ---------------------------------------------------------------------------
+# Shape 2 — the reported hex-nibble decoder shape (single-line if + `-1` tail).
+# ---------------------------------------------------------------------------
+fn hex_digit(c: text) -> i64:
+    if c == "0": return 0
+    if c == "1": return 1
+    if c == "2": return 2
+    if c == "3": return 3
+    if c == "4": return 4
+    if c == "5": return 5
+    if c == "6": return 6
+    if c == "7": return 7
+    if c == "8": return 8
+    if c == "9": return 9
+    if c == "a" or c == "A": return 10
+    if c == "b" or c == "B": return 11
+    if c == "c" or c == "C": return 12
+    if c == "d" or c == "D": return 13
+    if c == "e" or c == "E": return 14
+    if c == "f" or c == "F": return 15
+    -1
+
+
+# ---------------------------------------------------------------------------
+# Shape 3 — chain length is irrelevant: one arm reproduces it identically.
+# ---------------------------------------------------------------------------
+fn one_arm(c: text) -> i64:
+    if c == "f": return 15
+    -1
+
+
+# ---------------------------------------------------------------------------
+# Shape 4 — leading `+` is affected too.
+# ---------------------------------------------------------------------------
+fn leading_plus(c: text) -> i64:
+    if c == "f": return 15
+    +1
+
+
+# ---------------------------------------------------------------------------
+# Shape 5 — a blank line between the two statements does NOT stop the gluing.
+# ---------------------------------------------------------------------------
+fn blank_between(c: text) -> i64:
+    if c == "f": return 15
+
+    -1
+
+
+# ---------------------------------------------------------------------------
+# Shape 6 — the assignment variant: the swallowed `-1` corrupts a live var.
+# ---------------------------------------------------------------------------
+fn assign_variant(c: text) -> i64:
+    var r = 0
+    if c == "f": r = 15
+    -1
+    return r
+
+
+# ---------------------------------------------------------------------------
+# Control shapes that MUST keep working (these already pass; they pin the fix
+# so it does not over-correct and break real multi-line expressions).
+# ---------------------------------------------------------------------------
+fn ctl_explicit_return(c: text) -> i64:
+    if c == "f": return 15
+    return -1
+
+fn ctl_block_form(c: text) -> i64:
+    if c == "f":
+        return 15
+    -1
+
+fn ctl_parenthesised(c: text) -> i64:
+    if c == "f": return 15
+    (-1)
+
+fn ctl_unsigned_tail(c: text) -> i64:
+    if c == "f": return 15
+    99
+
+# Intended feature: a DEEPER-indented leading operator IS a continuation.
+fn ctl_indented_continuation_plus() -> i64:
+    val s = 10
+        + 5
+    return s
+
+fn ctl_indented_continuation_minus() -> i64:
+    val s = 10
+        - 5
+    return s
+
+
+describe "same-indent leading operator does not continue the previous statement":
+    """
+    Gate for doc/08_tracking/bug/if_chain_last_arm_returns_previous_value_2026-07-28.md.
+    Every case here fails on the Rust bootstrap seed and passes on the pure-Simple
+    parser; the divergence is the bug.
+    """
+
+    it "does not fuse `15` and `-1` into `15 - 1`":
+        expect(pure_form()).to_equal(-1)
+
+    it "decodes the last hex nibble as 15, not 14":
+        expect(hex_digit("f")).to_equal(15)
+        expect(hex_digit("F")).to_equal(15)
+
+    it "decodes non-final hex nibbles correctly (unaffected arms)":
+        expect(hex_digit("0")).to_equal(0)
+        expect(hex_digit("9")).to_equal(9)
+        expect(hex_digit("a")).to_equal(10)
+        expect(hex_digit("e")).to_equal(14)
+
+    it "returns the -1 sentinel for a non-hex character":
+        expect(hex_digit("z")).to_equal(-1)
+
+    it "reproduces with a single arm — chain length is irrelevant":
+        expect(one_arm("f")).to_equal(15)
+        expect(one_arm("z")).to_equal(-1)
+
+    it "does not fuse a leading + either":
+        expect(leading_plus("f")).to_equal(15)
+
+    it "is not stopped by an intervening blank line":
+        expect(blank_between("f")).to_equal(15)
+
+    it "does not corrupt an assignment-style arm":
+        expect(assign_variant("f")).to_equal(15)
+
+
+describe "control shapes that must keep working":
+    """
+    These already pass today. They pin the fix so that removing the same-indent
+    continuation does not also remove the intended deeper-indent continuation.
+    """
+
+    it "explicit `return -1` tail is unaffected":
+        expect(ctl_explicit_return("f")).to_equal(15)
+        expect(ctl_explicit_return("z")).to_equal(-1)
+
+    it "block-form if dedents and is unaffected":
+        expect(ctl_block_form("f")).to_equal(15)
+        expect(ctl_block_form("z")).to_equal(-1)
+
+    it "parenthesising the sentinel is a valid workaround":
+        expect(ctl_parenthesised("f")).to_equal(15)
+        expect(ctl_parenthesised("z")).to_equal(-1)
+
+    it "an unsigned tail literal is unaffected":
+        expect(ctl_unsigned_tail("f")).to_equal(15)
+        expect(ctl_unsigned_tail("z")).to_equal(99)
+
+    it "deeper-indented leading operators remain real continuations":
+        expect(ctl_indented_continuation_plus()).to_equal(15)
+        expect(ctl_indented_continuation_minus()).to_equal(5)

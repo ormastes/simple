@@ -1,0 +1,258 @@
+"""
+Closure Capture Must See Every Statement Kind
+
+Bug doc: doc/08_tracking/bug/closure_selective_capture_skips_non_expression_statements_2026-07-27.md
+
+Closures use SELECTIVE capture: only the identifiers a free-variable walker
+finds in the body are copied into the captured environment. The walker used to
+descend into `Node::Expression` statements only, so an outer value read solely
+from a `val` initializer, an assignment, an `if`/`for`/`while`/`match` body, or
+a `return` was never captured. At runtime the name was then simply absent:
+a hard `variable X not found` inside sspec, and a SILENT `0` in ordinary code
+under the JIT — an assertion written that way passed vacuously.
+
+The smoking gun this spec pins: an earlier plain-expression read of a fixture
+used to "rescue" a later `val` read of the same name in the same closure body.
+Every shape below must work on its own, in any order.
+
+The other half is shadowing: a name bound INSIDE the closure (`val`, a `for`
+binder, a match pattern, a nested lambda parameter) must not drag the outer
+value in — while a binder's own initializer (`val fx = fx + 1`) still reads the
+outer one, because it is evaluated before the binder exists.
+
+Deliberately NOT pinned here: how long a block-local binder lives after its
+block. `val fx = 55` inside an `if` body and a `for fx in ...` binder both leak
+into the enclosing scope today, identically inside and outside closures, and the
+JIT and interpreter disagree about the `if` case (55 vs 10 — see
+build/capfix/scope_probe.spl). That is a pre-existing block-scope-lifetime
+question, unrelated to capture, so this spec asserts only what is unambiguous.
+"""
+
+use std.spec
+
+# --- Plain (non-BDD) closures: the silent-zero half of the defect. -----------
+# `runner(fn(): ...)` passes a lambda as a `fn()` parameter, the exact shape
+# that used to return 0 instead of the captured value under the JIT.
+
+fn call_i64(block: fn() -> i64) -> i64:
+    return block()
+
+fn plain_direct_read() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64: fx)
+
+fn plain_let_read() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64:
+        val a = fx
+        return a
+    )
+
+fn plain_let_arith_read() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64:
+        val a = fx + 1
+        return a
+    )
+
+fn plain_assignment_read() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64:
+        var a = 0
+        a = fx
+        return a
+    )
+
+fn plain_for_read() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64:
+        var total = 0
+        for i in [1, 2]:
+            total = total + fx
+        return total
+    )
+
+fn plain_if_read() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64:
+        var a = 0
+        if true:
+            a = fx
+        return a
+    )
+
+fn plain_shadowing_let() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64:
+        val fx = 99
+        return fx
+    )
+
+fn plain_shadowing_initializer() -> i64:
+    val fx = 10
+    return call_i64(fn() -> i64:
+        val fx = fx + 1
+        return fx
+    )
+
+describe "closure capture reaches every statement kind":
+    val fx = 10
+    val fxs = [1, 2, 3]
+
+    it "captures a fixture read only from a val initializer":
+        val a = fx
+        expect(a).to_equal(10)
+
+    it "captures a fixture read only from a var initializer":
+        var a = fx
+        expect(a).to_equal(10)
+
+    it "captures a fixture read only from an assignment value":
+        var a = 0
+        a = fx
+        expect(a).to_equal(10)
+
+    it "captures a fixture read only from an if condition":
+        var seen = 0
+        if fx > 5:
+            seen = 1
+        expect(seen).to_equal(1)
+
+    it "captures a fixture read only from an if body":
+        var a = 0
+        if true:
+            a = fx
+        expect(a).to_equal(10)
+
+    it "captures a fixture read only from an else body":
+        var a = 0
+        if false:
+            a = 1
+        else:
+            a = fx
+        expect(a).to_equal(10)
+
+    it "captures a fixture read only from a for iterable":
+        var total = 0
+        for v in fxs:
+            total = total + v
+        expect(total).to_equal(6)
+
+    it "captures a fixture read only from a for body":
+        var total = 0
+        for i in [1, 2]:
+            total = total + fx
+        expect(total).to_equal(20)
+
+    it "captures a fixture read only from a while condition":
+        var n = 0
+        while n < fx:
+            n = n + 5
+        expect(n).to_equal(10)
+
+    it "captures a fixture read only from a while body":
+        var n = 0
+        var guard = 0
+        while guard < 1:
+            n = fx
+            guard = 1
+        expect(n).to_equal(10)
+
+    it "captures a fixture read only from a match subject":
+        var label = "none"
+        match fx:
+            case 10:
+                label = "ten"
+            case _:
+                label = "other"
+        expect(label).to_equal("ten")
+
+    it "captures a fixture read only from a match arm body":
+        var a = 0
+        match 1:
+            case 1:
+                a = fx
+            case _:
+                a = 0
+        expect(a).to_equal(10)
+
+    it "captures a fixture read only from a nested lambda body":
+        val f = fn() -> i64: fx
+        expect(f()).to_equal(10)
+
+    it "captures a fixture read only from a return inside a nested lambda":
+        val f = fn() -> i64:
+            return fx
+        expect(f()).to_equal(10)
+
+    it "captures a fixture read from a nested block inside a loop":
+        var total = 0
+        for i in [1, 2]:
+            if i > 1:
+                total = total + fx
+        expect(total).to_equal(10)
+
+    it "needs no earlier plain-expression read to rescue a later val read":
+        # The order-dependence smoking gun: this used to pass ONLY when a bare
+        # `fx` or `expect(fx)` statement came first.
+        val a = fx + 0
+        expect(a).to_equal(10)
+
+describe "closure capture honours shadowing":
+    val fx = 10
+
+    it "a val binder inside the closure shadows the fixture":
+        val fx = 99
+        expect(fx).to_equal(99)
+
+    it "a binder initializer still reads the fixture it shadows":
+        val fx = fx + 1
+        expect(fx).to_equal(11)
+
+    it "a for binder shadows the fixture inside the loop":
+        var last = 0
+        for fx in [7]:
+            last = fx
+        expect(last).to_equal(7)
+
+    it "the fixture is still readable before a shadowing loop runs":
+        expect(fx).to_equal(10)
+        var last = 0
+        for fx in [7]:
+            last = fx
+        expect(last).to_equal(7)
+
+    it "a nested lambda parameter shadows the fixture":
+        val f = fn(fx: i64) -> i64: fx
+        expect(f(3)).to_equal(3)
+        expect(fx).to_equal(10)
+
+    it "a shadowing binder inside an if body wins inside that body":
+        if true:
+            val fx = 55
+            expect(fx).to_equal(55)
+
+describe "closure capture outside sspec never silently yields 0":
+    it "a direct read inside a fn() block keeps its value":
+        expect(plain_direct_read()).to_equal(10)
+
+    it "a val initializer read inside a fn() block keeps its value":
+        expect(plain_let_read()).to_equal(10)
+
+    it "an arithmetic val read inside a fn() block keeps its value":
+        expect(plain_let_arith_read()).to_equal(11)
+
+    it "an assignment read inside a fn() block keeps its value":
+        expect(plain_assignment_read()).to_equal(10)
+
+    it "a for-body read inside a fn() block keeps its value":
+        expect(plain_for_read()).to_equal(20)
+
+    it "an if-body read inside a fn() block keeps its value":
+        expect(plain_if_read()).to_equal(10)
+
+    it "a shadowing val inside a fn() block wins over the outer value":
+        expect(plain_shadowing_let()).to_equal(99)
+
+    it "a shadowing binder initializer still reads the outer value":
+        expect(plain_shadowing_initializer()).to_equal(11)

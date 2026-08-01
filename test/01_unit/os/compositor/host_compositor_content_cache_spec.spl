@@ -1,0 +1,87 @@
+# Task #15 remainder item 4 (S1 perf) — WebRenderPixelArtifactCache wired
+# into HostCompositor.render_frame so unchanged window content is NOT
+# re-rendered every frame.
+#
+# HostCompositor.content_caches (Dict<window_id, WebRenderPixelArtifactCache>)
+# is keyed per hosted window and replaced whenever (width, height, backend)
+# changes (see _content_cache_for); WebRenderPixelArtifactCache itself only
+# recomputes pixels when the rendered HTML body differs from the last one it
+# stored. This proves, through two consecutive real render_frame() calls
+# (not a synthetic direct cache poke):
+#   - frame 2 with unchanged window content is a cache HIT (hits() grows,
+#     stores() does not)
+#   - a content change forces a cache MISS/store on the next frame
+#     (stores() grows again)
+#   - resizing the window (a size-key change) also forces a fresh cache
+#     (miss), not a stale hit against the old size
+
+use std.spec.*
+use os.compositor.browser_compositor_backend.{BrowserCompositorBackend}
+use os.compositor.host_compositor_entry.{
+    HostCompositor, host_wm_force_direct_chrome
+}
+use common.window_protocol.geometry.{Size}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_UPDATE_TREE, COMP_RESIZE}
+
+describe "HostCompositor per-window content pixel cache (task #15 remainder item 4)":
+
+    it "hits on frame 2 with unchanged content and misses again after a content change":
+        host_wm_force_direct_chrome(true)
+        val backend = BrowserCompositorBackend.with_color(640, 480, 0xFF000000u32)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 40, 60, 200, 140, "ready", 1, "/sys/apps/one")
+        val wid = comp.windows[0].id
+
+        # Frame 1: no cache yet for this window -> first content paint stores.
+        comp.render_frame()
+        val cache1 = comp.content_caches.get(wid)
+        assert_not_equal(cache1, nil)
+        expect(cache1.stores()).to_equal(1)
+        expect(cache1.hits()).to_equal(0)
+
+        # Frame 2: same window, same content, same size -> cache HIT (same
+        # cache object instance, since (width, height, backend) unchanged).
+        comp.render_frame()
+        val cache2 = comp.content_caches.get(wid)
+        expect(cache2.stores()).to_equal(1)
+        expect(cache2.hits()).to_equal(1)
+
+        # Frame 3: same content again -> another hit.
+        comp.render_frame()
+        val cache3 = comp.content_caches.get(wid)
+        expect(cache3.stores()).to_equal(1)
+        expect(cache3.hits()).to_equal(2)
+
+        # Content change (COMP_UPDATE_TREE) -> next frame is a genuine
+        # content-hash miss: a new store, hit count does not grow.
+        comp.apply_bridge_request(2, 77, COMP_UPDATE_TREE.to_i64(), wid, "", 0, 0, 0, 0, "changed", 0, "")
+        comp.render_frame()
+        val cache4 = comp.content_caches.get(wid)
+        expect(cache4.stores()).to_equal(2)
+        expect(cache4.hits()).to_equal(2)
+
+        # Unchanged again after the content settles -> hits resume growing.
+        comp.render_frame()
+        val cache5 = comp.content_caches.get(wid)
+        expect(cache5.stores()).to_equal(2)
+        expect(cache5.hits()).to_equal(3)
+
+    it "replaces (not reuses) the cache when the window is resized":
+        host_wm_force_direct_chrome(true)
+        val backend = BrowserCompositorBackend.with_color(640, 480, 0xFF000000u32)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 77, COMP_CREATE_WINDOW.to_i64(), 0, "Terminal", 40, 60, 200, 140, "ready", 1, "/sys/apps/one")
+        val wid = comp.windows[0].id
+
+        comp.render_frame()
+        comp.render_frame()
+        val before = comp.content_caches.get(wid)
+        expect(before.hits()).to_equal(1)
+
+        comp.apply_bridge_request(2, 77, COMP_RESIZE.to_i64(), wid, "", 0, 0, 260, 180, "", 0, "")
+        comp.render_frame()
+        val after = comp.content_caches.get(wid)
+        # A fresh cache for the new size starts at 0 hits / 1 store, not a
+        # stale hit carried over from the old (width, height) cache.
+        expect(after.stores()).to_equal(1)
+        expect(after.hits()).to_equal(0)

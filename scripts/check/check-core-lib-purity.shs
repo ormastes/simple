@@ -1,0 +1,55 @@
+#!/bin/sh
+# Core-lib purity gate (three-tier layering, doc/04_architecture/lib/host_io_layering/).
+#
+# Tier rule R1: src/lib/common/** is the CORE tier — pure transforms only.
+#   - Impure rt_* externs (file/dir/process/env/io/net/time/cli/exit/stdin)
+#     are forbidden. Pure value intrinsics (rt_sin, rt_sha256, ...) are allowed.
+#   - Imports from host/full tiers (nogc_sync_mut, nogc_async_mut, gc_*) are
+#     forbidden.
+# Existing debt is baselined in core_purity_baseline.txt (one path per line).
+# The gate RATCHETS: any violating file NOT in the baseline fails the check.
+# Shrink the baseline as files are cleaned; never add to it without a plan note.
+set -eu
+
+ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$ROOT_DIR"
+BASELINE="scripts/check/core_purity_baseline.txt"
+
+IMPURE_EXTERN='\brt_(file|dir|process|env|io|net|tcp|udp|stdin|stdout|cli|exit|time|socket|http)[a-z0-9_]*'
+IMPURE_IMPORT='^use (std\.)?(nogc_sync_mut|nogc_async_mut|gc_async_mut|gc_sync_mut)'
+
+tmp_violations="$(mktemp)"
+trap 'rm -f "$tmp_violations"' EXIT INT TERM
+
+rg -l "$IMPURE_EXTERN" src/lib/common/ 2>/dev/null | sort >"$tmp_violations" || true
+rg -l "$IMPURE_IMPORT" src/lib/common/ 2>/dev/null | sort >>"$tmp_violations" || true
+sort -u "$tmp_violations" -o "$tmp_violations"
+
+total=$(wc -l <"$tmp_violations" | tr -d ' ')
+new_count=0
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if ! grep -qxF "$f" "$BASELINE" 2>/dev/null; then
+        echo "core_purity_new_violation=$f"
+        new_count=$((new_count + 1))
+    fi
+done <"$tmp_violations"
+
+baseline_total=$(grep -c . "$BASELINE" 2>/dev/null || echo 0)
+echo "core_purity_baselined=$baseline_total"
+echo "core_purity_current=$total"
+echo "core_purity_new=$new_count"
+
+# Report baseline entries that are now clean (candidates for removal)
+while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    if ! grep -qxF "$b" "$tmp_violations"; then
+        echo "core_purity_baseline_stale=$b"
+    fi
+done <"$BASELINE"
+
+if [ "$new_count" -gt 0 ]; then
+    echo "core_purity_ok=false"
+    exit 1
+fi
+echo "core_purity_ok=true"

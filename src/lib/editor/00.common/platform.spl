@@ -1,0 +1,131 @@
+# Editor Platform
+#
+# Platform detection and configuration for Desktop, SimpleOS, and Web.
+#
+# The key/value get/set ladder here used to be a second copy of the one in
+# config.spl, complete with its own `extern fn parse_int` and its own bool→text
+# conversion, and it rebuilt the whole five-field `PlatformConfig(...)` literal
+# once per key. Both now route through `std.common.config_core`.
+
+use std.common.config_core.schema.{ConfigFieldDescriptor, config_field}
+use std.common.config_core.schema.{config_bool_to_text, config_text_to_bool, config_parse_int}
+use std.common.config_core.schema.{config_schema_index}
+use std.common.config_core.layers.{ConfigEntry, config_resolve, config_resolve_valid}
+
+enum EditorPlatform:
+    Desktop
+    SimpleOS
+    Web
+
+struct PlatformConfig:
+    platform: EditorPlatform
+    max_open_files: i64
+    max_undo_depth: i64
+    auto_save_interval_ms: i64
+    file_watcher_enabled: bool
+
+fn platform_default_config(platform: EditorPlatform) -> PlatformConfig:
+    match platform:
+        EditorPlatform.Desktop:
+            PlatformConfig(
+                platform: platform,
+                max_open_files: 256,
+                max_undo_depth: 128,
+                auto_save_interval_ms: 30000,
+                file_watcher_enabled: true
+            )
+        EditorPlatform.SimpleOS:
+            PlatformConfig(
+                platform: platform,
+                max_open_files: 32,
+                max_undo_depth: 32,
+                auto_save_interval_ms: 60000,
+                file_watcher_enabled: false
+            )
+        EditorPlatform.Web:
+            PlatformConfig(
+                platform: platform,
+                max_open_files: 64,
+                max_undo_depth: 64,
+                auto_save_interval_ms: 30000,
+                file_watcher_enabled: false
+            )
+
+fn platform_name(platform: EditorPlatform) -> text:
+    match platform:
+        EditorPlatform.Desktop => "desktop"
+        EditorPlatform.SimpleOS => "simpleos"
+        EditorPlatform.Web => "web"
+
+fn platform_from_name(name: text, fallback: EditorPlatform) -> EditorPlatform:
+    if name == "desktop":
+        return EditorPlatform.Desktop
+    if name == "simpleos":
+        return EditorPlatform.SimpleOS
+    if name == "web":
+        return EditorPlatform.Web
+    fallback
+
+# Typed schema for the settable platform keys. The int fields carry no minimum:
+# the previous `parse_int(value) ?? current` form accepted any parseable integer
+# and kept the current value otherwise, which is what plain `i64` validation does.
+fn platform_config_schema() -> [ConfigFieldDescriptor]:
+    [
+        config_field(key: "platform", value_type: "text", default_value: "desktop"),
+        config_field(key: "max_open_files", value_type: "i64", default_value: "256"),
+        config_field(key: "max_undo_depth", value_type: "i64", default_value: "128"),
+        config_field(key: "auto_save_interval_ms", value_type: "i64", default_value: "30000"),
+        config_field(key: "file_watcher_enabled", value_type: "bool", default_value: "true")
+    ]
+
+fn _pc_text_of(entries: [ConfigEntry], key: text) -> text:
+    val schema = platform_config_schema()
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return ""
+    config_resolve(schema[idx], entries).value
+
+fn _pc_int_of(entries: [ConfigEntry], key: text) -> i64:
+    val schema = platform_config_schema()
+    val idx = config_schema_index(schema, key)
+    if idx < 0:
+        return 0
+    config_parse_int(config_resolve_valid(schema[idx], entries).value)
+
+fn platform_config_to_entries(config: PlatformConfig, layer: text) -> [ConfigEntry]:
+    val schema = platform_config_schema()
+    var result: [ConfigEntry] = []
+    var i = 0
+    while i < schema.len():
+        val key = schema[i].key
+        result.push(ConfigEntry(key: key, value: platform_config_get_by_key(config, key), layer: layer))
+        i = i + 1
+    result
+
+# Build the struct ONCE from resolved entries.
+fn platform_config_from_entries(entries: [ConfigEntry], fallback: EditorPlatform) -> PlatformConfig:
+    PlatformConfig(
+        platform: platform_from_name(_pc_text_of(entries, "platform"), fallback),
+        max_open_files: _pc_int_of(entries, "max_open_files"),
+        max_undo_depth: _pc_int_of(entries, "max_undo_depth"),
+        auto_save_interval_ms: _pc_int_of(entries, "auto_save_interval_ms"),
+        file_watcher_enabled: config_text_to_bool(_pc_text_of(entries, "file_watcher_enabled"))
+    )
+
+fn platform_config_get_by_key(config: PlatformConfig, key: text) -> text:
+    if key == "max_open_files":
+        return config.max_open_files.to_text()
+    if key == "max_undo_depth":
+        return config.max_undo_depth.to_text()
+    if key == "auto_save_interval_ms":
+        return config.auto_save_interval_ms.to_text()
+    if key == "file_watcher_enabled":
+        return config_bool_to_text(config.file_watcher_enabled)
+    if key == "platform":
+        return platform_name(config.platform)
+    ""
+
+fn platform_config_set_by_key(config: PlatformConfig, key: text, value: text) -> PlatformConfig:
+    var entries = platform_config_to_entries(config, "compiled_default")
+    entries.push(ConfigEntry(key: key, value: value, layer: "user"))
+    platform_config_from_entries(entries, config.platform)

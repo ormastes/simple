@@ -1,0 +1,47 @@
+"""
+Claude full user tool result message router parity model.
+"""
+
+use app.llm_caret.claude_full.components.messages.UserToolResultMessage.utils.*
+
+const USER_TOOL_RESULT_MESSAGE_SOURCE_LINES = 105
+const USER_TOOL_RESULT_CANCEL_MESSAGE = "tool_use_cancelled"
+const USER_TOOL_RESULT_REJECT_MESSAGE = "tool_use_rejected"
+const USER_TOOL_RESULT_INTERRUPT_MESSAGE = "[Request interrupted by user for tool use]"
+
+class UserToolResultParam:
+    tool_use_id: text
+    content: text
+    is_error: bool
+
+impl UserToolResultParam:
+    static fn new(toolUseID: text, content: text, isError: bool) -> UserToolResultParam:
+        UserToolResultParam(tool_use_id: toolUseID, content: content, is_error: isError)
+
+class UserToolResultRoute:
+    visible: bool
+    kind: text
+    tool_name: text
+    tool_use_id: text
+
+impl UserToolResultRoute:
+    static fn hidden() -> UserToolResultRoute:
+        UserToolResultRoute(visible: false, kind: "missing-tool", tool_name: "", tool_use_id: "")
+
+    static fn route(kind: text, toolName: text, toolUseID: text) -> UserToolResultRoute:
+        UserToolResultRoute(visible: true, kind: kind, tool_name: toolName, tool_use_id: toolUseID)
+
+fn userToolResultMessage(param: UserToolResultParam, tools: [UserToolLookupTool], toolUses: [UserToolLookupToolUse]) -> UserToolResultRoute:
+    val toolUse = getToolFromMessages(param.tool_use_id, tools, toolUses)
+    if not toolUse.found:
+        return UserToolResultRoute.hidden()
+    if param.content.starts_with(USER_TOOL_RESULT_CANCEL_MESSAGE):
+        return UserToolResultRoute.route("canceled", toolUse.tool_name, toolUse.tool_use_id)
+    if param.content.starts_with(USER_TOOL_RESULT_REJECT_MESSAGE) or param.content == USER_TOOL_RESULT_INTERRUPT_MESSAGE:
+        return UserToolResultRoute.route("rejected", toolUse.tool_name, toolUse.tool_use_id)
+    if param.is_error:
+        return UserToolResultRoute.route("error", toolUse.tool_name, toolUse.tool_use_id)
+    UserToolResultRoute.route("success", toolUse.tool_name, toolUse.tool_use_id)
+
+fn userToolResultMessageSourceLinesModeled() -> i64:
+    USER_TOOL_RESULT_MESSAGE_SOURCE_LINES

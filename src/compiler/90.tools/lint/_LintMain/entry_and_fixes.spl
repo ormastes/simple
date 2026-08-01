@@ -1,0 +1,457 @@
+# Linter main() entry and easy-fix collection/application.
+use compiler.tools.lint.main.*
+# Simple Language Linter
+# Semantic lints for code quality and safety
+# Usage: simple_lint <file.spl> [--deny-all] [--warn-all]
+
+# I/O imports
+use std.nogc_sync_mut.io.file_ops (file_read, file_exists, file_atomic_write)
+use std.nogc_sync_mut.io.dir_ops (is_dir)
+use app.io.cli_ops (get_args)
+
+# Logging imports
+use std.log.{error, info}
+
+# Import EasyFix data types from stdlib
+use std.tooling.easy_fix.*
+use common.text.{escape_json}
+use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
+use compiler.core.ast.{module_get_decls}
+use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error}
+use compiler.semantics.lint.argument_count.{check_argument_count}
+use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
+use compiler.semantics.lint.star_import.{check_star_export_file}
+use compiler.semantics.lint.stub_impl.{check_stub_impl}
+use compiler.semantics.lint.wide_public.{check_wide_public_file}
+
+# File I/O wrapper
+
+fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult]:
+    var results = linter.lint_source(path, content)
+    if not path.ends_with(".spl"):
+        return results
+
+    val previous_parse_error = parser_has_errors()
+    # Must use the *_checked form: `parse_module_silent` + `parser_has_errors()`
+    # reads back a module-level flag that does not survive the return across the
+    # module boundary, which made this gate fail open — lint reported
+    # `all files clean` on files the compiler rejects outright. See
+    # doc/08_tracking/bug/lint_does_not_detect_syntax_errors_2026-07-28.md.
+    val parse_failed = parse_module_silent_checked(content, path)
+    parser_set_had_error(previous_parse_error)
+    if parse_failed:
+        val lint = Lint.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, "Source did not parse")
+        results.push(LintResult.new(path, 1, 0, lint))
+        return results
+
+    val config = resolve_lint_config(linter.config, path, content)
+    val decls = module_get_decls()
+    val lines = content.split("\n")
+    for warning in check_argument_count(decls):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val base_level = if warning.code == "ARG002": LintLevel.Deny else: LintLevel.Warn
+        val level = apply_config_level(config, warning.code, base_level)
+        val lint = Lint.new(warning.code, level, LintCategory.Style, warning.message)
+            .with_fix(warning.hint)
+        results.push(LintResult.new(path, warning.line, 0, lint))
+    for warning in check_collection_patterns(decls):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val base_level = if warning.code == "COLL001" or warning.code == "COLL006": LintLevel.Deny else: LintLevel.Warn
+        val level = apply_config_level(config, warning.code, base_level)
+        var lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+            .with_fix(warning.hint)
+        # Locate the offending line textually; the AST span pool is empty on
+        # this path (verified: expr/stmt spans all read 0 and span_is_valid is
+        # false), so line recovery here works the same way lint_cli_find_fn_line
+        # already does.
+        val hit = collection_fix_line(lines, warning.code)
+        var coll_line = lint_cli_find_fn_line(lines, warning.item_name)
+        if hit >= 0:
+            coll_line = hit + 1
+            match collection_easy_fix(path, lines, warning.code, hit):
+                case Some(fix):
+                    lint = lint.with_easy_fix(fix)
+                case nil:
+                    val _ = 0
+        results.push(LintResult.new(path, coll_line, 0, lint))
+    for warning in check_stub_impl(decls):
+        # STUB003 remains the generic source lint so one placeholder emits once.
+        if warning.code != "STUB001" and warning.code != "STUB002":
+            continue
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val base_level = if warning.code == "STUB001": LintLevel.Warn else: LintLevel.Allow
+        val level = apply_config_level(config, warning.code, base_level)
+        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+            .with_fix(warning.hint)
+        results.push(LintResult.new(path, warning.line, 0, lint))
+    # W0406 already comes from the text EasyFix owner. Add only the parsed
+    # export sibling here so wildcard imports are not reported twice.
+    for warning in check_star_export_file(decls, path):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val level = apply_config_level(config, warning.code, LintLevel.Warn)
+        val lint = Lint.new(warning.code, level, LintCategory.Warning, warning.message)
+        results.push(LintResult.new(path, lint_cli_find_decl_line(lines, "export ", warning.module_path), 0, lint))
+    for warning in check_wide_public_file(decls, path):
+        if not should_keep_lint_result(config, warning.code):
+            continue
+        val level = apply_config_level(config, warning.code, LintLevel.Warn)
+        val message = "{warning.message} ({warning.export_count} symbols, threshold {warning.threshold})"
+        val lint = Lint.new(warning.code, level, LintCategory.Warning, message)
+        results.push(LintResult.new(path, warning.line, 0, lint))
+    results
+
+fn lint_cli_find_decl_line(lines: [text], prefix: text, module_path: text) -> i64:
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        if trimmed.starts_with(prefix) and trimmed.contains(module_path):
+            return i + 1
+        i = i + 1
+    1
+
+# Locate a declaration line without mistaking comment or string decoys for a function.
+fn lint_cli_find_fn_line(lines: [text], fn_name: text) -> i64:
+    var i = 0
+    while i < lines.len():
+        val trimmed = lines[i].trim()
+        val is_fn_decl = trimmed.starts_with("fn ") or trimmed.starts_with("pub fn ") or trimmed.starts_with("static fn ") or trimmed.starts_with("pub static fn ") or trimmed.starts_with("async fn ") or trimmed.starts_with("pub async fn ")
+        if is_fn_decl:
+            if trimmed.contains("fn {fn_name}(") or trimmed.contains("fn {fn_name}<"):
+                return i + 1
+        i = i + 1
+    0
+
+# ---------------------------------------------------------------------------
+# Machine-applicable fixes for the collection-efficiency lints (COLL0xx).
+#
+# Only rules with a deterministic, statement-local rewrite get an EasyFix.
+# The structural rules stay hint-only on purpose:
+#   COLL002 needs a hoisted HashSet (blocked on a generic HashMap<K,V> —
+#           today's pure HashSet is text-keyed only)
+#   COLL003 needs an index cursor rewrite of the whole loop
+#   COLL005 needs predicate merging across two closures
+#   COLL006 needs a builder declared outside the loop
+# Those land with the CollectionPlan planner. See
+# doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md
+# ---------------------------------------------------------------------------
+
+# Split `lhs = rhs` on a source line, returning ("", "") when the line is not a
+# plain assignment to a simple lvalue path. A target carrying a call, index or
+# space is not safely reconstructible from source text, so it is rejected here.
+fn collection_split_assign(line: text) -> (text, text):
+    if line.trim().starts_with("#"):
+        return ("", "")
+    val eq = line.index_of(" = ")
+    if eq <= 0:
+        return ("", "")
+    val lhs = line.slice(0, eq).trim()
+    val rhs = line.slice(eq + 3, line.len()).trim()
+    if lhs == "" or lhs.contains(" ") or lhs.contains("(") or lhs.contains("["):
+        return ("", "")
+    (lhs, rhs)
+
+# The rewritten form for one COLL rule, or "" when the line does not match the
+# exact shape the rule fixes.
+fn collection_rewrite_for(code: text, lhs: text, rhs: text) -> text:
+    if code == "COLL001":
+        # arr = arr + [x]  ->  arr.push(x)
+        val prefix = "{lhs} + ["
+        if not rhs.starts_with(prefix) or not rhs.ends_with("]"):
+            return ""
+        val inner = rhs.slice(prefix.len(), rhs.len() - 1).trim()
+        # A multi-element literal needs one push per element; leave it alone.
+        if inner == "" or inner.contains(","):
+            return ""
+        return "{lhs}.push({inner})"
+    if code == "COLL007":
+        # arr = arr[0:arr.len()-1]  ->  arr.pop()
+        # ponytail: `..` was never valid slice syntax here (only `:` parses to
+        # EXPR_SLICE — see the note above is_array_rebuild_pop in
+        # collection_patterns.spl), so this matcher tracks the same colon
+        # form the detector actually fires on.
+        if rhs.replace(" ", "") != "{lhs}[0:{lhs}.len()-1]":
+            return ""
+        return "{lhs}.pop()"
+    ""
+
+# Index of the single line this rule can rewrite, or -1.
+#
+# ponytail: requires a file-unique match rather than tracking fn scope. Two
+# identical concat lines in one file yield no fix (the warning still fires).
+# Scope tracking becomes worthwhile once the AST span pool is populated on this
+# path — see doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md
+fn collection_fix_line(lines: [text], code: text) -> i64:
+    var found = -1
+    var i = 0
+    while i < lines.len():
+        val parts = collection_split_assign(lines[i])
+        if parts.0 != "" and collection_rewrite_for(code, parts.0, parts.1) != "":
+            if found >= 0:
+                return -1
+            found = i
+        i = i + 1
+    found
+
+fn collection_easy_fix(file_path: text, lines: [text], code: text, line_idx: i64) -> EasyFix?:
+    if line_idx < 0 or line_idx >= lines.len():
+        return nil
+    val line = lines[line_idx]
+    val parts = collection_split_assign(line)
+    val replacement_text = collection_rewrite_for(code, parts.0, parts.1)
+    if replacement_text == "":
+        return nil
+
+    # Byte range of this line, preserving its original indentation.
+    var start = 0
+    var i = 0
+    while i < line_idx:
+        start = start + lines[i].len() + 1
+        i = i + 1
+    # Byte offsets, not character offsets: `.len()` is bytes and the fix
+    # pipeline slices the source by byte, so index_of on the trimmed text gives
+    # the indent width consistently even on a non-ASCII line.
+    val trimmed = line.trim()
+    val indent = line.index_of(trimmed)
+    val text_start = start + indent
+    val text_end = text_start + trimmed.len()
+
+    # COLL007 changes a rebind into a discarding `.pop()` call, so it is Likely
+    # rather than Certain: correct, but worth a human glance.
+    val confidence = if code == "COLL001": FixConfidence.Certain else: FixConfidence.Likely
+    var fix = EasyFix.create(code, "replace `{trimmed}` with `{replacement_text}`", confidence)
+    fix.add_replacement(Replacement.create(
+        file_path, text_start, text_end, line_idx + 1, indent, replacement_text
+    ))
+    Some(fix)
+
+fn main() -> Int:
+    val args = get_args()
+    val json_output = args.contains("--json")
+
+    if args.len() < 2:
+        if json_output:
+            print("{\"type\":\"lint-error\",\"message\":\"no input files\"}")
+            return 2
+        print("Usage: simple_lint <file.spl> [options]")
+        print("")
+        print("Options:")
+        print("  --deny-all        Treat all warnings as errors")
+        print("  --warn-all        Enable all style lints")
+        print("  --profile=<tier>  Strictness tier: moderate | strict | robust | critical")
+        print("  --json            Output in JSON format")
+        print("  --fix             Apply safe auto-fixes")
+        print("  --fix-all         Apply all fixes regardless of confidence")
+        print("  --fix-dry-run     Show what would be fixed without applying")
+        print("  --fix-interactive Prompt for each fix")
+        print("")
+        print("Lint categories:")
+        print("  Safety (S): Memory safety and null checks")
+        print("  Correctness (C): Logic errors")
+        print("  Warning (W): Potential issues")
+        print("  Style (ST): Code style")
+        print("  Concurrency (CC): Thread safety")
+        print("  TODO (T): TODO/FIXME format [area][priority]")
+        print("  Stub (STUB): Trivial/dummy implementations")
+        return 1
+
+    val file_path = args[1]
+
+    # Verify file exists
+    if not file_exists(file_path):
+        if json_output:
+            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"file not found\"}")
+        else:
+            error("lint", "File not found: " + file_path)
+        return 1
+
+    run_lint_file(file_path, args)
+
+# Lint a single file and print a report, shared by the standalone
+# `simple_lint` entry above and the `simple lint` CLI wrapper
+# (app.io.cli_lint_commands.run_lint_command). Returns 0 when the file is
+# clean (or only warnings, unless --deny-all is set), 1 otherwise.
+fn run_lint_file(file_path: String, args: [text]) -> Int:
+    val deny_all = args.contains("--deny-all")
+    val warn_all = args.contains("--warn-all")
+    val json_output = args.contains("--json")
+    val fix_mode = args.contains("--fix")
+    val fix_all = args.contains("--fix-all")
+    val fix_dry_run = args.contains("--fix-dry-run")
+
+    # Run linter (loads config from simple.sdn automatically)
+    var linter = Linter.new()
+
+    # Try to load config relative to the target file
+    val sdn_path = find_project_sdn(file_path)
+    if sdn_path != "":
+        linter.config = LintConfig.from_sdn_file(sdn_path)
+    if linter.config.error != "":
+        if json_output:
+            print("{\"type\":\"lint-error\",\"message\":\"{escape_json(linter.config.error)}\"}")
+        else:
+            error("lint", linter.config.error)
+        return 2
+
+    # --profile=<tier> selects the strictness tier (moderate|strict|robust|
+    # critical; old spellings moderate|lib|reliable|mission-critical still
+    # parse as deprecated aliases — see config_and_model.parse_lint_profile).
+    # A file-header @profile() may still override this (most-local-wins).
+    for arg in args:
+        if arg.starts_with("--profile="):
+            val prof_str = arg.slice(10, arg.len())
+            match parse_lint_profile(prof_str):
+                case Some(profile):
+                    linter.config.set_profile(profile)
+                case nil:
+                    if json_output:
+                        print("{\"type\":\"lint-error\",\"message\":\"unknown profile: {escape_json(prof_str)}\"}")
+                    else:
+                        error("lint", "Unknown profile: " + prof_str)
+                    return 2
+
+    if warn_all:
+        for lint_name in all_lint_names():
+            match linter.config.get_level(lint_name):
+                case Allow:
+                    linter.config.set_level(lint_name, LintLevel.Warn)
+                case _:
+                    val _ = 0
+
+    var lint_result = LintFileResult.LintFileErr("Failed to read file: {file_path}")
+    match lint_read_file(file_path):
+        case LintReadFileResult.ReadFileErr(error):
+            lint_result = LintFileResult.LintFileErr(error)
+        case LintReadFileResult.ReadFileOk(content):
+            lint_result = LintFileResult.LintFileOk(lint_cli_source(linter, file_path, content))
+    match lint_result:
+        case LintFileResult.LintFileOk(results):
+            if results.is_empty():
+                if json_output:
+                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":0,\"warnings\":0,\"fixes\":0}")
+                else:
+                    info("lint", "No issues found in " + file_path)
+                return 0
+            else:
+                var error_count = 0
+                var warning_count = 0
+                var fix_count = 0
+
+                for lint_item in results:
+                    if json_output:
+                        var level_text = "allow"
+                        match lint_item.lint.level:
+                            case Deny: level_text = "error"
+                            case Warn: level_text = "warning"
+                            case Allow: val _ = 0
+                        print("{\"type\":\"lint-diagnostic\",\"file\":\"{escape_json(lint_item.file_path)}\",\"line\":{lint_item.line},\"column\":{lint_item.column},\"level\":\"{level_text}\",\"code\":\"{escape_json(lint_item.lint.code)}\",\"message\":\"{escape_json(lint_item.lint.message)}\"}")
+                    else:
+                        print(lint_item.format())
+
+                    match lint_item.lint.level:
+                        case Deny:
+                            error_count = error_count + 1
+                        case Warn:
+                            warning_count = warning_count + 1
+                            if deny_all:
+                                error_count = error_count + 1
+                        case Allow:
+                            val _ = 0
+
+                    if lint_item.has_easy_fix():
+                        fix_count = fix_count + 1
+
+                if json_output:
+                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count}}")
+                else:
+                    print("")
+                    print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
+
+                # Apply fixes if requested
+                if (fix_mode or fix_all or fix_dry_run) and fix_count > 0:
+                    val fixes_to_apply = collect_easy_fixes(results, fix_all)
+                    if not fixes_to_apply.is_empty():
+                        if not apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run, json_output):
+                            return 1
+
+                if error_count > 0:
+                    return 1
+                else:
+                    return 0
+
+        case LintFileResult.LintFileErr(error):
+            if json_output:
+                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"{escape_json(error)}\"}")
+            else:
+                error("lint", error)
+            return 1
+
+    return 0
+
+fn collect_easy_fixes(results: [LintResult], include_all: Bool) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for result in results:
+        match result.lint.easy_fix:
+            case Some(fix):
+                if include_all or fix.is_safe():
+                    fixes.push(fix)
+            case nil:
+                val _ = 0
+    fixes
+
+fn apply_collected_fixes(file_path: String, fixes: [EasyFix], dry_run: Bool, json_output: Bool) -> Bool:
+    val source = file_read(file_path)
+    if source == "":
+        if json_output:
+            print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"reading file for fix failed\"}")
+        else:
+            error("lint", "reading file for fix failed: {file_path}")
+        return false
+
+    # Sort replacements by position descending and apply
+    var all_replacements: [Replacement] = []
+    for fix in fixes:
+        for rep in easyfix_replacements(fix):
+            all_replacements.push(rep)
+
+    var sort_i = 0
+    while sort_i < all_replacements.len():
+        var sort_j = sort_i + 1
+        while sort_j < all_replacements.len():
+            val left = all_replacements[sort_i]
+            val right = all_replacements[sort_j]
+            if left.start < right.start:
+                all_replacements[sort_i] = right
+                all_replacements[sort_j] = left
+            sort_j = sort_j + 1
+        sort_i = sort_i + 1
+
+    var new_source = source
+    for rep in all_replacements:
+        if rep.start <= new_source.len() and rep.end <= new_source.len():
+            new_source = new_source.slice(0, rep.start) + rep.new_text + new_source.slice(rep.end)
+
+    if dry_run:
+        if json_output:
+            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"dry-run\",\"fixes\":{fixes.len()}}")
+        else:
+            print("\nDry run - would apply {fixes.len()} fix(es):")
+            for fix in fixes:
+                print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
+    else:
+        if not file_atomic_write(file_path, new_source):
+            if json_output:
+                print("{\"type\":\"lint-error\",\"file\":\"{escape_json(file_path)}\",\"message\":\"atomic fix write failed\"}")
+            else:
+                error("lint", "atomic fix write failed: {file_path}")
+            return false
+        if json_output:
+            print("{\"type\":\"lint-fix-summary\",\"file\":\"{escape_json(file_path)}\",\"mode\":\"applied\",\"fixes\":{fixes.len()}}")
+        else:
+            print("\nApplied {fixes.len()} fix(es):")
+            for fix in fixes:
+                print("  [{easyfix_id(fix)}] {easyfix_description(fix)}")
+    true

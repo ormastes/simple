@@ -1,0 +1,46 @@
+extern fn rt_file_read_text(path: text) -> text
+
+describe "interpreter text.byte_at dispatch":
+    it "is BYTE-indexed and disagrees with char_code_at on non-ASCII text":
+        # "café," is 6 bytes / 5 chars: c(0) a(1) f(2) 0xC3(3) 0xA9(4) ,(5).
+        # byte_at is byte-indexed (raw UTF-8 buffer read); char_code_at is
+        # character-indexed (decoded codepoint). They must disagree at the
+        # multi-byte 'é'.
+        val s = "café,"
+        expect(s.byte_at(0)).to_equal(99)
+        expect(s.byte_at(3)).to_equal(195)
+        expect(s.byte_at(4)).to_equal(169)
+        expect(s.byte_at(5)).to_equal(44)
+        expect(s.char_code_at(3)).to_equal(233)
+        expect(s.byte_at(3)).to_not_equal(s.char_code_at(3))
+        # Out-of-range reads 0, matching char_code_at's convention.
+        expect(s.byte_at(99)).to_equal(0)
+        expect(s.byte_at(-1)).to_equal(0)
+
+    it "the pure-Simple interpreter's byte_at arm reads raw bytes, not a UTF-8-decoded slice":
+        # Structural guard on the actual source: byte_at must NOT reuse
+        # char_code_at's `s[idx:idx+1]` + `.char_code_at(0)` shape. Slicing a
+        # single byte out of a multi-byte codepoint and then UTF-8-decoding
+        # it returns garbage (0xC3 alone decodes as 192, not the raw byte
+        # 195) — confirmed empirically before this arm was written. byte_at
+        # must instead read through rt_string_byte_at, the O(1) raw-byte
+        # extern registered for this engine in interpreter_extern/mod.rs.
+        val source = rt_file_read_text("src/compiler/10.frontend/core/interpreter/eval_methods.spl") ?? ""
+        expect(source).to_contain("extern fn rt_string_byte_at")
+
+        val char_code_at_pos = source.index_of("if method_name == \"char_code_at\":")
+        expect(char_code_at_pos).to_be_greater_than(-1)
+        val byte_at_pos = source.index_of("if method_name == \"byte_at\":", char_code_at_pos)
+        expect(byte_at_pos).to_be_greater_than(char_code_at_pos)
+
+        val branch = source.substring(byte_at_pos, source.len())
+        val next_arm_pos = branch.index_of("if method_name == \"substring\":")
+        expect(next_arm_pos).to_be_greater_than(-1)
+        val byte_at_body = branch.substring(0, next_arm_pos)
+
+        expect(byte_at_body).to_contain("rt_string_byte_at(s, idx)")
+        expect(byte_at_body).to_not_contain("char_code_at(0)")
+        # Must NOT fall back to rt_text_to_bytes: that materializes the whole
+        # byte array per call, making a full scan O(n^2) -- the same quadratic
+        # trap char_code_at was already fixed for.
+        expect(byte_at_body).to_not_contain("rt_text_to_bytes")

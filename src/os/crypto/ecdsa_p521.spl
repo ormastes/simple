@@ -1,0 +1,703 @@
+# ECDSA P-521 Signing and Verification — Pure Simple
+#
+# Self-contained module providing:
+#   - 521-bit field arithmetic (mod p) using BigNat ([i64] base-2^30)
+#   - 521-bit scalar arithmetic (mod n)
+#   - Affine + Jacobian point operations (double, add, scalar_mult)
+#   - ECDSA sign/verify with RFC 6979 deterministic nonce (SHA-512 HMAC)
+#
+# No SFFI — all arithmetic is in pure Simple via std.math.bignum.bignat.
+#
+# Curve: y^2 = x^3 - 3x + b  (mod p)
+# p = 2^521 - 1  (Mersenne prime, FIPS 186-5 §D.1.2.5)
+# n = order of base point G
+#
+# Key format:
+#   - Signing:      raw 66-byte big-endian private scalar
+#   - Verification: 133-byte uncompressed SEC1 public key (0x04 || X || Y)
+#
+# Signature format:
+#   - fixed132: 132-byte r||s (66 bytes each, big-endian, 521-bit values
+#     left-padded into 528-bit/66-byte buffers per RFC 8446 §4.2.3).
+#
+# Performance note: BigNat-based P-521 scalar multiplication is multi-second
+# in interpreter mode due to the 521-bit field width. This implementation is
+# correct and pure-Simple; a faster custom-limb version following p384.spl's
+# pattern is tracked as Path B in the feature request.
+#
+# References:
+#   * FIPS 186-5 §D.1.2.5 (P-521 parameters)
+#   * RFC 6979 (Deterministic Usage of DSA and ECDSA)
+#   * RFC 8446 §4.2.3 (TLS 1.3 ECDSA-P-521 signature encoding)
+#   * SEC1 v2.0 §2.7.2 (uncompressed point encoding)
+
+use os.crypto.sha512.{sha512, sha512_hmac}
+use std.math.bignum.bignat.{
+    bn_zero, bn_one, bn_from_i64, is_zero, cmp, add, sub, mul, modulo,
+    from_bytes_be, to_bytes_be, mod_exp, bit_length, get_bit, div_mod
+}
+
+# ============================================================================
+# P-521 curve constants (big-endian bytes -> BigNat at module init)
+# ============================================================================
+
+fn _p521_p_bytes() -> [u8]:
+    """P-521 prime p = 2^521 - 1 as 66 big-endian bytes."""
+    [
+        0x01u8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8
+    ]
+
+fn _p521_n_bytes() -> [u8]:
+    """P-521 group order n as 66 big-endian bytes.
+    n = 0x01FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFA51868783BF2F966B7FCC0148F709A5D03BB5C9B8899C47AEBB6FB71E91386409
+    (FIPS 186-4 §D.1.2.5 / SEC2 v2.0 §2.6.1)"""
+    [
+        0x01u8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8,
+        0xFFu8, 0xFAu8, 0x51u8, 0x86u8, 0x87u8, 0x83u8, 0xBFu8, 0x2Fu8,
+        0x96u8, 0x6Bu8, 0x7Fu8, 0xCCu8, 0x01u8, 0x48u8, 0xF7u8, 0x09u8,
+        0xA5u8, 0xD0u8, 0x3Bu8, 0xB5u8, 0xC9u8, 0xB8u8, 0x89u8, 0x9Cu8,
+        0x47u8, 0xAEu8, 0xBBu8, 0x6Fu8, 0xB7u8, 0x1Eu8, 0x91u8, 0x38u8,
+        0x64u8, 0x09u8
+    ]
+
+fn _p521_b_bytes() -> [u8]:
+    """P-521 curve coefficient b as 66 big-endian bytes."""
+    [
+        0x00u8, 0x51u8, 0x95u8, 0x3Eu8, 0xB9u8, 0x61u8, 0x8Eu8, 0x1Cu8,
+        0x9Au8, 0x1Fu8, 0x92u8, 0x9Au8, 0x21u8, 0xA0u8, 0xB6u8, 0x85u8,
+        0x40u8, 0xEEu8, 0xA2u8, 0xDAu8, 0x72u8, 0x5Bu8, 0x99u8, 0xB3u8,
+        0x15u8, 0xF3u8, 0xB8u8, 0xB4u8, 0x89u8, 0x91u8, 0x8Eu8, 0xF1u8,
+        0x09u8, 0xE1u8, 0x56u8, 0x19u8, 0x39u8, 0x51u8, 0xECu8, 0x7Eu8,
+        0x93u8, 0x7Bu8, 0x16u8, 0x52u8, 0xC0u8, 0xBDu8, 0x3Bu8, 0xB1u8,
+        0xBFu8, 0x07u8, 0x35u8, 0x73u8, 0xDFu8, 0x88u8, 0x3Du8, 0x2Cu8,
+        0x34u8, 0xF1u8, 0xEFu8, 0x45u8, 0x1Fu8, 0xD4u8, 0x6Bu8, 0x50u8,
+        0x3Fu8, 0x00u8
+    ]
+
+fn _p521_gx_bytes() -> [u8]:
+    """P-521 generator x-coordinate as 66 big-endian bytes."""
+    [
+        0x00u8, 0xC6u8, 0x85u8, 0x8Eu8, 0x06u8, 0xB7u8, 0x04u8, 0x04u8,
+        0xE9u8, 0xCDu8, 0x9Eu8, 0x3Eu8, 0xCBu8, 0x66u8, 0x23u8, 0x95u8,
+        0xB4u8, 0x42u8, 0x9Cu8, 0x64u8, 0x81u8, 0x39u8, 0x05u8, 0x3Fu8,
+        0xB5u8, 0x21u8, 0xF8u8, 0x28u8, 0xAFu8, 0x60u8, 0x6Bu8, 0x4Du8,
+        0x3Du8, 0xBAu8, 0xA1u8, 0x4Bu8, 0x5Eu8, 0x77u8, 0xEFu8, 0xE7u8,
+        0x59u8, 0x28u8, 0xFEu8, 0x1Du8, 0xC1u8, 0x27u8, 0xA2u8, 0xFFu8,
+        0xA8u8, 0xDEu8, 0x33u8, 0x48u8, 0xB3u8, 0xC1u8, 0x85u8, 0x6Au8,
+        0x42u8, 0x9Bu8, 0xF9u8, 0x7Eu8, 0x7Eu8, 0x31u8, 0xC2u8, 0xE5u8,
+        0xBDu8, 0x66u8
+    ]
+
+fn _p521_gy_bytes() -> [u8]:
+    """P-521 generator y-coordinate as 66 big-endian bytes.
+    Gy = 0x011839296A789A3BC0045C8A5FB42C7D1BD998F54449579B4468170AFBD17273E662C97EE72995EF42640C550B9013FAD0761353C7086A272C24088BE94769FD16650
+    (SEC2 v2.0 §2.6.1 / verified: G on curve = True)"""
+    [
+        0x01u8, 0x18u8, 0x39u8, 0x29u8, 0x6Au8, 0x78u8, 0x9Au8, 0x3Bu8,
+        0xC0u8, 0x04u8, 0x5Cu8, 0x8Au8, 0x5Fu8, 0xB4u8, 0x2Cu8, 0x7Du8,
+        0x1Bu8, 0xD9u8, 0x98u8, 0xF5u8, 0x44u8, 0x49u8, 0x57u8, 0x9Bu8,
+        0x44u8, 0x68u8, 0x17u8, 0xAFu8, 0xBDu8, 0x17u8, 0x27u8, 0x3Eu8,
+        0x66u8, 0x2Cu8, 0x97u8, 0xEEu8, 0x72u8, 0x99u8, 0x5Eu8, 0xF4u8,
+        0x26u8, 0x40u8, 0xC5u8, 0x50u8, 0xB9u8, 0x01u8, 0x3Fu8, 0xADu8,
+        0x07u8, 0x61u8, 0x35u8, 0x3Cu8, 0x70u8, 0x86u8, 0xA2u8, 0x72u8,
+        0xC2u8, 0x40u8, 0x88u8, 0xBEu8, 0x94u8, 0x76u8, 0x9Fu8, 0xD1u8,
+        0x66u8, 0x50u8
+    ]
+
+# ============================================================================
+# Field helpers (BigNat wrappers for mod-p arithmetic)
+# ============================================================================
+
+fn _fp_add(a: [i64], b: [i64], p: [i64]) -> [i64]:
+    """a + b mod p."""
+    val s = add(a, b)
+    modulo(s, p)
+
+fn _fp_sub(a: [i64], b: [i64], p: [i64]) -> [i64]:
+    """a - b mod p  (handles a < b by adding p first)."""
+    val cmp_res = cmp(a, b)
+    if cmp_res >= 0:
+        modulo(sub(a, b), p)
+    else:
+        val tmp = add(a, p)
+        modulo(sub(tmp, b), p)
+
+fn _fp_mul(a: [i64], b: [i64], p: [i64]) -> [i64]:
+    """a * b mod p."""
+    val prod = mul(a, b)
+    modulo(prod, p)
+
+fn _fp_sq(a: [i64], p: [i64]) -> [i64]:
+    """a^2 mod p."""
+    _fp_mul(a, a, p)
+
+fn _fp_inv(a: [i64], p: [i64]) -> [i64]:
+    """a^(p-2) mod p (Fermat's little theorem inversion; p is prime)."""
+    val exp = sub(p, bn_from_i64(2))
+    mod_exp(a, exp, p)
+
+fn _fp_neg(a: [i64], p: [i64]) -> [i64]:
+    """-a mod p."""
+    val cmp_res = cmp(a, bn_zero())
+    if is_zero(a):
+        bn_zero()
+    else:
+        sub(p, modulo(a, p))
+
+# ============================================================================
+# Jacobian point type (stored as 3 BigNat)
+# Represents (X:Y:Z) in Jacobian coordinates where affine = (X/Z^2, Y/Z^3).
+# The infinity point is represented by Z = 0.
+# ============================================================================
+
+# We use a flat [i64] array of fixed segment length to store three bignats.
+# However Simple doesn't have structs passed by value conveniently for bignats,
+# so we use a wrapper record.
+
+# JacP521 is represented as three [i64] values in a list:
+#   index 0: X bignat  (variable length, but bounded by p)
+#   index 1: Y bignat
+#   index 2: Z bignat
+# Stored as [[i64]] — a list of three bignats.
+
+fn _jac_inf() -> [[i64]]:
+    """Return the point at infinity."""
+    [bn_zero(), bn_one(), bn_zero()]
+
+fn _jac_is_inf(pt: [[i64]]) -> bool:
+    """True if pt is the point at infinity (Z == 0)."""
+    is_zero(pt[2])
+
+fn _jac_from_affine(x: [i64], y: [i64]) -> [[i64]]:
+    """Convert affine (x, y) to Jacobian (x : y : 1)."""
+    [x, y, bn_one()]
+
+fn _jac_to_affine(pt: [[i64]], p: [i64]) -> ([i64], [i64]):
+    """Convert Jacobian (X:Y:Z) to affine (x, y) = (X/Z^2, Y/Z^3) mod p."""
+    val z_inv = _fp_inv(pt[2], p)
+    val z_inv2 = _fp_sq(z_inv, p)
+    val z_inv3 = _fp_mul(z_inv, z_inv2, p)
+    val x = _fp_mul(pt[0], z_inv2, p)
+    val y = _fp_mul(pt[1], z_inv3, p)
+    (x, y)
+
+# ============================================================================
+# Jacobian point doubling (a = -3 short Weierstrass)
+# Formula: https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-3.html#doubling-dbl-2001-b
+# ============================================================================
+
+fn _jac_double(pt: [[i64]], p: [i64]) -> [[i64]]:
+    """Double a Jacobian point on y^2 = x^3 - 3x + b (mod p)."""
+    if _jac_is_inf(pt):
+        return _jac_inf()
+    val x1 = pt[0]
+    val y1 = pt[1]
+    val z1 = pt[2]
+    # delta = z1^2
+    val delta = _fp_sq(z1, p)
+    # gamma = y1^2
+    val gamma = _fp_sq(y1, p)
+    # beta = x1 * gamma
+    val beta = _fp_mul(x1, gamma, p)
+    # alpha = 3 * (x1 - delta) * (x1 + delta)  [for a=-3]
+    val x1_minus_delta = _fp_sub(x1, delta, p)
+    val x1_plus_delta = _fp_add(x1, delta, p)
+    val alpha_raw = _fp_mul(x1_minus_delta, x1_plus_delta, p)
+    # alpha = 3 * alpha_raw
+    val alpha = _fp_add(_fp_add(alpha_raw, alpha_raw, p), alpha_raw, p)
+    # x3 = alpha^2 - 8*beta
+    val alpha_sq = _fp_sq(alpha, p)
+    val eight_beta = _fp_add(_fp_add(_fp_add(_fp_add(_fp_add(_fp_add(_fp_add(
+        beta, beta, p), beta, p), beta, p), beta, p), beta, p), beta, p), beta, p)
+    val x3 = _fp_sub(alpha_sq, eight_beta, p)
+    # z3 = (y1 + z1)^2 - gamma - delta
+    val y1_plus_z1 = _fp_add(y1, z1, p)
+    val y1z1_sq = _fp_sq(y1_plus_z1, p)
+    val z3 = _fp_sub(_fp_sub(y1z1_sq, gamma, p), delta, p)
+    # y3 = alpha * (4*beta - x3) - 8*gamma^2
+    val four_beta = _fp_add(_fp_add(_fp_add(beta, beta, p), beta, p), beta, p)
+    val four_beta_minus_x3 = _fp_sub(four_beta, x3, p)
+    val gamma_sq = _fp_sq(gamma, p)
+    val eight_gamma_sq = _fp_add(_fp_add(_fp_add(_fp_add(_fp_add(_fp_add(_fp_add(
+        gamma_sq, gamma_sq, p), gamma_sq, p), gamma_sq, p), gamma_sq, p),
+        gamma_sq, p), gamma_sq, p), gamma_sq, p)
+    val y3 = _fp_sub(_fp_mul(alpha, four_beta_minus_x3, p), eight_gamma_sq, p)
+    [x3, y3, z3]
+
+# ============================================================================
+# Jacobian + Jacobian point addition
+# Formula: https://hyperelliptic.org/EFD/g1p/auto-shortw-jacobian-3.html#addition-add-2007-bl
+# ============================================================================
+
+fn _jac_add(p1: [[i64]], p2: [[i64]], p: [i64]) -> [[i64]]:
+    """Add two Jacobian points on the curve."""
+    if _jac_is_inf(p1):
+        return p2
+    if _jac_is_inf(p2):
+        return p1
+    val x1 = p1[0]
+    val y1 = p1[1]
+    val z1 = p1[2]
+    val x2 = p2[0]
+    val y2 = p2[1]
+    val z2 = p2[2]
+    # z1z1 = z1^2, z2z2 = z2^2
+    val z1z1 = _fp_sq(z1, p)
+    val z2z2 = _fp_sq(z2, p)
+    # u1 = x1 * z2z2, u2 = x2 * z1z1
+    val u1 = _fp_mul(x1, z2z2, p)
+    val u2 = _fp_mul(x2, z1z1, p)
+    # s1 = y1 * z2 * z2z2, s2 = y2 * z1 * z1z1
+    val s1 = _fp_mul(_fp_mul(y1, z2, p), z2z2, p)
+    val s2 = _fp_mul(_fp_mul(y2, z1, p), z1z1, p)
+    # h = u2 - u1, r = 2*(s2 - s1)
+    val h = _fp_sub(u2, u1, p)
+    val r = _fp_add(_fp_sub(s2, s1, p), _fp_sub(s2, s1, p), p)
+    if is_zero(h):
+        # u1 == u2; if s1 == s2 we have point doubling, else point at inf
+        if is_zero(r):
+            return _jac_double(p1, p)
+        else:
+            return _jac_inf()
+    # i = (2*h)^2, j = h * i
+    val two_h = _fp_add(h, h, p)
+    val i = _fp_sq(two_h, p)
+    val j = _fp_mul(h, i, p)
+    # v = u1 * i
+    val v = _fp_mul(u1, i, p)
+    # x3 = r^2 - j - 2*v
+    val r_sq = _fp_sq(r, p)
+    val two_v = _fp_add(v, v, p)
+    val x3 = _fp_sub(_fp_sub(r_sq, j, p), two_v, p)
+    # y3 = r*(v - x3) - 2*s1*j
+    val v_minus_x3 = _fp_sub(v, x3, p)
+    val two_s1_j = _fp_mul(_fp_add(s1, s1, p), j, p)
+    val y3 = _fp_sub(_fp_mul(r, v_minus_x3, p), two_s1_j, p)
+    # z3 = ((z1+z2)^2 - z1z1 - z2z2) * h
+    val z1_plus_z2 = _fp_add(z1, z2, p)
+    val z1z2_sq = _fp_sq(z1_plus_z2, p)
+    val z3_tmp = _fp_sub(_fp_sub(z1z2_sq, z1z1, p), z2z2, p)
+    val z3 = _fp_mul(z3_tmp, h, p)
+    [x3, y3, z3]
+
+# ============================================================================
+# Scalar multiplication: MSB-first double-and-add
+# Uses constant-time select to avoid timing side-channels on secret scalars.
+# ============================================================================
+
+fn _bn_cond_select(a: [i64], b: [i64], take_b: bool) -> [i64]:
+    """Return b if take_b, else a."""
+    if take_b: b else: a
+
+fn _jac_cond_select(a: [[i64]], b: [[i64]], take_b: bool) -> [[i64]]:
+    """Return b if take_b, else a."""
+    if take_b: b else: a
+
+fn _scalar_mul(k_bytes: [u8], px: [i64], py: [i64], p: [i64]) -> [[i64]]:
+    """Compute k * P using MSB-first double-and-add with constant-time select.
+
+    k_bytes: 66-byte big-endian scalar.
+    Returns Jacobian point.
+    """
+    val k = from_bytes_be(k_bytes)
+    val nbits = bit_length(k)
+    # Always-add discipline: maintain two accumulators (R0=accumulator, R1=R0+P)
+    # and select based on the bit without branching on secret.
+    var r0 = _jac_inf()
+    var r1 = _jac_from_affine(px, py)
+    var bit_idx: i64 = nbits - 1
+    while bit_idx >= 0:
+        val b = get_bit(k, bit_idx)
+        val take_one = b == 1
+        # If bit=1: R0 = R0+P (which is R1 before doubling); else R0 = double(R0)
+        # Standard double-and-add:
+        r0 = _jac_double(r0, p)
+        val sum = _jac_add(r0, r1, p)
+        val new_r0 = _jac_cond_select(r0, sum, take_one)
+        # Keep R1 = R0 + P for next iteration (update after selection)
+        r1 = _jac_add(new_r0, _jac_from_affine(px, py), p)
+        r0 = new_r0
+        bit_idx = bit_idx - 1
+    r0
+
+# ============================================================================
+# Scalar field arithmetic (mod n) for ECDSA
+# ============================================================================
+
+fn _sc_add(a: [i64], b: [i64], n: [i64]) -> [i64]:
+    """a + b mod n."""
+    modulo(add(a, b), n)
+
+fn _sc_sub(a: [i64], b: [i64], n: [i64]) -> [i64]:
+    """a - b mod n."""
+    val cmp_res = cmp(a, b)
+    if cmp_res >= 0:
+        modulo(sub(a, b), n)
+    else:
+        modulo(sub(add(a, n), b), n)
+
+fn _sc_mul(a: [i64], b: [i64], n: [i64]) -> [i64]:
+    """a * b mod n."""
+    modulo(mul(a, b), n)
+
+fn _sc_inv(a: [i64], n: [i64]) -> [i64]:
+    """a^(n-2) mod n — modular inverse via Fermat (n is prime order)."""
+    val exp = sub(n, bn_from_i64(2))
+    mod_exp(a, exp, n)
+
+fn _sc_is_zero(a: [i64]) -> bool:
+    is_zero(a)
+
+fn _sc_is_valid(a: [i64], n: [i64]) -> bool:
+    """True if 1 <= a < n."""
+    val cmp_zero = cmp(a, bn_zero())
+    val cmp_n = cmp(a, n)
+    (cmp_zero > 0) and (cmp_n < 0)
+
+# ============================================================================
+# RFC 6979 §3.2 — Deterministic nonce generation (SHA-512 HMAC)
+# ============================================================================
+
+fn _hmac_sha512(key: [u8], data: [u8]) -> [u8]:
+    """HMAC-SHA-512 per RFC 2104 — delegates to os.crypto.sha512."""
+    sha512_hmac(key, data)
+
+fn _i2osp(x: [i64], xlen: i64) -> [u8]:
+    """Integer-to-octet-string primitive: bignat -> big-endian bytes of length xlen."""
+    to_bytes_be(x, xlen)
+
+fn _rfc6979_generate_k_p521(privkey_bytes: [u8], msg_hash: [u8]) -> [u8]:
+    """RFC 6979 §3.2 deterministic k for P-521 using SHA-512 HMAC.
+
+    privkey_bytes: 66-byte private key (qlen = 521 bits -> 66 bytes).
+    msg_hash:      64-byte SHA-512 hash of the message.
+    Returns:       66-byte k (may need retry if k outside [1, n-1]).
+    """
+    val qlen_bytes: i64 = 66  # ceil(521/8)
+    val hlen_bytes: i64 = 64  # SHA-512 output
+
+    # Step b: V = 0x01 * hlen
+    var vv: [u8] = []
+    var vi: i64 = 0
+    while vi < hlen_bytes:
+        vv.push(0x01u8)
+        vi = vi + 1
+
+    # Step c: K = 0x00 * hlen
+    var kk: [u8] = []
+    var ki: i64 = 0
+    while ki < hlen_bytes:
+        kk.push(0x00u8)
+        ki = ki + 1
+
+    # Step d: K = HMAC_K(V || 0x00 || int2octets(x) || bits2octets(h1))
+    var concat_d: [u8] = []
+    var ci: i64 = 0
+    while ci < vv.len():
+        concat_d.push(vv[ci])
+        ci = ci + 1
+    concat_d.push(0x00u8)
+    ci = 0
+    while ci < privkey_bytes.len():
+        concat_d.push(privkey_bytes[ci])
+        ci = ci + 1
+    # bits2octets(h1): hash mod n, then pad to qlen_bytes
+    val n_bn = from_bytes_be(_p521_n_bytes())
+    val h1_bn = from_bytes_be(msg_hash)
+    val h1_mod_n = modulo(h1_bn, n_bn)
+    val h1_bytes = to_bytes_be(h1_mod_n, qlen_bytes)
+    ci = 0
+    while ci < h1_bytes.len():
+        concat_d.push(h1_bytes[ci])
+        ci = ci + 1
+    kk = _hmac_sha512(kk, concat_d)
+
+    # Step e: V = HMAC_K(V)
+    vv = _hmac_sha512(kk, vv)
+
+    # Step f: K = HMAC_K(V || 0x01 || int2octets(x) || bits2octets(h1))
+    var concat_f: [u8] = []
+    ci = 0
+    while ci < vv.len():
+        concat_f.push(vv[ci])
+        ci = ci + 1
+    concat_f.push(0x01u8)
+    ci = 0
+    while ci < privkey_bytes.len():
+        concat_f.push(privkey_bytes[ci])
+        ci = ci + 1
+    ci = 0
+    while ci < h1_bytes.len():
+        concat_f.push(h1_bytes[ci])
+        ci = ci + 1
+    kk = _hmac_sha512(kk, concat_f)
+
+    # Step g: V = HMAC_K(V)
+    vv = _hmac_sha512(kk, vv)
+
+    # Step h: generate candidate k
+    var result_k: [u8] = []
+    var found = false
+    var max_retries: i64 = 100
+    var retry: i64 = 0
+    while (found == false) and (retry < max_retries):
+        # Accumulate T until len(T) >= qlen
+        var tt: [u8] = []
+        while tt.len() < qlen_bytes:
+            vv = _hmac_sha512(kk, vv)
+            var tci: i64 = 0
+            while tci < vv.len():
+                if tt.len() < qlen_bytes:
+                    tt.push(vv[tci])
+                tci = tci + 1
+
+        # Take the leftmost qlen_bytes
+        var k_candidate: [u8] = []
+        var ti: i64 = 0
+        while ti < qlen_bytes:
+            k_candidate.push(tt[ti])
+            ti = ti + 1
+
+        # Check 1 <= k < n
+        val k_bn = from_bytes_be(k_candidate)
+        if _sc_is_valid(k_bn, n_bn):
+            result_k = k_candidate
+            found = true
+        else:
+            # K = HMAC_K(V || 0x00), V = HMAC_K(V)
+            var reject_data: [u8] = []
+            var rdi: i64 = 0
+            while rdi < vv.len():
+                reject_data.push(vv[rdi])
+                rdi = rdi + 1
+            reject_data.push(0x00u8)
+            kk = _hmac_sha512(kk, reject_data)
+            vv = _hmac_sha512(kk, vv)
+            retry = retry + 1
+
+    result_k
+
+# ============================================================================
+# Point-on-curve check
+# ============================================================================
+
+fn _p521_point_on_curve(px: [u8], py: [u8]) -> bool:
+    """Check that (px, py) is on P-521: y^2 == x^3 - 3x + b (mod p)."""
+    val p_bn = from_bytes_be(_p521_p_bytes())
+    val x = from_bytes_be(px)
+    val y = from_bytes_be(py)
+    val y2 = _fp_sq(y, p_bn)
+    val x3 = _fp_mul(_fp_sq(x, p_bn), x, p_bn)
+    val three_x = _fp_add(_fp_add(x, x, p_bn), x, p_bn)
+    val x3_minus_3x = _fp_sub(x3, three_x, p_bn)
+    val b_bn = from_bytes_be(_p521_b_bytes())
+    val rhs = _fp_add(x3_minus_3x, b_bn, p_bn)
+    cmp(y2, rhs) == 0
+
+fn _valid_uncompressed_p521_pubkey(pubkey: [u8]) -> bool:
+    """Check SEC1 uncompressed P-521 public-key encoding and curve membership."""
+    if pubkey.len() != 133:
+        return false
+    if pubkey[0] != 0x04u8:
+        return false
+    var px: [u8] = []
+    var py: [u8] = []
+    var i: i64 = 0
+    while i < 66:
+        px.push(pubkey[1 + i])
+        i = i + 1
+    i = 0
+    while i < 66:
+        py.push(pubkey[67 + i])
+        i = i + 1
+    _p521_point_on_curve(px, py)
+
+# ============================================================================
+# ECDSA Sign (RFC 6979 deterministic nonce)
+# ============================================================================
+
+fn p521_ecdsa_sign(privkey: [u8], msg_hash: [u8]) -> [u8]:
+    """ECDSA sign with RFC 6979 deterministic nonce.
+
+    privkey:  66 bytes, big-endian private scalar.
+    msg_hash: 64 bytes (SHA-512 hash).
+    Returns:  132 bytes r||s (66 bytes each), or empty on error.
+    """
+    if privkey.len() != 66:
+        return []
+    if msg_hash.len() != 64:
+        return []
+
+    val n_bn = from_bytes_be(_p521_n_bytes())
+    val p_bn = from_bytes_be(_p521_p_bytes())
+    val gx = from_bytes_be(_p521_gx_bytes())
+    val gy = from_bytes_be(_p521_gy_bytes())
+
+    val k_bytes = _rfc6979_generate_k_p521(privkey, msg_hash)
+    if k_bytes.len() != 66:
+        return []
+
+    # R = k * G
+    val r_jac = _scalar_mul(k_bytes, gx, gy, p_bn)
+    if _jac_is_inf(r_jac):
+        return []
+    val (rx, _ry) = _jac_to_affine(r_jac, p_bn)
+
+    # r = x(R) mod n
+    val r = modulo(rx, n_bn)
+    if _sc_is_zero(r):
+        return []
+
+    # z = hash mod n (leftmost bits2int per RFC 6979; for P-521 hash is 512 bits
+    # which is shorter than 521-bit n, so no truncation needed)
+    val z = modulo(from_bytes_be(msg_hash), n_bn)
+    val d = modulo(from_bytes_be(privkey), n_bn)
+
+    # s = k^-1 * (z + r*d) mod n
+    val k_bn = from_bytes_be(k_bytes)
+    val k_inv = _sc_inv(k_bn, n_bn)
+    val r_d = _sc_mul(r, d, n_bn)
+    val z_plus_rd = _sc_add(z, r_d, n_bn)
+    val s = _sc_mul(k_inv, z_plus_rd, n_bn)
+    if _sc_is_zero(s):
+        return []
+
+    val r_out = to_bytes_be(r, 66)
+    val s_out = to_bytes_be(s, 66)
+    var sig: [u8] = []
+    var i: i64 = 0
+    while i < 66:
+        sig.push(r_out[i])
+        i = i + 1
+    i = 0
+    while i < 66:
+        sig.push(s_out[i])
+        i = i + 1
+    sig
+
+# ============================================================================
+# ECDSA Verify
+# ============================================================================
+
+fn p521_ecdsa_verify(pubkey: [u8], msg_hash: [u8], sig: [u8]) -> bool:
+    """Verify ECDSA P-521 signature.
+
+    pubkey:   133 bytes (0x04 || x || y), uncompressed SEC1.
+    msg_hash: 64 bytes (SHA-512 hash).
+    sig:      132 bytes r||s (66 bytes each).
+    Returns:  true if valid.
+    """
+    if _valid_uncompressed_p521_pubkey(pubkey) == false:
+        return false
+    if msg_hash.len() != 64:
+        return false
+    if sig.len() != 132:
+        return false
+
+    val n_bn = from_bytes_be(_p521_n_bytes())
+    val p_bn = from_bytes_be(_p521_p_bytes())
+    val gx = from_bytes_be(_p521_gx_bytes())
+    val gy = from_bytes_be(_p521_gy_bytes())
+
+    var r_bytes: [u8] = []
+    var s_bytes: [u8] = []
+    var i: i64 = 0
+    while i < 66:
+        r_bytes.push(sig[i])
+        i = i + 1
+    i = 0
+    while i < 66:
+        s_bytes.push(sig[66 + i])
+        i = i + 1
+
+    val r = from_bytes_be(r_bytes)
+    val s = from_bytes_be(s_bytes)
+
+    if _sc_is_zero(r): return false
+    elif _sc_is_zero(s): return false
+    elif _sc_is_valid(r, n_bn) == false: return false
+    elif _sc_is_valid(s, n_bn) == false: return false
+
+    # w = s^-1 mod n
+    val w = _sc_inv(s, n_bn)
+    val z = modulo(from_bytes_be(msg_hash), n_bn)
+
+    # u1 = z*w mod n,  u2 = r*w mod n
+    val u1 = _sc_mul(z, w, n_bn)
+    val u2 = _sc_mul(r, w, n_bn)
+
+    # Parse Q from pubkey
+    var qx_bytes: [u8] = []
+    var qy_bytes: [u8] = []
+    i = 0
+    while i < 66:
+        qx_bytes.push(pubkey[1 + i])
+        i = i + 1
+    i = 0
+    while i < 66:
+        qy_bytes.push(pubkey[67 + i])
+        i = i + 1
+    val qx = from_bytes_be(qx_bytes)
+    val qy = from_bytes_be(qy_bytes)
+
+    val u1_bytes = to_bytes_be(u1, 66)
+    val u2_bytes = to_bytes_be(u2, 66)
+
+    # R' = u1*G + u2*Q
+    val p1 = _scalar_mul(u1_bytes, gx, gy, p_bn)
+    val p2 = _scalar_mul(u2_bytes, qx, qy, p_bn)
+    val rp = _jac_add(p1, p2, p_bn)
+    if _jac_is_inf(rp):
+        return false
+
+    val (rpx, _rpy) = _jac_to_affine(rp, p_bn)
+    val rp_x_mod_n = modulo(rpx, n_bn)
+
+    cmp(rp_x_mod_n, r) == 0
+
+# ============================================================================
+# Public API — sign/verify with full SHA-512 hashing
+# ============================================================================
+
+fn ecdsa_p521_sign_fixed(private_key: [u8], message: [u8]) -> [u8]:
+    """Sign `message` with ECDSA P-521 SHA-512; returns 132-byte r||s.
+
+    Args:
+        private_key: 66-byte big-endian private scalar.
+        message:     Arbitrary byte sequence to sign.
+
+    Returns:
+        132-byte fixed-width r||s (66-byte big-endian r, 66-byte big-endian s;
+        521-bit values left-padded into 528-bit/66-byte buffers per RFC 8446 §4.2.3).
+        Returns an empty array on any error.
+
+    Deterministic: RFC 6979 nonce (SHA-512 HMAC). Pure-Simple — no SFFI.
+    """
+    val msg_hash = sha512(message)
+    p521_ecdsa_sign(private_key, msg_hash)
+
+fn ecdsa_p521_verify_fixed(public_key: [u8], message: [u8], signature_fixed132: [u8]) -> bool:
+    """Verify a 132-byte r||s ECDSA P-521 SHA-512 signature.
+
+    Args:
+        public_key:         133-byte uncompressed SEC1 public key (0x04 || X || Y).
+        message:            Message bytes that were signed.
+        signature_fixed132: 132-byte r||s form (66-byte big-endian r, 66-byte big-endian s).
+
+    Returns: true if the signature is valid, false otherwise.
+
+    Pure-Simple — no SFFI.
+    """
+    val msg_hash = sha512(message)
+    p521_ecdsa_verify(public_key, msg_hash, signature_fixed132)

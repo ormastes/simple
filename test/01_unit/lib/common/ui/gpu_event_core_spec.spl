@@ -1,0 +1,215 @@
+# @cover src/lib/common/ui/gpu_event_core.spl 80%
+"""
+# GPU Event Core Spec
+
+## Overview
+
+`gpu_event_core.spl` is the CPU-reference interpreter for the W2 "GPU event
+core" described in
+`doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md` §3 "GPU event
+model" and §11 W2. It operates on the frozen C0 packet types from
+`gpu_web_ports.spl` (`GpuInputEvent`, `GpuMutation`) and implements, in pure
+Simple with no Dict, the deterministic pieces of the per-event pipeline:
+stale-generation rejection, pointer-move/wheel coalescing, ancestor route
+construction, capture/target/bubble dispatch ordering, mutation journal
+commit ordering, and a deterministic epoch hash used as an oracle handle for
+"same event batch produces deterministic mutation bytes".
+
+## Requirements
+
+**Requirements:** N/A
+
+## Plan
+
+**Plan:** doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md
+
+## Design
+
+**Design:** doc/03_plan/ui/gpu_web_scene_offload_mdsoc_plus_plan.md §3, §11 W2
+
+## Research
+
+**Research:** N/A
+
+## Examples
+
+Each example below exercises one deterministic-ordering guarantee the plan
+requires of the CPU reference: stale events never validate, moves/wheels
+coalesce while other kinds pass through untouched, an ancestor route walks
+root-to-target, dispatch visits capture/target/bubble in the documented
+order with registration_order as the tie-break, the mutation journal is a
+stable sort by sequence, and the epoch hash is a pure function of mutation
+field bytes.
+"""
+
+use std.spec.*
+use common.ui.gpu_web_ports.{
+    GpuInputEvent, GpuMutation,
+    GPU_EVENT_KIND_POINTER_MOVE, GPU_EVENT_KIND_WHEEL,
+    GPU_EVENT_KIND_POINTER_DOWN, GPU_EVENT_KIND_KEY_DOWN, GPU_EVENT_KIND_POINTER_UP
+}
+use common.ui.gpu_event_core.{
+    GpuEventListener, GpuEventRouteStep,
+    gpu_event_validate_generation, gpu_event_coalesce, gpu_event_build_route,
+    gpu_event_dispatch, gpu_mutation_journal_commit, gpu_event_epoch_hash
+}
+
+fn mk_event(seq: u64, scene_gen: u64, kind: u16, x: i32, y: i32, dx: i32, dy: i32) -> GpuInputEvent:
+    GpuInputEvent(
+        sequence: seq,
+        scene_generation: scene_gen,
+        timestamp_ns: 0u64,
+        kind: kind,
+        device_id: 0u16,
+        flags: 0u32,
+        x_fixed: x,
+        y_fixed: y,
+        delta_x_fixed: dx,
+        delta_y_fixed: dy,
+        key_code: 0u32,
+        text_offset: 0u32,
+        text_length: 0u32,
+    )
+
+fn mk_mutation(node_id: u32, node_generation: u32, field_id: u16, operation: u16, value_lo: u32, value_hi: u32, sequence: u32) -> GpuMutation:
+    GpuMutation(
+        node_id: node_id,
+        node_generation: node_generation,
+        field_id: field_id,
+        operation: operation,
+        value_lo: value_lo,
+        value_hi: value_hi,
+        sequence: sequence,
+    )
+
+describe "gpu_event_validate_generation -- stale-event rejection":
+
+    it "accepts an event whose scene_generation matches current, rejects a stale one":
+        step("Build one event pinned to generation 5")
+        val ev = mk_event(1u64, 5u64, GPU_EVENT_KIND_POINTER_DOWN, 0, 0, 0, 0)
+
+        step("Validate against the matching generation")
+        assert_true(gpu_event_validate_generation(ev, 5u64))
+
+        step("Validate against a newer generation: must reject")
+        assert_false(gpu_event_validate_generation(ev, 6u64))
+
+describe "gpu_event_coalesce -- pointer-move and wheel merging":
+
+    it "merges 3 consecutive POINTER_MOVE events into 1, keeping the last position":
+        step("Build 3 consecutive moves ending at (3, 3)")
+        val events = [
+            mk_event(1u64, 1u64, GPU_EVENT_KIND_POINTER_MOVE, 1, 1, 0, 0),
+            mk_event(2u64, 1u64, GPU_EVENT_KIND_POINTER_MOVE, 2, 2, 0, 0),
+            mk_event(3u64, 1u64, GPU_EVENT_KIND_POINTER_MOVE, 3, 3, 0, 0),
+        ]
+
+        step("Coalesce: expect exactly 1 event with the last position")
+        val merged = gpu_event_coalesce(events)
+        assert_equal(merged.len(), 1)
+        expect(merged[0].x_fixed).to_equal(3)
+        expect(merged[0].y_fixed).to_equal(3)
+
+    it "sums delta_x_fixed/delta_y_fixed across a consecutive WHEEL run":
+        step("Build 2 consecutive wheel events")
+        val events = [
+            mk_event(1u64, 1u64, GPU_EVENT_KIND_WHEEL, 0, 0, 1, 2),
+            mk_event(2u64, 1u64, GPU_EVENT_KIND_WHEEL, 0, 0, 3, 4),
+        ]
+
+        step("Coalesce: expect 1 event with summed deltas")
+        val merged = gpu_event_coalesce(events)
+        assert_equal(merged.len(), 1)
+        expect(merged[0].delta_x_fixed).to_equal(4)
+        expect(merged[0].delta_y_fixed).to_equal(6)
+
+    it "passes non-coalescible kinds through unchanged and in order":
+        step("Build a down/key/up sequence -- none of these kinds coalesce")
+        val events = [
+            mk_event(10u64, 1u64, GPU_EVENT_KIND_POINTER_DOWN, 0, 0, 0, 0),
+            mk_event(11u64, 1u64, GPU_EVENT_KIND_KEY_DOWN, 0, 0, 0, 0),
+            mk_event(12u64, 1u64, GPU_EVENT_KIND_POINTER_UP, 0, 0, 0, 0),
+        ]
+
+        step("Coalesce: expect all 3 preserved, relative order intact")
+        val merged = gpu_event_coalesce(events)
+        assert_equal(merged.len(), 3)
+        expect(merged[0].sequence).to_equal(10u64)
+        expect(merged[1].sequence).to_equal(11u64)
+        expect(merged[2].sequence).to_equal(12u64)
+
+describe "gpu_event_build_route -- ancestor chain":
+
+    it "builds a root-to-target chain for a 3-deep parent hierarchy":
+        step("node 0 is root (parents[0] == 0), node 1's parent is 0, node 2's parent is 1")
+        val parents = [0u32, 0u32, 1u32]
+
+        step("Build the route to target node 2")
+        val route = gpu_event_build_route(2u32, parents)
+        assert_equal(route.len(), 3)
+        expect(route[0]).to_equal(0u32)
+        expect(route[1]).to_equal(1u32)
+        expect(route[2]).to_equal(2u32)
+
+describe "gpu_event_dispatch -- capture/target/bubble order":
+
+    it "visits capture(root, mid) -> target -> bubble(mid, root), tie-breaking by registration_order":
+        step("3-deep chain: root=0, mid=1, target=2")
+        val parents = [0u32, 0u32, 1u32]
+
+        step("Register 2 capture listeners on root out of registration_order, plus 1 each on mid/target/mid-bubble/root-bubble")
+        val listeners = [
+            GpuEventListener(node_id: 0u32, phase: 0u16, registration_order: 5u32, handler_id: 100u32),
+            GpuEventListener(node_id: 0u32, phase: 0u16, registration_order: 1u32, handler_id: 101u32),
+            GpuEventListener(node_id: 1u32, phase: 0u16, registration_order: 1u32, handler_id: 102u32),
+            GpuEventListener(node_id: 2u32, phase: 1u16, registration_order: 1u32, handler_id: 103u32),
+            GpuEventListener(node_id: 1u32, phase: 2u16, registration_order: 1u32, handler_id: 104u32),
+            GpuEventListener(node_id: 0u32, phase: 2u16, registration_order: 1u32, handler_id: 105u32),
+        ]
+
+        step("Dispatch to target node 2")
+        val steps = gpu_event_dispatch(2u32, parents, listeners)
+
+        step("Expect: root-capture(order1), root-capture(order5), mid-capture, target, mid-bubble, root-bubble")
+        assert_equal(steps.len(), 6)
+        expect(steps[0].listener_handler_id).to_equal(101u32)
+        expect(steps[1].listener_handler_id).to_equal(100u32)
+        expect(steps[2].listener_handler_id).to_equal(102u32)
+        expect(steps[3].listener_handler_id).to_equal(103u32)
+        expect(steps[4].listener_handler_id).to_equal(104u32)
+        expect(steps[5].listener_handler_id).to_equal(105u32)
+
+describe "gpu_mutation_journal_commit -- stable sort by sequence":
+
+    it "sorts by sequence and preserves insertion order among equal sequences":
+        step("Build 4 mutations with sequences 2, 1, 1, 0 (2 ties at sequence 1)")
+        val mutations = [
+            mk_mutation(10u32, 0u32, 0u16, 0u16, 0u32, 0u32, 2u32),
+            mk_mutation(20u32, 0u32, 0u16, 0u16, 0u32, 0u32, 1u32),
+            mk_mutation(21u32, 0u32, 0u16, 0u16, 0u32, 0u32, 1u32),
+            mk_mutation(30u32, 0u32, 0u16, 0u16, 0u32, 0u32, 0u32),
+        ]
+
+        step("Commit the journal")
+        val journal = gpu_mutation_journal_commit(mutations)
+        assert_equal(journal.len(), 4)
+        expect(journal[0].node_id).to_equal(30u32)
+        expect(journal[1].node_id).to_equal(20u32)
+        expect(journal[2].node_id).to_equal(21u32)
+        expect(journal[3].node_id).to_equal(10u32)
+
+describe "gpu_event_epoch_hash -- deterministic mutation bytes":
+
+    it "hashes identical batches equal, and a changed field to a different value":
+        step("Build 2 separately-constructed but field-identical batches")
+        val batch_a = [mk_mutation(1u32, 2u32, 3u16, 4u16, 5u32, 6u32, 7u32)]
+        val batch_b = [mk_mutation(1u32, 2u32, 3u16, 4u16, 5u32, 6u32, 7u32)]
+
+        step("Equal field batches must hash equal")
+        expect(gpu_event_epoch_hash(batch_a)).to_equal(gpu_event_epoch_hash(batch_b))
+
+        step("Changing one field (value_lo) must change the hash")
+        val batch_c = [mk_mutation(1u32, 2u32, 3u16, 4u16, 9u32, 6u32, 7u32)]
+        val hash_a = gpu_event_epoch_hash(batch_a)
+        val hash_c = gpu_event_epoch_hash(batch_c)
+        assert_true(hash_a != hash_c)
