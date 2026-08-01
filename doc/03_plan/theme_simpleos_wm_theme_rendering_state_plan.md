@@ -97,8 +97,20 @@ Plan impact: upstream introduced parser/HIR and DrawIR architecture updates plus
   - Evidence in `build/hosted-wm-capture-evidence/*` and
     `doc/09_report/hosted_wm_capture_evidence_2026-07-25.md`.
   - Backend currently uses local Web raster readback; Metal GPU submit/readback remains unhooked.
-- `check-simpleos-x86-64-wm-qemu-preflight.shs`: PASS.
-- `check-simpleos-x86-64-wm-qemu-readiness.shs`: FAIL on this host (`grub-mkstandalone` missing), so boot path blocked.
-- `check-simpleos-arm64-wm-qemu-readiness.shs`: PASS.
-- `check-simpleos-wm-visible-display-evidence.shs`: FAIL on this host for the same grub tooling blocker.
-- `doc/09_report/simpleos_wm_visible_display_evidence_2026-07-25.md` added by validation run.
+  - `check-simpleos-x86-64-wm-qemu-preflight.shs`: PASS.
+  - `check-simpleos-x86-64-wm-qemu-readiness.shs`: FAIL on this host (`grub-mkstandalone` missing), so boot path blocked.
+  - `check-simpleos-arm64-wm-qemu-readiness.shs`: PASS.
+  - `check-simpleos-wm-visible-display-evidence.shs`: FAIL on this host for the same grub tooling blocker.
+  - `doc/09_report/simpleos_wm_visible_display_evidence_2026-07-25.md` added by validation run.
+
+## 2026-08-01 GH sync re-check: renderer/IR-runner spec scan
+
+- Ran `git fetch --all --prune` and compared against `origin/main`.
+- Latest runner/IR-related upstream in this range:
+  - `118c636ead` `feat(web/2d): land GAP-2 N-stop gradient CSS wiring + l4-stage-a salvage audit` (web2D gradient pipeline wiring + doc updates).
+  - `31c858cab9` `refactor(ui): S2 DrawIR backend accessor seam (VK identity, MTL/DXGI remap)`.
+- `IR spec` impact scan result:
+  - no new `*_spec.spl` files in this lane’s renderer stack changed in those two points;
+  - no immediate plan item change required beyond current theme propagation + payload fidelity tasks.
+- Known tracking note:
+  - upstream `118c...` touched this plan file on main in a different maintenance path; branch remains intentionally on `origin/tmp-docfix` docs lane, so I am keeping this plan as the local lane tracker and logging the delta here.
