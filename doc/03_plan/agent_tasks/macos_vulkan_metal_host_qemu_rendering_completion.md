@@ -29,6 +29,15 @@ manifest-bound Vulkan 2D live PASS exists, so no downstream lane may be marked
 complete from source review, retained diagnostics, CPU mirrors, or unretained
 peer reports.
 
+### External bootstrap note (2026-08-01)
+
+- The bootstrap Stage 3 source-admission process is currently running in a separate
+  agent session (`/root/bootstrap_early_exit_diagnosis`) and is progressing through
+  Stage 2/3 snapshot generation. To avoid duplicate and conflicting builds, this
+  session is not rerunning bootstrap.
+- Non-bootstrap work will proceed in order on this lane while bootstrap is active:
+  manifest-bound Vulkan 2D evidence → Vulkan web/gui/host WM → Metal → QEMU.
+
 ### Render design / IR alignment addendum (2026-08-01)
 
 - DrawIR/GPU design control changed in the local branch and is now the source
