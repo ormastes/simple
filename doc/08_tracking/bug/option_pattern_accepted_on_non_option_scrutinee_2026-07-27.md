@@ -236,3 +236,60 @@ branch was kept verbatim, only the test changed.
 3. `.?` on an `i64` is plain truthiness, so it is wrong at *both* ends: it
    rejects a genuine match at index `0` and accepts the `-1` sentinel. Sites
    half-repaired as `if x.? and x >= 0:` still drop index-0 matches.
+
+## 2026-08-01: array accessors are a REACHABLE TRIGGER SURFACE for this hole
+
+Independently reproduced on the seed binary built 2026-08-01 14:48. This section
+adds *which real API invites the mistake*, which the doc previously did not say.
+
+`[T]` accessors split into two different return shapes, and only one is `T?`:
+
+| accessor | declared return type | source |
+|---|---|---|
+| `at(i)` | **`T?`** (`HirType::Pointer{inner: elem}`) | `hir/lower/expr/mod.rs:1257` |
+| `first` / `last` / `get` / `max` / `min` | **`T`** (bare element) | `hir/lower/expr/mod.rs:1271` |
+
+Because `.at()` legitimately returns `T?`, `match xs.at(0): case Some(v)` is
+correct and now works. Writing the visually identical `match xs.first(): case
+Some(v)` is silently wrong — `first` is `T`. This is an easy and natural mistake,
+and neither engine reports it.
+
+Measured on `xs = [10, 20, 30, 40, 50]`, one program, one binary:
+
+| expression | correct | JIT | interpreter |
+|---|---|---|---|
+| `match xs.at(1)` | `Some(20)` | `Some(20)` — correct | `Some(20)` — correct |
+| `match xs.first()` | *type error* | `Some(5e-323)` — **denormal float garbage** | **no arm taken, no output** |
+| `match xs.last()` | *type error* | `Some(<denormal>)` | no arm taken |
+| `match xs.get(1)` | *type error* | `Some(<value:0x14>)` — undecoded tag box (0x14 = 20) | no arm taken |
+| `match xs.get(99)` | *type error* | `None` | `None` |
+
+Both engines exit **0** with no diagnostic.
+
+**New manifestation:** the table above documents JIT binding **nil** for a
+non-Option scrutinee. Via `first`/`last` it instead binds a **denormal float** —
+the element's `i64` bit pattern reinterpreted as `f64` (`10` -> `5e-323`). So the
+JIT symptom is not always nil; it is "whatever the consumer's own misdecode
+yields", which is harder to spot because it still prints inside `Some(...)`.
+
+Minimal repro with **no array and no `.at()` at all** (`typehole.spl`):
+
+```simple
+fn plain() -> i64:
+    return 42
+
+fn main():
+    print("start")
+    match plain():
+        case Some(v): print("Some({v})")
+        case None: print("None")
+    print("end")
+```
+
+JIT prints `start` / `Some(<denormal>)` / `end`; the interpreter prints `start` /
+`end`, taking neither arm. This confirms the root cause is the type checker
+accepting Option patterns on a non-Option scrutinee, not anything array-specific
+-- the array accessors merely make it easy to reach.
+
+**Not a defect in `first`/`last`/`get`:** returning `T` is their defined
+contract. The defect is only that the Option pattern is accepted against them.
