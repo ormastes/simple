@@ -40,6 +40,7 @@ use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr, expr_match_
 use compiler.core.ast.{expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn}
 use compiler.core.ast.{expr_unit, expr_block, expr_lambda}
 use compiler.core.ast.{expr_unsafe_block}
+use compiler.frontend.desugar.placeholder_lambda.{set_placeholder_transform_suppressed}
 use compiler.frontend.core.lexer.{lex_token_end_get, lex_source_char_at}
 use compiler.frontend.core.lexer.{lex_pop_indent, lex_enable_forced_indentation, lex_disable_forced_indentation}
 use compiler.core.ast.{expr_get_tag, expr_get_str, expr_get_left, expr_get_args}
@@ -1255,7 +1256,26 @@ fn parse_match_arms_common() -> (i64, [i64]):
 
             # Support multi-pattern: case X | Y | Z:
             # Parse first pattern
+            #
+            # `_` in PATTERN position is the wildcard pattern, never the
+            # placeholder-lambda shorthand. Patterns are parsed with the
+            # general expression parser (see convert_flat_pattern's docstring),
+            # so without this suppression `case Ok((selected, _)):` had its
+            # `(selected, _)` tuple rewritten by transform_placeholder_lambda
+            # into an EXPR_LAMBDA -- a tag convert_flat_pattern has no case
+            # for, so the whole sub-pattern silently degraded to an
+            # UNCONDITIONAL Wildcard that binds nothing. The arm then matched
+            # everything AND failed HIR lowering with "unresolved name:
+            # selected" -- a name declared in the very same file
+            # (stage4_symbol_closure.spl:831). Suppression is scoped to the
+            # pattern list only: the guard expression and the arm body below
+            # are parsed outside it, so `_`-placeholder lambdas keep working
+            # there. Mirrors string_interpolation_expand.spl's use of the same
+            # suppression API.
+            # bug doc: doc/08_tracking/bug/
+            #   match_arm_underscore_subpattern_becomes_lambda_2026-08-01.md
             var patterns: [i64] = []
+            val ph_prev = set_placeholder_transform_suppressed(true)
             patterns.push(parse_expr())
 
             # Check for pipe separator and collect additional patterns
@@ -1294,6 +1314,10 @@ fn parse_match_arms_common() -> (i64, [i64]):
                     parser_advance()
                 kind = par_kind_get()
 
+            # Pattern list is complete -- restore the caller's placeholder
+            # setting so the guard and the arm body keep normal `_` semantics.
+            set_placeholder_transform_suppressed(ph_prev)
+
             # Check for guard clause: case X if guard_expr:
             var guard_expr_idx: i64 = -1
             if par_kind_get() == 40:
@@ -1321,11 +1345,15 @@ fn parse_match_arms_common() -> (i64, [i64]):
         else:
             # Caseless arm: pattern directly followed by ':' (no 'case' keyword required)
             # e.g. `Enum.Variant:`, `Ok(v):`, `_:`, `0:`
+            # Same placeholder-lambda suppression as the `case` arm above --
+            # `_` here is the wildcard pattern, not the lambda shorthand.
             var patterns: [i64] = []
+            val cl_ph_prev = set_placeholder_transform_suppressed(true)
             patterns.push(parse_expr())
             while par_kind_get() == TOK_PIPE or par_kind_get() == TOK_COMMA:
                 parser_advance()
                 patterns.push(parse_expr())
+            set_placeholder_transform_suppressed(cl_ph_prev)
 
             # Check for guard clause: pattern if guard_expr:
             var guard_expr_idx: i64 = -1
