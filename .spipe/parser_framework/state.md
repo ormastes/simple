@@ -137,3 +137,4 @@ impl-in-progress
 - design-review: Corrected default-tier ownership, completed public type definitions, added indexed output writes and private fallback, separated semantic parity from telemetry, and made segment reuse/snapshot lineage representable.
 - impl: Added runtime/API seam placeholders in nogc_async_mut structural parse (parse_runtime/result wrappers, explicit fail-closed executor seams), added execute-seam hashes/equality helpers, and aligned placeholder exports to frozen parser-framework contracts.
 - impl-tests: Added system-spec runtime entrypoint/error coverage in parser framework SSpec (`parser_framework_spec`) and mirrored `doc/06_spec` scenarios for runtime result/failure parity.
+- impl-tests: Added output-mask and tag-demand action-sink system-spec assertions (`parser_framework_spec`) plus mirrored `doc/06_spec` coverage for metadata-only runs and demand-driven tag emission.

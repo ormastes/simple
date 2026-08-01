@@ -45,6 +45,25 @@
 3. Call `runtime_parse_request(runtime, framework_request("ab", "wave-6-mirage"))`.
    - Expect an error string equal to `"parse_request_unknown_mode: wave-6-mirage:reject_unknown_mode"`.
 
+#### honors output masking without changing parse metadata
+
+1. Build a request with `PARSE_OUTPUT_DIAGNOSTICS` only.
+2. Parse `"ab 12 cd"` with CPU-reference.
+3. Expect:
+   - `ok == true`
+   - `parse_token_arena_len(result.tokens) == 0`
+   - `parse_diagnostic_arena_len(result.diagnostics) == 0`
+   - `item_count_in == 5`
+   - `item_count_out == 0`
+
+#### keeps tag allocations off unless demand is enabled
+
+1. Start with an empty tag-demand action sink.
+2. Emit a tag with `PARSE_TAG_DEMAND_OFF` and again with `PARSE_TAG_DEMAND_ALL`.
+3. Expect:
+   - OFF path emits `0`
+   - ALL path emits `1`
+
 ## Source
 
 - Source: `test/03_system/app/compiler/feature/parser_framework_spec.spl`
