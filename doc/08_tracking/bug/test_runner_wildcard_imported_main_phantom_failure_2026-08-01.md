@@ -1,162 +1,156 @@
-# `bin/simple test`: a wildcard-imported `main` adds a phantom file-level failure
+# Importing a module named `main` adds a phantom test failure
 
 **Date:** 2026-08-01
-**Component:** `bin/simple test` outer/second pass (test runner + module loader)
-**Severity:** **false RED across the suite** — affected spec files report one extra
-failure that no example produced. Example pass counts stay correct, so this
-inflates the failing-FILE count only. A fail-*closed* error, but a phantom one:
-it makes green work look broken and hides real regressions in the noise.
+**Component:** `evaluate_module_impl`, `src/compiler_rust/compiler/src/interpreter_eval.rs`
+**Severity:** **false RED across the suite** — 73 spec files report a failure no
+example produced. Example counts stay correct; the failing-FILE count is
+inflated, so real regressions hide in phantom noise.
 
-## Symptom
+> **Title history:** this was filed as a wildcard-import defect and twice
+> re-scoped as evidence came in. Neither "the spec must wildcard-import" nor
+> "the module must declare `fn main`" is true. The confirmed rule is below.
 
-A spec whose import graph **wildcard-imports** a module declaring a top-level
-`fn main` reports an extra file-level failure AFTER all its examples pass:
+## The rule
+
+**Importing any module whose final path segment is literally `main` — by name or
+by wildcard — binds that module's entire export dict under the reserved key
+`"main"`, which the runner later forces through `.as_int()`.**
+
+The module does **not** need to declare `fn main`. The importer's style does
+**not** matter. Only the last segment of the imported path matters.
 
 ```
-error: semantic: type mismatch: cannot convert function to int
+error: semantic: type mismatch: cannot convert dict to int
 error: test-runner: spec failed
 Results: 2 total, 1 passed, 1 failed
 ```
 
-The error text varies with what occupies the colliding slot — `cannot convert
-dict to int` in the original lint case, `function to int` in the minimal one.
+## Control matrix (each verified on the seed binary)
 
-## Minimal reproduction (verified twice, independently)
-
-`src/probe/just_main.spl` — the entire file:
+`probemain/main.spl` and `probemain/notmain.spl` have **identical content** and
+contain **no `fn main`**:
 
 ```
-fn main():
-    print("hello")
+fn helper() -> Int:
+    42
 ```
 
-A one-assertion spec that does `use probe.just_main.*` → `2 total, 1 passed, 1 failed`.
-
-Controls, all clean at `1 total, 1 passed, 0 failed`:
-
-| variant | result |
+| spec import | result |
 |---|---|
-| `use probe.just_main.*` (wildcard, fn named `main`) | **FAILS** |
-| `use probe.just_notmain.*` (wildcard, fn renamed) | clean |
-| `use probe.just_main.{main}` (**named** import of the same symbol) | clean |
-| `compile` instead of `test`, same wildcard import | clean |
+| `use probemain.main.{helper}` — file named `main.spl` | **FAILS** `cannot convert dict to int` |
+| `use probemain.notmain.{helper2}` — identical, renamed file | clean |
+| `use probe.just_main.*` — wildcard, file declares `fn main` | **FAILS** `cannot convert function to int` |
+| `use probe.just_notmain.*` — wildcard, fn renamed | clean |
+| `use probe.just_main.{main}` — named import of the `main` symbol | clean |
+| `compile` instead of `test`, any of the above | clean |
 
-So all three of these are required: the **test** lane, a **wildcard** import, and
-the imported symbol being literally named **`main`**.
+The two distinct error texts correspond to two distinct sites (below), which is
+the strongest evidence that the mechanism is understood rather than guessed.
 
-### CORRECTION — the consumer's import style is NOT what matters
+**Independent confirmation from the opposite direction:** a separate lane removed
+`fn main` from the lint graph completely — replaced the facade's
+`export use ..._LintMain.entry_and_fixes.*` with an explicit 10-symbol named
+list, AND renamed `fn main() -> Int` to `lint_main()` in `entry_and_fixes.spl`.
+With **zero** `fn main` anywhere in the reachable chain, all three lint specs
+still failed identically. That is exactly what the rule predicts: the file is
+still `.../lint/main.spl`, so site B still binds its export dict under `"main"`.
+Removing the *function* cannot help; only renaming the *file* or fixing the
+runner can.
 
-The table above measures the **direct** edge (spec → module). Do not generalize
-"named import is clean" to the transitive case: it is false there, and reading it
-that way sends you hunting for wildcard imports in specs, of which there are
-**zero**.
+## Root cause — two compounding sites
 
-Both real reproducers — `collection_easy_fix_spec.spl` and
-`collection_index_mutation_spec.spl` — use a **named** import
-(`use compiler.tools.lint.main.{Linter, lint_cli_source}`) and reproduce anyway.
-The wildcard that matters is the one **inside the facade**:
-`compiler.tools.lint.main` does `export use ..._LintMain.entry_and_fixes.*`,
-which bakes `main` into the facade's own symbol table at load time regardless of
-how a consumer imports from it.
+Both in `evaluate_module_impl`, `src/compiler_rust/compiler/src/interpreter_eval.rs`.
 
-Precise necessary condition: **a wildcard import/re-export anywhere in the
-import chain pulls a top-level `main` into some module's symbol table.** The
-consumer may import by name and still be affected.
+**Site B — the dominant one (`dict to int`).** `binding_name` for
+`ImportTarget::Glob | ImportTarget::Group(_)` is derived from
+`use_stmt.path.segments.last()` — the last **path segment**, independent of which
+symbols are named. For `use compiler.tools.lint.main.{Linter, lint_cli_source}`,
+`binding_name == "main"` purely because the file is `.../lint/main.spl`. Then,
+unconditionally and outside any per-target guard,
+`env.insert(binding_name, value)` binds the whole module — a `Value::Dict` of
+its exports — under the reserved key `"main"`.
 
-Probe environment kept at
-`scratchpad/lint_probe/` (`src/probe/just_main.spl`, `src/probe/just_notmain.spl`,
-`test/probe_just_main_spec.spl`, `test/probe_just_notmain_spec.spl`,
-`test/probe_named_main_spec.spl`).
+**Site A — the narrower one (`function to int`).** In the `ImportTarget::Glob`
+per-export loop, `functions.insert` was already guarded by `if name != "main"`,
+but the following `env.insert` and `MODULE_GLOBALS` insert were **not**. So a
+glob-imported `fn main` still landed in the importer's scope.
 
-## Where it happens
+**Shared consumption point.** The runner does
+`env.get("main").cloned().unwrap_or(Value::Int(0))` … `.as_int()?` — a
+"fall back to a `main = <value>` binding" convention with no type discrimination.
+Anything that ends up in `env["main"]` is forced through `.as_int()`.
 
-The runner is **two-phase**. An outer process spawns a child that actually
-executes the spec; the child reports `1 example, 0 failures` — genuinely clean —
-and exits. Only afterwards does the outer pass run (co-occurring with loading
-`std.nogc_sync_mut.spec.env_detect`) and emit the error. `compile` never
-reproduces it, so the defect is in the test runner's outer pass, not in the
-compiler front end generally.
+## Why it fools people
 
-Leading hypothesis (not yet confirmed in code): the outer pass looks up a
-module-level `main` to decide whether the module is executable / what its exit
-status is, finds the **wildcard-imported** one rather than the module's own, and
-type-checks it as `int` — `fn main() -> Int` returns a status code.
+The runner is **two-phase**. A child process executes the spec and reports
+`0 failures` — genuinely clean — and exits. Only afterwards does the outer pass
+emit the error. **Anything reported after a clean child run is runner
+bookkeeping, not the code under test.** Three sessions read this as a real type
+error in the lint module graph.
 
-## Real-world instance
+## Blast radius (measured 2026-08-01)
 
-`src/compiler/90.tools/lint/main.spl:11` does
-`export use compiler.tools.lint._LintMain.entry_and_fixes.*`, and
-`_LintMain/entry_and_fixes.spl:231` declares `fn main() -> Int` — the lint CLI's
-own entry point. So the CLI `main` leaks through the facade's wildcard
-re-export into every consumer, and **every spec importing the lint facade**
-inherits the phantom failure. That is how this was found; see
-`lint_module_graph_spec_pollution_dict_int_2026-07-31.md` for the bisect that
-got here.
-
-Note this is also an API smell in its own right: a library facade should not
-re-export a CLI entry point, independent of the runner defect.
-
-## Blast radius (measured 2026-08-01, static)
-
-Smaller than the 608 `fn main` declarations suggest, and concentrated in one
-facade:
-
-| axis | count |
+| | |
 |---|---|
-| files under `src/` declaring a top-level `fn main` | 608 |
-| wildcard import statements in `src/`+`test/` | 9,767 |
-| **specs directly wildcard-importing a main-declaring module** | **0** |
-| facades that `export use`-wildcard a main-declaring module | **5** |
-| **spec files importing one of those 5 facades (any style)** | **29** |
+| **spec files importing a module path ending in `.main`** | **73** |
+| `src/` files doing the same | 31 |
 
-The 5 facades: `compiler.tools.lint.main`, `app.cli.main`, `app.wm_compare.main`,
-`compiler.tools.sffi_gen.main`, `os.port.bootstrap_cross`. No level-2 facade
-re-exports any of them, so depth-1 is exhaustive.
+Top imported `.main` modules: `app.mcp.main` (41), `compiler.tools.lint.main`
+(37), `compiler.tools.fix.main` (11), `std.scv.main` (5),
+`compiler.tools.duplicate_check.main` (5), `app.dashboard.main` (5).
 
-`compiler.tools.lint.main` dominates at 37 importers (27 test + 10 src) —
-roughly 10× every other facade. Fixing that one facade addresses ~27 of the 29.
+Superseded earlier estimate: an count of 29 built on "facades that
+wildcard-re-export a `fn main`" measured the wrong population — that framing
+missed every `.main` module that declares no `fn main`, and `app.mcp.main`
+(the single biggest offender) was absent from it entirely.
 
-Caveats stated by the measuring lane, kept deliberately: ~6 of the 29 are
-duplicate-tree mirrors (`test/unit/**` mirrors `test/01_unit/**`) and 5 more are
-paired `.spipe_matchers_*` shadow files, so distinct authored specs are closer to
-**~18** — but if the runner executes both mirror trees, executed impact is
-higher. Matching on module BASENAME instead of full dotted path yields 7 direct
-hits, and **all 7 are false positives** (e.g. `compiler.visibility` vs the
-main-declaring `compiler.tools.verify.visibility`); use exact-path joins.
+`doc/08_tracking/test/test_result.md` cannot corroborate this: generated
+2026-05-19, example granularity (120,809 examples), no file-level summary — it
+structurally cannot show an "examples green, +1 phantom file failure" signature.
 
-`doc/08_tracking/test/test_result.md` **cannot** corroborate this: it was
-generated 2026-05-19, predates the bug's discovery, and reports example
-granularity (120,809 examples) with no file-level summary — so it structurally
-cannot show an "examples green, +1 phantom file failure" signature. No tracked
-doc currently gives an authoritative file-level count to check against.
+## Fix
 
-## How the bisect got here (so it is not repeated)
+A patch exists but is **UNVERIFIED** — it could not be built. Two hunks in
+`evaluate_module_impl`: skip binding a glob-imported `main` function into
+`env`/`MODULE_GLOBALS` (site A), and skip the module-dict bind when
+`binding_name == "main"` was derived from the path for a `Glob`/`Group` target
+(site B). `Single`/`Aliased` imports are deliberately untouched — there the local
+name is explicitly chosen by the user, not derived from the path.
 
-Two whole hypothesis classes were eliminated first, and both are dead ends:
+This is **Rust-only** logic in the seed interpreter/module loader, with no
+exercised `.spl` equivalent, so the repo's fix-the-`.spl`-not-the-Rust rule does
+not offer an alternative here. Verification is blocked on seed build contention
+(six concurrent `simple-driver` builds produced
+`ld terminated with signal 7 [Bus error]`).
 
-- **Not a lint bug.** With the `_LintMain` import cycle genuinely broken in a
-  disposable copy, all six submodules loaded clean individually. The family is
-  innocent.
-- **Not any single declaration.** All 22 external dependencies are clean
-  imported in isolation, and the only module-level Dict in the family uses the
-  safe `contains_key` pattern.
-- **Per-file bisection is impossible as written** — all six `_LintMain`
-  submodules `use compiler.tools.lint.main.*` themselves, so importing any one
-  drags the family back in. An earlier "all six reproduce individually" result
-  was a cycle artifact, NOT attribution.
+**To verify when contention clears:** one clean seed build, then re-run the six
+control-matrix cases plus the three real lint specs
+(`collection_index_mutation_spec` 6 ex, `collection_array_rebuild_spec` 5 ex,
+`collection_easy_fix_spec` 4 ex) — each currently carries the phantom failure and
+must lose it while the controls stay clean.
 
-## Next step
+Probe environment kept at `scratchpad/lint_probe/` (`src/probemain/main.spl`,
+`src/probemain/notmain.spl`, `src/probe/just_main.spl`, `src/probe/just_notmain.spl`
+and the matching specs under `test/`).
 
-Locate the outer-pass code that resolves a module's `main` and make a
-wildcard-imported `main` not count as the module's own entry point. Grep the
-runner (`src/app/` test_runner_new) and `src/compiler/99.loader/` for
-special-casing of the literal name `"main"` in wildcard-import/re-export
-resolution.
+## Dead ends — do not re-run
+
+- **Not a lint bug.** With the `_LintMain` import cycle broken in a disposable
+  copy, all six submodules loaded clean individually.
+- **Not any single declaration.** All 22 external dependencies are clean in
+  isolation; the only module-level Dict in the family uses the safe
+  `contains_key` pattern.
+- **Per-file bisection is meaningless** while a family's members mutually import
+  their own facade — every file "reproduces" via the cycle.
+- **Basename joins over-report.** Matching module basenames instead of exact
+  dotted paths gave 7 direct hits, all false positives.
 
 ## Lesson
 
-**A phantom failure reported after a clean child run is a runner artifact, not a
-code defect.** The examples had already passed in a separate process; anything
-reported afterwards is bookkeeping. Check which phase emitted an error before
-attributing it to the code under test — three sessions read this as a real
-type error in the lint module graph.
+Each of the three framings was consistent with all evidence available when it
+was written, and each was wrong. What broke the cycle was building a control
+that differed in exactly **one** attribute: two files with byte-identical
+contents, one named `main.spl` and one named `notmain.spl`. The name was the
+variable nobody had isolated, because it was never the thing under suspicion.
+When a hypothesis keeps surviving in weakened form, test the attribute you have
+been treating as incidental.
