@@ -473,6 +473,45 @@ pub(crate) fn module_init_symbol(module_prefix: Option<&str>) -> String {
     }
 }
 
+fn make_module_init_dynamic_name(module_name: &str) -> String {
+    let normalized = module_name
+        .replace('.', "_")
+        .replace('/', "_")
+        .replace('-', "_");
+    if normalized.is_empty() {
+        "__module_init_dynamic".to_string()
+    } else {
+        format!("__module_init_{normalized}_dynamic")
+    }
+}
+
+fn find_dynamic_init_func_id(
+    func_ids: &BTreeMap<String, cranelift_module::FuncId>,
+    module_name: &Option<String>,
+) -> Option<cranelift_module::FuncId> {
+    let names = module_name
+        .as_ref()
+        .map(|name| make_module_init_dynamic_name(name));
+    names.and_then(|name| func_ids.get(&name).copied()).or_else(|| {
+        // Compatibility with older plain-name emission.
+        if let Some(id) = func_ids.get("__module_init_dynamic").copied() {
+            return Some(id);
+        }
+
+        // Fallback search: when module naming is unavailable, pick the first
+        // matching dynamic init function for this build step.
+        func_ids
+            .iter()
+            .find_map(|(name, id)| {
+                if name.starts_with("__module_init_") && name.ends_with("_dynamic") {
+                    Some(*id)
+                } else {
+                    None
+                }
+            })
+    })
+}
+
 pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
     matches!(
         name,
@@ -2125,8 +2164,9 @@ impl<M: Module> CodegenBackend<M> {
         // Generate module initialization function for heap-backed global constants.
         // This allocates runtime strings/arrays and stores their handles in globals.
         //
-        // `__module_init_dynamic` (if present) is a plain HIR-lowered function
-        // synthesized by hir/lower/module_lowering/module_pass.rs for globals
+        // A per-module `__module_init_<module>_dynamic` (or legacy
+        // `__module_init_dynamic`) function is synthesized by
+        // hir/lower/module_lowering/module_pass.rs for globals
         // whose initializer needs genuine runtime evaluation (a function call,
         // or an expression referencing another global) rather than one of the
         // const-foldable shapes below. It is compiled through the ordinary
@@ -2134,7 +2174,7 @@ impl<M: Module> CodegenBackend<M> {
         // body); the only wiring generate_module_init does is call it, so it
         // runs automatically wherever __module_init already does (JIT's
         // run_module_init_once, and the native binary's startup code).
-        let dynamic_init_func_id = self.func_ids.get("__module_init_dynamic").copied();
+        let dynamic_init_func_id = find_dynamic_init_func_id(&self.func_ids, &mir.name);
         if !mir.global_init_strings.is_empty()
             || !mir.global_init_arrays.is_empty()
             || !mir.global_init_functions.is_empty()
