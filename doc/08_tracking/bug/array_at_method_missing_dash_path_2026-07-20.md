@@ -2,8 +2,45 @@
 
 **Date:** 2026-07-20
 **Severity:** high (production source code, not a test-only issue)
-**Status:** open
+**Status:** open — root-caused and patched 2026-08-01, fix NOT YET COMPILED
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/skia` cluster
+
+## Update 2026-08-01 — root cause, scope, and a worse sibling defect
+
+**Seed-only.** The pure-Simple interpreter ALREADY implements `.at()` correctly
+(`src/compiler/10.frontend/core/interpreter/eval_methods.spl:296` and
+`_EvalOps/call_method_eval.spl:830`, flat encoding, supported explicitly at
+`eval.spl:911-921`). The failing message is the Rust seed's wording, so the gap
+is in the bootstrap engine only. Root cause: the array-method dispatch in
+`src/compiler_rust/compiler/src/interpreter_method/collections.rs` has
+`get`/`has`/`contains`/... but no `"at"` arm, so it falls through to the
+not-found error. Text `.at` is handled separately at
+`interpreter_method/string.rs:368`.
+
+**There are TWO defects, and the second is worse than the reported one.** Under
+the JIT, `[99,111,108].at(1)` does not error — it SILENTLY MATCHES `None`,
+with `SIMPLE_JIT_STRICT=1` set. A caller gets a plausible empty result instead
+of a diagnostic. The 4-line dispatch arm fixes the interpreter path only; the
+JIT silent-`None` is NOT covered and remains open.
+
+**The encoding is forced, not a design choice.** Measured in the seed
+interpreter: an enum `Option` matches (`Some(42)` -> `ENUM-SOME 42`), while the
+flat encoding does not — `match bytes.get(1): Some(v)/None:` leaves the
+sentinel untouched and falls through EVERY arm. So the arm must build
+`Value::some`/`Value::none` (`value_impl.rs:729/738`).
+
+**Call-site survey re-measured** (vendor excluded, `Type.at(` static
+constructors separated out): **218 sites expect `Option`, 0 expect a bare `T`**,
+plus 137 static constructors and 36 unclear (comments, JS strings, `Ray.at`).
+An earlier "~253 Option / ~8 bare" figure quoted during triage was wrong.
+Design risk is therefore zero: `.at()` on an array today either errors or
+always returns `None`, so no working caller depends on current behaviour.
+
+**Not landed.** With/without numbers need a Rust seed rebuild, and the box has
+been saturated (load 77-85 on 32 cores, another session holding the shared
+110G target dir). Patch held at `scratchpad/at_option_seed.patch` pending a
+build. Per pure-Simple-first this is bootstrap-only value — the shipping
+interpreter is already correct.
 
 ## Symptom
 
