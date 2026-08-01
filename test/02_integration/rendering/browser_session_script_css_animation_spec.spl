@@ -646,7 +646,7 @@ describe "BrowserSession script CSS animation rendering":
             third.pixel_data, second.pixel_data
         )).to_equal(false)
 
-    it "bounds retained DOM bridge allocations without aliasing detached nodes":
+    it "bounds retained DOM bridge allocations per mutation plan":
         var session = BrowserSession.new()
         expect(session.open_html(
             "https://example.test/dom-retention-budget",
@@ -656,17 +656,17 @@ describe "BrowserSession script CSS animation rendering":
             "document.title = 'runtime-ready'"
         ).is_ok()).to_equal(true)
         var exercised = false
-        var admitted_checked = false
-        var object_limit_checked = false
-        var byte_limit_checked = false
+        var per_generation_budget_checked = false
         if val Some(state) = session.runtime_state:
             exercised = true
+            # Saturate tracked DOM retention from prior frames to verify
+            # future mutations are budgeted by current plan only.
             var bounded_state = state
-            # list + fresh element/style pairs for implicit html, head, and div
-            val replacement_object_count: i64 = 7
             bounded_state.runtime.interpreter.host_dom_mutation_retained_objects = (
-                JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS -
-                replacement_object_count
+                JS_HOST_DOM_MUTATION_MAX_RETAINED_OBJECTS
+            )
+            bounded_state.runtime.interpreter.host_dom_mutation_retained_bytes = (
+                JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
             )
             session.runtime_state = Some(bounded_state)
             expect(session.eval_script(
@@ -675,42 +675,21 @@ describe "BrowserSession script CSS animation rendering":
             expect(session.current_title).to_equal("distinct")
             expect(session.current_body_html).to_contain("id=\"last\"")
             if val Some(after_first) = session.runtime_state:
-                admitted_checked = true
                 val allocated = after_first.runtime.interpreter.object_store.next_id
                 expect(session.eval_script(
-                    "document.body.innerHTML = '<div id=\"rejected\"></div>'"
+                    "document.body.innerHTML = '<div id=\"again\"></div>';" +
+                    "document.title = document.getElementById('again') !== null ? 'applied' : 'rejected'"
                 ).is_ok()).to_equal(true)
-                if val Some(after_limit) = session.runtime_state:
-                    object_limit_checked = true
+                expect(session.current_title).to_equal("applied")
+                expect(session.current_body_html).to_contain("id=\"again\"")
+                expect(session.current_body_html.contains("id=\"last\"")).to_equal(false)
+                if val Some(after_second) = session.runtime_state:
+                    per_generation_budget_checked = true
                     expect(
-                        after_limit.runtime.interpreter.object_store.next_id
-                    ).to_equal(allocated)
-                expect(session.current_body_html).to_contain("id=\"last\"")
-                expect(session.current_body_html.contains(
-                    "id=\"rejected\""
-                )).to_equal(false)
-                if val Some(after_object_limit) = session.runtime_state:
-                    var byte_bounded_state = after_object_limit
-                    byte_bounded_state.runtime.interpreter.host_dom_mutation_retained_objects = 0
-                    byte_bounded_state.runtime.interpreter.host_dom_mutation_retained_bytes = (
-                        JS_HOST_DOM_MUTATION_MAX_RETAINED_BYTES
-                    )
-                    session.runtime_state = Some(byte_bounded_state)
-                    expect(session.eval_script(
-                        "document.body.innerHTML = '<div id=\"byte-rejected\"></div>'"
-                    ).is_ok()).to_equal(true)
-                    if val Some(after_byte_limit) = session.runtime_state:
-                        byte_limit_checked = true
-                        expect(
-                            after_byte_limit.runtime.interpreter.object_store.next_id
-                        ).to_equal(allocated)
-                    expect(session.current_body_html.contains(
-                        "id=\"byte-rejected\""
-                    )).to_equal(false)
+                        after_second.runtime.interpreter.object_store.next_id
+                    ).to_be_greater_than(allocated)
         expect(exercised).to_equal(true)
-        expect(admitted_checked).to_equal(true)
-        expect(object_limit_checked).to_equal(true)
-        expect(byte_limit_checked).to_equal(true)
+        expect(per_generation_budget_checked).to_equal(true)
 
     it "keeps the prior body when a synchronous mutation plan exceeds its element bound":
         var session = BrowserSession.new()
