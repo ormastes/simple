@@ -2513,7 +2513,7 @@ impl LlvmBackend {
                             | "rt_array_reverse"
                             | "rt_array_sort"
                             | "rt_contains"
-                            | "rt_dict_contains_key"
+                            | "rt_dict_contains"
                             | "rt_is_none"
                             | "rt_is_some"
                             | "rt_array_any"
@@ -2800,7 +2800,13 @@ impl LlvmBackend {
                     ("Dict" | "dict", "clear") => Some("rt_dict_clear"),
                     ("Dict" | "dict", "keys") => Some("rt_dict_keys"),
                     ("Dict" | "dict", "values") => Some("rt_dict_values"),
-                    ("Dict" | "dict", "contains_key") => Some("rt_dict_contains_key"),
+                    // `rt_dict_contains` is the exported name in BOTH runtimes
+                    // (Rust: `rt_dict_contains(dict, key) -> bool`; C:
+                    // `int8_t rt_dict_contains(int64_t, int64_t)`). This used to
+                    // map to `rt_dict_contains_key`, which is defined in neither,
+                    // so `d.contains_key(k)` failed at link time under the LLVM
+                    // backend.
+                    ("Dict" | "dict", "contains_key") => Some("rt_dict_contains"),
                     ("Tuple" | "tuple", "get") => Some("rt_tuple_get"),
                     ("Tuple" | "tuple", "len") => Some("rt_tuple_len"),
                     ("Tuple" | "tuple", "set") => Some("rt_tuple_set"),
@@ -3671,5 +3677,48 @@ mod tests {
         assert!(!ir.contains("rt_box_float"));
         assert!(!ir.contains("rt_unbox_float"));
         backend.verify().unwrap();
+    }
+
+    /// Regression guard for the `Dict.contains_key` runtime callee.
+    ///
+    /// This mapping is on the LIVE LLVM production path (unlike the emitter.rs
+    /// probe emissions, which only `Vec*` SIMD instructions ever reach). It
+    /// used to map to `rt_dict_contains_key`, which is defined in NEITHER
+    /// runtime, so `d.contains_key(k)` compiled fine and then failed at LINK
+    /// with `undefined reference to 'rt_dict_contains_key'`.
+    ///
+    /// `rt_dict_contains` is exported by BOTH runtimes — Rust
+    /// `rt_dict_contains(dict, key) -> bool` and C
+    /// `int8_t rt_dict_contains(int64_t, int64_t)` — confirmed with
+    /// `nm --defined-only` on both built archives and then at the link level
+    /// (broken name: rc=1 undefined reference; real name: rc=0 plus an ELF
+    /// executable with the symbol at a real address).
+    ///
+    /// The positive assertions are the TRUE-POSITIVE CONTROL: deleting the
+    /// mapping entirely would satisfy the negative assertion alone.
+    #[test]
+    fn dict_contains_key_maps_to_a_runtime_symbol_that_exists() {
+        // Search the backend code only, never this test module, or the
+        // assertions would match their own text and prove nothing.
+        let src = include_str!("functions.rs");
+        let split = src.find("#[cfg(all(test, feature = \"llvm\"))]").expect("test module marker");
+        let code = &src[..split];
+
+        assert!(
+            !code.contains("\"rt_dict_contains_key\""),
+            "rt_dict_contains_key is defined in neither runtime; emitting it \
+             makes every Dict.contains_key call fail at link time"
+        );
+        assert!(
+            code.contains("(\"Dict\" | \"dict\", \"contains_key\") => Some(\"rt_dict_contains\")"),
+            "the Dict.contains_key mapping must still exist and must name \
+             rt_dict_contains, the symbol both runtimes export"
+        );
+        // It returns a bool, so it must stay in the bool-returning list or the
+        // declared LLVM prototype will disagree with the runtime.
+        assert!(
+            code.contains("| \"rt_dict_contains\""),
+            "rt_dict_contains returns bool and must remain in the returns_bool set"
+        );
     }
 }

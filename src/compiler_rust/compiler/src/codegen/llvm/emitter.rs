@@ -1748,6 +1748,26 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     // =========================================================================
     // Coverage — delegate to runtime
     // =========================================================================
+    // The three probe callees below are `rt_decision_probe`,
+    // `rt_condition_probe` and `rt_path_probe`. These are the names the runtime
+    // actually exports, the names the Cranelift backend emits
+    // (`codegen/instr/coverage.rs`), and the names already declared as codegen
+    // roots for these MIR instructions in `codegen/common_backend.rs`.
+    //
+    // They previously read `rt_coverage_decision` / `rt_coverage_condition` /
+    // `rt_coverage_path`, which are defined in NEITHER runtime — confirmed with
+    // `nm --defined-only` against both built archives — so any module reaching
+    // these paths failed at LINK time (`undefined reference to
+    // 'rt_coverage_path'`). Codegen itself never complains about an undefined
+    // callee, which is why this survived: only linking discriminates.
+    //
+    // The argument ORDER was wrong as well, independently of the names. The
+    // runtime signatures are `rt_decision_probe(decision_id: u64, result: bool)`
+    // and `rt_condition_probe(decision_id: u64, condition_id: u32,
+    // result: bool)` — id(s) first, result last — and Cranelift passes them in
+    // that order. This emitter passed `result` FIRST. Renaming alone would have
+    // turned an undefined-symbol link error into a silently transposed call, so
+    // the operands are reordered here to match.
     fn emit_decision_probe(
         &mut self,
         result: VReg,
@@ -1758,7 +1778,7 @@ impl CodegenEmitter for LlvmEmitter<'_> {
     ) -> Result<(), String> {
         let res = self.get(result)?;
         let id = self.i64_const(decision_id as i64);
-        self.call_runtime_void("rt_coverage_decision", &[res, id])
+        self.call_runtime_void("rt_decision_probe", &[id, res])
     }
 
     fn emit_condition_probe(
@@ -1773,13 +1793,13 @@ impl CodegenEmitter for LlvmEmitter<'_> {
         let res = self.get(result)?;
         let did = self.i64_const(decision_id as i64);
         let cid = self.i64_const(condition_id as i64);
-        self.call_runtime_void("rt_coverage_condition", &[res, did, cid])
+        self.call_runtime_void("rt_condition_probe", &[did, cid, res])
     }
 
     fn emit_path_probe(&mut self, path_id: u32, block_id: u32) -> Result<(), String> {
         let pid = self.i64_const(path_id as i64);
         let bid = self.i64_const(block_id as i64);
-        self.call_runtime_void("rt_coverage_path", &[pid, bid])
+        self.call_runtime_void("rt_path_probe", &[pid, bid])
     }
 
     // =========================================================================
@@ -2165,5 +2185,75 @@ mod tests {
     fn llvm_method_leaf_name_handles_qualified_symbols() {
         assert_eq!(LlvmEmitter::method_leaf_name("Result.unwrap_err"), "unwrap_err");
         assert_eq!(LlvmEmitter::method_leaf_name("to_u32"), "to_u32");
+    }
+
+    /// Regression guard for the coverage-probe callee names.
+    ///
+    /// `rt_coverage_path` / `rt_coverage_decision` / `rt_coverage_condition` are
+    /// defined in NEITHER runtime. That was established at the BINARY level, not
+    /// by reading source: `nm --defined-only` over both built archives
+    /// (`target/release/libsimple_runtime.a`, 1679 exported `rt_*`, and
+    /// `build/simple-core/libsimple_runtime.a`, 790) lists none of them, while
+    /// the three replacements below are present. It was then confirmed at the
+    /// LINK level, which is the only layer that discriminates: an object
+    /// referencing `rt_coverage_path` fails with `undefined reference to
+    /// 'rt_coverage_path'` (rc=1), whereas one referencing `rt_path_probe` links
+    /// to a real ELF executable with the symbol resolved at a real address.
+    /// Codegen alone never complains, so no codegen-only check can see this.
+    ///
+    /// The positive half of this test is the TRUE-POSITIVE CONTROL: without it,
+    /// "the dead names are gone" could be satisfied by deleting the probe
+    /// emission entirely rather than by pointing it at the real helper. Both
+    /// halves must hold.
+    #[test]
+    fn llvm_emitter_probes_call_symbols_that_exist_in_the_runtime() {
+        // Search the EMITTER code only, never this test module — otherwise the
+        // assertions below would match their own text and be vacuous in both
+        // directions.
+        let src = include_str!("emitter.rs");
+        let split = src.find("#[cfg(all(test, feature = \"llvm\"))]").expect("test module marker");
+        let code = &src[..split];
+
+        // Negative: these three are defined in neither runtime. Names are
+        // assembled at runtime so they never appear as quoted literals here.
+        for suffix in ["path", "decision", "condition"] {
+            let dead = format!("\"rt_coverage_{}\"", suffix);
+            assert!(
+                !code.contains(&dead),
+                "rt_coverage_{} is not defined in either runtime; emitting it \
+                 produces an undefined-symbol link failure that codegen cannot see",
+                suffix
+            );
+        }
+
+        // Positive control: the probe emissions must still exist, naming the
+        // helpers the runtime actually exports and that Cranelift already emits.
+        // Without this half, deleting the probes would satisfy the negative half.
+        for kind in ["path", "decision", "condition"] {
+            let live = format!("\"rt_{}_probe\"", kind);
+            assert!(
+                code.contains(&live),
+                "rt_{}_probe must still be emitted; a silent probe path would \
+                 satisfy the negative assertions above without fixing anything",
+                kind
+            );
+        }
+
+        // Argument order matters independently of the name: the runtime
+        // signatures are (decision_id, result) and (decision_id, condition_id,
+        // result) — ids first, result last — matching Cranelift's emission in
+        // codegen/instr/coverage.rs. Renaming without reordering would have
+        // traded a loud link error for a silently transposed call.
+        assert!(
+            code.contains(&format!("{}\"rt_decision_probe\", &[id, res])", "call_runtime_void(")),
+            "rt_decision_probe takes (decision_id, result), not (result, decision_id)"
+        );
+        assert!(
+            code.contains(&format!(
+                "{}\"rt_condition_probe\", &[did, cid, res])",
+                "call_runtime_void("
+            )),
+            "rt_condition_probe takes (decision_id, condition_id, result)"
+        );
     }
 }
