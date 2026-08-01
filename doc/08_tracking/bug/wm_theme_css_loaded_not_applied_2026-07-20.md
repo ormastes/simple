@@ -22,6 +22,18 @@ theme-cache identity 3/3. The bug remains OPEN only for real guest QEMU
 pixel/event capture across `/THEME.CSS` boot paths; that work is assigned to
 the QEMU plan/host rather than this hosted renderer lane.
 
+## 2026-08-01 Web serialization follow-up
+
+The earlier snapshot repair initially changed only material identity. Review
+found the Web serializer still read the package `composed_css`, so a valid
+override could invalidate a cache while emitting the old CSS pixels. The
+effective snapshot now appends one final canonical CSS palette block (WM plus
+the existing `ui`/`app` aliases), and both normal and install-wire Web documents
+consume it. Hosted receipt revisions mix the material SHA-256 as well as the
+source manifest. Native consumers were also moved off the known broken optional
+snapshot aggregate ABI. Focused tests cover the normal/wire CSS text and
+material-only revision delta; guest visible capture remains open.
+
 Boot B (OVMF, fat32-theme.img carrying the slate_dark palette
 `#0f172a`/`#1e293b`/`#2050a0` as /THEME.CSS): serial prints
 `[desktop-gui] theme bytes=1276 loaded=1` — the VFS allowlist fix works,

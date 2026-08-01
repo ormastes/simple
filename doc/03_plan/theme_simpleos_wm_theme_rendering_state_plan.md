@@ -455,6 +455,21 @@ Current upstream tip noted in this branch as `63c362526c` (latest checked).
   `simpleos_qemu_wm_real_screen.md`; do not block this host/IR fix on absent
   guest tooling.
 
+## 2026-08-01 Web CSS and native snapshot follow-up
+
+- Review found that material-aware cache identity alone was insufficient: the
+  override-derived snapshot still carried the package's old `composed_css`, so
+  Web pixels could remain unchanged. The shared snapshot projection now appends
+  canonical final `--wm-*`, `--ui-*`, and `--app-*` CSS aliases; normal Simple
+  Web, install-wire HTML, and BrowserBackend all consume that effective CSS.
+- Hosted receipt revisions now include both source-manifest and material hash,
+  preventing stale retained content after a material-only override.
+- Native WM/Web/capture consumers no longer use the hosted Cranelift-broken
+  optional `active_wm_theme_render_snapshot()` aggregate ABI; they use the
+  scalar or guarded unchecked accessors instead.
+- Focused current-runtime evidence: Simple Web compositor 26/26,
+  BrowserBackend cache/CSS 3/3, and hosted bootstrap source contract 12/12.
+
 - `fe481ab069` `refactor(ui): S1 DrawIR Vulkan-canonical enums + ResourceTable.formats u32`
   - `src/lib/common/ui/draw_ir_v3.spl`
   - `src/lib/common/ui/draw_ir_v3_backend_enums.spl`

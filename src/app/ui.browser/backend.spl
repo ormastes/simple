@@ -28,6 +28,7 @@ use std.io_runtime.{write_file, time_now_unix_micros}
 use nogc_sync_mut.ui.theme_package.{resolve_theme_alias, theme_package_render_snapshot}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
 use common.ui.wm_chrome_theme.{
+    active_theme_composed_css,
     active_wm_theme_snapshot_present,
     active_wm_theme_snapshot_unchecked
 }
@@ -65,6 +66,18 @@ fn browser_theme_render_snapshot(theme_id: text) -> ThemeRenderSnapshot:
             return active
     theme_package_render_snapshot(theme_id)
 
+pub fn browser_theme_composed_css(theme_id: text) -> text:
+    """Return the same effective CSS represented by BrowserBackend's snapshot.
+
+    A matching active WM snapshot is authoritative for both material/cache
+    identity and CSS. Falling back to generate_css preserves normal browser
+    sessions that have no installed WM theme.
+    """
+    val installed_css = active_theme_composed_css(theme_id)
+    if installed_css != "":
+        return installed_css
+    generate_css(theme_id)
+
 pub fn web_render_engine_is_known(name: text) -> bool:
     """Loud-fail gate for `--web-engine`: only the two real WebRenderBackend
     engines are accepted here (no silent alias-to-default normalization like
@@ -82,7 +95,7 @@ fn browser_backend_time_us() -> i64:
 
 fn browser_semantic_render_ipc_json(state: UIState, viewport_w: i32, viewport_h: i32) -> text:
     val theme = state.tree.theme_name()
-    val css = generate_css(theme)
+    val css = browser_theme_composed_css(theme)
     val body_html = render_html_tree(state.tree.root_node(), state)
     val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body_html, css, "", viewport_w, viewport_h).with_root_attrs(wm_root_data_attrs(theme))
     web_render_ipc_json_with_html_and_semantic(req, web_render_full_html(req), semantic_ui_snapshot_to_json(browser_semantic_snapshot(state)))
@@ -486,7 +499,7 @@ class BrowserBackend:
 
         val body = render_html_tree(tree.root_node(), state)
         val theme = state.tree.theme_name()
-        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body, generate_css(theme), "", self.width, self.height).with_root_attrs(wm_root_data_attrs(theme))
+        val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body, browser_theme_composed_css(theme), "", self.width, self.height).with_root_attrs(wm_root_data_attrs(theme))
         self.last_semantic_snapshot_json = semantic_ui_snapshot_to_json(browser_semantic_snapshot(state))
         val profile = web_render_optimization_profile(req)
         val themed_cache_key = browser_theme_cache_key(
