@@ -470,16 +470,26 @@ fn eval_stmt_for(sid: i64) -> i64:
 
     if val_is_text(iterable):
         val str_val = val_get_text(iterable)
+        # One loop element is one UTF-8 codepoint, not one byte. `len()` is the
+        # BYTE length and `substring(i, i + 1)` is a byte slice, so the old
+        # index-stepped form over-ran non-ASCII input ("café," ran 6 times, not
+        # 5) and bound split-codepoint fragments. `chars()` is the canonical
+        # Unicode splitter and matches the MIR lowering in
+        # src/compiler/50.mir/mir_lowering_stmts.spl (rt_string_chars).
+        # Bound to a val so the `for x in s.chars()` -> `for x in s` desugar
+        # (Pattern F in 10.frontend/desugar/collection_desugar.spl) cannot
+        # rewrite this back into the byte-indexed shape.
+        val str_chars = str_val.chars()
         var last_val3 = val_make_nil()
         var char_idx = 0
-        for _iter in 0..str_val.len():
-            if char_idx >= str_val.len(): break
+        for _iter in 0..str_chars.len():
+            if char_idx >= str_chars.len(): break
             if eval_had_error: break
             if eval_returning: break
             if eval_breaking: break
             eval_continuing = false
             eval_continue_label = ""
-            val ch = str_val.substring(char_idx, char_idx + 1)
+            val ch = str_chars[char_idx]
             env_push_scope()
             env_define(iter_name, val_make_text(ch))
             for sid2 in body_stmts:

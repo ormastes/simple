@@ -5582,6 +5582,13 @@ int64_t rt_dict_entries(int64_t dict) {
  * so `for x in <collection>` called a NULL pointer and SIGSEGV'd. */
 int64_t rt_for_iterable(int64_t collection) {
     if (rt_core_as_dict(collection)) return rt_dict_entries(collection);
+    /* Text becomes its UTF-8 codepoint array, so `for ch in <text>` binds one
+     * 1-char text per codepoint. Without this, a string fell through to the
+     * generic rt_array_len / IndexGet path, which read the BYTE length and
+     * indexed raw bytes: "café,"-style input ran 6 times instead of 5 and
+     * bound garbage that concatenated to nothing. Keep in sync with
+     * rt_for_iterable in src/runtime/simple_core/core_array.spl. */
+    if (rt_core_as_string(collection)) return rt_string_chars(collection);
     return collection;
 }
 

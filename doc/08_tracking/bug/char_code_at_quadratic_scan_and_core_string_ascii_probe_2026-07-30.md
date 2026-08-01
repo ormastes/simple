@@ -422,3 +422,15 @@ is a superoptimizer for precisely the `while i < s.len(): if s.char_code_at(i) =
 shape, and it is gated on `value.is_ascii()` (`:961`). That is an additional
 reason the ASCII column measured flat in the 2026-07-30 table, and it means the
 ASCII half of that table is not evidence about the general path at all.
+
+## 2026-08-01 — why these call sites exist at all
+
+`for ch in <text>` iterates the BYTE count and binds a corrupt value on the Rust
+seed JIT/MIR and native AOT paths, which is what pushed ~120 of the call sites
+counted here onto the `while i < s.len(): s.char_code_at(i)` idiom in the first
+place. See `for_in_text_iterates_bytes_not_chars_2026-08-01.md`.
+
+The migration criteria in this document remain the gate for touching those call
+sites. Do not start the migration until the Rust seed JIT/native lane described
+in that bug is closed — `for ch in <text>` is still wrong there, so migrating a
+caller off `char_code_at` today would regress it on the engine most people run.
