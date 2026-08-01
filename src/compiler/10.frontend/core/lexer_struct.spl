@@ -10,7 +10,7 @@
 # Design: All state in CoreLexer struct fields. Methods modify self.
 # Compatible with the minimal bootstrap subset: no generics, no closures, no lambdas.
 
-use compiler.core.tokens.{keyword_lookup, token_requires_rhs}
+use compiler.core.tokens.{keyword_lookup, token_requires_rhs, token_can_end_expr}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use std.string_core.{char_code, char_from_code}
 
@@ -208,6 +208,124 @@ impl CoreLexer:
         if target >= self.source_chars.len():
             return ""
         self.source_chars[target]
+
+    # ----- G27b: leading-operator line continuation -----
+    #
+    # Mirror of token_requires_rhs (the TRAILING form, G27) and of the
+    # leading-`.`/`|` method-chain rule: a line whose first non-blank
+    # characters spell a binary operator continues the previous logical line,
+    # so its Newline and Indent must both be suppressed.
+    #
+    #     val er = 1.0
+    #         + r
+    #         + r2 / 2.0
+    #
+    # `.` and `|` are deliberately absent — they are handled by the older
+    # leading-dot rule, which has no indent guard. Bare `not` is absent too:
+    # it is a prefix operator as often as it is the head of `not in`.
+
+    fn char_at_pos(p: i64) -> text:
+        if p < 0:
+            return ""
+        if p >= self.source_chars.len():
+            return ""
+        self.source_chars[p]
+
+    # A word operator only continues the line when it is a whole word: `or`
+    # continues, `order` is an ordinary identifier.
+    fn word_boundary_at(p: i64) -> bool:
+        val after: text = self.char_at_pos(p)
+        if after == "":
+            return false
+        if is_alpha(after):
+            return false
+        if is_digit(after):
+            return false
+        if after == "_":
+            return false
+        true
+
+    # Indentation width of the line beginning at `p`, using the same weights
+    # handle_indentation uses (space 1, tab 4, CR zero-width).
+    fn measure_indent_from(p: i64) -> i64:
+        var indent: i64 = 0
+        var i: i64 = p
+        for _mi in 0..100000:
+            val c: text = self.char_at_pos(i)
+            if c == " ":
+                indent = indent + 1
+                i = i + 1
+            elif c == "\t":
+                indent = indent + 4
+                i = i + 1
+            elif c == "\r":
+                i = i + 1
+            else:
+                break
+        indent
+
+    # Position of the first non-blank char of the line beginning at `p`.
+    fn skip_indent_from(p: i64) -> i64:
+        var i: i64 = p
+        for _si in 0..100000:
+            val c: text = self.char_at_pos(i)
+            if c == " " or c == "\t" or c == "\r":
+                i = i + 1
+            else:
+                break
+        i
+
+    fn line_starts_binary_op(p: i64) -> bool:
+        val c0: text = self.char_at_pos(p)
+        if c0 == "":
+            return false
+        val c1: text = self.char_at_pos(p + 1)
+        # Two-character forms that a single-character test would misread.
+        if c0 == "=":
+            return c1 == "="
+        if c0 == "!":
+            return c1 == "="
+        if c0 == "?":
+            return c1 == "?"
+        # Arithmetic, bitwise and comparison operators. None of these can
+        # legally BEGIN a statement once the two guards in
+        # leading_op_continues have already fired.
+        if c0 == "+" or c0 == "-" or c0 == "*" or c0 == "/" or c0 == "%":
+            return true
+        if c0 == "<" or c0 == ">" or c0 == "&" or c0 == "^":
+            return true
+        # Word operators.
+        val c2: text = self.char_at_pos(p + 2)
+        if c0 == "a" and c1 == "n" and c2 == "d" and self.word_boundary_at(p + 3):
+            return true
+        if c0 == "o" and c1 == "r" and self.word_boundary_at(p + 2):
+            return true
+        if c0 == "i" and c1 == "n" and self.word_boundary_at(p + 2):
+            return true
+        if c0 == "i" and c1 == "s" and self.word_boundary_at(p + 2):
+            return true
+        if c0 == "a" and c1 == "s" and self.word_boundary_at(p + 2):
+            return true
+        false
+
+    # Guards, in the order they matter:
+    #   1. the previous token must be able to END an expression. This is what
+    #      stops `if c:` NEWLINE INDENT `-1` from folding the block body into
+    #      the header.
+    #   2. the continuation line must be indented STRICTLY DEEPER than the
+    #      current logical line. This is what stops the implicit-return `-1`
+    #      that DEDENTS out of a loop body from being folded into the last
+    #      statement of that body — the shape in
+    #      src/runtime/simple_core/core_string.spl (`i = i + 1` then `-1`).
+    #   3. the line must actually start with a binary operator.
+    fn leading_op_continues(indent_level: i64, p: i64) -> bool:
+        if not token_can_end_expr(self.cur_kind):
+            return false
+        val stack_len: i64 = self.indent_stack.len()
+        val current_indent: i64 = self.indent_stack[stack_len - 1]
+        if indent_level <= current_indent:
+            return false
+        self.line_starts_binary_op(p)
 
     # Token-text extraction over a [start,end) char range: O(span) via indexed
     # collection + one join, replacing `source[start:end]` which was O(N) per call.
@@ -1019,6 +1137,13 @@ impl CoreLexer:
             self.scan_token()
             return
 
+        # G27b: leading-operator continuation — suppress the Indent the same
+        # way. self.pos is already at the first non-blank char of this line,
+        # and indent_level is its measured indentation.
+        if self.leading_op_continues(indent_level, self.pos):
+            self.scan_token()
+            return
+
         # Inside parentheses/brackets: suppress Indent/Dedent tokens entirely.
         # The indent stack is left unchanged so it remains valid after the closing bracket.
         # Exception: a block-bodied construct (e.g. `\x:` block lambda) that
@@ -1124,6 +1249,14 @@ impl CoreLexer:
                     break
             val la_c: text = if dot_la < self.source_chars.len() then self.source_chars[dot_la] else ""
             if la_c == "." or la_c == "|":
+                self.scan_token_rescan()
+                return
+            # G27b: leading-operator continuation — suppress the Newline. The
+            # matching Indent suppression lives in handle_indentation; both
+            # sites must agree, or the parser sees a half-continued line.
+            val la_indent: i64 = self.measure_indent_from(self.pos)
+            val la_first: i64 = self.skip_indent_from(self.pos)
+            if self.leading_op_continues(la_indent, la_first):
                 self.scan_token_rescan()
                 return
             self.make_token(180, "\n", start_line, start_col)
