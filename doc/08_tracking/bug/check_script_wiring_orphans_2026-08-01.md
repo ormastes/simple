@@ -227,3 +227,98 @@ pre-existing untracked `pre-commit` as `pre-commit.local` and installed
   merely *named* in a workflow comment counts as wired. It over-approximates
   reachability on purpose -- that under-reports orphans rather than failing a
   build on a parse gap -- but it means the 51 "invoked" figure is an upper bound.
+
+## Orphan-shrinking pass 1 (2026-08-01, base `76c3e1e080d`)
+
+Scope: the 141 opt-out entries carrying the placeholder reason "not yet
+triaged". The other 221 (GPU / browser / QEMU / platform / perf) were left
+alone -- their reasons are already substantive.
+
+**First finding: the ratchet was already RED at `76c3e1e080d`.**
+`check-guard-wiring.shs` exits 1 with `unwired_guard=check-lint-census.shs` --
+a guard landed after the seeding and wired into nothing. The ratchet worked
+exactly as designed; nobody had looked. Absorbed below.
+
+### Wired (3) -- each fire-proved by sabotage, control green
+
+| Guard | Protects | Fallout absorbed |
+|---|---|---|
+| `check-jit-runtime-symbol-manifest.shs` | silent whole-module de-JIT (~1000x) | 3 symbols added to `RUNTIME_SYMBOL_NAMES` |
+| `check-spipe-submodule-gitlinks.shs` | index/tree shape corruption | none (green) |
+| `check-lint-census.shs --self-test` | census scoring a crash as a checked file | none (green) |
+
+`check-jit-runtime-symbol-manifest.shs` was red on `rt_array_at`, `rt_at` and
+`rt_mem_attr_set_owner`. All three are emitted by codegen and defined with no
+feature cfg (`value/collections.rs:648,683`, `value/heap.rs:675`) in
+non-cfg-gated modules, so each was a silent de-JIT. They were **added to the
+manifest**, not baselined. `rt_array_at`/`rt_at` back the `.at()` accessor.
+
+Fire-proofs (all run from the worktree root, output to a file, file read):
+
+- manifest guard -- control exit 0, `missing=0`, `manifest names: 1609`.
+  Sabotage: drop `"rt_array_len"` **from `RUNTIME_SYMBOL_NAMES`** -> exit 1,
+  names it. Drop `"rt_at"` (one this change added) -> exit 1, names both, which
+  proves the added entries are load-bearing. Plant a quoted string inside a
+  comment in the list -> exit 1, `PHANTOM manifest entries (1)`. Restore ->
+  exit 0. *A first sabotage attempt did NOT fire*: the file holds two lists and
+  the edit hit `CORE_REQUIRED_RUNTIME_SYMBOLS` instead. Recorded because a guard
+  that "did not fire" is as often a bad sabotage as a bad guard.
+- gitlink guard -- real fixture repo with a real submodule. Control exit 0,
+  `PASS -- 2 path(s) checked`. Flatten the gitlink into a tracked file tree ->
+  exit 1 `gitlink_bad ... mode=100644`. Collapse the tracked example tree to one
+  entry -> exit 1 `tracked_tree_bad`. Restore -> exit 0. Also proved it works on
+  a checkout with the submodule **not** initialised (`actions/checkout@v4`
+  default): it reads `git ls-files --stage`, i.e. the index, not the worktree.
+- lint-census self-test -- control `PASS: self-test 11 of 11`. Rewrite the
+  classifier's `CRASH` verdict to `LINTED` at one site -> `FAIL: 4 of 11
+  wrong`; at the other site -> `FAIL: 1 of 11 wrong`. Restore -> 11 of 11.
+
+The guard contract was added to `check-spipe-submodule-gitlinks.shs`, which
+previously printed only per-path lines: it now emits
+`PASS -- <n> path(s) checked` and `ERROR -- nothing was checked` (exit 2).
+
+All three steps carry `if: ${{ !cancelled() }}`, so a red earlier gate cannot
+silently skip them -- the defect that left five gates unexecuted. YAML parsed
+and the step list re-read after the edit; `code-idiom-gates` now has 11 steps.
+
+Ratchet after the change: `PASS -- 414 guard(s) checked, 54 invoked, 360
+orphaned (all justified)` (was 51 invoked / 362 orphaned, exit 1).
+
+### Filed with a concrete count -- valuable, fallout beyond this lane
+
+Every count below is from running the guard at HEAD from the repo root, exit
+status read from a file, not a pipe.
+
+| Guard | State | Count it would flag |
+|---|---|---|
+| `check-dangling-references.shs` | RED, exit 1 | **297 dangling references** -- imported names declared in no src file (`src/os/userlib/_Window/*` is a large cluster). Unresolved-symbol class; highest-value single item left. |
+| `check-runtime-bundle-duplicate-symbols.shs` | RED, exit 1 | baselined 72, current 74, **new 2**: `rt_file_is_regular_no_follow`, `rt_is_interpreter_runtime`, each defined by both `runtime.c` and `runtime_native.c`. The guard's own text: *every native link will fail*. Fix is to remove a duplicate C definition -- do NOT baseline it. |
+| `check-runtime-symbol-lane-divergence.shs` | RED, exit 1 | 903 symbols scanned, baselined 114, current 115, **new 1**: `rt_time_now_monotonic_ms` in `runtime_native.c` + `runtime_time.c`. Two implementations that may disagree = silent wrong value. |
+| `check-core-lib-purity.shs` | RED, exit 1 | baselined 13, current 17, **new 5** (`font_registry.spl`, `js/engine/runtime.spl`, `renderdoc/backend_render_receipt_wire.spl`, `ui/widget_draw_ir.spl`, `ui/window_scene_draw_ir.spl`) **plus 1 stale baseline entry** (`ui/win_text_access.spl`). Tighten, never drop. |
+| `check-api-arch-guard.shs` | RED, exit 1, 106s | 2 arch-doc hash mismatches (`00_compiler_architecture.md`, `mcp_performance_regression_enforcement.md`) + module-symbol drift. Baseline is doc-hash based and needs `--update-baseline` by an owner. |
+| `check-type-name-collisions.shs` | exit **0**, warn-only | **85 colliding names** (e.g. `HandshakeResult` declared as both enum and struct). Exits 0 by design, so wiring it as-is gates nothing -- it must be promoted to fail-on-new-collision first. |
+
+### Reclassified -- the reason was wrong, not the guard
+
+- `check-lint-rejects-unparseable.shs` -- green (16s) and it guards a real blind
+  spot (`simple lint` not failing closed on an unparseable file), but it needs a
+  **built `bin/simple`**. It cannot go in `code-idiom-gates`, which only checks
+  out. Belongs in a workflow that builds the compiler.
+- `check-keyword-identifier-bindings.shs` -- green, pure git+grep, `cd`s to its
+  own repo root so it cannot fail open on cwd. Blocked on the contract only: it
+  prints a bare `OK: no keyword bindings` with **no count**. Needs a count first.
+- `check-heavy-work-preflight.shs` -- not a gate at all. It measures live machine
+  state (swap, 1m load, dirty-file count: 8046 here) and reports `BLOCKED`. It is
+  an operator preflight; the placeholder reason should say so.
+- `check-sspec-count-truthful.shs` -- takes spec paths as arguments and exits 2
+  with a usage message when given none. Needs a driver that supplies targets.
+- `check-req-traceability.shs` -- lives at `scripts/check/cert/`, not
+  `scripts/check/`. Basename-keyed opt-out entries hide that.
+- `check-compiler-provenance.shs` -- green (47s) but informational: it prints
+  which fix commits are present in the deployed binary and says so itself
+  ("Symbol presence alone does not prove reachability").
+
+Orphans remaining: **360**, of which **127** still carry the placeholder reason
+(down from 141: 2 were wired and 12 placeholder reasons were replaced with a
+substantive one, so "deliberately not a gate" is now distinguishable from
+"someone forgot" for those).

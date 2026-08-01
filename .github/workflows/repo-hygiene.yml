@@ -112,6 +112,53 @@ jobs:
         run: |
           sh scripts/check/check-guard-wiring.shs
 
+      # JIT runtime-symbol manifest gate.
+      #
+      # The JIT symbol table is generated from a HAND-MAINTAINED list,
+      # RUNTIME_SYMBOL_NAMES in src/compiler_rust/common/src/runtime_symbols.rs.
+      # There is no scanner. A symbol codegen emits but the list omits is never
+      # registered, the JIT import fails to resolve, and the WHOLE module falls
+      # back to the interpreter -- correct, and ~1000x slower (rt_index_of took
+      # compute_styles from 369ms to over ten minutes, fixed in 5c75a1bbce0).
+      # Because de-JITted code stays CORRECT, nothing else catches this.
+      #
+      # Wired 2026-08-01 from guard_wiring_optout.txt. It was red on three
+      # symbols at the time (rt_array_at, rt_at, rt_mem_attr_set_owner); those
+      # were added to the manifest in the same change rather than baselined.
+      - name: JIT runtime-symbol manifest gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-jit-runtime-symbol-manifest.shs
+
+      # .spipe/spipe gitlink shape gate.
+      #
+      # Index/tree corruption class. When a submodule gitlink (mode 160000) is
+      # flattened into a tracked file tree, or a tracked tree collapses into a
+      # gitlink, the parent index silently changes shape and a clone gets the
+      # wrong content. main was wiped to near-zero twice in 24h on 2026-08-01
+      # through adjacent index-shape failures, so this class gets a gate.
+      # Runs in ~0s and needs nothing but git.
+      - name: spipe submodule gitlink shape gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-spipe-submodule-gitlinks.shs
+
+      # Lint-census classifier self-test.
+      #
+      # check-lint-census.shs exists because `simple lint` can DIE mid-file with
+      # no summary line, and a census that scores by summary lines reads that
+      # crash as success -- a lint census was retracted on 2026-08-01 for
+      # exactly that vacuous oracle. The census itself needs a built bin/simple
+      # and explicit targets so it cannot gate here, but its classifier can:
+      # --self-test drives 11 synthetic runs (clean, not-linted, arena-OOB
+      # crash, crash-with-rc-0, timeout, SIGKILL, missing log) through the real
+      # classify_run and asserts each verdict. If the classifier ever regresses
+      # to scoring a crash as LINTED, this step goes red.
+      - name: Lint-census classifier self-test
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-lint-census.shs --self-test
+
       # Unregistered-extern gate, REPORT-ONLY for now.
       #
       # An @extern symbol with no registration does not fail to link: depending

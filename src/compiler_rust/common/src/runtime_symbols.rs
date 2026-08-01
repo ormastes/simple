@@ -387,6 +387,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_transient_array_scope_pause",
     "rt_transient_heap_promote",
     "rt_transient_array_scope_end",
+    // Unconditionally defined in value/heap.rs and emitted by codegen; absent
+    // from this list until 2026-08-01, so any module tagging heap ownership
+    // silently fell back to the interpreter.
+    "rt_mem_attr_set_owner",
     // Array operations
     "rt_array_new",
     "rt_byte_array_new",
@@ -394,6 +398,13 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_push",
     "rt_array_get",
     "rt_array_get_text",
+    // rt_array_at / rt_at back the `.at()` Option accessor. Both are emitted by
+    // codegen and both are unconditionally defined in value/collections.rs, so
+    // omitting them de-JITted every module that uses `.at()` -- silently, and
+    // ~1000x slower. Added 2026-08-01 when check-jit-runtime-symbol-manifest.shs
+    // was wired into CI and reported them.
+    "rt_array_at",
+    "rt_at",
     "rt_array_data_ptr_text",
     "rt_array_data_ptr_u8",
     "rt_array_set",
