@@ -344,3 +344,9 @@ On-device verification (absolute oracles, NOT `eval OK` which ≠ painted):
 - Engine2D/Metal/winit runtime externs live in the **GUI driver**
   (`src/compiler_rust/target/gui/debug/simple`), not the stale `bin/release`.
 - Reference: `doc/04_architecture/ui/simple_gui_stack.md` → "GUI Sanity Apps".
+- For `graphics_2d_showcase`, also follow
+  `doc/00_llm_process/feature_expert/simple_2d_showcase/skill.md` and
+  `test/03_system/app/simple_2d/feature/graphics_2d_showcase_spec.spl`.
+  A valid 2D receipt includes compositor planes, `WindowEventLoop`-normalized
+  input, vector-font cache evidence, and >=60 changed redraws with p95 <=33.33
+  ms; static present loops do not qualify.

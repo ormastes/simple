@@ -49,10 +49,22 @@ alpha mask, shadow, blur, and engine-to-engine composition (plain + opacity).
 **Not shown (exist on `Engine2D` but absent from the showcase):**
 - `draw_glyph_run` — raw pre-shaped glyph-batch rendering (the showcase only
   calls the higher-level `draw_text` / `draw_text_bg`)
-- Font management (`load_font`, `load_font_bytes`, `select_font_identity`,
-  `unload_font`, `font_cache_stats`) — the showcase never loads a custom font
-- `tick_forever` — the frame-pacing animation loop; the showcase renders one
-  static frame and never enters a paced loop
+
+## 2D hardening flow
+
+`graphics_2d_showcase` loads a selected vector face and proves one cold glyph
+rasterization followed by a warm-cache reuse. Its lower panel contains actual
+`Engine2D` compositor output for ordered desktop, child-window, and taskbar
+planes. Host Winit input is normalized by `WindowEventLoop` before it changes
+the rendered interaction state. `SHOWCASE_PERF=1` runs at least 60 changed
+overlay redraws and fails unless p95 is at most 33.33 ms; a retained static
+`present()` loop is not valid performance evidence.
+
+The title encodes the selected backend. For the detailed contract, see the
+[2D expert wiki](../../00_llm_process/feature_expert/simple_2d_showcase/skill.md),
+the [test plan](../../03_plan/sys_test/simple_2d_showcase_hardening.md), and
+the SPipe source contract at
+`test/03_system/app/simple_2d/feature/graphics_2d_showcase_spec.spl`.
 
 **Not offered by `Engine2D` at all** (so the showcase cannot demonstrate them
 without a runtime feature add): a dedicated anti-aliasing toggle/primitive,

@@ -78,6 +78,13 @@ Use these stable app IDs across every supported launch surface:
 | `web_standards_showcase` | HTML/CSS/web standards rendering |
 | `gui_widget_showcase` | Widget state and interaction |
 
+For the 2D primitive gallery, use the expert wiki at
+`doc/00_llm_process/feature_expert/simple_2d_showcase/skill.md` and its SPipe
+contract at `test/03_system/app/simple_2d/feature/graphics_2d_showcase_spec.spl`.
+Before marking it ready, require same-run window identity, nonblank pixels,
+normalized event history, post-input visual change, vector-font receipt, and
+changed-frame performance evidence.
+
 Run each applicable app on `standalone`, `host_wm`, and `simpleos_wm`. For each
 combination: snapshot the surface, find the app by canonical ID or visible role,
 act on at least one semantic control, read history, then snapshot again. Assert
