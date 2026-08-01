@@ -283,6 +283,38 @@ Use `cargo build --profile bootstrap --features llvm` from `src/compiler_rust/`
 if the seed is rebuilt by hand — omitting `--features llvm` yields a no-LLVM
 seed.
 
+### 14:48 — `bin/simple` was replaced by a RUST-BUILT binary. This is a FALSE GREEN.
+
+Minutes after the refusal above, a parallel lane deployed a new
+`bin/release/x86_64-unknown-linux-gnu/simple`: **154,185,152 bytes**, mtime
+14:48:18, sha `6c1dcb2b…` (the pre-attempt baseline was `65d941e8…`,
+130,366,776 bytes). The symptoms this bug tracks now *appear* fixed:
+
+| check | result |
+|---|---|
+| `compile hello.spl --format=smf` | **exit 0**, no SIGILL (was exit 132) |
+| `compile hello.spl --native` | exit 0, 609,168 bytes, runs, prints `HELLO_FROM_DEPLOYED_SIMPLE_42` |
+| `--help` subcommands | `test`/`compile`/`watch`/… present again |
+
+**Do not read that as this bug being fixed.** The deployed binary is the
+**Rust** compiler, not the pure-Simple self-hosted one:
+
+- it prints `WARNING: this Rust-built Simple binary is a bootstrap seed only; do
+  not use it as the normal tool. Build and use the pure-Simple bin/simple
+  instead.` on every invocation;
+- `strings` shows Rust std/backtrace paths (`library/std/src/…`), i.e. Rust-built;
+- the guard symbol `plan_synthetic_driver_registration` added by the fix is
+  **absent** from the binary.
+
+So the SIGILL is gone only because the pure-Simple compiler is no longer being
+run at all. The `.?`-nil-sentinel fix `2cb9636309cf` remains **undeployed**, and
+this contradicts the standing rule that default tooling is the pure-Simple
+self-hosted binary, not the Rust seed. The redeploy task therefore **stays
+open**; closing it on the evidence in the table above would be a false green of
+exactly the kind this file exists to catch. Whoever owns the 14:48 deploy should
+also confirm it was intentional, since it silently changed the engine behind
+every `bin/simple` invocation repo-wide.
+
 **Verified good, and reusable next window:** the fix commit `2cb9636309cf` is
 intact in the working tree (`git diff 2cb9636309c` over the three touched files
 is empty), and the current seed is LLVM-capable *by positive test* — it compiled
