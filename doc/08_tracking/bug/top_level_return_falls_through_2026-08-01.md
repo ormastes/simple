@@ -98,8 +98,11 @@ used a top-level `return` to keep TBAA metadata switched off. The guard never
 took effect, so **every** `.ll` the pure-Simple LLVM lane emitted carried TBAA
 metadata — and that metadata was itself malformed (see the companion bug
 `llvm_lane_emits_invalid_ir_2026-08-01.md`), making `llc` reject every module.
-That single site is why the pure-Simple LLVM lane could not compile a six-line
-hello-world.
+
+That site is now fixed, but it was **not** the only thing blocking the lane: a
+six-line hello-world still fails there on a corrupt `target triple` and lost
+constants (defects 2 and 3 of the companion entry, both still OPEN). Fixing this
+one site is necessary, not sufficient.
 
 The general risk is much wider: any `.spl` function that early-returns
 unconditionally at statement level and has code after it is running that code.
