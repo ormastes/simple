@@ -211,3 +211,18 @@ caches, Stage 3 cleared the former 5m30s abort and remained CPU-active until its
 1,567,392 KiB. This supersedes the old claim that the current proximate failure
 is a seed-wrapper fallback. The next evidence action is one Stage 3-only run
 with a 90-minute cap, followed by the full-CLI relink only if Stage 3 succeeds.
+
+## Status update 2026-08-01 — NOT YET DONE (still Open)
+
+Pure-Simple self-host is **not complete** at HEAD. Do not close. Progress from
+parallel sessions has removed major causes (e.g. `case Some(x)` on nullable `T?`
+never matching — `fb1a0033d51`, unresolved names 9,530 → ~195; the `true_*`
+prefix-call grammar bug — `28bea12384b`), but Stage 3 / full-CLI self-host is not
+green, so the deployed `bin/simple` still lacks `test`/`run`/`lint`.
+
+In parallel, the byte-vs-char / find-as-Option **divergence sweep** continues to
+land correctness fixes on `src/**` (waves through 2026-08-01: `4beaa207810`,
+`29687ff0d530`, `30fbcdc0f00`). These are independent product-correctness fixes,
+not self-host unblockers — the self-host gate remains the umbrella blocker. See
+`doc/08_tracking/bug/divergence_byte_char_find_option_sweep_2026-08-01.md` and
+`doc/08_tracking/bug/module_lowering_byte_vs_char_sanitizer_2026-08-01.md`.
