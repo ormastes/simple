@@ -65,6 +65,29 @@ that way and is in fact **not a module-level alias at all**.
 | distinct alias names | 190 | **185** |
 | names declared in >1 file | 63 | **52** |
 
+### All three injection routes, enumerated
+
+A duplicate can only bite if two providers of one name reach **one module's**
+symbol table. There are exactly three routes, and all three are empty at the
+tip this was measured on:
+
+| route | result |
+|---|---|
+| a file declares alias `N` **and** named-imports `N` | **0** |
+| ≥2 glob-imported modules provide the same alias name | 13 (file, name) pairs; of these 6 involve a divergent-target name |
+| — of those 6, surviving hand-verification | **0** |
+
+The 6 divergent-target candidates were all `Count`, and every one dissolves on
+inspection: `failsafe/mod.spl` and the `mcp/core/*` files glob providers that
+**all** declare `type Count = i64`, and `sdoctest/mod.spl` globs siblings that
+declare no `Count` at all — that row is an artifact of joining on module
+basename (`sdoctest/discovery` vs `tooling/testing/discovery`). The only `i32`
+providers of `Count` live under `src/compiler_rust/lib/std/src/tooling/**`,
+which none of those roots reach. A basename join is unavoidable here because
+path-derived module names carry numbered-layer segments
+(`compiler.30.types.foo`) while `use` lines use the symlink spelling
+(`compiler.types.foo`) — a full-path join silently yields zero.
+
 Of the 52 duplicated names, **40 have providers that all agree on the target**
 (a swapped winner is harmless even under a future transparent-alias
 implementation). **12 have divergent targets** — the set that would become live:
