@@ -246,39 +246,49 @@ fn ws_parse_frame(data: [u8], offset: i64) -> WsFrame?:
     else:
         payload = _slice_bytes(data, header.payload_offset, header.payload_len)
 
-    match header.opcode:
-        case WS_OPCODE_TEXT:
-            return WsFrame.Text(WsTextFrame(
-                fin: header.fin,
-                rsv1: header.rsv1,
-                rsv2: header.rsv2,
-                rsv3: header.rsv3,
-                payload: payload
-            ))
-        case WS_OPCODE_BINARY:
-            return WsFrame.Binary(WsBinaryFrame(
-                fin: header.fin,
-                rsv1: header.rsv1,
-                rsv2: header.rsv2,
-                rsv3: header.rsv3,
-                payload: payload
-            ))
-        case WS_OPCODE_CONTINUATION:
-            return WsFrame.Continuation(WsContinuationFrame(
-                fin: header.fin,
-                rsv1: header.rsv1,
-                rsv2: header.rsv2,
-                rsv3: header.rsv3,
-                payload: payload
-            ))
-        case WS_OPCODE_CLOSE:
-            return _build_close_frame(header, payload)
-        case WS_OPCODE_PING:
-            return _build_ping_frame(header, payload)
-        case WS_OPCODE_PONG:
-            return _build_pong_frame(header, payload)
-        case _:
-            return nil
+    # Opcode dispatch MUST use explicit equality, NOT `match`.
+    #
+    # WS_OPCODE_* are `val` i64 constants (ws_frame.spl), not enum variants.
+    # In `case` position a bare identifier is an IRREFUTABLE BINDING PATTERN
+    # even when it names an in-scope constant, so `match header.opcode:` with
+    # `case WS_OPCODE_TEXT:` bound *every* opcode to the first arm and made
+    # the other five arms dead — every frame dispatched as Text. See
+    # doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+    # (lint MEXH006). ws_frame.spl's ws_is_data_opcode uses the same
+    # `==` idiom for the same reason.
+    if header.opcode == WS_OPCODE_TEXT:
+        return WsFrame.Text(WsTextFrame(
+            fin: header.fin,
+            rsv1: header.rsv1,
+            rsv2: header.rsv2,
+            rsv3: header.rsv3,
+            payload: payload
+        ))
+    elif header.opcode == WS_OPCODE_BINARY:
+        return WsFrame.Binary(WsBinaryFrame(
+            fin: header.fin,
+            rsv1: header.rsv1,
+            rsv2: header.rsv2,
+            rsv3: header.rsv3,
+            payload: payload
+        ))
+    elif header.opcode == WS_OPCODE_CONTINUATION:
+        return WsFrame.Continuation(WsContinuationFrame(
+            fin: header.fin,
+            rsv1: header.rsv1,
+            rsv2: header.rsv2,
+            rsv3: header.rsv3,
+            payload: payload
+        ))
+    elif header.opcode == WS_OPCODE_CLOSE:
+        return _build_close_frame(header, payload)
+    elif header.opcode == WS_OPCODE_PING:
+        return _build_ping_frame(header, payload)
+    elif header.opcode == WS_OPCODE_PONG:
+        return _build_pong_frame(header, payload)
+    # Unknown / reserved opcode (RFC 6455 §5.2): receivers MUST fail the
+    # connection; surfaced here as nil.
+    return nil
 
 # Compute the wire size that a frame with `payload_len` would consume.
 # Useful for caller-side framing chunking. Does not include masking key bytes.
