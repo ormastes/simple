@@ -591,6 +591,33 @@ enum MappingKind:
 
 `weight_milli` is optional diagnostic attribution, not semantic correctness. For example, a merged optimized instruction may attribute 600/400 to two inputs.
 
+`TransformInstanceId` and `MappingFlags` are declared as `MappingEdge` fields
+but were never defined; both are ratified here so lanes cannot disagree on a
+width or on what a bit means.
+
+`TransformInstanceId` is a `u32`, applying the scalar convention already
+ratified in §4.2 — a fixed-width unsigned integer, little-endian, and `u32` for
+an identity scalar unless a section says otherwise. The identifier occurs
+exactly once in the repository, at that field declaration, so nothing else
+constrained it.
+
+`MappingFlags` is a `u32` bitfield with three defined bits. Each bit exists
+because a sentence in this chapter is otherwise unrepresentable, not because a
+producer wanted somewhere to put a hint:
+
+| Bit | Name | Sentence that forces it |
+|---|---|---|
+| 0 (`0x1`) | `WEIGHT_VALID` | §6.2 above: `weight_milli` is *optional*. Without the bit, an edge attributing 0/1000 and an edge supplying no attribution encode to identical bytes |
+| 1 (`0x2`) | `SYNTHETIC` | §6.5 `Synthesize`, and §6.1 "or synthesize entities" — the target has no true source origin, which is part of why §6.1 rejects a single source pointer |
+| 2 (`0x4`) | `DISCARDED` | §6.5 `DiscardWithReason` plus "A pass cannot silently drop origins" — a dropped origin not recorded as an edge *is* the silent drop that rule forbids |
+
+An edge without `WEIGHT_VALID` attributes a full share, 1000 milli: a merged
+instruction with no stated split still fully derives from each listed input.
+
+Bits 3..31 are reserved and must be zero. A set reserved bit is a hard reject,
+exactly as an unknown enum discriminant is — a reader that masked one off would
+report success on provenance written by a producer it does not understand.
+
 ### 6.3 Storage
 
 Mappings are stored as compressed sparse adjacency structures:
@@ -603,6 +630,35 @@ reverse_edges[]
 ```
 
 A stage can emit forward edges cheaply and construct the reverse index lazily.
+
+The element type of `reverse_edges` was never stated. It is a `u32` **index into
+the forward edge list**, not a duplicated edge record: this section calls the
+structure the reverse *index* and requires it be cheap to build lazily, and a
+second copy of every edge body is neither cheap nor guaranteed to agree with the
+first.
+
+The four arrays are a compressed sparse row (CSR) layout, and a CSR is
+undecodable without its well-formedness rules — without the terminator rule
+alone, `N` versus `N + 1` offset entries is ambiguous. The invariants below are
+therefore normative, and are enforced identically on encode and decode so no
+lane can emit a shard another lane must reject:
+
+- `from_offsets` has `node_count + 1` entries, starts at 0, is non-decreasing,
+  and ends at the edge count. Edges for node `n` are
+  `from_offsets[n] .. from_offsets[n + 1]`.
+- `reverse_offsets` obeys the same rule against the `reverse_edges` length.
+- every `reverse_edges[i]` is less than the edge count, and the reverse index is
+  no longer than the edge list. A *shorter* reverse index is legal: a lazily
+  built partial index does not cover targets outside its reverse node range.
+- when the reverse index is absent, both reverse arrays are empty.
+- no trailing bytes, and no edge carrying a reserved `MappingFlags` bit.
+
+A producer must not be able to put a corrupt CSR on the wire, so an ill-formed
+shard encodes to an empty buffer rather than to bytes no decoder will accept.
+This matters more here than for any other structure in this document: a
+corrupted offset array does not fail loudly, it silently returns a *neighbouring
+node's* provenance — and provenance that is wrong-but-plausible is exactly what
+§6.5 forbids.
 
 ### 6.4 Mapping API
 
@@ -619,6 +675,27 @@ interface MappingWritePort:
     fn map_split(from: EntityRef, to: EntitySetView, kind: MappingKind)
     fn finish() -> MappingShardRef
 ```
+
+`MappingKindSet` is passed as `kind_mask` to `forward` and `reverse` but was
+never defined. It is ratified as a `u32` bitset in which bit *i* is `MappingKind`
+discriminant *i*. The parameter is named a *mask*, and §6.2 enumerates 17 kinds;
+17 bits do not fit a `u16`, so `u32` is the smallest fixed width that holds the
+frozen enum. Bits 17..31 are reserved and must be zero under the same hard-reject
+rule as §6.2's flags — a reader that ignored a set reserved bit would silently
+answer a query about kinds it does not know.
+
+A consequence worth stating rather than rediscovering: adding an 18th
+`MappingKind` is a breaking change to `MappingKindSet`, not an additive one, and
+requires a schema-version bump.
+
+Three types in these signatures are deliberately **not** frozen and remain
+tracked open gaps: `MappingShardRef` (`finish()`, and a field of `StageReceipt`
+and `VerificationReceipt`), `SourceOriginSet` (`trace_to_source`) and
+`EntitySetView` (also used by §5's tag index port). They are handle and view
+types rather than parts of the compressed mapping format, and `EntitySetView` in
+particular is shared with the tag and query groups — freezing them from inside
+the mapping group would pre-empt the StageReceipt and QueryIR artifact groups.
+They are recorded here so the gap stays tracked.
 
 ### 6.5 Transformation preservation rules
 
