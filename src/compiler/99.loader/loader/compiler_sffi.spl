@@ -568,15 +568,22 @@ fn json_to_type_info_text(jv: text) -> TypeInfo:
     val bits_opt = sffi_json_field_i64(jv, "bits")
     val signed_opt = sffi_json_field_bool_opt(jv, "signed")
     val lanes_opt = sffi_json_field_i64(jv, "lanes")
+    # Same defect class as HirFunction.has_driver_manifest_attr: `.?` is the
+    # TryOperator, has no native lowering, and under SIMPLE_BOOTSTRAP=1 yields
+    # the nil sentinel (3) instead of a bool -- which reads back TRUE out of a
+    # `bool` slot. Use `if val`, which lowers to a genuine bool natively.
+    val has_bits_value = sffi_optional_i64_exists(bits_opt)
+    val has_signed_value = sffi_optional_bool_exists(signed_opt)
+    val has_lanes_value = sffi_optional_i64_exists(lanes_opt)
 
     TypeInfo(
         kind: kind,
         name: resolved_name,
-        has_bits: bits_opt.?,
+        has_bits: has_bits_value,
         bits: bits_opt.unwrap_or(0),
-        has_signed: signed_opt.?,
+        has_signed: has_signed_value,
         signed: signed_opt.unwrap_or(false),
-        has_lanes: lanes_opt.?,
+        has_lanes: has_lanes_value,
         lanes: lanes_opt.unwrap_or(0),
         args: [],
         has_elem: false,
@@ -646,6 +653,20 @@ fn sffi_json_field_text(json_text: text, key: text) -> text:
     if end_idx < 0:
         return ""
     sffi_json_unquote('"' + rest[0:end_idx] + '"')
+
+# Native-safe optional presence checks. See the note at the TypeInfo
+# construction site: `opt.?` must never be used to fill a `bool` field.
+fn sffi_optional_i64_exists(opt: i64?) -> bool:
+    if val present = opt:
+        true
+    else:
+        false
+
+fn sffi_optional_bool_exists(opt: bool?) -> bool:
+    if val present = opt:
+        true
+    else:
+        false
 
 fn sffi_json_field_i64(json_text: text, key: text) -> i64?:
     val field_literal = sffi_json_field_literal(json_text, key)

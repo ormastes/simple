@@ -178,6 +178,23 @@ fn native_build_single_spl_positional(args: [text]) -> text:
     else:
         ""
 
+# `--entry` without `--source` is NOT a hang -- it is the by-design delegation
+# to the Rust rt_native_build FFI, which then scans the DEFAULT source roots
+# (effectively the whole project) and loads that entire import graph BEFORE any
+# codegen, printing nothing meanwhile. Measured 2026-08-01: with
+# `--source <dir>` the same invocation finishes in 2.1 s and produces a working
+# 23 KB binary; without it, no output at all after 45 s. Silence for minutes is
+# what made this look like defect-grade hang, so name the cost and the fix.
+fn native_build_has_source_arg(args: [text], i: i64) -> i64:
+    if i >= args.len():
+        0
+    elif args[i] == "--source":
+        1
+    elif args[i].starts_with("--source="):
+        1
+    else:
+        native_build_has_source_arg(args, i + 1)
+
 fn native_build_backend_from_args(args: [text], i: i64) -> text:
     if i >= args.len():
         "llvm"
@@ -225,6 +242,8 @@ pub fn run_native_build_bootstrap(args: [text]) -> i64:
     val explicit_entry = native_build_entry_from_args(args, 0)
     if explicit_entry != "":
         if env_get("SIMPLE_BOOTSTRAP_STAGE4") != "1":
+            if native_build_has_source_arg(args, 0) == 0:
+                print "note: --entry without --source scans the DEFAULT source roots (whole project) and stays silent while loading that import graph; pass --source <dir> to bound it"
             return run_rt_native_build(args)
         if explicit_entry != "src/app/cli/main.spl" and explicit_entry != "src/app/os/main.spl":
             print "Error: Stage4 entry must be src/app/cli/main.spl or src/app/os/main.spl"
@@ -407,7 +426,12 @@ fn main() -> i64:
     val argc = all_args.len()
     if argc < 2:
         print "Simple Bootstrap Compiler v{bootstrap_version()}"
-        print "Usage: simple compile <file> [-o <output>] [--native] [--opt-level=<level>] [--list-optimizations]"
+        # `compile` accepts --format=smf ONLY (run_compile_bootstrap rejects
+        # everything else); advertising --native here made the usage text lie
+        # about an interface the implementation refuses. Native output is
+        # reached through `native-build`, which is listed separately.
+        print "Usage: simple compile <file> --format=smf [-o <output>] [--opt-level=<level>] [--list-optimizations]"
+        print "       simple native-build <file>.spl [-o <output>] [--backend=<llvm|cranelift>]"
         return 0
     val first = all_args[1]
     if first == "native-build":
@@ -418,6 +442,10 @@ fn main() -> i64:
     if first.len() == 6 and first.starts_with("--help"):
         print "Simple Bootstrap Compiler v{bootstrap_version()}"
         print "Built from Simple source via the staged bootstrap"
+        print ""
+        print "Commands:"
+        print "  compile <file> --format=smf   Compile to SMF (the ONLY format `compile` supports)"
+        print "  native-build <file>.spl       Compile to a native executable"
         print ""
         print "Compile-related flags include:"
         print "  --opt-level=<none|basic|standard|aggressive>"

@@ -8,7 +8,8 @@
 
 use compiler.hir.hir_definitions.{HirFunction, HirBlock, HirStmt, HirStmtKind, HirExpr, HirExprKind, HirCallArg}
 use compiler.hir.hir_types.{HirType, SymbolId, SymbolTable}
-use compiler.common.attributes.{DriverManifestAttrKind}
+use compiler.common.attributes.{DriverManifestAttrKind, DriverManifestAttr}
+use std.nogc_sync_mut.io.process_ops.{eprint}
 
 enum SyntheticDriverRegistrationStatus:
     NoManifest
@@ -58,6 +59,27 @@ fn plan_synthetic_driver_registration(fn_: HirFunction, symbols: SymbolTable) ->
             ops_value_name: ""
         )
 
+    # HirFunction.driver_manifest_attr is a DESUGARED optional: the paired
+    # `has_driver_manifest_attr` flag above is supposed to guarantee it is
+    # populated. When that pair goes out of sync the flag reads true and this
+    # line dereferences nil -- which the native backend turns into a bare
+    # "runtime error: field access on nil receiver" + ud2 (SIGILL, exit 132)
+    # naming no function and no field. That is exactly what happened on
+    # 2026-08-01: `.?` filled the bool slot with the nil sentinel (3), every
+    # function looked manifest-carrying, and the deployed pure-Simple compiler
+    # SIGILLed on every program it was asked to compile (both native-build and
+    # --format=smf). The flag source is fixed in declaration_lowering.spl; this
+    # guard makes any future desync a named diagnostic instead of a trap.
+    if not driver_manifest_attr_is_present(fn_.driver_manifest_attr):
+        eprint("error: internal: function '{fn_.name}' has has_driver_manifest_attr set but driver_manifest_attr is nil (desugared optional pair out of sync); skipping synthetic driver registration\n")
+        return SyntheticDriverRegistrationPlan(
+            function_name: fn_.name,
+            status: SyntheticDriverRegistrationStatus.NoManifest,
+            reason: "has_driver_manifest_attr was set but the paired driver_manifest_attr value is nil",
+            has_ops_value: false,
+            ops_value_name: ""
+        )
+
     match fn_.driver_manifest_attr.kind:
         case NativeLib:
             return SyntheticDriverRegistrationPlan(
@@ -87,6 +109,16 @@ fn plan_synthetic_driver_registration(fn_: HirFunction, symbols: SymbolTable) ->
                 has_ops_value: false,
                 ops_value_name: ""
             )
+
+# Presence check for the desugared driver_manifest_attr value slot. The
+# parameter is declared optional so a nil value binds instead of trapping;
+# `if val` lowers to a genuine bool on the native path (`.?` does NOT -- it is
+# the TryOperator and yields the nil sentinel under SIMPLE_BOOTSTRAP=1).
+fn driver_manifest_attr_is_present(attr: DriverManifestAttr?) -> bool:
+    if val present = attr:
+        true
+    else:
+        false
 
 fn empty_register_static_driver_call() -> RegisterStaticDriverCall:
     RegisterStaticDriverCall(found: false, has_ops_value: false, ops_value_name: "")

@@ -31,12 +31,36 @@ extern fn rt_env_get(key: text) -> text
 fn hir_lower_env_get(key: text) -> text:
     rt_env_get(key)
 
+# Native-safe presence checks for the desugared `has_*` / value field pairs on
+# HirFunction. `opt.?` MUST NOT be used for these: it is the TryOperator, it has
+# no native lowering, and under SIMPLE_BOOTSTRAP=1 it silently yields the nil
+# sentinel (3) rather than a bool -- see the comment at the lower_function
+# construction site. `if val` lowers to a genuine bool on the native path.
+fn hir_optional_export_attr_exists(opt: ExportAttr?) -> bool:
+    if val present = opt:
+        true
+    else:
+        false
+
+fn hir_optional_driver_manifest_exists(opt: DriverManifestAttr?) -> bool:
+    if val present = opt:
+        true
+    else:
+        false
+
 fn hir_lower_diag_enabled() -> bool:
     val trace = hir_lower_env_get("SIMPLE_COMPILER_TRACE") ?? ""
     val diag = hir_lower_env_get("SIMPLE_BOOTSTRAP_DIAG") ?? ""
     if trace == "1":
         return true
     diag == "1"
+
+fn bootstrap_erased_len_generic_is_safe(name: text) -> bool:
+    # These helpers inspect only array length and return an explicit i64; their
+    # element parameter never reaches a value operation. Erasure is therefore
+    # semantics-preserving while general generic functions remain blocked.
+    name == "lexer_array_len" or name == "rt_array_len_safe" or
+        name == "decl_nodes_array_len"
 
 # Reads the parser-recorded span for a declaration index. Falls back to an
 # empty span only when the id is invalid, so a missing location stays visibly
@@ -58,29 +82,21 @@ impl HirLowering:
         # which fixes the same hole on the non-bootstrap path.
         val span = declaration_span_for(decl_idx)
         val name = decl_get_name(decl_idx)
-        eprint("[hir-lower] flat_function:start {name}")
         val symbol = bootstrap_hir_symbol_for_name(name)
         self.current_function = Some(symbol)
         self.symbols.push_scope(ScopeKind.Function)
-        eprint("[hir-lower] flat_function:params:start {name}")
         val param_count = 0
-        eprint("[hir-lower] flat_function:params:count {name} {param_count}")
         var params: [HirParam] = []
         var pi = 0
         while pi < param_count:
-            eprint("[hir-lower] flat_function:param {name} {pi}")
             val p_type = HirType(kind: HirTypeKind.Infer(0, 0), span: span)
             val p_sym = self.symbols.define("", SymbolKind.Parameter, Some(p_type), span, Visibility.Private, false, nil)
             params.push(HirParam(symbol: p_sym, name: "", type_: p_type, has_default: false, default: HirExpr(kind: HirExprKind.NilLit, has_type_: true, type_: HirType(kind: HirTypeKind.Unit, span: span), span: span), span: span, is_mutable: false))
             pi = pi + 1
-        eprint("[hir-lower] flat_function:body:start {name}")
         val body_ids = decl_get_body(decl_idx)
-        eprint("[hir-lower] flat_function:body:count {name} {body_ids.len()}")
         val body = self.lower_bootstrap_flat_block(body_ids)
-        eprint("[hir-lower] flat_function:body:done {name}")
         self.symbols.pop_scope()
         self.current_function = nil
-        eprint("[hir-lower] flat_function:done {name}")
         var func_attr = FunctionAttr.default()
         if decl_is_gpu_kernel[decl_idx] != 0:
             var fa = func_attr
@@ -247,7 +263,10 @@ impl HirLowering:
         # of proceeding into codegen with an unmonomorphized generic. Real
         # monomorphization is tracked separately (#158 Phase B) -- this is a
         # deliberate hard stop, not a workaround.
-        if fn_.type_params.len() > 0:
+        if (fn_.type_params.len() > 0 and not (
+            (hir_lower_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and
+            bootstrap_erased_len_generic_is_safe(fn_.name)
+        )):
             self.error("generic functions are not supported on the native build path yet: fn '{fn_.name}' declares type parameter(s); monomorphization is not implemented (#158 Phase B)", fn_.span)
 
         # Lower parameters
@@ -413,6 +432,22 @@ impl HirLowering:
         val parsed_export_attr: ExportAttr? = parse_export_attrs(fn_.attributes)
         val driver_manifest: DriverManifestAttr? = parse_driver_manifest_attrs(fn_.attributes)
         val vhdl_metadata: VhdlHardwareMetadata = parse_vhdl_hardware_attrs(fn_.attributes)
+        # NEVER compute a desugared `has_*` bool with `.?` here. `.?` is the
+        # TryOperator and has NO native lowering: on the normal path the seed
+        # rejects it outright ("constructs that require the interpreter:
+        # [TryOperator]"), and under SIMPLE_BOOTSTRAP=1 -- which is exactly how
+        # this compiler is built -- that hard error is downgraded to a warning
+        # and `opt.?` yields the NIL SENTINEL (3) instead of a bool. Storing 3
+        # into a `bool` slot reads back TRUE, so every function looked like it
+        # carried an @export/@driver manifest while the paired value field was
+        # nil -- and `fn_.driver_manifest_attr.kind` then trapped on a nil
+        # receiver (SIGILL, exit 132) for EVERY function of EVERY program,
+        # which is why the deployed pure-Simple compiler could not compile
+        # anything at all. Verified 2026-08-01 by gdb on the deployed stage3:
+        # the has_driver_manifest_attr byte at [fn_+0x90] held 0x03.
+        # `if val` lowers to a real bool on the native path (measured).
+        val has_parsed_export_attr = hir_optional_export_attr_exists(parsed_export_attr)
+        val has_parsed_driver_manifest = hir_optional_driver_manifest_exists(driver_manifest)
 
         # Seed effects from is_async annotation.
         # The full effect pass (effect_pass.spl) will refine these later.
@@ -441,9 +476,9 @@ impl HirLowering:
             # order: the seed fills partial named constructions POSITIONALLY,
             # shifting every later field one slot (same bug class as
             # HirCallArg.value — bug doc iteration 18).
-            has_export_attr: parsed_export_attr.?,
+            has_export_attr: has_parsed_export_attr,
             export_attr: parsed_export_attr,
-            has_driver_manifest_attr: driver_manifest.?,
+            has_driver_manifest_attr: has_parsed_driver_manifest,
             driver_manifest_attr: driver_manifest,
             has_suspension: false,
             has_vhdl_metadata: vhdl_metadata.is_hardware,

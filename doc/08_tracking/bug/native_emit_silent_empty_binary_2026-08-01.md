@@ -136,12 +136,78 @@ plus expected stdout from a live control compiled in the same run. Do not infer
 success from a clean exit, and do not use symbol presence as a health signal on
 this path — host `--native` strips by default.
 
-## Follow-ups (not fixed here)
+## Follow-ups — the three CLI defects, resolved 2026-08-01
 
-- `bin/simple native-build <f>.spl` nil-receiver crash → SIGILL.
-- `bin/simple native-build --entry <f>.spl` hang.
-- `bootstrap_main.spl` usage text still advertises `[--native]` for `compile`
-  while the implementation rejects everything but `--format=smf`.
+### 1. nil-receiver SIGILL — ROOT CAUSE FOUND AND FIXED
+
+It was never native-specific. `bin/simple compile ctl.spl --format=smf` SIGILLs
+**identically**, so the deployed pure-Simple compiler could not compile *any*
+program by *any* route. Exact site, via gdb on the deployed stage3:
+
+```
+#0 compiler.mir.synthetic_driver_registration.plan_synthetic_driver_registration+300
+#1 compiler.mir.synthetic_driver_codegen.apply_synthetic_driver_codegen
+#2 MirLowering.lower_function  #3 lower_module  #4 lower_to_mir  #5 aot_compile
+```
+
+Deliberate trap, not a null jump: `guard_nonnull_receiver`
+(`src/compiler_rust/compiler/src/codegen/instr/fields.rs:23`) emits
+`rt_eprintln_str` + `ud2`. The receiver is `fn_.driver_manifest_attr` in
+`fn_.driver_manifest_attr.kind`, guarded one line earlier by
+`if not fn_.has_driver_manifest_attr`.
+
+**Why the guard passed.** Dumping the HirFunction at the trap:
+`[fn_+0x90]` — the `has_driver_manifest_attr` **bool** slot — held **`0x03`, the
+nil sentinel**, which `test/je` reads as TRUE. The paired value at `[fn_+0x98]`
+was also `3`; `3 & ~7 == 0`, so the receiver masked to null.
+
+Source: `declaration_lowering.spl` computed the flag as `driver_manifest.?`.
+`.?` is the **TryOperator** and has **no native lowering** — on the normal path
+the seed rejects it (`constructs that require the interpreter: [TryOperator]`),
+but under `SIMPLE_BOOTSTRAP=1`, which is exactly how this compiler is built,
+that hard error is downgraded to a warning and `opt.?` yields the nil sentinel
+instead of a bool. Every function then looked manifest-carrying with a nil
+manifest. `check-extern-registration.shs` is clean (`ok=true`); the weak-stub
+mechanism was **not** involved.
+
+Fixed by replacing `.?`-into-`bool` with `if val`-based presence checks (all 5
+non-test sites: 2 in `declaration_lowering.spl`, 3 in `compiler_sffi.spl`), plus
+a defence-in-depth guard in `plan_synthetic_driver_registration` that names the
+function and the desynced field instead of trapping.
+
+### 2. `--entry` "hang" — NOT A HANG, by-design delegation
+
+`--entry` without `SIMPLE_BOOTSTRAP_STAGE4=1` delegates to the Rust
+`rt_native_build` FFI by design. With **no `--source`** it scans the DEFAULT
+source roots (whole project) and loads that import graph before any codegen,
+printing nothing. Measured: `--entry ctl.spl --source tmp_nativecli` finishes in
+**2.1 s** and yields a working 23 KB binary that prints `HELLO_CONTROL`; the
+same command without `--source` produces no output at all after 45 s. Not a
+defect — an unbounded silent default. Now prints a note naming the cost and the
+fix. **Do not "fix" this by changing the delegation.**
+
+### 3. `compile` usage text — FIXED
+
+Usage and `--help` now state `--format=smf` (the only form `compile` accepts)
+and list `native-build` separately, instead of advertising the `--native` that
+`run_compile_bootstrap` rejects.
+
+### Verification status
+
+Constructs verified by execution on the canonical seed's real native path
+(hello-world control passing in the same session): the `if val` presence check
+returns a true bool for `Some` and false for nil, and the desync case that used
+to SIGILL now prints its named diagnostic and returns cleanly. **The full
+bootstrap redeploy (T3) that would put these fixes into `bin/simple` has NOT
+been run** — `bin/simple` still SIGILLs until it is rebuilt.
+
+**Measurement trap found while probing (record this):** `SIMPLE_BOOTSTRAP=1`
+makes seed `--native` emit **vacuous** binaries — the hello-world control built
+with it is 5,648 bytes, prints nothing, and exits 0, versus ~3 MB and correct
+output without it. Any `--native` probe run under that env measures nothing.
+
+### Still open
+
 - Re-measure the native AOT row in
   `doc/08_tracking/bug/for_in_text_iterates_bytes_not_chars_2026-08-01.md` on the
   canonical seed; it is currently inference, not measurement.
