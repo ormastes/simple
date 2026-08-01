@@ -499,3 +499,102 @@ recorded rather than normalized silently, per the repo rule on workarounds.
 - Probe A: `probe_casearm.spl` (enum form)
 - Probe B: `probe_constcase.spl` (const form)
 - Sweep script and classified output: `sweep.sh`, `confirmed.txt`
+
+## Disposition of the remaining 29 rows (2026-08-01, second pass)
+
+`ws_parser.spl` (18), `wat_codegen.spl` (13) and `expr_infer.spl` (25) were
+handled earlier. The 29 rows left were each checked against the **scrutinee's
+actual type definition** and against **wiring** (importers anchored on
+`use`/`import`/`export use` lines, never a bare basename grep). Result: **one
+real, wired production defect; 13 harvester false positives; 15 rows inside
+unwired islands.**
+
+| Cluster | Rows | Wired? | Verdict |
+|---|---|---|---|
+| `50.mir/mir_aop_injection.spl` | 1 | **YES** — `80.driver/driver_pipeline_aop.spl`, `driver_aot_vhdl_output.spl`, 3 specs | **REAL — FIXED** (`33b57c515f39`) |
+| `desugar/desugar_async.spl`, `90.tools/desugar_async.spl`, `poll_generator.spl` | 8 | n/a | **FALSE POSITIVE** — all 8 are inside `"""` docstrings |
+| `compiler_rust/lib/std/examples/vulkan_gui_demo.spl` | 5 | no | **FALSE POSITIVE** — `case WindowEvent::CloseRequested:` is `::`-qualified, not a bare identifier; the file is Rust-syntax pseudocode (`::`, `\|e\| ...`, `println("{}", x)`) that cannot parse as Simple |
+| `app/interpreter/core/contract.spl` | 2 | **no** — zero `use` lines in the file, zero importers, zero callers of `collect_old_exprs`/`substitute_old_exprs` | dead module |
+| `35.semantics/lint/primitive_api.spl` | 6 | module yes, **these functions no** | phantom-AST island — see below |
+| `30.types/type_system/{bidirectional,expr_infer_ops,_StmtCheck/bindings_check}.spl` | 7 | **no** — whole package is a closed island | phantom-AST island — see below |
+
+### FIXED: `inject_after_error_advice` injected advice into EVERY block
+
+`match block.terminator: case Unwind:` — `MirTerminator` is
+`Goto/Ret/If/Switch/Unreachable/Abort/CallTerminator`; there is no `Unwind`.
+The bare identifier bound irrefutably, so every basic block of every advised
+function received an after-error advice call and the `case _:` pass-through was
+dead. Note the *reported* symptom was wrong in the usual direction: the same
+file's `apply_weaving_result` (`case Execution:` on `JoinPointKind`) looks
+identical but is **correct** — `Execution` is a real variant. Measured, not
+assumed.
+
+Execution control, 4-block function (Ret / Abort / Goto / Unreachable):
+
+```
+before   ret=1  abort=1  goto=1  unreach=1     <- every block advised
+after    ret=0  abort=1  goto=0  unreach=0     <- only the error exit
+```
+
+Fixed to qualified `case MirTerminator.Abort(_):`. `CallTerminator`'s `unwind`
+edge is deliberately not a join point: the handler is the unwind TARGET block,
+and injecting at the calling block would also fire the advice on the
+normal-return path.
+
+### Mechanism boundary, re-measured
+
+A bare `case N:` swallows **only** when `N` is not a variant of the scrutinee's
+enum. Verified by execution both ways:
+
+```
+enum JPK: Execution / FunctionCall / Error
+bare arms   -> "exec call err"      (identical to qualified arms)
+sentinel: a leading `case Unwind:`  -> "SWALLOWED SWALLOWED"
+```
+
+So the ~20,505 bare arms are not suspect as a class; only the name-resolution
+failures are. Equally important: a row with a **payload** (`case Qualified(p,_):`,
+`case ForNode(s):`) naming a nonexistent variant is *refutable* — it never
+matches rather than swallowing. Those are dead arms, a real but different bug,
+and the confirmed-85 list mixes both kinds.
+
+### ESCALATED: two phantom-AST islands, same class as `expr_infer.spl`
+
+Not repaired per-arm, for the same reason `expr_infer.spl` was not: the arm
+names are the least of it, and a "fix" would be inventing a feature.
+
+**`lint/primitive_api.spl` — the `raw_unit` sub-lint (6 rows).** Written against
+an AST that does not exist. `is_unit_type`/`unit_type_short` do `match ty:` on
+the **struct** `Type` (rule: must be `ty.kind`) and name `Qualified`/`Simple`,
+neither of which exists anywhere in `src/compiler/**`; the real `TypeKind` is
+`Named/Tuple/Array/Function/Optional/Reference/Atomic/Isolated/Union/Projection/
+Infer/Error`. `is_raw_primitive_expr` matches `Expr` not `Expr.kind` and names
+`ExprInt`/`ExprFloat`/`SuffixedInt`/`SuffixedFloat` (none exist; `ExprKind` has
+`IntLit`/`FloatLit` and no suffixed form at all). `check_call_site` reads
+`param.ty` — `Param` has `has_type_`/`type_` — and takes `callee: FunctionDef`,
+whose `params` field is `[text]`, i.e. carries no types whatsoever. The group has
+no caller outside the file; `test/01_unit/lib/unit/unit_raw_warning_spec.spl`
+says "RED until `lint_raw_unit` + `lint_allow_list` + `check_call_site` land".
+The rest of `primitive_api.spl` is wired via `lint/__init__.spl` and unaffected.
+
+**`30.types/type_system/**` — `bidirectional` (3), `bindings_check` (3),
+`expr_infer_ops` (1).** The package is a closed import island: every importer of
+`checker`, `stmt_check`, `module_check`, `expr_infer*`, `bidirectional` is
+*inside the package*, the only exceptions being `effect_pass` (genuinely wired
+into `driver_hir_pipeline_lowering.spl`) and a `TypeError`-only import in
+`90.tools/query_helpers.spl`. The driver's real inference is
+`compiler.types.type_infer.*`. Inside the island the same phantom AST recurs:
+`check_stmt(stmt: Node)` matches `ValBinding/Assignment/Return/If/Match/ForNode/
+WhileNode/Loop/Break/Continue/Pass` while `ast.Node` has exactly
+`Function/Struct/Class/Enum/Trait/Other`; `bind_pattern(pattern: Pattern)`
+matches the struct, not `pattern.kind`, and names `EnumPattern` where
+`PatternKind` has `Enum`. `expr_infer_ops.infer_unary` is the one near-miss —
+`UnaryOp` is real and `Neg/Not/BitNot/Ref/RefMut/Deref` are correct — but
+`case ChannelRecv:` (line 222) and `case Move:` (line 245) are not `UnaryOp`
+variants, so `Transpose` and the tail are swallowed; its body also references an
+undefined `has_args`. Left as-is with the island.
+
+Recommended follow-up: run `MEXH006` over `src/**` once the pure-Simple
+`bin/simple` is redeployed. The name-existence sweep cannot see the
+`tco.spl`-class defect (a real variant of the *wrong* enum), which is where the
+remaining 20,360 unresolved arms live.
