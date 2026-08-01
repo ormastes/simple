@@ -233,28 +233,54 @@ describe "DirtyMask wire bit positions":
         assert_true(dirty_mask_is_empty(DIRTY_MASK_EMPTY))
         assert_false(dirty_mask_is_empty(m))
 
-describe "Layout-lane DIRTY_* divergence (pinned, awaiting ratification)":
-    it "pins the four layout aliases at their current low-bit packing":
-        # contracts.spl packs the four stages the layout lane cares about into
-        # bits 0..3. Those are NOT the canonical §9.1 positions asserted above.
-        # Nothing observes the difference today because the layout constants are
-        # never serialized and every consumer composes them symbolically, but
-        # the two numberings MUST be reconciled before layout dirty state reaches
-        # the wire. Pinned here so the packing cannot change unnoticed while the
-        # reconciliation is being ratified.
+describe "Layout-lane DIRTY_* reconciliation onto the canonical bits":
+    it "puts the four layout constants on their canonical §9.1 bits":
+        # contracts.spl originally packed the four stages the layout lane cared
+        # about into bits 0..3, so bit 0 meant IntrinsicMeasure to the layout
+        # lane and Source on the wire. Now reconciled onto the §9.1 positions.
+        # The renumber was legal precisely because nothing had serialized a
+        # layout-built mask yet: no golden vector was ever authored in the
+        # layout vocabulary, and every consumer composes these symbolically.
         assert_equal(DIRTY_NONE, 0)
-        assert_equal(DIRTY_INTRINSIC_MEASURE, 1)
-        assert_equal(DIRTY_LAYOUT, 2)
-        assert_equal(DIRTY_HIT_TEST, 4)
-        assert_equal(DIRTY_RESOURCE, 8)
+        assert_equal(DIRTY_INTRINSIC_MEASURE, 16384)
+        assert_equal(DIRTY_LAYOUT, 32768)
+        assert_equal(DIRTY_HIT_TEST, 262144)
+        assert_equal(DIRTY_RESOURCE, 1048576)
 
-    it "records that the layout aliases do not match the canonical bits":
-        assert_false(DIRTY_INTRINSIC_MEASURE == DIRTY_BIT_INTRINSIC_MEASURE)
-        assert_false(DIRTY_LAYOUT == DIRTY_BIT_LAYOUT)
-        assert_false(DIRTY_HIT_TEST == DIRTY_BIT_HIT_TEST)
-        assert_false(DIRTY_RESOURCE == DIRTY_BIT_RESOURCE)
-        # The empty mask is the one value both numberings agree on.
+    it "makes the layout constants identical to the canonical vocabulary":
+        assert_equal(DIRTY_INTRINSIC_MEASURE, DIRTY_BIT_INTRINSIC_MEASURE)
+        assert_equal(DIRTY_LAYOUT, DIRTY_BIT_LAYOUT)
+        assert_equal(DIRTY_HIT_TEST, DIRTY_BIT_HIT_TEST)
+        assert_equal(DIRTY_RESOURCE, DIRTY_BIT_RESOURCE)
+        # The empty mask is the one value both numberings always agreed on.
         assert_equal(DIRTY_NONE, DIRTY_MASK_EMPTY)
+
+    it "accepts every layout constant as a valid wire mask":
+        # Under the old 1/2/4/8 packing these passed this check too, but as the
+        # WRONG stages. Validity alone was never the property that mattered.
+        assert_true(dirty_mask_valid(DIRTY_INTRINSIC_MEASURE))
+        assert_true(dirty_mask_valid(DIRTY_LAYOUT))
+        assert_true(dirty_mask_valid(DIRTY_HIT_TEST))
+        assert_true(dirty_mask_valid(DIRTY_RESOURCE))
+        assert_true(dirty_mask_valid(
+            DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT | DIRTY_HIT_TEST
+            | DIRTY_RESOURCE))
+
+    it "encodes a layout-composed mask to the canonical golden bytes":
+        # This is the property the renumber exists to buy, and the assertion
+        # that would have caught the divergence had it existed earlier: a mask
+        # composed from the LAYOUT vocabulary now serializes to exactly the
+        # bytes the canonical vocabulary produces for the same stages.
+        # Under the old packing DIRTY_LAYOUT | DIRTY_HIT_TEST was 6 and encoded
+        # to "06000000" — {Token, Parse} on the wire, two stages that have
+        # nothing to do with layout.
+        assert_equal(
+            wire_to_hex(encode_dirty_mask(mask(DIRTY_LAYOUT | DIRTY_HIT_TEST))),
+            GOLDEN_DIRTY_LAYOUT_HITTEST)
+        assert_equal(
+            wire_to_hex(encode_dirty_mask(
+                mask(DIRTY_INTRINSIC_MEASURE | DIRTY_LAYOUT | DIRTY_HIT_TEST))),
+            GOLDEN_DIRTY_INTRINSIC_CHAIN)
 
 describe "DirtyMask exact bytes":
     it "encodes the empty mask to the golden vector":

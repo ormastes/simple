@@ -203,38 +203,76 @@ every vector, so a foreign encoder can be checked without linking Simple.
    grounds that §9.3's purpose is propagation and a non-firing edge is
    unobservable except as graph bloat.
 
-## Divergences — MUST be reconciled, not yet ratified
+## Divergences — RESOLVED
 
-**The layout lane's `DIRTY_*` constants are not on the canonical bits.**
-`invalidation/contracts.spl` carries four shorthand constants packed at 1/2/4/8
-(bits 0..3):
+**The layout lane's `DIRTY_*` constants are now on the canonical bits.**
+`invalidation/contracts.spl` originally carried four shorthand constants packed
+at 1/2/4/8 (bits 0..3). They have been renumbered onto the §9.1 positions:
 
-| Constant | Current bit | Canonical §9.1 bit |
-|---|---|---|
-| `DIRTY_INTRINSIC_MEASURE` | 0 | 14 |
-| `DIRTY_LAYOUT` | 1 | 15 |
-| `DIRTY_HIT_TEST` | 2 | 18 |
-| `DIRTY_RESOURCE` | 3 | 20 |
+| Constant | Was (bit) | Was (value) | Now (bit) | Now (value) |
+|---|---|---|---|---|
+| `DIRTY_NONE` | — | 0 | — | 0 |
+| `DIRTY_INTRINSIC_MEASURE` | 0 | 1 | 14 | 16384 |
+| `DIRTY_LAYOUT` | 1 | 2 | 15 | 32768 |
+| `DIRTY_HIT_TEST` | 2 | 4 | 18 | 262144 |
+| `DIRTY_RESOURCE` | 3 | 8 | 20 | 1048576 |
 
-The layout lane packed the four stages it cared about into the low bits before
-the contract freeze existed. Nothing observes the difference **today**: those
-constants are never serialized, and every consumer (`structural/layout`,
-`gpu_web/layout`, `simple_web_render_session` and their specs) composes them
-symbolically with `|` and `&` — a repository-wide grep found no numeric dirty
-literal at any call site. But bit 0 currently means *IntrinsicMeasure* to the
-layout lane and *Source* on the wire, so the moment any layout dirty state
-reaches the wire the two readings silently disagree with no error.
+Each constant is now value-identical to the correspondingly-named `DIRTY_BIT_*`
+in `dirty_mask.spl`.
 
-This contract does **not** renumber them. Renumbering is a change to an existing
-module owned by another lane, and it could not be verified in this wave (see the
-note in the delivery report on stdlib module resolution). The gate pins the four
-constants at their current values so the packing cannot drift while the
-reconciliation is ratified.
+### Why this was still legal to change
 
-**Recommended resolution:** redefine the four constants to the canonical bits
-(16384 / 32768 / 262144 / 1048576). Expected to be behaviour-preserving given
-the symbolic-only usage, but it must be landed with the layout and gpu_web specs
-green.
+The renumber landed inside the window this document opened for it — **before**
+anything serialized a layout-built `DirtyMask`. That was verified, not assumed:
+
+- **No golden vector was authored in the layout vocabulary.** Every vector in
+  `test/fixtures/structural/invalidation_golden_v1.spl` is composed from the
+  canonical `DIRTY_BIT_*` names. `GOLDEN_DIRTY_LAYOUT_HITTEST` is bits 15|18 =
+  `0x00048000`, not the old `DIRTY_LAYOUT | DIRTY_HIT_TEST` = 6. **No golden
+  byte changes as a result of this renumber**, in this contract or any other.
+- **No layout-built mask ever reached an encoder.** `invalidation_codec` is
+  imported by exactly one file, this contract's spec; the layout and `gpu_web`
+  lanes never import it. A repository-wide grep for a dirty value passed to any
+  `hash*`/`encode*`/`serialize*`/`to_sdn`/`to_json`/`digest` call returns
+  nothing, and the DrawIR SDN serializer carries no dirty field.
+- **The one serialized mask-shaped slot is deliberately opaque.** `MutationIR`'s
+  `MutationEffect` (group 5) does serialize an `invalidates u32`, and its golden
+  vector fixes it at `0x00000003`. That lane does **not** import these constants
+  — it freezes only the slot and records that the vocabulary belongs to the
+  INVALIDATE lane — so the literal is unaffected by this renumber. It is,
+  however, exactly the slot that would have closed this window the moment
+  anything wired the layout mask into it: under the old packing `3` would have
+  read as `{IntrinsicMeasure, Layout}`, and under §9.1 it reads `{Source,
+  Token}`.
+- **No consumer depends on the numeric packing.** Every consumer composes the
+  constants symbolically with `|` and `&`. The only numeric comparison anywhere
+  in the family is `dirty_bits == 0`, and `DIRTY_NONE == DIRTY_MASK_EMPTY == 0`
+  under both numberings. There is no shift by a mask, no array indexed by a
+  mask, and no numeric dirty literal at any call site.
+
+Had any one of those been false, the correct action would have been a versioned
+wire change owned by the INVALIDATE lane, not a renumber.
+
+### Consumers updated in the same change
+
+The renumber is behaviour-preserving for all of them precisely because they are
+symbolic, but they are enumerated here so the family is closed, not sampled:
+`structural/layout/{types,scheduler,__init__}.spl`,
+`gpu_web/layout/{adapter,invalidation}.spl`,
+`gc_async_mut/gpu/browser_engine/simple_web_render_session.spl`, and the specs
+`test/01_unit/lib/gpu_web/layout/web_layout_manager_spec.spl` and
+`test/01_unit/common/structural/invalidation_contract_spec.spl`.
+
+### What now prevents the drift from returning
+
+The contract spec asserts the four constants at their canonical values, asserts
+equality with the `DIRTY_BIT_*` vocabulary, and — the assertion that would have
+caught the original divergence — asserts that a mask composed from the **layout**
+constants encodes to the canonical golden bytes. That last assertion was
+demonstrated non-vacuous: run against the old packing it fails with
+`expected 53444d4b0100000000c00400, got 53444d4b0100000007000000`, i.e. the
+layout-composed `{IntrinsicMeasure, Layout, HitTest}` serialized as `7`
+(`{Source, Token, Parse}` on the wire) instead of `0x0004c000`.
 
 ## Naming divergence from §9.3
 
