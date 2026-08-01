@@ -101,6 +101,10 @@ All variable-length data (text, payloads, bytes) lives in fixed event/payload ar
 - `GPU_ROUTE_GPU` — GPU handled entire epoch
 - `GPU_ROUTE_CPU_SELECTED` — CPU intentionally chosen by cost policy (NOT a fallback)
 - `GPU_ROUTE_GPU_FALLBACK` — GPU failed and fell back to CPU
+- `DrawIrV3ExecutionProfile` / `DrawIrV3RouteDecision` now require this split:
+  - `GPU_ROUTE_CPU_SELECTED` is policy, must pair with reason codes `100..199` (intentional CPU work).
+  - `GPU_ROUTE_GPU_FALLBACK` is denial, must pair with reason codes `200..299` (GPU could not execute).
+  - `accepted` on submit receipts is true for GPU route and CPU-selected route; false for any fallback route.
 
 ### draw_ir_v3.spl (or draw_ir_v3_ports.spl)
 **Purpose:** Packed, no-reallocation display-list command stream and side tables.  
@@ -176,4 +180,3 @@ No per-widget GPU submissions. No intermediate host synchronization within an ep
 - **Isolation Rule 3 (C0 freeze):** After C0 merge, these files are read-only until an explicit schema-version change. No agent edits a frozen contract in place.
 - **Reference Oracle:** Every accelerated operation has a CPU oracle. The cpu_oracle implementations (in draw_ir_v3/cpu_oracle/, gpu_event/) are the canonical implementations and are never deleted.
 - **No Silent Fallback (Shared Rule 4):** Every fallback carries a reason receipt that names the feature, subtree scope, or fault code. Falling back silently is a defect.
-

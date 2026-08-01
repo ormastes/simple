@@ -10,6 +10,23 @@ re-verified by grep/read against the actual source. Every claim below cites
 `file:line`; anything not independently confirmed is marked **UNVERIFIED**
 rather than guessed.
 
+## 0. Remote sync & active design goal (2026-08-01)
+
+`origin/main` has no additional commits beyond `tmp-docfix` after `git fetch`,
+so the rendering/IR design lane to continue is the one already in this workspace:
+
+- Confirmed upstream design changes already reflected in sources:
+  - `src/lib/common/ui/draw_ir_v3_execution_route.spl` (route/reason partitioning:
+    `CPU_SELECTED` vs `GPU_FALLBACK`, strict pass semantics).
+  - `src/lib/common/ui/gpu_web_receipt_contract.spl` (route constants + fault/overflow receipts).
+  - `src/lib/common/ui/gpu_web_ports.spl` and `gpu_web_capacity_manifest.spl`
+    (C0 contract sets and no-realloc verification semantics).
+- Active goal for this phase: continue design and planning against those live IR
+  contracts, then execute the next design lanes from this doc:
+  - Keep tilemap texture sampling and render-to-texture minimap marked done,
+  - Move to GAP-10 (atlas de-dup) and GAP-4T (affine transform path),
+    while preserving `cpu_selected`/`gpu_fallback` contract semantics.
+
 ## 1. What DrawIR supports today
 
 Core contract: `src/lib/common/ui/draw_ir.spl`. Advanced execution
@@ -138,12 +155,12 @@ from it (own transform/z-order/camera model, not DrawIR fields).
 | Sprites/atlases | **SUPPORTED** | `Sprite`/`FrameRef` w/ `texture_id`+UV rect (`game2d/sprite.spl:16-25,33-52`); two atlas packers: `nogc_sync_mut/engine/sprite/atlas.spl:21-35` (`TextureAtlas.pack()`) and `nogc_sync_mut/game2d/render/texture_atlas.spl:23-38` (duplicate, `TextureAtlas2D`) |
 | Transforms (rotate/scale) | **PARTIAL** | `Transform2D{pos_x,pos_y,rotation,scale_x,scale_y,parent}` + cached 3x3 matrix, `game2d/transform.spl:13-31`. No `skew` field anywhere (`grep -rn skew` across engine/game2d/common/ui = 0 hits) |
 | Blend modes | **PARTIAL** | `enum BlendMode{Alpha,Additive,Multiply,Opaque}` (`nogc_sync_mut/engine/render/types.spl:28-33`); real per-channel math primitive `emu_draw_rect_blend_mode` (modes 0-3) at `gpu/engine2d/backend_emu_adv.spl:192-229`. `BlendMode.Additive` has **zero call sites** — not wired into the sprite/particle draw path |
-| Tilemaps | **PARTIAL** | `TileMap`, grid `[[i32]] cells`, `render_tilemap()` (`game2d/tilemap.spl:16-56`) but explicit in-code comment: tiles paint as flat-color rects, "placeholder — real texture sampling would require a TextureRegistry" |
+| Tilemaps | **SUPPORTED** | `TileMap`, grid `[[i32]] cells`, `render_tilemap()` now uses optional `TextureRegistry` sampling via `TileMap.create_textured()` / `tilemap_sample_tile` for real pixels, with placeholder fallback when no registry exists (`texture_registry_spec.spl`). |
 | Particles | **SUPPORTED** | `Particle{x,y,vx,vy,life,max_life,size,color,alpha,rotation,angular_velocity}`, `ParticleEmitter`/`EmitterConfig` (`nogc_sync_mut/engine/render/particle.spl:19-49`), pooled via `ParticlePool` (`particle_pool.spl:13-24`) |
 | Camera/viewport | **SUPPORTED** | `Camera2D{viewport_x/y/w/h, target:Transform2D, zoom, bounds:Rect?}` (`game2d/camera.spl:31-53`); calls real `engine.set_clip(vx,vy,vw,vh)` (`:127` → `engine.spl:2421`) |
 | Z-ordering | **SUPPORTED** | `Sprite.z: f32` (`sprite.spl:44`); `SpriteEntry.z_order: ZIndex` sorted in `sprite_batch.spl:33` (doc `:9-11`); every `RenderCommand` carries `z_order` (`engine/render/command.spl:41-49`) — own model, independent of DrawIR `layer` |
 | Clipping | **SUPPORTED** | Reuses DrawIR `clip_rect`/`set_clip` (`draw_ir.spl:81`, `engine.spl:2421`) — confirmed game-usable via Camera2D |
-| Render-to-texture | **SUPPORTED (primitive); usage UNVERIFIED** | `Engine2D.create_offscreen()` (`engine.spl:413`, wired `:2214-2229`) exists; no minimap/particle-compositing consumer was located in the game2d layer — search only, none found |
+| Render-to-texture | **SUPPORTED** | `Engine2D.create_offscreen()` (`engine.spl:413`, wired `:2214-2229`) plus concrete game-layer consumer `TileMap.render_minimap()` which renders a minimap in offscreen and composites with `draw_engine` (`game2d/tilemap.spl:129+`, `texture_registry_spec.spl`). |
 | Animation | **SUPPORTED (frame-based); tweening ABSENT** | `AnimationFrame`/`SpriteAnimation`/`AnimationPlayer.from_strip()` (`nogc_sync_mut/engine/render/sprite_animation.spl:17-31`), `AnimatedSprite{frames,current_frame,tick(dt_ms)}` (`game2d/sprite.spl:105-135`). Skeletal animation infra exists too (`engine/animation/{skeleton,skinning,ik_solver,clip,blender}.spl`, 3D-oriented, not confirmed wired to 2D). No `Tween`/`Easing` helper found (0 hits) |
 
 ## 3. What a GUI-through-web renderer needs
@@ -183,17 +200,17 @@ GPU parity is a separate, later proof).
 | 3 | Rounded-gradient clip | web | ABSENT (explicit TODO comment) | S–M | No |
 | 4 | Per-command/paint-time affine transform (rotate/scale/skew, arbitrary angle) at the DrawIR or browser-paint layer | both — game has its own `Transform2D` but it does not flow into DrawIR; web has only a layout-geometry approximation | v2 production ABSENT; v3 schema admits affine data but has no producer/executor; web paint PARTIAL | L | No (CPU rasterizer can do affine sampling) |
 | 5 | Blend-mode wiring into sprite/particle draw calls | game | PARTIAL — primitive exists (`emu_draw_rect_blend_mode`), unwired | S–M | No |
-| 6 | Tilemap real texture sampling (vs flat-color placeholder) | game | PARTIAL, explicit placeholder | S–M | No |
+| 6 | Tilemap real texture sampling (vs flat-color placeholder) | game | **DONE** (`ff2a297d3f`) | S–M | No |
 | 7 | CSS filter functions beyond `opacity()` (blur/drop-shadow/grayscale/etc) | web | ABSENT | M–L | Maybe (blur can reuse existing glass-material blur primitive on CPU) |
 | 8 | CSS `isolation`/isolated blend groups, per-command opacity | web | ABSENT | M | No |
 | 9 | Game↔web convergence: unify `Transform2D`/`ZIndex` (game) with `layer`/x-y (DrawIR) so game sprites and web nodes share one transform+z model instead of two parallel systems | both | ARCHITECTURAL GAP, not a missing primitive | L (design first) | No |
 | 10 | Duplicate texture-atlas implementations (`engine/sprite/atlas.spl` vs `game2d/render/texture_atlas.spl`) | game | Debt, not a feature gap, but blocks confident atlas work | S (consolidate) | No |
 | 11 | Full stacking-context formation (relative/sticky/flex/grid, not just absolute) | web | UNVERIFIED — needs a dedicated read before scoping | Unknown until surveyed | No |
-| 12 | Render-to-texture game-layer consumer (minimap/particle post-fx) | game | Primitive SUPPORTED, no consumer found | S–M (once a concrete use case is picked) | No |
+| 12 | Render-to-texture game-layer consumer (minimap/particle post-fx) | game | **DONE (`TileMap.render_minimap`)** | S–M (once a concrete use case is picked) | No |
 | 13 | Field-level DrawIR patch (vs whole-command replace) + per-frame adoption of diff/patch | both (perf) | SUPPORTED structurally, unused in the frame path (per campaign D9 notes) | L | No |
 | 14 | Tween/easing helpers for animation | game | ABSENT | S | No |
 
-Items 1, 3, 5, 6, 10 are the cheapest, most self-contained lanes. Item 4 is
+Items 1, 3, 5, 10 are the cheapest, most self-contained lanes. Tilemap sampling is now landed, so GAP-10 (atlas de-dup) is the short follow-up before affine-transform work. Item 4 is
 the single biggest structural hole shared by both consumers and should be
 scoped carefully (it touches DrawIR's core struct, so it is not "add a
 field" — see lane breakdown).
@@ -229,18 +246,17 @@ mirrors source path; cite `Results:` lines, not per-example ticks).
    Spec: additive/multiply/screen produce the expected composited pixel for
    a 2-sprite overlap.
 
-5. **Lane GAP-5 — Tilemap texture sampling.** Replace the flat-color
-   placeholder in `game2d/tilemap.spl` with real `TextureRegistry`-backed
-   sampling (first resolve which of the two atlas implementations is
-   canonical — see GAP-10). Depends on GAP-10 if the atlas consolidation
-   is done first; otherwise pick one atlas explicitly and record the other
-   as deprecated.
+5. **Lane GAP-5 — Tilemap texture sampling.** COMPLETE (`ff2a297d3f`).
+   `game2d/tilemap.spl` now samples real pixels from a registered strip in
+   `create_textured()` and preserves placeholder fallback when no registry
+   is set (`_pixels_for_tile`, `tilemap_sample_tile`, `render_minimap`).
 
 6. **Lane GAP-10 — Atlas de-duplication.** Diff
    `nogc_sync_mut/engine/sprite/atlas.spl` vs
    `nogc_sync_mut/game2d/render/texture_atlas.spl`, pick the canonical one
-   per D8-style dedup rules, delete/redirect the other. Prerequisite for
-   GAP-5 to avoid building on the wrong one.
+   per D8-style dedup rules, and delete/redirect the other. This is now a
+   pure technical-debt cleanup; GAP-5 is already landed on top of texture
+   registry behavior.
 
 7. **Lane GAP-4T — Affine transform at paint time (the big one).** Design
    step first (not code): decide whether rotation/scale/skew becomes a new

@@ -67,11 +67,27 @@ All variable-length data (text, payload bytes) lives in fixed arenas referenced 
 - `GPU_ROUTE_CPU_SELECTED` — CPU chosen by cost policy (NOT a fallback; must be distinguished from failures)
 - `GPU_ROUTE_GPU_FALLBACK` — GPU attempted but fell back to CPU
 
+`draw_ir_v3_execution_route.spl` adds a stricter execution-selection model for
+DrawIR-v3 documents. In addition to the route, it defines:
+
+- `DrawIrV3ExecutionProfile` (`cpu_reference`, `hybrid_vector_gpu`,
+  `resident_gpu`) with an explicit `strict` flag
+- a `DrawIrV3RouteDecision` with `route`, `executed_mode`,
+  `fallback_level`, `reason_code`, and `strict_pass`
+- the invariant that route and reason-class must stay partitioned:
+  - `gpu-selected` must carry policy reasons (`100..199`)
+  - `gpu-fallback` must carry denial reasons (`200..299`)
+
+Design consequence: `"cpu_selected"` is a valid first-class success mode only when
+the profile explicitly requests/justifies CPU; it must not be used to hide missing
+device or denied capability failures. `accepted` on the submit receipt follows
+this split (`true` for CPU-selected and GPU routes; `false` for any fallback).
+
 ### 3. gpu_web_capacity_manifest.spl — No-Reallocation Capacity Contract
 
 **Purpose:** Explicit policy bounds for finite no-reallocation arenas. Kernel A counts outputs, Kernel B exclusive-prefix-scans, Kernel C verifies total ≤ capacity. Exceeding a bound triggers a rejection with a diagnostic receipt.
 
-**Schema Version:** `GPU_WEB_CAPACITY_MANIFEST_SCHEMA_VERSION = "simple-gpu-web-capacity-v1"` (ID: 1) [Note: exact constant name TBD]
+**Schema Version:** `GPU_WEB_CAPACITY_MANIFEST_SCHEMA_VERSION = "simple-gpu-web-capacity-v1"` (ID: 1)
 
 **Manifest Records:**
 - `GpuWebCapacityManifest` — policy bounds: max_input_bytes, max_nodes, max_css_rules, max_layout_boxes, max_draw_commands, max_glyphs, max_mutations_per_epoch, scratch areas (parser_scratch_bytes, style_scratch_bytes, layout_scratch_bytes, scan_scratch_bytes, backend_preprocess_bytes)
@@ -201,4 +217,3 @@ All reference CPU oracles for parity gates.
 **Fallback honesty:** Every fallback carries a diagnostic receipt; no silent SoftwareBackend calls.  
 **Capacity honesty:** Every overflow receipt names the bound and measurement; no clamping or auto-grow.  
 **Determinism:** Same event batch produces identical mutation bytes over 1,000 repetitions (validated via deterministic_hash fields).
-
