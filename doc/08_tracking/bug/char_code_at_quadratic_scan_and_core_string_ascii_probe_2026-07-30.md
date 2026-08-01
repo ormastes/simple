@@ -273,6 +273,15 @@ delegates to the Rust seed child, so a green run there would NOT cover lane 4.
 Binary: `src/compiler_rust/target/bootstrap/simple` (154 MB, the canonical
 LLVM-enabled seed). Everything below was RUN, not read.
 
+**Commit-message clobber, recorded so this fix is findable:** the change below
+landed as `1fc9d905bee8c44efdc285c35ce64c362a208342`, but that commit carries a
+*different lane's* message (`fix(mir): make string-arm dispatch receiver-aware
+for find/rfind`). A parallel session overwrote the shared scratchpad message
+file between it being written and the landing script reading it. The commit's
+three-file diff is this work and is correct; only the message text is wrong.
+Origin had already advanced past it before the mistake was noticed, so it was
+NOT rewritten. Search for the fix by path, not by commit subject.
+
 ## (g) The byte-vs-char mismatch is confirmed, and it is EXECUTABLE
 
 Source confirmation of the (a) "bonus defect", re-checked at the cited lines:
