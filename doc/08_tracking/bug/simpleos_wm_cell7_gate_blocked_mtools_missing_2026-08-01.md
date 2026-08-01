@@ -158,3 +158,87 @@ produce the first genuinely new information about the SMF payload; either way
 the next unknown is branch 30 and then the **first QEMU boot** this gate has
 ever performed on linux-x86_64. Budget ~4 min for the kernel build plus the
 QEMU phase.
+
+## Appendix — full ordered fail-branch enumeration (52 outcomes, 1 is `pass`)
+
+## Phase A — prologue, strictly sequential (lines 395-751)
+
+| # | line | `reason=` | requires |
+|---|---|---|---|
+| 1 | 397 | `artifact-sha256-invalid` | wrapper's own sha256 computable |
+| 2 | 405 | `simple-bin-forbidden` | `SIMPLE_BIN` path is not a Rust-seed path |
+| 3 | 411 | `simple-bin-missing` | `SIMPLE_BIN` set and executable |
+| 4 | 417 | `simple-bin-provenance-unverified` | `--version` exits 0 |
+| 5 | 426 | `simple-bin-forbidden` | version must NOT match `*rust-built*`/`*rust*seed*`/`*bootstrap*seed*` |
+| 6 | 432 | `simple-bin-provenance-unverified` | non-empty version + valid binary sha256 |
+| 7 | 441 | `pinned-font-asset-invalid` | `NotoSansMono[wdth,wght].ttf` = 1,708,408 B, sha256 `2cb2adb3…a081` |
+| 8 | 446 | `qemu-system-x86_64-not-found` | qemu on PATH |
+| 9 | 461 | `grub-mkstandalone-not-found` | grub-mkstandalone on PATH |
+| 10 | 475 | `ovmf-code-not-found` | OVMF_CODE_4M.fd present (real-firmware boot, not `-kernel`) |
+| 11 | 479 | `ovmf-vars-not-found` | OVMF_VARS_4M.fd present |
+| 12 | 485/492 | `native-build-timeout-invalid` | worker timeout < wall timeout, both numeric, ≤9 digits |
+| 13 | 506 | `wm-simple-web-source-missing` | `examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl` |
+| 14 | 517 | `explicit-wm-kernel-artifact-invalid` | only if `SIMPLEOS_WM_KERNEL_ARTIFACT` is set |
+| 15 | 540 | `native-build-watchdog-not-found` | a `timeout` binary |
+| 16 | 558 | `wm-simple-web-source-revision-unavailable` | kernel source manifest hashable |
+| 17 | 592 | `wm-simple-web-build-timeout` | native-build ≤900 s wall / 870 s worker |
+| 18 | **597** | **`wm-simple-web-build-failed`** | **native-build exits 0 and emits a non-empty ELF** ← 2026-07-31 landed here |
+| 19 | 602 | `wm-simple-web-build-invalid-elf` | candidate is a valid ELF |
+| 20 | 609 | `artifact-sha256-invalid` | candidate sha256 computable |
+| 21 | 616 | `wm-simple-web-build-source-changed` | source manifest unchanged across the build |
+| 22 | 637 | `artifact-sha256-invalid` | admitted kernel sha256 |
+| 23 | 647 | `browser-demo-client-build-failed` | `build/os/apps/browser_demo/browser_demo.elf` builds |
+| 24 | 653 | `browser-demo-client-hash-invalid` | its sha256 |
+| 25 | 675 | `pinned-font-disk-staging-failed` | TTF staged into the FAT32 image at `/SYS/FONTS/NOTOSANS` |
+| 26 | 687 | `default-disk-kernel-not-admitted` | disk kernel == admitted kernel |
+| 27 | 695 | `production-fat32-disk-invalid` | FAT32 production disk builds |
+| 28 | 704 | `artifact-sha256-invalid` | disk image sha256 |
+| 29 | 709 | `browser-demo-real-elf-not-staged` | real (non-stub) browser ELF on the disk |
+| 30 | 751 | `grub-mkstandalone-did-not-produce-BOOTX64.EFI` | EFI bootloader produced |
+
+## Phase B — QEMU boot + scanout discovery (lines 782-938)
+
+Initial value is `reason=not-run` (line 782). QEMU is launched with OVMF pflash
+(real-firmware proxy — no `-kernel`, no `isa-debug-exit`), QMP socket, serial log.
+
+| # | line | `reason=` | requires |
+|---|---|---|---|
+| 31 | 855 | `qmp-socket-missing` | QMP socket appears within 60 s |
+| 32 | 857 | `qemu-exited-early` | QEMU still alive |
+| 33 | 872 | `guest-render-fault` | no production fault in serial |
+| 34 | 875 | `guest-serial-fault-storm` | serial log ≤1 MiB |
+| 35 | 917 | `dynamic-scanout-or-desktop-readiness-missing` | both `[scanout-evidence]` and `[production-readiness]` markers |
+| 36 | 920 | `guest-pinned-font-evidence-unavailable` | no `[font-evidence-unavailable]` marker (the oracle-pending escape is closed because `FONT_REGION_EXPECTED_SHA256` is pinned) |
+| 37 | 923 | `guest-pinned-font-evidence-invalid` | `[font-evidence]` line must match verbatim: guest_path, asset_bytes, `family=Noto Sans Mono`, asset sha256, `raster=pure-sfnt-glyf`, `route=shared-wm-draw-ir`, `component_id=taskbar-clock`, `font_size=12`, `text=00:00`, `region=right56,bottom48`, `region_rgb_sha256=addf76ed…54fc` |
+| 38 | 928 | `dynamic-scanout-metadata-invalid` | address/width/height/stride/generation all numeric and >0; pixel_format non-empty. **No defaults are accepted — the guest marker is the only source** |
+| 39 | 932 | `dynamic-scanout-bounds-or-byte-pitch-invalid` | ≤16384 px, stride ≥ width*4, stride%4==0 |
+| 40 | 938 | `dynamic-scanout-address-range-invalid` | scanout end ≤64 GiB |
+| 41 | 1268 | `capture-input-or-guest-correlation-failed` | python3 QMP capture: baseline PPM, two F11 make/break pairs, host nonce ↔ guest monotonic input-sequence correlation |
+
+## Phase C — post-capture oracle ladder (lines 1328-1366)
+
+| # | line | `reason=` | requires |
+|---|---|---|---|
+| 42 | 1330 | `guest-render-fault` | re-check after capture |
+| 43 | 1333 | `guest-browser-window-identity-invalid` | remote browser window id valid |
+| 44 | 1336 | `guest-browser-presented-generation-invalid` | presented generation |
+| 45 | 1339 | `guest-browser-content-generation-mismatch` | delta generation |
+| 46 | 1342 | `guest-content-provenance-invalid` | `[wm-frame] content-presented … status=engine2d_rendered … theme=aetheric_dark source=<manifest sha>` present, and no `content-provenance-rejected` / `backend=native-safe-fallback` |
+| 47 | 1345 | `guest-hda-initialization-missing` | `[hda-init] ok` |
+| 48 | 1348 | `guest-hda-repeated-irq-missing` | `[hda-irq] active` |
+| 49 | 1351 | `canonical-taskbar-clock-oracle-pending` | `FONT_REGION_EXPECTED_SHA256` non-empty (it IS pinned, so unreachable) |
+| 50 | 1356 | `pinned-font-region-oracle-mismatch` | host `pmemsave` extraction of the 8,064-byte clock region matches sha256 `addf76ed…54fc` AND passes the independent region oracle |
+| 51 | 1362 | `font-region-corrupt-copy-calibration-failed` | **deliberate-red calibration**: a corrupted copy of the same region must have the right byte count, a different sha256, and must be REJECTED by the oracle |
+| 52 | 1366 | `pass` | all of the above |
+| — | 1381/1386 | `artifact-sha256-invalid` / `artifact-sha256-mismatch` | final artifact re-hash |
+
+## Notes
+
+- 52 ordered outcomes; one is `pass`. Branch 51 is an anti-fabrication
+  self-test: the oracle must be proven capable of failing on the same run.
+- The gate is a real-firmware boot (OVMF pflash), consistent with
+  `.claude/rules/board-runnable.md`.
+- The gate itself sets `SIMPLE_ALLOW_FREESTANDING_STUBS=1` (line 575) — that is
+  the gate's own configuration, gated in turn by the
+  `config/freestanding_fabricated_stub_baseline.sdn` ratchet, which is what
+  actually refuses new nil-returning stubs.
