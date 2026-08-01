@@ -1,0 +1,173 @@
+# @tag: system, gpu, gpu-mmu, object-vm, placement, mmu
+
+use std.spec
+use std.common.compute.placement_contracts.schema.{
+    PLACEMENT_SCHEMA_VERSION,
+    PLACEMENT_NO_SLOT,
+    PLACEMENT_NO_EPOCH,
+    PLACEMENT_SCHEMA_ID,
+    residency_tier_to_u8,
+    residency_tier_from_u8,
+    residency_tier_name,
+    residency_tier_is_device,
+    RESIDENCY_TIER_MAX
+}
+use std.common.compute.placement_contracts.planner.{PlacementBudget}
+use std.nogc_async_mut.gpu.object_vm.descriptor_table.{
+    ObjectVmFault,
+    ObjectVmDecisionKind,
+    object_vm_table_empty,
+    object_vm_define,
+    object_vm_acquire_lease,
+    object_vm_release_lease,
+    object_vm_resolve,
+    object_vm_set_pinned,
+    object_vm_plan_residency,
+    object_vm_plan_receipt,
+    object_vm_residency_request,
+    object_vm_device_bytes,
+    object_vm_fault_to_u8
+}
+
+val TIER_DEVICE_LOCAL: i64 = 0
+val TIER_HOST_COLD: i64 = 4
+val TIER_SSD_CAS: i64 = 5
+
+fn _budget(bytes: i64) -> PlacementBudget:
+    PlacementBudget(
+        device_bytes: bytes,
+        host_pinned_bytes: 0,
+        host_hot_bytes: 0,
+        staging_bytes: 0,
+        driver_queue_bytes: 0,
+        manifest_cache_bytes: 0,
+        runtime_base_bytes: 0)
+
+fn _kind(k: ObjectVmDecisionKind) -> i64:
+    match k:
+        case Hit: 0
+        case Admitted: 1
+        case Evicted: 2
+        case Rejected: 3
+
+# ----------------------------------------------------------------------------
+# 1) Contract surface is deterministic and wire-stable.
+# ----------------------------------------------------------------------------
+
+describe "GPU MMU contract surface (system-level)":
+    it "stamps a frozen schema and wire-order constants":
+        expect(PLACEMENT_SCHEMA_VERSION).to_equal("simple-placement-contracts-v1")
+        expect(PLACEMENT_SCHEMA_ID).to_equal(1)
+        expect(PLACEMENT_NO_SLOT).to_equal(4294967295)
+        expect(PLACEMENT_NO_EPOCH).to_equal(4294967295)
+        expect(RESIDENCY_TIER_MAX).to_equal(6)
+        expect(residency_tier_to_u8(residency_tier_from_u8(3))).to_equal(3)
+        expect(residency_tier_name(5)).to_equal("SsdCas")
+        expect(residency_tier_name(7)).to_equal("InvalidTier")
+        expect(residency_tier_is_device(TIER_DEVICE_LOCAL)).to_equal(true)
+        expect(residency_tier_is_device(TIER_SSD_CAS)).to_equal(false)
+
+    it "keeps object-vm fault enums stable":
+        expect(ObjectVmFault.NoFault).to_not_equal(ObjectVmFault.StaleGeneration)
+        expect(object_vm_fault_to_u8(ObjectVmFault.NoFault)).to_equal(0)
+        expect(object_vm_fault_to_u8(ObjectVmFault.UnknownSlot)).to_equal(1)
+        expect(object_vm_fault_to_u8(ObjectVmFault.StaleGeneration)).to_equal(2)
+        expect(object_vm_fault_to_u8(ObjectVmFault.StaleLease)).to_equal(3)
+
+# ----------------------------------------------------------------------------
+# 2) Handles and leases.
+# ----------------------------------------------------------------------------
+
+describe "GPU MMU handles and leases":
+    it "resolves a live device arena and rejects stale lease reads":
+        val d = object_vm_define(object_vm_table_empty(), TIER_DEVICE_LOCAL, TIER_HOST_COLD, 1024, 5)
+        expect(d.ok).to_equal(true)
+
+        val lease = object_vm_acquire_lease(d.table, d.slot, d.generation)
+        expect(lease.resolve.ok).to_equal(true)
+
+        val ok = object_vm_resolve(lease.table, d.slot, d.generation, lease.resolve.lease_epoch)
+        expect(ok.ok).to_equal(true)
+        expect(ok.device_address > 0).to_be(true)
+        expect(ok.length).to_equal(1024)
+        expect(ok.slot).to_equal(d.slot)
+
+        val released = object_vm_release_lease(lease.table, d.slot, lease.resolve.lease_epoch)
+        expect(released.resolve.ok).to_equal(true)
+
+        val stale = object_vm_resolve(released.table, d.slot, d.generation, lease.resolve.lease_epoch)
+        expect(stale.ok).to_equal(false)
+        expect(stale.fault).to_equal(ObjectVmFault.StaleLease)
+        expect(stale.reason.contains("object_vm_stale_lease")).to_be(true)
+
+    it "distinguishes missing and stale-generation handles":
+        val d = object_vm_define(object_vm_table_empty(), TIER_DEVICE_LOCAL, TIER_HOST_COLD, 256, 1)
+        val missing_slot = object_vm_resolve(d.table, 999, 1, 0)
+        expect(missing_slot.ok).to_equal(false)
+        expect(missing_slot.fault).to_equal(ObjectVmFault.UnknownSlot)
+
+        val stale = object_vm_resolve(d.table, d.slot, d.generation + 5, 0)
+        expect(stale.ok).to_equal(false)
+        expect(stale.fault).to_equal(ObjectVmFault.StaleGeneration)
+
+# ----------------------------------------------------------------------------
+# 3) Planner decisions and receipts.
+# ----------------------------------------------------------------------------
+
+describe "GPU MMU planner":
+    it "admits a miss with explicit deterministic receipt and stamps plan metadata":
+        val t = object_vm_define(object_vm_table_empty(), TIER_HOST_COLD, TIER_HOST_COLD, 1024, 0)
+        val plan = object_vm_plan_residency(t.table, _budget(2048), [object_vm_residency_request(t.slot, t.generation, 7)])
+
+        expect(plan.ok).to_equal(true)
+        expect(plan.admit_count).to_equal(1)
+        expect(plan.hit_count).to_equal(0)
+        expect(plan.reject_count).to_equal(0)
+        expect(plan.device_bytes_used).to_equal(1024)
+        expect(plan.decisions.len()).to_equal(1)
+        expect(_kind(plan.decisions[0].kind)).to_equal(1)
+        expect(plan.decisions[0].reason.contains("object_vm_residency_miss")).to_equal(true)
+        expect(plan.schema_version).to_equal(PLACEMENT_SCHEMA_VERSION)
+        expect(object_vm_plan_receipt(plan).contains("object_vm_residency_miss")).to_be(true)
+
+    it "produces repeatable decisions when replaying the same request list":
+        val t = object_vm_define(object_vm_table_empty(), TIER_HOST_COLD, TIER_HOST_COLD, 256, 0)
+        val req = [object_vm_residency_request(t.slot, t.generation, 3)]
+        val a = object_vm_plan_residency(t.table, _budget(1024), req)
+        val b = object_vm_plan_residency(t.table, _budget(1024), req)
+
+        expect(a.ok).to_equal(b.ok)
+        expect(a.hit_count).to_equal(b.hit_count)
+        expect(a.admit_count).to_equal(b.admit_count)
+        expect(a.decisions.len()).to_equal(b.decisions.len())
+        expect(a.decisions[0].slot).to_equal(b.decisions[0].slot)
+        expect(a.decisions[0].reason).to_equal(b.decisions[0].reason)
+
+    it "fails closed for zero device budget and preserves a machine-readable reason":
+        val t = object_vm_define(object_vm_table_empty(), TIER_HOST_COLD, TIER_HOST_COLD, 128, 0)
+        val plan = object_vm_plan_residency(t.table, _budget(0), [object_vm_residency_request(t.slot, t.generation, 1)])
+        expect(plan.ok).to_equal(false)
+        expect(plan.decisions.len()).to_equal(0)
+        expect(plan.reason.contains("object_vm_budget_unset")).to_equal(true)
+        expect(plan.reason.contains("PlacementBudget.device_bytes")).to_equal(true)
+        expect(plan.reason).to_equal(object_vm_plan_receipt(plan))
+
+    it "keeps pinned or leased device tables from eviction candidates":
+        val a = object_vm_define(object_vm_table_empty(), TIER_DEVICE_LOCAL, TIER_HOST_COLD, 1024, 1)
+        val pinned = object_vm_set_pinned(a.table, a.slot, true)
+        expect(pinned.resolve.ok).to_equal(true)
+        val b = object_vm_define(pinned.table, TIER_HOST_COLD, TIER_HOST_COLD, 1024, 1)
+        val with_pinned = object_vm_plan_residency(b.table, _budget(1024), [object_vm_residency_request(b.slot, b.generation, 1)])
+        expect(with_pinned.ok).to_equal(false)
+        expect(with_pinned.reject_count).to_equal(1)
+        expect(with_pinned.decisions[0].reason.contains("blocked_pinned=1")).to_be(true)
+        expect(with_pinned.table.tier[a.slot]).to_equal(TIER_DEVICE_LOCAL)
+
+        val c = object_vm_define(object_vm_table_empty(), TIER_DEVICE_LOCAL, TIER_HOST_COLD, 1024, 1)
+        val leased = object_vm_acquire_lease(c.table, c.slot, c.generation)
+        expect(leased.resolve.ok).to_equal(true)
+        val d = object_vm_define(leased.table, TIER_HOST_COLD, TIER_HOST_COLD, 1024, 1)
+        val with_leased = object_vm_plan_residency(d.table, _budget(1024), [object_vm_residency_request(d.slot, d.generation, 1)])
+        expect(with_leased.ok).to_equal(false)
+        expect(with_leased.reject_count).to_equal(1)
+        expect(with_leased.decisions[0].reason.contains("blocked_leased=1")).to_be(true)
