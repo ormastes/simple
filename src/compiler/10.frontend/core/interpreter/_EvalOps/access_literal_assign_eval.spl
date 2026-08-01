@@ -31,19 +31,39 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             return val_make_bool(s.contains(t))
         return val_make_bool(false)
 
+    # char_code_at is CHARACTER (codepoint) indexed in every other lane: the
+    # seed does `s.chars().nth(idx)` (interpreter_method/string.rs), and the
+    # compiled lanes lower to __simple_rt_string_char_code_at, which walks
+    # UTF-8 widths (runtime_native.c rt_string_char_code_at /
+    # src/runtime/simple_core/core_string.spl).
+    #
+    # This used to be `s.substring(idx, idx+1)` then `.char_code_at(0)` on the
+    # result. `substring` is BYTE-indexed (deliberately -- it has to agree with
+    # the byte offsets `len` and `index_of` hand out), so on any multi-byte
+    # codepoint this sliced ONE byte out of the middle of a character and
+    # re-decoded that lone byte as UTF-8. Measured: "café,".char_code_at(3)
+    # returned 65533 (U+FFFD, the lossy-decode replacement for a bare 0xC3)
+    # instead of 233, and every index at or past the first non-ASCII character
+    # was shifted.
+    #
+    # NOTE: this is the SECOND copy of eval_text_method. eval_methods.spl has a
+    # near-identical one that had the same bug in the `s[idx:idx+1]` spelling.
+    # THIS file's copy is the one actually reached at runtime (confirmed by
+    # probe -- see the bug doc). Keep the two in sync; fixing only one is how
+    # this defect survived.
+    #
+    # Bounds are handled inside the runtime, which returns 0 for negative and
+    # for out-of-range indices -- matching the seed's `None => 0`. Do NOT
+    # re-add an `idx < s.len()` guard here: `len` is BYTE length, so for
+    # multi-byte text it is an over-estimate of the character count and the
+    # walk is the only thing that knows the real end.
     if method_name == "char_code_at":
         if arg_eids.len() > 0:
             val idx_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
             val idx = val_get_int(idx_val)
-            if idx >= 0 and idx < s.len():
-                val ch = s.substring(idx, idx + 1)
-                return val_make_int(ch.char_code_at(0))
-            return val_make_int(0)
-        if s.len() > 0:
-            val first_ch = s.substring(0, 1)
-            return val_make_int(first_ch.char_code_at(0))
-        return val_make_int(0)
+            return val_make_int(s.char_code_at(idx))
+        return val_make_int(s.char_code_at(0))
 
     if method_name == "substring":
         if arg_eids.len() >= 2:

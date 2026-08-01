@@ -326,19 +326,33 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             return val_make_bool(s.contains(t))
         return val_make_bool(false)
 
+    # char_code_at is CHARACTER (codepoint) indexed in every other lane: the
+    # seed does `s.chars().nth(idx)` (interpreter_method/string.rs), and the
+    # compiled lanes lower to __simple_rt_string_char_code_at, which walks
+    # UTF-8 widths (runtime_native.c rt_string_char_code_at /
+    # src/runtime/simple_core/core_string.spl).
+    #
+    # This used to be `s[idx:idx+1]` then `.char_code_at(0)` on the result.
+    # That is BYTE-addressed (same shape rt_string_char_at uses), so on any
+    # multi-byte codepoint it sliced ONE byte out of the middle of a
+    # character and re-decoded that lone byte as UTF-8 -- garbage, not even
+    # the raw byte. "café".char_code_at(3) returned junk instead of 233, and
+    # every index at or past the first non-ASCII character was shifted.
+    # Delegating to the host builtin gets the shared runtime walk and the
+    # ASCII fast path with it.
+    #
+    # Bounds are handled inside the runtime, which returns 0 for negative and
+    # for out-of-range indices -- matching the seed's `None => 0`. Do NOT
+    # re-add an `idx < s.len()` guard here: `len` is BYTE length, so for
+    # multi-byte text it is an over-estimate of the character count and the
+    # walk is the only thing that knows the real end.
     if method_name == "char_code_at":
         if arg_eids.len() > 0:
             val idx_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
             val idx = val_get_int(idx_val)
-            if idx >= 0 and idx < s.len():
-                val ch = s[idx:idx + 1]
-                return val_make_int(ch.char_code_at(0))
-            return val_make_int(0)
-        if s.len() > 0:
-            val first_ch = s[0:1]
-            return val_make_int(first_ch.char_code_at(0))
-        return val_make_int(0)
+            return val_make_int(s.char_code_at(idx))
+        return val_make_int(s.char_code_at(0))
 
     # byte_at is BYTE-indexed, in contrast to char_code_at above which is
     # CHARACTER-indexed: on non-ASCII text the two diverge (e.g.
@@ -534,6 +548,15 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             return val_make_int(s.last_index_of(needle))
         return val_make_int(-1)
 
+    # char_at is left BYTE-indexed on purpose: the compiled lanes lower it to
+    # rt_string_char_at, which is `rt_string_new(s->data + index, 1)` -- a raw
+    # one-byte slice (runtime_native.c). The seed disagrees (it uses
+    # `s.chars().nth(idx)`), so char_at is a genuine cross-lane divergence in
+    # its own right, but the split is between the SEED and the RUNTIME, not
+    # something this interpreter introduced -- matching the seed here would
+    # break agreement with native/JIT. Tracked separately in
+    # doc/08_tracking/bug/2026-08-01_interpreter_char_code_at_byte_indexed.md;
+    # do not "fix" one side of it in isolation.
     if method_name == "char_at":
         if arg_eids.len() > 0:
             val idx_val = eval_expr(arg_eids[0])
