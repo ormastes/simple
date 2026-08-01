@@ -1,4 +1,4 @@
-use compiler.backend.backend.llvm_ir_builder.{LlvmIRBuilder}
+use compiler.backend.backend.llvm_ir_builder.{LlvmIRBuilder, llvm_ir_builder_build}
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple}
 use compiler.backend.backend_types.{CodegenTarget}
 
@@ -47,3 +47,46 @@ describe "LLVM IR Builder":
         expect(builder.instructions[1]).to_equal("  %3 = load i64, ptr %ptr, align 8")
         expect(builder.instructions[2]).to_equal("  store i64 %3, ptr %ptr, align 8")
         expect(builder.instructions[3]).to_equal("  %4 = icmp eq i64 %3, %2")
+
+# --- Regression: bootstrap IR buffer must not leak across modules ---
+# doc/08_tracking/bug/llvm_bootstrap_ir_buffer_not_reset_2026-08-01.md
+extern fn rt_env_set(key: text, value_str: text) -> bool
+
+describe "LLVM IR Builder bootstrap buffer isolation":
+    it "does not prepend a previous module's IR to the next module":
+        # Under SIMPLE_BOOTSTRAP=1, emit() accumulates into the module-level
+        # global _llvm_bootstrap_ir_text instead of the per-instance string
+        # builder. That global is the mirror of `sb`, so LlvmIRBuilder.create()
+        # must clear it. Before the fix, module B built as A ++ B, producing a
+        # second `source_filename`/`target triple` mid-file, which llc rejects
+        # with "expected top-level entity".
+        rt_env_set("SIMPLE_BOOTSTRAP", "1")
+
+        val triple = LlvmTargetTriple.from_target(CodegenTarget.X86_64)
+
+        val a = LlvmIRBuilder.create("mod_a", triple)
+        a.emit_module_header()
+        a.start_function("mod_a", [], "i64")
+        a.emit_ret("i64", "42")
+        a.end_function()
+        val ir_a = llvm_ir_builder_build(a)
+
+        val b = LlvmIRBuilder.create("mod_b", triple)
+        b.emit_module_header()
+        b.start_function("mod_b", [], "i64")
+        b.emit_ret("i64", "7")
+        b.end_function()
+        val ir_b = llvm_ir_builder_build(b)
+
+        rt_env_set("SIMPLE_BOOTSTRAP", "")
+
+        # Module A is well-formed on its own.
+        expect(ir_a.contains("ModuleID = 'mod_a'")).to_equal(true)
+
+        # Module B must be a STANDALONE module: no trace of module A.
+        expect(ir_b.contains("mod_a")).to_equal(false)
+        expect(ir_b.contains("ModuleID = 'mod_b'")).to_equal(true)
+
+        # Exactly one module header in B (split on N occurrences -> N+1 parts).
+        expect(ir_b.split("target triple").len()).to_equal(2)
+        expect(ir_b.split("source_filename").len()).to_equal(2)
