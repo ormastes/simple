@@ -31,6 +31,16 @@
 # 2026-08-01: `repo_root=... || exit 0` used to let a push through whenever
 # `git rev-parse` failed — the same fail-open class this hook exists to close.
 # It now refuses.
+#
+# 2026-08-01 (second amendment): a THIRD guard now runs on every ref —
+# scripts/check/check-tree-size-push.shs, the tree-STRUCTURE gate. The two
+# conflict guards only recognise `.jjconflict*` entries and literal marker text,
+# so a tree truncated by anything else went straight through them. `main` was
+# wiped to near-zero files twice in 24 hours with every guard green; the only
+# thing that ever caught it was a human counting `git ls-tree -r | wc -l`. The
+# tree-size guard automates that count plus a duplicate-entry check, a `src/`
+# entry band and load-bearing-path floors. The file keeps its original name
+# because other docs reference it by path.
 
 set -u
 
@@ -45,8 +55,9 @@ fi
 
 tree_guard="$repo_root/scripts/check/check-no-conflict-tree-push.shs"
 markers_guard="$repo_root/scripts/check/check-no-conflict-markers-push.shs"
+size_guard="$repo_root/scripts/check/check-tree-size-push.shs"
 
-for g in "$tree_guard" "$markers_guard"; do
+for g in "$tree_guard" "$markers_guard" "$size_guard"; do
     [ -f "$g" ] || {
         echo "pre-push: guard script missing at $g — refusing to push blind" >&2
         exit 1
@@ -102,9 +113,15 @@ while read -r _local_ref local_sha _remote_ref remote_sha; do
         fi
         run_guard "$tree_guard" "new ref $local_sha (not on origin)" \
             --rev-list-args "$local_sha" --not --remotes=origin
+        run_guard "$size_guard" "new ref $local_sha (not on origin)" \
+            --rev-list-args "$local_sha" --not --remotes=origin
     else
         markers_range="$remote_sha..$local_sha"
         run_guard "$tree_guard" "$remote_sha..$local_sha" "$remote_sha..$local_sha"
+        # The size guard takes the SAME range and uses its left endpoint —
+        # exactly the tree this push replaces — as the reference count for the
+        # relative band.
+        run_guard "$size_guard" "$remote_sha..$local_sha" "$remote_sha..$local_sha"
     fi
 
     if [ -z "$markers_range" ]; then
