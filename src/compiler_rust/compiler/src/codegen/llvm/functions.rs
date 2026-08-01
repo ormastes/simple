@@ -294,17 +294,26 @@ impl LlvmBackend {
             _ => f64_type.const_zero(),
         };
 
+        // `rt_box_float` NEVER EXISTED in any runtime (2026-08-01): there is no
+        // `pub extern "C" fn rt_box_float` under src/compiler_rust/runtime and no
+        // `rt_box_float(` definition in src/runtime/runtime_native.c — only a
+        // stale comment mentions the name. The real f64 tagging helper is
+        // `rt_value_float`, which IS defined in BOTH runtimes. Same defect and
+        // same fix as the Cranelift `wrap_value` path (see
+        // codegen/instr/methods.rs), where emitting the nonexistent
+        // `rt_box_int`/`rt_box_float` made the JIT report "unresolved external
+        // symbol" and silently drop the whole module to the interpreter.
         let fn_type = rv_type.fn_type(&[f64_type.into()], false);
         let func = module
-            .get_function("rt_box_float")
-            .unwrap_or_else(|| module.add_function("rt_box_float", fn_type, None));
+            .get_function("rt_value_float")
+            .unwrap_or_else(|| module.add_function("rt_value_float", fn_type, None));
         let call = builder
-            .build_call(func, &[f64_val.into()], "rt_box_float")
-            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_box_float", &e))?;
+            .build_call(func, &[f64_val.into()], "rt_value_float")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_float", &e))?;
         let ret = call
             .try_as_basic_value()
             .left()
-            .ok_or_else(|| CompileError::semantic("rt_box_float returned no value".to_string()))?
+            .ok_or_else(|| CompileError::semantic("rt_value_float returned no value".to_string()))?
             .into_int_value();
         Ok(ret)
     }
@@ -336,17 +345,23 @@ impl LlvmBackend {
                 .into_float_value());
         }
 
+        // `rt_unbox_float` never existed either — sibling of the `rt_box_float`
+        // defect above. It has ZERO mentions anywhere under
+        // src/compiler_rust/runtime or src/runtime. The real untagging helper is
+        // `rt_value_as_float`, defined in BOTH runtimes
+        // (`rt_value_as_float(RuntimeValue) -> f64` / `double
+        // rt_value_as_float(int64_t)`), matching this `(rv) -> f64` shape.
         let fn_type = f64_type.fn_type(&[rv_type.into()], false);
         let func = module
-            .get_function("rt_unbox_float")
-            .unwrap_or_else(|| module.add_function("rt_unbox_float", fn_type, None));
+            .get_function("rt_value_as_float")
+            .unwrap_or_else(|| module.add_function("rt_value_as_float", fn_type, None));
         let call = builder
-            .build_call(func, &[int_val.into()], "rt_unbox_float")
-            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_unbox_float", &e))?;
+            .build_call(func, &[int_val.into()], "rt_value_as_float")
+            .map_err(|e| crate::error::factory::llvm_build_failed("call rt_value_as_float", &e))?;
         Ok(call
             .try_as_basic_value()
             .left()
-            .ok_or_else(|| CompileError::semantic("rt_unbox_float returned no value".to_string()))?
+            .ok_or_else(|| CompileError::semantic("rt_value_as_float returned no value".to_string()))?
             .into_float_value())
     }
 
@@ -3567,6 +3582,15 @@ mod tests {
         backend.verify().unwrap();
     }
 
+    /// REPLACED 2026-08-01. The previous body of this test asserted
+    /// `call i32 @rt_box_float(double` and `call double @rt_unbox_float(i32` —
+    /// i.e. it PINNED a defect: neither `rt_box_float` nor `rt_unbox_float` is
+    /// defined in either runtime (no `pub extern "C" fn` under
+    /// src/compiler_rust/runtime, no definition in src/runtime/runtime_native.c),
+    /// so on every 32-bit target the LLVM backend emitted calls to symbols that
+    /// do not exist. The assertions were not relaxed — they were replaced with
+    /// assertions naming the helpers that DO exist in both runtimes, plus
+    /// explicit negative assertions so the dead names can never come back.
     #[test]
     fn test_riscv32_float_boxing_uses_runtime_helpers() {
         let target = Target::new(TargetArch::Riscv32, TargetOS::SimpleOS);
@@ -3593,9 +3617,59 @@ mod tests {
         }
 
         let ir = backend.get_ir().unwrap();
-        assert!(ir.contains("call i32 @rt_box_float(double"));
-        assert!(ir.contains("call double @rt_unbox_float(i32"));
+        // Positive artifacts: the 32-bit boxing path must call the helpers that
+        // are actually EXPORTED by the runtimes.
+        assert!(
+            ir.contains("call i32 @rt_value_float(double"),
+            "32-bit float boxing must call rt_value_float; IR was:\n{}",
+            ir
+        );
+        assert!(
+            ir.contains("call double @rt_value_as_float(i32"),
+            "32-bit float unboxing must call rt_value_as_float; IR was:\n{}",
+            ir
+        );
+        // Negative artifacts: these two symbols do not exist in ANY runtime.
+        // Emitting them is what this test previously asserted.
+        assert!(!ir.contains("rt_box_float"), "rt_box_float does not exist in any runtime");
+        assert!(!ir.contains("rt_unbox_float"), "rt_unbox_float does not exist in any runtime");
         assert!(!ir.contains("bitcast i32"));
+        backend.verify().unwrap();
+    }
+
+    /// True-positive control for the test above: on a 64-bit target the float
+    /// boxing path is INLINE (shift/or + bitcast) and must emit no runtime call
+    /// at all. Without this control, "no rt_box_float in the IR" could be
+    /// satisfied by the boxing path going silent rather than by it being fixed.
+    #[test]
+    fn test_x86_64_float_boxing_is_inline_not_a_runtime_call() {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module("x64_float_boxing").unwrap();
+
+        {
+            let module_ref = backend.module.borrow();
+            let module = module_ref.as_ref().unwrap();
+            let builder_ref = backend.builder.borrow();
+            let builder = builder_ref.as_ref().unwrap();
+            let fn_type = backend.context_ref().void_type().fn_type(&[], false);
+            let func = module.add_function("test", fn_type, None);
+            let block = backend.context_ref().append_basic_block(func, "entry");
+            builder.position_at_end(block);
+
+            let float_val = backend.context_ref().f64_type().const_float(1.5);
+            let boxed = backend
+                .build_box_float_value(float_val.into(), builder, module)
+                .unwrap();
+            let unboxed = backend.build_unbox_float_value(boxed.into(), builder, module).unwrap();
+            let _ = unboxed;
+            builder.build_return(None).unwrap();
+        }
+
+        let ir = backend.get_ir().unwrap();
+        assert!(!ir.contains("rt_value_float"), "64-bit boxing must stay inline");
+        assert!(!ir.contains("rt_box_float"));
+        assert!(!ir.contains("rt_unbox_float"));
         backend.verify().unwrap();
     }
 }
