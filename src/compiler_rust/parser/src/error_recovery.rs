@@ -122,10 +122,16 @@ impl CommonMistake {
                  Java:    Point p = new Point(1, 2);\n\
                  Simple:  val p = Point { x: 1, y: 2 }"
                 .to_string(),
-            Self::JavaThis => "Use 'self' instead of 'this' (and it's implicit in methods).\n\
+            // Do NOT recommend a bare `x = value` here. Inside a method body a
+            // bare `field = value` does not assign the receiver's field -- it is
+            // rejected as an unresolved/invalid assignment, and before that guard
+            // landed it silently minted a shadowing local. `self` is implicit in
+            // the PARAMETER LIST only, never in field access.
+            // See doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
+            Self::JavaThis => "Use 'self' instead of 'this'. Field access keeps the 'self.' prefix.\n\
                  \n\
                  Java:    this.x = value;\n\
-                 Simple:  x = value  # self is implicit"
+                 Simple:  self.x = value  # 'self' is implicit only in the parameter list"
                 .to_string(),
             Self::CppTemplate => "Generic parameters come after the name in Simple.\n\
                  \n\
@@ -249,7 +255,7 @@ impl CommonMistake {
             Self::JavaPublicClass => "Use 'pub class' or 'pub struct'".to_string(),
             Self::JavaVoid => "Omit the return type (-> Type) for void functions".to_string(),
             Self::JavaNew => "Use struct literal: Type { field: value }".to_string(),
-            Self::JavaThis => "Use 'self' (which is implicit in methods)".to_string(),
+            Self::JavaThis => "Replace 'this.' with 'self.' (keep the prefix on field access)".to_string(),
             Self::TsFunction => "Replace 'function' with 'fn'".to_string(),
             Self::TsConst => "Replace 'const' with 'val'".to_string(),
             Self::TsLet => "Use 'val' (immutable) or 'var' (mutable)".to_string(),

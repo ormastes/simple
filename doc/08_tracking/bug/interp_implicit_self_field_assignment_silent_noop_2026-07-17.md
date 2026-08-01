@@ -68,3 +68,42 @@ any `self.` token) is a parser-level false positive independent of whether
 the surrounding construct even supports the implicit form it recommends.
 `chip.spl` keeps its `self.` usages; removing them is not safe on this
 binary.
+
+## Update 2026-08-01: direction (2) chosen; guard landed, hint corrected
+
+**Direction: (2) hard error.** Not (1). Reads are *not* symmetric today —
+they already reject the implicit form (pure-Simple HIR: `unresolved name`;
+pure-Simple interpreter `env_assign` miss → `undefined variable`; Rust seed
+HIR: `UnknownVariable`). Making *assignment* resolve to the field while reads
+keep erroring would create a new, worse asymmetry, and it contradicts
+`.claude/memory/ref_coding.md`, where `self.field` in the body is the stated
+convention. Erroring is also the narrower change: a bare `n = ...` may still
+implicitly declare a local everywhere else — only the case where the name
+collides with a field of the receiver is rejected.
+
+State of each lane:
+
+- Assignment guard for the Rust AST interpreter **already landed** in
+  `941605d43d9` (`compiler/src/interpreter/node_exec.rs:581-597`), buried in a
+  `chore: sync ...` commit. It is **not in the currently built seed**
+  (`src/compiler_rust/target/bootstrap/simple`, built 2026-07-31 06:28 — the
+  guard landed 2026-08-01 03:26), so a repro run today still shows the silent
+  no-op. Re-verify after the next seed rebuild.
+- The **compounding defect was still live** and is fixed here: the `JavaThis`
+  recovery hint literally recommended `Simple:  x = value  # self is implicit`,
+  i.e. the exact broken shape. Corrected in both trees to `self.x = value`
+  (`src/compiler_rust/parser/src/error_recovery.rs`,
+  `src/compiler/10.frontend/parser/recovery.spl`).
+- The earlier claim that the hint "fires unconditionally on any `self.` token"
+  is **stale**: `detect_common_mistake` gates `JavaThis` on the literal lexeme
+  `this` (`error_recovery.rs:403-405`). Correct `self.` code is not flagged.
+
+Regression spec:
+`test/01_unit/compiler/frontend/implicit_self_field_assignment_hint_spec.spl`
+(4 of 5 failing before the hint fix, 5/5 after).
+
+**Separate defect observed while reproducing (not fixed here):** under
+`SIMPLE_EXECUTION_MODE=jit` an implicit field *read* returns `0` silently
+instead of erroring, and a plain undeclared read/assign round-trip yields `0`
+where the interpreter yields `7`. That is a JIT lenient-lowering divergence,
+not this bug.
