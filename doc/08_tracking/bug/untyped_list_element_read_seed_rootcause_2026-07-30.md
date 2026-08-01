@@ -206,3 +206,39 @@ fixed here.
    (steering toward the proven-safe concrete element types) is more
    tractable and lower-risk than a general runtime-tag-dispatched decode
    mechanism, given the demonstrated type-confusion risk of the latter.
+
+## Re-measurement 2026-08-01 (base `9349ff90f60`, deployed seed)
+
+Re-ran the three recorded members of this family as a single no-import probe
+(an import forces a whole-module interpreter fallback and makes the run
+silently vacuous). Probe values avoid `3` (the nil sentinel); the corruption
+signature is `v -> v*8`, so `5 -> 40` and `7 -> 56` are the tells.
+
+Default engine (Cranelift JIT) vs `SIMPLE_EXECUTION_MODE=interpret`:
+
+| probe | default | interpret | verdict |
+|---|---|---|---|
+| `ctl_direct` — straight-line `[i64]` read | `5,7` | `5,7` | control passes |
+| `param_untyped` — callee param declared `: list` | **`40,56`** | `5,7` | **STILL LIVE — exact `<<3`** |
+| `param_typed` — callee param declared `[i64]` | `5,7` | `5,7` | unaffected, confirms the retype workaround |
+| `rebind_from_empty` — `var work = []` then rebind | `5,7` | `5,7` | **does NOT reproduce** |
+| `rebind_from_nonempty` (control) | `5,7` | `5,7` | unaffected |
+| `loop_spill_buf0` — `.push()` in a `while`, index-read later iteration | `5;5;5;5;5;5;` | same | **does NOT reproduce** |
+| `loop_presized_buf0` (control) | `5;5;5;5;5;5;` | same | unaffected |
+
+**PROVED:** the untyped `: list` parameter member (family member 3) is live at
+this base, with the exact documented `<<3` signature and the documented
+interpreter/default polarity reversal.
+
+**NOT REPRODUCING at this base** in the shapes recorded on 2026-07-29:
+the empty-list-first-assignment poisoning (member 1) and the loop-carried
+`.push()` spill (member 2). Both returned correct values on both engines.
+This is *not* proof they are fixed — the original repros were shrunk from
+`base58_decode` and the shapes here may not be faithful. Treat as "not
+reproducible from the recorded description"; re-derive from the base58 original
+before either closing them or re-asserting them.
+
+Consequence for the fix order: the `: list` retype campaign remains the only
+member with a demonstrated live reproduction, which strengthens recommended
+next step 4 above (lint/error on `: list` parameters) relative to the
+general runtime-tag-dispatched decode.
