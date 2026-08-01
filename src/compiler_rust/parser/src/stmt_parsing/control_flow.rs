@@ -482,7 +482,8 @@ impl<'a> Parser<'a> {
             // condition's continuation pseudo-indent level already coincides
             // with the block body's column — see `parse_while_with_label`
             // above for the full rationale.
-            if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+            let equal_column = self.header_continuation_is_equal_column(deferred_before);
+            if !equal_column {
                 self.expect(&TokenKind::Indent)?;
             }
 
@@ -492,8 +493,7 @@ impl<'a> Parser<'a> {
             // Parse rest of block body
             let body = self.parse_block_body()?;
 
-            let deferred = self.deferred_dedent_count + deferred_before;
-            self.deferred_dedent_count = 0;
+            let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
             self.consume_dedents_for_method_chain(deferred);
 
             Ok(Node::For(ForStmt {
@@ -602,7 +602,8 @@ impl<'a> Parser<'a> {
             // that level). Detect it and skip straight to body parsing —
             // `parse_block_body` doesn't require Indent to have been
             // physically consumed, it just loops until Dedent.
-            if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+            let equal_column = self.header_continuation_is_equal_column(deferred_before);
+            if !equal_column {
                 self.expect(&TokenKind::Indent)?;
             }
 
@@ -612,8 +613,7 @@ impl<'a> Parser<'a> {
             // Parse rest of block body
             let body = self.parse_block_body()?;
 
-            let deferred = self.deferred_dedent_count + deferred_before;
-            self.deferred_dedent_count = 0;
+            let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
             self.consume_dedents_for_method_chain(deferred);
 
             (body, invariants)
@@ -802,10 +802,10 @@ impl<'a> Parser<'a> {
             // level coincides exactly with the arms' column, so no fresh
             // Indent appears — skip straight to the arms loop, which does
             // not require Indent to have been physically consumed.
-            if !(deferred_before > 0
+            let equal_column = deferred_before > 0
                 && !self.check(&TokenKind::Indent)
-                && (self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe)))
-            {
+                && (self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe));
+            if !equal_column {
                 self.expect(&TokenKind::Indent)?;
             }
 
@@ -824,8 +824,7 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
 
-            let deferred = self.deferred_dedent_count + deferred_before;
-            self.deferred_dedent_count = 0;
+            let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
             self.consume_dedents_for_method_chain(deferred);
 
             arms
@@ -874,10 +873,10 @@ impl<'a> Parser<'a> {
         self.drain_available_deferred_dedents();
         let deferred_before = self.deferred_dedent_count;
         self.deferred_dedent_count = 0;
-        if !(deferred_before > 0
+        let equal_column = deferred_before > 0
             && !self.check(&TokenKind::Indent)
-            && (self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe)))
-        {
+            && (self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe));
+        if !equal_column {
             self.expect(&TokenKind::Indent)?;
         }
 
@@ -896,8 +895,7 @@ impl<'a> Parser<'a> {
             self.advance();
         }
 
-        let deferred = self.deferred_dedent_count + deferred_before;
-        self.deferred_dedent_count = 0;
+        let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
         self.consume_dedents_for_method_chain(deferred);
 
         Ok(Node::Match(MatchStmt {
@@ -1066,7 +1064,8 @@ impl<'a> Parser<'a> {
         self.drain_available_deferred_dedents();
         let deferred_before = self.deferred_dedent_count;
         self.deferred_dedent_count = 0;
-        if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+        let equal_column = self.header_continuation_is_equal_column(deferred_before);
+        if !equal_column {
             self.expect(&TokenKind::Indent)?;
         }
 
@@ -1076,8 +1075,7 @@ impl<'a> Parser<'a> {
         // Parse rest of block body
         let body = self.parse_block_body()?;
 
-        let deferred = self.deferred_dedent_count + deferred_before;
-        self.deferred_dedent_count = 0;
+        let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
         self.consume_dedents_for_method_chain(deferred);
 
         Ok(Node::For(ForStmt {
@@ -1113,7 +1111,8 @@ impl<'a> Parser<'a> {
         self.drain_available_deferred_dedents();
         let deferred_before = self.deferred_dedent_count;
         self.deferred_dedent_count = 0;
-        if !(deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()) {
+        let equal_column = self.header_continuation_is_equal_column(deferred_before);
+        if !equal_column {
             self.expect(&TokenKind::Indent)?;
         }
 
@@ -1123,8 +1122,7 @@ impl<'a> Parser<'a> {
         // Parse rest of block body
         let body = self.parse_block_body()?;
 
-        let deferred = self.deferred_dedent_count + deferred_before;
-        self.deferred_dedent_count = 0;
+        let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
         self.consume_dedents_for_method_chain(deferred);
 
         Ok(Node::While(WhileStmt {

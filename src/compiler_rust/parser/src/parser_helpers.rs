@@ -593,6 +593,42 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Equal-column detection for a loop/condition header whose expression used
+    /// a multi-line operator continuation.
+    ///
+    /// When the continuation line's column equals the block body's column, the
+    /// lexer emits NO fresh `Indent` for the body — the pseudo-INDENT consumed
+    /// by the continuation *is* the block's own INDENT. Callers use this to skip
+    /// the `expect(Indent)` and, crucially, to know that the pseudo-INDENT's
+    /// compensating DEDENT will be consumed by `parse_block_body` as the body
+    /// terminator (see `header_continuation_dedents_to_reconcile`).
+    pub(crate) fn header_continuation_is_equal_column(&mut self, deferred_before: usize) -> bool {
+        deferred_before > 0 && !self.check(&TokenKind::Indent) && self.is_statement_start()
+    }
+
+    /// How many deferred pseudo-INDENT DEDENTs still need reconciling AFTER a
+    /// loop/condition header's block body has been parsed.
+    ///
+    /// In the equal-column shape (`header_continuation_is_equal_column`) the
+    /// body's terminating DEDENT and the pseudo-INDENT's compensating DEDENT are
+    /// the SAME token, and `parse_block_body` has already consumed it. Counting
+    /// it again here makes the parser consume a DEDENT belonging to an ENCLOSING
+    /// block — which silently re-parents every following top-level declaration
+    /// into the current function, with no parse error at all.
+    ///
+    /// See doc/08_tracking/bug/
+    /// parser_while_continuation_swallows_following_declarations_2026-08-01.md.
+    pub(crate) fn header_continuation_dedents_to_reconcile(&mut self, deferred_before: usize, equal_column: bool) -> usize {
+        let pending = if equal_column {
+            deferred_before.saturating_sub(1)
+        } else {
+            deferred_before
+        };
+        let deferred = self.deferred_dedent_count + pending;
+        self.deferred_dedent_count = 0;
+        deferred
+    }
+
     /// Check if the next token after the current could start a type.
     /// Used to distinguish typed patterns (x: Int) from match arm separators (case x:).
     ///

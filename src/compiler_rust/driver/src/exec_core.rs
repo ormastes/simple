@@ -231,6 +231,103 @@ impl ExecCore {
         }
     }
 
+    /// True when a top-level item is a pure DECLARATION — something that
+    /// defines a name but executes nothing when the module is run.
+    ///
+    /// Anything not listed here is treated as executable, so a newly added
+    /// `Node` variant can never turn into a spurious "nothing to run" error.
+    fn is_pure_declaration(item: &simple_parser::ast::Node) -> bool {
+        use simple_parser::ast::Node as N;
+        matches!(
+            item,
+            N::Function(_)
+                | N::Struct(_)
+                | N::Bitfield(_)
+                | N::Class(_)
+                | N::Enum(_)
+                | N::Trait(_)
+                | N::Impl(_)
+                | N::InterfaceBinding(_)
+                | N::Mixin(_)
+                | N::Actor(_)
+                | N::TypeAlias(_)
+                | N::ClassAlias(_)
+                | N::FunctionAlias(_)
+                | N::Extern(_)
+                | N::ExternClass(_)
+                | N::Macro(_)
+                | N::Unit(_)
+                | N::UnitFamily(_)
+                | N::CompoundUnit(_)
+                | N::HandlePool(_)
+                | N::LiteralFunction(_)
+                | N::ModDecl(_)
+                | N::UseStmt(_)
+                | N::MultiUse(_)
+                | N::CommonUseStmt(_)
+                | N::ExportUseStmt(_)
+                | N::StructuredExportStmt(_)
+                | N::AutoImportStmt(_)
+                | N::RequiresCapabilities(_)
+                | N::AopAdvice(_)
+                | N::DiBinding(_)
+                | N::InjectGraph(_)
+                | N::SecurityPolicy(_)
+                | N::SecurityGate(_)
+                | N::SandboxPolicy(_)
+                | N::CapabilityPolicy(_)
+                | N::UiPolicy(_)
+                | N::ArchitectureRule(_)
+                | N::MockDecl(_)
+                | N::Newtype(_)
+                | N::Extend(_)
+                | N::Pass(_)
+        )
+    }
+
+    /// Guard the silent no-op run.
+    ///
+    /// A module with no `fn main` AND no executable top-level item runs
+    /// NOTHING. Historically that path returned `Ok(0)` without printing a
+    /// single character, so a mis-parse that re-parented `main` into an
+    /// enclosing block was indistinguishable from a successful run — the worst
+    /// possible diagnostic shape, and the mechanism behind
+    /// doc/08_tracking/bug/
+    /// parser_while_continuation_swallows_following_declarations_2026-08-01.md.
+    ///
+    /// Returns an error describing what the module DID declare so the caller
+    /// gets a located, actionable message instead of exit 0.
+    fn reject_silent_no_op_module(items: &[simple_parser::ast::Node]) -> Result<(), String> {
+        if items.iter().any(|i| !Self::is_pure_declaration(i)) {
+            return Ok(());
+        }
+        if items
+            .iter()
+            .any(|i| matches!(i, simple_parser::ast::Node::Function(f) if f.name == "main"))
+        {
+            return Ok(());
+        }
+        let nested_main = items.iter().any(|i| {
+            matches!(i, simple_parser::ast::Node::Function(f) if f.body.statements.iter().any(|s| {
+                matches!(s, simple_parser::ast::Node::Function(inner) if inner.name == "main")
+            }))
+        });
+        let mut msg = String::from(
+            "no `main` function and no top-level statements: this module declares only \
+             names, so running it would execute nothing",
+        );
+        if nested_main {
+            msg.push_str(
+                "\n  = note: a `main` was found NESTED inside another function's body. \
+                 That is almost always an indentation/line-continuation mis-parse that \
+                 re-parented the following declarations — check any multi-line \
+                 `while`/`for`/`match` header just above it.",
+            );
+        }
+        msg.push_str("\n  = help: add `fn main():`, or run this file with `simple test` / import it instead of running it directly");
+        Err(msg)
+    }
+
     // =========================================================================
     // Compilation methods
     // =========================================================================
@@ -507,6 +604,9 @@ impl ExecCore {
         let has_main_function = mir_module.functions.iter().any(|f| f.name == "main");
 
         if !has_main_function {
+            // Never exit 0 silently: a module with nothing to run is an error,
+            // not a successful no-op run.
+            Self::reject_silent_no_op_module(&ast.items)?;
             // Fallback: evaluate via interpreter for module-level `main = ...` syntax
             let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
             self.collect_gc();
@@ -776,6 +876,8 @@ impl ExecCore {
         let has_main = mir_module.functions.iter().any(|f| f.name == "main");
 
         if !has_main {
+            // Never exit 0 silently — see `reject_silent_no_op_module`.
+            Self::reject_silent_no_op_module(&ast.items)?;
             let exit_code = evaluate_module(&ast.items).map_err(|e| format!("{}", e))?;
             set_current_file(None);
             self.collect_gc();
@@ -885,6 +987,11 @@ impl ExecCore {
         // Drop wrong-arch @cfg(<arch>) fn variants before interpretation (the
         // interpreter's registration is also first-wins by source order).
         simple_compiler::pipeline::cfg_strip::strip_inactive_cfg_arch_fns_for_host(&mut module);
+
+        // Never exit 0 silently — see `reject_silent_no_op_module`. This is the
+        // LAST fallback in the run chain, so a miss here is what actually
+        // reaches the user as "no output, exit 0".
+        Self::reject_silent_no_op_module(&module.items)?;
 
         let exit_code = evaluate_module(&module.items).map_err(|e| format!("{}", e))?;
 
