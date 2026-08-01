@@ -154,12 +154,127 @@ census hit.
   set-identical** before and after (compared by `comm`); the delta is exactly
   the 10 new tests. No regressions.
 
+## Closing the loop: the linker now consults the attribution (landed)
+
+`attributions_for` existed but nothing called it, so a link failure caused by
+this fallback was still a bare symbol name.
+
+The production path could not reach the index at all (PROVED):
+`native_project/compiler.rs:532` calls `.lower_module(&ast)`, whose signature is
+`pub fn lower_module(mut self, ..) -> LowerResult<HirModule>` — it consumes the
+lowerer and returns only the module. Only `lower_module_with_warnings` returns
+the `LoweringOutput` that carries `lenient_globals`, and `native_project` never
+calls it. Per-file lowering also runs on a spawned thread behind an `mpsc`
+channel driven by a rayon pool, with the link running later from `&self`.
+
+So `record_lenient_global` mirrors each entry into a process-global registry in
+`lenient_global_diag` — append-only, dedup'd, capped at 100k entries, read only
+on the link-failure path — rather than changing three signatures on the
+production compile path for diagnostics.
+`native_project::linker::link_failure_output` consults it; both native link
+paths (`link_objects`, `link_objects_freestanding`) funnel failure text through
+that one function. A failure whose symbols were not attributed is left
+untouched, so unrelated link errors gain no noise.
+
+Two details worth recording:
+
+- `undefined_symbols_in_linker_output` returns **all** undefined symbols. The
+  pre-existing `NativeLinker::extract_undefined_symbol` returns `Option<String>`
+  and stops at the first, which would attribute one symbol out of a multi-symbol
+  failure. That function is on a different link path and was left alone.
+- A lenient unresolved global is by construction absent from `use_map` /
+  `import_map` and from `mir.local_globals`, so `mangle` leaves it verbatim and
+  the reported name normally *is* the HIR name. `linker_symbol_candidates`
+  covers only the residual cases: Mach-O/MSVC leading underscore, the
+  `.` ⇄ `_dot_` swap, a `prefix__` module prefix, and the `@` sigil on SFFI
+  references.
+
+Verification: 25 tests in `lenient_global_diag` pass (10 pre-existing, 15 new),
+including end-to-end cases for both historical blockers — lower the source, then
+hand `explain_link_failure` the exact GNU `ld` and LLD wording that shape
+produced, and assert the report names the file and the enclosing function. Both
+defects are fixed, so both are shape-equivalent regressions. Also covered:
+multi-symbol failures, accumulation across separate `Lowerer` instances, and
+silence for unattributed symbols.
+
+
+## Triage of the undefined names (measured at `9a0b9d8ef40`)
+
+Re-running the census at the landed tip gives **578**, not 580 — the tree moved
+between `5ca84bcefe5` and `9a0b9d8ef40` (11,294 files scanned vs 11,380, 2,069
+attributed vs 2,094). The 578 were classified against definition indexes built
+over tiers the census does **not** scan (`src/os`, `src/unit`, `src/type`,
+`src/i18n`, `src/hardware`, `src/runtime`), `src/runtime` C exports,
+`compiler_rust` exports and registry string literals, and all 3,270 declared
+`extern fn` names:
+
+| Class | Count | Meaning |
+|---|---|---|
+| `UNDEFINED` | 393 | no definition, extern declaration or name-variant anywhere |
+| `METHOD_ONLY` | 89 | exists only as an indented (method/nested) definition |
+| `PARAM_ONLY` | 28 | exists only as a parameter name somewhere |
+| `COMPILER_BUILTIN` | 26 | appears as a string literal in `compiler_rust` |
+| `EXTERN_UNBACKED` | 24 | declared `extern fn`, no C/Rust implementation — overlaps the extern-registration backlog |
+| `CENSUS_DEF_GAP` | 9 | module-level def *is* in a scanned root; the census def-model missed the form |
+| `NAME_VARIANT` | 5 | a prefix variant exists (the `ffi_` / `sffi_` precedent) |
+| `OTHER_TIER` | 2 | module-level def in an unscanned tier |
+| `EXTERNAL_C` | 2 | defined in `src/runtime` C |
+
+Class counts are INFERRED from static indexes. The two findings below were then
+confirmed against real source and are PROVED.
+
+### Confirmed defect class 1: `value` written for `val` (5 sites)
+
+`"val" => TokenKind::Val` is in the lexer keyword table; `"value"` has **no**
+keyword mapping (PROVED). So `value (a, b) = expr` is not a binding at all — the
+names in the parentheses are *reads*, and they become lenient globals headed for
+the linker. Tree-wide there are 1,672 `val (`, 11 `var (` and just 5 `value (`:
+
+```
+src/app/interpreter/collections/persistent_dict/node.spl:290
+src/app/interpreter/memory/refc_binary.spl:409, 468, 550, 551
+```
+
+This also demonstrates the "lower bound" claim with a concrete mechanism: of the
+ten names bound across those five sites, only `block_size`, `curr_offset` and
+`curr_size` reach the census. `k`, `v`, `offset` and `size` are masked because
+those names happen to be defined at module level *somewhere else* in the tree,
+so `is_defined` clears them even though they are unbound here.
+
+### Confirmed defect class 2: `enumname_Variant` constructors (63 names)
+
+63 of the 393 have the shape `lowercase_Capitalized`, e.g.
+`binaryopresult_Error`, `predicate_Or`, `selector_Call`, `stmtkind_Expr`,
+`concretetype_Array`. `enum BinaryOpResult` with variants
+`Int/Float/Bool/String/Error` does exist
+(`src/compiler/35.semantics/semantics/binary_ops.spl:16`), and the file defines
+lowercase wrappers whose bodies call the capitalized form:
+
+```
+fn binaryopresult_error(msg: text) -> BinaryOpResult:
+        binaryopresult_Error(msg)
+```
+
+Nothing defines or synthesizes `binaryopresult_Error`. No desugar pass generates
+`enumname_Variant` constructors. These are unresolved constructor references in
+the self-hosted compiler's own source; the language spelling is
+`BinaryOpResult.Error(..)`. This is the silent-nil class — worth pairing with
+the `check_no_fabricated_extern_definitions` guard, since a weak zero-size
+definition would have hidden exactly this.
+
+
 ## Follow-ups (not done here)
 
 - `Expr::Identifier` has no span, so attribution is function-granular. Giving
   identifiers a span would make it line-exact.
-- Nothing yet consults `attributions_for` automatically when the linker reports
-  an undefined symbol; wiring that into the native-link error path would close
-  the loop end to end.
-- The 580 undefined names are unreviewed. Each is either a real defect or a
-  name resolved by a mechanism the census does not model.
+- The remaining ~330 `UNDEFINED` names are untriaged beyond the class table.
+  Priority order: the 63 `enumname_Variant` constructors (one mechanical
+  rewrite), then the 116 names ending in a collection-op suffix
+  (`_push`/`_len`/`_get`/`_contains`/…), then the long tail.
+- The census masks any unbound name that collides with a module-level
+  definition elsewhere in the tree, so it is a lower bound for a second reason
+  beyond the 980 lowering failures and 43 parse failures.
+- The pure-Simple compiler mirrors the seed's lenient branch
+  (`src/compiler/20.hir/hir_lowering/types.spl`) but has no equivalent
+  attribution; instrumenting that side would close the same loop for the
+  self-hosted lane.

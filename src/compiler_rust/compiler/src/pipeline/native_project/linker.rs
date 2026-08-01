@@ -25,10 +25,23 @@ fn clang_cl_whole_archive_args(path: &Path) -> [String; 2] {
     ["-Xlinker".to_string(), format!("/WHOLEARCHIVE:{}", path.display())]
 }
 
+/// Linker stdout+stderr, with source attribution appended for any undefined
+/// symbol that HIR lowering produced via the `lenient_types` fallback.
+///
+/// Without this, such a failure is a bare symbol name with no file, no line and
+/// no enclosing function -- the exact shape that made `interp_list` and
+/// `animation_time_ms` look unfixable. `lenient_global_diag` recorded where
+/// every one of those names came from; this is the point that consults it.
+/// Both native link paths (`link_objects` and `link_objects_freestanding`)
+/// funnel their failure text through here, so wiring it here covers both.
 fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
     let stdout = String::from_utf8_lossy(stdout);
     let stderr = String::from_utf8_lossy(stderr);
-    format!("{}{}", stdout, stderr)
+    let raw = format!("{}{}", stdout, stderr);
+    match crate::hir::lenient_global_diag::explain_link_failure(&raw) {
+        Some(attribution) => format!("{raw}\n{attribution}"),
+        None => raw,
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -323,7 +323,7 @@ impl Lowerer {
     /// link-time "undefined symbol" can be traced back to a file and function
     /// instead of appearing with no source location at all.
     pub(super) fn record_lenient_global(&mut self, name: &str, kind: LenientGlobalKind) {
-        self.lenient_globals.record(LenientGlobal {
+        let entry = LenientGlobal {
             file: self
                 .current_file
                 .as_ref()
@@ -332,7 +332,14 @@ impl Lowerer {
             function_line: self.current_function_line,
             name: name.to_string(),
             kind,
-        });
+        };
+        // Mirror into the process-global registry so the native link path can
+        // resolve an "undefined symbol" back to this location. The production
+        // path (`native_project::compile_file_to_object`) calls
+        // `lower_module`, which consumes the lowerer and returns only a
+        // `HirModule`, so this per-instance collector never reaches the linker.
+        super::lenient_global_diag::record_for_link_diagnostics(&entry);
+        self.lenient_globals.record(entry);
     }
 
     /// Names lowered as globals by the `lenient_types` fallback, dedup'd.

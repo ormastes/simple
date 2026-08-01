@@ -182,3 +182,98 @@ fn same_name_in_two_functions_is_two_attributions() {
     let hits = output.lenient_globals.attributions_for("shared_missing");
     assert_eq!(hits.len(), 2, "got {hits:?}");
 }
+
+// ---------------------------------------------------------------------------
+// Closing the loop: lowering -> process-global registry -> link failure.
+//
+// The production compile path throws the per-instance collector away:
+// `native_project::compiler::compile_file_to_object` calls
+// `Lowerer::lower_module`, which consumes the lowerer and returns only a
+// `HirModule`. So the tests above -- which read `output.lenient_globals` --
+// prove attribution happens, but NOT that a real link failure can consult it.
+// These tests go through `lenient_global_diag::explain_link_failure`, the free
+// function that `native_project::linker::link_failure_output` calls, which is
+// the path a real `undefined symbol` actually takes.
+// ---------------------------------------------------------------------------
+
+/// The `interp_list` blocker, end to end: lower the source, then hand the
+/// module the *exact* linker text that shape of defect produced. What used to
+/// be a bare symbol name must come back naming the file and the function.
+#[test]
+fn link_failure_for_interp_list_shape_is_located_from_linker_output() {
+    let source = concat!(
+        "fn module_surface_from_module(kind: i64) -> i64:\n",
+        "    return interp_list_e2e_probe\n"
+    );
+    let _ = lower_lenient_with_file(source, "/tmp/module_surface.spl");
+
+    let report = crate::hir::lower::lenient_global_diag::explain_link_failure(
+        "ld.lld: error: undefined symbol: interp_list_e2e_probe\n>>> referenced by module_surface.o\n",
+    )
+    .expect("a symbol attributed during lowering must be explained at link time");
+
+    assert!(report.contains("interp_list_e2e_probe"), "{report}");
+    assert!(report.contains("/tmp/module_surface.spl"), "{report}");
+    assert!(report.contains("module_surface_from_module"), "{report}");
+}
+
+/// The `animation_time_ms` blocker, end to end, through the GNU `ld` wording
+/// rather than LLD's -- the two link paths in this tree can produce either.
+#[test]
+fn link_failure_for_animation_time_ms_shape_is_located_from_gnu_ld_output() {
+    let source = concat!(
+        "fn _simple_web_layout_compose_retained(node_id: i64, width: i64, height: i64) -> i64:\n",
+        "    return node_id + animation_time_ms_e2e_probe\n"
+    );
+    let _ = lower_lenient_with_file(source, "/tmp/web_renderer.spl");
+
+    let report = crate::hir::lower::lenient_global_diag::explain_link_failure(
+        "/usr/bin/ld: web.o: in function `main':\nweb.o:(.text+0x2c): undefined reference to `animation_time_ms_e2e_probe'\n",
+    )
+    .expect("GNU ld wording must be understood too");
+
+    assert!(report.contains("animation_time_ms_e2e_probe"), "{report}");
+    assert!(report.contains("_simple_web_layout_compose_retained"), "{report}");
+    assert!(report.contains("web_renderer.spl"), "{report}");
+}
+
+/// A link failure that has nothing to do with the lenient fallback must add
+/// nothing. Appending noise to every unrelated link error would make the
+/// diagnostic worse, not better.
+#[test]
+fn unrelated_link_failure_gets_no_attribution_appended() {
+    let source = "fn probe() -> i64:\n    return some_unrelated_probe_name\n";
+    let _ = lower_lenient_with_file(source, "/tmp/unrelated.spl");
+
+    assert!(crate::hir::lower::lenient_global_diag::explain_link_failure(
+        "/usr/bin/ld: cannot find -lssl: No such file or directory\n"
+    )
+    .is_none());
+    assert!(crate::hir::lower::lenient_global_diag::explain_link_failure(
+        "undefined reference to `pthread_setname_np'\n"
+    )
+    .is_none());
+}
+
+/// The registry must survive across lowerer instances, because a project build
+/// lowers each file with its own `Lowerer` (on its own thread) and links once
+/// at the end.
+#[test]
+fn attributions_from_separate_lowerer_runs_are_all_visible_at_link_time() {
+    let _ = lower_lenient_with_file(
+        "fn first_unit() -> i64:\n    return cross_file_probe_alpha\n",
+        "/tmp/unit_a.spl",
+    );
+    let _ = lower_lenient_with_file(
+        "fn second_unit() -> i64:\n    return cross_file_probe_beta\n",
+        "/tmp/unit_b.spl",
+    );
+
+    let report = crate::hir::lower::lenient_global_diag::explain_link_failure(
+        "undefined symbol: cross_file_probe_alpha\nundefined symbol: cross_file_probe_beta\n",
+    )
+    .expect("both files' attributions must be reachable from one link failure");
+
+    assert!(report.contains("unit_a.spl") && report.contains("first_unit"), "{report}");
+    assert!(report.contains("unit_b.spl") && report.contains("second_unit"), "{report}");
+}
