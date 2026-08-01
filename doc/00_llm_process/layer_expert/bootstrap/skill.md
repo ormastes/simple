@@ -170,6 +170,28 @@ See `doc/03_plan/compiler/bootstrap/redeploy_stage4_plan_2026-07-09.md` for bloc
 toggles nested string literal; unmatched `{` containment via newline guard for non-triple f-strings 
 (parser/src/lexer/strings.rs, regression ca58e1f reverted).
 
+**Stage-3 blocker FIXED 2026-08-01 — `true_*`/`false_*` call args (doc/08_tracking/bug/parser_true_false_prefix_call_arg_2026-08-01.md):**
+`parse_call_arg_raw` read any call argument whose identifier started with `true_`
+or `false_` as a *suffixed bool literal*, the rest of the name being a type
+suffix. The Rust seed has no such production. Loud mode: `f(true_target.id)` and
+`f(true_count + 1)` fail to parse (this is what killed Stage 3 on
+`vulkan_backend.spl:1109`). Silent mode: `f(true_value)` parses but becomes
+`true` with type suffix `value` → `unresolved type: value`, a likely contributor
+to the 3,350 `unresolved type` errors previously blamed entirely on match-arm
+scoping. Production removed, not narrowed — narrowing leaves the silent path.
+
+**Gotcha — reproduce stage-3 parse failures WITHOUT a 21-minute bootstrap.** The
+stage2 binary from any prior run (`build/bootstrap/stage2/<triple>/simple`) is a
+standalone compiler; drive it with `native-build` on a scratch `.spl`. The bug
+above went from "whole-tree parse-state defect, unreproducible in isolation" to a
+9-line standalone repro this way.
+
+**Gotcha — `bin/simple` is NOT the Rust seed.** It reports `simple-bootstrap
+1.0.0-beta` and carries pure-Simple frontend bugs. The real seed oracle is
+`src/compiler_rust/target/bootstrap/simple` (prints a "bootstrap seed only"
+warning banner). Use it, not `bin/simple`, when asking "what is the correct
+behaviour?" during bootstrap work.
+
 ## Update Rule
 
 After any bootstrap, JIT stability, or redeploy-gate change, refresh this skill
