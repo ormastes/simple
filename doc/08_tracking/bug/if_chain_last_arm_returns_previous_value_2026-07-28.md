@@ -1,7 +1,10 @@
 # A statement-leading `-`/`+` at the same indent is silently glued to the previous line
 
 **Filed:** 2026-07-28 · **Lane:** IFCHAIN · **Severity:** critical (silent wrong arithmetic)
-**Status:** OPEN (parser fix deferred) — **interim guard LANDED**: lint `LEADOP001`
+**Status:** FIXED IN SOURCE 2026-08-01, **awaiting a seed rebuild** — the shipped
+seed (`src/compiler_rust/target/bootstrap/simple`, built 2026-07-31 06:28) predates
+the fix and still mis-parses. See "Fix as applied" below.
+**Previously:** OPEN (parser fix deferred) — **interim guard LANDED**: lint `LEADOP001`
 (`src/compiler/35.semantics/lint/leading_operator.spl`, Warn) flags the same-indent
 shape. 276 existing sites inventoried in `build/leadop_sites.txt`; escalate the rule
 to Deny once they are converted. Lane state: `.spipe/leading_operator_lint/state.md`.
@@ -142,7 +145,66 @@ source means different things depending on which compiler reads it. Every hazard
 site below is currently mis-compiled by the seed and correctly compiled by the
 pure-Simple compiler. That is a bootstrap-correctness problem in its own right.
 
-## Fix sketch (not applied — see Coordination)
+## Fix as applied (2026-08-01)
+
+Two parts, both in `src/compiler_rust/parser`:
+
+1. **Base fix** (landed 2026-08-01 03:26 inside the bulk commit `941605d43d9`,
+   labelled `chore: sync ...`). `parse_binary_multi!` gained an `indent_required`
+   variant (`expressions/binary.rs:47-58`) backed by a new
+   `peek_indented_operator_continuation` (`parser_helpers.rs:458+`) that returns
+   `None` unless an `Indent` was crossed; `parse_term` (`+`/`-`) is wired to it at
+   `expressions/binary.rs:391`. Only `+`/`-` are re-pointed, which is the right
+   scope: they are the only affected operators that are also legal statement
+   starts. **This had never been compiled** — the seed was not rebuilt.
+
+2. **Regression in part 1, fixed here** (`parser_helpers.rs:478`). The lexer emits
+   `Indent` only ONCE, for the *first* continuation line. Lines 2..n of a chain sit
+   at that same deeper indent and emit a bare `Newline`, so requiring a fresh
+   `Indent` per operator accepted `+ "b"` and then **hard-rejected** `+ "c"`:
+
+   ```
+   return "a"
+       + "b"
+       + "c"     # error: UnexpectedToken { expected: "expression", found: "Plus" }
+   ```
+
+   That is exactly the `+ RB()` builder-chain collateral predicted under
+   "Blast radius" (≈102 such lines in `src/app/mcpgdb/**` + `src/app/serial_mcp/`
+   alone). Fix: seed `saw_indent` from `self.binary_indent_count > 0` — that
+   counter is reset per expression (`expressions/core.rs:61`) and counts the
+   `Indent`s already crossed inside the current expression, so a non-zero value
+   means we are already inside a deeper-indented continuation and the chain may
+   continue at that indent. No re-indenting or parenthesising of the builder
+   chains is needed.
+
+**Behaviour change worth noting:** a same-indent leading `+` (row E) is now a
+*parse error* rather than silent `15 + 1`. There is no unary-prefix `+`, so a bare
+`+1` statement has no valid parse. A diagnostic is the acceptable outcome; the
+defect was the silence. Leading `-` is unaffected (unary minus exists), so the
+142-of-156 `-` sentinel sites parse correctly as separate statements.
+
+### Gates
+
+- `src/compiler_rust/parser/tests/leading_operator_indent_gate.rs` — parser-level,
+  9 cases. Runs without a seed rebuild:
+  `cargo test -p simple-parser --test leading_operator_indent_gate`.
+  Proven non-vacuous: reverting part 2 alone → 1 failure; reverting part 1 → 5
+  failures; with both → 9 pass. Full `cargo test -p simple-parser` is green.
+- `test/01_unit/compiler/if_chain_arm_value_spec.spl` — end-to-end, still RED on
+  the stale seed (7 examples / 6 failures) and turns green once the seed is
+  rebuilt. Its `leading_plus` case was removed (it can no longer parse, see
+  above) and a `ctl_multiline_chain` case was added to pin part 2.
+
+**Remaining work:** rebuild the seed
+(`cargo build --profile bootstrap -p simple-driver --features llvm`, or a full
+`scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap`) and re-run the
+`.spl` gate. Not done here: another session held a concurrent
+`-p simple-native-all` bootstrap build, and both write
+`target/bootstrap/simple` — the exact race the bootstrap script's concurrency
+guard documents (twin builds truncating the linked binary to 0 KB).
+
+## Original fix sketch (superseded by "Fix as applied")
 
 Add an indent-aware variant of the lookahead and use it for the arithmetic /
 shift / bitwise levels:

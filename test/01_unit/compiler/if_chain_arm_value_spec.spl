@@ -58,11 +58,15 @@ fn one_arm(c: text) -> i64:
 
 
 # ---------------------------------------------------------------------------
-# Shape 4 — leading `+` is affected too.
+# Shape 4 — leading `+` is affected too, but it CANNOT be expressed here.
+#
+# There is no unary-prefix `+`, so a bare `+1` statement has no valid parse.
+# Before the fix it was silently absorbed as `15 + 1` (= 16); after the fix it
+# is a hard parse error, which would make this whole file unparseable. The `+`
+# case is therefore gated at the parser level instead, by
+# `same_indent_leading_plus_no_longer_glues_silently` in
+# src/compiler_rust/parser/tests/leading_operator_indent_gate.rs.
 # ---------------------------------------------------------------------------
-fn leading_plus(c: text) -> i64:
-    if c == "f": return 15
-    +1
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +120,18 @@ fn ctl_indented_continuation_minus() -> i64:
         - 5
     return s
 
+# A multi-line chain: the lexer emits `Indent` only for the FIRST continuation
+# line, so the 2nd+ lines sit at the same deeper indent and emit a bare
+# `Newline`. Requiring a fresh `Indent` per operator would accept `+ "b"` and
+# then reject `+ "c"` — this pins the whole chain, not just its first link.
+# Same shape as the `+ RB()` JSON builders in src/app/mcpgdb/** and
+# src/app/serial_mcp/main.spl.
+fn ctl_multiline_chain() -> text:
+    return "a"
+        + "b"
+        + "c"
+        + "d"
+
 
 describe "same-indent leading operator does not continue the previous statement":
     """
@@ -143,9 +159,6 @@ describe "same-indent leading operator does not continue the previous statement"
     it "reproduces with a single arm — chain length is irrelevant":
         expect(one_arm("f")).to_equal(15)
         expect(one_arm("z")).to_equal(-1)
-
-    it "does not fuse a leading + either":
-        expect(leading_plus("f")).to_equal(15)
 
     it "is not stopped by an intervening blank line":
         expect(blank_between("f")).to_equal(15)
@@ -179,3 +192,6 @@ describe "control shapes that must keep working":
     it "deeper-indented leading operators remain real continuations":
         expect(ctl_indented_continuation_plus()).to_equal(15)
         expect(ctl_indented_continuation_minus()).to_equal(5)
+
+    it "keeps every link of a multi-line continuation chain, not just the first":
+        expect(ctl_multiline_chain()).to_equal("abcd")

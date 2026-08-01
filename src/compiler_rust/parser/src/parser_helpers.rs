@@ -464,9 +464,18 @@ impl<'a> Parser<'a> {
     /// same-indent `-1` after `return 15` must stay a separate statement rather
     /// than becoming `return (15 - 1)`.
     /// See `doc/08_tracking/bug/if_chain_last_arm_returns_previous_value_2026-07-28.md`.
+    /// Note the `binary_indent_count` seed: the lexer emits `Indent` only ONCE,
+    /// when the continuation first steps to the deeper level. The 2nd and later
+    /// lines of a multi-line chain (`x\n    + a\n    + b\n    + c`) sit at that
+    /// same deeper indent and emit a bare `Newline`, so requiring a fresh
+    /// `Indent` per operator would accept `+ a` and then reject `+ b`.
+    /// `binary_indent_count` is reset per expression (`expressions/core.rs:61`)
+    /// and counts the `Indent`s already crossed inside THIS expression, so a
+    /// non-zero value means we are already inside a deeper-indented
+    /// continuation and the chain may keep going at that indent.
     pub(crate) fn peek_indented_operator_continuation(&mut self) -> Option<TokenKind> {
         let mut lookahead_pos = 0;
-        let mut saw_indent = false;
+        let mut saw_indent = self.binary_indent_count > 0;
 
         loop {
             let token = if lookahead_pos == 0 {
