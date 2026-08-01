@@ -3,9 +3,16 @@
 **Date:** 2026-07-31
 **Severity:** spec-verdict pollution — example results stay correct, but every
 affected spec FILE reports one extra failure
-**Status:** open — bisect attempted 2026-08-01, narrowed but NOT isolated to a
-line. See "Bisect results" at the bottom before starting any new probe; two
-whole classes of hypothesis are already eliminated.
+**Status:** ROOT-CAUSED 2026-08-01 — **and it is not a lint bug.** The trigger is
+a test-runner defect: a **wildcard-imported top-level symbol named `main`** makes
+`bin/simple test`'s outer pass emit a phantom file-level failure. The lint facade
+is merely the messenger — `main.spl:11` wildcard-re-exports `entry_and_fixes.*`,
+which declares the lint CLI's own `fn main() -> Int` at :231.
+
+Tracking moved to
+`doc/08_tracking/bug/test_runner_wildcard_imported_main_phantom_failure_2026-08-01.md`
+(minimal repro, control matrix, next step). The bisect notes below are kept
+because they record what was ELIMINATED — do not re-run them.
 
 ## Symptom
 
