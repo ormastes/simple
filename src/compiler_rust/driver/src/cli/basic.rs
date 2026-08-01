@@ -8,6 +8,77 @@ use crate::watcher::watch;
 use simple_common::target::Target;
 use std::path::{Path, PathBuf};
 
+/// Exit status returned by `simple run <spec>` when BDD examples executed and at
+/// least one of them failed.
+///
+/// This is deliberately the same status `simple test` uses for a failing spec, so
+/// the two entry points agree and ordinary `if ! simple run x` CI checks behave.
+/// The failure *mode* is made distinguishable by the `spec failure:` diagnostic
+/// emitted alongside it (see `bdd_failure_exit_code`), which names the failed and
+/// total example counts — a generic error also exits 1 but never prints that line,
+/// and an interpreter crash exits 101.
+const SPEC_EXAMPLE_FAILURE_EXIT: i32 = 1;
+
+/// Total non-skipped examples and how many of them failed.
+///
+/// Input is the interpreter's per-example record,
+/// `(describe_path, test_name, passed, skipped)`, as returned by
+/// `simple_compiler::interpreter::get_test_results()`.
+///
+/// This is the same source `simple test` trusts (`cli/test_runner/execution.rs`).
+/// It is deliberately NOT the `BDD_COUNTS` pair behind the printed
+/// "N examples, M failures" line: that pair is reset to `(0, 0)` at the end of
+/// every top-level describe block, so by the time the run returns it is always
+/// zero — reading it would have produced a fresh fail-open. `BDD_TEST_RESULTS`
+/// accumulates across the whole file instead, so a failure in a later describe
+/// block still counts.
+fn bdd_example_counts(results: &[(String, String, bool, bool)]) -> (usize, usize) {
+    let mut total = 0usize;
+    let mut failed = 0usize;
+    for (_describe, _name, passed, skipped) in results.iter() {
+        if *skipped {
+            continue;
+        }
+        total += 1;
+        if !*passed {
+            failed += 1;
+        }
+    }
+    (total, failed)
+}
+
+/// Derive a process exit status from the in-process BDD example results.
+///
+/// `run_file*` previously returned only the interpreted module's own exit code. A
+/// spec file has no explicit `main` and so returns 0, which meant
+/// `simple run <spec>` exited 0 even when the printed report said
+/// "N examples, M failures" — a verification fail-open: any evidence justified by
+/// "exit 0" from `simple run` was unevidenced. The per-example results were already
+/// recorded and already consumed by `simple test`; nothing consumed them on the
+/// `run` path. This function is that missing consumer.
+///
+/// Fail-closed rules:
+/// * No example ran (empty results) -> leave `module_exit_code` untouched.
+///   Non-spec programs run through this same path and must keep their own status.
+/// * Any example failed -> `SPEC_EXAMPLE_FAILURE_EXIT`, even if the module
+///   returned 0.
+/// * A non-zero `module_exit_code` is always preserved: a real error must not be
+///   masked by, or downgraded to, a spec-failure status.
+fn bdd_failure_exit_code(module_exit_code: i32, results: &[(String, String, bool, bool)]) -> i32 {
+    if module_exit_code != 0 {
+        return module_exit_code;
+    }
+    let (total, failed) = bdd_example_counts(results);
+    if failed == 0 {
+        return module_exit_code;
+    }
+    eprintln!(
+        "spec failure: {} of {} example(s) failed (exit {})",
+        failed, total, SPEC_EXAMPLE_FAILURE_EXIT
+    );
+    SPEC_EXAMPLE_FAILURE_EXIT
+}
+
 /// Create a runner with appropriate GC configuration
 pub fn create_runner(gc_log: bool, gc_off: bool) -> Runner {
     if gc_off {
@@ -125,7 +196,10 @@ pub fn run_file_with_args(path: &Path, gc_log: bool, gc_off: bool, args: Vec<Str
             runner.run_file(&path)
         };
         match result {
-            Ok(code) => code,
+            // Fail-closed: a spec whose examples failed must not exit 0 just
+            // because the module body itself returned 0. See
+            // `bdd_failure_exit_code`.
+            Ok(code) => bdd_failure_exit_code(code, &simple_compiler::interpreter::get_test_results()),
             Err(e) => {
                 if watchdog.is_active() && is_timeout_error(&e) {
                     eprintln!("error: {}", timeout_error_message(&path, watchdog.timeout_secs()));
@@ -406,5 +480,76 @@ mod tests {
 
         assert_eq!(observed, None);
         assert!(std::env::var("SIMPLE_STRICT_RUNTIME_FAMILY").is_err());
+    }
+
+    // --- exit status must track the BDD failure count -----------------------
+    //
+    // Fail-closed regression for the `simple run <spec>` exit-code fail-open:
+    // the report said "N examples, M failures" while the process exited 0, so
+    // any result in this repo justified by "exit 0" from `simple run` was
+    // unevidenced. These pin the decision function; `interpreter_bdd.rs`
+    // (`bdd_matcher_pass_after_failure_keeps_example_failed`,
+    // `bdd_bare_falsy_call_without_matcher_still_fails`) pins it end-to-end.
+
+    /// `(describe_path, test_name, passed, skipped)`, matching
+    /// `simple_compiler::interpreter::get_test_results()`.
+    fn ex(group: &str, name: &str, passed: bool, skipped: bool) -> (String, String, bool, bool) {
+        (group.to_string(), name.to_string(), passed, skipped)
+    }
+
+    #[test]
+    fn bdd_exit_code_is_non_zero_when_any_example_failed() {
+        // The exact shape that exited 0 before the fix.
+        let results = vec![ex("control", "fails", false, false)];
+        assert_eq!(bdd_failure_exit_code(0, &results), SPEC_EXAMPLE_FAILURE_EXIT);
+        assert_ne!(bdd_failure_exit_code(0, &results), 0);
+    }
+
+    #[test]
+    fn bdd_exit_code_tracks_failures_across_multiple_describe_blocks() {
+        // Aggregation must not stop at the first block: a later failing block is
+        // exactly the "silently dropped" shape the sibling multi-path bug had.
+        // This also pins the choice of BDD_TEST_RESULTS over BDD_COUNTS, which is
+        // zeroed at the end of every top-level describe.
+        let late_failure = vec![
+            ex("first", "ok", true, false),
+            ex("first", "ok too", true, false),
+            ex("second", "fails", false, false),
+        ];
+        let early_failure = vec![ex("first", "fails", false, false), ex("second", "ok", true, false)];
+        let all_clean = vec![ex("first", "ok", true, false), ex("second", "ok", true, false)];
+        assert_eq!(bdd_failure_exit_code(0, &late_failure), SPEC_EXAMPLE_FAILURE_EXIT);
+        assert_eq!(bdd_failure_exit_code(0, &early_failure), SPEC_EXAMPLE_FAILURE_EXIT);
+        assert_eq!(bdd_failure_exit_code(0, &all_clean), 0);
+    }
+
+    #[test]
+    fn bdd_exit_code_stays_zero_for_clean_specs() {
+        let results = vec![ex("control", "passes", true, false)];
+        assert_eq!(bdd_failure_exit_code(0, &results), 0);
+    }
+
+    #[test]
+    fn bdd_exit_code_ignores_programs_with_no_examples() {
+        // Non-spec programs share this run path and must keep their own status.
+        assert_eq!(bdd_failure_exit_code(0, &[]), 0);
+        assert_eq!(bdd_failure_exit_code(7, &[]), 7);
+    }
+
+    #[test]
+    fn bdd_exit_code_treats_skipped_examples_as_neither_pass_nor_fail() {
+        // A skipped example carries passed=false; counting it as a failure would
+        // turn every ignored test into a red run.
+        let results = vec![ex("control", "ignored", false, true)];
+        assert_eq!(bdd_failure_exit_code(0, &results), 0);
+        assert_eq!(bdd_example_counts(&results), (0, 0));
+    }
+
+    #[test]
+    fn bdd_exit_code_never_masks_a_real_error_status() {
+        // A genuine non-zero must survive, not be rewritten to the spec status,
+        // so "examples failed" stays distinguishable from other failure modes.
+        assert_eq!(bdd_failure_exit_code(101, &[ex("g", "n", false, false)]), 101);
+        assert_eq!(bdd_failure_exit_code(2, &[ex("g", "n", true, false)]), 2);
     }
 }

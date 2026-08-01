@@ -27,8 +27,12 @@ fn bdd_matcher_pass_after_failure_keeps_example_failed() {
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("run").arg(&spec);
 
+    // Exit status must track the failure count. This assertion previously read
+    // `.success()`, which encoded the `simple run` exit-code fail-open: the report
+    // said "1 example, 1 failure" while the process exited 0. Tightened to `.code(1)`
+    // alongside the fix in cli/basic.rs (`bdd_failure_exit_code`).
     cmd.assert()
-        .success()
+        .code(1)
         .stdout(contains("expected deliberate to equal failure"))
         .stdout(contains("1 example, 1 failure"));
 }
@@ -82,7 +86,10 @@ describe "bdd hollow call":
     let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("simple"));
     cmd.current_dir(project_root()).arg("run").arg(&spec);
 
-    cmd.assert().success().stdout(contains("1 example, 1 failure"));
+    // See the note in `bdd_matcher_pass_after_failure_keeps_example_failed`: this
+    // was `.success()` and asserted the exit-code fail-open. A reported failure
+    // must produce a non-zero status.
+    cmd.assert().code(1).stdout(contains("1 example, 1 failure"));
 }
 
 #[test]
@@ -178,7 +185,16 @@ describe "mutual recursion":
     // Must NOT crash (no SIGSEGV/core dump -> process exits with a normal
     // status code) and must surface a stack-overflow diagnostic rather than
     // silently hanging or reporting an unrelated failure.
-    cmd.assert().success().stdout(contains("stack overflow"));
+    //
+    // The status assertion was `.success()`, which only ever held because of the
+    // `simple run` exit-code fail-open: the example genuinely FAILS (the report
+    // says "1 example, 1 failure" — a stack-overflow diagnostic is a failed
+    // example, not a pass), yet the process exited 0. `.success()` was being used
+    // as a proxy for "was not killed by a signal". Now that the status tracks the
+    // failure count it must be `.code(1)`; a signal death would surface as a
+    // different status (or no code at all), so the crash regression this test
+    // exists for is still caught — more precisely than before.
+    cmd.assert().code(1).stdout(contains("stack overflow"));
 }
 
 #[test]
