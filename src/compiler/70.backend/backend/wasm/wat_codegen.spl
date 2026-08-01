@@ -38,6 +38,13 @@ class MirToWat:
     use_wasi: bool
     local_counter: i64
 
+    # LocalId.id -> WAT numeric-op class ("i32" / "i64" / "f32" / "f64").
+    # MirBinOp/MirUnaryOp carry NO operand type, so this is the only way
+    # translate_binop can tell a float add from an integer one. Populated per
+    # function by register_local_types; a local that is absent here has an
+    # UNKNOWN type and must trap rather than default to an integer op.
+    local_types: Dict<i64, text>
+
     static fn create(module_name: text) -> MirToWat:
         """Create translator for wasm32-wasi target."""
         MirToWat(
@@ -46,7 +53,8 @@ class MirToWat:
             memory: WasmMemoryManager.create(),
             control_flow: WasmControlFlow.create(),
             use_wasi: true,
-            local_counter: 0
+            local_counter: 0,
+            local_types: {}
         )
 
     static fn create_standalone(module_name: text) -> MirToWat:
@@ -57,7 +65,8 @@ class MirToWat:
             memory: WasmMemoryManager.create(),
             control_flow: WasmControlFlow.create(),
             use_wasi: false,
-            local_counter: 0
+            local_counter: 0,
+            local_types: {}
         )
 
     me translate_module(module: MirModule) -> text:
@@ -68,9 +77,15 @@ class MirToWat:
         # Emit imports
         emit_all_wasm_imports(builder, self.use_wasi)
 
+        # MirModule.functions is a Dict<SymbolId, MirFunction>, not a list.
+        # `for func in module.functions:` bound a (key, value) TUPLE, so every
+        # `func.<field>` below failed at runtime with "unknown property or
+        # method 'body' on Tuple" -- translate_module had never completed once.
+        # Iterate keys() and index-read (never `.get()`: the value type is a
+        # struct, see .claude/rules/code-style.md Native-Codegen Dict Pitfalls).
         # First pass: collect string constants from all functions
-        for func in module.functions:
-            self.collect_strings(func)
+        for sym in module.functions.keys():
+            self.collect_strings(module.functions[sym])
 
         # Finalize memory layout
         self.memory.finalize()
@@ -85,13 +100,17 @@ class MirToWat:
         # Emit bump allocator helper
         self.memory.emit_bump_alloc(builder)
 
-        # Translate functions
-        for func in module.functions:
-            if not func.is_extern:
+        # Translate functions. MirFunction has NO `is_extern` field (see
+        # mir_instruction_graph.spl:26); an extern declaration is one with no
+        # basic blocks, which is what the block count tests.
+        for sym in module.functions.keys():
+            val func = module.functions[sym]
+            if func.blocks.len() > 0:
                 self.translate_function(builder, func)
 
         # Export _start if present
-        for func in module.functions:
+        for sym in module.functions.keys():
+            val func = module.functions[sym]
             if func.name == "_start" or func.name == "__simple_main":
                 builder.emit("(export \"{func.name}\" (func ${func.name}))")
 
@@ -100,7 +119,7 @@ class MirToWat:
 
     me collect_strings(func: MirFunction):
         """Collect string constants from a function for data segments."""
-        for block in func.body.blocks:
+        for block in func.blocks:
             for inst in block.instructions:
                 match inst.kind:
                     case Const(dest, value, type_):
@@ -112,20 +131,48 @@ class MirToWat:
                     case _:
                         ()
 
+    me register_local_types(locals: [MirLocal]):
+        """Record every local's WAT op class so translate_binop can pick i64.* vs f64.*.
+
+        This is THE seam for float arithmetic. The bug doc suggested
+        `func.body.locals`, but MirFunction has no `body` field at all -- it
+        carries `locals: [MirLocal]` directly (mir_instruction_graph.spl:26),
+        and each MirLocal names its type `type_`, not `ty`
+        (mir_types.spl:38). `func.locals` is measured to carry the real type
+        of every local, which is exactly what the binop lowering needs.
+
+        Cleared per function: a stale entry from the previous function would
+        silently type an unrelated local.
+        """
+        self.local_types = {}
+        for local in locals:
+            val cls = wat_op_class(local.type_)
+            if cls != "":
+                self.local_types[local.id.id] = cls
+
     me translate_function(builder: WatBuilder, func: MirFunction):
         """Translate a single MIR function to WAT."""
-        # Build parameter and result types
+        self.register_local_types(func.locals)
+
+        # Build parameter and result types.
+        # NOTE: this used to read `func.body.locals` (no such field), test
+        # `local.kind == MirLocalKind.Arg` (no such TYPE -- LocalKind is the
+        # real name and its Arg variant carries an index payload, so `==`
+        # could never work), and read `local.ty` / `local.name` (the fields are
+        # `type_` and an OPTIONAL `name: text?`). Params are named `_l{id}` to
+        # match the `_l{id}` naming every instruction lowering already uses;
+        # naming them from `local.name` produced params no body reference could
+        # ever resolve.
         var param_types: [WasmType] = []
         var param_names: [text] = []
-        for local in func.body.locals:
-            if local.kind == MirLocalKind.Arg:
-                val wasm_ty = self.mir_type_to_wasm_type(local.ty)
-                param_types.push(wasm_ty)
-                param_names.push(local.name)
+        for local in func.locals:
+            if mir_local_is_arg(local):
+                param_types.push(self.mir_type_to_wasm_type(local.type_))
+                param_names.push("_l{local.id.id}")
 
         var result_types: [WasmType] = []
-        if func.body.return_ty.kind != MirTypeKind.Unit:
-            result_types.push(self.mir_type_to_wasm_type(func.body.return_ty))
+        if func.signature.return_type.kind != MirTypeKind.Unit:
+            result_types.push(self.mir_type_to_wasm_type(func.signature.return_type))
 
         # Emit function header
         var param_parts: [text] = []
@@ -144,13 +191,13 @@ class MirToWat:
         builder.indent_level = builder.indent_level + 1
 
         # Emit local variables (non-arg locals)
-        for local in func.body.locals:
-            if local.kind != MirLocalKind.Arg:
-                val wasm_ty = self.mir_type_to_wasm_type(local.ty)
-                builder.emit("(local ${local.name} {wasm_ty.to_text()})")
+        for local in func.locals:
+            if not mir_local_is_arg(local):
+                val wasm_ty = self.mir_type_to_wasm_type(local.type_)
+                builder.emit("(local $_l{local.id.id} {wasm_ty.to_text()})")
 
         # Translate basic blocks
-        for block in func.body.blocks:
+        for block in func.blocks:
             self.translate_block(builder, block)
 
         builder.indent_level = builder.indent_level - 1
@@ -394,8 +441,32 @@ class MirToWat:
                 builder.emit(";; UNSUPPORTED: aggregate constant initializer")
                 builder.emit("unreachable")
 
+    me operand_op_class(operand: MirOperand) -> text:
+        """WAT numeric-op class for an operand, or "" when genuinely unknown.
+
+        A Const operand is self-describing -- MirOperandKind.Const carries its
+        own MirType. A Copy/Move operand names a local, whose type comes from
+        the per-function map register_local_types built from `func.locals`.
+        Destructure the constant payload with a plain binding only; a NESTED
+        enum sub-pattern in a payload position always matches and never binds
+        on the native/JIT lanes.
+        """
+        match operand.kind:
+            case Const(_, type_): wat_op_class(type_)
+            case Copy(local_id): self.local_op_class(local_id)
+            case Move(local_id): self.local_op_class(local_id)
+            case _: ""
+
+    me local_op_class(local_id: LocalId) -> text:
+        """WAT op class of a local, or "" if this translator never saw its type."""
+        # contains_key + index read, never .get(): see the Dict pitfalls rule.
+        if self.local_types.contains_key(local_id.id):
+            self.local_types[local_id.id]
+        else:
+            ""
+
     me translate_binop(builder: WatBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
-        """Translate a binary operation."""
+        """Translate a binary operation, in the operand's own numeric type."""
         self.emit_operand(builder, left)
         self.emit_operand(builder, right)
 
@@ -407,43 +478,69 @@ class MirToWat:
         # There are NO `And`/`Or`/`Xor`/`Mod` variants and NO `F*` float
         # variants. `case And:` was therefore an irrefutable BINDING pattern,
         # not a comparison, so it matched EVERY value that reached it and every
-        # arm below it was dead -- including `case _:`. Measured before this
-        # fix: Pow, MatMul, BitAnd, BitOr, BitXor, Shl, Shr, BroadcastAdd,
-        # BroadcastSub, BroadcastMul, BroadcastDiv, BroadcastPow and Offset ALL
-        # emitted `i32.and`. Seven of those had a correct lowering written
-        # directly below the swallowing arm and it never ran.
+        # arm below it was dead -- including `case _:`.
+        #
+        # Because MirBinOp names no float ops, the operation alone cannot say
+        # whether this is an integer or a float add; the OPERAND type decides.
+        # That is why every f32/f64 program used to lower to `i64.*` (measured:
+        # `f64.const 1.5 | f64.const 2.5 | i64.add`, which is not even valid
+        # WAT -- the operands on the stack are f64).
+        val left_class = self.operand_op_class(left)
+        val right_class = self.operand_op_class(right)
+        var cls = left_class
+        if cls == "":
+            cls = right_class
+
+        if cls == "":
+            # UNKNOWN type. Emitting the integer form here is precisely the
+            # defect being fixed: a plausible instruction for a type we never
+            # established. Fail loudly instead (precedent: 4c140b35e1d).
+            builder.emit(";; UNSUPPORTED: binop operand type is unknown (no local type registered)")
+            builder.emit("unreachable")
+        elif left_class != "" and right_class != "" and left_class != right_class:
+            # Mixed-width/mixed-domain operands need an explicit Cast in MIR.
+            # Picking one side would silently reinterpret the other.
+            builder.emit(";; UNSUPPORTED: mismatched binop operand types {left_class}/{right_class}")
+            builder.emit("unreachable")
+        elif cls == "f32" or cls == "f64":
+            self.emit_float_binop(builder, cls, op)
+        else:
+            self.emit_int_binop(builder, cls, op)
+
+        builder.emit_local_named_set("_l{dest.id}")
+
+    me emit_int_binop(builder: WatBuilder, cls: text, op: MirBinOp):
+        """Integer lowering. `cls` is "i32" or "i64"."""
         match op:
-            case Add: builder.emit("i64.add")
-            case Sub: builder.emit("i64.sub")
-            case Mul: builder.emit("i64.mul")
-            case Div: builder.emit("i64.div_s")
-            case Rem: builder.emit("i64.rem_s")
-            case Eq: builder.emit("i64.eq")
-            case Ne: builder.emit("i64.ne")
-            case Lt: builder.emit("i64.lt_s")
-            case Le: builder.emit("i64.le_s")
-            case Gt: builder.emit("i64.gt_s")
-            case Ge: builder.emit("i64.ge_s")
-            case Shl: builder.emit("i64.shl")
-            case Shr: builder.emit("i64.shr_s")
-            case BitAnd: builder.emit("i64.and")
-            case BitOr: builder.emit("i64.or")
-            case BitXor: builder.emit("i64.xor")
+            case Add: builder.emit("{cls}.add")
+            case Sub: builder.emit("{cls}.sub")
+            case Mul: builder.emit("{cls}.mul")
+            case Div: builder.emit("{cls}.div_s")
+            case Rem: builder.emit("{cls}.rem_s")
+            case Eq: builder.emit("{cls}.eq")
+            case Ne: builder.emit("{cls}.ne")
+            case Lt: builder.emit("{cls}.lt_s")
+            case Le: builder.emit("{cls}.le_s")
+            case Gt: builder.emit("{cls}.gt_s")
+            case Ge: builder.emit("{cls}.ge_s")
+            case Shl: builder.emit("{cls}.shl")
+            case Shr: builder.emit("{cls}.shr_s")
+            case BitAnd: builder.emit("{cls}.and")
+            case BitOr: builder.emit("{cls}.or")
+            case BitXor: builder.emit("{cls}.xor")
 
             case Offset:
                 # Pointer arithmetic: base + byte offset, unscaled -- the same
                 # lowering GetElementPtr already uses for pointer math in this
-                # backend (i64.add), and what the LLVM backend emits as
-                # `getelementptr i8` (core_codegen.spl:1261).
-                builder.emit("i64.add")
+                # backend, and what the LLVM backend emits as `getelementptr i8`
+                # (core_codegen.spl:1261).
+                builder.emit("{cls}.add")
 
             case Pow:
-                # The old arm re-pushed BOTH operands (they are already on the
-                # stack from the top of this function), converted them, and then
-                # emitted only a comment -- leaving four values on the value
-                # stack and never producing a result. WASM has no native pow and
-                # wasm_runtime.spl imports no pow helper, so there is nothing to
-                # call. Trap instead of emitting invalid WAT.
+                # The old arm re-pushed BOTH operands (already on the stack),
+                # converted them, then emitted only a comment -- four values
+                # left on the value stack and no result. WASM has no native pow
+                # and wasm_runtime.spl imports no pow helper.
                 builder.emit(";; UNSUPPORTED: wasm backend has no pow lowering")
                 builder.emit("unreachable")
 
@@ -473,7 +570,74 @@ class MirToWat:
                 builder.emit(";; UNSUPPORTED: unknown MirBinOp variant")
                 builder.emit("unreachable")
 
-        builder.emit_local_named_set("_l{dest.id}")
+    me emit_float_binop(builder: WatBuilder, cls: text, op: MirBinOp):
+        """Float lowering. `cls` is "f32" or "f64".
+
+        WASM float compares and division carry no signedness suffix
+        (`f64.div`, `f64.lt`), unlike their integer counterparts.
+        """
+        match op:
+            case Add: builder.emit("{cls}.add")
+            case Sub: builder.emit("{cls}.sub")
+            case Mul: builder.emit("{cls}.mul")
+            case Div: builder.emit("{cls}.div")
+            case Eq: builder.emit("{cls}.eq")
+            case Ne: builder.emit("{cls}.ne")
+            case Lt: builder.emit("{cls}.lt")
+            case Le: builder.emit("{cls}.le")
+            case Gt: builder.emit("{cls}.gt")
+            case Ge: builder.emit("{cls}.ge")
+
+            case Rem:
+                # WASM has no float remainder instruction and wasm_runtime.spl
+                # imports no fmod helper.
+                builder.emit(";; UNSUPPORTED: wasm has no float remainder instruction")
+                builder.emit("unreachable")
+
+            case Shl:
+                builder.emit(";; UNSUPPORTED: shift on a float operand")
+                builder.emit("unreachable")
+            case Shr:
+                builder.emit(";; UNSUPPORTED: shift on a float operand")
+                builder.emit("unreachable")
+            case BitAnd:
+                builder.emit(";; UNSUPPORTED: bitwise op on a float operand")
+                builder.emit("unreachable")
+            case BitOr:
+                builder.emit(";; UNSUPPORTED: bitwise op on a float operand")
+                builder.emit("unreachable")
+            case BitXor:
+                builder.emit(";; UNSUPPORTED: bitwise op on a float operand")
+                builder.emit("unreachable")
+            case Offset:
+                builder.emit(";; UNSUPPORTED: pointer offset on a float operand")
+                builder.emit("unreachable")
+
+            case Pow:
+                builder.emit(";; UNSUPPORTED: wasm backend has no pow lowering")
+                builder.emit("unreachable")
+            case MatMul:
+                builder.emit(";; UNSUPPORTED: wasm backend has no MatMul lowering")
+                builder.emit("unreachable")
+            case BroadcastAdd:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastAdd lowering")
+                builder.emit("unreachable")
+            case BroadcastSub:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastSub lowering")
+                builder.emit("unreachable")
+            case BroadcastMul:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastMul lowering")
+                builder.emit("unreachable")
+            case BroadcastDiv:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastDiv lowering")
+                builder.emit("unreachable")
+            case BroadcastPow:
+                builder.emit(";; UNSUPPORTED: wasm backend has no BroadcastPow lowering")
+                builder.emit("unreachable")
+
+            case _:
+                builder.emit(";; UNSUPPORTED: unknown MirBinOp variant")
+                builder.emit("unreachable")
 
     me translate_unaryop(builder: WatBuilder, dest: LocalId, op: MirUnaryOp, operand: MirOperand):
         """Translate a unary operation."""
@@ -484,24 +648,52 @@ class MirToWat:
         # before this fix: the real `BitNot` and `Transpose` variants both
         # emitted `f64.neg`, i.e. bitwise-not lowered to float negation.
         # Width conversion is reached through Cast, not UnaryOp.
-        match op:
-            case Neg:
-                builder.emit("i64.const 0")
-                self.emit_operand(builder, operand)
-                builder.emit("i64.sub")
-            case Not:
-                self.emit_operand(builder, operand)
-                builder.emit("i32.eqz")
-            case BitNot:
-                self.emit_operand(builder, operand)
-                builder.emit("i64.const -1")
-                builder.emit("i64.xor")
-            case Transpose:
-                builder.emit(";; UNSUPPORTED: wasm backend has no Transpose lowering")
-                builder.emit("unreachable")
-            case _:
-                builder.emit(";; UNSUPPORTED: unknown MirUnaryOp variant")
-                builder.emit("unreachable")
+        #
+        # MirUnaryOp carries no operand type either, so Neg has the same
+        # int-vs-float problem as the binops: `i64.const 0; <x>; i64.sub`
+        # is wrong for an f32/f64 operand, which needs the native `f64.neg`.
+        val cls = self.operand_op_class(operand)
+        val is_float = cls == "f32" or cls == "f64"
+
+        if cls == "":
+            builder.emit(";; UNSUPPORTED: unaryop operand type is unknown (no local type registered)")
+            builder.emit("unreachable")
+        elif is_float:
+            match op:
+                case Neg:
+                    self.emit_operand(builder, operand)
+                    builder.emit("{cls}.neg")
+                case Not:
+                    builder.emit(";; UNSUPPORTED: logical not on a float operand")
+                    builder.emit("unreachable")
+                case BitNot:
+                    builder.emit(";; UNSUPPORTED: bitwise not on a float operand")
+                    builder.emit("unreachable")
+                case Transpose:
+                    builder.emit(";; UNSUPPORTED: wasm backend has no Transpose lowering")
+                    builder.emit("unreachable")
+                case _:
+                    builder.emit(";; UNSUPPORTED: unknown MirUnaryOp variant")
+                    builder.emit("unreachable")
+        else:
+            match op:
+                case Neg:
+                    builder.emit("{cls}.const 0")
+                    self.emit_operand(builder, operand)
+                    builder.emit("{cls}.sub")
+                case Not:
+                    self.emit_operand(builder, operand)
+                    builder.emit("{cls}.eqz")
+                case BitNot:
+                    self.emit_operand(builder, operand)
+                    builder.emit("{cls}.const -1")
+                    builder.emit("{cls}.xor")
+                case Transpose:
+                    builder.emit(";; UNSUPPORTED: wasm backend has no Transpose lowering")
+                    builder.emit("unreachable")
+                case _:
+                    builder.emit(";; UNSUPPORTED: unknown MirUnaryOp variant")
+                    builder.emit("unreachable")
 
         builder.emit_local_named_set("_l{dest.id}")
 
@@ -544,7 +736,16 @@ class MirToWat:
 
     me translate_terminator(builder: WatBuilder, term: MirTerminator):
         """Translate a block terminator."""
-        match term.kind:
+        # NOTE: MirTerminator is an ENUM (mir_instruction_support.spl:276), not
+        # a struct with a `.kind` field -- the mirror image of the defect fixed
+        # in emit_operand/translate_call, where the scrutinee was the struct
+        # instead of its kind. `match term.kind:` raised "unknown property or
+        # method 'kind' on enum MirTerminator" and aborted the whole module
+        # translation. `CondBranch` is also not a variant; the real name is
+        # `If`. (It had a payload pattern, so unlike `case And:` it was a dead
+        # arm rather than a swallowing one -- it just meant every conditional
+        # branch fell through to ";; unhandled terminator".)
+        match term:
             case Ret(value):
                 if value.?:
                     self.emit_operand(builder, value.unwrap())
@@ -553,7 +754,7 @@ class MirToWat:
             case Goto(target):
                 builder.emit(";; goto block {target}")
 
-            case CondBranch(cond, then_target, else_target):
+            case If(cond, then_target, else_target):
                 self.emit_operand(builder, cond)
                 builder.emit(";; br_if then={then_target} else={else_target}")
 
@@ -617,6 +818,53 @@ class MirToWat:
             case "f64": WasmType.F64
             case "f32": WasmType.F32
             case _: WasmType.I32
+
+# ============================================================================
+# Type classification
+# ============================================================================
+
+fn wat_op_class(ty: MirType) -> text:
+    """MIR type -> WAT numeric-op prefix ("i32"/"i64"/"f32"/"f64"), or "" if none.
+
+    STRICT on purpose. `MirToWat.mir_type_to_wasm_type` falls back to
+    `WasmType.I32` for anything it does not recognise, which is fine for
+    declaring a local slot (an aggregate is a wasm32 pointer) but is exactly
+    the wrong behaviour when choosing an ARITHMETIC instruction: it would turn
+    "I have no idea what this is" into "emit the integer op", which is the
+    defect this classifier exists to prevent. "" means the caller must trap.
+    """
+    match ty.kind:
+        # Sub-i32 integers, bool and char all live in an i32 stack slot.
+        case I8: "i32"
+        case I16: "i32"
+        case I32: "i32"
+        case U8: "i32"
+        case U16: "i32"
+        case U32: "i32"
+        case Bool: "i32"
+        case Char: "i32"
+        case I64: "i64"
+        case U64: "i64"
+        # wasm32 addresses are i32.
+        case Ptr(_, _): "i32"
+        case Ref(_, _): "i32"
+        case F32: "f32"
+        case F64: "f64"
+        case _:
+            # Unit, Never, SIMD vectors, aggregates, Opaque, function pointers,
+            # Bits, Union, Promise... none has a scalar WAT arithmetic form in
+            # this backend. Do NOT guess.
+            ""
+
+fn mir_local_is_arg(local: MirLocal) -> bool:
+    """True when a local is a function parameter.
+
+    LocalKind.Arg carries an index payload (mir_types.spl:32), so it cannot be
+    compared with `==` against a bare `LocalKind.Arg`; it has to be matched.
+    """
+    match local.kind:
+        case Arg(_): true
+        case _: false
 
 # ============================================================================
 # Exports

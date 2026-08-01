@@ -312,7 +312,7 @@ operands that were already on the value stack and then emitted only a comment �
 four values left on the stack, no result. `wasm_runtime.spl` imports no pow
 helper, so it now traps.
 
-## OPEN — separate defect, not fixed here
+## ~~OPEN~~ FIXED in the third pass — see "Follow-up 3" below
 
 `MirBinOp` carries no operand type and `translate_binop` receives none, so a
 **float** add/sub/mul/div/comparison still lowers to the `i64.*` instruction —
@@ -328,3 +328,147 @@ float arithmetic.
 `it` blocks with `translate_binop` and `translate_unaryop` sections. Sabotage
 check: re-inserting `case And: builder.emit("i32.and")` above the restored arms
 turns the new blocks red.
+
+---
+
+# Follow-up 3 2026-08-01 (third pass): float arithmetic, and the seam it needed
+
+Fixes the OPEN item above. Status: **FIXED, executed and measured** against a
+before/after control with `src/compiler_rust/target/bootstrap/simple`.
+
+## The suggested seam did not exist
+
+The OPEN note said to "thread per-local types from `func.body.locals`".
+**`MirFunction` has no `body` field.** It carries `locals: [MirLocal]` and
+`blocks: [MirBlock]` directly (`mir_instruction_graph.spl:26`), and `MirBody`
+is a separate struct built on demand by `MirBody.from_function`. Nor does
+`MirFunction` have an `is_extern` field. Measured, not inferred:
+
+```
+error: semantic: undefined field: unknown property or method 'body' on Tuple
+```
+
+...which also exposes a second thing: `module.functions` is a
+`Dict<SymbolId, MirFunction>`, so `for func in module.functions:` bound a
+**(key, value) tuple**, not a function. `translate_module` had therefore
+**never run to completion even once**. Behind it sat a third defect —
+`translate_terminator` did `match term.kind:` but `MirTerminator` is an ENUM,
+not a struct with a `.kind` field (the exact mirror of the original
+`emit_operand` defect), and its `CondBranch` arm named a variant that does not
+exist (the real one is `If`).
+
+That is why a missing operand type went unnoticed for so long: nothing
+downstream of `translate_module` was reachable, so no end-to-end output existed
+to be wrong.
+
+The real seam is `func.locals`, each `MirLocal` carrying `type_: MirType`
+(`mir_types.spl:38` — the field is `type_`, not `ty`, and `name` is `text?`).
+
+## Fix
+
+- `MirToWat.local_types: Dict<i64, text>` maps LocalId → WAT op class
+  (`i32`/`i64`/`f32`/`f64`), rebuilt per function by `register_local_types`
+  (cleared each time — a stale entry would silently type an unrelated local).
+- A `Const` operand is self-describing (`MirOperandKind.Const` carries its own
+  `MirType`), so it needs no registration. `Copy`/`Move` resolve through the map.
+- `wat_op_class` is deliberately **strict**: it returns `""` for anything with
+  no scalar WAT arithmetic form. It does NOT reuse `mir_type_to_wasm_type`,
+  whose `case _: WasmType.I32` fallback is fine for declaring a local slot but
+  would turn "unknown type" into "emit the integer op" — the very defect here.
+- **Unknown, or mismatched left/right, ⇒ `;; UNSUPPORTED:` + `unreachable`.**
+  Never a plausible integer op.
+- `translate_unaryop` got the same treatment: `Neg` on a float is `f64.neg`,
+  not `i64.const 0; x; i64.sub`.
+- `translate_function` / `collect_strings` / `translate_module` /
+  `translate_terminator` corrected to the real field and variant names, since
+  the type map can only be populated on a path that actually runs. Params are
+  now named `$_lN` to match the `_l{id}` naming every instruction lowering
+  already uses — naming them from `MirLocal.name` produced parameters no body
+  instruction could resolve.
+
+## Measured, before → after (same binary, live integer control in both runs)
+
+Control (`i64 Add` → `i64.add`, `i64 Lt` → `i64.lt_s`) is unchanged in both
+runs, so these are real deltas, not harness noise. Both runs exited 0.
+
+| operands / op | before | after |
+|---|---|---|
+| f64 Add / Sub / Mul | `i64.add` / `i64.sub` / `i64.mul` | `f64.add` / `f64.sub` / `f64.mul` |
+| f64 Div | `i64.div_s` | `f64.div` |
+| f64 Eq / Ne | `i64.eq` / `i64.ne` | `f64.eq` / `f64.ne` |
+| f64 Lt / Le / Gt / Ge | `i64.lt_s` / `le_s` / `gt_s` / `ge_s` | `f64.lt` / `le` / `gt` / `ge` |
+| f32 Mul | `i64.mul` | `f32.mul` |
+| f64 Rem | `i64.rem_s` | `;; UNSUPPORTED` + `unreachable` |
+| f64 BitAnd/BitOr/BitXor/Shl/Shr | `i64.and` etc. | `;; UNSUPPORTED` + `unreachable` |
+| **i32 Add** | `i64.add` | `i32.add` |
+| unregistered local | `i64.add` | `;; UNSUPPORTED` + `unreachable` |
+| mismatched f64/i64 | `i64.add` | `;; UNSUPPORTED` + `unreachable` |
+| Unit-typed operands | `i64.add` | `;; UNSUPPORTED` + `unreachable` |
+| unary Neg on f64 | `i64.const 0; …; i64.sub` | `f64.neg` |
+| unary BitNot on f64 | `i64.const -1; i64.xor` | `;; UNSUPPORTED` + `unreachable` |
+| `translate_module` (any function) | **aborted**: `'body' on Tuple` | completes |
+
+**The reported symptom was again narrower than the defect.** It was filed as a
+float problem; `i32` operands were equally wrong (`i32.const 1; i32.const 2;
+i64.add` — not merely a wrong result but invalid WAT, since `i64.add` cannot
+consume two i32 stack values).
+
+End-to-end, an f64 function now produces:
+
+```
+(func $fmul (param $_l0 f64) (param $_l1 f64) (result f64)
+  (local $_l2 f64)
+  ... f64.mul
+```
+
+Before, `translate_module` aborted before emitting anything.
+
+## Spec: 24 → 46 `it` blocks, and the "24 passing" claim was never observed
+
+`test/01_unit/compiler/backend/wasm_mir_to_wat_spec.spl`. Final:
+**`Results: 46 total, 46 passed, 0 failed`**, exit 0.
+
+Sabotage proof (requirement: prove it CAN fail). Forcing the pre-fix behaviour
+with a one-line `var cls = "i64"` in `translate_binop` gives
+**`Results: 46 total, 32 passed, 14 failed`, exit 1** — every float block, the
+i32 block, both unknown-type blocks and the end-to-end `f64.mul` block go red,
+while the integer control blocks stay green. Restoring returns 46/46.
+
+A *weaker* sabotage was tried first and rejected: routing floats through
+`emit_int_binop` still passed `f64 Add`, because that function interpolates the
+class (`"{cls}.add"`) and so coincidentally produced `f64.add`. Only a sabotage
+that reproduces the *actual* pre-fix instruction (hardcoded `i64`) is a valid
+proof.
+
+## Measurement trap hit during this pass — read before trusting any run here
+
+`simple test <spec>` **does** run this spec, but its output is ~3,600 lines of
+lint/deprecation noise with the verdict at line ~3,629. Grepping the head or
+tailing 30 lines shows **nothing at all** and the command exits 0, which reads
+exactly like "the runner silently executed no tests". It was misread that way
+here before `.claude/rules/testing.md` ("capture to a file and read the tail";
+"take `$?` from the command under test, never from a pipe") was applied and the
+real `Results:` line appeared. The earlier note in this document that
+`simple test` "cannot be used, it times out" is **wrong** and is withdrawn.
+
+## Remaining gap — recorded, not silently normalized
+
+**Unsigned integers still lower to signed instructions.** `U8`/`U16`/`U32`
+classify as `i32` and `U64` as `i64`, and `emit_int_binop` emits `div_s`,
+`rem_s`, `lt_s`, `le_s`, `gt_s`, `ge_s`, `shr_s` unconditionally. For an
+unsigned operand these should be `div_u`/`rem_u`/`lt_u`/`le_u`/`gt_u`/`ge_u`/
+`shr_u`. Same defect family (instruction not matched to operand type), out of
+scope for this float-focused pass, and left explicitly rather than normalized.
+
+Also still stubbed, unchanged by this pass: `Goto` and `If` terminators emit
+comments rather than real branches, and `Switch` interpolates `SwitchCase`
+structs into a `br_table` operand list. The control-flow lowering in this
+backend is not yet real.
+
+## Sibling defect found while verifying — filed separately
+
+`doc/08_tracking/bug/chained_static_ctor_receiver_drops_mutation_2026-08-01.md`
+— `MirToWat.create("m").emit_operand(b, op)` emits **nothing**, while the same
+call through a plain function or a bound `val` works. This produced 3 phantom
+failures in the verification driver and is a false-green generator for any spec
+written in the `Class.create(...).method(...)` style.

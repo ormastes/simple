@@ -19,7 +19,9 @@ use compiler.mir.mir_data.*
 # MirOperand/MirOperandKind are NOT reachable through the mir_data wildcard --
 # constructing one via `MirOperand(kind: ...)` with only the `.*` import fails
 # with "function `MirOperand` not found". Import them explicitly.
-use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_instruction_kinds.{MirInst, MirInstKind}
+use compiler.mir.mir_instruction_graph.{MirBlock, MirFunction, MirModule}
 
 fn translator() -> MirToWat:
     MirToWat.create("spec_mod")
@@ -39,15 +41,60 @@ fn op_const(v: MirConstValue, t: MirType) -> MirOperand:
 fn op_local(n: i64) -> MirOperand:
     MirOperand(kind: MirOperandKind.Copy(local(n)))
 
-fn binop_wat(op: MirBinOp) -> text:
+fn mk_local(n: i64, k: MirTypeKind) -> MirLocal:
+    MirLocal(id: local(n), name: nil, type_: ty(k), kind: LocalKind.Temp, is_ghost: false)
+
+fn typed_translator(k: MirTypeKind) -> MirToWat:
+    # MirBinOp/MirUnaryOp carry NO operand type, so the ONLY way the lowering
+    # can tell `f64.add` from `i64.add` is the type of the locals the operands
+    # name. register_local_types is that seam; an operand whose type was never
+    # registered is UNKNOWN and must trap, never fall back to an integer op.
+    val t = MirToWat.create("spec_mod")
+    t.register_local_types([mk_local(0, k), mk_local(1, k)])
+    t
+
+fn binop_wat_ty(k: MirTypeKind, op: MirBinOp) -> text:
     val b = builder()
-    translator().translate_binop(b, local(20), op, op_local(0), op_local(1))
+    typed_translator(k).translate_binop(b, local(20), op, op_local(0), op_local(1))
+    b.build()
+
+fn binop_wat(op: MirBinOp) -> text:
+    binop_wat_ty(MirTypeKind.I64, op)
+
+fn unaryop_wat_ty(k: MirTypeKind, op: MirUnaryOp) -> text:
+    val b = builder()
+    typed_translator(k).translate_unaryop(b, local(21), op, op_local(0))
     b.build()
 
 fn unaryop_wat(op: MirUnaryOp) -> text:
-    val b = builder()
-    translator().translate_unaryop(b, local(21), op, op_local(0))
-    b.build()
+    unaryop_wat_ty(MirTypeKind.I64, op)
+
+fn float_fn_module() -> MirModule:
+    """A one-instruction f64 function: r = a * b; return r."""
+    val f64_ty = ty(MirTypeKind.F64)
+    val locals = [
+        MirLocal(id: local(0), name: Some("a"), type_: f64_ty, kind: LocalKind.Arg(0), is_ghost: false),
+        MirLocal(id: local(1), name: Some("b"), type_: f64_ty, kind: LocalKind.Arg(1), is_ghost: false),
+        MirLocal(id: local(2), name: Some("r"), type_: f64_ty, kind: LocalKind.Temp, is_ghost: false)
+    ]
+    val inst = MirInst(kind: MirInstKind.BinOp(local(2), MirBinOp.Mul, op_local(0), op_local(1)), span: nil)
+    val func = MirFunction(
+        symbol: SymbolId(id: 1), name: "fmul",
+        signature: MirSignature(params: [f64_ty, f64_ty], return_type: f64_ty, is_variadic: false),
+        locals: locals,
+        blocks: [MirBlock(id: BlockId.entry(), label: Some("entry"), instructions: [inst],
+                          terminator: MirTerminator.Ret(Some(op_local(2))))],
+        entry_block: BlockId.entry(), span: Span.empty(),
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false,
+        gpu_target: "", gpu_backend_order: "", is_export_c: false,
+        export_name: "", has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false
+    )
+    var functions: Dict<SymbolId, MirFunction> = {}
+    functions[func.symbol] = func
+    MirModule(name: "float_mod", functions: functions, statics: {}, constants: {}, types: {})
 
 describe "MirToWat translation layer":
 
@@ -192,6 +239,141 @@ describe "MirToWat translation layer":
                 expect(wat).to_contain("UNSUPPORTED")
                 expect(wat).to_contain("unreachable")
 
+        it "picks the operand type from a Const operand without any registration":
+            # MirOperandKind.Const carries its own MirType, so a constant
+            # operand is self-describing -- no local registration needed.
+            val b = builder()
+            val lhs = op_const(MirConstValue.Float(1.5), ty(MirTypeKind.F64))
+            val rhs = op_const(MirConstValue.Float(2.5), ty(MirTypeKind.F64))
+            translator().translate_binop(b, local(20), MirBinOp.Add, lhs, rhs)
+            val wat = b.build()
+
+            expect(wat).to_contain("f64.add")
+            assert_false(wat.contains("i64.add"))
+
+    describe "translate_binop float operands":
+        # REGRESSION: MirBinOp has no F* variants and carries no operand type,
+        # so EVERY float program lowered to the integer instruction. Measured
+        # before this fix, with a live integer control in the same run:
+        #   f64.const 1.5 | f64.const 2.5 | i64.add
+        # That is not merely the wrong result, it is invalid WAT -- the two
+        # values on the stack are f64 and `i64.add` cannot consume them.
+        # The ten `f64.*` arms that used to sit in this function matched
+        # variant names that do not exist, so they never lowered anything;
+        # deleting the fiction is what exposed the real gap.
+
+        it "emits f64.add, not i64.add, for a float Add":
+            val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Add)
+            expect(wat).to_contain("f64.add")
+            assert_false(wat.contains("i64.add"))
+
+        it "emits f64.sub for a float Sub":
+            val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Sub)
+            expect(wat).to_contain("f64.sub")
+            assert_false(wat.contains("i64.sub"))
+
+        it "emits f64.mul for a float Mul":
+            val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Mul)
+            expect(wat).to_contain("f64.mul")
+            assert_false(wat.contains("i64.mul"))
+
+        it "emits f64.div with no signedness suffix":
+            # Float division is `f64.div`; there is no `f64.div_s`. Reusing the
+            # integer arm would have produced `i64.div_s`, which is both the
+            # wrong domain and a suffix that does not exist for floats.
+            val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Div)
+            expect(wat).to_contain("f64.div")
+            assert_false(wat.contains("div_s"))
+
+        it "emits unsuffixed float comparisons":
+            expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Eq)).to_contain("f64.eq")
+            expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Ne)).to_contain("f64.ne")
+            expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Lt)).to_contain("f64.lt")
+            expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Le)).to_contain("f64.le")
+            expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Gt)).to_contain("f64.gt")
+            expect(binop_wat_ty(MirTypeKind.F64, MirBinOp.Ge)).to_contain("f64.ge")
+
+        it "never emits a signed integer compare for a float compare":
+            for op in [MirBinOp.Lt, MirBinOp.Le, MirBinOp.Gt, MirBinOp.Ge]:
+                val wat = binop_wat_ty(MirTypeKind.F64, op)
+                assert_false(wat.contains("_s"))
+                assert_false(wat.contains("i64."))
+
+        it "lowers f32 at its own width, not widened to f64":
+            val wat = binop_wat_ty(MirTypeKind.F32, MirBinOp.Mul)
+            expect(wat).to_contain("f32.mul")
+            assert_false(wat.contains("f64."))
+
+        it "traps on float Rem -- wasm has no float remainder instruction":
+            val wat = binop_wat_ty(MirTypeKind.F64, MirBinOp.Rem)
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains("rem_s"))
+
+        it "traps on bitwise and shift ops applied to float operands":
+            for op in [MirBinOp.BitAnd, MirBinOp.BitOr, MirBinOp.BitXor,
+                       MirBinOp.Shl, MirBinOp.Shr]:
+                val wat = binop_wat_ty(MirTypeKind.F64, op)
+                expect(wat).to_contain("UNSUPPORTED")
+                expect(wat).to_contain("unreachable")
+
+        it "lowers integer ops at i32 width when the operands are i32":
+            # The same missing-type defect: i32 operands were pushed as
+            # `i32.const` and then combined with `i64.add`.
+            val wat = binop_wat_ty(MirTypeKind.I32, MirBinOp.Add)
+            expect(wat).to_contain("i32.add")
+            assert_false(wat.contains("i64.add"))
+
+    describe "translate_binop unknown operand type":
+        it "traps instead of guessing an integer op when no type is known":
+            # THE core requirement. An unregistered local has no type. Emitting
+            # `i64.add` here -- a plausible-looking instruction for a type we
+            # never established -- is exactly the failure mode being fixed.
+            val b = builder()
+            translator().translate_binop(b, local(20), MirBinOp.Add, op_local(0), op_local(1))
+            val wat = b.build()
+
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains("i64.add"))
+            assert_false(wat.contains("f64.add"))
+
+        it "traps for a type with no scalar WAT arithmetic form":
+            # Unit/aggregates/SIMD have no arithmetic lowering here. The
+            # classifier must NOT reuse mir_type_to_wasm_type, whose `case _:`
+            # silently answers i32 for anything unrecognised.
+            val b = builder()
+            val t = MirToWat.create("spec_mod")
+            t.register_local_types([mk_local(0, MirTypeKind.Unit), mk_local(1, MirTypeKind.Unit)])
+            t.translate_binop(b, local(20), MirBinOp.Add, op_local(0), op_local(1))
+            val wat = b.build()
+
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains("i32.add"))
+
+        it "traps on mismatched operand types rather than reinterpreting one":
+            val b = builder()
+            val t = MirToWat.create("spec_mod")
+            t.register_local_types([mk_local(0, MirTypeKind.F64), mk_local(1, MirTypeKind.I64)])
+            t.translate_binop(b, local(20), MirBinOp.Add, op_local(0), op_local(1))
+            val wat = b.build()
+
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+
+        it "does not leak one function's local types into the next":
+            val t = MirToWat.create("spec_mod")
+            t.register_local_types([mk_local(0, MirTypeKind.F64), mk_local(1, MirTypeKind.F64)])
+            t.register_local_types([mk_local(0, MirTypeKind.I64), mk_local(1, MirTypeKind.I64)])
+            val b = builder()
+            t.translate_binop(b, local(20), MirBinOp.Add, op_local(0), op_local(1))
+
+            expect(b.build()).to_contain("i64.add")
+            assert_false(b.build().contains("f64.add"))
+
+    describe "translate_binop":
+
         it "never emits i32.and for an op that is not a bitwise and":
             # The single sharpest pin on the defect: i32.and was the swallowing
             # arm's instruction and is not the correct lowering for ANY
@@ -220,4 +402,59 @@ describe "MirToWat translation layer":
 
         it "keeps Neg and Not working":
             expect(unaryop_wat(MirUnaryOp.Neg)).to_contain("i64.sub")
-            expect(unaryop_wat(MirUnaryOp.Not)).to_contain("i32.eqz")
+            expect(unaryop_wat_ty(MirTypeKind.Bool, MirUnaryOp.Not)).to_contain("i32.eqz")
+
+        it "emits f64.neg for a float Neg instead of an integer subtract":
+            # MirUnaryOp carries no operand type either, so Neg had the same
+            # defect: `i64.const 0; <x>; i64.sub` on an f64 operand.
+            val wat = unaryop_wat_ty(MirTypeKind.F64, MirUnaryOp.Neg)
+            expect(wat).to_contain("f64.neg")
+            assert_false(wat.contains("i64.sub"))
+            assert_false(wat.contains("i64.const 0"))
+
+        it "emits f32.neg at f32 width":
+            expect(unaryop_wat_ty(MirTypeKind.F32, MirUnaryOp.Neg)).to_contain("f32.neg")
+
+        it "traps on a bitwise not applied to a float operand":
+            val wat = unaryop_wat_ty(MirTypeKind.F64, MirUnaryOp.BitNot)
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains("i64.xor"))
+
+        it "traps when the unaryop operand type is unknown":
+            val b = builder()
+            translator().translate_unaryop(b, local(21), MirUnaryOp.Neg, op_local(0))
+            val wat = b.build()
+
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+            assert_false(wat.contains("i64.sub"))
+
+    describe "translate_module end to end":
+        # translate_module had NEVER completed once. `for func in
+        # module.functions:` iterates a Dict<SymbolId, MirFunction>, binding a
+        # (key, value) TUPLE, so `func.body.blocks` aborted with "unknown
+        # property or method 'body' on Tuple" -- and MirFunction has no `body`
+        # field at all, nor an `is_extern` one. Behind that, translate_terminator
+        # matched `term.kind` on MirTerminator, which is an ENUM, not a struct.
+        # Nothing downstream of translate_module was reachable, which is why a
+        # missing operand type in translate_binop went unnoticed for so long.
+
+        it "translates a whole float function without aborting":
+            val wat = MirToWat.create("float_mod").translate_module(float_fn_module())
+            expect(wat).to_contain("(func $fmul")
+
+        it "declares float params and result at f64, named to match the body":
+            val wat = MirToWat.create("float_mod").translate_module(float_fn_module())
+            # Params must be named $_lN: every instruction lowering references
+            # locals as `_l{id}`, so naming params from MirLocal.name produced
+            # parameters no body instruction could ever resolve.
+            expect(wat).to_contain("(param $_l0 f64)")
+            expect(wat).to_contain("(param $_l1 f64)")
+            expect(wat).to_contain("(result f64)")
+            expect(wat).to_contain("(local $_l2 f64)")
+
+        it "emits f64.mul in the function body, not i64.mul":
+            val wat = MirToWat.create("float_mod").translate_module(float_fn_module())
+            expect(wat).to_contain("f64.mul")
+            assert_false(wat.contains("i64.mul"))
