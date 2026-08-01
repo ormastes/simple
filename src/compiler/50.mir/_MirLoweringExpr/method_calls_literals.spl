@@ -1256,14 +1256,12 @@ impl MirLowering:
             self.builder = b_has
             return has_bool
 
-        # `.get(key)` -> rt_dict_get, resolved and decoded by the same shared
-        # helper as the `d[k]` Index case in expr_dispatch.spl -- but read as
-        # an OPTION (`as_option: true`), because `.get()`'s declared result is
-        # `V?` while `d[k]`'s is `V`. That flag is what preserves the MISS
-        # sentinel through the decode (bug
-        # native_dict_get_miss_returns_zero_not_nil_2026-07-28, which
-        # superseded the "missing-key behaviour intentionally mirrors `d[k]`"
-        # note that used to sit here).
+        # `.get(key)` -> rt_dict_get, decoded exactly like the `d[k]` Index
+        # case in expr_dispatch.spl (same runtime call, same decode_runtime_value
+        # unboxing). Missing-key behavior intentionally mirrors the existing
+        # `d[k]` raw-read path (pre-existing garbage-on-miss behavior documented
+        # in scratchpad/dict_native_report.md item 15 -- not introduced here,
+        # not fixed here, out of scope for this sweep).
         if receiver_is_dict and method == "get" and args.len() == 1:
             val receiver_local = if dict_recv_lowered: dict_recv_local else: self.lower_expr(receiver)
             val key_local = self.lower_dict_key(args[0].value)
@@ -1282,7 +1280,7 @@ impl MirLowering:
             # because nil survives the shift as nil. Route through the shared
             # helper the `d[k]` index read uses, so both readers of rt_dict_get
             # resolve, decode and register identically.
-            return self.lower_dict_runtime_read(receiver, receiver_local, key_local, true)
+            return self.lower_dict_runtime_get(receiver, receiver_local, key_local)
 
         # `.remove(key)` / `.delete(key)` -> rt_dict_remove (mutates in place,
         # returns whether the key was present -- discarded here). The oracle
@@ -1866,8 +1864,22 @@ impl MirLowering:
         # contains" build failure (matching the existing loud-fail
         # convention for .pop()/.first()/.last()) instead of a silent wrong
         # answer.
+        #
+        # Scope (bug mir_string_arm_array_receiver_find_rfind_2026-08-01): this
+        # probe is CONSUMED by the string-only arm below, which fires for
+        # `find`/`rfind` as well as `contains` -- but it used to be COMPUTED
+        # only when `method == "contains"`. For an array receiver calling
+        # `.find(x)`/`.rfind(x)` the flag therefore stayed false, the array
+        # handle was passed to rt_string_find as if it were a string pointer,
+        # and `rt_core_as_string` returned NULL -> a silent **-1** ("not
+        # found") for every element, including elements that ARE present.
+        # Same silent-wrong-answer class as the `contains` false/false case
+        # documented above, and the same fix: positively-known array/slice
+        # receivers must be excluded from this string-only arm for the whole
+        # arity-1 search family so they fall through to the LOUD unresolved
+        # path instead of returning a plausible wrong answer.
         var contains_recv_is_array = false
-        if method == "contains" and args.len() == 1 and resolution_is_unresolved and not predicate_has_custom_owner:
+        if (method == "contains" or method == "find" or method == "rfind") and args.len() == 1 and resolution_is_unresolved and not predicate_has_custom_owner:
             if val contains_recv_ty = receiver.type_:
                 match contains_recv_ty.kind:
                     case HirTypeKind.Array(_, _) | HirTypeKind.Slice(_):
