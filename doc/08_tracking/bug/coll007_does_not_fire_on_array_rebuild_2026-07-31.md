@@ -1,6 +1,8 @@
 # COLL007 does not fire on the array-rebuild-to-pop idiom
 
 **Date:** 2026-07-31
+**Status:** RESOLVED 2026-08-01 — see "Resolution" at the bottom. The detector was
+never broken; **this report's own fixture was invalid code**.
 **Component:** `src/compiler/35.semantics/lint/collection_patterns.spl`
 **Severity:** the rule is documented and registered but silently matches nothing
 
@@ -68,3 +70,42 @@ so the rule is fix-capable the moment it fires; the spec
 covers COLL001 only.
 
 See also `doc/01_research/compiler/collection_planner/collection_plan_ir_2026-07-31.md` §2.
+
+## Resolution (2026-08-01)
+
+The first bullet of the three hypotheses above was right: **`arr[0..arr.len()-1]`
+is not slicing in this language.** `..` always builds an `EXPR_RANGE`
+(`parse_range`, `parser_expr.spl:356`) regardless of context, so `arr[a..b]`
+parses as `EXPR_INDEX(base, EXPR_RANGE(..))`. Only the colon forms `[a:b]`,
+`[:b]`, `[a:]` produce `EXPR_SLICE` (`parse_postfix_on`, ~:962).
+
+The `..` shape is not merely undetected — **it cannot execute**:
+`eval_index_expr` (`interpreter/eval_access.spl:87`) has cases for int, text and
+struct/dict indices only, so a Range index falls through to
+`cannot index ...`; `cg_index_expr` has no Range case either. Running the
+fixture prints `nil` rather than a drained array. So the detector was correct to
+ignore it, and extending the matcher to that shape would mean matching code that
+can never run.
+
+`is_array_rebuild_pop` fires correctly on the real syntax — verified
+`arr = arr[:-1]` → 1 warning, `arr = arr[0:arr.len()-1]` → 1 warning,
+`arr = other[0:other.len()-1]` → silent.
+
+**One genuine defect was found and fixed underneath the false report:**
+`collection_rewrite_for`'s COLL007 branch compared against
+`"{lhs}[0..{lhs}.len()-1]"`, the same invalid `..` spelling. The "Related"
+section above calls that rewrite "correct in isolation" — it was not. It could
+never have matched a real COLL007 warning, so the `.pop()` auto-fix would have
+stayed dead even once the rule fired. Now matches the colon form.
+
+Fixed: header table + matcher doc comments corrected to `[0:len-1]`, the
+rewrite matcher string, and a `ponytail:` note on the detector warning against
+re-adding the `..` shape. Covered by
+`test/01_unit/compiler/lint/collection_array_rebuild_spec.spl` (5 examples,
+both directions) and a real `.pop()` easy-fix assertion in
+`collection_easy_fix_spec.spl`, which previously only documented the gap.
+
+**Lesson: a lint that "never fires" may be reading a fixture nobody ran.** This
+report's fixture was never executed, only linted — and it is not runnable code.
+Before declaring a matcher dead, run the fixture through the engine, not just
+the linter.

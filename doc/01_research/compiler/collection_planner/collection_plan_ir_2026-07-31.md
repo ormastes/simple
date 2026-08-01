@@ -73,7 +73,7 @@ record reconstruction as the new dominant cost.
 | COLL004 | loop-invariant method call | MEDIUM |
 | COLL005 | chained `.filter().filter()` (expression-level, not loop-dependent) | MEDIUM |
 | COLL006 | `str = str + x` in loop — "string concat in loop (O(n^2))" | CRITICAL |
-| COLL007 | `arr = arr[0..len-1]` array rebuild to pop | HIGH |
+| COLL007 | `arr = arr[0:len-1]` array rebuild to pop | HIGH |
 | COLL008 | unbounded module-global `.push()` with no reset | MEDIUM |
 | COLL019 | `d[k].push(x)` / `a[i].field.push(x)` — mutation through indexed access silently lost (ADR-004 value semantics; a correctness rule, not a cost rule; 009–018 stay reserved for §7) | HIGH |
 

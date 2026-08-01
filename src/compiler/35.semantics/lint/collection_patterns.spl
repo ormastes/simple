@@ -8,7 +8,7 @@
 # COLL004: Loop-invariant method call                           MEDIUM
 # COLL005: Chained .filter().filter()                           MEDIUM
 # COLL006: String concat in loop       str = str + x            CRITICAL
-# COLL007: Array rebuild to pop last   arr = arr[0..len-1]      HIGH
+# COLL007: Array rebuild to pop last   arr = arr[0:len-1]       HIGH
 # COLL008: Unbounded global .push()    module var with no reset MEDIUM
 # COLL019: Mutation through indexed    d[k].push(x)             HIGH
 #          access is silently lost     a[i].field.push(x)
@@ -540,8 +540,20 @@ fn is_string_concat_assign_expr(e: i64, text_vars: [text]) -> bool:
 
     false
 
-# COLL007: Detect arr = arr[0..arr.len()-1] (array rebuild to remove last)
+# COLL007: Detect arr = arr[0:arr.len()-1] (array rebuild to remove last)
 # Matches EXPR_ASSIGN where RHS is EXPR_SLICE of the same variable
+#
+# ponytail: only the colon slice form (`[a:b]`, `[:b]`, `[a:]`) parses to
+# EXPR_SLICE (see parse_postfix_on in parser_expr.spl) and is a real,
+# runnable operation. `arr[a..b]` is NOT array slicing in this language: `..`
+# always builds an EXPR_RANGE value (parse_range), so `arr[a..b]` parses as
+# EXPR_INDEX(base, EXPR_RANGE(...)) and indexing by a Range errors at
+# runtime (eval_index_expr / cg_index_expr have no Range-index case). A
+# fixture written with `..` (as this rule's own header comment and the bug
+# report that flagged it once did) is not valid code and correctly never
+# fires. Do not extend this matcher to EXPR_INDEX-with-EXPR_RANGE — that
+# would be pattern-matching a shape that cannot execute. See
+# doc/08_tracking/bug/coll007_does_not_fire_on_array_rebuild_2026-07-31.md.
 fn is_array_rebuild_pop(e: i64) -> bool:
     if e < 0:
         return false
