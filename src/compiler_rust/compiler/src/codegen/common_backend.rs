@@ -363,8 +363,12 @@ pub(crate) fn referenced_call_names(functions: &[MirFunction]) -> HashSet<String
                             "rt_array_len",
                             "rt_array_pop",
                             "rt_array_push",
-                            "rt_box_float",
-                            "rt_box_int",
+                            // Real tagging helpers used by methods.rs
+                            // `wrap_value`. The former "rt_box_float"/
+                            // "rt_box_int" entries here named symbols that
+                            // do not exist in the runtime at all.
+                            "rt_value_float",
+                            "rt_value_int",
                             "rt_contains",
                             "rt_dict_clear",
                             "rt_dict_keys",
@@ -599,6 +603,17 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             // typed `f64 ** x` reaches codegen (task #104: threading dict value
             // types made such float operands reachable for the first time).
             | "rt_math_pow"
+            // P0 fix (2026-08-01): the `BinOp::In`/`BinOp::NotIn` arm in
+            // codegen/instr/core.rs boxes the membership needle through
+            // methods.rs `wrap_value` before calling rt_contains, exactly as
+            // `.contains()` does. Those boxing helpers are emitted straight
+            // from a BinOp node, never from a MIR BuiltinMethod node, so
+            // without them here the JIT reports "unresolved external symbol
+            // 'rt_box_int'" and silently drops the WHOLE MODULE to the
+            // interpreter (exit 0, ~100-1000x slower) instead of failing.
+            // See doc/08_tracking/bug/jit_in_operator_unboxed_needle_2026-08-01.md.
+            | "rt_value_int"
+            | "rt_value_float"
     )
 }
 

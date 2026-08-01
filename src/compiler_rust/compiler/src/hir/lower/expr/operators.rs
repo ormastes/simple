@@ -45,7 +45,11 @@ impl Lowerer {
                     TypeId::BOOL
                 }
             }
-            ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In => TypeId::BOOL,
+            // `NotIn` belongs here with `In`: leaving it out fell through to
+            // `left_hir.ty`, so `"zzz" not in hay` was typed TEXT and printing
+            // it decoded the raw 0/1 as a heap handle ("nil"/"0"). Branching
+            // still worked, which is why this hid behind `if x not in y`.
+            ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In | ast::BinOp::NotIn => TypeId::BOOL,
             _ => left_hir.ty,
         };
 

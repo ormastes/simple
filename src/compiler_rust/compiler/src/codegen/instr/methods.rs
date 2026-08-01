@@ -18,7 +18,7 @@ use crate::mir::VReg;
 /// For .push() on integer-typed arrays, MIR lowering now inserts BoxInt before the
 /// MethodCallStatic (see lowering_expr.rs), so integer args arrive already tagged.
 /// This function remains a no-op pass-through.
-fn wrap_value<M: Module>(
+pub(super) fn wrap_value<M: Module>(
     ctx: &mut InstrContext<'_, M>,
     builder: &mut FunctionBuilder,
     vreg: VReg,
@@ -34,13 +34,20 @@ fn wrap_value<M: Module>(
         Some(
             TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32 | TypeId::U64,
         ) => {
+            // `rt_box_int` NEVER EXISTED in the runtime (2026-08-01): no
+            // `pub extern "C" fn rt_box_int` is defined anywhere under
+            // src/compiler_rust/runtime. Emitting it made the JIT report
+            // "unresolved external symbol 'rt_box_int'" and silently drop the
+            // WHOLE MODULE to the interpreter (exit 0), so every `.contains()`
+            // on an int-typed collection has been running interpreted. The
+            // real tagging helper is `rt_value_int`.
             let mut sig = Signature::new(platform_call_conv());
             sig.params.push(AbiParam::new(types::I64));
             sig.returns.push(AbiParam::new(types::I64));
             let func_id = ctx
                 .module
-                .declare_function("rt_box_int", Linkage::Import, &sig)
-                .expect("declare rt_box_int");
+                .declare_function("rt_value_int", Linkage::Import, &sig)
+                .expect("declare rt_value_int");
             let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
             let call = adapted_call(builder, func_ref, &[val]);
             builder.inst_results(call)[0]
@@ -49,10 +56,12 @@ fn wrap_value<M: Module>(
             let mut sig = Signature::new(platform_call_conv());
             sig.params.push(AbiParam::new(types::F64));
             sig.returns.push(AbiParam::new(types::I64));
+            // `rt_box_float` never existed either — see the rt_value_int note
+            // above. `rt_value_float` is the real f64 tagging helper.
             let func_id = ctx
                 .module
-                .declare_function("rt_box_float", Linkage::Import, &sig)
-                .expect("declare rt_box_float");
+                .declare_function("rt_value_float", Linkage::Import, &sig)
+                .expect("declare rt_value_float");
             let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
             let arg = if builder.func.dfg.value_type(val) == types::F32 {
                 builder.ins().fpromote(types::F64, val)

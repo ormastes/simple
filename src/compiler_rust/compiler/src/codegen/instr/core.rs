@@ -14,6 +14,7 @@ use super::helpers::{
     adapted_call, call_runtime_1, call_runtime_1_void, call_runtime_2, call_runtime_2_void, call_runtime_3,
     call_runtime_4, create_string_constant, declare_named_bytes,
 };
+use super::methods;
 use super::{InstrContext, InstrResult};
 
 /// Look up whether a VReg holds a signed integer.
@@ -505,14 +506,34 @@ pub(crate) fn compile_binop<M: Module>(
             ensure_i64(builder, result)
         }
         BinOp::In | BinOp::NotIn => {
-            // Ensure both operands are i64 for runtime function call
-            let lhs_i64 = ensure_i64(builder, lhs);
-            let rhs_i64 = ensure_i64(builder, rhs);
-            let contains_raw = call_runtime_2(ctx, builder, "rt_contains", rhs_i64, lhs_i64);
+            // The membership needle MUST be boxed exactly the way `.contains()`
+            // boxes it (see instr/methods.rs, the `("Array", "contains")` arm):
+            // `rt_contains` compares array elements with `rt_value_eq` against a
+            // tagged `RuntimeValue`, and looks a dict key up by its tagged hash.
+            // Passing the raw i64 here made every non-heap needle miss, so
+            // `2 in [1, 2, 3]` and `1 in {1: 10}` returned FALSE for a present
+            // member while `nums.contains(2)` returned true.
+            //
+            // Use the PRE-COERCE operands: `coerce_binop_operands` promotes the
+            // other side to float when either side is float, which would turn
+            // the collection pointer into an f64 for `2.5 in floats`.
+            let needle_pre = if pre_lhs_is_int {
+                ensure_i64_typed(builder, pre_lhs, lhs_signed)
+            } else {
+                pre_lhs
+            };
+            let needle = methods::wrap_value(ctx, builder, left_vreg, needle_pre);
+            let collection = ensure_i64(builder, pre_rhs);
+            let contains_raw = call_runtime_2(ctx, builder, "rt_contains", collection, needle);
             let result = ensure_i64(builder, contains_raw);
             if matches!(op, BinOp::NotIn) {
-                let one = builder.ins().iconst(types::I64, 1);
-                builder.ins().bxor(result, one)
+                // Negate the same way `BinOp::NotEq` does (icmp against zero),
+                // not with `bxor(result, 1)`: `rt_contains` returns a u8 whose
+                // upper return-register bits are not guaranteed clear, so xor
+                // could leave a value that is neither 0 nor 1.
+                let zero = builder.ins().iconst(types::I64, 0);
+                let negated = builder.ins().icmp(IntCC::Equal, result, zero);
+                ensure_i64(builder, negated)
             } else {
                 result
             }
