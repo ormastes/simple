@@ -525,9 +525,40 @@ impl HirLowering:
             case "u16": HirTypeKind.Int(16, false)
             case "u32": HirTypeKind.Int(32, false)
             case "u64": HirTypeKind.Int(64, false)
+            # SEED-PARITY (2026-08-01): the Rust seed's type resolver
+            # (src/compiler_rust/compiler/src/hir/lower/type_resolver.rs)
+            # already accepts `usize`/`isize`/`u128`/`i128`/`unit`, and this
+            # compiler's OWN `HirType.named` (hir_types.spl) maps `usize` ->
+            # Int(64, signed:false) and `isize` -> Int(64, signed:true). The
+            # layout tables (30.types/_TypeLayout/{layout_core,arch_and_verify}
+            # .spl -> 8 bytes), the riscv32 backend, and shb_types' layout
+            # registry all carry a `usize` entry too. Only THIS match -- the
+            # single strict gate that emits "unresolved type: {name}" -- was
+            # missing the arms, so every `usize` annotation in the tree (779
+            # type-position uses across 132 files, including the load-bearing
+            # src/lib/*/allocator.spl and src/lib/*/mimalloc.spl tiers) hard-
+            # errored here and collapsed the decl to HirTypeKind.Error.
+            #
+            # Signedness follows `HirType.named` (this layer's own canonical
+            # name->kind map), NOT the seed: the seed returns a signed I64 for
+            # both. That divergence only becomes observable for `>>` on a
+            # high-bit-set value (sshr vs ushr); it is recorded in
+            # doc/08_tracking/bug/unresolved_type_declared_nowhere_family.md
+            # rather than silently normalized here.
+            case "usize": HirTypeKind.Int(64, false)
+            case "isize": HirTypeKind.Int(64, true)
+            # BUG-U128-64BIT parity: neither engine has a 128-bit integer, so
+            # the seed resolves these to a SIGNED I64 deliberately (keeping the
+            # JIT's arithmetic shift byte-identical to the interpreter's
+            # `i64 >>`). Mirror that choice exactly -- picking Int(128, ..) or
+            # an unsigned 64 here would diverge from the seed.
+            case "u128" | "i128": HirTypeKind.Int(64, true)
             case "f32": HirTypeKind.Float(32)
             case "f64": HirTypeKind.Float(64)
             case "bool": HirTypeKind.Bool
+            # Seed parity: `"unit" => TypeId::VOID`. Bare `unit` annotations
+            # come from inference / cross-module signatures.
+            case "unit": HirTypeKind.Unit
             case "char": HirTypeKind.Char
             case "text" | "str" | "String": HirTypeKind.Str
             case "list": HirTypeKind.Array(HirType(kind: HirTypeKind.Any, span: span), nil)

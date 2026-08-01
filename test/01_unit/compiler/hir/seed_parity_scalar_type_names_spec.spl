@@ -1,0 +1,129 @@
+# @cover src/compiler/20.hir/hir_lowering/types.spl 3%
+# @tag: unit, compiler, hir, types, seed-parity, usize
+
+# Seed-parity regression for `HirLowering.lower_named_kind`
+# (src/compiler/20.hir/hir_lowering/types.spl).
+#
+# The Rust seed's type resolver
+# (src/compiler_rust/compiler/src/hir/lower/type_resolver.rs) accepts
+# `usize` / `isize` / `u128` / `i128` / `unit` as bare scalar type names, and
+# this compiler's own `HirType.named` (hir_types.spl) maps `usize` and `isize`
+# to 64-bit Int kinds. But `lower_named_kind` -- the single strict gate that
+# emits `unresolved type: {name}` -- was missing those arms, so every such
+# annotation hard-errored and collapsed the declaration to HirTypeKind.Error.
+#
+# `usize` alone had 779 type-position uses across 132 files at the time this
+# spec was written, including the load-bearing src/lib/*/allocator.spl and
+# src/lib/*/mimalloc.spl tiers. Neither the seed's `run` nor its `compile`
+# path can catch the regression: both resolve unknown type names to ANY under
+# `lenient_types`, so a seed-based probe false-greens. Driving HirLowering
+# directly and asserting `errors.len() == 0` is what actually gates it.
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_definitions.{HirFunction}
+
+fn expect_int_param(fn_: HirFunction, index: i64, bits: i64, signed_: bool):
+    match fn_.params[index].type_.kind:
+        case Int(actual_bits, actual_signed):
+            expect(actual_bits).to_equal(bits)
+            expect(actual_signed).to_equal(signed_)
+        case _:
+            expect(false).to_equal(true)
+
+describe "seed-parity bare scalar type names lower without error":
+    it "resolves usize and isize to 64-bit Int kinds":
+        val source = "fn sizes(a: usize, b: isize):\n    ()\n"
+        val parsed = parse_full_frontend(source, "sizes.spl", "sizes", Logger(level: 0))
+        var lowering = HirLowering.with_filename("sizes.spl")
+        val hir = lowering.lower_module(parsed)
+
+        # The gate: before the fix this was 2 ("unresolved type: usize",
+        # "unresolved type: isize").
+        expect(lowering.errors.len()).to_equal(0)
+
+        if val fn_id = hir.symbols.lookup("sizes"):
+            val fn_ = hir.functions[fn_id]
+            # usize follows HirType.named: unsigned 64.
+            expect_int_param(fn_, 0, 64, false)
+            # isize follows HirType.named: signed 64.
+            expect_int_param(fn_, 1, 64, true)
+        else:
+            expect(false).to_equal(true)
+
+    it "resolves u128 and i128 to a signed 64-bit Int, matching the seed":
+        # BUG-U128-64BIT: neither engine has a 128-bit integer. The seed
+        # resolves both spellings to a SIGNED I64 on purpose so the JIT's
+        # arithmetic shift stays byte-identical to the interpreter's `i64 >>`.
+        # Picking an unsigned 64 here would make `>>` emit ushr and silently
+        # diverge on high-bit-set limbs.
+        val source = "fn wide(a: u128, b: i128):\n    ()\n"
+        val parsed = parse_full_frontend(source, "wide.spl", "wide", Logger(level: 0))
+        var lowering = HirLowering.with_filename("wide.spl")
+        val hir = lowering.lower_module(parsed)
+
+        expect(lowering.errors.len()).to_equal(0)
+
+        if val fn_id = hir.symbols.lookup("wide"):
+            val fn_ = hir.functions[fn_id]
+            expect_int_param(fn_, 0, 64, true)
+            expect_int_param(fn_, 1, 64, true)
+        else:
+            expect(false).to_equal(true)
+
+    it "resolves a bare unit return annotation":
+        val source = "fn nothing() -> unit:\n    ()\n"
+        val parsed = parse_full_frontend(source, "nothing.spl", "nothing", Logger(level: 0))
+        var lowering = HirLowering.with_filename("nothing.spl")
+        val hir = lowering.lower_module(parsed)
+
+        expect(lowering.errors.len()).to_equal(0)
+
+        if val fn_id = hir.symbols.lookup("nothing"):
+            val fn_ = hir.functions[fn_id]
+            match fn_.return_type.kind:
+                case Unit:
+                    expect(true).to_equal(true)
+                case _:
+                    expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "still rejects a type name that is genuinely declared nowhere":
+        # Live control. Without this, the three cases above would pass just as
+        # well against a lower_named_kind that had been weakened to accept
+        # every unknown name -- which is exactly the failure mode the seed's
+        # `lenient_types` mode exhibits (both `seed run` and `seed compile`
+        # resolve an undeclared annotation to ANY and exit 0, so neither can
+        # be used to gate this).
+        #
+        # Asserted by error IDENTITY, not by count: the same undeclared
+        # annotation is reported once per lowering pass that visits it, so a
+        # fixed count is brittle. What must hold is that the unresolved-type
+        # diagnostic naming this symbol is still produced.
+        val source = "fn bogus(a: ZzzNotARealTypeQqq):\n    ()\n"
+        val parsed = parse_full_frontend(source, "bogus.spl", "bogus", Logger(level: 0))
+        var lowering = HirLowering.with_filename("bogus.spl")
+        val hir = lowering.lower_module(parsed)
+
+        var saw_unresolved = false
+        for e in lowering.errors:
+            if e.message == "unresolved type: ZzzNotARealTypeQqq":
+                saw_unresolved = true
+        expect(saw_unresolved).to_equal(true)
+
+    it "does not report an unresolved-type error for any seed-parity name":
+        # The mirror of the control above: prove the accepted names produce no
+        # unresolved-type diagnostic at all, by message, so a future change
+        # that "recovers" instead of erroring is still caught.
+        val source = "fn every(a: usize, b: isize, c: u128, d: i128) -> unit:\n    ()\n"
+        val parsed = parse_full_frontend(source, "every.spl", "every", Logger(level: 0))
+        var lowering = HirLowering.with_filename("every.spl")
+        val hir = lowering.lower_module(parsed)
+
+        for e in lowering.errors:
+            expect(e.message.contains("unresolved type")).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
