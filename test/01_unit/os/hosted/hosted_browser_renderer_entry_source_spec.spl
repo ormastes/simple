@@ -1013,6 +1013,43 @@ describe "hosted browser renderer entry isolation":
             "raster: Engine2dCompositorBackend?"
         )).to_be(false)
 
+    it "keeps transient close failures recoverable":
+        step("Check close retry clears only close-failed markers on success")
+        val registry = rt_file_read_text(
+            "src/os/hosted/hosted_browser_renderer_registry.spl"
+        ) ?? ""
+        val drop_start = registry.find(
+            "fn _drop_renderer_close_failure(reason: text) -> text:"
+        )
+        expect(drop_start).to_be_greater_than(-1)
+        val drop_end = registry.find("fn _active_or_default_wm_theme_id()", drop_start)
+        expect(drop_end).to_be_greater_than(drop_start)
+        val drop_body = registry.slice(drop_start, drop_end)
+        expect(drop_body).to_contain("renderer-close-failed")
+        expect(drop_body).to_contain("reason.replace(\";\" + marker + \";\", \";\")")
+        val teardown = registry.find("me _teardown(index: i32, reason: text) -> bool:")
+        val begin_site_swap = registry.find("me _begin_site_swap(", teardown)
+        expect(teardown).to_be_greater_than(-1)
+        expect(begin_site_swap).to_be_greater_than(teardown)
+        val teardown_body = registry.slice(teardown, begin_site_swap)
+        val close_success = teardown_body.find("if entry.renderer.close():")
+        val clear_close_failure = (
+            teardown_body.find("_drop_renderer_close_failure", close_success)
+        )
+        expect(close_success).to_be_greater_than(-1)
+        expect(clear_close_failure).to_be_greater_than(close_success)
+        val advance_start = registry.find("me advance_window(")
+        val advance_end = registry.find("me take_frame(", advance_start)
+        val advance = registry.slice(advance_start, advance_end)
+        val advance_success = advance.find(
+            "if entry.renderer.close():", advance.find("if entry.close_pending:")
+        )
+        val advance_clear = advance.find(
+            "_drop_renderer_close_failure(", advance_success
+        )
+        expect(advance_success).to_be_greater_than(-1)
+        expect(advance_clear).to_be_greater_than(advance_success)
+
     # @req REQ-WEB-BROWSER-011 REQ-WEB-BROWSER-017
     it "persists learned HSTS before processing the completed frame":
         step("Inspect HSTS persistence ordering")
