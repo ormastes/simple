@@ -308,6 +308,23 @@ int spl_str_cmp(const char* a, const char* b) {
     return strcmp(a, b);
 }
 
+/* UTF-8 slice audit hooks, stage 1 (COUNTING ONLY, default off). Declared
+ * WEAK here because runtime.c is the standalone bootstrap translation unit and
+ * is not always linked with runtime_simd_utf8.c, which defines them: when the
+ * audit object is absent these resolve to NULL and the audit is simply
+ * inactive, never a link failure. See runtime_simd_utf8.c for the contract. */
+#if defined(__GNUC__) || defined(__clang__)
+extern int64_t rt_text_slice_audit_level(void) __attribute__((weak));
+extern int64_t rt_text_slice_audit_note(int site_id, const char* site_name,
+                                        int64_t start, int64_t end,
+                                        const uint8_t* src, uint64_t src_len,
+                                        const uint8_t* out, uint64_t out_len)
+    __attribute__((weak));
+#  define SPL_SLICE_AUDIT_AVAILABLE (rt_text_slice_audit_level && rt_text_slice_audit_note)
+#else
+#  define SPL_SLICE_AUDIT_AVAILABLE 0
+#endif
+
 char* spl_str_slice(const char* s, int64_t start, int64_t end) {
     if (!s) return SPL_STRDUP("", "str");
     int64_t slen = (int64_t)strlen(s);
@@ -320,6 +337,12 @@ char* spl_str_slice(const char* s, int64_t start, int64_t end) {
     char* result = (char*)SPL_MALLOC(len + 1, "str");
     memcpy(result, s + start, len);
     result[len] = '\0';
+    if (SPL_SLICE_AUDIT_AVAILABLE && rt_text_slice_audit_level() != 0) {
+        rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_SPL_STR_SLICE, "spl_str_slice",
+                                 start, end,
+                                 (const uint8_t*)s, (uint64_t)slen,
+                                 (const uint8_t*)result, (uint64_t)len);
+    }
     return result;
 }
 

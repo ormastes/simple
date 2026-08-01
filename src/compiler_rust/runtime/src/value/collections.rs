@@ -3875,6 +3875,23 @@ pub extern "C" fn rt_slice(collection: RuntimeValue, start: i64, end: i64, step:
                 }
 
                 let data = str_ptr.add(1) as *const u8;
+
+                // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
+                // This range is copied RAW, so a boundary that falls inside a
+                // multi-byte codepoint stores invalid bytes and only the byte
+                // length betrays it -- stdout's sanitizer renders valid and
+                // invalid identically. Record it; do not fail. See
+                // simple_runtime::text_slice_audit.
+                if crate::text_slice_audit::enabled() {
+                    let src = std::slice::from_raw_parts(data, len as usize);
+                    crate::text_slice_audit::note(
+                        crate::text_slice_audit::site::RT_SLICE_RUST,
+                        start,
+                        end,
+                        src,
+                        &src[start as usize..end as usize],
+                    );
+                }
                 rt_string_new(data.add(start as usize), (end - start) as u64)
             }
         }

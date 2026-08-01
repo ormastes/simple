@@ -927,6 +927,19 @@ pub(super) fn eval_collection_expr(
                     // the RAW bytes (Value::StrBytes) so reassembly
                     // re-validates, matching the compiled lane.
                     let sliced = slice_collection(s.as_bytes(), start_idx, end_idx, step_val);
+                    // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off).
+                    // Preserving the RAW bytes is what makes a mid-codepoint
+                    // boundary invisible: `Value::StrBytes` holds them and the
+                    // byte length is the only tell. Record it; do not fail.
+                    if simple_runtime::text_slice_audit::enabled() {
+                        simple_runtime::text_slice_audit::note(
+                            simple_runtime::text_slice_audit::site::INTERP_BRACKET,
+                            start_idx,
+                            end_idx,
+                            s.as_bytes(),
+                            &sliced,
+                        );
+                    }
                     Ok(Value::text_from_bytes(sliced))
                 }
                 Value::Tuple(tup) => Ok(Value::Tuple(slice_collection(&tup, start_idx, end_idx, step_val))),

@@ -9,8 +9,19 @@
 
 #include "runtime_simd_dispatch.h"
 #include <stdlib.h>
+#include <stdio.h>
 #include <ctype.h>
 #include <string.h>
+
+/* Site ids + prototypes for the UTF-8 slice-boundary audit defined at the
+ * bottom of this file. Declared locally (not in runtime.h) so the legacy C
+ * translation units that are NOT linked with this file can take a weak
+ * reference without dragging in the SIMD dispatch header. */
+#define RT_TEXT_SLICE_SITE_RT_SLICE_C      0
+#define RT_TEXT_SLICE_SITE_SPL_STR_SLICE   1
+#define RT_TEXT_SLICE_SITE_SPL_LEGACY      2
+#define RT_TEXT_SLICE_SITE_RT_SLICE_SIMPLE 3
+#define RT_TEXT_SLICE_SITE_SELF_TEST       4
 
 #if SIMD_HAS_X86
 #  include <immintrin.h>
@@ -652,4 +663,123 @@ int64_t rt_text_find_invalid_utf8(int64_t value) {
 
     return g_simd_text.utf8_find_invalid(
         (const uint8_t*)s->data, s->len);
+}
+
+/*
+ * rt_text_validate_utf8_bytes(data, len) -> int64_t (1=valid, 0=invalid)
+ *
+ * Raw-buffer entry point for the same validator `rt_text_validate_utf8` uses.
+ * The tagged-value form cannot be applied to a slice RANGE of a string that
+ * has not been materialised yet, which is exactly what the slice audit below
+ * needs to check.
+ */
+int64_t rt_text_validate_utf8_bytes(const uint8_t* data, uint64_t len) {
+    if (!data || len == 0) return 1;
+    simd_text_ensure_init();
+    return (int64_t)g_simd_text.utf8_validate(data, len);
+}
+
+/* ================================================================
+ * UTF-8 slice-boundary audit — COUNTING MODE (stage 1)
+ *
+ * Bug: text slicing splits UTF-8 mid-codepoint and stores the invalid bytes
+ * with no validation. Several independent slice implementations disagree
+ * about what happens (raw / lossy / clamped) and stdout's sanitizer renders
+ * every one of them identically, so the defect is invisible in printed
+ * output -- only the bytes show it.
+ *
+ * Every C slice implementation reports the range it is about to return here.
+ * NOTHING FAILS: this records and (level-gated) logs. The hard error is
+ * stage 4 and is enabled only once the measured blast radius over a real
+ * workload is zero or a justified residual.
+ *
+ * Gate -- DEFAULT OFF -- environment `SIMPLE_UTF8_SLICE_AUDIT`:
+ *   unset / "0"  disabled; one relaxed load per slice, no validation
+ *   "1"          count violations, log the FIRST occurrence per site
+ *   "2"          count violations, log EVERY occurrence
+ *
+ * A violation is recorded only when the SOURCE bytes were valid UTF-8 and
+ * the returned bytes are not, so the count measures what slicing causes
+ * rather than inheriting unrelated corruption.
+ * ================================================================ */
+
+static int g_slice_audit_level = -1; /* -1 = not yet read from environment */
+static int64_t g_slice_audit_violations = 0;
+static int g_slice_audit_seen[8];
+
+int64_t rt_text_slice_audit_level(void) {
+    if (g_slice_audit_level < 0) {
+        const char* raw = getenv("SIMPLE_UTF8_SLICE_AUDIT");
+        if (raw && raw[0] == '1' && raw[1] == '\0') g_slice_audit_level = 1;
+        else if (raw && raw[0] == '2' && raw[1] == '\0') g_slice_audit_level = 2;
+        else g_slice_audit_level = 0;
+    }
+    return g_slice_audit_level;
+}
+
+int64_t rt_text_slice_audit_violations(void) {
+    return g_slice_audit_violations;
+}
+
+/*
+ * Returns 1 when this slice created invalid UTF-8. Callers MUST NOT change
+ * behaviour on the result while the rollout is in counting mode -- the return
+ * value exists so stage 4 can flip to an error at exactly these call sites.
+ */
+int64_t rt_text_slice_audit_note(int site_id,
+                                 const char* site_name,
+                                 int64_t start,
+                                 int64_t end,
+                                 const uint8_t* src,
+                                 uint64_t src_len,
+                                 const uint8_t* out,
+                                 uint64_t out_len) {
+    if (rt_text_slice_audit_level() == 0) return 0;
+    if (rt_text_validate_utf8_bytes(out, out_len)) return 0;
+    if (!rt_text_validate_utf8_bytes(src, src_len)) return 0;
+
+    g_slice_audit_violations++;
+
+    int idx = site_id & 7;
+    int first_for_site = (g_slice_audit_seen[idx] == 0);
+    g_slice_audit_seen[idx] = 1;
+    if (g_slice_audit_level >= 2 || first_for_site) {
+        fprintf(stderr,
+                "SIMPLE_UTF8_SLICE_AUDIT site=%s start=%lld end=%lld srclen=%llu outlen=%llu\n",
+                site_name ? site_name : "unknown",
+                (long long)start, (long long)end,
+                (unsigned long long)src_len, (unsigned long long)out_len);
+    }
+    return 1;
+}
+
+/*
+ * rt_text_slice_audit_note_range(src, src_len, begin, finish)
+ *
+ * Range form for callers that have not materialised the output string yet --
+ * notably the pure-Simple `rt_slice` in src/runtime/simple_core/core_string.spl,
+ * which cannot build a C site-name pointer from its baremetal tier. When this
+ * object is not linked in, the Simple side's extern resolves to a stub that
+ * returns 0 and the audit is simply inactive (fail-closed OFF).
+ */
+int64_t rt_text_slice_audit_note_range(int64_t src, int64_t src_len,
+                                       int64_t begin, int64_t finish) {
+    if (rt_text_slice_audit_level() == 0) return 0;
+    if (src == 0 || begin < 0 || finish < begin || finish > src_len) return 0;
+    const uint8_t* data = (const uint8_t*)(uintptr_t)src;
+    return rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_RT_SLICE_SIMPLE, "rt_slice_simple",
+                                    begin, finish,
+                                    data, (uint64_t)src_len,
+                                    data + begin, (uint64_t)(finish - begin));
+}
+
+/*
+ * Force a synthetic violation. Used to prove the counter is LIVE in the same
+ * process as a measurement run: a count of zero from an inert check is
+ * indistinguishable from a real zero. Honours the gate like any other site.
+ */
+int64_t rt_text_slice_audit_self_test(void) {
+    static const uint8_t src[2] = { 0xC3, 0xA9 }; /* "é" */
+    return rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_SELF_TEST, "self_test",
+                                    0, 1, src, 2, src, 1);
 }

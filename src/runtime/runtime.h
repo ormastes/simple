@@ -1115,6 +1115,28 @@ bool     rt_opencl_release_context(int64_t context);
 int64_t  rt_text_count_codepoints_cached(int64_t value);
 int64_t  rt_text_count_codepoints(int64_t value);
 int64_t  rt_text_validate_utf8(int64_t value);
+int64_t  rt_text_validate_utf8_bytes(const uint8_t* data, uint64_t len);
+
+/* ===== UTF-8 slice-boundary audit (COUNTING MODE, stage 1) =====
+ * Level-gated by SIMPLE_UTF8_SLICE_AUDIT, DEFAULT OFF. Records a violation
+ * when a slice turns valid UTF-8 into invalid UTF-8; never fails. Defined in
+ * runtime_simd_utf8.c. See that file for the full contract. */
+
+#define RT_TEXT_SLICE_SITE_RT_SLICE_C      0
+#define RT_TEXT_SLICE_SITE_SPL_STR_SLICE   1
+#define RT_TEXT_SLICE_SITE_SPL_LEGACY      2
+#define RT_TEXT_SLICE_SITE_RT_SLICE_SIMPLE 3
+#define RT_TEXT_SLICE_SITE_SELF_TEST       4
+
+int64_t  rt_text_slice_audit_level(void);
+int64_t  rt_text_slice_audit_violations(void);
+int64_t  rt_text_slice_audit_note(int site_id, const char* site_name,
+                                  int64_t start, int64_t end,
+                                  const uint8_t* src, uint64_t src_len,
+                                  const uint8_t* out, uint64_t out_len);
+int64_t  rt_text_slice_audit_note_range(int64_t src, int64_t src_len,
+                                        int64_t begin, int64_t finish);
+int64_t  rt_text_slice_audit_self_test(void);
 int64_t  rt_text_find_invalid_utf8(int64_t value);
 
 /* ===== SIMD String Search & Equality ===== */

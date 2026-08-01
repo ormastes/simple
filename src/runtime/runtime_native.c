@@ -3167,6 +3167,17 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
         }
         return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
     }
+    /* UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). This range is
+     * copied RAW, so a boundary inside a multi-byte codepoint stores invalid
+     * bytes and only the byte length betrays it -- stdout's sanitizer renders
+     * valid and invalid identically. Record it; do not fail. */
+    if (rt_text_slice_audit_level() != 0) {
+        rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_RT_SLICE_C, "rt_slice_c",
+                                 begin, finish,
+                                 (const uint8_t*)s->data, (uint64_t)len,
+                                 (const uint8_t*)s->data + begin,
+                                 (uint64_t)(finish - begin));
+    }
     return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
 }
 

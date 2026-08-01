@@ -64,6 +64,9 @@ fn register_static_runtime_symbols_with_abi() {
 pub mod parallel;
 pub mod sandbox;
 pub mod security_runtime;
+/// UTF-8 slice-boundary audit (counting mode). See the module docs: this is
+/// stage 1 of the mid-codepoint-slice rollout and is DEFAULT OFF.
+pub mod text_slice_audit;
 pub mod value;
 
 // Keep a small set of dynamic-loader exports alive only when static runtime

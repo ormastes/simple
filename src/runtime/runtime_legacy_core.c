@@ -191,6 +191,14 @@ char* spl_str_slice(const char* s, int64_t start, int64_t end) {
     if (!out) return NULL;
     memcpy(out, s + start, (size_t)out_len);
     out[out_len] = '\0';
+    /* UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). See
+     * runtime_simd_utf8.c -- records a mid-codepoint boundary, never fails. */
+    if (rt_text_slice_audit_level() != 0) {
+        rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_SPL_LEGACY, "spl_str_slice_legacy",
+                                 start, end,
+                                 (const uint8_t*)s, (uint64_t)len,
+                                 (const uint8_t*)out, (uint64_t)out_len);
+    }
     return out;
 }
 

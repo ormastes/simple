@@ -324,6 +324,19 @@ if let Value::Str(ref s) = recv_val {
             // A range that splits a multi-byte codepoint cannot be held in
             // Rust's UTF-8 `String`; substitute U+FFFD, which prints
             // byte-identically to what the native lane emits for such a range.
+            // UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). Measured
+            // on the RAW range, before the lossy substitution below: U+FFFD
+            // makes the value valid-but-wrong (and CHANGES its byte length),
+            // which is exactly what hides this defect. Record it; do not fail.
+            if simple_runtime::text_slice_audit::enabled() {
+                simple_runtime::text_slice_audit::note(
+                    simple_runtime::text_slice_audit::site::INTERP_METHOD,
+                    start as i64,
+                    end as i64,
+                    bytes,
+                    &bytes[start..end],
+                );
+            }
             let result = String::from_utf8_lossy(&bytes[start..end]).into_owned();
             return Ok(Value::text(result));
         }
