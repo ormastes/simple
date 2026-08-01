@@ -35,8 +35,24 @@ peer reports.
   agent session (`/root/bootstrap_early_exit_diagnosis`) and is progressing through
   Stage 2/3 snapshot generation. To avoid duplicate and conflicting builds, this
   session is not rerunning bootstrap.
+- As of this session, the bootstrap process reported that the Stage-2 portion is
+  active and progressing; the host lane will continue with non-bootstrap evidence
+  tasks only until a shared, manifest-bound trusted Stage 3 arrives.
 - Non-bootstrap work will proceed in order on this lane while bootstrap is active:
   manifest-bound Vulkan 2D evidence → Vulkan web/gui/host WM → Metal → QEMU.
+
+### 2026-08-01 evidence status (non-bootstrap work)
+
+- Added evidence artifacts for:
+  - `doc/09_report/macos_vulkan_web_live_evidence_2026-08-01.md`
+  - `doc/09_report/macos_vulkan_gui_widget_live_evidence_2026-08-01.md`
+  - `doc/09_report/hosted_wm_capture_evidence_2026-08-01.md`
+- Current failure pattern in hosted WM evidence is stable and non-actionable from this
+  lane: the selected runtime still reports `runtime-rust-seed-forbidden` and
+  local-raster fallback for capture readback.
+- The ordered lane remains unchanged: Vulkan/Metal 2D and web/GUI are blocked on
+  manifest-bound vector-font 300-DPI runtime evidence; QEMU remains blocked by those
+  upstream dependencies.
 
 ### Render design / IR alignment addendum (2026-08-01)
 
