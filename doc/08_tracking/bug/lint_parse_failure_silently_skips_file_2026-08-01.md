@@ -703,3 +703,121 @@ the shipped code uses the explicit `[0:idx]` form and says why.
 ways — emits exactly one summary under **both** the interpreter and the JIT
 route, i.e. the target and discovered-file dedupe is unchanged by this work. No
 lint rule, no dedupe path and no reporting site was modified.
+
+## Re-test after the JIT text-ordering fix (6469d70eb4e) — one blocker closed, a NEW one found
+
+**Binary:** freshly built `cargo build --release -p simple-driver --bin simple` from
+tip `7cabb12ee05` (which has `6469d70eb4e` as an ancestor), sha256 prefix
+`d74e84cb0162e039`. This rebuild is not optional: the fix is in Rust codegen
+(`codegen/instr/core.rs`), so it lives in the **binary**, not the tree — re-testing
+with the old `simple.pre-segv-fix-20260731` would have been vacuous.
+Note the build is 57 MB, the known no-LLVM size rather than the ~130 MB canonical
+one; that does not affect these results (lint needs the parser and the cranelift
+JIT, not LLVM codegen) but no perf number here should be read as the shipped artifact.
+
+### MODINIT001 divergence: CLOSED
+
+The real mechanism was not `>=`-collapsing-to-`==` as this file previously
+inferred. Per the fixing lane, JIT text `<` `<=` `>` `>=` compared **heap handle
+addresses, not content**; it only looked like `==` because `Eq`/`NotEq` already
+had a tag-aware fallback while ordering had none.
+
+Attribution is controlled, not assumed — the old binary was first run against the
+**new** tree:
+
+| binary | tree | `digits.spl` MODINIT001 under JIT |
+|---|---|---|
+| `simple.pre-segv-fix-20260731` (Jul 31) | tip `7cabb12ee05` | **4** (false) |
+| rebuilt tip `d74e84cb0162e039` | tip `7cabb12ee05` | **0** |
+
+So the symptom tracked the binary, not lint-source drift, and the disappearance
+is attributable to `6469d70eb4e`.
+
+**Guarded against agreement-by-silence.** "Both engines agree" is also satisfied
+if the JIT stops reporting anything, so two true-positive controls were added:
+
+| control | expected | interpreter | JIT |
+|---|---|---|---|
+| `compute()` + `1 + 2` + 2 literals | 2 | **2** (lines 4,5) | **2** (lines 4,5) |
+| `[]` + 2 int literals | 1 | **1** | **1** |
+
+The rule still detects real non-literal initializers on both engines; only the
+false positives vanished. `src/lib/nogc_sync_mut/test_runner/runner_lifecycle.spl`,
+the original reproducer, is now **SAME**.
+
+### Corpus re-test — 10 files, one process per file per mode
+
+`retest.shs`, asserting `results == inputs` for both modes and scoring
+MODINIT001 counts separately from the SAME/DIFF verdict.
+
+    INPUTS=10  INTERP_LINTED=8  JIT_LINTED=10  IDENTICAL=4   (harness exit 4)
+
+`modinit_j` is **0 on every file where the interpreter did not crash**. The
+remaining divergences are two shapes, neither of them MODINIT001:
+
+* **2 files — the interpreter crashes, the JIT completes** (`misc_commands.spl`,
+  `generation_sweeper_spec.spl`). Already filed above as the AST-arena defect.
+  On `generation_sweeper_spec.spl` the JIT's 4 MODINIT001 were adjudicated and
+  are **true positives**: lines 16/17/146/147 are exactly the `[]` collection
+  initializers the rule's own header says to flag, while the integer literals on
+  15/18/145 are correctly ignored. The interpreter reported none only because it
+  died.
+* **4 files — a NEW, independent JIT defect**, below.
+
+### NEW BLOCKER: `text.repeat()` returns the literal text "error" under the JIT
+
+Measured on the primitive directly rather than inferred from the lint:
+
+    fn main() -> i64:
+        val s = " ".repeat(4)
+        print "LEN={s.len()}"
+        print "VAL=[{s}]"
+        0
+
+| route | output |
+|---|---|
+| interpreter | `LEN=4`, `VAL=[    ]` — correct |
+| JIT | `Runtime error: Function 'str.repeat' not found`, `LEN=-1`, `VAL=[error]` |
+
+So `.repeat()` on text does not merely fail loudly — it **substitutes the string
+`"error"`** and reports length -1. This is the whole content of the four
+remaining diffs.
+
+**Why this blocks the route change specifically.** `" ".repeat(n)` is how
+`src/lib/nogc_sync_mut/tooling/easy_fix/rules_lint.spl` builds the *indentation
+of EasyFix replacement text* (7 call sites). `simple fix` and `simple fmt`
+dispatch through the **same** `src/app/cli/lint_entry.spl` as `simple lint`, so
+the exemption cannot be granted to lint alone — flipping it puts `fix` on the
+JIT route too, where it would write `error` where indentation belongs.
+Demonstrated end-to-end on a non-exhaustive-match fixture:
+
+    simple fix --dry-run <fixture>
+      interpreter: (no runtime errors)
+      JIT:         Runtime error: Function 'str.repeat' not found   x2
+
+on the very rule (`non_exhaustive_match`) whose replacement text is built with
+`" ".repeat(indent)`.
+
+**TODO(compiler,P1): `text.repeat(n)` is unresolved under the JIT and yields the
+literal text "error" with len -1 instead of the repeated string. Reproducer is
+the five-line probe above — `simple run` it with `SIMPLE_EXECUTION_MODE=interpret`
+vs `=jit`. Blast radius is every `.repeat()` on text, not just lint; the reason it
+surfaces here is that `easy_fix/rules_lint.spl` uses it to indent generated fixes.**
+
+### Status of the route change: still written, still NOT landed
+
+The driver patch (`is_jit_safe_cli_args_entrypoint`) is unchanged and its three
+unit tests still accompany the ten pre-existing `exec_core` tests. The MODINIT001
+objection is gone; the `.repeat()` objection is new and is a strictly harder one,
+because it can corrupt files that `simple fix` writes rather than only adding a
+spurious warning.
+
+**TODO(lint,P1): land the JIT route for `lint_entry.spl` once `text.repeat()` is
+fixed under the JIT. At that point re-run `retest.shs` and require
+`INTERP_LINTED == JIT_LINTED == IDENTICAL == INPUTS`, with the two MODINIT001
+true-positive controls still firing 2/2 and 1/1.**
+
+`SIMPLE_EXECUTION_MODE=jit` remains correct for a **census**, whose question is
+which files fail to parse: PARSE001 agrees across both engines, and the
+`.repeat()` defect only adds noise lines and corrupts *fix* text, which a census
+never applies.
