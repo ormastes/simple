@@ -290,3 +290,114 @@ the hello-world control to a 3,043,288-byte binary that printed
 `HELLO_FROM_DEPLOYED_SIMPLE_42`. Note this seed is **32 MB**, which independently
 re-confirms that the 57 MB/154 MB "has LLVM" size heuristic is worthless; test
 capability, never size.
+
+---
+
+## Native-evidence audit across `doc/08_tracking/bug/` + `doc/03_plan/` (2026-08-01)
+
+Audit of every doc claiming a defect was observed/reproduced/verified on the
+native path, against the two facts established today (the enum-`match` native
+gate, and the `SIMPLE_BOOTSTRAP=1` vacuous emit). Read-only; nothing was built.
+
+**Headline: almost nothing needed retracting, and two of the invalidating facts
+were themselves over-scoped.** Applying them as stated would have wrongly voided
+several sound bug docs. Corrections below.
+
+### Method and funnel
+
+`/usr/bin/grep` (pinned — default here is ugrep) + a classifier over both trees:
+854 docs mention "native" → 520 make some native-flavoured claim → **155 claim a
+native *execution outcome*** (a binary ran and misbehaved — the only class the
+two facts can touch) → **14** of those show an enum `match` / `Option`-`Result`
+construct in the measured code → after reading each, **1** needed a substantive
+caveat. Build-*failure* claims ("native build failed with X") are excluded
+throughout: those are loud failures, and neither fact can manufacture one.
+
+### CORRECTION 1 — the native enum gate is DATED; "impossible" holds only after 2026-07-19
+
+The refusal is not a constant of history. `git log -S` on
+`src/compiler_rust/compiler/src/pipeline/execution.rs` dates the fail-closed gate
+to **`7adbe1359ca` (2026-07-19)**. At `7adbe1359ca^` there is no
+`allow_interp_calls` and no refusal at all — only three unconditional
+`apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns)` sites.
+The compiler's own help text names the pre-gate behaviour: build anyway, and
+calls to flagged functions **"will silently return nil in this standalone native
+binary"** (exit 3). Hence three eras, not two:
+
+| Era | `compile --native` on enum-matching code | Evidence verdict |
+|---|---|---|
+| **before 2026-07-19** | **builds**; flagged fns hybrid-stubbed → calls silently return **nil** | **CONFOUNDED**, not impossible |
+| **2026-07-19 → 2026-08-01** | refused, fail-closed, per compilation unit | **IMPOSSIBLE** — no binary existed to observe |
+| after `3b9eb0a` (2026-08-01) | payload-free arms allowed (591 fns); payload/guard/bare-ident still refused | scope per Stage 1 |
+
+The pre-gate era is the more dangerous one and was not on the original list. A
+refusal is self-announcing; a nil-stub is not — and it **fabricates exactly the
+symptom vocabulary these bug docs use**: "returns nil", "returns zero", "prints
+nothing", "silent wrong value". Any pre-07-19 native measurement of a function
+the gate deemed non-compilable was measuring the stub, not the defect. So
+`native_pattern_match_staging.md` §3.1's "treat pre-2026-08-01 'verified on
+native' statements as unsubstantiated" is right in outcome but wrong in
+mechanism for the pre-07-19 majority — corrected in place there.
+
+### CORRECTION 2 — the `SIMPLE_BOOTSTRAP=1` vacuity is `compile --native` ONLY, not `native-build`
+
+The measurement recorded above (5,648 bytes, prints nothing) was taken on
+`compile --native`. It does **not** generalise to `native-build`, and there is
+direct counter-evidence already in the tree:
+`cranelift_direct_string_constant_null_pointer_2026-07-12.md` (lines 516-522)
+records that under `SIMPLE_BOOTSTRAP=1`, `native-build` **reroutes to the
+LLVM/`llc` backend** (confirmed by `[bootstrap-real-llvm]` log lines) and
+`fn main(): print("hello")` **builds and runs correctly, printing `hello`**. A
+vacuous binary cannot print. Do not void bootstrap-env `native-build`
+measurements wholesale — check the subcommand.
+
+### CORRECTION 3 — `native-build` in a repro usually measures the INTERPRETER
+
+The single largest source of false positives in this audit. The `native-build`
+worker executes the LLVM-IR-generating Simple code **interpreted**
+(`run_file_interpreted_with_args`). `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md`
+states it outright in its own header — "**Backend:** native-build LLVM IR
+generation, run **interpreted**" — with a 184-frame interpreter stack. So
+"native-build" in a command line is *not* evidence of native execution, and such
+docs are untouched by both facts. The audit question stays: **which binary,
+which construct, which env.**
+
+### Verdicts — docs examined in full
+
+**SOUND, explicitly NOT retracted** (seed-produced, positive artifact, or the
+construct/engine is not the gated one):
+
+| Doc | Why it stands |
+|---|---|
+| `array_at_returns_nil_for_every_index_2026-08-01.md` | Rust-seed `compile --native --backend llvm`, "CONFIRMED by running a real ELF". `arr.at(i)` needs no enum `match`. |
+| `jit_run_file_pipeline_gaps_2026-07-30.md` §13 | Post-gate but clean: `compile --native --backend cranelift`, real stripped PIE ELF (11,496 bytes — not the 5,648 vacuity signature), verified with `file`, run directly. Two-line cross-module-global repro, no enum match. |
+| `hosted_native_option_try_unwrap_payload_leak_2026-07-19.md` | Seed `native-build`, rebuilt+run executable returning a specific wrong **84** — neither the nil-stub nor the vacuity signature. |
+| `local_mir_type_of_option_bare_mismatch_2026-07-19.md` | `native-smoke-matrix.shs` `array_index_rw`, positive PASS (rc=71). |
+| `bootstrap_stage1_native_build_llvm_icmp_segfault_2026-07-09.md` | Interpreter-FFI defect per Correction 3. |
+| `hir_stmt_expr_payload_extraction_nil_2026-07-17.md` | Despite `SIMPLE_BOOTSTRAP=1` + `native-build` + a nil symptom, root-caused and fixed **inside the seed interpreter**; the native-build worker is the harness, not the engine under test. |
+| `hir_get_symbol_id_zero_returns_nil_2026-07-29.md` | Says plainly it reproduces under the tree-walk interpreter, "not native codegen". |
+| `cranelift_direct_string_constant_null_pointer_2026-07-12.md` | Source of Correction 2's counter-evidence; its own bootstrap-env result is a *success* with correct output. |
+
+**Conclusion changed — 1 doc, annotated in place:**
+
+- `bootstrap_mir_interpolation_literal_braces_2026-07-11.md` — the fix (removing
+  the branch that wiped `hir_interps` under `SIMPLE_BOOTSTRAP=1`) **survives**,
+  and its non-bootstrap confirmation (`native-smoke-matrix.shs` 15/15 including
+  `string_interp`) is untouched. What falls is one specific line of evidence: the
+  guard is `interps.?`, confirmed by debug trace *under `SIMPLE_BOOTSTRAP=1`* —
+  and this doc establishes that under exactly that env `.?` yields the nil
+  sentinel `3`, which tests as TRUE. So that trace cannot discriminate "the fix
+  works" from "`.?` was unconditionally true". The conclusion stands on the
+  non-bootstrap evidence alone.
+
+**Also corrected in place:** `doc/03_plan/compiler/native_pattern_match_staging.md`
+§3.1 — era framing per Correction 1.
+
+### Standing rule for future native claims
+
+State all three or the claim is UNKNOWN, not SOUND: **which binary** (canonical
+Rust seed vs. deployed pure-Simple `bin/simple`), **which subcommand**
+(`compile --native` vs. `native-build` — they differ under `SIMPLE_BOOTSTRAP=1`,
+and the latter often runs interpreted), and **which env**. Then assert a positive
+artifact: non-trivial byte size plus expected stdout from a live control compiled
+in the same run.

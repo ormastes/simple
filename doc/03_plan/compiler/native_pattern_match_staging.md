@@ -172,6 +172,37 @@ side `src/runtime/simple_core/core_enum.spl:49`.
 over-approximation, not a missing backend.** Stage 1 is a gate correction, not
 new codegen.
 
+### Correction 2026-08-01 — §3.1's era framing: the refusal only dates to 2026-07-19
+
+§3.1 says to "treat pre-2026-08-01 'verified on native' statements about
+enum-matching code as unsubstantiated". That verdict holds, but for **two
+different mechanisms**, and the doc as written implies the fail-closed refusal
+covers the whole period. It does not.
+
+`git log -S` on `src/compiler_rust/compiler/src/pipeline/execution.rs` dates the
+refusal to **`7adbe1359ca` (2026-07-19)**. At `7adbe1359ca^` there is no
+`allow_interp_calls` branch and no error path — only three unconditional
+`apply_hybrid_transform(&mut mir_module, &non_compilable, &boxed_returns)` calls.
+The surviving help text describes that older behaviour: build anyway, and calls
+to flagged functions **"will silently return nil in this standalone native
+binary"** (exit 3).
+
+So:
+
+- **before 2026-07-19** — enum-matching code **did** produce a native binary; the
+  flagged functions were hybrid-stubbed and silently returned nil. Evidence from
+  this window is **CONFOUNDED, not impossible** — and the stub fabricates
+  precisely the symptoms bug docs record ("returns nil", "returns zero", "prints
+  nothing", "silent wrong value"). This is the more hazardous era, because a
+  refusal announces itself and a nil-stub does not.
+- **2026-07-19 → 2026-08-01** — fail-closed, per compilation unit. Evidence from
+  this window is **IMPOSSIBLE**: no binary existed to observe.
+
+Audit applying this split, with per-doc verdicts and two further scope
+corrections (the `SIMPLE_BOOTSTRAP=1` vacuity is `compile --native`-only, and
+`native-build` repros usually measure the interpreter):
+`doc/08_tracking/bug/native_emit_silent_empty_binary_2026-08-01.md`.
+
 ## 5. Stage 1 — payload-free enum matches (IMPLEMENTED)
 
 `is_native_payload_free_enum_match` in `compilability.rs` accepts a match, in
