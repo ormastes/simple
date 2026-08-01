@@ -341,6 +341,7 @@ impl Linter:
         self.check_spipe_example_bodies(path, lines)
 
     me check_spipe_example_bodies(path: String, lines: [String]):
+        val asserting_helpers = collect_asserting_helpers(lines)
         var i = 0
         while i < lines.len():
             val line = lines[i]
@@ -380,10 +381,10 @@ impl Linter:
             for stmt in statements:
                 val normalized = normalize_lint_line(stmt)
                 val trimmed_stmt = stmt.trim()
-                val assertion_like = normalized.contains("expect(") or normalized.contains("expect_not(") or normalized.contains("to_equal(") or normalized.contains("to_be(") or normalized.contains("is_equal(") or normalized.contains("to_contain(") or normalized.contains("to_start_with(") or normalized.contains("to_end_with(") or normalized.contains("to_be_greater_than(") or normalized.contains("to_be_less_than(") or normalized.contains("assert_true(") or normalized.contains("assert_false(") or normalized.contains("assert_equal(") or normalized.contains("assert_not_equal(") or normalized.contains("assert_contains(") or normalized.contains("assert_nil(") or (trimmed_stmt.starts_with("expect ") and trimmed_stmt.len() > 7)
+                val assertion_like = statement_has_direct_assertion(normalized, trimmed_stmt) or calls_asserting_helper(normalized, asserting_helpers)
                 if assertion_like:
                     has_real_assertion = true
-                val sanctioned_skip = normalized == "skip:" or normalized.starts_with("skip:") or normalized.contains("return\"skip:") or normalized.contains("return'skip:")
+                val sanctioned_skip = normalized == "skip:" or normalized.starts_with("skip:") or normalized == "skip" or normalized.contains("return\"skip:") or normalized.contains("return'skip:")
                 if sanctioned_skip:
                     has_sanctioned_skip = true
             if not has_real_assertion and not has_sanctioned_skip:
@@ -566,6 +567,174 @@ fn extract_unfold_subpackages(line: String) -> [String]:
             subpackages.push(trimmed)
 
     subpackages
+
+# -----------------------------------------------------------------------
+# SPIPE005 assertion-idiom recognition
+#
+# SPIPE005 means "this example asserts nothing". Everything below is a
+# recognizer for assertion idioms that are real but were not spelled with a
+# literal `expect(`/`assert_*(` call. Every clause here is ADDITIVE to the
+# SPIPE005 disjunction, so it can only ever REMOVE a firing, never add one.
+# Deliberately NOT recognized (these examples really do assert nothing, so
+# SPIPE005 must keep firing): `pass`, `pass_do_nothing`, `pending(...)`.
+# -----------------------------------------------------------------------
+
+fn is_ident_char(ch: String) -> Bool:
+    val alnum = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+    alnum.contains(ch)
+
+# Names called in BARE (non-method) position, returned as "|a|b|c|".
+# Bare position matters for precision: `might_fail(x)` must not read as a
+# `fail(` assertion, and `parser.check(x)` must not read as a `check(` one.
+fn bare_call_names(normalized: String) -> String:
+    var names = "|"
+    var current = ""
+    var prev_char = ""
+    var last_char = ""
+    for ch in normalized:
+        if is_ident_char(ch):
+            if current == "":
+                prev_char = last_char
+            current = current + ch
+        else:
+            if ch == "(" and current != "" and prev_char != ".":
+                if not names.contains("|" + current + "|"):
+                    names = names + current + "|"
+            current = ""
+        last_char = ch
+    names
+
+fn strip_leading_underscores(raw: String) -> String:
+    var name = raw
+    while name.starts_with("_"):
+        name = name.slice(1)
+    name
+
+# Repo-wide assertion/matcher naming families.
+fn is_assertion_family_name(raw: String) -> Bool:
+    val name = strip_leading_underscores(raw)
+    if name.starts_with("assert") or name.starts_with("expect"):
+        return true
+    if name.starts_with("should_") or name.starts_with("must_"):
+        return true
+    if name.starts_with("check_") or name.starts_with("verify_"):
+        return true
+    name == "check" or name == "verify" or name == "fail"
+
+fn has_assertion_family_call(normalized: String) -> Bool:
+    val parts = bare_call_names(normalized).split("|")
+    for part in parts:
+        if part != "" and is_assertion_family_name(part):
+            return true
+    false
+
+# `assert <expr>` / `expect <expr>` statement form, including inside a
+# `case Some(x): expect x == 1` match arm.
+fn has_assertion_keyword_statement(trimmed_stmt: String) -> Bool:
+    if trimmed_stmt.starts_with("assert ") and trimmed_stmt.len() > 7:
+        return true
+    if trimmed_stmt.starts_with("expect ") and trimmed_stmt.len() > 7:
+        return true
+    if trimmed_stmt.contains(": assert ") or trimmed_stmt.contains(":assert "):
+        return true
+    trimmed_stmt.contains(": expect ") or trimmed_stmt.contains(":expect ")
+
+# `subject.should_*(...)` / `subject.must_*(...)` matcher chains.
+# `.is_*`/`.has_*` are deliberately excluded — those are queries, not
+# assertions, and recognizing them would silence genuine findings.
+fn has_method_matcher(normalized: String) -> Bool:
+    normalized.contains(".should_") or normalized.contains(".must_")
+
+fn statement_has_direct_assertion(normalized: String, trimmed_stmt: String) -> Bool:
+    val builtin = normalized.contains("expect(") or normalized.contains("expect_not(") or normalized.contains("to_equal(") or normalized.contains("to_be(") or normalized.contains("is_equal(") or normalized.contains("to_contain(") or normalized.contains("to_start_with(") or normalized.contains("to_end_with(") or normalized.contains("to_be_greater_than(") or normalized.contains("to_be_less_than(") or normalized.contains("assert_true(") or normalized.contains("assert_false(") or normalized.contains("assert_equal(") or normalized.contains("assert_not_equal(") or normalized.contains("assert_contains(") or normalized.contains("assert_nil(")
+    if builtin:
+        return true
+    if has_assertion_keyword_statement(trimmed_stmt):
+        return true
+    if has_method_matcher(normalized):
+        return true
+    has_assertion_family_call(normalized)
+
+# Names of fn/me definitions in THIS file whose body reaches an assertion,
+# transitively. Spec files routinely wrap `expect(...)` in a file-local
+# `check`/`verify` helper; calling such a helper IS an assertion.
+fn collect_asserting_helpers(lines: [String]) -> String:
+    var names: [String] = []
+    var direct: [Bool] = []
+    var calls: [String] = []
+
+    var i = 0
+    while i < lines.len():
+        val line = lines[i]
+        val trimmed = line.trim()
+        if not (trimmed.starts_with("fn ") or trimmed.starts_with("me ")):
+            i = i + 1
+            continue
+        val open_paren = trimmed.find("(")
+        if open_paren < 4:
+            i = i + 1
+            continue
+        val name = trimmed.slice(3, open_paren).trim()
+        if name == "" or name.contains(" "):
+            i = i + 1
+            continue
+
+        val header_indent = indent_width(line)
+        var j = i + 1
+        var body_direct = false
+        var body_calls = "|"
+        while j < lines.len():
+            val body_line = lines[j]
+            val body_trimmed = body_line.trim()
+            if body_trimmed != "" and not body_trimmed.starts_with("#") and indent_width(body_line) <= header_indent:
+                break
+            if body_trimmed != "" and not body_trimmed.starts_with("#"):
+                val body_norm = normalize_lint_line(body_trimmed)
+                if statement_has_direct_assertion(body_norm, body_trimmed):
+                    body_direct = true
+                val found = bare_call_names(body_norm).split("|")
+                for part in found:
+                    if part != "" and not body_calls.contains("|" + part + "|"):
+                        body_calls = body_calls + part + "|"
+            j = j + 1
+
+        names.push(name)
+        direct.push(body_direct)
+        calls.push(body_calls)
+        i = j
+
+    var good = "|"
+    var k = 0
+    while k < names.len():
+        if direct[k] and not good.contains("|" + names[k] + "|"):
+            good = good + names[k] + "|"
+        k = k + 1
+
+    var changed = true
+    while changed:
+        changed = false
+        var m = 0
+        while m < names.len():
+            if not good.contains("|" + names[m] + "|"):
+                var reaches = false
+                val parts = calls[m].split("|")
+                for part in parts:
+                    if part != "" and good.contains("|" + part + "|"):
+                        reaches = true
+                if reaches:
+                    good = good + names[m] + "|"
+                    changed = true
+            m = m + 1
+    good
+
+fn calls_asserting_helper(normalized: String, helper_names: String) -> Bool:
+    if helper_names == "|":
+        return false
+    val parts = bare_call_names(normalized).split("|")
+    for part in parts:
+        if part != "" and helper_names.contains("|" + part + "|"):
+            return true
+    false
 
 fn is_test_like_file(path: String) -> Bool:
     path.ends_with("_spec.spl") or path.contains("/test/") or path.starts_with("test/")
