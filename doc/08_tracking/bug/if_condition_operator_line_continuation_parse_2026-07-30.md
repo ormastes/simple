@@ -1,7 +1,10 @@
 # Trailing-operator line continuation rejected for comparison/equality operators (seed parser only)
 
-**Status:** FIXED for comparison and equality (2026-07-30). One sub-case
-remains open: `elif` conditions — see "Remaining gap" below.
+**Status:** FULLY FIXED. Comparison and equality landed 2026-07-30; the
+`elif` sub-case landed 2026-07-31 (`a7e5fbccf85` plus the shared
+`parse_condition_block` drain in `parser_impl/core.rs`) and is re-verified
+closed at origin `b9341804e5` on 2026-08-01 — see "Remaining gap" below,
+which is now a closed record rather than an open item.
 **Found:** while running
 `scripts/check/check-linux-hosted-wm-live-window-evidence.shs`.
 
@@ -88,7 +91,36 @@ binding and `if` position, `while` conditions, the exact real-world
 construct, and a guard that the already-working arithmetic/logical forms
 keep parsing. Full parser suite: 240/240 pass.
 
-## Remaining gap: `elif` (open, deliberately not chased)
+## Remaining gap: `elif` — CLOSED 2026-07-31, re-verified 2026-08-01
+
+The section below is the original open-item write-up, kept for the
+diagnosis. It is no longer open. `elif a >` ⏎ `b:` now parses, in both the
+deep (continuation column > body column) and shallow shapes, together with
+`else if`, `while`, and chained `elif`. The fix did land in the
+statement/expression boundary, exactly where this section predicted:
+`parse_elif_or_else_if_body` in `stmt_parsing/control_flow.rs` applies the
+save-before/drain-after `deferred_dedent_count` dance at all four `elif` /
+`else if` call sites, and `parse_condition_block` in `parser_impl/core.rs`
+drains at BOTH candidate points so the deep and shallow shapes agree.
+Coverage is `elif_condition_continuation_parses`,
+`elif_condition_deep_continuation_indent_ambiguity_is_now_supported`, and
+`condition_continuation_indent_shape_matrix` in
+`src/compiler_rust/parser/src/expressions/binary.rs`, plus the
+language-level `test/01_unit/compiler/parser_line_continuation_assign_elif_spec.spl`.
+
+Re-verification on 2026-08-01 at origin `b9341804e5` (PROVED): a probe test
+built against the tip `simple-parser` crate parses `elif a and` ⏎ `b:`,
+`elif a ==` ⏎ `b:`, `elif a >` ⏎ `b:`, and the real-world
+`browser_session_runtime.spl` dispatch condition, while a deliberate
+syntax-error fixture in the same run still fails.
+
+**Trap for the next reader:** the deployed `bin/simple_seed` in this
+workspace is a 2026-07-25 binary, i.e. older than BOTH the assignment fix
+(`6587c9e8875`) and this `elif` fix. Probing with it reproduces the exact
+original error strings and looks like the gaps are still open. Probe the
+tip source (`cargo test -p simple-parser`), not the deployed binary.
+
+### Original write-up (historical)
 
 `elif a >` ⏎ `b:` still fails. After the expression-level fix its error
 **moves** from `expected expression, found Newline` to
