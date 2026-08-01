@@ -367,3 +367,123 @@ answer 0 for any byte >= 0x80, where the Rust runtime and the interpreter
 classify per Unicode `char`. `is_digit`/`is_numeric` are ASCII-digit by
 definition and agree exactly on all input. Documented in `runtime_native.c` at
 the implementation; the native lane is the only one affected.
+
+---
+
+# Update 2026-08-01 (batch 3): 36 -> 21, measured on VALUES not on dispatch existence
+
+Base sha `8dd8f17b656`. Three binaries from one isolated extraction and one
+`CARGO_TARGET_DIR`, differing only in staged source.
+
+## The harness was replaced, again
+
+The inherited 102-probe sweep is not used here at all. It classifies on the
+presence of a diagnostic, and both previous batches were scored PASS by it while
+returning wrong values. This lane compares the **printed value** from each
+engine against a hand-computed expectation, and reports four outcomes
+(`PASS` / `JIT-BROKEN` / `INTERP-BROKEN` / `BOTH-BROKEN`). A wrong value is a
+FAIL, not a pass. Exit status is never consulted -- every probe exits 0.
+
+Two controls run in every sweep and both behaved on every run:
+
+| control | requirement | v0 | v1 |
+|---|---|---|---|
+| `MUSTFAIL_CONTROL` = `.no_such_method_xyz()` | must produce NO value on either engine | fails both | fails both |
+| `MUSTPASS_CONTROL` = `"ab".upper()` | must produce `AB` on both | PASS | PASS |
+
+## Landed: 15 methods via 11 new runtime functions in BOTH runtimes
+
+`char_count`, `capitalize`, `swapcase`, `title`, `titlecase`, `chomp`,
+`trim_start_matches`, `trim_end_matches`, `removeprefix`, `remove_prefix`,
+`removesuffix`, `remove_suffix`, `squeeze`, `push_str`, `replace_first`.
+
+New entry points: `rt_string_char_count`, `rt_string_capitalize`,
+`rt_string_swapcase`, `rt_string_title`, `rt_string_chomp`,
+`rt_string_trim_start_matches`, `rt_string_trim_end_matches`,
+`rt_string_remove_prefix`, `rt_string_remove_suffix`, `rt_string_squeeze`,
+`rt_string_replace_first`. `push_str` needs no new function -- text is
+immutable here, so it is exactly the existing `rt_string_concat`.
+
+All eight wiring sites were used. `char_count` returns `i64` and the other
+fourteen return `str`, so all fifteen needed the `hir/lower/expr/mod.rs`
+result-type entry that batch 2 identified as site 8 -- it is not bool-specific,
+it is required for **every** result type that needs boxing.
+
+### Value evidence (PROVED)
+
+26-probe run, `v0` = pristine `8dd8f17b656`, `v1` = v0 + this batch:
+
+| | v0 | v1 |
+|---|---|---|
+| non-green rows | **24 of 24 real probes JIT-BROKEN** | **0** |
+| controls | both correct | both correct |
+
+v0's JIT half printed no value at all and emitted
+`Runtime error: Function 'str.capitalize' not found` followed by the loud
+`unresolved symbol` exit added earlier in this bug. v1 matches the interpreter
+byte-for-byte on all 24, including `"héllo".char_count() == 5` (codepoints, not
+bytes) and `"héllo"`-class UTF-8 in `squeeze`.
+
+### Non-vacuity controls actually run (PROVED)
+
+- **Sabotage of the IMPLEMENTATION, not a shim.** `rt_string_capitalize`'s body
+  in `runtime/src/value/collections.rs` was made to return `SABOTAGE`, rebuilt,
+  and the JIT probe printed `R=[SABOTAGE]` while the interpreter still printed
+  `R=[Hello world]` and the neighbouring `swapcase` probe still printed
+  `R=[AbC9]`. The compiled lane genuinely executes this function body.
+- **De-JIT control.** `SIMPLE_JIT_STRICT=1` on v1 still prints the value and no
+  `[jit-fallback]` / "dropped to the interpreter" line appears, so this is not a
+  whole-module drop to the interpreter.
+- **C runtime measured, not just compiled.** The C half is unreachable from the
+  seed, so it was linked into a direct harness
+  (`runtime_native.c` + siblings) and every one of the 23 C cases printed the
+  same bytes as the interpreter and the JIT -- including the UTF-8 `squeeze`
+  case, which a byte-wise implementation would have got wrong.
+
+### Divergence introduced (documented at the implementation)
+
+The C runtime still has no Unicode tables, so `capitalize`/`swapcase`/`title`
+change case for **ASCII letters only** and pass bytes >= 0x80 through unchanged,
+where the Rust runtime and the interpreter apply full Unicode case mapping.
+Same trade-off and same reason as the `is_alpha`/`is_alnum`/`is_whitespace`
+divergence from batch 2. The other nine functions (`char_count`, `chomp`, the
+two `trim_*_matches`, the two `remove_*fix`, `squeeze`, `replace_first`) are
+codepoint- or byte-exact and agree on all input, non-ASCII included -- `squeeze`
+in particular decodes UTF-8 rather than comparing bytes, precisely so it does not
+diverge.
+
+## Remaining 21
+
+    rev reversed sorted taken take dropped drop skip
+    pad_left pad_start pad_right pad_end center zfill
+    partition rpartition find_all find_indices substr
+    parse_i64 ptr
+
+Grouped by the obstacle that is actually distinct, not by name:
+
+- **Receiver-polymorphic (8):** `rev`, `reversed`, `sorted`, `take`, `taken`,
+  `drop`, `dropped`, `skip` are ALSO array methods
+  (`interpreter_method/collections.rs`), and the `calls.rs` table is keyed on the
+  method name alone with no receiver type. A text-only mapping would silently
+  give an array receiver a text answer -- trading a loud failure for a wrong one.
+  These need receiver-dispatching entry points, the `rt_at`/`rt_array_at`
+  precedent. Note the tree ALREADY has this defect for `reverse`, which is mapped
+  to `rt_array_reverse` for every receiver.
+- **Optional-argument (6):** the pad family takes an optional pad character.
+  A missing argument is padded with tagged nil (bit pattern 3) by
+  `adapt_args_to_signature`, which is safely detectable for a TEXT parameter
+  (not a heap string) -- the mechanism `squeeze` already uses here.
+- **Array-returning (4):** `partition`, `rpartition`, `find_all`,
+  `find_indices`. `partition` is also an array method, so it inherits the
+  receiver-polymorphism problem.
+- **`substr` (1):** the optional argument is an INT, and tagged nil IS the
+  integer 3, so "absent" and "3" are indistinguishable at the callee. Needs
+  arity-aware dispatch (two entry points selected on `args.len()`), not a
+  sentinel.
+- **`parse_i64` (1):** still blocked on the pre-existing `parse_*` Option/raw-i64
+  mismatch documented in batch 1. Unchanged; not papered over.
+- **`ptr` (1):** returns a raw address into a thread-local pin cache
+  (`PINNED_STRINGS`). It is an SFFI escape hatch whose interpreter semantics
+  (pin a copy for the process lifetime) have no meaningful compiled-lane
+  equivalent -- the compiled string's buffer is already stable. Needs a decision,
+  not a transcription.

@@ -2145,6 +2145,228 @@ pub extern "C" fn rt_string_is_whitespace(string: RuntimeValue) -> i64 {
     string_all_chars(string, char::is_whitespace)
 }
 
+// ---------------------------------------------------------------------------
+// Text methods that had NO runtime definition at all.
+//
+// Every function below existed only in the tree-walking interpreter
+// (`interpreter_method/string.rs`). On the compiled lanes the method name fell
+// through the dispatch tables to `rt_method_not_found`, which used to fabricate
+// the SPECIAL_ERROR sentinel (stringifies as `error`) and keep going. Each one
+// mirrors its interpreter arm exactly; where the arm is quoted in a doc comment
+// the line number refers to that file.
+//
+// Convention shared with the pre-existing text functions here: a non-text
+// receiver is detected by `rt_string_len(..) < 0` and the receiver is returned
+// unchanged rather than a fabricated value.
+// ---------------------------------------------------------------------------
+
+/// Borrow a `RuntimeValue` as `&str`, or `None` when it is not valid UTF-8 text.
+///
+/// `None` also covers the non-text receiver (`rt_string_len` returns a negative
+/// length for anything that is not a heap string), which every caller below
+/// turns into "return the receiver unchanged".
+///
+/// # Safety
+/// The returned slice borrows the runtime string's buffer. Runtime strings are
+/// registered with the collector and outlive the call, matching what the
+/// surrounding `from_utf8_unchecked` call sites already assume.
+fn string_as_str<'a>(string: RuntimeValue) -> Option<&'a str> {
+    let len = rt_string_len(string);
+    if len < 0 {
+        return None;
+    }
+    if len == 0 {
+        return Some("");
+    }
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return Some("");
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, len as usize) };
+    std::str::from_utf8(bytes).ok()
+}
+
+/// Allocate a new runtime string from a Rust `str`.
+fn new_string(s: &str) -> RuntimeValue {
+    rt_string_new(s.as_ptr(), s.len() as u64)
+}
+
+/// `char_count`: number of Unicode scalar values, as opposed to `len`, which is
+/// the BYTE count. Returns -1 for a non-text receiver, matching `rt_string_len`
+/// and `rt_len`.
+#[no_mangle]
+pub extern "C" fn rt_string_char_count(string: RuntimeValue) -> i64 {
+    match string_as_str(string) {
+        Some(s) => s.chars().count() as i64,
+        None => -1,
+    }
+}
+
+/// `capitalize`: uppercase the first character, lowercase the rest.
+#[no_mangle]
+pub extern "C" fn rt_string_capitalize(string: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return new_string("");
+    };
+    let mut out: String = first.to_uppercase().collect();
+    for c in chars {
+        out.extend(c.to_lowercase());
+    }
+    new_string(&out)
+}
+
+/// `swapcase`: uppercase characters become lowercase and vice versa.
+#[no_mangle]
+pub extern "C" fn rt_string_swapcase(string: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if c.is_uppercase() {
+            out.extend(c.to_lowercase());
+        } else {
+            out.extend(c.to_uppercase());
+        }
+    }
+    new_string(&out)
+}
+
+/// `title` / `titlecase`: uppercase the first character of each word.
+///
+/// A word boundary is whitespace OR ASCII punctuation, exactly as the
+/// interpreter's arm defines it -- not Unicode punctuation, so `"a-b"` titles
+/// to `"A-B"` while `"a\u{2010}b"` (non-ASCII hyphen) titles to `"A\u{2010}b"`.
+#[no_mangle]
+pub extern "C" fn rt_string_title(string: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut capitalize_next = true;
+    for c in s.chars() {
+        if c.is_whitespace() || c.is_ascii_punctuation() {
+            out.push(c);
+            capitalize_next = true;
+        } else if capitalize_next {
+            out.extend(c.to_uppercase());
+            capitalize_next = false;
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    new_string(&out)
+}
+
+/// `chomp`: strip ONE trailing line terminator -- `\r\n`, `\n`, or `\r`.
+#[no_mangle]
+pub extern "C" fn rt_string_chomp(string: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    let out = s
+        .strip_suffix("\r\n")
+        .or_else(|| s.strip_suffix('\n'))
+        .or_else(|| s.strip_suffix('\r'))
+        .unwrap_or(s);
+    new_string(out)
+}
+
+/// `trim_start_matches`: repeatedly strip `pattern` from the front.
+#[no_mangle]
+pub extern "C" fn rt_string_trim_start_matches(string: RuntimeValue, pattern: RuntimeValue) -> RuntimeValue {
+    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(pattern)) else {
+        return string;
+    };
+    new_string(s.trim_start_matches(p))
+}
+
+/// `trim_end_matches`: repeatedly strip `pattern` from the end.
+#[no_mangle]
+pub extern "C" fn rt_string_trim_end_matches(string: RuntimeValue, pattern: RuntimeValue) -> RuntimeValue {
+    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(pattern)) else {
+        return string;
+    };
+    new_string(s.trim_end_matches(p))
+}
+
+/// `removeprefix` / `remove_prefix`: strip `prefix` ONCE if present.
+#[no_mangle]
+pub extern "C" fn rt_string_remove_prefix(string: RuntimeValue, prefix: RuntimeValue) -> RuntimeValue {
+    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(prefix)) else {
+        return string;
+    };
+    match s.strip_prefix(p) {
+        Some(rest) => new_string(rest),
+        None => string,
+    }
+}
+
+/// `removesuffix` / `remove_suffix`: strip `suffix` ONCE if present.
+#[no_mangle]
+pub extern "C" fn rt_string_remove_suffix(string: RuntimeValue, suffix: RuntimeValue) -> RuntimeValue {
+    let (Some(s), Some(p)) = (string_as_str(string), string_as_str(suffix)) else {
+        return string;
+    };
+    match s.strip_suffix(p) {
+        Some(rest) => new_string(rest),
+        None => string,
+    }
+}
+
+/// `squeeze`: collapse runs of the same adjacent character.
+///
+/// The optional argument restricts the collapse to characters in that set. The
+/// dispatch site pads a missing argument with tagged nil (bit pattern 3), which
+/// is not a heap string, so `string_as_str` yields `None` -- that is exactly the
+/// "no argument, squeeze everything" case. A caller who passes an explicit
+/// empty string gets `Some("")`, which squeezes nothing, matching the
+/// interpreter's `set.contains(c)` against an empty set.
+#[no_mangle]
+pub extern "C" fn rt_string_squeeze(string: RuntimeValue, set: RuntimeValue) -> RuntimeValue {
+    let Some(s) = string_as_str(string) else {
+        return string;
+    };
+    if s.is_empty() {
+        return new_string("");
+    }
+    let set = string_as_str(set);
+    let mut out = String::with_capacity(s.len());
+    let mut prev: Option<char> = None;
+    for c in s.chars() {
+        let squeezable = match set {
+            Some(set) => set.contains(c),
+            None => true,
+        };
+        if !squeezable || Some(c) != prev {
+            out.push(c);
+        }
+        prev = Some(c);
+    }
+    new_string(&out)
+}
+
+/// `replace_first`: replace only the FIRST occurrence of `pattern`.
+#[no_mangle]
+pub extern "C" fn rt_string_replace_first(
+    string: RuntimeValue,
+    pattern: RuntimeValue,
+    replacement: RuntimeValue,
+) -> RuntimeValue {
+    let (Some(s), Some(p), Some(r)) = (
+        string_as_str(string),
+        string_as_str(pattern),
+        string_as_str(replacement),
+    ) else {
+        return string;
+    };
+    new_string(&s.replacen(p, r, 1))
+}
+
 /// Check if string starts with prefix
 /// Returns 1 if true, 0 if false
 #[no_mangle]

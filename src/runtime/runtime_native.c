@@ -3583,6 +3583,242 @@ int64_t rt_string_is_alpha(int64_t value)      { return rt_string_all_ascii_clas
 int64_t rt_string_is_alnum(int64_t value)      { return rt_string_all_ascii_class(value, rt_pred_is_alnum); }
 int64_t rt_string_is_whitespace(int64_t value) { return rt_string_all_ascii_class(value, rt_pred_is_space); }
 
+/* ---------------------------------------------------------------------------
+ * Text methods that had NO runtime definition in EITHER runtime.
+ *
+ * Each mirrors its arm in the tree-walking interpreter
+ * (compiler/src/interpreter_method/string.rs) and the matching rt_string_* in
+ * the Rust runtime (runtime/src/value/collections.rs). Before this, the method
+ * name fell through every dispatch table to rt_method_not_found.
+ *
+ * KNOWN DIVERGENCE, non-ASCII only: this file has no Unicode case tables, so
+ * capitalize/swapcase/title change case for ASCII letters ONLY and pass every
+ * byte >= 0x80 through unchanged, where the Rust runtime and the interpreter
+ * apply full Unicode case mapping. Same trade-off, and same reason, as the
+ * is_alpha/is_alnum/is_whitespace divergence documented above: guessing a case
+ * mapping without tables would be worse than declining one. The remaining
+ * functions here (char_count, chomp, trim_*_matches, remove_prefix/suffix,
+ * squeeze, replace_first) are codepoint- or byte-exact and agree with the other
+ * engines on all input, including non-ASCII.
+ * ------------------------------------------------------------------------- */
+
+/* ASCII case/class helpers. Deliberately hand-written rather than <ctype.h>:
+ * this file is built for freestanding targets too, and the surrounding
+ * rt_pred_is_* predicates already follow this convention. */
+static char rt_ascii_upper(unsigned char c) { return (char)((c >= 'a' && c <= 'z') ? c - 32 : c); }
+static char rt_ascii_lower(unsigned char c) { return (char)((c >= 'A' && c <= 'Z') ? c + 32 : c); }
+/* ASCII punctuation per Rust's char::is_ascii_punctuation: the printable
+ * non-alphanumeric, non-space ASCII characters. */
+static int rt_ascii_punct(unsigned char c) {
+    return (c >= '!' && c <= '/') || (c >= ':' && c <= '@') || (c >= '[' && c <= '`') || (c >= '{' && c <= '~');
+}
+
+/* Byte width of the UTF-8 sequence starting at `lead`, clamped to `remaining`.
+ * Mirrors the decoder already used by rt_string_chars above. */
+static uint64_t rt_utf8_width(const char* data, uint64_t i, uint64_t len) {
+    uint8_t lead = (uint8_t)data[i];
+    if (lead >= 0xc2 && lead <= 0xdf && i + 2 <= len) return 2;
+    if (lead >= 0xe0 && lead <= 0xef && i + 3 <= len) return 3;
+    if (lead >= 0xf0 && lead <= 0xf4 && i + 4 <= len) return 4;
+    return 1;
+}
+
+/* char_count: number of UTF-8 codepoints, as opposed to len (bytes).
+ * -1 for a non-text receiver, matching rt_string_len / rt_len. */
+int64_t rt_string_char_count(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return -1;
+    int64_t count = 0;
+    for (uint64_t i = 0; i < s->len; i += rt_utf8_width(s->data, i, s->len)) count++;
+    return count;
+}
+
+/* capitalize: uppercase the first character, lowercase the rest (ASCII only). */
+int64_t rt_string_capitalize(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    char* out = (char*)malloc((size_t)s->len);
+    if (!out) return value;
+    uint64_t first = rt_utf8_width(s->data, 0, s->len);
+    for (uint64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (i < first) out[i] = rt_ascii_upper(c);
+        else out[i] = rt_ascii_lower(c);
+    }
+    int64_t result = rt_string_new((const uint8_t*)out, s->len);
+    free(out);
+    return result;
+}
+
+/* swapcase: uppercase <-> lowercase for every character (ASCII only). */
+int64_t rt_string_swapcase(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    char* out = (char*)malloc((size_t)s->len);
+    if (!out) return value;
+    for (uint64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c >= 'A' && c <= 'Z') out[i] = rt_ascii_lower(c);
+        else if (c >= 'a' && c <= 'z') out[i] = rt_ascii_upper(c);
+        else out[i] = (char)c;
+    }
+    int64_t result = rt_string_new((const uint8_t*)out, s->len);
+    free(out);
+    return result;
+}
+
+/* title / titlecase: uppercase the first character of each word. A word
+ * boundary is whitespace OR ASCII punctuation, exactly as the interpreter's
+ * arm defines it. */
+int64_t rt_string_title(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    char* out = (char*)malloc((size_t)s->len);
+    if (!out) return value;
+    int capitalize_next = 1;
+    for (uint64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c < 0x80 && (rt_pred_is_space(c) || rt_ascii_punct(c))) {
+            out[i] = (char)c;
+            capitalize_next = 1;
+        } else if (capitalize_next) {
+            out[i] = rt_ascii_upper(c);
+            capitalize_next = 0;
+        } else {
+            out[i] = rt_ascii_lower(c);
+        }
+    }
+    int64_t result = rt_string_new((const uint8_t*)out, s->len);
+    free(out);
+    return result;
+}
+
+/* chomp: strip ONE trailing line terminator -- "\r\n", "\n", or "\r". */
+int64_t rt_string_chomp(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    uint64_t len = s->len;
+    if (len >= 2 && s->data[len - 2] == '\r' && s->data[len - 1] == '\n') len -= 2;
+    else if (len >= 1 && (s->data[len - 1] == '\n' || s->data[len - 1] == '\r')) len -= 1;
+    if (len == s->len) return value;
+    return rt_string_new((const uint8_t*)s->data, len);
+}
+
+/* trim_start_matches: repeatedly strip `pattern` from the front. */
+int64_t rt_string_trim_start_matches(int64_t value, int64_t pattern) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* p = rt_core_as_string(pattern);
+    if (!s || !p) return value;
+    if (p->len == 0) return value;
+    uint64_t start = 0;
+    while (s->len - start >= p->len && memcmp(s->data + start, p->data, (size_t)p->len) == 0) {
+        start += p->len;
+    }
+    if (start == 0) return value;
+    return rt_string_new((const uint8_t*)s->data + start, s->len - start);
+}
+
+/* trim_end_matches: repeatedly strip `pattern` from the end. */
+int64_t rt_string_trim_end_matches(int64_t value, int64_t pattern) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* p = rt_core_as_string(pattern);
+    if (!s || !p) return value;
+    if (p->len == 0) return value;
+    uint64_t end = s->len;
+    while (end >= p->len && memcmp(s->data + end - p->len, p->data, (size_t)p->len) == 0) {
+        end -= p->len;
+    }
+    if (end == s->len) return value;
+    return rt_string_new((const uint8_t*)s->data, end);
+}
+
+/* removeprefix / remove_prefix: strip `prefix` ONCE if present. */
+int64_t rt_string_remove_prefix(int64_t value, int64_t prefix) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* p = rt_core_as_string(prefix);
+    if (!s || !p) return value;
+    if (p->len == 0 || p->len > s->len) return value;
+    if (memcmp(s->data, p->data, (size_t)p->len) != 0) return value;
+    return rt_string_new((const uint8_t*)s->data + p->len, s->len - p->len);
+}
+
+/* removesuffix / remove_suffix: strip `suffix` ONCE if present. */
+int64_t rt_string_remove_suffix(int64_t value, int64_t suffix) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* p = rt_core_as_string(suffix);
+    if (!s || !p) return value;
+    if (p->len == 0 || p->len > s->len) return value;
+    if (memcmp(s->data + s->len - p->len, p->data, (size_t)p->len) != 0) return value;
+    return rt_string_new((const uint8_t*)s->data, s->len - p->len);
+}
+
+/* squeeze: collapse runs of the same adjacent CHARACTER (codepoint, not byte,
+ * so "eacute eacute" collapses the same way it does on the other engines).
+ *
+ * The optional argument restricts the collapse to characters in that set. The
+ * dispatch site pads a missing argument with tagged nil, which is not a heap
+ * string, so rt_core_as_string yields NULL -- that is the "no argument,
+ * squeeze everything" case. An explicit empty string squeezes nothing. */
+int64_t rt_string_squeeze(int64_t value, int64_t set) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s) return value;
+    if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
+    RtCoreString* set_s = rt_core_as_string(set);
+    char* out = (char*)malloc((size_t)s->len);
+    if (!out) return value;
+    uint64_t out_len = 0;
+    uint64_t prev_off = 0, prev_w = 0; /* previous character, empty until set */
+    for (uint64_t i = 0; i < s->len;) {
+        uint64_t w = rt_utf8_width(s->data, i, s->len);
+        int squeezable = 1;
+        if (set_s) {
+            squeezable = 0;
+            for (uint64_t j = 0; j + w <= set_s->len; j++) {
+                if (memcmp(set_s->data + j, s->data + i, (size_t)w) == 0) { squeezable = 1; break; }
+            }
+        }
+        int same_as_prev = prev_w == w && prev_w != 0 && memcmp(s->data + prev_off, s->data + i, (size_t)w) == 0;
+        if (!squeezable || !same_as_prev) {
+            memcpy(out + out_len, s->data + i, (size_t)w);
+            out_len += w;
+        }
+        prev_off = i;
+        prev_w = w;
+        i += w;
+    }
+    int64_t result = rt_string_new((const uint8_t*)out, out_len);
+    free(out);
+    return result;
+}
+
+/* replace_first: replace only the FIRST occurrence of `pattern`. */
+int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacement) {
+    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* p = rt_core_as_string(pattern);
+    RtCoreString* r = rt_core_as_string(replacement);
+    if (!s || !p || !r) return value;
+    if (p->len > s->len) return value;
+    /* An empty pattern matches at offset 0, so replace_first("", x) prepends x
+     * -- what Rust's str::replacen does, and therefore what the interpreter
+     * arm does. */
+    for (uint64_t i = 0; i + p->len <= s->len; i++) {
+        if (memcmp(s->data + i, p->data, (size_t)p->len) != 0) continue;
+        uint64_t out_len = s->len - p->len + r->len;
+        char* out = (char*)malloc((size_t)out_len > 0 ? (size_t)out_len : 1);
+        if (!out) return value;
+        memcpy(out, s->data, (size_t)i);
+        memcpy(out + i, r->data, (size_t)r->len);
+        memcpy(out + i + r->len, s->data + i + p->len, (size_t)(s->len - i - p->len));
+        int64_t result = rt_string_new((const uint8_t*)out, out_len);
+        free(out);
+        return result;
+    }
+    return value;
+}
+
 int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* old_s = rt_core_as_string(old_value);

@@ -3274,6 +3274,35 @@ pub fn compile_call<M: Module>(
                 "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
                 "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
                 "is_whitespace" => Some("rt_string_is_whitespace"),
+                // Text methods that had no runtime definition in EITHER runtime
+                // until now, so every one of them raised
+                // "Function 'str.X' not found". Each mirrors its arm in
+                // interpreter_method/string.rs; see the block comment on
+                // `string_as_str` in runtime/src/value/collections.rs.
+                //
+                // None of these names is shared with an array/dict receiver
+                // (checked against interpreter_method/collections.rs), so a
+                // plain text mapping cannot mis-route a non-text receiver the
+                // way `index_of` and `at` did.
+                "char_count" => Some("rt_string_char_count"),
+                "capitalize" => Some("rt_string_capitalize"),
+                "swapcase" => Some("rt_string_swapcase"),
+                "title" | "titlecase" => Some("rt_string_title"),
+                "chomp" => Some("rt_string_chomp"),
+                "trim_start_matches" => Some("rt_string_trim_start_matches"),
+                "trim_end_matches" => Some("rt_string_trim_end_matches"),
+                "removeprefix" | "remove_prefix" => Some("rt_string_remove_prefix"),
+                "removesuffix" | "remove_suffix" => Some("rt_string_remove_suffix"),
+                // The optional character-set argument is padded with tagged nil
+                // by `adapt_args_to_signature` when it is absent; the runtime
+                // reads that as "squeeze everything".
+                "squeeze" => Some("rt_string_squeeze"),
+                "replace_first" => Some("rt_string_replace_first"),
+                // `push_str` appends and returns a NEW string (text is
+                // immutable here) -- exactly `rt_string_concat`, which already
+                // exists. Note `push` stays on `rt_array_push`: it is
+                // receiver-polymorphic and out of scope here.
+                "push_str" => Some("rt_string_concat"),
                 // The interpreter folds five spellings into one arm each
                 // (interpreter_method/string.rs:76-77); only two of each were
                 // wired here, so `up`/`uppercase`/`to_uppercase` and their

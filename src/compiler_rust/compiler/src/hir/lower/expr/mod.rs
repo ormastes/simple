@@ -1117,6 +1117,16 @@ impl Lowerer {
                 // NEEDS-RUNTIME (need a char-aware slice symbol) rather than
                 // CLEAN-LOWERING.
                 "appended" | "prepended" => Some(TypeId::STRING),
+                // Newly wired text methods (see calls.rs and
+                // runtime/src/value/collections.rs). `char_count` returns a raw
+                // i64 and the rest return a fresh String; both classes need
+                // their result type declared here or the boxing step at the
+                // print()/call-arg lowering site is skipped, exactly as it was
+                // for `length` and the `is_*` predicates above.
+                "char_count" => Some(TypeId::I64),
+                "capitalize" | "swapcase" | "title" | "titlecase" | "chomp" | "trim_start_matches"
+                | "trim_end_matches" | "removeprefix" | "remove_prefix" | "removesuffix" | "remove_suffix"
+                | "squeeze" | "replace_first" | "push_str" => Some(TypeId::STRING),
                 "split" => Some(
                     self.module
                         .types
