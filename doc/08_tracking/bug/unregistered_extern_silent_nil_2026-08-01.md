@@ -376,6 +376,36 @@ command. Control: no warning, rc=0, `ghost returned: 3`, and
 `SIMPLE_STRICT_EXTERN=1` has **zero** effect. Fixed: warning present; strict
 mode aborts (rc=134). The delta is attributable to the change, not to drift.
 
+### Measured fallout of the warning — 0
+
+Corpus: every 15th `.spl` under `examples/` and `test/`, first 220 files, run as
+`simple run <file>` with the fixed debug seed, 12s timeout each.
+
+```
+files run                       220
+exit 0                          149
+exit 1                           50
+timeout (124)                    19
+exit 101                          2
+warning lines emitted             0
+distinct externs warned about     0
+```
+
+**Zero.** Not one of the ~919 statically-unbacked symbols was actually *called*
+in 220 real programs. The measurement is not vacuous: the same binary emits the
+warning for the `ghost` probe above, so the detector demonstrably fires.
+
+Read this carefully — it does **not** say the backlog is harmless. It says the
+unbacked declarations are overwhelmingly *unreached* on this corpus, which is
+consistent with most of them being dead declarations (disposition: delete) or
+reachable only under configurations this corpus never enters (baremetal, T32,
+vscode, GPU). It also means the warning is cheap: turning it on by default cost
+0 lines of noise across 220 programs.
+
+220 of ~21k `.spl` files is a sample, not a census, so this is **not** grounds
+to promote the warning to fatal on its own. A promotion lane should re-run this
+over the full corpus and over the spec suite first.
+
 ## Counting correction — beware the `insert_simple!` registry
 
 A triage pass that looked only for Rust `extern "C" fn NAME` definitions
