@@ -188,6 +188,34 @@ demonstrably did NOT abort in phase 3):
 | `unresolved symbol` | 0 |
 | `unresolved call` | 2 (`platform_normalize`, emitted during codegen) |
 
+### Post-fix run (regression check)
+
+A second full Stage 4 build, same env/flags and same frozen compiler, against the
+fixed tree (origin `a0d20a0` plus this commit's changes):
+
+```
+VERDICT= tag=fixed exit=1 secs=1379 stmt_oob=0 expr_oob=0 flat_stmt_miss=0
+         flat_expr_miss=0 phase3_FAILED=0 unresolved_type=0 unresolved_name=0
+         unresolved_import=0 unresolved_call=2
+```
+
+**No regression:** phase 3 completes, the arena signature stays at zero, and the
+run is 143 s faster than the baseline. It fails at the same LLVM-codegen stage.
+
+The fixed run reports **1** failed file (`animation_time_ms`) where the baseline
+reported **2** (`animation_time_ms` + `interp_list` in
+`src/compiler/20.hir/hir_lowering/module_surface.spl`). **This is CONFOUNDED and
+must not be read as an improvement from this fix:** the two runs used different
+source trees, and `module_surface.spl` itself differs between them
+(`0d02867e22de8636` vs `9e6b79538377b310`). The renderer file that fails in both
+is byte-identical in both trees (`488351d2a8fc6ee9`), which is the consistent
+control. A clean before/after needs both arms built from the *same* tree.
+
+Note also `phase3_file_start=0` / `phase3_file_done=0` in the fixed verdict: the
+`log_phase` markers are not routed to this log at all, which independently
+confirms the caveat below — the census zeros are absence-in-this-log, not a
+verified diagnostic channel.
+
 **Caveat, stated explicitly:** the whole build produced only a 10-line log, so
 these zeros mean "no such diagnostic reached this log", not "the phase 3
 diagnostic channel was verified to be live". They are no longer *early-abort*
