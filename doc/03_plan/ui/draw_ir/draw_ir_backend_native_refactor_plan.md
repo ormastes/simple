@@ -1,23 +1,6 @@
 # DrawIR Backend-Native Layout — Non-Destructive Refactoring Plan
 
-Status: IN PROGRESS (2026-08-01). Stage state:
-- S1 DONE `fe481ab069c` (enums file, formats u16→u32, de-magicked
-  vulkan_backend3d, pre-FFI validation). Finding: runtime usage bits are
-  RT-local, not VkImageUsageFlagBits — see arch doc §3.5.
-- S2 DONE `31c858cab98` (accessor seam + MTL/DXGI/D3D12 remap tables + spec;
-  DrawIrV3BlendParts made pub). Metal/DX backend WIRING deferred to S6 —
-  their format values are engine-local, not DrawIR-canonical.
-- S5 DONE `4755c8ab526` (gpu_web_capacity_strides.spl — additive, manifest
-  API untouched).
-- S0/spec execution DEFERRED: test runner hangs environment-wide (btrfs
-  metadata 45.96/46.50 GiB, ENOSPC family); receipts in scratchpad only.
-  Run draw_ir_v3_backend_{enums,access}_spec.spl +
-  gpu_web_capacity_strides_spec.spl + draw_ir_v3_spec.spl first thing after
-  runner recovery, BEFORE building on S1-S5.
-- S3/S4 PARKED: need new externs → bootstrap rebuild; do not start until the
-  filesystem is healthy and a rebuild window is scheduled.
-
-Architecture:
+Status: PLANNED (2026-08-01). Architecture:
 `doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md`.
 TLDR: `draw_ir_backend_native_refactor_plan_tldr.md`.
 

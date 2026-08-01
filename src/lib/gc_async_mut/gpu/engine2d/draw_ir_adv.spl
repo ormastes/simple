@@ -306,6 +306,15 @@ fn _engine2d_draw_ir_style_value(props: [DrawIrStyleProp], key: text) -> text:
             return prop_value
     ""
 
+# GAP-2: how many N-stop gradient stops (if any) `paint_layout.spl` encoded
+# for this style, via the "background-gradient-stop-count" prop. 0 means no
+# N-stop gradient was parsed at CSS-apply time and the legacy 2-stop
+# background-image path (from/to only) remains authoritative.
+fn _engine2d_draw_ir_gradient_stop_count(props: [DrawIrStyleProp]) -> i32:
+    _engine2d_draw_ir_nth_int(
+        _engine2d_draw_ir_style_value(props, "background-gradient-stop-count"), 0, 0
+    ) as i32
+
 fn _engine2d_draw_ir_text_advances(command: DrawIrCommand) -> [i32]:
     if command.advance_widths.len() > 0:
         if command.advance_widths.len() > _E2D_DRAW_IR_MAX_TEXT_ITEMS:
@@ -630,6 +639,37 @@ fn _engine2d_draw_ir_render_box(engine: Engine2D, command: DrawIrCommand, x: i32
     if typed_nonuniform:
         eng = engine2d_draw_ir_render_typed_background(
             eng, command, x, y, w, h, effective_corners)
+    elif _engine2d_draw_ir_gradient_stop_count(style) >= 2 and radius <= 0:
+        # GAP-2: an N-stop/angled/radial gradient was parsed at CSS-apply
+        # time (simple_web_html_layout_renderer_decl_apply.spl) and threaded
+        # through as flat style props (paint_layout.spl). Rebuild the stop
+        # arrays here with the same `_engine2d_draw_ir_nth_int` decimal
+        # scanner the legacy 2-stop path already uses, then paint with the
+        # stop-list-aware Engine2D primitives instead of the legacy 2-color
+        # `draw_gradient_rect`.
+        val stop_count = _engine2d_draw_ir_gradient_stop_count(style)
+        val stops_raw = _engine2d_draw_ir_style_value(style, "background-gradient-stops")
+        val angle_deg = _engine2d_draw_ir_nth_int(
+            _engine2d_draw_ir_style_value(style, "background-gradient-angle-deg"), 0, 180
+        ) as i32
+        val is_radial = _engine2d_draw_ir_style_value(style, "background-gradient-is-radial") == "1"
+        var stop_colors: [u32] = []
+        var stop_positions: [i32] = []
+        var gsi: i32 = 0
+        while gsi < stop_count:
+            stop_colors.push(_engine2d_draw_ir_nth_int(stops_raw, gsi, 0) as u32)
+            gsi = gsi + 1
+        gsi = 0
+        while gsi < stop_count:
+            stop_positions.push(_engine2d_draw_ir_nth_int(stops_raw, stop_count + gsi, 0) as i32)
+            gsi = gsi + 1
+        if is_radial:
+            val cx = x + w / 2
+            val cy = y + h / 2
+            val r = if w > h: w / 2 else: h / 2
+            eng.draw_radial_gradient_rect_stops(cx, cy, r, stop_colors, stop_positions)
+        else:
+            eng.draw_gradient_rect_stops(x, y, w, h, stop_colors, stop_positions, angle_deg)
     elif bg_image.starts_with("linear-gradient(") and radius <= 0:
         val g_from = _engine2d_draw_ir_nth_int(bg_image, 0, 0) as u32
         val g_to = _engine2d_draw_ir_nth_int(bg_image, 1, 0) as u32
