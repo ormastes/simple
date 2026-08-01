@@ -5,7 +5,10 @@
 Scalars (`usize`/`isize`/`u128`/`i128`/`unit`) landed in `085dfec41`;
 `Self`, `tuple`, `Map`/`HashMap`/`dict`/`set`, the single-uppercase-letter rule
 and `has_X` landed in the follow-up commit that added this paragraph.
-Class B remains blocked on an owner decision.
+Class B **CLOSED** 2026-08-01 — the owner chose the alias: `Int`/`Bool`/`Char`
+landed with call sites unchanged; `Float`/`Vec` verified wrong and deliberately
+not aliased. One new defect split out: generic applications reach the gate with
+the name `Any` (`Vec<i64>` and `list<i64>` both fail as `unresolved type: Any`).
 **Component:** `src/compiler/20.hir/hir_lowering/types.spl` — `HirLowering.lower_named_kind`
 (plus `20.hir/hir_lowering/_Items/module_lowering.spl` for the `Self` scope fix)
 
@@ -192,6 +195,80 @@ Two further amplifiers, both confirmed:
 `Vec` (37 uses) is a third case: a Rust spelling with no counterpart in either
 resolver and no `String`-style precedent. Likely a genuine port artifact; should
 become `[T]`.
+
+### RESOLVED 2026-08-01 — Option A (alias), user-chosen. Class B CLOSED.
+
+The owner decision landed: **Option A**, alias in the compiler, **all call sites
+left unchanged**, the rewrite deliberately not taken. Implemented in
+`lower_named_kind`, in the same post-symbol-lookup `elif` chain as the Class A
+container rules.
+
+**Only three of the five candidate names were aliased.** Each mapping was
+verified against real use sites first; two turned out to be wrong and are
+recorded here rather than landed as plausible guesses.
+
+| spelling | maps to | owned type-position uses | seed parity |
+|---|---|---:|---|
+| `Int` | `HirTypeKind.Int(64, **signed**)` | 524 under `src/` | **none** — seed has no arm; `ANY` under `lenient_types`, `UnknownType` strict |
+| `Bool` | `HirTypeKind.Bool` | 208 under `src/` | **none** — same |
+| `Char` | `HirTypeKind.Char` | 3 (`is_identifier_char(c: Char) -> Bool`, x3 lsp tiers) | **none** — same |
+| `Float` | **NOT aliased** | **0** | **none** — same |
+| `Vec` | **NOT aliased** | **0** bare | **none** — same |
+
+**This family is the only one in this file that is NOT seed parity.** The seed's
+`type_resolver.rs` has no arm for any of the five, so the alias makes this
+compiler *stricter and more precise* than the seed here (a real `i64`/`bool`/
+`char` instead of `ANY`), never looser.
+
+**No width/signedness divergence is introduced.** `Int` takes the **signed**
+64-bit kind, matching the tree's own `type I64 = i64` and the `i64` any rewrite
+would have produced; `Bool` and `Char` have no width axis. So the divergence
+recorded under *Known divergence left open* stays confined to `usize`/`isize`.
+
+**Placement is load-bearing** — the same rule the `Map`/`HashMap`/`Set` arms
+already document. The arms sit **after** the symbol lookup, so a declared type of
+the same name still wins. One really exists: `struct Bool: value: bool` in
+`src/lib/*/ndarray/mod.spl` (all three tiers), used in type position by
+`flat_bool(..) -> Bool` and `get_bool_at(..) -> Bool`. A top-level `case "Bool"`
+would silently retype those returns from the boxed struct to a primitive `bool`.
+Verified in-process: a module declaring `struct Bool` lowers with `errors=0` and
+a `Named(..)` return kind, before and after. Pinned by the regression example
+*does NOT shadow a user-declared type of the same name*.
+
+**Why `Float` was rejected.** `Float` has **zero** genuine type-position uses in
+owned `.spl`. The "12" in the census table above counted comment prose
+(`# — Float-only arithmetic —`) and Rust source *inside string literals* in the
+`src/app/ffi_gen.specs/runtime_value_full.spl` code generator. `Float` is also
+**declared** — a marker `trait Float:` in `src/lib/*/simd/vector.spl` (three
+tiers). An `f64` alias would be dead code whose only effect is shadowing risk.
+
+**Why `Vec` was rejected.** Bare `Vec` has **zero** type-position uses in owned
+`.spl`. Every real use is `Vec<T>` — and `Vec<T>` **never reaches
+`lower_named_kind` under the name `Vec`**: the generic-argument path collapses
+the name first, so `fn f(a: Vec<i64>)` fails as `unresolved type: Any`, not
+`unresolved type: Vec`. A `case "Vec"` arm would not fix a single real site.
+`Vec` is additionally SIMD-shaped in `src/lib/*/simd` (`Vec<f32,4>`,
+`Vec<T, const N: usize>`), where `list` would be the wrong meaning even if the
+arm could fire. The census row `Vec` (37) should be read as *`Vec<T>`
+occurrences*, which this gate never sees.
+
+**New defect split out (pre-existing, NOT fixed here): generic applications
+reach the gate with the name `Any`.** `Vec<i64>`, `Vec<Foo>` **and `list<i64>`**
+all fail identically with `unresolved type: Any`, even though bare `list`
+resolves. The constructor name is lost before the strict gate sees it. Needs its
+own lane — it is the reason no `Vec` arm can work, and it likely suppresses other
+generic annotations too.
+
+`src/type/simple_lang/` corroborates the three-name result: it blesses the same
+dialect as real declarations (`type Bool = bool`, `type I64 = i64`,
+`type Text = text`, plus F32/F64/U8..U64) — spelling the integer `I64`, and
+carrying **no** `Float`, `Char` or `Vec` member.
+
+The `primitive_types.spl` "single source of truth" risk flagged under Option A
+did **not** materialise: `test/01_unit/compiler/lint/primitive_types_parity_spec.spl`
+is still **4 examples, 0 failures** after the change. That table governs the
+lint's lowercase bare-primitive set; the alias lives in HIR lowering's
+declared-nowhere fallback and does not touch it.
 
 ## Evidence standard used
 

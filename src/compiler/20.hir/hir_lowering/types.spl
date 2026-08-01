@@ -675,6 +675,72 @@ impl HirLowering:
                         HirTypeKind.Any
                 elif name == "dict" or name == "set":
                     HirTypeKind.Any
+                # CAPITALIZED-DIALECT ALIAS (2026-08-01) -- Class B of the bug
+                # doc, and the one family here that is NOT seed parity.
+                #
+                # The tree carries a capitalized spelling of the primitives that
+                # NEITHER resolver accepts as a bare name. It is not a stray
+                # typo: `String` from the same dialect already resolves via the
+                # `case "text" | "str" | "String"` arm above, and the two
+                # spellings appear inside a SINGLE signature --
+                #   fn name_lint_parse_class(trimmed: String, indent: Int, ..)
+                # -- so `String` lowered while `Int` hard-errored on the same
+                # line. `src/type/simple_lang/` already blesses the same dialect
+                # as real declarations (`type Bool = bool`, `type I64 = i64`,
+                # `type Text = text`, plus F32/F64/U8..U64).
+                #
+                # The USER chose this alias over a rewrite of the call sites;
+                # the rewrite was deliberately NOT taken. It would have touched
+                # ~730 sites, amplified ~4x by tier mirroring (gc_async_mut /
+                # nogc_async_mut / nogc_sync_mut + src/app/dap) and 2x by the
+                # duplicate test trees.
+                #
+                # NOT seed parity, unlike every other arm in this chain: the
+                # seed's type_resolver.rs has no arm for any of these, so it
+                # yields TypeId::ANY under `lenient_types` and UnknownType under
+                # strict mode. This compiler is therefore now STRICTER and more
+                # precise than the seed here (a real i64/bool/char instead of
+                # ANY), never looser -- which is also why no seed-driven probe
+                # can gate these arms; only driving HirLowering in-process can.
+                #
+                #   Int  -> Int(64, SIGNED)  seed: no arm (ANY / UnknownType)
+                #   Bool -> Bool             seed: no arm (ANY / UnknownType)
+                #   Char -> Char             seed: no arm (ANY / UnknownType)
+                #
+                # `Int` takes the SIGNED 64-bit kind, matching the tree's own
+                # `type I64 = i64` alias and the i64 any rewrite would have
+                # produced. No width/signedness divergence is introduced --
+                # unlike the `usize` arm above, whose unsigned-64 choice differs
+                # from the seed's signed I64 and is observable for `>>` on
+                # high-bit-set values. `Bool`/`Char` have no width axis.
+                #
+                # Placement follows the same load-bearing rule the Map/HashMap/
+                # Set arms above document: AFTER the symbol lookup, so a
+                # DECLARED type of the same name still wins. One really exists
+                # -- `struct Bool: value: bool` in src/lib/*/ndarray/mod.spl
+                # (all three tiers), used in type position by
+                # `flat_bool(..) -> Bool` and `get_bool_at(..) -> Bool`. A
+                # top-level `case "Bool"` would silently retype those returns
+                # from the boxed struct to a primitive bool.
+                #
+                # `Float` and `Vec` were considered and deliberately REJECTED
+                # (see the bug doc). `Float` has ZERO genuine type-position uses
+                # in owned .spl -- every apparent hit is a comment or Rust
+                # inside a string literal in the ffi_gen code generator -- and
+                # IS declared as a marker `trait Float` in
+                # src/lib/*/simd/vector.spl. `Vec` has ZERO bare type-position
+                # uses; every real use is `Vec<T>`, which never arrives here
+                # under the name "Vec" because the generic-argument path
+                # collapses the name to "Any" first (`Vec<i64>` fails as
+                # `unresolved type: Any`, and so does `list<i64>` -- a separate
+                # pre-existing defect filed in the bug doc). An arm for either
+                # would be dead code that only added shadowing risk.
+                elif name == "Int":
+                    HirTypeKind.Int(64, true)
+                elif name == "Bool":
+                    HirTypeKind.Bool
+                elif name == "Char":
+                    HirTypeKind.Char
                 else:
                     if name == "Any" or (name == "Option" and hir_args.len() == 0):
                         self.recovered("unresolved type: {name}", span)
