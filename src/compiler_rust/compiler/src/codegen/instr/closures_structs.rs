@@ -1448,9 +1448,22 @@ fn try_compile_builtin_method_call<M: Module>(
             return Ok(None);
         }
         "map" => {
-            // Use rt_option_map for Option.map (also works for arrays since
-            // rt_option_map checks if the value is an enum with Some/None)
-            if let Some(&func_id) = ctx.runtime_funcs.get("rt_option_map") {
+            // Receiver-polymorphic, exactly like `at` and `index_of` below.
+            //
+            // This used to call `rt_option_map` directly, under a comment
+            // claiming it "also works for arrays since rt_option_map checks if
+            // the value is an enum with Some/None". That claim was WRONG, and
+            // wrong in the direction that produces a silent answer rather than
+            // an error: `rt_is_none(array)` is false, so the early return does
+            // not fire; `rt_enum_payload(array)` fails its Enum type test and
+            // returns NIL; the closure is then invoked EXACTLY ONCE on that
+            // NIL and the result is wrapped in `Some`. `[1,2,3].map(f)`
+            // answered `Some(f(nil))` — one call instead of three, on a value
+            // never in the receiver — with no error and exit 0.
+            //
+            // `rt_map` tests the receiver: arrays get `rt_array_map`, and
+            // everything else keeps the exact previous `rt_option_map` result.
+            if let Some(&func_id) = ctx.runtime_funcs.get("rt_map") {
                 let func_ref = ctx.module.declare_func_in_func(func_id, builder.func);
                 let closure_val = get_vreg_or_default(ctx, builder, &args[0]);
                 let call = adapted_call(builder, func_ref, &[receiver_val, closure_val]);

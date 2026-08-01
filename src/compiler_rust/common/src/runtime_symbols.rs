@@ -1688,6 +1688,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_any",
     "rt_array_filter",
     "rt_array_find",
+    // Receiver-polymorphic map (array or Option). See rt_map.
+    "rt_map",
     "rt_array_map",
     "rt_array_each",
     "rt_array_reduce",

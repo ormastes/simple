@@ -253,6 +253,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_find", &[I64, I64], &[I64]),
     // rt_array_map(array, closure) -> array; rt_array_each(array, closure) -> receiver.
     RuntimeFuncSpec::new("rt_array_map", &[I64, I64], &[I64]),
+    // Receiver-polymorphic map (array or Option), for the two type-BLIND
+    // dispatch tables that cannot see a static receiver type. See rt_map.
+    RuntimeFuncSpec::new("rt_map", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_each", &[I64, I64], &[I64]),
     // rt_array_reduce(array, init, closure): `init` FIRST, matching the
     // interpreter's `reduce(init, func)` argument order.

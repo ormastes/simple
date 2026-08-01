@@ -17,7 +17,9 @@ use super::heap::{
     unregister_heap_ptr_checked,
     HeapHeader, HeapObjectType,
 };
-use super::objects::{rt_closure_func_ptr, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject};
+use super::objects::{
+    rt_closure_func_ptr, rt_option_map, rt_option_none, rt_option_some, RuntimeClosure, RuntimeEnum, RuntimeObject,
+};
 use super::primitive_sort;
 use simple_simd::{active_simd_tier, SimdTier};
 
@@ -4121,6 +4123,45 @@ pub extern "C" fn rt_array_map(array: RuntimeValue, closure: RuntimeValue) -> Ru
         i += 1;
     }
     result
+}
+
+/// Receiver-dispatching `map`, in the same shape as `rt_at` and `rt_index_of`.
+///
+/// The two type-BLIND dispatch tables — the Cranelift
+/// `codegen/instr/closures_structs.rs` `"map"` arm and the LLVM
+/// `codegen/llvm/emitter.rs` `runtime_method_name` table — mapped the method
+/// name `map` straight to `rt_option_map` with no receiver test. A comment at
+/// the Cranelift site claimed this "also works for arrays since rt_option_map
+/// checks if the value is an enum with Some/None". It does not, and the claim
+/// was wrong in a way that produced a silent wrong answer rather than an error:
+///
+///   * `rt_is_none(array)` is false — an array is not an Option enum — so the
+///     early return does not fire;
+///   * `rt_enum_payload(array)` takes the `get_typed_ptr::<RuntimeEnum>(_,
+///     HeapObjectType::Enum)` path, which fails on an Array and returns NIL;
+///   * the closure is then invoked EXACTLY ONCE, on that NIL, and the result is
+///     wrapped in `Some`.
+///
+/// So `[1,2,3].map(f)` yielded `Some(f(nil))` — one call instead of three, on a
+/// value that was never in the receiver, boxed in an Option that the source
+/// never asked for. No error, no crash, exit 0.
+///
+/// The test is done here, at runtime, rather than at the two codegen sites
+/// because those sites dispatch purely on the method name and have no reliable
+/// static receiver type available (`try_compile_builtin_method_call` does not
+/// even take one). The type-AWARE LLVM table in `codegen/llvm/functions.rs`
+/// already routed `("Array", "map")` to `rt_array_map` and is left untouched.
+///
+/// Option behaviour is intentionally unchanged: a non-array receiver still goes
+/// to `rt_option_map` and keeps its exact previous result, including the `Some`
+/// wrap and the None/nil pass-through. Only the array receiver — which had no
+/// correct implementation on these two lanes — changes.
+#[no_mangle]
+pub extern "C" fn rt_map(receiver: RuntimeValue, closure: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        return rt_array_map(receiver, closure);
+    }
+    rt_option_map(receiver, closure)
 }
 
 /// Apply `closure` to every element for its side effects and return the

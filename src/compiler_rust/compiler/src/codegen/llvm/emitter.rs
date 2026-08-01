@@ -170,7 +170,16 @@ impl LlvmEmitter<'_> {
             "any" => Some("rt_array_any"),
             "all" => Some("rt_array_all"),
             "filter" => Some("rt_array_filter"),
-            "map" => Some("rt_option_map"),
+            // Receiver-polymorphic, exactly like `at` and `index_of` below.
+            // Routing the bare name `map` straight to the Option-only
+            // `rt_option_map` made `[T].map(f)` call the closure EXACTLY ONCE,
+            // on the NIL that `rt_enum_payload` returns for a non-enum, and
+            // wrap that in `Some` — one call instead of len(), on a value never
+            // in the receiver, with no error and exit 0. The type-AWARE table
+            // in functions.rs already routes ("Array", "map") correctly; this
+            // is the type-blind fallback, which has no receiver type to test,
+            // so the test moves into the runtime. See rt_map.
+            "map" => Some("rt_map"),
             "starts_with" => Some("rt_string_starts_with"),
             "ends_with" => Some("rt_string_ends_with"),
             "concat" => Some("rt_string_concat"),

@@ -249,20 +249,14 @@ definitions, and "no undefined symbols" is not proof.
 
 ### Residuals recorded, not silently resolved
 
-- **`rt_array_any` / `rt_array_all` have an arity divergence.** The interpreter
-  takes a predicate (`any(f)`), but the Rust runtime is
-  `rt_array_any(array) -> i64` with no closure parameter, while the LLVM emitter
-  passes `(array, closure)`. One extra argument is ignored and the predicate is
-  never applied. Not touched here — it is a wrong-answer bug in its own right,
-  not a missing symbol.
-- **The C runtime has no `filter`/`find`/`any`/`all` at all.** Only the Rust
-  runtime defines them, so the two runtimes are not at parity on this axis even
-  after this change.
-- **Cranelift routes `.map()` to `rt_option_map`** (`instr/closures_structs.rs`)
-  with a comment claiming it "also works for arrays". It does not:
-  `rt_option_map` calls `rt_enum_payload` on its receiver, so an array receiver
-  is treated as an enum. That is a silent wrong answer on the Cranelift path and
-  is left filed rather than changed under a link-fix lane.
+- **`rt_array_any` / `rt_array_all` have an arity divergence.** — **FIXED in
+  `f835ee71522`** (Rust runtime) and **`9b5661528a9`** (C runtime). See
+  "Residual sweep: the three array-op residuals" below.
+- **The C runtime has no `filter`/`find`/`any`/`all` at all.** — **FIXED in
+  `9b5661528a9`.** See below.
+- **Cranelift routes `.map()` to `rt_option_map`** with a comment claiming it
+  "also works for arrays". — **The comment was WRONG and is now corrected; the
+  misroute is FIXED.** See below.
 - **`codegen/runtime_sffi.rs` has a pre-existing duplicate spec** for
   `rt_dir_exists` (two byte-identical entries), which fails
   `codegen::runtime_sffi::tests::all_funcs_have_unique_names`. Present at both
@@ -593,3 +587,195 @@ recorded rather than papered over — the same treatment §6 gives the divergent
 - **Non-vacuity PROVED by sabotage of the implementation, not a shim:** the four
   callee names were reverted (and the two operand orders un-swapped) with the
   test bodies left untouched; both guards went RED. Restoring turned them GREEN.
+
+## Residual sweep: the three array-op residuals (2026-08-01, follow-up lane)
+
+The three residuals recorded under "Residuals recorded, not silently resolved"
+were each a genuine silent wrong answer, not a missing feature. All three are
+now closed. Landed across `f835ee71522` (Rust `any`/`all`), `9b5661528a9`
+(C-runtime parity) and the `rt_map` commit below.
+
+### Emitter-operand verification FIRST, per symbol (the gate)
+
+A symbol may only be implemented once its emitters are shown to pass their
+operands faithfully. An emitter that DISCARDS operands must keep failing
+loudly — giving it a receiver converts a link error into a silently wrong
+answer. Re-verified independently this lane:
+
+| symbol | dispatch sites | emitted call | operands faithful? | verdict |
+|---|---|---|---|---|
+| `rt_array_any` | `llvm/functions.rs` ×2 (blind + `("Array","any")`), `llvm/emitter.rs`, Cranelift `instr/calls.rs` + `instr/closures_structs.rs` | `(array, closure)` | yes — both LLVM sites build `receiver + args` verbatim via `get_vreg` + `coerce_value_to_type` | implement |
+| `rt_array_all` | same five | `(array, closure)` | yes | implement |
+| `rt_array_filter` | same five | `(array, closure)` | yes | implement |
+| `rt_array_find` | `llvm/functions.rs` ×2, Cranelift ×2 | `(array, closure)` | yes | implement |
+| `rt_par_map` / `rt_par_filter` / `rt_par_for_each` | `llvm/emitter.rs` | emitter passes **2**, `runtime_sffi.rs` declares **4** (`input_len` and `backend` DROPPED) | **NO** | **left loud, deliberately** |
+| `rt_par_reduce` | `llvm/emitter.rs` | passes **3**, declares **5** | **NO** | **left loud, deliberately** |
+
+The `rt_par_*` verdict was re-verified this lane rather than inherited. They
+remain undefined in both runtimes and must stay that way until their emitters
+thread the real operands.
+
+### 1. `any` / `all` — the predicate was never applied (FIXED)
+
+`rt_array_any(array) -> i64` had **no closure parameter** while every one of the
+five dispatch sites emitted `(array, closure)`. The predicate operand was
+accepted by the ABI and then discarded, and the body forwarded to
+`rt_array_any_truthy`. The predicate was never invoked even once.
+
+Wrong in BOTH directions, so no "mostly right" reading survives:
+
+| receiver | predicate | before | after (= interpreter) |
+|---|---|---|---|
+| `[1,2,3]` | `x > 10` | `any=1 all=1` | `any=0 all=0` |
+| `[0,0,0]` | `x == 0` | `any=0 all=0` | `any=1 all=1` |
+
+Semantics pinned to the interpreter (`interpreter_helpers/collections.rs`
+`eval_array_any` / `eval_array_all`), not guessed: predicate takes the element
+alone, iteration short-circuits on the first decisive element, empty receiver is
+`false` for `any` and vacuously `true` for `all`.
+
+The zero-predicate spelling is a SEPARATE symbol, not a defaulted argument:
+`arr.all_truthy()` lowers to `rt_array_all_truthy(array)` through its own MIR
+arm, so no caller reaches these with one operand. This is the same rule as
+`substr`: an INT slot cannot carry an optional argument, because the tagged nil
+sentinel *is* the integer 3.
+
+### 2. C-runtime parity — six symbols, not four (FIXED in `9b5661528a9`)
+
+The gap was wider than recorded. The Rust runtime defined `rt_array_filter`,
+`rt_array_find`, `rt_array_any`, `rt_array_all` **and** `rt_array_any_truthy` /
+`rt_array_all_truthy`; the C runtime defined **none of the six**, while already
+defining `map`/`each`/`reduce` from `4fbe8c5bb40`.
+
+Absence established against BUILT objects with a true-positive control —
+`rt_array_map` / `rt_array_each` / `rt_array_reduce` / `rt_array_get` /
+`rt_closure_func_ptr` all present at 1, the six at 0, out of **738** `rt_*`
+symbols defined in `runtime_native.c` (vs **1,705** `T rt_*` in the Rust
+archive) — then confirmed at source level across every `src/runtime/*.c`,
+because archive-absence alone is not proof (`rt_index_of` / `rt_string_lines`
+previously looked missing against a stale archive and do exist).
+
+Link-level evidence, never codegen:
+
+| link | result |
+|---|---|
+| probe vs runtime object built from **BASE** sources | `rc=1`, exactly the six `undefined symbol`, **no artifact** |
+| probe vs the **NEW** object | `rc=0`, `file` reports ELF 64-bit executable, `nm` shows all six at real addresses, and it RUNS |
+
+25 of 25 printed values match HAND-COMPUTED expectations: both directions of the
+discarded-predicate defect, short-circuit call counts of 1/2/2/3, empty-receiver
+vacuity, nil/false/int-0/heap-object truthiness, and the non-array receiver
+answering 0 for BOTH `_truthy` forms rather than the vacuous `true` an empty
+loop yields. `nm -u` was used nowhere — it is blind to weak zero-size
+definitions.
+
+Non-vacuity proved by sabotaging the **implementation**: restoring the
+predicate-discarding body turns 8 checks RED with the predicate call count at 0.
+
+`rt_core_value_truthy` mirrors Rust's `RuntimeValue::truthy()` branch for
+branch, float test FIRST, because a heap-boxed `0.0` carries `TAG_HEAP` and
+would otherwise read as "truthy because the pointer exists".
+
+### 3. `.map()` misrouted to `rt_option_map` — the in-tree comment was WRONG
+
+The comment at `codegen/instr/closures_structs.rs` claimed `rt_option_map`
+"also works for arrays since rt_option_map checks if the value is an enum with
+Some/None". **It does not**, and the failure is silent rather than loud.
+Traced through the actual bodies:
+
+- `rt_is_none(array)` is false — an array is not an Option enum — so the early
+  return does not fire;
+- `rt_enum_payload(array)` takes `get_typed_ptr::<RuntimeEnum>(_,
+  HeapObjectType::Enum)`, which fails on an Array and returns **NIL**;
+- the closure is invoked **exactly once**, on that NIL, and the result is
+  wrapped in `Some`.
+
+So `[1,2,3].map(f)` answered `Some(f(nil))` — one call instead of three, on a
+value never in the receiver, boxed in an Option the source never asked for, with
+no error and exit 0. MEASURED, not inferred, both routes in one binary:
+
+| probe | `rt_option_map(array,f)` (old route) | `rt_map(array,f)` (new) |
+|---|---|---|
+| closure call count | **1** | 3 |
+| argument the closure saw | **nil (3)** | 1, 2, 3 |
+| result is a `Some` | **yes** | no (an array) |
+| result length | **-1** (not an array at all) | 3 |
+| result elements | — | `[2,4,6]` |
+
+The **LLVM** `emitter.rs` type-blind table had the identical arm, so this was
+never Cranelift-only. The type-AWARE table in `llvm/functions.rs` already routed
+`("Array","map")` to `rt_array_map` correctly and is untouched.
+
+**Fix:** a receiver-polymorphic `rt_map`, in the same shape as the in-tree
+`rt_at` and `rt_index_of` precedents — arrays go to `rt_array_map`, everything
+else keeps its exact previous `rt_option_map` result. The test is done in the
+runtime because both misrouting sites dispatch purely on method name;
+`try_compile_builtin_method_call` does not even take a receiver type. Option
+behaviour is verified UNCHANGED (`Some(5)` → `Some(10)` with one call, `None`
+returned unchanged with zero calls, raw nil passed through), so the fix cannot
+have bought the array answer with an Option regression. 19 of 19 hand-computed
+values match; the comment is corrected at both sites.
+
+### Value-level comparison earned its keep — TWICE
+
+Both probes compared printed values against hand-computed expectations rather
+than against another engine, and each caught one of MY OWN wrong expectations
+that an engine-vs-engine comparison would have scored PASS:
+
+1. `all(x<2)` over `[1,2,3]` short-circuits after **2** predicate calls, not 1 —
+   `x<2` is truthy at 1 and falsy at 2, so the first FALSY element is the
+   second. (Implementation was right; my arithmetic was wrong.)
+2. `rt_array_len` on a non-array answers **-1**, not 0 — the `as_typed_ptr!`
+   bail-out default. The real value is the stronger statement anyway.
+
+### Left deliberately loud (do NOT implement receivers for these)
+
+- **`rt_par_map` / `rt_par_filter` / `rt_par_for_each`** — emitter passes 2
+  operands, spec declares 4; `input_len` and `backend` are DROPPED.
+- **`rt_par_reduce`** — passes 3, declares 5.
+
+Verified again this lane. Undefined in both runtimes, and they must stay that
+way: an emitter that discards operands must keep failing loudly.
+
+### Enumerated sibling found and NOT fixed — `.find()` on an array
+
+Enumerating the family turned up a fourth misroute of the same shape, which is
+recorded rather than guessed at:
+
+- `codegen/instr/calls.rs` contains **two** `"find"` arms in one `match`:
+  `"find" | "find_str" => Some("rt_string_find")` earlier, and
+  `"find" => Some("rt_array_find")` later. First-match-wins in Rust, so the
+  array arm is **unreachable** and every array `.find(pred)` on the type-blind
+  Cranelift path takes the string route.
+- `instr/closures_structs.rs` and `llvm/emitter.rs` both map the bare name
+  `find` to `rt_string_find` unconditionally, with no array arm at all.
+
+This is NOT fixed here because it is not the same fix as `rt_map`. Array `find`
+returns the ELEMENT while text `find` returns an INDEX (a raw `i64`, not a
+tagged value), so a polymorphic `rt_find` would have to change the text return
+shape — trading a known wrong answer on one receiver for a possible new one on
+the other. It needs a return-type decision, not a rename.
+
+### Signature divergence recorded, not silently reconciled
+
+The C entry points take `SplArray*` and raw pointers where the Rust ones take a
+tagged `RuntimeValue`; the C receiver-type test is therefore
+`rt_core_array_ptr(array)` rather than Rust's `as_typed_ptr!` heap-type check.
+Behaviour is matched (non-array → NIL for `filter`/`find`, 0 for
+`any`/`all`/both `_truthy` forms). The pre-existing `call_runtime_void` residual
+— every parameter declared as `runtime_int_type()` regardless of the real
+signature — is unchanged and still open.
+
+`rt_map` is deliberately NOT added to the C runtime: that runtime has no
+`rt_option_map` either, so the type-blind `map` path could never link against it
+and still cannot. That stays a LOUD link failure rather than a fabricated
+half-implementation. `rt_index_of` is likewise still absent from the C runtime —
+a wider parity gap on the same axis, recorded here, not addressed.
+
+### Pre-existing failures, proved at the same base sha
+
+- duplicate `rt_dir_exists` spec in `codegen/runtime_sffi.rs` failing
+  `all_funcs_have_unique_names` — present with these changes absent;
+- `simple-runtime --lib` at `1080 passed / 7 failed` before `f835ee71522`,
+  `1082 passed / 7 failed` after (that commit added 2 tests); the same 7
+  failures by name.

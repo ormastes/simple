@@ -541,6 +541,8 @@ pub use value::{
     rt_array_find,
     rt_array_map,
     rt_array_reduce,
+    // Receiver-polymorphic map (array or Option). See rt_map.
+    rt_map,
     rt_array_header_ptr,
     rt_array_get,
     rt_array_get_i64_raw,
