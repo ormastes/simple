@@ -3,13 +3,17 @@
 
 Architecture: `doc/04_architecture/web_iframe_draw_ir_embedding.md`
 
+Status: static source/spec/manual implemented; qualified execution and five
+legacy caller parity migrations remain held.
+
 ## Minimal source changes
 
 1. `src/lib/common/ui/draw_ir.spl`: add `draw_ir_embed_composition` and one
    private command copy-with-clip helper; reuse existing rect operations.
 2. `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`:
-   extract `_simple_web_layout_compose_document`; extend retained composition
-   with depth/deadline; segment commands and insert children in paint order.
+   `_simple_web_layout_compose_document` scopes/restores child deadlines;
+   retained composition carries depth, segments commands, and inserts children
+   in paint order.
 3. `simple_web_html_layout_renderer_paint_layout.spl`: retain pixel helpers
    during parity; delete them only after all five callers migrate.
 4. Add `test/02_integration/rendering/simple_web_iframe_draw_ir_embedding_spec.spl`
@@ -106,3 +110,57 @@ instead of maintaining duplicate behavior tests.
 Use a qualified pure-Simple stage 2/3 or release binary for focused spec and
 docgen. No full bootstrap, Rust seed, or renderer-wide suite. Static review
 alone remains RED.
+
+## Sandboxed child-document handoff (RED)
+
+Before enabling child script, request/navigation, or input, replace the hidden
+`_web_render_child_pixels` assumption with one child record keyed by
+`BrowserChildIdentity(parent_dom_generation, iframe_route,
+child_frame_generation)`. It stores `document_url = about:srcdoc`, captured
+fallback base, resolved effective base, typed `Origin`, intersected
+`BrowserCspSandboxPolicy`, and current process generation. Layout receives only
+already-admitted child semantic output.
+
+In isolated mode, `HostedBrowserRendererProcess` owns the authoritative record,
+the outer SBR2 staged/issued tuple, and a distinct one-use
+`BrowserChildPermit`; worker `BrowserSession` is a mirror. `SBCI1` carries only
+the child identity plus direction/kind/routes/raw URL reference/method/headers/
+body. The host validates canonical framing, bounds, live identity, sandbox,
+CSP, origin, route, request, and navigation policy before it creates `SBCP1`.
+`SBCP1` returns the exact normalized operation plus an opaque 32-hex permit,
+bound in the host ledger to the current outer SBR2 process/root/wire tuple.
+Consume it immediately before exactly one mutation and clear it on every exit.
+
+Host-to-child pointer/key/text follows the same order: validate host hit target,
+issue `SBCP1` inside a new outer SBR2 command, let the worker mirror consume it
+before DOM dispatch, then require the matching outer reply before host-ledger
+retirement. Child-to-host script/fetch/navigation arrives as `SBCI1` within an
+already-admitted outer reply; the host validates before script-visible state,
+network, history, cookie, or DOM mutation.
+
+Direct `HostedWebContentSession` serializes neither schema and uses no SBR2.
+It submits the same `BrowserChildIntent` to the shared session broker, which
+creates and consumes a local scoped permit around the validated mutation.
+Both modes use the same sandbox/origin/base and retirement decisions.
+
+The future SSpec/manual is
+`test/03_system/security/browser_iframe_sandbox_contract_spec.spl` mirrored at
+`doc/06_spec/03_system/security/browser_iframe_sandbox_contract_spec.md` with
+these frozen steps/helpers:
+
+1. `Create the sandboxed srcdoc child document` —
+   `setup_iframe_sandbox_contract_fixture` /
+   `check_child_document_context`.
+2. `Broker one child script operation` — `check_child_script_broker_use`.
+3. `Constrain child request navigation and input` —
+   `check_child_request_navigation_input`.
+4. `Revoke stale child authority` — `check_child_revocation_and_stale_rejection`.
+
+Each checker begins as `fail(...)` until its production owner exists; no
+constant assertion or validator-only substitute is admissible. The required
+matrix covers absent versus empty sandbox, iframe/CSP deny-wins intersection,
+malformed/oversized/unknown tokens and wire fields, two distinct opaque sibling
+origins, allowed same-origin without parent access, child URL versus fallback/
+effective base, forged/replayed outer SBR2 and inner permit, forged identity
+rejection before mutation, stale child route, child reload, parent replacement,
+Stop/Close/site swap/process failure, and direct/isolated parity.

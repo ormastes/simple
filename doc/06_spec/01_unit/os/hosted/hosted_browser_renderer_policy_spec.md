@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 52 | 52 | 0 | 0 |
+| 57 | 57 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -24,8 +24,8 @@ Treats decoded renderer protocol messages as untrusted input at the hosted brows
 | Design | doc/05_design/simple_web_browser_engine_production_hardening.md |
 | Research | doc/01_research/local/simple_web_browser_engine_production_hardening.md |
 | Source | `test/01_unit/os/hosted/hosted_browser_renderer_policy_spec.spl` |
-| Updated | 2026-07-29 |
-| Generator | `simple spipe-docgen` (Simple) |
+| Updated | 2026-07-30 |
+| Generator | Manual mirror; admitted pure-Simple docgen pending |
 
 ## Overview
 
@@ -872,6 +872,16 @@ expect(headers).to_equal(
 
 </details>
 
+#### rejects a malformed HTTPS redirect before creating a navigation permit
+
+- Receive a hostile `Location: https:///missing-host` response from the
+  authenticated transport.
+- Reject it as `invalid-navigation-redirect` without creating a broker navigation
+  permit, pending document commit, or provisional origin.
+
+Docgen: pending — this reviewed manual mirror reflects the executable SSpec;
+the isolated worktree has no deployed self-hosted runtime.
+
 #### never learns HSTS from generic response finalization
 
 - var broker = HostedBrowserRendererProcess create
@@ -1618,6 +1628,60 @@ expect(broker._frame_history_state_valid(
 
 </details>
 
+#### rejects a forged legacy frame before committing a pending document
+
+A legacy `SBRF2` frame has no history state. While a broker-authorized
+document response is pending, that omission fails and tears down the broker
+before it can commit the target URL or advance history. Only a state-bearing
+renderer reply may complete the transition.
+
+- Send a state-less renderer frame while a document is pending
+   - Expected: the decoded frame has no history state
+- Fail closed before the forged frame can commit the target
+   - Expected: rejection reason equals `missing-frame-history`
+   - Expected: broker is failed and closed without committing the target
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 30 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Send a state-less renderer frame while a document is pending")
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.document_url = "https://source.test/start"
+broker.document_origin = "https://source.test"
+broker.history_urls = ["https://source.test/start"]
+broker.history_index = 0
+broker.history_current_url = "https://source.test/start"
+broker.pending_history_action = "push"
+broker.pending_document_commit_url = "https://target.test/private"
+broker.provisional_document_origin = "https://target.test"
+broker.expected_reply_to_request_id = 2
+val forged_wire = browser_renderer_frame_encode(
+    draw_ir_composition("", "", "", []), 1, 2
+)
+expect(forged_wire.ok).to_be(true)
+val forged = browser_renderer_frame_decode(
+    browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(1), forged_wire.wire
+    ).message,
+    640, 480
+)
+expect(forged.history_state_present).to_be(false)
+
+step("Fail closed before the forged frame can commit the target")
+val rejected = broker._accept_decoded_frame(forged, 1)
+expect(rejected.ok).to_be(false)
+expect(rejected.reason).to_equal("missing-frame-history")
+expect(broker.state).to_equal("failed")
+expect(broker.document_url).to_equal("")
+expect(broker.history_urls.len()).to_equal(0)
+```
+
+</details>
+
 #### resolves duplicate history URLs in the requested direction
 
 - var back = HostedBrowserRendererProcess create
@@ -1761,29 +1825,28 @@ expect(broker.deferred_commands.len()).to_equal(0)
 
 </details>
 
-#### preserves immediate pointer press and release in order
+#### should preserve immediate pointer press and release in order
 
-- var broker = HostedBrowserRendererProcess create
-- browser renderer decoder new
-   - Expected: broker.deferred_commands.len() equals `1`
-   - Expected: broker._activate_deferred_command() equals ``
-- browser renderer decoder new
-   - Expected: released.event_id equals `2`
-   - Expected: broker.deferred_commands.len() equals `0`
+1. Queue a primary page pointer press.
+2. Cancel the page press before chrome takes ownership.
+3. Decode the deferred renderer cancellation.
+4. Ignore a redundant cancellation without queuing a command.
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 31 lines folded for reproduction.
+Runnable source: 48 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
+step("Queue a primary page pointer press")
 var broker = HostedBrowserRendererProcess.create(1, 640, 480)
 broker.state = "active"
 expect(broker.begin_pointer(
     1, 4, 5, true, 1000
 ).is_ok()).to_be(true)
+expect(broker.pointer_pressed).to_be(true)
 val pressed_message = browser_renderer_decoder_feed(
     browser_renderer_decoder_new(1), broker.pending_wire
 )
@@ -1791,10 +1854,14 @@ expect(browser_renderer_action_decode(
     pressed_message.message
 ).pressed).to_be(true)
 
-expect(broker.begin_pointer(
-    2, 4, 5, false, 1000
+step("Cancel the page press before chrome takes ownership")
+expect(broker.cancel_pointer(
+    2, 1000
 ).is_ok()).to_be(true)
+expect(broker.pointer_pressed).to_be(false)
 expect(broker.deferred_commands.len()).to_equal(1)
+
+step("Decode the deferred renderer cancellation")
 broker.pending_wire = ""
 broker.pending_wire_is_command = false
 broker.command_deadline_ms = 0
@@ -1810,6 +1877,97 @@ val released = browser_renderer_action_decode(
 expect(released.event_id).to_equal(2)
 expect(released.pressed).to_be(false)
 expect(broker.deferred_commands.len()).to_equal(0)
+
+step("Ignore a redundant cancellation without queuing a command")
+var idle = HostedBrowserRendererProcess.create(2, 640, 480)
+idle.state = "active"
+match idle.cancel_pointer(3, 1000):
+    Err(reason):
+        fail("redundant pointer cancellation failed: {reason}")
+    Ok(queued):
+        expect(queued).to_be(false)
+expect(idle.pending_wire).to_equal("")
+```
+
+</details>
+
+#### should retry a page pointer cancellation after renderer work drains
+
+1. Queue a page press while a resource job becomes active.
+2. Retain one cancellation while the renderer is busy.
+3. Drain prior work and emit the retained pointer release.
+4. Acknowledge the cancellation before releasing its owner state.
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 63 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Queue a page press while a resource job becomes active")
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.state = "active"
+expect(broker.begin_pointer(
+    1, 4, 5, true, 1000
+).is_ok()).to_be(true)
+broker.network_job_handle = 41
+
+step("Retain the cancellation while the renderer is busy")
+expect(broker.cancel_pointer(
+    2, 1000
+).is_ok()).to_be(true)
+expect(broker.pointer_pressed).to_be(false)
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+match broker.cancel_pointer(99, 1000):
+    Err(reason):
+        fail("retained pointer cancellation failed: {reason}")
+    Ok(queued):
+        expect(queued).to_be(false)
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+match broker.begin_pointer(3, 5, 5, true, 1000):
+    Err(reason):
+        expect(reason).to_equal("pointer-cancel-pending")
+    Ok(_):
+        fail("page press replaced a retained pointer cancellation")
+
+step("Drain prior work and emit the retained pointer release")
+broker.network_job_handle = 0
+broker.pending_wire = ""
+broker.pending_wire_is_command = false
+broker.command_deadline_ms = 0
+broker.pending_operation = ""
+broker.next_request_id = 3
+expect(broker.flush_pointer_cancel(
+    1000
+).is_ok()).to_be(true)
+val canceled_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(1), broker.pending_wire
+)
+val canceled = browser_renderer_action_decode(
+    canceled_message.message
+)
+expect(canceled.event_id).to_equal(2)
+expect(canceled.pressed).to_be(false)
+expect(broker.pointer_pressed).to_be(false)
+expect(broker.pending_operation).to_equal("pointer-cancel")
+expect(broker.pending_pointer_cancel_event_id).to_equal(2)
+
+step("Acknowledge the cancellation before releasing its owner state")
+val ack_wire = browser_renderer_frame_encode_with_state_and_images(
+    draw_ir_composition("", "", "", []),
+    1, 41, 3, -1, 0, "", 0, "", "", "", "", "", []
+)
+val ack = browser_renderer_frame_decode(
+    browser_renderer_decoder_feed(
+        browser_renderer_decoder_new(1), ack_wire.wire
+    ).message,
+    640, 480
+)
+broker.expected_reply_to_request_id = 3
+expect(broker._accept_decoded_frame(ack, 1).ok).to_be(true)
+expect(broker.pending_pointer_cancel_event_id).to_equal(0)
 ```
 
 </details>
@@ -2416,6 +2574,47 @@ expect(broker.network.cookie_store.get_header_for_origin(
     old_origin, "/next", Some(old_origin), "GET", false,
     rt_time_now_unix_micros() / 1000000
 ).contains("fresh=yes")).to_be(false)
+```
+
+</details>
+
+#### partitions script cookies by the active broker document not a stale request
+
+- Seed the broker transport with hostile requester `https://stale.test`.
+- Write a `Secure; SameSite=None; Partitioned` script cookie from
+  `https://app.test/page`.
+- Expected: the cookie is visible only through `cookie_partition_key(app)`;
+  the stale partition remains empty.
+
+Docgen: pending — reviewed manual mirror because this isolated worktree has no
+deployed self-hosted runtime.
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 24 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var broker = HostedBrowserRendererProcess.create(1, 640, 480)
+broker.document_url = "https://app.test/page"
+broker.document_origin = "https://app.test"
+broker.network.set_requester_origin("https://stale.test")
+
+expect(broker._apply_script_cookie_writes([
+    "part=active; Secure; SameSite=None; Partitioned; Path=/"
+])).to_equal(true)
+val app = Origin(scheme: "https", host: "app.test", port: 443)
+val stale = Origin(scheme: "https", host: "stale.test", port: 443)
+val now = rt_time_now_unix_micros() / 1000000
+expect(broker.network.cookie_store.get_header_for_origin(
+    app, "/", Some(app), "GET", false, now,
+    cookie_partition_key(app)
+)).to_equal("part=active")
+expect(broker.network.cookie_store.get_header_for_origin(
+    app, "/", Some(stale), "GET", false, now,
+    cookie_partition_key(stale)
+)).to_equal("")
 ```
 
 </details>
@@ -3647,12 +3846,53 @@ expect(stale.decoder.error).to_equal("stale-generation")
 
 </details>
 
+#### binds a bookmark title to generation reply and canonical URL
+
+- var renderer = HostedBrowserRendererProcess create
+   - Expected: renderer.bookmark_stored_title() equals `Bound title`
+   - Expected: renderer.bookmark_stored_title() equals ``
+   - Expected: renderer.bookmark_stored_title() equals ``
+   - Expected: renderer.bookmark_stored_title() equals ``
+   - Expected: renderer.bookmark_stored_title() equals ``
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 20 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+var renderer = HostedBrowserRendererProcess.create(7, 64, 48)
+renderer.expected_reply_to_request_id = 41
+renderer.document_url = "https://title.test/"
+renderer.document_title = "Bound title"
+renderer.document_title_url = "https://title.test/"
+renderer.document_title_generation = 7
+renderer.document_title_reply_to_request_id = 41
+expect(renderer.bookmark_stored_title()).to_equal("Bound title")
+
+renderer.document_title_generation = 6
+expect(renderer.bookmark_stored_title()).to_equal("")
+renderer.document_title_generation = 7
+renderer.document_title_reply_to_request_id = 40
+expect(renderer.bookmark_stored_title()).to_equal("")
+renderer.document_title_reply_to_request_id = 41
+renderer.document_title_url = "https://other.test/"
+expect(renderer.bookmark_stored_title()).to_equal("")
+renderer.document_title_url = renderer.document_url
+expect(renderer.close()).to_be(true)
+expect(renderer.bookmark_stored_title()).to_equal("")
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 52 |
-| Active scenarios | 52 |
+| Total scenarios | 53 |
+| Active scenarios | 53 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |

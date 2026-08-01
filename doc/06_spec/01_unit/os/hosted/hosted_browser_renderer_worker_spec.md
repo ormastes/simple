@@ -122,14 +122,38 @@ expect(worker.render_session.counters.retained_command_count).to_equal(0)
    - Expected: viewport_after.layout_count equals `2`
    - Expected: viewport_after.paint_count equals `2`
    - Expected: viewport_after.composition_revision equals `2`
+- Reuse parsed layout work across unchanged animation frames
+- Render HTML and CSS through canonical Draw IR
 - var animation worker = HostedBrowserRendererWorkerSession create
+- payload: "<style>@keyframes unusedLayout..."
 - animation worker render session composition checksum
    - Expected: animation_after.parse_count equals `1`
    - Expected: animation_after.css_count equals `1`
    - Expected: animation_after.style_count equals `2`
-   - Expected: animation_after.layout_count equals `2`
+   - Expected: animation_after.layout_count equals `1`
    - Expected: animation_after.paint_count equals `2`
 - animation worker render session composition checksum
+   - Expected: animation_stage is greater than `-1`
+   - Expected: animation_commands[animation_stage].color equals `4287255447`
+- var animation raster = Engine2dCompositorBackend create named
+   - Expected: animation_midpoint_pixels equals `768`
+   - Expected: animation_pixels.skipped_command_count equals `0`
+- var shadowed worker = HostedBrowserRendererWorkerSession create
+- payload: "<style>@keyframes grow...@keyframes grow{}..."
+   - Expected: shadowed_initial_stage is greater than `-1`
+   - Expected: shadowed_initial_commands[shadowed_initial_stage].width equals `24`
+   - Expected: shadowed_initial.animation_property_work_count equals `0`
+- shadowed worker render session composition checksum
+   - Expected: shadowed_after.parse_count equals `1`
+   - Expected: shadowed_after.css_count equals `1`
+   - Expected: shadowed_after.style_count equals `2`
+   - Expected: shadowed_after.layout_count equals `1`
+   - Expected: shadowed_after.paint_count equals `2`
+   - Expected: shadowed_after.composition_revision equals `2`
+   - Expected: shadowed_stage is greater than `-1`
+   - Expected: shadowed_commands[shadowed_stage].width equals `24`
+   - Expected: shadowed_result.animation_property_work_count equals `0`
+- shadowed worker render session composition checksum
 - var scroll worker = HostedBrowserRendererWorkerSession create
 - scroll worker render session composition checksum
 - browser renderer decoder new
@@ -154,7 +178,7 @@ expect(worker.render_session.counters.retained_command_count).to_equal(0)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 120 lines folded for reproduction.
+Runnable source: 193 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -210,10 +234,12 @@ expect(viewport_after.layout_count).to_equal(2)
 expect(viewport_after.paint_count).to_equal(2)
 expect(viewport_after.composition_revision).to_equal(2)
 
+step("Reuse parsed layout work across unchanged animation frames")
+step("Render HTML and CSS through canonical Draw IR")
 var animation_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(animation_worker.handle(BrowserRendererMessage(
     kind: "init", generation: 7, request_id: 2,
-    payload: CSS_ANIMATION_HTML
+    payload: "<style>@keyframes unusedLayout{from{width:1px}to{width:2px}}@keyframes pulse{from{background-color:#ef4444}to{background-color:#2563eb}}#stage{width:32px;height:24px;animation:pulse 1000ms linear forwards}</style><div id='stage'></div>"
 )).ok).to_be(true)
 val animation_checksum = (
     animation_worker.render_session.composition_checksum()
@@ -225,12 +251,82 @@ val animation_after = animation_worker.render_session.counters
 expect(animation_after.parse_count).to_equal(1)
 expect(animation_after.css_count).to_equal(1)
 expect(animation_after.style_count).to_equal(2)
-expect(animation_after.layout_count).to_equal(2)
+expect(animation_after.layout_count).to_equal(1)
 expect(animation_after.paint_count).to_equal(2)
 expect(
     animation_worker.render_session.composition_checksum() ==
     animation_checksum
 ).to_be(false)
+val animation_result = (
+    animation_worker.render_session.current_result.unwrap()
+)
+val animation_commands = animation_result.composition.batches[0].commands
+val animation_stage = _worker_command_index(
+    animation_commands, "stage"
+)
+expect(animation_stage).to_be_greater_than(-1)
+expect(animation_commands[animation_stage].color).to_equal(
+    0xFF8A5397u32
+)
+val animation_raster = Engine2dCompositorBackend.create_named(
+    64, 48, "software"
+)
+val animation_pixels = animation_raster.render_draw_ir_composition(
+    animation_result.composition, []
+)
+animation_raster.shutdown()
+var animation_midpoint_pixels: i64 = 0
+for pixel in animation_pixels.pixels:
+    if pixel == 0xFF8A5397u32:
+        animation_midpoint_pixels = animation_midpoint_pixels + 1
+expect(animation_midpoint_pixels).to_equal(32 * 24)
+expect(animation_pixels.skipped_command_count).to_equal(0)
+
+var shadowed_worker = HostedBrowserRendererWorkerSession.create(64, 48)
+expect(shadowed_worker.handle(BrowserRendererMessage(
+    kind: "init", generation: 7, request_id: 2,
+    payload: "<style>@keyframes grow{from{width:8px}to{width:32px}}@keyframes grow{}#shadowed{width:24px;height:16px;background-color:#2563eb;animation:grow 1000ms linear forwards}</style><div id='shadowed'></div>"
+)).ok).to_be(true)
+val shadowed_initial = (
+    shadowed_worker.render_session.current_result.unwrap()
+)
+val shadowed_initial_commands = (
+    shadowed_initial.composition.batches[0].commands
+)
+val shadowed_initial_stage = _worker_command_index(
+    shadowed_initial_commands, "shadowed"
+)
+expect(shadowed_initial_stage).to_be_greater_than(-1)
+expect(shadowed_initial_commands[shadowed_initial_stage].width).to_equal(
+    24
+)
+expect(shadowed_initial.animation_property_work_count).to_equal(0)
+val shadowed_checksum = (
+    shadowed_worker.render_session.composition_checksum()
+)
+expect(shadowed_worker.handle(BrowserRendererMessage(
+    kind: "advance", generation: 7, request_id: 3, payload: "500"
+)).ok).to_be(true)
+val shadowed_after = shadowed_worker.render_session.counters
+expect(shadowed_after.parse_count).to_equal(1)
+expect(shadowed_after.css_count).to_equal(1)
+expect(shadowed_after.style_count).to_equal(2)
+expect(shadowed_after.layout_count).to_equal(1)
+expect(shadowed_after.paint_count).to_equal(2)
+expect(shadowed_after.composition_revision).to_equal(2)
+val shadowed_result = (
+    shadowed_worker.render_session.current_result.unwrap()
+)
+val shadowed_commands = shadowed_result.composition.batches[0].commands
+val shadowed_stage = _worker_command_index(
+    shadowed_commands, "shadowed"
+)
+expect(shadowed_stage).to_be_greater_than(-1)
+expect(shadowed_commands[shadowed_stage].width).to_equal(24)
+expect(shadowed_result.animation_property_work_count).to_equal(0)
+expect(
+    shadowed_worker.render_session.composition_checksum()
+).to_equal(shadowed_checksum)
 
 var scroll_worker = HostedBrowserRendererWorkerSession.create(64, 48)
 expect(scroll_worker.handle(BrowserRendererMessage(
@@ -550,7 +646,7 @@ val bookmarks = ui_access_find_nodes(
 )
 expect(bookmarks.len()).to_equal(1)
 expect(bookmarks[0].canonical_id).to_equal(
-    "browser:session#bookmark_0"
+    "browser:session#bookmark_{worker.browser.ui_access_revision}_0"
 )
 worker.browser.register_resource(
     saved_url, "<p>restored bookmark</p>"
@@ -582,6 +678,7 @@ expect(host).to_contain("profile.load_bookmarks()")
 expect(host).to_contain(
     "browser_renderer.begin_bookmark_snapshot("
 )
+
 ```
 
 </details>

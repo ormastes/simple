@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 6 | 6 | 0 | 0 |
+| 8 | 8 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -14,6 +14,201 @@
 ## Scenarios
 
 ### isolated browser renderer protocol
+
+#### rejects NUL payloads at both renderer envelope decoders
+
+- Decode manually framed malformed renderer envelopes
+   - Expected: legacy.status equals `violation`
+   - Expected: legacy.decoder.error equals `nul-payload`
+   - Expected: bound.status equals `violation`
+   - Expected: bound.decoder.error equals `nul-payload`
+
+<details>
+<summary>Executable SSpec</summary>
+
+```simple
+val legacy = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(7),
+    "SBR1\tinit\t7\t1\t3\nA\0B"
+)
+expect(legacy.status).to_equal("violation")
+expect(legacy.decoder.error).to_equal("nul-payload")
+
+val capability = "0123456789abcdef0123456789abcdef"
+val bound = browser_renderer_capability_decoder_feed(
+    browser_renderer_capability_decoder_new(7),
+    "SBR2\tinit\t7\t1\t1\t3\t32\nA\0B" + capability
+)
+expect(bound.status).to_equal("violation")
+expect(bound.decoder.error).to_equal("nul-payload")
+```
+
+</details>
+
+#### round-trips bounded document titles and rejects hostile SBRF8 fields
+
+**Requirements:** `REQ-WEB-BROWSER-009`, `REQ-WEB-BROWSER-021`
+
+- hosted browser title is valid
+   - Expected: hosted_browser_title_is_valid(title_512) is `true`
+   - Expected: hosted_browser_title_is_valid(title_513) is `false`
+-  renderer protocol fixture
+- browser renderer decoder new
+   - Expected: decoded_message.status equals `message`
+   - Expected: frame.document_title equals `title_512`
+-  renderer protocol fixture
+   - Expected: oversized.reason equals `invalid-document-title`
+   - Expected: forged_title.len() equals `684`
+- base64 encode
+   - Expected: forged_rejection.document_title equals ``
+-  renderer protocol fixture
+- browser renderer decoder new
+-  renderer protocol fixture
+- browser renderer decoder new
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 132 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+val title_512 = "a".repeat(510) + "é"
+val title_513 = "a".repeat(511) + "é"
+expect(hosted_browser_title_is_valid(title_512)).to_be(true)
+expect(hosted_browser_title_is_valid(title_513)).to_be(false)
+val encoded = (
+    browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+        _renderer_protocol_fixture(),
+        7, 2, 41, -1, 0, "", 0, "", "",
+        "https://title.test/", "", "", title_512,
+        1, [], []
+    )
+)
+expect(encoded.ok).to_be(true)
+val decoded_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(7), encoded.wire
+)
+expect(decoded_message.status).to_equal("message")
+expect(browser_renderer_frame_reply_to_request_id(
+    decoded_message.message
+)).to_equal(41)
+val frame = browser_renderer_frame_decode(
+    decoded_message.message, 64, 48
+)
+expect(frame.ok).to_be(true)
+expect(frame.document_title_present).to_be(true)
+expect(frame.document_title).to_equal(title_512)
+
+val oversized = (
+    browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+        _renderer_protocol_fixture(),
+        7, 2, 41, -1, 0, "", 0, "", "",
+        "https://title.test/", "", "", title_513,
+        1, [], []
+    )
+)
+expect(oversized.reason).to_equal("invalid-document-title")
+val forged_title = base64_encode(title_513)
+expect(forged_title.len()).to_equal(684)
+val forged_oversized = BrowserRendererMessage(
+    kind: "frame",
+    generation: decoded_message.message.generation,
+    request_id: decoded_message.message.request_id,
+    payload: decoded_message.message.payload.replace(
+        base64_encode(title_512), forged_title
+    )
+)
+val forged_rejection = browser_renderer_frame_decode(
+    forged_oversized, 64, 48
+)
+expect(forged_rejection.ok).to_be(false)
+expect(forged_rejection.reason).to_equal(
+    "invalid-document-title"
+)
+expect(forged_rejection.document_title_present).to_be(false)
+expect(forged_rejection.document_title).to_equal("")
+val noncanonical = BrowserRendererMessage(
+    kind: "frame",
+    generation: decoded_message.message.generation,
+    request_id: decoded_message.message.request_id,
+    payload: decoded_message.message.payload.replace(
+        "\t684\t", "\t0684\t"
+    )
+)
+expect(browser_renderer_frame_decode(
+    noncanonical, 64, 48
+).reason).to_equal("malformed-document-title")
+val short_title = (
+    browser_renderer_frame_encode_with_state_and_retained_images_and_title(
+        _renderer_protocol_fixture(),
+        7, 2, 41, -1, 0, "", 0, "", "",
+        "https://title.test/", "", "", "ok",
+        1, [], []
+    )
+)
+val short_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(7), short_title.wire
+)
+val nul_title = BrowserRendererMessage(
+    kind: "frame",
+    generation: short_message.message.generation,
+    request_id: short_message.message.request_id,
+    payload: short_message.message.payload.replace(
+        "b2s=", "AA=="
+    )
+)
+expect(browser_renderer_frame_decode(
+    nul_title, 64, 48
+).reason).to_equal("invalid-document-title")
+val invalid_padding = BrowserRendererMessage(
+    kind: "frame",
+    generation: short_message.message.generation,
+    request_id: short_message.message.request_id,
+    payload: short_message.message.payload.replace(
+        "b2s=", "b=8="
+    )
+)
+expect(browser_renderer_frame_decode(
+    invalid_padding, 64, 48
+).reason).to_equal("invalid-document-title")
+val truncated_title = BrowserRendererMessage(
+    kind: "frame",
+    generation: short_message.message.generation,
+    request_id: short_message.message.request_id,
+    payload: short_message.message.payload.replace(
+        "\t4\t0\t", "\t5\t0\t"
+    )
+)
+expect(browser_renderer_frame_decode(
+    truncated_title, 64, 48
+).ok).to_be(false)
+val overlapping_title = BrowserRendererMessage(
+    kind: "frame",
+    generation: short_message.message.generation,
+    request_id: short_message.message.request_id,
+    payload: short_message.message.payload.replace(
+        "\t4\t0\t", "\t0\t0\t"
+    )
+)
+expect(browser_renderer_frame_decode(
+    overlapping_title, 64, 48
+).ok).to_be(false)
+val legacy = browser_renderer_frame_encode_with_state_and_retained_images(
+    _renderer_protocol_fixture(),
+    7, 2, 41, -1, 0, "", 0, "", "",
+    "https://title.test/", "", "", 1, [], []
+)
+val legacy_message = browser_renderer_decoder_feed(
+    browser_renderer_decoder_new(7), legacy.wire
+)
+expect(browser_renderer_frame_decode(
+    legacy_message.message, 64, 48
+).document_title_present).to_be(false)
+```
+
+</details>
 
 #### selects dense image resources once in first-reference order
 
@@ -509,10 +704,16 @@ expect(browser_renderer_navigation_decode(BrowserRendererMessage(
    - Expected: image_frame.image_resources[0].image_uri equals `image_uri`
 - image state wire len
 - browser renderer decoder new
+   - Expected: retained_image_frame.composition_revision equals `1`
+- retained header slice
+- retained image message message payload len
+   - Expected: legacy_retained_frame.composition_revision equals `-1`
 - browser renderer decoder new
+   - Expected: changed_image_frame.composition_revision equals `2`
 - browser renderer decoder new
    - Expected: mixed_image_frame.image_resources.len() equals `2`
 -  renderer protocol image fixture
+-  renderer protocol fixture
    - Expected: referenced_resources.len() equals `2`
    - Expected: referenced_resources[0].image_uri equals `image_uri`
    - Expected: referenced_resources[1].image_uri equals `second_uri`
@@ -590,7 +791,7 @@ expect(browser_renderer_navigation_decode(BrowserRendererMessage(
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 665 lines folded for reproduction.
+Runnable source: 707 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -779,11 +980,11 @@ val retained_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         image_composition, 7, 6, 46, 16, 0, "", 0, "",
         "", "https://example.test/image", "", "",
-        image_resources, image_revisions
+        1, image_resources, image_revisions
     )
 )
 expect(retained_image_state.ok).to_be(true)
-expect(retained_image_state.wire.contains("SBRF6")).to_be(true)
+expect(retained_image_state.wire.contains("SBRF7")).to_be(true)
 expect(retained_image_state.wire.len()).to_be_less_than(
     image_state.wire.len()
 )
@@ -799,7 +1000,38 @@ val retained_image_frame = (
     )
 )
 expect(retained_image_frame.ok).to_be(true)
+expect(retained_image_frame.composition_revision).to_equal(1)
 expect(retained_image_frame.image_resources[0].pixels[0]).to_equal(
+    0xffc080feu32
+)
+val retained_header_end = retained_image_message.message.payload.index_of(
+    "\n"
+)
+val retained_header = retained_image_message.message.payload.slice(
+    0, retained_header_end
+)
+val retained_revision_start = retained_header.last_index_of("\t")
+expect(retained_header).to_start_with("SBRF7\t")
+expect(retained_revision_start).to_be_greater_than(4)
+val legacy_retained_message = BrowserRendererMessage(
+    kind: "frame",
+    generation: retained_image_message.message.generation,
+    request_id: retained_image_message.message.request_id,
+    payload: "SBRF6" +
+        retained_header.slice(5, retained_revision_start) + "\n" +
+        retained_image_message.message.payload.slice(
+            retained_header_end + 1,
+            retained_image_message.message.payload.len()
+        )
+)
+val legacy_retained_frame = (
+    browser_renderer_frame_decode_with_retained_images(
+        legacy_retained_message, 64, 48, image_resources
+    )
+)
+expect(legacy_retained_frame.ok).to_be(true)
+expect(legacy_retained_frame.composition_revision).to_equal(-1)
+expect(legacy_retained_frame.image_resources[0].pixels[0]).to_equal(
     0xffc080feu32
 )
 val changed_image_resources = [
@@ -811,11 +1043,11 @@ val changed_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         image_composition, 7, 7, 47, 32, 0, "", 0, "",
         "", "https://example.test/image", "", "",
-        changed_image_resources, image_revisions
+        2, changed_image_resources, image_revisions
     )
 )
 expect(changed_image_state.ok).to_be(true)
-expect(changed_image_state.wire.contains("SBRF5")).to_be(true)
+expect(changed_image_state.wire.contains("SBRF7")).to_be(true)
 val changed_image_frame = browser_renderer_frame_decode(
     browser_renderer_decoder_feed(
         browser_renderer_decoder_new(7), changed_image_state.wire
@@ -824,6 +1056,7 @@ val changed_image_frame = browser_renderer_frame_decode(
     48
 )
 expect(changed_image_frame.ok).to_be(true)
+expect(changed_image_frame.composition_revision).to_equal(2)
 expect(changed_image_frame.image_resources[0].pixels[0]).to_equal(
     0xff010203u32
 )
@@ -851,11 +1084,11 @@ val mixed_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         ordered_composition, 7, 8, 48, 48, 0, "", 0, "",
         "", "https://example.test/image", "", "",
-        [image_resources[0], second_resource], image_revisions
+        3, [image_resources[0], second_resource], image_revisions
     )
 )
 expect(mixed_image_state.ok).to_be(true)
-expect(mixed_image_state.wire.contains("SBRF6")).to_be(true)
+expect(mixed_image_state.wire.contains("SBRF7")).to_be(true)
 val mixed_image_frame = (
     browser_renderer_frame_decode_with_retained_images(
         browser_renderer_decoder_feed(
@@ -868,6 +1101,9 @@ val mixed_image_frame = (
 )
 expect(mixed_image_frame.ok).to_be(true)
 expect(mixed_image_frame.image_resources.len()).to_equal(2)
+expect(mixed_image_frame.image_resources[0].pixels[0]).to_equal(
+    0xffc080feu32
+)
 expect(mixed_image_frame.image_resources[1].pixels[0]).to_equal(
     0xff556677u32
 )
@@ -878,11 +1114,18 @@ val tiny_image_state = (
     browser_renderer_frame_encode_with_state_and_retained_images(
         _renderer_protocol_image_fixture(second_uri),
         7, 9, 49, 64, 0, "", 0, "", "", "", "", "",
-        [second_resource], tiny_revisions
+        4, [second_resource], tiny_revisions
     )
 )
 expect(tiny_image_state.ok).to_be(true)
-expect(tiny_image_state.wire.contains("SBRF5")).to_be(true)
+expect(tiny_image_state.wire.contains("SBRF7")).to_be(true)
+expect(
+    browser_renderer_frame_encode_with_state_and_retained_images(
+        _renderer_protocol_fixture(),
+        7, 10, 50, -1, 0, "", 0, "", "", "", "", "",
+        -1, [], []
+    ).reason
+).to_equal("invalid-composition-revision")
 val referenced_resources = browser_renderer_referenced_image_resources(
     ordered_composition,
     [unused_resource, second_resource, image_resources[0]]
@@ -1270,7 +1513,7 @@ expect(oversized.decoder.error).to_equal("payload-too-large")
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/common/web/browser_renderer_protocol_spec.spl` |
-| Updated | 2026-07-29 |
+| Updated | 2026-07-30 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -1282,8 +1525,8 @@ Tests covering isolated browser renderer protocol.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 6 |
-| Active scenarios | 6 |
+| Total scenarios | 7 |
+| Active scenarios | 7 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
