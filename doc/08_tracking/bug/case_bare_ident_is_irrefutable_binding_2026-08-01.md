@@ -249,6 +249,17 @@ Two additional sweep caveats, both found and corrected mid-sweep:
   `MacroInvocation` etc. These exist as variants in the Rust seed's
   `parser/src/ast/nodes/core.rs` but not in any `.spl` enum. The first such arm
   captures every expression form the earlier arms did not.
+  **ESCALATED 2026-08-01 — see
+  `doc/08_tracking/bug/expr_infer_matches_struct_against_enum_variants_2026-08-01.md`.**
+  Audit of these 22 found the defect is one level up: `infer_expr` does
+  `match expr:` on the **struct** `Expr` rather than `match expr.kind:` on
+  `ExprKind`, so *all 63* top-level arms are dead — proven by execution, a
+  constructor arm placed *above* the bare `case Nil:` is still swallowed. Only
+  18 of 63 arm names are real `ExprKind` variants, and all 13 helper functions
+  the arm bodies call (`engine_fresh_var`, `type_Str`, `env_contains`, ...) are
+  undefined repo-wide. The module is not wired into the driver and has never
+  executed; a per-arm fix would have changed nothing. Filed rather than
+  rewritten.
 - **`src/compiler/{10.frontend/desugar,90.tools}/desugar_async.spl`,
   `poll_generator.spl` (8 arms)** — `case State0/State1/State2:` in the async
   state machine.
