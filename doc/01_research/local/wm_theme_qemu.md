@@ -17,6 +17,10 @@
 - Native hosted Cranelift has a known Option aggregate ABI defect for
   `active_wm_theme_render_snapshot()`. Consumers need scalar accessors or a
   presence guard plus `active_wm_theme_snapshot_unchecked()`.
+- The x86 `gui_entry_engine2d.spl` QEMU screenshot lane is a real WM/Web/2D
+  capture target, but deliberately baseline-only: its UEFI wrapper stages no
+  `/THEME.CSS` and the entry has no VFS override path. It cannot prove a custom
+  Stitch theme until F-2 Option A is selected and implemented.
 
 ## QEMU evidence status
 

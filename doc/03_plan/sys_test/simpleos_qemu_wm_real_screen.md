@@ -774,3 +774,37 @@ sh scripts/check/check-simpleos-qemu-host-gpu-2d.shs --preflight
 
 `virtio-serial-unimplemented` remains the correct fail-closed outcome until
 those checks and a fresh admitted per-ISA artifact exist.
+
+### x86 Engine2D screenshot boundary
+
+`scripts/check/check-simpleos-wm-visible-display-evidence.shs` and
+`test/03_system/gui/gui_entry_engine2d_wm_simple_web_spec.spl` build
+`examples/09_embedded/simple_os/arch/x86_64/gui_entry_engine2d.spl`. That
+target proves the generated Aetheric baseline and WM/Web/Engine2D scene, but
+does not mount media or read `/THEME.CSS`; its UEFI image stages only the
+kernel. It must not be cited as custom Stitch/glass CSS evidence.
+
+The full x86 desktop entry has the required VFS override order. Extending the
+Engine2D screenshot target is an explicit F-2 requirement choice in
+`doc/02_requirements/feature/wm_theme_qemu_options.md`:
+
+- F-2 A: add the shared mounted CSS contract to every QEMU capture target;
+- F-2 B: retain the small baseline demo and restrict custom CSS claims to the
+  full desktop entry.
+
+Until selection, this row remains `baseline-only`, not `PASS` or `blocked`.
+
+### AArch64 compiler admission boundary
+
+The ARM64 attested-build wrapper intentionally requires the canonical current
+self-hosted compiler at
+`bin/release/aarch64-apple-darwin-macho/simple`. The present artifact is
+rejected as `rust-seed-or-debug-forbidden`. An older
+`bin/release/macos-arm64/simple` validates mechanically but is stale and must
+not be copied or renamed to bypass provenance admission. Resume only after a
+new provenance-qualified self-hosted deployment exists, then run once:
+
+```sh
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs --self-test
+sh scripts/check/build-simpleos-arm64-desktop-engine2d-attested.shs
+```
