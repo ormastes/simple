@@ -453,8 +453,10 @@ fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
         if _inflate_reader_failed(br) or btype < BLOCK_STORED or btype > BLOCK_DYNAMIC:
             return nil
 
+        # A negative `remaining` is the sentinel for "unbounded", not an error.
+        # Only the bounded path can genuinely overflow its budget.
         val remaining = if max_output < 0: -1 else: max_output - out.len()
-        if remaining < 0:
+        if max_output >= 0 and remaining < 0:
             return nil
 
         if btype == BLOCK_STORED:
@@ -496,12 +498,19 @@ fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
                 out.push(block_out[k])
                 k = k + 1
 
+        val byte_pos = br[1]
+        val bit_pos = br[2]
+        val consumed_bytes = if bit_pos == 0: byte_pos else: byte_pos + 1
+
         if bfinal == 1:
-            val byte_pos = br[1]
-            val bit_pos = br[2]
-            val consumed_bytes = if bit_pos == 0: byte_pos else: byte_pos + 1
             if consumed_bytes != input.len():
                 return nil
+            break
+
+        # Non-final block with the input fully consumed: this is a sync-flush
+        # stream (RFC 7692 permessage-deflate), which legitimately carries no
+        # BFINAL=1 block. Stop cleanly rather than reading past the end.
+        if consumed_bytes >= input.len():
             break
 
     return out

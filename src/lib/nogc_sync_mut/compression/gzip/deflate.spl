@@ -57,7 +57,16 @@ fn deflate_block_stored(data, is_final) -> [u8]:
 
 # Create DEFLATE fixed Huffman block (RFC 1951 §3.2.6)
 # Produces a proper bitstream: BFINAL+BTYPE LSB-first, Huffman codes MSB-first packed LSB into bytes.
-fn deflate_block_fixed(tokens, is_final) -> [u8]:
+# Core fixed-Huffman block writer.
+#
+# `sync_flush` appends an empty stored block (RFC 1951 §3.2.4) so the stream
+# ends in 00 00 FF FF — required by RFC 7692 permessage-deflate.  The stored
+# block's 3 header bits are written INTO the bitstream *before* padding, so they
+# share the end-of-block symbol's trailing byte whenever there is room.  That
+# bit-level packing is what makes the output byte-exact with zlib Z_SYNC_FLUSH;
+# simply appending 4 bytes to a padded block produces a stream whose second
+# block header is misaligned and fails to inflate.
+fn _deflate_block_fixed_ex(tokens, is_final, sync_flush) -> [u8]:
     if tokens == nil:
         return []
 
@@ -121,7 +130,26 @@ fn deflate_block_fixed(tokens, is_final) -> [u8]:
     if val eob_info = huffman_lookup(lit_codes, 256):
         bs = bitstream_write_huffman(bs, eob_info[0], eob_info[1])
 
-    return bitstream_finish(bs)
+    if not sync_flush:
+        return bitstream_finish(bs)
+
+    # Empty stored block header: BFINAL=0 (1 bit) + BTYPE=00 stored (2 bits).
+    bs = bitstream_write_bits_lsb(bs, 0, 3)
+    var out = bitstream_finish(bs)
+    # LEN = 0x0000, NLEN = 0xFFFF — byte-aligned after the padding above.
+    out.push(0x00u8)
+    out.push(0x00u8)
+    out.push(0xFFu8)
+    out.push(0xFFu8)
+    return out
+
+fn deflate_block_fixed(tokens, is_final) -> [u8]:
+    _deflate_block_fixed_ex(tokens, is_final, false)
+
+# Fixed-Huffman block in sync-flush mode: BFINAL=0 plus the empty stored block
+# tail (00 00 FF FF).  Used by RFC 7692 permessage-deflate.
+fn deflate_block_fixed_sync_flush(tokens) -> [u8]:
+    _deflate_block_fixed_ex(tokens, false, true)
 
 # Get length code for match length
 fn deflate_length_code(length) -> i64:
