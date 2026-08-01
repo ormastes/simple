@@ -1,12 +1,12 @@
 # Deleting the pure-facade glob gate swaps 356 import winners (33 of them types)
 
 - **Date:** 2026-08-01
-- **Status:** OPEN — measured, not fixed. The landed change is **not** being
-  reverted: it introduces no unresolved-name regression. This documents a silent
-  semantic change that no unresolved-name census can detect.
+- **Status:** FIXED — the ungate is reverted; the memo is retained. See
+  "Resolution (2026-08-01)" at the bottom. Kept OPEN-as-history above so the
+  measurement that drove the decision is not lost.
 - **Area:** `src/compiler/20.hir/hir_lowering/_Items/module_lowering.spl`
   (`register_glob_imported_symbols_depth`)
-- **Landed in:** `3226faaf9eb`; still live at `f793418c802`
+- **Landed in:** `3226faaf9eb`; reverted (gate only) at `b2d42b02ecc`+1
 - **Severity:** MEDIUM — no observed miscompile, but type identity moves.
 
 ## Background
@@ -268,3 +268,104 @@ semantic change than the defect it would close.
 Simulation sources and full result sets: `/dev/shm/globsim/` (`extract.py`,
 `sim.py`, `detail.py`, `report.json`, `detail.json`) — scratch, not durable.
 Patch and run wrappers: `build/glob-memo-lane-artifacts/`.
+
+
+---
+
+## Resolution (2026-08-01) — gate restored, memo retained
+
+The two halves of `3226faaf9eb` were separated and only **(B) the ungate** was
+reverted. **(A) the memo** (`glob_expand_memo` in `hir_lowering/types.spl` plus
+the check/insert and per-root reset in `module_lowering.spl`) is **kept**.
+
+Source delta is 4 non-comment lines: re-add `has_own_symbols` / `facade_shape`,
+and restore `if glob_imp.items.len() == 0 and facade_shape:`.
+
+### Acceptance evidence
+
+Simulation re-run against the **exact** origin tip `b2d42b02ecc` (graph
+re-extracted from that tree: 13,801 modules, 22,717 spellings, 3,553 roots with
+at least one resolved glob import). Baseline `pristine` = gated + un-memoized =
+the pre-`3226faaf9eb` walk.
+
+| arm | gate | memo | expansions | swaps | type swaps | newly | lost |
+|---|---|---|---|---|---|---|---|
+| pristine (pre-3226) | ON | off | 27,445 | — | — | — | — |
+| patched (3226 as landed) | off | ON | 34,973 | **356** | 33 | 132,687 | 0 |
+| ungate_only | off | off | 2,618,812 | 345 | 33 | 132,221 | 0 |
+| **memo_only (THIS CHANGE)** | **ON** | **ON** | **9,133** | **0** | **0** | **0** | **0** |
+
+- **PROVED — the swaps go away completely.** Not the ~11 residue that was
+  predicted: gate-plus-memo reproduces the pre-`3226faaf9eb` import-winner map
+  **exactly**, 0 swaps / 0 newly / 0 lost across all 3,553 roots. The memo is
+  observationally inert once the gate is back.
+- **PROVED — the memo still pays.** 27,445 -> 9,133 expansions, a 3.0x
+  reduction, with zero winner change. It is free and it is kept.
+- **PROVED — the ungate was the whole cost.** Un-gated and un-memoized the walk
+  costs 2,618,812 expansions (95x the gated baseline) and hits the depth cap on
+  one root. Gated, the depth-8 cap alone already terminates with 0 capped roots.
+
+  Correction to the original commit message, which called the memo load-bearing
+  for termination: **in the gated configuration it is not.** The gate terminates
+  on its own; the memo is a 3x saving and a margin against the cyclic glob graph
+  (168 directed 2-cycles over 3,026 `use x.*` edges). Un-gated it *is*
+  load-bearing — that is why the two must move together if the gate is ever
+  lifted again.
+
+### No regression: seed -> stage2, four arms at the same tip
+
+`simple_seed native-build --entry-closure --mode dynload --backend llvm`, same
+flags as `bootstrap-from-scratch.sh` stage 2, in a dedicated tree at
+`b2d42b02ecc`:
+
+| arm | result |
+|---|---|
+| pristine (tip, ungated) | 728/728 compiled, 0 cached, **0 failed**, 91.6s |
+| pristine2 (identical re-run, determinism control) | 728/728, **0 failed**, 123.3s |
+| patched (gate restored) | 728/728, **0 failed**, 99.2s |
+| final (exact landed bytes) | 728/728, **0 failed**, 88.6s |
+
+**Sets, not counts.** The content-addressed compile cache is the deterministic
+per-unit set:
+
+- control (pristine vs pristine2, identical source): **0 of 729** cache entries
+  differ.
+- pristine vs the landed bytes: **exactly 1 of 729** entries differs — the
+  `module_lowering` unit itself, the only file edited.
+
+Raw `.o` files are **not** reproducible and must not be used as the set signal:
+the same source compiled twice produced 7 byte-differing objects and 14 changed
+object hashes. That noise floor is why the cache set, not the object set, is the
+gate.
+
+Link fails identically (byte-identical error text, md5 `9ad95fc2...`) in **all
+four** arms on `rt_native_build` / `rt_cranelift_*` / `max`. That is an artifact
+of the ad-hoc runtime authority used for this comparison, not of the change; it
+is present in the unmodified-tip arm.
+
+### Signals deliberately NOT used
+
+- **stage4 unresolved counts.** stage4 exits 1 at `[ERROR] phase 3 FAILED` —
+  phase 3 *is* HIR lowering — with 6,474 `[stmt_get_tag] OOB` / `arena_len=0`
+  events, the first on log line 1. Its zero counts are early-abort artifacts.
+- **stage3.** It runs the bootstrap-flat pipeline and never performs this
+  lowering at all.
+
+### On the stated justification for the ungate
+
+It does not hold. `MirOperand` / `MirType` were never an observed failure at
+this tip, and `MirType` remained unresolved x77 in the patched stage4 arm. The
+ungate did not achieve its goal, and its only measurable effects are the winner
+swaps documented above — including 33 that move TYPE identity (`BlockId`,
+`CompiledModule` inside `compiler.backend`) and, under `SIMPLE_BOOTSTRAP=1` plus
+`SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1`, the `qualify_imported_function_symbol`
+rename that makes the winner the emitted callee (239 divergent rows over 52
+roots, including `driver.driver` and `loader.module_loader`).
+
+The `Function`/`Const` and `TypeAlias` slices remain **inert**, as previously
+proved. They are not a reason for this revert and are not restated as harms.
+
+### Reproduction of the resolution measurement
+
+`extract.py` + `sim_fable.py` re-pointed at a `git archive` of `b2d42b02ecc`;
+the arm table is printed by the appended `VERDICT=` block. Scratch, not durable.

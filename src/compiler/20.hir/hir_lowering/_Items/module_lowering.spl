@@ -1013,28 +1013,44 @@ impl HirLowering:
         # (register_imported_symbol routes through find_reexport_source, itself
         # depth-capped) and does not recurse.
         #
-        # GLB2 (2026-08-01): the NESTED-GLOB recursion used to be gated on the
+        # GLB2 (2026-08-01): the NESTED-GLOB recursion STAYS gated on the
         # pure-facade shape (no own symbols AND no `export` decls). Ungating it
-        # alone was measured on 2026-08-01: stage3 HIR lowering ran >13 min of CPU
-        # with RSS climbing past 8.5 GB without finishing, versus ~6 min / ~2 GB
-        # gated, because each glob re-expands every transitively globbed module up to
-        # the depth-8 cap. The cost of leaving it gated was that names a module
+        # was measured on 2026-08-01: stage3 HIR lowering ran >13 min of CPU with
+        # RSS climbing past 8.5 GB without finishing, versus ~6 min / ~2 GB gated,
+        # because each glob re-expands every transitively globbed module up to the
+        # depth-8 cap. The residual cost of leaving it gated is that names a module
         # reaches only through its OWN `use x.*` (MirOperand, MirType via
-        # mir_data's `use compiler.mir.mir_types.*`) never leaked through a
-        # second-level glob.
+        # mir_data's `use compiler.mir.mir_types.*`) still do not leak through a
+        # second-level glob; that is tracked separately rather than paid for here.
         #
-        # The gate is now gone and the blow-up is paid for by glob_expand_memo
-        # instead. The blow-up was never fan-out: the glob graph is CYCLIC (168
-        # directed 2-cycles over 3,026 `use x.*` edges) and the depth-8 cap was
-        # its only terminator. Census over the real graph: 394,207 module
-        # expansions across 2,082 roots un-memoized (worst root
-        # app.editor.editor_controller at 35,284) vs 7,529 memoized (worst root
-        # 70) -- 52x. Each redundant expansion also appended orphan HirSymbol
-        # entries to the symbol arena, which is where the RSS went.
+        # GLB3 (2026-08-01) -- the gate was briefly DELETED in 3226faaf9eb and is
+        # restored here. glob_expand_memo (below / in types.spl) is KEPT: the two
+        # changes are separable and only the memo was ever justified.
+        #   * memo, gate ON:  0 import-winner swaps vs the un-memoized walk, and
+        #     27,445 -> 9,133 module expansions over 3,553 roots (3.0x cheaper).
+        #     Free and measurably identical, so it is KEPT. Precisely: with the
+        #     gate ON the depth-8 cap alone already terminates (0 roots hit the
+        #     cap un-memoized), so the memo is a 3x saving and a margin against
+        #     the CYCLIC glob graph (168 directed 2-cycles over 3,026 `use x.*`
+        #     edges), not the terminator. Un-GATED it is the difference between
+        #     9,133 and 2,618,812 expansions, so if the gate is ever lifted again
+        #     the memo must go with it.
+        #   * ungate: 345 of 356 winner swaps, 33 of which move TYPE identity
+        #     (BlockId, CompiledModule inside compiler.backend), and under
+        #     SIMPLE_BOOTSTRAP=1 + SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 the
+        #     qualify_imported_function_symbol rename above makes the winner the
+        #     EMITTED callee (239 divergent rows over 52 roots, including
+        #     driver.driver and loader.module_loader). Its stated justification --
+        #     closing MirOperand/MirType -- did not hold: neither was an observed
+        #     failure at that tip and MirType stayed unresolved x77 in the patched
+        #     arm. So it bought nothing measurable and is reverted.
+        # See doc/08_tracking/bug/glob_ungate_swaps_import_winners_2026-08-01.md.
+        val has_own_symbols = imported_mod.composites.keys().len() > 0 or imported_mod.enums.keys().len() > 0 or imported_mod.traits.keys().len() > 0 or imported_mod.callables.keys().len() > 0 or imported_mod.constants.keys().len() > 0
+        val facade_shape = not has_own_symbols and imported_mod.exports.len() == 0
         var glob_imp_idx = 0
         while glob_imp_idx < imported_mod.imports.len():
             val glob_imp = imported_mod.imports[glob_imp_idx]
-            if glob_imp.items.len() == 0:
+            if glob_imp.items.len() == 0 and facade_shape:
                 val nested_key = self.resolve_module_key_relative(glob_imp.module, imported_mod_name)
                 val nested_surface = if nested_key != "": hir_module_surface_get(self.module_surfaces, nested_key) else: nil
                 if nested_surface != nil and nested_key != imported_mod_name:
