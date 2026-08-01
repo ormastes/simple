@@ -63,7 +63,14 @@ pub(crate) fn eval_arg_usize(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<usize, CompileError> {
-    Ok(eval_arg_int(args, idx, default as i64, env, functions, classes, enums, impl_methods)? as usize)
+    // Saturate negatives to 0 rather than letting `as usize` wrap them.
+    // A bare `as usize` turned `-5` into 18446744073709551611, which every
+    // caller then treated as a real length: `"ab".pad_left(-5)` reached
+    // `repeat_n(pad_char, huge)` and PANICKED the interpreter with "capacity
+    // overflow". All 21 call sites pass a count, width, or index, so a negative
+    // argument means "none" -- never "usize::MAX".
+    let raw = eval_arg_int(args, idx, default as i64, env, functions, classes, enums, impl_methods)?;
+    Ok(if raw < 0 { 0 } else { raw as usize })
 }
 
 /// Apply a lambda or named function to each item in an array, returning Vec of results.

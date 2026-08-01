@@ -1475,8 +1475,9 @@ fn try_compile_builtin_method_call<M: Module>(
         // `strip`/`trimmed` are interpreter-level aliases of `trim`
         // (interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).
         "trim" | "trimmed" | "strip" => "rt_string_trim",
-        "trim_start" => "rt_string_trim_start",
-        "trim_end" => "rt_string_trim_end",
+        // `trim_left`/`trim_right`: interpreter aliases of trim_start/trim_end.
+        "trim_start" | "trim_left" => "rt_string_trim_start",
+        "trim_end" | "trim_right" => "rt_string_trim_end",
         "split" => "rt_string_split",
         "bytes" => "rt_string_bytes",
         "chars" => "rt_string_chars",
@@ -1485,8 +1486,11 @@ fn try_compile_builtin_method_call<M: Module>(
         // See calls.rs: `.repeat()` had no runtime definition at all, so it
         // silently produced the SPECIAL_ERROR sentinel instead of a string.
         "repeat" => "rt_string_repeat",
-        "to_upper" | "upper" => "rt_string_to_upper",
-        "to_lower" | "lower" => "rt_string_to_lower",
+        // Full alias sets, matching interpreter_method/string.rs:76-77.
+        "to_upper" | "upper" | "up" | "uppercase" | "to_uppercase" => "rt_string_to_upper",
+        "to_lower" | "lower" | "down" | "lowercase" | "to_lowercase" => "rt_string_to_lower",
+        // `parse_i64` intentionally omitted: parse_* returns an Option in the
+        // interpreter but a raw i64 here. See the note in calls.rs.
         "to_int" | "to_i64" | "parse_int" => "rt_string_to_int",
         "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => "rt_string_to_float",
         // Receiver-polymorphic: see rt_index_of.

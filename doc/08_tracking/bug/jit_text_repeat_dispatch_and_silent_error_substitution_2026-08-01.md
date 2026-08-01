@@ -189,3 +189,118 @@ Anti-false-green controls actually run:
    `as usize` for every caller, not just `repeat`. Two more call sites in
    `interpreter_method/string.rs` (lines 187, 191) take the same argument and
    should be audited for the same panic.
+
+---
+
+# Update 2026-08-01 (follow-up lane): 51 -> 43
+
+## The inherited harness could not tell the two engines apart
+
+The 102-probe sweep classified a method as interpreter-OK/JIT-broken with
+`jnf>0 && inf==0`, where both columns counted the regex
+`(Function|Method) '[^']*' not found`. The interpreter does not use that
+wording. It emits:
+
+    error: semantic: method `no_such_method_xyz` not found on type `str`
+
+backticks, lowercase, and no `Function '...'`. So `inf` was **0 for every one of
+the 102 probes, including the deliberate `no_such_method_xyz` control**. The
+control row reads `NOSUCHMETHOD_CONTROL 1 0 0` -- it "passed" only because the
+interpreter half was structurally incapable of firing. The interpreter column
+carried no information at all.
+
+Reclassified on printed success (`^OK$`) per engine instead, since **every probe
+exits 0 regardless** -- exit status is unusable here. Both self-checks now
+behave:
+
+| probe | JIT | interpreter |
+|---|---|---|
+| `NOSUCHMETHOD_CONTROL` (must fail both) | FAIL | FAIL |
+| `SELFCHECK_GOOD` = `s.upper()` (must pass both) | PASS | PASS |
+
+Re-measured at `e482a8e1af39`: **51 FAIL/PASS, 51 PASS/PASS, 1 FAIL/FAIL**. The
+51 are byte-identical to `missing51.txt`, so the count survived the correction
+-- no method fails on both engines. PROVED.
+
+`git diff 73a041794404 e482a8e1af39 -- src/compiler_rust src/runtime` is empty,
+so the sibling's binaries are still current-tip-accurate for these files.
+
+**Scope limit of the sweep:** it proves *dispatch existence*, not correctness. It
+cannot see a wrong mapping. Example already in the tree: `reverse` maps to
+`rt_array_reverse` (the ARRAY reverse) yet "passes".
+
+## Landed: 8 aliases
+
+`up`, `uppercase`, `to_uppercase` -> `rt_string_to_upper`; `down`, `lowercase`,
+`to_lowercase` -> `rt_string_to_lower`; `trim_left` -> `rt_string_trim_start`;
+`trim_right` -> `rt_string_trim_end`. Two dispatch sites only (`calls.rs`,
+`closures_structs.rs`) -- aliases need no new runtime function, so the five
+silent sites do not apply. Values verified equal on both engines (`up`/`uppercase`
+/`to_uppercase` all `AB`, `trim_left` `[x  ]`, `trim_right` `[  x]`).
+
+**51 -> 43.**
+
+## `parse_i64` was deliberately NOT wired -- it exposed an existing defect
+
+`parse_i64` is in the interpreter's `parse_int | parse_i32 | parse_i64` arm, so
+it looked like a free alias of the already-wired `parse_int`. Wiring it made the
+sweep go to 42. That was a false green in *this lane's own measurement*, caught
+only by a value spot-check:
+
+    "42".parse_i64() + 1   JIT: 43     interpreter: type mismatch: cannot convert enum to int
+
+The interpreter's `parse_*` returns an **Option** (`Value::some`/`Value::none`,
+string.rs:354); `rt_string_to_int` returns a raw `i64`. So the pre-existing
+`parse_int -> rt_string_to_int` entry is **already wrong** and silently strips
+the Option -- reproduced on the unmodified baseline binary, so it is not
+introduced here. Adding `parse_i64` would have spread that defect to a second
+spelling. Reverted; the count is honestly 43, not 42.
+
+**Open defect:** `parse_int` / `parse_float` / `parse_f64` / `parse_f64_safe`
+strip the Option on the JIT. Needs Option-returning runtime entry points, not a
+table edit.
+
+## Fixed: `eval_arg_usize` negative-argument panic (all 21 call sites)
+
+`Ok(eval_arg_int(...)? as usize)` turned `-5` into 18446744073709551611. Callers
+compare `current_len >= width` (false against a huge width) and then allocate the
+difference:
+
+    "ab".pad_left(-5)   ->   PANIC capacity overflow (raw_vec/mod.rs:554)
+
+This is a **second instance beyond the sibling's `repeat`**, found by probing the
+family rather than the one reported method. Fixed centrally by saturating
+negatives to 0, which repairs all 21 call sites (10 in `interpreter_method/
+string.rs`, 9 in `collections.rs`, 2 in `interpreter_helpers/patterns.rs`) at
+once:
+
+| probe (interpreter) | before | after |
+|---|---|---|
+| `"ab".pad_left(-5)` | PANIC capacity overflow | `ab` |
+| `"ab".take(-2)` | `ab` (wrapped to usize::MAX) | `` |
+| `"ab".drop(-2)` | `` | `ab` |
+| `"ab".substr(-1, 2)` | `` | `ab` |
+
+## Correction to a standing assumption about pure-Simple codegen
+
+It has been suggested that `src/compiler/50.mir/_MirLoweringExpr/
+method_calls_literals.spl` special-cases only a handful of text methods and has
+no `str.* -> rt_*` table. It does have one, with **62** `rt_string` references.
+The real gap is narrower but real: its guard admits only
+
+    trim strip lower to_lower to_upper split replace rfind find contains parse_f64
+
+`upper` is not in that list, nor are any of the 8 aliases landed here. **So these
+fixes do not reach pure-Simple codegen** -- confirmed as a third work item, in a
+different codegen from the two dispatch sites above.
+
+## Remaining 43
+
+Alias class is exhausted; every one of the 43 needs a real runtime function in
+**both** the Rust runtime and `src/runtime/runtime_native.c`, plus the five other
+wiring sites. Groups: case (`capitalize`, `swapcase`, `title`, `titlecase`),
+affix (`trim_*_matches`, `remove{,_}prefix/suffix`, `chomp`), sequence (`rev`,
+`reversed`, `sorted`, `take{,n}`, `drop{ped}`, `skip`, `squeeze`), split
+(`partition`, `rpartition`, `find_all`, `find_indices`), pad (`pad_left/start/
+right/end`, `center`, `zfill`), predicate (`is_*`), and misc (`char_count`,
+`push_str`, `replace_first`, `substr`, `parse_i64`, `ptr`).

@@ -3249,8 +3249,12 @@ pub fn compile_call<M: Module>(
                 // Without them here `text.strip()` raised "Function 'str.strip'
                 // not found" and still exited 0.
                 "trim" | "trimmed" | "strip" => Some("rt_string_trim"),
-                "trim_start" => Some("rt_string_trim_start"),
-                "trim_end" => Some("rt_string_trim_end"),
+                // `trim_left`/`trim_right` share the interpreter's arm with
+                // `trim_start`/`trim_end` (interpreter_method/string.rs:118-119)
+                // but had no arm here, so they raised "Function 'str.trim_left'
+                // not found" on the JIT while working on the interpreter.
+                "trim_start" | "trim_left" => Some("rt_string_trim_start"),
+                "trim_end" | "trim_right" => Some("rt_string_trim_end"),
                 "split" => Some("rt_string_split"),
                 "bytes" => Some("rt_string_bytes"),
                 "chars" => Some("rt_string_chars"),
@@ -3262,8 +3266,22 @@ pub fn compile_call<M: Module>(
                 // `error`), and still exited 0 -- corrupting every indentation
                 // string built that way, including EasyFix replacement text.
                 "repeat" => Some("rt_string_repeat"),
-                "to_upper" | "upper" => Some("rt_string_to_upper"),
-                "to_lower" | "lower" => Some("rt_string_to_lower"),
+                // The interpreter folds five spellings into one arm each
+                // (interpreter_method/string.rs:76-77); only two of each were
+                // wired here, so `up`/`uppercase`/`to_uppercase` and their
+                // lowercase counterparts failed on the JIT alone.
+                "to_upper" | "upper" | "up" | "uppercase" | "to_uppercase" => Some("rt_string_to_upper"),
+                "to_lower" | "lower" | "down" | "lowercase" | "to_lowercase" => Some("rt_string_to_lower"),
+                // `parse_i64` is deliberately NOT added here. The interpreter's
+                // `parse_int | parse_i32 | parse_i64` arm returns an OPTION
+                // (`Value::some`/`Value::none`, string.rs:354), while
+                // rt_string_to_int returns a raw i64. The existing `parse_int`
+                // entry below is therefore already wrong -- it strips the Option,
+                // so `"42".parse_int() + 1` yields 43 on the JIT but a type error
+                // on the interpreter. Routing `parse_i64` here too would spread
+                // that defect to another spelling instead of fixing it. Tracked
+                // in doc/08_tracking/bug/jit_text_repeat_dispatch_and_silent_
+                // error_substitution_2026-08-01.md.
                 "to_int" | "to_i64" | "parse_int" => Some("rt_string_to_int"),
                 "to_float" | "to_f64" | "parse_float" | "parse_f64" | "parse_f64_safe" => Some("rt_string_to_float"),
                 // `index_of` is receiver-polymorphic (array or text): routing it
