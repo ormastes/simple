@@ -91,6 +91,13 @@ lands, the capacity manifest cannot be imported by any consumer, and
 the capacity manifest; it constructs its capacity-overflow denial from a
 command count instead, and carries an in-file boundary note pointing here.
 
+UNWOUND. That workaround is gone: the route module now imports
+`GpuWebCapacityVerdict`, `draw_ir_v3_route_capacity_denial` takes the verdict
+and carries `first_breach_bound` into the route receipt, and the new
+`draw_ir_v3_route_apply_capacity` reads `verdict.accepted` in the module
+instead of in each caller. Boundary note 2 in that file records the change
+rather than being deleted. The frozen file was not edited.
+
 ## Why this is a real grammar gap, not a style preference
 
 Leading-operator continuation is the form the repo's own landed code already
@@ -107,10 +114,15 @@ normalising every call site to the trailing form would hide a parser defect —
    at least `+`, `-`, `and`, `or`.
 3. Re-run `lint` on `src/lib/common/ui/gpu_web_capacity_manifest.spl` and on
    its spec; both should go clean with no edit to the frozen file.
-4. Re-import `GpuWebCapacityVerdict` into
-   `src/lib/common/ui/draw_ir_v3_execution_route.spl` and replace
+4. DONE. Re-imported `GpuWebCapacityVerdict` into
+   `src/lib/common/ui/draw_ir_v3_execution_route.spl` and replaced
    `draw_ir_v3_route_capacity_denial` with a verdict-taking form, so the
-   breached bound name flows into the fallback receipt.
+   breached bound name flows into the fallback receipt
+   (`gpu_fallback reason=capacity_overflow level=L4 commands=4096
+   bound=max_draw_commands`). Re-verified at `55115a82411`:
+   `parse_module_silent_checked` says PARSE_OK for the frozen manifest, and
+   PARSE_FAILED again with only `lexer_struct.spl` + `tokens.spl` reverted to
+   `69d3e4db82b^`.
 
 ## Family (measured, not assumed)
 

@@ -63,6 +63,15 @@
 #    mechanical form of §7 rule 9, "no backend reports success after an
 #    implicit software fallback". cpu_selected is accepted:true, because
 #    nothing was refused.
+# 6. Where a capacity verdict is applied. `draw_ir_v3_route_apply_capacity`
+#    overrides ONLY the GPU route. A decision that already carries a reason —
+#    policy or denial — is returned untouched, for two reasons. A route that
+#    already went to the CPU never reserves the GPU output arenas the manifest
+#    bounds, so its plan does not exercise those bounds; and rewriting an
+#    existing denial would discard the more fundamental one (no device, missing
+#    capability) in favour of a later check, making `first_breach_bound`
+#    order-dependent. Capacity is therefore an admission check ON the GPU path,
+#    evaluated after the selector, not a sixth branch inside it.
 #
 # BOUNDARIES NOT CROSSED
 # ----------------------
@@ -99,15 +108,40 @@
 #    StageReceipt until the two missing variants are decided, are ratified in
 #    doc/04_architecture/compiler/mdsoc/
 #    mdsoc_plus_tagged_structural_compute_architecture.md §21.4.
-# 2. `gpu_web_capacity_manifest.spl` (frozen) is NOT imported, even though
-#    DRAW_IR_V3_REASON_CAPACITY_OVERFLOW exists here. That module currently
-#    fails to parse (leading-operator line continuation, see
-#    doc/08_tracking/bug/parser_leading_operator_line_continuation_2026-08-01.md),
+# 2. RESOLVED — this boundary is CROSSED now, and the note is kept so nobody
+#    re-derives the old workaround from the old shape of the code.
+#
+#    It used to read: `gpu_web_capacity_manifest.spl` (frozen) is NOT imported,
+#    because that module failed to parse (leading-operator line continuation),
 #    so importing it would make this module and its spec unverifiable. The
-#    capacity denial is therefore constructed by
-#    `draw_ir_v3_route_capacity_denial`, which takes only the command count;
-#    the caller runs `gpu_web_capacity_verify` and decides. Wire the verdict
-#    type through once that file parses again.
+#    capacity denial was therefore built by `draw_ir_v3_route_capacity_denial`
+#    from a bare command count, and the CALLER ran `gpu_web_capacity_verify`
+#    and decided what the verdict meant.
+#
+#    That parse bug is fixed — `69d3e4db82b` added
+#    `CoreLexer.leading_op_continues`; the frozen file needed no edit and still
+#    has none. Verified at `55115a82411` through the frontend's own gate
+#    `parse_module_silent_checked` (the call `lint` makes for PARSE001):
+#    PARSE_OK, and PARSE_FAILED again with only
+#    `lexer_struct.spl` + `tokens.spl` reverted to `69d3e4db82b^`.
+#
+#    So the decision came back here. `GpuWebCapacityVerdict` is imported;
+#    `draw_ir_v3_route_capacity_denial` takes the verdict and carries
+#    `first_breach_bound` into the decision, so the breached bound is now IN
+#    the route receipt instead of only in the capacity lane's own verdict; and
+#    `draw_ir_v3_route_apply_capacity` interprets `verdict.accepted` here
+#    rather than in each caller. "A capacity check that passes must never
+#    manufacture a fallback" was a comment addressed to callers; it is now
+#    mechanical — an accepted verdict returns the decision unchanged, and
+#    `draw_ir_v3_route_decision_is_consistent` rejects a CAPACITY_OVERFLOW
+#    decision with an empty `capacity_breach_bound`.
+#
+#    Still NOT crossed, and not for a parse reason: this module does not call
+#    `gpu_web_capacity_verify` itself and does not build a `GpuWebCapacityPlan`.
+#    Projecting a scene into a plan is the emit lane's job and it already does
+#    it (`draw_ir_v3_capacity_plan` / `draw_ir_v3_verify_capacity` in
+#    `draw_ir_v3_emit.spl`). Duplicating it here would create a second, drifting
+#    projection of the same frozen contract.
 
 use common.ui.draw_ir_v3.{DrawIrV3Scene, draw_ir_v3_scene_command_count}
 use common.ui.draw_ir_v3_oracle.{draw_ir_v3_oracle_hash}
@@ -116,6 +150,7 @@ use common.ui.draw_ir_v3_ports.{
     DRAW_IR_V3_CAP_INDIRECT_DISPATCH,
     DrawIrV3SubmitReceipt
 }
+use common.ui.gpu_web_capacity_manifest.{GpuWebCapacityVerdict}
 use common.ui.gpu_web_receipt_contract.{
     GPU_FALLBACK_L0_GPU_NATIVE,
     GPU_FALLBACK_L4_DOCUMENT_COMPAT,
@@ -191,6 +226,12 @@ struct DrawIrV3RouteDecision:
     command_count: i64
     cost_threshold_commands: i64
     strict_pass: bool
+    # The frozen `GpuWebCapacityVerdict.first_breach_bound`, verbatim, so the
+    # route receipt names the exact manifest field a caller has to raise or the
+    # exact input it has to shrink. Empty unless reason_code is
+    # DRAW_IR_V3_REASON_CAPACITY_OVERFLOW — and a capacity-overflow decision
+    # with an empty bound is inconsistent, see the partition guard below.
+    capacity_breach_bound: text
 
 # ---------------------------------------------------------------------------
 # Reason-space predicates
@@ -216,7 +257,14 @@ fn draw_ir_v3_route_decision_is_consistent(decision: DrawIrV3RouteDecision) -> b
     if decision.route == GPU_ROUTE_CPU_SELECTED:
         return draw_ir_v3_reason_is_policy(decision.reason_code)
     if decision.route == GPU_ROUTE_GPU_FALLBACK:
-        return draw_ir_v3_reason_is_denial(decision.reason_code)
+        if not draw_ir_v3_reason_is_denial(decision.reason_code):
+            return false
+        # A capacity denial must name the bound it breached. An empty bound
+        # means the decision was built without a rejecting verdict behind it —
+        # exactly the manufactured fallback the capacity lane forbids.
+        if decision.reason_code == DRAW_IR_V3_REASON_CAPACITY_OVERFLOW:
+            return decision.capacity_breach_bound != ""
+        return true
     return false
 
 # ---------------------------------------------------------------------------
@@ -292,7 +340,8 @@ fn _route_decision(profile: DrawIrV3ExecutionProfile,
         missing_capabilities: missing_capabilities,
         command_count: command_count,
         cost_threshold_commands: profile.cost_threshold_commands,
-        strict_pass: _route_strict_pass(profile, route, fallback_level)
+        strict_pass: _route_strict_pass(profile, route, fallback_level),
+        capacity_breach_bound: ""
     )
 
 # ---------------------------------------------------------------------------
@@ -351,17 +400,40 @@ fn draw_ir_v3_route_device_fault(profile: DrawIrV3ExecutionProfile,
         DRAW_IR_V3_MODE_CPU_REFERENCE, GPU_FALLBACK_L5_DEVICE_RECOVERY,
         DRAW_IR_V3_REASON_DEVICE_FAULT, 0u32, command_count)
 
-# Capacity overflow denial. Call this only after `gpu_web_capacity_verify`
-# has actually rejected a plan — a capacity check that passes must never
-# manufacture a fallback. The breached bound stays diagnosable through the
-# capacity lane's own `GpuWebCapacityVerdict.first_breach_bound`; see
-# boundary note 2 at the top of this file for why that type is not threaded
-# through here yet.
+# Capacity overflow denial, built FROM the frozen Kernel C verdict. The
+# breached bound is copied out of `verdict.first_breach_bound` verbatim, so the
+# route receipt and the capacity receipt name the same manifest field.
+#
+# This is a constructor, not a decision: it does not read `verdict.accepted`.
+# Feed it an accepted verdict and `first_breach_bound` is empty, which
+# `draw_ir_v3_route_decision_is_consistent` reports as inconsistent — a
+# manufactured fallback cannot pass the partition guard. Use
+# `draw_ir_v3_route_apply_capacity` for the decision.
 fn draw_ir_v3_route_capacity_denial(profile: DrawIrV3ExecutionProfile,
+                                    verdict: GpuWebCapacityVerdict,
                                     command_count: i64) -> DrawIrV3RouteDecision:
-    _route_decision(profile, GPU_ROUTE_GPU_FALLBACK,
+    var decision = _route_decision(profile, GPU_ROUTE_GPU_FALLBACK,
         DRAW_IR_V3_MODE_CPU_REFERENCE, GPU_FALLBACK_L4_DOCUMENT_COMPAT,
         DRAW_IR_V3_REASON_CAPACITY_OVERFLOW, 0u32, command_count)
+    decision.capacity_breach_bound = verdict.first_breach_bound
+    return decision
+
+# Apply a Kernel C verdict to a route decision. This is the join between the
+# capacity lane and the route lane, and it lives here — not in the caller — so
+# that "a capacity check that passes must never manufacture a fallback" is
+# mechanical rather than an instruction.
+#
+# An accepted verdict returns `decision` UNCHANGED. A rejecting verdict
+# overrides only the GPU route; a decision that already carries a reason,
+# policy or denial, is returned unchanged too (interpretation 6).
+fn draw_ir_v3_route_apply_capacity(profile: DrawIrV3ExecutionProfile,
+                                   decision: DrawIrV3RouteDecision,
+                                   verdict: GpuWebCapacityVerdict) -> DrawIrV3RouteDecision:
+    if verdict.accepted:
+        return decision
+    if decision.route != GPU_ROUTE_GPU:
+        return decision
+    return draw_ir_v3_route_capacity_denial(profile, verdict, decision.command_count)
 
 # ---------------------------------------------------------------------------
 # Receipts
@@ -398,8 +470,11 @@ fn draw_ir_v3_reason_name(reason_code: u32) -> text:
 # Human-readable reason receipt. Every non-GPU route carries one; this is the
 # "no silent fallback" rule in its readable form.
 #
-# Written with trailing-operator continuation, not leading-operator: the
-# leading form does not parse (see boundary note 2 at the top of this file).
+# Built by statement-per-clause reassignment rather than one continued
+# expression. That was originally forced — leading-operator continuation did
+# not parse — and `69d3e4db82b` removed the constraint (boundary note 2), but
+# the shape is kept: each optional clause is guarded by its own `if`, which a
+# single continued expression cannot express anyway.
 fn draw_ir_v3_route_reason_receipt(decision: DrawIrV3RouteDecision) -> text:
     var line = draw_ir_v3_route_name(decision.route)
     line = line + " reason=" + draw_ir_v3_reason_name(decision.reason_code)
@@ -409,6 +484,8 @@ fn draw_ir_v3_route_reason_receipt(decision: DrawIrV3RouteDecision) -> text:
         line = line + " missing_caps=" + decision.missing_capabilities.to_i64().to_text()
     if decision.reason_code == DRAW_IR_V3_REASON_COST_BELOW_THRESHOLD:
         line = line + " threshold=" + decision.cost_threshold_commands.to_text()
+    if decision.reason_code == DRAW_IR_V3_REASON_CAPACITY_OVERFLOW:
+        line = line + " bound=" + decision.capacity_breach_bound
     return line
 
 # CPU-reference submit receipt. `deterministic_hash_lo` is the oracle hash of
@@ -449,6 +526,6 @@ export DRAW_IR_V3_ROUTE_SCHEMA_VERSION, DRAW_IR_V3_ROUTE_SCHEMA_ID,
     draw_ir_v3_profile_for_mode, draw_ir_v3_profile_cpu_only,
     draw_ir_v3_profile_balanced, draw_ir_v3_profile_full_offload,
     draw_ir_v3_route_select, draw_ir_v3_route_device_fault,
-    draw_ir_v3_route_capacity_denial,
+    draw_ir_v3_route_capacity_denial, draw_ir_v3_route_apply_capacity,
     draw_ir_v3_route_name, draw_ir_v3_reason_name,
     draw_ir_v3_route_reason_receipt, draw_ir_v3_route_cpu_reference_receipt

@@ -17,6 +17,12 @@ use common.ui.draw_ir_v3_ports.{
     DRAW_IR_V3_CAP_COMPUTE_PASSES,
     DRAW_IR_V3_CAP_INDIRECT_DISPATCH
 }
+use common.ui.gpu_web_capacity_manifest.{
+    GpuWebCapacityVerdict,
+    gpu_web_capacity_manifest_compile_time_default,
+    gpu_web_capacity_plan_zero,
+    gpu_web_capacity_verify
+}
 use common.ui.gpu_web_receipt_contract.{
     GPU_FALLBACK_L0_GPU_NATIVE,
     GPU_FALLBACK_L4_DOCUMENT_COMPAT,
@@ -39,6 +45,7 @@ use common.ui.draw_ir_v3_execution_route.{
     draw_ir_v3_profile_cpu_only,
     draw_ir_v3_profile_full_offload,
     draw_ir_v3_reason_name,
+    draw_ir_v3_route_apply_capacity,
     draw_ir_v3_route_capacity_denial,
     draw_ir_v3_route_cpu_reference_receipt,
     draw_ir_v3_route_decision_is_consistent,
@@ -84,6 +91,21 @@ fn _scene_with_rects(count: i64) -> DrawIrV3Scene:
         scene = draw_ir_v3_scene_push_command(scene, cmd)
         i = i + 1
     return scene
+
+# Real Kernel C verdicts from the frozen contract module — not hand-built
+# records. The compile-time default manifest caps max_draw_commands at 1024.
+
+fn _verdict_accepted() -> GpuWebCapacityVerdict:
+    var plan = gpu_web_capacity_plan_zero()
+    plan.draw_commands = 8u32
+    return gpu_web_capacity_verify(
+        plan, gpu_web_capacity_manifest_compile_time_default())
+
+fn _verdict_rejected() -> GpuWebCapacityVerdict:
+    var plan = gpu_web_capacity_plan_zero()
+    plan.draw_commands = 4096u32
+    return gpu_web_capacity_verify(
+        plan, gpu_web_capacity_manifest_compile_time_default())
 
 describe "DrawIR v3 execution route selection":
     """Route a DrawIR v3 scene to GPU, to CPU by cost policy, or to CPU by
@@ -192,13 +214,79 @@ describe "DrawIR v3 execution route selection":
         expect(draw_ir_v3_route_decision_is_consistent(decision)).to_equal(true)
 
     it "should report a capacity denial as a document-level gpu_fallback":
-        step("Build a capacity-overflow denial for a balanced profile")
-        val decision = draw_ir_v3_route_capacity_denial(draw_ir_v3_profile_balanced(2), 40)
+        step("Reject a plan through the frozen Kernel C verifier, then deny the route")
+        val verdict = _verdict_rejected()
+        val decision = draw_ir_v3_route_capacity_denial(
+            draw_ir_v3_profile_balanced(2), verdict, 40)
 
+        expect(verdict.accepted).to_equal(false)
         expect(draw_ir_v3_route_is_gpu_fallback(decision)).to_equal(true)
         expect(decision.reason_code).to_equal(DRAW_IR_V3_REASON_CAPACITY_OVERFLOW)
         expect(decision.fallback_level).to_equal(GPU_FALLBACK_L4_DOCUMENT_COMPAT)
         expect(draw_ir_v3_route_decision_is_consistent(decision)).to_equal(true)
+
+    it "should name the breached manifest bound in the route decision and receipt":
+        step("Carry GpuWebCapacityVerdict.first_breach_bound into the route receipt")
+        val verdict = _verdict_rejected()
+        val decision = draw_ir_v3_route_capacity_denial(
+            draw_ir_v3_profile_balanced(2), verdict, 4096)
+
+        expect(verdict.first_breach_bound).to_equal("max_draw_commands")
+        expect(decision.capacity_breach_bound).to_equal("max_draw_commands")
+        val expected_receipt = "gpu_fallback reason=capacity_overflow level=L4 commands=4096 bound=max_draw_commands"
+        expect(draw_ir_v3_route_reason_receipt(decision)).to_equal(expected_receipt)
+
+    it "should leave a GPU route untouched when the capacity verdict accepts":
+        step("Apply an accepted verdict to a GPU route")
+        val profile = draw_ir_v3_profile_balanced(2)
+        val scene = _scene_with_rects(8)
+        val routed = draw_ir_v3_route_select(profile, scene, _caps_tier1(), true)
+        val applied = draw_ir_v3_route_apply_capacity(profile, routed, _verdict_accepted())
+
+        expect(routed.route).to_equal(GPU_ROUTE_GPU)
+        expect(applied.route).to_equal(GPU_ROUTE_GPU)
+        expect(applied.reason_code).to_equal(routed.reason_code)
+        expect(applied.capacity_breach_bound).to_equal("")
+
+    it "should turn a GPU route into a capacity denial when the verdict rejects":
+        step("Apply a rejecting verdict to a GPU route")
+        val profile = draw_ir_v3_profile_balanced(2)
+        val scene = _scene_with_rects(8)
+        val routed = draw_ir_v3_route_select(profile, scene, _caps_tier1(), true)
+        val applied = draw_ir_v3_route_apply_capacity(profile, routed, _verdict_rejected())
+
+        expect(routed.route).to_equal(GPU_ROUTE_GPU)
+        expect(applied.route).to_equal(GPU_ROUTE_GPU_FALLBACK)
+        expect(applied.reason_code).to_equal(DRAW_IR_V3_REASON_CAPACITY_OVERFLOW)
+        expect(applied.capacity_breach_bound).to_equal("max_draw_commands")
+        expect(applied.command_count).to_equal(routed.command_count)
+        expect(draw_ir_v3_route_decision_is_consistent(applied)).to_equal(true)
+
+    it "should not overwrite a route that already carries a reason":
+        step("Apply a rejecting verdict to a no-device denial and to a policy CPU route")
+        val strict = draw_ir_v3_profile_full_offload()
+        val scene = _scene_with_rects(8)
+        val denied = draw_ir_v3_route_select(strict, scene, _caps_tier1(), false)
+        val denied_applied = draw_ir_v3_route_apply_capacity(
+            strict, denied, _verdict_rejected())
+
+        val balanced = draw_ir_v3_profile_balanced(100)
+        val small = _scene_with_rects(3)
+        val policy = draw_ir_v3_route_select(balanced, small, _caps_tier1(), true)
+        val policy_applied = draw_ir_v3_route_apply_capacity(
+            balanced, policy, _verdict_rejected())
+
+        expect(denied_applied.reason_code).to_equal(DRAW_IR_V3_REASON_NO_DEVICE)
+        expect(policy_applied.reason_code).to_equal(DRAW_IR_V3_REASON_COST_BELOW_THRESHOLD)
+        expect(policy_applied.route).to_equal(GPU_ROUTE_CPU_SELECTED)
+
+    it "should reject a capacity denial that names no breached bound":
+        step("A denial built from an ACCEPTED verdict must fail the partition guard")
+        val manufactured = draw_ir_v3_route_capacity_denial(
+            draw_ir_v3_profile_balanced(2), _verdict_accepted(), 8)
+
+        expect(manufactured.capacity_breach_bound).to_equal("")
+        expect(draw_ir_v3_route_decision_is_consistent(manufactured)).to_equal(false)
 
     it "should not mark a submission accepted after a gpu_fallback":
         step("Build CPU-reference receipts for a policy route and a denial route")
