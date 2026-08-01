@@ -1593,7 +1593,10 @@ impl Lowerer {
             if !dyn_body.is_empty() {
                 dyn_body.push(HirStmt::Return(None));
                 self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
+                    name: format!(
+                        "__module_init_{}_dynamic",
+                        ast_module.name.as_deref().unwrap_or("module")
+                    ),
                     span: None,
                     params: Vec::new(),
                     locals: dyn_ctx.locals,
@@ -1925,7 +1928,10 @@ impl Lowerer {
             if !dyn_body.is_empty() {
                 dyn_body.push(HirStmt::Return(None));
                 self.module.functions.push(HirFunction {
-                    name: "__module_init_dynamic".to_string(),
+                    name: format!(
+                        "__module_init_{}_dynamic",
+                        ast_module.name.as_deref().unwrap_or("module")
+                    ),
                     span: None,
                     params: Vec::new(),
                     locals: dyn_ctx.locals,
