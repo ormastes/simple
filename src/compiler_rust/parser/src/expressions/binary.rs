@@ -43,8 +43,20 @@ macro_rules! parse_binary_single {
 /// Handles line continuation in two ways:
 /// 1. Trailing operator: `expr +\n  expr` - skips newline/indent after operator
 /// 2. Leading operator: `expr\n  + expr` - peeks through newline/indent to find operator
+///
+/// `indent_required` variant: the leading-continuation lookahead only fires when
+/// the operator sits on a MORE DEEPLY INDENTED line. Required for `+`/`-`, which
+/// are also legal statement starts — see `parse_term`.
 macro_rules! parse_binary_multi {
+    (indent_required $fn_name:ident, $next_fn:ident, $( $token:ident => $op:expr ),+ $(,)?) => {
+        parse_binary_multi!(@impl $fn_name, $next_fn, peek_indented_operator_continuation,
+            $( $token => $op ),+);
+    };
     ($fn_name:ident, $next_fn:ident, $( $token:ident => $op:expr ),+ $(,)?) => {
+        parse_binary_multi!(@impl $fn_name, $next_fn, peek_through_newlines_and_indents,
+            $( $token => $op ),+);
+    };
+    (@impl $fn_name:ident, $next_fn:ident, $peek_fn:ident, $( $token:ident => $op:expr ),+ $(,)?) => {
         pub(crate) fn $fn_name(&mut self) -> Result<Expr, ParseError> {
             let mut left = self.$next_fn()?;
             loop {
@@ -69,7 +81,7 @@ macro_rules! parse_binary_multi {
                 // Only check if current token is Newline or Indent
                 if matches!(self.current.kind, TokenKind::Newline | TokenKind::Indent) {
                     let found_op = {
-                        let peeked = self.peek_through_newlines_and_indents();
+                        let peeked = self.$peek_fn();
                         match peeked {
                             $( Some(TokenKind::$token) => Some($op), )+
                             _ => None,
@@ -372,7 +384,11 @@ impl<'a> Parser<'a> {
         Ok(left)
     }
 
-    parse_binary_multi!(parse_term, parse_factor,
+    // Additive operators: `+` and `-`. `indent_required` because these are the
+    // only binary operators that are also legal STATEMENT starts (unary sign).
+    // A same-indent `-1` line after `return 15` is a new statement, not a
+    // continuation — gluing it produced `return (15 - 1)` == 14.
+    parse_binary_multi!(indent_required parse_term, parse_factor,
         Plus => BinOp::Add,
         Minus => BinOp::Sub,
     );

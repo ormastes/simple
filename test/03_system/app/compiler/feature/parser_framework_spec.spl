@@ -1,0 +1,91 @@
+# codex-system-test
+# @tag: system, compiler, structural_compute, parse
+
+use std.spec
+use std.common.structural.parse.*
+
+val D_NUMBER: i64 = 1
+val D_SPACE: i64 = 2
+val D_IDENT: i64 = 3
+
+fn framework_byte_class() -> [u8]:
+    var out: [u8] = []
+    var b = 0
+    while b < 256:
+        var cls = 0
+        if b >= 48 and b <= 57:
+            cls = 1
+        elif b == 32:
+            cls = 2
+        elif (b >= 97 and b <= 122) or (b >= 65 and b <= 90):
+            cls = 3
+        out = out.push(cls as u8)
+        b = b + 1
+    out
+
+fn framework_transitions() -> [u32]:
+    val no = PARSE_NO_ID
+    [no, 1u32, 2u32, 3u32,
+     no, 1u32, no, no,
+     no, no, 2u32, no,
+     no, 3u32, no, 3u32]
+
+fn framework_dialect() -> ParseDialect:
+    val program = parse_lex_program(
+        7u32,
+        4,
+        4,
+        0u32,
+        framework_byte_class(),
+        framework_transitions(),
+        [0u16, D_NUMBER as u16, D_SPACE as u16, D_IDENT as u16],
+        [PARSE_STATE_FLAG_NONE, PARSE_STATE_FLAG_NONE, PARSE_STATE_FLAG_SKIP, PARSE_STATE_FLAG_NONE]
+    )
+    parse_dialect_lexical(11u32, program)
+
+fn framework_request(source: text, mode: text) -> ParseRequest:
+    parse_request(
+        parse_source_blob_from_text(source),
+        0u32,
+        PARSE_OUTPUT_TOKENS | PARSE_OUTPUT_DIAGNOSTICS,
+        PARSE_TAG_DEMAND_OFF,
+        mode,
+        parse_capacity_manifest(4096, 256, 64)
+    )
+
+describe "parser framework baseline":
+    it "keeps scalar oracle determinism across repeated CPU-reference parses":
+        val dialect = framework_dialect()
+        val first = parse_run(dialect, framework_request("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+        val second = parse_run(dialect, framework_request("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+
+        expect(first.receipt.deterministic_hash).to_equal(second.receipt.deterministic_hash)
+        expect(first.receipt.item_count_out).to_equal(second.receipt.item_count_out)
+        expect(second.receipt.fallback_count).to_equal(0)
+
+    it "demotes unimplemented accelerated mode and keeps deterministic equality to CPU oracle":
+        val dialect = framework_dialect()
+        val base = parse_run(dialect, framework_request("ab 12 cd", PARSE_MODE_CPU_REFERENCE))
+        val accelerated = parse_run(dialect, framework_request("ab 12 cd", PARSE_MODE_HYBRID_VECTOR_GPU))
+
+        expect(accelerated.receipt.candidate_backend).to_equal(PARSE_MODE_HYBRID_VECTOR_GPU)
+        expect(accelerated.receipt.backend).to_equal(PARSE_BACKEND_CPU_REFERENCE)
+        expect(accelerated.receipt.fallback_count).to_equal(1)
+        expect(accelerated.receipt.deterministic_hash).to_equal(base.receipt.deterministic_hash)
+
+    it "fails closed for malformed lex programs":
+        val bad = parse_lex_program(
+            7u32,
+            4,
+            4,
+            0u32,
+            framework_byte_class(),
+            [0u32, 1u32],
+            [0u16, 1u16, 2u16, 3u16],
+            [0u16, 0u16, 0u16, 0u16]
+        )
+        val dialect = parse_dialect_lexical(11u32, bad)
+        val result = parse_run(dialect, framework_request("ab", PARSE_MODE_CPU_REFERENCE))
+
+        expect(result.receipt.fallback_reason).to_equal("parse_lex_program_malformed")
+        assert_false(result.ok)

@@ -1,7 +1,7 @@
 # `byte_at()` reads zeros out of a `slice()` result
 
 **Date:** 2026-07-28
-**Status:** Open
+**Status:** Fixed 2026-08-01
 **Severity:** High — silent wrong data, no error
 **Area:** `std.tls.utilities.{byte_at, slice}`, interpreter (test-runner engine)
 
@@ -50,9 +50,30 @@ while d < ext_data_len:
 `find_alpn_extension_data` in `src/lib/nogc_async_mut/io/tls_handshake.spl`
 does this, with a comment pointing here.
 
+## Root cause (2026-08-01)
+
+Not an array-representation bug. Two plain library defects:
+
+1. `src/lib/nogc_sync_mut/tls/_TlsUtilities/text_ops.spl` shipped `append` and
+   `len` as **placeholder stubs** — `append(list, item)` returned `list`
+   unchanged and `len(collection)` returned `0`. `slice()` builds its result
+   with `append`, so it always returned `[]`. (A builtin `len` happened to win
+   at the call site, which is why the length assertion looked green while the
+   contents were empty.)
+2. `byte_at`/`slice` in `_TlsUtilities/hex_encoding.spl` had no parameter or
+   return types, so their results were erased to `Any` and read back as `0`
+   (or as a raw tag-boxed `value << 3`) at the call boundary.
+
 ## Fix
 
-Root-cause the interaction between `slice`'s returned array representation and
-`byte_at`'s element read (suspected same family as the nested-array
-element-read shred), A/B it against the JIT and native engines, then drop the
-copy loop above.
+- Implemented `append` and `len` for real; typed `append` as `[i64] -> i64 -> [i64]`.
+- Gave `byte_at` and `slice` explicit `[i64]`/`i64` parameter and return types.
+- Dropped the byte-by-byte copy loop in `find_alpn_extension_data`
+  (`src/lib/nogc_async_mut/io/tls_handshake.spl`); it now calls `slice()`.
+
+Regression: `test/01_unit/lib/nogc_sync_mut/tls/tls_utilities_slice_byte_at_spec.spl`
+(7 examples; 5 fail without the fix, 0 fail with it).
+
+Separately found and NOT fixed here: the underlying compiler/seed defect that
+zeroes an untyped function's result — see
+`doc/08_tracking/bug/untyped_fn_result_erased_to_zero_2026-08-01.md`.

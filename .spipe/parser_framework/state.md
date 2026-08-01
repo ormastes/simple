@@ -126,9 +126,13 @@ arch-done
 ## Phase
 research-done
 
+## Phase
+impl-in-progress
+
 ## Log
 - dev: Created state file with 12 acceptance criteria (type: feature); froze shared interface and manual-step vocabulary before agent fan-out.
 - research: Five agent lanes plus root incremental research identified reusable compiler/library owners, domain constraints, eight requirement groups, and three feature/NFR bundles; awaiting mandatory user selection.
 - requirements: User selected F2 complete phased framework and N2 balanced targets; final requirement docs written and option docs deleted.
 - arch: Froze 15-module acyclic design, declarative data contracts, ordered sink, executor seams, and Simple compatibility boundary.
 - design-review: Corrected default-tier ownership, completed public type definitions, added indexed output writes and private fallback, separated semantic parity from telemetry, and made segment reuse/snapshot lineage representable.
+- impl: Added runtime/API seam placeholders in nogc_async_mut structural parse (parse_runtime/result wrappers, explicit fail-closed executor seams), added execute-seam hashes/equality helpers, and aligned placeholder exports to frozen parser-framework contracts.

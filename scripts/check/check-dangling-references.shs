@@ -54,7 +54,12 @@
 #   enum variants and local bindings count as definitions too, so a
 #   closure-valued field invoked as self.field() does not trip [2].
 #
-# * Aliased imports (`use m.{A as B}`) are skipped entirely.
+# * Aliased imports (`use m.{A as B}`) are not checked at the CALL SITE. They
+#   are still indexed as DEFINITIONS when the form is `export use` -- that is
+#   the only place the alias B is ever spelled, so without it every consumer of
+#   B reported "declared in no src file" (5 false NvfsHostedDriver findings,
+#   2026-07-28). A plain `use m.{A as B}` binds B file-locally and does not
+#   re-export it, so it contributes no definition.
 #
 # Usage: check-dangling-references.shs [--quiet] [--path FILE|DIR]...
 #   --quiet    print only the final verdict line
@@ -84,7 +89,7 @@ $1"
 ${1#--path=}"
             have_targets=1
             ;;
-        -h|--help) sed -n '2,66p' "$0"; exit 0 ;;
+        -h|--help) sed -n '2,71p' "$0"; exit 0 ;;
         *) echo "check-dangling-references: unknown argument: $1" >&2; exit 2 ;;
     esac
     shift
@@ -204,6 +209,7 @@ function decl_name(line,   cnt, w, i, saw_fn, t) {
     return t
 }
 FNR == 1 {
+    in_export_use = 0
     p = FILENAME
     sub(/\.spl$/, "", p)
     n = split(p, seg, "/")
@@ -225,6 +231,25 @@ FNR == 1 {
 }
 {
     line = $0
+    # `export use m.{A as B}` DEFINES B here: the re-exporting file is the only
+    # place B is ever spelled, so without this every consumer of B is reported
+    # "declared in no src file". Only the `export` form re-exports (the parser
+    # records a re-export surface for `export use` alone -- see
+    # 10.frontend/core/parser_decls_use.spl:_export_record_reexport_surface), so
+    # a plain `use m.{A as B}` -- a file-local binding -- contributes nothing.
+    if (in_export_use || line ~ /^[ \t]*export[ \t]+use[ \t]/) {
+        if (line ~ /^[ \t]*export[ \t]+use[ \t]/)
+            in_export_use = (line ~ /\{/ && line !~ /\}/)
+        else if (line ~ /\}/)
+            in_export_use = 0
+        al = line
+        while (match(al, /[A-Za-z_][A-Za-z0-9_]*[ \t]+as[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
+            aseg = substr(al, RSTART, RLENGTH)
+            al = substr(al, RSTART + RLENGTH)
+            acnt = split(aseg, aw, /[ \t]+/)
+            emit_def(aw[acnt])
+        }
+    }
     if (line ~ /^[ \t]*([a-z]+[ \t]+)*(fn|me)[ \t]/) {
         nm = decl_name(line)
         if (nm != "") { emit_fn(nm); emit_def(nm); next }

@@ -1528,18 +1528,26 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Add all exports to env
                                 if let Value::Dict(exports) = &value {
                                     for (name, export_value) in exports.iter() {
-                                        if let Value::Function { def, .. } = export_value {
-                                            // Don't add "main" from an imported module
-                                            // to the entry program's flat `functions` map
-                                            // -- it would leak into the `entry_main`/
-                                            // `main_to_run` fallback below and get
-                                            // auto-invoked instead of (or in place of)
-                                            // the entry script's own main. Matches the
-                                            // guard in evaluation_helpers.rs::process_use_stmt
-                                            // and register_definitions.
-                                            if name != "main" {
-                                                functions.insert(name.clone(), Arc::clone(def));
+                                        // Don't add a glob-imported "main" function to
+                                        // `functions`, `env`, or `MODULE_GLOBALS` at all --
+                                        // it would leak into the `entry_main`/`main_to_run`
+                                        // fallback below (auto-invoked instead of the entry
+                                        // script's own main) or into the final `env.get("main")
+                                        // -> as_int()` exit-code fallback (a `fn main` Value
+                                        // there fails "cannot convert function to int" even
+                                        // though the entry file never declared its own main).
+                                        // Matches the guard in
+                                        // evaluation_helpers.rs::process_use_stmt and
+                                        // register_definitions. A NAMED import
+                                        // (`use mod.{main}`) is an explicit opt-in and is not
+                                        // covered by this guard.
+                                        if let Value::Function { .. } = export_value {
+                                            if name == "main" {
+                                                continue;
                                             }
+                                        }
+                                        if let Value::Function { def, .. } = export_value {
+                                            functions.insert(name.clone(), Arc::clone(def));
                                         }
                                         env.insert(name.clone(), export_value.clone());
                                         MODULE_GLOBALS.with(|cell| {
@@ -1552,12 +1560,29 @@ pub(super) fn evaluate_module_impl(items: &[Node]) -> Result<i32, CompileError> 
                                 // Single/Aliased: bind module dict only, do NOT unpack
                             }
                         }
-                        // Also keep the module dict under its name for qualified access
-                        env.insert(binding_name.clone(), value.clone());
-                        // Sync module binding to MODULE_GLOBALS so functions can access it
-                        MODULE_GLOBALS.with(|cell| {
-                            cell.borrow_mut().insert(binding_name.clone(), value);
-                        });
+                        // Also keep the module dict under its name for qualified access.
+                        // Skip this for Glob/Group imports whose `binding_name` is only
+                        // "main" because the imported module's *file* happens to be named
+                        // `main.spl` (binding_name is derived from the last path segment
+                        // for those two targets, not chosen by the importer) -- binding a
+                        // whole-module Dict under the reserved key "main" collides with
+                        // the `env.get("main") -> as_int()` exit-code fallback below and
+                        // fails every such import with "cannot convert dict to int" even
+                        // though the entry file never declared its own main (e.g. any spec
+                        // doing `use compiler.tools.lint.main.{Linter, ...}`). A Single or
+                        // Aliased import is explicit user intent and is left untouched.
+                        let is_path_derived_main = binding_name == "main"
+                            && matches!(
+                                &use_stmt.target,
+                                ImportTarget::Glob | ImportTarget::Group(_)
+                            );
+                        if !is_path_derived_main {
+                            env.insert(binding_name.clone(), value.clone());
+                            // Sync module binding to MODULE_GLOBALS so functions can access it
+                            MODULE_GLOBALS.with(|cell| {
+                                cell.borrow_mut().insert(binding_name.clone(), value);
+                            });
+                        }
                     }
                     Err(e) => {
                         tracing::debug!("Module loading failed for '{}': {:?}", binding_name, e);

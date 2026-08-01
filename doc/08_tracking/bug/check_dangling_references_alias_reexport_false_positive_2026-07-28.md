@@ -1,6 +1,6 @@
 # `check-dangling-references.shs` reports false SYMBOL findings for alias re-exports
 
-**Status:** OPEN
+**Status:** FIXED 2026-08-01
 **Found:** 2026-07-28 (dangling-reference triage, `src/os/**` scope)
 **Area:** `scripts/check/check-dangling-references.shs`
 **Severity:** low — false positives only, no missed defects. But it inflates the
@@ -60,3 +60,23 @@ plain name is. The pass-2 call-site skip for aliased imports can stay as is.
 
 Of the 83 findings under `src/os/**` + `src/unit/**` as of 2026-07-28, **5 are
 this false positive** (all `NvfsHostedDriver`). Real remaining findings: 78.
+
+## Fix (2026-08-01)
+
+`scripts/check/check-dangling-references.shs`, pass-1 `index.awk`: a line of the
+form `export use m.{... A as B ...}` (single- or multi-line brace list) now
+emits `D B`. Restricted to the `export` form on purpose — only `export use`
+records a re-export surface in the parser
+(`src/compiler/10.frontend/core/parser_decls_use.spl`,
+`_export_record_reexport_surface`); a plain `use m.{A as B}` is a file-local
+binding and still contributes no definition. The pass-2 call-site skip for
+aliased items is unchanged.
+
+Verified: the 6 `NvfsHostedDriver` findings drop to 0, and a planted file with a
+nonexistent module, two nonexistent imported names and a nonexistent
+`self.<method>()` still produces all three finding classes (MODULE, SYMBOL,
+METHOD).
+
+Not addressed (deliberate, unchanged from before): the alias SOURCE name `A` in
+`export use m.{A as B}` is still never checked, so an alias whose source does
+not exist is not flagged.

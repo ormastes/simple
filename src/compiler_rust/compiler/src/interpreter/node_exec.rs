@@ -566,6 +566,36 @@ pub(crate) fn exec_assignment(
             return Err(crate::error::factory::cannot_assign_to_const(name));
         }
 
+        // Inside a method body, a bare `field = value` (no `self.`) would fall
+        // through to the implicit-declaration path below and mint a *fresh
+        // local* that shadows the receiver's field, leaving `self.field`
+        // untouched -- a silent wrong result. Every other lane already rejects
+        // this shape (HIR lowering: "unresolved name", MIR lowering:
+        // "assignment target has no local binding", native codegen: "llvm
+        // global store referenced undeclared symbol"), and the pure-Simple
+        // interpreter errors with "undefined variable"; only this AST
+        // interpreter silently no-opped. Reject it here so the trap is loud
+        // and the engines agree. Note the read path already errors (E1001),
+        // so this only restores read/write symmetry.
+        // See doc/08_tracking/bug/interp_implicit_self_field_assignment_silent_noop_2026-07-17.md
+        if is_first_assignment {
+            if let Some(Value::Object { class, fields }) = env.get("self") {
+                if fields.contains_key(name) {
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INVALID_ASSIGNMENT)
+                        .with_help(format!(
+                            "write `self.{name} = ...` to assign the field; `self` is implicit only in the parameter list, not in field access"
+                        ));
+                    return Err(CompileError::semantic_with_context(
+                        format!(
+                            "invalid assignment: `{name}` is a field of `{class}`; a bare `{name} = ...` creates a new local and leaves `self.{name}` unchanged"
+                        ),
+                        ctx,
+                    ));
+                }
+            }
+        }
+
         // Check immutability for reassignments (not first assignment)
         if !is_first_assignment {
             let is_immutable = IMMUTABLE_VARS.with(|cell| cell.borrow().contains(name));

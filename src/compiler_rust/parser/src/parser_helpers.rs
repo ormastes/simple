@@ -455,6 +455,56 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Like `peek_through_newlines_and_indents`, but only reports the next
+    /// meaningful token when it is on a *more deeply indented* line, i.e. at
+    /// least one `Indent` token was crossed to reach it.
+    ///
+    /// Used for leading-operator line continuation of `+`/`-`, where those two
+    /// tokens are also valid *statement* starts (a `-1` sentinel line). A
+    /// same-indent `-1` after `return 15` must stay a separate statement rather
+    /// than becoming `return (15 - 1)`.
+    /// See `doc/08_tracking/bug/if_chain_last_arm_returns_previous_value_2026-07-28.md`.
+    pub(crate) fn peek_indented_operator_continuation(&mut self) -> Option<TokenKind> {
+        let mut lookahead_pos = 0;
+        let mut saw_indent = false;
+
+        loop {
+            let token = if lookahead_pos == 0 {
+                &self.current
+            } else if lookahead_pos <= self.pending_tokens.len() {
+                &self.pending_tokens[lookahead_pos - 1]
+            } else {
+                let tok = self.lexer.next_token();
+                self.pending_tokens.push_back(tok);
+                self.pending_tokens.back().unwrap()
+            };
+
+            match &token.kind {
+                TokenKind::Indent => {
+                    saw_indent = true;
+                    lookahead_pos += 1;
+                }
+                TokenKind::Newline => {
+                    lookahead_pos += 1;
+                }
+                TokenKind::Dedent | TokenKind::Eof => {
+                    return None;
+                }
+                _ => {
+                    return if saw_indent {
+                        Some(token.kind.clone())
+                    } else {
+                        None
+                    };
+                }
+            }
+
+            if lookahead_pos > 100 {
+                return None;
+            }
+        }
+    }
+
     /// Skip through newlines and indents when we've confirmed a dot follows.
     /// Used for multi-line method chaining and binary operator line continuation.
     /// Call this AFTER peek_through_newlines_and_indents_is returns true.
