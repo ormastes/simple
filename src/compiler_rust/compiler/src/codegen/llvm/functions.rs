@@ -2368,7 +2368,14 @@ impl LlvmBackend {
                     "starts_with" => Some("rt_string_starts_with"),
                     "ends_with" => Some("rt_string_ends_with"),
                     "concat" => Some("rt_string_concat"),
-                    "char_at" | "at" => Some("rt_string_char_at"),
+                    "char_at" => Some("rt_string_char_at"),
+                    // Receiver-polymorphic; see emitter.rs. `at` on an array
+                    // receiver must reach `rt_array_at` (a real `Option`), not
+                    // the string-only `rt_string_char_at`, which answers `nil`
+                    // for every index of every array. Cranelift already routes
+                    // `at` to `rt_at` (codegen/instr/calls.rs); this keeps the
+                    // two backends from disagreeing on the same source.
+                    "at" => Some("rt_at"),
                     "char_code_at" => Some("rt_string_char_code_at"),
                     "byte_at" => Some("rt_string_byte_at"),
                     "push" => Some("rt_array_push"),

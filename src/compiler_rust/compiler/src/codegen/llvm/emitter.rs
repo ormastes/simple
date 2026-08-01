@@ -175,7 +175,17 @@ impl LlvmEmitter<'_> {
             "ends_with" => Some("rt_string_ends_with"),
             "concat" => Some("rt_string_concat"),
             "contains" | "contains_key" | "has_key" | "has" => Some("rt_contains"),
-            "char_at" | "at" => Some("rt_string_char_at"),
+            "char_at" => Some("rt_string_char_at"),
+            // Receiver-polymorphic, exactly like `index_of` below: `at` must NOT
+            // go straight to the string-only `rt_string_char_at`, which returns
+            // its receiver-mismatch `nil` for an array receiver. That made every
+            // `[T].at(i)` read as absent under LLVM — in-range hits included —
+            // while Cranelift (codegen/instr/calls.rs) returns a real `Option`
+            // via `rt_at`. Same source, two different answers per backend.
+            // `rt_at` tests the receiver: arrays get the bounds-checked
+            // `rt_array_at` Option, text keeps its raw-character result.
+            // See doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
+            "at" => Some("rt_at"),
             "char_code_at" => Some("rt_string_char_code_at"),
             "byte_at" => Some("rt_string_byte_at"),
             "join" => Some("rt_string_join"),

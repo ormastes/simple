@@ -2094,7 +2094,11 @@ impl LlvmBackend {
                 "replace" => Some("rt_string_replace"),
                 "to_upper" | "upper" => Some("rt_string_to_upper"),
                 "to_lower" | "lower" => Some("rt_string_to_lower"),
-                "char_at" | "at" => Some("rt_string_char_at"),
+                "char_at" => Some("rt_string_char_at"),
+                // Receiver-polymorphic; see emitter.rs. Routing `at` to the
+                // string-only `rt_string_char_at` made every `[T].at(i)` read
+                // as absent under LLVM. `rt_at` dispatches on the receiver.
+                "at" => Some("rt_at"),
                 "char_code_at" => Some("rt_string_char_code_at"),
                 "byte_at" => Some("rt_string_byte_at"),
                 "to_text" | "to_string" | "str" => Some("rt_to_string"),

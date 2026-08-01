@@ -1,7 +1,10 @@
 # Array `.at(i)` returns `nil` for EVERY index — all Option call sites take the None branch
 
 **Date:** 2026-08-01
-**Status:** interpreter lane FIXED; **JIT lane FIXED**; native LLVM still OPEN
+**Status:** interpreter lane FIXED; **JIT lane FIXED**; **native LLVM (Rust seed
+`compile --native`) FIXED to JIT parity** — see
+`array_at_native_llvm_lane_2026-08-01.md`. The pure-Simple `native-build` lane
+is still OPEN (no `at` arm in its MIR lowering; fails loudly).
 **Severity:** CRITICAL on native — silent wrong answer, no error, no crash
 
 ### Lane table (all rows PROVED by transcript)
@@ -10,7 +13,8 @@
 |---|---|---|---|
 | Rust-seed tree-walking interpreter | `SIMPLE_EXECUTION_MODE=interpret` | **loud** — `method 'at' not found on type 'array'` | correct Option |
 | Rust-seed JIT (**the default** for `simple foo.spl`) | default | **silent `nil` for every index** | **correct Option** (11 examples 6 failures → 11/0) |
-| Native LLVM | `simple compile --native` | **silent `nil` for every index** | still broken — NOT verified here, see below |
+| Native LLVM (Rust seed) | `simple compile --native --backend llvm` | **silent absent for every index — now CONFIRMED by running a real ELF, no longer a prediction** | **correct** (`at(0)` ABSENT→PRESENT); parity with JIT |
+| Native, pure-Simple | `simple native-build` | LOUD `unresolved method call: at` at MIR lowering | still OPEN — no `at` arm in the pure-Simple MIR lowering |
 | Pure-Simple compiler's own interpreter | n/a — cannot self-host at HEAD | implements `at` (source read; **INFERRED**, not run) | — |
 
 ### JIT lane fix — what it actually took

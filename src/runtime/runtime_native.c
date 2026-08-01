@@ -5122,6 +5122,68 @@ int64_t rt_enum_payload(int64_t value) {
     return e ? e->payload : rt_core_nil();
 }
 
+/* Array `at`: bounds-checked element access with an Option (`T?`) result.
+ *
+ * The native lane previously had NO array `at` at all -- the LLVM codegen
+ * mapped the method name `at` straight to the string-only `rt_string_char_at`
+ * with no receiver test, so `arr.at(i)` took the TEXT path and read as absent
+ * for EVERY index, in-range hits included, with no error and no crash. See
+ * doc/08_tracking/bug/array_at_native_llvm_lane_2026-08-01.md.
+ *
+ * Deliberately NOT built on rt_array_get, for two independent reasons:
+ *
+ *  1. rt_array_get NORMALIZES the index Python-style (`if (idx < 0) idx =
+ *     len + idx`), so `at(-1)` would silently wrap to the last element instead
+ *     of reporting absence. Bounds here are checked SIGNED and UNNORMALIZED,
+ *     matching the tree-walking interpreter's array `at` arm (f18c5963132) and
+ *     the Rust runtime's rt_array_at: present iff `0 <= index < len`.
+ *
+ *  2. rt_array_get reports a miss by returning the raw nil sentinel 3
+ *     (RT_NIL). Array elements on this lane are RAW i64 words, so an element
+ *     whose value happens to be 3 is indistinguishable from absence BY
+ *     CONSTRUCTION. `xs.at(3)` on `[0,1,2,3,4]` is exactly that case. A
+ *     flat/raw optional therefore cannot express this operation safely.
+ *
+ * So the result is a CANONICAL BOXED Option: enum_id 1 with ordinal Some=0 /
+ * None=1, the representation rt_is_none() above already recognises. Boxing
+ * removes the collision entirely -- absence is a distinct heap enum object,
+ * never the payload word -- which is the same conclusion the JIT lane reached
+ * in ceee960ca8e.
+ *
+ * The payload is the RAW element word, matching what `xs[i]` (rt_array_get)
+ * yields on this lane, so `.at()` and `[i]` cannot silently disagree.
+ */
+int64_t rt_array_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return rt_enum_new(1, 1, rt_core_nil());
+    if (idx < 0 || idx >= array->len) return rt_enum_new(1, 1, rt_core_nil());
+    int64_t elem;
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        elem = (int64_t)((uint8_t*)array->data)[idx];
+    } else {
+        elem = ((int64_t*)array->data)[idx];
+    }
+    return rt_enum_new(1, 0, elem);
+}
+
+/* Receiver-dispatching `at`.
+ *
+ * The codegen sites dispatch purely on the method NAME and do not all have a
+ * reliable static receiver type available, so the receiver test is done here
+ * at runtime -- the same shape as the Cranelift/JIT `rt_at` added in
+ * ceee960ca8e, so the two backends cannot answer differently for one source.
+ *
+ * Text behaviour is intentionally unchanged: `text.at(i)` still yields a raw
+ * single-character string, NOT an Option. Only the array receiver -- which
+ * previously had no implementation at all on this lane -- gains the Option.
+ */
+int64_t rt_at(int64_t receiver, int64_t index) {
+    if (rt_core_as_array(receiver)) {
+        return rt_array_at((SplArray*)(uintptr_t)receiver, index);
+    }
+    return rt_string_char_at(receiver, index);
+}
+
 int64_t rt_closure_new(int64_t func_ptr, int64_t capture_count) {
     if (!func_ptr || capture_count < 0) return rt_core_nil();
     size_t count = (size_t)capture_count;
