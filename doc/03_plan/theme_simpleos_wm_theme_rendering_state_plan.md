@@ -1,5 +1,23 @@
 # Theme rendering and WM host/simpleOS sync state (2026-07-25)
 
+## 2026-08-01 latest GH sync + runderer/IR recheck (this run)
+
+- Ran `git fetch --all --prune`; remote now at `origin/main = 5d3223e329`.
+- Search of remote refs for `runderer` found no direct branch/tag match.
+- Renderer/IR lane remains `origin/sync-renderer-ir-spec-update` (`2a4bf46c9d`) with commits:
+  - `f7b8526aa8` (`fix(web): preserve themed renderer restarts`)
+  - `2277b52949` (`test(web): enforce hosted theme receipts`)
+  - `2a4bf46c9d` (`docs: sync renderer and DrawIR IR spec plan artifacts`)
+- `tmp-docfix` is currently diverged from `origin/main` (`56` behind, `59` ahead by git count).
+- Overlap vs this lane is still limited to shared hosted web surfaces (`src/os/hosted/hosted_entry.spl`, hosted browser renderer/worker/process/protocol files, web-window renderer docs/tests), with no direct source edits touching:
+  - `src/os/compositor/host_wm_theme_bootstrap.spl`
+  - `src/os/compositor/simpleos_wm_theme_bootstrap.spl`
+  - `src/lib/common/ui/wm_theme_css.spl`
+  - `examples/09_embedded/simple_os/arch/*/gui_entry_desktop.spl`
+  - `scripts/os/make_os_disk.c`
+  - `scripts/check/check-simpleos-qemu-host-gpu-2d.shs`
+- Plan decision unchanged: keep this lane on host/SimpleOS WM snapshot-capture fidelity and capture parity; consume `sync-renderer-ir-spec-update` changes only when renderer/Web protocol scope is explicitly expanded.
+
 ## 2026-08-01 GH sync + renderer/IR scan (latest check)
 
 - Ran `git fetch --all --prune`.
