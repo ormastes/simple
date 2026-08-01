@@ -465,6 +465,92 @@ int main(int argc, char** argv) {
         found_any.then_some(set)
     }
 
+    /// Parse `nm --defined-only -S <path>` into `(symbol, type, has_size)` triples.
+    ///
+    /// `nm -S` prints `addr size type name` for a sized symbol and `addr type name` for a
+    /// symbol with no size, so field count is what distinguishes the two.
+    fn nm_defined_with_sizes(&self, path: &Path) -> Option<Vec<(String, char, bool)>> {
+        let (nm_cmd, _) = detect_nm_command(&self.options.target);
+        let out = std::process::Command::new(&nm_cmd)
+            .arg("--defined-only")
+            .arg("-S")
+            .arg(path)
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let mut result = Vec::new();
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            let (ty, name, has_size) = match parts.as_slice() {
+                [_addr, _size, ty, name] => (*ty, *name, true),
+                [_addr, ty, name] => (*ty, *name, false),
+                _ => continue,
+            };
+            let Some(ty_char) = ty.chars().next().filter(|_| ty.len() == 1) else {
+                continue;
+            };
+            result.push((name.to_string(), ty_char, has_size));
+        }
+        Some(result)
+    }
+
+    /// Guard (2026-08-01): reject FABRICATED extern definitions in the object we are about
+    /// to link — the native-lane member of the "unregistered extern silently returns 0"
+    /// family.
+    ///
+    /// Root cause, measured not assumed: when an `@extern fn foo(...)` has no implementation
+    /// anywhere, codegen does NOT leave `foo` undefined. It emits a WEAK, ZERO-SIZE
+    /// definition of `foo` into the object. Because the symbol is thereby *defined*, it
+    /// never appears in `nm -u`, so `check_no_fake_rt_stubs` below — which reads `nm -u`
+    /// output — is structurally unable to see it. That is why a missing `rt_*` extern also
+    /// slipped through despite the #97 guard, and why narrowing/widening the `rt_` prefix
+    /// filter alone fixes nothing.
+    ///
+    /// A weak, zero-size FUNCTION symbol has no body by construction, so this test needs no
+    /// heuristic and cannot false-positive on a real function: Cranelift's `Preemptible`
+    /// linkage also yields weak symbols, but a real function always carries a non-zero size.
+    ///
+    /// Freestanding targets are deliberately skipped. Baremetal/SimpleOS intrinsics (the
+    /// `@extern("bare", ...)` family) are legitimately absent at compile time and are
+    /// resolved by the boot layer; those links go through
+    /// `pipeline/native_project/stubs.rs`, which has its own per-entry fabricated-stub
+    /// ratchet. There is intentionally NO env hatch and NO allowlist on this path.
+    pub(super) fn check_no_fabricated_extern_definitions(&self, obj_path: &Path) -> LinkerResult<()> {
+        // Freestanding/baremetal: covered by the native_project fabricated-stub ratchet.
+        if matches!(
+            self.options.target.os,
+            TargetOS::Any | TargetOS::None | TargetOS::SimpleOS
+        ) {
+            return Ok(());
+        }
+        // MSVC toolchains report symbols in a different format; skip rather than misparse.
+        if is_msvc_compiler(&detect_c_compiler(&self.options.target)) {
+            return Ok(());
+        }
+        let Some(defined) = self.nm_defined_with_sizes(obj_path) else {
+            return Ok(()); // could not inspect; fail open rather than block uninspectable targets
+        };
+        let fabricated: Vec<String> = defined
+            .into_iter()
+            .filter(|(_, ty, has_size)| *ty == 'W' && !*has_size)
+            .map(|(name, _, _)| name)
+            .collect();
+        if fabricated.is_empty() {
+            return Ok(());
+        }
+        Err(LinkerError::LinkFailed(format!(
+            "native-build: {count} extern declaration(s) have NO implementation and were emitted \
+             as weak, empty (zero-size) definitions in {obj}: [{names}]. Linking would succeed and \
+             every call to them would silently return garbage instead of failing. Implement the \
+             symbol, correct the `@extern` name, or link the library that provides it.",
+            count = fabricated.len(),
+            obj = obj_path.display(),
+            names = fabricated.join(", "),
+        )))
+    }
+
     /// Guard for task #97: reject undeclared/missing `rt_*` externs instead of letting the
     /// bootstrap auto-stub generator silently fabricate a zero-returning definition for them.
     /// A fake stub for a genuine ABI symbol is indistinguishable from a real one at link time —

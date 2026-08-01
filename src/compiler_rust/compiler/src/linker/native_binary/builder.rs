@@ -89,6 +89,11 @@ impl NativeBinaryBuilder {
         std::fs::write(&obj_path, &self.object_code)
             .map_err(|e| LinkerError::LinkFailed(format!("failed to write object file: {}", e)))?;
 
+        // Reject `@extern` declarations that codegen turned into weak, empty definitions.
+        // This runs on EVERY link, not just `bootstrap_mode`: the fabrication happens in
+        // codegen, so it is present regardless of whether the auto-stub generator runs.
+        self.check_no_fabricated_extern_definitions(&obj_path)?;
+
         let mut bootstrap_stubs: Vec<PathBuf> = Vec::new();
         let runtime_free_object = !self.object_has_undefined_symbols(&obj_path);
         let bootstrap_mode = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1")

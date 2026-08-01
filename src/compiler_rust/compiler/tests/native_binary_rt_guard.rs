@@ -179,3 +179,130 @@ fn rejects_missing_rt_extern_but_allows_real_ones() {
         std::env::remove_var("SIMPLE_RUNTIME_PATH");
     }
 }
+
+/// Compile an object that contains a WEAK, ZERO-SIZE definition of `symbol` —
+/// byte-for-byte the shape that Simple codegen emits for an `@extern fn` with no
+/// implementation anywhere (measured on 2026-08-01: `nm -S main.o` reports
+/// `0000000000000000 W <name>`, i.e. weak, defined, no size, empty body).
+///
+/// Because the symbol is *defined*, it never shows up in `nm -u`, which is why the
+/// `nm -u`-based #97 guard could not see it and the build linked clean.
+fn compile_fabricated_extern_object(symbol: &str, out_dir: &Path) -> Vec<u8> {
+    let c_path = out_dir.join(format!("fab_{symbol}.c"));
+    let o_path = out_dir.join(format!("fab_{symbol}.o"));
+    std::fs::write(
+        &c_path,
+        format!(
+            r#"
+#include <stdint.h>
+__asm__(".weak {sym}\n{sym}:\n");
+extern int64_t {sym}(void);
+int spl_main(void) {{
+    return (int){sym}();
+}}
+"#,
+            sym = symbol
+        ),
+    )
+    .expect("write fabricated-extern c source");
+    let status = std::process::Command::new(cc())
+        .arg("-c")
+        .arg("-o")
+        .arg(&o_path)
+        .arg(&c_path)
+        .status()
+        .expect("invoke cc");
+    assert!(status.success(), "failed to compile fabricated-extern object for {symbol}");
+    std::fs::read(&o_path).expect("read fabricated-extern object")
+}
+
+/// Regression test for the native-lane member of the "unregistered extern silently
+/// returns 0" family (2026-08-01).
+///
+/// RED before the fix: `NativeBinaryBuilder::build()` linked this object clean and
+/// produced a runnable binary, because the fabricated symbol is DEFINED (weak,
+/// zero-size) and therefore invisible to the `nm -u`-based #97 guard. Reproduced
+/// end-to-end through `simple compile --native` with `@extern fn
+/// lane_definitely_absent(x: i64) -> i64` and no implementation: build exit 0,
+/// artifact produced, guard silent — for BOTH an `rt_`-prefixed and a non-`rt_`
+/// symbol name, with and without `SIMPLE_BOOTSTRAP=1`.
+///
+/// Note the prefix is irrelevant here on purpose: case 1 uses a non-`rt_` name (the
+/// class the old guard filtered out entirely) and case 2 uses an `rt_` name (which
+/// the old guard *claimed* to cover but structurally could not).
+#[test]
+fn rejects_fabricated_weak_empty_extern_definitions() {
+    let _guard = ENV_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let temp_dir = tempfile::tempdir().expect("tempdir");
+
+    // --- Case 1: non-`rt_` fabricated extern must FAIL the build, naming the symbol.
+    {
+        let obj = compile_fabricated_extern_object("lane_definitely_absent", temp_dir.path());
+        let out_path = temp_dir.path().join("fab_nonrt_out");
+        let result = NativeBinaryBuilder::new(obj)
+            .target(Target::host())
+            .output(&out_path)
+            .build();
+
+        assert!(
+            result.is_err(),
+            "expected build() to reject a fabricated weak/empty non-rt_ extern, but it succeeded"
+        );
+        let message = format!("{}", result.unwrap_err());
+        assert!(
+            message.contains("lane_definitely_absent"),
+            "error message should name the offending symbol, got: {message}"
+        );
+    }
+
+    // --- Case 2: same defect with an `rt_` name — the old guard could not see this either.
+    {
+        let obj = compile_fabricated_extern_object("rt_lane_definitely_absent", temp_dir.path());
+        let out_path = temp_dir.path().join("fab_rt_out");
+        let result = NativeBinaryBuilder::new(obj)
+            .target(Target::host())
+            .output(&out_path)
+            .build();
+
+        assert!(
+            result.is_err(),
+            "expected build() to reject a fabricated weak/empty rt_ extern, but it succeeded"
+        );
+        let message = format!("{}", result.unwrap_err());
+        assert!(
+            message.contains("rt_lane_definitely_absent"),
+            "error message should name the offending symbol, got: {message}"
+        );
+    }
+
+    // --- Case 3: NON-VACUITY CONTROL. An object with no fabricated symbols must still
+    // build. Without this, cases 1 and 2 would also pass if build() always failed.
+    // Measured on a real program (structs, generics, List, string interpolation,
+    // `print`): zero weak zero-size definitions, so the guard does not false-positive.
+    {
+        let c_path = temp_dir.path().join("control.c");
+        let o_path = temp_dir.path().join("control.o");
+        std::fs::write(&c_path, "int spl_main(void) { return 7; }\n").expect("write control c");
+        let status = std::process::Command::new(cc())
+            .arg("-c")
+            .arg("-o")
+            .arg(&o_path)
+            .arg(&c_path)
+            .status()
+            .expect("invoke cc");
+        assert!(status.success(), "failed to compile control object");
+        let obj = std::fs::read(&o_path).expect("read control object");
+
+        let out_path = temp_dir.path().join("control_out");
+        let result = NativeBinaryBuilder::new(obj)
+            .target(Target::host())
+            .output(&out_path)
+            .build();
+
+        assert!(
+            result.is_ok(),
+            "control object with no fabricated symbols must still link, got: {:?}",
+            result.err()
+        );
+    }
+}
