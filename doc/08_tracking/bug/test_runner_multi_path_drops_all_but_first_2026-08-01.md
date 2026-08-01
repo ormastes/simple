@@ -499,3 +499,70 @@ The premise that the matcher-word form is the dominant idiom does **not** hold
 at this tip: it is ~1.4% of assertion lines. What is true is that **137 spec
 files consist entirely of it and therefore could never fail on the `run`
 path** — their green was structural, not earned.
+
+### Newly-visible pre-existing failures — enumeration (2026-08-01)
+
+Every `*_spec.spl` containing at least one matcher-word assertion was run under
+`simple run` with the OLD and NEW debug drivers (identical trees apart from this
+fix). Exit codes read from a file, never a pipe. **130 of the 157 files** were
+measured before the sweep was cut for machine time; the unmeasured remainder is
+almost entirely `test/unit/**` duplicates of already-measured `test/01_unit/**`
+paths.
+
+| transition (spec exit code) | count |
+|---|---|
+| `0 -> 0` still green | 36 |
+| `0 -> 1` **newly RED** | **2** |
+| `1 -> 0` newly green | 40 |
+| `1 -> 1` still red | 51 |
+| `134 -> 134` (SIGABRT both sides, unrelated) | 1 |
+
+Example-level across the same 130 specs: **451 failing examples before, 238
+after**. 9 specs gained failing examples; 50 lost them.
+
+**These move in both directions, and both directions are corrections.** The old
+matcher-word form was not purely fail-open — it was fail-open on the matcher and
+wrongly fail-closed on the subject. `expect(a)` alone reached the unrelated
+hollow-call heuristic in `bdd.rs`, so any spec writing `expect xs.len()
+to_equal 0` was **falsely RED** ("expected call result to be truthy, got 0")
+while a genuine mismatch was **falsely GREEN**. Fixing the parse removes the
+first and exposes the second. Nothing was weakened, skipped or retimed to
+produce the green transitions.
+
+Newly RED specs (exit `0 -> 1`):
+
+- `test/01_unit/app/ui/html_render_spec.spl` — 1 of 47
+- `test/03_system/gui/ui/widget_coverage_spec.spl` — 2 of 23
+
+Specs gaining failing examples (pre-existing failures, newly visible):
+
+| delta | spec | before -> after |
+|---|---|---|
+| +4 | `test/01_unit/app/ui/diff_patch_spec.spl` | 4 -> 8 of 10 |
+| +4 | `test/unit/app/ui/diff_patch_spec.spl` | 4 -> 8 of 10 |
+| +3 | `test/01_unit/app/ui/widget_modifiers_spec.spl` | 1 -> 4 of 25 |
+| +3 | `test/unit/app/ui/widget_modifiers_spec.spl` | 1 -> 4 of 25 |
+| +2 | `test/01_unit/app/svim/core_spec.spl` | 3 -> 5 of 25 |
+| +2 | `test/unit/app/svim/core_spec.spl` | 3 -> 5 of 25 |
+| +2 | `test/03_system/feature/app/web_dashboard/dashboard_render_spec.spl` | 1 -> 3 of 27 |
+| +2 | `test/03_system/gui/ui/widget_coverage_spec.spl` | 0 -> 2 of 23 |
+| +1 | `test/01_unit/app/ui/html_render_spec.spl` | 0 -> 1 of 47 |
+
+Worked example, `test/01_unit/app/ui/diff_patch_spec.spl` — both directions in
+one file:
+
+- OLD-only failures, now correctly green: *produces empty patch list for
+  identical trees* and *produces no patches when children are identical*, both
+  reported `expected call result to be truthy, got 0` — 0 was the **expected**
+  answer.
+- NEW failures, previously invisible: six examples now report
+  `expected false to equal true` (*produces RemoveProp / UpdateProp for added
+  property / UpdateLayout / UpdateVisibility / InsertChild / RemoveChild*).
+
+Same shape in `test/01_unit/app/ui/builder_spec.spl`: three
+`expected call result to be truthy` false REDs disappear and one real failure
+appears — `expect tree.theme to_equal "dark"` where the value is `glass_dark`.
+
+**All failures listed here are pre-existing and newly visible. None was
+introduced by this fix, and none was suppressed to obtain a green.** They are
+recorded here rather than repaired; repairing them is separate product work.
