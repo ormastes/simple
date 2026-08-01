@@ -1107,6 +1107,21 @@ impl<'a> MirLowerer<'a> {
         self.state.try_set_current_block(block)
     }
 
+    /// Open a fresh block after the current one has been given an explicit
+    /// terminator (`return` / `break` / `continue`).
+    ///
+    /// Without this, statements that textually follow such a terminator in the
+    /// same source block are lowered into the block that was just terminated:
+    /// they are appended to its instruction list and still execute, and a
+    /// later terminator write OVERWRITES the one already stored (so the LAST
+    /// `return` in a block wins instead of the first). The new block is
+    /// unreachable by construction — nothing jumps to it — so it is dropped by
+    /// later passes unless something is lowered into it.
+    pub(super) fn start_unreachable_block(&mut self) -> MirLowerResult<()> {
+        let next = self.with_func(|func, _| func.new_block())?;
+        self.set_current_block(next)
+    }
+
     /// Push loop context - for break/continue handling
     pub(super) fn push_loop(&mut self, ctx: LoopContext) -> MirLowerResult<()> {
         self.state.try_loop_stack_mut().map(|stack| stack.push(ctx))

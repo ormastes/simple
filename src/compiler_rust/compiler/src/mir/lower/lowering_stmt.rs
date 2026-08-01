@@ -894,6 +894,12 @@ impl<'a> MirLowerer<'a> {
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Return(ret_reg);
                 })?;
+                // The block is now terminated. Any statements that textually
+                // follow this `return` in the same block are unreachable, so
+                // lower them into a fresh block: otherwise they are appended
+                // to this block and still execute, and a later `return` here
+                // OVERWRITES the terminator just written (last-return-wins).
+                self.start_unreachable_block()?;
                 Ok(())
             }
 
@@ -1339,6 +1345,10 @@ impl<'a> MirLowerer<'a> {
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Jump(loop_ctx.break_target);
                 })?;
+                // Same terminator-clobber hazard as `return` above: statements
+                // after a `break` in the same block are unreachable and must
+                // not be appended to the block we just terminated.
+                self.start_unreachable_block()?;
                 Ok(())
             }
 
@@ -1356,6 +1366,8 @@ impl<'a> MirLowerer<'a> {
                     let block = func.block_mut(current_block).unwrap();
                     block.terminator = Terminator::Jump(loop_ctx.continue_target);
                 })?;
+                // Same terminator-clobber hazard as `return` / `break` above.
+                self.start_unreachable_block()?;
                 Ok(())
             }
 

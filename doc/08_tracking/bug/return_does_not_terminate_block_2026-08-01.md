@@ -6,10 +6,14 @@
   - pure-Simple: `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:1138-1168`
     (`lower_return_expr`), terminator write in
     `src/compiler/50.mir/mir_data.spl:548-557` (`set_terminator`)
-- **Severity:** medium. **Confined to statements after a `return` in the
-  SAME block** — i.e. strictly unreachable code. All *reachable* return
-  semantics were measured correct (see "Not affected" below).
-- **Status:** OPEN — diagnosed and reproduced, not yet fixed.
+- **Severity:** medium-high. Confined to statements after a terminator in
+  the SAME block (unreachable code), but that dead code EXECUTES and can
+  mutate live variables — see the `continue` case below, which returned
+  300 instead of 0. All *reachable* control flow was measured correct.
+- **Status:** FIXED in the Rust seed (verified RED->GREEN on real native
+  ELF binaries, see "Verification" below). The pure-Simple site is still
+  OPEN — it could not be exercised because the deployed `bin/simple`
+  rejects a bare `.spl` path.
 
 ## Symptom
 
@@ -93,11 +97,55 @@ fn e(x: i64) -> i64:
 `Control::Return`. The tree-walking interpreter is not the defect; the
 reproduction above goes through MIR on every lane tested.
 
+## The same defect has three members, not one
+
+`break` (lowering_stmt.rs:1328) and `continue` (:1345) write their `Jump`
+terminator the same way and likewise never open a new block. The
+`continue` case is the worst of the three because the dead statements
+mutate a live variable that is read after the loop:
+
+```
+fn cont() -> i64:
+    var n = 0
+    for v in [1,2,3]:
+        continue
+        print "CONT_DEAD_RAN"
+        n = n + 100
+    n
+```
+
+Pre-fix this printed `CONT_DEAD_RAN` three times and returned **300**;
+post-fix it prints nothing and returns **0**.
+
+## Verification (PROVED, RED -> GREEN)
+
+Both compilers were built by this lane from the same source tree
+(`cargo build --release --bin simple`), differing only by the fix, and
+both fixtures were compiled to real native ELF binaries and run:
+
+| case | pre-fix | post-fix | expected |
+|---|---|---|---|
+| `a()` | `A_TAIL_RAN` printed, a=1 | silent, a=1 | silent, 1 |
+| `b()` | `B_MID_RAN` printed, b=1 | silent, b=1 | silent, 1 |
+| `c()` | `C1`,`C2` printed, **c=3** | silent, **c=1** | silent, 1 |
+| `d()` | `D_NESTED_RAN` printed, d=1 | silent, d=1 | silent, 1 |
+| `brk()` | `BRK_DEAD_RAN` printed | silent | silent |
+| `cont()` | `CONT_DEAD_RAN` x3, **cont=300** | silent, **cont=0** | silent, 0 |
+
+No-regression controls (reachable control flow), byte-identical output
+pre- and post-fix: early return out of an `if` (`e(5)=1`, no
+`E_AFTER_IF_RAN`), early return out of a `for` (`F_LOOP_BODY 1` only,
+`f=2`), nested `if`-in-`if` return (`g(5)=1`), and
+`guarded(5)=1 / guarded(-5)=2 / loop_ret=2`.
+
 ## Fix shape
 
-After emitting a `Return` terminator, start a fresh (unreachable) block so
-later statements lower into it instead of clobbering, and/or make
-`set_terminator` refuse to overwrite an existing explicit terminator.
+After emitting a `Return` / `Jump` terminator, start a fresh (unreachable)
+block so later statements lower into it instead of clobbering. Implemented
+as `start_unreachable_block()` in `lowering_core.rs`, called from all three
+of `HirStmt::Return`, `HirStmt::Break` and `HirStmt::Continue`. The new
+block is unreachable by construction (nothing jumps to it), so it costs
+nothing when the following statements are absent.
 Note `current_block_has_explicit_terminator()` is **already used** at ~20
 control-flow-join sites — it is not a dormant unused helper — so the new
 guard must be added at the `Return` emission site itself.
