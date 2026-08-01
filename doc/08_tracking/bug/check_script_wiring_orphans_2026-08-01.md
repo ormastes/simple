@@ -292,8 +292,8 @@ status read from a file, not a pipe.
 | Guard | State | Count it would flag |
 |---|---|---|
 | `check-dangling-references.shs` | RED, exit 1 | **297 dangling references** -- imported names declared in no src file (`src/os/userlib/_Window/*` is a large cluster). Unresolved-symbol class; highest-value single item left. |
-| `check-runtime-bundle-duplicate-symbols.shs` | RED, exit 1 | baselined 72, current 74, **new 2**: `rt_file_is_regular_no_follow`, `rt_is_interpreter_runtime`, each defined by both `runtime.c` and `runtime_native.c`. The guard's own text: *every native link will fail*. Fix is to remove a duplicate C definition -- do NOT baseline it. |
-| `check-runtime-symbol-lane-divergence.shs` | RED, exit 1 | 903 symbols scanned, baselined 114, current 115, **new 1**: `rt_time_now_monotonic_ms` in `runtime_native.c` + `runtime_time.c`. Two implementations that may disagree = silent wrong value. |
+| `check-runtime-bundle-duplicate-symbols.shs` | ~~RED, exit 1~~ **GREEN, exit 0** (2026-08-01) | baselined 72, current 74, **new 2**: `rt_file_is_regular_no_follow`, `rt_is_interpreter_runtime`, each defined by both `runtime.c` and `runtime_native.c`. The guard's own text said *every native link will fail* -- **that consequence was INFERRED and is REFUTED at link level** (see "Link-level verdict" below). Guard wording corrected; both pairs triaged and baselined with reasons. Now 74/74/0. |
+| `check-runtime-symbol-lane-divergence.shs` | ~~RED, exit 1~~ **GREEN, exit 0** (2026-08-01) | 907 symbols scanned, baselined 114, current 115, **new 1**: `rt_time_now_monotonic_ms` in `runtime_native.c` + `runtime_time.c`. **This one was REAL and severe** -- two different epochs behind one name. Fixed in `runtime_native.c`, then baselined with the reason. Now 115/115/0. |
 | `check-core-lib-purity.shs` | RED, exit 1 | baselined 13, current 17, **new 5** (`font_registry.spl`, `js/engine/runtime.spl`, `renderdoc/backend_render_receipt_wire.spl`, `ui/widget_draw_ir.spl`, `ui/window_scene_draw_ir.spl`) **plus 1 stale baseline entry** (`ui/win_text_access.spl`). Tighten, never drop. |
 | `check-api-arch-guard.shs` | RED, exit 1, 106s | 2 arch-doc hash mismatches (`00_compiler_architecture.md`, `mcp_performance_regression_enforcement.md`) + module-symbol drift. Baseline is doc-hash based and needs `--update-baseline` by an owner. |
 | `check-type-name-collisions.shs` | exit **0**, warn-only | **85 colliding names** (e.g. `HandshakeResult` declared as both enum and struct). Exits 0 by design, so wiring it as-is gates nothing -- it must be promoted to fail-on-new-collision first. |
@@ -322,3 +322,88 @@ Orphans remaining: **360**, of which **127** still carry the placeholder reason
 (down from 141: 2 were wired and 12 placeholder reasons were replaced with a
 substantive one, so "deliberately not a gate" is now distinguishable from
 "someone forgot" for those).
+
+## Link-level verdict on "every native link will fail" (2026-08-01) -- REFUTED
+
+Base sha `9349ff90f60fbce062d9a5c321df9ed51cd9b4fd`, origin-tip worktree, real
+`clang-18` + `ld.lld-18`. The static fact (each of
+`rt_file_is_regular_no_follow` / `rt_is_interpreter_runtime` defined once in
+`src/runtime/runtime.c` and once in `src/runtime/runtime_native.c`) is
+confirmed. The **consequence** was inferred from file contents and is wrong.
+
+### PROVED
+
+1. `runtime.o` and `runtime_native.o` already share **23 strong (`T`) symbols**
+   at this sha -- `rt_dir_create`, `rt_fd_write`, `rt_fd_read_until`,
+   `rt_fd_close`, `rt_text_to_bytes`, the `rt_bdd_*` family, and others. The two
+   new symbols join a large pre-existing family, they do not create one.
+2. `ld.lld-18` linking just those two objects **without** muldefs reports
+   **20 duplicate-symbol errors** -- so if the build linked them naively, it
+   would have been failing on 20 other symbols long before these two.
+3. `llvm_native_link.spl` passes `allow_duplicate_definitions: not
+   stage4_requested` (line ~1579), i.e. `-z muldefs` /
+   `--allow-multiple-definition` on the default profile. Linking the **full
+   14-object bundle** from `runtime_compiler.spl`'s `sources` array with that
+   flag: `rc=0`, `0` duplicate errors, `0` undefined symbols, output is a real
+   `ELF 64-bit LSB pie executable`, `nm` shows all three symbols at real
+   addresses (`T rt_file_is_regular_no_follow` @ `0x197c0`,
+   `T rt_is_interpreter_runtime` @ `0x16290`,
+   `T rt_time_now_monotonic_ms` @ `0x34b50`), and **running it** prints
+   `is_regular(/etc/hostname)=1 / is_interp=0 / mono_ms_positive=1`, exit 0.
+4. `runtime` (i.e. `runtime.c`) is **not** one of the stage4 `candidate_labels`
+   (`compiler_backfill, runtime_native, runtime_legacy_compat, runtime_process,
+   runtime_dynload, runtime_font, runtime_memtrack, runtime_timestamp`), so a
+   `runtime.c` / `runtime_native.c` pair never reaches a stage4 archive core.
+5. The Rust driver's own native link (`build_c_runtime_library` in
+   `src/compiler_rust/compiler/src/pipeline/native_project/tools.rs`) compiles
+   `runtime_native.c` and **not** `runtime.c` -- mutually exclusive there.
+6. The guard's own numbers refute it: **72 duplicate pairs were already
+   baselined** in this same bundle, 31 of them `runtime.c,runtime_native.c`.
+
+**Verdict: not a live breakage.** Native links work today and would have kept
+working. The 2026-07-24 regression the guard's header cites was real but was
+specific to the **stage4 strict** profile.
+
+### Still worth fixing (and fixed)
+
+Both pairs are deliberate per-lane definitions -- lane C
+(`src/app/compile/native.spl` `rt_sources`) compiles `runtime.c` without
+`runtime_native.c`; lane B (`native_project/tools.rs`) compiles
+`runtime_native.c` without `runtime.c` -- so neither copy can be deleted.
+Bodies were compared and are byte-identical (`rt_file_is_regular_no_follow`) /
+both `return false;` (`rt_is_interpreter_runtime`, and the `runtime_native.c`
+copy is inside `#if defined(SIMPLE_CORE_C_STANDALONE)`). Baselined with those
+reasons. The guard's failure message was rewritten to state the real
+consequence per link profile -- **first-definition-wins under muldefs, so
+behavioral drift becomes a silent wrong answer, not a build error** -- instead
+of the false "every native link will fail". Threshold unchanged (0 new fails).
+
+## `rt_time_now_monotonic_ms` -- GENUINE divergence, FIXED
+
+Not the same story. Two lanes, **two different epochs behind one public name**:
+
+| lane | source | reading at startup |
+|---|---|---|
+| A (Rust-seed cdylib) | `src/runtime/runtime_time.c` | `0` (ms since process start) |
+| B (core-c bootstrap) | `src/runtime/runtime_native.c` | `22255054` (ms since **boot**; box uptime `22255060`) |
+| interp | `src/compiler_rust/compiler/src/interpreter_extern/file_io.rs` | `0` (ms since process start, `Instant` baseline) |
+
+PROVED by compiling each lane's source set and **running two real linked ELF
+binaries**, not by reading source. `runtime_native.c` was the outlier, 2 of 3
+lanes agreed on process-relative, and its own sibling doc comment in
+`file_io.rs` documents the process-start contract.
+
+All current in-tree callers (`src/lib/nogc_sync_mut/diag.spl`,
+`src/lib/nogc_sync_mut/src/core/decorators.spl`,
+`src/compiler/80.driver/driver_log_helpers.spl`,
+`src/lib/nogc_sync_mut/io/browser_net_runtime.spl`) use the value as a
+**delta**, so the divergence was latent rather than actively corrupting -- but
+any caller reading it as "elapsed since process start" (what the name and the
+other two lanes promise) was silently wrong on lane B only.
+
+Fixed in `src/runtime/runtime_native.c` by capturing a process-start baseline.
+Verified by relinking and running: reading is now `0` at startup on both lanes,
+and a 120 ms `nanosleep` still yields `delta=120`, so monotonic-delta semantics
+are preserved. `rt_time_now_ns` / `rt_time_now_nanos` / `rt_time_now_micros`
+were deliberately left absolute -- they are separately baselined and owned by
+another lane.

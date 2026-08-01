@@ -7634,8 +7634,36 @@ int64_t rt_time_now_micros(void) {
     return rt_time_now_ns() / 1000LL;
 }
 
+/* Lane-divergence fix (2026-08-01, proved by running two real linked ELFs):
+ * this used to return `rt_time_now_micros() / 1000`, i.e. CLOCK_MONOTONIC
+ * ms since BOOT (measured 22255054 on a box with 22255060 ms uptime), while
+ * the other two lanes that implement the same public name return ms since a
+ * PROCESS-START baseline and read 0 at startup:
+ *   - src/runtime/runtime_time.c   (Rust-seed cdylib lane)
+ *   - rt_time_now_monotonic_ms in
+ *     src/compiler_rust/compiler/src/interpreter_extern/file_io.rs
+ * Same symbol, two epochs ~22 million apart, no build error -- the exact
+ * defect class scripts/check/check-runtime-symbol-lane-divergence.shs exists
+ * to catch. Every in-tree caller uses the value as a DELTA (now - start), so
+ * the divergence was latent rather than actively wrong, but any caller that
+ * ever treats the reading as "elapsed since process start" (which the name
+ * and the sibling lanes both promise) is silently wrong on this lane only.
+ * Aligned to the process-start baseline so all three lanes agree.
+ * NOTE: rt_time_now_ns / rt_time_now_nanos / rt_time_now_micros are left
+ * absolute here on purpose -- they are separately tracked in
+ * scripts/check/runtime_symbol_lane_divergence_baseline.txt and are owned by
+ * another lane; do not "fix" them as a side effect of this one. */
 int64_t rt_time_now_monotonic_ms(void) {
-    return rt_time_now_micros() / 1000LL;
+    static int64_t rt_monotonic_ms_baseline_ns = 0;
+    static int rt_monotonic_ms_baseline_set = 0;
+    int64_t now_ns = rt_time_now_ns();
+    if (!rt_monotonic_ms_baseline_set) {
+        rt_monotonic_ms_baseline_ns = now_ns;
+        rt_monotonic_ms_baseline_set = 1;
+    }
+    int64_t diff_ns = now_ns - rt_monotonic_ms_baseline_ns;
+    if (diff_ns < 0) diff_ns = 0;
+    return diff_ns / 1000000LL;
 }
 
 void rt_sleep_ms(int64_t ms) {

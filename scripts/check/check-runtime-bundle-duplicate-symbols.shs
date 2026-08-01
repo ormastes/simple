@@ -15,6 +15,23 @@
 # 7ce46eb187e (removed the five duplicate stubs). See also
 # .claude/memory feedback_recurring_problem_team_analysis_and_tests.
 #
+# Scope correction (2026-08-01, proved at link level, not by source
+# reading): that 2026-07-24 regression broke the STAGE4 STRICT profile,
+# where each admitted object arrives via a labelled per-provider archive
+# whose core contract rejects a doubly-defined symbol. It is NOT true that
+# any cross-file duplicate breaks *every* native link:
+#   - `runtime` (runtime.c) is not one of the stage4 candidate labels
+#     (see candidate_labels in llvm_native_link.spl), so runtime.c's object
+#     never reaches a stage4 archive core at all.
+#   - the default non-stage4 profile sets `allow_duplicate_definitions:
+#     not stage4_requested` (llvm_native_link.spl), i.e. -z muldefs, and
+#     links the whole bundle successfully with first-definition-wins.
+# Measured at 9349ff90f60: runtime.o and runtime_native.o already share 23
+# strong (T) symbols; `ld.lld-18` without muldefs reports 20 duplicate-symbol
+# errors, and WITH muldefs the full 14-object bundle links rc=0 into a real
+# ELF that runs. So the value of this gate is DRIFT detection between two
+# copies that both ship, not "the build is down".
+#
 # This gate is text/regex only (no compiler invocation, no C parser): it
 # reads the actual `sources` array (plus its two conditional
 # sources.push(...) entries) straight out of runtime_compiler.spl, so the
@@ -146,11 +163,31 @@ done <"$BASELINE"
 if [ "$new_count" -gt 0 ]; then
     echo "runtime_bundle_duplicate_symbols_ok=false"
     echo "A NEW non-static symbol is now defined by 2+ files in the runtime" >&2
-    echo "C bundle read from $COMPILER_SPL. Every native link will fail with" >&2
-    echo "\"Stage4 archive core defines \`SYMBOL\` N times\". Remove the" >&2
-    echo "duplicate definition, or if it is an intentional weak-symbol" >&2
-    echo "fallback pair, add the 'symbol<TAB>file1,file2' line to $BASELINE" >&2
-    echo "with a one-line reason." >&2
+    echo "C bundle read from $COMPILER_SPL." >&2
+    echo "" >&2
+    echo "Consequence depends on WHICH link profile consumes the object:" >&2
+    echo "  * stage4 strict profile (stage4_requested=true): the object is" >&2
+    echo "    admitted only via a labelled per-provider archive, and the" >&2
+    echo "    archive-core contract rejects a symbol defined more than once" >&2
+    echo "    -> that link FAILS. Note runtime.c itself is NOT one of the" >&2
+    echo "    stage4 candidate labels, so a runtime.c/<other>.c pair does not" >&2
+    echo "    by itself break the stage4 link." >&2
+    echo "  * default (non-stage4) profile: llvm_native_link.spl passes" >&2
+    echo "    allow_duplicate_definitions (-z muldefs / --allow-multiple-" >&2
+    echo "    definition) so the link SUCCEEDS and the FIRST definition in" >&2
+    echo "    link order silently wins. That is the real hazard here: a" >&2
+    echo "    behavioral drift between the two copies becomes a silent wrong" >&2
+    echo "    answer, not a build error." >&2
+    echo "" >&2
+    echo "Do NOT read this failure as \"every native link is broken\" without" >&2
+    echo "checking the profile -- $BASELINE already" >&2
+    echo "carries dozens of accepted pairs that link fine today." >&2
+    echo "" >&2
+    echo "Remove the duplicate definition, or if the two copies are" >&2
+    echo "deliberately per-lane (each .c belongs to a different lane's source" >&2
+    echo "set) or an intentional weak-symbol fallback pair, add the" >&2
+    echo "'symbol<TAB>file1,file2' line to $BASELINE" >&2
+    echo "with a one-line reason AND confirm the bodies agree." >&2
     exit 1
 fi
 echo "runtime_bundle_duplicate_symbols_ok=true"
