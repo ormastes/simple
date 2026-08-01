@@ -121,6 +121,13 @@ fn run_lint_command(args: [text]) -> i64:
         return 1
 
     var failed_files = 0
+    # Files the parse gate rejected. These were NOT analysed at all — no
+    # AST-based lint ran on them — so they must be counted and reported
+    # separately from files that were analysed and found faulty. Without this
+    # the verification layer reports a skipped file as "1 error" and it reads
+    # as checked. See
+    # doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
+    var not_linted_files = 0
     var lint_files: [text] = []
     var seen_targets: [text] = []
     var seen_files: [text] = []
@@ -159,9 +166,12 @@ fn run_lint_command(args: [text]) -> i64:
             continue
 
         val file_exit = run_lint_file(file_path, args)
+        if file_exit == 3:
+            not_linted_files = not_linted_files + 1
         if file_exit != 0:
             if exit_code == 0:
-                exit_code = file_exit
+                # 3 is the internal NOT-LINTED marker, not a process exit code.
+                exit_code = if file_exit == 3: 1 else: file_exit
             failed_files = failed_files + 1
 
         # SIMD opportunity pass — info severity, never increments exit code
@@ -181,15 +191,22 @@ fn run_lint_command(args: [text]) -> i64:
                     print "{file_path}:{line_str2}: info[simd_opportunity]: {easyfix_description_text(sf)}"
                 si = si + 1
 
+    # Fail closed on skipped files. A run that could not parse a file has NOT
+    # verified it, so "passed" is never a truthful summary for that run — even
+    # if every diagnostic that did surface was only a warning.
+    if not_linted_files > 0 and exit_code == 0:
+        exit_code = 1
     if failed_files > 0:
         if json_output:
-            print "{\"type\":\"lint-summary\",\"status\":\"failed\",\"failed_files\":{failed_files}}"
+            print "{\"type\":\"lint-summary\",\"status\":\"failed\",\"failed_files\":{failed_files},\"not_linted_files\":{not_linted_files}}"
         else:
             print ""
+            if not_linted_files > 0:
+                print "NOT LINTED: {not_linted_files} file(s) could not be parsed and were never analysed"
             print "Lint failed in {failed_files} file(s)"
     elif exit_code == 0:
         if json_output:
-            print "{\"type\":\"lint-summary\",\"status\":\"passed\",\"failed_files\":0}"
+            print "{\"type\":\"lint-summary\",\"status\":\"passed\",\"failed_files\":0,\"not_linted_files\":0}"
         else:
             print ""
             print "Lint passed: all files clean"

@@ -71,6 +71,42 @@ describe "simple lint CLI contract":
         expect(stdout).to_contain("PARSE001")
         expect(stdout).to_contain("Lint failed in 1 file(s)")
 
+    it "reports an unparseable file as NOT LINTED, loudly and countably":
+        # A file the parse gate rejects has been analysed LESS than a clean
+        # file, not more: every AST-based lint is skipped for it. Reporting it
+        # as one ordinary error made it read as checked. The run must name the
+        # file, count the skips separately, and exit nonzero.
+        val (stdout, stderr, code) = run_lint(["test/fixtures/lint/dirty.spl"])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("PARSE001")
+        expect(stdout).to_contain("NOT LINTED: test/fixtures/lint/dirty.spl")
+        expect(stdout).to_contain("NOT LINTED: 1 file(s) could not be parsed and were never analysed")
+        expect(stdout.contains("Lint passed")).to_equal(false)
+
+    it "never summarises a run with a skipped file as passed":
+        val (stdout, stderr, code) = run_lint(["test/fixtures/lint/dirty.spl", "test/fixtures/lint/clean.spl"])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("NOT LINTED: 1 file(s) could not be parsed and were never analysed")
+        expect(stdout.contains("Lint passed: all files clean")).to_equal(false)
+
+    it "counts skipped files in the JSON summary":
+        val (stdout, stderr, code) = run_lint(["test/fixtures/lint/dirty.spl", "--json"])
+        expect(code).to_equal(1)
+        expect(stdout).to_contain("\"type\":\"lint-not-linted\"")
+        expect(stdout).to_contain("\"not_linted\":true")
+        expect(stdout).to_contain("\"not_linted_files\":1")
+        # The human-readable summary banner must stay out of JSON mode; the
+        # phrase still appears inside the PARSE001 diagnostic message itself.
+        expect(stdout.contains("NOT LINTED: 1 file(s)")).to_equal(false)
+        expect_json_lines(stdout)
+
+    it "reports zero skipped files on a clean run":
+        val (stdout, stderr, code) = run_lint(["test/fixtures/lint/clean.spl", "--json"])
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("\"not_linted_files\":0")
+        expect(stdout.contains("lint-not-linted")).to_equal(false)
+        expect_json_lines(stdout)
+
     it "deduplicates overlapping directory and file targets":
         val (stdout, stderr, code) = run_lint([
             "./test/fixtures/pure_simple_tooling/lint_directory",

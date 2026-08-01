@@ -45,7 +45,14 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
     val parse_failed = parse_module_silent_checked(content, path)
     parser_set_had_error(previous_parse_error)
     if parse_failed:
-        val lint = Lint.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, "Source did not parse")
+        # NOT LINTED, not "one error". Every AST-based lint below this point
+        # (ARG*, COLL*, STUB*, W0406 export, wide-public, riscv-rtl) is skipped
+        # for this file, so a file that trips this gate has been *analysed less*
+        # than a clean file, not more. Wording it as a plain parse error made
+        # such files read as "checked, one problem" when in fact nothing was
+        # checked — see
+        # doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
+        val lint = Lint.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, "NOT LINTED: source did not parse - every AST-based lint was skipped for this file")
         results.push(LintResult.new(path, 1, 0, lint))
         return results
 
@@ -273,7 +280,14 @@ fn lint_main() -> Int:
             error("lint", "File not found: " + file_path)
         return 1
 
-    run_lint_file(file_path, args)
+    # Normalise the NOT-LINTED code (3) to the historical failure code on the
+    # standalone `simple_lint` entry; the loud per-file banner has already been
+    # printed by run_lint_file, and the richer code is consumed by the
+    # `simple lint` CLI summary, which is where the count belongs.
+    val standalone_rc = run_lint_file(file_path, args)
+    if standalone_rc == 3:
+        return 1
+    standalone_rc
 
 # Lint a single file and print a report, shared by the standalone
 # `simple_lint` entry above and the `simple lint` CLI wrapper
@@ -344,8 +358,11 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                 var error_count = 0
                 var warning_count = 0
                 var fix_count = 0
+                var not_linted = false
 
                 for lint_item in results:
+                    if lint_item.lint.code == "PARSE001":
+                        not_linted = true
                     if json_output:
                         var level_text = "allow"
                         match lint_item.lint.level:
@@ -369,10 +386,19 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                     if lint_item.has_easy_fix():
                         fix_count = fix_count + 1
 
+                # Render the flag as text rather than interpolating the Bool:
+                # to_text on an erased Any bool is corrupt (true -> "nil"), which
+                # would emit invalid JSON. See
+                # .claude/memory reference_to_to_text_on_erased_any_bool_corrupt.
+                val not_linted_json = if not_linted: "true" else: "false"
                 if json_output:
-                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count}}")
+                    if not_linted:
+                        print("{\"type\":\"lint-not-linted\",\"file\":\"{escape_json(file_path)}\",\"reason\":\"parse failure\"}")
+                    print("{\"type\":\"lint-file-summary\",\"file\":\"{escape_json(file_path)}\",\"errors\":{error_count},\"warnings\":{warning_count},\"fixes\":{fix_count},\"not_linted\":{not_linted_json}}")
                 else:
                     print("")
+                    if not_linted:
+                        print("NOT LINTED: {file_path} - source did not parse, so no AST-based lint ran on it")
                     print("Found {error_count} error(s), {warning_count} warning(s), {fix_count} auto-fix(es) available")
 
                 # Apply fixes if requested
@@ -382,6 +408,14 @@ fn run_lint_file(file_path: String, args: [text]) -> Int:
                         if not apply_collected_fixes(file_path, fixes_to_apply, fix_dry_run, json_output):
                             return 1
 
+                # 3 = NOT LINTED. A distinct code so the CLI summary can COUNT
+                # skipped files separately from files that were analysed and
+                # found faulty. Fail-closed: 3 is nonzero on every caller, and
+                # it is returned even if some future config downgrades PARSE001
+                # below Deny (error_count could then be 0 while the file was
+                # still never analysed).
+                if not_linted:
+                    return 3
                 if error_count > 0:
                     return 1
                 else:
