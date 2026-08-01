@@ -1,12 +1,68 @@
 # Qualified-import call statement (`module.func()`) lowers to an empty function body
 
-**Status:** open
+**Status:** fixed — `bbe045e92ce` (2026-07-29), re-verified at HEAD 2026-08-01
+
+## RESOLUTION (2026-08-01 re-verification)
+
+**Two separate things were reported here as one bug. One was never a bug; the
+other was real and is already fixed.**
+
+1. **`body.stmts.len() == 0` was NOT a drop — it is the normal tail-value
+   desugar and was a red herring.** For a *value-returning* body
+   (`fn main() -> i64:`), `lower_hir_block`
+   (`src/compiler/20.hir/hir_lowering/expressions.spl:1787-1817`) lifts the
+   trailing expression-statement out of `stmts` into `HirBlock.has` / `.value`.
+   A sole-statement body therefore *always* has `stmts.len() == 0`, qualified
+   call or not (an ordinary `fn f() -> i64: g()` behaves identically). The
+   original probe printed only `stmts.len()` and never read `body.has` /
+   `body.value`, so it could not distinguish "lifted to tail value" from
+   "dropped". `lowering.errors.len() == 0` was correct, not a silent failure.
+
+2. **The real defect was in the `ExprKind.MethodCall` lowering arm.**
+   `provider.answer()` parses as `MethodCall(receiver, method, args)`, but the
+   module-namespace redirect existed only in the sibling `Field` arm. The call
+   therefore lowered to `HirExprKind.MethodCall` on a `Module` symbol — which
+   has no runtime receiver and no such class method — so it survived
+   structurally but was semantically dead, with no diagnostic. Fixed in
+   `bbe045e92ce` by mirroring the Field arm's intent
+   (`expressions.spl:513-568`); a contributing landmine (`SymbolKind` enum
+   patterns never matching cross-module, `rt_enum_discriminant == -1`) is filed
+   separately as
+   `doc/08_tracking/bug/symbolkind_enum_match_fails_cross_module_discriminant_minus_one_2026-07-29.md`.
+
+**Regression guard:** `test/01_unit/compiler/hir/qualified_import_call_spec.spl`
+(added by the same commit; single file, no stale duplicate basename). Its third
+example is an *unqualified* control that pins the tail-value shape, so a future
+reader cannot re-derive misreading #1.
+
+### Re-verification evidence (2026-08-01, seed oracle `src/compiler_rust/target/bootstrap/simple`)
+
+Command (both directions):
+`src/compiler_rust/target/bootstrap/simple test test/01_unit/compiler/hir/qualified_import_call_spec.spl`
+
+| Tree state | Result |
+|---|---|
+| HEAD as-is (fix present) | **3 examples, 0 failures** |
+| Fix disabled (one-line mutation at `expressions.spl:549`, gating the MethodCall module-redirect off) | **3 examples, 2 failures** |
+
+The two failures are exactly the qualified-call examples; the third example —
+the *unqualified* control — still passes in both directions. So the guard is
+**non-vacuous** (it goes red when the fix is removed) and **specific** (it does
+not simply fail wholesale). The mutation was reverted and `expressions.spl`
+restored byte-identical (sha256 `ed9bcafb34a6…`).
+
+This doc was left at `Status: open` only because the fix commit never touched
+it.
+
+## Original report (2026-07-29) — kept verbatim below; see RESOLUTION above
+
 **Found:** 2026-07-29 (lane RIS1, `resolve_import_symbols_spec.spl` repair)
 **Area:** HIR lowering (`src/compiler/20.hir/hir_lowering/`), statement/call
 lowering for the `import MODULE` qualified-access form
-**Severity:** medium-high — the call is silently discarded rather than
-erroring, so downstream passes (MIR, codegen) see a function with no body at
-all
+**Severity as reported:** medium-high — "the call is silently discarded rather
+than erroring, so downstream passes (MIR, codegen) see a function with no body
+at all". Corrected: the call was never discarded, it was lowered to a
+semantically dead `MethodCall` on a module namespace (see RESOLUTION #2).
 
 ## Finding
 
@@ -71,8 +127,10 @@ rejected during resolution).
 
 ## Impact on this lane
 
-`resolve_import_symbols_spec.spl`'s "resolves a module-qualified imported
-function call" example is left red (not weakened) pending this fix. Its
+(Historical — resolved.) `resolve_import_symbols_spec.spl`'s "resolves a
+module-qualified imported function call" example was left red (not weakened)
+pending this fix; `bbe045e92ce` also repaired that example to read
+`body.value` when `stmts` is empty. Its
 harness plumbing (module_surfaces wiring) is otherwise correct — see
 `doc/08_tracking/bug/resolve_import_symbols_spec_field_and_wiring_repair_2026-07-29.md`.
 
