@@ -1,0 +1,63 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: $0 --simple PATH --evidence-dir DIR --log PATH" >&2
+    exit 2
+}
+
+fail() {
+    echo "release_beta_essential_tools_status=fail reason=$1${2:+ $2}" >&2
+    exit 1
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail missing-sha256-tool
+    fi
+}
+
+[ "$#" -eq 6 ] || usage
+[ "$1" = --simple ] || usage
+simple_bin=$2
+[ "$3" = --evidence-dir ] || usage
+evidence_dir=$4
+[ "$5" = --log ] || usage
+log_path=$6
+[ -x "$simple_bin" ] || fail missing-simple-binary "path=$simple_bin"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+mkdir -p "$evidence_dir" "$(dirname -- "$log_path")"
+log_tmp="$log_path.tmp.$$"
+receipt_tmp="$evidence_dir/essential_tools.env.tmp.$$"
+trap 'rm -f "$log_tmp" "$receipt_tmp"' EXIT HUP INT TERM
+
+if ! SIMPLE_BINARY="$simple_bin" sh "$repo_root/scripts/check/check-bootstrap-essential-tools-smoke.shs" >"$log_tmp" 2>&1; then
+    mv "$log_tmp" "$log_path"
+    fail essential-tools-command-failed "log=$log_path"
+fi
+for marker in \
+    essential_tools_pure_simple_identity=true \
+    essential_test_runner_smoke=true \
+    essential_lint_smoke=true \
+    essential_duplicate_checker_smoke=true \
+    bootstrap_essential_tools_smoke=true; do
+    grep -F -x "$marker" "$log_tmp" >/dev/null || fail missing-essential-tools-marker "marker=$marker"
+done
+mv "$log_tmp" "$log_path"
+stage4_sha256=$(sha256_file "$simple_bin")
+cat > "$receipt_tmp" <<EOF
+stage4_sha256=$stage4_sha256
+test_runner_status=pass
+lint_status=pass
+duplicate_check_status=pass
+aggregate_status=pass
+EOF
+mv "$receipt_tmp" "$evidence_dir/essential_tools.env"
+trap - EXIT HUP INT TERM
+echo "release_beta_essential_tools_status=pass stage4_sha256=$stage4_sha256 log=$log_path"

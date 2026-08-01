@@ -1,0 +1,282 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: $0 --self-test | --evidence-dir DIR [--section bootstrap|tools|platforms]" >&2
+    exit 2
+}
+
+fail() {
+    echo "release_beta_readiness_status=fail reason=$1${2:+ $2}" >&2
+    exit 1
+}
+
+receipt_value() {
+    receipt_file=$1
+    receipt_key=$2
+    count=$(awk -F= -v key="$receipt_key" '$1 == key { count += 1 } END { print count + 0 }' "$receipt_file")
+    [ "$count" -eq 1 ] || fail malformed-receipt-key "file=$receipt_file key=$receipt_key count=$count"
+    awk -F= -v key="$receipt_key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$receipt_file"
+}
+
+require_value() {
+    receipt_file=$1
+    receipt_key=$2
+    expected=$3
+    observed=$(receipt_value "$receipt_file" "$receipt_key")
+    [ "$observed" = "$expected" ] || fail receipt-value-mismatch "file=$receipt_file key=$receipt_key expected=$expected observed=$observed"
+}
+
+require_nonempty() {
+    receipt_file=$1
+    receipt_key=$2
+    observed=$(receipt_value "$receipt_file" "$receipt_key")
+    [ -n "$observed" ] || fail empty-receipt-value "file=$receipt_file key=$receipt_key"
+    printf '%s\n' "$observed"
+}
+
+require_receipt() {
+    receipt_file=$1
+    [ -f "$receipt_file" ] || fail missing-receipt "file=$receipt_file"
+    if awk 'index($0, "=") == 0 || $0 ~ /^[[:space:]]/ || $0 ~ /[[:space:]]$/' "$receipt_file" | grep -q .; then
+        fail malformed-receipt-line "file=$receipt_file"
+    fi
+}
+
+sha256_file() {
+    file=$1
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$file" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$file" | awk '{print $1}'
+    else
+        fail missing-sha256-tool
+    fi
+}
+
+require_at_most() {
+    metric_name=$1
+    observed=$2
+    ceiling=$3
+    case "$ceiling" in *[!0-9]*|'') fail malformed-resource-ceiling "key=$metric_name value=$ceiling" ;; esac
+    [ "$observed" -le "$ceiling" ] || fail resource-ceiling-exceeded "key=$metric_name observed=$observed ceiling=$ceiling"
+}
+
+validate_bootstrap() {
+    evidence_dir=$1
+    bootstrap="$evidence_dir/bootstrap.env"
+    require_receipt "$bootstrap"
+    source_revision=$(require_nonempty "$bootstrap" source_revision)
+    version=$(require_nonempty "$bootstrap" version)
+    require_value "$bootstrap" stage2_status pass
+    require_value "$bootstrap" stage3_status pass
+    require_value "$bootstrap" stage4_status pass
+    require_value "$bootstrap" stub_fallback disabled
+    stage4_path=$(require_nonempty "$bootstrap" stage4_path)
+    stage4_sha256=$(require_nonempty "$bootstrap" stage4_sha256)
+    [ -x "$stage4_path" ] || fail missing-stage4-executable "path=$stage4_path"
+    observed_sha256=$(sha256_file "$stage4_path")
+    [ "$observed_sha256" = "$stage4_sha256" ] || fail stage4-sha256-mismatch "expected=$stage4_sha256 observed=$observed_sha256"
+    for metric in stage2_elapsed_seconds stage2_max_rss_kb stage3_elapsed_seconds stage3_max_rss_kb stage4_elapsed_seconds stage4_max_rss_kb; do
+        value=$(require_nonempty "$bootstrap" "$metric")
+        case "$value" in *[!0-9]*|'') fail malformed-resource-metric "key=$metric value=$value" ;; esac
+    done
+    stage3_elapsed_seconds=$(receipt_value "$bootstrap" stage3_elapsed_seconds)
+    require_at_most stage3_elapsed_seconds "$stage3_elapsed_seconds" "${RELEASE_BETA_STAGE3_ELAPSED_CEILING_SECONDS:-254}"
+    max_rss_ceiling_kb=${RELEASE_BETA_STAGE_MAX_RSS_CEILING_KB:-25165824}
+    for metric in stage2_max_rss_kb stage3_max_rss_kb stage4_max_rss_kb; do
+        require_at_most "$metric" "$(receipt_value "$bootstrap" "$metric")" "$max_rss_ceiling_kb"
+    done
+    echo "release_beta_bootstrap_status=pass source_revision=$source_revision version=$version stage4_sha256=$stage4_sha256 stub_fallback=disabled"
+}
+
+validate_tools() {
+    evidence_dir=$1
+    bootstrap="$evidence_dir/bootstrap.env"
+    tools="$evidence_dir/essential_tools.env"
+    checkers="$evidence_dir/release_checkers.env"
+    require_receipt "$bootstrap"
+    require_receipt "$tools"
+    require_receipt "$checkers"
+    stage4_sha256=$(receipt_value "$bootstrap" stage4_sha256)
+    require_value "$tools" stage4_sha256 "$stage4_sha256"
+    for key in test_runner_status lint_status duplicate_check_status aggregate_status; do require_value "$tools" "$key" pass; done
+    for key in executable_status payload_status simpleos_status mcp_status lsp_status; do require_value "$checkers" "$key" pass; done
+    echo "release_beta_tools_status=pass stage4_sha256=$stage4_sha256"
+    echo "release_beta_checkers_status=pass"
+}
+
+validate_platforms() {
+    evidence_dir=$1
+    platforms="$evidence_dir/platforms.env"
+    require_receipt "$platforms"
+    for platform in linux-x86_64 linux-aarch64 linux-riscv64 freebsd-x86_64 freebsd-x86 windows-x86_64 windows-aarch64; do
+        key=$(printf '%s' "$platform" | tr '-' '_')
+        require_value "$platforms" "platform_${key}_status" pass
+        role=$(receipt_value "$platforms" "platform_${key}_role")
+        artifact=$(require_nonempty "$platforms" "platform_${key}_artifact")
+        expected_sha256=$(require_nonempty "$platforms" "platform_${key}_sha256")
+        [ -f "$artifact" ] || fail missing-platform-artifact "platform=$platform path=$artifact"
+        observed_sha256=$(sha256_file "$artifact")
+        [ "$observed_sha256" = "$expected_sha256" ] || fail platform-sha256-mismatch "platform=$platform expected=$expected_sha256 observed=$observed_sha256"
+        case "$role" in executable|source) ;; *) fail unknown-platform-role "platform=$platform role=$role" ;; esac
+        payload_kind=$(receipt_value "$platforms" "platform_${key}_payload_kind")
+        [ "$payload_kind" = "$role" ] || fail platform-role-payload-mismatch "platform=$platform role=$role payload_kind=$payload_kind"
+        echo "platform_${platform}=pass role=$role sha256=$expected_sha256"
+    done
+    echo "release_beta_platforms_status=pass"
+}
+
+validate_final() {
+    evidence_dir=$1
+    validate_bootstrap "$evidence_dir"
+    validate_tools "$evidence_dir"
+    validate_platforms "$evidence_dir"
+    bootstrap="$evidence_dir/bootstrap.env"
+    verification="$evidence_dir/verification.env"
+    github="$evidence_dir/github_release.env"
+    require_receipt "$verification"
+    require_receipt "$github"
+    source_revision=$(receipt_value "$bootstrap" source_revision)
+    version=$(receipt_value "$bootstrap" version)
+    stage4_sha256=$(receipt_value "$bootstrap" stage4_sha256)
+    require_value "$verification" source_revision "$source_revision"
+    require_value "$verification" version "$version"
+    require_value "$verification" stage4_sha256 "$stage4_sha256"
+    for key in core_status lib_status mcp_status lsp_status runtime_guard_status whole_test_status spec_layout_status docs_status verify_status; do require_value "$verification" "$key" pass; done
+    require_value "$github" source_revision "$source_revision"
+    require_value "$github" version "$version"
+    require_value "$github" conclusion success
+    require_value "$github" release_status published
+    require_value "$github" prerelease true
+    require_nonempty "$github" workflow_run_id >/dev/null
+    require_nonempty "$github" workflow_run_url >/dev/null
+    echo "release_beta_verification_status=pass"
+    echo "github_release_conclusion=success"
+    echo "release_beta_readiness_status=pass source_revision=$source_revision version=$version stage4_sha256=$stage4_sha256"
+}
+
+write_self_test_receipts() {
+    evidence_dir=$1
+    artifact_dir="$evidence_dir/artifacts"
+    mkdir -p "$artifact_dir"
+    stage4="$artifact_dir/simple"
+    printf '%s\n' '#!/bin/sh' 'exit 0' > "$stage4"
+    chmod +x "$stage4"
+    stage4_sha256=$(sha256_file "$stage4")
+    cat > "$evidence_dir/bootstrap.env" <<EOF
+source_revision=self-test-revision
+version=1.0.0-beta-self-test
+stage2_status=pass
+stage3_status=pass
+stage4_status=pass
+stub_fallback=disabled
+stage4_path=$stage4
+stage4_sha256=$stage4_sha256
+stage2_elapsed_seconds=1
+stage2_max_rss_kb=1
+stage3_elapsed_seconds=1
+stage3_max_rss_kb=1
+stage4_elapsed_seconds=1
+stage4_max_rss_kb=1
+EOF
+    cat > "$evidence_dir/essential_tools.env" <<EOF
+stage4_sha256=$stage4_sha256
+test_runner_status=pass
+lint_status=pass
+duplicate_check_status=pass
+aggregate_status=pass
+EOF
+    cat > "$evidence_dir/release_checkers.env" <<EOF
+executable_status=pass
+payload_status=pass
+simpleos_status=pass
+mcp_status=pass
+lsp_status=pass
+EOF
+    : > "$evidence_dir/platforms.env"
+    for platform in linux-x86_64 linux-aarch64 linux-riscv64 freebsd-x86_64 freebsd-x86 windows-x86_64 windows-aarch64; do
+        key=$(printf '%s' "$platform" | tr '-' '_')
+        artifact="$artifact_dir/$platform.spk"
+        printf 'artifact:%s\n' "$platform" > "$artifact"
+        digest=$(sha256_file "$artifact")
+        cat >> "$evidence_dir/platforms.env" <<EOF
+platform_${key}_status=pass
+platform_${key}_role=executable
+platform_${key}_artifact=$artifact
+platform_${key}_sha256=$digest
+platform_${key}_payload_kind=executable
+EOF
+    done
+    cat > "$evidence_dir/verification.env" <<EOF
+source_revision=self-test-revision
+version=1.0.0-beta-self-test
+stage4_sha256=$stage4_sha256
+core_status=pass
+lib_status=pass
+mcp_status=pass
+lsp_status=pass
+runtime_guard_status=pass
+whole_test_status=pass
+spec_layout_status=pass
+docs_status=pass
+verify_status=pass
+EOF
+    cat > "$evidence_dir/github_release.env" <<EOF
+source_revision=self-test-revision
+version=1.0.0-beta-self-test
+conclusion=success
+release_status=published
+prerelease=true
+workflow_run_id=self-test-run
+workflow_run_url=https://example.invalid/self-test
+EOF
+}
+
+self_test() {
+    self_test_dir=$(mktemp -d "${TMPDIR:-/tmp}/release-beta-readiness.XXXXXX")
+    trap 'rm -rf "$self_test_dir"' EXIT HUP INT TERM
+    write_self_test_receipts "$self_test_dir"
+    validate_final "$self_test_dir" >/dev/null
+    sed 's/platform_windows_aarch64_payload_kind=executable/platform_windows_aarch64_payload_kind=source/' "$self_test_dir/platforms.env" > "$self_test_dir/platforms.bad"
+    mv "$self_test_dir/platforms.bad" "$self_test_dir/platforms.env"
+    if (validate_final "$self_test_dir") >/dev/null 2>&1; then
+        fail self-test-accepted-source-only-substitution
+    fi
+    sed 's/stage3_elapsed_seconds=1/stage3_elapsed_seconds=255/' "$self_test_dir/bootstrap.env" > "$self_test_dir/bootstrap.bad"
+    mv "$self_test_dir/bootstrap.bad" "$self_test_dir/bootstrap.env"
+    if (validate_bootstrap "$self_test_dir") >/dev/null 2>&1; then
+        fail self-test-accepted-resource-ceiling-excess
+    fi
+    sed 's/stage3_elapsed_seconds=255/stage3_elapsed_seconds=1/' "$self_test_dir/bootstrap.env" > "$self_test_dir/bootstrap.good"
+    mv "$self_test_dir/bootstrap.good" "$self_test_dir/bootstrap.env"
+    rm -f "$self_test_dir/github_release.env"
+    if (validate_final "$self_test_dir") >/dev/null 2>&1; then
+        fail self-test-accepted-missing-github-receipt
+    fi
+    echo "release_beta_readiness_self_test=pass"
+}
+
+[ "$#" -gt 0 ] || usage
+if [ "$1" = --self-test ]; then
+    [ "$#" -eq 1 ] || usage
+    self_test
+    exit 0
+fi
+[ "$1" = --evidence-dir ] || usage
+[ "$#" -ge 2 ] || usage
+evidence_dir=$2
+[ -d "$evidence_dir" ] || fail missing-evidence-directory "path=$evidence_dir"
+shift 2
+section=all
+if [ "$#" -gt 0 ]; then
+    [ "$1" = --section ] && [ "$#" -eq 2 ] || usage
+    section=$2
+fi
+case "$section" in
+    bootstrap) validate_bootstrap "$evidence_dir" ;;
+    tools) validate_tools "$evidence_dir" ;;
+    platforms) validate_platforms "$evidence_dir" ;;
+    all) validate_final "$evidence_dir" ;;
+    *) usage ;;
+esac

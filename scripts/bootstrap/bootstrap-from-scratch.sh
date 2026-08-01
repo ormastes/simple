@@ -1124,7 +1124,16 @@ elif [ ! -x "${seed_bin}" ] || [ ! -f "${native_all_lib}" ] || [ "${seed_stale}"
     --manifest-path src/compiler_rust/Cargo.toml --profile bootstrap \
     --target "${PLATFORM}" -p simple-runtime --features runtime-symbol-table
   mkdir -p "$(dirname -- "${seed_bin}")"
-  cp -p "${rust_authority_profile_dir}/simple${exe_suffix}" "${seed_bin}"
+  # Never overwrite a live executable inode: concurrent diagnostic lanes may
+  # legitimately still be running the old seed, and Linux rejects that with
+  # ETXTBSY. Copy beside the destination and atomically replace the directory
+  # entry; existing processes retain the old inode while new work gets the
+  # freshly built authority.
+  seed_install_tmp="${seed_bin}.install.$$"
+  rm -f "${seed_install_tmp}"
+  cp -p "${rust_authority_profile_dir}/simple${exe_suffix}" \
+    "${seed_install_tmp}"
+  mv -f "${seed_install_tmp}" "${seed_bin}"
   cp -p "${rust_authority_profile_dir}/${archive_prefix}simple_native_all${archive_suffix}" \
     "${native_all_lib}"
   for rust_runtime_artifact in \

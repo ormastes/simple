@@ -1,0 +1,69 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: $0 --run-id ID --evidence-dir DIR --source-revision SHA --version VERSION" >&2
+    exit 2
+}
+
+fail() {
+    echo "release_beta_github_evidence_status=fail reason=$1${2:+ $2}" >&2
+    exit 1
+}
+
+[ "$#" -eq 8 ] || usage
+[ "$1" = --run-id ] || usage
+run_id=$2
+[ "$3" = --evidence-dir ] || usage
+evidence_dir=$4
+[ "$5" = --source-revision ] || usage
+source_revision=$6
+[ "$7" = --version ] || usage
+version=$8
+
+case "$run_id" in *[!0-9]*|'') fail invalid-run-id "value=$run_id" ;; esac
+[ -n "$source_revision" ] || fail missing-source-revision
+[ -n "$version" ] || fail missing-version
+command -v gh >/dev/null 2>&1 || fail missing-gh-cli
+
+run_row=$(gh run view "$run_id" --json databaseId,url,headSha,conclusion \
+    --jq '[.databaseId,.url,.headSha,.conclusion] | @tsv') || fail github-run-query-failed "run_id=$run_id"
+old_ifs=$IFS
+IFS=$(printf '\t')
+set -- $run_row
+IFS=$old_ifs
+[ "$#" -eq 4 ] || fail malformed-github-run-result
+observed_run_id=$1
+workflow_run_url=$2
+observed_revision=$3
+conclusion=$4
+[ "$observed_run_id" = "$run_id" ] || fail run-id-mismatch "expected=$run_id observed=$observed_run_id"
+[ "$observed_revision" = "$source_revision" ] || fail source-revision-mismatch "expected=$source_revision observed=$observed_revision"
+[ "$conclusion" = success ] || fail workflow-not-successful "conclusion=$conclusion"
+
+tag="v$version"
+release_row=$(gh release view "$tag" --json tagName,isDraft,isPrerelease \
+    --jq '[.tagName,.isDraft,.isPrerelease] | @tsv') || fail github-release-query-failed "tag=$tag"
+IFS=$(printf '\t')
+set -- $release_row
+IFS=$old_ifs
+[ "$#" -eq 3 ] || fail malformed-github-release-result
+[ "$1" = "$tag" ] || fail release-tag-mismatch "expected=$tag observed=$1"
+[ "$2" = false ] || fail release-still-draft "tag=$tag"
+[ "$3" = true ] || fail release-not-prerelease "tag=$tag"
+
+mkdir -p "$evidence_dir"
+receipt_tmp="$evidence_dir/github_release.env.tmp.$$"
+trap 'rm -f "$receipt_tmp"' EXIT HUP INT TERM
+cat > "$receipt_tmp" <<EOF
+source_revision=$source_revision
+version=$version
+conclusion=success
+release_status=published
+prerelease=true
+workflow_run_id=$run_id
+workflow_run_url=$workflow_run_url
+EOF
+mv "$receipt_tmp" "$evidence_dir/github_release.env"
+trap - EXIT HUP INT TERM
+echo "release_beta_github_evidence_status=pass run_id=$run_id tag=$tag prerelease=$3"

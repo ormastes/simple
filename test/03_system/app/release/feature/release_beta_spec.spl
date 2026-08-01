@@ -1,0 +1,71 @@
+use std.spec.*
+use std.process.{run}
+
+# @cover scripts/check/check-release-beta-readiness.shs
+# @cover scripts/bootstrap/bootstrap-from-scratch.sh
+# @cover .github/workflows/release.yml
+
+val READINESS_CHECKER = "scripts/check/check-release-beta-readiness.shs"
+val EVIDENCE_DIR = "build/release-beta/evidence"
+
+fn check_readiness(args: [text]) -> (text, text, i64):
+    val result = run("/bin/sh", [READINESS_CHECKER] + args)
+    (result.stdout, result.stderr, result.exit_code)
+
+describe "Release beta qualification":
+    """Operators qualify one source revision through strict self-hosting, the
+    exact fresh full CLI, every selected non-macOS package, and the repository's
+    real GitHub release workflow. Missing or substituted evidence fails closed.
+    """
+
+    # @inline
+    # @capture(exec)
+    it "the readiness contract rejects incomplete or inconsistent evidence":
+        step("Calibrate the fail-closed release receipt contract")
+        val (out, err, code) = check_readiness(["--self-test"])
+        expect(code).to_equal(0)
+        expect(out + err).to_contain("release_beta_readiness_self_test=pass")
+
+    # @prev("the readiness contract rejects incomplete or inconsistent evidence")
+    # @capture(log)
+    it "the strict bootstrap chain produces one admitted full CLI":
+        step("Build the strict bootstrap chain")
+        val (out, err, code) = check_readiness(["--evidence-dir", EVIDENCE_DIR, "--section", "bootstrap"])
+        expect(code).to_equal(0)
+        expect(out + err).to_contain("release_beta_bootstrap_status=pass")
+        expect(out + err).to_contain("stub_fallback=disabled")
+
+    # @capture(exec)
+    it "the fresh full CLI and release checkers qualify their real artifacts":
+        step("Qualify the fresh full CLI")
+        step("Validate release payloads and tool servers")
+        val (out, err, code) = check_readiness(["--evidence-dir", EVIDENCE_DIR, "--section", "tools"])
+        expect(code).to_equal(0)
+        expect(out + err).to_contain("release_beta_tools_status=pass")
+        expect(out + err).to_contain("release_beta_checkers_status=pass")
+
+    # @capture(log)
+    it "every selected non-macOS workflow row supplies a validated package":
+        step("Audit the platform workflow matrix")
+        val (out, err, code) = check_readiness(["--evidence-dir", EVIDENCE_DIR, "--section", "platforms"])
+        expect(code).to_equal(0)
+        for platform in ["linux-x86_64", "linux-aarch64", "linux-riscv64", "freebsd-x86_64", "freebsd-x86", "windows-x86_64", "windows-aarch64"]:
+            expect(out + err).to_contain("platform_{platform}=pass")
+
+    # @capture(protocol)
+    it "the verified revision completes the real GitHub release workflow":
+        step("Record the releasable beta handoff")
+        val (out, err, code) = check_readiness(["--evidence-dir", EVIDENCE_DIR])
+        expect(code).to_equal(0)
+        expect(out + err).to_contain("release_beta_verification_status=pass")
+        expect(out + err).to_contain("github_release_conclusion=success")
+        expect(out + err).to_contain("release_beta_readiness_status=pass")
+
+# @manual-file: folded
+describe "Release beta receipt failures":
+    # @manual: folded
+    it "an absent evidence directory cannot be mistaken for a release":
+        step("Inspect an absent release evidence directory")
+        val (out, err, code) = check_readiness(["--evidence-dir", "build/release-beta/absent"])
+        expect(code).to_be_greater_than(0)
+        expect(out + err).to_contain("reason=missing-evidence-directory")
