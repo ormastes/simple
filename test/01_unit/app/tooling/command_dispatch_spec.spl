@@ -34,6 +34,9 @@
 # - Commands with no Rust fallback
 # - Path with spaces and unicode
 
+use std.test_runner.test_runner_args.{parse_test_args}
+use app.test_runner_new.test_runner_client.{count_positional_args}
+
 
 # ============================================================================
 # 1. Simple App File Existence (12 tests)
@@ -501,6 +504,55 @@ describe "flag detection edge cases":
         val args = ["test", "a.spl", "--json", "b.spl"]
         val needs_rust = args.any(_1 == "--json")
         expect needs_rust == true
+
+    it "EDGE: flag in middle of args does not swallow the trailing path":
+        # Flag detection above only proves the flag was SEEN. It says nothing
+        # about the positional paths on either side of it, so it passes
+        # identically against a parser that drops b.spl. Drive the shipped
+        # parser so a dropped path is actually observable.
+        # See doc/08_tracking/bug/
+        # test_runner_multi_path_drops_all_but_first_2026-08-01.md.
+        val opts = parse_test_args(["a.spl", "--json", "b.spl"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "a.spl"
+        expect opts.paths[1] == "b.spl"
+        expect count_positional_args(["a.spl", "--json", "b.spl"]) == 2
+
+    it "EDGE: two positional paths with no flag between them":
+        val opts = parse_test_args(["a.spl", "b.spl"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "a.spl"
+        expect opts.paths[1] == "b.spl"
+
+    it "EDGE: reversed path order is preserved, not re-sorted or truncated":
+        val opts = parse_test_args(["b.spl", "a.spl"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "b.spl"
+        expect opts.paths[1] == "a.spl"
+
+    it "EDGE: two directory targets are both retained":
+        val opts = parse_test_args(["test/unit/", "test/integration/"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "test/unit/"
+        expect opts.paths[1] == "test/integration/"
+
+    it "EDGE: single path parses to exactly one target":
+        # The single-path case must stay byte-identical in behaviour: the
+        # multi-path fix must not add a phantom second target.
+        val opts = parse_test_args(["a.spl"])
+        expect opts.paths.len() == 1
+        expect opts.paths[0] == "a.spl"
+        expect opts.path == "a.spl"
+        expect count_positional_args(["a.spl"]) == 1
+
+    it "EDGE: value-taking flag does not count as a positional path":
+        # --timeout consumes its value, so only a.spl is positional. The
+        # parser and the fail-closed counter must agree, otherwise the runner
+        # aborts a legitimate run.
+        val opts = parse_test_args(["--timeout", "30", "a.spl"])
+        expect opts.paths.len() == 1
+        expect opts.paths[0] == "a.spl"
+        expect count_positional_args(["--timeout", "30", "a.spl"]) == 1
 
     it "EDGE: only flag, no files":
         val args = ["lint", "--json"]

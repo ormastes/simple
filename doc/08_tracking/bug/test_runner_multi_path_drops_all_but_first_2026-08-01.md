@@ -140,12 +140,56 @@ Repo-wide sweep with `/usr/bin/grep` (not ugrep):
   claim is
   `doc/03_plan/app/spipe/sspec_traceability_reorg_plan.md:226`, which cites a
   two-spec invocation as verification — that evidence is void.
-- **4 guard specs are vacuous**: `test/01_unit/app/cli_dispatch_unit_spec.spl:157`
+- **4 guard specs were vacuous — now de-vacuumed** (see next section):
+  `test/01_unit/app/cli_dispatch_unit_spec.spl:157`
   ("parses multiple file paths") and
   `test/01_unit/app/tooling/command_dispatch_spec.spl:501`, plus their
-  `test/unit/` duplicates, assert on a locally-constructed array and never
-  invoke the runner. That is why a bug this loud survived: the spec named after
+  `test/unit/` duplicates, asserted on a locally-constructed array and never
+  invoked the runner. That is why a bug this loud survived: the spec named after
   the exact behaviour never exercised it.
+
+## De-vacuuming the four guard specs (2026-08-01, spec lane — PROVED)
+
+The four examples above asserted on an array literal they had just written
+(`val args = ["test", "file1.spl", "file2.spl"]`, then `args[1].ends_with(".spl")`).
+No parser was involved, so they passed identically against broken and fixed
+code. The `test/unit/` copy of `command_dispatch_spec.spl` was worse still: its
+`EDGE: flag in middle of args` example built `args` and then asserted
+`val needs_rust = false; expect needs_rust == false`, never reading `args` at
+all — a hardcoded tautology.
+
+All four now drive the **shipped** parsers through their established import
+seam, so a dropped path is observable:
+
+    use std.test_runner.test_runner_args.{parse_test_args}
+    use app.test_runner_new.test_runner_client.{count_positional_args}
+
+Cases covered in each file: two spec paths retained in order; reversed order
+retained (no position privileged); two positionals separated by a flag; two
+directory targets; single-path parses to exactly one target (the fix must not
+invent a phantom second); and `--timeout <v>` consuming its value so the parser
+and the fail-closed counter agree.
+
+**Non-vacuity proof — the RED.** The pre-fix latch was reintroduced in a scratch
+tree (never landed): `test_runner_args.spl` restored to
+`elif not arg.starts_with("-") and not path_explicit:` with the `paths.push(arg)`
+accumulation removed, and `parse_client_run` gated with `and paths.len() == 0`.
+Under that sabotage **all four specs went RED with 4 failures each**:
+
+    ✗ parses multiple file paths
+      semantic: array index out of bounds: index is 1 but length is 1
+
+The pre-existing examples in the same `describe` blocks (`EDGE: flag in middle
+of args`, `parses single file path`, `parses glob pattern`) stayed GREEN under
+the identical sabotage — a direct demonstration of which assertions were load
+bearing and which were not. After restoring the parsers (hash-verified against
+the pristine copies) all four specs return to 0 failures:
+57 / 111 / 57 / 114 examples, 0 failures.
+
+Engine caveat: run with `simple.pre-segv-fix-20260731` via `run`. That binary
+prints `WARNING: this Rust-built Simple binary is a bootstrap seed only`, so
+this is **interpreter/seed evidence only**, consistent with the rest of this
+report.
 
 ## Related fail-opens (same family, still open)
 
@@ -155,3 +199,20 @@ Repo-wide sweep with `/usr/bin/grep` (not ugrep):
 - `simple compile` invoked by absolute path exits 0 without compiling.
 - The default JIT exits 0 while printing "whole module dropped to the
   interpreter".
+- **`simple run <spec>` exits 0 even when examples FAIL** (found 2026-08-01 by
+  the spec lane while proving the sabotage above — PROVED, not yet fixed).
+  Minimal repro with `simple.pre-segv-fix-20260731`:
+
+      # probe_exit_spec.spl
+      describe "exit code probe":
+          it "deliberately fails":
+              expect 1 == 2
+
+      $ simple run probe_exit_spec.spl   # output written to a file, not piped
+      1 example, 1 failure
+      exit 0
+
+  The failure is visible in the report but not in the status, so any caller that
+  gates on the exit code of `run` reads GREEN. This is why the RED above is
+  evidenced by **failure counts parsed out of the report**, never by exit code.
+  Note this is `run`, not `test`; the `test` path exits non-zero correctly.

@@ -10,6 +10,9 @@
 # Unit tests for CLI command dispatch and argument parsing.
 # 100% branch coverage for command routing logic.
 
+use std.test_runner.test_runner_args.{parse_test_args}
+use app.test_runner_new.test_runner_client.{count_positional_args}
+
 fn check(condition: bool):
     expect(condition).to_equal(true)
 fn check_msg(condition: bool, message: text):
@@ -148,24 +151,68 @@ describe "CLI Argument Validation":
 describe "CLI Path Arguments":
     # ## File Path Arguments
     #
-    # Test file path argument handling.
-    
+    # These examples drive the SHIPPED argument parser (parse_test_args) and
+    # the runner's fail-closed cross-check (count_positional_args) instead of
+    # asserting on a local array literal.
+    #
+    # An assertion that only inspects ["test", "file1.spl", "file2.spl"] can
+    # never observe the parser dropping a path, so it passes just as happily
+    # against a broken parser as a correct one. That is exactly how the
+    # multi-path drop survived into shipped code: `simple test a.spl b.spl`
+    # ran only a.spl and exited 0. See doc/08_tracking/bug/
+    # test_runner_multi_path_drops_all_but_first_2026-08-01.md.
+
     it "parses single file path":
-        val args = ["test", "test/unit/test_spec.spl"]
-        check(args[1].ends_with(".spl"))
-        
+        val opts = parse_test_args(["test/unit/test_spec.spl"])
+        expect opts.paths.len() == 1
+        expect opts.paths[0] == "test/unit/test_spec.spl"
+        expect opts.path == "test/unit/test_spec.spl"
+
     it "parses multiple file paths":
-        val args = ["test", "file1.spl", "file2.spl"]
-        check(args[1].ends_with(".spl"))
-        check(args[2].ends_with(".spl"))
-        
+        # Regression guard: the parser must retain EVERY positional path.
+        # A "first positional wins" latch reduces this to 1 and the run then
+        # silently tests a subset of what was asked for.
+        val opts = parse_test_args(["file1.spl", "file2.spl"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "file1.spl"
+        expect opts.paths[1] == "file2.spl"
+
+    it "parses multiple file paths in reverse order":
+        # Order is preserved and no position is privileged over another.
+        val opts = parse_test_args(["file2.spl", "file1.spl"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "file2.spl"
+        expect opts.paths[1] == "file1.spl"
+
+    it "keeps positional paths separated by a flag":
+        val opts = parse_test_args(["a.spl", "--verbose", "b.spl"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "a.spl"
+        expect opts.paths[1] == "b.spl"
+
+    it "counts positional paths independently of the parser":
+        # count_positional_args is the fail-closed cross-check main() uses to
+        # refuse a run whose paths were dropped. It must agree with the parser,
+        # so assert that contract directly.
+        expect count_positional_args(["file1.spl", "file2.spl"]) == 2
+        expect count_positional_args(["a.spl", "--verbose", "b.spl"]) == 2
+        expect count_positional_args(["--timeout", "30", "a.spl"]) == 1
+
     it "parses directory path":
-        val args = ["test", "test/unit/"]
-        check(args[1].contains("/"))
-        
+        val opts = parse_test_args(["test/unit/"])
+        expect opts.paths.len() == 1
+        expect opts.paths[0] == "test/unit/"
+
+    it "parses multiple directory paths":
+        val opts = parse_test_args(["test/unit/", "test/integration/"])
+        expect opts.paths.len() == 2
+        expect opts.paths[0] == "test/unit/"
+        expect opts.paths[1] == "test/integration/"
+
     it "parses glob pattern":
-        val args = ["test", "test/**/*_spec.spl"]
-        check(args[1].contains("*"))
+        val opts = parse_test_args(["test/**/*_spec.spl"])
+        expect opts.paths.len() == 1
+        expect opts.paths[0] == "test/**/*_spec.spl"
 
 
 describe "CLI Command Dispatch":
