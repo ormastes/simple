@@ -1,0 +1,128 @@
+# MirToWat translation-layer specification.
+#
+# The pre-existing wasm_codegen_spec.spl files claim in their header to
+# "validate MIR to WAT translation", but every test in them drives WatBuilder /
+# WasmType / WasmTypeMapper primitives DIRECTLY -- none constructs a MirToWat.
+# The whole MIR->WAT translation layer was untested, which is how four silent
+# wrong-code defects survived in wat_codegen.spl (see
+# doc/08_tracking/bug/wasm_wat_codegen_match_on_struct_not_kind_2026-08-01.md).
+#
+# This spec exists to pin the thing those specs skipped: that a const, a call,
+# and an operand each actually emit their instruction, and that an unsupported
+# case FAILS LOUDLY (`unreachable`) rather than emitting a plausible value.
+#
+# Every `it` block here fails against the pre-fix code.
+
+use compiler.backend.{WatBuilder}
+use compiler.backend.wasm.wat_codegen.{MirToWat}
+use compiler.mir.mir_data.*
+# MirOperand/MirOperandKind are NOT reachable through the mir_data wildcard --
+# constructing one via `MirOperand(kind: ...)` with only the `.*` import fails
+# with "function `MirOperand` not found". Import them explicitly.
+use compiler.mir.mir_instruction_support.{MirOperand, MirOperandKind}
+
+fn translator() -> MirToWat:
+    MirToWat.create("spec_mod")
+
+fn builder() -> WatBuilder:
+    WatBuilder.create()
+
+fn local(n: i64) -> LocalId:
+    LocalId(id: n)
+
+fn ty(k: MirTypeKind) -> MirType:
+    MirType(kind: k)
+
+fn op_const(v: MirConstValue, t: MirType) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(v, t))
+
+describe "MirToWat translation layer":
+
+    describe "translate_const":
+        it "writes the destination local for a scalar Zero constant":
+            # REGRESSION: `Zero` is the real MirConstValue variant, but
+            # translate_const only had dead `Unit`/`Nil` arms, so Zero fell to
+            # `case _:` which emitted a comment and NO local.set -- leaving the
+            # destination local unwritten with no diagnostic.
+            val b = builder()
+            translator().translate_const(b, local(0), MirConstValue.Zero, ty(MirTypeKind.I64))
+            val wat = b.build()
+
+            expect(wat).to_contain("i64.const 0")
+            expect(wat).to_contain("local.set $_l0")
+
+        it "zero-initializes at the destination width, not always i64":
+            val b = builder()
+            translator().translate_const(b, local(1), MirConstValue.Zero, ty(MirTypeKind.I32))
+            val wat = b.build()
+
+            expect(wat).to_contain("i32.const 0")
+            expect(wat).to_contain("local.set $_l1")
+
+        it "emits an integer constant and stores it":
+            val b = builder()
+            translator().translate_const(b, local(2), MirConstValue.Int(42), ty(MirTypeKind.I64))
+            val wat = b.build()
+
+            expect(wat).to_contain("i64.const 42")
+            expect(wat).to_contain("local.set $_l2")
+
+        it "traps on an aggregate constant instead of emitting malformed WAT":
+            # The old Array arm emitted `i64.const {elem}` -- interpolating a
+            # MirConstValue into a numeric operand. Unsupported must fail
+            # explicitly, never produce a plausible-looking instruction.
+            val b = builder()
+            val elems = [MirConstValue.Int(1), MirConstValue.Int(2)]
+            translator().translate_const(b, local(3), MirConstValue.Array(elems), ty(MirTypeKind.I64))
+            val wat = b.build()
+
+            expect(wat).to_contain("UNSUPPORTED")
+            expect(wat).to_contain("unreachable")
+
+    describe "emit_operand":
+        it "pushes a local for a Copy operand":
+            # REGRESSION: emit_operand matched the MirOperand STRUCT instead of
+            # `.kind`, so every operand fell to a comment-only default and
+            # pushed NOTHING onto the value stack.
+            val b = builder()
+            translator().emit_operand(b, MirOperand(kind: MirOperandKind.Copy(local(4))))
+            expect(b.build()).to_contain("local.get $_l4")
+
+        it "pushes a local for a Move operand":
+            val b = builder()
+            translator().emit_operand(b, MirOperand(kind: MirOperandKind.Move(local(5))))
+            expect(b.build()).to_contain("local.get $_l5")
+
+        it "pushes a real constant, not a comment, for a Const operand":
+            val b = builder()
+            translator().emit_operand(b, op_const(MirConstValue.Int(7), ty(MirTypeKind.I64)))
+            expect(b.build()).to_contain("i64.const 7")
+
+        it "pushes a bool constant as i32":
+            val b = builder()
+            translator().emit_operand(b, op_const(MirConstValue.Bool(true), ty(MirTypeKind.Bool)))
+            expect(b.build()).to_contain("i32.const 1")
+
+    describe "translate_call":
+        it "emits the call instruction for a symbol callee":
+            # REGRESSION: translate_call matched the struct against
+            # `Constant`/`Use` with no `case _:`, so it emitted the argument
+            # pushes and then NO call at all -- the following local.set
+            # consumed the last argument as if it were the return value.
+            val b = builder()
+            val callee = op_const(MirConstValue.Str("my_func"), ty(MirTypeKind.I32))
+            val args = [op_const(MirConstValue.Int(3), ty(MirTypeKind.I64))]
+            translator().translate_call(b, local(6), callee, args)
+            val wat = b.build()
+
+            expect(wat).to_contain("i64.const 3")
+            expect(wat).to_contain("call $my_func")
+
+        it "emits call_indirect for a computed callee":
+            val b = builder()
+            val callee = MirOperand(kind: MirOperandKind.Move(local(7)))
+            translator().translate_call(b, local(8), callee, [])
+            val wat = b.build()
+
+            expect(wat).to_contain("local.get $_l7")
+            expect(wat).to_contain("call_indirect")

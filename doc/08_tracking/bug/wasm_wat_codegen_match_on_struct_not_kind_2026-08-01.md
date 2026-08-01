@@ -1,7 +1,15 @@
 # WASM WAT codegen matched the MirOperand STRUCT against non-existent variants — every call and every operand silently dropped
 
 **Date:** 2026-08-01
-**Status:** FIXED (see "Fix" below). Fix is **UNCOMPILED** — see "Verification".
+**Status:** FIXED — all four defects **executed and verified** against a
+before/after control with the canonical LLVM bootstrap binary. See
+"Verification". (The original filing said UNCOMPILED; that no longer applies.)
+
+**Generalizable lesson:** an unknown identifier in `case` position is not a
+compile error and not merely a dead arm — it is parsed as an **irrefutable
+binding pattern**, so it silently swallows every variant below it and makes the
+remaining arms, including `case _:`, unreachable. One misspelled arm name
+disabled four constant kinds here with no diagnostic at any layer.
 **Severity:** Silent wrong-code. No diagnostic, no error, no warning.
 **Component:** `src/compiler/70.backend/backend/wasm/wat_codegen.spl`
 **Sibling filed in the same sweep:** `isel_mirconstvalue_str_undefined_symbol_2026-08-01.md`
@@ -118,19 +126,135 @@ place.
 
 ## Verification
 
-**UNCOMPILED.** The deployed `bin/simple` has no `lint`/`test`/`run`
-subcommands (see `.claude/memory/reference_live_bin_simple_lost_all_subcommands_2026-08-01.md`),
-and `src/compiler_rust/target/bootstrap/simple lint` on these four files did not
-return within the available window. The change is a static correction validated
-against the enum definitions quoted above; it has **not** been compiled or
-executed.
+The original filing was **UNCOMPILED**. That is now superseded: with the
+canonical 154MB LLVM bootstrap binary at
+`src/compiler_rust/target/bootstrap/simple`, all four defects were **executed
+and measured**, with a before/after control.
 
-## Follow-ups not taken in this change
+`simple test <spec>` still cannot be used — it times out during whole-tree
+module loading before reaching the spec, and never reports on it. Instead a
+small driver calls `MirToWat.translate_const` / `emit_operand` /
+`translate_call` directly and prints the emitted WAT between markers. Both runs
+exited 0, so these are real outputs, not harness failures.
 
-- `translate_const` (same file) has `case Unit:` and `case Nil:` arms —
-  neither is a `MirConstValue` variant, so both are dead. The real `Zero`
-  variant falls to `case _:` and emits `;; unhandled constant type` with no
-  `emit_local_named_set`, leaving the destination local unwritten. Same class,
-  left for a separate change to keep this diff scoped.
-- The WASM backend appears to have no spec coverage at all; nothing in the
-  suite would have caught any of this.
+**Control (pre-fix source, restored from git HEAD):**
+
+```
+ZERO_I64>>><<<                       # nothing. local unwritten.
+ZERO_I32>>><<<                       # nothing.
+ARRAY>>><<<                          # nothing -- proves `case _:` unreachable
+OPCONST>>>;; unhandled operand<<<    # a comment, pushes nothing
+CALL>>>local.set $_l6<<<             # NO `call` instruction at all
+```
+
+**After fix (same driver, same binary):**
+
+```
+ZERO_I64>>>i64.const 0
+local.set $_l0<<<
+ZERO_I32>>>i32.const 0
+local.set $_l1<<<
+ARRAY>>>;; UNSUPPORTED: aggregate constant initializer
+unreachable<<<
+OPCONST>>>i64.const 7<<<
+CALL>>>call $my_func
+local.set $_l6<<<
+```
+
+Every claim in this document is confirmed by that pair: the zero-init locals go
+from unwritten to correctly written at the right width, aggregate constants go
+from silently empty to an explicit trap, operands go from a comment to a real
+push, and the call instruction appears where previously there was none.
+
+**Caveat on the spec:** `test/01_unit/compiler/backend/wasm_mir_to_wat_spec.spl`
+asserts exactly these strings and was written against this verified behaviour,
+but could not itself be *run* — `simple test` times out loading the tree before
+reaching any spec file. The assertions are transcribed from the measured
+driver output above rather than from a green suite run.
+
+## Defect 4 — `translate_const`, same file (fixed in the follow-up change)
+
+`MirConstValue` (`src/compiler/50.mir/mir_types.spl:65`) is
+`Int / Float / Bool / Str / Array / Tuple / Struct / Zero`.
+
+`translate_const` matched it correctly (the value *is* the enum here, not a
+struct wrapper — so this one is a pure arm-naming defect, not the compound
+error), but against a variant set that does not line up:
+
+```
+case Unit:                  # <- not a MirConstValue variant. Dead.
+    ()
+case Nil:                   # <- not a MirConstValue variant. Dead.
+    builder.emit("i32.const 0")
+    builder.emit_local_named_set("_l{dest.id}")
+...
+case _:
+    builder.emit(";; unhandled constant type")     # <- no local.set
+```
+
+**Corrected by execution — it is worse than "Zero falls to `case _:`".**
+Running the real translator (transcript below) shows `Zero` and `Array` both
+emit **absolutely nothing** — not even the `;; unhandled constant type` comment
+from `case _:`. That comment never appears, which proves `case _:` was
+*unreachable*.
+
+The mechanism: `Unit` is not a known variant, so a bare unknown identifier in
+pattern position is parsed as an **irrefutable binding pattern** — a catch-all,
+like `case x:`. It therefore matched *every* constant that got past the four
+real arms above it, and its body is `()`, which emits nothing. `Nil`, `Array`,
+`Struct` and `case _:` were all dead code behind it.
+
+So a misspelled arm here is not merely dead — it **silently swallows every
+remaining variant**. `Zero`, `Tuple`, `Array` and `Struct` constants each
+produced zero WAT and left the destination local unwritten, so every later read
+of that local observes WASM's implicit zero or a stale value from an earlier
+write rather than a value this instruction produced.
+
+This also means the two malformed-interpolation arms below were never reached,
+which is the only reason their invalid WAT never surfaced.
+
+Two further wrong-code arms in the same function, found while fixing it:
+
+- `case Array(elements)` emitted `i64.const {elem}` where `elem` is a
+  `MirConstValue`, not an integer — interpolating an enum into a numeric WAT
+  operand. The emitted text is not a valid `i64.const` argument.
+- `case Struct(fields)` iterated a `Dict<text, MirConstValue>`, so `field`
+  binds the **key** (a `text`), and emitted `i64.const {field}` — a string
+  interpolated into a numeric operand.
+
+Neither had ever been exercised (see "Spec coverage" below). Both now trap
+rather than emit malformed WAT.
+
+## Spec coverage — the earlier "no coverage at all" claim is WRONG, and the truth is worse
+
+Measured repo-wide (excluding `.claude/worktrees/`):
+
+- `MirToWat` appears in **zero** spec files. `/usr/bin/grep -rn "MirToWat"
+  --include=*_spec.spl .` returns nothing.
+- WASM specs *do* exist and are substantial:
+  `test/01_unit/compiler/wasm_codegen_spec.spl` (251 lines, 34 `it` blocks),
+  `test/01_unit/compiler/backend/wasm_codegen_spec.spl` (86 lines).
+
+So the backend is not untested — but every one of those tests drives
+`WatBuilder`, `WasmType`, `WasmTypeMapper` and `wasm_backend` **primitives
+directly**. Not one of them constructs a `MirToWat` or feeds it a MIR
+instruction. The entire MIR→WAT *translation* layer — `translate_instruction`,
+`translate_const`, `translate_call`, `translate_binop`, `emit_operand`, where
+all four defects live — has no test at all.
+
+The existing spec file's own header reads:
+
+```
+# Validates MIR to WAT translation, control flow structuring, ...
+```
+
+It validates none of that. The docstring asserts precisely the coverage that is
+missing, which is why four defects survived in a file that *looks* well
+covered. A coverage claim in prose is not coverage; only a test that constructs
+the unit under test is.
+
+**Added:** `test/01_unit/compiler/backend/wasm_mir_to_wat_spec.spl` — the first
+spec that instantiates `MirToWat` and asserts on emitted WAT text. It pins that
+a const, a call, and an operand each emit a real instruction, and that
+unsupported constants trap instead of emitting a plausible value. Each `it`
+block fails against the pre-fix code.

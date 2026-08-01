@@ -350,37 +350,49 @@ class MirToWat:
                 builder.emit("i32.const {offset}")
                 builder.emit_local_named_set("_l{dest.id}")
 
-            case Unit:
-                ()  # No value to emit
-
-            case Nil:
-                builder.emit("i32.const 0")
+            # MirConstValue is Int/Float/Bool/Str/Array/Tuple/Struct/Zero
+            # (mir_types.spl:65). `Unit` and `Nil` were NOT variants, so both
+            # arms were dead, and the real `Zero` variant fell to `case _:`
+            # -- which emitted a comment and never ran emit_local_named_set,
+            # leaving the destination local unwritten for every zero-init.
+            case Zero:
+                # A real lowering, not a guess: zero-initialize the local at
+                # its own width. Aggregate zero-init needs a memory clear that
+                # this backend has no lowering for, so it traps below instead.
+                match type_.kind:
+                    case I8: builder.emit("i32.const 0")
+                    case I16: builder.emit("i32.const 0")
+                    case I32: builder.emit("i32.const 0")
+                    case U8: builder.emit("i32.const 0")
+                    case U16: builder.emit("i32.const 0")
+                    case U32: builder.emit("i32.const 0")
+                    case Bool: builder.emit("i32.const 0")
+                    case Char: builder.emit("i32.const 0")
+                    case I64: builder.emit("i64.const 0")
+                    case U64: builder.emit("i64.const 0")
+                    case Ptr(_, _): builder.emit("i32.const 0")
+                    case Ref(_, _): builder.emit("i32.const 0")
+                    case F32: builder.emit("f32.const 0")
+                    case F64: builder.emit("f64.const 0")
+                    case _:
+                        # Aggregate/vector/unit zero-init has no scalar push.
+                        # Emitting i64.const 0 here would be a plausible value
+                        # for a destination that is not a scalar at all.
+                        builder.emit(";; UNSUPPORTED: zero-init of non-scalar type")
+                        builder.emit("unreachable")
                 builder.emit_local_named_set("_l{dest.id}")
 
-            case Array(elements):
-                builder.emit(";; array constant")
-                var offset = 0
-                for elem in elements:
-                    builder.emit_local_named_get("_l{dest.id}")
-                    builder.emit("i32.const {offset}")
-                    builder.emit("i32.add")
-                    builder.emit("i64.const {elem}")
-                    builder.emit("i64.store offset=0 align=4")
-                    offset = offset + 8
-
-            case Struct(fields):
-                builder.emit(";; struct constant")
-                var offset = 0
-                for field in fields:
-                    builder.emit_local_named_get("_l{dest.id}")
-                    builder.emit("i32.const {offset}")
-                    builder.emit("i32.add")
-                    builder.emit("i64.const {field}")
-                    builder.emit("i64.store offset=0 align=4")
-                    offset = offset + 8
-
             case _:
-                builder.emit(";; unhandled constant type")
+                # Array/Tuple/Struct aggregate constants. The previous Array
+                # and Struct arms emitted `i64.const {elem}` / `i64.const
+                # {field}` -- interpolating a MirConstValue (and, for Struct,
+                # a Dict KEY, i.e. a text) into a numeric WAT operand, which
+                # is not valid WAT. Neither had ever been exercised. There is
+                # no correct aggregate-constant lowering in this backend yet,
+                # so trap explicitly rather than emit malformed instructions
+                # or leave the destination local unwritten.
+                builder.emit(";; UNSUPPORTED: aggregate constant initializer")
+                builder.emit("unreachable")
 
     me translate_binop(builder: WatBuilder, dest: LocalId, op: MirBinOp, left: MirOperand, right: MirOperand):
         """Translate a binary operation."""
