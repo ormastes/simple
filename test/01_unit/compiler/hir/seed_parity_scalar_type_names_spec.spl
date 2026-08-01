@@ -289,3 +289,116 @@ describe "capitalized type dialect lowers via alias arms":
             if e.message == "unresolved type: Vec":
                 saw_unresolved = true
         expect(saw_unresolved).to_equal(true)
+
+describe "generic applications keep the base name the parser preserved":
+    # Class C of the bug doc
+    # (doc/08_tracking/bug/unresolved_type_declared_nowhere_family_2026-08-01.md).
+    #
+    # A generic application reaches `lower_named_kind` spelled `Any` whenever
+    # its base is absent from the PARSER's per-file named-type registry --
+    # `parser_parse_type_impl` returns TYPE_ANY there, and the AST bridge
+    # decodes TYPE_ANY as `Named("Any", [])`. So `list<i64>`, `Vec<i64>` and
+    # `Map<text,i64>` all die as `unresolved type: Any`, naming a type nobody
+    # wrote, while bare `list` resolves. No arm added to `lower_named_kind` --
+    # a `Vec -> list` alias included -- can fire for those, because the name is
+    # already gone when the gate runs.
+    #
+    # These examples do NOT assert that defect (that would enshrine it and go
+    # red the day it is fixed). They pin the three paths that DO work, which is
+    # what a fix must not break:
+    #   - the Dict/Result side tables, the only two bases that keep arguments;
+    #   - the bare container name;
+    #   - the declared-base path, whose hit/miss on `named_type_find` is the
+    #     single variable that decides whether a name survives at all.
+    #
+    # NOTE for whoever fixes Class C: the erasure is in the PARSER, and the
+    # pure-Simple core parser is NOT executed when the frontend is driven
+    # in-process -- `compiler.core.parser` resolves to an implementation baked
+    # into the binary. A parser-layer change is invisible to this spec until a
+    # bootstrap rebuild. Only the HIR layer below is read from .spl at runtime.
+
+    it "keeps K and V for the two bases that have argument side tables":
+        # Dict<K,V> and Result<T,E> are special-cased in the parser ahead of the
+        # erasing branch and carry their arguments through dedicated registries.
+        # Every other generic base loses its arguments even when its NAME
+        # survives, so these two are the only positive evidence that argument
+        # threading works at all -- and the regression gate for it.
+        val source = "fn pairs(a: Dict<text, i64>, b: Result<i64, text>):\n    ()\n"
+        val parsed = parse_full_frontend(source, "pairs.spl", "pairs", Logger(level: 0))
+        var lowering = HirLowering.with_filename("pairs.spl")
+        val hir = lowering.lower_module(parsed)
+
+        expect(lowering.errors.len()).to_equal(0)
+
+        if val fn_id = hir.symbols.lookup("pairs"):
+            val fn_ = hir.functions[fn_id]
+            match fn_.params[0].type_.kind:
+                case Dict(k, v):
+                    match k.kind:
+                        case Str: expect(true).to_equal(true)
+                        case _: expect(false).to_equal(true)
+                    match v.kind:
+                        case Int(_, _): expect(true).to_equal(true)
+                        case _: expect(false).to_equal(true)
+                case _:
+                    expect(false).to_equal(true)
+            match fn_.params[1].type_.kind:
+                case Result(o, e):
+                    match o.kind:
+                        case Int(_, _): expect(true).to_equal(true)
+                        case _: expect(false).to_equal(true)
+                    match e.kind:
+                        case Str: expect(true).to_equal(true)
+                        case _: expect(false).to_equal(true)
+                case _:
+                    expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "resolves a bare container name to a dynamic array":
+        # The other half of the diagnostic contrast: bare `list` resolves via
+        # the `case "list"` arm, so a failure of `list<i64>` is never the arm
+        # missing -- it is the name never arriving.
+        val source = "fn items(a: list):\n    ()\n"
+        val parsed = parse_full_frontend(source, "items.spl", "items", Logger(level: 0))
+        var lowering = HirLowering.with_filename("items.spl")
+        val hir = lowering.lower_module(parsed)
+
+        expect(lowering.errors.len()).to_equal(0)
+
+        if val fn_id = hir.symbols.lookup("items"):
+            val fn_ = hir.functions[fn_id]
+            match fn_.params[0].type_.kind:
+                case Array(_, _):
+                    expect(true).to_equal(true)
+                case _:
+                    expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)
+
+    it "keeps the base name when the base is declared in the same file":
+        # THE discriminating control for Class C. Identical shape to
+        # `Baz<i64>`, which fails as `unresolved type: Any`; the only variable
+        # is that the base is declared here, so the parser's `named_type_find`
+        # hits and returns the real name instead of TYPE_ANY. Whatever fixes
+        # Class C must keep this hit path intact -- and this example is what
+        # localises the defect to the registry miss rather than to the gate.
+        val source = "struct Bar:\n    x: i64\n\nfn holder(a: Bar<i64>):\n    ()\n"
+        val parsed = parse_full_frontend(source, "bar.spl", "bar", Logger(level: 0))
+        var lowering = HirLowering.with_filename("bar.spl")
+        val hir = lowering.lower_module(parsed)
+
+        for e in lowering.errors:
+            expect(e.message.contains("unresolved type")).to_equal(false)
+        expect(lowering.errors.len()).to_equal(0)
+
+        if val fn_id = hir.symbols.lookup("holder"):
+            val fn_ = hir.functions[fn_id]
+            # The declared struct, NOT an erased Any.
+            match fn_.params[0].type_.kind:
+                case Named(_, _):
+                    expect(true).to_equal(true)
+                case _:
+                    expect(false).to_equal(true)
+        else:
+            expect(false).to_equal(true)

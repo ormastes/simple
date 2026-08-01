@@ -329,6 +329,114 @@ them:**
    regression signal. Per-file verdicts require **one process per file**; the
    directory number must never be quoted as a result.
 
+## Class C — generic applications erased to `Any` in the PARSER (root-caused 2026-08-01)
+
+`fn f(a: Vec<i64>)` fails as `unresolved type: Any`. So do `Vec<Foo>`,
+`list<i64>`, `list<list<i64>>`, `Map<text,i64>` and the SIMD `Vec<f32,4>`, while
+bare `list` resolves to `Array<ANY>` and bare `Vec` correctly reports
+`unresolved type: Vec`. This is NOT a `lower_named_kind` whitelist gap: the base
+name is destroyed before the gate is reached, so no arm added to that match — a
+`Vec -> list` alias included — can ever fire for a generic application.
+
+### Root cause (PROVED)
+
+`src/compiler/10.frontend/core/parser.spl` `parser_parse_type_impl`, the
+"unknown generic type" tail of the `has_generic` branch:
+
+- `Option` / `Result` / `Dict` are special-cased above it and keep their
+  arguments through the dedicated `result_type_register` / `dict_type_register`
+  side tables. That is why `Result<i64,text>` and `Dict<text,i64>` lower
+  correctly today.
+- Any other base is looked up with `named_type_find(type_name)`. On a hit it
+  returns `TYPE_NAMED_BASE + gid` — the **name survives, the arguments are
+  dropped**.
+- On a miss it returns **`TYPE_ANY`**, which
+  `_FlatAstBridge/convert_nodes.spl` decodes as `Named("Any", [])`. The
+  annotation now literally spells `Any`, and `lower_named_kind` reports
+  `unresolved type: Any` — naming a type nobody wrote.
+
+The erasure is therefore conditional on the base being absent from **this
+file's** named-type registry. `list`, `Vec` and `Map` are builtins or live in
+other modules, so they always miss. This makes Class C a symptom of the same
+missing cross-module type fallback recorded below, not an independent defect.
+
+### Evidence
+
+In-process `HirLowering` A/B (the only harness that can see this — see the
+measurement traps below), 13 shapes:
+
+| annotation | param0 lowers to | errors |
+|---|---|---|
+| `list` (bare) | `Array<ANY>` | 0 |
+| `Dict<text,i64>` | `Dict<Str,Int>` | 0 |
+| `Result<i64,text>` | `Result<Int,Str>` | 0 |
+| `i64?` | `Opt<Int>` | 0 |
+| `list<i64>` | `ERROR` | `unresolved type: Any` |
+| `list<list<i64>>` | `ERROR` | `unresolved type: Any` |
+| `Vec<i64>`, `Vec<Foo>` | `ERROR` | `unresolved type: Any` |
+| `Map<text,i64>` | `ERROR` | `unresolved type: Any` |
+| `Vec<f32,4>` (SIMD) | `ERROR` | `unresolved type: Any` |
+| `Vec` (bare) | `ERROR` | `unresolved type: Vec` |
+| `Foo<i64>`, `struct Foo<T>` declared | `Named(nargs=0)` | monomorphization #158 Phase B |
+
+Discriminating confirmation that the running parser really implements the
+branch above: a base declared **in the same file** keeps its name and lowers
+clean (`struct Bar` + `fn f(a: Bar<i64>)` → 0 errors; `struct Map` +
+`fn f(a: Map<text,i64>)` → 0 errors), while the identical shape with an
+undeclared base (`Baz<i64>`) reports `unresolved type: Any`. Declared-vs-
+undeclared is the only variable, which is exactly what `named_type_find`
+gates.
+
+### Why no fix is landed here
+
+The one-line fix — register the base name instead of returning `TYPE_ANY`, as
+the non-generic path immediately below already does — is **not safe to land
+unverified**, for two independent reasons:
+
+1. **It converts a lenient recovery into a hard error.** The `TYPE_ANY`
+   fallback exists precisely because a generic base is usually declared in
+   another module. Preserving the name sends it to the strict gate, where the
+   missing cross-module fallback (see below) means it will NOT be found — so
+   every cross-module generic annotation in the tree would turn from a silent
+   `Any` into `unresolved type: <Name>`. Fixing Class C properly therefore
+   **depends on** the cross-module struct fallback, which is still open.
+2. **It cannot be measured from source.** See below.
+
+A safe subset exists and is the recommended next step: preserve the base name
+only for bases `lower_named_kind` can resolve **without** the symbol table
+(`list`, `Map`, `HashMap`, `set`, `dict`, `tuple`), keeping `TYPE_ANY` for
+everything else. That fixes `list<i64>`, `list<list<i64>>` and `Map<K,V>` with
+no new hard-error surface, and leaves `Vec<i64>` as `Any` — correctly, since
+`Vec` has no arm and is SIMD-shaped in `src/lib/*/simd`, where `list` would be
+the wrong meaning.
+
+Generic **arguments** remain dropped either way: `TYPE_NAMED_BASE + gid` is a
+bare integer tag with nowhere to carry them, and the bridge decodes it as
+`Named(type_tag_name(tag), [])`. Only `Dict` and `Result` keep arguments, via
+their dedicated side tables. Carrying arguments for an arbitrary base needs a
+general side table — a design change, not a patch.
+
+### Measurement traps found while root-causing this (both false-greened)
+
+1. **The JIT false-greens the whole family.** Running the in-process probe as a
+   bare positional `.spl` (the Cranelift JIT) reported **`errors=0` for every
+   shape, including the broken ones**. `hir.functions[fn_id]` returns nil under
+   the JIT — the known Dict-with-struct-values defect — so the probe silently
+   inspected nothing. The same probe under `SIMPLE_EXECUTION_MODE=interpreter`
+   shows the real failures. Any in-process HIR probe here MUST pin the
+   interpreter. (`simple test` already hard-defaults to it.)
+2. **The pure-Simple core parser is NOT executed when driving the frontend
+   in-process.** An `eprint` at the top of `parser_parse_type_impl` produced
+   **zero** hits across a full probe run, and sabotaging both the unknown-
+   generic return and the bare-name registration changed nothing, while
+   sabotaging `lower_named_kind`'s message in `20.hir/hir_lowering/types.spl`
+   showed up immediately. `compiler.core.parser` resolves to an implementation
+   baked into the binary; only the HIR layer is read from `.spl` at runtime.
+   **Consequence: a parser-layer fix in this family cannot be gated by any
+   in-process probe — it requires a bootstrap rebuild to become observable.**
+   This is why Class A/B fixes (all in `lower_named_kind`) were verifiable and
+   Class C is not.
+
 ## Known divergence left open
 
 `usize`/`isize` signedness follows `HirType.named` (unsigned/signed 64), **not**
