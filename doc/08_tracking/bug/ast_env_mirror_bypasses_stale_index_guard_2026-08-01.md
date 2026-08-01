@@ -2,7 +2,11 @@
 
 **ID:** ast_env_mirror_bypasses_stale_index_guard_2026-08-01
 **Severity:** P1 — latent correctness (silent wrong AST tag) + proven O(N^2) + **exec ceiling already exceeded by current source files** (measured 2026-08-01)
-**Status:** Diagnosed, NOT fixed. Largest-file question ANSWERED 2026-08-01 (see "Largest-file measurement") — the mirror is unusable on this repo as-is
+**Status:** **FIXED 2026-08-01 — the stmt/expr env mirror is RETIRED (deleted).** All three defects
+(E2BIG, stale cross-unit reads, O(N^2)) close together. The premise that kept the mirror alive —
+"under a tree-walk interpreter, module-level arrays may not persist between calls" — was tested
+directly and **DISPROVED**; see "Decisive experiment" below. The decl-side env store is a separate
+mechanism and is **unchanged**.
 **Reported:** 2026-08-01
 **Mode:** only when `SIMPLE_BOOTSTRAP=1` and `SIMPLE_NATIVE_ARENA_DECLS != 1`
 **Related:** `ast_env_var_quadratic_parse_2026-06-13.md` (perf only),
@@ -191,54 +195,96 @@ membership question above. Neither affects the verdict, which the 10,700-literal
 establishes independently.
 
 
-## Is the enabling condition still live? YES — this is why it must not simply be deleted
+## Is the enabling condition still live? NO — DISPROVED 2026-08-01
 
-`ast_decl_arena_default()` (`_Ast/decl_nodes.spl:136`) documents the reason, and it still holds:
+An earlier revision of this document asserted the enabling condition still held and that the mirror
+"must not simply be deleted". **That assertion was never tested. It has now been tested and it is
+false.** The claim under test, from `ast_decl_arena_default()` (`_Ast/decl_nodes.spl:136`):
 
 > under a tree-walk interpreter, module-level arrays may not persist between calls, and the env
 > store is the reliable store there
 
-The **decl** arena was already migrated to arena-preferred-by-default on 2026-07-24, but it
-deliberately kept `SIMPLE_BOOTSTRAP=1` on the legacy env path for that reason. The stmt/expr
-siblings were never given the equivalent opt-out and have no default-flip at all. Live
-mirror-enabled lane today: `src/app/ci/build_simpleos_toolchain.spl:402` runs
-`SIMPLE_BOOTSTRAP=1 ... native-build --source src/compiler --source src/lib --source src/app`
-with no `SIMPLE_NATIVE_ARENA_DECLS=1`.
+### Decisive experiment (PROVED)
 
-**Do not "fix" this by deleting the fallback or the env read.** The fail-safe is load-bearing.
+Binary: `bin/release/x86_64-unknown-linux-gnu/simple_seed` (rebuilt 2026-08-01 from origin tip
+`f93c9b2623`, contains all four parser fixes). **Lane: interpreter** (`SIMPLE_EXECUTION_MODE=interpret`)
+— the mode the mirror exists to protect.
 
-## Proposed fix (conservative, keeps the fallback)
+**1. Module-level arrays persist, in-module and cross-module.** A module-level `[i64]` written
+through one function and read through another returns the written values; with the owner array in
+module A and all access through A's exported accessors called from module B, unit A's 3 pushes read
+back as 3 and a subsequent `clear()` + 1 push from unit B reads back as exactly 1 (`g0=21`, not
+`11`). Identical under `interpret` and `jit`. Probes:
+`/dev/shm` scratch, reproduced from the harness described below.
 
-Bound the env-first read by the live node count rather than reordering the guard:
+**2. The real parser, N=2 compilation units in one process, mirror ON vs OFF — arrays identical.**
+Harness: `parse_module_silent_checked` on a generated 400-statement unit A, then a 2-line unit B,
+then `expr_get_tag(len_b + 50)` — an index live in A and out of bounds in B.
 
-```
-fn expr_env_read(idx: i64, field: text) -> text:
-    if not expr_env_mirror_enabled():
-        return ""
-    if idx < 0 or idx >= expr_count_env():   # NEW: stale//OOB index is not a live node
-        return ""
-    rt_env_get(expr_key(idx, field)) ?? ""
-```
+| run | `owner_len` A | `owner_len` B | `expr_get_tag(51)` | verdict |
+|-----|--------------|---------------|--------------------|---------|
+| mirror OFF (`SIMPLE_BOOTSTRAP` unset) | 1200 | 1 | **-1** + OOB diagnostic | CLEAN |
+| mirror ON (`SIMPLE_BOOTSTRAP=1`)      | 1200 | 1 | **1** (unit A's tag), no diagnostic | CONTAMINATED |
+| **after retirement**, `SIMPLE_BOOTSTRAP=1` | 1200 | 1 | **-1** + OOB diagnostic | CLEAN |
 
-`expr_count_env()` is env-authoritative under the mirror (`expr_reset` writes COUNT=0, `expr_alloc`
-bumps it before writing fields), so this refuses only indices that provably are not live nodes,
-and it restores reachability of the `expr_get_tag` OOB guard. Same change for `stmt_env_read`.
+The arena columns are **identical in all three rows**. The arrays persisted perfectly with the
+mirror disabled, across two compilation units, in the interpreter, under `SIMPLE_BOOTSTRAP=1`.
+The mirror contributed nothing to state retention — its only observable effect was the
+contamination in row 2. This is the repro sketch that the previous revision left "not yet executed".
 
-## Why not fixed yet
+### Corroborating evidence already in-tree
 
-The guard depends on `expr_count_env()` being trustworthy in the one environment where module-level
-state is known to be unreliable. If `SIMPLE_BOOTSTRAP_EXPR_COUNT` is ever absent while the
-per-index entries are present, `expr_count_env()` returns 0 and the proposed guard would reject
-**every** env read — turning a latent bug into a total bootstrap failure. That is the same
-fail-safe reasoning that kept this code as it is.
+`scripts/bootstrap/bootstrap-from-scratch.sh` pairs `SIMPLE_BOOTSTRAP=1` with
+`SIMPLE_NATIVE_ARENA_DECLS=1` in `bootstrap_native_build_main` (line ~599) and in the stage3/stage4
+arg sets (lines ~1224, ~1349). `expr_env_mirror_enabled()`/`stmt_env_mirror_enabled()` both already
+tested `SIMPLE_NATIVE_ARENA_DECLS != 1`, so **the canonical self-host bootstrap was already running
+with the expr/stmt mirror disabled.** Retirement does not create a new untested configuration; it
+makes every lane take the configuration stage3/stage4 already proved. The lanes whose behaviour
+actually changes are the ~30 SimpleOS/`scripts/os` lanes that set `SIMPLE_BOOTSTRAP=1` alone — and
+per the measurement above those are the lanes already past `ARG_MAX` on real files, so removing the
+mirror can only help them.
 
-Validating the change requires running the bootstrap interpreter lane, which was not possible this
-session: the live `bin/simple` has no `run`/`test` subcommands and `bin/simple_seed` predates
-several parser fixes. **This must be landed only together with a bootstrap-lane run that exercises
-`SIMPLE_BOOTSTRAP=1` across a multi-file parse.**
+## Fix landed: the mirror is retired
 
-## Repro sketch (not yet executed)
+The env mirror was **deleted**, not gated off — the repo rule is to remove unused code rather than
+leave dead branches. The mechanism was fully contained in four files with **no external consumers**
+(verified by symbol grep across `src/`):
 
-Under `SIMPLE_BOOTSTRAP=1` without `SIMPLE_NATIVE_ARENA_DECLS=1`, parse a large file (N expr nodes),
-then parse a small one, then read a node index between the two counts: `expr_get_tag` returns the
-first file's tag instead of -1. Expected after fix: -1 plus the OOB diagnostic.
+| file | change |
+|------|--------|
+| `_AstExpr/nodes.spl` | mirror gate/slot, `expr_env_read`, `expr_mode_slots_refresh`, `expr_key`, the four `expr_*_set` writers, the three `expr_*_get` env readers, `env_value_nul_free`, and the now-dead `expr_parse_i64`/`expr_i64_list_join`/`expr_i64_list_split` removed; `expr_count_env`/`expr_count_set` now read/write `expr_count_slot[0]` only |
+| `_AstExpr/accessors.spl` | all 11 env-first read prologues removed, so **the `expr_get_tag` bounds guard is now the first thing that runs** |
+| `ast_stmt.spl` | same retirement on the stmt side, plus `stmt_is_if_val_decl` now reads `stmt_if_val_marker` unconditionally |
+| `_Ast/decl_nodes.spl`, `_Ast/module_state.spl` | comments referencing the removed functions and the disproved premise corrected |
+
+Deliberately **kept**: the `SIMPLE_TRACE_EXPR_TAGS` / `SIMPLE_TRACE_STMT_TAGS` trace prints and the
+lane-L6 generation diagnostics (level-gated, default off — log-retention policy), and the entire
+decl-side env store (`ast_decl_*`), which is a separate mechanism with its own live callers.
+
+### The naive fix was correctly declined
+
+The `expr_count_env()`-bounded `expr_env_read` proposed in the previous revision was **not** taken.
+It trusts `SIMPLE_BOOTSTRAP_EXPR_COUNT` in the one environment where module state was believed
+unreliable; had COUNT ever been absent it would have rejected every env read and converted a latent
+bug into total bootstrap failure. Retirement removes the question instead of answering it.
+
+### Verification performed
+
+- Multi-unit A/B above (N=2 units in one process), interpreter lane — **the second unit is
+  uncontaminated after the fix**, and the previously-unreachable OOB guard fires.
+- Post-fix environ check: after parsing 1,200 expr nodes under `SIMPLE_BOOTSTRAP=1`,
+  `SIMPLE_BOOTSTRAP_EXPR_0_TAG`, `..._500_TAG`, `..._EXPR_COUNT` and `SIMPLE_BOOTSTRAP_STMT_0_TAG`
+  are all **empty** — zero mirror entries, so the `E2BIG` and O(N^2) mechanisms are gone by
+  construction, not merely bounded.
+- Corpus regression: **18 of 25** real `src/compiler/10.frontend/core/*.spl` files parsed in one
+  process under `SIMPLE_BOOTSTRAP=1` — **0 failures**, and the 18 include all five files this change
+  touches (`nodes.spl` 1355 nodes, `accessors.spl` 383, `ast_stmt.spl` 714, `decl_nodes.spl` 3389,
+  `module_state.spl` 1545), i.e. the edited compiler parses itself. **Stated honestly: this run was
+  truncated by a 1200 s harness timeout (interpreter lane is slow), not run to completion** — the
+  remaining 7 files are unmeasured, and no `SUMMARY` line was emitted. It is a partial pass, not a
+  clean sweep.
+
+**Not verified in this lane (stated plainly):** a full stage3/stage4 bootstrap was not run here.
+The risk is bounded by the corroborating evidence above — stage3/stage4 already set
+`SIMPLE_NATIVE_ARENA_DECLS=1`, so those lanes were already exercising the exact code path this
+change makes universal.

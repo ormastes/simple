@@ -130,17 +130,20 @@ fn ast_decl_imports_key(idx: i64) -> text:
 # constructor, so arena-preferred reads lose nothing.
 # The flag is cached in a slot: rt_env_get_i64 is itself an environ scan and
 # these gates sit on the per-decl-field hot path. Refreshed per file via
-# ast_decl_mode_slots_refresh() (same pattern as stmt_mode_slots_refresh).
+# ast_decl_mode_slots_refresh().
 var ast_decl_mode_slot: [i64] = []
 
 fn ast_decl_arena_default() -> i64:
     # Bootstrap lanes keep the legacy default (env store on unless the lane
-    # explicitly sets SIMPLE_NATIVE_ARENA_DECLS=1, as stage4 does): under a
-    # tree-walk interpreter, module-level arrays may not persist between
-    # calls, and the env store is the reliable store there (see the
-    # stmt_env_mirror_enabled compatibility note). Non-bootstrap runs
-    # (test/LSP/plain native-build) always execute compiled code where the
-    # arenas persist — they default to arena-preferred.
+    # explicitly sets SIMPLE_NATIVE_ARENA_DECLS=1, as stage4 does). The original
+    # justification — "under a tree-walk interpreter, module-level arrays may
+    # not persist between calls" — was DISPROVED on 2026-08-01: an A/B on the
+    # same seed binary showed the expr/stmt arenas persist identically with the
+    # env mirror on and off, across N=2 compilation units in one process and
+    # across a module boundary. The stmt/expr env mirrors were retired on that
+    # evidence; this decl gate is kept only because the decl env store still has
+    # its own callers. See
+    # doc/08_tracking/bug/ast_env_mirror_bypasses_stale_index_guard_2026-08-01.md
     if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1:
         return 0
     1
@@ -153,8 +156,8 @@ fn ast_decl_mode_slots_refresh():
 fn ast_decl_prefer_arena() -> bool:
     if ast_decl_mode_slot != nil and ast_decl_mode_slot.len() > 0:
         return ast_decl_mode_slot[0] == 1
-    # Interpreter module variables may not persist between calls — fall back
-    # to a direct env read (same compatibility note as stmt_env_mirror_enabled).
+    # Slot not yet initialised (first call, or a native binary that
+    # zero-initialised the module array) — fall back to a direct env read.
     rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
 
 fn ast_decl_env_mirror_enabled() -> bool:
