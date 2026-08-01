@@ -12,7 +12,7 @@ use common.ui.theme_package_wire.{
 }
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
 use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
-use nogc_sync_mut.ui.theme_package.{default_theme_id, resolved_theme_css, resolve_theme_alias, theme_package_fingerprint, theme_package_material_solid_fallback_rgba, theme_package_material_text_rgba}
+use nogc_sync_mut.ui.theme_package.{default_theme_id, resolved_theme_css, resolve_theme_alias, theme_package_fingerprint, theme_package_material_solid_fallback_rgba, theme_package_material_text_rgba, theme_package_render_snapshot}
 use common.ui.wm_chrome_theme.{
     active_wm_theme_render_snapshot,
     active_theme_composed_css,
@@ -292,11 +292,27 @@ fn _simple_web_content_revision_with_fingerprint(
     hash = _simple_web_revision_mix(hash, height.to_i64())
     _simple_web_revision_mix(hash, _clamp_scroll_px(scroll_y).to_i64())
 
+fn _simple_web_theme_cache_fingerprint(theme: text) -> text:
+    """Stable cache identity for the effective theme material, not just source.
+
+    The active snapshot may be a CSS/WM override of the package with the same
+    source manifest but different realized material. Keep that material in the
+    content revision so timed and retained Web artifacts cannot cross it.
+    """
+    val canonical_theme = resolve_theme_alias(theme)
+    if active_wm_theme_snapshot_present():
+        val active = active_wm_theme_snapshot_unchecked()
+        if active.id == canonical_theme:
+            return active.id + "|" + active.source_manifest_sha256 + "|" +
+                active.material_sha256
+    val snapshot = theme_package_render_snapshot(canonical_theme)
+    snapshot.id + "|" + snapshot.source_manifest_sha256 + "|" +
+        snapshot.material_sha256
+
 fn simple_web_content_revision_with_theme(theme: text, title: text, body_html: text, width: i32, height: i32, scroll_y: i32) -> i64:
-    # The content-addressed package fingerprint covers every package-owned
-    # source without rescanning the much larger composed CSS on each request.
-    val installed_fingerprint = active_theme_source_fingerprint(theme)
-    val theme_fingerprint = if installed_fingerprint != "": installed_fingerprint else: theme_package_fingerprint(theme)
+    # The effective snapshot includes source and material: a WM/CSS override
+    # can retain a package source digest while changing realized Draw IR pixels.
+    val theme_fingerprint = _simple_web_theme_cache_fingerprint(theme)
     _simple_web_content_revision_with_fingerprint(
         theme_fingerprint, title, body_html, width, height, scroll_y
     )

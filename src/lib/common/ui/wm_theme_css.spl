@@ -24,10 +24,10 @@
 # lazy-apply entry point is apply_wm_css_theme_text() below — call it AFTER
 # fs/VFS is available (e.g. after SIMPLE_WM_THEME_FILE is read on the hosted
 # hosted_entry.spl path, or after a mounted /THEME.CSS is read on the guest
-# freestanding path), never at module init. It only calls
-# register_wm_chrome_theme() when at least one of the 6 tokens actually
-# parsed; empty/garbage CSS text is a no-op, so whatever chrome theme was
-# already installed (defaults, or an earlier package/snapshot install)
+# freestanding path), never at module init. When a generated/package snapshot
+# is active, it derives and re-installs an effective snapshot before retaining
+# the exact chrome palette. Empty/garbage CSS text is a no-op, so whatever
+# theme was already installed (defaults, or an earlier package/snapshot install)
 # survives untouched — see simpleos_wm_theme_bootstrap.spl's
 # apply_simpleos_css_theme_override() for the guest-side call point this
 # hands off to.
@@ -37,7 +37,7 @@
 # remains deliberately free of fs/env access so that boot-order boundary stays
 # explicit at the entry point.
 
-use common.ui.wm_chrome_theme.{WmChromeColors, wm_chrome_colors_from_gui_tokens, register_wm_chrome_theme}
+use common.ui.wm_chrome_theme.{WmChromeColors, active_wm_theme_snapshot_present, active_wm_theme_snapshot_unchecked, apply_theme_render_snapshot_to_wm_chrome, register_wm_chrome_theme, theme_render_snapshot_with_wm_colors, wm_chrome_colors_from_gui_tokens}
 
 # Unique `wtc_` field prefix dodges the most-fields-wins struct-inference
 # landmine when multiple small text-only structs are in scope.
@@ -204,9 +204,14 @@ fn _wm_theme_tokens_all_absent(tokens: WmThemeCssTokens) -> bool:
 fn apply_wm_css_theme_text(content: text) -> bool:
     """Lazy wiring point: parse `content` (a loaded .css or .html theme
     file's text) and, if at least one of the 6 --wm-* tokens parsed,
-    install the resulting palette via register_wm_chrome_theme() so every
-    chrome pipeline (wm_chrome_theme()) picks it up on the next scene
-    projection. Returns true when a theme was installed.
+    install the resulting palette so every chrome pipeline
+    (wm_chrome_theme()) picks it up on the next scene projection. When a
+    renderer-neutral snapshot is already active, first derive and install an
+    effective snapshot with matching durable material/identity; this keeps
+    theme wire, Draw IR, and cache consumers from observing the pre-override
+    material fingerprint. The exact palette is then registered because the
+    CSS --wm-error and compositor-only slots have no ThemeRenderSnapshot
+    field. Returns true when an override was installed.
 
     Fallback contract: if none of the 6 tokens parse (content is empty,
     garbage, or has no recognizable --wm-* declarations at all), this is a
@@ -227,5 +232,13 @@ fn apply_wm_css_theme_text(content: text) -> bool:
         tokens.wtc_surface,
         tokens.wtc_surface_hover,
         tokens.wtc_error)
+    if active_wm_theme_snapshot_present():
+        val base_snapshot = active_wm_theme_snapshot_unchecked()
+        val effective_snapshot = theme_render_snapshot_with_wm_colors(
+            base_snapshot, colors)
+        apply_theme_render_snapshot_to_wm_chrome(effective_snapshot)
+    # Keep CSS-only chrome values such as --wm-error exact after snapshot
+    # projection, whose material vocabulary intentionally has no close-button
+    # or command-lane fields.
     register_wm_chrome_theme(colors)
     true

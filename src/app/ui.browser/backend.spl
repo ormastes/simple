@@ -25,7 +25,12 @@ use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, 
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.io_runtime.{write_file, time_now_unix_micros}
-use nogc_sync_mut.ui.theme_package.{theme_package_render_snapshot}
+use nogc_sync_mut.ui.theme_package.{resolve_theme_alias, theme_package_render_snapshot}
+use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
+use common.ui.wm_chrome_theme.{
+    active_wm_theme_snapshot_present,
+    active_wm_theme_snapshot_unchecked
+}
 
 # Gap B (backend_isolation_plan.md): WebRenderer facade selector, distinct
 # from the Engine2D `--backend` selector above. "pure_simple" (default)
@@ -46,6 +51,19 @@ pub fn browser_theme_cache_identity(canonical_theme_id: text, source_manifest_sh
 
 pub fn browser_theme_cache_key(base_key: text, canonical_theme_id: text, source_manifest_sha256: text, material_sha256: text) -> text:
     "{base_key}|{browser_theme_cache_identity(canonical_theme_id, source_manifest_sha256, material_sha256)}"
+
+fn browser_theme_render_snapshot(theme_id: text) -> ThemeRenderSnapshot:
+    """Return the installed snapshot only for its matching UI-tree theme.
+
+    A WM CSS override changes the active snapshot's CSS/material identity while
+    package lookup remains the correct fallback for unrelated UI sessions.
+    """
+    val canonical_theme = resolve_theme_alias(theme_id)
+    if active_wm_theme_snapshot_present():
+        val active = active_wm_theme_snapshot_unchecked()
+        if active.id == canonical_theme:
+            return active
+    theme_package_render_snapshot(theme_id)
 
 pub fn web_render_engine_is_known(name: text) -> bool:
     """Loud-fail gate for `--web-engine`: only the two real WebRenderBackend
@@ -445,7 +463,7 @@ class BrowserBackend:
         self.static_frame_theme_identity = theme_identity
 
     fn widget_draw_ir_composition(state: UIState) -> DrawIrComposition:
-        val theme_snapshot = theme_package_render_snapshot(state.tree.theme_name())
+        val theme_snapshot = browser_theme_render_snapshot(state.tree.theme_name())
         widget_tree_to_draw_ir_with_theme(state.tree.root_node(), self.width, self.height, DRAW_IR_BACKEND_GPU, theme_snapshot)
 
     me render_frame(tree: UITree, state: UIState):
@@ -454,7 +472,7 @@ class BrowserBackend:
     me render_frame_with_composition(tree: UITree, state: UIState, _composition: DrawIrComposition):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
         val revision = widget_store_revision()
-        val theme_snapshot = theme_package_render_snapshot(state.tree.theme_name())
+        val theme_snapshot = browser_theme_render_snapshot(state.tree.theme_name())
         val theme_identity = browser_theme_cache_identity(
             theme_snapshot.id,
             theme_snapshot.source_manifest_sha256,
