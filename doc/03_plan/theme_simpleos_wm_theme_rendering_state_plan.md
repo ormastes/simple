@@ -23,7 +23,8 @@
   - Re-run host + qemu WM render parity checks after this commit.
 ## 2026-08-01 GH sync and renderer/IR check
 
-Ran `git fetch` and synced `tmp-docfix` context against `origin/main` now at `57923b8259` (from `fe481ab069`).
+Ran `git fetch` and synced `tmp-docfix` context against `origin/main`.
+Current upstream tip noted in this branch as `31c858cab9` (latest checked).
 - New upstream commit since the last recorded sync:
   - `57923b8259` `fix(hir): keep the operator when lowering augmented assignment`
     - `src/compiler_rust/compiler/src/hir/lower/stmt_lowering.rs`
@@ -31,8 +32,8 @@ Ran `git fetch` and synced `tmp-docfix` context against `origin/main` now at `57
     - `doc/08_tracking/bug/jit_struct_field_compound_assign_loads_zero_2026-07-27.md`
 - "runderer"/runner search against upstream branch refs/docs/code returned no new match.
 - IR-spec check:
-  - No new `*_spec.spl` changes related to renderer backend runners were included in `57923b8259`; IR/spec-impact remains from existing DrawIR work already tracked in prior runs.
-- Plan impact: upstream change is compiler-HIR scope only (non-blocking for current WM/theme rendering lane). Keep local theme-state and capture/evidence tasks as-is.
+  - No new `*_spec.spl` changes related to renderer backend runners were included in `31c858cab9`; IR/spec-impact remains from existing DrawIR work already tracked in prior runs.
+  - Plan impact: upstream change is compiler-HIR scope only (non-blocking for current WM/theme rendering lane). Keep local theme-state and capture/evidence tasks as-is.
   - Continue focusing on:
     - hosted theme input (`SIMPLE_WM_THEME_FILE`)
     - SimpleOS theme file (`/THEME.CSS`)
@@ -41,6 +42,15 @@ Ran `git fetch` and synced `tmp-docfix` context against `origin/main` now at `57
   - Searched recent upstream logs for renderer/backend/IR/spek runner-relevant commits: `fe481ab069`, `f80696b851`, `33754b8df0`, `205b35e474`, plus legacy `51bfb0d970`, `57923b8259`.
   - Impact to this lane: no new renderer runner/IR spec behavior requiring plan adjustment.
   - `f80696b851` (hosted-wm unparseable source fixes) is advisory for hosted-runner stability only.
+
+- 2026-08-01 follow-up "runderer/IR" check (latest range refresh):
+  - Compared upstream window: `57923b8259..31c858cab9`.
+  - New commit:
+    - `31c858cab9` `refactor(ui): S2 DrawIR backend accessor seam (VK identity, MTL/DXGI remap)`
+      - `src/lib/common/ui/draw_ir_v3_backend_access.spl` (new file)
+      - `src/lib/common/ui/draw_ir_v3_backend_enums.spl` (minor access change)
+  - IR-spec impact: no `_spec.spl` files changed in this commit.
+  - Plan impact: current lane still unchanged; keep focus on hosted/simpleOS theme propagation and web-window payload fidelity while this DrawIR seam is consumed where needed by backend implementers.
 
 ## Historical upstream renderer/IR context tracked
 
