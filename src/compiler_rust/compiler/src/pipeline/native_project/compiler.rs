@@ -440,8 +440,9 @@ pub(crate) fn compile_file_to_object(
     } else {
         ast
     };
+    let module_prefix = module_prefix_from_path(file_path, source_root);
+    ast.name = Some(module_prefix.clone());
     if is_freestanding {
-        let module_prefix = module_prefix_from_path(file_path, source_root);
         inject_freestanding_module_global_init(&mut ast, &module_prefix);
     }
 
@@ -538,7 +539,6 @@ pub(crate) fn compile_file_to_object(
     // MIR
     let mut mir = crate::mir::lower_to_mir_with_global_trait_impls(&hir, imports.trait_impls.as_ref())
         .map_err(|e| format!("{}: mir: {e}", file_path.display()))?;
-    let module_prefix = module_prefix_from_path(file_path, source_root);
     qualify_native_struct_layouts(
         &mut mir,
         &module_prefix,
