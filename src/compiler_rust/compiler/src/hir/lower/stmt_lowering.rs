@@ -467,6 +467,98 @@ impl Lowerer {
             }
 
             Node::While(while_stmt) => {
+                if let Some(pattern) = &while_stmt.let_pattern {
+                    // `while val Some(w) = expr:` / `while var Ok(v) = expr:`
+                    //
+                    // Until 2026-08-01 this arm lowered ONLY `while_stmt.condition`
+                    // and silently DROPPED `let_pattern`: the Option-typed subject was
+                    // fed straight to `lower_condition` (a boxed Option is truthy, so
+                    // the loop was always entered — even for a `None` first value) and
+                    // no payload extraction was ever emitted, so the body ran with the
+                    // binding reading 0. Measured on the 6-form family probe at base
+                    // `05231d6c69f`: every `while val`/`while var` form answered
+                    // `sum=0` under the JIT where the interpreter answered the
+                    // hand-computed value. See
+                    // doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md
+                    // §10 / §16.
+                    //
+                    // Desugar to the same shape the pure-Simple parser already
+                    // produces for this form (`parse_while_stmt` in
+                    // src/compiler/10.frontend/core/parser_stmts.spl), so the subject
+                    // is re-evaluated on every iteration:
+                    //
+                    //     loop:
+                    //         val $while_let_subject = EXPR
+                    //         if <pattern matches>:
+                    //             <payload bindings>
+                    //             BODY
+                    //         else:
+                    //             break
+                    //
+                    // `HirStmt::Loop` + `If` + `Break` are used rather than
+                    // `HirStmt::While` because the subject `Let` has to run *inside*
+                    // the loop, before the test, and a `While` condition is a single
+                    // expression with no room for a preceding statement.
+                    if !while_stmt.invariants.is_empty() {
+                        // `HirStmt::Loop` carries no invariants slot, and lowering to
+                        // it would silently drop them. No site in the tree combines
+                        // the two forms; refuse loudly rather than lose the contract.
+                        return Err(LowerError::Unsupported(
+                            "loop invariants are not supported on a `while val <pattern> = ...` loop"
+                                .to_string(),
+                        ));
+                    }
+
+                    // `while val v = expr.?:` needs the same one-layer ExistsCheck
+                    // unwrap as the `if val` form — see the `Node::If` branch above.
+                    let condition_expr = match &while_stmt.condition {
+                        Expr::ExistsCheck(inner) => inner.as_ref(),
+                        other => other,
+                    };
+                    let subject_hir = self.lower_expr(condition_expr, ctx)?;
+                    let subject_ty = subject_hir.ty;
+
+                    let subject_idx = ctx.locals.len();
+                    ctx.add_local("$while_let_subject".to_string(), subject_ty, Mutability::Immutable);
+                    let store_stmt = HirStmt::Let {
+                        local_index: subject_idx,
+                        ty: subject_ty,
+                        value: Some(subject_hir),
+                    };
+
+                    let condition = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
+
+                    let bindings = self.extract_pattern_bindings(pattern, subject_ty);
+                    let mutability = if matches!(pattern, Pattern::MutIdentifier(_)) {
+                        Mutability::Mutable
+                    } else {
+                        Mutability::Immutable
+                    };
+                    for (name, ty) in &bindings {
+                        ctx.add_local(name.clone(), *ty, mutability);
+                    }
+
+                    let mut then_block =
+                        self.build_pattern_binding_stmts(pattern, subject_idx, subject_ty, &bindings, ctx);
+                    then_block.extend(self.lower_block(&while_stmt.body, ctx)?);
+
+                    for (name, _) in &bindings {
+                        ctx.local_map.remove(name);
+                    }
+
+                    return Ok(vec![HirStmt::Loop {
+                        body: vec![
+                            store_stmt,
+                            HirStmt::If {
+                                condition,
+                                then_block,
+                                else_block: Some(vec![HirStmt::Break]),
+                            },
+                        ],
+                        simd_requested: while_stmt.simd_requested,
+                    }]);
+                }
+
                 let condition = self.lower_condition(&while_stmt.condition, ctx)?;
                 let body = self.lower_block(&while_stmt.body, ctx)?;
                 let invariants = self.lower_contract_clauses(&while_stmt.invariants, ctx)?;

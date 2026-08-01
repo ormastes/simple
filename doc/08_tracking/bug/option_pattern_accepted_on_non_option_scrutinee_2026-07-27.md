@@ -569,3 +569,113 @@ interpreter instrument was measuring the engine that does not have the bug.
 **Known gap in the instrument:** the warning carries no source span, so a hit
 names the *run*, not the offending line. Adding a span is the obvious next
 improvement and is required before any warn→error promotion can be triaged.
+
+## 2026-08-01 lane WHILELET (base `05231d6c69fe9b542fc595a046a87a8de539f3b1`)
+
+### 16. §10 / §14.2 FIXED: `Node::While` now lowers its let-pattern
+
+`hir/lower/stmt_lowering.rs` `Node::While` ignored `while_stmt.let_pattern`
+entirely — it lowered only `while_stmt.condition`. A boxed Option is truthy, so
+the loop was entered unconditionally (even when the first value was `None`), the
+subject was never pattern-tested, and no payload extraction was emitted, so the
+binding read `0`. That is the FOURTH match-lowering path, and it did not check
+anything at all.
+
+Fixed by desugaring the let-pattern form to the shape the pure-Simple parser
+already produces for it (`parse_while_stmt`,
+`src/compiler/10.frontend/core/parser_stmts.spl`):
+
+```
+loop:
+    val $while_let_subject = EXPR
+    if <pattern matches>:
+        <payload bindings>
+        BODY
+    else:
+        break
+```
+
+`HirStmt::Loop` + `If` + `Break` rather than `HirStmt::While`, because the
+subject `Let` must run inside the loop before the test and a `While` condition is
+one expression with no room for a preceding statement. The pattern test and the
+payload extraction reuse the *same* `if_let_pattern_condition` /
+`extract_pattern_bindings` / `build_pattern_binding_stmts` owners the `if val`
+form uses, so the two forms cannot drift apart again. `HirStmt::Loop` has no
+invariants slot; a `while val <pattern>` carrying `invariant:` clauses is now a
+loud `LowerError::Unsupported` rather than a silent drop (no site in the tree
+combines the two).
+
+The non-pattern `while` path is byte-identical to before — the new code sits
+entirely inside `if let Some(pattern) = &while_stmt.let_pattern`.
+
+### 17. The binding family, measured (PROVED, both engines, `[jit-fallback]` = 0)
+
+Each form in its own file, run through `simple run` on a debug build of the base
+sha and of the fixed sha; the value-3 control `[3,7].at(0)` → `Some 3` is present
+in every file and fired in every run, so the engine was genuinely executing.
+Expected values are hand-computed, not cross-engine agreement.
+
+| # | form | expected | base JIT | fixed JIT | base interp | fixed interp | verdict |
+|---|---|---|---|---|---|---|---|
+| A | `while val Some(w) = xs.at(i)` | `sum=21 it=3` | `sum=0 it=9` | **`sum=21 it=3`** | `21/3` | `21/3` | **dropped silently → FIXED** |
+| B | `while val Some(w) = f()` where `f() -> i64?` | `sum=6 it=3` | `sum=0 it=9` | `sum=0 it=0` † | `6/3` | `6/3` | **dropped silently → FIXED; † see §18** |
+| C | `while val w = f()` (plain-identifier form) | `sum=3 it=2` | `sum=0 it=9` | **`sum=3 it=2`** | rc=1 ‡ | rc=1 ‡ | **dropped silently → FIXED; ‡ see §19** |
+| D | `while var Some(w) = f()` | `sum=3 it=2` | `sum=0 it=9` | **`sum=3 it=2`** | `3/2` | `3/2` | **dropped silently → FIXED** |
+| K | `while val Some(w) = f()` where the FIRST value is `None` | `it=0` | `it=9` | **`it=0`** | `0` | `0` | **dropped silently → FIXED** (loop was entered on `None`) |
+| T | `while val Some(dir) = <text? local>` | `n=4 last=""` | *no output at all*, rc=0 | **`n=4 last=""`** | `n=0` § | `n=0` § | **dropped silently → FIXED; § pre-existing interp `val x: T?` defect (§13)** |
+| U | `while val Some((a,b)) = f()` (tuple payload) | `s=13 n=2` | `s=0 n=9` | `s=0 n=2` ¶ | `13/2` | `13/2` | **trip count FIXED; ¶ payload gap is pre-existing, see §20** |
+| E | `if val Some(k) = ...` (statement) | `k=3` | `k=3` | `k=3` | `k=3` | `k=3` | binds correctly, unchanged |
+| F | `elif val Some(k) = ...` | `k=7` | `k=7` | `k=7` | `k=7` | `k=7` | binds correctly, unchanged |
+| G | `val g = match ...` (expression form) | `11` | `11` | `11` | `11` | `11` | binds correctly, unchanged |
+| H | `match ...` (statement form) | `v=3` | `v=3` | `v=3` | `v=3` | `v=3` | binds correctly, unchanged |
+| I | match-arm guard carrying a binding | `v=7` | `v=7` | `v=7` | `v=7` | `v=7` | binds correctly, unchanged |
+| J | `for (a, b) in pairs` destructuring | `46` | `46` | `46` | `46` | `46` | binds correctly, unchanged |
+
+There is no expression-form `while` in the AST (`Expr` has `If` and `Match` but
+no `While`), so the statement form is the whole while-let surface.
+
+Which lowering site each form reaches, re-attributed at this sha:
+
+| form | site |
+|---|---|
+| `while val`/`while var` (before) | **none of the four** — pattern dropped |
+| `while val`/`while var` (after) | `stmt_lowering.rs` `Node::While` → `if_let_pattern_condition` → `lower_pattern_condition_stmt` |
+| `if val` / `elif val` (statement) | `stmt_lowering.rs` `lower_pattern_condition_stmt` |
+| statement `match` | `stmt_lowering.rs` `lower_pattern_condition_stmt` |
+| expression `if val` / `match` | `expr/control.rs` `lower_pattern_condition` |
+| interpreter, all forms | `interpreter_patterns.rs` `Pattern::Enum` (while-let via `interpreter_control.rs:354`, which was already correct) |
+
+### 18. † The value-3 miss is PRE-EXISTING and shared with `if val` and `match`
+
+Form B stops immediately because its first value is the integer **3 — the nil
+sentinel**. Isolated with two controls at the same base sha:
+
+- `while val Some(w) = f()` over `4,3,2,1`: fixed JIT gives `sum=4 it=1` — it
+  stops exactly at the 3.
+- the same loop over `6,5,4` (no 3): both engines give `sum=15 it=3`.
+- **decisive control, on code this lane did not touch:** `if val Some(w) =
+  f_returning_3()` prints `none` and `match f_returning_3()` picks `case _` — on
+  the **base** binary as well as the fixed one.
+
+So `rt_is_some` on a raw `i64?` holding 3 answers false on the JIT for *every*
+pattern form. Not introduced here, not fixed here.
+
+### 19. ‡ `while val w = <i64?>` fails LOUDLY on the interpreter (pre-existing)
+
+`error: semantic: type mismatch: cannot convert enum to int`, rc=1, at the base
+sha and after the fix. A loud failure, not a silent wrong answer, and only on the
+interpreter — the JIT answers correctly after the fix. Filed here, not fixed.
+
+### 20. ¶ Nested tuple sub-pattern payloads bind 0 on the JIT (pre-existing)
+
+`Some((a, b))` binds `a=0 b=0` under the JIT for **`if val` and `match` too**, at
+the base sha and after the fix — so it is a `build_pattern_binding_stmts`
+sub-pattern gap, not a while-let gap. The while-let trip count is now correct
+(2, was 9); only the payload is still wrong. Consistent with the known
+"enum payload sub-pattern, nesting depth" family.
+
+### 21. Native column: unmeasurable
+
+`match` on an enum has no native lowering — `compile --native` fails closed with
+`[PatternMatch]` — so no native value can be reported for any row above. Stated
+rather than invented.
