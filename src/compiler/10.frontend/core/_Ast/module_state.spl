@@ -17,8 +17,7 @@ use compiler.frontend.core.ast.*
 # ===== Import from split modules =====
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
-use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl, make_core_decl}
-use compiler.core.types.{int_to_str}
+use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
@@ -85,7 +84,7 @@ var ast_harden_retired_module_decl_slots: [[i64]] = []
 
 fn ast_gen_harden_refresh():
     # Cached read, refreshed once per ast_reset() cycle (same pattern as
-    # ast_decl_mode_slots_refresh) — a hot-path check
+    # ast_decl_mode_slots_refresh/expr_mode_slots_refresh) — a hot-path check
     # is then a slot read, not a per-call env syscall.
     if ast_gen_harden_slot == nil or ast_gen_harden_slot.len() == 0:
         ast_gen_harden_slot = [0]
@@ -615,6 +614,13 @@ fn ast_reset():
     elif_body.clear()
     elif_else.clear()
     module_decls.clear()
+    # Drop the per-index decl env mirror BEFORE the slot array goes: it is read
+    # env-first (module_decl_at / ast_decl_text_get), so anything left here
+    # outlives the arena it describes and is served to the NEXT file as if it
+    # were that file's own decl -- an order-dependent verdict. Must run while
+    # the high-water marks are still intact (ast_decl_count_set(0) /
+    # ast_module_decl_count_set(0) below reset the live counts, not the marks).
+    ast_decl_env_mirror_clear()
     ast_module_decl_slots_clear()
     _ast_slots_ensure()
     module_path_slot[0] = ""
@@ -644,19 +650,6 @@ fn ast_reset():
 # Needed by the interpreter which expects struct-based access
 
 fn expr_get(idx: i64) -> CoreExpr:
-    # Same stale-arena-index hazard `decl_get` above already guards against.
-    # This builder reads ELEVEN arena arrays at `idx`, so it is the widest
-    # single crash surface in the family. tag 0 is the neutral value here — no
-    # real EXPR_* constant is 0 — so a tag dispatcher falls through to its
-    # default branch exactly as it does for the -1 expr_get_tag returns.
-    # (doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md)
-    if idx < 0 or idx >= expr_tag.len():
-        return CoreExpr(
-            tag: 0, span_id: -1, span: -1,
-            i_val: 0, f_val: "", s_val: "",
-            left: -1, right: -1, extra: -1,
-            args: [], stmts: []
-        )
     CoreExpr(
         tag: expr_tag[idx],
         span_id: expr_span[idx],
@@ -672,19 +665,6 @@ fn expr_get(idx: i64) -> CoreExpr:
     )
 
 fn stmt_get(idx: i64) -> CoreStmt:
-    # Same stale-arena-index hazard as expr_get above, and the direct struct
-    # analogue of the accessor family guarded in core/ast_stmt.spl. tag 0 is
-    # neutral: no real STMT_* constant is 0, so a tag dispatcher falls through
-    # to its default branch exactly as it does for the -1 stmt_get_tag returns.
-    # (doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md)
-    if idx < 0 or idx >= stmt_tag.len():
-        return CoreStmt(
-            tag: 0, span_id: -1, span: -1,
-            expr_idx: -1, name: "", type_tag: 0, body: [],
-            target: -1, value: -1, condition: -1, op: -1,
-            iterator: -1, iterable: -1,
-            else_body: [], elif_conds: [], elif_bodies: []
-        )
     CoreStmt(
         tag: stmt_tag[idx],
         span_id: stmt_span[idx],

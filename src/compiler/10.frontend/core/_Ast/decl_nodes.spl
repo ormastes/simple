@@ -18,11 +18,19 @@ use compiler.frontend.core.ast.*
 use compiler.core.ast_expr.*
 use compiler.core.ast_stmt.*
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
-use compiler.core.types.{int_to_str}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_env_get_i64(key: text, default_value: i64) -> i64
 extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+# High-water marks of the largest decl / module-decl index ever mirrored into
+# the environment since the last ast_reset(). ast_reset() sets both counts back
+# to 0, which would otherwise erase the only record of how far the mirror
+# reaches, so a SMALLER file parsed after a bigger one would leave the big
+# file's tail entries alive. See ast_decl_env_mirror_clear.
+var ast_decl_mirror_high_slot: [i64] = [0]
+var ast_module_decl_mirror_high_slot: [i64] = [0]
 fn decl_nodes_array_len<T>(array: [T]) -> i64:
     return array.len()
 
@@ -78,9 +86,18 @@ fn ast_decl_count_get() -> i64:
     ast_count_slots_ensure()
     ast_decl_count_slot[0]
 
+fn ast_decl_mirror_high_ensure():
+    if ast_decl_mirror_high_slot == nil or ast_decl_mirror_high_slot.len() == 0:
+        ast_decl_mirror_high_slot = [0]
+    if ast_module_decl_mirror_high_slot == nil or ast_module_decl_mirror_high_slot.len() == 0:
+        ast_module_decl_mirror_high_slot = [0]
+
 fn ast_decl_count_set(value: i64):
     ast_count_slots_ensure()
     ast_decl_count_slot[0] = value
+    ast_decl_mirror_high_ensure()
+    if value > ast_decl_mirror_high_slot[0]:
+        ast_decl_mirror_high_slot[0] = value
     if ast_decl_env_mirror_enabled():
         rt_env_set("SIMPLE_BOOTSTRAP_DECL_COUNT", int_to_str(value))
 
@@ -91,6 +108,9 @@ fn ast_module_decl_count_get() -> i64:
 fn ast_module_decl_count_set(value: i64):
     ast_count_slots_ensure()
     ast_module_decl_count_slot[0] = value
+    ast_decl_mirror_high_ensure()
+    if value > ast_module_decl_mirror_high_slot[0]:
+        ast_module_decl_mirror_high_slot[0] = value
     if ast_decl_env_mirror_enabled():
         rt_env_set("SIMPLE_BOOTSTRAP_MODULE_DECL_COUNT", int_to_str(value))
 
@@ -130,20 +150,17 @@ fn ast_decl_imports_key(idx: i64) -> text:
 # constructor, so arena-preferred reads lose nothing.
 # The flag is cached in a slot: rt_env_get_i64 is itself an environ scan and
 # these gates sit on the per-decl-field hot path. Refreshed per file via
-# ast_decl_mode_slots_refresh().
+# ast_decl_mode_slots_refresh() (same pattern as stmt_mode_slots_refresh).
 var ast_decl_mode_slot: [i64] = []
 
 fn ast_decl_arena_default() -> i64:
     # Bootstrap lanes keep the legacy default (env store on unless the lane
-    # explicitly sets SIMPLE_NATIVE_ARENA_DECLS=1, as stage4 does). The original
-    # justification — "under a tree-walk interpreter, module-level arrays may
-    # not persist between calls" — was DISPROVED on 2026-08-01: an A/B on the
-    # same seed binary showed the expr/stmt arenas persist identically with the
-    # env mirror on and off, across N=2 compilation units in one process and
-    # across a module boundary. The stmt/expr env mirrors were retired on that
-    # evidence; this decl gate is kept only because the decl env store still has
-    # its own callers. See
-    # doc/08_tracking/bug/ast_env_mirror_bypasses_stale_index_guard_2026-08-01.md
+    # explicitly sets SIMPLE_NATIVE_ARENA_DECLS=1, as stage4 does): under a
+    # tree-walk interpreter, module-level arrays may not persist between
+    # calls, and the env store is the reliable store there (see the
+    # stmt_env_mirror_enabled compatibility note). Non-bootstrap runs
+    # (test/LSP/plain native-build) always execute compiled code where the
+    # arenas persist — they default to arena-preferred.
     if rt_env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1:
         return 0
     1
@@ -156,8 +173,8 @@ fn ast_decl_mode_slots_refresh():
 fn ast_decl_prefer_arena() -> bool:
     if ast_decl_mode_slot != nil and ast_decl_mode_slot.len() > 0:
         return ast_decl_mode_slot[0] == 1
-    # Slot not yet initialised (first call, or a native binary that
-    # zero-initialised the module array) — fall back to a direct env read.
+    # Interpreter module variables may not persist between calls — fall back
+    # to a direct env read (same compatibility note as stmt_env_mirror_enabled).
     rt_env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
 
 fn ast_decl_env_mirror_enabled() -> bool:
@@ -1306,22 +1323,60 @@ fn ast_module_decl_slot_push(value: i64):
     module_decl_slots.push(value)
 
 fn ast_module_decl_slots_clear():
-    # Clear IN PLACE -- never `module_decl_slots = []`.
-    #
-    # A rebinding form allocated a FRESH RtCoreArray on EVERY ast_reset().
-    # rt_core_register_scoped_immortal() stamps every array born while a
-    # transient array scope is active with that scope's id, and
-    # rt_transient_array_scope_end() then free()s it AND erases it from the
-    # immortal pointer registry. ast_reset() is called from inside such a scope
-    # on the stage4 streaming path, so this global was left pointing at a dead
-    # object: rt_array_len -> 0/-1, rt_array_push -> silently dropped,
-    # rt_array_clear -> silent no-op, permanently. Clearing in place keeps the
-    # original process-lifetime object (and its capacity) alive.
-    # See doc/08_tracking/bug/ast_arena_reset_inside_transient_scope_2026-08-01.md
-    if module_decl_slots == nil:
-        module_decl_slots = []
-    else:
-        module_decl_slots.clear()
+    module_decl_slots = []
+
+# Fields mirrored per decl index. Keep in sync with the ast_decl_*_set writers
+# above; a field missing here leaks its entry and can be read back stale.
+# Built per call, not a module-level `val`: module globals are nil in native
+# builds, which would make the clear silently inert.
+fn decl_mirror_fields() -> [text]:
+    [
+        "TAG", "SPAN", "NAME", "RET", "VIS", "BODY", "IMPORTS", "IMPL_TRAIT",
+        "IS_TRAIT", "ASYNC", "COMPTIME", "LAZY",
+        "PARAM_NAMES", "PARAM_TYPES", "PARAM_DEFAULTS", "TYPE_PARAMS",
+        "FIELD_NAMES", "FIELD_TYPES", "FIELD_DEFAULTS", "FIELD_BITS",
+        "GPU_TARGET", "GPU_TARGET_ARG_NAME", "GPU_BACKENDS",
+        "MEMORY_BANKS", "PIPELINE_II", "UNROLL_FACTOR"
+    ]
+
+fn ast_decl_env_mirror_clear():
+    """Unset every per-index decl env-mirror entry minted since the last reset.
+
+    Reset-under-live-state defect. ast_reset() clears the decl_* arrays and
+    ast_module_decl_slots_clear() drops the slot array, but every
+    SIMPLE_BOOTSTRAP_DECL_<idx>_<field>, SIMPLE_BOOTSTRAP_DECL_{TAG,NAME,RET}_<idx>
+    and SIMPLE_BOOTSTRAP_MODULE_DECL_<idx> entry survives. Readers are ENV-FIRST
+    (ast_decl_text_get, module_decl_at), so a decl written while parsing file A
+    is served for an index file B never allocated: the verdict depends on the
+    order the files were parsed, and the entries never die, so environ grows for
+    the whole run.
+
+    Gated on `not ast_decl_prefer_arena()`, NOT on ast_decl_env_mirror_enabled():
+    ast_decl_text_set writes NAME / PARAM_NAMES / PARAM_TYPES / TYPE_PARAMS /
+    BODY / IMPL_TRAIT unconditionally in that mode, i.e. WITHOUT SIMPLE_BOOTSTRAP
+    set, so the leak is live on the ordinary lint/census path too. Clearing must
+    cover every case the writer covers or the fix is present but inert.
+    """
+    if ast_decl_prefer_arena():
+        return
+    ast_decl_mirror_high_ensure()
+    val decl_upto = ast_decl_mirror_high_slot[0]
+    val fields = decl_mirror_fields()
+    var i: i64 = 0
+    while i < decl_upto:
+        for field in fields:
+            rt_env_remove(ast_decl_key(i, field))
+        rt_env_remove(ast_decl_tag_key(i))
+        rt_env_remove(ast_decl_name_key(i))
+        rt_env_remove(ast_decl_ret_key(i))
+        i = i + 1
+    ast_decl_mirror_high_slot[0] = 0
+    val mod_upto = ast_module_decl_mirror_high_slot[0]
+    var j: i64 = 0
+    while j < mod_upto:
+        rt_env_remove("SIMPLE_BOOTSTRAP_MODULE_DECL_" + int_to_str(j))
+        j = j + 1
+    ast_module_decl_mirror_high_slot[0] = 0
 
 var lexer_state_core_pos_slot: [text] = ["0"]
 var lexer_state_core_line_slot: [text] = ["1"]

@@ -150,3 +150,121 @@ Eliminating 6×O(N·S) `setenv` calls per parse and converting all reads to O(1)
 This is a **real latent quadratic** — it will become the bottleneck once the env-var issue is fixed and `infer_module` is actually wired up to the driver pipeline. Currently `infer_module` is defined (`inference_control.spl:594`) but **never called** from the check/compile driver path (`type_check_impl` is a documented stub no-op; `lower_and_check_impl` creates empty HIR shells for non-bootstrap single-file input). Not the active bottleneck today.
 
 Fix when it becomes active: replace the `[i64]` linear-scan containers (`to_generalize.contains`, `scheme.vars.contains`) with `Dict<i64, bool>` sets. Both `env_free_var_ids` and `generalize` become O(N·depth) rather than O(N²).
+
+---
+
+## 2026-08-01 — The env mirror is also a LEAK and an ORDER-DEPENDENCE bug
+
+The 2026-06-13 analysis above treated this store purely as a *speed* problem and
+fixed it by **gating the writes** (`expr_env_mirror_enabled()` /
+`stmt_env_mirror_enabled()` / `ast_decl_env_mirror_enabled()`). That left a
+second, worse defect untouched: **nothing ever removes the entries.**
+
+This is a member of the "reset under live state" family — state reset at the
+wrong moment relative to live readers.
+
+### Mechanism
+
+`expr_reset()` / `stmt_reset()` / `ast_reset()` clear the backing *arrays* and
+set the counts to 0, but never unset a single `SIMPLE_BOOTSTRAP_EXPR_<idx>_<f>`,
+`SIMPLE_BOOTSTRAP_STMT_<idx>_<f>`, `SIMPLE_BOOTSTRAP_DECL_<idx>_<f>` or
+`SIMPLE_BOOTSTRAP_MODULE_DECL_<idx>` key. Every reader in this family is
+**env-FIRST, array-fallback**. So after a large file is parsed, the entries for
+its high indices stay alive, and the *next, smaller* file's readers are served
+the **previous file's node** for any index that file never allocated.
+
+Two consequences:
+
+1. **Order-dependent verdicts.** The result for file B depends on whether a
+   larger file A was parsed before it in the same process. Any census or sweep
+   that calls `parse_module_silent_checked` repeatedly in one process has a
+   result that depends on the order it walked the tree.
+2. **Unbounded environ growth.** ~11 entries per expr node, 7 per stmt node and
+   up to 29 per decl node, for the whole run, never freed.
+
+**The staleness BYPASSES the guard meant to catch it.** `ast_gen_check_index`
+(the L6 arena-generation check) only sees indices that carry a *minted
+generation*. An env read carries none, so the guard matches and binds while the
+stale value flows through unchecked — present, and inert.
+
+**The decl half is NOT gated on `SIMPLE_BOOTSTRAP`.** `ast_decl_text_set` writes
+`NAME` / `PARAM_NAMES` / `PARAM_TYPES` / `TYPE_PARAMS` / `BODY` / `IMPL_TRAIT`
+whenever `not ast_decl_prefer_arena()`, i.e. on the ordinary lint/census path
+with no bootstrap env set at all. The clear is therefore gated the same way, not
+on `ast_decl_env_mirror_enabled()` — gating the clear more narrowly than the
+write is exactly how this fix would have shipped present-but-inert.
+
+### Fix
+
+`expr_env_mirror_clear()` (`_AstExpr/nodes.spl`), `stmt_env_mirror_clear()`
+(`ast_stmt.spl`) and `ast_decl_env_mirror_clear()` (`_Ast/decl_nodes.spl`),
+called from the top of the corresponding reset, before the arrays are cleared.
+
+Each keeps a **high-water slot** of the largest index ever mirrored since the
+last reset. Without it, `*_count_set(0)` inside the reset erases the only record
+of how far the mirror reaches, and a smaller file parsed after a bigger one
+leaves the big file's tail entries alive — the fix would then be present and
+inert for precisely the case that produces the bug.
+
+Field lists are returned by a `fn`, not held in a module-level `val`: module
+globals are nil/zero in native builds, which would make the clear silently do
+nothing.
+
+This is **not** a perf regression. The removals are the same
+O(nodes x fields) order the writes already pay, and because environ now stays
+bounded by ONE file instead of the cumulative run, every subsequent libc
+`setenv`/`getenv` linear scan gets *cheaper*.
+
+### Evidence (interpreter, `bin/simple run`, SIMPLE_BOOTSTRAP=1)
+
+Probe: parse a 90-decl/180-expr file, then a 1-decl/3-expr file, in one process;
+count surviving `SIMPLE_BOOTSTRAP_EXPR_<i>_TAG` and
+`SIMPLE_BOOTSTRAP_DECL_<i>_NAME` + `SIMPLE_BOOTSTRAP_MODULE_DECL_<i>` keys.
+
+| | after big file | after small file |
+|---|---|---|
+| expr keys, before fix | 180 | **180** (should be 3) |
+| expr keys, after fix | 180 | **3** |
+| decl keys, before fix | 180 | **180** (should be 2) |
+| decl keys, after fix | 180 | **2** |
+
+RED was produced by sabotaging the *implementation* (removing the
+`ast_decl_env_mirror_clear()` call from `ast_reset`), not a shim; the expr
+counter stayed at its fixed value of 3 during that run, proving the two clears
+are independent and neither is carrying the other.
+
+### Still open
+
+- `intern_reset()`, `mono_cache_reset()`, `alloc_inference_reset()` and
+  `bootstrap_fn_ret_types_reset()` have **zero call sites** — accumulators with
+  a reset function that nothing ever calls. Not yet fixed.
+
+### Sibling: `ast_reset()` inside a live transient array scope — ENUMERATED, NOT FIXED
+
+Two sites run `ast_reset()` *before* `rt_transient_array_scope_end()`:
+
+- `src/compiler/80.driver/driver_source_pipeline_parsing.spl` —
+  `driver_end_transient_parse_scope()`
+- `src/compiler/10.frontend/_FlatAstBridge/module_assembly.spl` —
+  `parse_and_build_module_scoped()`
+
+`ast_reset()` does not only `.clear()`; it re-seeds arenas by assignment
+(`ast_module_decl_slots_clear()` does `module_decl_slots = []`, and the
+nil-guards in `expr_reset`/`stmt_reset` allocate fresh backing arrays). Those
+fresh allocations land in the scope that is about to be torn down — "reset inside
+a dying scope is allocation into a grave".
+
+**The naive fix (move `ast_reset()` after `scope_end`) was tried and REVERTED.**
+It is not obviously an improvement: the arenas *grew* during the parse, and that
+growth reallocated inside the scope, so after `scope_end` the globals hold freed
+handles either way. Resetting before `scope_end` allocates into dying memory;
+resetting after `scope_end` `.clear()`s freed memory. The second may be worse.
+
+A correct fix has to re-materialize the arenas outside the scope after teardown
+(what `driver_prepare_transient_parse_scope()` already does for the *next*
+cycle), not merely reorder two statements. Landing the reorder without a runtime
+reproduction would be trading a quiet defect for a possibly louder one on a
+memory-corruption-sensitive path, so it is recorded here instead. **No runtime
+reproduction of harm from this site was obtained** — the next cycle's
+`driver_prepare_transient_parse_scope()` overwrites the dangling handles before
+any read, which may be why it has stayed latent.

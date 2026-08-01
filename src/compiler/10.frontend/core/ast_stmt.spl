@@ -6,6 +6,7 @@
 # See ast.spl for the full AST module documentation.
 
 use compiler.core.ast_expr.{asm_arm_new, ast_generation}
+use std.string_core.{char_code}
 use compiler.core.types.{int_to_str}
 
 # ===== Statement Kind Tags =====
@@ -43,8 +44,88 @@ var stmt_body: [[i64]] = []
 var stmt_empty_i64: [i64] = []
 var stmt_if_val_marker: [bool] = []
 var stmt_count_slot: [i64] = [0]
+var stmt_env_mirror_slot: [bool] = []
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_env_set(key: text, value: text) -> bool
+extern fn rt_env_remove(key: text) -> bool
+
+# High-water mark of the largest stmt index ever mirrored into the environment
+# since the last stmt_reset(). stmt_count_set(0) inside stmt_reset() would
+# otherwise erase the only record of how far the mirror reaches, so a SMALLER
+# file parsed after a bigger one would leave the big file's tail entries alive.
+var stmt_env_mirror_high_slot: [i64] = [0]
+
+fn stmt_parse_i64(raw: text) -> i64:
+    if raw == "":
+        return 0
+    var value: i64 = 0
+    var i: i64 = 0
+    var neg: bool = false
+    if raw.len() > 0 and raw[0:1] == "-":
+        neg = true
+        i = 1
+    while i < raw.len():
+        val ch = raw[i:i + 1]
+        value = value * 10
+        if ch == "1":
+            value = value + 1
+        elif ch == "2":
+            value = value + 2
+        elif ch == "3":
+            value = value + 3
+        elif ch == "4":
+            value = value + 4
+        elif ch == "5":
+            value = value + 5
+        elif ch == "6":
+            value = value + 6
+        elif ch == "7":
+            value = value + 7
+        elif ch == "8":
+            value = value + 8
+        elif ch == "9":
+            value = value + 9
+        elif ch == "0":
+            pass_dn
+        else:
+            break
+        i = i + 1
+    if neg: return 0 - value
+    value
+
+fn stmt_i64_list_join(values: [i64]) -> text:
+    var parts: [text] = []
+    for value in values:
+        parts.push(int_to_str(value))
+    parts.join(",")
+
+fn stmt_i64_list_split(raw: text) -> [i64]:
+    if raw == "":
+        return []
+    var result: [i64] = []
+    for part in raw.split(","):
+        if part != "":
+            result.push(stmt_parse_i64(part))
+    result
+
+fn stmt_env_mirror_enabled() -> bool:
+    if stmt_env_mirror_slot != nil and stmt_env_mirror_slot.len() > 0:
+        return stmt_env_mirror_slot[0]
+    # Interpreter module variables may not persist between calls. Preserve its
+    # compatibility mirror while compiled Stage4 uses the cached fast path.
+    (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") != "1"
+
+fn stmt_env_read(idx: i64, field: text) -> text:
+    if not stmt_env_mirror_enabled():
+        return ""
+    rt_env_get(stmt_key(idx, field)) ?? ""
+
+fn stmt_mode_slots_refresh():
+    if stmt_env_mirror_slot == nil or stmt_env_mirror_slot.len() == 0:
+        stmt_env_mirror_slot = [false]
+    val native_arena = (rt_env_get("SIMPLE_NATIVE_ARENA_DECLS") ?? "") == "1"
+    stmt_env_mirror_slot[0] = (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1" and not native_arena
 
 fn stmt_count_slot_ensure():
     if stmt_count_slot == nil or stmt_count_slot.len() == 0:
@@ -52,11 +133,78 @@ fn stmt_count_slot_ensure():
 
 fn stmt_count_env() -> i64:
     stmt_count_slot_ensure()
+    if not stmt_env_mirror_enabled():
+        return stmt_count_slot[0]
+    val env_count = stmt_parse_i64(rt_env_get("SIMPLE_BOOTSTRAP_STMT_COUNT") ?? "")
+    if env_count > 0:
+        return env_count
     stmt_count_slot[0]
+
+fn stmt_env_mirror_high_ensure():
+    if stmt_env_mirror_high_slot == nil or stmt_env_mirror_high_slot.len() == 0:
+        stmt_env_mirror_high_slot = [0]
 
 fn stmt_count_set(value: i64):
     stmt_count_slot_ensure()
     stmt_count_slot[0] = value
+    if stmt_env_mirror_enabled():
+        stmt_env_mirror_high_ensure()
+        if value > stmt_env_mirror_high_slot[0]:
+            stmt_env_mirror_high_slot[0] = value
+        rt_env_set("SIMPLE_BOOTSTRAP_STMT_COUNT", int_to_str(value))
+
+fn stmt_key(idx: i64, field: text) -> text:
+    "SIMPLE_BOOTSTRAP_STMT_" + int_to_str(idx) + "_" + field
+
+# Fields mirrored per stmt index. Keep in sync with the stmt_*_set writers
+# below; a field missing here leaks its entry and can be read back stale.
+# Built per call, not a module-level `val`: module globals are nil in native
+# builds, which would make the clear silently inert.
+fn stmt_mirror_fields() -> [text]:
+    ["TAG", "SPAN", "EXPR", "NAME", "TYPE", "BODY", "IF_VAL"]
+
+fn stmt_env_mirror_clear():
+    """Unset every per-index stmt env-mirror entry minted since the last reset.
+
+    Same reset-under-live-state defect as expr_env_mirror_clear (see
+    _AstExpr/nodes.spl): stmt_reset() clears the backing arrays, but the mirror
+    is read ENV-FIRST, so an entry written while parsing file A is served for an
+    index file B never allocated -- an order-dependent verdict -- and the entries
+    never die, so environ grows for the whole run.
+    """
+    if not stmt_env_mirror_enabled():
+        return
+    stmt_env_mirror_high_ensure()
+    val upto = stmt_env_mirror_high_slot[0]
+    if upto <= 0:
+        return
+    val fields = stmt_mirror_fields()
+    var i: i64 = 0
+    while i < upto:
+        for field in fields:
+            rt_env_remove(stmt_key(i, field))
+        i = i + 1
+    stmt_env_mirror_high_slot[0] = 0
+
+# Perf: the per-index SIMPLE_BOOTSTRAP_STMT_<idx>_<field> env mirror accumulates
+# 6 environ entries per statement; libc setenv/getenv linear-scan environ, so the
+# mirror is O(N^2) in statement count. The parallel module-var arrays (stmt_tag,
+# stmt_expr, ...) are written unconditionally by the constructors and are the real
+# store in compiled stage4; the env mirror is only needed in the interpreter
+# bootstrap (SIMPLE_BOOTSTRAP=1), where module-var arrays do not persist. Readers
+# are env-first/array-fallback, so skipping the env write here makes them fall
+# back to the (correct) arrays. See bug ast_env_var_quadratic_parse_2026-06-13.
+fn stmt_i64_set(idx: i64, field: text, value: i64):
+    if stmt_env_mirror_enabled():
+        rt_env_set(stmt_key(idx, field), int_to_str(value))
+
+fn stmt_text_set(idx: i64, field: text, value: text):
+    if stmt_env_mirror_enabled():
+        rt_env_set(stmt_key(idx, field), value)
+
+fn stmt_list_set(idx: i64, field: text, values: [i64]):
+    if stmt_env_mirror_enabled():
+        rt_env_set(stmt_key(idx, field), stmt_i64_list_join(values))
 
 fn stmt_count() -> i64:
     val env_count = stmt_count_env()
@@ -66,6 +214,10 @@ fn stmt_count() -> i64:
 
 fn stmt_reset():
     # Allocate nil module arrays once, then retain their storage across files.
+    stmt_mode_slots_refresh()
+    # Drop the per-index env mirror BEFORE the arrays are cleared: it is read
+    # env-first, so anything left here outlives the arena it describes.
+    stmt_env_mirror_clear()
     if stmt_tag == nil:
         stmt_tag = []
     if stmt_span == nil:
@@ -107,6 +259,12 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
     stmt_type_tag.push(0)
     stmt_body.push(stmt_empty_i64)
     stmt_if_val_marker.push(false)
+    stmt_i64_set(idx, "TAG", tag)
+    stmt_i64_set(idx, "SPAN", span_id)
+    stmt_i64_set(idx, "EXPR", -1)
+    stmt_text_set(idx, "NAME", "")
+    stmt_i64_set(idx, "TYPE", 0)
+    stmt_list_set(idx, "BODY", [])
     val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
     if trace_stmt_tags != "" and (idx < 8 or tag <= 0):
         print "[stmt_alloc] idx={idx} tag={tag} span={span_id}"
@@ -117,75 +275,102 @@ fn stmt_alloc(tag: i64, span_id: i64) -> i64:
 fn stmt_expr_stmt(expression: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(1, span_id)
     stmt_expr[idx] = expression
+    stmt_i64_set(idx, "EXPR", expression)
     idx
 
 fn stmt_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_VAL_DECL, span_id)
     stmt_name[idx] = name
+    stmt_text_set(idx, "NAME", name)
     stmt_type_tag[idx] = type_tag
+    stmt_i64_set(idx, "TYPE", type_tag)
     stmt_expr[idx] = init_expr
+    stmt_i64_set(idx, "EXPR", init_expr)
     stmt_if_val_marker[idx] = false
+    stmt_i64_set(idx, "IF_VAL", 0)
     idx
 
 fn stmt_if_val_decl(name: text, init_expr: i64, span_id: i64) -> i64:
     val idx = stmt_val_decl(name, 0, init_expr, span_id)
     stmt_if_val_marker[idx] = true
+    stmt_i64_set(idx, "IF_VAL", 1)
     idx
 
 fn stmt_is_if_val_decl(idx: i64) -> bool:
-    idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
+    if not stmt_env_mirror_enabled():
+        return idx >= 0 and idx < stmt_if_val_marker.len() and stmt_if_val_marker[idx]
+    stmt_env_read(idx, "IF_VAL") == "1"
 
 fn stmt_lazy_val_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_LAZY_VAL_DECL, span_id)
     stmt_name[idx] = name
+    stmt_text_set(idx, "NAME", name)
     stmt_type_tag[idx] = type_tag
+    stmt_i64_set(idx, "TYPE", type_tag)
     stmt_expr[idx] = init_expr
+    stmt_i64_set(idx, "EXPR", init_expr)
     idx
 
 fn stmt_var_decl(name: text, type_tag: i64, init_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_VAR_DECL, span_id)
     stmt_name[idx] = name
+    stmt_text_set(idx, "NAME", name)
     stmt_type_tag[idx] = type_tag
+    stmt_i64_set(idx, "TYPE", type_tag)
     stmt_expr[idx] = init_expr
+    stmt_i64_set(idx, "EXPR", init_expr)
     idx
 
 fn stmt_assign_stmt(target_expr: i64, value_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_ASSIGN, span_id)
     stmt_expr[idx] = target_expr
+    stmt_i64_set(idx, "EXPR", target_expr)
     var body: [i64] = []
     body.push(value_expr)
     stmt_body[idx] = body
+    stmt_list_set(idx, "BODY", body)
     idx
 
 fn stmt_return_stmt(value_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(5, span_id)
     stmt_expr[idx] = value_expr
+    stmt_i64_set(idx, "EXPR", value_expr)
     idx
 
 fn stmt_if_stmt(cond_expr: i64, then_stmts: [i64], elif_idx: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_IF, span_id)
     stmt_expr[idx] = cond_expr
+    stmt_i64_set(idx, "EXPR", cond_expr)
     stmt_body[idx] = then_stmts
+    stmt_list_set(idx, "BODY", then_stmts)
     stmt_type_tag[idx] = elif_idx
+    stmt_i64_set(idx, "TYPE", elif_idx)
     idx
 
 fn stmt_for_stmt(iter_name: text, iterable: i64, body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_FOR, span_id)
     stmt_name[idx] = iter_name
+    stmt_text_set(idx, "NAME", iter_name)
     stmt_expr[idx] = iterable
+    stmt_i64_set(idx, "EXPR", iterable)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_static_for_stmt(iter_name: text, iterable: i64, body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_STATIC_FOR, span_id)
     stmt_name[idx] = iter_name
+    stmt_text_set(idx, "NAME", iter_name)
     stmt_expr[idx] = iterable
+    stmt_i64_set(idx, "EXPR", iterable)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_comptime_block(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_COMPTIME, span_id)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_receive_stmt(arm_indices: [i64], timeout_expr: i64, timeout_body_idx: i64, span_id: i64) -> i64:
@@ -193,32 +378,42 @@ fn stmt_receive_stmt(arm_indices: [i64], timeout_expr: i64, timeout_body_idx: i6
     # timeout_expr = after timeout expr (or -1), timeout_body_idx = after body stmt index (or -1)
     val idx = stmt_alloc(STMT_RECEIVE, span_id)
     stmt_body[idx] = arm_indices
+    stmt_list_set(idx, "BODY", arm_indices)
     stmt_expr[idx] = timeout_expr
+    stmt_i64_set(idx, "EXPR", timeout_expr)
     stmt_type_tag[idx] = timeout_body_idx
+    stmt_i64_set(idx, "TYPE", timeout_body_idx)
     idx
 
 fn stmt_bind_stmt(var_name: text, rhs_expr: i64, span_id: i64) -> i64:
     # bind x = expr — monadic bind inside ce: blocks
     val idx = stmt_alloc(STMT_BIND, span_id)
     stmt_name[idx] = var_name
+    stmt_text_set(idx, "NAME", var_name)
     stmt_expr[idx] = rhs_expr
+    stmt_i64_set(idx, "EXPR", rhs_expr)
     idx
 
 fn stmt_while_stmt(cond_expr: i64, body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_WHILE, span_id)
     stmt_expr[idx] = cond_expr
+    stmt_i64_set(idx, "EXPR", cond_expr)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_match_stmt(scrutinee: i64, arm_indices: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(9, span_id)
     stmt_expr[idx] = scrutinee
+    stmt_i64_set(idx, "EXPR", scrutinee)
     stmt_body[idx] = arm_indices
+    stmt_list_set(idx, "BODY", arm_indices)
     idx
 
 fn stmt_block_stmt(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_BLOCK, span_id)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_break_stmt(span_id: i64) -> i64:
@@ -227,6 +422,7 @@ fn stmt_break_stmt(span_id: i64) -> i64:
 fn stmt_break_labeled(label: text, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_BREAK, span_id)
     stmt_name[idx] = label
+    stmt_text_set(idx, "NAME", label)
     idx
 
 fn stmt_continue_stmt(span_id: i64) -> i64:
@@ -235,25 +431,31 @@ fn stmt_continue_stmt(span_id: i64) -> i64:
 fn stmt_continue_labeled(label: text, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_CONTINUE, span_id)
     stmt_name[idx] = label
+    stmt_text_set(idx, "NAME", label)
     idx
 
 fn stmt_compound_assign_stmt(op: i64, target_expr: i64, value_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_COMPOUND_ASSIGN, span_id)
     stmt_expr[idx] = target_expr
+    stmt_i64_set(idx, "EXPR", target_expr)
     stmt_type_tag[idx] = op
+    stmt_i64_set(idx, "TYPE", op)
     var body: [i64] = []
     body.push(value_expr)
     stmt_body[idx] = body
+    stmt_list_set(idx, "BODY", body)
     idx
 
 fn stmt_defer_stmt(deferred_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_DEFER, span_id)
     stmt_expr[idx] = deferred_expr
+    stmt_i64_set(idx, "EXPR", deferred_expr)
     idx
 
 fn stmt_errdefer_stmt(deferred_expr: i64, span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_ERRDEFER, span_id)
     stmt_expr[idx] = deferred_expr
+    stmt_i64_set(idx, "EXPR", deferred_expr)
     idx
 
 # Block-form `defer:` / `errdefer:` (bug #172). EXPR is left at the -1
@@ -263,22 +465,28 @@ fn stmt_errdefer_stmt(deferred_expr: i64, span_id: i64) -> i64:
 fn stmt_defer_block_stmt(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_DEFER, span_id)
     stmt_expr[idx] = -1
+    stmt_i64_set(idx, "EXPR", -1)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_errdefer_block_stmt(body_stmts: [i64], span_id: i64) -> i64:
     val idx = stmt_alloc(STMT_ERRDEFER, span_id)
     stmt_expr[idx] = -1
+    stmt_i64_set(idx, "EXPR", -1)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     idx
 
 fn stmt_labeled_loop(label: text, inner_stmt: i64, span_id: i64) -> i64:
     # Wraps a for/while loop with a label for labeled break/continue
     val idx = stmt_alloc(STMT_LABELED_LOOP, span_id)
     stmt_name[idx] = label
+    stmt_text_set(idx, "NAME", label)
     var body: [i64] = []
     body.push(inner_stmt)
     stmt_body[idx] = body
+    stmt_list_set(idx, "BODY", body)
     idx
 
 fn stmt_asm_assert(archs: [text], os: text, abi: text, backend: text,
@@ -287,6 +495,7 @@ fn stmt_asm_assert(archs: [text], os: text, abi: text, backend: text,
     val arm_idx = asm_arm_new(archs, os, abi, backend, ver_ops, ver_vals, "", false, "", false)
     val idx = stmt_alloc(STMT_ASM_ASSERT, span_id)
     stmt_expr[idx] = arm_idx
+    stmt_i64_set(idx, "EXPR", arm_idx)
     idx
 
 # GPU launch dimension storage (parallel to stmt arrays)
@@ -297,6 +506,7 @@ fn stmt_gpu_launch(grid_exprs: [i64], block_exprs: [i64], body_stmts: [i64], spa
     """Create gpu_launch statement with grid/block dimensions and body."""
     val idx = stmt_alloc(STMT_GPU_LAUNCH, span_id)
     stmt_body[idx] = body_stmts
+    stmt_list_set(idx, "BODY", body_stmts)
     # Grow GPU storage arrays to match
     while stmt_gpu_grid_exprs.len() <= idx:
         stmt_gpu_grid_exprs.push(stmt_empty_i64)
@@ -318,6 +528,13 @@ fn stmt_get_gpu_block(idx: i64) -> [i64]:
 # ===== Statement Accessors =====
 
 fn stmt_get_tag(idx: i64) -> i64:
+    val direct = stmt_env_read(idx, "TAG")
+    if direct != "":
+        val parsed = stmt_parse_i64(direct)
+        val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
+        if trace_stmt_tags != "" and (idx < 8 or parsed <= 0):
+            print "[stmt_get_tag] idx={idx} env={direct} parsed={parsed}"
+        return parsed
     # Bounds guard: a stale stmt index (captured before an interleaved
     # ast_reset/stmt_reset cleared the shared arena) can exceed the live arena
     # length (stage-4 "index is 48 but length is 13" class). Return -1 so tag
@@ -331,77 +548,37 @@ fn stmt_get_tag(idx: i64) -> i64:
     val fallback = stmt_tag[idx]
     val trace_stmt_tags = rt_env_get("SIMPLE_TRACE_STMT_TAGS") ?? ""
     if trace_stmt_tags != "" and (idx < 8 or fallback <= 0):
-        print "[stmt_get_tag] idx={idx} arena={fallback}"
+        print "[stmt_get_tag] idx={idx} env=<missing> fallback={fallback}"
     fallback
 
-# Sibling bounds guards for the rest of the statement accessor family.
-#
-# `stmt_get_tag` above has been guarded since the stage-4 work, but its
-# siblings were not — and a guard on the dispatcher alone does not stop the
-# crash. A walker asks for the tag (gets -1 plus a loud OOB line), falls
-# through to its default branch, and then still reads `stmt_get_span/expr/
-# name/type/body` with the SAME stale index. That unguarded read is what
-# actually kills the process.
-#
-# Measured on `src/compiler_rust/lib/std/src/tooling/misc_commands.spl` under
-# `simple lint` on the interpreter route:
-#
-#     [stmt_get_tag] OOB idx=149 arena_len=79 arena_gen=1 -> -1
-#     error: semantic: array index out of bounds: index is 149 but length is 79
-#
-# Same index, same length, one line apart — the guard fired and the very next
-# read of the same stale index was fatal. The process ended there: no summary,
-# no verdict, no NOT-LINTED count, so the file simply vanished from the run.
-# The JIT reaches the identical stale index (149 and 158) and survives it,
-# which is the whole reason the two engines disagreed on this file. Neither
-# verdict is trustworthy for such a file; what is fixed here is only that the
-# interpreter no longer dies silently instead of reporting.
-# See doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
-#
-# These return the neutral values an absent node carries, matching the
-# established precedent in this arena family (`decl_get`, `expr_contains_yield`,
-# `stmt_contains_yield`, `stmt_get_tag`). This is containment, not a root-cause
-# fix: WHY a stale index reaches these accessors at arena_gen=1 — when no
-# second ast_reset has run — is still open and tracked in that bug file.
-#
-# The loud, always-on OOB report stays on `stmt_get_tag`, which any walk
-# reaching a stale node passes through first, so completing the family removes
-# the crash without silencing the diagnosis. The per-accessor line is gated
-# behind SIMPLE_TRACE_AST_OOB (default off) so a walk over a stale subtree
-# cannot flood the output with one line per field.
-fn stmt_oob_trace(accessor: text, idx: i64, arena_len: i64):
-    val trace_ast_oob = rt_env_get("SIMPLE_TRACE_AST_OOB") ?? ""
-    if trace_ast_oob != "":
-        print "[{accessor}] OOB idx={idx} arena_len={arena_len} arena_gen={ast_generation()}"
-
 fn stmt_get_span(idx: i64) -> i64:
-    if idx < 0 or idx >= stmt_span.len():
-        stmt_oob_trace("stmt_get_span", idx, stmt_span.len())
-        return -1
+    val direct = stmt_env_read(idx, "SPAN")
+    if direct != "":
+        return stmt_parse_i64(direct)
     stmt_span[idx]
 
 fn stmt_get_expr(idx: i64) -> i64:
-    if idx < 0 or idx >= stmt_expr.len():
-        stmt_oob_trace("stmt_get_expr", idx, stmt_expr.len())
-        return -1
+    val direct = stmt_env_read(idx, "EXPR")
+    if direct != "":
+        return stmt_parse_i64(direct)
     stmt_expr[idx]
 
 fn stmt_get_name(idx: i64) -> text:
-    if idx < 0 or idx >= stmt_name.len():
-        stmt_oob_trace("stmt_get_name", idx, stmt_name.len())
-        return ""
+    val direct = stmt_env_read(idx, "NAME")
+    if direct != "":
+        return direct
     stmt_name[idx]
 
 fn stmt_get_type(idx: i64) -> i64:
-    if idx < 0 or idx >= stmt_type_tag.len():
-        stmt_oob_trace("stmt_get_type", idx, stmt_type_tag.len())
-        return 0
+    val direct = stmt_env_read(idx, "TYPE")
+    if direct != "":
+        return stmt_parse_i64(direct)
     stmt_type_tag[idx]
 
 fn stmt_get_body(idx: i64) -> [i64]:
-    if idx < 0 or idx >= stmt_body.len():
-        stmt_oob_trace("stmt_get_body", idx, stmt_body.len())
-        return []
+    val direct = stmt_env_read(idx, "BODY")
+    if direct != "":
+        return stmt_i64_list_split(direct)
     stmt_body[idx]
 
 export STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_ASSIGN, STMT_RETURN
@@ -410,5 +587,7 @@ export STMT_BREAK, STMT_CONTINUE, STMT_COMPOUND_ASSIGN, STMT_DEFER, STMT_ERRDEFE
 export STMT_LABELED_LOOP, STMT_STATIC_FOR, STMT_COMPTIME, STMT_RECEIVE, STMT_BIND
 export STMT_LAZY_VAL_DECL, STMT_ASM_ASSERT, STMT_GPU_LAUNCH
 export stmt_tag, stmt_span, stmt_expr, stmt_name, stmt_type_tag, stmt_body, stmt_count
-export stmt_count_env, stmt_count_set
+export stmt_parse_i64, stmt_i64_list_join, stmt_i64_list_split
+export stmt_count_env, stmt_count_set, stmt_key
+export stmt_i64_set, stmt_text_set, stmt_list_set
 export stmt_reset, stmt_alloc
