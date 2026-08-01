@@ -185,6 +185,28 @@ fn par_had_error_mirror_clear():
 fn par_had_error_mirror_get() -> bool:
     (rt_env_get("SIMPLE_PARSER_HAD_ERROR") ?? "") == "1"
 
+# Mirror of the FIRST parser error's location and reason.
+#
+# Same process-global channel, and the same reason, as par_had_error_mirror
+# above: `bin/simple lint` reads it after control has returned across the module
+# boundary. Without it PARSE001 could only ever be reported at `<file>:1:0`
+# with the fixed text "Source did not parse", so a census could count parse
+# failures but never break them down by shape
+# (doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md).
+#
+# First error wins: later errors are usually cascade noise from the first.
+# Written only on the (cold) error path, so no hot-path cost.
+fn par_first_error_mirror_set(line: i64, col: i64, msg: text):
+    if (rt_env_get("SIMPLE_PARSER_FIRST_ERROR") ?? "") == "":
+        rt_env_set("SIMPLE_PARSER_FIRST_ERROR", int_to_str(line) + ":" + int_to_str(col) + ":" + msg)
+
+fn par_first_error_mirror_clear():
+    rt_env_set("SIMPLE_PARSER_FIRST_ERROR", "")
+
+# Returns "" when no error was recorded, else "<line>:<col>:<message>".
+fn parser_first_error_get() -> text:
+    rt_env_get("SIMPLE_PARSER_FIRST_ERROR") ?? ""
+
 fn parser_diagnostics_suppressed_get() -> bool:
     par_diagnostics_suppressed
 
@@ -266,6 +288,7 @@ fn parser_expect(expected: i64) -> bool:
         par_diagnostic_emit_count = par_diagnostic_emit_count + 1
     par_had_error_set(true)
     par_had_error_mirror_set()
+    par_first_error_mirror_set(par_line_get(), par_col_get(), "expected " + tok_kind_name(expected) + ", got " + tok_kind_name(par_kind_get()) + " '" + par_text_get() + "'")
     false
 
 fn parser_error(msg: text):
@@ -276,6 +299,7 @@ fn parser_error(msg: text):
         par_diagnostic_emit_count = par_diagnostic_emit_count + 1
     par_had_error_set(true)
     par_had_error_mirror_set()
+    par_first_error_mirror_set(par_line_get(), par_col_get(), msg)
 
 fn parser_guarded_int_text(t: text) -> i64:
     # Lexer bugs must surface as located parser errors, not location-less
@@ -862,6 +886,7 @@ fn parse_module_silent(source: text, path: text):
 # bool is returned by value and is therefore reliable.
 fn parse_module_silent_checked(source: text, path: text) -> bool:
     par_had_error_mirror_clear()
+    par_first_error_mirror_clear()
     _parse_module_with_diagnostics(source, path, true)
     par_had_error_get() or par_had_error_mirror_get()
 
@@ -922,6 +947,7 @@ fn parser_tok_restore(nums: [i64], saved_text: text):
 export par_errors, par_warnings, par_struct_names
 export parser_init, parser_init_with_path, parser_advance, parser_check, parser_match_tok, parser_expect
 export parser_has_errors, parser_get_errors, parser_error_count, parser_set_had_error
+export parser_first_error_get
 export parser_tok_save, parser_tok_restore
 export parser_path_is_script, parser_warn_print_if_needed
 export rt_is_debug_mode_enabled

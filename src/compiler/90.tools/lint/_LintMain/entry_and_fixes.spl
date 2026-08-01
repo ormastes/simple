@@ -22,7 +22,7 @@ use std.tooling.easy_fix.*
 use common.text.{escape_json}
 use compiler.semantics.lint.riscv_rtl_debuggability_lint.{lint_riscv_rtl_debuggability}
 use compiler.core.ast.{module_get_decls}
-use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error}
+use compiler.core.parser.{parse_module_silent_checked, parser_has_errors, parser_set_had_error, parser_first_error_get}
 use compiler.semantics.lint.argument_count.{check_argument_count}
 use compiler.semantics.lint.collection_patterns.{check_collection_patterns}
 use compiler.semantics.lint.star_import.{check_star_export_file}
@@ -52,8 +52,39 @@ fn lint_cli_source(linter: Linter, path: String, content: String) -> [LintResult
         # such files read as "checked, one problem" when in fact nothing was
         # checked — see
         # doc/08_tracking/bug/lint_parse_failure_silently_skips_file_2026-08-01.md.
-        val lint = Lint.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, "NOT LINTED: source did not parse - every AST-based lint was skipped for this file")
-        results.push(LintResult.new(path, 1, 0, lint))
+        # Report WHERE and WHY as well. PARSE001 was emitted at a hardcoded
+        # <file>:1:0 with no location and no reason, so a repo-wide census
+        # could count parse failures but never break them down by shape. The
+        # parser now mirrors its first error out across the module boundary
+        # (parser.parser_first_error_get). The NOT LINTED wording above is
+        # unchanged and is still the head of the message; the reason is
+        # appended. Falls back to 1:0 with no suffix when the parser recorded
+        # nothing, so this can never be weaker than before.
+        var parse_line = 1
+        var parse_col = 0
+        var parse_message = "NOT LINTED: source did not parse - every AST-based lint was skipped for this file"
+        val first_error = parser_first_error_get()
+        if first_error != "":
+            val head_sep = first_error.find(":")
+            if head_sep > 0:
+                val rest = first_error[head_sep + 1:]
+                val col_sep = rest.find(":")
+                if col_sep > 0:
+                    # Explicit 0-based lower bound: the bare `[:idx]` form has
+                    # a history of lexing as a symbol literal here.
+                    val line_text = first_error[0:head_sep]
+                    val col_text = rest[0:col_sep]
+                    val parsed_line = line_text.to_i64()
+                    val parsed_col = col_text.to_i64()
+                    val reason = rest[col_sep + 1:]
+                    if parsed_line > 0:
+                        parse_line = parsed_line
+                    if parsed_col > 0:
+                        parse_col = parsed_col
+                    if reason != "":
+                        parse_message = "{parse_message} ({reason})"
+        val lint = Lint.new("PARSE001", LintLevel.Deny, LintCategory.Correctness, parse_message)
+        results.push(LintResult.new(path, parse_line, parse_col, lint))
         return results
 
     val config = resolve_lint_config(linter.config, path, content)

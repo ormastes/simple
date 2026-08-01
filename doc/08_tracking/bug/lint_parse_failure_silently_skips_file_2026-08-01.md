@@ -391,3 +391,315 @@ headline, both confirmed here:
   it is a duplicate of `src/lib` shipped for the seed. Whether the pure-Simple
   lint gate is even meant to apply to it is an open scoping question, not a
   measurement question.
+
+## Per-file lint cost — ROOT-CAUSED and FIXED (2026-08-01)
+
+The `~90 h` blocker above is resolved. The stated hypothesis for it is
+**REFUTED**, and the actual mechanism is unrelated to imports.
+
+**Instruments.** Wall/RSS from `/usr/bin/time -v`, one process per data point.
+Phase attribution from `rt_time_now_monotonic_ms()` timers inserted around every
+call in `Linter.lint_source` and `lint_cli_source` (scratch tree only, never
+committed). Binary `bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731`,
+tree = a private checkout of origin `3807bab68e8` (109,576 entries), never the
+shared working copy. Host was under load average ~16-20 from sibling lanes
+throughout, so absolute walls are pessimistic; the *ratios* are the result.
+
+### The transitive-module-graph hypothesis is REFUTED
+
+The brief for this work said "lint appears to pay for the linted file's
+transitive module graph, so cost tracks imports, not line count". It does not.
+
+* `parse_use_decl` in `src/compiler/10.frontend/core/parser_decls_use.spl`
+  performs **no file I/O at all** — no `file_read`, no module resolution. Lint's
+  parse of a target file never loads that file's imports.
+* Cost is **linear in the target's line count**, not in its import count:
+
+  | target | lines | wall | marginal over the 3-line floor |
+  |---|---|---|---|
+  | 3-line fixture | 3 | 6.66 s | — |
+  | `src/app/coverage/main.spl` | 248 | 99.86 s | 0.380 s/line |
+  | `src/app/io/_CliCommands/run_commands.spl` | 709 | 297.26 s | 0.412 s/line |
+
+  Two files whose import counts differ by 22 give the same per-line rate. The
+  709-line file was "import-heavy" only incidentally; it was simply the biggest.
+
+### The actual mechanism: `simple lint` never ran the JIT
+
+Phase timers on `src/app/coverage/main.spl` (248 lines, 88.33 s wall in that run):
+
+| phase | ms |
+|---|---|
+| `parse_module_silent_checked` (the target's own parse) | **74,564** |
+| `check_stub_impl` | 5,170 |
+| `check_collection_patterns` | 2,184 |
+| **all 20 text lints together** (`lint_source`) | **1,471** |
+| `check_all_rules` (of that 1,471) | 1,089 |
+| everything else | < 100 each |
+
+84% of the run is one call. The control: the same file goes through the native
+compiler in **0.18 s** (`/usr/bin/time`, `simple compile`). A ~500x gap.
+
+The cause is in the driver, not in lint.
+`should_prefer_interpreter_for_source` in
+`src/compiler_rust/driver/src/exec_core.rs` routes an app to the **interpreter**
+whenever its entry source contains the substring `std.cli`, `get_cli_args` or
+`rt_cli_get_args`. `src/app/cli/lint_entry.spl` line 6 is
+`use std.cli.cli_util (get_cli_args)`, so **every `simple lint`, `simple fmt`
+and `simple fix` invocation has always run fully interpreted.** That is cheap
+for a short-lived CLI, but the linter runs the *pure-Simple parser* over every
+target file, so the guard interpreted a whole parse per file — the ~100-1000x
+class described on `jit_strict_fallback_error`, except silent: this is a
+deliberate pre-JIT routing decision, so no `[jit-fallback]` marker is ever
+printed. `grep` for that marker in a lint run returns **0 hits**.
+
+### The fix, and why it is NOT yet the default — READ THIS BEFORE FLIPPING IT
+
+The fix is to stop routing `lint_entry.spl` to the interpreter: a narrow
+`is_jit_safe_cli_args_entrypoint()` allow-list in
+`should_prefer_interpreter_for_source`, consulted before the CLI-args guard, an
+**exemption rather than a removal** so every other CLI-args app keeps the
+interpreter route byte-for-byte. That patch was written, compiles, and its three
+new unit tests pass alongside the ten pre-existing `exec_core` tests
+(`cargo test -p simple-driver --lib exec_core`: 13 passed, 0 failed) — including
+one asserting an unrelated CLI-args app is *still* sent to the interpreter.
+
+**It is deliberately not committed, because flipping the route changes lint
+output.** See the A/B below: the JIT emits false-positive MODINIT001 warnings
+that the interpreter does not. Shipping it would push a lint false positive
+across the whole repo, which is exactly the kind of trade this bug file exists
+to refuse.
+
+What is available **today**, with no rebuild, for anyone who needs the throughput
+and can tolerate the known divergence:
+
+    SIMPLE_EXECUTION_MODE=jit simple lint <file>
+
+That pre-existing escape hatch takes the same route (`should_prefer_interpreter_for_source`
+returns early when the variable is set) and reproduces every number below. It is
+the right tool for a *census*, whose question is "which files fail to parse" —
+PARSE001 behaves identically under both engines (verified) — and the wrong tool
+for a gate that trusts warning counts.
+
+**TODO(lint,P1): make the JIT route the default for `lint_entry.spl` once the
+MODINIT001 divergence below is closed. The driver patch and its tests are
+described here; the blocker is the engine, not the routing.**
+
+### After — same fixtures, same instrument
+
+| target | lines | interpreted (before) | JIT (after) | speedup |
+|---|---|---|---|---|
+| 3-line fixture | 3 | 6.66 s | 7.80 s | 0.85x |
+| `src/app/coverage/main.spl` | 248 | 99.86 s | 8.36 s | **11.9x** |
+| `src/app/io/_CliCommands/run_commands.spl` | 709 | 297.26 s | see A/B below | — |
+
+The shape is what matters: per-file cost went from `~5.5 s + 0.4 s/line` to a
+**flat ~8 s**, independent of target size. Small files pay ~1 s more (JIT compile
+of the lint app's own module graph); everything else collapses. Peak RSS is
+unchanged (~350 MB either way).
+
+### The remaining cost is a fixed per-process floor, and it now dominates
+
+~8 s of every run is compiling the lint app's own module graph from `.spl`
+source. There is no compiled-app cache in the driver (`grep` for
+`SIMPLE_APP_CACHE`/`app_cache` in `driver/src/`: 0 hits), so it is paid on every
+invocation. At ~8 s/file, 31,998 files is ~71 h single-threaded, ~12 h at 6-way
+— against ~90 h before. That unblocks the census but leaves the floor as the
+next target.
+
+**TODO(lint,P2): remove the per-process module-graph compile from `simple lint`
+— AOT-compile the lint app into the shipped binary, or add a compiled-app cache.
+Measured at ~8 s per invocation, it is now 100% of the cost of linting a small
+file.**
+
+### Batching is NOT an alternative fix — it crashes (PROVED)
+
+The obvious way to amortise that floor is one process for many files. It does not
+work, and this was measured rather than assumed. 200 real repo `.spl` files
+(44,923 lines) in a single `simple lint <dir>` process under JIT:
+
+    RC=134 (SIGABRT)   wall 57.48 s   max RSS 1,606,112 KB
+    thread 'simple-main' has overflowed its stack
+    fatal runtime error: stack overflow, aborting
+
+107 files produced a `Found N error(s)` block before the abort; **no summary line
+was ever printed**, so a harness trusting the exit code or the summary would have
+scored this as zero findings. This is the same cross-file state accumulation
+already recorded above as "8.9 GB RSS after 4,363 files" — the JIT reaches it
+sooner and as a stack overflow rather than as RSS growth.
+
+So **one process per file remains mandatory**, and any cross-file parse cache is
+contraindicated: the shared parser/AST state that a cache would have to reuse is
+exactly the state that is already leaking. The fix above deliberately adds no
+cache and no cross-file state, so it cannot join that defect family.
+
+### A/B verification — interpreter vs JIT, one process per file per mode
+
+Harness `ab.shs`: 33 deterministically sampled repo `.spl` files (every 900th of
+a sorted list of 33,905, capped at 300 lines), each linted twice — once on the
+current interpreter route, once with `SIMPLE_EXECUTION_MODE=jit` — against a
+**pristine** checkout of `3807bab68e8` (the three files this change touches were
+restored from the origin blob and hash-verified first, so the A/B measures the
+route change alone). It asserts `results == inputs` for both modes and diffs the
+normalised diagnostic stream. The seed banner and the compiler's `[gc-*]` notes
+about the *lint tool's own* module graph are excluded — they are not lint
+diagnostics; nothing else is filtered.
+
+**This run was stopped early and is a PARTIAL, not a certified result.** 19 of
+the 33 files completed before it was killed to stop starving sibling lanes, so
+the harness's own `results == inputs` assertion never ran. Treat the counts below
+as a lower bound on divergence, never as a rate. (Per this file's own standing
+rule, a partial prefix is not a result — the difference here is that the
+conclusion drawn from it is one-directional: a single divergence is enough to
+block the route flip, and seven were seen.)
+
+    COMPLETED=19  SAME=12  DIFF=7  INTERP_CRASHED=2
+    aggregate wall over those 19: interpreter 522.5 s, JIT 156.0 s (3.35x)
+
+The 3.35x aggregate badly understates the win because the sample was capped at
+300 lines to keep the interpreted side affordable; the per-file table above
+(11.9x at 248 lines) is the honest shape.
+
+**The two routes do NOT agree.** Divergences came in two distinct shapes, and
+only the first is harmless.
+
+Shape 1 — the interpreter crashes and the JIT survives (a strict improvement,
+but neither verdict is trustworthy):
+
+`src/compiler_rust/lib/std/src/tooling/misc_commands.spl` (176 lines)
+
+* interpreted: `[stmt_get_tag] OOB idx=149 arena_len=79` then
+  `error: semantic: array index out of bounds: index is 149 but length is 79`,
+  process dies, **no summary, no verdict, and no `not_linted` count** — the file
+  is silently absent from the run.
+* JIT: same arena OOB (`idx=158`), survives it, emits 5 warnings and
+  `Lint passed: all files clean`.
+
+Both engines hit the same underlying AST-arena defect; they differ only in
+whether it is fatal. **Neither verdict is trustworthy for such a file** and this
+must not be read as "JIT is correct here" — it is `neither_engine_trustworthy`
+again. What it does establish is that the interpreter route has its own
+fail-open hole: a crashed lint process produces no diagnostic, no summary and no
+NOT-LINTED count, which is precisely the blindness this bug file exists to close.
+
+**TODO(lint,P1): a census harness must treat "process died without a summary" as
+a distinct CRASH verdict, not fold it into LINTED or NOT_LINTED. The `ab.shs`
+control (`summary line present`) is the minimum bar; `misc_commands.spl` is a
+live reproducer.**
+
+#### The blocking divergence: JIT invents MODINIT001 warnings
+
+The second and third divergences are not crashes — they are the JIT reporting a
+lint the interpreter does not. On
+`src/lib/nogc_sync_mut/test_runner/runner_lifecycle.spl` the JIT emits
+`MODINIT001` ("module-level initializer is not a literal") at line 199, which is
+
+    var _heartbeat_interval_ms = 5000  # 5 seconds
+
+an integer literal. The file's only two module-level declarations are `5000` and
+`0`; neither should be flagged. The interpreter flags neither. **The JIT warning
+is a false positive.**
+
+`check_module_init_literal` is a pure **text** lint — it says so in its own
+header ("no AST dependency") and it only ever touches `substring`, `starts_with`,
+`ends_with` and character comparisons. So this is a pure-Simple execution
+divergence, not an AST or parser problem.
+
+Minimal reproducer, 4 declarations, same binary, same tree, one process each:
+
+    var d1 = 7
+    var d2 = 12
+    var d3 = 123
+    var d4 = 1234
+
+| route | MODINIT001 warnings |
+|---|---|
+| interpreter (current default) | **0** — correct |
+| `SIMPLE_EXECUTION_MODE=jit` | **4** — all four flagged |
+
+and in the real file above, `var _last_heartbeat_time = 0` was **not** flagged
+under either route.
+
+That split — every digit flagged except `0` — points at the digit test inside
+`_mil_is_numeric_literal`:
+
+    val is_digit = ch >= "0" and ch <= "9"
+
+**INFERRED** (the reproducer is PROVED; the mechanism is not yet isolated): the
+JIT evaluates the relational text comparisons `>=` / `<=` on single-character
+text as something equivalent to `==`, so only the literal `"0"` satisfies
+`ch >= "0"`, every other digit falls through to the loop's `else: return false`,
+and the whole numeric literal is misclassified. If that is right, the blast
+radius is far wider than one lint: every `a >= b` / `a <= b` on `text` in the
+tree is suspect under JIT.
+
+**TODO(compiler,P1): isolate and fix text `>=`/`<=` under the JIT. Reproducer:
+`printf 'var d1 = 7\n' > d.spl` then compare `simple lint d.spl` against
+`SIMPLE_EXECUTION_MODE=jit simple lint d.spl` — 0 warnings vs 1. Confirm first
+whether the primitive really is the text relational compare (write a direct
+two-line `text` comparison spec) before assuming the lint is the only victim;
+this is the "measure the primitive first" case.**
+
+This one defect is the entire reason the route change is not the default. It is
+in the engine, not in lint, and not in the routing patch.
+
+The seven divergent files in the partial run, for whoever picks this up:
+
+    src/compiler_rust/lib/std/src/tooling/misc_commands.spl   (interpreter crashed)
+    test/01_unit/compiler/loader/generation_sweeper_spec.spl  (interpreter crashed)
+    src/lib/nogc_sync_mut/test_runner/runner_lifecycle.spl
+    test/01_unit/app/mcp_unit/mcp_cancellation_spec.spl
+    test/01_unit/lib/common/encoding/protobuf_e_spec.spl
+    test/01_unit/lib/extended/collections_heap_integration_spec.spl
+    test/01_unit/lib/nogc_async_mut/terminal/credential/terminal_credential_facade_spec.spl
+
+The last one is 9 lines long, so the cheapest reproduction of a non-crash
+divergence is there, not in the 280-line file.
+
+**TODO(compiler,P1): `[stmt_get_tag] OOB idx=N arena_len=79` on
+`src/compiler_rust/lib/std/src/tooling/misc_commands.spl` — the AST statement
+arena is indexed past its length during lint's parse, fatally under the
+interpreter and non-fatally under the JIT. Reproduce with
+`simple lint src/compiler_rust/lib/std/src/tooling/misc_commands.spl`.**
+
+### PARSE001 now carries the real location and reason — DONE
+
+Closes the `TODO(lint,P2)` above.
+`src/compiler/10.frontend/core/parser.spl` mirrors the **first** parser error out
+through the same process-global env channel `par_had_error_mirror` already uses
+(and for the same reason — a module-level `var` written inside the parse call
+tree is not visible after control returns across the module boundary). New
+`parser_first_error_get()` returns `"<line>:<col>:<message>"`, or `""` when
+nothing was recorded. Both error sites (`parser_expect` and `parser_error`) feed
+it; first error wins, since later ones are usually cascade noise. It is cleared
+at the top of `parse_module_silent_checked`, next to the existing mirror clear.
+
+`entry_and_fixes.spl` uses it for PARSE001's line, column and message suffix, and
+falls back to the old `1:0` with the unchanged message when the parser recorded
+nothing — so the diagnostic can never be weaker than before. **The `NOT LINTED:`
+wording is unchanged and is still the head of the message**; the reason is
+appended in parentheses. `not_linted_files` and all seven NOT-LINTED reporting
+sites are untouched.
+
+Before:
+
+    <file>:1:0: error[PARSE001]: NOT LINTED: source did not parse - every AST-based lint was skipped for this file
+
+After, on a fixture whose only fault is `val y = = 7` on line 8:
+
+    <file>:8:13: error[PARSE001]: NOT LINTED: source did not parse - every AST-based lint was skipped for this file (unexpected token in expression: = '=')
+
+A census can now group parse failures by cause.
+
+Incidental finding while writing that code: the bare `text[:idx]` slice form
+still yields the wrong value here — the first draft used `first_error[:head_sep]`
+and got line 1 for an error on line 8, while `first_error[0:head_sep]` on the
+same input gives 8. This is the `find()`-plus-`[:idx]` lexer defect resurfacing;
+the shipped code uses the explicit `[0:idx]` form and says why.
+
+### Dedupe behaviour preserved
+
+`simple lint <dir> <dir> <dir>/` — the same directory three times, spelled two
+ways — emits exactly one summary under **both** the interpreter and the JIT
+route, i.e. the target and discovered-file dedupe is unchanged by this work. No
+lint rule, no dedupe path and no reporting site was modified.
