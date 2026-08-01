@@ -70,10 +70,7 @@ use std.gc_async_mut.text_layout.font_renderer.{
 }
 use std.gc_async_mut.gpu.engine2d.font_owner.{
     Engine2DFontOwner,
-    engine2d_font_owner_clear,
-    engine2d_font_owner_get_or_create,
-    engine2d_font_owner_has,
-    engine2d_font_owner_store
+    engine2d_font_owner_clear
 }
 use std.common.encoding.font_registry.{selected_font_asset_local_path_for_identity}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload}
@@ -239,25 +236,25 @@ class Engine2D with DrawIrRenderTarget:
     last_font_size_is_100: bool = false
 
     me fonts() -> FontRenderer:
-        val owner: Engine2DFontOwner = self.font_owner
-        val renderer = engine2d_font_owner_get_or_create(owner)
-        self.font_owner = owner
-        renderer
+        # Do not obtain FontRenderer through an aggregate-return owner helper:
+        # the freestanding native ABI loses that aggregate. Initialisation and
+        # the live renderer stay in the real owner slot instead.
+        self.ensure_font_renderer()
+        self.font_owner.active[0]
 
     me ensure_font_renderer():
         if self.font_owner.active.len() == 0:
             self.font_owner.active = [FontRenderer.new()]
 
     me install_font_renderer(renderer: FontRenderer):
-        self.font_owner = engine2d_font_owner_store(self.font_owner, renderer)
+        self.font_owner.active = [renderer]
 
     me selected_font_identity() -> text:
-        val owner: Engine2DFontOwner = self.font_owner
-        if not engine2d_font_owner_has(owner):
+        if self.font_owner.active.len() == 0:
             return ""
-        val fonts = engine2d_font_owner_get_or_create(owner)
+        val fonts: FontRenderer = self.font_owner.active[0]
         val identity = fonts.current_font_identity()
-        self.font_owner = engine2d_font_owner_store(owner, fonts)
+        self.font_owner.active[0] = fonts
         identity
 
     fn font_execution_attempts() -> [text]: self.last_font_execution_attempts
@@ -1394,7 +1391,7 @@ class Engine2D with DrawIrRenderTarget:
         val renderer_present = owner.active.len() > 0
         if renderer_present:
             # Read the owner slot directly — rerun10 proved even the PLAIN
-            # aggregate return of engine2d_font_owner_get_or_create arrives
+            # aggregate return of the former owner helper arrives
             # null in the freestanding build (has_sffi_ttf cr2=0x0 with a
             # typed intermediate already bound). Field + array-element
             # access are the proven channels; no function return crosses.
@@ -1567,34 +1564,35 @@ class Engine2D with DrawIrRenderTarget:
         loaded
 
     me load_font_bytes(path: text, blob: [u8]) -> bool:
-        val fonts = self.fonts()
+        self.ensure_font_renderer()
+        val fonts: FontRenderer = self.font_owner.active[0]
         val loaded = fonts.try_load_selected_bytes(path, blob)
-        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+        self.font_owner.active[0] = fonts
         loaded
 
     me select_font_identity(identity: text) -> bool:
         """Select the exact bundled face named by a stable Draw IR identity."""
         if identity == "":
             return false
-        val owner: Engine2DFontOwner = self.font_owner
-        if engine2d_font_owner_has(owner):
-            val owner_fonts = engine2d_font_owner_get_or_create(owner)
+        if self.font_owner.active.len() > 0:
+            val owner_fonts: FontRenderer = self.font_owner.active[0]
             val current_identity = owner_fonts.current_font_identity()
-            self.font_owner = engine2d_font_owner_store(self.font_owner, owner_fonts)
+            self.font_owner.active[0] = owner_fonts
             if current_identity == identity:
                 return true
         val selected_path = selected_font_asset_local_path_for_identity(identity)
         if selected_path == "":
             return false
-        val fonts = self.fonts()
+        self.ensure_font_renderer()
+        val fonts: FontRenderer = self.font_owner.active[0]
         val registered = fonts.try_load_registered_identity(identity)
-        self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+        self.font_owner.active[0] = fonts
         if (not registered and
             (font_renderer_registered_selected_bytes_only() or not self.load_font(selected_path))):
             return false
-        val loaded_fonts = self.fonts()
+        val loaded_fonts: FontRenderer = self.font_owner.active[0]
         val loaded_identity = loaded_fonts.current_font_identity()
-        self.font_owner = engine2d_font_owner_store(self.font_owner, loaded_fonts)
+        self.font_owner.active[0] = loaded_fonts
         if loaded_identity == identity:
             return true
         self.unload_font()
@@ -1628,8 +1626,11 @@ class Engine2D with DrawIrRenderTarget:
         self.font_owner = engine2d_font_owner_clear(owner)
 
     me font_cache_stats() -> FontCacheStats:
-        val fonts = self.fonts()
-        fonts.cache_stats()
+        self.ensure_font_renderer()
+        val fonts: FontRenderer = self.font_owner.active[0]
+        val stats = fonts.cache_stats()
+        self.font_owner.active[0] = fonts
+        stats
 
     me font_receipt_reset_cache_stats() -> bool:
         if self.font_owner.active.len() == 0:
@@ -1883,13 +1884,12 @@ class Engine2D with DrawIrRenderTarget:
         backend cell painter. This is the method `Engine2dCompositorBackend`
         and other GUI wrappers should call.
         """
-        val owner: Engine2DFontOwner = self.font_owner
-        if engine2d_font_owner_has(owner):
-            val fonts = engine2d_font_owner_get_or_create(owner)
+        if self.font_owner.active.len() > 0:
+            val fonts: FontRenderer = self.font_owner.active[0]
             if fonts.has_sffi_ttf() and font_size > 0 and font_size <= 512:
                     val text_width = fonts.measure_text_width(text_val, font_size)
                     var line_height = fonts.horizontal_line_metric(font_size, 3)
-                    self.font_owner = engine2d_font_owner_store(self.font_owner, fonts)
+                    self.font_owner.active[0] = fonts
                     if line_height <= 0:
                         line_height = font_size
                     if text_width > 0:
