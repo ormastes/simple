@@ -1,7 +1,10 @@
 # Nested enum payload sub-patterns always-match and never-bind on the JIT
 
 **Date:** 2026-08-01
-**Status:** Fixed (one-level variant sub-patterns); residue filed below
+**Status:** Fixed for variant sub-patterns at ANY depth, literal sub-patterns,
+range/or sub-patterns, and literals inside struct sub-patterns. Tuple and array
+sub-patterns remain open — see the residue section, which now records a
+DIFFERENT and larger root cause than "irrefutable".
 **Engines:** JIT wrong. Tree-walk interpreter correct. Native gate-blocked (not wrong).
 **Fixture:** `test/fixtures/compiler/nested_payload_subpattern_matrix.spl`
 
@@ -91,36 +94,78 @@ parser spells both `Shape.Circle(..)` and `Point(x, y)` as `Pattern::Enum`, and
 emitting a discriminant check for the struct spelling would test an object
 pointer's enum header and never match.
 
-## Residue — still irrefutable in payload position (NOT fixed)
+## Residue round 2 — dispositioned 2026-08-01 (second pass)
 
-Filed rather than silently normalized:
+Items 1 and 3 of the original residue list, plus a sibling of item 2, are now
+**fixed**. `nested_payload_condition` was made recursive over an *expression*
+slot rather than a local index, so the extracted slot of one level becomes the
+subject of the next; `subpattern_condition` (new) dispatches per sub-pattern
+kind, and `bind_nested_payload` (new, `stmt_lowering.rs`) is the matching
+recursive binding walk. Both must agree on slot extraction — a mismatch
+selects an arm on one slot and binds from another — so the extraction is
+factored into `payload_slot_expr`.
 
-1. **Literal sub-patterns** — `case A(0, y):` still matches any `A`. Measured
-   on the fixed binary: `A(x: 9, y: 7)` against `case A(0, y)` returns 7 on the
-   JIT (arm wrongly selected) vs 107 on the interpreter. Needs an equality test
-   against the extracted slot, with the slot's boxed/ANY representation handled
-   (int vs string vs float paths all differ).
-2. **Tuple / struct / array sub-patterns in payload position** — still return
-   `Bool(true)` (`control.rs`, the `Pattern::Tuple(_) | Pattern::Array(_) |
-   Pattern::Struct { .. }` arm).
-3. **Nesting deeper than one level** — measured, not assumed. For
-   `case C(L2.S(L3.X(n)), tag)` over a three-level enum, the JIT returns 3 for
-   BOTH an `L3.X` and an `L3.Y` subject (interpreter: 10 and 510). So the
-   innermost level is neither tested (first arm always selected) nor bound
-   (`n` reads 0, leaving just `tag`). `nested_payload_condition` deliberately
-   descends one level only; making it fully recursive requires threading the
-   extracted slot expression through as the new subject for both the condition
-   and the binding walk.
-4. **`codegen/instr/pattern.rs:96`** has an independent catch-all
-   (`_ => iconst(1)`, "always match for now") on the MIR->Cranelift path, and
-   `MirPattern::Variant { .. }` there also discards its `payload`. The HIR fix
-   covers the lane exercised by `SIMPLE_EXECUTION_MODE=jit`; that MIR-level
-   site should be brought to parity before anything relies on it.
+Fixture: `test/fixtures/compiler/nested_payload_subpattern_depth_matrix.spl`.
+Measured JIT `BADCOUNT 8 -> 0`, interpreter `BADCOUNT 0` before and after
+(true-positive control: the interpreter recurses correctly, so it pins that the
+expected values themselves are right). Both fixtures carry a live sentinel row
+that proves `check` can still report a mismatch.
+
+| Sub-pattern kind / depth | before (JIT) | after (JIT) | interpreter |
+|---|---|---|---|
+| variant, depth 2 | correct since `1957ea41f64` | correct | correct |
+| variant, depth 3 (`C(L2.S(L3.Y(m)), tag)`) | 703 (inner not bound) | 710 | 710 |
+| variant, depth 4 (`C(L2.S(L3.X(L4.P(a))), tag)`) | 3 for BOTH `P` and `Q` | 10 / 510 | 10 / 510 |
+| integer literal, multi-slot (`A(0, y)`) | 7 (arm wrongly selected) | 116 | 116 |
+| integer literal, single-slot (`B(5)`) | 55 | 209 | 209 |
+| text literal (`Tag("hi")`) | 1 | 2 | 2 |
+| literal inside struct sub-pattern (`Wrap(Point(0, b))`) | 4 | 107 | 107 |
+| range / or sub-pattern | irrefutable | tested | correct |
+| **tuple sub-pattern** (`V((0, b))`) | 0 | **0 — still open** | correct |
+| **array sub-pattern** (`V([a, b])`) | 0 | **0 — still open** | correct |
+
+Which implementation this reaches was proved by instrumentation, not by
+reading: `SIMPLE_DEBUG_PATTERN_LOWER=1` (default off) makes
+`subpattern_condition` announce itself. It fires **11 times under
+`SIMPLE_EXECUTION_MODE=jit` and 0 times under
+`SIMPLE_EXECUTION_MODE=interpreter`** for the depth-3 probe. That is the direct
+evidence for the standing warning that the interpreter uses
+`interpreter_patterns.rs` and never this HIR walk — and note that match ARMS
+route through the statement-form twin `lower_pattern_condition_stmt`, not the
+expression form, which is why an unconditional print in
+`lower_pattern_condition`'s own `Pattern::Enum` arm emits nothing for a program
+that trips this path.
+
+### Still open
+
+1. **Tuple and array sub-patterns — the root cause is NOT irrefutability.**
+   Measured on the JIT, base and fixed alike: `match xs: case [a, b]: a + b`
+   over `[1, 2]` returns **0**, and `case (a, b)` over `(1, 2)` returns **0** —
+   at *top level*, with no enum involved at all. The binders are never emitted;
+   array/tuple destructuring has no binding lowering on this path. Adding the
+   length/arity test alone would move `[1,2,3]` from the `[a,b]` arm to the
+   `[a,b,c]` arm and still answer 0 + 100 = 100 instead of 106 — a *different*
+   wrong answer, not a fix. So the condition side deliberately still returns
+   `None` for `Pattern::Tuple` / `Pattern::Array`, and the binding gap must be
+   closed first. Fixture rows exist in the probe set but are intentionally NOT
+   added to the in-tree matrix, which must stay green.
+2. **`codegen/instr/pattern.rs:96`** — unchanged, still an independent catch-all
+   (`_ => iconst(1)`, "always match for now") on the MIR->Cranelift path with
+   `MirPattern::Variant { .. }` discarding its `payload`. Owned by a separate
+   lane. The HIR fix covers the lane exercised by `SIMPLE_EXECUTION_MODE=jit`;
+   that MIR-level site should be brought to parity before anything relies on it.
 
 ## S4 (native payload arms)
 
-Still gated. `is_native_payload_free_enum_match` (`compilability.rs:240`)
-rejects any arm where `payload.as_ref().is_some_and(|p| !p.is_empty())`.
-Accepting payload arms additionally requires the bare-identifier defect
-(`case_bare_ident_is_irrefutable_binding_2026-08-01.md`) to be resolved and
-items 1-4 above to be closed, since native would otherwise inherit them.
+**Still gated, and this change does not ungate it.**
+`is_native_payload_free_enum_match` (`compilability.rs:240`) is untouched and
+still rejects any arm where `payload.as_ref().is_some_and(|p| !p.is_empty())`,
+so `compile --native` continues to fail closed with `[PatternMatch]`. Three
+blockers remain, all of which native would otherwise inherit:
+
+* tuple/array destructuring emits no bindings (open item 1 above);
+* the MIR->Cranelift catch-all still matches everything (open item 2 above);
+* the bare-identifier defect
+  (`case_bare_ident_is_irrefutable_binding_2026-08-01.md`).
+
+Do not flip the gate on the strength of the depth/literal rows alone.

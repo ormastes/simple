@@ -661,7 +661,7 @@ impl Lowerer {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
                         ..
-                    } => self.nested_payload_condition(&subject_ref, payload_patterns),
+                    } => self.nested_payload_condition(&subject_ref, payload_patterns, ctx),
                     _ => None,
                 };
 
@@ -721,76 +721,23 @@ impl Lowerer {
     /// inside it read zero. The tree-walk interpreter recurses correctly
     /// (`interpreter_patterns.rs`), so no interpreter-run spec caught this.
     ///
-    /// Scope: one level of nesting with a variant sub-pattern, which is the
-    /// shape that blocks native pattern-match staging. Literal and tuple/struct
-    /// sub-patterns in payload position remain irrefutable here and are tracked
-    /// separately.
+    /// Scope: fully recursive over variant and literal sub-patterns, at any
+    /// nesting depth. Tuple/array/struct sub-patterns in payload position are
+    /// still treated as irrefutable and are tracked separately in the bug doc.
     pub(crate) fn nested_payload_condition(
         &mut self,
         subject_ref: &HirExpr,
         payload_patterns: &[Pattern],
+        ctx: &mut FunctionContext,
     ) -> Option<HirExpr> {
         let arity = payload_patterns.len();
         let mut combined: Option<HirExpr> = None;
 
         for (i, p) in payload_patterns.iter().enumerate() {
-            let Pattern::Enum {
-                variant: nested_variant,
-                ..
-            } = p
-            else {
+            let slot_expr = Self::payload_slot_expr(subject_ref, i, arity);
+            let Some(test) = self.subpattern_condition(&slot_expr, p, ctx) else {
                 continue;
             };
-            if !self.is_real_enum_variant_name(nested_variant) {
-                continue;
-            }
-
-            // Extract payload slot `i`. Mirrors the extraction in
-            // `build_pattern_binding_stmts`: a single-field variant's payload is
-            // the value itself; multi-field variants wrap it in an array.
-            let payload_expr = HirExpr {
-                kind: HirExprKind::BuiltinCall {
-                    name: "rt_enum_payload".to_string(),
-                    args: vec![subject_ref.clone()],
-                },
-                ty: TypeId::ANY,
-            };
-            let slot_expr = if arity == 1 {
-                payload_expr
-            } else {
-                HirExpr {
-                    kind: HirExprKind::Index {
-                        receiver: Box::new(payload_expr),
-                        index: Box::new(HirExpr {
-                            kind: HirExprKind::Integer(i as i64),
-                            ty: TypeId::I64,
-                        }),
-                    },
-                    ty: TypeId::ANY,
-                }
-            };
-
-            let expected_disc: i64 = {
-                use std::collections::hash_map::DefaultHasher;
-                use std::hash::{Hash, Hasher};
-                let mut hasher = DefaultHasher::new();
-                nested_variant.hash(&mut hasher);
-                (hasher.finish() & 0xFFFFFFFF) as i64
-            };
-            let test = HirExpr {
-                kind: HirExprKind::BuiltinCall {
-                    name: "rt_enum_check_discriminant".to_string(),
-                    args: vec![
-                        slot_expr,
-                        HirExpr {
-                            kind: HirExprKind::Integer(expected_disc),
-                            ty: TypeId::I64,
-                        },
-                    ],
-                },
-                ty: TypeId::BOOL,
-            };
-
             combined = Some(match combined {
                 None => test,
                 Some(prev) => HirExpr {
@@ -804,6 +751,278 @@ impl Lowerer {
             });
         }
 
+        combined
+    }
+
+    /// Expression that extracts payload slot `i` of an enum value.
+    ///
+    /// Mirrors the extraction in `build_pattern_binding_stmts`: a single-field
+    /// variant's payload is the value itself; multi-field variants wrap it in
+    /// an array. Condition and binding MUST agree on this shape or an arm is
+    /// selected on one slot and bound from another.
+    pub(crate) fn payload_slot_expr(subject_ref: &HirExpr, i: usize, arity: usize) -> HirExpr {
+        let payload_expr = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_payload".to_string(),
+                args: vec![subject_ref.clone()],
+            },
+            ty: TypeId::ANY,
+        };
+        if arity == 1 {
+            payload_expr
+        } else {
+            HirExpr {
+                kind: HirExprKind::Index {
+                    receiver: Box::new(payload_expr),
+                    index: Box::new(HirExpr {
+                        kind: HirExprKind::Integer(i as i64),
+                        ty: TypeId::I64,
+                    }),
+                },
+                ty: TypeId::ANY,
+            }
+        }
+    }
+
+    /// Refutability test for ONE sub-pattern sitting in an already-extracted
+    /// payload slot, or `None` when that sub-pattern is irrefutable.
+    ///
+    /// `slot` is an expression, not a local, so this recurses to arbitrary
+    /// depth: the slot of an inner variant becomes the subject of the next
+    /// level down. Descending only one level made
+    /// `case C(L2.S(L3.X(n)), tag)` select on `L2.S` alone, so an `L3.Y`
+    /// subject took the `L3.X` arm.
+    pub(crate) fn subpattern_condition(
+        &mut self,
+        slot: &HirExpr,
+        pattern: &Pattern,
+        ctx: &mut FunctionContext,
+    ) -> Option<HirExpr> {
+        // Default-off probe. Which of the three match implementations a given
+        // engine actually reaches is not inferable from the source: the JIT
+        // does not use `interpreter_patterns.rs`, and match ARMS route through
+        // the statement-form twin rather than the expression form, so an
+        // unconditional print in `lower_pattern_condition`'s `Pattern::Enum`
+        // arm emits nothing for a program that trips this code path. Set
+        // SIMPLE_DEBUG_PATTERN_LOWER=1 to see this walk fire.
+        if std::env::var_os("SIMPLE_DEBUG_PATTERN_LOWER").is_some() {
+            eprintln!("[pattern-lower] subpattern_condition kind={}", pattern_kind_name(pattern));
+        }
+        match pattern {
+            // Irrefutable: binds or ignores, never rejects.
+            Pattern::Wildcard
+            | Pattern::Identifier(_)
+            | Pattern::MutIdentifier(_)
+            | Pattern::MoveIdentifier(_)
+            | Pattern::Rest => None,
+            Pattern::Typed { pattern, .. } => self.subpattern_condition(slot, pattern, ctx),
+            Pattern::Literal(lit_expr) => {
+                // `case A(0, y)` must reject `A(9, 7)`. Without this the arm was
+                // irrefutable and the first literal arm swallowed every value.
+                let lit_hir = self.lower_expr(lit_expr, ctx).ok()?;
+                // The slot is ANY-typed (it came out of rt_enum_payload), so the
+                // literal's own type is the only usable signal for picking the
+                // text comparison over the scalar one.
+                let is_string = lit_hir.ty == TypeId::STRING
+                    || lit_hir.ty == TypeId::CHAR
+                    || matches!(lit_hir.kind, HirExprKind::String(_));
+                Some(if is_string {
+                    HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_string_eq".to_string(),
+                            args: vec![slot.clone(), lit_hir],
+                        },
+                        ty: TypeId::BOOL,
+                    }
+                } else {
+                    HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::Eq,
+                            left: Box::new(slot.clone()),
+                            right: Box::new(lit_hir),
+                        },
+                        ty: TypeId::BOOL,
+                    }
+                })
+            }
+            Pattern::Range { start, end, inclusive } => {
+                let start_hir = self.lower_expr(start, ctx).ok()?;
+                let end_hir = self.lower_expr(end, ctx).ok()?;
+                let gte = HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::GtEq,
+                        left: Box::new(slot.clone()),
+                        right: Box::new(start_hir),
+                    },
+                    ty: TypeId::BOOL,
+                };
+                let lte = HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: if *inclusive { BinOp::LtEq } else { BinOp::Lt },
+                        left: Box::new(slot.clone()),
+                        right: Box::new(end_hir),
+                    },
+                    ty: TypeId::BOOL,
+                };
+                Some(HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(gte),
+                        right: Box::new(lte),
+                    },
+                    ty: TypeId::BOOL,
+                })
+            }
+            Pattern::Or(alternatives) => {
+                // An alternative that is itself irrefutable makes the whole
+                // `Or` irrefutable — returning a partial OR would reject values
+                // the pattern does accept.
+                let mut acc: Option<HirExpr> = None;
+                for alt in alternatives {
+                    let test = self.subpattern_condition(slot, alt, ctx)?;
+                    acc = Some(match acc {
+                        None => test,
+                        Some(prev) => HirExpr {
+                            kind: HirExprKind::Binary {
+                                op: BinOp::Or,
+                                left: Box::new(prev),
+                                right: Box::new(test),
+                            },
+                            ty: TypeId::BOOL,
+                        },
+                    });
+                }
+                acc
+            }
+            Pattern::Enum {
+                variant,
+                payload,
+                ..
+            } => {
+                // A struct/class spelling (`Point(x, y)`) also arrives as
+                // Pattern::Enum. Emitting a discriminant check for it would
+                // read an object pointer's enum header and never match — see
+                // `is_real_enum_variant_name`. The struct itself is
+                // irrefutable, but a refutable sub-pattern inside it
+                // (`P(Point(0, b))`) still has to be tested, by positional
+                // field access rather than payload extraction.
+                if !self.is_real_enum_variant_name(variant) {
+                    let fields = payload.as_ref()?;
+                    let positional: Vec<(usize, &Pattern)> = fields.iter().enumerate().collect();
+                    return self.struct_fields_condition(slot, variant, &positional, ctx);
+                }
+                let expected_disc: i64 = {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = DefaultHasher::new();
+                    variant.hash(&mut hasher);
+                    (hasher.finish() & 0xFFFFFFFF) as i64
+                };
+                let tag_test = HirExpr {
+                    kind: HirExprKind::BuiltinCall {
+                        name: "rt_enum_check_discriminant".to_string(),
+                        args: vec![
+                            slot.clone(),
+                            HirExpr {
+                                kind: HirExprKind::Integer(expected_disc),
+                                ty: TypeId::I64,
+                            },
+                        ],
+                    },
+                    ty: TypeId::BOOL,
+                };
+                let deeper = payload
+                    .as_ref()
+                    .and_then(|inner| self.nested_payload_condition(slot, inner, ctx));
+                Some(match deeper {
+                    None => tag_test,
+                    Some(inner_test) => HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::And,
+                            left: Box::new(tag_test),
+                            right: Box::new(inner_test),
+                        },
+                        ty: TypeId::BOOL,
+                    },
+                })
+            }
+            Pattern::Struct { name, fields } => {
+                // Named-field spelling `Point { x: 0, y: b }`. Resolve each
+                // named field to its declaration index, then test positionally.
+                let struct_fields = self.struct_field_list(name)?;
+                let mut positional: Vec<(usize, &Pattern)> = Vec::new();
+                for (field_name, field_pattern) in fields {
+                    let idx = struct_fields.iter().position(|(n, _)| n == field_name)?;
+                    positional.push((idx, field_pattern));
+                }
+                self.struct_fields_condition(slot, name, &positional, ctx)
+            }
+            // Still irrefutable in payload position. Tracked in
+            // doc/08_tracking/bug/nested_payload_subpattern_always_matches_2026-08-01.md
+            // — the blocker is that array/tuple destructuring emits no binding
+            // on this path either, so a length test alone would swap a
+            // wrong-arm answer for a right-arm-with-zero-binders answer:
+            // strictly a different wrong answer, not a fix.
+            Pattern::Tuple(_) | Pattern::Array(_) => None,
+        }
+    }
+
+    /// Declared `(name, type)` field list of the struct/class named `name`.
+    pub(crate) fn struct_field_list(&self, name: &str) -> Option<Vec<(String, TypeId)>> {
+        let tid = self.module.types.lookup(name)?;
+        match self.module.types.get(tid) {
+            Some(HirType::Struct { fields, .. }) => Some(fields.clone()),
+            _ => None,
+        }
+    }
+
+    /// Refutability test for the fields of a struct sub-pattern sitting at
+    /// `slot`, given `(field_index, sub_pattern)` pairs.
+    ///
+    /// A struct pattern is itself irrefutable — the type system already fixed
+    /// the class — so this returns `None` unless some FIELD is refutable.
+    pub(crate) fn struct_fields_condition(
+        &mut self,
+        slot: &HirExpr,
+        struct_name: &str,
+        positional: &[(usize, &Pattern)],
+        ctx: &mut FunctionContext,
+    ) -> Option<HirExpr> {
+        let struct_ty = self.module.types.lookup(struct_name)?;
+        let fields = match self.module.types.get(struct_ty) {
+            Some(HirType::Struct { fields, .. }) => fields.clone(),
+            _ => return None,
+        };
+        let mut combined: Option<HirExpr> = None;
+        for (field_index, field_pattern) in positional {
+            let Some((_, field_ty)) = fields.get(*field_index).cloned() else {
+                continue;
+            };
+            let field_expr = HirExpr {
+                kind: HirExprKind::FieldAccess {
+                    receiver: Box::new(HirExpr {
+                        kind: slot.kind.clone(),
+                        ty: struct_ty,
+                    }),
+                    field_index: *field_index,
+                },
+                ty: field_ty,
+            };
+            let Some(test) = self.subpattern_condition(&field_expr, field_pattern, ctx) else {
+                continue;
+            };
+            combined = Some(match combined {
+                None => test,
+                Some(prev) => HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(prev),
+                        right: Box::new(test),
+                    },
+                    ty: TypeId::BOOL,
+                },
+            });
+        }
         combined
     }
 
@@ -2061,5 +2280,24 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
         }
         // Literals and other expressions that don't contain identifiers
         _ => {}
+    }
+}
+
+/// Discriminant name of a `Pattern`, for the default-off pattern-lowering probe.
+fn pattern_kind_name(pattern: &Pattern) -> &'static str {
+    match pattern {
+        Pattern::Wildcard => "Wildcard",
+        Pattern::Identifier(_) => "Identifier",
+        Pattern::MutIdentifier(_) => "MutIdentifier",
+        Pattern::MoveIdentifier(_) => "MoveIdentifier",
+        Pattern::Literal(_) => "Literal",
+        Pattern::Tuple(_) => "Tuple",
+        Pattern::Array(_) => "Array",
+        Pattern::Struct { .. } => "Struct",
+        Pattern::Enum { .. } => "Enum",
+        Pattern::Or(_) => "Or",
+        Pattern::Typed { .. } => "Typed",
+        Pattern::Range { .. } => "Range",
+        Pattern::Rest => "Rest",
     }
 }

@@ -1489,52 +1489,92 @@ impl Lowerer {
                                 ty: TypeId::ANY,
                             }
                         };
-                        // Unwrap the inner variant's own payload.
-                        let inner_payload = HirExpr {
-                            kind: HirExprKind::BuiltinCall {
-                                name: "rt_enum_payload".to_string(),
-                                args: vec![slot_expr],
-                            },
-                            ty: TypeId::ANY,
-                        };
-                        for (j, inner_pattern) in nested_patterns.iter().enumerate() {
-                            let (Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name)) =
-                                inner_pattern
-                            else {
-                                continue;
-                            };
-                            let Some(&local_idx) = ctx.local_map.get(bound_name) else {
-                                continue;
-                            };
-                            let bound_ty = binding_type_map.get(bound_name).copied().unwrap_or(TypeId::ANY);
-                            let value = if nested_patterns.len() == 1 {
-                                HirExpr {
-                                    kind: inner_payload.kind.clone(),
-                                    ty: bound_ty,
-                                }
-                            } else {
-                                HirExpr {
-                                    kind: HirExprKind::Index {
-                                        receiver: Box::new(inner_payload.clone()),
-                                        index: Box::new(HirExpr {
-                                            kind: HirExprKind::Integer(j as i64),
-                                            ty: TypeId::I64,
-                                        }),
-                                    },
-                                    ty: bound_ty,
-                                }
-                            };
-                            binding_stmts.push(HirStmt::Let {
-                                local_index: local_idx,
-                                ty: bound_ty,
-                                value: Some(value),
-                            });
-                        }
+                        // Walk the inner variant's own payload. Recursive, so a
+                        // binder at depth 3+ (`C(L2.S(L3.X(n)), tag)`) is
+                        // emitted too; the previous non-recursive loop bound
+                        // only `Identifier` sub-patterns exactly one level in,
+                        // leaving `n` at its stack zero.
+                        self.bind_nested_payload(
+                            &slot_expr,
+                            nested_patterns,
+                            &binding_type_map,
+                            ctx,
+                            &mut binding_stmts,
+                        );
                     }
                 }
             }
         }
         binding_stmts
+    }
+
+    /// Emit `Let` bindings for the payload sub-patterns of the enum value
+    /// produced by `enum_expr`, recursing through nested variant patterns.
+    ///
+    /// `enum_expr` is an expression rather than a local index precisely so this
+    /// can descend: the extracted slot of one level becomes the enum value of
+    /// the next. The condition side mirrors this walk in
+    /// `subpattern_condition` (hir/lower/expr/control.rs) and the two must
+    /// agree on slot extraction, or an arm is selected on one slot and bound
+    /// from another.
+    pub(crate) fn bind_nested_payload(
+        &mut self,
+        enum_expr: &HirExpr,
+        payload_patterns: &[Pattern],
+        binding_type_map: &std::collections::HashMap<String, TypeId>,
+        ctx: &mut FunctionContext,
+        out: &mut Vec<HirStmt>,
+    ) {
+        // Unwrap this level's payload: single-field variants carry the value
+        // directly, multi-field variants wrap it in an array.
+        let payload = HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_enum_payload".to_string(),
+                args: vec![enum_expr.clone()],
+            },
+            ty: TypeId::ANY,
+        };
+        let arity = payload_patterns.len();
+        for (j, sub) in payload_patterns.iter().enumerate() {
+            let slot = if arity == 1 {
+                payload.clone()
+            } else {
+                HirExpr {
+                    kind: HirExprKind::Index {
+                        receiver: Box::new(payload.clone()),
+                        index: Box::new(HirExpr {
+                            kind: HirExprKind::Integer(j as i64),
+                            ty: TypeId::I64,
+                        }),
+                    },
+                    ty: TypeId::ANY,
+                }
+            };
+            match sub {
+                Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name) => {
+                    let Some(&local_idx) = ctx.local_map.get(bound_name) else {
+                        continue;
+                    };
+                    let bound_ty = binding_type_map.get(bound_name).copied().unwrap_or(TypeId::ANY);
+                    out.push(HirStmt::Let {
+                        local_index: local_idx,
+                        ty: bound_ty,
+                        value: Some(HirExpr {
+                            kind: slot.kind.clone(),
+                            ty: bound_ty,
+                        }),
+                    });
+                }
+                Pattern::Enum {
+                    variant,
+                    payload: Some(inner_patterns),
+                    ..
+                } if self.is_real_enum_variant_name(variant) => {
+                    self.bind_nested_payload(&slot, inner_patterns, binding_type_map, ctx, out);
+                }
+                _ => {}
+            }
+        }
     }
 
     pub(crate) fn lower_match_guard(
@@ -1976,7 +2016,7 @@ impl Lowerer {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
                         ..
-                    } => self.nested_payload_condition(&subject_ref, payload_patterns),
+                    } => self.nested_payload_condition(&subject_ref, payload_patterns, ctx),
                     _ => None,
                 };
 

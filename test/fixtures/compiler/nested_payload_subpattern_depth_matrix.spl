@@ -1,0 +1,142 @@
+"""Depth and sub-pattern-kind matrix for enum payload sub-patterns.
+
+Companion to `nested_payload_subpattern_matrix.spl`, which pins the ONE-level
+shapes. This file pins the residue that file recorded as still open:
+nesting depth 3 and 4, literal sub-patterns in payload position, and a literal
+inside a struct sub-pattern in payload position.
+
+Run under BOTH engines and diff -- the tree-walk interpreter recurses correctly
+and was always right here, so an interpreter-only run proves nothing:
+
+    SIMPLE_EXECUTION_MODE=interpreter simple run <this file>
+    SIMPLE_EXECUTION_MODE=jit         simple run <this file>
+
+Both must print `BADCOUNT 0`. Before the fix the JIT printed BADCOUNT 7.
+
+The nil sentinel is the integer 3, so a binder that silently reads nil is
+indistinguishable from a correct 3. `d4_value3_ctrl` therefore asserts a case
+whose CORRECT answer is 3 while `d4_p`/`d4_q` assert answers that are not 3 --
+a silent-nil result cannot satisfy both.
+"""
+
+struct Point:
+    x: i64
+    y: i64
+
+enum L4:
+    P(a: i64)
+    Q(b: i64)
+
+enum L3:
+    X(inner: L4)
+    Y(m: i64)
+
+enum L2:
+    S(inner: L3)
+    T(q: i64)
+
+enum L1:
+    C(mid: L2, tag: i64)
+    D(z: i64)
+
+enum Lit:
+    A(x: i64, y: i64)
+    B(z: i64)
+
+enum Named:
+    Tag(s: text)
+    Off
+
+enum Holder:
+    Wrap(p: Point)
+    Bare(k: i64)
+
+# Depth 3: the arm must be selected by the INNERMOST variant, and the
+# innermost binder must actually bind.
+fn depth3(o: L1) -> i64:
+    match o:
+        case C(L2.S(L3.Y(m)), tag): m + tag + 700
+        case C(L2.T(q), tag): q + tag + 900
+        case _: -1
+
+# Depth 4.
+fn depth4(o: L1) -> i64:
+    match o:
+        case C(L2.S(L3.X(L4.P(a))), tag): a + tag
+        case C(L2.S(L3.X(L4.Q(b))), tag): b + tag + 500
+        case C(L2.S(L3.Y(m)), tag): m + tag + 700
+        case C(L2.T(q), tag): q + tag + 900
+        case _: -1
+
+# Literal sub-pattern in a multi-slot payload.
+fn lit_multi(o: Lit) -> i64:
+    match o:
+        case A(0, y): y
+        case A(x, y): x + y + 100
+        case _: -1
+
+# Literal sub-pattern in a single-slot payload.
+fn lit_single(o: Lit) -> i64:
+    match o:
+        case B(5): 55
+        case B(z): z + 200
+        case _: -1
+
+# Text literal sub-pattern -- takes the rt_string_eq path, not the scalar one.
+fn lit_text(o: Named) -> i64:
+    match o:
+        case Tag("hi"): 1
+        case Tag(_): 2
+        case _: -1
+
+# Literal inside a STRUCT sub-pattern in payload position: refutable by
+# positional field access, not by payload extraction.
+fn struct_lit(o: Holder) -> i64:
+    match o:
+        case Wrap(Point(0, b)): b
+        case Wrap(Point(a, b)): a + b + 100
+        case _: -1
+
+fn check(name: text, got: i64, want: i64) -> i64:
+    if got == want:
+        print("PASS {name} got={got}")
+        return 0
+    print("FAIL {name} got={got} want={want}")
+    1
+
+# Harness self-test: proves `check` CAN report a mismatch, so a green matrix is
+# not vacuous. The single FAIL line it prints is expected.
+fn sentinel() -> i64:
+    print("-- sentinel: the next FAIL line is EXPECTED --")
+    val detected = check("SENTINEL_expected_fail", 1, 999)
+    if detected == 1:
+        print("PASS sentinel_harness_live")
+        return 0
+    print("FAIL sentinel_harness_VACUOUS")
+    1
+
+fn main() -> i64:
+    var bad = 0
+    bad = bad + sentinel()
+
+    bad = bad + check("d3_y", depth3(L1.C(mid: L2.S(inner: L3.Y(m: 7)), tag: 3)), 710)
+    bad = bad + check("d3_t", depth3(L1.C(mid: L2.T(q: 7), tag: 3)), 910)
+    bad = bad + check("d3_other", depth3(L1.D(z: 1)), -1)
+
+    bad = bad + check("d4_p", depth4(L1.C(mid: L2.S(inner: L3.X(inner: L4.P(a: 7))), tag: 3)), 10)
+    bad = bad + check("d4_q", depth4(L1.C(mid: L2.S(inner: L3.X(inner: L4.Q(b: 7))), tag: 3)), 510)
+    bad = bad + check("d4_y", depth4(L1.C(mid: L2.S(inner: L3.Y(m: 7)), tag: 3)), 710)
+    bad = bad + check("d4_value3_ctrl", depth4(L1.C(mid: L2.S(inner: L3.X(inner: L4.P(a: 0))), tag: 3)), 3)
+
+    bad = bad + check("lit_multi_hit", lit_multi(Lit.A(x: 0, y: 7)), 7)
+    bad = bad + check("lit_multi_miss", lit_multi(Lit.A(x: 9, y: 7)), 116)
+    bad = bad + check("lit_single_hit", lit_single(Lit.B(z: 5)), 55)
+    bad = bad + check("lit_single_miss", lit_single(Lit.B(z: 9)), 209)
+    bad = bad + check("lit_text_hit", lit_text(Named.Tag(s: "hi")), 1)
+    bad = bad + check("lit_text_miss", lit_text(Named.Tag(s: "bye")), 2)
+
+    bad = bad + check("struct_lit_hit", struct_lit(Holder.Wrap(p: Point(x: 0, y: 4))), 4)
+    bad = bad + check("struct_lit_miss", struct_lit(Holder.Wrap(p: Point(x: 3, y: 4))), 107)
+
+    print("BADCOUNT {bad}")
+    bad
