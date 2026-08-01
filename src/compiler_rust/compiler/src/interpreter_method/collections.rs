@@ -60,6 +60,36 @@ pub fn handle_array_methods(
             let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
             arr.get(idx).cloned().unwrap_or(Value::Nil)
         }
+        // Array `at`: bounds-checked element access returning a real
+        // `Option` -- `Value::some(elem)` in range, `Value::none()` otherwise.
+        //
+        // Until this arm existed the seed had NO array `at` at all: the only
+        // `at` binding was the *text* one (`"char_at" | "at" =>
+        // rt_string_char_at`). Every `arr.at(i)` therefore fell to
+        // `_ => Ok(None)` ("unhandled"). On this interpreter that surfaced
+        // loudly as "method `at` not found on type `array`", but on the JIT and
+        // native-LLVM lanes the same gap silently yields `nil`, which reads as
+        // `None` for EVERY index -- in-range hits included, and
+        // indistinguishable from a genuinely absent element. See
+        // doc/08_tracking/bug/array_at_returns_nil_for_every_index_2026-08-01.md.
+        //
+        // Note this must build an actual Option, NOT the "flat" encoding the
+        // pure-Simple interpreter uses (where the bare element stands for
+        // `Some`). This interpreter's pattern matcher rejects a bare `i64`
+        // against `Some(v)`/`None` with "match expression exhausted", so
+        // returning the element directly trades a loud missing-method error for
+        // a loud missing-pattern one.
+        //
+        // The index is read as *signed* on purpose. The `get` arm above uses
+        // `eval_arg_usize`, which cannot represent `at(-1)`; a negative index
+        // must resolve to `None`, not wrap around to a huge positive one.
+        "at" => {
+            let idx_val = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
+            match idx_val {
+                Value::Int(idx) if idx >= 0 && (idx as usize) < arr.len() => Value::some(arr[idx as usize].clone()),
+                _ => Value::none(),
+            }
+        }
         "has" | "contains" => {
             let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
             Value::Bool(arr.contains(&needle))

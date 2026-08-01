@@ -1,18 +1,36 @@
 # Array `.at(i)` returns `nil` for EVERY index — all Option call sites take the None branch
 
 **Date:** 2026-08-01
-**Status:** OPEN (census + reproduction complete; fix not landed)
-**Severity:** CRITICAL — silent wrong answer, no error, no crash
-**Lanes affected:** Rust-seed tree-walking interpreter AND native LLVM (PROVED).
-JIT not separately reachable via a CLI flag on the deployed seed.
-**Lane NOT affected:** the pure-Simple compiler's own interpreter
-(`src/compiler/10.frontend/core/interpreter/`) already implements it correctly.
+**Status:** interpreter lane FIXED; JIT and native lanes still OPEN
+**Severity:** CRITICAL on JIT/native — silent wrong answer, no error, no crash
+
+### Lane table (all rows PROVED by transcript)
+
+| Lane | How to select | Behaviour before fix | After fix |
+|---|---|---|---|
+| Rust-seed tree-walking interpreter | `SIMPLE_EXECUTION_MODE=interpret` | **loud** — `method 'at' not found on type 'array'` | correct Option |
+| Rust-seed JIT (**the default** for `simple foo.spl`) | default | **silent `nil` for every index** | still broken |
+| Native LLVM | `simple compile --native` | **silent `nil` for every index** | still broken |
+| Pure-Simple compiler's own interpreter | n/a — cannot self-host at HEAD | implements `at` (source read; **INFERRED**, not run) | — |
+
+Two corrections to the first draft of this document, both worth stating because
+they change what the bug *is*:
+
+1. **`simple foo.spl` is the JIT lane, not the interpreter.** `should_prefer_interpreter_for_source`
+   (`src/compiler_rust/driver/src/exec_core.rs:940`) only prefers the interpreter
+   for `.shs`, for one hard-coded path, and for sources mentioning `std.cli` /
+   `get_cli_args`. Everything else goes to the JIT with interpreter fallback. An
+   unqualified "I ran it and got nil" therefore says nothing about the interpreter.
+2. **The interpreter was never silent.** It raised a hard missing-method error.
+   The silent-`nil` behaviour is specific to JIT and native. This matches the
+   recorded pattern that the interpreter is frequently the *correct* lane, and it
+   means the blast radius is the compiled lanes only.
 
 ## Symptom (PROVED)
 
-`arr.at(i)` on an array returns `nil` for *every* index — in-range hits included.
-It is not a bounds bug and not an off-by-one; the method is simply not
-implemented for arrays, and the unhandled-method path yields `Nil`.
+On the JIT and native lanes, `arr.at(i)` returns `nil` for *every* index —
+in-range hits included. It is not a bounds bug and not an off-by-one; the method
+is simply not implemented for arrays, and the unhandled path yields `Nil`.
 
 Probe (`/dev/shm/fable-atopt/probe/at_flat.spl`):
 
@@ -32,10 +50,11 @@ fn main():
 ```
 
 Run with `bin/release/x86_64-unknown-linux-gnu/simple.pre-segv-fix-20260731`
-(the 154 MB LLVM-enabled seed; the live `bin/simple` has no `run`/`test`):
+(the 154 MB LLVM-enabled seed; the live `bin/simple` has no `run`/`test`).
+The left column is the **default (JIT)** lane, not the interpreter:
 
 ```
-=== interpreter ===              === native LLVM ===
+=== default / JIT ===            === native LLVM ===
 len=5                            len=5
 idx  xs[i]      xs.at(i)         idx  xs[i]      xs.at(i)
 0    10        nil               0    10        nil
@@ -49,7 +68,7 @@ at(-1) = nil                     at(-1) = nil
 empty at(0) = nil                empty at(0) = nil
 ```
 
-Both lanes agree, and both are wrong at indices 0..4.
+Both compiled lanes agree, and both are wrong at indices 0..4.
 
 A `match` probe confirms the Option-shaped consequence directly — with a
 5-element array, **every** arm resolves to `None`:
@@ -67,6 +86,15 @@ Because the failure mode is `None`, and `None` is exactly what an out-of-range
 read *should* produce, every call site degrades to its "absent" branch silently.
 There is no error, no crash, and no log line. Only the three genuinely-absent
 rows are right, and they are right by accident.
+
+The interpreter lane, by contrast, refuses the same program outright:
+
+```
+$ SIMPLE_EXECUTION_MODE=interpret simple at_flat.spl
+len=5
+idx  xs[i]      xs.at(i)
+error: semantic: method `at` not found on type `array` (receiver value: [10, 20, 30, 40, 50])
+```
 
 ## Root cause
 
@@ -211,23 +239,80 @@ This matches a family of defects already recorded for this repo (silent
 pattern/dispatch mismatch): a `case`/`match` arm existing is not evidence it ever
 runs, and `None` being *reachable* is not evidence `Some` is.
 
-## Fix direction
+## Fix — interpreter lane (LANDED)
 
-Mirror the pure-Simple semantics into the seed:
+`handle_array_methods` in
+`src/compiler_rust/compiler/src/interpreter_method/collections.rs` gained an
+`"at"` arm returning `Value::some(elem)` / `Value::none()`, with a **signed**
+index so `at(-1)` is `None` rather than a wrap-around (the neighbouring `get`
+arm uses `eval_arg_usize` and cannot express a negative index).
 
-1. `interpreter_method/collections.rs` `handle_array_methods` — add an `"at"`
-   arm: `let idx = eval_arg_i64(...); if 0 <= idx < arr.len() { arr[idx].clone() } else { Value::Nil }`.
-   Note the index must be read as **signed** and negative rejected — the existing
-   `get` arm uses `eval_arg_usize`, which cannot express `at(-1)`.
-2. The five codegen sites that map `"char_at" | "at" => rt_string_char_at` must
-   become receiver-type-aware, or arrays will keep silently missing on native.
-   Today they map `at` to a *string* runtime call unconditionally by name.
-3. Do **not** build on `list.get(i)` — it is separately defective (returns
-   `value << 3`, tag-boxing defect, owned by another lane).
+One thing to know before copying the pure-Simple implementation verbatim: the
+two compilers use **different Option encodings**, and they are not
+interchangeable.
+
+- The pure-Simple interpreter uses a *flat* encoding — the bare element stands
+  for `Some`, `nil` for `None` (documented at `eval.spl match_pattern`).
+- The seed uses a *real* Option value, built with `Value::some` / `Value::none`.
+
+Returning the bare element on the seed does not work: its pattern matcher
+rejects a bare `i64` against `Some(v)`/`None` with
+`invalid pattern: match expression exhausted without matching any pattern for
+i64 value 10`. That was observed directly while developing this fix — it merely
+trades a loud missing-method error for a loud missing-pattern one.
+
+Verified against `test/01_unit/lib/common/array_at_option_spec.spl`:
+
+```
+unpatched seed:  11 examples, 11 failures
+patched seed:    11 examples, 0 failures
+```
+
+Every failure on the unpatched side is `method 'at' not found on type 'array'`,
+so the spec is non-vacuous on all eleven examples, including the in-range ones
+that are the only assertions capable of distinguishing "absent" from
+"unimplemented".
+
+## Still OPEN — JIT and native LLVM
+
+The compiled lanes are unchanged and still return `nil` for every index. Six
+codegen sites map `at` to a *string* runtime call unconditionally, by name,
+with no receiver-type test:
+
+```
+src/compiler_rust/compiler/src/codegen/instr/calls.rs:3235
+src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:1363
+src/compiler_rust/compiler/src/codegen/llvm/emitter.rs:178
+src/compiler_rust/compiler/src/codegen/llvm/functions.rs:2371
+src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:2097
+```
+
+Each must become receiver-type-aware and route an array receiver to a
+bounds-checked Option accessor. Until then, **the default `simple foo.spl`
+invocation still silently mis-executes every one of the ~161 call sites** — the
+interpreter fix does not cover the lane most people actually run.
+
+The pure-Simple compiler has the same shape of gap on its own native path:
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` handles
+`char_at`, `index_of`, `substring`, dict `get`, etc., but has no `at` case, so
+only its interpreter implements `.at()`.
+
+Do **not** build any of this on `list.get(i)` — it is separately defective
+(returns `value << 3`, tag-boxing defect, owned by another lane).
 
 Do not blanket-rewrite the call sites. The call sites are overwhelmingly correct
 already; it is the method that is missing. Fixing the method fixes the ~161
-sites at once, and any bulk edit risks reverting sibling lanes' work.
+sites at once, and any bulk edit risks reverting sibling lanes' work. No call
+site was edited for this fix, and none should be.
+
+### Grep hazard while reproducing this census
+
+The default `grep` on this box is **ugrep 7.5.0**, not GNU grep, and the two
+disagree on `'"[^"]*\.at\('`: ugrep splits the 43 excluded in-string matches as
+"2 js/engine + 41 in-string" while GNU grep (`/usr/bin/grep`) attributes all 43
+to in-string. The totals above (341 / 298 / 114 / 184) were re-derived under
+`/usr/bin/grep` and are identical either way, but any re-count should pin the
+binary explicitly rather than trust `grep` on `PATH`.
 
 ### Sentinel note
 
@@ -244,6 +329,9 @@ container, index 3 (sentinel), and the boundary index `len-1` / `len`. Each must
 be shown RED against the unpatched build first — trivially satisfiable today,
 since every in-range read currently returns `None`.
 
-Note that `bin/simple_seed test` runs the **interpreter**, so a green spec is
-not evidence about the native or JIT lanes. Native must be verified by
-`simple compile --native` + running the produced binary, as done above.
+Note that a spec run selects the **interpreter**, so a green spec is not
+evidence about the native or JIT lanes — which is exactly why
+`test/01_unit/lib/common/array_at_option_spec.spl` passing today does **not**
+close this bug. Native must be verified by `simple compile --native` plus
+running the produced binary, and JIT by a default `simple foo.spl` run, as done
+in the transcripts above.
