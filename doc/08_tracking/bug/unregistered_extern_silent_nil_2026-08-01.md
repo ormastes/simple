@@ -1,9 +1,17 @@
 # An unregistered `@extern fn` is not a link error — it is a silent nil, a silent 0, or a SIGILL (2026-08-01)
 
-**Status:** PARTIALLY FIXED. The live `_cos`/`_sin` instance is fixed and a
-detection gate (`scripts/check/check-extern-registration.shs`) now enumerates
-the family. The per-lane fall-through sites are located but NOT patched — each
-needs a bootstrap rebuild.
+**Status:** PARTIALLY FIXED. The live `_cos`/`_sin` instance is fixed, a
+detection gate (`scripts/check/check-extern-registration.shs`) enumerates the
+family, and as of the update below the JIT fall-through now **warns by
+default** and can be made fatal on demand. The individual unbacked symbols are
+still unbacked.
+
+> **Update 2026-08-01 (later lane) — the fall-through is no longer silent.**
+> `interp_call_handler` swallowed *every* extern error into
+> `RuntimeValue::NIL` and exited 0. It now distinguishes "no implementation
+> exists" from a real error inside a backed extern and reports the former.
+> Default is **warn-only** (values and exit codes unchanged);
+> `SIMPLE_STRICT_EXTERN=1` makes it fatal. See "Loud diagnostic" below.
 
 **Class:** silent wrong answer. Related:
 `game2d_f64_to_i32_extern_unregistered_2026-07-31.md` (same family; commit
@@ -313,14 +321,84 @@ Comments are excluded, which matters: an earlier revision of this scan counted
 `_sin` as registered purely on the strength of a Rust doc comment, and so missed
 the very bug that motivated the work.
 
+## Loud diagnostic (2026-08-01, later lane)
+
+### Where the silence actually was — PROVED, and narrower than assumed
+
+Re-measured at `29992868d68` with a debug seed built from that exact tip. Probe:
+a `extern fn totally_nonexistent_ghost_symbol_xyz(a: i64) -> i64` that is called
+and printed.
+
+| path | result | loud? |
+|---|---|---|
+| `compile --native` | `error: codegen: undefined symbol: <name>`, rc=1 | **yes** |
+| `native-build` | worker exits 1 | **yes** |
+| `run` with `SIMPLE_EXECUTION_MODE=interpreter` | `error: semantic: unknown extern function: <name>`, rc=1 | **yes** |
+| `run` (default = JIT) | prints `ghost returned: 3`, **rc=0** | **NO** |
+
+So the surviving silent path is **the JIT only** — not the native link. `3` is
+`NIL_VALUE`; it prints as an ordinary integer, which is exactly why this reads
+as a legitimate `0`-ish answer. The earlier claim in this file that the native
+link weak-stubs any non-`rt_` name did **not** reproduce on either native path
+at this tip: both refuse. (The weak-stub fabricator in
+`pipeline/native_project/stubs.rs` is still real, but it is reached by the
+freestanding/bootstrap configurations, which have their own ratchet, not by a
+plain hosted `compile --native`.)
+
+### Root cause (exact line)
+
+`src/compiler_rust/compiler/src/interpreter_sffi.rs`, `interp_call_handler`:
+the terminal `Err(e) => { tracing::error!(...); RuntimeValue::NIL }` arm
+swallowed **every** extern failure into nil and let the process exit 0. The
+`tracing::error!` is not a gate — it does not change the value or the status.
+
+### Fix shipped
+
+`interp_call_handler` now sets a thread-local when a name reaches the terminal
+"not found" branch, so the error arm can tell an **unbacked extern** apart from
+a genuine error raised *inside* a backed extern. Only the former is reported.
+
+- **default:** one warning per distinct name per process, naming the symbol,
+  the arg count, and the fact that nil was substituted. Return value and exit
+  status are **unchanged** — this is warn-only on purpose.
+- `SIMPLE_STRICT_EXTERN=1`: abort instead of substituting nil.
+- `SIMPLE_QUIET_EXTERN_WARN=1`: silence the warning without changing any value.
+
+Deliberately **not** promoted to fatal by default: ~919 symbols are unbacked on
+the high-confidence count below, and some callers read the nil as "feature
+unavailable". Promotion needs its own lane with the fallout measured first.
+
+### Non-vacuity (PROVED)
+
+Control = the *same* source tree at the *same* tip with only
+`interpreter_sffi.rs` reverted to its pristine blob, rebuilt with the same
+command. Control: no warning, rc=0, `ghost returned: 3`, and
+`SIMPLE_STRICT_EXTERN=1` has **zero** effect. Fixed: warning present; strict
+mode aborts (rc=134). The delta is attributable to the change, not to drift.
+
+## Counting correction — beware the `insert_simple!` registry
+
+A triage pass that looked only for Rust `extern "C" fn NAME` definitions
+classified 1,418 names as unbacked. **109 of those are in fact registered**, via
+`insert_simple!("name", path::to::fn)` in
+`src/compiler_rust/compiler/src/interpreter_extern/mod.rs` (1,572 such
+registrations; 1,422 distinct quoted names). The whole `rt_jit_*` family — one
+of the highest-blast-radius groups by declaring-file count — is registered this
+way and is **not** a defect. Any future scan that ignores this registry will
+manufacture false positives.
+
+Intersecting the two independent methods (this file's
+`check-extern-registration.shs`, which does see the registry, and the
+definition-scan above) gives **919 unique symbols both agree are unbacked** —
+treat that as the actionable core, not 1,418 and not 2,378.
+
 ## Remaining work
 
-1. Patch the per-lane fall-throughs so an unregistered `@extern` aborts with the
-   symbol name instead of yielding nil/0/SIGILL. The cheapest correct fix is to
-   register `@extern`-decorated names into `EXTERN_FUNCTIONS` alongside
-   `Node::Extern` so the existing `unknown extern function` path fires — but
-   note that path currently only *logs*, so it must be made fatal too. Needs a
-   bootstrap rebuild.
+1. ~~Patch the per-lane fall-throughs so an unregistered `@extern` aborts with
+   the symbol name instead of yielding nil/0/SIGILL.~~ Done for the JIT path
+   as warn-only + opt-in strict (above). Still to do: decide whether the
+   `@extern`-attribute form reaches the same handler, and measure the SIGILL
+   variant reported earlier in this file at the current tip.
 2. Narrow the gate's scope to exclude sffi_gen generator inputs, resolve the
    `ffi_`/`sffi_` naming question, then flip it to `--strict` in the pre-push
    guards.

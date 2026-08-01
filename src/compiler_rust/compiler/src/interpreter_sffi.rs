@@ -577,6 +577,69 @@ fn interp_error_diag_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var_os("SIMPLE_BOOTSTRAP_DIAG").is_some())
 }
 
+thread_local! {
+    /// Set by `interp_call_handler` when a name reached the terminal
+    /// "not found" branch, i.e. the extern is declared in Simple but backed by
+    /// no implementation anywhere. Read immediately afterwards by the error
+    /// arm, which otherwise cannot tell an unbacked extern apart from a real
+    /// runtime error raised *inside* a backed extern.
+    static UNBACKED_EXTERN: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Opt-in strict mode: treat a call to an unbacked extern as fatal instead of
+/// substituting nil.
+///
+/// Default OFF. The nil substitution below is a known silent-wrong-value
+/// source (an unbacked extern is indistinguishable from one that legitimately
+/// returned 0/nil), but thousands of declared externs are unbacked today, so
+/// promoting this to fatal by default would break callers that currently read
+/// the nil as "feature unavailable". This flag exists so a lane can measure the
+/// real blast radius before that promotion is considered.
+fn strict_extern_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("SIMPLE_STRICT_EXTERN").as_deref() == Ok("1"))
+}
+
+/// Suppress the default warn-only diagnostic without changing any value.
+fn extern_warn_silenced() -> bool {
+    static QUIET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *QUIET.get_or_init(|| std::env::var("SIMPLE_QUIET_EXTERN_WARN").as_deref() == Ok("1"))
+}
+
+/// Report a call to an extern that no implementation backs, once per distinct
+/// name per process.
+///
+/// Warn-only by default: the call still returns nil exactly as before, so this
+/// changes no program's value or exit status. It only makes the substitution
+/// *visible*, which is the whole defect — a fabricated nil currently reads as a
+/// legitimate 0. Under `SIMPLE_STRICT_EXTERN=1` the same condition aborts.
+fn report_unbacked_extern(name: &str, argc: usize) {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> = std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    let first_time = match seen.lock() {
+        Ok(mut set) => set.insert(name.to_string()),
+        Err(_) => true,
+    };
+
+    if strict_extern_enabled() {
+        eprintln!(
+            "error: extern `{name}` (argc={argc}) is declared in Simple but backed by no \
+             implementation; SIMPLE_STRICT_EXTERN=1 refuses to substitute nil for it."
+        );
+        std::process::abort();
+    }
+
+    if first_time && !extern_warn_silenced() {
+        eprintln!(
+            "warning: extern `{name}` (argc={argc}) is declared but backed by no \
+             implementation -- the call returned nil, which is indistinguishable from a \
+             real 0/false/empty result. Implement it, fix the spelling, or delete the \
+             declaration. Set SIMPLE_STRICT_EXTERN=1 to make this fatal, or \
+             SIMPLE_QUIET_EXTERN_WARN=1 to silence this warning."
+        );
+    }
+}
+
 /// Internal handler for rt_interp_call.
 ///
 /// This is registered with the runtime via `init_interpreter_handlers()`.
@@ -718,6 +781,10 @@ unsafe extern "C" fn interp_call_handler(
             )
         } else {
             tracing::error!("rt_interp_call: function not found: {}", name);
+            // Nothing backs this name: not an interpreted function, not an
+            // rt_/spl_ extern handler. Flag it so the error arm below can warn
+            // about the nil substitution instead of silently performing it.
+            UNBACKED_EXTERN.with(|f| f.set(true));
             // E3008 - Function Not Found
             let ctx = ErrorContext::new()
                 .with_code(codes::FUNCTION_NOT_FOUND)
@@ -731,11 +798,20 @@ unsafe extern "C" fn interp_call_handler(
     });
 
     match result {
-        Ok(value) => value_to_runtime(&value),
+        Ok(value) => {
+            UNBACKED_EXTERN.with(|f| f.set(false));
+            value_to_runtime(&value)
+        }
         Err(e) => {
             tracing::error!("rt_interp_call error: {:?}", e);
             if interp_error_diag_enabled() {
                 eprintln!("[interp-call-error] name={name} argc={} error={e:?}", args.len());
+            }
+            // Distinguish "no implementation exists" from a genuine error
+            // raised inside a real extern. Only the former is the silent-nil
+            // defect this diagnostic targets.
+            if UNBACKED_EXTERN.with(|f| f.replace(false)) {
+                report_unbacked_extern(name, args.len());
             }
             simple_runtime::RuntimeValue::NIL
         }
