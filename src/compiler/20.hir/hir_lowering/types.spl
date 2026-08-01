@@ -123,6 +123,17 @@ class HirLowering:
     # interpreter (cross-pass enum-payload landmine, observed disc
     # 2735847868), while a fresh same-pass extraction is reliable.
     fn_tuple_returns: {text: [HirType]}
+    # GLB2 (2026-08-01): per-ROOT memo for register_glob_imported_symbols_depth.
+    # Maps a canonical module KEY -> the shallowest depth at which that key has
+    # already been glob-expanded during the CURRENT root expansion. The glob
+    # graph is cyclic (168 directed 2-cycles over 3,026 `use x.*` edges), so
+    # before this the depth-8 cap was the only terminator and a single root
+    # re-expanded the same modules exponentially. Keyed on the resolution KEY
+    # (not surface.module_name) because relative sub-paths resolve against it.
+    # Shallowest-depth (not a plain visited set) so a module first reached at
+    # depth 8 can still be re-expanded from a shallower arrival, which is what
+    # keeps the depth cap's reachable set intact.
+    glob_expand_memo: {text: i64}
 
 struct LoweringError:
     message: text
@@ -152,6 +163,7 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
     val empty_local_tuple_types: HirLocalTupleTypes = {}
     val empty_enum_variant_names: {text: bool} = {}
     val empty_fn_tuple_returns: {text: [HirType]} = {}
+    val empty_glob_expand_memo: {text: i64} = {}
     HirLowering(
         symbols: SymbolTable.new(),
         errors: errors,
@@ -176,7 +188,8 @@ fn hirlowering_new_with_diagnostics(errors: [LoweringError], diagnostic_messages
         local_tuple_types: empty_local_tuple_types,
         enum_variant_names: empty_enum_variant_names,
         registering_import_symbols: false,
-        fn_tuple_returns: empty_fn_tuple_returns
+        fn_tuple_returns: empty_fn_tuple_returns,
+        glob_expand_memo: empty_glob_expand_memo
     )
 
 fn hirlowering_new() -> HirLowering:
@@ -228,6 +241,7 @@ impl HirLowering:
         self.enum_variant_names = fresh.enum_variant_names
         self.registering_import_symbols = fresh.registering_import_symbols
         self.fn_tuple_returns = fresh.fn_tuple_returns
+        self.glob_expand_memo = fresh.glob_expand_memo
 
     static fn new() -> HirLowering:
         hirlowering_new()
