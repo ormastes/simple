@@ -3266,6 +3266,14 @@ pub fn compile_call<M: Module>(
                 // `error`), and still exited 0 -- corrupting every indentation
                 // string built that way, including EasyFix replacement text.
                 "repeat" => Some("rt_string_repeat"),
+                // Character-class predicates. The interpreter gives `is_numeric`
+                // and `is_digit` the same ASCII-digit body, and pairs
+                // `is_alpha`/`is_alphabetic` and `is_alphanumeric`/`is_alnum`,
+                // so seven spellings share four runtime entry points.
+                "is_digit" | "is_numeric" => Some("rt_string_is_digit"),
+                "is_alpha" | "is_alphabetic" => Some("rt_string_is_alpha"),
+                "is_alphanumeric" | "is_alnum" => Some("rt_string_is_alnum"),
+                "is_whitespace" => Some("rt_string_is_whitespace"),
                 // The interpreter folds five spellings into one arm each
                 // (interpreter_method/string.rs:76-77); only two of each were
                 // wired here, so `up`/`uppercase`/`to_uppercase` and their

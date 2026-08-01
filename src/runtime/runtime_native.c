@@ -3548,6 +3548,41 @@ int64_t rt_string_repeat(int64_t value, int64_t count) {
     return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
+/* Character-class predicates: non-empty AND every character in the class.
+ *
+ * Mirrors interpreter_method/string.rs (arms "is_numeric", "is_alpha",
+ * "is_digit", "is_alphanumeric", "is_whitespace") and rt_string_is_* in the
+ * Rust runtime (runtime/src/value/collections.rs). The native lane links THIS
+ * file, so a Rust-only definition would leave native `.is_digit()` unresolved
+ * -- the same way rt_at/rt_array_at were added to the Rust runtime alone and
+ * left the native lane broken.
+ *
+ * KNOWN DIVERGENCE, non-ASCII only: the Rust runtime and the interpreter
+ * classify per Unicode `char`, so "e-acute".is_alpha() is true there. This file
+ * has no Unicode tables, so any byte >= 0x80 makes the alpha/alnum/whitespace
+ * predicates answer 0 rather than guess. is_digit/is_numeric are ASCII-digit by
+ * definition, so those two agree with the other engines exactly, everywhere. */
+static int64_t rt_string_all_ascii_class(int64_t value, int (*pred)(unsigned char)) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (!s || s->len == 0) return 0; /* empty string is false for every class */
+    for (uint64_t i = 0; i < s->len; i++) {
+        unsigned char c = (unsigned char)s->data[i];
+        if (c >= 0x80) return 0; /* see KNOWN DIVERGENCE above */
+        if (!pred(c)) return 0;
+    }
+    return 1;
+}
+
+static int rt_pred_is_digit(unsigned char c)  { return c >= '0' && c <= '9'; }
+static int rt_pred_is_alpha(unsigned char c)  { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+static int rt_pred_is_alnum(unsigned char c)  { return rt_pred_is_alpha(c) || rt_pred_is_digit(c); }
+static int rt_pred_is_space(unsigned char c)  { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v'; }
+
+int64_t rt_string_is_digit(int64_t value)      { return rt_string_all_ascii_class(value, rt_pred_is_digit); }
+int64_t rt_string_is_alpha(int64_t value)      { return rt_string_all_ascii_class(value, rt_pred_is_alpha); }
+int64_t rt_string_is_alnum(int64_t value)      { return rt_string_all_ascii_class(value, rt_pred_is_alnum); }
+int64_t rt_string_is_whitespace(int64_t value) { return rt_string_all_ascii_class(value, rt_pred_is_space); }
+
 int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
     RtCoreString* s = rt_core_as_string(value);
     RtCoreString* old_s = rt_core_as_string(old_value);

@@ -304,3 +304,66 @@ affix (`trim_*_matches`, `remove{,_}prefix/suffix`, `chomp`), sequence (`rev`,
 (`partition`, `rpartition`, `find_all`, `find_indices`), pad (`pad_left/start/
 right/end`, `center`, `zfill`), predicate (`is_*`), and misc (`char_count`,
 `push_str`, `replace_first`, `substr`, `parse_i64`, `ptr`).
+
+---
+
+# Update 2026-08-01 (batch 2): 43 -> 36, and the wiring list is EIGHT sites
+
+## Landed: 7 `is_*` predicates via 4 runtime functions
+
+`is_numeric` and `is_digit` have the same ASCII-digit body in the interpreter,
+and `is_alpha`/`is_alphabetic` and `is_alphanumeric`/`is_alnum` are pairs, so
+seven spellings collapse to four entry points: `rt_string_is_digit`,
+`rt_string_is_alpha`, `rt_string_is_alnum`, `rt_string_is_whitespace`.
+Implemented in **both** runtimes (Rust `value/collections.rs` and C
+`runtime_native.c` + `runtime.h`), per the rt_at/rt_array_at precedent.
+
+Semantics matched to the interpreter: the empty string is FALSE for every class.
+
+**43 -> 36.**
+
+## The seven-site list is incomplete: a bool-returning method needs an EIGHTH
+
+All seven known sites were wired correctly and the sweep went green -- but the
+values were wrong on the JIT:
+
+    "123".is_digit()   JIT: nil     interpreter: true
+    "12a".is_digit()   JIT: 0       interpreter: false
+
+Truthy misdecoded as `nil`, falsy printed as the raw untagged `0`. The missing
+site is the result-type table at `hir/lower/expr/mod.rs:1096`. Without an entry
+there the call is typed `TypeId::ANY` and the bool-boxing step at the
+print/call-arg lowering site is skipped.
+
+This is the *same defect* as bug `jit_bool_result_type_gap_2026-07-29` (lane
+BOOLRESULT), which fixed exactly this for `is_empty`. The comment recording that
+fix sits three lines above the arm that had to be edited again here -- the fix
+enumerated the one reported method rather than the family, so the next
+bool-returning text method to be wired hit it again.
+
+**Site 8 of 8 (bool-returning methods only): `hir/lower/expr/mod.rs`, the
+`Some(TypeId::BOOL)` arm.** Like the `value/mod.rs` re-export and
+`RUNTIME_SYMBOL_NAMES`, it is SILENT when missed -- worse than silent here,
+since the 102-probe sweep reports PASS.
+
+Also noted while tracing it: `closures_structs.rs` has a *second* dispatch table
+at :1359 besides the one at :1487, and the LLVM backend has two more
+(`codegen/llvm/emitter.rs:174`, `codegen/llvm/functions.rs:2368`). Those were not
+needed for this batch but belong in the site list for anyone wiring the
+remaining 36.
+
+## Confirmed limit of the sweep
+
+Both `parse_i64` (batch 1) and the `is_*` predicates (batch 2) were scored PASS
+by the 102-probe sweep while returning WRONG VALUES. The sweep proves dispatch
+existence only. **Every batch needs a hand value-comparison across both engines
+before it is claimed.** Both defects were caught that way and neither reached a
+commit.
+
+## Known divergence introduced, non-ASCII only
+
+The C runtime has no Unicode tables, so `is_alpha`/`is_alnum`/`is_whitespace`
+answer 0 for any byte >= 0x80, where the Rust runtime and the interpreter
+classify per Unicode `char`. `is_digit`/`is_numeric` are ASCII-digit by
+definition and agree exactly on all input. Documented in `runtime_native.c` at
+the implementation; the native lane is the only one affected.

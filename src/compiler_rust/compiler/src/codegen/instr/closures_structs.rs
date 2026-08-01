@@ -1486,6 +1486,11 @@ fn try_compile_builtin_method_call<M: Module>(
         // See calls.rs: `.repeat()` had no runtime definition at all, so it
         // silently produced the SPECIAL_ERROR sentinel instead of a string.
         "repeat" => "rt_string_repeat",
+        // See calls.rs: seven is_* spellings share four runtime entry points.
+        "is_digit" | "is_numeric" => "rt_string_is_digit",
+        "is_alpha" | "is_alphabetic" => "rt_string_is_alpha",
+        "is_alphanumeric" | "is_alnum" => "rt_string_is_alnum",
+        "is_whitespace" => "rt_string_is_whitespace",
         // Full alias sets, matching interpreter_method/string.rs:76-77.
         "to_upper" | "upper" | "up" | "uppercase" | "to_uppercase" => "rt_string_to_upper",
         "to_lower" | "lower" | "down" | "lowercase" | "to_lowercase" => "rt_string_to_lower",

@@ -2090,6 +2090,61 @@ pub extern "C" fn rt_any_add(left: RuntimeValue, right: RuntimeValue) -> Runtime
     RuntimeValue::from_int(left.as_int() + right.as_int())
 }
 
+/// Shared body for the `is_*` character-class predicates.
+///
+/// Mirrors the tree-walking interpreter (`interpreter_method/string.rs`, arms
+/// `"is_numeric"`, `"is_alpha"`, `"is_digit"`, `"is_alphanumeric"`,
+/// `"is_whitespace"`): the empty string is FALSE for every class, and a
+/// non-empty string is true only when every `char` satisfies the predicate.
+///
+/// Classification is per-`char`, not per-byte, so it agrees with the
+/// interpreter's `s.chars().all(..)` on non-ASCII input. Invalid UTF-8 is
+/// reported as false rather than being silently classified byte-wise, which
+/// would disagree with the interpreter.
+fn string_all_chars(string: RuntimeValue, pred: fn(char) -> bool) -> i64 {
+    let str_len = rt_string_len(string);
+    if str_len <= 0 {
+        // Includes the non-text receiver case (len < 0): no class claim.
+        return 0;
+    }
+    let data = rt_string_data(string);
+    if data.is_null() {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(data, str_len as usize) };
+    match std::str::from_utf8(bytes) {
+        Ok(s) => i64::from(s.chars().all(pred)),
+        Err(_) => 0,
+    }
+}
+
+/// `is_digit` / `is_numeric`: non-empty and all ASCII digits.
+///
+/// The interpreter gives these two spellings the same ASCII-digit body, so they
+/// share one runtime entry point here.
+#[no_mangle]
+pub extern "C" fn rt_string_is_digit(string: RuntimeValue) -> i64 {
+    string_all_chars(string, |c| c.is_ascii_digit())
+}
+
+/// `is_alpha` / `is_alphabetic`: non-empty and all alphabetic (Unicode).
+#[no_mangle]
+pub extern "C" fn rt_string_is_alpha(string: RuntimeValue) -> i64 {
+    string_all_chars(string, char::is_alphabetic)
+}
+
+/// `is_alphanumeric` / `is_alnum`: non-empty and all alphanumeric (Unicode).
+#[no_mangle]
+pub extern "C" fn rt_string_is_alnum(string: RuntimeValue) -> i64 {
+    string_all_chars(string, char::is_alphanumeric)
+}
+
+/// `is_whitespace`: non-empty and all whitespace.
+#[no_mangle]
+pub extern "C" fn rt_string_is_whitespace(string: RuntimeValue) -> i64 {
+    string_all_chars(string, char::is_whitespace)
+}
+
 /// Check if string starts with prefix
 /// Returns 1 if true, 0 if false
 #[no_mangle]

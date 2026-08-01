@@ -140,7 +140,7 @@ pub use collections::{
     rt_string_char_code_at, rt_string_concat, rt_string_contains, rt_string_data, rt_string_ends_with, rt_string_eq,
     rt_string_find,
     rt_string_free,
-    rt_string_index_of, rt_string_join, rt_string_len, rt_string_new, rt_string_new_literal, rt_string_repeat, rt_string_replace, rt_string_rfind,
+    rt_string_index_of, rt_string_is_alnum, rt_string_is_alpha, rt_string_is_digit, rt_string_is_whitespace, rt_string_join, rt_string_len, rt_string_new, rt_string_new_literal, rt_string_repeat, rt_string_replace, rt_string_rfind,
     rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_int_lenient,
     rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string,
     rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push,

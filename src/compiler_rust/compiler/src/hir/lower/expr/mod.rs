@@ -1093,7 +1093,16 @@ impl Lowerer {
                 // lowering site — printing the raw untagged int (`0`) instead
                 // of `false`, and misdecoding the truthy case as `nil`
                 // (bug jit_bool_result_type_gap_2026-07-29, lane BOOLRESULT).
-                "starts_with" | "ends_with" | "contains" | "is_empty" => Some(TypeId::BOOL),
+                // The `is_*` character-class predicates return bool too, and
+                // omitting them reproduced this bug exactly: `"123".is_digit()`
+                // printed `nil` (truthy misdecoded) and `"12a".is_digit()`
+                // printed `0` instead of `false`, even though the runtime
+                // function was correctly wired at all seven other sites. A
+                // dispatch entry alone is not enough for a bool-returning
+                // method -- the result type must be declared here or the
+                // bool-boxing step is skipped.
+                "starts_with" | "ends_with" | "contains" | "is_empty" | "is_digit" | "is_numeric" | "is_alpha"
+                | "is_alphabetic" | "is_alphanumeric" | "is_alnum" | "is_whitespace" => Some(TypeId::BOOL),
                 "concat" | "slice" | "replace" | "trim" | "trim_start" | "trim_end" => {
                     Some(TypeId::STRING)
                 }
