@@ -37,6 +37,10 @@ Ran `git fetch` and synced `tmp-docfix` context against `origin/main` now at `57
     - hosted theme input (`SIMPLE_WM_THEME_FILE`)
     - SimpleOS theme file (`/THEME.CSS`)
     - web-window themed payload propagation and envelope fidelity.
+- 2026-08-01 follow-up "runderer/IR" check:
+  - Searched recent upstream logs for renderer/backend/IR/spek runner-relevant commits: `fe481ab069`, `f80696b851`, `33754b8df0`, `205b35e474`, plus legacy `51bfb0d970`, `57923b8259`.
+  - Impact to this lane: no new renderer runner/IR spec behavior requiring plan adjustment.
+  - `f80696b851` (hosted-wm unparseable source fixes) is advisory for hosted-runner stability only.
 
 ## Historical upstream renderer/IR context tracked
 
