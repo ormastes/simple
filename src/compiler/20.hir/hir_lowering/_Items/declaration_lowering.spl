@@ -27,6 +27,7 @@ use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text
+extern fn rt_enum_discriminant(value: Any) -> i64
 
 fn hir_lower_env_get(key: text) -> text:
     rt_env_get(key)
@@ -654,7 +655,15 @@ impl HirLowering:
         var fields: [HirField] = []
         for f in struct_fields:
             val sf: ParserField = f
-            fields = fields.push(self.lower_field(sf))
+            val lowered_field: HirField = self.lower_field(sf)
+            if (struct_name == "BackendError" and lowered_field.name == "span") or (struct_name == "CompiledUnit" and lowered_field.name == "entry_point"):
+                val actual_disc = rt_enum_discriminant(lowered_field.type_.kind)
+                val optional_disc = rt_enum_discriminant(HirTypeKind.Optional(lowered_field.type_))
+                val infer_disc = rt_enum_discriminant(HirTypeKind.Infer(0, 0))
+                val error_disc = rt_enum_discriminant(HirTypeKind.Error)
+                val named_disc = rt_enum_discriminant(HirTypeKind.Named(SymbolId(id: -1), []))
+                eprint("[hir-field-type] struct={struct_name} field={lowered_field.name} actual={actual_disc} optional={optional_disc} infer={infer_disc} error={error_disc} named={named_disc}\n")
+            fields = fields.push(lowered_field)
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(struct_name, struct_visibility)

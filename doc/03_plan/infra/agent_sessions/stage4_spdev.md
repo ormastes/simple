@@ -461,3 +461,45 @@ field-kind discriminant alongside reference discriminants for `Optional`,
 these two owners. Determine where `Span?`/`text?` cease to be valid Optional
 values before changing MIR fallback semantics. Use fresh per-cycle Stage2
 caches; do not reuse `current-seed-cache` or rerun `typekind-cycle3-stage3`.
+
+## 2026-08-01 flat optional tags and recursive Span frontier
+
+- Paired HIR/MIR numeric receipts proved both failing fields were already
+  `HirTypeKind.Infer` at HIR construction and were not corrupted by
+  `HirStruct.fields` storage. Cycle 1 values: actual/infer `3031551406`,
+  optional reference `2589120870`. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle4-stage3/stage3.log`.
+- Root cause was the flat bridge's unguarded imported `TYPE_OPTION*` constants.
+  Stage3 misreads imported fixed module values, while optional tags 14..18 had
+  no ordered-literal guards like primitive tags already did. Added fixed-tag
+  decoding for bare, i64, f64, text, and bool optionals. Focused contract:
+  `build/mini_builds/flat-optional-fixed-tag-guard.log`.
+- Cycle 2 proved both target fields remain Optional across HIR construction and
+  MIR consumption: actual/optional `2589120870`, infer `3031551406`. The
+  `CompiledUnit.entry_point: text?` path then lowered without an error, while
+  `BackendError.span: Span?` failed recursively on its inner type. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle5-stage3/stage3.log`.
+- Added discriminant-first isolated handling for `HirTypeKind.Named`, preserving
+  the existing custom-primitive and canonical struct-symbol semantics. Focused
+  ownership contract passed:
+  `build/mini_builds/mir-hir-type-kind-ownership-cycle3.log`.
+- Fresh Stage2 candidates passed version, unsupported-command, frontend smoke,
+  and immutable-hash admission. Cycle 1 SHA-256:
+  `95a43bed4472a4887f63f75d5291fc1a3b351f16e325e67992c429c7638c52af`;
+  cycle 2: `e731509a138fd755ac41c4b8e4bdbd59e2ee762c063f5ab467a8444274c49e3b`;
+  cycle 3: `a30fe01181cef6513a3ee2952d6a36620556277b0255211bcbdaafb9e206fc79`.
+- Cycle 3 still fails recursively while lowering `BackendError.span`; its outer
+  Optional discriminant remains correct. Named predispatch therefore either
+  does not recognize the inner staged value or receives a non-Named/malformed
+  inner payload. Final evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle6-stage3/stage3.log`.
+- The mandatory three-cycle cap is exhausted. Stage3 produced no compiler;
+  Stage4, essential-tools smoke, and release verification were not run. Nothing
+  was pushed.
+
+Next: in a fresh session, add an Optional-owner diagnostic inside
+`MirLowering.lower_type` that prints the extracted inner discriminant and
+references for Named/Infer/Error/Str before recursing, plus the `SymbolId` only
+when the inner discriminant is proven Named. Compare `Span?` against `text?`.
+Fix the first proven inner-payload boundary; do not add an i64/error fallback.
+Use fresh per-cycle caches and do not rerun `typekind-cycle6-stage3` unchanged.
