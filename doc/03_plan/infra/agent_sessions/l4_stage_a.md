@@ -72,3 +72,62 @@ The session's real work IS on `origin/main`:
 8. **Housekeeping flagged for the user, still open:** `.git` is 55 G with
    153,450 loose objects and gc disabled by a stale `gc.log`; the session
    declined to `git prune` on a repo other sessions are writing.
+
+## sspec coverage 2026-08-01
+
+Audit of the session's six goal items against runnable sspec system tests
+present on `origin/main` (unit/integration specs under `test/`). "Covered"
+means a spec exercises the item's shipped code; it does not claim the item
+itself is complete.
+
+1. **Event hardening through simple 2d — covered.**
+   `test/01_unit/lib/common/engine/interaction/window_event_adapter_spec.spl`,
+   `hit_grid_u32_spec.spl`, `test/01_unit/lib/common/ui/gpu_event_core_spec.spl`,
+   `test/01_unit/lib/{gc,nogc}_async_mut/gpu/engine2d/host_gpu_event_queue_spec.spl`.
+2. **Panels (internal window, task bar, layer, scrollable, transparent) — partial.**
+   Covered: `panel2d_spec.spl`, `panel2d_text_spec.spl`,
+   `window_scene_draw_ir_panel2d_migration_spec.spl`,
+   `window_scene_draw_ir_layer_order_spec.spl`, `window_scene_close_lifecycle_spec.spl`.
+   MISSING scenarios: task-bar panel behavior, scrollable-panel scrolling,
+   transparent-panel compositing, internal window driven by an in-game object.
+   (Goal item 2 itself was never reached — see MISSING item 7 above.)
+3. **Event forward through DrawIR objects/groups + collision — partial.**
+   Covered: `draw_ir_hit_bridge_spec.spl`, `host_gpu_hit_query_spec.spl`,
+   `host_gpu_hit_query_grid_parity_spec.spl`. MISSING scenarios: event
+   forwarding through *grouped/composed* DrawIR nodes, and any
+   object-vs-object collision-detection spec (none exists under game2d).
+4. **Highly offloadable 2d — partial.** Covered:
+   `backend_lane_spec.spl`, `sosix_gpu_lane_route_spec.spl`,
+   `font_offload_preference_smoke_spec.spl`, `bitmap_font_offload_spec.spl`,
+   `vector_font_offload_spec.spl`,
+   `test/02_integration/rendering/engine2d_gpu_offload_evidence.spl`.
+5. **Renderer feature completeness / DrawIR full support — partial.**
+   Covered: `draw_ir_adv_spec.spl`, `gradient_stops_paint_spec.spl`,
+   `simple_web_html_layout_renderer_foundation_gradient_spec.spl`, and (landed
+   with this commit) `browser_renderer_gradient_stops_wiring_spec.spl` closing
+   the GAP-2 middle (CSS→Style→paint props→draw_ir_adv→Engine2D stops).
+   `texture_registry_spec.spl` + `tilemap_spec.spl` cover texel sampling.
+   MISSING: the Phase 2 pixel-parity corpus (images + iframes) — still the
+   acceptance gate for the two closed Phase 2 items (MISSING item 4 above);
+   `draw_ir_transform_spec.spl` exists only in the session scratchpad, not on
+   main.
+6. **Vulkan/CUDA full 2D offload + GPU event forward — contract-level only.**
+   Covered (contracts, not behavior): `test/01_unit/check/vulkan_engine2d_frame_batch_contract_spec.spl`,
+   `vulkan_engine2d_readback_mode_contract_spec.spl`,
+   `vulkan_2d_benchmark_batch_contract_spec.spl`, `vulkan_renderer_spec.spl`.
+   MISSING scenarios: CPU↔Vulkan and CUDA↔Vulkan render-parity specs (the
+   killed haiku lane's `l7_*_parity` logs were never landed as specs), and any
+   end-to-end "2D pipeline + event forward actually offloaded to GPU" system
+   test. Goal items 4/6 were never reached (MISSING item 7 above).
+
+Defect salvage landed with this note:
+- `texture_registry` "6/10 failures" reproduce only against a STALE working
+  copy whose `tilemap.spl` predates `44b41ef9f56c` (no `TextureRegistry`
+  import/field). Module, spec, and textured tilemap on `origin/main` are
+  consistent; nothing to fix in the module.
+- `draw_gradient_rect_stops` / `draw_radial_gradient_rect_stops` exist on main
+  (`engine2d/engine.spl`) but had ZERO callers: the CSS wiring
+  (Style stop fields → decl apply parse → paint_layout props → draw_ir_adv
+  consumption) was killed with the session. Re-landed minimally from the
+  session's proven scratchpad graft, wiring-only (no unrelated reverts), plus
+  the wiring spec named above.
