@@ -53,6 +53,8 @@ use super::{
     rt_array_fill,
     rt_array_all_truthy,
     rt_array_any_truthy,
+    rt_array_all,
+    rt_array_any,
     rt_array_join,
     rt_array_last_index_of,
     rt_array_sort_desc,
@@ -1149,6 +1151,88 @@ fn test_array_all_any_truthy() {
 
     assert_eq!(rt_array_all_truthy(all_zero), 0);
     assert_eq!(rt_array_any_truthy(all_zero), 0);
+}
+
+/// `rt_array_any`/`rt_array_all` must APPLY the predicate the backends pass.
+///
+/// Every backend dispatch site emits `rt_array_any(array, closure)`, but the
+/// runtime used to take `(array)` only and forward to `rt_array_*_truthy`, so
+/// the predicate operand was swallowed by the ABI and never invoked. Both
+/// directions are asserted because a truthiness-only implementation is not
+/// merely "sometimes wrong" — it is wrong the OTHER way too:
+///
+/// | receiver  | predicate | truthiness-only | correct (interpreter) |
+/// |-----------|-----------|-----------------|-----------------------|
+/// | [1,2,3]   | x > 10    | any=1 all=1     | any=0 all=0           |
+/// | [0,0,0]   | x == 0    | any=0 all=0     | any=1 all=1           |
+///
+/// A test asserting only the first row would still pass against an
+/// implementation that ignored the predicate and answered a constant 0.
+/// The call-count assertions pin the SHORT-CIRCUIT behaviour to the
+/// interpreter's early return and, separately, are what make predicate
+/// application observable at all: a swallowed predicate registers zero calls.
+#[test]
+fn test_array_any_all_apply_the_predicate() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    extern "C" fn gt10(_c: RuntimeValue, item: RuntimeValue) -> RuntimeValue {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        RuntimeValue::from_bool(item.as_int() > 10)
+    }
+    extern "C" fn is_zero(_c: RuntimeValue, item: RuntimeValue) -> RuntimeValue {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        RuntimeValue::from_bool(item.as_int() == 0)
+    }
+    extern "C" fn ge2(_c: RuntimeValue, item: RuntimeValue) -> RuntimeValue {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        RuntimeValue::from_bool(item.as_int() >= 2)
+    }
+    extern "C" fn lt2(_c: RuntimeValue, item: RuntimeValue) -> RuntimeValue {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        RuntimeValue::from_bool(item.as_int() < 2)
+    }
+    fn closure(f: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue) -> RuntimeValue {
+        crate::value::objects::rt_closure_new(f as *const () as *const u8, 0)
+    }
+    fn array(items: &[i64]) -> RuntimeValue {
+        let a = rt_array_new(items.len().max(1) as u64);
+        for v in items {
+            rt_array_push(a, RuntimeValue::from_int(*v));
+        }
+        a
+    }
+
+    let a123 = array(&[1, 2, 3]);
+    let a000 = array(&[0, 0, 0]);
+
+    // Row 1: elements all truthy, predicate false everywhere.
+    assert_eq!(rt_array_any(a123, closure(gt10)), 0, "any([1,2,3], x>10) must be false");
+    assert_eq!(rt_array_all(a123, closure(gt10)), 0, "all([1,2,3], x>10) must be false");
+
+    // Row 2: elements all falsy, predicate true everywhere. This is the
+    // direction that catches a constant-0 implementation.
+    assert_eq!(rt_array_any(a000, closure(is_zero)), 1, "any([0,0,0], x==0) must be true");
+    assert_eq!(rt_array_all(a000, closure(is_zero)), 1, "all([0,0,0], x==0) must be true");
+
+    // Short-circuit: stop at the first decisive element, as the interpreter does.
+    CALLS.store(0, Ordering::SeqCst);
+    assert_eq!(rt_array_any(a123, closure(ge2)), 1);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2, "any must stop at the first truthy element");
+
+    CALLS.store(0, Ordering::SeqCst);
+    assert_eq!(rt_array_all(a123, closure(lt2)), 0);
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2, "all must stop at the first falsy element");
+
+    // Empty receiver is vacuously true for `all`, false for `any`.
+    let empty = array(&[]);
+    assert_eq!(rt_array_any(empty, closure(gt10)), 0);
+    assert_eq!(rt_array_all(empty, closure(gt10)), 1);
+
+    // A non-closure operand still degrades to element truthiness rather than
+    // calling through an unvalidated address.
+    assert_eq!(rt_array_any(a123, RuntimeValue::NIL), 1);
+    assert_eq!(rt_array_all(a000, RuntimeValue::NIL), 0);
 }
 
 // ============================================================================

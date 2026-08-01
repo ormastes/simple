@@ -4640,9 +4640,47 @@ pub extern "C" fn rt_array_all_truthy(array: RuntimeValue) -> i64 {
     }
 }
 
+/// `arr.all(pred)`: true when `pred` is truthy for EVERY element.
+///
+/// Codegen contract: all four backend dispatch sites — `codegen/llvm/
+/// functions.rs` (both the type-blind fallback table and the
+/// `("Array", "all")` table), `codegen/llvm/emitter.rs` and the Cranelift
+/// `codegen/instr/{calls,closures_structs}.rs` — map `all` here and emit
+/// `receiver + args` verbatim, i.e. `rt_array_all(array, closure)`. This
+/// function previously took only `(array)` and forwarded to
+/// `rt_array_all_truthy`, so the predicate operand was accepted by the ABI and
+/// then DISCARDED: `[1,2,3].all(x => x > 10)` answered `true` (every element is
+/// truthy) instead of `false`, and the predicate was never invoked even once.
+///
+/// Semantics are pinned to the interpreter (`interpreter_helpers/collections.rs`
+/// `eval_array_all`), not guessed: the predicate is called with the element
+/// alone, iteration SHORT-CIRCUITS on the first falsy result, and an empty
+/// receiver is vacuously `true`.
+///
+/// The zero-predicate spelling is a SEPARATE symbol, not a defaulted argument:
+/// `arr.all_truthy()` lowers to `rt_array_all_truthy(array)` via its own MIR arm
+/// (`mir/lower/lowering_expr_method.rs`), so no caller reaches this function
+/// with one operand. A non-closure `closure` (nil, or a value that is not a
+/// registered closure) therefore still degrades to element truthiness rather
+/// than calling through an unvalidated address — the same bail-out
+/// `rt_array_filter`/`rt_array_find`/`rt_array_map` use.
 #[no_mangle]
-pub extern "C" fn rt_array_all(array: RuntimeValue) -> i64 {
-    rt_array_all_truthy(array)
+pub extern "C" fn rt_array_all(array: RuntimeValue, closure: RuntimeValue) -> i64 {
+    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let func_ptr = rt_closure_func_ptr(closure);
+    if func_ptr.is_null() {
+        return rt_array_all_truthy(array);
+    }
+
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
+    let mut i: i64 = 0;
+    while i < rt_array_len(array) {
+        if !func(closure, rt_array_get(array, i)).truthy() {
+            return 0;
+        }
+        i += 1;
+    }
+    1
 }
 
 /// Check if any element is truthy
@@ -4673,9 +4711,30 @@ pub extern "C" fn rt_array_any_truthy(array: RuntimeValue) -> i64 {
     }
 }
 
+/// `arr.any(pred)`: true when `pred` is truthy for AT LEAST ONE element.
+///
+/// See `rt_array_all` for the full codegen contract and the arity divergence
+/// this fixes; the two are the same defect. Semantics pinned to
+/// `eval_array_any` (`interpreter_helpers/collections.rs`): the predicate takes
+/// the element alone, iteration SHORT-CIRCUITS on the first truthy result, and
+/// an empty receiver is `false`.
 #[no_mangle]
-pub extern "C" fn rt_array_any(array: RuntimeValue) -> i64 {
-    rt_array_any_truthy(array)
+pub extern "C" fn rt_array_any(array: RuntimeValue, closure: RuntimeValue) -> i64 {
+    let _ = as_typed_ptr!(array, HeapObjectType::Array, RuntimeArray, 0);
+    let func_ptr = rt_closure_func_ptr(closure);
+    if func_ptr.is_null() {
+        return rt_array_any_truthy(array);
+    }
+
+    let func: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue = unsafe { std::mem::transmute(func_ptr) };
+    let mut i: i64 = 0;
+    while i < rt_array_len(array) {
+        if func(closure, rt_array_get(array, i)).truthy() {
+            return 1;
+        }
+        i += 1;
+    }
+    0
 }
 
 /// Fill array with a value (in place)
