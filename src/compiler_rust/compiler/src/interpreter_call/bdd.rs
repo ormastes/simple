@@ -844,22 +844,13 @@ pub(super) fn eval_bdd_builtin(
                         // `expect(opt == nil).to_equal(true)` / `expect(opt != nil)...`
                         // over a `-> T?` return silently failed. Operates on the
                         // already-evaluated values (no re-eval / side effects).
-                        BinOp::Eq => {
-                            let m = if left_val.is_nil_like() || right_val.is_nil_like() {
-                                left_val.is_nil_like() && right_val.is_nil_like()
-                            } else {
-                                left_val == right_val
-                            };
-                            (m, "equal")
-                        }
-                        BinOp::NotEq => {
-                            let m = if left_val.is_nil_like() || right_val.is_nil_like() {
-                                !(left_val.is_nil_like() && right_val.is_nil_like())
-                            } else {
-                                left_val != right_val
-                            };
-                            (m, "not equal")
-                        }
+                        // `nullable_eq` bridges BOTH nullable representation splits:
+                        // nil/`Option::None` (the original fix noted above) and
+                        // payload/`Option::Some(payload)`. The latter was still
+                        // missing, so `expect(f() == 7)` over a `-> i64?` return
+                        // compared `Option::Some(7)` to `7` and silently failed.
+                        BinOp::Eq => (left_val.nullable_eq(&right_val), "equal"),
+                        BinOp::NotEq => (!left_val.nullable_eq(&right_val), "not equal"),
                         // Ordered comparisons (<, <=, >, >=): defer to the
                         // standard binary-expr evaluator and check truthiness on
                         // the resulting Bool — this avoids re-implementing

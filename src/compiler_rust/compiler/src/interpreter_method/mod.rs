@@ -373,7 +373,11 @@ pub(crate) fn evaluate_method_call(
     match method {
         "to_equal" | "to_be" => {
             let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let matched = recv_val == expected;
+            // Must use nullable-aware equality, not raw `==`: a receiver from a
+            // `-> T?` function arrives as `Option::None`/`Option::Some(x)`, so raw
+            // `==` made `to_equal(nil)` a FALSE FAILURE on a genuinely-nil value
+            // and `to_equal(x)` a false failure on a genuinely-matching one.
+            let matched = recv_val.nullable_eq(&expected);
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
@@ -604,7 +608,10 @@ pub(crate) fn evaluate_method_call(
         }
         "to_not_equal" => {
             let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let matched = recv_val != expected;
+            // Nullable-aware, per `to_equal` above. With raw `!=` this was the
+            // dangerous direction: `to_not_equal(nil)` on a genuinely-nil value
+            // and `to_not_equal(x)` on a genuinely-equal one both FALSE-PASSED.
+            let matched = !recv_val.nullable_eq(&expected);
             use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
             if !matched {
                 BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);

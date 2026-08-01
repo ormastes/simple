@@ -1326,6 +1326,43 @@ impl Value {
         }
     }
 
+    /// Unwrap a single-payload `Option::Some(x)` down to `x`; any other value is
+    /// returned unchanged.
+    ///
+    /// A nullable `T?` has two runtime representations, exactly like the
+    /// nil/`Option::None` split documented on [`Value::is_nil_like`]: a literal
+    /// `7` assigned to a `T?` stays a bare `Value::Int`, while a function
+    /// declared `-> i64?` that returns `7` yields `Option::Some(7)`
+    /// (a `Value::Enum`). Equality must bridge those, or `opt == 7` is
+    /// unconditionally false for the function-returned form.
+    pub fn unwrap_option_payload(&self) -> &Value {
+        match self {
+            Value::Enum {
+                enum_name,
+                variant,
+                payload: Some(inner),
+            } if enum_name == enum_names::OPTION && variant == enum_names::SOME => inner.as_ref(),
+            _ => self,
+        }
+    }
+
+    /// Equality with nullable (`T?`) semantics — the single source of truth for
+    /// `==`/`!=` on values that may be Option-wrapped.
+    ///
+    /// Bridges BOTH representation splits a nullable can present:
+    /// - `nil` literal vs `Option::None` (see [`Value::is_nil_like`])
+    /// - a bare payload vs `Option::Some(payload)`
+    ///
+    /// Without the second bridge every `expect(f()).to_equal(v)` on a function
+    /// returning `T?` compares `Option::Some(v)` against `v` and reports a
+    /// FALSE FAILURE, while `to_not_equal(v)` reports a FALSE PASS.
+    pub fn nullable_eq(&self, other: &Value) -> bool {
+        if self.is_nil_like() || other.is_nil_like() {
+            return self.is_nil_like() && other.is_nil_like();
+        }
+        self.unwrap_option_payload() == other.unwrap_option_payload()
+    }
+
     /// Create a new fixed-size array with runtime size checking
     /// Returns error if data length doesn't match expected size
     pub fn fixed_size_array(size: usize, data: Vec<Value>) -> Result<Self, String> {

@@ -935,7 +935,12 @@ pub(super) fn eval_op_expr(
                     ) {
                         result
                     } else {
-                        Ok(Value::Bool(left_val == right_val))
+                        // A nullable `T?` also splits into bare-payload vs
+                        // `Option::Some(payload)`; bridge it the same way the
+                        // nil/`Option::None` check above bridges absence.
+                        // Unwrapping only here (not before `__eq__`) keeps a
+                        // user enum's operator overload seeing the enum itself.
+                        Ok(Value::Bool(left_val.unwrap_option_payload() == right_val.unwrap_option_payload()))
                     }
                 }
                 BinOp::NotEq => {
@@ -954,7 +959,8 @@ pub(super) fn eval_op_expr(
                     ) {
                         result
                     } else {
-                        Ok(Value::Bool(left_val != right_val))
+                        // See BinOp::Eq above: also bridge Some(payload) vs payload.
+                        Ok(Value::Bool(left_val.unwrap_option_payload() != right_val.unwrap_option_payload()))
                     }
                 }
                 BinOp::Lt => match (&left_val, &right_val) {
