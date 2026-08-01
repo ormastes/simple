@@ -582,3 +582,43 @@ subregion. Inspect `receiver.has_type_` versus direct `receiver.type_` use and
 the unresolved receiver local before changing semantics. Remove all temporary
 `[mir-method-call]`, `[hir-field-type]`, `[mir-field-type]`, and
 `[mir-optional-inner]` receipts before eventual Stage4/release gates.
+
+## 2026-08-01 unresolved push early dispatch and lower frontier
+
+- Resolution-arm receipts disproved enum-match misrouting. Failing `push`
+  calls carry discriminant `1851930204`, `resolution_is_unresolved=true`, and
+  correctly enter the Unresolved arm. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle12-stage3/stage3.log`.
+  Stage2 admission SHA-256:
+  `3fe4d41e8869011a40602fb84901a147d63e46850828329869da7ace15dfda37`.
+- Finer receipts proved the first `push` completed receiver lowering, owner
+  lookup, array classification, argument lowering, element typing, boxing,
+  emit, and writeback. The second `push` trapped after owner recovery but before
+  array classification/push entry, inside irrelevant text/conversion probes.
+  Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle13-stage3/stage3.log`.
+  Stage2 admission SHA-256:
+  `fbe0f0992327f3e764a073ef6b1daaae66eb300a755d0f42dee2b03fa9685c88`.
+- Extracted builtin Array.push lowering into
+  `lower_unresolved_array_push` and dispatch it immediately after custom-owner
+  recovery. This preserves custom method precedence and the existing runtime
+  boxing/writeback semantics while avoiding unrelated text probes. Focused
+  contract passed:
+  `build/mini_builds/mir-unresolved-push-early-dispatch-cycle3b.log`.
+- Final Stage2 passed admission with SHA-256
+  `de5002027e16f6fba9d289f86c30d6d9c71f308dcc35ecdae8e142e515fe9ad2`.
+  Stage3 clears both formerly failing pushes and advances hundreds of method
+  calls. The new frontier is a `lower()` call that completes through
+  `receiver-type` then traps before later builtin/resolution dispatch. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle14-stage3/stage3.log`.
+- The mandatory three-cycle cap is exhausted. Stage3 produced no compiler;
+  Stage4, essential-tools smoke, and release verification were not run. Nothing
+  was pushed.
+
+Next: in a fresh session, add sparse receipts after dict probing, text builtin
+selection/call emission, split-lines/slice blocks, and immediately before
+writeback/resolution dispatch. The failing method is `lower`, which likely
+routes through the text-special builtin block between `receiver-type` and
+writeback. Diagnose its nullable result/receiver metadata without changing
+semantics, then run a fresh bounded cycle. Remove all temporary receipts before
+eventual Stage4/release gates.

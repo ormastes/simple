@@ -871,6 +871,24 @@ impl MirLowering:
 
         nil
 
+    me lower_unresolved_array_push(push_recv: LocalId, push_value: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        val push_val_raw = self.lower_expr(push_value)
+        self.note_container_elem_type(push_recv, push_val_raw)
+        val push_val_tagged = self.box_runtime_value(push_val_raw)
+        val push_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_push"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                return_type: MirType(kind: MirTypeKind.I8),
+                is_variadic: false
+            )))
+        ))
+        var b_push = self.builder
+        b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_val_tagged)], MirType(kind: MirTypeKind.I8))
+        self.builder = b_push
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
+        push_recv
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
         """Lower method call based on resolution.
 
@@ -1094,6 +1112,7 @@ impl MirLowering:
             val found_receiver_type = maybe_receiver_type_for_call
             if found_receiver_type != nil:
                 receiver_type = self.lower_type(found_receiver_type)
+        eprint("[mir-method-call] receiver-type method={method}\n")
 
         # Bug #138: `resolution == Unresolved` (no method-resolution info for
         # this receiver -- HIR type inference never populated receiver.type_)
@@ -2137,6 +2156,7 @@ impl MirLowering:
                                 ()
 
         if self.is_mutating_method(method):
+            eprint("[mir-method-call] writeback-enter method={method}\n")
             match receiver.kind:
                 case Index(base, index):
                     wb_base = self.lower_expr(base)
@@ -2171,9 +2191,12 @@ impl MirLowering:
                     self.remember_field_projection_provenance(base, wb_base, wb_field_idx, wb_receiver)
                     wb_kind = 2
                 case _: ()
+        eprint("[mir-method-call] writeback-done method={method} kind={wb_kind}\n")
 
+        eprint("[mir-method-call] resolution-enter method={method} disc={resolution_disc} unresolved={resolution_is_unresolved}\n")
         match resolution:
             case InstanceMethod(type_id, method_id):
+                eprint("[mir-method-call] resolution-arm=instance method={method}\n")
                 # Direct method call on type
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
@@ -2208,6 +2231,7 @@ impl MirLowering:
                     temp
 
             case TraitMethod(trait_id, method_id):
+                eprint("[mir-method-call] resolution-arm=trait method={method}\n")
                 val arg_operands = if wb_kind != 0:
                     self.build_args_from_receiver(wb_receiver, args)
                 else if has_prelowered_method_receiver:
@@ -2236,6 +2260,7 @@ impl MirLowering:
                     temp
 
             case FreeFunction(func_id):
+                eprint("[mir-method-call] resolution-arm=free method={method}\n")
                 val free_receiver = if wb_kind != 0:
                     wb_receiver
                 else if has_prelowered_method_receiver:
@@ -2271,6 +2296,7 @@ impl MirLowering:
                     temp
 
             case StaticMethod(type_id, method_id):
+                eprint("[mir-method-call] resolution-arm=static method={method}\n")
                 var arg_operands: [MirOperand] = []
                 for arg in args:
                     val arg_local = self.lower_expr(arg.value)
@@ -2283,6 +2309,7 @@ impl MirLowering:
                 result
 
             case Unresolved:
+                eprint("[mir-method-call] resolution-arm=unresolved method={method}\n")
                 # Bug #138/#156 keystone: minimal-viable native resolution of
                 # struct INSTANCE methods when HIR type inference left
                 # `resolution` Unresolved (receiver.type_ nil -- see the
@@ -2327,6 +2354,7 @@ impl MirLowering:
                         case _: nil
                 else:
                     nil
+                eprint("[mir-method-call] unresolved-static method={method}\n")
                 if static_method_id != nil:
                     val resolved_static_method_id = static_method_id ?? SymbolId(id: -1)
                     var static_args: [MirOperand] = []
@@ -2356,7 +2384,9 @@ impl MirLowering:
                     prelowered_method_receiver
                 else:
                     self.lower_expr(receiver)
+                eprint("[mir-method-call] unresolved-receiver method={method} local={unresolved_receiver_local.id}\n")
                 val unresolved_struct_name = self.struct_value_syms.get(unresolved_receiver_local.id)
+                eprint("[mir-method-call] unresolved-owner-get method={method}\n")
                 if unresolved_struct_name != nil and unresolved_struct_name != "":
                     val unresolved_method_key = "{unresolved_struct_name}::{method}"
                     # Method symbols are owner-qualified during HIR lowering,
@@ -2409,6 +2439,16 @@ impl MirLowering:
                         im_b2.emit_const(im_temp, MirConstValue.Int(0), MirType.i64())
                         self.builder = im_b2
                         return im_temp
+                eprint("[mir-method-call] unresolved-owner-done method={method}\n")
+
+                # Builtin Array.push has no method symbol. Once custom-owner
+                # recovery above has had first chance, lower it immediately;
+                # unrelated text/conversion probes below can consult stale
+                # optional local-type metadata on the staged path.
+                if method == "push" and args.len() == 1:
+                    return self.lower_unresolved_array_push(
+                        unresolved_receiver_local, args[0].value,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
 
                 # `char_code_at` is a text runtime primitive, but flat HIR has
                 # no method symbol for it. Keep custom owner methods above,
@@ -2516,6 +2556,7 @@ impl MirLowering:
                 # (which this codebase does not currently have, but might grow)
                 # can't be misdispatched as an array op.
                 if self.local_is_runtime_array(unresolved_receiver_local):
+                    eprint("[mir-method-call] unresolved-array method={method}\n")
                     if method == "map" and args.len() == 1:
                         match args[0].value.kind:
                             case Lambda(map_params, map_body, _):
@@ -2567,6 +2608,7 @@ impl MirLowering:
                 # mutating methods) and a true no-op for a plain Var
                 # receiver (wb_kind == 0) -- never a silently-dropped append.
                 if method == "push" and args.len() == 1:
+                    eprint("[mir-method-call] push-enter local={unresolved_receiver_local.id}\n")
                     # Bug (array-push-tag): rt_array_push's `val` slot is the
                     # tagged i64 runtime ABI -- EVERY other producer of array
                     # element storage (lower_array_lit's per-element loop,
@@ -2585,23 +2627,9 @@ impl MirLowering:
                     # (which always un-boxes via `>>3`) recovers the true
                     # value instead of corrupting a small untagged int (e.g.
                     # push(7) stored raw 7, then read-side `7 >> 3 == 0`).
-                    val push_recv = unresolved_receiver_local
-                    val push_val_raw = self.lower_expr(args[0].value)
-                    self.note_container_elem_type(push_recv, push_val_raw)
-                    val push_val_tagged = self.box_runtime_value(push_val_raw)
-                    val push_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_array_push"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                            params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
-                            return_type: MirType(kind: MirTypeKind.I8),
-                            is_variadic: false
-                        )))
-                    ))
-                    var b_push = self.builder
-                    b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_val_tagged)], MirType(kind: MirTypeKind.I8))
-                    self.builder = b_push
-                    self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
-                    return push_recv
+                    return self.lower_unresolved_array_push(
+                        unresolved_receiver_local, args[0].value,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
                 self.error("unresolved method call: {method}", nil)
                 # Task #145: self.error only COLLECTS -- both the bootstrap
                 # lane (driver_bootstrap.spl reads ctx.errors, never
