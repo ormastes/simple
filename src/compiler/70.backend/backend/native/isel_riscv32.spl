@@ -25,7 +25,7 @@ use compiler.backend.backend.backend_types.{CodegenTarget}
 use compiler.backend.backend.riscv_target.{RiscvTargetContract, riscv_linux_target_contract}
 use compiler.backend.native.mach_inst.{RV_X0, RV_X1, RV_X2, RV_X3, RV_X4, RV_X5, RV_X6, RV_X7, RV_X8, RV_X9, RV_X10, RV_X11, RV_X12, RV_X13, RV_X14, RV_X15, RV_X16, RV_X17, RV_X18, RV_X19, RV_X20, RV_X21, RV_X22, RV_X23, RV_X24, RV_X25, RV_X26, RV_X27, RV_X28, RV_X29, RV_X30, RV_X31}
 use compiler.backend.native.mach_inst.{RV_ARG_REGS, RV_CALLEE_SAVED}
-use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ}
+use compiler.backend.native.mach_inst.{RV_OP_ADD, RV_OP_SUB, RV_OP_MUL, RV_OP_DIV, RV_OP_REM, RV_OP_AND, RV_OP_OR, RV_OP_XOR, RV_OP_SLL, RV_OP_SRA, RV_OP_SRL, RV_OP_SLT, RV_OP_SLTU, RV_OP_ADDI, RV_OP_LUI, RV_OP_AUIPC, RV_OP_JAL, RV_OP_JALR, RV_OP_BEQ, RV_OP_BNE, RV_OP_BLT, RV_OP_BGE, RV_OP_LD, RV_OP_SD, RV_OP_LW, RV_OP_SW, RV_OP_MV, RV_OP_LI, RV_OP_NOP, RV_OP_EBREAK, RV_OP_RET, RV_OP_CALL, RV_OP_NEG, RV_OP_NOT, RV_OP_SEQZ, RV_OP_SNEZ}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_alloc_frame_slot_aligned, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 
@@ -668,8 +668,29 @@ fn rv32_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult
             rv32_isel_switch(ctx, value, targets, default_target)
         case Unreachable:
             ISelInstResult(insts: [new_mach_inst(RV_OP_NOP, [])], ctx: ctx)
+        case Abort(message):
+            # Abort must HALT. It previously fell through to the `case _:` arm
+            # below, which printed a diagnostic and then emitted a NOP -- control
+            # ran straight on into whatever block was laid out next, with exactly
+            # the corrupt state the abort existed to stop. EBREAK traps.
+            ISelInstResult(insts: [new_mach_inst(RV_OP_EBREAK, [])], ctx: ctx)
+        case CallTerminator(dest, func, args, normal, unwind):
+            # Contract (mir_interpreter.spl `case CallTerminator`): perform the
+            # call, bind the return value into `dest` when present, then
+            # transfer to `normal`. The NOP this used to emit dropped both the
+            # call and the edge.
+            if unwind.?:
+                # The native backend has no landing pads. Silently discarding
+                # the unwind edge would send an unwinding call into `normal`.
+                panic("riscv32 isel: CallTerminator with an unwind edge has no lowering (native backend has no exception handling)")
+            val call_res = rv32_isel_call(ctx, dest, func, args)
+            var insts = call_res.insts
+            insts.push(new_mach_inst(RV_OP_JAL, [op_phys(RV_X0), op_label(normal.id)]))
+            ISelInstResult(insts: insts, ctx: call_res.ctx)
         case _:
-            rv32_isel_unsupported(ctx, "terminator")
+            # All seven MirTerminator variants are handled above. Returning a
+            # NOP here would silently delete a terminator; fail loudly instead.
+            panic("riscv32 isel: unhandled MirTerminator variant -- terminator lowered to nothing")
 
 fn rv32_isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     var insts: [MachInst] = []

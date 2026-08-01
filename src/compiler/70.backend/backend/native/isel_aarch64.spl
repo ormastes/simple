@@ -18,7 +18,7 @@ use compiler.backend.native.mach_inst.{MachReg, virtual_reg, physical_reg, reg_i
 use compiler.backend.common.isel_common.{LoweredOperand, ISelFuncResult, ISelBlockResult, ISelInstResult, local_to_vreg, local_vreg_op, isel_fresh_dest, isel_emit_one}
 use compiler.backend.native.mach_inst.{AARCH64_X0, AARCH64_X1, AARCH64_X2, AARCH64_X3, AARCH64_X4, AARCH64_X5, AARCH64_X6, AARCH64_X7, AARCH64_X8, AARCH64_X9, AARCH64_X16, AARCH64_X29, AARCH64_X30, AARCH64_SP}
 use compiler.backend.native.mach_inst.{AARCH64_ARG_REGS, AARCH64_CALLEE_SAVED}
-use compiler.backend.native.mach_inst.{A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV, A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET, A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE, A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP, A64_OP_CBZ, A64_OP_CBNZ, A64_OP_RBIT, A64_OP_CLZ, A64_OP_REV}
+use compiler.backend.native.mach_inst.{A64_OP_MOV, A64_OP_MOVZ, A64_OP_MOVK, A64_OP_ADD, A64_OP_SUB, A64_OP_MUL, A64_OP_SDIV, A64_OP_AND, A64_OP_ORR, A64_OP_EOR, A64_OP_LSL, A64_OP_ASR, A64_OP_LSR, A64_OP_NEG, A64_OP_CMP, A64_OP_CSET, A64_OP_B, A64_OP_BEQ, A64_OP_BNE, A64_OP_BLT, A64_OP_BGE, A64_OP_BGT, A64_OP_BLE, A64_OP_BL, A64_OP_RET, A64_OP_LDR, A64_OP_STR, A64_OP_STP, A64_OP_LDP, A64_OP_ADRP, A64_OP_ADD_IMM, A64_OP_SUB_IMM, A64_OP_NOP, A64_OP_BRK, A64_OP_CBZ, A64_OP_CBNZ, A64_OP_RBIT, A64_OP_CLZ, A64_OP_REV}
 use compiler.backend.common.isel_context.{ISelContext, new_isel_context, isel_alloc_vreg, isel_get_vreg, isel_alloc_frame_slot, isel_frame_offset, isel_add_extern, isel_add_string_data, isel_last_string_label}
 use compiler.backend.common.ascii_utils.{char_to_ascii}
 
@@ -574,7 +574,7 @@ fn a64_isel_cast(ctx: ISelContext, dest: LocalId, operand: MirOperand, target: M
 # Function Calls
 # ============================================================================
 
-fn a64_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
+fn a64_isel_call(ctx: ISelContext, dest: LocalId?, func_op: MirOperand, args: [MirOperand]) -> ISelInstResult:
     var insts: [MachInst] = []
     var current_ctx = ctx
 
@@ -620,8 +620,14 @@ fn a64_isel_call(ctx: ISelContext, dest: LocalId, func_op: MirOperand, args: [Mi
         case _:
             insts.push(new_mach_inst(A64_OP_NOP, []))
 
-    # Move return value from x0
-    insts.push(new_mach_inst(A64_OP_MOV, [local_vreg_op(dest.id), op_phys(AARCH64_X0)]))
+    # Move return value from x0. `dest` is optional (MirInstKind.Call and
+    # MirTerminator.CallTerminator both declare `dest: LocalId?`): a void call
+    # has no destination, and reading `.id` off a nil dest would write x0 into
+    # a bogus vreg.
+    match dest:
+        case Some(d):
+            insts.push(new_mach_inst(A64_OP_MOV, [local_vreg_op(d.id), op_phys(AARCH64_X0)]))
+        case None: ()
 
     ISelInstResult(insts: insts, ctx: current_ctx)
 
@@ -643,8 +649,29 @@ fn a64_isel_terminator(ctx: ISelContext, term: MirTerminator) -> ISelInstResult:
             a64_isel_switch(ctx, value, targets, default_target)
         case Unreachable:
             ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
+        case Abort(message):
+            # Abort must HALT. It previously fell through to the `case _:` NOP
+            # below, which lowered an aborting block to nothing at all -- control
+            # then ran straight on into whatever block was laid out next, with
+            # exactly the corrupt state the abort existed to stop. BRK #0 traps.
+            ISelInstResult(insts: [new_mach_inst(A64_OP_BRK, [])], ctx: ctx)
+        case CallTerminator(dest, func, args, normal, unwind):
+            # Contract (mir_interpreter.spl `case CallTerminator`): perform the
+            # call, bind the return value into `dest` when present, then
+            # transfer to `normal`. The NOP this used to emit dropped both the
+            # call and the edge.
+            if unwind.?:
+                # The native backend has no landing pads. Silently discarding
+                # the unwind edge would send an unwinding call into `normal`.
+                panic("aarch64 isel: CallTerminator with an unwind edge has no lowering (native backend has no exception handling)")
+            val call_res = a64_isel_call(ctx, dest, func, args)
+            var insts = call_res.insts
+            insts.push(new_mach_inst(A64_OP_B, [op_label(normal.id)]))
+            ISelInstResult(insts: insts, ctx: call_res.ctx)
         case _:
-            ISelInstResult(insts: [new_mach_inst(A64_OP_NOP, [])], ctx: ctx)
+            # All seven MirTerminator variants are handled above. A NOP here
+            # would silently delete a terminator; fail loudly instead.
+            panic("aarch64 isel: unhandled MirTerminator variant -- terminator lowered to nothing")
 
 fn a64_isel_return(ctx: ISelContext, value: MirOperand?) -> ISelInstResult:
     var insts: [MachInst] = []

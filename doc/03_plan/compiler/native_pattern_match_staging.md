@@ -160,8 +160,9 @@ Native isel already covers every op an enum match needs:
 isel coverage: `isel_x86_64.spl` (:163-193, terminators :578-613),
 `isel_aarch64.spl` (:251-277 / :634-644, no `GetElementPtr`/`Aggregate`),
 `isel_riscv64.spl` (:306-336 / :705-715), `isel_riscv32.spl` (:301-329 /
-:659-669, no `Intrinsic`). `CallTerminator` and `Abort` fall into the `case _ ->
-NOP` default in every isel — a separate latent gap worth its own item.
+:659-669, no `Intrinsic`). `CallTerminator` and `Abort` used to fall into the
+`case _ -> NOP` default in every isel; both are now lowered explicitly and the
+default `panic`s — see §7.
 
 Runtime helper: `src/runtime/runtime.c:1248`,
 `src/runtime/runtime_native.c:5105`, decl `src/runtime/runtime.h:479`, Simple
@@ -247,8 +248,36 @@ Independent, orthogonal follow-ups surfaced by this work:
   reach `Switch` (they take the If-chain) — routing dense payload-free enum
   matches through `Switch`, and giving `Switch` a real `br_table`, are two
   separate improvements. Neither is required for correctness.
-- **`CallTerminator` / `Abort` are silent NOPs in every isel.** Latent
-  wrong-code risk, unrelated to `match`; file separately.
+- **~~`CallTerminator` / `Abort` are silent NOPs in every isel.~~ FIXED.** Both
+  now lower properly in all four isels (`isel_x86_64`, `isel_aarch64`,
+  `isel_riscv64`, `isel_riscv32`):
+  - `Abort` emits a trap — `INT3` (x86_64), new `A64_OP_BRK` = `BRK #0` /
+    `0xD4200000` (aarch64), new `RV_OP_EBREAK` = `0x00100073` (riscv32/64).
+  - `CallTerminator` lowers to the call plus a branch to `normal`, per the
+    contract in `mir_interpreter.spl` `case CallTerminator`. An `unwind` edge
+    `panic`s: the native backend has no landing pads, and silently dropping the
+    edge would route an unwinding call into `normal`.
+  - The trailing `case _:` in each isel now `panic`s instead of returning a NOP.
+    All seven `MirTerminator` variants are handled, so it is unreachable — and an
+    unreachable arm that silently emits nothing is indistinguishable from a bug.
+  - Same-family fix: `isel_call` / `a64_isel_call` / `rv_isel_call` declared
+    `dest: LocalId`, but both `MirInstKind.Call` and `MirTerminator.CallTerminator`
+    declare `dest: LocalId?`. A void call would have read `.id` off a nil dest and
+    written the return register into a bogus vreg. Signatures widened to
+    `LocalId?` and the return-value move guarded (`rv32_isel_call` was already
+    correct and is now matched by the other three).
+  - **Reachability: latent, not live.** No MIR builder in `src/**` originates
+    either terminator — zero `MirTerminator.Abort(` construction sites anywhere,
+    and all four `MirTerminator.CallTerminator(` sites (`copy_prop`, `loop_licm`,
+    `var_reassign_ssa`, `vhdl_design_catalog`) are rewriters that reconstruct an
+    *existing* one while destructuring it. So nothing miscompiles today; this
+    closes the trap before a front end starts emitting them.
+  - Verified by execution against a before/after control and a
+    deliberately-failing sentinel row: before, x86 `Abort` → opcode 73 (`NOP`)
+    and aarch64 → 132 (`NOP`); after, 74 (`INT3`) / 138 (`BRK`) / 240 (`EBREAK`),
+    `CallTerminator` → `CALL`+`JMP` and `BL`+`B`, encoder bytes byte-exact, the
+    unwind path panics, and the sentinel (asserting the old NOP) was the only
+    failing row. The end-to-end native lane still builds and runs correctly.
 - **Delete the four dead `FallbackReason` variants** (`DynamicTypes`,
   `GcInNogcContext`, `BlockingInAsync`, `ObjectConstruction`) — they can never be
   reported and make the blocklist look larger than it is.
