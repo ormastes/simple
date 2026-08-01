@@ -75,7 +75,7 @@ reader/writer as parity oracle. Contract doc:
 
 ## Phase
 
-implement-cycles-batch-reloc-wiki-done
+implement-apply-layout-stylercpt-freezeprop-done
 
 ## Log
 
@@ -161,8 +161,22 @@ implement-cycles-batch-reloc-wiki-done
   proven; integrated re-run 72/72 green. Shared-WC clobber recurred
   mid-wave (LANE_GUIDE wave-7 block reverted by parallel session) —
   landed from object-store blobs per protocol, no loss.
-- Next: hybrid batch-layout freeze proper (batch shapes now measured by
-  resolve_batch.spl — answer the 10 open questions in
-  hybrid_batch_notes.md with the architecture owner); apply-side reloc
-  (formula oracle exists, no applier); style-profile receipts once stage
-  ids for non-SMF profiles are decided.
+- 2026-08-01 implement (wave 8, base 19ea0dbb9c08, 4 parallel lanes):
+  APPLY — smf_reloc_apply.spl consumes the formula oracle; all-or-nothing
+  patching (any reject -> ok:false + rejected_index + empty bytes), LE
+  width-8/4 patch via push-rebuild, negative-shift-free byte split; spec
+  18/18. LAYOUT — smf_section_layout.spl closes the L7 scan gap: aligned
+  prefix-sum with pow2 checks and pre-add overflow guards exact at the
+  i64 boundary (max accepted, max+1 rejects); spec 15/15. STYLERCPT —
+  style_link_receipts.spl mirrors the SMF receipts precedent
+  (style_link.collect/resolve/link StageIds, profile-local u32 stage
+  consts, deterministic sha256 roots, versioned preimages); spec 14/14.
+  FREEZEPROP — hybrid_batch_freeze_proposal.md answers all 10
+  hybrid_batch_notes.md questions: 7 DECIDE-HERE / 3 ARCH-OWNER (StageId
+  text vs i64, elapsed_us policy, lease renewal — gpu_mmu trait has no
+  renew call), PROPOSED §6 text included but NOT applied. All lanes
+  red-sentinel proven; integrated re-run 47/47 green.
+- Next: ARCH-OWNER decisions on freeze proposal rows 1/2/9, then apply
+  the §6 amendment and freeze batch layouts; wire layout+apply+receipts
+  into an end-to-end smf_link pipeline slice (L2–L8 on CPU) behind one
+  driver function with per-stage receipts.

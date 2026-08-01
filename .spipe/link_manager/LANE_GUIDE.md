@@ -217,3 +217,70 @@ smf_linker_map.md, style_resolver_map.md, hybrid_batch_notes.md. Cover: what
 the LINK lane is, frozen surfaces, oracle decisions (SMF externs bug, no CSS
 resolver), verification discipline (seed runner + red sentinels), file map.
 NO code. Keep it accurate to landed commits only (through 85c1338abfd).
+
+# Phase wave 8 (4 parallel lanes, base 19ea0dbb9c08)
+
+Shared rules unchanged. Ownership DISJOINT; integration re-run at landing.
+
+## Lane APPLY — relocation applier over the formula oracle
+
+Owns: NEW `src/compiler/70.backend/linker/gpu_smf/smf_reloc_apply.spl` +
+`test/01_unit/compiler/linker/gpu_smf/smf_reloc_apply_spec.spl`. Consume
+`smf_reloc_compute` from `smf_reloc_formulas.spl` (import, never
+reimplement). Deliver `smf_apply_relocations(section_bytes: [u8],
+section_addr: i64, relocs: [SmfRelocation], symbol_addrs: [i64]) ->
+SmfApplyResult { ok, bytes: [u8], rejected_index: i64 }`: for each reloc,
+p = section_addr + offset, s = symbol_addrs[symbol_index] (out-of-range
+symbol_index or offset+width beyond section rejects, rejected_index = the
+failing reloc's position, bytes empty on failure — all-or-nothing, no
+partial patch), value from smf_reloc_compute (its ok:false propagates),
+patch LE bytes of the variant's width (8 for Abs64, 4 for the 32-bit
+variants) via push-rebuild of the byte array (COLL019 — no b[i]=v). Spec:
+hand-computed byte-level fixtures (one per width incl. negative value
+two's-complement bytes), multi-reloc ordering, each reject path with
+rejected_index asserted, red sentinel.
+
+## Lane LAYOUT — L7 section address layout scan primitive
+
+Owns: NEW `src/compiler/70.backend/linker/gpu_smf/smf_section_layout.spl` +
+`test/01_unit/compiler/linker/gpu_smf/smf_section_layout_spec.spl`. The L7
+scan CPU oracle flagged missing in hybrid_batch_notes.md. Deliver
+`smf_layout_sections(base_addr: i64, sizes: [i64], alignments: [i64]) ->
+SmfLayoutResult { ok, offsets: [i64], total_size: i64 }`: sequential
+aligned prefix-sum (offset = align_up(cursor, alignment), cursor = offset
++ size), align_up as a shared helper; rejects: negative base/size,
+alignment not a power of two or <= 0, i64 overflow at any step (check
+BEFORE adding — never wrap). Deterministic, input order preserved (no
+reordering this wave — ordering is a profile decision). Spec: hand-computed
+mixed alignments (1/8/16/4096), zero-size sections (occupy no bytes, still
+aligned), base > 0, each reject, overflow at exactly the boundary, red
+sentinel.
+
+## Lane STYLERCPT — style profile receipts
+
+Owns: NEW `src/lib/common/structural/resolve/style_link_receipts.spl` +
+`test/01_unit/common/structural/style_link_receipts_spec.spl`. Mirror
+`smf_link_receipts.spl` (read it first) for the style profile: profile-
+local stage consts STYLE_LINK_STAGE_COLLECT/RESOLVE/LINK (u32 0/1/2 —
+profile-owned like the SMF precedent, contract doc untouched), StageId
+text "style_link.<stage>", `style_collect_records_with_receipt` /
+`style_resolve_with_receipt` / `style_link_with_receipt` outcome structs
+reusing placement_contracts StageReceipt exactly as the SMF wrappers do
+(sha256 roots over canonical serializations, deterministic fields only,
+zero elapsed_us). Wrappers import the profile — never the reverse. Spec:
+receipt stage keys, deterministic roots (same input twice -> identical
+receipt), count fields, distinct-input -> distinct root, red sentinel.
+
+## Lane FREEZEPROP — batch-layout freeze proposal (docs only)
+
+Owns: NEW `doc/05_design/platform/structural_compute/hybrid_batch_freeze_proposal.md`
+— NO code, NO contract-doc edits. For EACH of the 10 open questions in
+`.spipe/link_manager/hybrid_batch_notes.md`: restate it, give a concrete
+recommendation with rationale grounded in landed code (resolve_batch.spl
+now measures the real columnar shapes — cite its field lists; RELOC/LAYOUT
+close two oracle gaps this same wave — mark those rows "resolved by wave
+8" conditionally), and label each row DECIDE-HERE (safe to freeze from
+evidence) vs ARCH-OWNER (needs a human/architecture decision — e.g.
+StageId text vs i64, elapsed_us policy). End with the exact §6 contract
+amendment text that WOULD be applied if approved, clearly marked PROPOSED
+— the freeze itself does not happen this wave.
