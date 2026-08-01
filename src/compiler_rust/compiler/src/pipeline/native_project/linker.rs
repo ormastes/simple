@@ -823,10 +823,28 @@ int main(int argc, char** argv) {
         };
         for obj in object_paths {
             for normalized in Self::cached_global_symbols(cache, obj)? {
-                if normalized.starts_with("__module_init_") {
-                    let sanitized = normalized.replace('.', "_dot_");
-                    init_names.push(sanitized);
+                if !normalized.starts_with("__module_init_") {
+                    continue;
                 }
+                // `__module_init_dynamic` is the HIR-synthesized initializer for
+                // module-level globals whose initializer needs genuine runtime
+                // evaluation (hir/lower/module_lowering/module_pass.rs). It keeps
+                // that literal, unmangled name (native_project/mangle.rs), so it
+                // matches this prefix scan -- but it is ALREADY called from the
+                // module's own `__module_init[_<prefix>]` body, wired up by
+                // codegen/common_backend.rs `generate_module_init`. Calling it
+                // from here too evaluates every such initializer TWICE, so the
+                // initializer's side effects are duplicated.
+                //
+                // The per-module freestanding `__module_init_<prefix>_dynamic`
+                // functions from native_project/module_global_init.rs carry the
+                // module prefix in their name, so they are a different thing and
+                // must stay in the scan -- nothing else calls those.
+                if normalized == "__module_init_dynamic" {
+                    continue;
+                }
+                let sanitized = normalized.replace('.', "_dot_");
+                init_names.push(sanitized);
             }
         }
         // Always emit the caller, even when this entry has no module init
