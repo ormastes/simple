@@ -1,7 +1,10 @@
 # ast_reset() runs INSIDE the transient array scope, so the flat-AST arena is freed under its readers
 
 - **Id:** ast_arena_reset_inside_transient_scope_2026-08-01
-- **Status:** root-caused, fix landed, Stage 4 end-to-end verification pending
+- **Status:** root-caused and fixed. The hazard is PROVED at the runtime level;
+  the 6,474-event Stage 4 signature did **not** reproduce at
+  `ca8ff9e003d2` (see "Reproduction status" below), so the fix is a proven-real
+  hazard closure, not a demonstrated before/after on that signature.
 - **Severity:** blocker — aborts Stage 4 phase 3 (HIR lowering) and voids every
   unresolved-type/name/import census taken from such a run
 - **Signature:** `[stmt_get_tag] OOB idx=<n> arena_len=0 arena_gen=<gen> -> -1`
@@ -143,6 +146,54 @@ about to be torn down is not a reset — it is an allocation into a grave.**
 - Acceptance criterion for closing this bug: a Stage 4 native build that reaches
   the **end of phase 3**, with the unresolved-type/name/import counts reported
   from that run. Not "fewer OOB events".
+
+## Reproduction status and the phase-3 census (PROVED)
+
+A full Stage 4 native build was run with the exact `bootstrap_native_build_main`
+env and flags, using the frozen 154 MB `stage2-runtime-authority` compiler,
+against the shared working copy at `ca8ff9e003d2`:
+
+```
+VERDICT= tag=full1 exit=1 secs=1522 stmt_oob=0 flat_stmt_miss=0
+         expr_oob=0 flat_expr_miss=0 phase3_FAILED=0 outbin=no
+```
+
+Two findings, both load-bearing:
+
+1. **The 6,474-event signature did NOT reproduce.** Zero `[stmt_get_tag] OOB`,
+   zero `[flat-bridge] missing stmt tag`, zero `[ERROR] phase 3 FAILED`. So the
+   fix in this commit cannot be credited with clearing that signature — it closes
+   a hazard proved real at the runtime level, on the code path that produced it,
+   but the failing revision (`ecf13e1cf3f8`) is not reachable from origin and the
+   defect did not reproduce at `ca8ff9e003d2`.
+
+2. **Phase 3 completed.** The run proceeded past HIR lowering all the way into
+   LLVM codegen and failed there, on a *different* defect — two files rejected
+   with `llvm codegen: semantic: llvm global load referenced undeclared symbol`:
+   - `src/compiler/20.hir/hir_lowering/module_surface.spl` — symbol `interp_list`
+   - `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer.spl`
+     — symbol `animation_time_ms`
+
+   That is now the Stage 4 blocker, and it is downstream of phase 3.
+
+Unresolved census from that run (the first such census taken from a build that
+demonstrably did NOT abort in phase 3):
+
+| diagnostic | count |
+|---|---|
+| `unresolved type` | 0 |
+| `unresolved name` | 0 |
+| `unresolved import` | 0 |
+| `unresolved method` | 0 |
+| `unresolved symbol` | 0 |
+| `unresolved call` | 2 (`platform_normalize`, emitted during codegen) |
+
+**Caveat, stated explicitly:** the whole build produced only a 10-line log, so
+these zeros mean "no such diagnostic reached this log", not "the phase 3
+diagnostic channel was verified to be live". They are no longer *early-abort*
+artifacts — the run reached codegen — but a lane that needs a positively
+verified census should re-run with the phase-log knobs on and assert a positive
+marker (e.g. `phase3:hir:file:done` counts) rather than reading absence.
 
 ## Notes / traps for the next lane
 
