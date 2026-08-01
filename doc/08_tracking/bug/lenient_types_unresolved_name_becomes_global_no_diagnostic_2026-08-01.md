@@ -381,13 +381,177 @@ means porting the four functions onto `ty.kind` / `expr.kind` plus the current
 `TypeKind`/`ExprKind` variant sets, which is a semantic port, not a rename.
 
 
+### Confirmed defect class 3: collection/text methods written as free functions (`X_op(X, …)`)
+
+The next-largest cluster after the enum constructors. The same mechanical
+Rust-to-Simple porter that produced `enumname_Variant` also flattened **method
+calls** on locals: `tokens.push(t)` became `tokens_push(tokens, t)`,
+`input.chars()` became `input_chars(input)`, `graph.keys()` became
+`graph_keys(graph)`. The receiver survives as the *first argument*, so the whole
+family has one machine-checkable shape:
+
+```
+(?<![.\w@"])([a-z][a-z0-9_]*)_([a-z][a-z0-9_]*)\(\s*\1\s*[,)]
+```
+
+i.e. `NAME_METHOD(NAME, …)` where the first argument is literally the prefix.
+
+#### Root cause (PROVED, by same-line self-contradiction)
+
+Two sites carry the correct and the broken spelling in the *same expression*:
+
+```
+src/compiler/40.mono/monomorphize/cycle_detector.spl:389
+    if result_len(result) == all_nodes_keys(all_nodes).len():
+
+src/compiler/70.backend/backend/common/expression_evaluator.spl:137
+    Ok(value_int(lhs.as_int() + rhs_as_int(rhs)))
+```
+
+`.len()` and `.as_int()` are used correctly on one operand and mis-ported on the
+other. Nothing defines `result_len`, `all_nodes_keys` or `rhs_as_int`.
+
+#### Scope of the family (PROVED by direct scan)
+
+Direct scan of `src/compiler`, `src/lib`, `src/app` at base
+`dfe952d0afaec367d06e95f3025daaab6f542de6`: **2,961** occurrences of the shape,
+**925** distinct names; after removing every name with a module-level definition
+anywhere in the tree, **179 names over 289 sites in 40 files** remain unresolved.
+The census (which cannot see names masked by a same-spelling definition
+elsewhere) reports a subset of those.
+
+A measurement bug caught during this work, recorded because it is the exact
+false-clear the campaign keeps hitting: the first definition index matched
+`^(fn|class|…)` and therefore **missed every `pub fn`** — 5,289 names. It made
+`theme_id_key` (12 sites) look undefined when it is `pub fn theme_id_key` on
+line 77 of the very file that calls it. Anchor definition greps on the
+visibility modifier, not just the keyword.
+
+#### The naive rewrite is NOT always safe (PROVED by runtime probe)
+
+`X_op(X, a)` → `X.op(a)` is only correct when `X.op` actually exists. Probing
+each spelling this cluster implies, against the deployed seed
+(`bin/simple run`), found three that do **not**:
+
+| Spelling | Probe result | Verdict |
+|---|---|---|
+| `d.get(k)`, `d.contains(k)`, `d.contains_key(k)`, `d.keys()`, `d.values()`, `d.remove(k)` | correct | safe |
+| `l.push(v)`, `l.len()`, `l.pop()`, `l.reverse()` | correct | safe |
+| `t.chars()`, `t.lines()`, `t.trim()`, `t.is_empty()` | correct | safe |
+| **`d.get(k, default)`** | hit returns `<special:11>`; miss returns the unresolved-symbol error | **UNSAFE** |
+| **`d.items()`** | `Runtime error: Function 'Dict.items' not found` | **UNSAFE** |
+| **`t.clone()`** | `Runtime error: Function 'str.clone' not found` | **UNSAFE** |
+
+Rewriting to any of the three bottom rows would have replaced a loud link error
+with a corrupt value or a runtime dispatch gap. 11 sites were excluded on this
+evidence — see "left loud" below. Probe source: `probe/p2.spl` shape, run with
+the seed `bin/simple`; the two-argument `get` is the same defect family as
+`doc/07_guide/language/dict_native_pitfalls.md`.
+
+#### Disposition
+
+Rewritten only where the receiver's type is provable from a local declaration, a
+parameter annotation, or a same-file initializer whose type is itself provable,
+**and** the method is on the safe list above: **134 token replacements over 21
+files**, covering 73 names the census reported.
+
+Deliberately left loud (disposition d — a loud link error beats a silent wrong
+answer):
+
+- `visited_get` ×3, `rec_stack_get`, `in_degree_get` (3-arg form) — would become
+  `d.get(k, default)`, which returns garbage.
+- `in_degree_items`, `vars_items` — would become `d.items()`, which does not exist.
+- `cycle_path_clone` ×2, `new_to_clone` ×2 — would become `t.clone()`, which does
+  not exist.
+- `queue_pop` (`cycle_detector.spl:374`) — the call site is
+  `match queue_pop(queue): Some(v) / None`, so it expects an `Option`. `l.pop()`
+  returns the element, not an `Option`; rewriting would leave a `match` that
+  never binds. Fixing this needs the surrounding match restructured, which is a
+  semantic change, not a spelling fix.
+- The remaining 148 sites whose receiver type this lane could not prove
+  (`rhs_as_int` ×11, `rng_next_range` ×7, `block_def_parse_payload` ×4,
+  `reader_result_is_err` ×4, …) and 15 whose method provably does not exist on
+  the named class (`fs_has_file` ×3, `metadata_add_circular_error`,
+  `metadata_add_circular_warning`, `result_add`, `checker_check_call`, …). The
+  second group is the more interesting one: those are missing *methods*, i.e.
+  real gaps, not spellings.
+
+#### Validation (PROVED, census A/B at base `dfe952d0afaec367d06e95f3025daaab6f542de6`)
+
+Note the baseline is **463**, not the 513 quoted earlier in this document: 513
+was measured at `eada96016e2` and other lanes have landed since.
+
+| Metric | before | after |
+|---|---|---|
+| files scanned | 11,286 | 11,286 |
+| parse failed | 43 | 43 |
+| lowering failed | 979 | 979 |
+| distinct names attributed | 1,948 | 1,880 |
+| **undefined tree-wide** | **463** | **395** |
+
+Compared by set: exactly **68 names removed, 0 added**. `files scanned`,
+`parsed ok` (11,243), `parse failed` and `lowering failed` are all unchanged, so
+every edited file still parses and still lowers. Five of the 73 census-visible
+names touched remain, because each has a further site this lane could not prove
+(`env_contains`, `errors_len`, `expected_errors_len`, `in_degree_get`,
+`tokens_len`).
+
+**True-positive control.** Eleven names of the *identical* `X_op(X, …)` shape
+were deliberately left unfixed, nine of them in `cycle_detector.spl` — the file
+that received 34 of the 134 replacements. After the rewrite they are **still
+reported**: `visited_get`, `rec_stack_get`, `in_degree_get`, `in_degree_items`,
+`vars_items`, `cycle_path_clone`, `new_to_clone`, `queue_pop`, `to_clone`,
+`metadata_add_circular_error`, `metadata_add_circular_warning`. Had the edit merely blinded the
+census to this name shape, they would have disappeared with the rest. The
+detector is still live on exactly this class inside an edited file.
+
+
+### Filed: mangled float literals — `0[0]` written for `0.0` (7 executable lines)
+
+Found while reading this cluster; a different mechanism, same porter. A float
+literal lost its decimal point and became an **index expression**, which the
+lenient path accepts silently:
+
+```
+src/compiler/35.semantics/semantics/binary_ops.spl:148-151
+    case And: binaryopresult_bool(left != 0[0] and right != 0[0])
+src/compiler/35.semantics/semantics/cast_rules.spl:95
+    CastNumericResult.Float(if value: 1[0] else: 0[0])
+src/compiler/35.semantics/semantics/cast_rules.spl:117
+    f != 0[0]
+src/compiler/55.borrow/gc_analysis/escape.spl:265
+    0[0]                       # in `fn stack_allocation_ratio() -> f64`
+src/compiler/15.blocks/blocks/testing.spl:381
+    return diff < 0[0001]      # intended epsilon 0.0001
+```
+
+This is strictly worse than the class above: it is a **silent wrong answer**
+today, not a link error. `binary_ops.spl` is the float `and`/`or` evaluator and
+`cast_rules.spl` is bool→float casting. A tree-wide scan for `\b[0-9]+\[[0-9]+\]`
+finds 25 hits, of which 7 lines are executable (the rest are inside docstrings —
+"Phase 3[3]", "2[5]x faster" — plus two real tuple-index expressions in
+`src/lib/common/yaml/validate.spl`). NOT fixed here: numeric semantics deserve
+their own evidence rather than riding on a spelling sweep.
+
+
 ## Follow-ups (not done here)
 
 - `Expr::Identifier` has no span, so attribution is function-granular. Giving
   identifiers a span would make it line-exact.
 - The `enumname_Variant` class is done (61 rewritten, 2 reclassified and filed).
-  Census now stands at **513**. Next in priority order: the 116 names ending in a
-  collection-op suffix (`_push`/`_len`/`_get`/`_contains`/…), then the long tail.
+- The `X_op(X, …)` method-as-free-function class is done for every receiver whose
+  type this lane could prove and whose method was confirmed to exist (134
+  replacements over 21 files). Census now stands at **395** (measured at
+  `dfe952d0afaec367d06e95f3025daaab6f542de6`; the 513 quoted above was measured at
+  `eada96016e2` and other lanes moved the tree in between). Next: the 148 sites of
+  the same shape whose receiver type is still unproven, and the 15 whose method
+  genuinely does not exist on the named class — the latter are real gaps, not
+  spellings.
+- Give `Dict` an `items()`/`entries()` method and `text` a `clone()`, or decide
+  they are deliberately absent; three sites are blocked on that answer.
+- Make two-argument `Dict.get(k, default)` either work or fail loudly. It
+  currently returns `<special:11>` on a hit and the unresolved-symbol error on a
+  miss, while 47 call sites already use it.
 - Port the four `monomorphize/util.spl` functions onto the current
   `struct Type` + `TypeKind` / `struct Expr` + `ExprKind` model (section above).
 - The census masks any unbound name that collides with a module-level
