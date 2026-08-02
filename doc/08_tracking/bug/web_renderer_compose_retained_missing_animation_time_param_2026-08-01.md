@@ -84,3 +84,12 @@ this as the sole instance of the defect in the file.
 `lenient_types` silently converting unresolved names to globals is what let a
 plain undefined identifier reach LLVM emission. Tracked in the follow-up section
 of `if_val_expression_binding_lost_hir_2026-08-01.md`.
+
+## Regression prevention (2026-08-02)
+
+A later renderer edit accidentally removed the parameter, retained-preparation
+field, initializer, and all three positional forwarding arguments together. The
+Stage3 native refresh reproduced the same undeclared-global failure. The
+`web_renderer_animation_clock_contract_spec.spl` source contract now locks the
+declaration and the direct, prepared, and rerender forwarding paths so another
+whole-block regression fails before bootstrap codegen.
