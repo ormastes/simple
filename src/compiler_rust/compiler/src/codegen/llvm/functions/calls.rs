@@ -1729,6 +1729,7 @@ impl LlvmBackend {
         target: &crate::mir::CallTarget,
         args: &[crate::mir::VReg],
         vreg_map: &mut VRegMap,
+        vreg_types: &super::VRegTypes,
         builder: &Builder<'static>,
         module: &Module<'static>,
     ) -> Result<(), CompileError> {
@@ -1945,13 +1946,8 @@ impl LlvmBackend {
             // Array methods (verified as T symbols)
             "push" => Some("rt_array_push"),
             "pop" => Some("rt_array_pop"),
-            // Type-BLIND table, so these must be the receiver-dispatched
-            // copying helpers. `rt_array_sort` / `rt_array_reverse` mutate in
-            // place, return a bool, and neither exists in runtime_native.c.
-            // The interpreter is the spec and copies for both.
-            "sort" => Some("rt_sort"),
-            // MUTATING spelling — see instr/calls.rs.
-            "reverse" => Some("rt_reverse_mut"),
+            "sort" => Some("rt_array_sort"),
+            "reverse" => Some("rt_array_reverse"),
             "join" => Some("rt_array_join"),
             "clear" => Some("rt_array_clear"),
             "slice" => Some("rt_slice"),
@@ -1979,8 +1975,14 @@ impl LlvmBackend {
                 return Ok(());
             }
             let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-            for arg in args.iter() {
-                let val = self.get_vreg(arg, vreg_map)?;
+            for (arg_idx, arg) in args.iter().enumerate() {
+                let mut val = self.get_vreg(arg, vreg_map)?;
+                // args[0] is the receiver; the membership needle (args[1])
+                // must be boxed to match the tagged store — see
+                // build_wrap_membership_needle (functions.rs).
+                if rt_fn_name == "rt_contains" && arg_idx == 1 {
+                    val = self.build_wrap_membership_needle(*arg, val, vreg_types, builder, module)?;
+                }
                 let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                 arg_vals.push(casted.into());
             }
@@ -2113,11 +2115,8 @@ impl LlvmBackend {
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "push" => Some("rt_array_push"),
                 "pop" => Some("rt_array_pop"),
-                // Type-BLIND table: receiver-dispatched copying helpers, not
-                // the in-place bool-returning ones. See the sibling table above.
-                "sort" => Some("rt_sort"),
-                // MUTATING spelling — see instr/calls.rs.
-                "reverse" => Some("rt_reverse_mut"),
+                "sort" => Some("rt_array_sort"),
+                "reverse" => Some("rt_array_reverse"),
                 "clear" => Some("rt_array_clear"),
                 "slice" => Some("rt_slice"),
                 "len" => Some("rt_len"),
@@ -2178,8 +2177,14 @@ impl LlvmBackend {
                         return Ok(());
                     }
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in args.iter() {
-                        let val = self.get_vreg(arg, vreg_map)?;
+                    for (arg_idx, arg) in args.iter().enumerate() {
+                        let mut val = self.get_vreg(arg, vreg_map)?;
+                        // args[0] is the receiver; the membership needle
+                        // (args[1]) must be boxed to match the tagged store —
+                        // see build_wrap_membership_needle (functions.rs).
+                        if rt_fn_name == "rt_contains" && arg_idx == 1 {
+                            val = self.build_wrap_membership_needle(*arg, val, vreg_types, builder, module)?;
+                        }
                         let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                         arg_vals.push(casted.into());
                     }

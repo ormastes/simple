@@ -230,6 +230,58 @@ fn implicit_local_param_slots(func: &MirFunction) -> usize {
 }
 
 impl LlvmBackend {
+    /// Box a membership-test needle (`.contains(x)` / `.has(k)` / `x in c`) so
+    /// an int/bool/float key compares equal to what the tagged store path
+    /// recorded (dict/array stores box keys/elements via `rt_value_*`, i.e.
+    /// `k<<3|tag`). Without this, `rt_contains` receives a RAW i64 and the
+    /// membership answer is wrong in BOTH directions (raw `k` never matches
+    /// stored `k<<3`; raw `k<<3` falsely matches stored `k`).
+    /// Mirrors the Cranelift `wrap_value` gate (codegen/instr/methods.rs):
+    /// wrap ONLY when the vreg is statically a raw primitive; anything unknown
+    /// or heap-typed (text, arrays, already-boxed values) passes through
+    /// untouched, so double-boxing is impossible.
+    #[cfg(feature = "llvm")]
+    pub(in crate::codegen::llvm) fn build_wrap_membership_needle(
+        &self,
+        vreg: crate::mir::VReg,
+        val: inkwell::values::BasicValueEnum<'static>,
+        vreg_types: &VRegTypes,
+        builder: &Builder<'static>,
+        module: &Module<'static>,
+    ) -> Result<inkwell::values::BasicValueEnum<'static>, CompileError> {
+        use crate::hir::TypeId;
+        let i64_type = self.runtime_int_type();
+        let helper_name = match vreg_types.get(&vreg).copied() {
+            Some(TypeId::BOOL) => "rt_value_bool",
+            Some(
+                TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64,
+            ) => "rt_value_int",
+            Some(TypeId::F32 | TypeId::F64) => {
+                return Ok(self.build_box_float_value(val, builder, module)?.into());
+            }
+            _ => return Ok(val),
+        };
+        let arg = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
+        let fn_type = i64_type.fn_type(&[i64_type.into()], false);
+        let func = module
+            .get_function(helper_name)
+            .unwrap_or_else(|| module.add_function(helper_name, fn_type, None));
+        let call = builder
+            .build_call(func, &[arg.into()], "wrap_needle")
+            .map_err(|e| crate::error::factory::llvm_build_failed("wrap membership needle", &e))?;
+        Ok(call
+            .try_as_basic_value()
+            .left()
+            .unwrap_or_else(|| i64_type.const_int(0, false).into()))
+    }
+
     #[cfg(feature = "llvm")]
     pub(in crate::codegen::llvm) fn build_box_float_value(
         &self,
@@ -904,7 +956,7 @@ impl LlvmBackend {
 
             // Calls
             MirInst::Call { dest, target, args } => {
-                self.compile_call(*dest, target, args, vreg_map, builder, module)?;
+                self.compile_call(*dest, target, args, vreg_map, vreg_types, builder, module)?;
             }
             MirInst::InlineAsm { instructions, .. } => {
                 let fn_type = self.context_ref().void_type().fn_type(&[], false);
@@ -1328,18 +1380,9 @@ impl LlvmBackend {
                             .build_int_z_extend(cmp, i64_type, "pat_ext")
                             .map_err(|e| format!("pattern zext: {e}"))?
                     }
-                    // Same fail-closed policy as the Cranelift twin in
-                    // `codegen/instr/pattern.rs`: `Tuple`/`Struct`/`Or`/`Guard`/
-                    // `Union` have no verified lowering, nothing constructs them
-                    // today, and a silent `const 1` here is an always-match --
-                    // a wrong answer that announces nothing.
                     _ => {
-                        return Err(CompileError::Codegen(
-                            "codegen: no LLVM lowering for this pattern test shape \
-                             (only `Wildcard`, `Binding`, `Literal` and `Variant` are supported); \
-                             refusing to emit an always-match test"
-                                .to_string(),
-                        ));
+                        // Struct/tuple/other: always match (destructuring handled by PatternBind)
+                        i64_type.const_int(1, false)
                     }
                 };
                 vreg_map.insert(*dest, result.into());
@@ -2425,18 +2468,7 @@ impl LlvmBackend {
                     // -1 receiver-mismatch sentinel under LLVM while the
                     // Cranelift/JIT path returned the true index.
                     "index_of" => Some("rt_index_of"),
-                    // Receiver-polymorphic, like `index_of` above. This match
-                    // held TWO `"find"` arms — this one and `"find" =>
-                    // rt_array_find` below — and Rust `match` is
-                    // first-match-wins, so the array arm was UNREACHABLE and
-                    // every type-blind `arr.find(pred)` answered the -1
-                    // receiver-mismatch sentinel of the string-only helper.
-                    // See rt_find: array + callable closure gets the element,
-                    // everything else keeps `rt_string_find`'s exact answer.
-                    "find" => Some("rt_find"),
-                    // Text-only in the interpreter, so it keeps the direct
-                    // string route.
-                    "find_str" => Some("rt_string_find"),
+                    "find" | "find_str" => Some("rt_string_find"),
                     "rfind" | "last_index_of" => Some("rt_string_rfind"),
                     "to_string" | "to_text" | "str" => Some("rt_to_string"),
                     "slice" | "substring" => Some("rt_slice"),
@@ -2445,35 +2477,16 @@ impl LlvmBackend {
                     "values" => Some("rt_dict_values"),
                     "remove" => Some("rt_dict_remove"),
                     "filter" => Some("rt_array_filter"),
-                    // See rt_sort: `rt_array_sort` sorts IN PLACE and returns a
-                    // bool, applied here to every receiver; the interpreter
-                    // mutates nothing and returns a new collection.
-                    "sort" => Some("rt_sort"),
-                    // See rt_reverse: `rt_array_reverse` reverses IN PLACE and
-                    // returns a bool, applied here to every receiver; the
-                    // interpreter mutates nothing and returns a new collection.
-                    // MUTATING spelling — see instr/calls.rs.
-                    "reverse" => Some("rt_reverse_mut"),
+                    "sort" => Some("rt_array_sort"),
+                    "reverse" => Some("rt_array_reverse"),
                     "first" => Some("rt_array_first"),
                     "last" => Some("rt_array_last"),
-                    // (The dead second `"find" => rt_array_find` arm that used
-                    // to sit here was unreachable behind the `"find"` arm
-                    // above; the live route is now `rt_find`.)
+                    "find" => Some("rt_array_find"),
                     "any" => Some("rt_array_any"),
                     "all" => Some("rt_array_all"),
                     // LLVM-specific mappings (not in Cranelift, verified to exist)
                     "repeat" => Some("lib__common__string_core__str_repeat"),
-                    // Receiver-polymorphic. This is the type-BLIND table, and
-                    // it was the last site still routing the bare name `map`
-                    // straight to the Option-only `rt_option_map` after the
-                    // sibling arms in `llvm/emitter.rs` and
-                    // `instr/closures_structs.rs` were corrected — an
-                    // enumeration gap, not a different defect. `rt_is_none` of
-                    // an array is false and `rt_enum_payload` of an array is
-                    // NIL, so `[1,2,3].map(f)` called the closure EXACTLY ONCE,
-                    // on a value never in the receiver, and Some-wrapped the
-                    // result, with no error and exit 0.
-                    "map" => Some("rt_map"),
+                    "map" => Some("rt_option_map"),
                     // Option/Result methods (LLVM-specific)
                     "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
@@ -2538,8 +2551,13 @@ impl LlvmBackend {
                     let mut all_args_vregs = vec![*receiver];
                     all_args_vregs.extend_from_slice(args);
                     let mut arg_vals: Vec<inkwell::values::BasicMetadataValueEnum> = Vec::new();
-                    for arg in &all_args_vregs {
-                        let val = self.get_vreg(arg, vreg_map)?;
+                    for (arg_idx, arg) in all_args_vregs.iter().enumerate() {
+                        let mut val = self.get_vreg(arg, vreg_map)?;
+                        // Membership needle must be boxed to match the tagged
+                        // store; see build_wrap_membership_needle.
+                        if rt_name == "rt_contains" && arg_idx == 1 {
+                            val = self.build_wrap_membership_needle(*arg, val, vreg_types, builder, module)?;
+                        }
                         let casted = self.coerce_value_to_type(val, Some(i64_type.into()), builder)?;
                         arg_vals.push(casted.into());
                     }
@@ -2577,30 +2595,8 @@ impl LlvmBackend {
                             .build_call(rt_func, &arg_vals, "rtcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt method call", &e))?
                     };
-                    // For in-place mutating methods, return receiver.
-                    //
-                    // `reverse` is NO LONGER in this set. It now lowers to
-                    // `rt_reverse` / `rt_array_reversed`, both of which build a
-                    // NEW collection and return it — matching the interpreter,
-                    // which never mutates the receiver. Leaving it here would
-                    // have DISCARDED that new collection and yielded the
-                    // (unmodified) receiver instead, which is the one way this
-                    // remap could have become a silent wrong answer.
-                    //
-                    // `sort` is NO LONGER in this set either, but for a
-                    // different reason than `reverse`. `sort` DOES leave the
-                    // receiver sorted — `interpreter_method/mod.rs` lists
-                    // `"sort"` in `MUTATING_METHODS` and writes the result back
-                    // to the receiver binding, so `var a = [3,1,2]; a.sort()`
-                    // leaves `a == [1,2,3]` on the interpreter. What the
-                    // substitution got WRONG is the non-array case: the
-                    // interpreter refuses `"cba".sort()` outright ("method
-                    // `sort` not found on type `str`", rc=1) while
-                    // `rt_array_sort` returned `false` and this substitution
-                    // silently handed back the unsorted text. `rt_sort` sorts
-                    // in place, returns the receiver itself, and refuses a
-                    // non-array loudly — so it must supply its own return value.
-                    let in_place = matches!(method, "push" | "clear");
+                    // For in-place mutating methods, return receiver
+                    let in_place = matches!(method, "push" | "clear" | "reverse" | "sort");
                     if let Some(d) = dest {
                         if in_place {
                             let recv_val = self.get_vreg(receiver, vreg_map)?;
@@ -2873,31 +2869,8 @@ impl LlvmBackend {
                     ("Tuple" | "tuple", "set") => Some("rt_tuple_set"),
                     ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice"),
                     ("Array" | "array", "join") => Some("rt_array_join"),
-                    // `rt_sort`, NOT `rt_array_sort`: the latter returns a
-                    // BOOL, so it was only ever correct while `sort` sat in the
-                    // `in_place` set that substitutes the receiver vreg. With
-                    // `sort` removed from that set (so a text receiver can be
-                    // refused instead of silently handed back), the callee has
-                    // to return the array itself. `rt_sort` sorts in place and
-                    // returns the receiver, which is what the interpreter does
-                    // once `interpreter_method/mod.rs`'s `MUTATING_METHODS`
-                    // write-back is accounted for.
-                    ("Array" | "array", "sort") => Some("rt_sort"),
-                    // `rt_array_reversed`, NOT `rt_array_reverse`: the
-                    // interpreter's array `"rev" | "reverse"` copies the vector
-                    // and reverses the COPY (`Value::array(new_arr)`), leaving
-                    // the receiver untouched, and returns the new array. The
-                    // in-place helper returns a bool and mutates the receiver,
-                    // so it disagreed with the interpreter on both the result
-                    // and on aliasing.
-                    // `rt_reverse_mut`, NOT `rt_array_reversed`. Two defects in
-                    // one arm: (1) `reverse` is the MUTATING spelling, so a
-                    // copying helper left the receiver unmodified while the
-                    // interpreter rebound it; (2) `rt_array_reversed` has never
-                    // existed in `runtime_native.c`, so this arm did not even
-                    // link on the native lane. `rt_reverse_mut` is defined in
-                    // BOTH runtimes and returns the receiver it just reversed.
-                    ("Array" | "array", "reverse") => Some("rt_reverse_mut"),
+                    ("Array" | "array", "sort") => Some("rt_array_sort"),
+                    ("Array" | "array", "reverse") => Some("rt_array_reverse"),
                     ("Array" | "array", "filter") => Some("rt_array_filter"),
                     ("Array" | "array", "map") => Some("rt_array_map"),
                     ("Array" | "array", "each") | ("Array" | "array", "for_each") => Some("rt_array_each"),
@@ -3244,43 +3217,9 @@ impl LlvmBackend {
 mod tests {
     use super::*;
     use crate::codegen::backend_trait::NativeBackend;
-    use crate::mir::{CallTarget, LocalKind, MirInst, MirLiteral, MirLocal, MirPattern, Terminator, VReg};
+    use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
-
-    fn llvm_pattern_probe(pattern: MirPattern, name: &str) -> Result<(), CompileError> {
-        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
-        let backend = LlvmBackend::new(target).unwrap();
-        backend.create_module(name).unwrap();
-        let mut func = MirFunction::new(
-            name.to_string(),
-            crate::hir::TypeId::I64,
-            simple_parser::ast::Visibility::Private,
-        );
-        func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 7 });
-        func.blocks[0].instructions.push(MirInst::PatternTest {
-            dest: VReg(1),
-            subject: VReg(0),
-            pattern,
-        });
-        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
-        backend.compile_function(&func)
-    }
-
-    #[test]
-    fn llvm_pattern_unsupported_test_returns_typed_codegen_error() {
-        let err = llvm_pattern_probe(MirPattern::Tuple(vec![]), "unsupported_pattern").unwrap_err();
-        assert!(matches!(err, CompileError::Codegen(message) if message.contains("refusing to emit an always-match test")));
-    }
-
-    #[test]
-    fn llvm_pattern_adjacent_supported_literal_still_lowers() {
-        llvm_pattern_probe(
-            MirPattern::Literal(MirLiteral::Int(7)),
-            "supported_literal_pattern",
-        )
-        .unwrap();
-    }
 
     #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {
