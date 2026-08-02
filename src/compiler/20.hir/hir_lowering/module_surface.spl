@@ -136,8 +136,14 @@ impl ModuleSurfaceBuilder:
     me has_path(path: text) -> bool:
         self.index_by_path.contains_key(module_surface_canonical_path(path))
 
+    me has_canonical_path(canonical_path: text) -> bool:
+        self.index_by_path.contains_key(canonical_path)
+
     me add_parsed(module: ParserModule, source: SourceFile, source_index: i64) -> Result<(), text>:
         val canonical_path = module_surface_canonical_path(source.path)
+        self.add_parsed_canonical(module, source, source_index, canonical_path)
+
+    me add_parsed_canonical(module: ParserModule, source: SourceFile, source_index: i64, canonical_path: text) -> Result<(), text>:
         if self.index_by_path.contains_key(canonical_path):
             return Err("module surface already exists for physical source: {canonical_path}")
         val surface_index = self.surfaces.len()
@@ -151,6 +157,9 @@ impl ModuleSurfaceBuilder:
 
     me add_alias(source: SourceFile) -> Result<(), text>:
         val canonical_path = module_surface_canonical_path(source.path)
+        self.add_alias_canonical(source, canonical_path)
+
+    me add_alias_canonical(source: SourceFile, canonical_path: text) -> Result<(), text>:
         if not self.index_by_path.contains_key(canonical_path):
             return Err("missing physical module surface for alias: {canonical_path}")
         val surface_index = self.index_by_path[canonical_path]
@@ -604,16 +613,17 @@ fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [Sou
         if not modules.contains_key(source.module_name):
             return Err("missing parsed module for source: {source.module_name}")
         val module = modules[source.module_name]
-        if builder.has_path(source.path):
-            val canonical_path = module_surface_canonical_path(source.path)
+        val canonical_path = module_surface_canonical_path(source.path)
+        if builder.has_canonical_path(canonical_path):
             val surface = builder.surfaces[builder.index_by_path[canonical_path]]
             if not module_surface_declaration_matches(surface, module):
                 return Err("conflicting declaration metadata for physical source: {canonical_path}")
-            val alias_result = builder.add_alias(source)
+            val alias_result = builder.add_alias_canonical(source, canonical_path)
             if alias_result.is_err():
                 return Err(alias_result.unwrap_err())
         else:
-            val add_result = builder.add_parsed(module, source, source_index)
+            val add_result = builder.add_parsed_canonical(
+                module, source, source_index, canonical_path)
             if add_result.is_err():
                 return Err(add_result.unwrap_err())
         source_index = source_index + 1

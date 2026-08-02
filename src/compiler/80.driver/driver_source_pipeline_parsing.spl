@@ -10,6 +10,7 @@ use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
     ModuleSurfaceBuilder,
+    module_surface_canonical_path,
     module_surface_promote
 }
 use compiler.driver.driver_source_loading.{
@@ -70,7 +71,8 @@ impl CompilerDriver:
     me add_streaming_module_surface(
         builder: ModuleSurfaceBuilder,
         source: SourceFile,
-        source_index: i64
+        source_index: i64,
+        canonical_path: text
     ) -> Result<ModuleSurfaceBuilder, text>:
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
@@ -82,7 +84,8 @@ impl CompilerDriver:
         if not rt_transient_array_scope_pause():
             val _ended = driver_end_transient_parse_scope()
             return Err("transient parser scope pause failed for {source.path}")
-        val add_result = builder.add_parsed(module, source, source_index)
+        val add_result = builder.add_parsed_canonical(
+            module, source, source_index, canonical_path)
         if add_result.is_err():
             val _ended = driver_end_transient_parse_scope()
             return Err(add_result.unwrap_err())
@@ -104,15 +107,17 @@ impl CompilerDriver:
         var release_seq: i64 = 0
         while source_index < self.ctx.sources.len():
             val source = self.ctx.sources[source_index]
-            if builder.has_path(source.path):
-                val alias_result = builder.add_alias(source)
+            val canonical_path = module_surface_canonical_path(source.path)
+            if builder.has_canonical_path(canonical_path):
+                val alias_result = builder.add_alias_canonical(
+                    source, canonical_path)
                 if alias_result.is_err():
                     self.ctx.add_error(
                         "Module surface extraction error: {alias_result.unwrap_err()}")
                     return (self.ctx, false)
             else:
                 val parsed_result = self.add_streaming_module_surface(
-                    builder, source, source_index)
+                    builder, source, source_index, canonical_path)
                 if parsed_result.is_err():
                     self.ctx.add_error(
                         "Module surface extraction error: {parsed_result.unwrap_err()}")

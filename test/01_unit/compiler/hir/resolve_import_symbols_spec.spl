@@ -142,6 +142,44 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(origin.owner_module).to_equal("hint.io.file_ops")
         expect(origin.resolution_kind).to_equal("generated-comment")
 
+    it "deduplicates slash variants through one canonical physical path":
+        val log = make_logger()
+        val source = "pub fn separator_answer() -> i64:\n    42"
+        val primary = parse_full_frontend(
+            source, "separator.primary", "separator.primary", log)
+        val alias = parse_full_frontend(
+            source, "separator.alias", "separator.alias", log)
+        var modules: Dict<text, Module> = {}
+        modules["separator.primary"] = primary
+        modules["separator.alias"] = alias
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "separator\\owner.spl", content: source, module_name: "separator.primary"),
+            SourceFile(path: "separator/owner.spl", content: source, module_name: "separator.alias")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(1)
+        expect(surfaces.index_by_name["separator.primary"]).to_equal(
+            surfaces.index_by_name["separator.alias"])
+
+    it "rejects different declarations behind one canonical physical path":
+        val log = make_logger()
+        val first_source = "pub fn first_answer() -> i64:\n    1"
+        val second_source = "pub fn second_answer() -> i64:\n    2"
+        val first = parse_full_frontend(
+            first_source, "conflict.first", "conflict.first", log)
+        val second = parse_full_frontend(
+            second_source, "conflict.second", "conflict.second", log)
+        var modules: Dict<text, Module> = {}
+        modules["conflict.first"] = first
+        modules["conflict.second"] = second
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "conflict\\owner.spl", content: first_source, module_name: "conflict.first"),
+            SourceFile(path: "conflict/owner.spl", content: second_source, module_name: "conflict.second")
+        ])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("conflicting declaration metadata")
+
     it "uses explicit concrete imports over compatibility stubs in a root facade":
         val log = make_logger()
         val concrete_source = "pub fn file_append() -> bool:\n    true\npub fn file_remove() -> bool:\n    true"
