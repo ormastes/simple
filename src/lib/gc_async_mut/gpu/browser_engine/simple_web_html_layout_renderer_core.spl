@@ -2548,6 +2548,16 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
     if trace_stages:
         print "[layout-trace] style_stage=defaults-ready nodes={node_count}"
     val _phase_on = _web_phase_trace_enabled()
+    # Hoisted trace gate. The [font-inherit-trace] probes below are level-gated
+    # and default off, but the GATE ITSELF used to be an env_get() evaluated at
+    # each of its 7 call sites INSIDE the per-node loop -- i.e. up to 7 env
+    # lookups per node per style pass, paid in full even with tracing off, and
+    # paid on every frame because the non-session render API re-runs the whole
+    # cascade per call. An env var cannot change mid-render, so reading it once
+    # here is semantics-preserving. The probes themselves are untouched and stay
+    # permanently available, per the log-retention policy; only the cost of
+    # asking whether they are on moves out of the loop. Mirrors _phase_on above.
+    val _font_style_trace_on = env_get("SIMPLE_TRACE_FONT_STYLE") != nil
     val _phase_loop_start_us = rt_time_now_micros()
     var i = 0
     while i < node_count:
@@ -2573,7 +2583,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
         # child, independent of trace_stages (which every real caller
         # hardwires false). See doc/08_tracking/bug/
         # jit_run_file_pipeline_gaps_2026-07-30.md section 16.
-        if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+        if _font_style_trace_on:
             val style_attr_len: i64 = nd.style_attr.len()
             val style_attr_has_bungee: bool = nd.style_attr.contains("Bungee")
             val raw_style_attr: text = attr_value(nd.attrs_raw, "style")
@@ -2591,12 +2601,12 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
                 print "[layout-trace] style_stage=parent-loaded index={i}"
                 print "[layout-trace] style_stage=parent-display index={i} display={parent_style.display}"
                 print "[layout-trace] style_stage=parent-font index={i} size={parent_style.font_size} family={parent_style.font_family}"
-            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+            if _font_style_trace_on:
                 print "[font-inherit-trace] index={i} parent_font_family={parent_style.font_family} parent_font_size={parent_style.font_size}"
             st.inherit_from(parent_style)
             if trace_stages:
                 print "[layout-trace] style_stage=inherit-returned index={i} display={st.display} font={st.font_family}"
-            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+            if _font_style_trace_on:
                 print "[font-inherit-trace] index={i} post_inherit_font_family={st.font_family} post_inherit_font_size={st.font_size}"
         # em/% font-size resolve against the inherited (parent) font-size, not the
         # UA-default set by tag_defaults (so h1{font-size:1.5em} == 1.5 x parent).
@@ -2706,7 +2716,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             val inline_priority = css_declaration_priority_split(nd.style_attr)
             inline_normal = inline_priority.normal
             inline_important = inline_priority.important
-        if env_get("SIMPLE_TRACE_FONT_STYLE") != nil and nd.style_attr.len() > 0:
+        if _font_style_trace_on and nd.style_attr.len() > 0:
             print "[font-inline-trace] index={i} raw_style_attr_len={nd.style_attr.len()} inline_normal_len={inline_normal.len()}"
         # Author-important declarations outrank every author-normal declaration,
         # including inline style. Within the important origin, retain the same
@@ -2767,7 +2777,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             st = apply_decls_without_display_on_writing_mode(
                 st, inline_normal, em_base, logical_writing_mode
             )
-            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+            if _font_style_trace_on:
                 print "[font-inline-trace] index={i} post_inline_apply_font_family={st.font_family} post_inline_apply_font_size={st.font_size}"
         if combined_important_decls != "":
             val important_empty_cells_decl = decl_get(
@@ -2876,7 +2886,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             # fault is downstream in category/coverage-matrix resolution --
             # see doc/08_tracking/bug/jit_run_file_pipeline_gaps_2026-07-30.md
             # section 16 (web showcase vector-font-evidence follow-on).
-            if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+            if _font_style_trace_on:
                 print "[font-style-trace] index={i} font_family={st.font_family} font_size={st.font_size} language={language} text={metric_text}"
             val metrics = resolve_font_metrics_with_language(st.font_family, metric_text, st.font_size, language)
             if trace_stages:
@@ -2952,7 +2962,7 @@ fn compute_styles_with_material(nodes: [HNode], rules: Rules, child_index: HtmlC
             not cpu_admitted and not solid_admitted
         ):
             print "[web-style-producer] entry-rejected index={i} mode={wm_material_mode} bg={mat_bg} gf={mat_gf} gt={mat_gt} layers_len={mat_layers.len()} backdrop_len={mat_backdrop.len()} animation={st.animation_name}"
-        if env_get("SIMPLE_TRACE_FONT_STYLE") != nil:
+        if _font_style_trace_on:
             print "[font-inherit-trace] index={i} final_font_family={st.font_family} final_font_size={st.font_size}"
         styles[i] = st
         if trace_stages:
