@@ -268,9 +268,18 @@ Located by SIGUSR1-stop under gdb, PROVED:
 ```
 
 The worklist in `reachable_from` never drains: `visited.has(cur.id)` /
-`succ_map[cur.id] ?? []` keep feeding it. Both are dict reads, so this is
-plausibly a third member of the same dict-on-degenerate-MIR family, but the
-mechanism is **INFERRED, not proved** — it needs its own lane. Filed here so the
+`succ_map[cur.id] ?? []` keep feeding it.
+
+**Follow-up 2026-08-02:** the membership half is now root-caused as its own
+defect and filed separately —
+`doc/08_tracking/bug/dict_array_contains_raw_untagged_key_2026-08-02.md`.
+`.has()`/`.contains()`/`in` pass an **untagged** key to `rt_contains` while
+`rt_dict_set` stores the **tagged** key (`$0x9` vs `$0x48`, PROVED by
+disassembly of a tip-built compiler), so membership answers are wrong in both
+directions. That is sufficient to make this worklist never drain, but the link
+to this specific hang is **INFERRED, not proved**: a standalone replica of
+`reachable_from` terminated correctly, so the chain still needs to be observed
+inside a real compiler run. Filed here so the
 fix above is not mistaken for making this invocation clean.
 
 ### The reported 900 s HANG is REFUTED (PROVED)
