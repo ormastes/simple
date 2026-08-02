@@ -270,6 +270,74 @@ iteration) for the scanner shape *first*, and only then can stage 4 flip. This
 is the concrete blocker the measurement was run to find, and it was not visible
 from the static 7,218-site count.
 
+### Stage 3 prerequisite: the byte accessor ALREADY EXISTS — `byte_at` (2026-08-02)
+
+The "byte-oriented accessor" this section asks for **was already in the tree**
+when the section was written. `text.byte_at(i)` is landed and wired end to end;
+no new primitive was needed. Verified present (PROVED, symbol + runtime):
+
+| layer | site |
+|---|---|
+| C runtime | `src/runtime/runtime_native.c:2372` `rt_string_byte_at` (+ `__simple_` alias) |
+| Simple runtime | `src/runtime/simple_core/core_string.spl:351` |
+| Rust runtime (JIT/native) | `src/compiler_rust/runtime/src/value/collections.rs:2993` |
+| Rust interpreter method | `src/compiler_rust/compiler/src/interpreter_method/string.rs` `"byte_at"` arm |
+| Simple interpreter | `src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl:101` |
+| Simple MIR lowering | `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:2443` |
+| Rust MIR lowering | `src/compiler_rust/compiler/src/mir/lower/lowering_expr_method.rs:1343` |
+| LLVM + Cranelift codegen | `codegen/llvm/functions.rs:2404,2848`, `codegen/instr/calls.rs:3242` |
+
+**Design, and why it is right (not a parallel vocabulary):**
+
+- **Shape** — a method `s.byte_at(i)`, deliberately mirroring the existing
+  `s.char_code_at(i)`. The pair is the whole point: `char_code_at` is
+  CHARACTER-indexed, `byte_at` is BYTE-indexed, and `len()` is BYTE length
+  (`rt_string_len`, "length of a string in bytes"). So `while i < s.len():
+  s.byte_at(i)` is index-consistent, and the mixed-units hazard that produced
+  the `strip_utf8_bom` bug is not expressible.
+- **Returns a raw `i64`, NOT an Option** — and that is forced, not a shortcut.
+  The nil sentinel IS the integer 3, so an INT-slot return cannot encode
+  absence: an absent value would be indistinguishable from a real byte 0x03.
+  (`substr` needed arity-aware dispatch to two symbols for exactly this.)
+  Out-of-range therefore yields **0**, matching `char_code_at`'s convention.
+- **Residual ambiguity, documented not hidden:** 0 is also a legal byte (NUL),
+  so `byte_at` alone cannot distinguish "NUL" from "out of range". Callers must
+  bound with `i < s.len()`. This is the price of the nil-sentinel constraint;
+  it is not a defect, but it is a real sharp edge.
+- **Not added to the two legacy C runtimes, deliberately.** `spl_str_slice` is
+  duplicated in `runtime.c:328` and `runtime_legacy_core.c:182`, and neither
+  has a byte accessor. Adding one would be a **defect, not a fix**: the bundle
+  links with `-z muldefs` (`pipeline/native_project/linker.rs:1224,2240,2248`;
+  see `scripts/check/check-runtime-bundle-duplicate-symbols.shs`, which records
+  20 already-duplicated symbols), so a second `rt_string_byte_at` would be
+  silently resolved first-definition-wins and drift into a wrong answer. One
+  definition in `runtime_native.c`, shared through the bundle, is correct.
+
+**Correctness PROVED against hand-computed expectations**, not cross-engine
+agreement. For `s = "aé€𝄞z"` (`61 C3A9 E282AC F09D849E 7A`, 11 bytes) all 11
+byte values, `len() == 11`, and the discriminator `byte_at(1) == 195` vs
+`char_code_at(1) == 233` were checked on the Cranelift JIT (default engine) and
+under `SIMPLE_EXECUTION_MODE=interpret`. `--native` remains UNMEASURABLE here
+(fails closed with `[CollectionOps]`), so there is no native column.
+
+### Defect found by that probe: negative index silently returned real data (FIXED)
+
+The probe caught a live engine divergence that the accessor's own users would
+have inherited. `"abc".byte_at(-1)` returned **0** on the JIT (the C impl guards
+`if (index < 0) return 0;`) but **97** — a real byte — under the interpreter;
+`char_code_at(-1)` likewise returned 97, and on `"ébc"` the two returned 195 and
+233. Root cause: the interpreter arms read the index through `eval_arg_usize`,
+which **saturates negatives to 0**. That saturation is correct for the
+count/width callers it was written for (it fixed a `pad_left(-5)` capacity
+panic) but wrong for an index accessor, where it converts an out-of-range index
+into plausible data — a silent wrong answer.
+
+Fixed in `interpreter_method/string.rs` by reading the index as a signed int and
+returning 0 for negatives, matching the native impl and the sibling `char_at`
+arm, which already guarded this way. RED before GREEN on both arms and both the
+ASCII fast path and the non-ASCII walk; positive controls (`byte_at(0) == 97`,
+out-of-range `byte_at(3) == 0`) held throughout, so the green is not vacuous.
+
 A genuine-bug class does exist inside the remainder, and counting mode found it:
 
 - **`strip_utf8_bom` — FIXED in this change.** `src/lib/common/encoding/text_ops.spl:112`
@@ -291,16 +359,107 @@ same string. Other single-occurrence wide-span sites (e.g. a `[0:14]` truncation
 of a 33-byte string in `ui/window` scene-render) are likely the same shape and
 remain OPEN.
 
+### Stage 3 migration — batch 1: `lib/common/json/parser.spl` (2026-08-02)
+
+First scanner migrated onto `byte_at`. The three pure-classification scanners
+(`json_skip_whitespace`, `json_string_escapes_are_valid`, `json_number_is_valid`)
+now read `s.byte_at(i)` and compare against byte constants (`44`, `48`..`57`,
+`92`, …) instead of slicing a 1-byte window and comparing it to an ASCII
+literal. Because the comparison is integer, **no text value is materialised at
+all**, so the invalid-UTF-8 intermediate cannot exist — this is a removal of the
+defect, not a relabelling of it.
+
+Measured with the audit as the instrument, same spec, same binary, on **both**
+reachable engines. The audit's `site=` field changes with the engine, so these
+are two genuinely different slice implementations, not one measured twice:
+
+| engine | audit site | before | after | liveness |
+|---|---|---|---|---|
+| Cranelift JIT (default) | `rt_slice_rust` | **18** | **0** | `self_test` present |
+| `SIMPLE_EXECUTION_MODE=interpret` | `interp_bracket` | **18** | **0** | `self_test` present |
+
+(`--native` remains UNMEASURABLE — it fails closed with `[CollectionOps]` — so
+there is no native column.)
+
+Behaviour is unchanged: the 17 assertions (valid/invalid numbers, escape forms,
+`\uXXXX`, and non-ASCII `é`/`€`/`𝄞` inputs) produce a byte-identical `diff`
+across the two versions, and `json_unicode_escape_spec.spl` (15 examples) and
+`json_1_complete_spec.spl` (15 examples) both pass 0 failures.
+
+**Measurement trap recorded, because it nearly produced a false green.** The
+audit's `self_test` liveness line is emitted lazily, on the FIRST slice
+operation in the process (`text_slice_audit.rs::level()`). A migration that
+removes *every* slice from a path therefore also removes the liveness line, so a
+genuine 0 is initially indistinguishable from a run that never reached the
+audit — the first AFTER run reported exactly that and was correctly rejected as
+INERT. The driver now performs one deliberately **codepoint-aligned** slice
+(`"aé"[0:1]`, cutting exactly on the `a`/`é` boundary) which initialises the
+audit and contributes no violation, so the 0 above is measured, not inert.
+
+Remaining in this file: 5 sites in the tokenizer, which **accumulate** the
+1-byte slice into an output string rather than only classifying it. That shape
+cannot be converted by a byte compare; it needs run-slicing at codepoint
+boundaries and is a larger refactor. It is OPEN.
+
+Two further facts this migration settles:
+
+- The in-file comments admitted the old idiom's index space was **chars under
+  the interpreter, bytes under compiled code, while `len()` is bytes** — an
+  engine divergence living inside the parser. `byte_at` is byte-indexed on every
+  engine, so the migration removes that divergence as well.
+- The empty-slice "logical EOF" sentinel the old loop relied on is gone; the
+  `i < s.len()` bound already covers it, and a real NUL byte is now correctly
+  rejected as an unescaped control character rather than silently ending the scan.
+
 ### Why the flip to a hard error is DEFERRED
 
 1,427 live violations across 39 spec files is not a justified residual, and
 87.9 % of them are the scanner idiom rather than buggy call sites. Making the
 check loud now would not surface 39 bugs; it would break every byte-stepping
 text scanner in the repo, plus whatever the two unmeasured surfaces (JIT,
-native/C) contribute. Stage 3 must land first, and stage 3 now has a concrete
-prerequisite the static count never revealed: a byte-oriented accessor for the
-scanner shape. The eventual default must still be the **error** — not a
-permanently-warning check.
+native/C) contribute. Stage 3 must land first. The eventual default must still
+be the **error** — not a permanently-warning check.
+
+**Status 2026-08-02 — still DEFERRED, but the blocker changed shape.** The
+prerequisite this section named (a byte-oriented accessor) is **met**: `byte_at`
+already existed, is wired on every engine, and is now proved correct against
+hand-computed values. What remains is not design work but migration volume.
+
+Honest accounting of the 1,427:
+
+- **18 removed** and PROVED to 0 (`lib/common/json/parser.spl`, batch 1 above).
+- **~1,409 remain.** This lane migrated one file; it did not re-run the
+  18,704-spec census, so the repo-wide total is *not* re-measured. Treating
+  "1,427 − 18" as the new census figure would be INFERRED, not measured, and the
+  subsystem attributions in the table above are per-spec-file, not per-source-file.
+- Static sweep of the scanner idiom `X[i:i + 1]` across `src/` finds **901
+  sites** (PROVED, `grep`), of which 10 are now migrated, leaving **891**. That
+  count is the realistic size of stage 3, and it is the number to plan against —
+  not 39 files. Classified by how the sliced value is consumed (PROVED, `grep`):
+
+  | shape | sites | migration cost |
+  |---|---|---|
+  | compared directly against a literal on the same line | 239 | mechanical — becomes an integer compare, batch-1 shape |
+  | bound to a `val`/`var` first | 461 | depends on downstream use: classification converts, accumulation does not |
+  | other (argument position, nested expression) | 191 | inspect individually |
+
+  Top concentrations: `browser_engine` layout renderer (36), `fix` lint rules
+  (29), editor LSP/DAP/diagnostics panels (~100 across a dozen files), the three
+  duplicated `gdb_mi_parser` copies (30), `office/sheets` (~30).
+
+The migration is mechanical but **not** blind-automatable: each site must be
+classified first. Sites that only *classify* the byte convert cleanly to an
+integer compare (batch 1's shape). Sites that *accumulate* the 1-byte slice into
+an output string do not, and need run-slicing at codepoint boundaries. A
+regex-driven bulk rewrite would silently convert the second class wrongly, so
+batches must stay small and each must carry a before/after audit measurement
+with the liveness control described above.
+
+Recommendation: **do not flip yet.** The remainder is dominated by the scanner
+idiom, not by genuine bugs, so a flip today would still break working scanners.
+Revisit the flip once the 901 sites are down to a residual small enough to
+inspect by hand; at that point the remainder should be genuine defects of the
+`strip_utf8_bom` class and the error becomes the right default.
 
 Reproduce the census:
 
