@@ -78,6 +78,8 @@ FILE.md files) are allowed.
 | `src/compiler` | Unified compiler (numbered layers 00-99) |
 | `src/compiler_rust` | Rust seed compiler and vendor |
 | `src/generated` | Generated source files |
+| `src/hardware` | Hardware/FPGA bundle generators |
+| `src/i18n` | Internationalization |
 | `src/lib` | Standard library (`use std.X`) |
 | `src/os` | OS-specific code |
 | `src/runtime` | Native runtime and support libraries |
