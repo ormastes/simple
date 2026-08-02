@@ -83,6 +83,48 @@ Staged per `doc/01_research/ui/rendering/gpu_runnable_compile_time_verification.
   and call chain. The scanner stays as the out-of-band cross-check.
   Process notes: `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md`.
 
+## Test evidence (2026-08-02)
+
+All seven GPU-offload spec lanes are landed and green (re-verified 2026-08-02
+on the interpreter-backed `bin/simple test` lane; Results lines verbatim):
+
+| Lane | Spec | Results |
+|---|---|---|
+| HTML parser GPU (flat projection, CPU-oracle parity) | `test/01_unit/lib/gc_async_mut/gpu/browser_engine/html_parser_gpu_flat_spec.spl` | 24/24 |
+| CSS parser GPU tables (style_block_parse + selector) | `.../css_parser_gpu_tables_spec.spl` | 47/47 |
+| DOM build GPU offload | `.../dom_build_gpu_offload_spec.spl` | 38/38 |
+| CSS apply + transform (decl_apply lane) | `.../css_decl_apply_transform_spec.spl` | 69/69 |
+| GPU script load + animation ticks | `.../browser_script_animation_gpu_spec.spl` | 22/22 |
+| 2D rendering GPU offload parity (device provenance) | `test/02_integration/rendering/web_engine2d_gpu_offload_parity_spec.spl` | 17/17 |
+| Full-GPU-offload web showcase + capture verification | `test/03_system/gui/web_showcase_full_gpu_offload_spec.spl` | 13/13 |
+
+Supporting gates: engine2d renderer unit spec 23/23, backend resolver spec
+6/6 (viable-probe auto-resolution, commit `b0ef8e6aee5`), tile grid + paint
+parity 21/21 (commit `f86f4c45354`). Capture evidence in the showcase lane:
+deterministic checksum, mutation sensitivity, pixel probes for the pinned
+palette, and honest offload provenance (device identity required for any
+device-readback claim; `host_cache_after_device_present` carries identity per
+the backend_vulkan provenance fix).
+
+**Coverage.** Measured with the now-working `SIMPLE_COVERAGE=1` statement
+path (test_runner epilogue injection; commit `1a6c1e362a5`). Conservative
+floors on target modules: selector_matcher 97%, dom_limits 100%,
+style_block_resolve 77%, style_block_parse 72%, html_tokenizer 64%,
+dom_identity_index 50%, tree_builder 28%. These are FLOORS, not point
+estimates: attribution requires line-hit AND enclosing-function match, and
+`dom.spl` measures 1% despite the 38/38 DOM lane exercising it heavily —
+direct evidence of under-attribution. The spec `@cover` targets declare 90%;
+closing the measured-floor gap is tracked as a coverage-tooling defect
+(`doc/08_tracking/bug/instrumented_statement_coverage_tooling_inert_2026-08-02.md`),
+not by adding vacuous tests.
+
+Defects found and filed by this campaign (all in `doc/08_tracking/bug/`):
+seed runner 600s child kill (fixed `fd381db82bc`), render-session second-render
+arm shadowing (fixed in `6eb19236c05`), heuristic size whitelist painting
+24x16 (fixed in `6eb19236c05`), JIT nil-`.lower()` in backend auto-resolve
+(open), seed `.?` bool-lowering crashing the CUDA resolve arm (worked around,
+family open), coverage tooling inert (fixed) / under-attribution (open).
+
 ## Acceptance
 
 The parent plan's gates apply verbatim (§14): byte-matching mutation
