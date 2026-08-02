@@ -82,3 +82,16 @@ accessors were missing imports. The helper now imports the two concrete
 compiler owners directly. A focused no-stub interpreter regression clears the
 shared owner state, invokes both display helpers, and verifies both owner
 accessors remain empty; it passed 1/1 before the next full Stage 4 cycle.
+
+## Doctest cleanup owner follow-up
+
+The next Stage 4 cycle passed the warning helpers and then proved
+`file_remove` unresolved through the broad `std.io` facade in both doctest
+runners. All four active cleanup calls now import the concrete
+`std.nogc_sync_mut.io.file_ops.file_remove` owner alongside their existing
+atomic-write dependency.
+
+`source_doctest_runner_spec.spl` now executes a real source doctest and verifies
+that its generated fixture is absent after the runner returns. The focused
+no-stub diagnostic passed 2/2. Final admission remains the subsequent full
+Stage 4 full-CLI build.
