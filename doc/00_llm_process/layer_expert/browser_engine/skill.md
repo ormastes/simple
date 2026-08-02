@@ -162,4 +162,17 @@ bind `char_code_at` as i64 (never chain `.to_i32()`). When touching parse/
 CSS/render handoffs, keep arrays local or project scalars — and keep the
 receipts (each is negative-control verified).
 
+## GPU-runnable offloadability check (2026-08-02)
+
+This layer (plus `src/lib/gc_async_mut/gpu/engine2d`) is scanned by the
+gpu-runnable transitive checker `src/app/gpu_lint/gpu_runnable_scan.spl`
+(`bin/simple run` it; inventory/warning mode). Current: 1463/3146 function
+names blocked, 133 overload-tainted names, 10/24 roots BLOCKED — dominant
+blockers are string ops, list-push, and text interpolation on paint-reachable
+paths. Before refactoring hot render code, check whether it sits on an
+offload root's closure; prefer the core/shell split (pure numeric core,
+host-only shell) so the core stays offloadable. Details, ban list, and the
+phase-by-phase GPU-reality audit:
+[gpu_offload_check feature expert](../../feature_expert/gpu_offload_check/skill.md).
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

@@ -68,6 +68,21 @@ CPU oracle state/layout/IR/pixel parity · clean device-loss recovery
 flag-off byte-identical to current behavior
 ```
 
+## Compile-time offloadability check
+
+Staged per `doc/01_research/ui/rendering/gpu_runnable_compile_time_verification.md` §D4:
+
+- **Now (zero compiler changes):** transitive scanner
+  `src/app/gpu_lint/gpu_runnable_scan.spl` (`bin/simple run` it) inventories
+  engine2d + browser_engine roots against the ban list, with the
+  any-def-blocked overload-taint rule. **Inventory mode first** — warnings and
+  a ratchet on blocked/tainted counts, not build errors.
+- **Later (W1 lane):** `@gpu_runnable` semantic pass in `35.semantics` wiring
+  `gpu_checker` + the `alloc_inference` fixpoint; only that pass meets the W1
+  acceptance bar that every rejection names the exact unsupported construct
+  and call chain. The scanner stays as the out-of-band cross-check.
+  Process notes: `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md`.
+
 ## Acceptance
 
 The parent plan's gates apply verbatim (§14): byte-matching mutation
