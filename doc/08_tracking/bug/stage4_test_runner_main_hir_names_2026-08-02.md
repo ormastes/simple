@@ -95,3 +95,18 @@ atomic-write dependency.
 that its generated fixture is absent after the runner returns. The focused
 no-stub diagnostic passed 2/2. Final admission remains the subsequent full
 Stage 4 full-CLI build.
+
+## Test-cache stat owner follow-up
+
+The following Stage 4 cycle passed the doctest cleanup repair, reached 395 HIR
+modules, and then proved `rt_file_stat` unresolved in
+`app.test_cache_shared`. That module was importing three raw runtime symbols
+through `app.io.mod`; it now uses the concrete public
+`std.nogc_sync_mut.io.file_ops` wrappers for stat, text read, and write. The
+adjacent read/write migration prevents the same invalid facade family from
+failing on the next resolver step.
+
+`test_result_cache_spec.spl` now records a real dependency, removes it, and
+verifies the cached result becomes stale. The single focused command exited
+before parsing because the Stage 3 CLI does not expose `test`; it is retained
+as non-evidence. Final admission remains the next no-stub full Stage 4 build.
