@@ -117,6 +117,49 @@ N_42=42    N_abc=0    N_3ctl=3    N_dot=0
 ⇒ native strips the Option identically to the JIT, and follows the **strict**
 runtime semantics (`"4.2"` → 0, not 4).
 
+## 3b. Root cause of the "present 3 read as absent" mode
+
+PROVED by reading `src/compiler_rust/compiler/src/hir/lower/expr/control.rs:1181-1201`
+(`lower_coalesce`): `x ?? d` is lowered to a **`BinOp::NotEq` against
+`HirExprKind::Nil`** — literally `if x != nil then x else d`.
+
+When `x` is typed `TypeId::I64` — which is exactly what
+`hir/lower/expr/mod.rs:1179` assigns to `parse_int` / `parse_i32` /
+`parse_i64` — that comparison degenerates to an **integer compare against the
+nil sentinel, and the nil sentinel is 3**. So `"3".parse_int() ?? -99` compares
+`3 != 3`, takes the default, and reports a successfully parsed 3 as absent.
+
+This closes the chain: the raw-`i64` typing is not merely *lossy*, it actively
+manufactures a wrong answer for one specific legitimate input.
+
+Note the in-file comment at `hir/lower/expr/mod.rs:1161-1179`: the
+`parse_int | parse_i32 | parse_i64 => TypeId::I64` entry was **added
+deliberately** by an earlier lane to fix a print-decode bug (a raw `i64` handed
+to `rt_println_value` was decoded by bit pattern, so `"42"` printed as an f64
+denormal). That fix was correct for its symptom but cemented the raw shape.
+Stage 2 must not simply revert it — the print-decode path has to keep working,
+which is another reason the tagged-nullable ABI of stage 1 is the right vehicle.
+
+Second, distinct gap — the float family: `rt_string_to_float` already returns
+`RuntimeValue::NIL` on failure, yet `"abc".parse_float() ?? -99.0` still yields
+**0** on the JIT, i.e. the `!= nil` test does not fire on that NIL either. So the
+tagged-nullable ABI alone is **not sufficient** in the Rust seed; the nil
+representation used by `lower_coalesce` and the one returned by the runtime do
+not agree. Stage 3 must fix that agreement, not just the HIR type. INFERRED
+mechanism, PROVED symptom.
+
+## 3c. Reproduced on a freshly built, unmodified baseline
+
+To rule out a stale deployed binary as the explanation, the whole workspace was
+rebuilt from the measured base sha in an isolated tree
+(`cargo build --release -p simple-driver`, rc=0, fresh target dir, 57,259,744
+bytes, enum-probe = 0 ⇒ Rust seed).
+
+The freshly built binary reproduces the §3 table **byte for byte** on both
+engines, including the `"3"` → `-99` inversion. The defect is in the source at
+the base sha, not in a stale artifact. A working build + repro platform for
+stage 1 therefore exists and is cheap to reconstruct.
+
 ## 4. Caller census — the premise inverts
 
 Counted over `src/`, `test/`, `scripts/`, `*.spl` + `*.shs`, excluding `build/`
