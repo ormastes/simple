@@ -108,9 +108,10 @@
 #     the two have silently disagreed.
 #
 # NON-VACUITY: --selftest runs automatically before every scan and is FATAL. It
-# builds 15 throwaway fixtures in a temp repo — truncated tree, duplicate entry,
-# missing src/runtime, shrunken src/, oversize, inherited-wipe, band-jump, and
-# healthy controls — and asserts each verdict. A guard that cannot fail on its
+# builds 16 throwaway fixtures in a temp repo — truncated tree, duplicate entry
+# (same-sha AND differing-sha), missing src/runtime, shrunken src/, oversize,
+# inherited-wipe, band-jump, and healthy controls — and asserts each verdict.
+# A guard that cannot fail on its
 # motivating case is worse than none.
 #
 # ISOLATION: the fixtures are built in a temp repo of the selftest's OWN making
@@ -188,10 +189,29 @@ inspect_commit() {
     IC_FILES=$(wc -l <"$ic_list")
     IC_FILES=$(printf '%s' "$IC_FILES" | tr -d ' ')
 
-    # Duplicate paths. Two identical tree entries (same name, same sha) expand to
-    # the same path list twice, so a recursive listing exposes them at any depth.
-    # PROVED against a `git mktree` fixture with `lib` listed twice.
-    sort "$ic_list" >"$TMPROOT/sorted.out" || { IC_ERR="sort failed on $ic_commit"; return 1; }
+    # Duplicate entries. The corruption axis is "the same NAME appears twice at
+    # the same tree level", and the SHAs of the two entries need not match.
+    #
+    # `ls-tree -r` (blobs only) only exposes that when the two entries expand to
+    # the same path list — i.e. when they are byte-identical trees. Two `src/lib`
+    # entries holding DIFFERENT subtrees expand to disjoint paths and produce
+    # ZERO duplicate lines. PROVED 2026-08-02 with a `git mktree` fixture:
+    # same-sha duplicate -> 2 dup lines, different-sha duplicate -> 0, both at a
+    # subtree and at the root. That is the same defect class as the fixed-width
+    # `^<<<<<<< ` conflict-marker regex: an exact-string assumption that a real
+    # variant walks straight past.
+    #
+    # `-t` additionally emits the TREE entries themselves, so a name repeated at
+    # a level is listed twice regardless of what is under it. Duplicate BLOBs are
+    # already caught by either listing. IC_FILES stays on the blob-only listing so
+    # the size band keeps counting files, not files+directories.
+    git -C "$ic_repo" ls-tree -r -t --name-only "$ic_commit" >"$TMPROOT/lst.out" 2>/dev/null
+    ic_st=$?
+    if [ "$ic_st" -ne 0 ]; then
+        IC_ERR="git ls-tree -r -t failed (status $ic_st) on $ic_commit"
+        return 1
+    fi
+    sort "$TMPROOT/lst.out" >"$TMPROOT/sorted.out" || { IC_ERR="sort failed on $ic_commit"; return 1; }
     uniq -d "$TMPROOT/sorted.out" >"$TMPROOT/dup.out" || { IC_ERR="uniq failed on $ic_commit"; return 1; }
     IC_DUPS=$(wc -l <"$TMPROOT/dup.out")
     IC_DUPS=$(printf '%s' "$IC_DUPS" | tr -d ' ')
@@ -329,7 +349,7 @@ evaluate_commit() {
 # ===========================================================================
 # SELFTEST — runs before every scan, FATAL. 14 fixtures.
 # ===========================================================================
-SELFTEST_EXPECTED=15
+SELFTEST_EXPECTED=16
 
 # --- FIXTURE HERMETICITY (2026-08-01) --------------------------------------
 # Every git call that BUILDS a fixture must go through st_git/st_git_init.
@@ -413,6 +433,23 @@ st_mktree() {
     done
     st_tree=$(ST_INDEX="$st_idx" st_git "$st_repo" write-tree) || return 1
     st_git "$st_repo" commit-tree "$st_tree" -m fixture </dev/null
+}
+
+st_mkdirtree() {
+    # st_mkdirtree <repo> <count> <name-prefix> -> echoes a TREE sha holding
+    # <prefix>0.txt .. <prefix>N-1.txt. Two calls with different prefixes give
+    # two trees with different shas AND disjoint path sets — the shape needed to
+    # prove the duplicate-entry check does not depend on the two entries being
+    # byte-identical.
+    st_md_repo=$1; st_md_n=$2; st_md_p=$3
+    st_md_blob=$(printf 'x %s\n' "$ST_NONCE" | st_git "$st_md_repo" hash-object -w --stdin) || return 1
+    st_md_i=0
+    : >"$TMPROOT/md.in"
+    while [ "$st_md_i" -lt "$st_md_n" ]; do
+        printf '100644 blob %s\t%s%s.txt\n' "$st_md_blob" "$st_md_p" "$st_md_i" >>"$TMPROOT/md.in"
+        st_md_i=$(( st_md_i + 1 ))
+    done
+    st_git "$st_md_repo" mktree <"$TMPROOT/md.in"
 }
 
 st_env_isolation_fixture() {
@@ -533,7 +570,32 @@ selftest() {
     st_toptree=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.top") || return 1
     st_dupc=$(st_git "$st_dir" commit-tree "$st_toptree" -m dupfixture </dev/null) || return 1
 
-    # --- 11 fixtures that MUST FAIL ---------------------------------------
+    # differing-sha duplicate fixture (2026-08-02): `src/lib` listed twice again,
+    # but the two entries hold DISJOINT subtrees (q0..q19 and z0..z19), so the
+    # blob-only `ls-tree -r` listing shows no repeated path at all. Everything
+    # else is deliberately healthy — 200 files, 5 entries under src/, both
+    # canaries at 40 — so ONLY the duplicate check can fail this. Reverting
+    # inspect_commit to the blob-only listing turns this fixture GREEN, which is
+    # exactly the miss being closed.
+    st_libq=$(st_mkdirtree "$st_dir" 20 q) || return 1
+    st_libz=$(st_mkdirtree "$st_dir" 20 z) || return 1
+    st_docd=$(st_git "$st_dir" rev-parse "$st_healthy^{tree}:doc") || return 1
+    {
+        printf '040000 tree %s\tlib\n'     "$st_libq"
+        printf '040000 tree %s\tlib\n'     "$st_libz"
+        printf '040000 tree %s\tos\n'      "$st_osd"
+        printf '040000 tree %s\truntime\n' "$st_run"
+        printf '040000 tree %s\tstd\n'     "$st_std"
+    } >"$TMPROOT/mktree.src2"
+    st_srctree2=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.src2") || return 1
+    {
+        printf '040000 tree %s\tdoc\n' "$st_docd"
+        printf '040000 tree %s\tsrc\n' "$st_srctree2"
+    } >"$TMPROOT/mktree.top2"
+    st_toptree2=$(st_git "$st_dir" mktree <"$TMPROOT/mktree.top2") || return 1
+    st_dupdiff=$(st_git "$st_dir" commit-tree "$st_toptree2" -m dupdiff </dev/null) || return 1
+
+    # --- 12 fixtures that MUST FAIL ---------------------------------------
     st_assert truncated-tree      "$st_trunc"   -1  1   # the wipe, no base
     st_assert truncated-vs-base   "$st_trunc"   200 1   # the wipe, healthy base
     st_assert inherited-wipe      "$st_trunc"   4   1   # base ALSO wiped: delta 0
@@ -542,6 +604,7 @@ selftest() {
     st_assert src-entries-shrunk  "$st_srcsm"   -1  1   # src/ 2 entries, band 4..6
     st_assert duplicate-entry     "$st_dupc"    -1  1   # src/lib listed twice
     st_assert duplicate-vs-base   "$st_dupc"    200 1   # ... independent of base
+    st_assert duplicate-diff-shas "$st_dupdiff" 200 1   # src/lib twice, DISJOINT
     st_assert oversize-absolute   "$st_over"    -1  1   # 500 > ceiling 400
     st_assert oversize-vs-base    "$st_over"    200 1
     st_assert band-jump           "$st_healthy" 160 1   # +40 vs tolerance 2
@@ -571,7 +634,7 @@ selftest() {
         return 1
     fi
     [ "$st_fail" -eq 0 ] || return 1
-    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (11 must-fail, 3 must-pass, 1 env-isolation)"
+    echo "$SELF: selftest $st_ran/$SELFTEST_EXPECTED fixtures correct (12 must-fail, 3 must-pass, 1 env-isolation)"
     return 0
 }
 
