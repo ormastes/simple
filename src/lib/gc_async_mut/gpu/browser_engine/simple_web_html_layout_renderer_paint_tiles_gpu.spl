@@ -1,0 +1,181 @@
+# Tile render culling GPU lane (T4 of the tile_render_culling_plan).
+#
+# Drives the shared T1/T3 tile core (grid, binning, live set — reused verbatim
+# from simple_web_html_layout_renderer_paint_tiles.spl) through the engine2d
+# per-tile DrawIR replay (engine2d_draw_ir_render_tiled): live tiles replay
+# only their binned commands with the scissor pinned to the tile rect, culled
+# tiles are skipped entirely, one submission per frame, one provenance-carrying
+# readback. The CPU lane and the GPU lane are the SAME function with a
+# different engine2d backend ("software" vs "vulkan"/SIMPLE_2D_BACKEND), which
+# is what makes per-tile pixel-checksum parity a meaningful oracle.
+#
+# Provenance honesty: the result carries the actual selected backend, the
+# readback source string, the backend handle and the device identity straight
+# from Engine2DReadback — a lane that fell back to CPU reports "cpu_fallback"/
+# a cpu-side source with zero handles, never a device claim.
+#
+# Flag: SIMPLE_WEB_TILE_GPU=1 (default off), independent of the CPU tile flag.
+# Plan: doc/03_plan/ui/rendering/tile_render_culling_plan.md
+
+use std.gc_async_mut.io.mod_stub.{env_get}
+use std.common.ui.draw_ir.{DrawIrCommand}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
+    Engine2dDrawIrTileOutcome, engine2d_draw_ir_render_tiled
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{
+    TILE_FNV_OFFSET_BASIS, TILE_PX, TileGrid, TileOp, tile_bin_ops,
+    tile_count, tile_fnv_step, tile_grid_make, tile_live_set, tile_op,
+    tile_rect_x0, tile_rect_y0
+}
+
+# GPU tile lane gate. Default OFF: flag-off keeps every existing render path
+# untouched (the lane is only entered by explicit callers/specs/benches).
+fn tile_gpu_flag_enabled() -> bool:
+    val v = env_get("SIMPLE_WEB_TILE_GPU")
+    if v == nil:
+        return false
+    v == "1"
+
+# Backend key for the GPU lane: SIMPLE_2D_BACKEND override wins, else vulkan
+# (the engine2d default GPU lane on this platform per the T4 plan).
+fn tile_gpu_backend_name() -> text:
+    val v = env_get("SIMPLE_2D_BACKEND")
+    if v == nil:
+        return "vulkan"
+    if v == "":
+        return "vulkan"
+    v
+
+# One tile-lane frame result. `tile_pixel_checksums` is filled only by
+# tile_lane_render_commands (the spec/oracle entry); the bench entry leaves it
+# empty so per-frame timing measures rendering, not checksumming.
+class TileLaneRender:
+    backend_requested: text
+    backend_selected: text
+    readback_source: text
+    readback_backend_handle: i64
+    readback_device_identity: i64
+    readback_pixel_count: i64
+    cpu_fallback_reason: text
+    tiles_total: i32
+    tiles_rendered: i32
+    tiles_skipped: i32
+    ops_rendered: i32
+    ops_skipped: i32
+    unsupported_kinds: text
+    pixels: [u32]
+    tile_pixel_checksums: [i64]
+
+# Engine-threading frame wrapper so a bench can reuse one engine (and one
+# device session) across frames.
+class TileLaneFrame:
+    engine: Engine2D
+    render: TileLaneRender
+
+fn tile_lane_grid(doc_w: i32, doc_h: i32) -> TileGrid:
+    tile_grid_make(0, 0, doc_w, doc_h)
+
+# Per-tile FNV-1a over the readback pixels restricted to tile rect intersected
+# with the framebuffer. Tiles fully outside the framebuffer hash to the FNV
+# offset basis (empty). Same constants as the T1 op checksums.
+fn tile_lane_pixel_checksums(pixels: [u32], fb_w: i32, fb_h: i32, grid: TileGrid) -> [i64]:
+    val tiles = tile_count(grid)
+    var out: [i64] = [0; tiles]
+    var t = 0
+    while t < tiles:
+        var h = TILE_FNV_OFFSET_BASIS
+        val x0 = tile_rect_x0(grid, t)
+        val y0 = tile_rect_y0(grid, t)
+        val x1 = x0 + TILE_PX
+        val y1 = y0 + TILE_PX
+        var y = y0
+        while y < y1:
+            if y >= 0 and y < fb_h:
+                var x = x0
+                while x < x1:
+                    if x >= 0 and x < fb_w:
+                        h = tile_fnv_step(h, pixels[y * fb_w + x] as i64)
+                    x = x + 1
+            y = y + 1
+        out[t] = h
+        t = t + 1
+    out
+
+# Render one frame of DrawIR commands through the tile lane on an existing
+# engine. Commands are binned by their device rects via the T1 core; the live
+# set is the viewport at (0,0,view_w,view_h) plus `margin` px. No checksums —
+# see tile_lane_render_commands for the oracle entry.
+fn tile_lane_render_into(engine: Engine2D, commands: [DrawIrCommand], doc_w: i32, doc_h: i32, view_w: i32, view_h: i32, margin: i32, clear_color: u32, backend_requested: text) -> TileLaneFrame:
+    var eng = engine
+    val grid = tile_lane_grid(doc_w, doc_h)
+    var ops: [TileOp] = []
+    val n = commands.len()
+    var i = 0
+    while i < n:
+        val c = commands[i]
+        ops.push(tile_op(
+            0, i.to_i32(), c.x, c.y, c.width, c.height, false, false, 0, -1))
+        i = i + 1
+    val bins = tile_bin_ops(ops, grid)
+    val live = tile_live_set(grid, 0, 0, view_w, view_h, margin)
+    val tiles = tile_count(grid)
+    var tx: [i32] = [0; tiles]
+    var ty: [i32] = [0; tiles]
+    var tw: [i32] = [0; tiles]
+    var th: [i32] = [0; tiles]
+    var t = 0
+    while t < tiles:
+        tx[t] = tile_rect_x0(grid, t)
+        ty[t] = tile_rect_y0(grid, t)
+        tw[t] = TILE_PX
+        th[t] = TILE_PX
+        t = t + 1
+    eng.clear(clear_color)
+    val outcome = engine2d_draw_ir_render_tiled(
+        eng, commands, tx, ty, tw, th, live, bins.starts, bins.items)
+    eng = outcome.engine
+    val readback = outcome.readback
+    var empty_sums: [i64] = []
+    # CPU-lane readbacks carry no device provenance: the engine2d record
+    # leaves handle/identity nil there, but TileLaneRender's fields are i64
+    # and the honest cpu-lane contract is "no device claim" = 0.
+    var rb_handle: i64 = 0
+    var rb_identity: i64 = 0
+    if readback.backend_handle != nil:
+        rb_handle = readback.backend_handle
+    if readback.device_identity != nil:
+        rb_identity = readback.device_identity
+    val render = TileLaneRender(
+        backend_requested: backend_requested,
+        backend_selected: eng.backend_name(),
+        readback_source: readback.source,
+        readback_backend_handle: rb_handle,
+        readback_device_identity: rb_identity,
+        readback_pixel_count: readback.pixel_count,
+        cpu_fallback_reason: eng.vulkan_cpu_fallback_reason(),
+        tiles_total: outcome.tiles_total,
+        tiles_rendered: outcome.tiles_rendered,
+        tiles_skipped: outcome.tiles_skipped,
+        ops_rendered: outcome.ops_rendered,
+        ops_skipped: outcome.ops_skipped,
+        unsupported_kinds: outcome.unsupported_kinds,
+        pixels: readback.pixels,
+        tile_pixel_checksums: empty_sums
+    )
+    TileLaneFrame(engine: eng, render: render)
+
+# Oracle entry: create an engine on the requested backend, render one frame
+# through the tile lane, fill per-tile pixel checksums, shut the engine down.
+# CPU lane = backend "software"; GPU lane = tile_gpu_backend_name().
+fn tile_lane_render_commands(commands: [DrawIrCommand], doc_w: i32, doc_h: i32, view_w: i32, view_h: i32, margin: i32, clear_color: u32, backend_requested: text) -> TileLaneRender:
+    var engine = Engine2D.create_with_backend(view_w, view_h, backend_requested)
+    val frame = tile_lane_render_into(
+        engine, commands, doc_w, doc_h, view_w, view_h, margin, clear_color,
+        backend_requested)
+    engine = frame.engine
+    var render = frame.render
+    render.tile_pixel_checksums = tile_lane_pixel_checksums(
+        render.pixels, view_w, view_h, tile_lane_grid(doc_w, doc_h))
+    engine.shutdown()
+    render

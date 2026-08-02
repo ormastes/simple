@@ -1,0 +1,143 @@
+"""Tile GPU lane spec (T4)
+
+The CPU lane and the GPU lane are the same tile-lane function on different
+engine2d backends ("software" vs SIMPLE_2D_BACKEND/vulkan). On one shared
+DrawIR command list this proves:
+
+- per-tile pixel checksums are identical between the two lanes (parity oracle
+  over the readback framebuffer, tile by tile);
+- culled tiles are skipped in both lanes (exact tile/op replay counters; the
+  offscreen op is never replayed);
+- readback provenance is honest: a device-claiming source must carry a
+  nonzero backend handle + device identity on the vulkan backend, and any
+  cpu-side source must not carry device handles.
+
+Plan: doc/03_plan/ui/rendering/tile_render_culling_plan.md (T4)
+
+@tag: rendering, simple-web, tiles, gpu-lane
+@cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_tiles_gpu.spl 80%
+"""
+
+use std.spec.{describe, it, expect}
+use std.common.ui.draw_ir.{DrawIrCommand, draw_ir_rect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles_gpu.{
+    TileLaneRender, tile_gpu_backend_name, tile_gpu_flag_enabled,
+    tile_lane_render_commands
+}
+# Two 600x400 readback + per-tile checksum passes exceed the interpreter's
+# default 10M-operation cap. The driver reads SIMPLE_EXECUTION_LIMIT once at
+# startup, so the runner forwards this directive into the child env:
+# @exec_limit 2000000000
+
+# Fixture: 600x400 viewport over a 600x1200 document => 3x5 grid of 256px
+# tiles (15 tiles). margin=128 makes tile rows 0-2 live (9 tiles); rows 3-4
+# (6 tiles) are culled. The last op sits at y=1000 entirely inside the culled
+# rows and must never be replayed.
+val DOC_W: i32 = 600
+val DOC_H: i32 = 1200
+val VIEW_W: i32 = 600
+val VIEW_H: i32 = 400
+val MARGIN: i32 = 128
+val CLEAR: u32 = 0xFF101418u32
+
+fn _fixture_commands() -> [DrawIrCommand]:
+    var cmds: [DrawIrCommand] = []
+    # background: covers tile rows 0-1, all 3 columns (6 tiles)
+    cmds.push(draw_ir_rect("bg", 0, 0, 600, 400, 0xFF223344u32))
+    # single-tile op (tile 0)
+    cmds.push(draw_ir_rect("red", 10, 10, 100, 80, 0xFFCC2222u32))
+    # tile-boundary spanning op (crosses x=256: tiles 0 and 1)
+    cmds.push(draw_ir_rect("span", 240, 20, 60, 40, 0xFF22CC44u32))
+    # mid-viewport op (row 1, column 1)
+    cmds.push(draw_ir_rect("mid", 300, 300, 120, 60, 0xFF4466EEu32))
+    # offscreen op: y=1000 lies in culled tile rows 3-4 only
+    cmds.push(draw_ir_rect("culled", 50, 1000, 200, 100, 0xFFEEDD00u32))
+    cmds
+
+fn _cpu_lane() -> TileLaneRender:
+    tile_lane_render_commands(
+        _fixture_commands(), DOC_W, DOC_H, VIEW_W, VIEW_H, MARGIN, CLEAR,
+        "software")
+
+fn _gpu_lane() -> TileLaneRender:
+    tile_lane_render_commands(
+        _fixture_commands(), DOC_W, DOC_H, VIEW_W, VIEW_H, MARGIN, CLEAR,
+        tile_gpu_backend_name())
+
+describe "tile gpu lane (T4)":
+
+    it "defaults the gpu lane flag off and resolves a backend name":
+        expect(tile_gpu_flag_enabled()).to_equal(false)
+        expect(tile_gpu_backend_name() != "").to_equal(true)
+
+    it "replays only live-tile binned ops and skips culled tiles on the cpu lane":
+        val cpu = _cpu_lane()
+        expect(cpu.tiles_total).to_equal(15)
+        # bg in 6 tiles + red in 1 + span in 2 + mid in 1; culled op never
+        # replayed, empty live tiles (row 2) not rendered.
+        expect(cpu.tiles_rendered).to_equal(6)
+        expect(cpu.tiles_skipped).to_equal(9)
+        expect(cpu.ops_rendered).to_equal(10)
+        expect(cpu.ops_skipped).to_equal(0)
+        expect(cpu.unsupported_kinds).to_equal("")
+
+    it "produces identical per-tile pixel checksums on cpu and gpu lanes for the same DrawIR ops":
+        val cpu = _cpu_lane()
+        val gpu = _gpu_lane()
+        expect(cpu.tile_pixel_checksums.len()).to_equal(15)
+        expect(gpu.tile_pixel_checksums.len()).to_equal(15)
+        # same culling decisions on both lanes
+        expect(gpu.tiles_rendered).to_equal(cpu.tiles_rendered)
+        expect(gpu.tiles_skipped).to_equal(cpu.tiles_skipped)
+        expect(gpu.ops_rendered).to_equal(cpu.ops_rendered)
+        var mismatches = 0
+        var t = 0
+        while t < 15:
+            if cpu.tile_pixel_checksums[t] != gpu.tile_pixel_checksums[t]:
+                mismatches = mismatches + 1
+            t = t + 1
+        expect(mismatches).to_equal(0)
+
+    it "reports honest cpu-lane readback provenance":
+        val cpu = _cpu_lane()
+        expect(cpu.backend_requested).to_equal("software")
+        expect(cpu.backend_selected).to_equal("software")
+        expect(cpu.readback_source != "").to_equal(true)
+        # a cpu-side readback must not carry device provenance
+        expect(cpu.readback_backend_handle).to_equal(0)
+        expect(cpu.readback_device_identity).to_equal(0)
+        expect(cpu.readback_pixel_count).to_equal(240000)
+        expect(cpu.pixels.len()).to_equal(240000)
+
+    it "reports honest gpu-lane readback provenance (device claims carry handles)":
+        val gpu = _gpu_lane()
+        expect(gpu.readback_source != "").to_equal(true)
+        expect(gpu.readback_pixel_count).to_equal(240000)
+        expect(gpu.pixels.len()).to_equal(240000)
+        val device_claim = (
+            gpu.readback_source == "device_readback" or
+            gpu.readback_source == "host_cache_after_device_present"
+        )
+        var honest = false
+        if device_claim:
+            honest = (
+                gpu.readback_backend_handle != 0 and
+                gpu.readback_device_identity != 0 and
+                gpu.backend_selected == "vulkan"
+            )
+        else:
+            # no device claim: handles must be absent, and if the vulkan
+            # backend fell back it must say so rather than claim the device
+            honest = (
+                gpu.readback_backend_handle == 0 and
+                gpu.readback_device_identity == 0
+            )
+        expect(honest).to_equal(true)
+
+    it "renders nothing and skips every tile on an empty command list":
+        var empty: [DrawIrCommand] = []
+        val r = tile_lane_render_commands(
+            empty, DOC_W, DOC_H, VIEW_W, VIEW_H, MARGIN, CLEAR, "software")
+        expect(r.tiles_rendered).to_equal(0)
+        expect(r.tiles_skipped).to_equal(15)
+        expect(r.ops_rendered).to_equal(0)
