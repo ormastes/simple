@@ -1593,7 +1593,9 @@ pub(super) fn eval_bdd_builtin(
             }
             Ok(Some(Value::Nil))
         }
-        "fail_assertion" => {
+        // `fail` is the spec-author-facing alias (use std.spec.*); both report
+        // through the same failing-assertion path.
+        "fail" | "fail_assertion" => {
             let msg = eval_arg(
                 args,
                 0,
