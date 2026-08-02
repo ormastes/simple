@@ -153,3 +153,17 @@ advanced to 424 HIR modules. It then stopped in
 was produced. In accordance with the three-cycle guard, this grouped type-owner
 family is recorded for the next fresh continuation; no fourth repair/build
 cycle was attempted.
+
+## MIR target-family preload repair
+
+The diagnostic location was package-surface attribution rather than a physical
+use in `target_family.spl`: all three names occurred only in an unused preload
+inside `compiler/60.mir_opt/__init__.spl`. The preload is removed instead of
+adding false MIR hardware dependencies to the target-triple identity layer.
+Canonical ownership remains in `compiler.mir.mir_instruction_support`, with
+existing GPU/VHDL backend behavior coverage unchanged.
+
+`target_family_package_surface_spec.spl` imports the public `compiler.mir_opt`
+package and behaviorally verifies hosted/embedded classification plus feature
+metadata. Its bounded diagnostic passed 2/2 on the Rust seed, so it is focused
+supporting evidence only; the fresh no-stub Stage 4 build remains admission.

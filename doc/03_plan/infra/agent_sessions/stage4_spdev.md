@@ -16,11 +16,13 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
   shell/process owner family, and async random-access file owner through
   `180e4179c1a9`. Its three Stage 4 cycles advanced the HIR frontier from 395
   to 424 modules and proved each preceding blocker cleared.
-- The final permitted cycle stopped in
-  `src/compiler/mir_opt/mir_opt/target_family.spl` on unresolved
-  `GpuBarrierScope`, `GpuAtomicOpKind`, and `VhdlProcessKind`. This grouped type
-  owner family is the next fresh-continuation blocker; no repair or fourth
-  build was attempted.
+- The final permitted cycle stopped while lowering the MIR optimizer package
+  surface on unresolved `GpuBarrierScope`, `GpuAtomicOpKind`, and
+  `VhdlProcessKind`. Audit proved the reported `target_family.spl` location was
+  attribution to the first public re-export target: that file uses none of the
+  types. The stale unused preload in `60.mir_opt/__init__.spl` is removed and a
+  public package-surface behavior spec passes 2/2; a fresh Stage 4 run is still
+  required.
 - No fresh Stage 4 CLI has passed sanity or the essential-tools smoke, and no
   artifact has been deployed.
 
@@ -29,17 +31,14 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
 1. Fetch/rebase current `main` and preserve the existing Stage 3/native cache.
 2. Refresh Stage 3 incrementally because compiler sources changed.
 3. Run one full-resource Stage 4 cycle with the progress/RSS watcher.
-4. First audit and repair the three unresolved `target_family.spl` types as one
-   concrete-owner family, checking other agents/workspaces before editing and
-   adding behavior-level target-family coverage.
-5. On a distinct failure, claim it in the bug DB, fix pure-Simple first, add
+4. On a distinct failure, claim it in the bug DB, fix pure-Simple first, add
    exact and adjacent regression coverage, push, and retry within the
    three-cycle session cap.
-6. On success, run sanity and
+5. On success, run sanity and
    `scripts/check/check-bootstrap-essential-tools-smoke.shs` against the exact
    fresh Stage 4 binary. Require test-runner, lint, duplicate-check, and
    aggregate PASS markers.
-7. Deploy only that verified binary, record its path and hash, and update this
+6. Deploy only that verified binary, record its path and hash, and update this
    document with the retained logs and evidence.
 
 ### Manual Stage 3 refresh invariant
