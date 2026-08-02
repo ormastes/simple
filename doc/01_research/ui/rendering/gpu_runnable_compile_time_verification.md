@@ -186,3 +186,106 @@ Everything needed exists in pieces, none of it wired: the ban list (`gpu_checker
 the transitive fixpoint (`alloc_inference.spl`), the marker plumbing pattern
 (`@gpu_kernel` path), and the per-fn manifest template (`noalloc_checker.spl`). The work
 is composition plus one new annotation branch — not new analysis machinery.
+
+---
+
+## Deployment options (follow-up, 2026-08-01)
+
+### D1. Lint-only path: cost and the incremental variant
+
+**Scope sizing.** The target trees are ~293 files / ~112K lines
+(`src/lib/gc_async_mut/gpu/browser_engine` 154 files / 68K lines,
+`src/lib/gc_async_mut/gpu/engine2d` 113 / 38K, `src/lib/nogc_sync_mut/gpu/engine2d`
+26 / 5.2K) against 11,373 `.spl` files repo-wide — a scoped closure touches ~2.6% of the
+repo. Cost is parse-dominated (the fixpoint itself is a function-level worklist, linear in
+call edges), so scoping to the two dirs is the difference between "hundreds of ms class"
+and "whole-repo build class"; never run the closure repo-wide per lint invocation.
+
+**alloc_inference is whole-program and dormant.** `alloc_inference_analyze()` takes no
+arguments and reads module-level global state populated by `ceu_register_functions()`
+(`10.frontend/core/alloc_inference.spl:41,:31-38,:47-52`), shared with
+`call_graph_analyze` via `call_edge_utils.spl`. It is not invoked anywhere in-tree today
+(only re-exports, `core/__init__.spl:150-153`). So the fixpoint pattern is reusable, but
+it is driver-shaped, not per-file-lint-shaped.
+
+**Incremental design (recommended for lint):** per-file summary = {functions defined
+(name + arity + gpu_runnable flag), calls made (callee names), ban-list hits
+(construct + line)}, cached on disk keyed by file content hash; the fixpoint runs over
+summaries only, so an edit re-parses one file and re-runs a cheap reduce. No cache infra
+exists today — `cli_lint_commands.spl` and `query_lint.spl` have zero cache logic, and the
+LSP caches only document text by URI+version (`src/app/lsp/server.spl:12-80`) — so the
+summary store is new (a `.sdn` file under `build/` suffices).
+
+**Minimal lint-infra change: a POST-pass is feasible.** The per-file loop
+(`src/app/io/cli_lint_commands.spl:165-199`) is followed by an end-of-run aggregation
+block (`:201-215+`, fail-closed `not_linted_files` logic + `lint-summary` JSON emit), and
+`lint_files` is fully materialized before the loop (`:151-156`). Insert: (1) per-file
+step emitting the summary row (source-text scan, since the flat AST lacks attributes —
+A2), (2) after-loop reduce loading cached summaries for unvisited target-dir files and
+running the fixpoint. First run must seed the whole target dirs; thereafter cost ≈ changed
+files + reduce. The same summaries serve the `query_lint`/LSP path for per-keystroke UX.
+
+### D2. AOP / weave-time enforcement
+
+What exists: pointcut/advice declarations `on pc{ execution(...) } before|around <handler>`
+(`10.frontend/core/_ParserDecls/bitfield_aop_arch_decls.spl:186-240`); pointcut matching
+is **glob over function names only** (`10.frontend/core/aop.spl:120,:347-421`); weaving
+inserts **runtime calls** to advice functions at MIR level
+(`50.mir/mir_aop_injection.spl:38-151`) plus an interpreter weave
+(`70.backend/backend/interpreter_aop_weave.spl`); typed model in
+`85.mdsoc/weaving/`. MDSOC proper is structural — layer/import checkers
+(`85.mdsoc/layer_checker.spl`, `construct_checker.spl`) and SDN-driven dependency rules
+(`70.backend/arch_rules.spl:20-88`).
+
+**Verdict: not a path today.** Advice can wrap a function's *execution*; nothing can
+introspect a function's *body* at compile time. A rule-checking aspect would need three
+missing pieces: body/AST predicates in pointcuts, a compile-time reflection API over
+HIR bodies, and a diagnostic-emitting advice form. Absent those, "AOP enforcement" reduces
+to the module-family/arch-rules import fence — which Option C already covers more cheaply.
+Related non-option: `comptime` blocks and `@static_assert` exist
+(`10.frontend/core/parser_stmts.spl:415`,
+`interpreter/eval_builtins.spl:203-219`) but `__traits` reflection is type-shaped
+(`eval_builtins.spl:232-582`) — no query returns a function body, and there is no derive
+hook, so per-function assertions would have to be hand-written inside every body.
+
+### D3. Zero-compiler-change combo
+
+**(a) Family fence — NOT actually zero-compiler-change.** `RUNTIME_FAMILY_MANIFEST` is a
+hardcoded `val` table in the `.spl` (`35.semantics/gc_boundary_check.spl:94-106`), not
+config-driven, and the family/prefix logic is duplicated: `00.common/gc_config.spl:146-228`
+hardcodes the prefix classes; the interpreter loader has an independent if-chain of path
+substrings that returns `""` for unknown families and **silently skips the check**
+(`interpreter/module_loader_core.spl:446-480,:497-498`); sibling loaders and
+`90.tools/verify/noalloc_reachable.spl` carry their own family strings. (An alias
+`"gpu"` → `gc_async_mut` already exists, `gc_boundary_check.spl:64-70` — today the gpu dirs
+are just gc-family.) Creating a real `gpu` family = small edits in ~5 compiler files.
+Import-granularity only regardless. Classify as a cheap add-on to Option A, not part of C.
+
+**(b) Standalone scanner + pre-commit — genuinely zero-compiler-change, and prototyped.**
+`src/app/gpu_lint/gpu_runnable_scan.spl` exists (self-described prototype, :1-7):
+text-level scan over hardcoded target dirs (:183-188), conservative name-match call graph
+(`extract_callees` :97) with blockage-chain propagation (:367), intrinsic/banned-FFI
+classification (:113-124), report writer (:438-466). Run:
+`bin/simple run src/app/gpu_lint/gpu_runnable_scan.spl`. Wiring = one line
+`sh scripts/check/check-gpu-runnable.shs` in `scripts/hooks/pre-commit` (installed via
+`scripts/setup/install-workspace-guard-hook.shs:43-60`; examples at pre-commit :30,:35,:48)
+plus a CI step. Cost is per-commit, not per-edit.
+
+**(c) comptime/macro:** non-option (D2).
+
+### D4. Matrix and staged recommendation
+
+| | Compiler changes | Latency | Soundness |
+|---|---|---|---|
+| **A** semantic pass (35.semantics + fixpoint) | annotation branch, HirFunction bool, wire `gpu_checker`+`alloc_inference` | per-edit OK if scoped/incremental (D1) | high: real AST, arity-aware overloads |
+| **B** AOP/weave | build body-predicate pointcuts + HIR reflection + diagnostic advice | n/a | **infeasible today — reject** |
+| **C** scanner + pre-commit (+CI) | **none** | per-commit | gaps: text-level name matching (overload/arity-blind, alias/import renames invisible, method-call ambiguity → false positives AND misses) |
+
+**Staged path: C now → A later.** C is running-code distance from deployment: harden the
+prototype's callee matching slightly, add the check script + pre-commit/CI line, run in
+inventory (warning) mode to produce the non-offloadable list immediately, with zero risk
+to the compiler. Its name-match soundness gaps are acceptable for an inventory/ratchet
+gate but not for the W1 acceptance bar ("exact unsupported construct"). When the W1
+`@gpu_event` lane starts, build A (Part C design: annotation + `gpu_checker` wiring +
+fixpoint, with the D1 summary cache if lint-time UX is wanted); keep C as the independent
+out-of-band cross-check. Fold the `gpu` family-fence edits (D3a) into A's change set.
