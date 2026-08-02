@@ -593,6 +593,48 @@ correct `true` on the interpreter and a conservative `false` on JIT/native.
   **not** fixed here because backing it requires real runtime mode-switching
   support — a feature, not a rename. Inventing a receiver would convert a loud
   failure into a silent wrong answer.
+
+  **CLOSED 2026-08-02 — as a refusal, and the blast radius is ZERO.** The
+  above call was right to leave it loud, and the follow-up found the situation
+  is worse *and* harmless in a way the static read could not show:
+
+  1. **`std.spec.mode_runner` did not LOAD AT ALL.** Its module-level
+     initializer is `var _current_modes: ModeSet = ModeSet.all()`, but
+     `execution_mode.spl` declared `all`/`new`/`interpreter_only`/
+     `compiled_only` **without `static`**, so every call on the TYPE failed.
+     Importing the module aborted *before `main` started* with `unknown static
+     method all on class ModeSet`. Importing via `std.spec` instead left the
+     symbol simply absent: `function run_in_modes not found` — while `ModeSet`
+     from the sibling module resolved fine, which is the **control that
+     verifies the probe fires** and isolates the missing symbol. PROVED.
+  2. **`run_in_modes` never reached the externs anyway.** Its body assigned
+     `_current_modes` and called `block()` exactly ONCE; it never invoked
+     `ModeRunner.set_execution_mode`. So even fully backed externs would not
+     have switched anything. PROVED by reading + the load failure above.
+  3. **Measured extern behaviour** (probe fires on both sides): under the
+     default JIT the call logs `rt_interp_call: function not found:
+     runtime_set_jit_enabled`, returns nil, and the program **continues and
+     exits 0**. Under `SIMPLE_EXECUTION_MODE=interpreter` it refuses with
+     rc=1. Confirms the JIT-only silent path.
+  4. **Blast radius: ZERO.** `run_in_modes`, `ModeRunner`, `get_current_modes`
+     and `execute_in_mode` have **no callers anywhere in the repo** — no spec,
+     test or app. Verified in a clean origin-tip worktree; the shared working
+     copy's stale sibling worktrees inflate a naive grep and were the reason
+     this looked larger than it is. **No existing result rests on
+     `run_in_modes`, so nothing needs re-measuring.** The multi-mode harness
+     was never wired up rather than silently lying.
+
+  Fixed by making it **refuse**: the `static` declarations are corrected so the
+  module loads, the two unbacked externs are deleted, and both `run_in_modes`
+  and `set_execution_mode` now `panic` with an actionable message. In-process
+  engine switching is structurally impossible — the engine is chosen once per
+  process and `simple test` forces `interpret` for the whole run via
+  `run_file_with_interpreter_mode`, ignoring `SIMPLE_EXECUTION_MODE`.
+  Multi-mode coverage requires **one process per mode**.
+
+  Also in the same change: this file's `get_current_time_ms` was registered
+  nowhere either, so every `duration_ms` in every `TestResult` was fabricated
+  on the JIT lane. Routed to `rt_current_time_ms`, which *is* registered.
 - The remaining ~685 live-caller symbols belong to unbuilt subsystems (torch,
   lyon, vulkan/wgpu/metal/oneapi, the arm64/arm32/rv32/x86 emulation cores,
   tls13/ssh/quic, gui/gamepad/serial). Registering them per-symbol would be

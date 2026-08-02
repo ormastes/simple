@@ -1022,6 +1022,33 @@ Base sha `e4b4561c803f07e3f7cc7a5882876bd78ab6e3c2`, taken from `git ls-remote`.
   unrelated to these tables (it JITs and runs basic arithmetic) and remains
   open, recorded here rather than left implicit.
 
+  **ROOT-CAUSED AND FIXED 2026-08-02.** It is a use-after-free at **drop**
+  time, not in the code under test — `assert_eq!(result, 42)` had already
+  passed. Faulting PC `llvm::LLVMContext::removeModule+11`, reached via:
+
+  ```text
+  LocalExecutionManager::drop -> LlvmJitCompiler::drop
+    -> ExecutionEngine::drop -> MCJIT::~MCJIT
+    -> OwningModuleContainer::~OwningModuleContainer -> Module::~Module
+    -> LLVMContext::removeModule            (SIGSEGV)
+  ```
+
+  `LlvmJitCompiler::compile_module` built the module inside a **local**
+  `LlvmBackend`, whose `Box<Context>` owns the `LLVMContext`, then handed the
+  module to `create_jit_execution_engine`. **MCJIT takes ownership of the
+  module.** The backend then went out of scope at the end of `compile_module`
+  and freed the context, so dropping the engine later ran `~Module` against
+  freed memory. The struct's own `context` field was a red herring: it is never
+  the context the JIT module lives in, and its field ordering was already
+  correct — which is why the existing "borrowing fields declared first" comment
+  looked like it had already covered this.
+
+  Fixed by storing the backend beside the engine it feeds, declared **after**
+  `execution_engine` so the engine is destroyed while the context is still
+  valid, and retiring a previous engine before its backend is replaced.
+  PROVED: 3/3 `llvm_jit_tests` green after the change; the same binary
+  segfaulted at `test_llvm_jit_basic` before it. Nothing skipped or disabled.
+
 **Guard non-vacuity PROVED by sabotaging the IMPLEMENTATION, not a shim.** Four
 mappings were reverted in the non-test source with every test body untouched —
 `closures_structs.rs` `find` back to `rt_string_find`, `calls.rs` `find` back to
@@ -1038,6 +1065,76 @@ tests are independent and neither is carrying the other.
 - **`sort` has the same divergence `reverse` had**: it lowers to the in-place
   `rt_array_sort` and stays in the `in_place` set, while the interpreter's array
   `"sort"` copies. Needs a copying runtime symbol first.
+
+  **CLOSED 2026-08-02 — but the predicted fix was WRONG, and finding out why
+  matters more than the fix.** "The interpreter's array `sort` copies" is what
+  `interpreter_method/collections.rs` says in isolation, and it is **not what
+  the language does**. `interpreter_method/mod.rs` lists `"sort"` in
+  `MUTATING_METHODS` and **writes the result back to the receiver binding**.
+  Measured end to end on the interpreter — the spec:
+
+  ```text
+  var a = [3, 1, 2]
+  val b = a.sort()     # b = [1, 2, 3]  AND  a = [1, 2, 3]
+  "cba".sort()         # error: method `sort` not found on type `str`  (rc=1)
+  ```
+
+  A *copying* `sort` — the obvious "make it like `reverse`" change — was
+  written, measured against that hand-computed expectation, **caught diverging
+  on the aliasing axis, and replaced.** Cross-engine agreement would not have
+  caught it; only comparing against the interpreter's observed behaviour did.
+
+  What was actually wrong with `"sort" => rt_array_sort`:
+  - `rt_array_sort` returns a **bool**, so the value was only ever right while
+    `sort` sat in the `in_place` set that substitutes the receiver vreg;
+  - on a **text** receiver it returned `false` and that substitution silently
+    handed back the unsorted receiver, where the interpreter errors outright;
+  - `runtime_native.c` has **never defined `rt_array_sort`**, so `arr.sort()`
+    did not link at all on the native lane.
+
+  Fixed by adding **`rt_sort` to both runtimes** — sort an array in place,
+  return that same array, refuse any other receiver loudly (`exit 70`) rather
+  than substitute a value — routing the four type-blind tables and the
+  type-aware LLVM arm to it, and **removing `sort` from the `in_place` set**,
+  because `rt_sort` now supplies its own return value and the substitution
+  would otherwise defeat the text refusal.
+
+  PROVED, both engines, `[jit-fallback]` asserted 0:
+
+  | case  | JIT                  | interpreter          |
+  |-------|----------------------|----------------------|
+  | array | `b=[1,2,3] a=[1,2,3]`| `b=[1,2,3] a=[1,2,3]`|
+  | text  | rc=70, refusal       | rc=1, refusal        |
+
+  Before the fix the JIT printed `u=abc` for `"cba".sort()` — a silent wrong
+  answer. `simple-compiler --lib` 3456/118 and `simple-runtime --lib` 1085/7,
+  failure NAME SETS identical to baseline by `diff`.
+  `runtime_sffi::all_funcs_have_unique_names` was confirmed **pre-existing** by
+  removing the new spec line and re-running (1178/1179 duplicate either way).
+
+- **OPEN — `reverse` now diverges on receiver rebinding, introduced by
+  `982ed57f65e`.** The same `MUTATING_METHODS` write-back that governs `sort`
+  also lists `"reverse"`, so the interpreter rebinds the receiver there too.
+  Routing `reverse` to the copying `rt_reverse` fixed the text case and the
+  native link but made the JIT stop rebinding. Measured on a binary built at
+  `14d7aba` (which contains that commit):
+
+  ```text
+  val a = [3, 1, 2]; val b = a.reverse()
+  JIT          b=[2,1,3]  a=[3,1,2]      <-- receiver NOT rebound
+  interpreter  b=[2,1,3]  a=[2,1,3]      <-- receiver rebound
+  ```
+
+  A binary predating the commit agreed with the interpreter on both. So this is
+  a **live silent wrong answer on the aliasing axis**, of exactly the shape the
+  `reverse` fix was written to remove. Not changed here: it means revisiting
+  another lane's landed decision and its
+  `rt_reverse_copies_and_leaves_the_receiver_alone` test, which should be a
+  deliberate call rather than a side effect of the `sort` work. The likely
+  resolution is the one `sort` took — reverse in place, return the receiver,
+  refuse non-array/non-text loudly — but that must be confirmed against
+  `interpreter_method/string.rs`, since **text** `reverse` genuinely copies and
+  has no receiver to rebind.
 - **`rt_value_float` signature divergence** (§6) — unchanged.
 - **`rt_par_*`** — must stay undefined until their emitters thread the real
   operands.
