@@ -49,6 +49,10 @@ The harness version-probes the `simple_seed` binary at startup:
 ## Related layer experts
 - [os_compositor](../../layer_expert/os_compositor/skill.md) — WM frame composition + scene projection
 - [bootstrap](../../layer_expert/bootstrap/skill.md) — seed/stage2/stage3 redeploy gate
+- [simpleos_cxl_device_process](../simpleos_cxl_device_process/skill.md) — isolated drivers, DMA/IOMMU, CXL, and QEMU evidence boundaries
+
+QEMU steps skipped because the pure-Simple CLI or bootstrap admission failed are
+blocked evidence, not passing SimpleOS device tests.
 
 ## Update Rule
 After harness admission logic, timeout behavior, evidence-lane additions, or seed

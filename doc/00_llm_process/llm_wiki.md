@@ -60,6 +60,29 @@ after changing PCI/ivshmem ownership. A source check or QEMU preflight does not
 replace a live device-origin readback receipt. Non-native platform rows must
 report unavailable or pending, never fabricated PASS.
 
+## SimpleOS device process / CXL / "driver in device"
+
+- **Canonical architecture:** isolated user-space hardware drivers with kernel-
+  enforced capabilities, IRQ routing, DMA/IOMMU, reset, and revocation.
+- **Default placement:** `HostIsolated`; colocation is profiling-driven.
+- **CXL Type 3:** host-visible memory, not a processor and not proof of a
+  device-local driver.
+- **Host queues in Type 3 memory:** call these `CxlHostMapped`.
+- **Device-local execution:** use `DeviceResident` only for a programmable,
+  securely loadable endpoint with watchdog/reset and a defined transport.
+- **UNO Q:** distributed MPU/MCU device graph with `NoCxl` under currently
+  published interfaces.
+- **Guide:** `doc/07_guide/platform/simpleos/cxl_device_process_architecture.md`.
+- **Expert note:** `doc/00_llm_process/feature_expert/simpleos_cxl_device_process/skill.md`.
+
+### Evidence lookup rule
+
+Research and selected requirements are available, but executable CXL/device-
+process specs and implementation are not yet present. Do not treat a QEMU job
+skipped after an upstream bootstrap failure as PASS. Keep documentation,
+executable-spec, QEMU-functional, real-IOMMU, and physical-device evidence as
+separate claim levels.
+
 ## PostgreSQL mimic / Simple DB server
 
 - **Protocol/session owner:** `std.database.postgres_mimic`.
