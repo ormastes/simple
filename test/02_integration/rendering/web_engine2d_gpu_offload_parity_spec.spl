@@ -1,0 +1,425 @@
+"""Simple Web Renderer non-Metal GPU Offload Parity (end-to-end)
+
+@tag: rendering, engine2d, vulkan, software, web, html, css, offload, scroll, parity
+@cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_engine2d_renderer.spl 90%
+@cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_engine2d_presenter.spl 90%
+
+Non-Metal sibling of web_engine2d_metal_offload_spec.spl. Proves the Simple Web
+surface (HTML AST + CSS pipeline) renders through the engine2d GPU offload path
+on the best lane available on THIS host — Vulkan when a device initializes,
+otherwise the deterministic software backend — with readback provenance and
+CPU parity.
+
+Lane selection is fail-closed: the spec resolves "vulkan" through the real
+probe (`simple_web_engine2d_resolved_backend_name`), which returns either
+"vulkan" (device initialized) or "software" (probe failed). Anything else is a
+hard failure with a printed reason — never a silent pass.
+
+Provenance is asserted the honest way (see
+doc/08_tracking/bug/web_render_gpu_backend_provenance_fabricated_2026-06-17.md:
+the requested-name label once fabricated "GPU-backed" evidence). Real offload
+must show `source == "device_readback"` with `backend_handle > 0` and
+`device_identity > 0` from the actual device readback; the software lane must
+honestly report `cpu_mirror` — never a GPU label.
+
+Parity strategy: the layout renderer carries a hostile-page wall-clock budget;
+on the interpreted lane it can expire mid-style ("[web-style-producer]
+budget-break"), which makes two renders of the SAME html legitimately diverge
+(graceful degradation, by design). Raising the budget instead trips the
+interpreter's 10M-operation execution limit. So:
+  - Single-source parity (CPU pixels blitted through the real GPU lane and
+    read back) is asserted UNCONDITIONALLY — it cannot be perturbed by the
+    budget and is the actual offload-path proof.
+  - Cross-render parity (two independent full renders) is asserted whenever
+    `simple_web_layout_last_render_degraded()` reports both renders completed;
+    a degraded render prints an explicit skip reason and still asserts the
+    non-parity invariants.
+"""
+
+use std.spec.{describe, context, it, expect}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_last_render_degraded}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_pixels,
+    simple_web_layout_render_html_pixels_at_scroll,
+    simple_web_layout_render_html_readback,
+    simple_web_layout_render_html_readback_paint,
+    simple_web_layout_render_html_should_gpu_paint,
+    simple_web_layout_render_html_gpu_paint_route_verdict,
+    web_gpu_paint_backend_verdict,
+    web_gpu_paint_timing_cache_reset}
+use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
+    simple_web_engine2d_render_html_pixels,
+    simple_web_engine2d_render_html_readback,
+    simple_web_engine2d_resolved_backend_name,
+    simple_web_html_background_color}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+val SPEC_W: i32 = 80
+val SPEC_H: i32 = 60
+
+# ============================================================================
+# Result type for direct Engine2D lane render
+# ============================================================================
+
+class LaneDirectResult:
+    ok: bool
+    source: text
+    handle: i64
+    identity: i64
+    px: [u32]
+
+# ============================================================================
+# Fixtures — scenes exercising text, boxes, colors, borders, nesting
+# ============================================================================
+
+# S1: text-heavy scene (h1/p/span) — routes through the full layout renderer.
+fn _fixture_text_html() -> text:
+    "<html><head><style>" +
+    "body { background-color: #1a1a2e; color: #e0e0ff; }" +
+    "h1 { background-color: #16213e; color: #a0c4ff; padding: 8px; }" +
+    ".card { background-color: #0f3460; border: 2px solid #533483; padding: 8px; }" +
+    ".tag { background-color: #533483; color: #fff; }" +
+    "</style></head><body>" +
+    "<h1>Offload Web Spec</h1>" +
+    "<div class='card'><p>GPU offload test</p><span class='tag'>Lane</span></div>" +
+    "<div class='card'><p>Scroll content below fold</p></div>" +
+    "<div class='card'><p>Block 3 — below viewport</p></div>" +
+    "</body></html>"
+
+# S2: nested boxes with borders and distinct colors.
+fn _fixture_boxes_html() -> text:
+    "<html><head><style>" +
+    "body { background-color: #202430; }" +
+    ".outer { background-color: #2d6a4f; border: 3px solid #d8f3dc; padding: 6px; }" +
+    ".inner { background-color: #b5838d; border: 1px solid #ffcdb2; }" +
+    "</style></head><body>" +
+    "<div class='outer'><p>outer</p><div class='inner'><span>inner</span></div></div>" +
+    "</body></html>"
+
+# S3: solid background, no text tags — renderer heuristic/solid path.
+fn _fixture_solid_html() -> text:
+    "<html><head><style>body { background-color: #204060; }</style></head>" +
+    "<body><div>plain</div></body></html>"
+
+# S4: inline block colors with size hints — renderer heuristic surface path.
+fn _fixture_blocks_html() -> text:
+    "<html><body>" +
+    "<div style='background-color: #aa3355; width: 80px; height: 40px'></div>" +
+    "<div style='background-color: #33aa55; width: 80px; height: 40px'></div>" +
+    "</body></html>"
+
+# S5: "Simple Web" mark on white — renderer accent-stripe heuristic path.
+fn _fixture_mark_html() -> text:
+    "<html><body>Simple Web</body></html>"
+
+# S6: toolbar/modal grid marker — renderer fixed-grid path.
+fn _fixture_toolbar_grid_html() -> text:
+    "<html><body><div class='simple-web-engine2d-toolbar-modal-grid'></div></body></html>"
+
+# ============================================================================
+# Helpers
+# ============================================================================
+
+fn _diffcount(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _nonzero(px: [u32]) -> i32:
+    var n = 0
+    var i = 0
+    while i < px.len():
+        if px[i] != 0u32:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _count_color(px: [u32], color: u32) -> i32:
+    var n = 0
+    var i = 0
+    while i < px.len():
+        if px[i] == color:
+            n = n + 1
+        i = i + 1
+    n
+
+# Resolve the non-Metal offload lane available on this host via the REAL probe:
+# "vulkan" when the device initializes, otherwise "software" (fail-closed).
+fn _offload_lane() -> text:
+    simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "vulkan")
+
+fn _lane_is_gpu(lane: text) -> bool:
+    lane == "vulkan"
+
+# Cross-render parity gate: bit-exact comparison is only meaningful when
+# neither render was degraded by the wall-clock budget. Prints an explicit
+# skip reason when degraded — never silently weakens the assertion.
+fn _assert_parity_unless_degraded(label: text, a: [u32], a_degraded: bool, b: [u32], b_degraded: bool):
+    expect(a.len()).to_equal(SPEC_W * SPEC_H)
+    expect(b.len()).to_equal(SPEC_W * SPEC_H)
+    if a_degraded or b_degraded:
+        print "[offload-parity] SKIP {label}: render degraded by wall-clock budget (a={a_degraded} b={b_degraded}) — cross-render parity not comparable on this host"
+    else:
+        expect(_diffcount(a, b)).to_equal(0)
+
+# Render cpu-oracle pixels onto the lane backend directly through the Engine2D
+# facade using per-row filled-rect runs (the same GPU-dispatched primitive the
+# offload path uses), then read back with provenance.
+fn _render_lane_direct(lane: text, cpu_px: [u32]) -> LaneDirectResult:
+    val engine_result = Engine2D.create_requested_backend(SPEC_W, SPEC_H, lane)
+    match engine_result:
+        Err(_):
+            LaneDirectResult(ok: false, source: "create_failed", handle: 0, identity: 0, px: [])
+        Ok(engine):
+            engine.clear(0xFFFFFFFFu32)
+            var y = 0
+            while y < SPEC_H:
+                var x = 0
+                while x < SPEC_W:
+                    val color = cpu_px[y * SPEC_W + x]
+                    var run_w = 1
+                    while x + run_w < SPEC_W and cpu_px[y * SPEC_W + x + run_w] == color:
+                        run_w = run_w + 1
+                    engine.draw_rect_filled(x, y, run_w, 1, color)
+                    x = x + run_w
+                y = y + 1
+            engine.present()
+            val readback = engine.read_pixels_with_source()
+            engine.shutdown()
+            LaneDirectResult(
+                ok: true,
+                source: readback.source,
+                handle: readback.backend_handle,
+                identity: readback.device_identity,
+                px: readback.pixels)
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+describe "Simple Web Renderer non-Metal GPU offload parity":
+
+    context "lane selection (fail closed)":
+
+        it "selects an available offload lane on this host or fails with a printed reason":
+            val lane = _offload_lane()
+            if lane != "vulkan" and lane != "software":
+                print "[offload-lane] NO ENGINE2D LANE AVAILABLE on this host: resolved='{lane}' — genuine gap, failing closed"
+            print "[offload-lane] selected lane: {lane}"
+            expect(lane == "vulkan" or lane == "software").to_equal(true)
+
+        it "resolves cpu and software requests verbatim and vulkan only via the probe":
+            expect(simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "cpu")).to_equal("cpu")
+            expect(simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "software")).to_equal("software")
+            val resolved = simple_web_engine2d_resolved_backend_name(SPEC_W, SPEC_H, "vulkan")
+            expect(resolved == "vulkan" or resolved == "software").to_equal(true)
+
+        it "classifies backends for GPU paint offload honestly":
+            expect(web_gpu_paint_backend_verdict("vulkan")).to_equal("gpu-paint-candidate")
+            expect(web_gpu_paint_backend_verdict("cpu")).to_equal("cpu-backend-not-gpu-offload")
+            expect(web_gpu_paint_backend_verdict("software")).to_equal("cpu-backend-not-gpu-offload")
+            expect(web_gpu_paint_backend_verdict("no-such-backend")).to_equal("unknown-backend-not-gpu-offload")
+
+    context "CPU oracle baseline":
+
+        it "renders a non-empty pixel buffer with the declared CSS background":
+            val html = _fixture_text_html()
+            val first = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val first_degraded = simple_web_layout_last_render_degraded()
+            val second = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val second_degraded = simple_web_layout_last_render_degraded()
+            expect(_nonzero(first)).to_be_greater_than(0)
+            expect(_count_color(first, 0xFF1A1A2Eu32)).to_be_greater_than(0)
+            _assert_parity_unless_degraded("cpu-determinism", first, first_degraded, second, second_degraded)
+
+        it "extracts a declared CSS color as the page background":
+            # The extractor is a precedence heuristic under active refinement —
+            # assert it lands on one of the fixture's DECLARED colors rather
+            # than pinning one precedence winner.
+            val bg = simple_web_html_background_color(_fixture_text_html())
+            print "[offload-bg-extract] extracted={bg}"
+            val declared = (bg == 0xFF1A1A2Eu32 or bg == 0xFF16213Eu32 or
+                bg == 0xFF0F3460u32 or bg == 0xFF533483u32)
+            expect(declared).to_equal(true)
+
+    context "offload readback provenance (anti-fabrication)":
+
+        it "lane readback carries genuine provenance and matches the cpu oracle":
+            val lane = _offload_lane()
+            val html = _fixture_text_html()
+            val cpu_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val readback = simple_web_layout_render_html_readback(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = simple_web_layout_last_render_degraded()
+            print "[offload-provenance] lane={lane} source={readback.source} handle={readback.backend_handle} identity={readback.device_identity}"
+            expect(readback.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
+            expect(readback.checksum).to_be_greater_than(0)
+            if _lane_is_gpu(lane):
+                # Real device offload: pixels physically copied back from the GPU.
+                expect(readback.source).to_equal("device_readback")
+                expect(readback.backend_handle).to_be_greater_than(0)
+                expect(readback.device_identity).to_be_greater_than(0)
+            else:
+                # Software lane must honestly report a CPU mirror — a GPU label
+                # here would be the fabricated-provenance bug resurfacing.
+                expect(readback.source).to_equal("cpu_mirror")
+            _assert_parity_unless_degraded("text-scene-lane", cpu_px, cpu_degraded, readback.pixels, lane_degraded)
+
+        it "cpu-backend readback through the renderer facade is an honest cpu_mirror":
+            val readback = simple_web_engine2d_render_html_readback(_fixture_text_html(), SPEC_W, SPEC_H, "cpu")
+            expect(readback.source).to_equal("cpu_mirror")
+            expect(readback.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
+
+        it "rejects degenerate surfaces with a not_requested readback":
+            val readback = simple_web_engine2d_render_html_readback(_fixture_text_html(), 0, SPEC_H, "cpu")
+            expect(readback.source).to_equal("not_requested")
+            expect(readback.pixels.len()).to_equal(0)
+            val none = simple_web_engine2d_render_html_pixels(_fixture_text_html(), SPEC_W, 0, "cpu")
+            expect(none.len()).to_equal(0)
+
+    context "CPU parity across scenes (offload lane)":
+
+        it "nested boxes-and-borders scene matches between cpu oracle and offload lane":
+            val lane = _offload_lane()
+            val html = _fixture_boxes_html()
+            val cpu_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val lane_px = simple_web_layout_render_html_pixels(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = simple_web_layout_last_render_degraded()
+            expect(_nonzero(cpu_px)).to_be_greater_than(0)
+            _assert_parity_unless_degraded("boxes-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
+
+        it "direct Engine2D lane render of the cpu oracle is bit-exact with real provenance":
+            # Single pixel source: the cpu frame is blitted through the lane's
+            # GPU primitives and read back — budget-immune, always bit-exact.
+            val lane = _offload_lane()
+            val cpu_px = simple_web_layout_render_html_pixels(_fixture_text_html(), SPEC_W, SPEC_H, "cpu")
+            val res = _render_lane_direct(lane, cpu_px)
+            expect(res.ok).to_equal(true)
+            expect(res.px.len()).to_equal(SPEC_W * SPEC_H)
+            expect(_diffcount(cpu_px, res.px)).to_equal(0)
+            if _lane_is_gpu(lane):
+                # Either a direct device readback or the host cache of a frame a
+                # real device present produced — both carry device provenance,
+                # and the handle/identity assertions below are the actual proof.
+                val device_sourced = (res.source == "device_readback" or
+                    res.source == "host_cache_after_device_present")
+                assert_true(device_sourced)
+                expect(res.handle).to_be_greater_than(0)
+                expect(res.identity).to_be_greater_than(0)
+            else:
+                expect(res.source).to_equal("cpu_mirror")
+
+    context "renderer heuristic routing (backend-independent surfaces)":
+
+        it "solid-background scene is dominated by the CSS color and parity holds":
+            val lane = _offload_lane()
+            val html = _fixture_solid_html()
+            val cpu_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val lane_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = simple_web_layout_last_render_degraded()
+            # Majority (not exact-full-frame) — the routed renderer may paint
+            # the "plain" text run over the background.
+            expect(_count_color(cpu_px, 0xFF204060u32)).to_be_greater_than((SPEC_W * SPEC_H) / 2)
+            _assert_parity_unless_degraded("solid-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
+
+        it "inline block colors paint heuristic rects identically on both lanes":
+            val lane = _offload_lane()
+            val html = _fixture_blocks_html()
+            val cpu_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val cpu_degraded = simple_web_layout_last_render_degraded()
+            val lane_px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, lane)
+            val lane_degraded = simple_web_layout_last_render_degraded()
+            expect(_count_color(cpu_px, 0xFFAA3355u32)).to_be_greater_than(0)
+            _assert_parity_unless_degraded("blocks-scene-lane", cpu_px, cpu_degraded, lane_px, lane_degraded)
+
+        it "Simple Web mark scene paints accent stripes over the white background":
+            val html = _fixture_mark_html()
+            val px = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            expect(px.len()).to_equal(SPEC_W * SPEC_H)
+            # Stripe column at x=0 spans the full height — corner pixel is not white.
+            expect(px[0] != 0xFFFFFFFFu32).to_equal(true)
+            expect(_count_color(px, 0xFFFFFFFFu32)).to_be_greater_than(0)
+
+        it "toolbar modal grid marker renders the fixed deterministic grid":
+            val html = _fixture_toolbar_grid_html()
+            val first = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            val second = simple_web_engine2d_render_html_pixels(html, SPEC_W, SPEC_H, "cpu")
+            expect(first.len()).to_equal(SPEC_W * SPEC_H)
+            expect(_nonzero(first)).to_be_greater_than(0)
+            # Fixed pixel grid — no layout/budget involvement, always exact.
+            expect(_diffcount(first, second)).to_equal(0)
+
+    context "scroll offset rendering on the offload lane":
+
+        it "scrolled content shifts correctly and matches on the offload lane":
+            val lane = _offload_lane()
+            val html = _fixture_text_html()
+            val scroll_dy = 10
+            val px0 = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, "cpu", 0)
+            val px0_degraded = simple_web_layout_last_render_degraded()
+            val pxDy = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, "cpu", scroll_dy)
+            val pxDy_degraded = simple_web_layout_last_render_degraded()
+            expect(px0.len()).to_equal(SPEC_W * SPEC_H)
+            expect(pxDy.len()).to_equal(SPEC_W * SPEC_H)
+            if px0_degraded or pxDy_degraded:
+                print "[offload-parity] SKIP scroll-shift: render degraded by wall-clock budget — shift comparison not stable on this host"
+            else:
+                expect(_diffcount(px0, pxDy)).to_be_greater_than(0)
+                # Shift correctness: row Y at offset 0 == row Y-dy at offset dy.
+                var row_band_diff = 0
+                var row = scroll_dy
+                while row < SPEC_H:
+                    var col = 0
+                    while col < SPEC_W:
+                        if px0[row * SPEC_W + col] != pxDy[(row - scroll_dy) * SPEC_W + col]:
+                            row_band_diff = row_band_diff + 1
+                        col = col + 1
+                    row = row + 1
+                expect(row_band_diff).to_equal(0)
+            # Lane parity at the same scroll offset.
+            val lane_px = simple_web_layout_render_html_pixels_at_scroll(html, SPEC_W, SPEC_H, lane, scroll_dy)
+            val lane_degraded = simple_web_layout_last_render_degraded()
+            _assert_parity_unless_degraded("scroll-lane", pxDy, pxDy_degraded, lane_px, lane_degraded)
+
+    context "GPU paint route selection":
+
+        it "route verdict reports disabled, cpu, and candidate lanes distinctly":
+            val html = _fixture_text_html()
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(html, SPEC_W, SPEC_H, "vulkan", false)).to_equal("gpu-paint-disabled")
+            expect(simple_web_layout_render_html_gpu_paint_route_verdict(html, SPEC_W, SPEC_H, "cpu", true)).to_equal("cpu-backend-not-gpu-offload")
+            val verdict = simple_web_layout_render_html_gpu_paint_route_verdict(html, SPEC_W, SPEC_H, "vulkan", true)
+            print "[gpu-paint-route] vulkan verdict: {verdict}"
+            expect(verdict.starts_with("gpu-paint:") or verdict.starts_with("cpu-mirror:")).to_equal(true)
+            expect(simple_web_layout_render_html_should_gpu_paint(html, SPEC_W, SPEC_H, "vulkan", false)).to_equal(false)
+            expect(simple_web_layout_render_html_should_gpu_paint(html, SPEC_W, SPEC_H, "cpu", true)).to_equal(false)
+
+        it "explicit gpu-paint readback on the lane matches the cpu truth":
+            web_gpu_paint_timing_cache_reset()
+            val lane = _offload_lane()
+            val html = _fixture_boxes_html()
+            val cpu_truth = simple_web_layout_render_html_readback_paint(html, SPEC_W, SPEC_H, "cpu", false)
+            val cpu_degraded = simple_web_layout_last_render_degraded()
+            expect(cpu_truth.source).to_equal("cpu_mirror")
+            val lane_paint = simple_web_layout_render_html_readback_paint(html, SPEC_W, SPEC_H, lane, true)
+            val lane_degraded = simple_web_layout_last_render_degraded()
+            print "[gpu-paint-readback] lane={lane} source={lane_paint.source} handle={lane_paint.backend_handle}"
+            expect(lane_paint.pixel_count).to_equal((SPEC_W * SPEC_H).to_i64())
+            if _lane_is_gpu(lane):
+                expect(lane_paint.source).to_equal("device_readback")
+                expect(lane_paint.backend_handle).to_be_greater_than(0)
+            else:
+                expect(lane_paint.source).to_equal("cpu_mirror")
+            _assert_parity_unless_degraded("gpu-paint-lane", cpu_truth.pixels, cpu_degraded, lane_paint.pixels, lane_degraded)
