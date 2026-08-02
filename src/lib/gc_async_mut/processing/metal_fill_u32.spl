@@ -1,8 +1,9 @@
 """Native Metal executor for the validated ProcessingIR FillU32 operation."""
 
-use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+use std.common.processing.processing_ir.{PROCESSING_IR_OP_FILL_RECT_U32, ProcessingIr, processing_ir_validate}
 use std.common.hash.djb2.{djb2_hash_text}
 use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_reason}
+use std.gc_async_mut.processing.metal_msl_backend.{processing_metal_source}
 use std.gc_async_mut.io.metal_sffi.{
     metal_device_info, metal_sffi_init, metal_sffi_is_available, metal_sffi_device_count,
     metal_sffi_create_device, metal_sffi_destroy_device,
@@ -16,8 +17,6 @@ use std.gc_async_mut.io.metal_ptr.{metal_buffer_download_ptr, metal_u32s_from_pt
 use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free}
 
 val PROCESSING_METAL_BLOCK_SIZE: i64 = 256
-val PROCESSING_METAL_MSL: text = "#include <metal_stdlib>\nusing namespace metal;\nstruct ProcessingFillParams { uint value; uint count; };\nkernel void processing_fill_u32(device uint* output [[buffer(0)]], device uint* unused [[buffer(1)]], constant ProcessingFillParams& p [[buffer(2)]], uint tid [[thread_position_in_grid]]) { if (tid >= p.count) return; output[tid] = p.value; }\n"
-
 struct ProcessingMetalResult:
     completed: bool
     reason: text
@@ -35,18 +34,20 @@ fn _processing_metal_failure(reason: text) -> ProcessingMetalResult:
     ProcessingMetalResult(completed: false, reason: reason, values: [], backend_handle: 0, device_identity: 0)
 
 fn _processing_metal_params(ir: ProcessingIr) -> [u8]:
-    val value = ir.value
-    val count = ir.element_count.to_u32()
-    [
-        (value & 0xFFu32).to_u8(),
-        ((value >> 8u32) & 0xFFu32).to_u8(),
-        ((value >> 16u32) & 0xFFu32).to_u8(),
-        ((value >> 24u32) & 0xFFu32).to_u8(),
-        (count & 0xFFu32).to_u8(),
-        ((count >> 8u32) & 0xFFu32).to_u8(),
-        ((count >> 16u32) & 0xFFu32).to_u8(),
-        ((count >> 24u32) & 0xFFu32).to_u8()
-    ]
+    var words: [u32] = []
+    if ir.op == PROCESSING_IR_OP_FILL_RECT_U32:
+        words = [ir.width.to_u32(), ir.height.to_u32(), ir.stride.to_u32(),
+            ir.x.to_u32(), ir.y.to_u32(), ir.rect_width.to_u32(),
+            ir.rect_height.to_u32(), ir.value]
+    else:
+        words = [ir.value, ir.element_count.to_u32()]
+    var bytes: [u8] = []
+    for word in words:
+        bytes.push((word & 0xFFu32).to_u8())
+        bytes.push(((word >> 8u32) & 0xFFu32).to_u8())
+        bytes.push(((word >> 16u32) & 0xFFu32).to_u8())
+        bytes.push(((word >> 24u32) & 0xFFu32).to_u8())
+    bytes
 
 fn _processing_metal_cleanup(device: i64, queue: i64, shader: i64, pipeline: i64, output: i64, dummy: i64, host: i64, byte_count: i64):
     if host != 0:
@@ -64,10 +65,16 @@ fn _processing_metal_cleanup(device: i64, queue: i64, shader: i64, pipeline: i64
     if device != 0:
         metal_sffi_destroy_device(device)
 
-fn processing_ir_execute_metal(ir: ProcessingIr) -> ProcessingMetalResult:
+fn processing_ir_execute_metal_artifact(ir: ProcessingIr, source: text, entry_point: text) -> ProcessingMetalResult:
     val valid = processing_ir_validate(ir)
     if not valid.valid:
         return _processing_metal_failure(valid.reason)
+    val expected_source = processing_metal_source(ir)
+    val expected_entry = if ir.op == PROCESSING_IR_OP_FILL_RECT_U32: "processing_fill_rect" else: "processing_fill_u32"
+    if source == "" or source != expected_source:
+        return _processing_metal_failure("metal-artifact-source-mismatch")
+    if entry_point != expected_entry:
+        return _processing_metal_failure("metal-artifact-entry-mismatch")
     val unavailable_fault = processing_ir_fault_reason("metal", "unavailable")
     if unavailable_fault != "":
         return _processing_metal_failure(unavailable_fault)
@@ -91,11 +98,11 @@ fn processing_ir_execute_metal(ir: ProcessingIr) -> ProcessingMetalResult:
     if queue == 0:
         _processing_metal_cleanup(device, 0, 0, 0, 0, 0, 0, 0)
         return _processing_metal_failure("metal-command-queue-create-failed")
-    val shader = metal_sffi_compile_shader(device, PROCESSING_METAL_MSL)
+    val shader = metal_sffi_compile_shader(device, source)
     if shader == 0:
         _processing_metal_cleanup(device, queue, 0, 0, 0, 0, 0, 0)
         return _processing_metal_failure("metal-shader-compile-failed")
-    val pipeline = metal_sffi_create_compute_pipeline(device, shader, "processing_fill_u32")
+    val pipeline = metal_sffi_create_compute_pipeline(device, shader, entry_point)
     if pipeline == 0:
         _processing_metal_cleanup(device, queue, shader, 0, 0, 0, 0, 0)
         return _processing_metal_failure("metal-pipeline-create-failed")
@@ -108,12 +115,15 @@ fn processing_ir_execute_metal(ir: ProcessingIr) -> ProcessingMetalResult:
         _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
         return _processing_metal_failure("metal-allocation-failed")
 
-    val groups = (ir.element_count + PROCESSING_METAL_BLOCK_SIZE - 1) / PROCESSING_METAL_BLOCK_SIZE
+    val groups = if ir.op == PROCESSING_IR_OP_FILL_RECT_U32: (ir.stride + 15) / 16 else: (ir.element_count + PROCESSING_METAL_BLOCK_SIZE - 1) / PROCESSING_METAL_BLOCK_SIZE
+    val groups_y = if ir.op == PROCESSING_IR_OP_FILL_RECT_U32: (ir.height + 15) / 16 else: 1
+    val threads_x = if ir.op == PROCESSING_IR_OP_FILL_RECT_U32: 16 else: PROCESSING_METAL_BLOCK_SIZE
+    val threads_y = if ir.op == PROCESSING_IR_OP_FILL_RECT_U32: 16 else: 1
     val submit_fault = processing_ir_fault_reason("metal", "submit")
     if submit_fault != "":
         _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
         return _processing_metal_failure(submit_fault)
-    val dispatched = metal_sffi_run_compute_frame(queue, pipeline, output, dummy, _processing_metal_params(ir), groups, 1, 1, PROCESSING_METAL_BLOCK_SIZE, 1, 1)
+    val dispatched = metal_sffi_run_compute_frame(queue, pipeline, output, dummy, _processing_metal_params(ir), groups, groups_y, 1, threads_x, threads_y, 1)
     if not dispatched:
         _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
         return _processing_metal_failure("metal-dispatch-failed")
@@ -139,4 +149,10 @@ fn processing_ir_execute_metal(ir: ProcessingIr) -> ProcessingMetalResult:
     _processing_metal_cleanup(device, queue, shader, pipeline, output, dummy, host, byte_count)
     ProcessingMetalResult(completed: true, reason: "ok", values: values, backend_handle: handle, device_identity: identity)
 
-export ProcessingMetalResult, processing_metal_device_identity, processing_ir_execute_metal
+fn processing_ir_execute_metal(ir: ProcessingIr) -> ProcessingMetalResult:
+    val source = processing_metal_source(ir)
+    val entry_point = if ir.op == PROCESSING_IR_OP_FILL_RECT_U32: "processing_fill_rect" else: "processing_fill_u32"
+    processing_ir_execute_metal_artifact(ir, source, entry_point)
+
+export ProcessingMetalResult, processing_metal_device_identity
+export processing_ir_execute_metal_artifact, processing_ir_execute_metal

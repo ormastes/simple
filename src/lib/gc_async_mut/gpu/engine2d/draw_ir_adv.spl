@@ -2112,7 +2112,95 @@ fn _engine2d_draw_ir_adv_composition_with_images(engine: Engine2D, composition: 
         result.font_atlas_payload_sha256 = evidence.atlas_payload_sha256
     result
 
+# ---------------------------------------------------------------------------
+# T4 tile lane (tile_render_culling_plan): per-tile replay of one DrawIR
+# command list. The caller (browser tile lane) supplies the tile rects, the
+# live-tile mask, and per-tile command index lists in the TileBins counting-
+# sort layout (items for tile t are tile_items[tile_starts[t] ..
+# tile_starts[t+1]], in paint order). Culled (non-live or empty) tiles get no
+# clear, no draw and no per-tile submission; live tiles replay only their
+# binned commands with the engine scissor pinned to the tile rect. All tiles
+# of a frame share one submit_batch() flush, then one provenance-carrying
+# readback (source / backend handle / device identity stay honest).
+# ---------------------------------------------------------------------------
+
+struct Engine2dDrawIrTileOutcome:
+    engine: Engine2D
+    tiles_total: i32
+    tiles_rendered: i32
+    tiles_skipped: i32
+    ops_rendered: i32
+    ops_skipped: i32
+    unsupported_kinds: text
+    readback: Engine2DReadback
+
+fn engine2d_draw_ir_render_tiled(
+    engine: Engine2D,
+    commands: [DrawIrCommand],
+    tile_x: [i32],
+    tile_y: [i32],
+    tile_w: [i32],
+    tile_h: [i32],
+    tile_live: [bool],
+    tile_starts: [i32],
+    tile_items: [i32]
+) -> Engine2dDrawIrTileOutcome:
+    var eng = engine
+    val tiles = tile_x.len()
+    var tiles_rendered = 0
+    var tiles_skipped = 0
+    var ops_rendered = 0
+    var ops_skipped = 0
+    var unsupported_kinds = ""
+    val budget = eng.width().to_i64() * eng.height().to_i64()
+    var images: [Engine2dResolvedDrawIrImage] = []
+    var t = 0
+    while t < tiles:
+        var replayed = false
+        if tile_live[t]:
+            val s0 = tile_starts[t]
+            val e0 = tile_starts[t + 1]
+            if e0 > s0:
+                var tile_commands: [DrawIrCommand] = []
+                var s = s0
+                while s < e0:
+                    tile_commands.push(commands[tile_items[s]])
+                    s = s + 1
+                val clip = draw_ir_rect_bounds(
+                    tile_x[t], tile_y[t], tile_w[t], tile_h[t])
+                eng.set_clip(clip.x, clip.y, clip.width, clip.height)
+                val outcome = _engine2d_draw_ir_render_commands(
+                    eng, tile_commands, 0, 0, images, false, false, clip,
+                    budget)
+                eng = outcome.engine
+                eng.clear_clip()
+                ops_rendered = ops_rendered + outcome.rendered
+                ops_skipped = ops_skipped + outcome.skipped
+                if (unsupported_kinds == "" and
+                    outcome.unsupported_kinds != "" and
+                    outcome.unsupported_kinds != "none"):
+                    unsupported_kinds = outcome.unsupported_kinds
+                replayed = true
+        if replayed:
+            tiles_rendered = tiles_rendered + 1
+        else:
+            tiles_skipped = tiles_skipped + 1
+        t = t + 1
+    eng.submit_batch()
+    val readback = eng.read_pixels_with_source()
+    Engine2dDrawIrTileOutcome(
+        engine: eng,
+        tiles_total: tiles_rendered + tiles_skipped,
+        tiles_rendered: tiles_rendered,
+        tiles_skipped: tiles_skipped,
+        ops_rendered: ops_rendered,
+        ops_skipped: ops_skipped,
+        unsupported_kinds: unsupported_kinds,
+        readback: readback
+    )
+
 export Engine2dDrawIrAdvResult
+export Engine2dDrawIrTileOutcome
 export Engine2dMetalGlassReceipt
 export Engine2dResolvedDrawIrImage
 export engine2d_draw_ir_adv_batch
@@ -2121,4 +2209,5 @@ export engine2d_draw_ir_adv_composition
 export engine2d_draw_ir_adv_composition_with_images
 export engine2d_draw_ir_adv_composition_present_with_images
 export engine2d_draw_ir_adv_fresh_device_composition_with_images
+export engine2d_draw_ir_render_tiled
 export engine2d_resolved_draw_ir_image

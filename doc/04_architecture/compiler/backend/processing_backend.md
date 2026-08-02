@@ -2,7 +2,7 @@
 # Processing Backend Architecture
 
 **Date:** 2026-06-14
-**Status:** Partial — validated `FillU32` vertical slice implemented
+**Status:** Partial — shared FillU32/FillRect contract and focused native Vulkan slice implemented
 **Scope:** Portable compute, draw, tensor, RV64 vector, and FPGA soft-accelerator backend lane.
 
 ## Bottom Line
@@ -104,6 +104,30 @@ q.wait()
 ```
 
 ## Processing IR Contract
+
+The executable v2 boundary is
+`src/lib/common/processing/{processing_ir,backend_contract}.spl`. Producers
+submit `ProcessingIr`; routing returns `ProcessingBackendArtifact`,
+`ProcessingCompileEvidence`, and `ProcessingDeviceReadbackEvidence` for a
+`ProcessingBackendTarget`. No backend-specific renderer API crosses this
+boundary.
+
+`FillRectU32` is row-major with explicit stride and half-open bounds. Operation,
+target, value, count, dimensions, stride, and every rectangle coordinate are
+part of the semantic key. Compiler, validator, ABI, driver, and device identity
+are additional native cache dimensions. Only immutable source/binary artifacts
+may be cached; buffers, pipelines, fences, handles, and readback authority stay
+transient and backend-owned.
+
+Startup probes report capability only. The hot path validates IR and artifact
+identity, submits through the native owner, waits for known completion, captures
+typed device readback, and compares it with the CPU oracle. Unsupported
+semantics, compiler/validator failure, unknown completion, CPU fallback, missing
+device identity, or non-device readback fail closed. External compilation and
+repository scans are cold-path operations and forbidden per dispatch.
+
+Operational targets are warm artifact selection below 1 ms and less than 4 MiB
+additional steady-state RSS excluding driver-owned allocations.
 
 ProcessingIR is separate from ordinary MIR and only accepts GPU-safe operations:
 

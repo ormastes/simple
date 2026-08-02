@@ -1,6 +1,20 @@
 """CUDA executor for the validated ProcessingIR FillU32 operation."""
 
-use std.common.processing.processing_ir.{ProcessingIr, processing_ir_validate}
+use std.common.processing.processing_ir.{
+    ProcessingIr,
+    PROCESSING_IR_OP_FILL_U32,
+    processing_ir_validate,
+    processing_ir_output_matches
+}
+use std.common.processing.backend_contract.{
+    ProcessingBackendTarget,
+    ProcessingBackendArtifact,
+    ProcessingCompileEvidence,
+    ProcessingDeviceReadbackEvidence,
+    processing_backend_semantic_key,
+    processing_backend_artifact_reject,
+    processing_backend_artifact_validate
+}
 use std.gc_async_mut.processing.fault_injection.{processing_ir_fault_reason}
 use std.gc_async_mut.cuda.{
     cuda_memcpy_dtoh,
@@ -25,6 +39,68 @@ struct ProcessingCudaResult:
 
 fn _processing_cuda_ptx() -> text:
     ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry processing_fill_u32(\n    .param .u64 output,\n    .param .u32 value,\n    .param .u32 count\n) {\n    .reg .pred %p;\n    .reg .b32 %r<6>;\n    .reg .b64 %rd<4>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [count];\n    setp.ge.u32 %p, %r3, %r4;\n    @%p bra done;\n    ld.param.u64 %rd0, [output];\n    mul.wide.u32 %rd1, %r3, 4;\n    add.u64 %rd2, %rd0, %rd1;\n    ld.param.u32 %r5, [value];\n    st.global.u32 [%rd2], %r5;\ndone:\n    ret;\n}\n"
+
+fn processing_cuda_artifact(ir: ProcessingIr) -> ProcessingBackendArtifact:
+    val validation = processing_ir_validate(ir)
+    if not validation.valid:
+        return processing_backend_artifact_reject(
+            ir, ProcessingBackendTarget.CudaPtx, validation.reason)
+    if ir.op != PROCESSING_IR_OP_FILL_U32:
+        return processing_backend_artifact_reject(
+            ir, ProcessingBackendTarget.CudaPtx, "cuda-unsupported-processing-op")
+    ProcessingBackendArtifact(
+        target: ProcessingBackendTarget.CudaPtx,
+        format: "ptx",
+        entry_point: "processing_fill_u32",
+        source: _processing_cuda_ptx(),
+        binary: [],
+        semantic_key: processing_backend_semantic_key(
+            ir, ProcessingBackendTarget.CudaPtx),
+        valid: true,
+        reason: "ok")
+
+fn processing_cuda_compile_evidence(ir: ProcessingIr, compiler_succeeded: bool,
+                                    compiler_identity: text) -> ProcessingCompileEvidence:
+    val artifact = processing_cuda_artifact(ir)
+    val artifact_reason = processing_backend_artifact_validate(ir, artifact)
+    val compiler_named = compiler_identity != ""
+    val reason = if artifact_reason != "ok":
+        artifact_reason
+    elif not compiler_succeeded:
+        "cuda-compiler-failed"
+    elif not compiler_named:
+        "cuda-compiler-identity-missing"
+    else:
+        "ok"
+    ProcessingCompileEvidence(
+        target: ProcessingBackendTarget.CudaPtx,
+        artifact_valid: artifact_reason == "ok",
+        compiler_succeeded: compiler_succeeded and compiler_named,
+        validator_succeeded: compiler_succeeded and compiler_named,
+        compiler_identity: compiler_identity,
+        validator_identity: if compiler_named: "cuda-driver-module-load" else: "",
+        reason: reason)
+
+fn processing_cuda_readback_evidence(ir: ProcessingIr,
+                                     result: ProcessingCudaResult) -> ProcessingDeviceReadbackEvidence:
+    val oracle_match = result.completed and processing_ir_output_matches(ir, result.values)
+    val device_origin = result.completed and result.backend_handle > 0 and result.device_identity > 0
+    val reason = if not result.completed:
+        result.reason
+    elif not device_origin:
+        "cuda-device-provenance-missing"
+    elif not oracle_match:
+        "cuda-oracle-mismatch"
+    else:
+        "ok"
+    ProcessingDeviceReadbackEvidence(
+        target: ProcessingBackendTarget.CudaPtx,
+        submitted: result.completed,
+        device_origin: device_origin,
+        oracle_match: oracle_match,
+        device_identity: if device_origin: result.device_identity else: 0,
+        values: if device_origin and oracle_match: result.values else: [],
+        reason: reason)
 
 fn _processing_cuda_cleanup(session: CudaSession, device: i64, values_ptr: i64, args_ptr: i64, host_ptr: i64, byte_count: i64):
     if device > 0:
@@ -66,6 +142,8 @@ fn processing_ir_execute_cuda_with_executor(executor: ProcessingCudaExecutor, ir
     val valid = processing_ir_validate(ir)
     if not valid.valid:
         return ProcessingCudaResult(completed: false, reason: valid.reason, values: [], backend_handle: 0, device_identity: 0)
+    if ir.op != PROCESSING_IR_OP_FILL_U32:
+        return ProcessingCudaResult(completed: false, reason: "cuda-unsupported-processing-op", values: [], backend_handle: 0, device_identity: 0)
     val unavailable_fault = processing_ir_fault_reason("cuda", "unavailable")
     if unavailable_fault != "":
         return ProcessingCudaResult(completed: false, reason: unavailable_fault, values: [], backend_handle: 0, device_identity: 0)
@@ -135,3 +213,5 @@ fn processing_ir_execute_cuda(ir: ProcessingIr) -> ProcessingCudaResult:
 
 export ProcessingCudaResult, ProcessingCudaExecutor
 export processing_ir_execute_cuda, processing_ir_execute_cuda_with_executor
+export processing_cuda_artifact, processing_cuda_compile_evidence
+export processing_cuda_readback_evidence

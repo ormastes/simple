@@ -1,6 +1,6 @@
 # Processing Backend Guide
 
-**Status:** Partial — `FillU32` CPU/Vulkan slice available
+**Status:** Partial — shared FillU32/FillRect artifacts and focused native Vulkan lane available
 
 The processing backend is the planned portable compute layer underneath
 `std.gpu`, draw APIs, and ML matops. It should use the current CUDA/Vulkan
@@ -81,6 +81,29 @@ unsupported recursion.
 8. `simplegpu64` SIMT soft-GPGPU.
 
 ## Verification
+
+Run the compiler-produced FillRect qualification on a prepared physical Vulkan
+host:
+
+```text
+bin/simple test test/02_integration/rendering/vulkan_compiler_fill_rect_live_spec.spl --mode=interpreter
+```
+
+The test lowers a fixed 6×5 rectangle through frontend, HIR, MIR, and the
+Vulkan backend; runs `spirv-as` and `spirv-val --target-env vulkan1.3`; requires
+a discrete or integrated Vulkan device; submits the exact resulting binary;
+and compares all 256 raw pixels with the row-major CPU oracle. A software ICD,
+CPU mirror, missing device identity, or absent validator is not PASS evidence.
+
+The shared operator sequence is
+`processing_backend_host_probe` → `compile_processing_backend_artifact` →
+`validate_processing_backend_artifact` →
+`run_processing_backend_device_probe` →
+`check_processing_backend_oracle_parity`. Artifacts use a v2 semantic key over
+operation, target, value, count, dimensions, stride, and rectangle coordinates.
+Invalidate on any semantic, ABI, compiler, validator, driver, or device change.
+Compilation/validation are cold paths; submission/readback are hot paths and
+must not invoke external compilers or scan the tree.
 
 Every new backend lane needs the same golden scenarios:
 

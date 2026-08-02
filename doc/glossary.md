@@ -522,6 +522,75 @@ describe "Parser deplyomeent coverage":
 
 ```
 
+## Environment Test
+
+An executable, fail-closed test that qualifies a feature against the actual
+hardware, operating-system service, driver, runtime library, compiler,
+validator, HAL, or wrapper it depends on. An environment test must retain a
+machine-readable receipt naming the dependency and evidence class.
+
+Finding a library, tool, device node, adapter, or environment variable proves
+only **presence**. Successfully opening it proves **loadability**. Neither means
+the external works as expected. A complete environment test proves, as
+applicable:
+
+1. the exact external library/tool and version or driver/device identity;
+2. the canonical HAL/wrapper owner used by production code;
+3. initialization and capability/readiness checks;
+4. real input transfer from the CPU or caller;
+5. execution through the external system;
+6. output/readback through the same owner;
+7. exact comparison with an independent oracle;
+8. repeated-use identity/resource stability;
+9. invalid-input, unavailable-resource, and teardown behavior;
+10. a retained command, receipt, evidence class, and bounded runtime.
+
+An external dependency is **fully environment-qualified** only when every
+required row above has current passing evidence on the target environment.
+“100% environment tested” means 100% of the declared external-dependency matrix
+is qualified; it does not mean every possible device, driver version, OS, or
+failure in the world has been tested. Any missing target host or native device
+keeps the matrix incomplete and must remain `blocked`, never assumed PASS.
+
+## Environment Evidence Class
+
+The origin and claim boundary attached to an environment-test receipt:
+
+- `physical-device`: work executed on identified hardware and returned
+  device-origin output.
+- `emulator`: the external contract/state machine executed in an emulator; it
+  does not prove physical hardware or native drivers.
+- `software`: a software backend executed the semantics; it is an oracle or
+  fallback, not GPU/hardware proof.
+- `presence-only`: a library/tool/device was found but no end-to-end work was
+  executed.
+- `blocked`: required native execution could not run; the receipt must contain
+  the prerequisite and exact resume command.
+
+Evidence classes cannot be promoted. In particular, source inspection,
+compiler success, CPU mirrors, emulation, screenshots, synthetic handles, or
+library presence cannot satisfy a `physical-device` row.
+
+## HAL/Wrapper Environment Path
+
+The production ownership chain from a feature to an external dependency. A GPU
+environment path is normally:
+
+`producer -> ProcessingIR/DrawIR -> backend -> HAL/session wrapper -> external
+runtime/driver -> device -> HAL readback -> independent CPU oracle`.
+
+Tests must name and exercise this chain. Calling a driver directly can qualify
+the driver, but it does not qualify a production feature that uses a different
+HAL or wrapper.
+
+## CPU/GPU Communication Qualification
+
+Physical-device evidence that CPU input was uploaded, GPU work was dispatched,
+and device output was downloaded through the canonical HAL/session owner. It
+requires exact byte/pixel parity, positive stable device and resource identity,
+at least one repeated dispatch, and fail-closed invalid-transfer coverage.
+Upload-only, dispatch-only, CPU-mirror, or runtime-queue receipts are incomplete.
+
 ---
 
 ## Simple Gui Texture Tree Interface (SGTTI)

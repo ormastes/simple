@@ -1,10 +1,14 @@
 # @cover src/lib/gc_async_mut/processing/cuda_fill_u32.spl 10%
+# @req REQ-003 REQ-006 REQ-007
 
-use std.spec.{describe, it, expect, expect_not}
-use std.common.processing.processing_ir.{ProcessingIr, processing_ir_fill_u32}
+use std.spec.{describe, it, step, expect, expect_not}
+use std.common.processing.processing_ir.{ProcessingIr, processing_ir_fill_u32, processing_ir_fill_rect_u32}
+use std.common.processing.backend_contract.{ProcessingBackendTarget}
 use std.gc_async_mut.processing.cuda_fill_u32.{
     ProcessingCudaResult, ProcessingCudaExecutor,
-    processing_ir_execute_cuda, processing_ir_execute_cuda_with_executor
+    processing_ir_execute_cuda, processing_ir_execute_cuda_with_executor,
+    processing_cuda_artifact, processing_cuda_compile_evidence,
+    processing_cuda_readback_evidence
 }
 
 fn _expect_rejected(result: ProcessingCudaResult, reason: text):
@@ -17,17 +21,95 @@ fn _expect_rejected(result: ProcessingCudaResult, reason: text):
 describe "CUDA ProcessingIR pre-device validation":
     """Host-independent CUDA validation before any driver operation."""
 
-    it "rejects invalid IR with zero device provenance":
+    it "should reject invalid IR with zero device provenance":
         val zero = processing_ir_execute_cuda(processing_ir_fill_u32(0, 7u32))
         expect(zero.reason).to_equal("invalid-element-count")
         _expect_rejected(zero, "invalid-element-count")
         _expect_rejected(processing_ir_execute_cuda(processing_ir_fill_u32(536870912, 7u32)), "output-size-overflow")
-        _expect_rejected(processing_ir_execute_cuda(ProcessingIr(op: 99, element_count: 1, value: 7u32)), "unsupported-op")
+        _expect_rejected(processing_ir_execute_cuda(ProcessingIr(op: 99, element_count: 1, value: 7u32, width: 1, height: 1, stride: 1, x: 0, y: 0, rect_width: 1, rect_height: 1)), "unsupported-op")
 
-    it "rejects work after executor shutdown without touching CUDA":
+    it "should reject work after executor shutdown without touching CUDA":
         var executor = ProcessingCudaExecutor.create()
         executor.shutdown()
         _expect_rejected(
             processing_ir_execute_cuda_with_executor(
                 executor, processing_ir_fill_u32(8, 7u32)),
             "cuda-executor-closed")
+
+    it "should reject drawing IR until a native CUDA drawing executor exists":
+        val rect = processing_ir_fill_rect_u32(8, 8, 8, 1, 1, 4, 4, 7u32)
+        val artifact = processing_cuda_artifact(rect)
+        expect(artifact.valid).to_equal(false)
+        expect(artifact.reason).to_equal("cuda-unsupported-processing-op")
+        _expect_rejected(processing_ir_execute_cuda(rect), "cuda-unsupported-processing-op")
+
+    it "should generate a deterministic shared-contract PTX artifact":
+        step("Exercise success branches")
+        val ir = processing_ir_fill_u32(64, 0x01020304u32)
+        val artifact = processing_cuda_artifact(ir)
+        val repeated = processing_cuda_artifact(ir)
+        expect(artifact.target).to_equal(ProcessingBackendTarget.CudaPtx)
+        expect(artifact.format).to_equal("ptx")
+        expect(artifact.entry_point).to_equal("processing_fill_u32")
+        expect(artifact.source).to_equal(repeated.source)
+        expect(artifact.semantic_key).to_equal(repeated.semantic_key)
+        expect(artifact.source).to_contain(".visible .entry processing_fill_u32")
+        expect(artifact.source).to_contain("st.global.u32")
+        expect(artifact.valid).to_equal(true)
+        expect(artifact.reason).to_equal("ok")
+
+    it "should preserve the one-element CUDA dispatch boundary in its artifact":
+        step("Exercise boundary branches")
+        val ir = processing_ir_fill_u32(1, 0xFFFFFFFFu32)
+        val artifact = processing_cuda_artifact(ir)
+        expect(artifact.valid).to_equal(true)
+        expect(artifact.semantic_key).to_contain("count=1")
+        expect(artifact.source).to_contain("setp.ge.u32")
+
+    it "should fail compile evidence closed without a named successful compiler":
+        step("Exercise rejection branches")
+        val ir = processing_ir_fill_u32(64, 7u32)
+        val failed = processing_cuda_compile_evidence(ir, false, "nvcc 13.0")
+        expect(failed.artifact_valid).to_equal(true)
+        expect(failed.compiler_succeeded).to_equal(false)
+        expect(failed.validator_succeeded).to_equal(false)
+        expect(failed.reason).to_equal("cuda-compiler-failed")
+        val unnamed = processing_cuda_compile_evidence(ir, true, "")
+        expect(unnamed.compiler_succeeded).to_equal(false)
+        expect(unnamed.reason).to_equal("cuda-compiler-identity-missing")
+        val accepted = processing_cuda_compile_evidence(ir, true, "CUDA driver 580.126.16")
+        expect(accepted.artifact_valid).to_equal(true)
+        expect(accepted.compiler_succeeded).to_equal(true)
+        expect(accepted.validator_succeeded).to_equal(true)
+        expect(accepted.validator_identity).to_equal("cuda-driver-module-load")
+        expect(accepted.reason).to_equal("ok")
+        val invalid = processing_cuda_compile_evidence(processing_ir_fill_u32(0, 7u32), true, "CUDA driver")
+        expect(invalid.artifact_valid).to_equal(false)
+        expect(invalid.reason).to_equal("invalid-element-count")
+
+    it "should accept only device-origin exact CUDA readback evidence":
+        step("Measure branch coverage")
+        val ir = processing_ir_fill_u32(2, 9u32)
+        val exact = processing_cuda_readback_evidence(
+            ir, ProcessingCudaResult(completed: true, reason: "ok", values: [9u32, 9u32], backend_handle: 2, device_identity: 3))
+        expect(exact.submitted).to_equal(true)
+        expect(exact.device_origin).to_equal(true)
+        expect(exact.oracle_match).to_equal(true)
+        expect(exact.reason).to_equal("ok")
+        val mirror = processing_cuda_readback_evidence(
+            ir, ProcessingCudaResult(completed: true, reason: "ok", values: [9u32, 9u32], backend_handle: 0, device_identity: 0))
+        expect(mirror.device_origin).to_equal(false)
+        expect(mirror.oracle_match).to_equal(true)
+        expect(mirror.values.len()).to_equal(0)
+        expect(mirror.reason).to_equal("cuda-device-provenance-missing")
+        val mismatch = processing_cuda_readback_evidence(
+            ir, ProcessingCudaResult(completed: true, reason: "ok", values: [9u32, 8u32], backend_handle: 2, device_identity: 3))
+        expect(mismatch.oracle_match).to_equal(false)
+        expect(mismatch.values.len()).to_equal(0)
+        expect(mismatch.reason).to_equal("cuda-oracle-mismatch")
+        val incomplete = processing_cuda_readback_evidence(
+            ir, ProcessingCudaResult(completed: false, reason: "cuda-dispatch-failed", values: [], backend_handle: 0, device_identity: 0))
+        expect(incomplete.submitted).to_equal(false)
+        expect(incomplete.device_origin).to_equal(false)
+        expect(incomplete.oracle_match).to_equal(false)
+        expect(incomplete.reason).to_equal("cuda-dispatch-failed")

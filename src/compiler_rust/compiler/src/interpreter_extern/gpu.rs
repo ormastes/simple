@@ -1246,7 +1246,7 @@ pub fn rt_cuda_memcpy_htod_fn(args: &[Value]) -> Result<Value, CompileError> {
     {
         if let Some(fns) = get_cuda_dl() {
             let r = unsafe { (fns.memcpy_htod)(dst as u64, src as *const std::os::raw::c_void, size as usize) };
-            return Ok(Value::Int(r as i64));
+            return Ok(Value::Int(cuda_driver_status(r)));
         }
         Ok(Value::Int(-3))
     }
@@ -1264,9 +1264,20 @@ pub fn rt_cuda_memcpy_dtoh_fn(args: &[Value]) -> Result<Value, CompileError> {
     {
         if let Some(fns) = get_cuda_dl() {
             let r = unsafe { (fns.memcpy_dtoh)(dst as *mut std::os::raw::c_void, src as u64, size as usize) };
-            return Ok(Value::Int(r as i64));
+            return Ok(Value::Int(cuda_driver_status(r)));
         }
         Ok(Value::Int(-3))
+    }
+}
+
+/// Match the statically linked CUDA runtime ABI: success is zero and CUDA
+/// driver errors are returned as negative status values.
+#[cfg(not(feature = "cuda"))]
+fn cuda_driver_status(status: i32) -> i64 {
+    if status == 0 {
+        0
+    } else {
+        -(status as i64)
     }
 }
 
@@ -4872,4 +4883,16 @@ pub fn rt_renderdoc_end_capture_for_device_fn(args: &[Value]) -> Result<Value, C
 /// `rt_renderdoc_num_captures() -> i64`
 pub fn rt_renderdoc_num_captures_fn(_args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(renderdoc_dlopen::num_captures() as i64))
+}
+
+#[cfg(all(test, not(feature = "cuda")))]
+mod cuda_status_tests {
+    use super::cuda_driver_status;
+
+    #[test]
+    fn dynamic_cuda_status_matches_runtime_negative_error_abi() {
+        assert_eq!(cuda_driver_status(0), 0);
+        assert_eq!(cuda_driver_status(1), -1);
+        assert_eq!(cuda_driver_status(100), -100);
+    }
 }

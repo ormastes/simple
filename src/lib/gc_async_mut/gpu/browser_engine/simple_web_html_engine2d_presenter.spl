@@ -20,6 +20,21 @@ pub fn web_gpu_paint_enabled() -> bool:
     val v = env_get("SIMPLE_WEB_GPU_PAINT")
     v == "1" or v == "true" or v == "on"
 
+# SIMPLE_WEB_GPU_PAINT routing mode for the default (no explicit gpu_paint arg)
+# render entry points:
+#   "0" / "false" / "off" -> "off"      legacy CPU-raster default, byte-identical
+#   "1" / "true"  / "on"  -> "measured" economics + timing measured lane
+#   unset / anything else -> "gpu-first" GPU paints every op it can handle
+#                            without correctness loss; CPU keeps the rest
+#                            (glyph/gradient ground truth) as a residual blit.
+pub fn web_gpu_paint_mode() -> text:
+    val v = (env_get("SIMPLE_WEB_GPU_PAINT") ?? "").trim().lower()
+    if v == "0" or v == "false" or v == "off":
+        return "off"
+    if v == "1" or v == "true" or v == "on":
+        return "measured"
+    "gpu-first"
+
 fn _backend_is_cpu(normalized_backend: text) -> bool:
     (normalized_backend == "software" or normalized_backend == "cpu"
         or normalized_backend == "cpu_simd" or normalized_backend == "simd_cpu"
@@ -710,8 +725,80 @@ pub fn simple_web_layout_render_html_readback_paint(html: text, width: i32, heig
     val pixels = simple_web_layout_render_html_software_pixels(html, width, height)
     present_layout_pixels_with_engine2d_readback(pixels, width, height, backend_name, base)
 
+# ---------------------------------------------------------------------------
+# GPU-first default lane (SIMPLE_WEB_GPU_PAINT unset): a viable GPU backend
+# paints every primitive it can handle without correctness loss (solid rect
+# fills, batched per-primitive dispatch); glyph rasterization, gradients and
+# images stay on the CPU ground truth and reach the device as a residual blit,
+# so the composited frame is bit-exact with the CPU path by construction.
+# Partial offload is reported honestly via a per-frame decision string, and
+# every decline to CPU is observable (marker line + decision string) instead
+# of the previously silent software-raster default.
+# ---------------------------------------------------------------------------
+class _WebGpuFirstPresent:
+    readback: Engine2DReadback
+    decision: text
+
+fn _present_gpu_first(html: text, width: i32, height: i32, backend_name: text) -> _WebGpuFirstPresent:
+    if width <= 0 or height <= 0:
+        return _WebGpuFirstPresent(
+            readback: engine2d_readback([], "not_requested"),
+            decision: "gpu-first:not-requested:degenerate-surface")
+    val normalized_backend = backend_name.trim().lower()
+    val backend_verdict = web_gpu_paint_backend_verdict(normalized_backend)
+    if backend_verdict != "gpu-paint-candidate":
+        # An explicit CPU backend is a request, not a decline; an unknown
+        # backend is a decline and must be visible.
+        val decision = "gpu-first:cpu-raster:offloaded=none:cpu=full-frame:reason=" + backend_verdict
+        if not _backend_is_cpu(normalized_backend):
+            print "[web-gpu-paint-decision] backend={normalized_backend} {decision}"
+        return _WebGpuFirstPresent(
+            readback: simple_web_layout_render_html_readback_paint(html, width, height, backend_name, false),
+            decision: decision)
+    val frame = simple_web_layout_render_html_gpu_frame(html, width, height)
+    val economics = web_gpu_paint_economics(frame, frame.base)
+    if economics.fill_op_count == 0 or economics.fill_pixels == 0:
+        # The GPU genuinely has no primitive it can paint for this frame —
+        # honest CPU raster, marked.
+        val decision = (
+            "gpu-first:cpu-raster:offloaded=none:cpu=full-frame:reason=" +
+            economics.reason + ":" + economics.cpu_job_verdict
+        )
+        print "[web-gpu-paint-decision] backend={normalized_backend} {decision}"
+        val pixels = _cpu_mirror_for_frame(frame, frame.base)
+        return _WebGpuFirstPresent(
+            readback: present_layout_pixels_with_engine2d_readback(pixels, width, height, normalized_backend, frame.base),
+            decision: decision)
+    val readback = present_gpu_paint_readback(frame, normalized_backend, frame.base)
+    if readback.source == "cpu_fallback":
+        # Engine2D backend refused to initialize — honest CPU fallback, marked.
+        val decision = "gpu-first:cpu-fallback:offloaded=none:cpu=full-frame:reason=engine2d-create-failed"
+        print "[web-gpu-paint-decision] backend={normalized_backend} {decision}"
+        return _WebGpuFirstPresent(readback: readback, decision: decision)
+    val offload_kind = if economics.residual_pixels > 0: "gpu-partial" else: "gpu-full"
+    val cpu_side = if economics.residual_pixels > 0:
+        "glyph-gradient-residual:" + economics.residual_pixels.to_text() + "px-cpu-rastered-ground-truth"
+    else:
+        "none"
+    val decision = (
+        "gpu-first:" + offload_kind +
+        ":offloaded=rect_fill:" + economics.fill_op_count.to_text() +
+        "ops/" + economics.fill_pixels.to_text() + "px" +
+        ":cpu=" + cpu_side +
+        ":source=" + readback.source +
+        ":handle=" + readback.backend_handle.to_text() +
+        ":device_identity=" + readback.device_identity.to_text()
+    )
+    print "[web-gpu-paint-decision] backend={normalized_backend} {decision}"
+    _WebGpuFirstPresent(readback: readback, decision: decision)
+
+# Probe entry: run the gpu-first lane once and return its per-frame decision
+# string (offloaded vs cpu ops + device provenance).
+pub fn simple_web_layout_render_html_gpu_first_decision(html: text, width: i32, height: i32, backend_name: text) -> text:
+    _present_gpu_first(html, width, height, backend_name).decision
+
 pub fn simple_web_layout_render_html_pixels(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
-    simple_web_layout_render_html_readback_paint(html, width, height, backend_name, web_gpu_paint_enabled()).pixels
+    simple_web_layout_render_html_readback(html, width, height, backend_name).pixels
 
 pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, height: i32, backend_name: text, scroll_y: i32) -> [u32]:
     val pixels = simple_web_layout_render_html_software_pixels_at_scroll(html, width, height, scroll_y)
@@ -719,4 +806,9 @@ pub fn simple_web_layout_render_html_pixels_at_scroll(html: text, width: i32, he
     present_layout_pixels_with_engine2d(pixels, width, height, backend_name, base)
 
 pub fn simple_web_layout_render_html_readback(html: text, width: i32, height: i32, backend_name: text) -> Engine2DReadback:
-    simple_web_layout_render_html_readback_paint(html, width, height, backend_name, web_gpu_paint_enabled())
+    val mode = web_gpu_paint_mode()
+    if mode == "gpu-first":
+        return _present_gpu_first(html, width, height, backend_name).readback
+    # "off" -> legacy CPU-raster default (byte-identical); "measured" -> the
+    # economics + timing measured lane (identical to SIMPLE_WEB_GPU_PAINT=1).
+    simple_web_layout_render_html_readback_paint(html, width, height, backend_name, mode == "measured")
