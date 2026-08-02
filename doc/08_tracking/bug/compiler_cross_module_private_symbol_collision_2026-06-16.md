@@ -318,3 +318,42 @@ Same 16-spec crypto/TLS set, two worktrees at the same base sha:
 | failing example NAME set | 3 | 3 | 3, `diff` clean |
 | per-spec exit codes | — | identical | identical |
 | live same-signature collisions | 50 | 25 | **13** |
+
+## Broad live enumeration — 63-spec sample (2026-08-02, PROVED)
+
+`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1 simple run` over a 1-in-300 sample of the
+18,708 `*_spec.spl` files (63 specs), post batch 1+2:
+
+| measure | value |
+|---|---|
+| specs that hit at least one same-signature collision | **12 / 63 (19%)** |
+| distinct colliding names observed | **178** |
+| total warning lines | 413 |
+| worst single spec (`test/03_system/gui/wm_compare/famous_site_engine2d_backend_spec.spl`) | **145 same-signature vs 12 differing** |
+
+The 145:12 ratio on the worst spec reproduces the reported ~8x same-vs-differing
+imbalance independently, on a different spec, after this lane's fixes. The
+previously reported 313 is therefore not an outlier.
+
+**The collisions are not in the runner stack.** A 3-example spec importing only
+`std.spec.{describe, it, expect}` warns ZERO times (PROVED). 51 of 63 sampled specs
+warn zero times. The load is concentrated in wide-surface specs (GUI/engine2d,
+browser engine, compiler bootstrap).
+
+### Next-largest family: duplicated stdlib filesystem/env API *within one tier*
+The most frequently colliding names in the sample are `file_read`, `file_write`,
+`file_exists`, `file_size`, `file_delete`, `file_copy`, `dir_list`, `dir_walk`,
+`dir_create`, `env_get`, `env_set`, `host_os`, `host_arch`, `has_avx2`, `has_neon`.
+
+These are **not** intentional tier mirrors — checked, and the collisions are inside a
+single tier:
+
+- `file_read` — `src/lib/nogc_sync_mut/database/atomic.spl` vs
+  `src/lib/nogc_sync_mut/database/core.spl`
+- `env_get` — `src/lib/nogc_sync_mut/io/env_ops.spl` vs
+  `src/lib/nogc_sync_mut/io_runtime.spl`
+
+`env_get` in particular already has its own bug record
+(`interp_env_get_name_collision_nil_root_2026-07-26`); this diagnostic now shows it
+is one member of a ~15-name family with the same shape. That family is the natural
+next batch and is a `src/lib/nogc_sync_mut/**` lane, not a crypto lane.
