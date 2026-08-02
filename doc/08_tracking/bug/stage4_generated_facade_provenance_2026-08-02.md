@@ -37,4 +37,6 @@ self-glob now has explicit imports for the concrete `file_ops`, `dir_ops`, and
 `file_shell` owners, so compatibility stubs cannot win or make those exports
 ambiguous during Stage4 extraction. The subsequent `cwd` failure extends the
 same pinning to `env_ops` for `cwd`, `home`, environment accessors, and host
-identity exports.
+identity exports. The next Stage4 extraction reached the adjacent process
+family, so the facade now also pins process execution to `process_ops` and
+host process metadata to `sysinfo_ops`.

@@ -189,6 +189,30 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(root_surface.export_origins["home"].owner_module).to_equal("root.io.env_ops")
         expect(root_surface.export_origins["host_arch"].owner_module).to_equal("root.io.env_ops")
 
+    it "pins root process exports to process_ops instead of compatibility stubs":
+        val log = make_logger()
+        val process_source = "pub fn process_run() -> bool:\n    true\npub fn process_run_timeout() -> bool:\n    true\npub fn process_wait() -> bool:\n    true"
+        val stub_source = "pub fn process_run() -> bool:\n    false\npub fn process_run_timeout() -> bool:\n    false"
+        val facade_source = "use root.io.process_ops.\{process_run, process_run_timeout, process_wait\}\nexport process_run, process_run_timeout, process_wait"
+        val process_ops = parse_full_frontend(process_source, "root.io.process_ops", "root.io.process_ops", log)
+        val stub = parse_full_frontend(stub_source, "root.io.mod_stub", "root.io.mod_stub", log)
+        val facade = parse_full_frontend(facade_source, "root.io", "root.io", log)
+        var modules: Dict<text, Module> = {}
+        modules["root.io.process_ops"] = process_ops
+        modules["root.io.mod_stub"] = stub
+        modules["root.io"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "root/io/process_ops.spl", content: process_source, module_name: "root.io.process_ops"),
+            SourceFile(path: "root/io/mod_stub.spl", content: stub_source, module_name: "root.io.mod_stub"),
+            SourceFile(path: "root/io.spl", content: facade_source, module_name: "root.io")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        val root_surface = surfaces.surfaces[surfaces.index_by_name["root.io"]]
+        expect(root_surface.export_origins["process_run"].owner_module).to_equal("root.io.process_ops")
+        expect(root_surface.export_origins["process_run_timeout"].owner_module).to_equal("root.io.process_ops")
+        expect(root_surface.export_origins["process_wait"].owner_module).to_equal("root.io.process_ops")
+
     it "accepts explanatory text after a generated provenance filename":
         val log = make_logger()
         val owner_source = "pub fn shell() -> bool:\n    true"
