@@ -74,11 +74,25 @@ describe "std.common.mem_infra config — capability matrix":
             expect(plan.enabled[0]).to_equal("attr")
             expect(plan.notices.len()).to_equal(1)
 
-        it "degrades strict on cranelift and on llvm to harden":
+        it "degrades strict to harden on cranelift, but errors on llvm where harden is inert":
+            step("cranelift has a real harden quarantine, so strict may degrade to it")
             val cranelift_plan = resolve_mem_infra(["strict"], "cranelift", false)
             expect(cranelift_plan.enabled[0]).to_equal("harden")
+
+            # Corrected 2026-08-02. This used to assert llvm ALSO degraded to
+            # harden. Measurement showed harden does nothing on llvm — the
+            # native runtime lane links a plain-malloc `rt_alloc` with no
+            # quarantine — so that degrade silently reported success while
+            # enabling an inert row. A fallback that is itself unsupported on
+            # the backend is now treated as "no fallback" and errors, which is
+            # what sends the caller to a backend that really has detection.
+            # See test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl.
+            step("llvm has no working harden, so strict must error rather than degrade")
             val llvm_plan = resolve_mem_infra(["strict"], "llvm", false)
-            expect(llvm_plan.enabled[0]).to_equal("harden")
+            expect(llvm_plan.enabled.len()).to_equal(0)
+            expect(llvm_plan.errors.len()).to_equal(1)
+
+            step("strict is natively supported on the interpreter, so it never degrades")
             val interp_plan = resolve_mem_infra(["strict"], "interpreter", false)
             expect(interp_plan.enabled[0]).to_equal("strict")
             expect(interp_plan.notices.len()).to_equal(0)

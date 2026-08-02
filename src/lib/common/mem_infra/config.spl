@@ -40,7 +40,29 @@ fn mem_infra_matrix() -> [MemInfraRow]:
         # commits a real use-after-free per backend and records which ones
         # actually trap.
         MemInfraRow(name: "guard", interpreter: true, cranelift: false, llvm: false),
-        MemInfraRow(name: "harden", interpreter: true, cranelift: true, llvm: true),
+        # harden is real on the interpreter and on cranelift, but NOT on llvm.
+        # Measured behaviourally on 2026-08-02, not read off the source tree —
+        # see `test/01_unit/lib/mem_infra/harden_backend_parity_spec.spl`, which
+        # frees blocks, tampers a known number of them, and asserts the reported
+        # tamper count tracks exactly that number.
+        #
+        # The three backends do NOT share one implementation:
+        #   * interpreter — `interpreter_extern/memory.rs`, reached as the
+        #     extern `rt_mem_harden_check`.
+        #   * cranelift   — the C quarantine in `src/runtime/runtime_memory.c`,
+        #     which the seed process links; reached as the extern
+        #     `rt_mem_harden_check_native`. (The interpreter's spelling
+        #     `rt_mem_harden_check` is NOT an exported C symbol, so under
+        #     cranelift it silently resolves to 0 — see
+        #     `doc/08_tracking/bug/mem_infra_harden_check_symbol_divergence_2026-08-02.md`.)
+        #   * llvm        — nothing. `native-build` links the `simple-core`
+        #     runtime lane, whose `rt_alloc` comes from `runtime_native.c`
+        #     (plain `malloc`, no quarantine, no poison, no getenv gate).
+        #     `runtime_memory.o` is not in that lane at all, so a probe that
+        #     calls the check fails to link with
+        #     `undefined symbol: rt_mem_harden_check_native`, and
+        #     `SIMPLE_MEM_HARDEN=1` is inert in a native artifact.
+        MemInfraRow(name: "harden", interpreter: true, cranelift: true, llvm: false),
         MemInfraRow(name: "genarena", interpreter: true, cranelift: true, llvm: true),
         MemInfraRow(name: "strict", interpreter: true, cranelift: false, llvm: false),
         MemInfraRow(name: "asan", interpreter: false, cranelift: false, llvm: true),
@@ -86,17 +108,39 @@ fn mem_infra_row_supported(name: text, backend: text) -> bool:
 # `guard` deliberately has NO fallback on cranelift/llvm. `harden` looks like
 # the obvious analog, but a guard page traps the faulting access at the
 # instruction that commits the use-after-free, whereas harden only notices
-# afterwards, when something calls `rt_mem_harden_check()`. Substituting one
-# for the other silently would answer "yes, you have UAF detection" to someone
-# who asked for the trapping kind — the exact false-safety failure this row was
+# afterwards, when something calls the harden check. Substituting one for the
+# other silently would answer "yes, you have UAF detection" to someone who
+# asked for the trapping kind — the exact false-safety failure this row was
 # corrected to remove. Erroring sends them to a backend that really has it.
+#
+# A degrade target is itself a capability claim, so it must never name a row
+# that is false on the requesting backend. `strict` used to degrade to
+# `harden` on every non-interpreter backend; now that `harden` is known false
+# on llvm, that path would have quietly enabled an inert row and reported
+# success. `strict` therefore degrades to `harden` only on cranelift, where
+# harden was actually measured to work. `resolve_mem_infra` re-checks this
+# invariant for every target so no future row can reintroduce it.
 fn mem_infra_degrade_target(name: text, backend: text) -> text:
     if name == "asan": return "harden"
     if name == "memprof": return "attr"
     if name == "strict":
-        if backend != "interpreter": return "harden"
+        if backend == "cranelift": return "harden"
         return ""
     ""
+
+# `mem_infra_degrade_target` filtered so it can only ever name a row that is
+# genuinely supported on `backend`. Returns "" when the declared fallback is
+# itself unsupported there, which callers already treat as "no fallback" and
+# turn into a loud error. This is the invariant that stops a corrected
+# capability row (harden on llvm, 2026-08-02) from leaving a degrade path that
+# still answers "yes, you have detection".
+fn _mem_infra_usable_degrade_target(name: text, backend: text) -> text:
+    val target = mem_infra_degrade_target(name, backend)
+    if target == "":
+        return ""
+    if not mem_infra_row_supported(target, backend):
+        return ""
+    target
 
 fn _mem_infra_contains(items: [text], value: text) -> bool:
     for item in items:
@@ -140,7 +184,12 @@ fn resolve_mem_infra(requested: [text], backend: text, strict: bool) -> MemInfra
                         "'" + name + "' is not supported on backend '" + backend + "' (strict mode)"
                     )
                 else:
-                    val target = mem_infra_degrade_target(name, backend)
+                    # A degrade target is itself a capability claim. If it is
+                    # unsupported on `backend` it is worse than no fallback:
+                    # resolution would report success while enabling a row that
+                    # does nothing. `_mem_infra_usable_degrade_target` collapses
+                    # that case to "" so it takes the no-fallback error path.
+                    val target = _mem_infra_usable_degrade_target(name, backend)
                     if target == "":
                         errors = errors.push(
                             "'" + name + "' is not supported on backend '" + backend + "' and has no fallback"
