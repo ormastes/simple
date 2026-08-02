@@ -1,5 +1,5 @@
-use std.test_runner.doctest_runner.{extract_doctests}
-use std.io.{file_delete, file_write, time_now_unix_micros}
+use std.test_runner.doctest_runner.{extract_doctests, run_doctests}
+use std.io.{env_get, file_delete, file_exists, file_write, time_now_unix_micros}
 
 describe "source doctest extraction":
     it "extracts ordinary comments and fenced docstrings but ignores malformed blocks":
@@ -12,4 +12,22 @@ describe "source doctest extraction":
         expect(blocks[0].code).to_contain("from_comment")
         expect(blocks[1].code).to_contain("from_docstring")
 
+        expect(file_delete(path)).to_be(true)
+
+    it "removes the generated source-doctest fixture after execution":
+        val path = "/tmp/simple_source_doctest_cleanup_{time_now_unix_micros()}.spl"
+        val source = "# ```simple\n# val cleanup_probe = 1\n# ```\n"
+        expect(file_write(path, source)).to_be(true)
+
+        val blocks = extract_doctests(path)
+        expect(blocks.len()).to_equal(1)
+        val tmpdir = env_get("TMPDIR")
+        val temp_root = if tmpdir != "": tmpdir else: "/tmp"
+        val generated_path = "{temp_root}/simple_doctest_{blocks[0].line_number}.spl"
+        if file_exists(generated_path):
+            file_delete(generated_path)
+
+        val result = run_doctests(path, 5000)
+        expect(result.passed + result.failed).to_equal(1)
+        expect(file_exists(generated_path)).to_be(false)
         expect(file_delete(path)).to_be(true)
