@@ -1,0 +1,36 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{file_read}
+use std.common.llm.knowledge_selector.*
+
+describe "SPipe deterministic knowledge routing process":
+    it "should keep registry guide and process surfaces aligned":
+        step("Read the canonical knowledge registry")
+        val registry = file_read("doc/00_llm_process/knowledge_registry.sdn")
+        expect(registry).to_contain("selection: exact-feature-then-longest-source-prefix")
+        expect(registry).to_contain("prefix: src/os/kernel")
+        expect(registry).to_contain("prefix: src/os/drivers")
+        expect(registry).to_contain("architecture_profile: mdsoc_only")
+
+        step("Verify shared implementation routing guidance")
+        val guide = file_read("doc/07_guide/app/llm/knowledge_selection.md")
+        expect(guide).to_contain("longest-prefix")
+        expect(guide).to_contain("feature-group")
+        expect(guide).to_contain("src/os/kernel/**")
+        expect(guide).to_contain("src/os/drivers/**")
+        expect(file_read(".codex/skills/sp_dev/SKILL.md")).to_contain("Deterministic knowledge gate")
+        expect(file_read(".claude/skills/spipe.md")).to_contain("Deterministic knowledge routing")
+        expect(file_read(".gemini/commands/impl.toml")).to_contain("longest-prefix layer knowledge receipt")
+
+    it "should reject an unsafe longest-prefix kernel route end to end":
+        step("Construct conflicting userland and kernel routes")
+        val features = [KnowledgeFeatureRoute(feature_id: "demo", group_id: "os_platform",
+            group_path: "feature-group", expert_path: "feature-expert")]
+        val routes = [KnowledgeLayerRoute(prefix: "src/os", group_id: "os_userland",
+                group_path: "userland-base", expert_path: "", architecture_profile: "mdsoc_plus"),
+            KnowledgeLayerRoute(prefix: "src/os/kernel", group_id: "os_kernel",
+                group_path: "kernel-base", expert_path: "", architecture_profile: "mdsoc_plus")]
+        step("Apply longest-prefix selection and MDSOC-only override")
+        val selected = select_implementation_knowledge("1", "demo",
+            ["src/os/kernel/main.spl"], features, routes)
+        expect(selected.reason).to_equal("mdsoc-only-route-required:src/os/kernel/main.spl")
+        expect(selected.knowledge_paths.len()).to_equal(0)

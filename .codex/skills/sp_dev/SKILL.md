@@ -861,3 +861,11 @@ there for the next investigation. Never gate a probe whose output an
 evidence/gate script asserts on. See
 `doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md` § "Probe
 caveats".
+
+## Deterministic knowledge gate
+
+Before implementation, resolve the exact feature and every planned source path
+through `doc/00_llm_process/knowledge_registry.sdn`; retain
+`.spipe/<feature>/knowledge_selection.sdn`. Load both feature and longest-prefix
+layer knowledge. Missing/ambiguous routes fail closed. Kernel/drivers are always
+`mdsoc_only`, never MDSOC+ or ECS.

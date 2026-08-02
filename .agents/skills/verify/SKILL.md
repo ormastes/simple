@@ -16,6 +16,9 @@ description: Production readiness verification. Checks SPipe tests for stubs/dum
 ## Checks
 
 ### 1. SPipe Tests
+
+- Verify longest-prefix receipt coverage for every changed source path and
+  reject MDSOC+ profiles for kernel or drivers.
 SPipe is verified here, before release. Release consumes `STATUS: PASS`; it does
 not create, rewrite, or weaken SPipe after verification.
 

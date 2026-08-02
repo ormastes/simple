@@ -5,6 +5,9 @@ description: Create architecture, UI design, system tests, and detail design for
 
 # Design — Self-Sufficient
 
+Consume the retained feature-plus-layer knowledge receipt before design.
+Missing/ambiguous routes and MDSOC+ on kernel/drivers fail closed.
+
 **Self-sufficient.** If research/requirements missing, do them first.
 
 ## Prerequisites Check

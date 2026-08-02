@@ -1,6 +1,8 @@
 # SPipe Phase 7: Verify -- QA
 
 **Role:** QA -- Full validation: tests, coverage, docs, production readiness
+Fail when a changed source path lacks exact-feature and longest-prefix layer
+receipt coverage, or when kernel/drivers select MDSOC+.
 **Blinders:** ONLY verification. No code changes except critical fixes.
 **Context budget:** sub-40% -- load only test output + coverage reports.
 

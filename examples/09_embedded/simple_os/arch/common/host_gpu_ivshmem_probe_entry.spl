@@ -1,5 +1,8 @@
 use os.kernel.ipc.host_gpu_ivshmem_map.{map_qemu_host_gpu_ivshmem_bar2}
 use os.lib.gpu_bridge.host_gpu_ivshmem.{HostGpuIvshmemHelloReceipt, HOST_GPU_IVSHMEM_DEFAULT_TIMEOUT_POLLS, host_gpu_ivshmem_negotiate, host_gpu_ivshmem_next_generation, host_gpu_ivshmem_submit, host_gpu_ivshmem_submit_draw_ir, host_gpu_ivshmem_fill_u32, host_gpu_ivshmem_device_receipt_valid}
+use os.lib.gpu_bridge.cuda_host_offload_adapter.{CudaHostOffloadAdapter}
+use os.lib.gpu_bridge.vulkan_host_offload_adapter.{VulkanHostOffloadAdapter}
+use common.processing.processing_ir.{processing_ir_fill_u32}
 use os.kernel.boot.mmio_hardware.{mmio_read32}
 use os.kernel.boot.monotonic_hardware.{boot_monotonic_prepare, boot_monotonic_deadline_us, boot_monotonic_elapsed_us, boot_monotonic_now_us}
 use common.gpu.simpleos_host_gpu_protocol.*
@@ -338,11 +341,41 @@ fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text):
         return
 
     val processing_generation = fixture_generation + HOST_GPU_WARM_SAMPLE_COUNT + 1
-    val processing_receipt = host_gpu_ivshmem_fill_u32(
-        base, processing_generation, run_id_hash, processing_generation,
-        processing_backend, 256, 7u32, HOST_GPU_PROBE_TIMEOUT_POLLS
-    )
-    if not host_gpu_ivshmem_device_receipt_valid(processing_receipt, processing_generation, run_id_hash, processing_generation, simpleos_host_gpu_backend_code(processing_backend), 1024):
+    val processing_ir = processing_ir_fill_u32(256, 7u32)
+    val cuda_adapter = CudaHostOffloadAdapter.create(base, HOST_GPU_PROBE_TIMEOUT_POLLS)
+    val vulkan_adapter = VulkanHostOffloadAdapter.create(base, HOST_GPU_PROBE_TIMEOUT_POLLS)
+    if processing_backend == "cuda" and not cuda_adapter.negotiated(hello):
+        _host_gpu_probe_fail(isa, "cuda-processing-port-not-negotiated")
+        return
+    if processing_backend == "vulkan" and not vulkan_adapter.negotiated(hello):
+        _host_gpu_probe_fail(isa, "vulkan-processing-port-not-negotiated")
+        return
+    val processing_receipt = if processing_backend == "cuda":
+        cuda_adapter.submit_fill_u32(
+            processing_generation, run_id_hash, processing_generation,
+            processing_ir.element_count, processing_ir.value)
+    elif processing_backend == "vulkan":
+        vulkan_adapter.submit_fill_u32(
+            processing_generation, run_id_hash, processing_generation,
+            processing_ir.element_count, processing_ir.value)
+    else:
+        host_gpu_ivshmem_fill_u32(
+            base, processing_generation, run_id_hash, processing_generation,
+            processing_backend, processing_ir.element_count, processing_ir.value,
+            HOST_GPU_PROBE_TIMEOUT_POLLS)
+    val processing_receipt_valid = if processing_backend == "cuda":
+        cuda_adapter.device_receipt_valid(
+            processing_receipt, processing_generation, run_id_hash,
+            processing_generation, 1024)
+    elif processing_backend == "vulkan":
+        vulkan_adapter.device_receipt_valid(
+            processing_receipt, processing_generation, run_id_hash,
+            processing_generation, 1024)
+    else:
+        host_gpu_ivshmem_device_receipt_valid(
+            processing_receipt, processing_generation, run_id_hash,
+            processing_generation, simpleos_host_gpu_backend_code(processing_backend), 1024)
+    if not processing_receipt_valid:
         _host_gpu_probe_fail(isa, "processing-receipt")
         return
     var mismatch_count: i64 = 0
@@ -361,6 +394,6 @@ fn _host_gpu_probe_main_at(base: u64, device: i64, transport: text):
         return
     val processing_handle = processing_receipt.native_handle
     val processing_identity = processing_receipt.device_identity
-    serial_println("HOST_GPU_PROCESS_OK isa={isa} backend={processing_backend} generation={processing_generation} run={processing_receipt.run_id_hash} frame={processing_receipt.frame_id} protocol={hello.version} elapsed_us={processing_receipt.elapsed_us} handle={processing_handle} identity={processing_identity} checksum={processing_checksum} mismatches={mismatch_count}")
+    serial_println("HOST_GPU_PROCESS_OK isa={isa} backend={processing_backend} evidence_class=host-offload generation={processing_generation} run={processing_receipt.run_id_hash} frame={processing_receipt.frame_id} protocol={hello.version} elapsed_us={processing_receipt.elapsed_us} handle={processing_handle} identity={processing_identity} checksum={processing_checksum} mismatches={mismatch_count}")
     serial_println("SIMPLEOS_HOST_GPU_2D_PASS isa={isa}")
     serial_println("TEST PASSED")

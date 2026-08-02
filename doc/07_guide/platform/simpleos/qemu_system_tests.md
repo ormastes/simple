@@ -1,5 +1,17 @@
 # QEMU System Tests Guide
 
+## Vulkan/CUDA ProcessingIR receipt
+
+The host-GPU probe routes CUDA and Vulkan compute through shared
+`ProcessingDevicePort` adapters and emits `HOST_GPU_PROCESS_OK` with the true
+backend plus `evidence_class=host-offload`. The passthrough checker keeps this
+separate from direct guest Vulkan/CUDA, which remains blocked until a real
+Venus or approved VFIO guest receipt exists.
+
+UNO Q promotion is owned by
+`test/03_system/os/board/uno_q_adreno_turnip_live_spec.spl`; its default blocked
+result is expected without a prepared physical board and retained receipt.
+
 ## Overview
 
 System-level SSpec tests for SimpleOS boot and execution live in `test/03_system/os/qemu/`. Each test boots a real QEMU instance per architecture, executing full end-to-end scenarios. The helper contract is defined in `src/os/qemu_systest_contract.spl`.

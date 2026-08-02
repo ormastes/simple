@@ -1,5 +1,15 @@
 # Processing Backend Guide
 
+## SimpleOS QEMU processing adapters
+
+The canonical guest probe at
+`examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl`
+constructs `ProcessingIr` and selects `CudaHostOffloadAdapter` when CUDA was
+negotiated, otherwise `VulkanHostOffloadAdapter` for Vulkan. Both implement
+`ProcessingDevicePort`, validate the negotiated mask, submit through ivshmem,
+and admit only correlated device-origin readback. The marker includes
+`evidence_class=host-offload`; it is never direct guest Vulkan evidence.
+
 **Status:** Partial — shared FillU32/FillRect artifacts and focused native Vulkan lane available
 
 The processing backend is the planned portable compute layer underneath

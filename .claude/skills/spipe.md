@@ -1734,3 +1734,11 @@ parse/analyse time (`TripleLt`, `AluResult32 not found`, VHDL `missing
 entity/architecture`) — a WC-pollution symptom, not a code regression. Restore
 the landed state first: `git checkout origin/main -- src/lib/hardware/
 examples/09_embedded/fpga_riscv/`.
+
+## Deterministic knowledge routing
+
+SPipe implementation loads both feature and layer knowledge. Resolve the exact
+feature, then longest-prefix match every planned/changed source path using
+`doc/00_llm_process/knowledge_registry.sdn`; retain the receipt under
+`.spipe/<feature>/knowledge_selection.sdn`. Fail closed on missing/ambiguous
+routes. Kernel and drivers are always MDSOC-only, never MDSOC+ ECS.

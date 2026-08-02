@@ -1,6 +1,19 @@
 <!-- codex-architecture -->
 # Processing Backend Architecture
 
+## SimpleOS QEMU and Adreno port composition (2026-08-02)
+
+SimpleOS guest processing composes backend-neutral `ProcessingDevicePort`
+adapters below canonical `ProcessingIr`. The QEMU guest probe uses
+`CudaHostOffloadAdapter` or `VulkanHostOffloadAdapter` over ivshmem; both retain
+their real backend code and require correlated device-origin receipts.
+Rendering selection remains independent.
+
+UNO Q uses `AdrenoTurnipAdapter` at the Vulkan device boundary. It shares
+Vulkan semantics and evidence policy but not QEMU transport code, and remains
+blocked from `simpleos-native` promotion until firmware, MMU/cache, queue,
+fence, and device-readback owners exist.
+
 **Date:** 2026-06-14
 **Status:** Partial — shared FillU32/FillRect contract and focused native Vulkan slice implemented
 **Scope:** Portable compute, draw, tensor, RV64 vector, and FPGA soft-accelerator backend lane.

@@ -1,6 +1,8 @@
 # SPipe Phase 6: Refactor -- Tech Lead
 
 **Role:** Tech Lead -- Refactor for quality: deduplication, file splitting, clean code
+Revalidate the knowledge receipt against touched paths and registry hashes;
+private wiki knowledge cannot override public architecture policy.
 **Blinders:** ONLY code quality. No new features, no behavior changes.
 **Context budget:** sub-40% -- load only implementation files + their specs.
 

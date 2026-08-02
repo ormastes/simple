@@ -464,6 +464,12 @@ After approval, use the jj linear push flow from `$release`: capture file count,
 
 ## Self-Sufficiency Principle
 
+### Shared knowledge selection
+
+Before implementation, every participant follows `knowledge_selection.md` and
+uses the same retained feature-plus-layer receipt. Kernel and driver paths
+always select MDSOC-only knowledge; feature guidance cannot enable ECS there.
+
 The core design principle: **every phase, every LLM, is self-sufficient.**
 
 Before starting any phase, check if prerequisite artifacts exist:

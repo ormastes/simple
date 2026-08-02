@@ -23,6 +23,10 @@ description: "Codex verification skill (primary verifier in cooperative mode). 6
 
 ### Phase 1: Scope Analysis
 
+- Verify the retained knowledge-selection receipt covers every changed source
+  path with exact-feature and longest-prefix layer routes; reject any
+  kernel/driver profile other than `mdsoc_only`.
+
 - Identify all files changed/added for the feature
 - Map changes to requirements (REQ-NNN)
 - Verify no unrelated changes sneaked in

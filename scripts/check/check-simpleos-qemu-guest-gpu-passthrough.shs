@@ -18,6 +18,9 @@ classify_passthrough() {
     if [ "$host" != linux ]; then
         CLASS_STATUS=unavailable
         CLASS_REASON=linux-host-required
+    elif [ "$guest_driver" = host-offload-only ]; then
+        CLASS_STATUS=unavailable
+        CLASS_REASON=direct-guest-vulkan-cuda-evidence-missing
     elif [ "$guest_driver" != validated ]; then
         CLASS_STATUS=unavailable
         CLASS_REASON=simpleos-guest-vulkan-cuda-evidence-missing
@@ -39,6 +42,8 @@ classify_passthrough() {
 self_test() {
     classify_passthrough linux available available missing vfio-ready
     [ "$CLASS_STATUS:$CLASS_REASON" = "unavailable:simpleos-guest-vulkan-cuda-evidence-missing" ]
+    classify_passthrough linux available available host-offload-only vfio-ready
+    [ "$CLASS_STATUS:$CLASS_REASON" = "unavailable:direct-guest-vulkan-cuda-evidence-missing" ]
     classify_passthrough linux available available validated host-bound
     [ "$CLASS_STATUS:$CLASS_REASON" = "blocked:selected-device-not-vfio-ready" ]
     classify_passthrough linux available available validated vfio-ready
@@ -67,9 +72,17 @@ self_test() {
 }
 
 guest_driver_evidence_status() {
-    # No canonical SimpleOS guest Vulkan/CUDA receipt producer exists yet.
-    # Never promote caller-authored text or hashes into passthrough readiness.
-    echo producer-missing
+    producer=examples/09_embedded/simple_os/arch/common/host_gpu_ivshmem_probe_entry.spl
+    if [ -f "$producer" ] \
+        && grep -q 'host_gpu_ivshmem_fill_u32' "$producer" \
+        && grep -q 'host_gpu_ivshmem_device_receipt_valid' "$producer" \
+        && grep -q 'HOST_GPU_PROCESS_OK' "$producer"; then
+        # Canonical producer exists, but its transport is ivshmem host offload.
+        # It is deliberately insufficient for direct Venus/VFIO admission.
+        echo host-offload-only
+    else
+        echo producer-missing
+    fi
 }
 
 qemu_path_metadata_is_trusted() {
@@ -306,6 +319,13 @@ preflight() {
     echo "${PREFIX}_qemu_trust_status=$qemu_trust"
     echo "${PREFIX}_qemu_version=$qemu_version"
     echo "${PREFIX}_simpleos_guest_vulkan_cuda_evidence_status=$guest_driver"
+    if [ "$guest_driver" = host-offload-only ]; then
+        echo "${PREFIX}_simpleos_guest_vulkan_cuda_evidence_class=host-offload"
+        echo "${PREFIX}_direct_guest_evidence_class=blocked"
+    else
+        echo "${PREFIX}_simpleos_guest_vulkan_cuda_evidence_class=blocked"
+        echo "${PREFIX}_direct_guest_evidence_class=blocked"
+    fi
     echo "${PREFIX}_selected_device_status=$selected_status"
     emit_selected_group_inventory
     if [ -f src/os/lib/gpu_bridge/host_gpu_ivshmem.spl ] \

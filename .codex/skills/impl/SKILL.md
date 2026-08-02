@@ -185,6 +185,10 @@ Before declaring implementation complete, verify:
 
 ## Rules
 
+- Consume `.spipe/<feature>/knowledge_selection.sdn` before implementation.
+  It must include exact feature knowledge and longest-prefix layer knowledge for
+  every planned source path; kernel/drivers must be `mdsoc_only`.
+
 - All code in `.spl` — no Python, no Bash
 - Generics use `<>` for type parameters — `Option<T>`, `Result<T, E>`; arrays use `[]` like `[i64]`
 - Pattern binding: `if val` not `if let`

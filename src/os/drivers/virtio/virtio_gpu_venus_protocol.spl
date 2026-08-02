@@ -1,0 +1,109 @@
+"""Fail-closed VirtIO-GPU Venus transport admission and command planning.
+
+This module owns protocol facts and validates prerequisites without claiming
+that a Vulkan ICD, queue transport, or native readback path already exists.
+"""
+
+# VirtIO 1.3 section 5.7 feature bits.
+val VIRTIO_GPU_F_VIRGL: i64 = 0
+val VIRTIO_GPU_F_RESOURCE_BLOB: i64 = 3
+val VIRTIO_GPU_F_CONTEXT_INIT: i64 = 4
+
+# VirtIO-GPU control commands used by a Venus transport.
+val VIRTIO_GPU_CMD_GET_CAPSET_INFO: u32 = 0x0108
+val VIRTIO_GPU_CMD_GET_CAPSET: u32 = 0x0109
+val VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB: u32 = 0x010c
+val VIRTIO_GPU_CMD_CTX_CREATE: u32 = 0x0200
+val VIRTIO_GPU_CMD_SUBMIT_3D: u32 = 0x0207
+val VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB: u32 = 0x0208
+
+val VIRTIO_GPU_RESP_OK_CAPSET_INFO: u32 = 0x1102
+val VIRTIO_GPU_RESP_OK_CAPSET: u32 = 0x1103
+val VIRTIO_GPU_RESP_OK_MAP_INFO: u32 = 0x1106
+
+val VIRTIO_GPU_CAPSET_VENUS: i64 = 4
+val VIRTIO_GPU_CTRL_HDR_SIZE: i64 = 24
+val VIRTIO_GPU_GET_CAPSET_INFO_SIZE: i64 = 32
+val VIRTIO_GPU_RESP_CAPSET_INFO_SIZE: i64 = 40
+val VIRTIO_GPU_GET_CAPSET_SIZE: i64 = 32
+val VIRTIO_GPU_CTX_CREATE_SIZE: i64 = 96
+val VIRTIO_GPU_RESOURCE_CREATE_BLOB_SIZE: i64 = 56
+val VIRTIO_GPU_SUBMIT_3D_PREFIX_SIZE: i64 = 32
+val VIRTIO_GPU_RESOURCE_MAP_BLOB_SIZE: i64 = 40
+
+struct VenusFeatureSet:
+    virgl: bool
+    resource_blob: bool
+    context_init: bool
+    capset_query_fix: bool
+    host_visible: bool
+
+struct VenusCapsetInfo:
+    id: i64
+    max_version: i64
+    max_size: i64
+
+struct VenusCommandPlan:
+    admitted: bool
+    reason: text
+    command_count: i64
+
+fn venus_features_ready(features: VenusFeatureSet) -> bool:
+    # @decision VN_FEATURES
+    features.virgl and features.resource_blob and features.context_init and
+        features.capset_query_fix and features.host_visible
+
+fn venus_capset_valid(info: VenusCapsetInfo, requested_version: i64, max_bytes: i64) -> bool:
+    # @decision VN_CAPSET
+    info.id == VIRTIO_GPU_CAPSET_VENUS and requested_version > 0 and
+        requested_version <= info.max_version and info.max_size > 0 and
+        info.max_size <= max_bytes
+
+fn venus_context_valid(context_id: i64, debug_name: text) -> bool:
+    # @decision VN_CONTEXT
+    context_id > 0 and debug_name.len() > 0 and debug_name.len() <= 64
+
+fn venus_blob_valid(resource_id: i64, blob_id: u64, size_bytes: u64) -> bool:
+    # @decision VN_BLOB
+    resource_id > 0 and blob_id > 0u64 and size_bytes > 0u64
+
+fn venus_command_plan(features: VenusFeatureSet, capset: VenusCapsetInfo,
+        context_id: i64, resource_id: i64, blob_id: u64, size_bytes: u64,
+        submit_bytes: u64, fence_id: u64) -> VenusCommandPlan:
+    # @decision VN_PLAN_FEATURES
+    if not venus_features_ready(features):
+        return VenusCommandPlan(admitted: false, reason: "blocked:venus-features-missing", command_count: 0)
+    # The transport negotiates the highest returned Venus version within the
+    # bounded response allocation; no Venus protocol version is hardcoded.
+    # @decision VN_PLAN_CAPSET
+    if not venus_capset_valid(capset, capset.max_version, capset.max_size):
+        return VenusCommandPlan(admitted: false, reason: "blocked:venus-capset-invalid", command_count: 0)
+    # @decision VN_PLAN_CONTEXT
+    if not venus_context_valid(context_id, "simpleos-venus"):
+        return VenusCommandPlan(admitted: false, reason: "blocked:venus-context-invalid", command_count: 0)
+    # @decision VN_PLAN_BLOB
+    if not venus_blob_valid(resource_id, blob_id, size_bytes):
+        return VenusCommandPlan(admitted: false, reason: "blocked:venus-blob-invalid", command_count: 0)
+    # @decision VN_PLAN_SUBMIT
+    if submit_bytes == 0u64:
+        return VenusCommandPlan(admitted: false, reason: "blocked:venus-submit-empty", command_count: 0)
+    # @decision VN_PLAN_FENCE
+    if fence_id == 0u64:
+        return VenusCommandPlan(admitted: false, reason: "blocked:venus-fence-missing", command_count: 0)
+    VenusCommandPlan(admitted: true, reason: "ready:venus-command-plan", command_count: 6)
+
+export VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_RESOURCE_BLOB, VIRTIO_GPU_F_CONTEXT_INIT
+export VIRTIO_GPU_CMD_GET_CAPSET_INFO, VIRTIO_GPU_CMD_GET_CAPSET
+export VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB, VIRTIO_GPU_CMD_CTX_CREATE
+export VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB
+export VIRTIO_GPU_RESP_OK_CAPSET_INFO, VIRTIO_GPU_RESP_OK_CAPSET, VIRTIO_GPU_RESP_OK_MAP_INFO
+export VIRTIO_GPU_CAPSET_VENUS, VIRTIO_GPU_CTRL_HDR_SIZE
+export VIRTIO_GPU_GET_CAPSET_INFO_SIZE, VIRTIO_GPU_RESP_CAPSET_INFO_SIZE
+export VIRTIO_GPU_GET_CAPSET_SIZE, VIRTIO_GPU_CTX_CREATE_SIZE
+export VIRTIO_GPU_RESOURCE_CREATE_BLOB_SIZE, VIRTIO_GPU_SUBMIT_3D_PREFIX_SIZE
+export VIRTIO_GPU_RESOURCE_MAP_BLOB_SIZE
+export VenusFeatureSet, VenusCapsetInfo, VenusCommandPlan
+export venus_features_ready, venus_capset_valid, venus_context_valid, venus_blob_valid
+export venus_command_plan
+
+# @req REQ-001 REQ-003 REQ-004 NFR-001 NFR-002 NFR-007

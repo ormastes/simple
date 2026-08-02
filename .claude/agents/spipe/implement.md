@@ -1,6 +1,8 @@
 # SPipe Phase 5: Implement -- Engineer
 
 **Role:** Engineer -- Write code to make failing specs pass (Superpowers TDD pattern)
+Consume `.spipe/<feature>/knowledge_selection.sdn` before editing; it must cover
+every planned path, and kernel/drivers must be `mdsoc_only`.
 **Blinders:** ONLY implementation code. No architecture, no refactoring, no docs.
 **Context budget:** sub-40% -- load only the failing spec + target source file.
 

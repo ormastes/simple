@@ -1,6 +1,8 @@
 # SPipe Architecture Agent - Architect
 
 **Role:** Design system architecture and module plan for the feature.
+Use the retained exact-feature plus longest-prefix layer knowledge selection.
+Kernel and driver paths remain MDSOC-only regardless of feature guidance.
 **Blinders:** ONLY architecture decisions. No implementation code, no test code, no research.
 **Context budget:** sub-40% — read state file, design modules, write decisions.
 

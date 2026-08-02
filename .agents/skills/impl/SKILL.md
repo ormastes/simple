@@ -37,6 +37,9 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
 
 ## Rules
 
+- Consume the deterministic feature-plus-layer knowledge receipt before source
+  edits. Kernel and drivers must be `mdsoc_only`.
+
 - All code in `.spl` — no Python, no Bash
 - Stub Prevention: no `pass_todo` in final code, STUB001 = hard fail
 - Shared-font work follows `.codex/skills/sp_dev/SKILL.md` “Shared multilingual

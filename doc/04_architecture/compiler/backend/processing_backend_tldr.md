@@ -1,6 +1,10 @@
 <!-- codex-architecture -->
 # Processing Backend TLDR
 
+- SimpleOS QEMU CUDA and Vulkan compute share `ProcessingDevicePort` while
+  retaining truthful backend and host-offload provenance.
+- UNO Q Adreno shares the Vulkan device contract, not the QEMU transport.
+
 Simple now has shared `FillU32` and stride-aware, half-open `FillRectU32`
 semantics, CPU oracles, Vulkan/CUDA/Metal artifact owners, and typed compile and
 device-readback evidence. A focused Vulkan test compiles a fixed representative

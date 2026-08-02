@@ -17,6 +17,9 @@ description: "Codex design skill (Step 4 in cooperative pipeline). Architecture 
 
 ## Prerequisites Check
 
+Consume the retained feature-plus-layer knowledge receipt before architecture
+or test design. Reject stale path coverage and MDSOC+/ECS on kernel/drivers.
+
 | Artifact | Path | If missing |
 |----------|------|-----------|
 | Requirements | `doc/02_requirements/feature/<feature>.md` | Run research first |

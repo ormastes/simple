@@ -51,6 +51,8 @@ Multi-Dimensional Separation of Concerns patterns from `src/compiler/85.mdsoc/`:
 - Sibling layers must not reach into each other's private implementation subtrees
 - If two siblings need the same node, move it upward into a common ancestor or shared layer
 - Frontend grammar stays single-source — no interpreter-only or loader-only grammar forks
+- Knowledge routing enforces `src/os/kernel/**` and `src/os/drivers/**` as
+  `mdsoc_only`; MDSOC+ ECS business state is userland-only.
 
 ### 2. Module Structure Evaluation
 

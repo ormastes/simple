@@ -1,0 +1,61 @@
+"""CUDA ProcessingIR adapter over the existing SimpleOS ivshmem transport."""
+
+use common.gpu.simpleos_host_gpu_protocol.{
+    SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
+    SIMPLEOS_HOST_GPU_STATUS_PASS,
+    SIMPLEOS_HOST_GPU_BACKEND_CUDA,
+    SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA,
+    simpleos_host_gpu_wire_correlation_valid
+}
+use os.lib.gpu_bridge.processing_device_port.{
+    ProcessingDevicePort,
+    processing_device_failure_receipt
+}
+use os.lib.gpu_bridge.host_gpu_ivshmem.{
+    HostGpuIvshmemReceipt,
+    HostGpuIvshmemHelloReceipt,
+    host_gpu_ivshmem_device_receipt_valid,
+    host_gpu_ivshmem_fill_u32
+}
+
+class CudaHostOffloadAdapter:
+    base: u64
+    timeout_polls: i64
+
+    static fn create(base: u64, timeout_polls: i64) -> CudaHostOffloadAdapter:
+        CudaHostOffloadAdapter(base: base, timeout_polls: timeout_polls)
+
+impl ProcessingDevicePort for CudaHostOffloadAdapter:
+    fn backend_name() -> text:
+        "cuda"
+
+    fn backend_code() -> i64:
+        SIMPLEOS_HOST_GPU_BACKEND_CUDA
+
+    # @decision CUDA_NEGOTIATED
+    fn negotiated(hello: HostGpuIvshmemHelloReceipt) -> bool:
+        (hello.published and hello.completed and
+         hello.status == SIMPLEOS_HOST_GPU_STATUS_PASS and hello.reason == 0 and
+         hello.version == SIMPLEOS_HOST_GPU_PROTOCOL_VERSION and
+         (hello.processing_mask & SIMPLEOS_HOST_GPU_BACKEND_MASK_CUDA) != 0 and
+         hello.max_payload_bytes > 0 and hello.max_readback_bytes > 0)
+
+    fn submit_fill_u32(generation: i64, run_id_hash: i64, frame_id: i64,
+                       element_count: i64, value: u32) -> HostGpuIvshmemReceipt:
+        # @decision CUDA_INVALID_SUBMIT
+        if (self.base == 0u64 or generation <= 0 or element_count <= 0 or
+            self.timeout_polls <= 0 or
+            not simpleos_host_gpu_wire_correlation_valid(run_id_hash, frame_id)):
+            return processing_device_failure_receipt(generation)
+        host_gpu_ivshmem_fill_u32(
+            self.base, generation, run_id_hash, frame_id, "cuda",
+            element_count, value, self.timeout_polls)
+
+    fn device_receipt_valid(receipt: HostGpuIvshmemReceipt,
+                            generation: i64, run_id_hash: i64,
+                            frame_id: i64, expected_bytes: i64) -> bool:
+        host_gpu_ivshmem_device_receipt_valid(
+            receipt, generation, run_id_hash, frame_id,
+            SIMPLEOS_HOST_GPU_BACKEND_CUDA, expected_bytes)
+
+export CudaHostOffloadAdapter
