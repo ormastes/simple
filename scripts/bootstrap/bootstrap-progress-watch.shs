@@ -50,6 +50,48 @@ if [ -n "$expected_start" ] && [ "$process_start" != "$expected_start" ]; then
   exit 3
 fi
 
+process_tree_metrics() {
+  metrics_root=$1
+  metrics_exclude=$2
+  ps -eo pid=,ppid=,%cpu=,rss= 2>/dev/null | awk \
+    -v root="$metrics_root" -v exclude="$metrics_exclude" '
+      {
+        pids[NR] = $1
+        parent[$1] = $2
+        cpu[$1] = $3
+        rss[$1] = $4
+      }
+      END {
+        included[root] = 1
+        excluded[exclude] = 1
+        changed = 1
+        while (changed) {
+          changed = 0
+          for (i = 1; i <= NR; i++) {
+            pid = pids[i]
+            if (included[parent[pid]] && !included[pid]) {
+              included[pid] = 1
+              changed = 1
+            }
+            if (excluded[parent[pid]] && !excluded[pid]) {
+              excluded[pid] = 1
+              changed = 1
+            }
+          }
+        }
+        for (i = 1; i <= NR; i++) {
+          pid = pids[i]
+          if (included[pid] && !excluded[pid]) {
+            total_cpu += cpu[pid]
+            total_rss += rss[pid]
+            total_processes++
+          }
+        }
+        printf "%.1f %d %d\n", total_cpu, total_rss, total_processes
+      }
+    '
+}
+
 started_at=$(date +%s)
 while :; do
   now=$(date +%s)
@@ -79,13 +121,20 @@ while :; do
   process_elapsed=${1:-unknown}
   cpu_pct=${2:-unknown}
   rss_kb=${3:-unknown}
+  tree_metrics=$(process_tree_metrics "$watch_pid" "$$")
+  set -- $tree_metrics
+  tree_cpu_pct=${1:-unknown}
+  tree_rss_kb=${2:-unknown}
+  tree_processes=${3:-unknown}
   log_bytes=absent
   if [ -n "$main_log" ] && [ -f "$main_log" ]; then
     log_bytes=$(ls -ln "$main_log" 2>/dev/null | awk 'NF {print $5; exit}')
     [ -n "$log_bytes" ] || log_bytes=unknown
   fi
-  printf 'event=sample timestamp=%s status=alive pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s milestone=%s main_log_bytes=%s\n' \
-    "$now" "$watch_pid" "$((now - started_at))" "$process_elapsed" "$cpu_pct" "$rss_kb" "$milestone" "$log_bytes" >>"$progress_log"
+  printf 'event=sample timestamp=%s status=alive pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s tree_cpu_pct=%s tree_rss_kb=%s tree_processes=%s milestone=%s main_log_bytes=%s\n' \
+    "$now" "$watch_pid" "$((now - started_at))" "$process_elapsed" \
+    "$cpu_pct" "$rss_kb" "$tree_cpu_pct" "$tree_rss_kb" \
+    "$tree_processes" "$milestone" "$log_bytes" >>"$progress_log"
 
   [ "$once" -eq 0 ] || exit 0
   sleep "$interval"

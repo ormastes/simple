@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+watcher="${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs"
+test_tmp=$(mktemp -d)
+owned_pids=
+
+cleanup() {
+  for owned_pid in ${owned_pids}; do
+    kill "${owned_pid}" 2>/dev/null || true
+  done
+  for owned_pid in ${owned_pids}; do
+    wait "${owned_pid}" 2>/dev/null || true
+  done
+  rm -rf "${test_tmp}"
+}
+trap cleanup EXIT INT TERM
+
+fail() {
+  echo "FAIL: $*" >&2
+  exit 1
+}
+
+field() {
+  field_name=$1
+  line=$2
+  printf '%s\n' "${line}" | tr ' ' '\n' | sed -n "s/^${field_name}=//p"
+}
+
+# Exact case: include the watched shell and its child, but not this independent
+# watcher process.
+sh -c 'sleep 30 & wait' &
+nested_root=$!
+owned_pids="${nested_root}"
+nested_child=
+attempt=0
+while [ -z "${nested_child}" ] && [ "${attempt}" -lt 50 ]; do
+  nested_child=$(ps -o pid= --ppid "${nested_root}" 2>/dev/null | awk 'NF {print $1; exit}')
+  attempt=$((attempt + 1))
+done
+[ -n "${nested_child}" ] || fail "nested child did not start"
+owned_pids="${nested_child} ${owned_pids}"
+nested_log="${test_tmp}/nested.log"
+sh "${watcher}" --pid="${nested_root}" --progress-log="${nested_log}" --once
+nested_line=$(tail -n 1 "${nested_log}")
+[ "$(field pid "${nested_line}")" = "${nested_root}" ] || fail "root PID changed"
+[ "$(field tree_processes "${nested_line}")" -eq 2 ] || fail "nested tree count is not exactly two"
+[ "$(field tree_rss_kb "${nested_line}")" -gt "$(field rss_kb "${nested_line}")" ] ||
+  fail "nested tree RSS does not exceed root RSS"
+
+# Adjacent leaf case: a process with no descendants has identical root/tree RSS.
+sleep 30 &
+leaf_pid=$!
+owned_pids="${leaf_pid} ${owned_pids}"
+leaf_log="${test_tmp}/leaf.log"
+sh "${watcher}" --pid="${leaf_pid}" --progress-log="${leaf_log}" --once
+leaf_line=$(tail -n 1 "${leaf_log}")
+[ "$(field tree_processes "${leaf_line}")" -eq 1 ] || fail "leaf tree count is not one"
+[ "$(field tree_rss_kb "${leaf_line}")" -eq "$(field rss_kb "${leaf_line}")" ] ||
+  fail "leaf tree RSS differs from root RSS"
+
+# Adjacent exited case: preserve the existing terminal event without fake metrics.
+sleep 0 &
+exited_pid=$!
+wait "${exited_pid}"
+exited_log="${test_tmp}/exited.log"
+sh "${watcher}" --pid="${exited_pid}" --progress-log="${exited_log}" --once
+exited_line=$(tail -n 1 "${exited_log}")
+[ "$(field status "${exited_line}")" = "exited" ] || fail "exited PID was not reported exited"
+case "${exited_line}" in
+  *tree_rss_kb=*) fail "exited event reported fabricated tree metrics" ;;
+esac
+
+echo "PASS: bootstrap progress watcher process-tree metrics"
