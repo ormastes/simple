@@ -22,12 +22,33 @@ use super::llvm::LlvmBackend;
 /// Uses inkwell's MCJIT execution engine to compile MIR functions
 /// to native code for direct in-process execution.
 pub struct LlvmJitCompiler {
-    // Fields that borrow from `context` MUST be declared before it
-    // so Rust's drop order (declaration order) destroys them first.
+    // Fields that borrow from an LLVM context MUST be declared before that
+    // context so Rust's drop order (declaration order) destroys them first.
     execution_engine: Option<ExecutionEngine<'static>>,
+    /// The backend whose `Context` owns the module currently inside
+    /// `execution_engine`.
+    ///
+    /// This field exists because it is the ONLY thing keeping that context
+    /// alive. `compile_module` builds the module in a `LlvmBackend`'s context
+    /// and hands the module to `create_jit_execution_engine`; MCJIT then OWNS
+    /// the module. When the backend was a plain local, its `Box<Context>` was
+    /// freed at the end of `compile_module` while MCJIT still held the module,
+    /// so dropping the engine later ran `~Module` against a freed
+    /// `LLVMContext` and segfaulted inside
+    /// `llvm::LLVMContext::removeModule` — the crash `test_llvm_jit_basic`
+    /// hit on teardown, after its `assert_eq!(result, 42)` had already passed.
+    ///
+    /// Declared AFTER `execution_engine` on purpose: the engine must be
+    /// destroyed while this context is still valid.
+    jit_backend: Option<LlvmBackend>,
     compiled_funcs: HashMap<String, u64>,
     target: simple_common::target::Target,
     /// Owned LLVM context – dropped LAST so borrowing fields are valid.
+    ///
+    /// NOTE: this is NOT the context the JIT module lives in; modules are
+    /// created inside `jit_backend`'s context. It is kept because it is what
+    /// makes the `'static` lifetimes on this struct sound for any future field
+    /// that borrows from the compiler's own context.
     context: Box<Context>,
 }
 
@@ -70,6 +91,7 @@ impl LlvmJitCompiler {
 
         Ok(Self {
             execution_engine: None,
+            jit_backend: None,
             compiled_funcs: HashMap::new(),
             target,
             context,
@@ -120,7 +142,14 @@ impl LlvmJitCompiler {
             }
         }
 
+        // Retire the PREVIOUS engine before its backend's context goes away,
+        // then store the new pair. Assigning `jit_backend` first would free the
+        // old context while the old engine still owned a module in it — the
+        // very use-after-free this pairing exists to prevent.
+        self.execution_engine = None;
+        self.jit_backend = None;
         self.execution_engine = Some(ee);
+        self.jit_backend = Some(backend);
         Ok(())
     }
 
