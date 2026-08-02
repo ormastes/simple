@@ -1,4 +1,4 @@
-# Stage 3 self-host blocked — ADJUDICATED 2026-08-02: the tuple SEGV is not the cause
+# Stage 3 self-host: bootstrap-script bug (fixed) + MIR nil-sentinel deref SEGV (fixed 2026-08-02)
 
 - **Status:** RESOLVED — root cause was a bootstrap-script bug, fixed in
   `scripts/bootstrap/bootstrap-from-scratch.sh`. The original title of this bug
@@ -119,33 +119,177 @@ register — producing the `unresolved type` cascade.
 void the self-host evidence. Stage 3 keeps its bare positional
 `src/app/cli/bootstrap_main.spl`.
 
-## Still open — recorded, deliberately not papered over
+## The SIGSEGV — root-caused and FIXED 2026-08-02
 
-**The compiler SIGSEGVs instead of emitting a diagnostic when package-sibling
-symbols are unresolvable.** Crash site, PROVED by gdb against both the admitted
-Stage-2 binary and the freshly built Stage-3 binary (identical PC):
+The crash was real and is fixed. The mechanism recorded in the previous revision
+of this section ("a raw NULL `0` reaches a slot whose emptiness is the tagged nil
+sentinel `3`, so `0 != 3` passes") is **REFUTED**. There is no NULL anywhere on
+this path. Measured at the fault, base sha
+`aa6119dd768098aa0bb5b7b335f82f101c2e98ca`, admitted Stage-2 binary
+(127,612,488 B, enum-probe = 2, `simple-bootstrap 1.0.0-beta`):
+
+### What actually happens (PROVED)
+
+Repro is unchanged and still RC=139:
 
 ```
-0x54fbe8 <MirLowering.lower_dict_runtime_read+1048>: mov (%rbx),%rdi   ; rbx = 0
-   +1025: call rt_native_neq        ; rsi = 3  (the nil sentinel)
-   +1039: mov 0x8(%rsp),%rbx
-   +1044: and $0xfffffffffffffff8,%rbx
+fn main():
+    var a: [i64] = [1, 2]
+    val x = a[0]
+    print(x)
+```
+`simple native-build f.spl` (no `--source`) -> SIGSEGV, first entry to the
+function, `MirLowering.lower_dict_runtime_read+1048`, `mov (%rbx),%rdi`, rbx=0.
+
+Three corrections, each measured:
+
+1. **The `rt_native_neq(x, 3)` at +1025 does not guard the value that faults.**
+   Its operand is `%rax`, the result of the preceding `MirBuilder.emit_call` —
+   i.e. `if val get_local = get_res` (expr_dispatch.spl:850), a different local.
+   The faulting value lives in `0x8(%rsp)` and is never nil-checked at all.
+
+2. **The faulting value is the nil sentinel `3`, not NULL.** Read directly at the
+   fault: `*(long*)($rsp+8) == 0x3`. `and $0xfffffffffffffff8` untags `3` to `0`,
+   and the next load dereferences address 0. rbx=0 is the *untagged* sentinel, so
+   rbx alone cannot distinguish `0` from `3` — that is what made NULL look
+   plausible.
+
+3. **The write is `dict_result_type = self.runtime_elem_value_type[base_local.id]`**
+   (expr_dispatch.spl:842), not line 832-833. Hardware watchpoint on the slot:
+   initialised at +45 to a valid `MirType.i64()` handle (`0x6b9e...`), then
+   overwritten with `3` by `mov %rax,0x8(%rsp)` at +675, immediately after
+   `call rt_index_get` at +670 with rdi = `self.runtime_elem_value_type`,
+   rsi = `base_local.id << 3`. A dict MISS returns the sentinel; the sentinel is
+   then dereferenced by `match dict_result_type.kind` at line 852.
+
+### Why the presence guard did not stop it (PROVED, and a defect in its own right)
+
+Line 841 guards the read with `self.runtime_elem_value_type.contains(base_local.id)`.
+Aligned disassembly of that guard in the Stage-2 binary:
+
+```
+54ff9d: call rt_native_eq              ; disc(dict_result_type.kind) == disc(I64)
+54ffa7: mov  0x108(%r12),%rdi          ; self.runtime_elem_value_type
+54ffb6: mov  (%rbx),%rsi               ; base_local.id
+54ffb9: call 704b60 <lib__common__text__contains>   ; <-- NOT rt_dict_contains
+54ffde: call rt_index_get
+54ffe3: mov  %rax,0x8(%rsp)            ; dict_result_type = <nil 3>
 ```
 
-A `!= nil` guard passes and the very next dereference is NULL — consistent with
-a raw NULL (`0`) reaching a slot whose emptiness is encoded as the tagged nil
-sentinel `3`, so `0 != 3` is true. Source region:
-`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:832-833`
-(`if not resolved_from_local and base.has_type_ == true and base.type_ != nil:`
-then `match base.type_.kind:`). This is a robustness defect (fail hard instead
-of diagnose), not a self-host blocker: it is reachable only through a
-`native-build` invocation missing its `--source` roots. It needs a real
-NULL-vs-nil-sentinel discrimination fix, not a local guard patch, so it is left
-open rather than covered up.
+`.contains` on a **Dict-typed CLASS FIELD** receiver is emitted as
+`lib.common.text.contains(s: text, sub: text) -> bool`, with the dict handle
+passed as a text pointer. The field projection carries no HIR type and its MIR
+temp is typed i64, so `receiver_is_dict` (method_calls_literals.spl:1127) stays
+false and the `local_is_runtime_dict` probe misses; the call then falls into the
+string-only arity-1 arm at method_calls_literals.spl:1965. That arm excludes
+Array/Slice receivers (the misroute documented in its own comment at :1847) but
+**never excluded Dict receivers**. The answer it returns has nothing to do with
+key presence, so a MISS can report present. Same silent-wrong-answer family,
+one member later.
 
-Observed on the same misconfigured path and also left open: `--source`-less
-`native-build` of a dict read (`d["k"]`) or a struct field read (`p.x`) HANGS
-(killed at 900 s) instead of crashing or completing.
+A local-variable Dict receiver is NOT affected — control run with the same
+binary, `Dict<i64, Payload>` as both a struct field and a local, hand-computed
+expectations `true` then `false`: printed `present=true absent=false` for both.
+The defect needs a *class* field (`self.runtime_elem_value_type` is initialised
+in a different function), which is why the small probe did not show it.
+
+### Fix
+
+Two halves, both in pure Simple, both covering the family rather than the one
+line:
+
+1. **Receiver side** — `remember_field_projection_provenance`
+   (`expr_dispatch.spl`): when a projected field's declared HIR type is
+   `HirTypeKind.Dict(_, _)`, record the projection temp in `runtime_dict_locals`.
+   `local_is_runtime_dict` then answers yes and every dict method on every
+   `Dict`-declared struct/class field (`contains`/`has`/`contains_key`/`get`/
+   `keys`/`values`/`remove`/`delete`) routes to the real dict runtime instead of
+   the string arm. MirLowering alone declares ~20 such fields.
+2. **Consumer side** — new `MirLowering.noted_runtime_elem_type(local) -> MirType?`
+   (`expr_dispatch.spl`), which discriminates the sentinel on the RESULT instead
+   of trusting key presence. All three `runtime_elem_value_type` contains+read
+   pairs now go through it: `expr_dispatch.spl:842`, `expr_dispatch.spl:1435`,
+   `mir_lowering_stmts.spl:1284`. A lost note degrades a type refinement to the
+   pre-existing i64 default — never a crash, never a different value.
+
+The `!= nil` test is sound *here* precisely because the slot is a class handle:
+a real `MirType` is a heap pointer and can never be `3`. That property is what
+the `??`-on-raw-i64 defect lacks (see below).
+
+### Not the same defect: `??` / `lower_coalesce`
+
+Asked whether `lower_coalesce` (`hir/lower/expr/control.rs:1181`, `x ?? d`
+lowered to `BinOp::NotEq` against `Nil`) is a member of this family. **It is
+not — separate defect, shared constant only.** Here the slot is a pointer domain
+where `3` is unreachable as a real value, so the sentinel is unambiguous and the
+bug was a *missing* guard. There the slot is `TypeId::I64`, where `3` is a legal
+value, so the sentinel is *ambiguous* and no guard placement can fix it — it
+needs a representation change. This fix neither helps nor hinders that one. See
+`doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md`.
+
+### Verification (PROVED)
+
+Two Stage-3 binaries built from base sha `aa6119dd768` with the identical
+`native-build` invocation (the landed Stage-3 argv plus `--entry-closure`;
+without it the run burns >16 GB with zero output, matching the 32.6 GB row
+above). Both `727 compiled, 0 cached, 0 failed`; both enum-probe = 2 and
+`simple-bootstrap 1.0.0-beta`. The fix therefore self-compiles.
+
+| program (all `native-build <f>` with NO `--source`) | control | fixed |
+|---|---|---|
+| `a[0]` array index (`f.spl`) | **RC=139 SIGSEGV, 1.31 s** | no crash (see below) |
+| `d["k"]` dict read | RC=1, 0.63 s, `<invalid-heap:0x...>` | RC=1, 0.62 s, same |
+| `p.x` struct field read | RC=1, 0.64 s, `<invalid-heap:0x...>` | RC=1, 0.64 s, same |
+| `[1,2]` + `.len()`, no index | RC=1, 1.07 s, `<invalid-heap:0x...>` | RC=1, 1.27 s, same |
+| `print("hi")` | RC=1, 1.11 s, `<invalid-heap:0x...>` | RC=1, 1.47 s, same |
+
+The SEGV is gone and nothing else on the misconfigured path changed.
+
+### NEWLY EXPOSED, still open: LoopDetector.reachable_from does not terminate
+
+With the crash removed, `f.spl` no longer dies at 1.31 s — it instead runs
+unbounded (killed at 110 s, 5.2 GB RSS and still climbing; a longer run reached
+10 GB). This is **not** caused by the fix, it was *masked* by it: an isolation
+build carrying only the consumer-side guard (no provenance change) hangs
+identically, and every non-index program above is unaffected. The crash was
+simply the first of two defects on this path.
+
+Located by SIGUSR1-stop under gdb, PROVED:
+
+```
+#0 rt_dict_get
+#1 rt_contains
+#2 LoopDetector.reachable_from        (60.mir_opt/mir_opt/loop_detect.spl:155)
+#3 LoopDetector.build_loop_info
+#4 LoopDetector.detect_loops
+#5 CollectionOptimization.optimize_function
+#6 run_typed_pass_on_module -> pipeline_optimize -> optimize_module_for_backend
+#9 CompilerDriver.optimize_mir_level -> aot_compile
+```
+
+The worklist in `reachable_from` never drains: `visited.has(cur.id)` /
+`succ_map[cur.id] ?? []` keep feeding it. Both are dict reads, so this is
+plausibly a third member of the same dict-on-degenerate-MIR family, but the
+mechanism is **INFERRED, not proved** — it needs its own lane. Filed here so the
+fix above is not mistaken for making this invocation clean.
+
+### The reported 900 s HANG is REFUTED (PROVED)
+
+Same binary, same `--source`-less invocation, `/usr/bin/time`:
+
+| program | result |
+|---|---|
+| `d["k"]` dict read | RC=1 in **0.67 s**, 154 MB peak RSS, `error: in-process native-build: AOT compile error in d: <invalid-heap:0x10d255a1>` |
+| `p.x` struct field read | RC=1 in **0.67 s**, 154 MB peak RSS, same `<invalid-heap:0x...>` shape |
+
+Neither hangs. Both already reach the diagnostic path — it is only the
+array/dict *index* lowering that died before getting there. The 900 s
+observation was most likely the `--source`-without-`--entry-closure` 32.6 GB
+case recorded in the table above, misattributed.
+
+Still open and unchanged: `<invalid-heap:0x...>` is a poor diagnostic. It does
+not name the unresolvable sibling. That is the same fail-open recorded below for
+`module_surface.spl:379` and stays a separate improvement request.
 
 The secondary fail-open diagnostic noted in the original report
 (`src/compiler/20.hir/hir_lowering/module_surface.spl:379`,

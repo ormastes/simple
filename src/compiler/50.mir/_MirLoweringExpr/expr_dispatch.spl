@@ -285,6 +285,45 @@ impl MirLowering:
             if item.id.id == local.id:
                 return rt_enum_discriminant(item.type_.kind) == rt_enum_discriminant(MirTypeKind.Dict(MirType.i64(), MirType.i64()))
         false
+    fn noted_runtime_elem_type(container_local: LocalId) -> MirType?:
+        """Nil-discriminating read of the store-observed element/value note.
+
+        `runtime_elem_value_type` is a `Dict<i64, MirType>` held in a CLASS
+        FIELD, and every consumer used to spell the read as the documented
+        `contains(k)` + `d[k]` idiom (doc/07_guide/language/dict_native_pitfalls.md).
+        On the self-hosted native backend that idiom is NOT sound for this
+        receiver shape, and the two halves fail together:
+
+        1. `.contains(k)` on a Dict-typed CLASS FIELD receiver does not reach
+           `rt_dict_contains`. The field projection carries no HIR type and its
+           MIR temp is typed i64, so `receiver_is_dict` stays false, the
+           `local_is_runtime_dict` probe misses, and the call falls into the
+           string-only arity-1 arm of `method_calls_literals.spl` — it is
+           emitted as `lib.common.text.contains` with the dict handle passed as
+           a text pointer. PROVED by disassembly of the stage-2 compiler:
+           `lower_dict_runtime_read+633: call <lib__common__text__contains>`.
+           The answer it returns is unrelated to key presence, so a MISS can
+           report present. (Tracked separately — same silent-wrong-answer family
+           as the array-receiver `contains`/`find`/`rfind` misroute already
+           documented at method_calls_literals.spl:1847.)
+        2. The following `d[k]` read of a MISSING key returns the tagged nil
+           sentinel `3`, not a struct handle. Every consumer then read `.kind`
+           off it; untagging `3` yields address `0` and the load SIGSEGVs, so
+           the compiler DIED instead of reporting the real diagnostic (the
+           `unresolved type:` cascade a `--source`-less native-build produces).
+
+        Guarding key presence therefore cannot be trusted; the RESULT must be
+        discriminated. `!= nil` lowers to `rt_native_neq(value, 3)`, which is
+        exactly the sentinel test the miss produces. Callers get `nil` and keep
+        their pre-existing default, so a lost note degrades a type refinement —
+        never a crash, and never a silently different value.
+        """
+        if not self.runtime_elem_value_type.contains(container_local.id):
+            return nil
+        val noted = self.runtime_elem_value_type[container_local.id]
+        if noted == nil:
+            return nil
+        Some(noted)
 
     me remember_field_projection_provenance(base: HirExpr, base_local: LocalId, field_idx: i64, result: LocalId):
         """Carry nested aggregate/array identity through a field projection."""
@@ -323,6 +362,30 @@ impl MirLowering:
                         # only test `!= ""`, so storing it is inert for them
                         # and adds only the element-is-an-array signal.
                         self.array_element_struct_syms[result.id] = element_name
+            # Dict-typed FIELD provenance. Without this the projection temp for
+            # `self.some_dict_field` is typed i64 and carries no HIR type, so
+            # `receiver_is_dict` and `local_is_runtime_dict` both say no and
+            # every dict method on it (`contains`/`has`/`contains_key`/`get`/
+            # `keys`/`values`) falls through to an arm meant for another
+            # receiver kind. For the arity-1 `contains` family that arm is the
+            # STRING one: the dict handle was passed to `lib.common.text.contains`
+            # as a text pointer and the answer had nothing to do with key
+            # presence -- the same silent-wrong-answer class as the array
+            # receiver misroute documented at method_calls_literals.spl:1847,
+            # which excluded arrays but never dicts. Marking the temp here is
+            # the receiver-side half of that fix and covers every
+            # `Dict`-declared struct/class field at once, not one call site.
+            if self.struct_field_hir_type.contains(name):
+                val decl_field_types = self.struct_field_hir_type[name]
+                # A missing/nil note must degrade to "unknown", never to a
+                # `.len()` on the tagged nil sentinel (see
+                # `noted_runtime_elem_type` for why this dict read cannot be
+                # trusted on presence alone).
+                if decl_field_types != nil and field_idx >= 0 and field_idx < decl_field_types.len():
+                    match decl_field_types[field_idx].kind:
+                        case HirTypeKind.Dict(_, _):
+                            self.runtime_dict_locals[result.id] = true
+                        case _: ()
 
     fn mir_type_is_integer(t: MirType) -> bool:
         """True for the MIR kinds `decode_runtime_value` unboxes with `>> 3`.
@@ -838,8 +901,9 @@ impl MirLowering:
         # value type at the i64 default, so an f64 stored later would decode
         # via the integer `>>3` arm and leak the heap-box POINTER. Use the
         # store-observed type instead.
-        if rt_enum_discriminant(dict_result_type.kind) == rt_enum_discriminant(MirTypeKind.I64) and self.runtime_elem_value_type.contains(base_local.id):
-            dict_result_type = self.runtime_elem_value_type[base_local.id]
+        if rt_enum_discriminant(dict_result_type.kind) == rt_enum_discriminant(MirTypeKind.I64):
+            if val noted_value_type = self.noted_runtime_elem_type(base_local):
+                dict_result_type = noted_value_type
         val get_op = MirOperand(kind: MirOperandKind.Const(
             MirConstValue.Str("rt_dict_get"),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
@@ -1431,8 +1495,7 @@ impl MirLowering:
         # empty `[]` literal fixes the element type at the i64 default;
         # a later `a.push(0.1)` / `a[i] = 0.1` heap-boxes, so decoding
         # as i64 would shred the box pointer via `>>3`.
-        if self.runtime_elem_value_type.contains(base_local.id):
-            val noted_elem_type = self.runtime_elem_value_type[base_local.id]
+        if val noted_elem_type = self.noted_runtime_elem_type(base_local):
             val array_disc = rt_enum_discriminant(MirTypeKind.Array(MirType.i64(), 0))
             val slice_disc = rt_enum_discriminant(MirTypeKind.Slice(MirType.i64()))
             val noted_disc = rt_enum_discriminant(noted_elem_type.kind)
