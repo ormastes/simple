@@ -661,7 +661,7 @@ impl Lowerer {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
                         ..
-                    } => self.nested_payload_condition(&subject_ref, payload_patterns, ctx),
+                    } => self.nested_payload_condition(variant, &subject_ref, payload_patterns, ctx),
                     _ => None,
                 };
 
@@ -741,6 +741,7 @@ impl Lowerer {
     /// still treated as irrefutable and are tracked separately in the bug doc.
     pub(crate) fn nested_payload_condition(
         &mut self,
+        outer_variant: &str,
         subject_ref: &HirExpr,
         payload_patterns: &[Pattern],
         ctx: &mut FunctionContext,
@@ -749,7 +750,7 @@ impl Lowerer {
         let mut combined: Option<HirExpr> = None;
 
         for (i, p) in payload_patterns.iter().enumerate() {
-            let slot_expr = Self::payload_slot_expr(subject_ref, i, arity);
+            let slot_expr = Self::payload_slot_expr(outer_variant, subject_ref, i, arity);
             let Some(test) = self.subpattern_condition(&slot_expr, p, ctx) else {
                 continue;
             };
@@ -775,13 +776,63 @@ impl Lowerer {
     /// variant's payload is the value itself; multi-field variants wrap it in
     /// an array. Condition and binding MUST agree on this shape or an arm is
     /// selected on one slot and bound from another.
-    pub(crate) fn payload_slot_expr(subject_ref: &HirExpr, i: usize, arity: usize) -> HirExpr {
-        let payload_expr = HirExpr {
+    ///
+    /// `outer_variant` selects the `Some` dual-representation guard. A `T?` has
+    /// TWO runtime forms: a boxed `Some` enum (literal `Some(x)` construction,
+    /// `.at()`) and the "raw migration form" — the bare payload, which is what
+    /// a natively compiled `T?`-returning function produces. `rt_enum_payload`
+    /// answers NIL (the integer 3) for the raw form, so a NON-identifier
+    /// sub-pattern under `Some` (`Some((a, b))`, `Some([a, b])`,
+    /// `Some(Point(x, y))`) read the nil sentinel and bound 3. The identifier
+    /// path in `build_pattern_binding_stmts` already carried this guard; this
+    /// is the same runtime branch, hoisted into the slot owner so the
+    /// CONDITION side and every sub-pattern binder get it too:
+    ///     if rt_enum_id(subj) >= 0: rt_enum_payload(subj) else: subj
+    /// See §22 of
+    /// doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md.
+    pub(crate) fn payload_slot_expr(
+        outer_variant: &str,
+        subject_ref: &HirExpr,
+        i: usize,
+        arity: usize,
+    ) -> HirExpr {
+        let legacy_payload_expr = HirExpr {
             kind: HirExprKind::BuiltinCall {
                 name: "rt_enum_payload".to_string(),
                 args: vec![subject_ref.clone()],
             },
             ty: TypeId::ANY,
+        };
+        let payload_expr = if outer_variant == "Some" && arity == 1 {
+            HirExpr {
+                kind: HirExprKind::If {
+                    condition: Box::new(HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::GtEq,
+                            left: Box::new(HirExpr {
+                                kind: HirExprKind::BuiltinCall {
+                                    name: "rt_enum_id".to_string(),
+                                    args: vec![subject_ref.clone()],
+                                },
+                                ty: TypeId::I64,
+                            }),
+                            right: Box::new(HirExpr {
+                                kind: HirExprKind::Integer(0),
+                                ty: TypeId::I64,
+                            }),
+                        },
+                        ty: TypeId::BOOL,
+                    }),
+                    then_branch: Box::new(legacy_payload_expr),
+                    else_branch: Some(Box::new(HirExpr {
+                        kind: subject_ref.kind.clone(),
+                        ty: TypeId::ANY,
+                    })),
+                },
+                ty: TypeId::ANY,
+            }
+        } else {
+            legacy_payload_expr
         };
         if arity == 1 {
             payload_expr
@@ -948,7 +999,7 @@ impl Lowerer {
                 };
                 let deeper = payload
                     .as_ref()
-                    .and_then(|inner| self.nested_payload_condition(slot, inner, ctx));
+                    .and_then(|inner| self.nested_payload_condition(variant, slot, inner, ctx));
                 Some(match deeper {
                     None => tag_test,
                     Some(inner_test) => HirExpr {
@@ -2447,7 +2498,7 @@ fn collect_identifiers_recursive(expr: &Expr, bound: &mut Vec<String>, identifie
 }
 
 /// Discriminant name of a `Pattern`, for the default-off pattern-lowering probe.
-fn pattern_kind_name(pattern: &Pattern) -> &'static str {
+pub(crate) fn pattern_kind_name(pattern: &Pattern) -> &'static str {
     match pattern {
         Pattern::Wildcard => "Wildcard",
         Pattern::Identifier(_) => "Identifier",

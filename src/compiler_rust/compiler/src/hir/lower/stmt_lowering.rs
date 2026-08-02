@@ -1491,38 +1491,27 @@ impl Lowerer {
                         // "never binds" half of the defect. (The "always
                         // matches" half is fixed in `nested_payload_condition`
                         // in hir/lower/expr/control.rs.)
-                        let outer_payload = HirExpr {
-                            kind: HirExprKind::BuiltinCall {
-                                name: "rt_enum_payload".to_string(),
-                                args: vec![HirExpr {
-                                    kind: HirExprKind::Local(subject_idx),
-                                    ty: subject_ty,
-                                }],
-                            },
-                            ty: TypeId::ANY,
+                        // Slot `i` of the outer variant, from the shared owner
+                        // `payload_slot_expr` (single-field variants carry the
+                        // value directly, multi-field wrap in an array) so the
+                        // `Some` raw-vs-boxed guard applies here too.
+                        let outer_subject_ref = HirExpr {
+                            kind: HirExprKind::Local(subject_idx),
+                            ty: subject_ty,
                         };
-                        // Slot `i` of the outer variant: single-field variants
-                        // carry the value directly, multi-field wrap in an array.
-                        let slot_expr = if payload_patterns.len() == 1 {
-                            outer_payload
-                        } else {
-                            HirExpr {
-                                kind: HirExprKind::Index {
-                                    receiver: Box::new(outer_payload),
-                                    index: Box::new(HirExpr {
-                                        kind: HirExprKind::Integer(i as i64),
-                                        ty: TypeId::I64,
-                                    }),
-                                },
-                                ty: TypeId::ANY,
-                            }
-                        };
+                        let slot_expr = Self::payload_slot_expr(
+                            enum_variant,
+                            &outer_subject_ref,
+                            i,
+                            payload_patterns.len(),
+                        );
                         // Walk the inner variant's own payload. Recursive, so a
                         // binder at depth 3+ (`C(L2.S(L3.X(n)), tag)`) is
                         // emitted too; the previous non-recursive loop bound
                         // only `Identifier` sub-patterns exactly one level in,
                         // leaving `n` at its stack zero.
                         self.bind_nested_payload(
+                            nested_variant_name,
                             &slot_expr,
                             nested_patterns,
                             &binding_type_map,
@@ -1551,7 +1540,8 @@ impl Lowerer {
                         kind: HirExprKind::Local(subject_idx),
                         ty: subject_ty,
                     };
-                    let slot_expr = Self::payload_slot_expr(&subject_ref, i, payload_patterns.len());
+                    let slot_expr =
+                        Self::payload_slot_expr(enum_variant, &subject_ref, i, payload_patterns.len());
                     self.bind_subpattern(&slot_expr, p, &binding_type_map, ctx, &mut binding_stmts);
                 }
             }
@@ -1570,37 +1560,20 @@ impl Lowerer {
     /// from another.
     pub(crate) fn bind_nested_payload(
         &mut self,
+        variant: &str,
         enum_expr: &HirExpr,
         payload_patterns: &[Pattern],
         binding_type_map: &std::collections::HashMap<String, TypeId>,
         ctx: &mut FunctionContext,
         out: &mut Vec<HirStmt>,
     ) {
-        // Unwrap this level's payload: single-field variants carry the value
-        // directly, multi-field variants wrap it in an array.
-        let payload = HirExpr {
-            kind: HirExprKind::BuiltinCall {
-                name: "rt_enum_payload".to_string(),
-                args: vec![enum_expr.clone()],
-            },
-            ty: TypeId::ANY,
-        };
+        // Slot addressing is delegated to `payload_slot_expr`, the SAME owner
+        // the condition side walks, so this level cannot be tested at one slot
+        // and bound from another — and so the `Some` raw-vs-boxed guard applies
+        // at every nesting depth, not just the top one.
         let arity = payload_patterns.len();
         for (j, sub) in payload_patterns.iter().enumerate() {
-            let slot = if arity == 1 {
-                payload.clone()
-            } else {
-                HirExpr {
-                    kind: HirExprKind::Index {
-                        receiver: Box::new(payload.clone()),
-                        index: Box::new(HirExpr {
-                            kind: HirExprKind::Integer(j as i64),
-                            ty: TypeId::I64,
-                        }),
-                    },
-                    ty: TypeId::ANY,
-                }
-            };
+            let slot = Self::payload_slot_expr(variant, enum_expr, j, arity);
             self.bind_subpattern(&slot, sub, binding_type_map, ctx, out);
         }
     }
@@ -1628,6 +1601,19 @@ impl Lowerer {
         ctx: &mut FunctionContext,
         out: &mut Vec<HirStmt>,
     ) {
+        // Default-off probe, twin of the one in `subpattern_condition`
+        // (hir/lower/expr/control.rs). Which lowering site a given surface form
+        // reaches is not inferable from the source — the JIT statement form,
+        // the JIT expression form and the tree-walk interpreter are three
+        // different implementations — so an instrumented run is the only proof
+        // that a change to this walk is on the path under test. Same switch:
+        // SIMPLE_DEBUG_PATTERN_LOWER=1.
+        if std::env::var_os("SIMPLE_DEBUG_PATTERN_LOWER").is_some() {
+            eprintln!(
+                "[pattern-lower] bind_subpattern kind={}",
+                crate::hir::lower::expr::control::pattern_kind_name(pattern)
+            );
+        }
         match pattern {
             Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name) => {
                 let Some(&local_idx) = ctx.local_map.get(bound_name) else {
@@ -1651,7 +1637,37 @@ impl Lowerer {
                 payload: Some(inner_patterns),
                 ..
             } if self.is_real_enum_variant_name(variant) => {
-                self.bind_nested_payload(slot, inner_patterns, binding_type_map, ctx, out);
+                self.bind_nested_payload(variant, slot, inner_patterns, binding_type_map, ctx, out);
+            }
+            // Positional struct spelling `Point(x, y)`. The parser cannot tell
+            // it from an enum-variant pattern, so it also arrives as
+            // `Pattern::Enum`; the arm above claimed the real variant names, so
+            // anything reaching here is a struct/class name (or unresolvable,
+            // in which case `bind_struct_fields` bails and nothing is emitted).
+            Pattern::Enum {
+                variant,
+                payload: Some(fields),
+                ..
+            } => {
+                let positional: Vec<(usize, &Pattern)> = fields.iter().enumerate().collect();
+                self.bind_struct_fields(slot, &variant.clone(), &positional, binding_type_map, ctx, out);
+            }
+            // Named-field struct spelling `Point { x: a, y: b }`. Resolve each
+            // field name to its declaration index, then bind positionally —
+            // the same resolution `subpattern_condition` does for the
+            // refutability half.
+            Pattern::Struct { name, fields } => {
+                let Some(struct_fields) = self.struct_field_list(name) else {
+                    return;
+                };
+                let mut positional: Vec<(usize, &Pattern)> = Vec::new();
+                for (field_name, field_pattern) in fields {
+                    let Some(idx) = struct_fields.iter().position(|(n, _)| n == field_name) else {
+                        return;
+                    };
+                    positional.push((idx, field_pattern));
+                }
+                self.bind_struct_fields(slot, &name.clone(), &positional, binding_type_map, ctx, out);
             }
             Pattern::Tuple(elements) => {
                 self.bind_sequence(slot, elements, false, binding_type_map, ctx, out);
@@ -1659,14 +1675,110 @@ impl Lowerer {
             Pattern::Array(elements) => {
                 self.bind_sequence(slot, elements, true, binding_type_map, ctx, out);
             }
-            // Wildcard / Rest / literals / ranges bind nothing. A struct
-            // sub-pattern nested inside an array or tuple element is NOT bound
-            // here: the struct spellings are already served by the
-            // `class_struct_fields` and `struct_info` paths in
-            // `build_pattern_binding_stmts`, and duplicating them here would
-            // emit the same `Let` twice.
+            // Wildcard / Rest / literals / ranges bind nothing.
             _ => {}
         }
+    }
+
+    /// Emit the `Let` bindings for the fields of a STRUCT sub-pattern whose
+    /// value sits at `slot`, given `(field_index, sub_pattern)` pairs.
+    ///
+    /// The binder twin of `struct_fields_condition` (hir/lower/expr/control.rs)
+    /// and deliberately identical in addressing: `FieldAccess { field_index }`
+    /// over a receiver retyped to the struct, which lowers to a byte-offset
+    /// load at `field_index * 8`. A struct sub-pattern nested inside an ARRAY
+    /// or TUPLE element (`case Items([Point(a, b)])`) had no binder anywhere —
+    /// the condition side tested it correctly, the arm was selected, and `a`/`b`
+    /// were read off the zeroed stack.
+    ///
+    /// # Why this cannot double-emit
+    ///
+    /// The earlier scope note on `5ce2f653a49` was that adding struct binding
+    /// here "would double-emit", because `build_pattern_binding_stmts` already
+    /// serves two struct positions of its own (`class_struct_fields` for a
+    /// TOP-LEVEL `case Point(x, y)`, `struct_info` for a struct sitting
+    /// DIRECTLY in an enum payload slot). Two independent reasons it cannot:
+    ///
+    /// 1. Reachability. `build_pattern_binding_stmts` intercepts both of those
+    ///    positions *before* any `bind_subpattern` call — the top-level struct
+    ///    returns from the `Pattern::Enum` block, and a payload-position struct
+    ///    is claimed by the `else if let Pattern::Enum { payload: Some(..) }`
+    ///    arm, whose `else` is the only branch that calls `bind_subpattern`. So
+    ///    a struct pattern reaches here only from a sequence element or a
+    ///    deeper nested-payload walk, which neither of those paths visits.
+    /// 2. A structural guard, not an argument: a local that already has a
+    ///    `Let` in `out` is skipped. Whatever the caller graph does later, the
+    ///    same binding can be emitted at most once per arm.
+    fn bind_struct_fields(
+        &mut self,
+        slot: &HirExpr,
+        struct_name: &str,
+        positional: &[(usize, &Pattern)],
+        binding_type_map: &std::collections::HashMap<String, TypeId>,
+        ctx: &mut FunctionContext,
+        out: &mut Vec<HirStmt>,
+    ) {
+        let Some(struct_ty) = self.module.types.lookup(struct_name) else {
+            return;
+        };
+        let fields = match self.module.types.get(struct_ty) {
+            Some(HirType::Struct { fields, .. }) => fields.clone(),
+            // Not a struct after all (an enum variant name that
+            // `is_real_enum_variant_name` could not confirm, say). Emitting
+            // nothing keeps the previous behaviour rather than inventing a
+            // field layout.
+            _ => return,
+        };
+        for (field_index, field_pattern) in positional {
+            let Some((_, field_ty)) = fields.get(*field_index).cloned() else {
+                continue;
+            };
+            let field_expr = HirExpr {
+                kind: HirExprKind::FieldAccess {
+                    receiver: Box::new(HirExpr {
+                        kind: slot.kind.clone(),
+                        ty: struct_ty,
+                    }),
+                    field_index: *field_index,
+                },
+                ty: field_ty,
+            };
+            // A field may itself be a nested struct/tuple/array/variant
+            // pattern, so recurse through the single sub-pattern owner rather
+            // than handling only `Identifier` here.
+            if let Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name) = field_pattern {
+                let Some(&local_idx) = ctx.local_map.get(bound_name.as_str()) else {
+                    continue;
+                };
+                if Self::already_bound(out, local_idx) {
+                    continue;
+                }
+                // `extract_pattern_bindings` registers struct-field binders as
+                // ANY (it resolves enum variant field types only), and MIR
+                // reads `local.ty`, not `HirStmt::Let.ty` — so the local has to
+                // be patched to the concrete field type or the Store is ANY and
+                // the value is mis-formatted at runtime. Same rule as the
+                // `class_struct_fields` path in `build_pattern_binding_stmts`.
+                if field_ty != TypeId::ANY {
+                    if let Some(local) = ctx.locals.get_mut(local_idx) {
+                        local.ty = field_ty;
+                    }
+                }
+                out.push(HirStmt::Let {
+                    local_index: local_idx,
+                    ty: field_ty,
+                    value: Some(field_expr),
+                });
+            } else {
+                self.bind_subpattern(&field_expr, field_pattern, binding_type_map, ctx, out);
+            }
+        }
+    }
+
+    /// Does `out` already carry a `Let` for `local_index`? The structural half
+    /// of the no-double-emit guarantee on [`Self::bind_struct_fields`].
+    fn already_bound(out: &[HirStmt], local_index: usize) -> bool {
+        out.iter().any(|stmt| matches!(stmt, HirStmt::Let { local_index: idx, .. } if *idx == local_index))
     }
 
     /// Emit binders for every element of an array/tuple pattern at `slot`,
@@ -2137,7 +2249,7 @@ impl Lowerer {
                     Pattern::Enum {
                         payload: Some(payload_patterns),
                         ..
-                    } => self.nested_payload_condition(&subject_ref, payload_patterns, ctx),
+                    } => self.nested_payload_condition(variant, &subject_ref, payload_patterns, ctx),
                     _ => None,
                 };
 

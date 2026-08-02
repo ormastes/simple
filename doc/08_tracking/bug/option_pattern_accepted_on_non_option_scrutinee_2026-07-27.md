@@ -679,3 +679,110 @@ sub-pattern gap, not a while-let gap. The while-let trip count is now correct
 `match` on an enum has no native lowering — `compile --native` fails closed with
 `[PatternMatch]` — so no native value can be reported for any row above. Stated
 rather than invented.
+
+## 2026-08-02 lane OPTPAT-RESID (base `e4b4561c803f07e3f7cc7a5882876bd78ab6e3c2`)
+
+Four residual defects, all measured on a debug driver built from that sha and
+from the modified tree, with `simple run` (NOT `simple test`, which forces the
+interpreter and ignores `SIMPLE_EXECUTION_MODE`). `[jit-fallback]` = 0 on every
+JIT run below. The interpreter is the true-positive control and answers every
+row correctly at both shas.
+
+### 22. §"scope limit of `5ce2f653a49`" FIXED: struct sub-pattern inside an array/tuple element
+
+`bind_subpattern` (hir/lower/stmt_lowering.rs) had arms for `Identifier`,
+`Typed`, nested `Enum`, `Tuple` and `Array`, and a `_ => {}` that swallowed the
+two STRUCT spellings. The refutability half already handled them —
+`subpattern_condition` routes both `Pattern::Enum{name:"_"}` and
+`Pattern::Struct` to `struct_fields_condition` — so the arm was SELECTED
+correctly and then every binder inside it read the zeroed stack.
+
+Measured at base, JIT (interpreter correct on all four):
+
+| form | base JIT | expected |
+|---|---|---|
+| `case Items([Point(a, b)])` (struct in an ARRAY element) | `0` | `47` |
+| `case Pair((Point(a, b), k))` (struct in a TUPLE element) | `2` | `472` |
+| `case [Point(a, b)]` (struct in a TOP-LEVEL array pattern) | `0` | `47` |
+| `case Point(a, b)` (top-level struct — control) | `47` | `47` |
+
+The `2` in row two is the diagnostic detail: the sibling `k` bound correctly and
+only the struct fields were zero, so this is a binder gap, not a slot-addressing
+gap.
+
+Fixed by `bind_struct_fields`, the binder twin of `struct_fields_condition` and
+deliberately identical in addressing (`FieldAccess { field_index }` over a
+receiver retyped to the struct). It patches `ctx.locals[i].ty` to the concrete
+field type for the same reason the `class_struct_fields` path does — MIR reads
+`local.ty`, not `HirStmt::Let.ty`.
+
+**The double-emit the earlier scope note warned about cannot happen, for two
+independent reasons.** (1) Reachability: `build_pattern_binding_stmts` claims
+both of its own struct positions BEFORE any `bind_subpattern` call — a
+top-level struct returns out of the `Pattern::Enum` block, and a struct sitting
+directly in an enum payload slot is taken by the `else if let Pattern::Enum {
+payload: Some(..) }` arm, whose `else` is the only branch that calls
+`bind_subpattern`. So a struct reaches the new arm only from a sequence element
+or a deeper nested-payload walk, which neither of those paths visits. (2) A
+structural guard rather than an argument: `already_bound` skips a local that
+already has a `Let` in the output, so the same binding can be emitted at most
+once per arm whatever the caller graph does later.
+
+Reachability (1) is not asserted from reading — it is measured. With the
+default-off probe `SIMPLE_DEBUG_PATTERN_LOWER=1` on a file containing all four
+rows above, `bind_subpattern` fires **6** times under the JIT, of which
+**3** are `kind=Enum` — the three NESTED struct rows. The top-level
+`case Point(a, b)` control never reaches `bind_subpattern` at all (3, not 4).
+Same run under `SIMPLE_EXECUTION_MODE=interpreter`: **0**. Flag off: **0**.
+
+### 23. §20 FIXED: `Some((a, b))` bound the nil sentinel, and the cause was slot extraction
+
+§20 recorded this as "binds 0". Re-measured at `e4b4561c8` it binds **3** —
+the nil sentinel — which names the cause exactly.
+
+`payload_slot_expr` emitted a bare `rt_enum_payload(subject)`. A `T?` has two
+runtime forms: a boxed `Some` enum (literal `Some(x)`, `.at()`) and the raw
+migration form (the bare payload) that a natively compiled `T?`-returning
+function produces. `rt_enum_payload` answers NIL for the raw form. The
+IDENTIFIER binding path in `build_pattern_binding_stmts` already carried the
+runtime discrimination for exactly this reason —
+`if rt_enum_id(subj) >= 0: rt_enum_payload(subj) else: subj` — but every
+NON-identifier sub-pattern under `Some` went through `payload_slot_expr` and did
+not. That is why `case Pair((0, b))` over a genuine enum payload has always
+passed while `case Some((a, b))` has not: the defect is specific to the
+Option dual representation, not to tuples.
+
+Fixed by hoisting the same guard into `payload_slot_expr` itself, keyed on the
+outer variant being `Some` with arity 1. It is the shared owner, so the
+CONDITION side (`nested_payload_condition`) and the BINDING side get it
+together and cannot drift. `bind_nested_payload` was rewritten to delegate to
+the same owner instead of rebuilding the extraction by hand, so the guard also
+applies at every nesting depth rather than only the top one.
+
+| row | base JIT | fixed JIT | interp (both) | expected |
+|---|---|---|---|---|
+| `match o: case Some((a, b))`, `o = (5, 8)` | `303` | `508` | `508` | `508` |
+| `if val Some((a, b)) = o`, `o = (5, 8)` | `303` | `508` | `508` | `508` |
+| `Some((3, 7))` — third value-3 control | `303` | `307` | `307` | `307` |
+| `Some(...)` over `nil` | `-1` | `-1` | `-1` | `-1` |
+
+`303` is `3 * 100 + 3`: both slots read the nil sentinel. The value-3 row is
+kept precisely because a silent nil answers `303` and cannot answer `307`.
+
+### Fixture
+
+`test/fixtures/compiler/nested_payload_subpattern_depth_matrix.spl` gained 7
+rows (30 → 37) and 2 enum/`T?` declarations. Both existing value-3 controls
+(`d4_value3_ctrl`, `arr2`) and the live harness sentinel are untouched and still
+fire. Non-vacuity, whole file:
+
+| binary | JIT | interpreter |
+|---|---|---|
+| base `e4b4561c803` | **BADCOUNT 6** | BADCOUNT 0 |
+| fixed | **BADCOUNT 0** | BADCOUNT 0 |
+
+`cargo test -p simple-compiler --lib` is **3455 passed / 118 failed** at both
+shas, and the 118 failure NAMES `diff` clean — the pre-existing set is
+unchanged, not merely the count.
+
+Native is unmeasurable for every row above, for the reason in §21.
