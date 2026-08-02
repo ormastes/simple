@@ -1,9 +1,13 @@
 # gpu_runnable_scan - lint: which web/2D renderer functions are NOT
 # GPU-offloadable, transitively.
 #
-# Text/line-level scan (no real parser). Conservative name-match call graph;
-# call-graph edges are filtered by a line-based import scan (an edge to a name
-# defined only in files the caller's file does not import is dropped).
+# Text/line-level scan (no real parser). Owner-aware call graph: defs are
+# keyed per (file, name); plain and self./me. calls resolve preferring
+# same-file defs, then import-reachable defs (line-based import scan).
+# Dotted calls with an unresolvable receiver stay ambiguous: they edge to
+# every reachable same-name def except the calling def itself, so delegation
+# (engine.clear -> backend.clear) is a cross edge, not a self-loop. Ambiguous
+# edges propagate blockage only; cycle detection runs on resolved edges.
 # Remaining false positives are noted in the report header.
 #
 # Run: SIMPLE_TIMEOUT_SECONDS=3600 bin/simple run src/app/gpu_lint/gpu_runnable_scan.spl
@@ -17,8 +21,9 @@
 # Whitelist: arithmetic, indexing, numeric loops, calls to gpu-runnable fns,
 # vulkan_*/cuda_*/vk_*/webgpu_sffi_*/metal_sffi_* SFFI intrinsics.
 #
-# Overload rule: if ANY definition sharing a name is non-runnable, the whole
-# name is tainted (registered-name rule).
+# Overload rule: a NAME is reported blocked when ANY of its defs is blocked
+# (any-def-blocked rollup); ambiguous dotted calls edge to all reachable
+# same-name defs, so unresolvable receivers keep the conservative taint.
 
 use app.io.mod (dir_walk, file_read, file_write, get_args)
 
@@ -99,19 +104,30 @@ fn has_interpolation(line: text) -> bool:
         pi = pi + 2
     false
 
+# entries are kind-prefixed: "0name" plain call, "1name" self./me. receiver,
+# "2name" other dotted receiver (unresolvable owner)
 fn extract_callees(code: text, ic: text) -> [text]:
     var out: [text] = []
     val frags = code.split("(")
     var fi = 0
     while fi < frags.len() - 1:
-        val name = trailing_ident(frags[fi], ic)
+        val frag = frags[fi]
+        val name = trailing_ident(frag, ic)
         if name.len() > 0:
             if name != "if" and name != "while" and name != "for" and
                name != "match" and name != "return" and name != "not" and
                name != "in" and name != "and" and name != "or" and
                name != "fn" and name != "me" and name != "val" and
                name != "var" and name != "case" and name != "else":
-                out.push(name)
+                val j = frag.len() - name.len()
+                var kind = "0"
+                if j > 0 and frag[j-1:j] == ".":
+                    val recv = trailing_ident(frag[0:j-1], ic)
+                    if recv == "self" or recv == "me":
+                        kind = "1"
+                    else:
+                        kind = "2"
+                out.push(kind + name)
         fi = fi + 1
     out
 
@@ -164,8 +180,9 @@ fn line_violations(raw: text, code: text, callees: [text], loc: text, ic: text) 
         v.push("higher-order-call at " + loc)
     var ci = 0
     while ci < callees.len():
-        if is_banned_ffi(callees[ci]):
-            v.push("ffi-call:" + callees[ci] + " at " + loc)
+        val cn = callees[ci][1:]
+        if is_banned_ffi(cn):
+            v.push("ffi-call:" + cn + " at " + loc)
         ci = ci + 1
     v
 
@@ -173,7 +190,7 @@ fn is_root_name(n: text) -> bool:
     if n == "draw_rect_filled" or n == "clear" or n == "draw_line" or
        n == "tile_checksum" or n == "tile_checksums":
         return true
-    if n.starts_with("draw_ellipse") or n.starts_with("draw_line"):
+    if n.contains("draw_ellipse") or n.contains("draw_line"):
         return true
     if n.contains("cull"):
         return true
@@ -216,15 +233,17 @@ fn main() -> i64:
                 if not rel.contains("/"):
                     files.push(f)
 
-    # ---- name-interned function table (parallel arrays) ----
+    # ---- def-level function table (parallel arrays, owner-aware) ----
+    var d_name: [text] = []            # bare function name
+    var d_file: [i64] = []             # owning file index
+    var d_loc: [text] = []             # "file:line"
+    var d_viols: [[text]] = []         # local violations of this def
+    var d_callees: [[text]] = []       # kind-prefixed callee entries
+    # name-level index over defs (for resolution + any-def-blocked rollup)
     var names: [text] = []
     var name_loc: [text] = []          # first def "file:line"
-    var name_defs: [i64] = []          # overload count
-    var name_local: [[text]] = []      # local violations (all defs merged)
-    var name_callees: [[text]] = []    # raw callee names (all defs merged)
     var name_id: Dict<text, i64> = {}
-    var name_def_files: [[text]] = []  # file basenames (no .spl) defining each name
-    var name_callee_fidx: [[i64]] = [] # file index each callee was recorded from
+    var name_def_ids: [[i64]] = []     # def node ids sharing each name
     var construct_counts: Dict<text, i64> = {}
     var construct_labels: [text] = []
     var total_defs = 0
@@ -297,38 +316,23 @@ fn main() -> i64:
                             cur_viols.push(v)
                         bi = bi + 1
 
-            # merge into name table
-            var id = -1
+            # register def node + name index
+            val did = d_name.len()
+            d_name.push(dname)
+            d_file.push(fidx)
+            d_loc.push("{f}:{dline + 1}")
+            d_viols.push(cur_viols)
+            d_callees.push(cur_callees)
             if name_id.contains_key(dname):
-                id = name_id[dname]
-                name_defs[id] = name_defs[id] + 1
-                var tv = name_local[id]
-                for v in cur_viols:
-                    tv.push(v)
-                name_local[id] = tv
-                var tc = name_callees[id]
-                var tf = name_callee_fidx[id]
-                for c in cur_callees:
-                    tc.push(c)
-                    tf.push(fidx)
-                name_callees[id] = tc
-                name_callee_fidx[id] = tf
-                var td = name_def_files[id]
-                td.push(fbase)
-                name_def_files[id] = td
+                val id = name_id[dname]
+                var td = name_def_ids[id]
+                td.push(did)
+                name_def_ids[id] = td
             else:
-                id = names.len()
-                name_id[dname] = id
+                name_id[dname] = names.len()
                 names.push(dname)
                 name_loc.push("{f}:{dline + 1}")
-                name_defs.push(1)
-                name_local.push(cur_viols)
-                name_callees.push(cur_callees)
-                var cfx: [i64] = []
-                for c in cur_callees:
-                    cfx.push(fidx)
-                name_callee_fidx.push(cfx)
-                name_def_files.push([fbase])
+                name_def_ids.push([did])
 
             # tally construct frequencies
             for v in cur_viols:
@@ -344,53 +348,86 @@ fn main() -> i64:
             di = di + 1
 
     val nfn = names.len()
+    val ndefs = d_name.len()
 
-    # ---- build name-level edge list (dedup, in-table only) ----
-    # import filter: drop an edge when the callee name is defined ONLY in
-    # files the calling file neither is nor imports (line-based use-scan).
-    var edges: [[i64]] = []
+    # ---- build owner-aware def-level edge lists (dedup, in-table only) ----
+    # STRONG edges: plain ("0") and self./me. ("1") calls, resolved preferring
+    # same-file defs, then import-reachable defs (line-based use-scan). These
+    # carry cycle detection: real recursion is always a resolved call.
+    # WEAK edges: dotted calls ("2") with an unresolvable receiver stay
+    # ambiguous: edge to EVERY reachable same-name def except the calling def
+    # itself. Weak edges propagate blockage (any-def-blocked taint) but do NOT
+    # feed cycle detection — an ambiguous fan-out is not recursion evidence,
+    # and treating it as such is what merged-name self-loops used to do.
+    # A callee with no reachable def drops the edge.
+    var s_edges: [[i64]] = []
+    var w_edges: [[i64]] = []
     var edges_dropped = 0
     var i = 0
-    while i < nfn:
+    while i < ndefs:
         var seen: Dict<text, bool> = {}
+        var tseen: Dict<text, bool> = {}
         var es: [i64] = []
-        val cs = name_callees[i]
-        val fx = name_callee_fidx[i]
+        var ws: [i64] = []
+        val cs = d_callees[i]
+        val cf = d_file[i]
         var ci2 = 0
         while ci2 < cs.len():
-            val c = cs[ci2]
-            if name_id.contains_key(c) and not seen.contains_key(c):
-                val cid = name_id[c]
-                val cfx = fx[ci2]
-                val dfs = name_def_files[cid]
-                var reachable = false
-                for b in dfs:
-                    if b == file_bases[cfx] or file_imports[cfx].contains(b):
-                        reachable = true
-                if reachable:
-                    seen[c] = true
-                    es.push(cid)
+            val entry = cs[ci2]
+            val c = entry[1:]
+            if name_id.contains_key(c) and not seen.contains_key(entry):
+                seen[entry] = true
+                val kind = entry[0:1]
+                val cands = name_def_ids[name_id[c]]
+                var targets: [i64] = []
+                if kind == "2":
+                    for t in cands:
+                        if t != i:
+                            if d_file[t] == cf or
+                               file_imports[cf].contains(file_bases[d_file[t]]):
+                                targets.push(t)
                 else:
+                    for t in cands:
+                        if d_file[t] == cf:
+                            targets.push(t)
+                    if targets.len() == 0:
+                        for t in cands:
+                            if file_imports[cf].contains(file_bases[d_file[t]]):
+                                targets.push(t)
+                if targets.len() == 0:
                     edges_dropped = edges_dropped + 1
+                else:
+                    var kc = "s"
+                    if kind == "2":
+                        kc = "w"
+                    for t in targets:
+                        val tk = kc + "{t}"
+                        if not tseen.contains_key(tk):
+                            tseen[tk] = true
+                            if kind == "2":
+                                ws.push(t)
+                            else:
+                                es.push(t)
             ci2 = ci2 + 1
-        edges.push(es)
+        s_edges.push(es)
+        w_edges.push(ws)
         i = i + 1
 
     # ---- cycle detection: eliminate nodes with no live out-edges ----
     # remaining nodes are in, or can reach, a call cycle (approximation)
     var removed: [bool] = []
     i = 0
-    while i < nfn:
+    while i < ndefs:
         removed.push(false)
         i = i + 1
     var changed = true
     while changed:
         changed = false
         i = 0
-        while i < nfn:
+        while i < ndefs:
             if not removed[i]:
                 var all_gone = true
-                val es = edges[i]
+                val es = s_edges[i]
                 for e in es:
                     if not removed[e]:
                         all_gone = false
@@ -399,33 +436,23 @@ fn main() -> i64:
                     changed = true
             i = i + 1
 
-    # ---- blocked state + chain reasons ----
+    # ---- blocked state + chain reasons (def-level) ----
     var blocked: [bool] = []
     var reason: [text] = []
     i = 0
-    while i < nfn:
-        val lv = name_local[i]
+    while i < ndefs:
+        val lv = d_viols[i]
         if lv.len() > 0:
             blocked.push(true)
             reason.push(lv[0])
         else:
             if not removed[i]:
                 blocked.push(true)
-                reason.push("recursion (direct or via call cycle) at " + name_loc[i])
+                reason.push("recursion (direct or via call cycle) at " + d_loc[i])
             else:
                 blocked.push(false)
                 reason.push("")
         i = i + 1
-    # count recursion construct
-    i = 0
-    var rec_count = 0
-    while i < nfn:
-        if blocked[i] and reason[i].starts_with("recursion"):
-            rec_count = rec_count + 1
-        i = i + 1
-    if rec_count > 0:
-        construct_counts["recursion-cycle"] = rec_count
-        construct_labels.push("recursion-cycle")
 
     # ---- propagate blockage up the call graph, building chains ----
     changed = true
@@ -434,25 +461,60 @@ fn main() -> i64:
         changed = false
         iters = iters + 1
         i = 0
-        while i < nfn:
+        while i < ndefs:
             if not blocked[i]:
-                val es = edges[i]
+                val es = s_edges[i]
                 var hit = -1
                 for e in es:
                     if hit < 0 and blocked[e]:
                         hit = e
+                var via = "calls"
+                if hit < 0:
+                    val ws2 = w_edges[i]
+                    for e in ws2:
+                        if hit < 0 and blocked[e]:
+                            hit = e
+                            via = "may-call"
                 if hit >= 0:
                     blocked[i] = true
-                    reason[i] = "calls {names[hit]} -> " + reason[hit]
+                    reason[i] = "{via} {d_name[hit]}[{file_bases[d_file[hit]]}] -> " + reason[hit]
                     changed = true
             i = i + 1
 
-    # ---- gather stats ----
+    # ---- name-level rollup (any-def-blocked overload rule) ----
+    var nblocked: [bool] = []
+    var nreason: [text] = []
+    var name_defs: [i64] = []
+    i = 0
+    while i < nfn:
+        val dids = name_def_ids[i]
+        name_defs.push(dids.len())
+        var b = false
+        var rsn = ""
+        for d in dids:
+            if blocked[d] and not b:
+                b = true
+                rsn = reason[d]
+        nblocked.push(b)
+        nreason.push(rsn)
+        i = i + 1
+    # count recursion construct (per name)
+    i = 0
+    var rec_count = 0
+    while i < nfn:
+        if nblocked[i] and nreason[i].starts_with("recursion"):
+            rec_count = rec_count + 1
+        i = i + 1
+    if rec_count > 0:
+        construct_counts["recursion-cycle"] = rec_count
+        construct_labels.push("recursion-cycle")
+
+    # ---- gather stats (name-level) ----
     var blocked_n = 0
     var tainted_overloads = 0
     i = 0
     while i < nfn:
-        if blocked[i]:
+        if nblocked[i]:
             blocked_n = blocked_n + 1
             if name_defs[i] > 1:
                 tainted_overloads = tainted_overloads + 1
@@ -467,7 +529,7 @@ fn main() -> i64:
         i = i + 1
     var roots_blocked = 0
     for r in root_ids:
-        if blocked[r]:
+        if nblocked[r]:
             roots_blocked = roots_blocked + 1
 
     # ---- top constructs by frequency (selection sort) ----
@@ -501,8 +563,11 @@ fn main() -> i64:
     var rep = "GPU-runnable transitive scan (line-based)\n"
     rep = rep + "Scanned dirs: engine2d + browser_engine (top-level .spl)\n"
     rep = rep + "Caveats (remaining false-positive sources, stated honestly):\n"
-    rep = rep + "  - NAME-MATCH call graph: same-name methods on unrelated types\n"
-    rep = rep + "    are still merged when both files are import-reachable.\n"
+    rep = rep + "  - Owner-aware graph keys defs per (file, name); dotted calls with\n"
+    rep = rep + "    an unresolvable receiver still edge to ALL reachable same-name\n"
+    rep = rep + "    defs (any-def-blocked taint), which can over-connect. Those weak\n"
+    rep = rep + "    edges do NOT feed cycle detection, so ambiguous mutual dotted\n"
+    rep = rep + "    recursion would be missed (recursion needs a resolved call).\n"
     rep = rep + "  - Import filter is line-based substring match on file basenames\n"
     rep = rep + "    (short basenames like 'mod' over-match, keeping extra edges;\n"
     rep = rep + "    re-exports/facade modules are not followed transitively).\n"
@@ -510,7 +575,7 @@ fn main() -> i64:
     rep = rep + "  - Cycle marking includes nodes that merely reach a cycle.\n"
     rep = rep + "Call-site edges dropped by import filter: {edges_dropped}\n\n"
     rep = rep + "Files scanned: {files.len()}\n"
-    rep = rep + "Function defs: {total_defs} ({nfn} unique names)\n"
+    rep = rep + "Function defs: {total_defs} ({nfn} unique names, {ndefs} graph nodes)\n"
     rep = rep + "Blocked names: {blocked_n} / {nfn}\n"
     rep = rep + "Tainted overloaded names (any-def-blocked rule): {tainted_overloads}\n"
     rep = rep + "Roots: {root_ids.len()} total, {roots_blocked} BLOCKED, {root_ids.len() - roots_blocked} OFFLOADABLE\n\n"
@@ -521,9 +586,9 @@ fn main() -> i64:
         ti = ti + 1
     rep = rep + "\n== Per-root verdicts (first blocking chain) ==\n"
     for r in root_ids:
-        if blocked[r]:
+        if nblocked[r]:
             rep = rep + "BLOCKED     {names[r]} ({name_loc[r]}, {name_defs[r]} defs)\n"
-            rep = rep + "    chain: {names[r]} -> " + reason[r] + "\n"
+            rep = rep + "    chain: {names[r]} -> " + nreason[r] + "\n"
         else:
             rep = rep + "OFFLOADABLE {names[r]} ({name_loc[r]}, {name_defs[r]} defs)\n"
 
@@ -536,7 +601,7 @@ fn main() -> i64:
         print "roots: {root_ids.len()} ({roots_blocked} BLOCKED, {root_ids.len() - roots_blocked} OFFLOADABLE)"
         var shown = 0
         for r in root_ids:
-            if blocked[r] and shown < 15:
+            if nblocked[r] and shown < 15:
                 print "  BLOCKED {names[r]}"
                 shown = shown + 1
         print "full report: {out_path}"
@@ -553,7 +618,7 @@ fn main() -> i64:
         print "root verdicts:"
         for r in root_ids:
             var verdict = "OFFLOADABLE"
-            if blocked[r]:
+            if nblocked[r]:
                 verdict = "BLOCKED"
             print "  {verdict} {names[r]}"
         print "full report: {out_path}"
