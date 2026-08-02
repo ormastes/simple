@@ -34,3 +34,13 @@ path with the authorized mapped aperture plus checked offset.
 `test/01_unit/os/drivers/virtio/virtio_gpu_venus_pci_caps_spec.spl` proves the
 pure snapshot/parser contract fails closed for missing, invalid, overflowing,
 or out-of-aperture grants while preserving the existing 2D-only row.
+
+`test/01_unit/os/kernel/device/pci_bar_window_resolver_spec.spl` also proves the
+pure kernel resolution contract for exact BDF/BAR selection, 32/64-bit memory
+apertures, checked subranges, and fail-closed malformed authority. The bug
+remains open because no live syscall consumes this result.
+
+The live fix must add device-VMA ownership. Generic unmap currently returns
+detached pages to PMM, which is invalid for MMIO, and current fork/COW risks
+inheriting mapping authority. Shipping syscall 88 without both invariants would
+not safely resolve this bug.

@@ -15,7 +15,7 @@
   provisional because docgen was bootstrap-seed-built
 - Runtime integration: canonical QEMU guest probe constructs `ProcessingIr` and
   routes CUDA/Vulkan through `ProcessingDevicePort`; Vulkan adapter unit 3/3
-- Coverage: tracked decision inventory 140/142 outcomes = 98%, gate 2/2; two
+- Coverage: tracked decision inventory 152/154 outcomes = 98%, gate 2/2; two
   valid-submission outcomes remain assigned to live MMIO evidence
 - Venus transport slice: protocol admission 4/4, exact binary encoding and
   typed response/fence validation 8/8, bounded controlq admission 4/4. Native
@@ -37,3 +37,10 @@
   explicit BAR mapping grants while preserving common+notify-only 2D readiness.
 - Tracked live-integration blocker:
   `doc/08_tracking/bug/virtio_map_bar_capability_authority_2026-08-02.md`.
+- Kernel BAR authority: pure `pci_bar_window_resolver` accepts only one present
+  BDF and one memory-BAR aperture. It rejects malformed kind, cardinality,
+  assignment, bounds, and arithmetic. Its focused unit run completed under the
+  bootstrap seed; pure-selfhost qualification remains pending.
+- Live mapping remains open: syscall 88, serialized/restored PCI probing,
+  caller-owned device VMAs, MMIO-safe unmap, and fork non-inheritance are
+  required before the resolver can authorize a CPU mapping.

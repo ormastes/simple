@@ -112,6 +112,21 @@ Unknown capability types remain ignorable; duplicate SHM IDs, truncated known
 records, arithmetic wrap, aperture escape, and grant escape fail closed. The
 parser preserves common+notify-only 2D readiness without promoting Venus.
 
+The kernel-side `pci_bar_window_resolver` is a pure MDSOC policy owner between
+PCI aperture discovery and address-space mutation. It resolves only an exact
+BDF/BAR request represented by one present function snapshot and one memory
+aperture. It rejects I/O BARs, 64-bit upper DWORDs, duplicate/absent rows,
+unassigned/zero apertures, empty ranges, escape, and arithmetic wrap while
+returning the original aperture provenance. It performs no config I/O or page
+mapping.
+
+A future live syscall must feed this owner from a serialized PCI probe and
+reserve a caller-owned device VMA. Device VMAs must use user/UC/NX permissions,
+must not release MMIO pages to PMM during unmap, and must not be inherited by
+fork/COW without independent authority. Existing syscall 83 cannot satisfy
+these invariants because it accepts caller-provided physical addresses and
+checks a fixed capability tuple; it remains compatibility-only.
+
 Promotion to `VirtioGpuVenusAdapter` remains blocked on all of the following:
 
 1. negotiated virtio-gpu blob-resource and context-init support;
