@@ -73,3 +73,12 @@ unused matching import was removed from `test_runner_main.spl`.
 The existing coverage aggregation and system coverage specs remain the
 behavioral oracle. The isolated no-stub probe was interrupted without a
 verdict, so only the subsequent full Stage 4 build may admit this repair.
+
+## Compiler warning owner follow-up
+
+After the directory repair passed, Stage 4 reached
+`test_runner_helpers.spl` and proved its active call-graph and closure warning
+accessors were missing imports. The helper now imports the two concrete
+compiler owners directly. A focused no-stub interpreter regression clears the
+shared owner state, invokes both display helpers, and verifies both owner
+accessors remain empty; it passed 1/1 before the next full Stage 4 cycle.
