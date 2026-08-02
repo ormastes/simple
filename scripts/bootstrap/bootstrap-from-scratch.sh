@@ -1234,8 +1234,11 @@ else
     "${stage2_admitted_dir}" "${stage2_runtime_authority}"
   mkdir -p "${stage2_provenance_home}" "${stage2_provenance_tmp}" \
     "${stage3_provenance_home}" "${stage3_provenance_tmp}"
-  runtime_origin_absolute="$(absolute_path \
-    src/compiler_rust/target/bootstrap)"
+  runtime_origin_absolute=$(bootstrap_stage3_physical_directory \
+    "$(absolute_path src/compiler_rust/target/bootstrap)") || {
+    echo "error: missing Rust runtime authority" >&2
+    exit 1
+  }
   runtime_bootstrap_self_link="${runtime_origin_absolute}/bootstrap"
   if [ -L "${runtime_bootstrap_self_link}" ]; then
     runtime_bootstrap_self_target=$(readlink "${runtime_bootstrap_self_link}") ||
