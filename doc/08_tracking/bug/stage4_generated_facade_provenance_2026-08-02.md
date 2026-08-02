@@ -35,4 +35,6 @@ bootstrap compilers and remains compatible with the grouped parser.
 The root `io.spl` facade is a separate module from `io/__init__.spl`. Its broad
 self-glob now has explicit imports for the concrete `file_ops`, `dir_ops`, and
 `file_shell` owners, so compatibility stubs cannot win or make those exports
-ambiguous during Stage4 extraction.
+ambiguous during Stage4 extraction. The subsequent `cwd` failure extends the
+same pinning to `env_ops` for `cwd`, `home`, environment accessors, and host
+identity exports.
