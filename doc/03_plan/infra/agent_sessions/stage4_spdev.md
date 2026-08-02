@@ -35,6 +35,26 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
 6. Deploy only that verified binary, record its path and hash, and update this
    document with the retained logs and evidence.
 
+### Manual Stage 3 refresh invariant
+
+Do not build `src/app/cli/main.spl` directly with a bootstrap-stage compiler and
+call that result Stage 3. Stage 3 is the bootstrap compiler entry
+`src/app/cli/bootstrap_main.spl`, built with `SIMPLE_NO_STUB_FALLBACK=1` and the
+canonical runtime/provenance authority. A manual refresh is admitted only when
+all of these checks pass:
+
+- the build log contains no `Generating [1-9][0-9]* stub functions`,
+  `FAILED FILES`, or `Build failed:` marker;
+- `--version` prints exactly `simple-bootstrap 1.0.0-beta`;
+- `run scripts/check/cert/redeploy_gate/fixtures/p2_add.spl` exits 1 and reports
+  `unknown command 'run'`;
+- the canonical candidate frontend admission passes without changing the
+  candidate hash.
+
+`Build complete: ... 0 failed` and executable-file existence are insufficient
+admission evidence. A stub-bearing full-CLI debug artifact can satisfy both,
+yet silently fall through for `run`/`-c` and then produce an empty Stage 4 MIR.
+
 ## Exact fresh-candidate verification and deployment
 
 The smoke accepts the candidate as its sole positional argument:
