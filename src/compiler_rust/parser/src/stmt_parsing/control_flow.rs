@@ -810,6 +810,9 @@ impl<'a> Parser<'a> {
             }
 
             let mut arms = Vec::new();
+            // `=>` inside an arm list is the arm separator, not a TypeScript
+            // arrow function -- see is_spurious_match_arm_fat_arrow.
+            self.match_arm_depth += 1;
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                 while self.check(&TokenKind::Newline) {
                     self.advance();
@@ -817,9 +820,22 @@ impl<'a> Parser<'a> {
                 if self.check(&TokenKind::Dedent) {
                     break;
                 }
-                arms.push(self.parse_match_arm()?);
-                self.consume_match_arm_separator_comma();
+                if self.at_enclosing_list_terminator() {
+                    break;
+                }
+                let arm = match self.parse_match_arm() {
+                    Ok(arm) => arm,
+                    Err(e) => {
+                        self.match_arm_depth -= 1;
+                        return Err(e);
+                    }
+                };
+                arms.push(arm);
+                if !self.consume_match_arm_separator_comma() {
+                    break;
+                }
             }
+            self.match_arm_depth -= 1;
 
             if self.check(&TokenKind::Dedent) {
                 self.advance();
@@ -832,9 +848,19 @@ impl<'a> Parser<'a> {
         } else {
             // Inline match: `match self: case X: expr; case Y: expr`
             let mut arms = Vec::new();
+            // `=>` inside an arm list is the arm separator, not a TypeScript
+            // arrow function -- see is_spurious_match_arm_fat_arrow.
+            self.match_arm_depth += 1;
             loop {
                 if self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe) {
-                    arms.push(self.parse_match_arm()?);
+                    let arm = match self.parse_match_arm() {
+                        Ok(arm) => arm,
+                        Err(e) => {
+                            self.match_arm_depth -= 1;
+                            return Err(e);
+                        }
+                    };
+                    arms.push(arm);
                 } else {
                     break;
                 }
@@ -845,6 +871,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+            self.match_arm_depth -= 1;
             arms
         };
 
@@ -882,6 +909,7 @@ impl<'a> Parser<'a> {
         }
 
         let mut arms = Vec::new();
+        self.match_arm_depth += 1;
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             while self.check(&TokenKind::Newline) {
                 self.advance();
@@ -889,9 +917,22 @@ impl<'a> Parser<'a> {
             if self.check(&TokenKind::Dedent) {
                 break;
             }
-            arms.push(self.parse_match_arm()?);
-            self.consume_match_arm_separator_comma();
+            if self.at_enclosing_list_terminator() {
+                break;
+            }
+            let arm = match self.parse_match_arm() {
+                Ok(arm) => arm,
+                Err(e) => {
+                    self.match_arm_depth -= 1;
+                    return Err(e);
+                }
+            };
+            arms.push(arm);
+            if !self.consume_match_arm_separator_comma() {
+                break;
+            }
         }
+        self.match_arm_depth -= 1;
 
         if self.check(&TokenKind::Dedent) {
             self.advance();
@@ -934,10 +975,59 @@ impl<'a> Parser<'a> {
     /// Only the indented form is affected: the inline form
     /// (`match x: case A: 1; case B: 2`) keeps `;` as its separator, because a
     /// comma there belongs to the enclosing argument / collection list.
-    pub(crate) fn consume_match_arm_separator_comma(&mut self) {
-        if self.check(&TokenKind::Comma) {
-            self.advance();
+    ///
+    /// Returns `true` if the arm loop may continue, `false` if the comma was
+    /// the ENCLOSING list's separator and must be left unconsumed — see
+    /// `at_enclosing_list_terminator` for why `bracket_depth` is the
+    /// discriminator.
+    pub(crate) fn consume_match_arm_separator_comma(&mut self) -> bool {
+        if !self.check(&TokenKind::Comma) {
+            return true;
         }
+        // A `match` used as a VALUE inside a call's argument list, a
+        // struct-literal field list or a collection literal is lexed at
+        // bracket depth > 0, and there the comma after the last arm body
+        // belongs to that enclosing list, not to the arm list:
+        //     Box(a: match x:
+        //             1: "one"
+        //             _: "other",     <- field separator, NOT an arm separator
+        //         b: x)
+        // Consuming it made the enclosing parser report
+        // "expected comma before argument 'b'", which is why
+        // test/01_unit/compiler/parser_inline_match_in_argument_list_spec.spl
+        // could not be parsed by the seed at all. At statement level
+        // (bracket_depth == 0) no enclosing list exists, so the comma is
+        // unambiguously an arm separator.
+        if self.lexer.bracket_depth > 0 {
+            return false;
+        }
+        self.advance();
+        true
+    }
+
+    /// True when the current token closes the list that ENCLOSES a `match`
+    /// used as a value (`)`, `]`, `}`), i.e. the match's arm list is over.
+    ///
+    /// The terminator shares the last arm's line, so the lexer has not
+    /// flushed a Dedent yet and the arms loop's `Dedent` exit never fires;
+    /// without this check the closer was handed to `parse_match_arm`, which
+    /// reported "expected pattern, found RParen". Mirrors the self-hosted
+    /// `ends_enclosing_list` break in
+    /// `src/compiler/10.frontend/core/parser_stmts.spl`
+    /// (`parse_match_arms_common`).
+    ///
+    /// Deliberately NOT gated on `bracket_depth`, unlike the comma case: the
+    /// lexer decrements `bracket_depth` as it produces the closer itself, so
+    /// by the time the closer is the current token the depth has already
+    /// dropped back to the enclosing level (0 for `take_flipped(x, match x:
+    /// ... _: "other")`). No gate is needed anyway — a match arm can never
+    /// BEGIN with `)`, `]` or `}`, so a closer in pattern position is always
+    /// the end of the arm list. At statement level this only changes which
+    /// parser reports the stray closer, never whether it is reported.
+    pub(crate) fn at_enclosing_list_terminator(&mut self) -> bool {
+        self.check(&TokenKind::RParen)
+            || self.check(&TokenKind::RBracket)
+            || self.check(&TokenKind::RBrace)
     }
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {

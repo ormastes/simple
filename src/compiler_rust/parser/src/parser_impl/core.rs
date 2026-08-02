@@ -70,6 +70,16 @@ pub struct Parser<'a> {
     /// Count of INDENT tokens consumed during pattern parsing that need matching DEDENTs
     /// consumed after the match arm body. Reset to 0 after consuming the dedents.
     pub(crate) pattern_indent_count: usize,
+    /// Nesting depth of `match`/`match suspend` ARM LISTS currently being
+    /// parsed. Non-zero means a `=>` in this position is the match-arm
+    /// separator, which is core Simple grammar — not the TypeScript
+    /// arrow-function mistake. `Some(code) =>` ends in `)`, so the
+    /// `) =>` heuristic in `detect_common_mistake` flagged every
+    /// call-shaped or tuple-shaped match pattern; std
+    /// `tooling/url_utils.spl` alone produced 160 lines of spurious
+    /// TsArrowFunction hints. Matches nest (a match inside an arm body), so
+    /// this is a counter rather than a flag.
+    pub(crate) match_arm_depth: usize,
     /// When true, postfix parsing won't consume `{ ... }` after field access.
     /// Used to prevent ambiguity in `if cond { body }` syntax.
     pub(crate) no_brace_postfix: bool,
@@ -120,6 +130,7 @@ impl<'a> Parser<'a> {
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
             pattern_indent_count: 0,
+            match_arm_depth: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,
@@ -177,6 +188,7 @@ impl<'a> Parser<'a> {
             current_scope: "module".to_string(),
             error_hints: Vec::new(),
             pattern_indent_count: 0,
+            match_arm_depth: 0,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
             binary_indent_count: 0,

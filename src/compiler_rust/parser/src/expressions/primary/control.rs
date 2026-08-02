@@ -97,6 +97,9 @@ impl<'a> Parser<'a> {
             self.advance();
             self.expect(&TokenKind::Indent)?;
             let mut arms = Vec::new();
+            // `=>` inside an arm list is the arm separator, not a TypeScript
+            // arrow function -- see is_spurious_match_arm_fat_arrow.
+            self.match_arm_depth += 1;
             while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                 while self.check(&TokenKind::Newline) {
                     self.advance();
@@ -104,14 +107,36 @@ impl<'a> Parser<'a> {
                 if self.check(&TokenKind::Dedent) {
                     break;
                 }
-                arms.push(self.parse_match_arm_expr()?);
+                // A `match` used as a VALUE ends at the ENCLOSING list's
+                // closer, which shares the last arm's line so no Dedent has
+                // been flushed yet. Leave the closer for the enclosing parser
+                // and resync the lexer's indent stack, since the Indent this
+                // loop consumed will never get its matching Dedent.
+                if self.at_enclosing_list_terminator() {
+                    self.lexer.pop_indent();
+                    break;
+                }
+                let arm = match self.parse_match_arm_expr() {
+                    Ok(arm) => arm,
+                    Err(e) => {
+                        self.match_arm_depth -= 1;
+                        return Err(e);
+                    }
+                };
+                arms.push(arm);
                 // `,` after an arm BODY separates arms (`0 => 10, 1 => 20`) or
                 // trails the last one; the multi-pattern comma (`case 1, 2:`)
                 // was already consumed by parse_pattern. See
                 // consume_match_arm_separator_comma in
-                // stmt_parsing/control_flow.rs.
-                self.consume_match_arm_separator_comma();
+                // stmt_parsing/control_flow.rs. Inside an enclosing bracket
+                // list the comma is that list's separator instead, and is
+                // left unconsumed.
+                if !self.consume_match_arm_separator_comma() {
+                    self.lexer.pop_indent();
+                    break;
+                }
             }
+            self.match_arm_depth -= 1;
             if self.check(&TokenKind::Dedent) {
                 self.advance();
             }
@@ -125,9 +150,17 @@ impl<'a> Parser<'a> {
             // Inline match expression: `match self: case X: expr; case Y: expr`
             self.lexer.disable_forced_indentation();
             let mut arms = Vec::new();
+            self.match_arm_depth += 1;
             loop {
                 if self.check(&TokenKind::Case) || self.check(&TokenKind::Pipe) {
-                    arms.push(self.parse_match_arm_expr()?);
+                    let arm = match self.parse_match_arm_expr() {
+                        Ok(arm) => arm,
+                        Err(e) => {
+                            self.match_arm_depth -= 1;
+                            return Err(e);
+                        }
+                    };
+                    arms.push(arm);
                 } else {
                     break;
                 }
@@ -138,6 +171,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
             }
+            self.match_arm_depth -= 1;
             Ok(Expr::Match {
                 subject: Box::new(subject),
                 arms,

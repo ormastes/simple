@@ -1,7 +1,14 @@
 # URL/URI utilities
 # Parse, encode, and manipulate URLs without regex
 
-use super.string_utils.{split, trim, starts_with, ends_with}
+# NOTE: this module previously did
+#     use super.string_utils.{split, trim, starts_with, ends_with}
+# but string_utils defines NONE of those four names (it has trim_start /
+# trim_end / split_take / split_once / starts_with_any / ends_with_any).
+# `trim`, `starts_with` and `ends_with` were never referenced as free
+# functions here -- the code uses the text methods -- and `split` was, so
+# parse_query_string died with "function `split` not found" the moment this
+# module became loadable. `split` is a text method, so it needs no import.
 
 # =====================================
 # URL Components
@@ -55,6 +62,13 @@ fn url_decode(input: text) -> text:
                         continue
                     None =>
                         result = result + ch
+            else:
+                # Truncated escape at end of input ("100%", "abc%A"). Without
+                # this branch NOTHING was appended and the '%' was silently
+                # DROPPED -- url_decode("100%") returned "100". A malformed
+                # escape must survive as literal text, exactly as the
+                # non-hex `None` arm above already does.
+                result = result + ch
         elif ch == "+":
             result = result + " "
         else:
@@ -66,7 +80,10 @@ fn url_decode(input: text) -> text:
 
 # Check if character is unreserved (doesn't need encoding)
 fn is_unreserved(ch: text) -> bool:
-    val c = ch.get(0).unwrap() if ch.len() > 0 else: ""
+    # `get` is not a method on text -- this whole module was unloadable behind
+    # a parse error until 75c6fff3b1a, so this line had never once been run.
+    # The rest of the file already uses `char_at`, which is the real accessor.
+    val c = ch.char_at(0) if ch.len() > 0 else: ""
 
     # A-Z, a-z, 0-9, -, ., _, ~
     (c >= "A" and c <= "Z") or
@@ -100,7 +117,15 @@ fn char_code(ch: text) -> i32:
         ">" => 62, "?" => 63, "@" => 64, "[" => 91, "\\" => 92,
         "]" => 93, "^" => 94, "_" => 95, "`" => 96, "{" => 123,
         "|" => 124, "}" => 125, "~" => 126,
-        _ => 32
+        # Anything outside the printable-ASCII table above: fall back to the
+        # real code point. The previous `_ => 32` silently reported SPACE for
+        # every non-ASCII character, so url_encode("\u{e9}") produced "%20" --
+        # a wrong answer with no error. Never trade a loud failure for a
+        # silent wrong one.
+        # TODO: url_encode should percent-encode each UTF-8 BYTE (%C3%A9), not
+        # the code point; that needs a byte accessor on text and is tracked in
+        # doc/08_tracking/bug/match_arm_comma_separator_rejected_2026-08-02.md.
+        _ => ch.char_code_at(0)
 
 # Character from code
 fn from_char_code(code: i32) -> text:
@@ -323,7 +348,7 @@ fn parse_query_string(query: text) -> List<(text, text)>:
     if query.is_empty():
         return params
 
-    val pairs = split(query, "&")
+    val pairs = query.split("&")
     for pair in pairs:
         val eq_pos = pair.find("=")
         if eq_pos >= 0:

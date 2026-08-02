@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use super::*;
 use crate::ast::{BinOp, UnaryOp, Visibility};
-use crate::error_recovery::{detect_common_mistake, ErrorHint, ErrorHintLevel};
+use crate::error_recovery::{detect_common_mistake, CommonMistake, ErrorHint, ErrorHintLevel};
 use crate::macro_registry::ConstValue;
 
 impl<'a> Parser<'a> {
@@ -61,7 +61,9 @@ impl<'a> Parser<'a> {
         let next_token = self.pending_tokens.front();
 
         if !skip_check {
-            if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token) {
+            if let Some(mistake) = detect_common_mistake(&self.current, &self.previous, next_token)
+                .filter(|m| !self.is_spurious_match_arm_fat_arrow(m))
+            {
                 // Determine error hint level based on mistake type.
                 // Shared classification - see CommonMistake::hint_level.
                 let level = mistake.hint_level();
@@ -102,6 +104,23 @@ impl<'a> Parser<'a> {
             self.pending_tokens.push_back(tok.clone());
             tok
         })
+    }
+
+    /// True when `detect_common_mistake` reported the TypeScript arrow-function
+    /// mistake for a `=>` that is really a MATCH-ARM SEPARATOR.
+    ///
+    /// The detector's rule is purely lexical — `)` immediately followed by `=>`
+    /// — but a match arm whose pattern is call-shaped or tuple-shaped ends in
+    /// `)` too, so every `Some(code) =>`, `Ok(v) =>` and `(a, b) =>` arm was
+    /// reported as a TypeScript mistake. That is core Simple grammar, not a
+    /// mistake: std `tooling/url_utils.spl` produced 160 lines of these hints
+    /// on a file that parses correctly. The detector only sees a three-token
+    /// window and cannot tell the two apart, so the arm context is supplied
+    /// here instead, leaving the diagnostic intact everywhere `=>` is NOT a
+    /// valid arm separator. bug doc:
+    /// doc/08_tracking/bug/match_arm_comma_separator_rejected_2026-08-02.md
+    fn is_spurious_match_arm_fat_arrow(&self, mistake: &CommonMistake) -> bool {
+        matches!(mistake, CommonMistake::TsArrowFunction) && self.match_arm_depth > 0
     }
 
     /// Parse an inline statement or an indented block after a colon/separator has been consumed.

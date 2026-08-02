@@ -1458,6 +1458,9 @@ fn parse_receive_stmt() -> i64:
     var arm_indices: [i64] = []
     var timeout_expr: i64 = -1
     var timeout_body_idx: i64 = -1
+    # True once at least one `case`/`after` arm has been parsed, so a `,` in
+    # arm-boundary position can be told apart from a stray leading comma.
+    var saw_arm = false
 
     var kind = par_kind_get()
     while true:
@@ -1469,6 +1472,31 @@ fn parse_receive_stmt() -> i64:
         if kind == 190:
             break
 
+        # `,` at ARM-BOUNDARY position separates one receive arm from the next
+        # (`case 1: a, case 2: b`) or trails the last one (`case 2: b,`).
+        # `receive` duplicates the arm loop of parse_match_arms_common instead
+        # of sharing it, so it did NOT get that function's arm-separator fix
+        # and every comma-separated receive arm list died on the `else` branch
+        # below with "expected 'case' or 'after' in receive block".
+        #
+        # Comma's two roles never collide here either: BEFORE the arm's `:` it
+        # is the multi-pattern separator (`case 1, 2, 3:`), consumed by the
+        # `while kind == 121` pattern loop further down; AFTER the arm body it
+        # is an arm separator. Unlike `match`, `receive` is always a statement
+        # with a real INDENT (parser_expect(181) above) and can never be an
+        # element of an enclosing call/collection list, so no bracket-depth
+        # gate is needed. bug doc: doc/08_tracking/bug/
+        #   match_arm_comma_separator_rejected_2026-08-02.md
+        if kind == TOK_COMMA and saw_arm:
+            parser_advance()
+            parser_skip_newlines()
+            kind = par_kind_get()
+            if kind == 182:
+                parser_advance()
+                break
+            if kind == 190:
+                break
+
         if kind == 207:
             # after TIMEOUT: body -- timeout arm
             parser_advance()
@@ -1477,6 +1505,7 @@ fn parse_receive_stmt() -> i64:
             val after_body = parse_block()
             val after_body_stmt_idx = stmt_block_stmt(after_body, 0)
             timeout_body_idx = after_body_stmt_idx
+            saw_arm = true
         elif kind == 44:
             parser_advance()
             var patterns: [i64] = []
@@ -1514,6 +1543,7 @@ fn parse_receive_stmt() -> i64:
                 val stored_pattern = normalize_wildcard_pattern(pattern_idx)
                 val arm_idx = arm_new_with_binding_and_rationale(stored_pattern, guard_expr_idx, arm_body, "", rationale)
                 arm_indices.push(arm_idx)
+            saw_arm = true
         else:
             parser_error("expected 'case' or 'after' in receive block")
             parser_advance()
