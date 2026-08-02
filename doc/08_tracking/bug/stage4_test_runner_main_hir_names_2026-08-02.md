@@ -200,3 +200,22 @@ from canonical `compiler.mir`. The regression keeps its target-family behavior
 through the optimizer facade while constructing the three variants through the
 MIR facade; its bounded seed diagnostic passed 3/3. A refreshed Stage 3 and the
 final no-stub Stage 4 cycle remain authoritative.
+
+## Package-sibling import leak confirmed
+
+Stage 3 was rebuilt from the admitted Stage 2 compiler after the canonical
+boundary repair. The 724-module build had zero failures or stub markers; its
+bootstrap identity, unsupported-command behavior, candidate frontend admission,
+and before/after hash all passed. Nevertheless, the final Stage 4 cycle again
+reported the same three aliases at `target_family.spl` after 423 HIR module
+declarations.
+
+The remaining owner is the HIR directory-package resolver. Its sibling path
+calls `register_glob_imported_symbols`, whose named-import expansion registers
+not only a sibling's own declarations/explicit exports but also every name that
+sibling imported for private use. `lower_module_enum_definitions` then
+rematerializes those leaked enums in each unrelated child and reports missing
+payload types against the current child's filename. The compiler fix and
+behavioral regression are tracked in
+`hir_package_sibling_imported_enum_surface_leak_2026-08-02.md`. No fourth build
+was attempted.

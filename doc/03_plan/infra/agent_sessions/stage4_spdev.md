@@ -16,29 +16,34 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
   shell/process owner family, and async random-access file owner through
   `180e4179c1a9`. Its three Stage 4 cycles advanced the HIR frontier from 395
   to 424 modules and proved each preceding blocker cleared.
-- Adding the complete payload group let `compiler.mir_opt.__init__` pass, but
-  cycle 2 reproduced the same aliases at the next child. Audit proved the
-  unused cross-layer MIR convenience re-export triggers package-sibling alias
-  rematerialization in every optimizer child. The invalid re-export is removed;
-  optimizer APIs remain on `compiler.mir_opt`, while MIR base types stay on
-  canonical `compiler.mir`. The behavior spec passes 3/3. Stage 3 must now be
-  refreshed incrementally before the final Stage 4 cycle.
+- The invalid MIR convenience re-export is removed and Stage 3 was rebuilt
+  from its admitted Stage 2 compiler: 724 compiled, 0 failed; identity,
+  unsupported-command, frontend admission, and hash-stability gates passed at
+  SHA-256 `adc4da69b802113f17980b88b783fe7ae6cfc1830ea93b6a660b51c68a2aba91`.
+  The final Stage 4 cycle still reproduced the same three aliases at
+  `target_family.spl` after 423 HIR declarations. This proves directory-package
+  sibling registration is leaking each sibling's named imports into unrelated
+  children; the compiler resolver itself is now the blocker.
 - No fresh Stage 4 CLI has passed sanity or the essential-tools smoke, and no
   artifact has been deployed.
 
 ## Required next run
 
 1. Fetch/rebase current `main` and preserve the existing Stage 3/native cache.
-2. Refresh Stage 3 incrementally because compiler sources changed.
-3. Run one full-resource Stage 4 cycle with the progress/RSS watcher.
-4. On a distinct failure, claim it in the bug DB, fix pure-Simple first, add
+2. Fix `resolve_package_sibling_symbols` so directory siblings contribute their
+   own public declarations and explicit exports, but not unrelated named
+   imports. Preserve normal explicit/glob import behavior and add a behavioral
+   mini-package regression.
+3. Refresh Stage 3 incrementally because compiler sources changed.
+4. Run one full-resource Stage 4 cycle with the progress/RSS watcher.
+5. On a distinct failure, claim it in the bug DB, fix pure-Simple first, add
    exact and adjacent regression coverage, push, and retry within the
    three-cycle session cap.
-5. On success, run sanity and
+6. On success, run sanity and
    `scripts/check/check-bootstrap-essential-tools-smoke.shs` against the exact
    fresh Stage 4 binary. Require test-runner, lint, duplicate-check, and
    aggregate PASS markers.
-6. Deploy only that verified binary, record its path and hash, and update this
+7. Deploy only that verified binary, record its path and hash, and update this
    document with the retained logs and evidence.
 
 ### Manual Stage 3 refresh invariant
