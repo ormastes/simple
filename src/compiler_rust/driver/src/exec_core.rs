@@ -884,6 +884,32 @@ impl ExecCore {
             return Ok(exit_code);
         }
 
+        // Module-level BDD example blocks are not reachable from the JIT entry
+        // path.  With a `main` present the JIT calls `main` and nothing else, so
+        // every module-level `describe`/`it` statement is dropped: the file
+        // prints whatever `main` prints, reports ZERO examples, and exits 0 — a
+        // deliberately-failing example is invisible.  Measured on
+        // test/01_unit/compiler/native/baremetal_syntax_spec.spl (22 blocks, 0
+        // executed) and reproduced on a two-example fixture: the same file runs
+        // both examples and exits 1 the moment its `fn main` is removed, or
+        // under SIMPLE_EXECUTION_MODE=interpreter.  See
+        // doc/08_tracking/bug/bare_assert_statement_vacuity_2026-08-02.md OPEN 3.
+        //
+        // Bail out to the interpreter (which executes module-level statements)
+        // exactly like the generator gap below, so such a file genuinely runs
+        // instead of silently reporting success for nothing.  A file whose
+        // examples live INSIDE `main` is unaffected: extract_file_test_meta does
+        // not descend into function bodies, so total_tests counts module-level
+        // examples only.
+        let module_level_examples =
+            simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests;
+        if module_level_examples > 0 {
+            return Err(format!(
+                "module declares {module_level_examples} top-level BDD example(s) that the JIT \
+                 entry path would silently skip (it calls `main` only); falling back to interpreter"
+            ));
+        }
+
         // B3 for-in gap: generator functions (containing Yield instructions) are not
         // supported by the Cranelift JIT state-machine lowering when called as top-level
         // `gen fn` declarations (generator_state_map is None for these).  The JIT would
@@ -1095,6 +1121,35 @@ mod tests {
     use std::fs;
     use std::path::Path;
     use tempfile::tempdir;
+
+    /// Guards the invariant `run_file_jit` relies on to refuse a JIT run that
+    /// would silently skip module-level BDD examples: `extract_file_test_meta`
+    /// counts examples declared at MODULE level and does NOT descend into
+    /// function bodies. If it ever started descending, the bail-out would fire
+    /// for ordinary programs that merely call a test helper from `main`.
+    fn module_level_example_count(source: &str) -> usize {
+        let mut parser = simple_parser::Parser::new(source);
+        let ast = parser.parse().expect("fixture must parse");
+        simple_parser::test_analyzer::extract_file_test_meta(&ast.items, None).total_tests
+    }
+
+    #[test]
+    fn counts_module_level_bdd_examples_that_the_jit_entry_path_would_skip() {
+        let source = "describe \"g\":\n    it \"a\":\n        expect(1).to_equal(1)\n\n    it \"b\":\n        expect(2).to_equal(2)\n\nfn main():\n    print \"hi\"\n";
+        assert_eq!(module_level_example_count(source), 2);
+    }
+
+    #[test]
+    fn ignores_examples_nested_inside_a_function_body() {
+        let source = "fn main():\n    describe \"g\":\n        it \"a\":\n            expect(1).to_equal(1)\n";
+        assert_eq!(module_level_example_count(source), 0);
+    }
+
+    #[test]
+    fn counts_zero_for_a_plain_program_with_no_examples() {
+        let source = "fn main():\n    print \"hi\"\n";
+        assert_eq!(module_level_example_count(source), 0);
+    }
 
     #[test]
     fn forces_interpreter_for_physical_nvme_serial_checker() {
