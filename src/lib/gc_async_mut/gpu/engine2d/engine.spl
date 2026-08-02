@@ -106,6 +106,16 @@ fn engine2d_env_backend_override() -> text:
 fn engine2d_env_get(key: text) -> text:
     env_get(key)
 
+fn engine2d_shutdown_has_typed_route(selected_name: text) -> bool:
+    """True when Engine2D.shutdown() reaches the backend through a typed
+    field arm; anything else falls to the duck-typed self.backend.shutdown()
+    dispatch, which dies under the Cranelift JIT when the trait impl's vtable
+    is missing from the unit (see probe_backend_viable)."""
+    (selected_name == "vulkan" or selected_name == "vulkan-poisoned-software"
+        or selected_name == "cuda" or selected_name == "metal"
+        or selected_name == "opencl" or selected_name == "rocm"
+        or selected_name == "software")
+
 fn engine2d_scale_pixel_alpha(pixels: [u32], opacity_milli: i32) -> [u32]:
     """Scale every pixel's alpha channel by opacity_milli/1000 (1000 = no
     change), used by draw_engine_opacity() to fade an embedded surface before
@@ -889,7 +899,19 @@ class Engine2D with DrawIrRenderTarget:
         var engine = Engine2D.create_with_backend(8, 8, canon)
         val created_name = engine.backend_name()
         if created_name != canon:
-            engine.shutdown()
+            # JIT-UNIT GUARD (2026-08-02): a fallback engine (e.g. requested
+            # "directx" falling back to "directx-software-emulation") has no
+            # typed backend field on Engine2D, so engine.shutdown() routes to
+            # the duck-typed self.backend.shutdown(). Under bare
+            # `bin/simple run` (Cranelift JIT) a unit that also contains
+            # browser_engine lacks that impl's vtable and the duck call traps
+            # ("duck-typed virtual method call ... no vtable", SIGILL). Only
+            # shut down when shutdown() has a typed route for the created
+            # name; a skipped fallback probe engine is an 8x8 CPU-raster
+            # surface holding no device resources, probed once per process
+            # (memoized in _viable_auto_backend_cache).
+            if engine2d_shutdown_has_typed_route(created_name):
+                engine.shutdown()
             return BackendProbeResult.failed(canon, "init_failed: fell back to " + created_name)
         # Drive the RenderBackend trait surface directly (engine.backend) so the
         # probe exercises the same draw/present/readback ops the render lane
