@@ -51,6 +51,9 @@ wrong repository subsystem. Link detailed guides instead of duplicating them.
   offload, not an in-guest CUDA runtime claim.
 - **Two-wire rule:** render/host-GPU owns ivshmem ordinal `0`; audio owns ordinal
   `1`. A first-match or shared mapper aliases the protocols and is invalid.
+- **Mapper owner:** `os.kernel.ipc.host_gpu_ivshmem_map` exports
+  `map_qemu_host_gpu_ivshmem_bar2` for ordinal `0` and
+  `map_qemu_audio_ivshmem_bar2` for ordinal `1`.
 - **Primary guide:** `doc/07_guide/platform/simpleos/io_audio.md`.
 
 ### Verification rule

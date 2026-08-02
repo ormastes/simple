@@ -58,11 +58,15 @@ SIMPLE_BIN=<admitted-pure-simple> sh scripts/check/check-simpleos-virtio-snd-qem
 
 ## Current synchronized status
 
-At `main` revision `329b5c923f5d`, eight focused specs pass (31/31 examples).
-The QEMU transport contract is 5/6: `host_gpu_ivshmem_map.spl` currently exposes
-only the generic first-match host-GPU mapper, while audio callers require the
-second-device audio mapper. Until that owner is restored and live two-ivshmem
-CUDA readback is rerun, overall verification is **FAIL**.
+The focused suite passes 37/37 examples. The QEMU transport contract passes
+6/6 after restoring `map_qemu_audio_ivshmem_bar2`: render/host-GPU selects
+ordinal `0`, audio selects ordinal `1`, and absence of the second device fails
+closed instead of aliasing the render wire. Mapper and audio-service source
+checks also pass.
+
+This is **PASS** for the focused transport regression. It does not replace the
+separate live two-ivshmem CUDA readback gate, which must still be run when the
+guest, host daemon, QEMU/OVMF, and CUDA device environment is available.
 
 Metal/macOS, Windows, and BSD runtime claims require native evidence on those
 platforms. Linux-only compilation or unavailable results are not native PASS.
