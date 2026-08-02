@@ -4,7 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
-mkdir -p "$work/input" "$work/cache"
+mkdir -p "$work/input" "$work/cache" "$work/repo/bin" "$work/missing-child"
 
 printf '%s\n' 'fn good() -> i64: 1' > "$work/input/adjacent_good.spl"
 printf '%s\n' 'fn broken_one(:' > "$work/input/exact_failure.spl"
@@ -22,10 +22,32 @@ printf '%s\n' \
   'exit 2' > "$fake"
 chmod +x "$fake"
 
+# Exact preflight: no worker may start when the seed's delegated pure-Simple
+# child is absent from the canonical repo-relative path.
+missing_output="$work/missing-child.txt"
+set +e
+(cd "$work/missing-child" && FAKE_INVOCATIONS="$work/missing-invocations" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  >"$missing_output" 2>&1
+missing_status=$?
+set -e
+[ "$missing_status" -eq 2 ] || { echo "missing child did not fail preflight" >&2; exit 1; }
+grep -Fq 'diagnostic child compiler is not executable: bin/simple' "$missing_output"
+[ ! -e "$work/missing-invocations" ] || { echo "worker ran before child preflight" >&2; exit 1; }
+
+# Adjacent admitted-child path: an executable at bin/simple preserves normal
+# aggregation. The fake seed below does not delegate, so a minimal executable
+# fixture is sufficient for this harness contract.
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$work/repo/bin/simple"
+chmod +x "$work/repo/bin/simple"
+
 output="$work/output.txt"
 set +e
-FAKE_INVOCATIONS="$work/invocations" sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
-  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2 >"$output" 2>&1
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/invocations" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  >"$output" 2>&1
 status=$?
 set -e
 
@@ -42,8 +64,10 @@ grep -Fq 'bootstrap diagnostic summary: checked=3 passed=1 failed=2' "$output"
 }
 touch "$work/cache/preserved-marker"
 set +e
-FAKE_INVOCATIONS="$work/invocations-second" sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
-  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2 >/dev/null 2>&1
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/invocations-second" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2) \
+  >/dev/null 2>&1
 second_status=$?
 set -e
 [ "$second_status" -eq 1 ]
