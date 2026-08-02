@@ -167,3 +167,19 @@ existing GPU/VHDL backend behavior coverage unchanged.
 package and behaviorally verifies hosted/embedded classification plus feature
 metadata. Its bounded diagnostic passed 2/2 on the Rust seed, so it is focused
 supporting evidence only; the fresh no-stub Stage 4 build remains admission.
+
+## MIR optimizer facade payload closure
+
+The next Stage 4 cycle showed the preload removal alone was incomplete: the
+same three names were then correctly attributed to `compiler.mir_opt.__init__`
+at 195 HIR modules. That facade publicly re-exports `MirInstKind`, whose GPU
+barrier, GPU atomic, and VHDL process variants carry the missing types. The
+existing `compiler.mir.mir_instructions` export edge now mirrors the proven MIR
+facade grouping for `GpuBarrierScope`, `GpuMemoryScope`, `GpuAtomicOpKind`,
+`VhdlProcessKind`, `VhdlClockDomain`, and `VhdlClockEdge`. No new module edge or
+backend-local duplicate type is introduced.
+
+The package-surface regression now constructs and pattern-matches the three
+observed `MirInstKind` variants solely through `compiler.mir_opt`. Its seed test
+selection broadened into an unrelated failing MIR-opt suite, so that attempt is
+non-evidence; the next no-stub Stage 4 build is authoritative.

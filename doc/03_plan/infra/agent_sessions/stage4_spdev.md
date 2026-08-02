@@ -16,13 +16,13 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
   shell/process owner family, and async random-access file owner through
   `180e4179c1a9`. Its three Stage 4 cycles advanced the HIR frontier from 395
   to 424 modules and proved each preceding blocker cleared.
-- The final permitted cycle stopped while lowering the MIR optimizer package
-  surface on unresolved `GpuBarrierScope`, `GpuAtomicOpKind`, and
-  `VhdlProcessKind`. Audit proved the reported `target_family.spl` location was
-  attribution to the first public re-export target: that file uses none of the
-  types. The stale unused preload in `60.mir_opt/__init__.spl` is removed and a
-  public package-surface behavior spec passes 2/2; a fresh Stage 4 run is still
-  required.
+- Removing the stale preload changed the diagnostic to the actual
+  `compiler.mir_opt.__init__` surface: its public `MirInstKind` re-export lacked
+  the payload type closure. The existing `compiler.mir.mir_instructions`
+  export edge now includes the proven six-name GPU/VHDL support group, without
+  adding a second module dependency. The public package behavior spec
+  constructs and matches barrier, atomic, and VHDL variants; a fresh Stage 4
+  run is still required.
 - No fresh Stage 4 CLI has passed sanity or the essential-tools smoke, and no
   artifact has been deployed.
 
