@@ -435,3 +435,176 @@ treat that as the actionable core, not 1,418 and not 2,378.
 3. Close the `rt_`-prefix hole in the native stub guards (`stubs.rs:477`,
    `llvm_native_link.spl:1825`) — a non-`rt_` symbol is silently given a weak
    `return 0` body today.
+
+## Working the 919 high-confidence core (2026-08-02 lane)
+
+Base: origin `main` @ `e4b4561c803f07e3f7cc7a5882876bd78ab6e3c2`, clean tree
+extracted from that sha, `simple-runtime` and the `simple` binary rebuilt from
+it. Handoff list: the 919-symbol intersection in `agreed_unbacked.txt`.
+
+### The 919 list re-verified — it holds (PROVED)
+
+Rebuilt the defined-symbol universe independently from the origin-tip source
+(Rust `extern "C"` definitions, the C runtime, and every quoted name in
+`interpreter_extern/`) = 5,128 distinct names, and separately from the
+*freshly built* `libsimple_runtime.a` (`nm --defined-only`) = 17,602 names.
+
+| check | result |
+|---|---|
+| of the 919, defined anywhere in the source universe | **0** |
+| of the 919, defined in the fresh archive | **0** |
+| true-positive control (`rt_dict_contains`, `rt_contains`, `rt_value_eq`, `rt_array_len`, `rt_index_of`, `rt_string_lines`) | all found |
+
+The archive is a *supporting* signal only, not the oracle: several real symbols
+(`rt_jit_create`, `rt_current_time_ms`, `rt_time_now_seconds`) are absent from
+`libsimple_runtime.a` because they live in other crates or behind cargo
+features. Absence was therefore always confirmed against source as well.
+
+### The operand-discard hazard does NOT intersect this list (PROVED)
+
+The prohibition "do not implement a receiver for an emitter that discards its
+operands" was checked against the list rather than assumed. All eight known
+hazard symbols are referenced from the Rust codegen but are **not** members of
+the 919:
+
+`rt_enum_unit`, `rt_enum_with`, `rt_pattern_test`, `rt_pattern_bind`,
+`rt_par_map`, `rt_par_reduce`, `rt_future_create`, `rt_dict_contains_key` —
+each `in_919 = 0`, `in_codegen_tokens = 1`.
+
+More generally: **0 of the 919 are referenced anywhere under
+`compiler/src/codegen/`.** The 919 are declaration-side Simple externs, a
+disjoint population from the codegen-emitted runtime calls tracked earlier in
+this file. Those codegen symbols stay loud and untouched.
+
+### Shape of the 919
+
+| bucket | count |
+|---|---|
+| referenced from a `.spl` non-declaration line (live call site) | 690 |
+| declaration-only, inert | 229 |
+| referenced from Rust at all | 14 |
+| referenced from `codegen/` | 0 |
+| dead (referenced nowhere) | **0** |
+
+The "31 referenced nowhere" figure from an intermediate scan was an artifact of
+indexing only `src/`; all 31 (`ptr_const_*`, `ptr_mut_*`, `rt_net_connect`, …)
+are referenced from `test/`. Nothing in the 919 is dead, so nothing was deleted
+on deadness grounds.
+
+Live-caller families are dominated by subsystems that are simply not built:
+`rt_lyon` 49, `rt_arm64` 39, `rt_torch` 38, `rt_arm32` 31, `rt_vk` 25,
+`rt_tls13` 24, `rt_cuda` 22, `rt_rv32` 19, `rt_x86` 18. All `@extern`
+attribute targets in the tree are `runtime`/`bare`/`browser`/`simple_layout_mark`
+— there is no per-external-library targeting, so these are runtime obligations
+that the runtime does not meet, not third-party library bindings.
+
+### Near-miss (class b) analysis
+
+28 of the 919 are within 0.90 similarity of a real defined symbol. Most are
+*semantic* false matches and were rejected rather than "fixed":
+`rt_torch_torchtensor_sin`→`_sum`, `_cos`→`_sub`, `_eye`→`_free`,
+`_reshape_Nd`→`_shape`, `rt_ssh_aes128_gcm_*`→`rt_ssh_aes256_gcm_*` (different
+cipher), `rt_gc_is_enabled`→`rt_log_is_enabled`, `rt_file_write_bytes_b64`→
+`rt_file_write_bytes` (different encoding). Renaming any of these would trade a
+loud failure for a silent wrong answer.
+
+Three were confirmed genuine wrong references and fixed.
+
+### Fixed in this change
+
+**1. `rt_cuda_is_available` → `rt_cuda_available`** (real symbol, arity 0, `i64`).
+Declared at three sites; the only caller is `cuda_available()` in
+`src/lib/nogc_sync_mut/io/cuda_sffi.spl:40`. The corrected call uses the idiom
+already established in three other files (`rt_cuda_available() != 0`:
+`gc_async_mut/cuda.spl:26`, `gc_async_mut/cuda/mod.spl:14`,
+`nogc_async_mut/cuda/mod.spl:664`). The two caller-less declarations
+(`nogc_async_mut/engine/physics/backend_gpu/gpu_solver.spl:22`,
+`os/ml/gpu_tensor.spl:18`) were deleted rather than renamed — they named a
+symbol that does not exist and nothing referenced them.
+
+**2. `rt_time_now_secs` → `rt_time_now_seconds`** in
+`src/compiler_rust/lib/std/src/sys/sffi/time.spl:7`. Registered as
+`insert_simple!("rt_time_now_seconds", …)`. No callers, so this is a
+correctness fix to a declaration table with no behavioural risk.
+
+**3. `get_current_time_ms` → `rt_current_time_ms`** in
+`src/compiler_rust/lib/std/src/spec/mode_runner.spl`. This one had **live
+callers**: lines 149 and 166 time every multi-mode spec run
+(`duration = get_current_time_ms() - start_time`), so the measured duration of
+every mode run was derived from an unbacked call. The real symbol is
+`native_all/src/lib.rs:1181 extern "C" fn rt_current_time_ms() -> i64`, also
+registered for the interpreter. The declaration said `-> i32`; epoch
+milliseconds do not fit in `i32`, so the declaration and the three `duration_ms`
+type sites (`mode_runner.spl:19`, `mode_reporter.spl:100,103`) were widened to
+`i64` in the same change.
+
+### Runtime evidence — RED then GREEN, measured not inferred (PROVED)
+
+Binary: `simple` rebuilt from the base sha (`enum-probe` = 0, i.e. the Rust
+seed, which is what `run` uses here).
+
+| mode | probe | rc | output |
+|---|---|---|---|
+| default (JIT) | unbacked `rt_cuda_is_available` | **0** | ERROR logged, then `-> false` |
+| default (JIT) | real `rt_cuda_available` | 0 | `raw -> 0` |
+| interpreter | unbacked `rt_cuda_is_available` | **1** | `error: semantic: unknown extern function` |
+| interpreter | real `rt_cuda_available` | 0 | `raw -> 1` |
+
+Two corrections to earlier assumptions, both caught by measuring instead of
+reasoning:
+
+- The substituted nil in a `-> bool` slot prints **`false`**, not a truthy 3.
+  So the pre-fix `cuda_available()` silently answered "no CUDA", it did not
+  falsely claim CUDA. The defect is real but its polarity was the opposite of
+  what was assumed.
+- Exit codes must be read without a pipe. An earlier reading of `rc=0` for the
+  interpreter RED case was `tail`'s status, not the compiler's; measured
+  directly it is **rc=1**, which matches the handoff.
+
+### Recorded, NOT silently resolved: `rt_cuda_available` diverges by runtime
+
+Hand-computed expectation: this host has two NVIDIA GPUs (`nvidia-smi -L`:
+RTX A6000, TITAN RTX), so the correct answer is **1**.
+
+- Interpreter → **1** (correct). Under `#[cfg(not(feature = "cuda"))]` the
+  registry shim `interpreter_extern/gpu.rs:1011 rt_cuda_available_fn`
+  *dynamically loads* libcuda via `get_cuda_dl()` and counts real devices.
+- JIT / native `extern "C"` symbol → **0** (wrong). `cuda_runtime.rs:1358`
+  compiles `get_device_count()` to a constant `Ok(0)` when the `cuda` feature is
+  off, so `rt_cuda_available()` is blind to the hardware. A third definition,
+  `src/runtime/runtime_native.c:183 int64_t rt_cuda_available(void) { return 0; }`,
+  hardcodes 0 as well.
+
+Two runtimes, two different detection policies, one compile-time constant
+answer. This is not an unbacked-extern defect and it is **not** fixed here — per
+policy the divergence is recorded rather than resolved by picking a side. Note
+the fix above still strictly improves the caller: previously `cuda_available()`
+logged an extern error and returned `false` on both engines; now it returns the
+correct `true` on the interpreter and a conservative `false` on JIT/native.
+
+### Left deliberately loud
+
+- **`runtime_set_jit_enabled` / `runtime_set_backend`** — both are in the 919
+  and both have live callers in `mode_runner.spl:94,97`. Together with defect 3
+  above, *all three* SFFI hooks of the multi-mode spec runner were unbacked,
+  which means `run_in_modes(...)` never actually switched execution mode: it
+  reports per-mode results while running every "mode" identically. This is a
+  false-green generator of the same family as the shim-vacuity findings. It is
+  **not** fixed here because backing it requires real runtime mode-switching
+  support — a feature, not a rename. Inventing a receiver would convert a loud
+  failure into a silent wrong answer.
+- The remaining ~685 live-caller symbols belong to unbuilt subsystems (torch,
+  lyon, vulkan/wgpu/metal/oneapi, the arm64/arm32/rv32/x86 emulation cores,
+  tls13/ssh/quic, gui/gamepad/serial). Registering them per-symbol would be
+  unverifiable churn against a detector that reports 0 runtime hits, and several
+  would require fabricating semantics. They stay loud.
+
+### Could not exercise, and why
+
+Only the CUDA and time families were exercised end-to-end, because they are the
+only ones among the fixed set reachable from a plain `simple run` on this host.
+Not exercised: every GPU/graphics family (needs a Vulkan/Metal/oneAPI context),
+the emulation cores (`rt_arm64`/`rt_arm32`/`rt_rv32`/`rt_x86`, need a loaded
+guest image), `rt_torch` (needs libtorch), and the network stacks
+(`rt_tls13`/`rt_ssh`/`rt_quic`, need a live peer). For those the disposition
+rests on source evidence only and is labelled INFERRED, not PROVED.
