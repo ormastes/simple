@@ -1,6 +1,6 @@
 // Block closure execution helpers for interpreter_call module
 
-use super::super::interpreter_control::{is_condition_present, optional_let_binding, LetBind};
+use super::super::interpreter_control::{assert_stmt_failure, is_condition_present, optional_let_binding, LetBind};
 use super::super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update};
 use super::bdd::{BDD_AFTER_EACH, BDD_BEFORE_EACH, BDD_CONTEXT_DEFS, BDD_INDENT};
 use crate::error::{codes, CompileError, ErrorContext};
@@ -1050,6 +1050,36 @@ pub(super) fn exec_block_closure_into(
                 IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
                 return Err(CompileError::BlockReturn(value));
             }
+            Node::Assert(assert_stmt) => {
+                // A bare `assert <cond>` statement inside ANY block-closure body
+                // (lambda, `fn` body, `it`/`describe` example) used to fall through
+                // to the `_ =>` catch-all below and do nothing at all — silently
+                // inert.  `assert 1 == 2` inside an `it` block reported PASS, so
+                // every spec written with bare `assert` was vacuous and every
+                // in-language contract check in a function body was disabled.
+                // Only the top-level statement path (`interpreter_eval.rs`) ever
+                // honoured it.
+                //
+                // Raise a hard error rather than merely flagging BDD state: the
+                // BDD `it` handler already turns an `Err` from the example body
+                // into a reported failure (see `interpreter_call/bdd.rs`), and a
+                // non-BDD caller (plain `fn` body) must also fail loudly instead
+                // of continuing past a violated contract.
+                let condition_value = evaluate_expr(
+                    &assert_stmt.condition,
+                    &mut local_env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                )?;
+                if !is_condition_present(&assert_stmt.condition, &condition_value) {
+                    CONST_NAMES.with(|cell| *cell.borrow_mut() = saved_const_names);
+                    IMMUTABLE_VARS.with(|cell| *cell.borrow_mut() = saved_immutable_vars);
+                    return Err(assert_stmt_failure(assert_stmt, &condition_value));
+                }
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -1665,6 +1695,17 @@ fn exec_block_closure_mut_inner(
                 };
                 return Err(CompileError::BlockReturn(value));
             }
+            Node::Assert(assert_stmt) => {
+                // Same fix as the `Node::Assert` arm in `exec_block_closure_mut`
+                // above: without this arm a bare `assert <cond>` nested inside an
+                // if/match/loop body was silently inert.
+                let condition_value =
+                    evaluate_expr(&assert_stmt.condition, local_env, functions, classes, enums, impl_methods)?;
+                if !is_condition_present(&assert_stmt.condition, &condition_value) {
+                    return Err(assert_stmt_failure(assert_stmt, &condition_value));
+                }
+                last_value = Value::Nil;
+            }
             _ => {
                 last_value = Value::Nil;
             }
@@ -1835,5 +1876,70 @@ mod tests {
         )
         .expect("exec_block_closure");
         assert_eq!(result.as_int().expect("int"), 100);
+    }
+
+    fn run_probe(src: &str) -> Result<Value, CompileError> {
+        let body = parse_probe_body(src);
+        let env = Env::new();
+        exec_block_closure(
+            &body,
+            &env,
+            &mut HashMap::new(),
+            &mut HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        )
+    }
+
+    /// Bare-assert vacuity: `assert <false cond>` inside a lambda/block-closure/
+    /// BDD `it`-block body used to fall through the generic wildcard arm and do
+    /// nothing at all, so `assert 1 == 2` inside an `it` block reported PASS.
+    #[test]
+    fn false_bare_assert_fails_block_closure() {
+        let err = run_probe("fn probe():\n    assert 1 == 2\n").expect_err("false assert must fail");
+        assert!(
+            err.to_string().contains("assertion failed"),
+            "unexpected error text: {err}"
+        );
+    }
+
+    /// The message form must fail too, and must carry the custom message.
+    #[test]
+    fn false_bare_assert_with_message_fails_block_closure() {
+        let err = run_probe("fn probe():\n    assert 1 == 2, \"one is not two\"\n")
+            .expect_err("false assert must fail");
+        let text = err.to_string();
+        assert!(text.contains("assertion failed"), "unexpected error text: {text}");
+        assert!(text.contains("one is not two"), "custom message dropped: {text}");
+    }
+
+    /// A false assert nested inside an `if` body goes through
+    /// `exec_block_closure_into`; that executor needs the same arm.
+    #[test]
+    fn false_bare_assert_nested_in_if_fails_block_closure() {
+        let err = run_probe("fn probe():\n    if true:\n        assert false\n")
+            .expect_err("false nested assert must fail");
+        assert!(
+            err.to_string().contains("assertion failed"),
+            "unexpected error text: {err}"
+        );
+    }
+
+    /// A false assert must stop the block: statements after it must not run.
+    #[test]
+    fn false_bare_assert_aborts_remaining_statements() {
+        let err = run_probe("fn probe():\n    assert false\n    return 7\n")
+            .expect_err("false assert must fail before the return");
+        assert!(
+            err.to_string().contains("assertion failed"),
+            "assert must abort before `return 7`: {err}"
+        );
+    }
+
+    /// Control: a TRUE assert must not fail, and must not swallow the block value.
+    #[test]
+    fn true_bare_assert_passes_block_closure() {
+        let result = run_probe("fn probe():\n    assert 1 == 1\n    42\n").expect("true assert must pass");
+        assert_eq!(result.as_int().expect("int"), 42);
     }
 }

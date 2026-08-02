@@ -9,7 +9,7 @@ use super::core_types::{Control, Enums, ImplMethods, get_identifier_name, get_pa
 use super::async_support::await_value;
 use super::expr::evaluate_expr;
 use super::interpreter_helpers::{bind_pattern_value, handle_method_call_with_self_update, handle_functional_update};
-use super::interpreter_control::{exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with, is_condition_present};
+use super::interpreter_control::{assert_stmt_failure, exec_if, exec_while, exec_loop, exec_for, exec_match, exec_context, exec_with, is_condition_present};
 use super::interpreter_state::{mark_as_moved, BLOCK_SCOPED_ENUMS, CONST_NAMES, IMMUTABLE_VARS, MODULE_GLOBALS};
 use super::coverage_helpers::{record_node_coverage, extract_node_location};
 use crate::interpreter_unit::{is_unit_type, validate_unit_type, validate_unit_constraints};
@@ -290,6 +290,19 @@ pub(crate) fn exec_node(
             Ok(Control::Break(value, b.label.clone()))
         }
         Node::Continue(c) => Ok(Control::Continue(c.label.clone())),
+        Node::Assert(assert_stmt) => {
+            // A bare `assert <cond>` inside a plain `fn` body reaches this
+            // executor.  Without this arm it fell through to the catch-all at the
+            // bottom of `exec_node` and did nothing at all — silently inert, so a
+            // violated in-language contract check simply continued.  The
+            // block-closure executors (`interpreter_call/block_execution.rs`) had
+            // the same hole for lambda / BDD `it`-block bodies.
+            let condition_value = evaluate_expr(&assert_stmt.condition, env, functions, classes, enums, impl_methods)?;
+            if !is_condition_present(&assert_stmt.condition, &condition_value) {
+                return Err(assert_stmt_failure(assert_stmt, &condition_value));
+            }
+            Ok(Control::Next)
+        }
         Node::Pass(_) => Ok(Control::Next), // No-op, just continue to next statement
         Node::Defer(defer_stmt) => {
             // Defer statement: queue the body for execution when the current scope exits

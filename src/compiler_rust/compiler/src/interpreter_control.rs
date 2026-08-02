@@ -185,6 +185,32 @@ pub(crate) fn is_condition_present(condition_expr: &Expr, val: &Value) -> bool {
     }
 }
 
+/// Build the error raised by a failing bare `assert <cond>` / `assert <cond>, "msg"`
+/// statement.
+///
+/// Shared by every statement executor that honours `Node::Assert` — `exec_node`
+/// (plain `fn` bodies) and `exec_block_closure_mut` / `exec_block_closure_into`
+/// (lambda, block-closure and BDD `it`-block bodies) — so a violated assertion
+/// reports one identical, greppable message no matter which body it sits in.
+pub(crate) fn assert_stmt_failure(
+    assert_stmt: &simple_parser::ast::AssertStmt,
+    condition_value: &Value,
+) -> CompileError {
+    let base = format!(
+        "assertion failed: condition evaluated to {}",
+        condition_value.to_display_string()
+    );
+    let msg = match &assert_stmt.message {
+        Some(custom) => format!("{} ({})", base, custom),
+        None => base,
+    };
+    let ctx = crate::error::ErrorContext::new()
+        .with_code(crate::error::codes::ASSERTION_FAILED)
+        .with_help("the assertion condition evaluated to false")
+        .with_note("`assert` aborts the enclosing block; use `expect(...)` in specs for a matcher message");
+    CompileError::semantic_with_context(msg, ctx)
+}
+
 #[cfg(test)]
 mod optional_let_binding_tests {
     use super::*;
