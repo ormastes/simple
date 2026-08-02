@@ -210,12 +210,24 @@ if let Value::Str(ref s) = recv_val {
             return Ok(Value::text(format!("{}{}", s, other)));
         }
         "pop" => {
-            // Note: Returns Some(last_char) but doesn't modify the string (immutable)
+            // Returns the LAST CHARACTER, and does not modify the string
+            // (strings are immutable — see the `push` note above).
+            //
+            // This used to return `Some(last_char)`. It was the only `pop` in
+            // the language that returned an Option: measured on BOTH engines,
+            // `[1, 2, 3].pop()` evaluates to the bare element `3`, never
+            // `Some(3)`. Text was the outlier, and the Option wrapping could
+            // not be matched by any compiled lane — the JIT has no Option
+            // constructor for text (`Some("c")` renders as an opaque
+            // `<enum@0x...>` there, and a `text?` value renders bare), so the
+            // wrapping was permanently unreachable outside this interpreter.
+            // An empty text has no last character, so it yields the empty text
+            // — unambiguous, since no real character is ever the empty text.
             if s.is_empty() {
-                return Ok(Value::none());
+                return Ok(Value::text(String::new()));
             }
-            let last = s.chars().last().map(|c| Value::text(c.to_string())).unwrap_or(Value::Nil);
-            return Ok(Value::some(last));
+            let last = s.chars().last().map(|c| c.to_string()).unwrap_or_default();
+            return Ok(Value::text(last));
         }
         "clear" => {
             // Note: Returns empty string (strings are immutable)

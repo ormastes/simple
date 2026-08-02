@@ -1175,6 +1175,39 @@ mod tests {
         assert!(closures.contains("\"sort\" => \"rt_sort\""), "bare `sort` must reach rt_sort");
         assert!(!closures.contains("\"sort\" => \"rt_array_sort\""));
 
+        // --- push / pop / clear ----------------------------------------------
+        // The same divergence, on the last three type-blind mutator names. The
+        // array-only helpers fail CLOSED on a text receiver, so text answered
+        // `0` (push), nil (pop) and the UNCLEARED receiver (clear) here while
+        // the interpreter returned a new text. Measured on `var t = "abc"`
+        // before the split, JIT / interpreter:
+        //   push  -> `0`     / `"abcd"`
+        //   pop   -> `nil`   / `Option::Some("c")`
+        //   clear -> `"abc"` / `""`
+        // `rt_push`/`rt_pop`/`rt_clear` dispatch on the receiver; the array
+        // contract is byte-for-byte what it was.
+        assert!(
+            calls.contains("\"push\" => Some(\"rt_push\")"),
+            "calls.rs must route `push` to the receiver-dispatched rt_push"
+        );
+        assert!(
+            !calls.contains("\"push\" => Some(\"rt_array_push\")"),
+            "rt_array_push fails closed to `false` on a text receiver"
+        );
+        assert!(calls.contains("\"pop\" => Some(\"rt_pop\")"));
+        assert!(!calls.contains("\"pop\" => Some(\"rt_array_pop\")"));
+        assert!(calls.contains("\"clear\" => Some(\"rt_clear\")"));
+        assert!(!calls.contains("\"clear\" => Some(\"rt_array_clear\")"));
+        assert!(
+            closures.contains("\"push\" | \"append\" => \"rt_push\""),
+            "bare `push`/`append` must reach rt_push"
+        );
+        assert!(!closures.contains("\"push\" | \"append\" => \"rt_array_push\""));
+        assert!(closures.contains("\"pop\" => \"rt_pop\""));
+        assert!(!closures.contains("\"pop\" => \"rt_array_pop\""));
+        assert!(closures.contains("\"clear\" => \"rt_clear\""));
+        assert!(!closures.contains("\"clear\" => \"rt_array_clear\""));
+
         // True-positive control: receiver-SPECIFIC methods must STAY specific,
         // so this cannot be satisfied by a table that renamed everything.
         // `first`/`filter` take an array receiver in both tables and have no
@@ -1474,10 +1507,16 @@ fn try_compile_builtin_method_call<M: Module>(
         "char_code_at" => "rt_string_char_code_at",
         "byte_at" => "rt_string_byte_at",
         "hash" => "rt_hash_text",
-        // Array methods
-        "push" | "append" => "rt_array_push",
-        "pop" => "rt_array_pop",
-        "clear" => "rt_array_clear",
+        // Array methods.
+        //
+        // Receiver-polymorphic (see calls.rs): the array-only helpers fail
+        // closed on a text receiver, so a text `push`/`pop`/`clear` produced
+        // `0` / nil / the UNCLEARED receiver here while the interpreter
+        // returned a new text. `rt_push`/`rt_pop`/`rt_clear` dispatch on the
+        // receiver and leave the array contract unchanged.
+        "push" | "append" => "rt_push",
+        "pop" => "rt_pop",
+        "clear" => "rt_clear",
         // Generic collection methods (work on String, Array, Tuple, Dict)
         "len" | "length" => "rt_len",
         // Result/Option methods.

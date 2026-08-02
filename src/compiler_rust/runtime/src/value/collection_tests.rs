@@ -2416,3 +2416,134 @@ fn rt_reverse_mut_reverses_in_place_and_returns_the_receiver() {
     let e = rt_array_new(0);
     assert_eq!(rt_array_len(rt_reverse_mut(e)), 0);
 }
+
+
+/// Build a text `RuntimeValue` from a `&str`, for the mutator tests below.
+#[cfg(test)]
+fn text_value(s: &str) -> crate::value::core::RuntimeValue {
+    super::rt_string_new(s.as_ptr(), s.len() as u64)
+}
+
+/// Assert a text `RuntimeValue` equals an expected `&str`.
+#[cfg(test)]
+fn assert_text_eq(actual: crate::value::core::RuntimeValue, expected: &str, what: &str) {
+    assert_eq!(
+        super::rt_string_eq(actual, text_value(expected)),
+        1,
+        "{what}: expected {expected:?}"
+    );
+}
+
+/// `rt_push` is what the type-blind `push` / `append` now lowers to.
+///
+/// Expectations are HAND-COMPUTED from the language's documented rules, not
+/// from cross-engine agreement (the two engines disagreed here, and both were
+/// wrong in different ways). The rule for text is stated in
+/// `interpreter_method/mod.rs`: "Strings in Simple are value types with NO
+/// mutating methods — every 'mutating' string op returns a new string", and
+/// `interpreter_method/string.rs`'s own `push` arm has always implemented it
+/// ("Returns a new string with the character appended (strings are
+/// immutable)").
+///
+/// ```text
+/// var t = "abc"
+/// val r = t.push("d")   // r == "abcd"  AND  t == "abc"     (text: value type)
+/// var a = [1, 2]
+/// val b = a.push(3)     // b == [1,2,3] AND  a == [1,2,3]   (array: in place)
+/// ```
+///
+/// Before the split, the text row measured `r == 0` on the JIT (because
+/// `rt_array_push` fails closed to `false` on a text receiver) and
+/// `t == "abcd"` on the interpreter (because its generic write-back rebound
+/// the receiver). Both halves are covered below.
+#[test]
+fn rt_push_appends_to_arrays_in_place_and_copies_text() {
+    use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_push};
+    use crate::value::core::RuntimeValue;
+
+    // Array: mutated in place, and the expression IS that array.
+    let a = rt_array_new(2);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+    let r = rt_push(a, RuntimeValue::from_int(3));
+    assert_eq!(rt_array_len(r), 3);
+    assert_eq!(rt_array_get(r, 2).as_int(), 3);
+    assert_eq!(rt_array_len(a), 3, "array receiver must be mutated in place");
+    assert_eq!(rt_array_get(a, 2).as_int(), 3);
+
+    // Text: a NEW text, and the receiver is untouched.
+    let t = text_value("abc");
+    assert_text_eq(rt_push(t, text_value("d")), "abcd", "push on text returns a new text");
+    assert_text_eq(t, "abc", "text receiver must NOT be mutated");
+
+    // Empty text is a plain base case, not a special one.
+    assert_text_eq(rt_push(text_value(""), text_value("x")), "x", "push onto empty text");
+}
+
+/// `rt_pop` is what the type-blind `pop` now lowers to.
+///
+/// The return shape is the ELEMENT / CHARACTER, never an `Option`. That is
+/// hand-computed from the array contract measured on BOTH engines
+/// (`[1, 2, 3].pop()` is `3`, not `Some(3)`); the interpreter's text arm was
+/// the only `pop` in the language that wrapped, and no compiled lane could
+/// express that wrapping. Text does not mutate.
+///
+/// ```text
+/// var t = "abc"
+/// val r = t.pop()   // r == "c"  AND  t == "abc"
+/// var a = [1, 2]
+/// val b = a.pop()   // b == 2    AND  a == [1]
+/// ```
+#[test]
+fn rt_pop_removes_from_arrays_and_peeks_text() {
+    use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_pop};
+    use crate::value::core::RuntimeValue;
+
+    // Array: the popped ELEMENT, receiver shortened.
+    let a = rt_array_new(2);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+    assert_eq!(rt_pop(a).as_int(), 2);
+    assert_eq!(rt_array_len(a), 1, "array receiver must lose its last element");
+    assert_eq!(rt_array_get(a, 0).as_int(), 1);
+
+    // Text: the last CHARACTER, receiver untouched.
+    let t = text_value("abc");
+    assert_text_eq(rt_pop(t), "c", "pop on text yields the last character");
+    assert_text_eq(t, "abc", "text receiver must NOT be mutated");
+
+    // Empty text has no last character; the empty text is unambiguous here
+    // because no real character is ever the empty text.
+    assert_text_eq(rt_pop(text_value("")), "", "pop on empty text");
+}
+
+/// `rt_clear` is what the type-blind `clear` now lowers to.
+///
+/// ```text
+/// var t = "abc"
+/// val r = t.clear()   // r == ""  AND  t == "abc"
+/// var a = [1, 2]
+/// val b = a.clear()   // b == []  AND  a == []
+/// ```
+///
+/// The text row is the one that used to hand back a plausible-but-wrong value:
+/// `clear` sat in the codegen `in_place` set that substitutes the receiver vreg
+/// for the call result, and `rt_array_clear` returned `false` on text, so the
+/// expression evaluated to the UNCLEARED `"abc"`.
+#[test]
+fn rt_clear_empties_arrays_in_place_and_copies_text() {
+    use super::{rt_array_len, rt_array_new, rt_array_push, rt_clear};
+    use crate::value::core::RuntimeValue;
+
+    // Array: emptied in place, and the expression IS that array.
+    let a = rt_array_new(2);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+    assert_eq!(rt_array_len(rt_clear(a)), 0);
+    assert_eq!(rt_array_len(a), 0, "array receiver must be emptied in place");
+
+    // Text: the empty text, receiver untouched.
+    let t = text_value("abc");
+    assert_text_eq(rt_clear(t), "", "clear on text yields the empty text");
+    assert_text_eq(t, "abc", "text receiver must NOT be mutated");
+}

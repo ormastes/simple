@@ -2672,6 +2672,93 @@ pub extern "C" fn rt_sort(receiver: RuntimeValue) -> RuntimeValue {
     refuse_non_array_sort_receiver()
 }
 
+/// `push`: append to an ARRAY in place, or build a NEW text.
+///
+/// Receiver-dispatched, same shape as `rt_reverse_mut` / `rt_sort` / `rt_at`.
+/// The type-blind dispatch tables used to send every `push` to
+/// `rt_array_push`, which `as_typed_ptr!`-fails closed on a text receiver and
+/// returns `false` — so `var t = "abc"; t.push("d")` evaluated to `0` on the
+/// compiled lane while the interpreter answered `"abcd"`. Measured before this
+/// helper existed (JIT / interpreter): `0` / `"abcd"`.
+///
+/// TEXT IS A VALUE TYPE, so the text branch returns a new text and never
+/// touches the receiver — the rule `interpreter_method/mod.rs` states and that
+/// `interpreter_method/string.rs`'s own `push` arm has always implemented
+/// ("Returns a new string with the character appended (strings are
+/// immutable)"). The array branch keeps the measured array contract exactly:
+/// the receiver is mutated AND the expression evaluates to that same array.
+///
+/// The concatenation goes through `rt_string_concat` so a non-text argument is
+/// rendered exactly as `push_str` already renders it (`push_str` has always
+/// dispatched to `rt_string_concat`).
+#[no_mangle]
+pub extern "C" fn rt_push(receiver: RuntimeValue, value: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        rt_array_push(receiver, value);
+        return receiver;
+    }
+    if string_as_str(receiver).is_some() {
+        return rt_string_concat(receiver, value);
+    }
+    refuse_non_text_receiver("push")
+}
+
+/// `pop`: remove and return the last ELEMENT of an array, or return the last
+/// CHARACTER of a text without modifying it.
+///
+/// Receiver-dispatched. `rt_array_pop` fails closed to nil on a text receiver,
+/// so `var t = "abc"; t.pop()` evaluated to `nil` on the compiled lane while
+/// the interpreter answered `Option::Some("c")` — two different wrong answers
+/// (measured JIT / interpreter: `nil` / `Option::Some(c)`).
+///
+/// The return shape is the ELEMENT, not an `Option`: measured on BOTH engines,
+/// `[1, 2, 3].pop()` evaluates to `3`, never `Some(3)`. Text was the only
+/// `pop` in the language that wrapped, and that wrapping was unreachable from
+/// any compiled lane (the JIT has no Option constructor for text). The
+/// interpreter's text arm now returns the bare character too.
+///
+/// An empty text has no last character and yields the empty text. That is
+/// unambiguous — no real character is ever the empty text — and it mirrors
+/// popping an empty array, which is a no-op on both engines.
+#[no_mangle]
+pub extern "C" fn rt_pop(receiver: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        return rt_array_pop(receiver);
+    }
+    match string_as_str(receiver) {
+        Some(s) => match s.chars().last() {
+            Some(c) => new_string(&c.to_string()),
+            None => new_string(""),
+        },
+        None => refuse_non_text_receiver("pop"),
+    }
+}
+
+/// `clear`: empty an ARRAY in place, or return the empty text.
+///
+/// Receiver-dispatched. `rt_array_clear` fails closed to `false` on a text
+/// receiver, and `clear` also sat in the LLVM `in_place` set that substitutes
+/// the receiver vreg for the call result — so `var t = "abc"; t.clear()`
+/// handed back the UNCLEARED receiver `"abc"` (measured on the JIT), which is
+/// the worst shape available: a plausible value that is silently wrong.
+///
+/// TEXT IS A VALUE TYPE: the text branch returns the empty text and leaves the
+/// receiver alone, exactly as `interpreter_method/string.rs`'s `clear` arm
+/// already documented ("Returns empty string (strings are immutable)"). The
+/// array branch keeps the measured array contract: receiver emptied AND the
+/// expression evaluates to that same (now empty) array.
+#[no_mangle]
+pub extern "C" fn rt_clear(receiver: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        rt_array_clear(receiver);
+        return receiver;
+    }
+    if string_as_str(receiver).is_some() {
+        return new_string("");
+    }
+    refuse_non_text_receiver("clear")
+}
+
 /// `take` / `taken`: first `n` CHARACTERS of text, or first `n` ELEMENTS of an
 /// array. Receiver-dispatched. A negative `n` yields an empty result, matching
 /// the saturating `eval_arg_usize` the interpreter now uses.

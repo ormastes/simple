@@ -3240,9 +3240,18 @@ pub fn compile_call<M: Module>(
                 "at" => Some("rt_at"),
                 "char_code_at" => Some("rt_string_char_code_at"),
                 "byte_at" => Some("rt_string_byte_at"),
-                "push" => Some("rt_array_push"),
-                "pop" => Some("rt_array_pop"),
-                "clear" => Some("rt_array_clear"),
+                // Receiver-polymorphic, same reason as `at`/`sort`/`reverse`
+                // above: this table cannot see the receiver's type, and
+                // `rt_array_push` / `rt_array_pop` / `rt_array_clear` all fail
+                // CLOSED on a text receiver (`false` / nil / `false`) instead
+                // of doing the documented text thing. Measured on text before
+                // this change (JIT / interpreter): `push` `0` / `"abcd"`,
+                // `pop` `nil` / `Some("c")`, `clear` `"abc"` / `""`. The
+                // `rt_*` helpers dispatch on the receiver and keep the array
+                // contract byte-for-byte.
+                "push" => Some("rt_push"),
+                "pop" => Some("rt_pop"),
+                "clear" => Some("rt_clear"),
                 "join" => Some("rt_string_join"),
                 // `strip`/`trimmed` are interpreter-level aliases of `trim`
                 // (interpreter_method/string.rs: `"trim" | "trimmed" | "strip"`).

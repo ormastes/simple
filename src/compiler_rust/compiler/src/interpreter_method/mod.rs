@@ -1878,6 +1878,38 @@ pub(crate) fn evaluate_method_call_with_self_update(
         }
     }
 
+    // TEXT IS A VALUE TYPE: never rebind a text receiver, for ANY method.
+    //
+    // The list above is an ARRAY/DICT mutator list. Four of its entries —
+    // `push`, `pop`, `clear`, `reverse` — also name real methods on text, and
+    // every one of those text arms in `interpreter_method/string.rs` already
+    // returns a NEW text and documents that it does ("strings are immutable").
+    // The same-discriminant test below could not tell the two apart: `Str` in,
+    // `Str` out, so it wrote the new text back over the receiver binding and
+    // turned three of them into in-place mutations. Measured before this guard,
+    // on `var t = "abc"`:
+    //
+    // ```text
+    // t.push("d")    # -> "abcd" AND t == "abcd"   (rebound)
+    // t.clear()      # -> ""     AND t == ""       (rebound)
+    // t.reverse()    # -> "cba"  AND t == "cba"    (rebound)
+    // ```
+    //
+    // That contradicts this file's own rule, stated at the head of
+    // MUTATING_METHODS: "Strings in Simple are value types with NO mutating
+    // methods — every 'mutating' string op returns a new string." It also
+    // diverged from every compiled lane, which leaves a text receiver alone.
+    // `t.rev()` / `t.reversed()` were already correct, purely because those
+    // spellings are absent from the list — the guard makes that an invariant
+    // instead of an accident, so a future addition to MUTATING_METHODS cannot
+    // silently re-break text.
+    //
+    // `StrBytes` is text too (a raw-byte text fragment; see `value.rs`), so it
+    // is covered by the same rule.
+    if matches!(recv_val, Value::Str(_) | Value::StrBytes(_)) {
+        return Ok((result, None));
+    }
+
     let updated_self =
         if MUTATING_METHODS.contains(&method) && std::mem::discriminant(&result) == std::mem::discriminant(&recv_val) {
             Some(result.clone())
@@ -1918,6 +1950,51 @@ main = c.double_add()
         let module = parser.parse().expect("parse");
         let result = evaluate_module(&module.items).expect("me.field as direct arg must not error");
         assert_eq!(result, 10, "double_add() should return count + count = 10");
+    }
+
+    /// TEXT IS A VALUE TYPE: no method rebinds a text receiver, and each of the
+    /// four array-mutator NAMES that also exist on text evaluates to the pure
+    /// result its `interpreter_method/string.rs` arm always documented.
+    ///
+    /// Expectations are HAND-COMPUTED from this file's own rule (see the
+    /// comment above `MUTATING_METHODS`) — never from agreement with another
+    /// engine, which would have scored the old behaviour a PASS on `reverse`
+    /// (both engines returned `"cba"`; they disagreed only on the receiver).
+    ///
+    /// Before the text guard in `evaluate_method_call_with_self_update`,
+    /// `push`, `clear` and `reverse` each REBOUND `t`, so the `check(t, "abc")`
+    /// half of every one of those three rows returned 0.
+    #[test]
+    fn text_receiver_is_never_rebound_by_an_array_mutator_name() {
+        use crate::interpreter::evaluate_module;
+        use simple_parser::Parser;
+
+        // (method call on `var t = "abc"`, expected VALUE of the expression)
+        let cases: &[(&str, &str)] = &[
+            ("t.push(\"d\")", "abcd"),
+            ("t.pop()", "c"),
+            ("t.clear()", ""),
+            ("t.reverse()", "cba"),
+            ("t.rev()", "cba"),
+            ("t.reversed()", "cba"),
+        ];
+        for (expr, expected) in cases {
+            let source = format!(
+                "fn check(a: text, b: text) -> i64:\n    \
+                 if a == b:\n        return 1\n    return 0\n\n\
+                 var t = \"abc\"\nval r = {expr}\n\
+                 main = check(r, \"{expected}\") * 10 + check(t, \"abc\")\n"
+            );
+            let mut parser = Parser::new(&source);
+            let module = parser.parse().unwrap_or_else(|e| panic!("parse {expr}: {e:?}"));
+            let result =
+                evaluate_module(&module.items).unwrap_or_else(|e| panic!("evaluate {expr}: {e:?}"));
+            assert_eq!(
+                result, 11,
+                "{expr}: tens digit = expression value is {expected:?}, \
+                 units digit = receiver `t` is still \"abc\""
+            );
+        }
     }
 
     #[test]
