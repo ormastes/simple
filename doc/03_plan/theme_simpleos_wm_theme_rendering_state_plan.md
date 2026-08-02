@@ -484,6 +484,22 @@ Current upstream tip noted in this branch as `63c362526c` (latest checked).
   not a CSS-render failure. Resume with a provenance-qualified self-hosted
   binary carrying the provider-link support, then run the wrapper once.
 
+## 2026-08-02 renderer/IR design sync
+
+- `sync-renderer-ir-spec-update` is already in this lane's history; no pending
+  IR protocol merge was found. Preserve the design boundary: DrawIR v2 is the
+  producer/replay oracle, v3 is additive packed backend encoding, and receipts
+  expose actual execution/readback with no silent fallback.
+- Theme overlap is now real, not a deferred hosted/web-owner concern. The
+  effective snapshot `(id, source, material)` must be established before
+  WM/GUI/Web lowering and must drive wire, CSS, DrawIR provenance, and every
+  retained cache/revision. Transient CSS/cache/atlas state stays out of DrawIR.
+- Open design/implementation requirement: the current six-token parser is
+  palette-only. Stitch glass fields (blur, saturation, border/radius, shadow,
+  gradient) cannot yet change through an override. Extend durable material
+  projection and identity, or introduce an effective CSS digest; never allow
+  output-visible CSS to retain an unchanged cache identity.
+
 - `fe481ab069` `refactor(ui): S1 DrawIR Vulkan-canonical enums + ResourceTable.formats u32`
   - `src/lib/common/ui/draw_ir_v3.spl`
   - `src/lib/common/ui/draw_ir_v3_backend_enums.spl`
