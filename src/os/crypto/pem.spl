@@ -120,12 +120,23 @@ fn _find_str(haystack: text, needle: text, start: i64) -> i64:
 
 # Strip whitespace (spaces, tabs, CR, LF) from both ends of a text.
 fn _trim_text(s: text) -> text:
+    # INDEX SPACE: BYTE-indexed throughout. `ls` and `le` are bounded by
+    # `s.len()` and handed to `substring`, both BYTE-based, but they used to be
+    # read with `char_at`, which is CHARACTER-based. On non-ASCII input that
+    # cut mid-character: `_trim_text("  <e-acute>")` is 4 BYTES / 3 CHARACTERS,
+    # `le` started at byte 3, `char_at(3)` was out of range so the trailing
+    # scan stopped immediately, and the result was `substring(2, 4)`... but the
+    # earlier form stopped at `le = 2` and returned only the LEAD BYTE of the
+    # e-acute -- invalid UTF-8 handed to the base64 decoder. All four
+    # whitespace bytes are ASCII (space 32, tab 9, CR 13, LF 10) and UTF-8
+    # continuation bytes are always >= 0x80, so a byte scan never mistakes part
+    # of a character for whitespace and always stops on a character boundary.
     val len = s.len()
     var ls = 0
     var found_start = false
     while ls < len and not found_start:
-        val c = s.char_at(ls)
-        if c != " " and c != "\t" and c != "\r" and c != "\n":
+        val b = s.byte_at(ls)
+        if b != 32 and b != 9 and b != 13 and b != 10:
             found_start = true
         else:
             ls = ls + 1
@@ -134,8 +145,8 @@ fn _trim_text(s: text) -> text:
     var le = len - 1
     var found_end = false
     while le >= 0 and not found_end:
-        val c = s.char_at(le)
-        if c != " " and c != "\t" and c != "\r" and c != "\n":
+        val b = s.byte_at(le)
+        if b != 32 and b != 9 and b != 13 and b != 10:
             found_end = true
         else:
             le = le - 1
@@ -163,10 +174,19 @@ fn pem_decode(pem_bytes: [u8]) -> Result<PemBlock, text>:
 
     # Body starts after the closing dashes + optional CRLF/LF
     var body_start = begin_end + marker_suffix.len()
-    # Skip one CRLF or LF
-    if body_start < src.len() and src.char_at(body_start) == "\r":
+    # Skip one CRLF or LF. INDEX SPACE: `body_start` is a BYTE offset -- it
+    # comes from `_find_str` plus `len()`, both of which count bytes -- and it
+    # is fed to `substring` below, which is byte-indexed too. `char_at` counts
+    # CHARACTERS, so reading the newline with it desynced the probe by
+    # (bytes - characters) of everything to the left. RFC 7468 explicitly
+    # allows arbitrary text between blocks and openssl writes non-ASCII subject
+    # lines there, so the skew is reachable in practice; when the misread
+    # landed on a "\n" (base64 wraps every ~64 characters) the body lost its
+    # first base64 character and the decoded DER was silently wrong. `byte_at`
+    # keeps the whole computation in one space. CR = 13, LF = 10.
+    if body_start < src.len() and src.byte_at(body_start) == 13:
         body_start = body_start + 1
-    if body_start < src.len() and src.char_at(body_start) == "\n":
+    if body_start < src.len() and src.byte_at(body_start) == 10:
         body_start = body_start + 1
 
     # Find matching END marker
@@ -224,9 +244,11 @@ fn pem_decode_all(pem_bytes: [u8]) -> Result<list, text>:
             val begin_label = src.substring(begin_label_start, begin_end)
 
             var body_start = begin_end + marker_suffix.len()
-            if body_start < src_len and src.char_at(body_start) == "\r":
+            # BYTE offset, same as the single-block path above; see the note
+            # there. CR = 13, LF = 10.
+            if body_start < src_len and src.byte_at(body_start) == 13:
                 body_start = body_start + 1
-            if body_start < src_len and src.char_at(body_start) == "\n":
+            if body_start < src_len and src.byte_at(body_start) == 10:
                 body_start = body_start + 1
 
             val end_search = "-----END " + begin_label + "-----"
