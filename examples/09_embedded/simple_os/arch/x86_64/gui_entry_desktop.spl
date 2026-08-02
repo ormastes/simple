@@ -30,7 +30,12 @@ use os.services.audio.audio_service.{
     simpleos_hda_start,
     simpleos_hda_started,
     simpleos_hda_stream_id,
+    simpleos_hda_submit_pcm_i16,
+    simpleos_hda_submission_count,
+    simpleos_hda_submitted_frames,
+    simpleos_hda_last_pcm_hash,
 }
+use os.services.audio.audio_offload_service.{simpleos_audio_offload_start, simpleos_audio_offload_started}
 use os.drivers.framebuffer.fb_driver.{FramebufferDriver}
 use os.drivers.framebuffer.fb_font.{get_glyph_8x16}
 use os.drivers.input.ps2_keyboard.{Ps2Keyboard}
@@ -263,6 +268,17 @@ fn _mouse_bootstrap_init(mouse: Ps2Mouse):
     _ps2_mouse_read()
     mouse.initialized = true
 
+fn _submit_hda_boot_calibration() -> i64:
+    """Submit a non-silent application-owned PCM period to the HDA service."""
+    var samples: [i64] = []
+    var frame = 0
+    while frame < 128:
+        val sample = if frame % 16 < 8: 8192 else: -8192
+        samples.push(sample)
+        samples.push(sample)
+        frame = frame + 1
+    simpleos_hda_submit_pcm_i16(samples, 2)
+
 fn spl_start():
     # Canonical Cocoa/UEFI lane uses -m 2G. Reserve the whole link-resident
     # kernel + bump-heap prefix before the PMM allocates VMM page tables.
@@ -341,8 +357,17 @@ fn spl_start():
         serial_println(
             "[hda-init] ok started={simpleos_hda_started()} stream={simpleos_hda_stream_id()} format=48000-stereo-s16"
         )
+        val calibration_frames = _submit_hda_boot_calibration()
+        serial_println(
+            "[hda-pcm] application=desktop calibration_frames={calibration_frames} submissions={simpleos_hda_submission_count()} submitted_frames={simpleos_hda_submitted_frames()} pcm_hash={simpleos_hda_last_pcm_hash()}"
+        )
     else:
         serial_println("[hda-init] unavailable status={hda_status}")
+
+    # The second ivshmem function is optional. Direct HDA playback remains the
+    # CPU-owned fallback when QEMU was launched without the CUDA audio service.
+    val audio_offload_status = simpleos_audio_offload_start()
+    serial_println("[audio-offload] status={audio_offload_status} started={simpleos_audio_offload_started()}")
 
     g_vfs_mounted = vfs_boot_init()
     if g_vfs_mounted:

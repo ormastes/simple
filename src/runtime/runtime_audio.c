@@ -7,7 +7,16 @@
  */
 
 #define MINIAUDIO_IMPLEMENTATION
+#if defined(__clang__)
+#pragma clang diagnostic push
+/* FreeBSD's Clang diagnoses backend helpers disabled by miniaudio's platform
+ * selection. Keep vendored-header noise out of the owned-code -Werror gate. */
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
 #include "miniaudio.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 #include "runtime.h"
 
 #include <stdint.h>
@@ -179,6 +188,31 @@ int64_t rt_audio_init(void) {
     }
     pthread_mutex_unlock(&g_audio_lock);
     return handle;
+}
+
+const char* rt_audio_backend_name(void) {
+    pthread_mutex_lock(&g_audio_lock);
+    const char* name = "uninitialized";
+    if (g_audio_initialized) {
+        ma_device* device = ma_engine_get_device(&g_audio_engine);
+        if (device && device->pContext) {
+            name = ma_get_backend_name(device->pContext->backend);
+        }
+    }
+    pthread_mutex_unlock(&g_audio_lock);
+    return name;
+}
+
+int64_t rt_audio_backend_is_real(void) {
+    pthread_mutex_lock(&g_audio_lock);
+    int64_t real = 0;
+    if (g_audio_initialized) {
+        ma_device* device = ma_engine_get_device(&g_audio_engine);
+        real = device && device->pContext &&
+            device->pContext->backend != ma_backend_null;
+    }
+    pthread_mutex_unlock(&g_audio_lock);
+    return real;
 }
 
 int64_t rt_audio_shutdown(int64_t engine_handle) {

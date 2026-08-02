@@ -50,7 +50,10 @@ int main(void) {
             ? UINT32_C(0xff204080) : UINT32_C(0xffd06020);
     }
 
-    if (rt_glfw_init() != 1) return 2;
+    if (rt_glfw_init() != 1) {
+        puts("glfw_live_probe=unavailable runtime=missing-or-headless");
+        return 77;
+    }
     int64_t window = rt_glfw_create_window("SimpleGLFWProbe", width, height);
     if (!window || rt_glfw_live_window_count() != 1) return 3;
     if (rt_glfw_framebuffer_width(window) <= 0 ||

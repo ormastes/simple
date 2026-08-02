@@ -7,12 +7,23 @@
 
 #include "runtime.h"
 
-#include <dlfcn.h>
 #include <limits.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#if defined(_WIN32)
+#include <windows.h>
+static void* glfw_open_library(const char* name) { return (void*)LoadLibraryA(name); }
+static void* glfw_load_symbol(void* lib, const char* name) { return lib ? (void*)GetProcAddress((HMODULE)lib, name) : NULL; }
+static void glfw_close_library(void* lib) { if (lib) FreeLibrary((HMODULE)lib); }
+#else
+#include <dlfcn.h>
+static void* glfw_open_library(const char* name) { return dlopen(name, RTLD_NOW | RTLD_LOCAL); }
+static void* glfw_load_symbol(void* lib, const char* name) { return lib ? dlsym(lib, name) : NULL; }
+static void glfw_close_library(void* lib) { if (lib) dlclose(lib); }
+#endif
 
 typedef struct GLFWwindow GLFWwindow;
 typedef void (*rt_glfw_key_fn)(GLFWwindow*, int, int, int, int);
@@ -142,7 +153,7 @@ static void (*p_glTexCoord2f)(float, float);
 static void (*p_glVertex2f)(float, float);
 
 static void* glfw_symbol(const char* name) {
-    return g_glfw_library ? dlsym(g_glfw_library, name) : NULL;
+    return glfw_load_symbol(g_glfw_library, name);
 }
 
 #define LOAD_REQUIRED(name) do { \
@@ -154,9 +165,16 @@ static void* glfw_symbol(const char* name) {
     *(void**)(&p_##name) = glfw_symbol(#name)
 
 static int64_t glfw_now_ns(void) {
+#if defined(_WIN32)
+    LARGE_INTEGER counter, frequency;
+    if (!QueryPerformanceCounter(&counter) || !QueryPerformanceFrequency(&frequency) || frequency.QuadPart <= 0) return 0;
+    return (int64_t)((counter.QuadPart / frequency.QuadPart) * INT64_C(1000000000) +
+        ((counter.QuadPart % frequency.QuadPart) * INT64_C(1000000000)) / frequency.QuadPart);
+#else
     struct timespec ts;
     if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
     return (int64_t)ts.tv_sec * INT64_C(1000000000) + ts.tv_nsec;
+#endif
 }
 
 static int64_t glfw_handle(size_t index, uint32_t generation) {
@@ -305,10 +323,14 @@ static void glfw_close_callback(GLFWwindow* window) {
 }
 
 static int glfw_load(void) {
-    g_glfw_library = dlopen("libglfw.so.3", RTLD_NOW | RTLD_LOCAL);
-    if (!g_glfw_library) g_glfw_library = dlopen(
-        "libglfw.so", RTLD_NOW | RTLD_LOCAL
-    );
+#if defined(_WIN32)
+    const char* names[] = {"glfw3.dll", "glfw.dll", NULL};
+#elif defined(__APPLE__)
+    const char* names[] = {"libglfw.3.dylib", "libglfw.dylib", NULL};
+#else
+    const char* names[] = {"libglfw.so.3", "libglfw.so", NULL};
+#endif
+    for (int i = 0; names[i] && !g_glfw_library; ++i) g_glfw_library = glfw_open_library(names[i]);
     if (!g_glfw_library) return 0;
     LOAD_REQUIRED(glfwInit);
     LOAD_REQUIRED(glfwTerminate);
@@ -348,7 +370,7 @@ static int glfw_load(void) {
 int64_t rt_glfw_init(void) {
     if (g_glfw_initialized) return 1;
     if (!glfw_load() || !p_glfwInit()) {
-        if (g_glfw_library) dlclose(g_glfw_library);
+        glfw_close_library(g_glfw_library);
         g_glfw_library = NULL;
         return 0;
     }
@@ -382,7 +404,7 @@ void rt_glfw_terminate(void) {
     g_glfw_initialized = 0;
     g_glfw_event_head = 0;
     g_glfw_event_count = 0;
-    dlclose(g_glfw_library);
+    glfw_close_library(g_glfw_library);
     g_glfw_library = NULL;
 }
 

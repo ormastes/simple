@@ -4608,19 +4608,19 @@ RuntimeValue rt_slice(RuntimeValue value, RuntimeValue start, RuntimeValue end)
 
 RuntimeValue spl_f64_to_bits(RuntimeValue value) { return value; }
 
-RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue dir_raw)
+__attribute__((weak)) RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue dir_raw)
 {
     (void)dir_raw;
     void *p = malloc((size_t)(int64_t)size);
     return p ? (RuntimeValue)(uintptr_t)p : 0;
 }
 
-RuntimeValue rt_dma_cache_line_size(void) { return 64; }
-void rt_dma_free(RuntimeValue p) { (void)p; }
-RuntimeValue rt_dma_phys_of(RuntimeValue p) { return p; }
-void rt_dma_sync_for_cpu(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
-void rt_dma_sync_for_device(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
-RuntimeValue rt_dma_virt_of(RuntimeValue p) { return p; }
+__attribute__((weak)) RuntimeValue rt_dma_cache_line_size(void) { return 64; }
+__attribute__((weak)) void rt_dma_free(RuntimeValue p) { (void)p; }
+__attribute__((weak)) RuntimeValue rt_dma_phys_of(RuntimeValue p) { return p; }
+__attribute__((weak)) void rt_dma_sync_for_cpu(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
+__attribute__((weak)) void rt_dma_sync_for_device(RuntimeValue a, RuntimeValue b) { (void)a; (void)b; }
+__attribute__((weak)) RuntimeValue rt_dma_virt_of(RuntimeValue p) { return p; }
 
 RuntimeValue unsafe_addr_of(RuntimeValue v)
 {

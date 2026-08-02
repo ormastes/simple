@@ -1,0 +1,295 @@
+# codex-impl
+# Retained CUDA executor for Q15 partitioned-convolution/HRTF work.
+
+use std.common.engine.audio.simple_audio_q15.*
+use std.gc_async_mut.engine.audio.simple_audio_cuda_driver.{SimpleAudioCudaDriver}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, rt_ptr_read_i64, raw_write_i64}
+
+val SIMPLE_AUDIO_CUDA_BLOCK_SIZE: i64 = 128
+val SIMPLE_AUDIO_CUDA_ARGS_BYTES: i64 = 40
+
+# A reference-owned envelope is required here: interpreter value-struct return
+# currently consumes mutable array fields at the call boundary. CUDA payloads
+# must remain owned and readable by the host service after this function exits.
+class SimpleAudioCudaQ15Result:
+    completed: bool
+    reason: text
+    readback_ptr: i64
+    readback_count: i64
+    readback_bytes: i64
+    backend_handle: i64
+    device_identity: i64
+    readback_checksum: i64
+    normalized_error_millionths: i64
+
+    me readback_sample(index: i64) -> i32:
+        if self.readback_ptr == 0 or index < 0 or index >= self.readback_count:
+            return 0i32
+        val packed = rt_ptr_read_i64(self.readback_ptr, (index / 2) * 8)
+        if index % 2 == 1:
+            return (packed >> 32).to_i32()
+        val low = packed & 4294967295
+        (if low > 2147483647: low - 4294967296 else: low).to_i32()
+
+    me release_readback():
+        if self.readback_ptr != 0:
+            raw_free(self.readback_ptr, self.readback_bytes)
+            self.readback_ptr = 0
+            self.readback_count = 0
+            self.readback_bytes = 0
+
+fn _simple_audio_cuda_q15_ptx() -> text:
+    ".version 7.0\n.target sm_52\n.address_size 64\n\n.visible .entry simple_audio_q15_convolve(\n    .param .u64 input,\n    .param .u64 kernel,\n    .param .u64 output,\n    .param .u32 input_count,\n    .param .u32 kernel_count\n) {\n    .reg .pred %p<5>;\n    .reg .b32 %r<12>;\n    .reg .b64 %rd<15>;\n    mov.u32 %r0, %ctaid.x;\n    mov.u32 %r1, %ntid.x;\n    mov.u32 %r2, %tid.x;\n    mad.lo.u32 %r3, %r0, %r1, %r2;\n    ld.param.u32 %r4, [input_count];\n    ld.param.u32 %r5, [kernel_count];\n    add.u32 %r6, %r4, %r5;\n    sub.u32 %r6, %r6, 1;\n    setp.ge.u32 %p0, %r3, %r6;\n    @%p0 bra done;\n    mov.u32 %r7, 0;\n    mov.s64 %rd0, 0;\nloop:\n    setp.ge.u32 %p1, %r7, %r5;\n    @%p1 bra store;\n    setp.lt.u32 %p2, %r3, %r7;\n    @%p2 bra next;\n    sub.u32 %r8, %r3, %r7;\n    setp.ge.u32 %p3, %r8, %r4;\n    @%p3 bra next;\n    ld.param.u64 %rd1, [input];\n    mul.wide.u32 %rd2, %r8, 4;\n    add.u64 %rd3, %rd1, %rd2;\n    ld.global.s32 %r9, [%rd3];\n    ld.param.u64 %rd4, [kernel];\n    mul.wide.u32 %rd5, %r7, 4;\n    add.u64 %rd6, %rd4, %rd5;\n    ld.global.s32 %r10, [%rd6];\n    mul.wide.s32 %rd7, %r9, %r10;\n    add.s64 %rd0, %rd0, %rd7;\nnext:\n    add.u32 %r7, %r7, 1;\n    bra loop;\nstore:\n    div.s64 %rd0, %rd0, 32768;\n    cvt.sat.s32.s64 %r11, %rd0;\n    ld.param.u64 %rd8, [output];\n    mul.wide.u32 %rd9, %r3, 4;\n    add.u64 %rd10, %rd8, %rd9;\n    st.global.u32 [%rd10], %r11;\ndone:\n    ret;\n}\n"
+
+class SimpleAudioCudaQ15Executor:
+    driver: SimpleAudioCudaDriver
+    closed: bool
+
+    static fn create() -> SimpleAudioCudaQ15Executor:
+        SimpleAudioCudaQ15Executor(driver: SimpleAudioCudaDriver.create(), closed: false)
+
+    me ready() -> text:
+        if self.closed:
+            return "cuda-audio-executor-closed"
+        if not self.driver.available():
+            return "cuda-unavailable"
+        if self.driver.module == 0 and not self.driver.load(_simple_audio_cuda_q15_ptx()):
+            self.driver.shutdown()
+            return "cuda-audio-module-load-failed"
+        "ok"
+
+    me shutdown():
+        self.closed = true
+        self.driver.shutdown()
+
+fn _audio_cuda_failed(reason: text) -> SimpleAudioCudaQ15Result:
+    SimpleAudioCudaQ15Result(completed: false, reason: reason, readback_ptr: 0, readback_count: 0, readback_bytes: 0, backend_handle: 0, device_identity: 0, readback_checksum: 0, normalized_error_millionths: 1000000)
+
+fn simple_audio_q15_raw_sample(ptr: i64, index: i64) -> i32:
+    val packed = rt_ptr_read_i64(ptr, (index / 2) * 8)
+    if index % 2 == 1:
+        return (packed >> 32).to_i32()
+    val low = packed & 4294967295
+    (if low > 2147483647: low - 4294967296 else: low).to_i32()
+
+fn simple_audio_q15_raw_checksum(ptr: i64, count: i64) -> i64:
+    var checksum = 1469598103
+    var index = 0
+    while index < count:
+        val packed = rt_ptr_read_i64(ptr, (index / 2) * 8)
+        val low = packed & 4294967295
+        val sample = if index % 2 == 1: packed >> 32 elif low > 2147483647: low - 4294967296 else: low
+        val bits = if sample < 0: sample + 4294967296 else: sample
+        checksum = ((checksum * 16777619) + bits) % 2147483647
+        index = index + 1
+    if checksum == 0: 1 else: checksum
+
+fn _audio_raw_parity_error(input_ptr: i64, input_count: i64, kernel_ptr: i64, kernel_count: i64, output_ptr: i64) -> i64:
+    var maximum = 0
+    var n = 0
+    val output_count = input_count + kernel_count - 1
+    while n < output_count:
+        var accumulator = 0
+        var k = 0
+        while k < kernel_count:
+            val input_index = n - k
+            if input_index >= 0 and input_index < input_count:
+                val input_packed = rt_ptr_read_i64(input_ptr, (input_index / 2) * 8)
+                val input_low = input_packed & 4294967295
+                val input_sample = if input_index % 2 == 1: input_packed >> 32 elif input_low > 2147483647: input_low - 4294967296 else: input_low
+                val kernel_packed = rt_ptr_read_i64(kernel_ptr, (k / 2) * 8)
+                val kernel_low = kernel_packed & 4294967295
+                val kernel_sample = if k % 2 == 1: kernel_packed >> 32 elif kernel_low > 2147483647: kernel_low - 4294967296 else: kernel_low
+                accumulator = accumulator + input_sample * kernel_sample
+            k = k + 1
+        var expected = accumulator / 32768
+        if expected > 2147483647:
+            expected = 2147483647
+        elif expected < -2147483648:
+            expected = -2147483648
+        val output_packed = rt_ptr_read_i64(output_ptr, (n / 2) * 8)
+        val output_low = output_packed & 4294967295
+        val observed = if n % 2 == 1: output_packed >> 32 elif output_low > 2147483647: output_low - 4294967296 else: output_low
+        var error = expected - observed
+        if error < 0:
+            error = 0 - error
+        val normalized = (error * 1000000) / 32768
+        if normalized > maximum:
+            maximum = normalized
+        n = n + 1
+    maximum
+
+fn _audio_raw_equal(left: i64, right: i64, count: i64) -> bool:
+    var pair = 0
+    while pair < (count + 1) / 2:
+        if rt_ptr_read_i64(left, pair * 8) != rt_ptr_read_i64(right, pair * 8):
+            return false
+        pair = pair + 1
+    true
+
+fn _audio_write_u32s(ptr: i64, values: [u32]):
+    var index = 0
+    while index < values.len():
+        val low = simple_audio_q15_at(values, index) & 4294967295
+        val high = if index + 1 < values.len(): simple_audio_q15_at(values, index + 1) & 4294967295 else: 0
+        raw_write_i64(ptr, (index / 2) * 8, low | (high << 32))
+        index = index + 2
+
+fn _audio_read_u32s(ptr: i64, count: i64) -> [u32]:
+    var values: [u32] = []
+    var index = 0
+    while index < count:
+        val packed = rt_ptr_read_i64(ptr, (index / 2) * 8)
+        simple_audio_q15_push(values, (packed & 4294967295).to_u32())
+        if index + 1 < count:
+            simple_audio_q15_push(values, ((packed >> 32) & 4294967295).to_u32())
+        index = index + 2
+    values
+
+fn _audio_cuda_cleanup(driver: SimpleAudioCudaDriver, device_input: i64, device_kernel: i64, device_output: i64, host_input: i64, host_kernel: i64, host_output: i64, values_ptr: i64, args_ptr: i64, input_bytes: i64, kernel_bytes: i64, output_bytes: i64):
+    if device_input > 0:
+        driver.free(device_input)
+    if device_kernel > 0:
+        driver.free(device_kernel)
+    if device_output > 0:
+        driver.free(device_output)
+    if host_input != 0:
+        raw_free(host_input, input_bytes)
+    if host_kernel != 0:
+        raw_free(host_kernel, kernel_bytes)
+    if host_output != 0:
+        raw_free(host_output, output_bytes)
+    if values_ptr != 0:
+        raw_free(values_ptr, SIMPLE_AUDIO_CUDA_ARGS_BYTES)
+    if args_ptr != 0:
+        raw_free(args_ptr, SIMPLE_AUDIO_CUDA_ARGS_BYTES)
+
+fn simple_audio_q15_execute_cuda_raw(executor: SimpleAudioCudaQ15Executor, input_ptr: i64, input_count: i64, kernel_ptr: i64, kernel_count: i64) -> SimpleAudioCudaQ15Result:
+    if input_ptr == 0 or kernel_ptr == 0 or input_count <= 0 or kernel_count <= 0:
+        return _audio_cuda_failed("empty-audio-work")
+    if input_count > 65536 or kernel_count > 4096 or input_count + kernel_count - 1 > 65536:
+        return _audio_cuda_failed("audio-work-too-large")
+    val ready = executor.ready()
+    if ready != "ok":
+        return _audio_cuda_failed(ready)
+    val output_count = input_count + kernel_count - 1
+    val input_bytes = input_count * 4
+    val kernel_bytes = kernel_count * 4
+    val output_bytes = output_count * 4
+    val host_output_bytes = ((output_count + 1) / 2) * 8
+    val host_output = raw_alloc(host_output_bytes)
+    val values_ptr = raw_alloc(SIMPLE_AUDIO_CUDA_ARGS_BYTES)
+    val args_ptr = raw_alloc(SIMPLE_AUDIO_CUDA_ARGS_BYTES)
+    val device_input = executor.driver.alloc(input_bytes)
+    val device_kernel = executor.driver.alloc(kernel_bytes)
+    val device_output = executor.driver.alloc(output_bytes)
+    if host_output == 0 or values_ptr == 0 or args_ptr == 0 or device_input <= 0 or device_kernel <= 0 or device_output <= 0:
+        _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, 0, 0, host_output, values_ptr, args_ptr, 0, 0, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-allocation-failed")
+    val uploaded = executor.driver.upload(device_input, input_ptr, input_bytes) and executor.driver.upload(device_kernel, kernel_ptr, kernel_bytes)
+    val upload_readback = uploaded and executor.driver.download(host_output, device_input, input_bytes)
+    if not upload_readback or not _audio_raw_equal(input_ptr, host_output, input_count):
+        _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, 0, 0, host_output, values_ptr, args_ptr, 0, 0, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-input-upload-parity-failed")
+    val kernel_upload_readback = executor.driver.download(host_output, device_kernel, kernel_bytes)
+    if not kernel_upload_readback or not _audio_raw_equal(kernel_ptr, host_output, kernel_count):
+        _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, 0, 0, host_output, values_ptr, args_ptr, 0, 0, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-kernel-upload-parity-failed")
+    raw_write_i64(values_ptr, 0, device_input)
+    raw_write_i64(values_ptr, 8, device_kernel)
+    raw_write_i64(values_ptr, 16, device_output)
+    raw_write_i64(values_ptr, 24, input_count)
+    raw_write_i64(values_ptr, 32, kernel_count)
+    raw_write_i64(args_ptr, 0, values_ptr)
+    raw_write_i64(args_ptr, 8, values_ptr + 8)
+    raw_write_i64(args_ptr, 16, values_ptr + 16)
+    raw_write_i64(args_ptr, 24, values_ptr + 24)
+    raw_write_i64(args_ptr, 32, values_ptr + 32)
+    val launched = uploaded and executor.driver.launch("simple_audio_q15_convolve", (output_count + SIMPLE_AUDIO_CUDA_BLOCK_SIZE - 1) / SIMPLE_AUDIO_CUDA_BLOCK_SIZE, SIMPLE_AUDIO_CUDA_BLOCK_SIZE, args_ptr)
+    val copied = launched and executor.driver.sync() and executor.driver.download(host_output, device_output, output_bytes)
+    val error = if copied: _audio_raw_parity_error(input_ptr, input_count, kernel_ptr, kernel_count, host_output) else: 1000000
+    val checksum = if copied: simple_audio_q15_raw_checksum(host_output, output_count) else: 0
+    val identity = executor.driver.identity()
+    val handle = executor.driver.handle
+    _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, 0, 0, 0, values_ptr, args_ptr, 0, 0, output_bytes)
+    if not copied:
+        raw_free(host_output, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-readback-failed")
+    if identity <= 0:
+        raw_free(host_output, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-device-identity-missing")
+    if error > 10:
+        raw_free(host_output, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-parity-failed")
+    SimpleAudioCudaQ15Result(completed: true, reason: "device-readback", readback_ptr: host_output, readback_count: output_count, readback_bytes: host_output_bytes, backend_handle: handle, device_identity: identity, readback_checksum: checksum, normalized_error_millionths: error)
+
+fn simple_audio_q15_execute_cuda(executor: SimpleAudioCudaQ15Executor, input: [u32], kernel: [u32]) -> SimpleAudioCudaQ15Result:
+    val work_status = simple_audio_q15_work_status(input, kernel)
+    if work_status != "ok":
+        return _audio_cuda_failed(work_status)
+    val ready = executor.ready()
+    if ready != "ok":
+        return _audio_cuda_failed(ready)
+    val output_count = input.len().to_i64() + kernel.len().to_i64() - 1
+    val input_bytes = input.len().to_i64() * 4
+    val kernel_bytes = kernel.len().to_i64() * 4
+    val output_bytes = output_count * 4
+    val host_output_bytes = ((output_count + 1) / 2) * 8
+    val host_input = raw_alloc(input_bytes)
+    val host_kernel = raw_alloc(kernel_bytes)
+    val host_output = raw_alloc(host_output_bytes)
+    val values_ptr = raw_alloc(SIMPLE_AUDIO_CUDA_ARGS_BYTES)
+    val args_ptr = raw_alloc(SIMPLE_AUDIO_CUDA_ARGS_BYTES)
+    val device_input = executor.driver.alloc(input_bytes)
+    val device_kernel = executor.driver.alloc(kernel_bytes)
+    val device_output = executor.driver.alloc(output_bytes)
+    if host_input == 0 or host_kernel == 0 or host_output == 0 or values_ptr == 0 or args_ptr == 0 or device_input <= 0 or device_kernel <= 0 or device_output <= 0:
+        _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, host_input, host_kernel, host_output, values_ptr, args_ptr, input_bytes, kernel_bytes, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-allocation-failed")
+    _audio_write_u32s(host_input, input)
+    _audio_write_u32s(host_kernel, kernel)
+    val uploaded = executor.driver.upload(device_input, host_input, input_bytes) and executor.driver.upload(device_kernel, host_kernel, kernel_bytes)
+    raw_write_i64(values_ptr, 0, device_input)
+    raw_write_i64(values_ptr, 8, device_kernel)
+    raw_write_i64(values_ptr, 16, device_output)
+    raw_write_i64(values_ptr, 24, input.len().to_i64())
+    raw_write_i64(values_ptr, 32, kernel.len().to_i64())
+    raw_write_i64(args_ptr, 0, values_ptr)
+    raw_write_i64(args_ptr, 8, values_ptr + 8)
+    raw_write_i64(args_ptr, 16, values_ptr + 16)
+    raw_write_i64(args_ptr, 24, values_ptr + 24)
+    raw_write_i64(args_ptr, 32, values_ptr + 32)
+    val launched = uploaded and executor.driver.launch("simple_audio_q15_convolve", (output_count + SIMPLE_AUDIO_CUDA_BLOCK_SIZE - 1) / SIMPLE_AUDIO_CUDA_BLOCK_SIZE, SIMPLE_AUDIO_CUDA_BLOCK_SIZE, args_ptr)
+    val synced = launched and executor.driver.sync()
+    val copied = synced and executor.driver.download(host_output, device_output, output_bytes)
+    val parity_values: [u32] = if copied: _audio_read_u32s(host_output, output_count) else: []
+    val reference = simple_audio_q15_convolve_reference(input, kernel)
+    val error = simple_audio_q15_max_error_millionths(reference, parity_values)
+    val raw_values: [u32] = if copied: _audio_read_u32s(host_output, output_count) else: []
+    var checksum = 1469598103
+    var value_index = 0
+    while value_index < raw_values.len():
+        val value = raw_values[value_index]
+        checksum = ((checksum * 16777619) + value.to_i64()) % 2147483647
+        value_index = value_index + 1
+    if checksum == 0:
+        checksum = 1
+    val identity = executor.driver.identity()
+    val handle = executor.driver.handle
+    # host_output transfers to the result and is released explicitly by its
+    # consumer; all other staging/device allocations end here.
+    _audio_cuda_cleanup(executor.driver, device_input, device_kernel, device_output, host_input, host_kernel, 0, values_ptr, args_ptr, input_bytes, kernel_bytes, output_bytes)
+    if not copied:
+        raw_free(host_output, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-readback-failed")
+    if identity <= 0:
+        raw_free(host_output, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-device-identity-missing")
+    if error > 10:
+        raw_free(host_output, host_output_bytes)
+        return _audio_cuda_failed("cuda-audio-parity-failed")
+    SimpleAudioCudaQ15Result(completed: true, reason: "device-readback", readback_ptr: host_output, readback_count: output_count, readback_bytes: host_output_bytes, backend_handle: handle, device_identity: identity, readback_checksum: checksum, normalized_error_millionths: error)
+
+export SimpleAudioCudaQ15Result, SimpleAudioCudaQ15Executor
+export simple_audio_q15_execute_cuda, simple_audio_q15_execute_cuda_raw
+export simple_audio_q15_raw_sample, simple_audio_q15_raw_checksum

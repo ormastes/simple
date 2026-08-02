@@ -180,6 +180,18 @@ static void serial_put_hex(uint64_t v)
     }
 }
 
+/* Entry-closure probes may omit interrupt.spl.  Never let their #UD path bind
+ * to auto_stubs.c's fabricated returning body: report the fault and park the
+ * CPU.  The strong pure-Simple export overrides this fallback in full images. */
+__attribute__((weak, noreturn))
+void spl_x86_on_kernel_ud2_fault(uint64_t rip)
+{
+    serial_puts("\n[fault] FATAL: kernel #UD (ud2) trap at rip=");
+    serial_put_hex(rip);
+    serial_puts(" vector=6 (#UD)\n");
+    for (;;) __asm__ volatile("cli; hlt");
+}
+
 static void serial_put_dec(int64_t v)
 {
     if (v < 0) {
@@ -6919,6 +6931,22 @@ static void sc_muladd(uint8_t out[32], const uint8_t a[32], const uint8_t b[32],
         _sc_sub_u32_8(prod32, prod32, _sc_l32);
     }
     _sc_store_u32_8(out, prod32);
+}
+
+/* Stable freestanding ABI consumed by the SSH/Ed25519 paths.  Keep these
+ * concrete exports beside the scalar implementation so entry-closure builds
+ * never bind their calls to auto_stubs.c's fabricated zero-return bodies. */
+void x25519_sc_reduce(uint8_t s[64])
+{
+    uint8_t reduced[32];
+    sc_reduce(reduced, s);
+    for (int i = 0; i < 32; i++) s[i] = reduced[i];
+}
+
+void x25519_sc_muladd(uint8_t s[32], const uint8_t a[32],
+                      const uint8_t b[32], const uint8_t c[32])
+{
+    sc_muladd(s, a, b, c);
 }
 
 /* ---------- ring crypto stubs (baremetal fallback — return -1 to trigger software path) ---------- */
@@ -18516,6 +18544,34 @@ static uint64_t _bm_uptime_ms(void)
          + ((elapsed % frequency) * 1000ULL) / frequency;
 }
 
+/* Raw SFFI hardware primitives required by entry-closure driver probes. */
+RuntimeValue rt_volatile_read_u32(RuntimeValue addr)
+{
+    return (RuntimeValue)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
+}
+
+RuntimeValue rt_volatile_read_u64(RuntimeValue addr)
+{
+    return (RuntimeValue)*(volatile uint64_t *)(uintptr_t)(uint64_t)addr;
+}
+
+RuntimeValue rt_volatile_write_u64(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint64_t *)(uintptr_t)(uint64_t)addr = (uint64_t)value;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_memory_barrier(void)
+{
+    __asm__ volatile("mfence" ::: "memory");
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_time_now_unix_micros(void)
+{
+    return (RuntimeValue)(_bm_uptime_ms() * 1000ULL);
+}
+
 /* rt_thread_sleep: block the caller for `millis` milliseconds.
  *
  * This was a no-op fake that returned INSTANTLY, so every poll loop paced
@@ -18689,6 +18745,21 @@ RuntimeValue rt_typed_words_u32_at(RuntimeValue array, RuntimeValue idx)
     int64_t i = (int64_t)idx;
     if (i < 0) i = len + i;
     if (i < 0 || i >= len) return 0;
+    return (RuntimeValue)((((int64_t)items[i]) >> 3) & 0xFFFFFFFFLL);
+}
+
+/* Audio wire adapter with a non-intrinsic symbol name. The compiler has a
+ * specialized lowering for rt_typed_words_u32_at that can apply an extra
+ * scalar decode on freestanding calls; this ABI wrapper forces the validated
+ * runtime implementation above and returns the canonical raw u32 bits. */
+RuntimeValue simpleos_audio_q15_word_raw(RuntimeValue array, RuntimeValue idx)
+{
+    RuntimeArray *a = runtime_array_from_abi(array);
+    if (!a || (a->hdr.gc_flags & BYTE_PACKED)) return 0;
+    RuntimeValue *items = runtime_array_items(a);
+    int64_t i = (int64_t)idx;
+    if (i < 0) i += (int64_t)a->len;
+    if (!items || i < 0 || (uint32_t)i >= a->len) return 0;
     return (RuntimeValue)((((int64_t)items[i]) >> 3) & 0xFFFFFFFFLL);
 }
 

@@ -1,0 +1,79 @@
+use std.spec.*
+use os.kernel.boot.mmio.{mmio_read32, mmio_reset_for_test, mmio_write16, mmio_write32}
+use os.services.audio.virtio_snd_service.{VirtioSndService}
+use os.drivers.virtio.virtio_snd_dma_resources.{VIRTIO_SND_EVENT_BUFFER_OFFSET}
+
+fn configure_virtio_sound_transport(base: u64):
+    mmio_reset_for_test()
+    mmio_write32(base + 0x000u64, 0x74726976u32)
+    mmio_write32(base + 0x004u64, 2u32)
+    mmio_write32(base + 0x008u64, 25u32)
+    mmio_write32(base + 0x010u64, 1u32)
+    mmio_write32(base + 0x034u64, 8u32)
+    mmio_write32(base + 0x100u64, 0u32)
+    mmio_write32(base + 0x104u64, 2u32)
+    mmio_write32(base + 0x108u64, 0u32)
+
+describe "pure Simple VirtIO sound service contracts":
+    it "starts all four queues and releases owned DMA on shutdown":
+        val base = 0x0A100000u64
+        configure_virtio_sound_transport(base)
+        var service = VirtioSndService.start(base)
+        expect(service.ready).to_be(true)
+        expect(service.dma.handle).to_be_greater_than(0)
+        expect(mmio_read32(base + 0x070u64)).to_equal(15u32)
+        var queue: u32 = 0u32
+        while queue < 4u32:
+            mmio_write32(base + 0x030u64, queue)
+            expect(mmio_read32(base + 0x044u64)).to_equal(1u32)
+            queue = queue + 1u32
+        val stopped = service.shutdown(0)
+        expect(stopped.status).to_equal("completed")
+        expect(service.ready).to_be(false)
+        expect(service.direction).to_equal("closed")
+        expect(service.dma.handle).to_equal(-1)
+        expect(mmio_read32(base + 0x070u64)).to_equal(0u32)
+
+    it "rejects invalid stream geometry without publishing control work":
+        val base = 0x0A101000u64
+        configure_virtio_sound_transport(base)
+        var service = VirtioSndService.start(base)
+        val direction = service.configure_stream(1u32, "sideways", 64, 2, 0)
+        val frames = service.configure_playback(1u32, 15, 2, 0)
+        val channels = service.configure_capture(1u32, 64, 17, 0)
+        expect(direction.status).to_equal("invalid")
+        expect(frames.status).to_equal("invalid")
+        expect(channels.status).to_equal("invalid")
+        expect(service.direction).to_equal("closed")
+        service.shutdown(0)
+
+    it "times out bounded control work when the device supplies no completion":
+        val base = 0x0A102000u64
+        configure_virtio_sound_transport(base)
+        var service = VirtioSndService.start(base)
+        val receipt = service.control([1u8, 1u8, 0u8, 0u8], 4u32, 2)
+        expect(receipt.status).to_equal("timeout")
+        expect(receipt.reason).to_equal("control completion unavailable")
+        service.shutdown(0)
+
+    it "delivers and reposts an xrun event with interrupt accounting":
+        val base = 0x0A103000u64
+        configure_virtio_sound_transport(base)
+        var service = VirtioSndService.start(base)
+        val used = service.transport.event.used_cpu
+        val event = service.dma.cpu_base + VIRTIO_SND_EVENT_BUFFER_OFFSET.to_u64()
+        mmio_write16(used + 2u64, 1u16)
+        mmio_write32(used + 4u64, 0u32)
+        mmio_write32(used + 8u64, 8u32)
+        mmio_write32(event, 0x1101u32)
+        mmio_write32(event + 4u64, 7u32)
+        mmio_write32(base + 0x060u64, 1u32)
+        expect(service.acknowledge_interrupt()).to_equal(1u32)
+        val receipt = service.poll_event()
+        expect(receipt.status).to_equal("xrun")
+        expect(receipt.reason).to_equal("audio-xrun")
+        expect(receipt.frames).to_equal(7)
+        expect(receipt.bytes).to_equal(8)
+        expect(receipt.interrupts).to_equal(1u64)
+        expect(mmio_read32(base + 0x064u64)).to_equal(1u32)
+        service.shutdown(0)

@@ -1,0 +1,30 @@
+use std.spec.*
+use std.io.simple_device_event.{SimpleDeviceEventRing}
+
+describe "shared device event ring":
+    it "orders timestamps and assigns stable sequence numbers":
+        var events = SimpleDeviceEventRing.create(3)
+        expect(events.publish(20u64, 1u64, 4, 2, 9u64, "audio-submit", "submitted")).to_equal("published")
+        expect(events.publish(10u64, 2u64, 4, 2, 10u64, "audio-period", "completed")).to_equal("published")
+        val drained = events.drain()
+        expect(drained.len()).to_equal(2)
+        expect(drained[0].sequence).to_equal(1u64)
+        expect(drained[1].sequence).to_equal(2u64)
+        expect(drained[1].monotonic_ns).to_equal(20u64)
+
+    it "bounds capacity and fails closed after shutdown":
+        var events = SimpleDeviceEventRing.create(2)
+        expect(events.publish(1u64, 0u64, 1, 1, 1u64, "one", "ready")).to_equal("published")
+        expect(events.publish(2u64, 0u64, 1, 1, 2u64, "two", "ready")).to_equal("published")
+        expect(events.publish(3u64, 0u64, 1, 1, 3u64, "three", "ready")).to_equal("queue-full")
+        expect(events.shutdown(4u64, 1)).to_equal("completed")
+        expect(events.publish(5u64, 0u64, 1, 1, 4u64, "late", "ready")).to_equal("shutdown")
+
+    it "clamps unsafe capacities and records shutdown when space remains":
+        var events = SimpleDeviceEventRing.create(0)
+        expect(events.capacity).to_equal(2)
+        expect(events.shutdown(7u64, 8)).to_equal("completed")
+        val drained = events.drain()
+        expect(drained.len()).to_equal(1)
+        expect(drained[0].kind).to_equal("shutdown")
+        expect(drained[0].device_id).to_equal(8)

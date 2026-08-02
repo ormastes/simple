@@ -20,6 +20,14 @@ use std.nogc_sync_mut.io.audio_sffi.{
     audio_live_device_count,
     audio_live_playback_count,
     audio_live_source_count,
+    rt_audio_load_sound,
+    rt_audio_unload_sound,
+    rt_audio_play,
+    rt_audio_set_listener_position,
+    rt_audio_set_pitch,
+    rt_audio_set_sound_position,
+    rt_audio_set_spatialization_enabled,
+    rt_audio_set_volume,
     audio_sdl2_close,
     audio_sdl2_init,
     audio_sdl2_live_device_count,
@@ -57,6 +65,7 @@ class SoundEngine:
     device_started: bool
     device_handle: i64
     playback_handles: [i64]
+    source_handles: [i64]
     mixed_pcm_frames: i64
     mixed_pcm_checksum: u64
     underrun_count: i64
@@ -75,6 +84,7 @@ impl SoundEngine:
             device_started: false,
             device_handle: 0,
             playback_handles: [],
+            source_handles: [],
             mixed_pcm_frames: 0,
             mixed_pcm_checksum: 0u64,
             underrun_count: 0
@@ -133,12 +143,58 @@ impl SoundEngine:
     me play_2d(entity_id: text, clip_id: text, x_milli: i64, listener_x_milli: i64) -> SoundCommand:
         val cmd = sound_command_2d(entity_id, clip_id, x_milli, listener_x_milli)
         self.command_log = self.command_log.push(cmd)
+        if self.device_started and self.capability.backend == "miniaudio":
+            self._play_file_spatial(
+                clip_id,
+                x_milli.to_f64() / 1000.0, 0.0, 0.0,
+                listener_x_milli.to_f64() / 1000.0, 0.0, 0.0,
+                cmd.volume_milli.to_f64() / 1000.0,
+                1.0
+            )
         cmd
 
     me play_3d(entity_id: text, clip_id: text, distance_milli: i64, doppler_milli: i64, occlusion_milli: i64) -> SoundCommand:
         val cmd = sound_command_3d(entity_id, clip_id, distance_milli, doppler_milli, occlusion_milli)
         self.command_log = self.command_log.push(cmd)
+        if self.device_started and self.capability.backend == "miniaudio":
+            self._play_file_spatial(
+                clip_id,
+                distance_milli.to_f64() / 1000.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                cmd.volume_milli.to_f64() / 1000.0,
+                doppler_milli.to_f64() / 1000.0
+            )
         cmd
+
+    me play_direct(clip_id: text) -> bool:
+        if not self.device_started or self.capability.backend != "miniaudio":
+            return false
+        self._play_file_spatial(clip_id, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0)
+
+    me play_3d_at(
+        entity_id: text,
+        clip_id: text,
+        x: f64,
+        y: f64,
+        z: f64,
+        listener_x: f64,
+        listener_y: f64,
+        listener_z: f64,
+        doppler: f64,
+        occlusion: f64
+    ) -> bool:
+        val distance = ((x - listener_x).abs() + (y - listener_y).abs() + (z - listener_z).abs())
+        val distance_milli = (distance * 1000.0).to_i64()
+        val doppler_milli = (doppler * 1000.0).to_i64()
+        val occlusion_milli = (occlusion * 1000.0).to_i64()
+        val cmd = sound_command_3d(entity_id, clip_id, distance_milli, doppler_milli, occlusion_milli)
+        self.command_log = self.command_log.push(cmd)
+        if not self.device_started or self.capability.backend != "miniaudio":
+            return false
+        self._play_file_spatial(
+            clip_id, x, y, z, listener_x, listener_y, listener_z,
+            cmd.volume_milli.to_f64() / 1000.0, doppler
+        )
 
     fn command_count() -> i64:
         self.command_log.len()
@@ -149,6 +205,9 @@ impl SoundEngine:
             if audio_is_playing(playback):
                 audio_stop(playback)
         self.playback_handles = []
+        for source_handle in self.source_handles:
+            rt_audio_unload_sound(source_handle)
+        self.source_handles = []
         if self.device_started:
             val device = AudioEngine(
                 handle: self.device_handle,
@@ -163,6 +222,35 @@ impl SoundEngine:
                 self.device_handle = 0
         self.command_log = []
         self.teardown_count = self.teardown_count + 1
+
+    me _play_file_spatial(
+        clip_id: text,
+        x: f64,
+        y: f64,
+        z: f64,
+        listener_x: f64,
+        listener_y: f64,
+        listener_z: f64,
+        volume: f64,
+        pitch: f64
+    ) -> bool:
+        val source_handle = rt_audio_load_sound(clip_id)
+        if source_handle <= 0:
+            self.underrun_count = self.underrun_count + 1
+            return false
+        val playback_handle = rt_audio_play(source_handle)
+        if playback_handle <= 0:
+            rt_audio_unload_sound(source_handle)
+            self.underrun_count = self.underrun_count + 1
+            return false
+        rt_audio_set_listener_position(listener_x, listener_y, listener_z)
+        rt_audio_set_spatialization_enabled(playback_handle, 1)
+        rt_audio_set_sound_position(playback_handle, x, y, z)
+        rt_audio_set_volume(playback_handle, volume)
+        rt_audio_set_pitch(playback_handle, pitch)
+        self.source_handles.push(source_handle)
+        self.playback_handles.push(playback_handle)
+        true
 
 fn sound_engine_decode_vector(input: text) -> SoundCodecResult:
     sound_decode_design_vector(input)

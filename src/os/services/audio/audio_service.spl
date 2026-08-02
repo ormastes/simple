@@ -18,6 +18,7 @@ use os.drivers.audio.hda_dma_resources.{
     hda_dma_resources_destroy,
     hda_dma_resource_phys,
     hda_dma_prepare_silent_stream,
+    hda_dma_write_pcm_i16,
 }
 use os.drivers.audio.hda_controller.{
     HdaController,
@@ -30,6 +31,8 @@ use os.kernel.arch.x86_64.console.{serial_println}
 use os.kernel.interrupts.idt.{idt_register_handler}
 use os.kernel.interrupts.ioapic.{ioapic_route_intx, ioapic_mask_intx}
 use os.kernel.types.task_types.{TaskContext}
+use os.kernel.boot.monotonic_hardware.{boot_monotonic_now_us}
+use common.io.simple_device_event.{SimpleDeviceEvent}
 
 val SIMPLEOS_HDA_OK: i64 = 0
 val SIMPLEOS_HDA_NO_DEVICE: i64 = -1
@@ -39,6 +42,8 @@ val SIMPLEOS_HDA_DMA_PREPARE_FAILED: i64 = -4
 val SIMPLEOS_HDA_INIT_FAILED: i64 = -5
 val SIMPLEOS_HDA_STREAM_FAILED: i64 = -6
 val SIMPLEOS_HDA_IRQ_ROUTE_FAILED: i64 = -7
+val SIMPLEOS_HDA_NOT_STARTED: i64 = -8
+val SIMPLEOS_HDA_INVALID_PCM: i64 = -9
 
 var g_simpleos_hda_started: bool = false
 var g_simpleos_hda_bar0: i64 = 0
@@ -49,12 +54,38 @@ var g_simpleos_hda_resources: i64 = 0
 var g_simpleos_hda_irq_count: i64 = 0
 var g_simpleos_hda_period_count: i64 = 0
 var g_simpleos_hda_repeated_irq_receipt: bool = false
+var g_simpleos_hda_submission_count: i64 = 0
+var g_simpleos_hda_submitted_frames: i64 = 0
+var g_simpleos_hda_last_pcm_hash: i64 = 0
+var g_simpleos_hda_event_sequence: u64 = 0u64
+var g_simpleos_hda_event_monotonic_ns: u64 = 0u64
+var g_simpleos_hda_event_device_clock_frames: u64 = 0u64
+var g_simpleos_hda_event_correlation: u64 = 0u64
+var g_simpleos_hda_event_kind: text = "uninitialized"
+var g_simpleos_hda_event_status: text = "unavailable"
+
+fn _simpleos_hda_record_event(kind: text, status: text, correlation: u64):
+    # IRQ-safe scalar snapshot. Static text values are assigned by reference;
+    # the aggregate SimpleDeviceEvent is constructed only by the reader.
+    g_simpleos_hda_event_sequence = g_simpleos_hda_event_sequence + 1u64
+    val now_us = boot_monotonic_now_us()
+    if now_us > 0:
+        g_simpleos_hda_event_monotonic_ns = (now_us as u64) * 1000u64
+    g_simpleos_hda_event_device_clock_frames = (g_simpleos_hda_period_count as u64) * 1024u64
+    g_simpleos_hda_event_correlation = correlation
+    g_simpleos_hda_event_kind = kind
+    g_simpleos_hda_event_status = status
 
 fn _simpleos_hda_irq_handler(ctx: TaskContext):
     val fired = hda_ack_irq_at(g_simpleos_hda_bar0)
     if fired > 0:
         g_simpleos_hda_irq_count = g_simpleos_hda_irq_count + 1
         g_simpleos_hda_period_count = g_simpleos_hda_period_count + fired
+        _simpleos_hda_record_event(
+            "audio-period",
+            "completed",
+            g_simpleos_hda_submission_count as u64
+        )
         if (g_simpleos_hda_irq_count >= 4 and
             not g_simpleos_hda_repeated_irq_receipt):
             serial_println(
@@ -108,6 +139,15 @@ fn simpleos_hda_start() -> i64:
     g_simpleos_hda_irq_count = 0
     g_simpleos_hda_period_count = 0
     g_simpleos_hda_repeated_irq_receipt = false
+    g_simpleos_hda_submission_count = 0
+    g_simpleos_hda_submitted_frames = 0
+    g_simpleos_hda_last_pcm_hash = 0
+    g_simpleos_hda_event_sequence = 0u64
+    g_simpleos_hda_event_monotonic_ns = 0u64
+    g_simpleos_hda_event_device_clock_frames = 0u64
+    g_simpleos_hda_event_correlation = 0u64
+    g_simpleos_hda_event_kind = "device-start"
+    g_simpleos_hda_event_status = "ready"
     idt_register_handler(
         g_simpleos_hda_irq_vector.to_u32(),
         _simpleos_hda_irq_handler
@@ -136,9 +176,50 @@ fn simpleos_hda_start() -> i64:
     g_simpleos_hda_started = true
     SIMPLEOS_HDA_OK
 
+fn simpleos_hda_submit_pcm_i16(samples: [i64], channels: i64) -> i64:
+    """Submit one application PCM period into the running HDA ring.
+
+    The negotiated Q35 compatibility format is interleaved stereo signed-16.
+    Submission is bounded to one 4096-byte BDL period.
+    """
+    if not g_simpleos_hda_started or g_simpleos_hda_resources == 0:
+        return SIMPLEOS_HDA_NOT_STARTED
+    if channels != 2 or samples.len() == 0 or samples.len() % 2 != 0:
+        return SIMPLEOS_HDA_INVALID_PCM
+    if samples.len() * 2 > 4096:
+        return SIMPLEOS_HDA_INVALID_PCM
+    val frames = samples.len() / channels
+    val period_index = g_simpleos_hda_submission_count % 4
+    val offset_frames = period_index * 1024
+    val written = hda_dma_write_pcm_i16(
+        g_simpleos_hda_resources,
+        offset_frames,
+        channels,
+        samples
+    )
+    if written != frames:
+        return SIMPLEOS_HDA_INVALID_PCM
+    var hash: i64 = 1469598103934665603
+    for sample in samples:
+        hash = (hash ^ (sample & 65535)) * 1099511628211
+    g_simpleos_hda_submission_count = g_simpleos_hda_submission_count + 1
+    g_simpleos_hda_submitted_frames = g_simpleos_hda_submitted_frames + frames
+    g_simpleos_hda_last_pcm_hash = hash
+    _simpleos_hda_record_event(
+        "audio-submit",
+        "submitted",
+        g_simpleos_hda_submission_count as u64
+    )
+    written
+
 fn simpleos_hda_stop():
     if not g_simpleos_hda_started:
         return
+    _simpleos_hda_record_event(
+        "shutdown",
+        "completed",
+        g_simpleos_hda_submission_count as u64
+    )
     hda_stop_stream_at(g_simpleos_hda_bar0, g_simpleos_hda_stream_id)
     ioapic_mask_intx(g_simpleos_hda_irq)
     X86Interrupt.unregister_handler(g_simpleos_hda_irq_vector.to_u64())
@@ -149,6 +230,9 @@ fn simpleos_hda_stop():
     g_simpleos_hda_irq_vector = 0
     g_simpleos_hda_stream_id = -1
     g_simpleos_hda_resources = 0
+    g_simpleos_hda_submission_count = 0
+    g_simpleos_hda_submitted_frames = 0
+    g_simpleos_hda_last_pcm_hash = 0
 
 fn simpleos_hda_started() -> bool:
     g_simpleos_hda_started
@@ -162,10 +246,35 @@ fn simpleos_hda_period_count() -> i64:
 fn simpleos_hda_stream_id() -> i64:
     g_simpleos_hda_stream_id
 
+fn simpleos_hda_submission_count() -> i64:
+    g_simpleos_hda_submission_count
+
+fn simpleos_hda_submitted_frames() -> i64:
+    g_simpleos_hda_submitted_frames
+
+fn simpleos_hda_last_pcm_hash() -> i64:
+    g_simpleos_hda_last_pcm_hash
+
+fn simpleos_hda_last_event() -> SimpleDeviceEvent:
+    SimpleDeviceEvent(
+        sequence: g_simpleos_hda_event_sequence,
+        monotonic_ns: g_simpleos_hda_event_monotonic_ns,
+        device_clock_frames: g_simpleos_hda_event_device_clock_frames,
+        device_id: g_simpleos_hda_bar0,
+        stream_id: g_simpleos_hda_stream_id,
+        correlation_id: g_simpleos_hda_event_correlation,
+        kind: g_simpleos_hda_event_kind,
+        status: g_simpleos_hda_event_status
+    )
+
 export SIMPLEOS_HDA_OK, SIMPLEOS_HDA_NO_DEVICE
 export SIMPLEOS_HDA_ENABLE_FAILED, SIMPLEOS_HDA_DMA_FAILED
 export SIMPLEOS_HDA_DMA_PREPARE_FAILED, SIMPLEOS_HDA_INIT_FAILED
 export SIMPLEOS_HDA_STREAM_FAILED, SIMPLEOS_HDA_IRQ_ROUTE_FAILED
+export SIMPLEOS_HDA_NOT_STARTED, SIMPLEOS_HDA_INVALID_PCM
 export simpleos_hda_start, simpleos_hda_stop, simpleos_hda_started
 export simpleos_hda_irq_count, simpleos_hda_period_count
 export simpleos_hda_stream_id
+export simpleos_hda_submit_pcm_i16, simpleos_hda_submission_count
+export simpleos_hda_submitted_frames, simpleos_hda_last_pcm_hash
+export simpleos_hda_last_event

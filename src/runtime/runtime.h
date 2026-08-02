@@ -858,6 +858,33 @@ int64_t  rt_audio_is_playing(int64_t playback_handle);
 int64_t  rt_audio_live_source_count(void);
 int64_t  rt_audio_live_playback_count(void);
 int64_t  rt_audio_live_device_count(void);
+const char* rt_audio_backend_name(void);
+int64_t  rt_audio_backend_is_real(void);
+
+int64_t rt_sdl3_available(void);
+int64_t rt_sdl3_init(void);
+void rt_sdl3_quit(void);
+int64_t rt_sdl3_create_window(const char* title, int64_t width, int64_t height);
+int64_t rt_sdl3_destroy_window(int64_t handle);
+int64_t rt_sdl3_live_window_count(void);
+int64_t rt_sdl3_normalize_event_type(uint32_t type);
+int64_t rt_sdl3_pop_event(void);
+int64_t rt_sdl3_event_window(void);
+int64_t rt_sdl3_event_sequence(void);
+int64_t rt_sdl3_event_timestamp_ns(void);
+int64_t rt_sdl3_event_key(void);
+int64_t rt_sdl3_event_scancode(void);
+int64_t rt_sdl3_event_action(void);
+int64_t rt_sdl3_event_modifiers(void);
+int64_t rt_sdl3_event_x_milli(void);
+int64_t rt_sdl3_event_y_milli(void);
+int64_t rt_sdl3_event_dx_milli(void);
+int64_t rt_sdl3_event_dy_milli(void);
+int64_t rt_sdl3_event_width(void);
+int64_t rt_sdl3_event_height(void);
+const char* rt_sdl3_event_text(void);
+const char* rt_sdl3_last_error(void);
+void rt_sdl3_unload(void);
 
 /* ===== Audio (SDL2 queued-device backend) ===== */
 

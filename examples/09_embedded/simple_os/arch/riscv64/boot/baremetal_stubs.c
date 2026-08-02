@@ -64,7 +64,9 @@ typedef struct {
     RuntimeValue payload;
 } RuntimeEnum;
 
-static unsigned char g_heap[64 * 1024] __attribute__((aligned(16)));
+/* Pure-Simple driver/service receipts and PCM staging outgrow the historical
+ * 64 KiB bootstrap heap. Keep a fixed, linker-accounted 1 MiB arena. */
+static unsigned char g_heap[1024 * 1024] __attribute__((aligned(16)));
 static uintptr_t g_heap_off = 0;
 static unsigned char g_virtq[8192] __attribute__((aligned(4096)));
 static unsigned char g_dma[1024] __attribute__((aligned(512)));
@@ -173,7 +175,7 @@ RuntimeValue spl_f64_to_bits(RuntimeValue val)
     return f64_to_bits(val);
 }
 
-RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue align)
+__attribute__((weak)) RuntimeValue rt_dma_alloc(RuntimeValue size, RuntimeValue align)
 {
     size_t bytes = (size_t)simpleos_raw_or_encoded_int(size);
     size_t alignment = (size_t)simpleos_raw_or_encoded_int(align);
@@ -309,7 +311,19 @@ static RuntimeValue rt_array_push_handle(RuntimeValue arr, RuntimeValue value)
     if (!IS_HEAP(arr)) return NIL_VALUE;
     RuntimeArray *a = (RuntimeArray *)DECODE_PTR(arr);
     if (!a || a->hdr.type != HEAP_ARRAY) return NIL_VALUE;
-    if (a->len >= a->cap) return arr;
+    if (a->len >= a->cap) {
+        uint64_t new_cap = a->cap ? a->cap * 2U : 16U;
+        /* Keep growth bounded by the 64 KiB freestanding bump heap. The
+         * array header remains stable while its item storage moves. */
+        if (new_cap > 4096U) return NIL_VALUE;
+        RuntimeValue *grown = (RuntimeValue *)rv_alloc((size_t)new_cap * sizeof(RuntimeValue));
+        if (!grown) return NIL_VALUE;
+        RuntimeValue *old_items = runtime_array_items(a);
+        for (uint64_t i = 0; i < a->len; i++) grown[i] = old_items[i];
+        for (uint64_t i = a->len; i < new_cap; i++) grown[i] = NIL_VALUE;
+        a->items = grown;
+        a->cap = new_cap;
+    }
     runtime_array_items(a)[a->len++] = value;
     return arr;
 }
@@ -1575,4 +1589,86 @@ RuntimeValue rt_string_new(RuntimeValue data, RuntimeValue len_val);
 RuntimeValue rt_string_new_literal(RuntimeValue data, RuntimeValue len_val)
 {
     return rt_string_new(data, len_val);
+}
+
+/* Pure-Simple driver ABI adapters. Hardware ownership remains in the shared
+ * driver modules; this capsule only exposes freestanding runtime primitives. */
+RuntimeValue rt_volatile_read_u16(RuntimeValue addr)
+{
+    return (RuntimeValue)(uint64_t)*(volatile uint16_t *)(uintptr_t)(uint64_t)addr;
+}
+
+RuntimeValue rt_volatile_read_u32(RuntimeValue addr)
+{
+    return (RuntimeValue)(uint64_t)*(volatile uint32_t *)(uintptr_t)(uint64_t)addr;
+}
+
+RuntimeValue rt_volatile_write_u8(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint8_t *)(uintptr_t)(uint64_t)addr = (uint8_t)(uint64_t)value;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_volatile_write_u16(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint16_t *)(uintptr_t)(uint64_t)addr = (uint16_t)(uint64_t)value;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_volatile_write_u32(RuntimeValue addr, RuntimeValue value)
+{
+    *(volatile uint32_t *)(uintptr_t)(uint64_t)addr = (uint32_t)(uint64_t)value;
+    return NIL_VALUE;
+}
+
+RuntimeValue rt_memory_barrier(void)
+{
+    __asm__ volatile("fence iorw, iorw" ::: "memory");
+    return NIL_VALUE;
+}
+
+void rt_eprintln_str(const uint8_t *ptr, uint64_t len)
+{
+    for (uint64_t i = 0; i < len; i++) serial_putchar((char)ptr[i]);
+    serial_puts("\r\n");
+}
+
+RuntimeValue rt_byte_array_new(RuntimeValue capacity)
+{
+    return rt_array_new(capacity);
+}
+
+RuntimeValue rt_typed_bytes_u8_push(RuntimeValue array, RuntimeValue value)
+{
+    return rt_array_push(array, ENCODE_INT(((uint64_t)value) & 0xFFU)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+RuntimeValue rt_typed_words_u32_push(RuntimeValue array, RuntimeValue value)
+{
+    return rt_array_push(array, ENCODE_INT(DECODE_INT(value) & 0xFFFFFFFFULL)) ? TRUE_VALUE : FALSE_VALUE;
+}
+
+int8_t rt_typed_words_u64_push(RuntimeValue array, int64_t value)
+{
+    return rt_array_push(array, ENCODE_INT(value)) ? 1 : 0;
+}
+
+RuntimeValue rt_raw_u64_to_string(RuntimeValue raw)
+{
+    uint64_t value = (uint64_t)raw;
+    char reversed[21];
+    uint32_t count = 0;
+    if (value == 0) return rt_string_new((RuntimeValue)(uintptr_t)"0", 1);
+    while (value > 0) {
+        reversed[count++] = (char)('0' + (value % 10U));
+        value /= 10U;
+    }
+    char text[21];
+    for (uint32_t i = 0; i < count; i++) text[i] = reversed[count - i - 1U];
+    return rt_string_new((RuntimeValue)(uintptr_t)text, (RuntimeValue)count);
+}
+
+int64_t rt_pool_safepoint(void)
+{
+    return 0;
 }
