@@ -47,6 +47,10 @@ capability.** Everyone downstream then reads it as the capability.
   re-derive this. In this host that map is
   `doc/07_guide/lib/database/sqlite_counterparts.md` plus the *In-Tree
   Counterpart Rule* section of `doc/glossary.md`.
+- Add the user-facing alias to `doc/00_llm_process/llm_wiki.md` when ordinary
+  terminology differs from the implementation name. In particular, “Simple
+  embedded DB” and “Simple SQLite” resolve to `PureDatabase` / `pure_sql`, not
+  to `sqlite_sffi` or `SdnDatabase`.
 
 ## Constraints
 

@@ -3,6 +3,31 @@
 ## Sub-Glossaries
 - [Simple Feature Module (SFM)](simple_feature_module_glossary.md) — `.sfm` feature-module format, layers, DI/AOP, security level, profiles, VERSION.md ([tldr](simple_feature_module_glossary_tldr.md)).
 - [SQLite counterparts in Simple](07_guide/lib/database/sqlite_counterparts.md) — which in-tree pure-Simple module replaces each piece of C SQLite, and which paths really are C-blocked.
+- [LLM repository wiki](00_llm_process/llm_wiki.md) — short canonical lookups for ambiguous repository terms before an LLM chooses an implementation.
+
+## Simple embedded DB / Simple SQLite
+
+These phrases mean the SQLite-compatible SQL engine rewritten in Simple:
+`std.database.pure_sql.PureDatabase`, implemented under
+`src/lib/nogc_sync_mut/database/pure_sql/`.
+
+They do **not** mean `app.io.sqlite_sffi` / `std.io.sqlite_sffi` (the C SQLite
+wrapper), and they do not mean `SdnDatabase` (the lower-level SDN row store).
+For new embedded SQL features, search `PureDatabase`, `pure_sql`, and
+`sqlite_counterparts` before selecting a persistence adapter.
+
+**Execution default:** use a cached SMF/LSM library or native executable for
+the database hot path even when its caller runs in interpreter mode. Directly
+interpreting PureDatabase is reserved for an explicitly selected slow
+diagnostic path. A configured artifact path is not evidence that the boundary
+is active; confirm the worker/library invocation.
+
+## PostgreSQL mimic
+
+The pure-Simple PostgreSQL-compatible session/query server surface at
+`std.database.postgres_mimic`, backed by `PureDatabase`. “Mimic” means bounded
+compatibility, not full PostgreSQL parity. Production uses a cached SMF/LSM or
+native artifact even when launched from interpreter mode.
 
 ## In-Tree Counterpart Rule
 **Before recording an "external port" blocker, search for the pure-Simple
@@ -929,3 +954,7 @@ naming both modules when a same-named type is registered twice. That converts
 this whole class from silent-and-downstream into immediate-and-obvious. Tracked
 as P5 in `doc/03_plan/ui/showcase_matrix_replan_2026-07-25.md`; struct-level
 precedent recorded in `.claude/memory/feedback_interp_struct_name_collision_global_registry.md`.
+**Compiled database carrier** — Cached SMF library or native executable that
+runs a pure-Simple database hot path. Interpreter-hosted applications should
+supervise this carrier instead of interpreting database operations; this does
+not mean a C SQLite SFFI wrapper.

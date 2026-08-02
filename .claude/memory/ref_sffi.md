@@ -6,6 +6,14 @@ type: reference
 
 ## Two Patterns
 
+## Native-counterpart gate
+
+Before choosing SFFI, search `doc/00_llm_process/llm_wiki.md`, `src/lib/**`, and
+`src/os/**` for a pure-Simple owner. In particular, “Simple embedded DB” and
+“Simple SQLite” mean `std.database.pure_sql.PureDatabase`; `sqlite_sffi` is only
+the C SQLite adapter. Prefer cached SMF/LSM or native database artifacts in
+production, even when the requesting command runs in interpreter mode.
+
 ### Runtime Pattern (built-ins)
 ```simple
 extern fn rt_file_read_text(path: text) -> text   # Raw FFI, rt_ prefix

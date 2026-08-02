@@ -38,6 +38,11 @@ engine. The C-amalgamation blocker applies only to the SFFI wrappers.
 
 - Guide (canonical map): [doc/07_guide/lib/database/sqlite_counterparts.md](../../../07_guide/lib/database/sqlite_counterparts.md)
 - Glossary: `doc/glossary.md` § *SQLite counterparts (pure-Simple SQL)* and § *In-Tree Counterpart Rule*
+- LLM aliases and deployment defaults: `doc/00_llm_process/llm_wiki.md`.
+- PostgreSQL-like session/query compatibility: `std.database.postgres_mimic`,
+  backed by `PureDatabase` without SFFI.
+- Production DB hot paths use cached SMF/LSM or native artifacts even when an
+  interpreter-mode tool launches them.
 - Ledger row: `database:` in `doc/08_tracking/os/production_status.sdn`
 - Source: `src/lib/nogc_sync_mut/database/`, `src/lib/nogc_async_mut/db/dbfs_engine/`, `src/os/port/sqlite/`
 

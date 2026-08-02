@@ -38,7 +38,17 @@ if [ -n "${native}" ]; then
   exec "${native}" "$@"
 fi
 
-if [ "${SIMPLE_CARET_ALLOW_SOURCE_FALLBACK:-0}" != "1" ]; then
+messaging_supervisor=0
+if [ "${1:-}" = "messaging" ]; then
+  # The messaging CLI is a thin supervisor. Database-bearing operations select
+  # their own freshness-checked native/SMF workers and fail closed when those
+  # artifacts cannot be built. Interpreting this control plane therefore never
+  # interprets the PureDatabase hot path.
+  messaging_supervisor=1
+fi
+
+if [ "${messaging_supervisor}" != "1" ] && \
+   [ "${SIMPLE_CARET_ALLOW_SOURCE_FALLBACK:-0}" != "1" ]; then
   {
     printf '%s\n' "error: cached native Caret artifact not found"
     printf '%s\n' "checked:"
@@ -70,5 +80,9 @@ done
 if [ -z "${runtime}" ]; then
   printf '%s\n' "error: source fallback requested but no Simple runtime found" >&2
   exit 127
+fi
+if [ "${messaging_supervisor}" = "1" ]; then
+  exec "${runtime}" run \
+    "${REPO_ROOT}/src/app/llm_caret/messaging/main.spl" "$@"
 fi
 exec "${runtime}" run "${REPO_ROOT}/src/app/llm_caret/main.spl" "$@"

@@ -4,6 +4,19 @@
 `PureDatabase`. You do not need the C SQLite amalgamation, and you cannot use it
 in-guest on SimpleOS.**
 
+For PostgreSQL-like server sessions over this engine, use
+`std.database.postgres_mimic`; see
+`doc/07_guide/lib/database/postgres_mimic_server.md`. Production database use
+defaults to cached SMF/LSM or native artifacts, including for interpreter-mode
+callers.
+
+This is a caller-independent policy: interpreter mode does not imply an
+interpreted database. Prefer the cached SMF/LSM library for embedded reuse or a
+cached native/SMF server executable for process isolation. Only an explicit
+diagnostic option may execute the PureDatabase hot path from source. Readiness
+metadata alone is insufficient evidence; production verification must observe
+the compiled carrier being invoked.
+
 This page exists because the C-SQLite blocker has repeatedly been mistaken for a
 SQL blocker. They are different things, and the in-tree counterparts are easy to
 miss.
