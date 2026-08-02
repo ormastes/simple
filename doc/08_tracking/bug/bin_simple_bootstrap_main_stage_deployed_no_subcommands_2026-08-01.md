@@ -196,3 +196,85 @@ banner and a size inside the canonical band.
 `test/02_integration/simple_launcher_dispatch_spec.spl` already covers in-process
 subcommand dispatch and would have caught this had it been run against the
 candidate before deploying.
+
+---
+
+## Follow-up 2026-08-02 — deploy-path audit (fail-open claim REFUTED) + identity gate added
+
+A bootstrap lane INFERRED that the mechanism behind a wrong artifact reaching
+`bin/simple` was a fail-open deploy: "when stage 3 fails, `--deploy` still
+deploys a stage 4 built by the Rust seed, and exits 2". That claim was tested.
+
+### Verdict: REFUTED (PROVED by runtime execution)
+
+A stage-3 failure sets `stage4_is_seed=1`, and the seed-fallback refusal
+(`error: full CLI build requires a verified pure-Simple stage2/stage3
+compiler; refusing seed fallback`) exits 2 **before** Stage 4 and **before** the
+deploy block. The guard is not new: it dates to `453a9f49357`
+(2026-07-14, `fix(bootstrap): gate pure-Simple full CLI promotion`), weeks
+before the incident.
+
+Runtime evidence, not static reading: the decision block and the deploy block
+were sed-extracted **verbatim** from the script (no retyping) and executed in a
+sandbox with `install` recorded and `bin/` redirected.
+
+| case | `stage3_ok` | exit | installs | `bin/release/*/simple` |
+|---|---|---|---|---|
+| A stage-3 failed | 0 | 2 | 0 | not created |
+| C stage-3 ok, self-hosted stage 4 | 1 | 0 | 3 | deployed |
+
+Case C is the live control proving the harness is non-vacuous: the same harness
+that refuses in A does deploy in C.
+
+Consequence: the trailing `if [ "${stage3_ok:-0}" -eq 0 ]` block at the end of
+the script was **unreachable dead code**, and its message ("Stage 4 used the
+Rust seed instead of the self-hosted compiler") described behaviour the script
+no longer had. Reading that stale message as live is what produced the false
+inference. It is now an invariant assertion with an accurate message; the
+exit-2 contract is unchanged.
+
+### Real gap found and closed: the deploy had NO identity check
+
+The deploy path's only pre-swap check was behavioural (`-c 'print(1+1)'`), and
+`scripts/check/cert/redeploy_gate/redeploy_gate.shs` is likewise purely
+behavioural. **The Rust seed passes both.** So nothing stopped a Rust-driver
+binary from being installed as `bin/simple` — exactly the failure class this
+bug records.
+
+Added an identity gate before the swap. Discriminator (PROVED to discriminate,
+measured on real binaries on this host):
+
+```
+strings -a <bin> | /usr/bin/grep -c "enum construction: unregistered enum"
+0 = Rust driver        2 = pure-Simple self-hosted
+```
+
+| binary | bytes | probe |
+|---|---|---|
+| `bin/release/x86_64-unknown-linux-gnu/simple` (live, 08-01 14:48) | 154,185,152 | 0 |
+| `bin/release/x86_64-unknown-linux-gnu/simple_seed` | 57,029,288 | 0 |
+| `build/native_probe/stage3-explicit/simple` | 22,300,688 | 2 |
+| `build/aggfix/x86_64-unknown-linux-gnu/simple` | 126,926,288 | 2 |
+
+The marker exists only in `.spl` compiler sources
+(`src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl:2540`), never
+in the Rust driver — that is why it discriminates. Note this re-confirms that
+**size is worthless as an identity signal**: the 154 MB binary was the Rust
+driver, a 22 MB one was self-hosted.
+
+### Proof the new gate fires (RED), with the behavioural probe forced to PASS
+
+Same verbatim-extraction harness, with `run_timeout` stubbed to always yield
+`2` so the behavioural smoke passes — modelling the documented fact that the
+seed passes it, and isolating the identity gate as the only discriminator:
+
+| case | stage 4 binary | exit | `simple` installed? |
+|---|---|---|---|
+| B | real Rust seed (probe 0) | **1 — refused** | **no** |
+| C | real self-hosted (probe 2) | 0 | yes |
+
+In case B the behavioural smoke passed and the identity gate was the only thing
+that caught it. Case C proves no false positive on a genuine self-hosted build.
+
+Scope note: this change touches only the deploy decision. Stage-3 compile
+behaviour is untouched (two other lanes were active there).

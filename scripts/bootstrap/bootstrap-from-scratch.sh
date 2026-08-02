@@ -1790,6 +1790,35 @@ if [ "${deploy}" -eq 1 ]; then
   install -m755 "${seed_src}" "${seed_delegate}"
   echo "Installed current seed delegate: ${seed_src} -> ${seed_delegate}"
 
+  # Identity gate: bin/simple MUST be the pure-Simple self-hosted compiler and
+  # never the Rust seed/driver (default tooling rule, .claude/rules/bootstrap.md).
+  # Behavioural probes cannot tell them apart: the seed passes -c 'print(1+1)',
+  # passes `test` 2-pass/1-fail, emits a .smf, and produces a running LLVM ELF.
+  # Size and banner have BOTH failed as identity signals — a 154,185,152-byte
+  # binary was the Rust driver while a 22,300,688-byte one was self-hosted.
+  # The discriminator is a diagnostic string that only the pure-Simple compiler
+  # sources carry into the emitted binary; it is absent from every Rust-driver
+  # build (see src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+  # and doc/08_tracking/bug/
+  # bin_simple_bootstrap_main_stage_deployed_no_subcommands_2026-08-01.md).
+  selfhost_identity_marker='enum construction: unregistered enum'
+  selfhost_identity_ok() {
+    [ -f "$1" ] || return 1
+    if command -v strings >/dev/null 2>&1; then
+      strings -a "$1" 2>/dev/null | grep -q "${selfhost_identity_marker}"
+    else
+      grep -a -q "${selfhost_identity_marker}" "$1" 2>/dev/null
+    fi
+  }
+  if ! selfhost_identity_ok "${full_bin}"; then
+    echo "ERROR: deploy refused — Stage 4 output is not the pure-Simple self-hosted compiler." >&2
+    echo "  candidate: ${full_bin}" >&2
+    echo "  identity probe found no self-hosted compiler marker (absent = Rust driver)." >&2
+    echo "  Refusing to install a Rust seed/driver as ${deploy_dir}/simple${exe_suffix}." >&2
+    exit 1
+  fi
+  echo "Identity gate: Stage 4 output verified pure-Simple self-hosted"
+
   deployed_bin="${deploy_dir}/simple${exe_suffix}"
   prev_bin="${deploy_dir}/simple${exe_suffix}.pre_deploy"
   [ -x "${deployed_bin}" ] && cp "${deployed_bin}" "${prev_bin}"
@@ -1842,11 +1871,18 @@ echo "Final binary: ${full_bin}"
 # Exit status — reflect self-host verification result
 # ===========================================================================
 
+# Invariant net. A stage-3 failure sets stage4_is_seed=1, which refuses the seed
+# fallback and exits 2 BEFORE Stage 4 and before any deploy, so reaching this
+# point with stage3_ok=0 is a control-flow regression, not a known limitation.
+# The message this block used to print ("Stage 4 used the Rust seed instead of
+# the self-hosted compiler") described behaviour the script no longer has, and
+# reading it as live was what led a lane to believe a failed self-host could
+# still deploy. Keep the exit-2 contract, but report it as the invariant break
+# it would be.
 if [ "${stage3_ok:-0}" -eq 0 ]; then
   echo ""
-  echo "WARNING: Bootstrap produced a binary but self-host verification (stage 3) failed."
-  echo "  The stage2 binary cannot yet recompile itself (LIM-010: LLVM symbol conflicts)."
-  echo "  Stage 4 used the Rust seed instead of the self-hosted compiler."
-  echo "  This is a known limitation — see doc/09_report/bootstrap_crash_report_2026_04_01.md"
+  echo "ERROR: internal invariant broken — reached completion with stage3_ok=0." >&2
+  echo "  A failed self-host must have exited at the seed-fallback refusal." >&2
+  echo "  Treat any binary deployed by this run as unverified." >&2
   exit 2
 fi
