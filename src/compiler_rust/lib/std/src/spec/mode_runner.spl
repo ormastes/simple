@@ -4,10 +4,32 @@
 use execution_mode.{ExecutionMode, ModeSet, mode_to_string, is_mode_available}
 use mode_config.{ModeConfig, FailureStrategy}
 
-# SFFI for runtime mode configuration
-extern fn runtime_set_jit_enabled(enabled: bool) -> ()
-extern fn runtime_set_backend(backend: text) -> ()
+# SFFI for runtime timing. `rt_current_time_ms` IS registered
+# (interpreter_extern/mod.rs), unlike the two externs that used to sit here.
 extern fn rt_current_time_ms() -> i64
+
+# There are deliberately NO `runtime_set_jit_enabled` / `runtime_set_backend`
+# externs any more. Both were declared here with live callers below and
+# registered in NO runtime. An unregistered extern only fails loudly on the
+# interpreter and the native/AOT lanes; on the default JIT lane it logs an
+# internal error, returns nil, keeps going and exits 0 -- so every call was a
+# silent no-op.
+#
+# They are not missing registrations. There is nothing correct to register them
+# TO: the execution engine is chosen ONCE per process, before any user code
+# runs.
+#
+#   * `SIMPLE_EXECUTION_MODE=interpreter|jit` is read at process start.
+#   * `simple test` ignores that variable entirely --
+#     `run_file_with_interpreter_mode` (driver/src/main.rs) saves it,
+#     unconditionally forces `interpret` for the whole run, then restores it.
+#   * `describe`/`it`/`expect` have no codegen lowering, so an in-process spec
+#     body cannot reach the JIT even inside a JIT process.
+#
+# Flipping a flag from inside a running program cannot change the engine that
+# is already executing that program. Multi-mode coverage requires ONE PROCESS
+# PER MODE. Anything else reports modes it did not run, which is strictly worse
+# than refusing -- so the helpers below now refuse.
 
 ## Test Result
 # Result of running a single test in a specific mode
@@ -80,27 +102,23 @@ impl ModeRunner:
 
     # Set execution mode for the runtime
     fn set_execution_mode(mode: ExecutionMode):
-        """Configure the runtime to execute in the specified mode.
+        """Refuse any in-process engine switch that cannot actually happen.
 
-        This sets the execution context so subsequent code runs
-        in the appropriate mode (interpreter, JIT, etc.).
+        This used to call `runtime_set_jit_enabled` / `runtime_set_backend`,
+        neither of which was registered in any runtime, so on the default JIT
+        lane every call was a silent no-op and the runner then reported a mode
+        it had not run. See the header comment: the engine is a per-process
+        choice and `simple test` forces the interpreter for the whole run.
+
+        Interpreter is the only mode this process can honestly claim, because
+        it is the mode `simple test` pins. Every other mode aborts loudly.
         """
         match mode:
             case ExecutionMode.Interpreter:
-                # Default mode - no special setup needed
+                # `simple test` already forced `interpret` for the whole run.
                 pass
-            case ExecutionMode.JIT:
-                # Enable JIT compilation for this execution
-                runtime_set_jit_enabled(true)
-            case ExecutionMode.SMF_Cranelift:
-                # Use Cranelift backend
-                runtime_set_backend("cranelift")
-            case ExecutionMode.SMF_LLVM:
-                # Use LLVM backend
-                runtime_set_backend("llvm")
             case _:
-                # Unknown mode - use interpreter
-                pass
+                panic("cannot switch execution mode to {mode_to_string(mode)} from inside a running process: the engine is fixed at process start and `simple test` pins the interpreter. Run one process per mode with SIMPLE_EXECUTION_MODE instead.")
 
     # Run a test function in all configured modes
     me run_test(test_name: text, test_fn: fn() -> ()) -> ModeExecutionResult:
@@ -217,17 +235,27 @@ impl ModeRunner:
 var _current_modes: ModeSet = ModeSet.all()
 
 fn run_in_modes(modes: ModeSet, block: fn() -> ()) -> ():
-    # Save previous mode configuration
-    val previous_modes = _current_modes
+    """Run `block` once per mode in `modes` -- or refuse if it cannot.
 
-    # Set mode configuration for nested tests
-    _current_modes = modes
+    It cannot. This helper NEVER switched the execution engine, on any run,
+    ever. Two independent reasons, both measured:
 
-    # Execute the block with the mode configuration
-    block()
+      1. Its body only assigned the module-level `_current_modes` and called
+         `block()` exactly ONCE. It never reached `ModeRunner.set_execution_mode`,
+         so it never even attempted the (unregistered) mode-switch externs.
+      2. Even had it reached them, the engine is fixed at process start -- see
+         the header comment at the top of this file.
 
-    # Restore previous mode configuration
-    _current_modes = previous_modes
+    So a caller that asked for three modes got ONE run of one engine and a
+    report naming three. That is the exact shape of a helper that manufactures
+    unearned multi-engine evidence, so it now aborts instead. Run one process
+    per mode with SIMPLE_EXECUTION_MODE, or drive `ModeRunner` per process.
+
+    `_current_modes` / `get_current_modes()` remain the honest part: they
+    record what was REQUESTED, not what ran.
+    """
+    val mode_count = modes.to_list().len()
+    panic("run_in_modes cannot switch execution mode in-process (requested {mode_count} mode(s)): the engine is fixed at process start and `simple test` pins the interpreter. It would run ONE engine and report {mode_count}. Run one process per mode with SIMPLE_EXECUTION_MODE instead.")
 
 ## Get current mode configuration
 fn get_current_modes() -> ModeSet:
