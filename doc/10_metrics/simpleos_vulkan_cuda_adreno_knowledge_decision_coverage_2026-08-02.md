@@ -2,8 +2,8 @@
 
 Date: 2026-08-02
 
-- Inventory: 56 production decisions / 112 branch outcomes.
-- Covered: 110 outcomes.
+- Inventory: 71 production decisions / 142 branch outcomes.
+- Covered: 140 outcomes.
 - Measured coverage: 98% (integer floor).
 - Gate: `test/02_integration/app/llm_process/simpleos_gpu_knowledge_decision_coverage_spec.spl`.
 - Result: 2/2 scenarios passed.

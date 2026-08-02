@@ -66,6 +66,14 @@ exactly one valid Venus capset and one nonzero `HOST_VISIBLE` region must exist.
 The resulting record may open the bounded controlq gate but is not a BAR grant,
 Vulkan ICD, or native execution receipt.
 
+The preceding raw PCI stage is `virtio_gpu_venus_pci_caps`. Its immutable
+snapshot separates configuration bytes, physical BAR apertures, and mapped BAR
+grants. Capability links are bounded to conventional config space, DWORD
+aligned, and cycle checked. Known records enforce minimum packed lengths;
+DEVICE_CFG offsets are 4-byte aligned; SHM low/high fields form checked 64-bit
+ranges; and both physical and mapped arithmetic must remain inside one
+nonzero-token grant. It never converts a physical address into a CPU address.
+
 ## Validation order
 
 1. validate IR and bounded dimensions;
@@ -108,6 +116,9 @@ class, or falls back while preserving device provenance.
 - Six environment-discovery scenarios cover offered/negotiated feature
   provenance, capset cardinality, exact Venus selection, host-visible SHM, and
   capset-query-fix admission; they are also provisional device-free evidence.
+- Nine PCI-snapshot scenarios cover invalid chains, cycles, truncation,
+  DEVICE_CFG alignment, 64-bit host-visible SHM, unique SHM IDs, checked BAR
+  containment, mapped-grant provenance, and preservation of the 2D-only path.
 - A later QEMU environment test must independently prove negotiated features,
   Venus capset/ICD identity, shared-memory mapping, real virtqueue submission,
   correlated fence completion, and device-origin readback. It is the only test

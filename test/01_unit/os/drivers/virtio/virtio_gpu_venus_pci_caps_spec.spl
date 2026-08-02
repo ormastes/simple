@@ -1,0 +1,255 @@
+# @req REQ-001 REQ-003 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/drivers/virtio/virtio_gpu_venus_pci_caps.spl 80%
+# @tag: unit, simpleos, virtio-gpu, venus, pci, capability-chain
+
+"""Pure tests for bounded virtio-pci capability and BAR-grant discovery.
+
+The fixture is a byte snapshot, never live PCI configuration or MMIO.  A BAR
+aperture remains physical evidence while a distinct kernel grant supplies the
+mapped CPU address; the parser must never confuse those address domains.
+"""
+
+use std.spec.*
+use os.drivers.virtio.virtio_gpu_venus_pci_caps.*
+
+fn zero_config(size: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < size:
+        out.push(0u8)
+        i = i + 1
+    out
+
+fn write_u32_le(bytes: [u8], offset: i64, value: u32):
+    bytes[offset] = (value & 0xFFu32).to_u8()
+    bytes[offset + 1] = ((value >> 8) & 0xFFu32).to_u8()
+    bytes[offset + 2] = ((value >> 16) & 0xFFu32).to_u8()
+    bytes[offset + 3] = ((value >> 24) & 0xFFu32).to_u8()
+
+fn write_cap_header(bytes: [u8], offset: i64, next: u8, cap_len: u8,
+        cfg_type: u8, bar: u8, id: u8):
+    bytes[offset] = 0x09u8
+    bytes[offset + 1] = next
+    bytes[offset + 2] = cap_len
+    bytes[offset + 3] = cfg_type
+    bytes[offset + 4] = bar
+    bytes[offset + 5] = id
+
+fn valid_config() -> [u8]:
+    var bytes = zero_config(256)
+
+    # COMMON_CFG at 0x40.
+    write_cap_header(bytes, 0x40, 0x50u8, 16u8, 1u8, 0u8, 0u8)
+    write_u32_le(bytes, 0x48, 0x1000u32)
+    write_u32_le(bytes, 0x4C, 0x100u32)
+
+    # NOTIFY_CFG at 0x50; its multiplier occupies bytes 16..19.
+    write_cap_header(bytes, 0x50, 0x64u8, 20u8, 2u8, 0u8, 0u8)
+    write_u32_le(bytes, 0x58, 0x2000u32)
+    write_u32_le(bytes, 0x5C, 0x100u32)
+    write_u32_le(bytes, 0x60, 4u32)
+
+    # DEVICE_CFG at 0x64.
+    write_cap_header(bytes, 0x64, 0x74u8, 16u8, 4u8, 0u8, 0u8)
+    write_u32_le(bytes, 0x6C, 0x3000u32)
+    write_u32_le(bytes, 0x70, 0x100u32)
+
+    # SHARED_MEMORY_CFG id 1 at 0x74, using BAR 4.
+    write_cap_header(bytes, 0x74, 0u8, 24u8, 8u8, 4u8, 1u8)
+    write_u32_le(bytes, 0x7C, 0x100000u32)
+    write_u32_le(bytes, 0x80, 0x200000u32)
+    write_u32_le(bytes, 0x84, 0u32)
+    write_u32_le(bytes, 0x88, 0u32)
+    bytes
+
+fn valid_apertures() -> [VirtioPciBarAperture]:
+    [VirtioPciBarAperture(bar: 0u8, memory: true,
+         physical_base: 0x10000000u64, byte_len: 0x10000u64),
+     VirtioPciBarAperture(bar: 4u8, memory: true,
+         physical_base: 0x20000000u64, byte_len: 0x400000u64)]
+
+fn valid_grants() -> [VirtioPciBarGrant]:
+    [VirtioPciBarGrant(bar: 0u8, physical_base: 0x10000000u64,
+         mapped_base: 0x40000000u64, byte_len: 0x10000u64,
+         cap_token: 11u64),
+     VirtioPciBarGrant(bar: 4u8, physical_base: 0x20000000u64,
+         mapped_base: 0x80000000u64, byte_len: 0x400000u64,
+         cap_token: 44u64)]
+
+fn snapshot(bytes: [u8], bars: [VirtioPciBarAperture],
+        grants: [VirtioPciBarGrant]) -> VirtioPciSnapshot:
+    VirtioPciSnapshot(config_bytes: bytes, first_cap: 0x40u8,
+        bars: bars, grants: grants)
+
+fn discover(bytes: [u8]) -> VirtioGpuPciSnapshotDiscovery:
+    virtio_gpu_parse_venus_pci_caps(snapshot(bytes, valid_apertures(),
+        valid_grants()))
+
+describe "VirtIO-GPU Venus raw PCI capability discovery":
+    it "maps valid DEVICE_CFG and HOST_VISIBLE SHM through explicit grants":
+        # @covers VP_CHAIN:true VP_CYCLE:true VP_TRUNCATED:true
+        # @covers VP_DEVICE_ROW:true VP_DEVICE_VALID:true
+        # @covers VP_SHM_ROW:true VP_SHM_VALID:true VP_DUP_SHM:true
+        # @covers VP_BAR_ROW:true VP_BAR_VALID:true
+        # @covers VP_GRANT_ROW:true VP_GRANT_VALID:true
+        # @covers VP_RANGE_ADD:true VP_APERTURE_CONTAIN:true VP_GRANT_CONTAIN:true
+        val result = discover(valid_config())
+        expect(result.two_d_ready).to_be(true)
+        expect(result.venus_ready).to_be(true)
+        expect(result.reason).to_equal("ready:venus-pci-caps")
+        expect(result.common_virt).to_equal(0x40001000u64)
+        expect(result.notify_virt).to_equal(0x40002000u64)
+        expect(result.notify_multiplier).to_equal(4u32)
+        expect(result.device_cfg_virt).to_equal(0x40003000u64)
+        expect(result.device_cfg_len).to_equal(0x100u64)
+        expect(result.host_visible_virt).to_equal(0x80100000u64)
+        expect(result.host_visible_len).to_equal(0x200000u64)
+        expect(result.host_visible_cap_token).to_equal(44u64)
+
+    it "rejects invalid capability pointers and cycles before decoding payloads":
+        # @covers VP_CHAIN:false VP_CYCLE:false
+        val unaligned = VirtioPciSnapshot(config_bytes: valid_config(),
+            first_cap: 0x41u8, bars: valid_apertures(), grants: valid_grants())
+        expect(virtio_gpu_parse_venus_pci_caps(unaligned).reason).to_equal(
+            "blocked:cap-chain-invalid")
+
+        val below_cap_space = VirtioPciSnapshot(config_bytes: valid_config(),
+            first_cap: 0x3Cu8, bars: valid_apertures(), grants: valid_grants())
+        expect(virtio_gpu_parse_venus_pci_caps(below_cap_space).reason).to_equal(
+            "blocked:cap-chain-invalid")
+
+        var cyclic = valid_config()
+        cyclic[0x41] = 0x40u8
+        expect(discover(cyclic).reason).to_equal("blocked:cap-cycle")
+
+    it "rejects truncated and undersized known capability records":
+        # @covers VP_TRUNCATED:false VP_DEVICE_VALID:false VP_SHM_VALID:false
+        var truncated = zero_config(0x48)
+        write_cap_header(truncated, 0x40, 0u8, 16u8, 4u8, 0u8, 0u8)
+        expect(discover(truncated).reason).to_equal("blocked:cap-truncated")
+
+        var short_device = valid_config()
+        short_device[0x66] = 15u8
+        expect(discover(short_device).reason).to_equal(
+            "blocked:device-cfg-malformed")
+
+        var short_shm = valid_config()
+        short_shm[0x76] = 23u8
+        expect(discover(short_shm).reason).to_equal(
+            "blocked:host-visible-shm-malformed")
+
+    it "ignores unknown vendor capability types without weakening admission":
+        var with_unknown = valid_config()
+        with_unknown[0x75] = 0x8Cu8
+        write_cap_header(with_unknown, 0x8C, 0u8, 16u8, 0x7Fu8,
+            5u8, 0u8)
+        val result = discover(with_unknown)
+        expect(result.venus_ready).to_be(true)
+        expect(result.reason).to_equal("ready:venus-pci-caps")
+
+    it "requires an aligned DEVICE_CFG window and one HOST_VISIBLE SHM row":
+        # @covers VP_DEVICE_ROW:false VP_SHM_ROW:false VP_DUP_SHM:false
+        var missing_device = valid_config()
+        missing_device[0x67] = 0x7Fu8
+        expect(discover(missing_device).reason).to_equal(
+            "blocked:device-cfg-missing")
+
+        var misaligned_device = valid_config()
+        write_u32_le(misaligned_device, 0x6C, 0x3002u32)
+        expect(discover(misaligned_device).reason).to_equal(
+            "blocked:device-cfg-malformed")
+
+        var missing_shm = valid_config()
+        missing_shm[0x79] = 2u8
+        expect(discover(missing_shm).reason).to_equal(
+            "blocked:host-visible-shm-missing")
+
+        var duplicate_shm = valid_config()
+        duplicate_shm[0x75] = 0x8Cu8
+        write_cap_header(duplicate_shm, 0x8C, 0u8, 24u8, 8u8, 4u8, 1u8)
+        write_u32_le(duplicate_shm, 0x94, 0x100000u32)
+        write_u32_le(duplicate_shm, 0x98, 0x1000u32)
+        expect(discover(duplicate_shm).reason).to_equal(
+            "blocked:duplicate-shm-id")
+
+    it "fails closed for missing or invalid BAR apertures":
+        # @covers VP_BAR_ROW:false VP_BAR_VALID:false
+        val no_bar4 = snapshot(valid_config(),
+            [VirtioPciBarAperture(bar: 0u8, memory: true,
+                physical_base: 0x10000000u64, byte_len: 0x10000u64)],
+            valid_grants())
+        expect(virtio_gpu_parse_venus_pci_caps(no_bar4).reason).to_equal(
+            "blocked:bar-aperture-missing")
+
+        val io_bar4 = snapshot(valid_config(),
+            [VirtioPciBarAperture(bar: 0u8, memory: true,
+                 physical_base: 0x10000000u64, byte_len: 0x10000u64),
+             VirtioPciBarAperture(bar: 4u8, memory: false,
+                 physical_base: 0x20000000u64, byte_len: 0x400000u64)],
+            valid_grants())
+        expect(virtio_gpu_parse_venus_pci_caps(io_bar4).reason).to_equal(
+            "blocked:bar-aperture-invalid")
+
+    it "requires a matching nonzero kernel mapping grant":
+        # @covers VP_GRANT_ROW:false VP_GRANT_VALID:false
+        val missing = snapshot(valid_config(), valid_apertures(),
+            [valid_grants()[0]])
+        expect(virtio_gpu_parse_venus_pci_caps(missing).reason).to_equal(
+            "blocked:bar-grant-missing")
+
+        val wrong_physical = snapshot(valid_config(), valid_apertures(),
+            [valid_grants()[0],
+             VirtioPciBarGrant(bar: 4u8, physical_base: 0x21000000u64,
+                 mapped_base: 0x80000000u64, byte_len: 0x400000u64,
+                 cap_token: 44u64)])
+        expect(virtio_gpu_parse_venus_pci_caps(wrong_physical).reason).to_equal(
+            "blocked:bar-grant-invalid")
+
+        val tokenless = snapshot(valid_config(), valid_apertures(),
+            [valid_grants()[0],
+             VirtioPciBarGrant(bar: 4u8, physical_base: 0x20000000u64,
+                 mapped_base: 0x80000000u64, byte_len: 0x400000u64,
+                 cap_token: 0u64)])
+        expect(virtio_gpu_parse_venus_pci_caps(tokenless).reason).to_equal(
+            "blocked:bar-grant-invalid")
+
+    it "uses checked addition and contains every window in aperture and grant":
+        # @covers VP_RANGE_ADD:false VP_APERTURE_CONTAIN:false
+        # @covers VP_GRANT_CONTAIN:false
+        var overflowing = valid_config()
+        write_u32_le(overflowing, 0x7C, 0xFFFFFFF0u32)
+        write_u32_le(overflowing, 0x84, 0xFFFFFFFFu32)
+        write_u32_le(overflowing, 0x80, 0x20u32)
+        expect(discover(overflowing).reason).to_equal("blocked:range-overflow")
+
+        var outside_aperture = valid_config()
+        write_u32_le(outside_aperture, 0x7C, 0x3FFF80u32)
+        write_u32_le(outside_aperture, 0x80, 0x100u32)
+        expect(discover(outside_aperture).reason).to_equal(
+            "blocked:range-outside-aperture")
+
+        val short_grant = snapshot(valid_config(), valid_apertures(),
+            [valid_grants()[0],
+             VirtioPciBarGrant(bar: 4u8, physical_base: 0x20000000u64,
+                 mapped_base: 0x80000000u64, byte_len: 0x200000u64,
+                 cap_token: 44u64)])
+        expect(virtio_gpu_parse_venus_pci_caps(short_grant).reason).to_equal(
+            "blocked:range-outside-grant")
+
+    it "preserves 2D readiness without falsely promoting Venus":
+        var common_notify_only = valid_config()
+        common_notify_only[0x51] = 0u8
+        val result = discover(common_notify_only)
+        expect(result.two_d_ready).to_be(true)
+        expect(result.venus_ready).to_be(false)
+        expect(result.reason).to_equal("blocked:device-cfg-missing")
+
+        var venus_without_common_notify = valid_config()
+        venus_without_common_notify[0x40] = 0u8
+        val missing_controlq = VirtioPciSnapshot(
+            config_bytes: venus_without_common_notify, first_cap: 0x64u8,
+            bars: valid_apertures(), grants: valid_grants())
+        val blocked = virtio_gpu_parse_venus_pci_caps(missing_controlq)
+        expect(blocked.two_d_ready).to_be(false)
+        expect(blocked.venus_ready).to_be(false)
+        expect(blocked.reason).to_equal("blocked:controlq-caps-missing")

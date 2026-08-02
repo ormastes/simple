@@ -15,7 +15,7 @@
   provisional because docgen was bootstrap-seed-built
 - Runtime integration: canonical QEMU guest probe constructs `ProcessingIr` and
   routes CUDA/Vulkan through `ProcessingDevicePort`; Vulkan adapter unit 3/3
-- Coverage: tracked decision inventory 110/112 outcomes = 98%, gate 2/2; two
+- Coverage: tracked decision inventory 140/142 outcomes = 98%, gate 2/2; two
   valid-submission outcomes remain assigned to live MMIO evidence
 - Venus transport slice: protocol admission 4/4, exact binary encoding and
   typed response/fence validation 8/8, bounded controlq admission 4/4. Native
@@ -31,3 +31,9 @@
   negotiated features, capset cardinality, the Venus capset row, PCI
   host-visible SHM, and capset-query-fix semantics. The current driver still
   cannot populate an admitted observation from hardware.
+- Venus PCI snapshot parser: 9/9 parent-reviewed scenarios validate bounded
+  capability traversal, cycles/truncation, DEVICE_CFG, 64-bit SHM, distinct
+  physical/mapped address domains, checked containment, unique SHM IDs, and
+  explicit BAR mapping grants while preserving common+notify-only 2D readiness.
+- Tracked live-integration blocker:
+  `doc/08_tracking/bug/virtio_map_bar_capability_authority_2026-08-02.md`.

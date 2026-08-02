@@ -23,7 +23,9 @@ Date: 2026-08-02
   unexpectedly fenced responses. They do not prove a live control queue.
 - Bounded Venus controlq admission/source-boundary scenarios: 4/4 provisional.
 - Typed Venus environment discovery scenarios: 6/6 provisional.
-- Decision-inventory coverage: 110/112 outcomes, 98%, gate 2/2.
+- Venus PCI snapshot/grant parser scenarios: 9/9 provisional after fixing
+  physical-aperture/grant provenance validation.
+- Decision-inventory coverage: 140/142 outcomes, 98%, gate 2/2.
 - QEMU generated manual: complete, 116 lines, 0 stubs, 0 warnings.
 - UNO Q generated manual: complete, 125 lines, 0 stubs, 0 warnings.
 - Direct-env working/staged guards: pass.
@@ -66,7 +68,7 @@ Expected receipt:
   pure-Simple release docgen gate.
 - Runtime instrumentation still emits no attributable counters. NFR-003 is
   instead proven for new owned decisions by the fail-closed tracked decision
-  inventory: 110/112 outcomes (98%). The two uncovered live-MMIO outcomes are
+  inventory: 140/142 outcomes (98%). The two uncovered live-MMIO outcomes are
   explicit and cannot be promoted by adding marker-only witnesses.
 - Staged variants of git-oriented guards are incompatible with this jj-only
   workspace (`git diff --cached`); their working variants passed.

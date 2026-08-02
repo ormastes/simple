@@ -10,11 +10,14 @@ Venus or approved VFIO guest receipt exists.
 
 The host-independent direct-guest foundation now lives in
 `virtio_gpu_venus_protocol.spl`, `virtio_gpu_venus_environment.spl`, and
-`virtio_gpu_venus_controlq.spl`. Device-free tests prove exact little-endian
+`virtio_gpu_venus_controlq.spl`, plus the raw snapshot parser
+`virtio_gpu_venus_pci_caps.spl`. Device-free tests prove exact little-endian
 commands, response/fence rejection, separated feature/capset/SHM discovery,
 and bounded controlq admission. These are structural prerequisites only. The
-current GPU driver still negotiates no Venus feature bits and lacks safe
-DEVICE_CFG/SHM capability discovery, an authorized non-BAR0 mapping, a guest
+snapshot parser rejects unsafe physical/mapped address conflation, but the
+current kernel ABI still grants only BAR0 and syscall 83 is not bound to the
+requested BDF/BAR/token. The live GPU driver therefore still negotiates no
+Venus feature bits and lacks an authorized non-BAR0 mapping, a guest
 Venus ICD, and device-origin readback, so the direct row remains blocked.
 
 UNO Q promotion is owned by

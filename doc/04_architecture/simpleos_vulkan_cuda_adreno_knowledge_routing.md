@@ -10,6 +10,7 @@ GPU session
 │   ├── QemuVulkanHostAdapter        typed host-offload evidence
 │   ├── VirtioGpuVenusProtocol       exact LE wire codec + typed validation
 │   │   ├── VenusEnvironment         separated discovery/admission evidence
+│   │   ├── VenusPciCaps             bounded snapshot + BAR grant parser
 │   │   ├── VenusControlq            bounded transport seam
 │   │   └── VirtioGpuVenusAdapter    future direct guest-native evidence
 │   └── AdrenoTurnipAdapter          UNO Q staged native adapter
@@ -102,6 +103,14 @@ the required feature mask is both offered and negotiated. This pure admission
 does not authorize physical BAR access: the live PCI owner must still validate
 capability lengths and cycles, use checked BAR arithmetic, and obtain a kernel
 grant covering the discovered region.
+
+`virtio_gpu_venus_pci_caps` parses an immutable conventional PCI capability
+snapshot with a bounded, aligned, cycle-detecting traversal. DEVICE_CFG and
+64-bit SHM ranges are checked against separate physical BAR apertures and
+kernel-authorized mapped grants before a CPU virtual address is returned.
+Unknown capability types remain ignorable; duplicate SHM IDs, truncated known
+records, arithmetic wrap, aperture escape, and grant escape fail closed. The
+parser preserves common+notify-only 2D readiness without promoting Venus.
 
 Promotion to `VirtioGpuVenusAdapter` remains blocked on all of the following:
 
