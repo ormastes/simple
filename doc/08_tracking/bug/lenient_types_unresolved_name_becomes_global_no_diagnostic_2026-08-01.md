@@ -800,6 +800,62 @@ the exact false-clear/false-alarm pair this campaign keeps hitting:
 Restoring the intended nesting is a semantic port, not a rename, and each site
 needs its Rust original consulted — hence not fixed here.
 
+#### RESOLVED `3473612bd37` — and the severity above is partly WRONG
+
+Re-derived count: **36 `if` sites in 9 files** (not 29 in 8). The delta is
+entirely `recovery.spl` (14, not 8) plus `cycle_detector.spl:191`, which the
+first scan missed. One further hit, `exhaustiveness_validator.spl:357`, is a
+**false positive**: its body is a `"""…"""` string in value position, i.e. the
+docstring trap again, in the opposite direction — stripping docstrings before
+the emptiness test turns a legitimate string-valued body into a phantom hit.
+Seven `case` arms are also body-less and all seven are deliberate no-ops
+(`module_loader.spl` documents its two as fall-throughs). No empty `while`,
+`for`, `else`, or `elif` body exists anywhere in `src/`.
+
+**The stated behaviour was never measured, and it is not what happens.** PROVED
+by probe on the seed engine, with a sabotage arm that discriminates all three
+shapes:
+
+| shape | behaviour |
+|---|---|
+| empty `if`, **1** following statement | statement is **absorbed as the body** — accidentally CORRECT |
+| empty `if`, **n** following statements | statement 1 absorbed; **2..n run unconditionally** |
+| empty `if` in **value position** | yields nil on the (outer-true, inner-false) path; following `elif`/`else` arms are **dead** |
+
+So `capability_tracker.spl` did **not** report every instruction as supported.
+Hand-computed 1-of-4 cranelift / 2-of-4 llvm inputs returned 25 / 50 both before
+and after the fix. Likewise `effects.spl:117` is single-statement and was already
+equivalent to the conjunction. Both were re-nested as hardening only.
+
+The genuinely wrong sites were:
+
+| site | wrong because | behaviour change |
+|---|---|---|
+| `resolution.spl:134` | value position | `resolve(file, !dir)` returned nil, not `Unique(File)`; `elif file_exists` was dead. **PROVED** (probe returned `0`) |
+| `serialize.spl:154` | value position | `trim_quotes` returned nil for any unquoted string of length ≥ 2 |
+| `effects.spl:355` | value position | `needs_await` returned nil, not `AwaitMode.None`, for a known sync callee |
+| `barriers.spl:200` | value position | Generational arm returned nil when target is GC and source is not |
+| `text_diff.spl:60,65` | 3 and 2 statements | LCS backtrack decremented `i`/`j` regardless of whether the lines matched |
+| `resolution.spl:153` | 3 statements | `__init__.spl` skip did not skip the check it guards |
+
+**The fix is condition merging, not re-indentation.** The Rust originals show the
+porter flattened a single conjunction (`current.lexeme == "def" && matches!(…)`,
+`i > 0 && j > 0 && old[i-1] == new[j-1]`) into nested `if`s. Naive re-indentation
+of the `text_diff` backtrack would have made it **loop forever** rather than
+return a wrong answer — a nesting restoration done by shape alone is a hazard.
+
+Left unfixed for want of provable intent: the unresolved names themselves
+(`has_current_lines`, `effect_value_is_async`, `callee_effect_value`, …) stay
+loud; `macro_contracts.spl`'s `inject` arm carries a TODO because the Rust
+original populates `inject_labels`/`injections` and the Simple port rebuilds
+`result` from itself, so nesting alone cannot restore the data flow.
+
+Not verified: the **pure-Simple** parser's recovery. Both `bin/simple` and
+`bin/release/x86_64-unknown-linux-gnu/simple` are the Rust seed (enum-probe = 0),
+so every runtime claim above is seed-engine evidence. If the self-hosted parser
+does not absorb the first statement, the 32 "accidentally correct" sites were
+broken there too — which is a further argument for the merge that landed.
+
 ## Follow-ups (not done here)
 
 - `Expr::Identifier` has no span, so attribution is function-granular. Giving
@@ -810,9 +866,11 @@ needs its Rust original consulted — hence not fixed here.
   census from **395** to **353** (measured at `e4b4561c803`). What remains of the
   family is the residue listed under "left loud" below — overwhelmingly *real
   missing methods*, not spellings.
-- Fix the 29 empty-body `if`/`while` sites (section above). This is the highest
-  severity item left in this document: it is a silent control-flow corruption,
-  and no census can see it.
+- ~~Fix the 29 empty-body `if`/`while` sites~~ — DONE in `3473612bd37`; the
+  re-derived figure was 36 sites in 9 files and the severity was overstated (see
+  "RESOLVED" above). Still open from that work: the `macro_contracts.spl`
+  `inject` arm is an incomplete port (TODO in place), and the pure-Simple
+  parser's empty-block recovery is unverified.
 - Provide the missing `std.random_utils` module, or port `fuzz.spl` onto an
   existing RNG (see "left loud" below).
 - Restore the impl blocks the porter emptied: `NumericType`, `FragmentKind`,
