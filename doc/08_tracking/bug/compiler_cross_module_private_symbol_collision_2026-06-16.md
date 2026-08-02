@@ -136,3 +136,111 @@ flattening and is a separate follow-up.
 Related: `rt_extern_registration_and_jit_cross_module_gap` (imported class methods →
 NULL-GOT). This is the private-function analogue and corrupts even the interpreter,
 so it is not caught by the existing JIT first-unresolved-import guard.
+
+## Same-signature collision resolution — batch 1, crypto/TLS stack (2026-08-02)
+
+Base sha `aa6119dd768098aa0bb5b7b335f82f101c2e98ca`. Binary: Rust driver built from
+that sha (enum-probe = 0), because the same-signature arm of the diagnostic lives in
+`src/compiler_rust/compiler/src/pipeline/module_loader.rs` and the deployed
+`bin/release/x86_64-unknown-linux-gnu/simple` does not contain it (`strings | grep -c
+"SAME signature"` = 0). PROVED.
+
+### Diagnostic control (PROVED)
+Two-module fixture (`ca.spl`/`cb.spl` each `fn who() -> text`, third file importing
+both) fires the warning and prints `A` — first-import-wins, matching the corrected
+policy table in the loader doc comment. The control is therefore verified PRESENT
+before any "no longer warned" claim below.
+
+### Runner stack is clean (PROVED)
+A 3-example spec importing only `std.spec.{describe, it, expect}` produces ZERO
+same-signature warnings. The collisions are NOT in the runner stack; they are in the
+subject modules a spec pulls in. This contradicts the "every spec pulls in the runner
+stack" framing of the 313 figure — that count came from a spec with a much wider
+subject surface, not from the runner.
+
+### Static census, before/after exclusions (PROVED)
+Over `src/**/*.spl`, excluding `build/`, `.claude/`, `vendor/`:
+
+| stage | count |
+|---|---|
+| files enumerated | 13,790 |
+| after byte-identical duplicate-content exclusion | 13,160 (−630) |
+| bodyless `extern fn` headers excluded | 9,314 |
+| top-level `fn` declarations remaining | 82,178 |
+| names declared in >= 2 distinct files | 7,883 |
+| declaration sites participating in a collision | 21,765 |
+
+This is a gross upper bound: it does not model co-compilation. `main` alone accounts
+for 565 sites and is almost never co-compiled. INFERRED that the live figure is one
+to two orders of magnitude smaller; see the measured numbers below.
+
+### Live enumeration, TLS 1.3 / crypto cluster (PROVED)
+`SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1 simple run
+test/01_unit/os/tls13/server_accept_spec.spl` reported 10 distinct same-signature
+collisions: `_append_bytes`, `_clamp_scalar`, `_copy_prefix`, `_curve_debug`,
+`_rotl32`, `_u32_mask`, `_u8_at`, `_zeros_48`, `msg_schedule1`, `msg_schedule2`.
+
+Two of these are NOT benign duplicates:
+
+- **`msg_schedule1` / `msg_schedule2`** (PUBLIC, `(i64)->i64`): `sha256.spl` computes
+  the SHA-256 message schedule inline with a 32-bit mask; `sha256_core.spl` delegates
+  to `sha256_little_sigma0`. Different bodies, identical signature. The MIR-opt crypto
+  pattern recogniser
+  (`src/compiler/60.mir_opt/mir_opt/pattern/rules_crypto.spl:44-45`) keys on the
+  fully-qualified `std.common.crypto.sha256.msg_schedule1`, i.e. it expects the
+  `sha256.spl` body to be the one that runs — which first-import-wins does not
+  guarantee.
+- **`_clamp_scalar`** (`([u8])->[u8]`): `curve25519.spl` and
+  `curve25519_smalllimb.spl` implement RFC 7748 scalar clamping by different means.
+  Which X25519 clamp runs was decided by import order.
+
+`_u8_at` is the worst of the family: 34 definitions, **6 semantically distinct
+bodies**, and **91 files that call it without defining it** and therefore depend
+entirely on the hijack. The only OOB-tolerant variant (`src/os/tls13/server.spl`,
+returns `0u8` past the end) has **zero in-file call sites**, so if it won the race it
+silently substituted zero for an out-of-range byte read anywhere in the crypto stack.
+
+### Dispositions applied
+- **Renamed to module-unique names** (disposition b — distinct implementations that
+  must not share a name), 24 definitions of `_append_bytes` plus the one non-defining
+  caller (`src/os/tls13/_Tls13/handshake.spl`, re-pointed at `_rec13_append_bytes`).
+  `_append_bytes` now has **0** remaining definitions and **0** remaining calls under
+  the bare name.
+- **Renamed** `_clamp_scalar`, `_curve_debug` (curve25519_smalllimb), `_rotl32`
+  (random/scrypt/serpent/zuc/lib chacha20), `_u32_mask` (random/sha256/lib chacha20),
+  `_zeros_48`, `_copy_prefix` (tls13 key_schedule/transcript), `msg_schedule1/2`
+  (sha256_core), `_u8_at` (tls13 server).
+- **Left alone, deliberately**: the 33 remaining `_u8_at` definitions. They cannot be
+  renamed piecemeal — 91 non-defining callers resolve through the bare name today, so
+  renaming them would convert a silent wrong answer into a build break across the
+  whole crypto stack. The correct fix is one canonical shared byte accessor that all
+  of them import. Filed as follow-up, NOT a triage question to be reopened.
+
+### Reroute-behaviour verification (PROVED)
+Every renamed helper except `_append_bytes` had **all** of its callers inside its own
+defining file (checked by definer-set vs caller-set difference), so those renames
+cannot reroute anything. For the one genuine re-point,
+`_Tls13/handshake.spl` previously resolved `_append_bytes` through first-import-wins
+among `record13`/`handshake13`/`_Tls13/context_io` — all three bodies were read and
+concatenate `a` then `b` identically, so `_rec13_append_bytes` preserves behaviour
+(body equivalence PROVED by reading; the identity of the previous winner is
+INFERRED).
+
+Two worktrees at the same base sha, 16-spec crypto/TLS verification set:
+
+| | BASE | after renames |
+|---|---|---|
+| failing example NAME set | 3 | 3, `diff` clean |
+| per-spec exit codes | — | identical |
+| live same-signature collisions | 50 | **25** |
+
+`server_accept_spec` alone went 10 -> 1. The three failures are pre-existing at the
+base sha and are unrelated (CertificateVerify signing path).
+
+### Not done in this lane
+The warning was NOT promoted to fatal (out of scope, and the measured runtime figure
+bounds the interpreter path only).
+
+`simple test` binds the child's stderr into a value via `process_run_bounded`, so a
+spec's own collision warnings never surface under `test`. All enumeration above was
+done with `simple run` for that reason. Mechanism INFERRED, invisibility PROVED.

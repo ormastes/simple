@@ -73,7 +73,7 @@ fn _u8_to_text(bytes: [u8]) -> text:
     out
 
 # Append all bytes from `src` into `dst` and return the new array.
-fn _append_bytes(dst: [u8], src: [u8]) -> [u8]:
+fn _hpack_enc_append_bytes(dst: [u8], src: [u8]) -> [u8]:
     var result = dst
     var i: i64 = 0
     while i < src.len():
@@ -88,16 +88,16 @@ fn _encode_string(payload_text: text, huffman_enabled: bool) -> [u8]:
     val payload_raw = _text_to_u8(payload_text)
     if not huffman_enabled:
         val header = encode_prefix_int(payload_raw.len(), 7, 0x00u8)
-        return _append_bytes(header, payload_raw)
+        return _hpack_enc_append_bytes(header, payload_raw)
     # Try Huffman
     val payload_huff = hpack_huffman_encode(payload_raw)
     if payload_huff.len() <= payload_raw.len():
         # Huffman is shorter: emit H=1
         val header = encode_prefix_int(payload_huff.len(), 7, 0x80u8)
-        return _append_bytes(header, payload_huff)
+        return _hpack_enc_append_bytes(header, payload_huff)
     # Raw is shorter or equal: emit H=0
     val header = encode_prefix_int(payload_raw.len(), 7, 0x00u8)
-    _append_bytes(header, payload_raw)
+    _hpack_enc_append_bytes(header, payload_raw)
 
 # Unified HPACK index lookup: searches static table first (lower indices win),
 # then dynamic table.
@@ -142,13 +142,13 @@ fn _encode_one(h: HpackHeader, state: HpackEncoderState) -> ([u8], HpackEncoderS
         if idx > 0:
             # Name already in a table — reference by index
             val prefix_byte = encode_prefix_int(idx, 4, 0x10u8)
-            out = _append_bytes(out, prefix_byte)
+            out = _hpack_enc_append_bytes(out, prefix_byte)
         else:
             # Literal name
             val prefix_byte: [u8] = [0x10u8]
-            out = _append_bytes(out, prefix_byte)
-            out = _append_bytes(out, _encode_string(h.name, huff))
-        out = _append_bytes(out, _encode_string(h.value, huff))
+            out = _hpack_enc_append_bytes(out, prefix_byte)
+            out = _hpack_enc_append_bytes(out, _encode_string(h.name, huff))
+        out = _hpack_enc_append_bytes(out, _encode_string(h.value, huff))
         # Never insert into dynamic table (§6.2.3)
         return (out, state)
 
@@ -165,8 +165,8 @@ fn _encode_one(h: HpackHeader, state: HpackEncoderState) -> ([u8], HpackEncoderS
         # §6.2.1 Literal w/ Incremental Indexing, name index
         var out: [u8] = []
         val prefix_byte = encode_prefix_int(idx, 6, 0x40u8)
-        out = _append_bytes(out, prefix_byte)
-        out = _append_bytes(out, _encode_string(h.value, huff))
+        out = _hpack_enc_append_bytes(out, prefix_byte)
+        out = _hpack_enc_append_bytes(out, _encode_string(h.value, huff))
         val new_table = dynamic_table_insert(state.table, h.name, h.value)
         val new_state = HpackEncoderState(table: new_table, huffman: huff)
         return (out, new_state)
@@ -174,9 +174,9 @@ fn _encode_one(h: HpackHeader, state: HpackEncoderState) -> ([u8], HpackEncoderS
     # §6.2.1 Literal w/ Incremental Indexing, literal name (index 0)
     var out: [u8] = []
     val prefix_byte: [u8] = [0x40u8]
-    out = _append_bytes(out, prefix_byte)
-    out = _append_bytes(out, _encode_string(h.name, huff))
-    out = _append_bytes(out, _encode_string(h.value, huff))
+    out = _hpack_enc_append_bytes(out, prefix_byte)
+    out = _hpack_enc_append_bytes(out, _encode_string(h.name, huff))
+    out = _hpack_enc_append_bytes(out, _encode_string(h.value, huff))
     val new_table = dynamic_table_insert(state.table, h.name, h.value)
     val new_state = HpackEncoderState(table: new_table, huffman: huff)
     (out, new_state)
@@ -193,7 +193,7 @@ fn hpack_encode(headers: [HpackHeader], state: HpackEncoderState) -> ([u8], Hpac
     while i < headers.len():
         val h = headers[i]
         val result = _encode_one(h, cur_state)
-        out = _append_bytes(out, result.0)
+        out = _hpack_enc_append_bytes(out, result.0)
         cur_state = result.1
         i = i + 1
     (out, cur_state)
