@@ -35,6 +35,31 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
 6. Deploy only that verified binary, record its path and hash, and update this
    document with the retained logs and evidence.
 
+## Exact fresh-candidate verification and deployment
+
+The smoke accepts the candidate as its sole positional argument:
+
+```bash
+sh scripts/check/check-bootstrap-essential-tools-smoke.shs /absolute/path/to/stage4/simple
+```
+
+The bootstrap-equivalent form is
+`SIMPLE_BINARY=/absolute/path/to/stage4/simple sh scripts/check/check-bootstrap-essential-tools-smoke.shs`.
+Do not pass both forms with different paths. Require all four markers:
+`essential_test_runner_smoke=true`, `essential_lint_smoke=true`,
+`essential_duplicate_checker_smoke=true`, and
+`bootstrap_essential_tools_smoke=true`. The script also rejects Rust-seed and
+debug identities before running tool probes.
+
+The canonical build/deploy command is
+`sh scripts/bootstrap/bootstrap-from-scratch.sh --full-cli --deploy`; it runs
+candidate sanity, redeploy gate, essential-tools smoke, and provenance checks
+before installation. Deployment copies the previous release binary to
+`bin/release/<platform>/simple.pre_deploy`, installs the candidate, and restores
+that backup automatically if the post-swap `-c 'print(1+1)'` smoke fails. On a
+later manual rollback, restore that `.pre_deploy` file only if it still exists
+and passes the same smoke; the successful deploy path intentionally deletes it.
+
 ## Performance evidence
 
 - Stage 4 remains effectively single-core during frontend/HIR work.
