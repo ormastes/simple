@@ -183,3 +183,20 @@ The package-surface regression now constructs and pattern-matches the three
 observed `MirInstKind` variants solely through `compiler.mir_opt`. Its seed test
 selection broadened into an unrelated failing MIR-opt suite, so that attempt is
 non-evidence; the next no-stub Stage 4 build is authoritative.
+
+## Canonical MIR optimizer boundary
+
+Cycle 2 passed the optimizer initializer but reproduced the same aliases at
+`target_family.spl`, proving that expanding the convenience export only moved
+the failure. The pure-Simple package resolver rematerializes imported enum
+surfaces in sibling children; the cross-layer `MirInstKind` re-export therefore
+pulled its GPU/VHDL payload closure into every optimizer module and attributed
+failures to the current child.
+
+No pre-existing production or test consumer imports MIR base types through
+`compiler.mir_opt`. The unused convenience re-export is removed completely:
+optimizer APIs remain owned by `compiler.mir_opt`, and MIR types are imported
+from canonical `compiler.mir`. The regression keeps its target-family behavior
+through the optimizer facade while constructing the three variants through the
+MIR facade; its bounded seed diagnostic passed 3/3. A refreshed Stage 3 and the
+final no-stub Stage 4 cycle remain authoritative.
