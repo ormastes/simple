@@ -4,7 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
-mkdir -p "$work/input" "$work/timeout-input" "$work/cache" "$work/repo/bin" "$work/missing-child"
+mkdir -p "$work/input" "$work/timeout-input" "$work/parent-input" "$work/cache" "$work/repo/bin" "$work/missing-child"
 
 printf '%s\n' 'fn good() -> i64: 1' > "$work/input/adjacent_good.spl"
 printf '%s\n' 'fn broken_one(:' > "$work/input/exact_failure.spl"
@@ -13,6 +13,7 @@ printf '%s\n' 'fn timeout_one() -> i64: 1' > "$work/timeout-input/01_timeout.spl
 printf '%s\n' 'fn timeout_failure(:' > "$work/timeout-input/02_failure.spl"
 printf '%s\n' 'fn timeout_two() -> i64: 1' > "$work/timeout-input/03_timeout.spl"
 printf '%s\n' 'fn timeout_success() -> i64: 1' > "$work/timeout-input/04_success.spl"
+printf '%s\n' 'fn parent_exit() -> i64: 1' > "$work/parent-input/parent_exit.spl"
 
 fake="$work/fake-simple"
 printf '%s\n' \
@@ -22,7 +23,7 @@ printf '%s\n' \
   '  *adjacent_good.spl) exit 0 ;;' \
   '  *exact_failure.spl) echo "error[E100]: exact parser failure" >&2; exit 1 ;;' \
   '  *second_failure.spl) echo "error[E200]: adjacent semantic failure" >&2; exit 1 ;;' \
-  '  *01_timeout.spl|*03_timeout.spl)' \
+  '  *01_timeout.spl|*03_timeout.spl|*parent_exit.spl)' \
   '    trap "" TERM' \
   '    (trap "" TERM; while :; do /bin/sleep 10; done) &' \
   '    echo "$!" >> "$FAKE_DESCENDANTS"' \
@@ -123,6 +124,36 @@ while IFS= read -r descendant_pid; do
     exit 1
   fi
 done < "$work/timeout-descendants"
+
+# Parent termination must tear down every owned compiler process group rather
+# than leaving delegated pure-Simple descendants alive without a sweep owner.
+(cd "$work/repo" && exec env \
+  FAKE_INVOCATIONS="$work/parent-invocations" \
+  FAKE_DESCENDANTS="$work/parent-descendants" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/parent-input" \
+  --cache-dir="$work/parent-cache" --jobs=1 --timeout=30 --timeout-grace=1) \
+  >"$work/parent-output" 2>&1 &
+sweep_pid=$!
+parent_wait=0
+while [ ! -s "$work/parent-descendants" ] && [ "$parent_wait" -lt 100 ]; do
+  /bin/sleep 0.02
+  parent_wait=$((parent_wait + 1))
+done
+[ -s "$work/parent-descendants" ] || { echo "parent cleanup fixture never started" >&2; exit 1; }
+kill -TERM "$sweep_pid"
+set +e
+wait "$sweep_pid"
+parent_status=$?
+set -e
+[ "$parent_status" -eq 143 ] || { echo "terminated sweep returned $parent_status, expected 143" >&2; exit 1; }
+/bin/sleep 0.2
+while IFS= read -r descendant_pid; do
+  if kill -0 "$descendant_pid" 2>/dev/null; then
+    echo "parent-exit descendant survived cleanup: $descendant_pid" >&2
+    exit 1
+  fi
+done < "$work/parent-descendants"
 
 # Adjacent option validation must fail before dispatch.
 set +e

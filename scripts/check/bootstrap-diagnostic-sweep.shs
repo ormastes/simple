@@ -52,7 +52,35 @@ command -v perl >/dev/null 2>&1 || { echo "error: perl is required for isolated 
 
 mkdir -p "$cache_root" || exit 2
 run_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic.XXXXXX") || exit 2
-trap 'rm -rf "$run_dir"' EXIT INT TERM
+active_workers=""
+cleanup_sweep() {
+  cleanup_status=$?
+  [ "$#" -eq 0 ] || cleanup_status=$1
+  trap - EXIT INT TERM HUP
+  for cleanup_worker in $active_workers; do
+    cleanup_worker_pid=${cleanup_worker%%:*}
+    kill -TERM "$cleanup_worker_pid" 2>/dev/null || true
+  done
+  for cleanup_pgid_file in "$run_dir"/*.pgid; do
+    [ -f "$cleanup_pgid_file" ] || continue
+    IFS= read -r cleanup_pgid < "$cleanup_pgid_file" || cleanup_pgid=""
+    case "$cleanup_pgid" in ''|*[!0-9]*) continue ;; esac
+    kill -TERM "-$cleanup_pgid" 2>/dev/null || true
+  done
+  /bin/sleep 0.1
+  for cleanup_pgid_file in "$run_dir"/*.pgid; do
+    [ -f "$cleanup_pgid_file" ] || continue
+    IFS= read -r cleanup_pgid < "$cleanup_pgid_file" || cleanup_pgid=""
+    case "$cleanup_pgid" in ''|*[!0-9]*) continue ;; esac
+    kill -KILL "-$cleanup_pgid" 2>/dev/null || true
+  done
+  rm -rf "$run_dir"
+  exit "$cleanup_status"
+}
+trap cleanup_sweep EXIT
+trap 'cleanup_sweep 130' INT
+trap 'cleanup_sweep 143' TERM
+trap 'cleanup_sweep 129' HUP
 files_list="$run_dir/files"
 : > "$files_list"
 
@@ -87,6 +115,8 @@ run_one() {
     env SIMPLE_NATIVE_BUILD_CACHE_DIR="$item_cache" \
     "$compiler" check "$source_path" >"$run_dir/$item_id.log" 2>&1 &
   compiler_pid=$!
+  printf '%s\n' "$compiler_pid" > "$run_dir/$item_id.pgid.tmp"
+  mv "$run_dir/$item_id.pgid.tmp" "$run_dir/$item_id.pgid"
   (
     /bin/sleep "$timeout_seconds"
     if kill -0 "$compiler_pid" 2>/dev/null; then
@@ -113,6 +143,7 @@ run_one() {
     /bin/sleep "$timeout_grace_seconds"
     kill -KILL "-$compiler_pid" 2>/dev/null || true
   fi
+  : > "$run_dir/$item_id.pgid"
 
   if [ -f "$timeout_marker" ]; then
     printf 'error: diagnostic timeout after %ss: %s\n' \
@@ -129,7 +160,6 @@ run_one() {
 
 item_id=0
 active_count=0
-active_workers=""
 reap_completed() {
   remaining_workers=""
   reaped_any=0

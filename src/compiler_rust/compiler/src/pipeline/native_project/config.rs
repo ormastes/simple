@@ -7,7 +7,7 @@ use simple_common::target::LinkerFlavor;
 use super::tools::{
     archive_defined_symbols, build_core_c_runtime_library, find_abi_complete_simple_core_runtime_library,
     find_core_c_runtime_source_root, find_runtime_library, find_simple_core_runtime_library,
-    runtime_archive_has_core_required_symbols,
+    runtime_archive_has_core_required_symbols, runtime_authority_search_dirs,
 };
 
 use super::NativeProjectBuilder;
@@ -267,14 +267,10 @@ impl NativeProjectBuilder {
                 .runtime_path
                 .as_ref()
                 .and_then(|path| {
-                    [
-                        path.join("bootstrap").join("deps").join("libsimple_runtime.a"),
-                        path.join("bootstrap").join("libsimple_runtime.a"),
-                        path.join("deps").join("libsimple_runtime.a"),
-                        path.join("libsimple_runtime.a"),
-                    ]
-                    .into_iter()
-                    .find(|candidate| candidate.is_file())
+                    runtime_authority_search_dirs(path)
+                        .into_iter()
+                        .map(|dir| dir.join(runtime_name))
+                        .find(|candidate| candidate.is_file())
                 })
                 .ok_or_else(|| {
                     "native-build requested host-gpu but a feature-built libsimple_runtime.a is missing".to_string()

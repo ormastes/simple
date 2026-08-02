@@ -3,6 +3,7 @@
 //! and LLVM constructor stripping.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use super::{effective_target, native_project_rust_trace_enabled, safe_canonicalize, RUNTIME_PATH_OVERRIDE};
@@ -439,8 +440,28 @@ pub(crate) fn build_stage4_c_runtime_library(build_dir: &Path) -> Option<PathBuf
     build_c_runtime_library(build_dir, true)
 }
 
+pub(crate) fn runtime_authority_search_dirs(runtime_path: &Path) -> Vec<PathBuf> {
+    let bootstrap_root = if runtime_path.file_name() == Some(OsStr::new("bootstrap")) {
+        runtime_path.to_path_buf()
+    } else {
+        runtime_path.join("bootstrap")
+    };
+    let mut dirs = Vec::new();
+    for dir in [
+        runtime_path.to_path_buf(),
+        runtime_path.join("deps"),
+        bootstrap_root.clone(),
+        bootstrap_root.join("deps"),
+    ] {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
 pub(crate) fn find_hosted_runtime_rlib(runtime_path: &Path) -> Option<PathBuf> {
-    [runtime_path.to_path_buf(), runtime_path.join("deps")]
+    runtime_authority_search_dirs(runtime_path)
         .into_iter()
         .filter_map(|dir| std::fs::read_dir(dir).ok())
         .flatten()
