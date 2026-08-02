@@ -1,5 +1,7 @@
 #!/bin/sh
 set -eu
+# Structured event tokens are data, never pathname patterns.
+set -f
 
 usage() {
   cat <<'EOF'
@@ -11,6 +13,7 @@ Options:
   --pid=N                 Process to observe (required)
   --progress-log=PATH     Append-only output log (required)
   --state-file=PATH       Optional milestone/main_log key-value state file
+  --event-file=PATH       Optional append-only structured build-progress events
   --interval=N            Seconds between samples (default: 30)
   --expected-start=TEXT   Reject PID reuse when ps start text differs
   --once                  Emit one sample and exit
@@ -21,6 +24,7 @@ EOF
 watch_pid=
 progress_log=
 state_file=
+event_file=
 interval=30
 expected_start=
 once=0
@@ -30,6 +34,7 @@ for arg in "$@"; do
     --pid=*) watch_pid=${arg#*=} ;;
     --progress-log=*) progress_log=${arg#*=} ;;
     --state-file=*) state_file=${arg#*=} ;;
+    --event-file=*) event_file=${arg#*=} ;;
     --interval=*) interval=${arg#*=} ;;
     --expected-start=*) expected_start=${arg#*=} ;;
     --once) once=1 ;;
@@ -92,6 +97,63 @@ process_tree_metrics() {
     '
 }
 
+load_progress_event() {
+  phase=unknown
+  unit_kind=unknown
+  done=unknown
+  total=unknown
+  remaining=unknown
+  tasks_done=unknown
+  tasks_total=unknown
+  tasks_remaining=unknown
+  failed=unknown
+  cached=unknown
+  current=unknown
+  terminal=unknown
+  [ -n "$event_file" ] && [ -f "$event_file" ] || return 0
+  progress_line=$(tail -n 1 "$event_file" 2>/dev/null || true)
+  case "$progress_line" in event=build_progress\ *) ;; *) return 0 ;; esac
+  for progress_token in $progress_line; do
+    progress_key=${progress_token%%=*}
+    progress_value=${progress_token#*=}
+    case "$progress_key" in
+      phase) [ -n "$progress_value" ] && phase=$progress_value ;;
+      unit_kind) [ -n "$progress_value" ] && unit_kind=$progress_value ;;
+      current) [ -n "$progress_value" ] && current=$progress_value ;;
+      done|total|remaining|tasks_done|tasks_total|tasks_remaining|failed|cached)
+        case "$progress_value" in unknown) ;; ''|*[!0-9]*) continue ;; esac
+        case "$progress_key" in
+          done) done=$progress_value ;;
+          total) total=$progress_value ;;
+          remaining) remaining=$progress_value ;;
+          tasks_done) tasks_done=$progress_value ;;
+          tasks_total) tasks_total=$progress_value ;;
+          tasks_remaining) tasks_remaining=$progress_value ;;
+          failed) failed=$progress_value ;;
+          cached) cached=$progress_value ;;
+        esac
+        ;;
+      terminal)
+        case "$progress_value" in running|succeeded|failed|exited) terminal=$progress_value ;; esac
+        ;;
+    esac
+  done
+  case "$done:$total" in
+    *[!0-9:]*|:*|*:) ;;
+    *)
+      remaining=$((total - done))
+      [ "$remaining" -ge 0 ] || remaining=0
+      ;;
+  esac
+  case "$tasks_done:$tasks_total" in
+    *[!0-9:]*|:*|*:) ;;
+    *)
+      tasks_remaining=$((tasks_total - tasks_done))
+      [ "$tasks_remaining" -ge 0 ] || tasks_remaining=0
+      ;;
+  esac
+}
+
 started_at=$(date +%s)
 while :; do
   now=$(date +%s)
@@ -102,10 +164,15 @@ while :; do
     main_log=$(sed -n 's/^main_log=//p' "$state_file" | tail -1)
     [ -n "$milestone" ] || milestone=unknown
   fi
+  load_progress_event
 
   if ! kill -0 "$watch_pid" 2>/dev/null; then
-    printf 'event=sample timestamp=%s status=exited pid=%s elapsed_s=%s milestone=%s\n' \
-      "$now" "$watch_pid" "$((now - started_at))" "$milestone" >>"$progress_log"
+    case "$terminal" in running|unknown) terminal=exited ;; esac
+    printf 'event=sample timestamp=%s status=exited pid=%s elapsed_s=%s milestone=%s phase=%s unit_kind=%s done=%s total=%s remaining=%s tasks_done=%s tasks_total=%s tasks_remaining=%s failed=%s cached=%s current=%s terminal=%s\n' \
+      "$now" "$watch_pid" "$((now - started_at))" "$milestone" \
+      "$phase" "$unit_kind" "$done" "$total" "$remaining" \
+      "$tasks_done" "$tasks_total" "$tasks_remaining" "$failed" \
+      "$cached" "$current" "$terminal" >>"$progress_log"
     exit 0
   fi
 
@@ -131,10 +198,13 @@ while :; do
     log_bytes=$(ls -ln "$main_log" 2>/dev/null | awk 'NF {print $5; exit}')
     [ -n "$log_bytes" ] || log_bytes=unknown
   fi
-  printf 'event=sample timestamp=%s status=alive pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s tree_cpu_pct=%s tree_rss_kb=%s tree_processes=%s milestone=%s main_log_bytes=%s\n' \
+  printf 'event=sample timestamp=%s status=alive pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s tree_cpu_pct=%s tree_rss_kb=%s tree_processes=%s milestone=%s main_log_bytes=%s phase=%s unit_kind=%s done=%s total=%s remaining=%s tasks_done=%s tasks_total=%s tasks_remaining=%s failed=%s cached=%s current=%s terminal=%s\n' \
     "$now" "$watch_pid" "$((now - started_at))" "$process_elapsed" \
     "$cpu_pct" "$rss_kb" "$tree_cpu_pct" "$tree_rss_kb" \
-    "$tree_processes" "$milestone" "$log_bytes" >>"$progress_log"
+    "$tree_processes" "$milestone" "$log_bytes" "$phase" "$unit_kind" \
+    "$done" "$total" "$remaining" "$tasks_done" "$tasks_total" \
+    "$tasks_remaining" "$failed" "$cached" "$current" "$terminal" \
+    >>"$progress_log"
 
   [ "$once" -eq 0 ] || exit 0
   sleep "$interval"

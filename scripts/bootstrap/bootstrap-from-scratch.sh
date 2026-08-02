@@ -277,6 +277,22 @@ fi
 echo "$$" > "${bootstrap_lock}/pid"
 bootstrap_progress_pid=
 bootstrap_progress_state=
+build_progress_events=
+bootstrap_progress_event() {
+  [ -n "${build_progress_events}" ] || return 0
+  progress_phase=$1
+  progress_current=$2
+  progress_terminal=${3:-running}
+  progress_failed=${4:-unknown}
+  if [ "${progress_terminal}" = succeeded ]; then
+    printf 'event=build_progress phase=%s unit_kind=tasks done=6 total=6 remaining=0 tasks_done=6 tasks_total=6 tasks_remaining=0 failed=0 cached=unknown current=%s terminal=succeeded\n' \
+      "${progress_phase}" "${progress_current}" >>"${build_progress_events}"
+  else
+    printf 'event=build_progress phase=%s unit_kind=unknown done=unknown total=unknown remaining=unknown tasks_done=unknown tasks_total=unknown tasks_remaining=unknown failed=%s cached=unknown current=%s terminal=%s\n' \
+      "${progress_phase}" "${progress_failed}" "${progress_current}" \
+      "${progress_terminal}" >>"${build_progress_events}"
+  fi
+}
 bootstrap_progress_mark() {
   [ -n "${progress_log}" ] || return 0
   milestone=$1
@@ -288,6 +304,17 @@ bootstrap_progress_mark() {
   mv "${bootstrap_progress_state}.tmp.$$" "${bootstrap_progress_state}"
   printf 'event=milestone timestamp=%s status=alive pid=%s milestone=%s main_log=%s\n' \
     "$(date +%s)" "$$" "${milestone}" "${main_log:-absent}" >>"${progress_log}"
+  case "${milestone}" in
+    complete|exit-0)
+      bootstrap_progress_event complete complete succeeded 0
+      ;;
+    exit-*)
+      bootstrap_progress_event "${milestone}" failed failed 1
+      ;;
+    *)
+      bootstrap_progress_event "${milestone}" "${milestone}" running unknown
+      ;;
+  esac
 }
 bootstrap_cleanup() {
   bootstrap_status=$?
@@ -310,10 +337,13 @@ if [ -n "${progress_log}" ]; then
   progress_log="$(CDPATH= cd -- "$(dirname -- "${progress_log}")" && pwd -P)/$(basename -- "${progress_log}")"
   mkdir -p "${output_dir}"
   bootstrap_progress_state="$(CDPATH= cd -- "${output_dir}" && pwd -P)/bootstrap-progress.state"
+  build_progress_events="$(CDPATH= cd -- "${output_dir}" && pwd -P)/bootstrap-build-progress.events"
   : >"${progress_log}"
+  : >"${build_progress_events}"
   bootstrap_progress_mark starting ""
   sh "${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs" \
     --pid="$$" --state-file="${bootstrap_progress_state}" \
+    --event-file="${build_progress_events}" \
     --progress-log="${progress_log}" --interval="${progress_interval}" &
   bootstrap_progress_pid=$!
 fi
@@ -736,6 +766,7 @@ bootstrap_native_build_main() {
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
+    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
     SIMPLE_NATIVE_BUILD_CACHE_DIR="${native_cache_dir}" \
@@ -830,6 +861,7 @@ fi
 # Content-hash staleness gate (see seed_inputs_hash above). Runs here so the
 # backend/features are final before they enter the fingerprint. If the seed or
 # runtime library is missing, the cargo branch below rebuilds regardless.
+bootstrap_progress_mark fingerprint ""
 seed_inputs_fingerprint=$(seed_inputs_hash) || {
   echo "error: failed to fingerprint Rust seed inputs" >&2
   exit 1
@@ -1146,6 +1178,7 @@ if [ "${can_full_bootstrap}" -eq 1 ]; then
   echo "  mode:     full CLI (build bootstrap)"
   RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_RUNTIME_PATH="$(pwd)/src/compiler_rust/target/bootstrap" \
+    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     "${seed_bin}" run src/app/cli/main.spl build bootstrap "--backend=${backend}" "--output=${output_dir}"
 else
   # Bootstrap-only or missing — manual staged bootstrap via seed
@@ -1356,6 +1389,7 @@ else
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_NATIVE_BUILD_RUST=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "SIMPLE_BINARY=${stage2_seed_absolute}" \
       native-build --target "${PLATFORM}" --backend "${backend}" \
       --runtime-bundle core-c-bootstrap \
@@ -1374,6 +1408,7 @@ else
       "SIMPLE_BOOTSTRAP=1" "SIMPLE_NO_DEPRECATED_WARNINGS=1" \
       "SIMPLE_NATIVE_ARENA_DECLS=1" \
       "SIMPLE_NO_STUB_FALLBACK=1" \
+      "SIMPLE_BUILD_PROGRESS_EVENTS=${build_progress_events}" \
       "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1" \
       "SIMPLE_NATIVE_BUILD_TARGET=${PLATFORM}" \
       "SIMPLE_NATIVE_BUILD_THREADS=${selfhost_jobs}" \
@@ -1406,6 +1441,7 @@ else
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_BUILD_RUST=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     SIMPLE_BINARY="${stage2_seed_absolute}" -- \
     "${stage2_seed_absolute}" native-build \
     --target "${PLATFORM}" \
@@ -1500,6 +1536,7 @@ else
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
+    SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NATIVE_BUILD_TARGET="${PLATFORM}" \
     SIMPLE_NATIVE_BUILD_THREADS="${selfhost_jobs}" \
@@ -1749,7 +1786,7 @@ fi
 # ===========================================================================
 
 echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
-bootstrap_progress_mark stage4 "$(absolute_path "${log_dir}/stage4-native-build.log")"
+bootstrap_progress_mark stage4-fingerprint ""
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 stage4_source_revision_before="$(stage4_source_revision "${repo_root}")" || {
@@ -1766,6 +1803,7 @@ full_bin="$(bootstrap_stage3_canonical_path "$(absolute_path "${full_dir}/simple
   exit 1
 }
 rm -f "${full_bin}" "${full_bin}.provenance.env"
+bootstrap_progress_mark stage4 "$(absolute_path "${log_dir}/stage4-native-build.log")"
 run_logged stage4-native-build bootstrap_native_build_main \
   "${stage4_parent}" "${full_bin}"
 
@@ -1779,6 +1817,7 @@ if [ ! -x "${full_bin}" ]; then
   exit 1
 fi
 
+bootstrap_progress_mark stage4-smoke "$(absolute_path "${log_dir}/stage4-native-build.log")"
 install -m755 "${seed_bin}" "${full_dir}/simple_seed${exe_suffix}"
 
 stage4_smoke="$(run_timeout 30 "${full_bin}" -c 'print(1+1)' 2>/dev/null)"
@@ -1834,6 +1873,7 @@ ui_backend_bin="${full_dir}/simple_ui_backend${exe_suffix}"
 prepare_native_cache stage4b-ui-backend
 run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
   SIMPLE_NO_DEPRECATED_WARNINGS=1 \
+  SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
   LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
   SIMPLE_STUB_MISSING_RT=1 \
   SIMPLE_BINARY="$(absolute_path "${full_bin}")" \
@@ -1874,6 +1914,7 @@ if [ "${build_mcp}" -eq 1 ]; then
       SIMPLE_NO_DEPRECATED_WARNINGS=1 \
       LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
       SIMPLE_NO_STUB_FALLBACK=1 \
+      SIMPLE_BUILD_PROGRESS_EVENTS="${build_progress_events}" \
       SIMPLE_BINARY="$(absolute_path "${stage_for_build}")" \
       "${stage_for_build}" native-build \
       --backend "${backend}" \
@@ -1926,6 +1967,7 @@ fi
 # ===========================================================================
 
 if [ "${deploy}" -eq 1 ]; then
+  bootstrap_progress_mark deploy ""
   deploy_dir="bin/release/${PLATFORM}"
   mkdir -p "${deploy_dir}"
 

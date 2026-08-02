@@ -4,6 +4,7 @@
 # Extracted from driver.spl.
 
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io.file_ops.{file_append}
 
 extern fn rt_env_get(key: text) -> text
 extern fn rt_heap_registry_count() -> i64
@@ -19,6 +20,8 @@ fn driver_phase_trace_enabled() -> bool:
 # root-caused to interpreted parse (phase2) using exactly these deltas.
 var _g_phase_t0_ms: i64 = 0
 var _g_phase_t0_set: bool = false
+var _g_progress_path: text = ""
+var _g_progress_path_set: bool = false
 
 fn _phase_elapsed_ms() -> i64:
     val now = rt_time_now_monotonic_ms()
@@ -44,6 +47,46 @@ pub fn log_error(msg: text):
 pub fn log_phase(msg: text):
     if driver_phase_trace_enabled():
         eprint("[BOOTSTRAP-PHASE] +{_phase_elapsed_ms()}ms {msg} heap_registry={rt_heap_registry_count()}")
+
+fn _build_progress_path() -> text:
+    if not _g_progress_path_set:
+        _g_progress_path = rt_env_get("SIMPLE_BUILD_PROGRESS_EVENTS") ?? ""
+        _g_progress_path_set = true
+    _g_progress_path
+
+fn _build_progress_number(value: i64) -> text:
+    if value < 0: "unknown" else: value.to_string()
+
+fn _build_progress_token(value: text) -> text:
+    value.replace("%", "%25").replace(" ", "%20").replace("=", "%3D").replace("\n", "%0A")
+
+pub fn log_build_progress(
+    phase: text,
+    unit_kind: text,
+    done: i64,
+    total: i64,
+    current: text,
+    tasks_done: i64,
+    tasks_total: i64,
+    failed: i64,
+    cached: i64,
+    terminal: text
+):
+    val path = _build_progress_path()
+    if path == "":
+        return
+    val remaining = if done >= 0 and total >= 0:
+        val delta = total - done
+        if delta > 0: delta else: 0
+    else:
+        -1
+    val tasks_remaining = if tasks_done >= 0 and tasks_total >= 0:
+        val delta = tasks_total - tasks_done
+        if delta > 0: delta else: 0
+    else:
+        -1
+    val line = "event=build_progress phase={_build_progress_token(phase)} unit_kind={_build_progress_token(unit_kind)} done={_build_progress_number(done)} total={_build_progress_number(total)} remaining={_build_progress_number(remaining)} tasks_done={_build_progress_number(tasks_done)} tasks_total={_build_progress_number(tasks_total)} tasks_remaining={_build_progress_number(tasks_remaining)} failed={_build_progress_number(failed)} cached={_build_progress_number(cached)} current={_build_progress_token(current)} terminal={_build_progress_token(terminal)}\n"
+    val _ = file_append(path, line)
 
 pub fn log_module_surface_released(path: text, seq: i64):
     eprint("phase2:surface:file:released path={path} seq={seq} heap_registry={rt_heap_registry_count()}\\n")

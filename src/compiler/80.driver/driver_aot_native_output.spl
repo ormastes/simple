@@ -26,6 +26,7 @@ use compiler.mir.mir_data.{MirModule}
 use compiler.frontend.parser_types.{ParserModule}
 use compiler.driver.driver_build.incremental.{BuildCache, FileFingerprint, native_build_cache_scope_key, native_build_compiler_identity}
 use compiler.driver.driver_build.parallel.{ParallelBuilder, ParallelBuildConfig, BuildResult}
+use compiler.driver.driver_log_helpers.{log_build_progress}
 
 extern fn rt_file_write_text(path: text, content: text) -> bool
 extern fn rt_file_exists(path: text) -> bool
@@ -305,7 +306,11 @@ impl CompilerDriver:
 
         # Phase 1: Check cache, collect cached objects, identify uncached modules
         var uncached_names: [text] = []
+        var progress_cache_scanned = 0
+        log_build_progress("native_cache", "modules", 0, total_modules,
+            "pending", 5, 6, 0, 0, "running")
         for name in module_names:
+            progress_cache_scanned = progress_cache_scanned + 1
             # ParserImport/export facades contribute symbols through their imported
             # implementation modules and have no object code of their own.
             if ctx.modules.has(name) and driver_native_module_is_export_facade(ctx.mir_modules[name], ctx.modules[name]):
@@ -336,11 +341,25 @@ impl CompilerDriver:
                         build_cache.remove_entry(cache_source)
             if not used_cache:
                 uncached_names = uncached_names.push(name)
+            if progress_cache_scanned % 64 == 0:
+                log_build_progress("native_cache", "modules",
+                    progress_cache_scanned, total_modules, name,
+                    5, 6, 0, cache_hit_count, "running")
+
+        log_build_progress("native_cache", "modules", total_modules,
+            total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
 
         if object_files.len() == 0 and uncached_names.len() == 0:
             return CompileResult.CodegenError("native-build produced no code-bearing MIR modules")
 
         # Phase 2: Compile uncached modules through ParallelBuilder
+        val native_compile_current = if uncached_names.len() > 0:
+            uncached_names[0]
+        else:
+            "complete"
+        log_build_progress("native_compile", "modules",
+            total_modules - uncached_names.len(), total_modules,
+            native_compile_current, 5, 6, 0, cache_hit_count, "running")
         if uncached_names.len() > 0:
             if uncached_names.len() == 1:
                 val name = uncached_names[0]
@@ -367,6 +386,10 @@ impl CompilerDriver:
 
                 if not build_result.success:
                     val first_err = build_result.errors[0]
+                    log_build_progress("native_compile", "modules",
+                        cache_hit_count + build_result.stats.completed,
+                        total_modules, first_err[0], 5, 6,
+                        build_result.stats.failed, cache_hit_count, "failed")
                     return CompileResult.CodegenError(first_err[1])
 
             # Post-process: update cache and collect object paths. Do not rely
@@ -404,6 +427,8 @@ impl CompilerDriver:
 
         # Save build cache
         build_cache.save()
+        log_build_progress("native_compile", "modules", total_modules,
+            total_modules, "complete", 5, 6, 0, cache_hit_count, "running")
         if trace and (cache_hit_count > 0 or cache_miss_count > 0):
             print "[NATIVE] cache: {cache_hit_count} hits, {cache_miss_count} misses"
             rt_stdout_flush()
@@ -461,6 +486,8 @@ impl CompilerDriver:
 
         if trace:
             print "[NATIVE] linking {object_files.len()} object files..."
+        log_build_progress("link", "objects", object_files.len(),
+            object_files.len(), output, 5, 6, 0, cache_hit_count, "running")
         if effective_backend == "llvm" or effective_backend == "llvm-lib":
             # LLVM path: compile C runtime and link with entry point
             if trace:
@@ -478,6 +505,9 @@ impl CompilerDriver:
                 print "[NATIVE] calling link_llvm_native..."
             match link_llvm_native(object_files, output, llvm_opts):
                 case Ok(_):
+                    log_build_progress("link", "objects", object_files.len(),
+                        object_files.len(), output, 6, 6, 0,
+                        cache_hit_count, "succeeded")
                     driver_log_info(log, "Native executable written to {output} (backend: LLVM)")
                     return driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):
@@ -496,6 +526,9 @@ impl CompilerDriver:
             )
             match link_llvm_native(object_files, output, hosted_opts):
                 case Ok(_):
+                    log_build_progress("link", "objects", object_files.len(),
+                        object_files.len(), output, 6, 6, 0,
+                        cache_hit_count, "succeeded")
                     driver_log_info(log, "Native executable written to {output} (backend: {effective_backend})")
                     driver_native_success_with_launch_metadata(ctx, output)
                 case Err(e):

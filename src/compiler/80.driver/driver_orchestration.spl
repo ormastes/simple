@@ -8,7 +8,8 @@ use compiler.driver.driver_log_helpers.{
     log_trace,
     log_warn,
     log_error,
-    log_phase
+    log_phase,
+    log_build_progress
 }
 use compiler.common.driver_core_types.{CompileMode, CompileResult}
 use compiler.common.attributes.{
@@ -92,15 +93,21 @@ impl CompilerDriver:
             compile_mode_text = self.ctx.options.cli_mode_text
 
         log_phase("compile:start")
+        log_build_progress("load_sources", "files", -1, -1,
+            "starting", 0, 6, 0, 0, "running")
         log_phase("phase1:load_sources:start")
         val (loaded_ctx, load_ok) = self.load_sources_impl()
         self.ctx = loaded_ctx
         if not load_ok:
             log_error("phase 1 FAILED")
+            log_build_progress("load_sources", "files", -1, -1,
+                "failed", 0, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
         if compile_mode_text == "aot":
             self.ctx.native_sources_fingerprint = driver_native_sources_fingerprint(self.ctx.sources)
         log_phase("phase1:load_sources:done n_sources={self.ctx.sources.len()}")
+        log_build_progress("load_sources", "files", self.ctx.sources.len(),
+            self.ctx.sources.len(), "complete", 1, 6, 0, 0, "running")
 
         log_phase("phase2:parse:start")
         log_debug("phase 2: parsing...")
@@ -108,11 +115,16 @@ impl CompilerDriver:
         self.ctx = parsed_ctx
         if not parse_ok:
             log_error("phase 2 FAILED")
+            log_build_progress("parse", "files", -1, self.ctx.sources.len(),
+                "failed", 1, 6, 1, 0, "failed")
             return CompileResult.ParseError(self.ctx.errors)
         if self.ctx.options.backend == "vhdl":
             self.capture_vhdl_metadata()
         log_debug("phase 2 done")
-        log_phase("phase2:parse:done n_modules={self.ctx.modules.keys().len()}")
+        val parsed_module_count = self.ctx.modules.keys().len()
+        log_phase("phase2:parse:done n_modules={parsed_module_count}")
+        log_build_progress("parse", "modules", parsed_module_count,
+            parsed_module_count, "complete", 2, 6, 0, 0, "running")
 
         if self.ctx.source_contents_reclaimable() and not driver_streaming_surface_enabled(self.ctx):
             log_phase("phase2:source_reclaim:start low_memory=true")
@@ -130,6 +142,8 @@ impl CompilerDriver:
         log_trace("AFTER phase 3")
         if not analyze_ok:
             log_error("phase 3 FAILED")
+            log_build_progress("hir", "modules", -1, -1,
+                "failed", 2, 6, 1, 0, "failed")
             if self.ctx.errors.len() > 0:
                 val first_error = self.ctx.errors[0]
                 if first_error.contains("Method resolution"):
@@ -137,6 +151,8 @@ impl CompilerDriver:
             return CompileResult.TypeError(self.ctx.errors)
         log_debug("phase 3 done")
         log_phase("phase3:hir_typecheck:done")
+        log_build_progress("hir", "modules", -1, -1,
+            "complete", 3, 6, 0, 0, "running")
 
         if self.ctx.options.low_memory:
             log_debug("low-memory: evicting AST modules")
@@ -151,9 +167,13 @@ impl CompilerDriver:
         val mono_ok = self.monomorphize_impl()
         if not mono_ok:
             log_error("phase 4 FAILED")
+            log_build_progress("monomorphize", "modules", -1, -1,
+                "failed", 3, 6, 1, 0, "failed")
             return CompileResult.TypeError(self.ctx.errors)
         log_debug("phase 4 done")
         log_phase("phase4:monomorphize:done")
+        log_build_progress("monomorphize", "modules", -1, -1,
+            "complete", 4, 6, 0, 0, "running")
 
         log_phase("phase5:mode_dispatch:start")
         log_debug("phase 5: mode-specific processing...")
