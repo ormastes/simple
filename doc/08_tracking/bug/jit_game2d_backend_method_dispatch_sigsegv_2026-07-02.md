@@ -210,3 +210,58 @@ Residual family defects still open: bare-name `trait_infos.insert` last-wins
 IMPLEMENTED same-named traits can still silently misdispatch), and
 import_loader.rs:454-478 dropping impl metadata for imported impl blocks.
 Deployed binaries built before this fix still coin-flip.
+
+## Update 2026-08-02 (follow-up): bare-name collision inventory + qualified-keying assessment
+
+Full sweep of duplicate bare trait names in `src/lib` (20 names, 46 definition
+sites). 16 are tier mirrors with IDENTICAL ordered method lists (benign under
+last-wins as long as the mirrors stay in sync — Vector, SimdElementType,
+SignedInt, Serializable, RequestHandler, Numeric, Integer, Float,
+Deserializable, DebugTargetInfo, Allocator, MemoryBus, FfiDispatchBase,
+FfiDispatchBase3D, Engine2DExtended, DebugInfoProvider). **4 names have
+DIVERGENT slot layouts** — the harmful class where last-wins misdispatches:
+
+| Trait | Defs | Layouts | Divergence |
+|---|---|---|---|
+| `RenderBackend` | common/ui/backend.spl; {gc_async_mut,nogc_async_mut}/gpu/engine2d/backend.spl | 2 | 12 methods vs 5 |
+| `RenderBackend3D` | {nogc_sync_mut,nogc_async_mut}/engine/render/backend3d.spl; gc_async_mut/gpu/engine3d/backend.spl | 2 | 21 methods vs 5 |
+| `DebugAdapter` | nogc_sync_mut/dap/adapter/mod.spl; nogc_async_mut_noalloc/execution/mod.spl | 2 | 34 methods vs 7 |
+| `ComputeSession` | nogc_sync_mut/gpu/engine2d/backend_session.spl; gc_async_mut/gpu/engine2d/backend_session.spl | 2 | 12 methods vs 13 |
+
+**Why the enum dual-key precedent (qualified-first, bare fallback) does NOT
+transfer containedly:** the enum fix worked because lookups already ARRIVE
+qualified (`runtime_name` carries qualification). For traits, NO lookup site
+possesses a qualifier: `HirImpl.trait_name` is the bare source token
+(module_pass.rs:1498), trait-typed receivers lower to `TypeId::ANY` via the
+bare alias (`type_registration.rs:480`) so MIR dispatch sees only a bare name
+string or no name at all, and the coupled registries are all bare-keyed too —
+`dependency_graph.get_implementations(trait)`, `local_trait_impls`
+(lowering_core.rs:306), and the link-level vtable symbol ABI
+`__vtable__{Type}__for__{Trait}` (lowering_core.rs:1493, shared with the
+native_project StructInit header scan and the pure-Simple compiler). Writing a
+qualified key is trivial (both `register_trait` call paths — module_pass.rs:485
+local, import_loader.rs:405 imported — know their module); there is simply
+nothing downstream to look it up WITH. Threading import provenance through
+HirImpl, type-annotation resolution, MIR dispatch, both impl registries, and
+the vtable symbol ABI is a coordinated multi-representation lane (same class as
+the deferred enum-discriminant ABI renumbering), not a contained edit. Deeper
+still: a single ANY-receiver call site lowers to ONE slot number, so two
+implemented same-named traits with different layouts cannot both be served by
+that site under the current vtable model regardless of registry keying —
+fixing only the registry (or only `vtable_impls` via method-set matching)
+would be a half-migration that shifts, not removes, the mismatch.
+
+Lane design (recorded, not implemented here):
+1. Fail-loud first: warn (later error) in `register_trait` when a bare-name
+   insert replaces an entry with a DIFFERENT ordered method list.
+2. Record provenance: source module path on `HirTraitInfo` and resolved trait
+   provenance on `HirImpl` at registration (both sites know it).
+3. Qualified-first/bare-fallback lookups once (2) exists, then qualify the
+   vtable symbol + constructor-side emission in the same change (cross-crate
+   ABI — must land with the pure-Simple compiler mirror together).
+4. ANY-receiver call sites need receiver provenance or per-trait-identity
+   itables to be fully correct — scope with (3).
+
+Interim mitigation: the 2026-08-02 determinism fix makes the winner stable;
+divergent-layout pairs above rarely co-load (different tiers/domains), and the
+browser_engine resolver spec pins the engine2d family green (6/6).
