@@ -36,6 +36,9 @@ class DomIdentityReplacementReceipt:
     index: DomIdentityIndex
     replacement_route: DomNodeRoute
 
+fn fail(message: text):
+    fail_assertion(message)
+
 fn _generation(value: i64) -> DomDocumentGeneration:
     match DomDocumentGeneration.create(value):
         Ok(generation): generation
@@ -54,7 +57,7 @@ fn _index(html: text, generation: i64) -> DomIdentityIndex:
 
 fn _dom_identity_fixture_html() -> text:
     "<html><head><title>identity</title></head><body>text" +
-        "<style>.hidden{display:none}</style>" +
+        "<style>.hidden{{display:none}}</style>" +
         "<input id='external' form='later' type='radio' name='team'>" +
         "<label id='explicit-label' for='external'>External</label>" +
         "<label id='nested-label'>Nested<input id='nested'></label>" +
@@ -89,37 +92,53 @@ fn _over_depth_layout_key() -> text:
     key
 
 fn _depth_overflow_dom() -> BeDomNode:
+    # Build bottom-up: `.push` copies, so children attached after a node is
+    # pushed into its parent would be lost.
+    var chain = BeDomNode.element_with_id(HTML_MAX_TREE_DEPTH.to_i64() + 1, "div")
+    var remaining = HTML_MAX_TREE_DEPTH - 1
+    while remaining > 0:
+        var parent = BeDomNode.element_with_id(remaining.to_i64() + 1, "div")
+        parent.children.push(chain)
+        chain = parent
+        remaining = remaining - 1
     var root = BeDomNode.element_with_id(1, "html")
-    var cursor = root
-    var depth = 0
-    while depth < HTML_MAX_TREE_DEPTH:
-        val child = BeDomNode.element_with_id(depth.to_i64() + 2, "div")
-        cursor.children.push(child)
-        cursor = child
-        depth = depth + 1
+    root.children.push(chain)
     root
 
 fn _node_overflow_dom() -> BeDomNode:
+    # Batched subtrees keep every child array small: interpreter `.push`
+    # clones the whole array, so one flat 65k-child list is quadratic and
+    # times out. 257 branches x 256 leaves = 66,306 nodes > HTML_MAX_NODES.
     var root = BeDomNode.element_with_id(1, "html")
-    var node_id: i64 = 2
-    while node_id <= HTML_MAX_NODES + 1:
-        root.children.push(BeDomNode.element_with_id(node_id, "div"))
-        node_id = node_id + 1
+    var next_id: i64 = 2
+    var branch_count = 0
+    while branch_count < 257:
+        var branch = BeDomNode.element_with_id(next_id, "section")
+        next_id = next_id + 1
+        var leaf_count = 0
+        while leaf_count < 256:
+            branch.children.push(BeDomNode.element_with_id(next_id, "div"))
+            next_id = next_id + 1
+            leaf_count = leaf_count + 1
+        root.children.push(branch)
+        branch_count = branch_count + 1
     root
 
 fn _check_deep_layout_inverse():
-    var root = BeDomNode.element_with_id(1, "html")
+    # Build bottom-up: `.push` copies, so children attached after a node is
+    # pushed into its parent would be lost.
+    val node_id: i64 = HTML_MAX_TREE_DEPTH.to_i64() + 1
+    var chain = BeDomNode.element_with_id(node_id - 1, "div")
+    var chain_id = node_id - 2
+    while chain_id >= 3:
+        var parent = BeDomNode.element_with_id(chain_id, "div")
+        parent.children.push(chain)
+        chain = parent
+        chain_id = chain_id - 1
     var body = BeDomNode.element_with_id(2, "body")
+    body.children.push(chain)
+    var root = BeDomNode.element_with_id(1, "html")
     root.children.push(body)
-    var cursor = body
-    var node_id: i64 = 3
-    var remaining = HTML_MAX_TREE_DEPTH - 2
-    while remaining > 0:
-        val child = BeDomNode.element_with_id(node_id, "div")
-        cursor.children.push(child)
-        cursor = child
-        node_id = node_id + 1
-        remaining = remaining - 1
     val index = match dom_identity_index_build(root, _generation(1)):
         Ok(value): value
         Err(reason): fail("Expected bounded deep layout index: {reason}")
