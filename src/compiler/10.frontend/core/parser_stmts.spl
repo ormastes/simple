@@ -1233,6 +1233,36 @@ fn parse_match_arms_common() -> (i64, [i64]):
             break
         if kind == 190:
             break
+        # `,` at ARM-BOUNDARY position inside a genuinely INDENTED match body
+        # separates one arm from the next (`0 => 10, 1 => 20`) or trails the
+        # last one (`_ => 0,`). Comma has two roles around an arm and they
+        # never collide: BEFORE the arm's `:`/`=>` it is a multi-pattern
+        # separator (`case 1, 2, 3:`), already consumed by the pattern loops
+        # below; AFTER the arm body it is an arm separator. Without this the
+        # comma fell through to the enclosing-list break just below, which
+        # silently truncated the match at its first arm and then made the
+        # enclosing parser choke with "expected pattern, found Comma" — that
+        # is what made std `tooling/base64_utils.spl` unloadable in its
+        # entirety. bug doc: doc/08_tracking/bug/
+        #   match_arm_comma_separator_rejected_2026-08-02.md
+        #
+        # Gated on `saw_indent` so the INLINE shape below keeps its meaning:
+        # `Box(a: match x: 1: "one" _: "o", b: x)` has no INDENT, so its comma
+        # still terminates the enclosing list.
+        if kind == TOK_COMMA and saw_indent and arm_indices.len() > 0:
+            parser_advance()
+            parser_skip_newlines()
+            kind = par_kind_get()
+            if kind == 182:
+                parser_advance()
+                break
+            if kind == 190:
+                break
+            # Trailing comma immediately before the enclosing list's closer.
+            if kind == TOK_RPAREN or kind == TOK_RBRACKET or kind == TOK_RBRACE:
+                lex_pop_indent()
+                break
+
         # A `match` used as a VALUE inside a call's arg list, a struct-literal
         # field list or a collection literal ends at that list's separator or
         # closing bracket, NOT at a DEDENT: the terminator shares the last

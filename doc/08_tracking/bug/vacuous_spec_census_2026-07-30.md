@@ -337,6 +337,16 @@ through a three-point sabotage of the file it imports.
    place, not silently), verified by running the module: `encode_base64("ABC")`
    → `QUJD`. ~20 other `src/` files match a loose comma-arm pattern and were not
    audited — that is a separate sweep.
+
+   **FIXED 2026-08-02 — see
+   `match_arm_comma_separator_rejected_2026-08-02.md`.** Both parsers needed it
+   (Rust seed and pure-Simple). The follow-up sweep parse-checked all 33,736
+   non-vendor `.spl` files in `src/**` + `test/**`: the gap explains exactly two
+   unloadable modules — `base64_utils.spl` and, previously unknown,
+   **`src/compiler_rust/lib/std/src/tooling/url_utils.spl`** (20 public
+   functions, never loadable). Zero files newly broken by the fix. The stopgap
+   normalisation in `base64_utils.spl` is reverted to the natural
+   comma-separated form.
 5. **`char_to_byte`/`byte_to_char` in `base64_utils.spl` cover only A-J, a-e,
    0-2, space and `!`** — every other byte maps to `0`/`"?"`, so `encode_base64`
    is wrong for ordinary text. Recorded as a `TODO(base64-charmap)` at the site.

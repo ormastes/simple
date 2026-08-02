@@ -105,6 +105,12 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 arms.push(self.parse_match_arm_expr()?);
+                // `,` after an arm BODY separates arms (`0 => 10, 1 => 20`) or
+                // trails the last one; the multi-pattern comma (`case 1, 2:`)
+                // was already consumed by parse_pattern. See
+                // consume_match_arm_separator_comma in
+                // stmt_parsing/control_flow.rs.
+                self.consume_match_arm_separator_comma();
             }
             if self.check(&TokenKind::Dedent) {
                 self.advance();

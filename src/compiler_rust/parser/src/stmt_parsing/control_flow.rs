@@ -818,6 +818,7 @@ impl<'a> Parser<'a> {
                     break;
                 }
                 arms.push(self.parse_match_arm()?);
+                self.consume_match_arm_separator_comma();
             }
 
             if self.check(&TokenKind::Dedent) {
@@ -889,6 +890,7 @@ impl<'a> Parser<'a> {
                 break;
             }
             arms.push(self.parse_match_arm()?);
+            self.consume_match_arm_separator_comma();
         }
 
         if self.check(&TokenKind::Dedent) {
@@ -909,6 +911,33 @@ impl<'a> Parser<'a> {
             arms,
             is_suspend: true,
         }))
+    }
+
+    /// Consume the optional `,` that separates two match arms of an INDENTED
+    /// (block-style) match body.
+    ///
+    /// Comma has two distinct roles around a match arm and they never collide:
+    ///   * BEFORE the arm's `:`/`=>`/`->` separator it is a multi-pattern
+    ///     separator (`case 1, 2, 3:`), consumed inside `parse_pattern`;
+    ///   * AFTER the arm's body it separates one arm from the next
+    ///     (`0 => 10, 1 => 20`) or trails the last arm (`_ => 0,`).
+    /// By the time control returns here the pattern list has already been
+    /// consumed, so a comma in this position is unambiguously the second role.
+    ///
+    /// Without this, every comma-separated / trailing-comma arm list failed
+    /// with "expected pattern, found Comma" — the loop re-entered
+    /// `parse_match_arm` on the comma itself. That made whole modules
+    /// unloadable (e.g. std `tooling/base64_utils.spl`, which had to be
+    /// normalised one-arm-per-line as a stopgap). bug doc:
+    /// doc/08_tracking/bug/match_arm_comma_separator_rejected_2026-08-02.md
+    ///
+    /// Only the indented form is affected: the inline form
+    /// (`match x: case A: 1; case B: 2`) keeps `;` as its separator, because a
+    /// comma there belongs to the enclosing argument / collection list.
+    pub(crate) fn consume_match_arm_separator_comma(&mut self) {
+        if self.check(&TokenKind::Comma) {
+            self.advance();
+        }
     }
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {

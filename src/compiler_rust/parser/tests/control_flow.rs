@@ -170,3 +170,98 @@ fn parse_regular_vs_suspend_if() {
         panic!("Expected If node");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Comma as a MATCH-ARM SEPARATOR (bug: match_arm_comma_separator_rejected,
+// doc/08_tracking/bug/match_arm_comma_separator_rejected_2026-08-02.md).
+//
+// Before the fix every one of the `arm_separator` tests below failed with
+// "expected pattern, found Comma" — the arms loop re-entered the arm parser on
+// the comma itself. That made std `tooling/base64_utils.spl` and
+// `tooling/url_utils.spl` unloadable in their entirety, so every spec and
+// census importing them silently saw nothing.
+//
+// The `multi_pattern` tests pin the OTHER role of comma (before the arm's
+// `:`/`=>`), which must keep working: the two roles are distinguished purely by
+// position and must not be conflated.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn parse_match_arm_separator_comma_same_line() {
+    let items = parse("match ch:\n    \"A\" => 65, \"B\" => 66, \"C\" => 67\n    _ => 0");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 4),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_match_arm_separator_trailing_comma_per_line() {
+    let items = parse("match n:\n    0 => 10,\n    1 => 20,\n    _ => 0,");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 3),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_match_arm_separator_comma_wraps_across_lines() {
+    let items = parse("match n:\n    0 => 10, 1 => 20\n    2 => 30, _ => 0");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 4),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_match_arm_separator_comma_colon_arms() {
+    let items = parse("match n:\n    0: y = 10, 1: y = 20\n    _: y = 0");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 3),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_match_arm_separator_comma_case_arms() {
+    let items = parse("match n:\n    case 0 => 10,\n    case 1 => 20,\n    case _ => 0");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 3),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_match_arm_separator_comma_in_expression_position() {
+    // `match` as a VALUE goes through parse_match_expr, a second arms loop.
+    parse_ok("fn f(n: i64) -> i64:\n    val r = match n:\n        0 => 10, 1 => 20, _ => 0\n    return r");
+}
+
+#[test]
+fn parse_match_multi_pattern_comma_still_binds_to_one_arm() {
+    // Comma BEFORE the arm separator stays a multi-pattern separator: three
+    // patterns, one shared body — not three arms plus a stray body.
+    let items = parse("match n:\n    case 1, 2, 3:\n        y = 100\n    case _:\n        y = 0");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 2),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_match_multi_pattern_comma_caseless_still_binds_to_one_arm() {
+    let items = parse("match n:\n    1, 2, 3 => 100\n    _ => 0");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 2),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
+
+#[test]
+fn parse_match_multi_pattern_pipe_still_binds_to_one_arm() {
+    let items = parse("match n:\n    case 1 | 2 | 3:\n        y = 100\n    case _:\n        y = 0");
+    match &items[0] {
+        Node::Match(m) => assert_eq!(m.arms.len(), 2),
+        other => panic!("expected Match, got {:?}", other),
+    }
+}
