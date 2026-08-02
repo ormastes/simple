@@ -146,3 +146,24 @@ Simple; `sqlite_sffi` is the foreign C wrapper. Prefer `PureDatabase`, but run
 production hot paths in a cached SMF library or native executable even when the
 top-level tool is launched in interpreter mode. LLM Caret's server, MCP, hook,
 bridge, and database workers are examples of this carrier pattern.
+
+## SSpec documentization maintenance
+
+Treat `simple sspec-maintain` as the SSpec/manual peer of lint and
+duplicate-check. Start with `scan`, review the seven explainable scores and
+stable `SSDOC-*` findings, then use `improve` only as a preview until a human or
+calling agent explicitly confirms `--apply`. Applied changes retain rollback
+material and must not rewrite behavioral meaning.
+
+For reference Markdown, use `scaffold`; preserve explicit REQ IDs and source
+hashes, and leave every unresolved oracle as executable
+`fail("TODO: replace generated placeholder with an executable assertion")`.
+Never fabricate outcomes, generate skips, or use tautologies. Use literal
+`step("...")` calls, not bare `@step "..."` decorators.
+
+`documentize` supplies scorecard and provenance while SPipe remains the
+canonical complete-manual generator. Professional manuals include purpose,
+preconditions, workflow, narratives, scorecard, remediation, evidence, and
+compatibility. Optional LLM suggestions are preview-only, excluded from the
+score, and never self-applied. See
+`doc/07_guide/infra/sspec_documentization_maintenance.md`.

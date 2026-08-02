@@ -1,5 +1,10 @@
 # SSpec Anti-Patterns — What Makes an Amateur Manual
 
+`simple sspec-maintain scan <spec>` detects documentization smells alongside
+existing `SPIPE001..007` lint rules. A scaffold that guesses an oracle, skips
+ambiguity, or uses a tautology is a blocker; unresolved behavior must execute
+`fail("TODO: replace generated placeholder with an executable assertion")`.
+
 SSpec `.spl` specs are the source of truth *and* the source text for the
 generated scenario manual (`bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`).
 The generator assembles; it never invents prose. A lazy spec yields a lazy manual

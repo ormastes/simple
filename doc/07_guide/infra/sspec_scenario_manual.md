@@ -1,5 +1,11 @@
 # SSpec Scenario Manual Guide
 
+Run `simple sspec-maintain scan <spec>` after authoring or changing a scenario.
+It scores narrative, structure, oracle quality, traceability, evidence,
+coverage, and maintainability. Use `improve` as preview-only until explicit
+confirmation and `scaffold` for reference Markdown with fail-fast unresolved
+oracles. See [SSpec documentization maintenance](sspec_documentization_maintenance.md).
+
 Use this guide when writing SSpec scenario manuals whose generated
 `doc/06_spec/...` output should read like a scenario-based manual. SSpec
 scenarios are executable `.spl` specs. SPipe is the related runner/docgen

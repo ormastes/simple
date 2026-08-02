@@ -83,3 +83,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 
 - Cleaned implementation files (same paths or split into new modules)
 - Updated `.spipe/<feature>/state.md`
+
+For changed SSpec, include `simple sspec-maintain scan` in the refactor
+inventory. Preview improvements, obtain explicit confirmation before apply,
+retain rollback material, and record the post-change scorecard/mirror state.

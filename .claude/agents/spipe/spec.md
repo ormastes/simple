@@ -28,8 +28,9 @@ Read the existing state file. Append your spec summary. Do not modify earlier se
    - Use helper functions only when they remove real duplication; keep primary
      manual `step("...")` calls in the scenario body so the generated manual
      exposes the flow without opening helper code.
-   - Use `@step "Human-readable text"` only when labeling an existing helper or
-     checker call that cannot be replaced cleanly with `step("...")`.
+   - Bare `@step "Human-readable text"` is invalid current syntax. Use a literal
+     `step("...")` call before an existing helper or checker when an exact label
+     is needed.
    - For broad cooperative lanes, use the shared interface and manual
      setup/checker helper names from `## Cooperative Review`; unresolved
      placeholders must fail explicitly with `assert(false)` or `fail(...)`.
@@ -89,15 +90,12 @@ use std.spec.*
 
 # --- Step Helpers ---
 
-@step "Open the project"
 fn open_project(path: text):
     ...
 
-@step "Build with release profile"
 fn build_with_release_profile() -> text:
     ...
 
-@step "Build succeeds without warnings"
 fn build_succeeds(output: text):
     expect(output).to_contain("Build complete")
 
@@ -133,6 +131,11 @@ describe "Build System Edge Cases":
     it "internal path normalization":
         expect(1 + 1).to_equal(2)
 ```
+
+Use literal `step("Open the project")` calls inside `it` blocks when the
+manual needs an exact label. Bare `@step "..."` decorators are invalid current
+Simple syntax. Generated unresolved behavior must call
+`fail("TODO: replace generated placeholder with an executable assertion")`.
 
 ## Evidence Kinds by Spec Type
 

@@ -70,3 +70,8 @@ doc/wiki/process links. Its job is documentation hygiene, not product behavior.
   `N/A` with reason.
 - `.spipe/<feature>/state.md` lists doc/wiki updates or states that none were
   needed.
+
+For changed SSpec sources, include the `sspec-maintain scan` scorecard and
+mirror status in the refactor inventory. Document preview/confirmation/rollback
+for applied improvements. Keep reference scaffolds visibly fail-fast and keep
+SPipe as the canonical complete-manual generator.

@@ -98,3 +98,9 @@ Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
 4. **Fix**: one file at a time
 5. **Verify**: tests after each change
 6. **Report**: before/after metrics
+
+## SSpec maintenance
+
+For changed SSpec sources, include `simple sspec-maintain scan <spec>` beside
+lint and duplicate-check. `improve` previews only; confirm before `--apply` and
+retain rollback material. Do not auto-rewrite behavior or assertions.

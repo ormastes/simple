@@ -475,3 +475,13 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test path/to/spec.spl --mode=native
 - NO inheritance in test helpers — use composition
 - NEVER skip or ignore failing tests without user approval
 - Do not write short-grammar tests that only prove a longer equivalent form; the compact token/form itself must appear in executable coverage.
+
+## Documentization quality gate
+
+After changing an SSpec, run `simple sspec-maintain scan <spec>` and inspect the
+seven scores, blocker cap, mirror state, and `SSDOC-*` findings. Professional
+manuals contain purpose/audience, preconditions, operator workflow, scenario
+narratives, scorecard, findings/remediation, evidence/provenance, and
+compatibility/limitations. Use literal `step("...")`, never bare `@step "..."`.
+Reference scaffolds preserve REQ IDs and source hashes and fail fast for every
+unresolved result. SPipe remains the full-manual generator.

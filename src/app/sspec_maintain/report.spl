@@ -1,0 +1,41 @@
+# REQ-004, REQ-009: machine reports and professional manual scorecard.
+use app.sspec_maintain.model.*
+use std.common.text_advanced.{escape_json}
+
+fn render_human_report(report: SspecDocumentizationReport) -> text:
+    var lines = ["SSpec documentization score: {report.score.aggregate}/100",
+        "source: {report.source_path}", "findings: {report.findings.len()}"]
+    lines.push("  narrative={report.score.narrative} structure={report.score.structure} oracle={report.score.oracle}")
+    lines.push("  traceability={report.score.traceability} evidence={report.score.evidence} coverage={report.score.coverage} maintainability={report.score.maintainability}")
+    for finding in report.findings:
+        lines.push("{finding.severity} {finding.rule_id} [{finding.dimension}]: {finding.evidence}")
+        lines.push("  improve: {finding.remediation}")
+    lines.join("\n")
+
+fn render_json_report(report: SspecDocumentizationReport) -> text:
+    var findings: [text] = []
+    for finding in report.findings:
+        findings.push("{\"rule_id\":\"{escape_json(finding.rule_id)}\",\"dimension\":\"{escape_json(finding.dimension)}\",\"severity\":\"{escape_json(finding.severity)}\",\"fingerprint\":\"{finding.fingerprint}\",\"message\":\"{escape_json(finding.evidence)}\",\"fixable\":{if finding.fixable: \"true\" else: \"false\"}}")
+    "{\"schema\":\"{report.schema_version}\",\"source\":\"{escape_json(report.source_path)}\",\"source_hash\":\"{report.source_hash}\",\"score\":{report.score.aggregate},\"dimensions\":{\"narrative\":{report.score.narrative},\"structure\":{report.score.structure},\"oracle\":{report.score.oracle},\"traceability\":{report.score.traceability},\"evidence\":{report.score.evidence},\"coverage\":{report.score.coverage},\"maintainability\":{report.score.maintainability}},\"findings\":[{findings.join(\",\")}] }"
+
+fn render_sarif_report(report: SspecDocumentizationReport) -> text:
+    var results: [text] = []
+    for finding in report.findings:
+        results.push("{\"ruleId\":\"{finding.rule_id}\",\"level\":\"{if finding.severity == \"advice\": \"note\" else: \"warning\"}\",\"message\":{\"text\":\"{escape_json(finding.evidence)}\"},\"partialFingerprints\":{\"ssdocFingerprint\":\"{finding.fingerprint}\"}}")
+    "{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"simple sspec-maintain\"}},\"results\":[{results.join(\",\")}] }]}"
+
+fn render_professional_manual(report: SspecDocumentizationReport) -> text:
+    "# SSpec Maintenance Report\n\n## Purpose and audience\n\nMaintenance evidence for SSpec authors and reviewers.\n\n## Preconditions\n\nThe source is parsed without executing tests.\n\n## Operator workflow\n\nScan, review, preview, confirm, then documentize.\n\n## Scenario narratives\n\nThe executable SSpec remains the source of behavioral truth.\n\n## Scorecard\n\nAggregate: **{report.score.aggregate}/100**; blockers: **{report.score.blockers}**.\n\n## Findings and remediation\n\n{render_human_report(report)}\n\n## Evidence and provenance\n\nSource: `{report.source_path}`  \nSHA-256: `{report.source_hash}`\n\n## Compatibility and limitations\n\nSPIPE001..007 retain their existing meaning. LLM advice is optional and never changes the score.\n"
+
+fn render_json_reports(reports: [SspecDocumentizationReport]) -> text:
+    var items: [text] = []
+    for report in reports:
+        items.push(render_json_report(report))
+    "{\"schema\":\"sspec-maintain-scope/v1\",\"reports\":[{items.join(\",\")}]}"
+
+fn render_sarif_reports(reports: [SspecDocumentizationReport]) -> text:
+    var results: [text] = []
+    for report in reports:
+        for finding in report.findings:
+            results.push("{\"ruleId\":\"{finding.rule_id}\",\"level\":\"warning\",\"message\":{\"text\":\"{escape_json(finding.evidence)}\"},\"locations\":[{\"physicalLocation\":{\"artifactLocation\":{\"uri\":\"{escape_json(report.source_path)}\"}}}],\"partialFingerprints\":{\"ssdocFingerprint\":\"{finding.fingerprint}\"}}")
+    "{\"version\":\"2.1.0\",\"runs\":[{\"tool\":{\"driver\":{\"name\":\"simple sspec-maintain\"}},\"results\":[{results.join(\",\")}] }]}"

@@ -861,3 +861,13 @@ there for the next investigation. Never gate a probe whose output an
 evidence/gate script asserts on. See
 `doc/07_guide/os/baremetal/baremetal_simple_codegen_landmines.md` § "Probe
 caveats".
+
+## SSpec documentization maintenance
+
+For SSpec authoring or cleanup, run `simple sspec-maintain scan <spec>` as the
+quality peer of lint and duplicate-check. Review all seven scores and stable
+`SSDOC-*` findings. `improve` previews; write only after explicit confirmation
+and retain rollback material. `scaffold` converts reference Markdown into
+traceable, fail-fast modern SSpec. `documentize` adds professional scoring and
+provenance while SPipe remains the canonical full-manual generator. Optional
+LLM advice is preview-only, excluded from scoring, and never self-applies.

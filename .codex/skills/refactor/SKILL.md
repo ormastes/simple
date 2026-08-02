@@ -80,3 +80,11 @@ Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
 - No inheritance — use composition, traits, mixins
 - New `rt_*` use is refactor debt unless it is an infrastructure/provider
   boundary or has a linked direct-hardware/compiler-performance blocker.
+
+## SSpec documentization maintenance
+
+For changed `*_spec.spl`, run `simple sspec-maintain scan <spec>` beside lint
+and duplicate-check. Treat its seven dimensions and `SSDOC-*` findings as
+refactoring evidence. `improve` is preview-only; require confirmation before
+`--apply` and retain rollback material. Never mechanically rewrite scenario
+meaning, assertions, REQ mappings, or authored narrative.

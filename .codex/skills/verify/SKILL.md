@@ -313,3 +313,10 @@ STATUS: FAIL (3 failures, 1 warning)
   `SIMPLE_EXECUTION_MODE` is explicitly set.
 - Do not mark STATUS: PASS for compiler/core/lib or MCP/LSP work unless the matching runtime and MCP smoke checks passed
 - Do not mark short grammar verification PASS when docs list a counterpart but executable tests only cover a longer equivalent form.
+
+## SSpec maintenance verification
+
+For changed SSpec/manual pairs, run deterministic `sspec-maintain scan` once.
+A blocker, threshold failure, stale/missing mirror, non-pure machine output, or
+baseline regression is FAIL. Verify preview and explicit confirmation, rollback
+evidence, fail-fast scaffolds, and all eight professional manual sections.

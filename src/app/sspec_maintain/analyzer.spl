@@ -1,0 +1,115 @@
+# REQ-002, REQ-003, REQ-004, REQ-005, REQ-006: analysis, scores, rules, reports, mirrors.
+use app.sspec_maintain.model.*
+use std.crypto.sha256.{sha256_text}
+
+fn _clamp_score(value: i64) -> i64:
+    if value < 0:
+        return 0
+    if value > 100:
+        return 100
+    value
+
+fn _finding(path: text, rule_id: text, dimension: text, severity: text,
+        evidence: text, remediation: text, blocker: bool, fixable: bool) -> SspecDocumentizationFinding:
+    val anchor = rule_id + ":" + dimension + ":" + evidence.trim()
+    SspecDocumentizationFinding(rule_id: rule_id, dimension: dimension,
+        severity: severity, confidence: "high", path: path, line: 1,
+        evidence: evidence, rationale: "The professional SSpec contract requires this authored fact.",
+        remediation: remediation, fingerprint: sha256_text(anchor), blocker: blocker,
+        fixable: fixable)
+
+fn _deduct(score: SspecDocumentizationScore, dimension: text, amount: i64,
+        blocker: bool) -> SspecDocumentizationScore:
+    val blockers = score.blockers + (if blocker: 1 else: 0)
+    SspecDocumentizationScore(
+        narrative: _clamp_score(score.narrative - (if dimension == "narrative": amount else: 0)),
+        structure: _clamp_score(score.structure - (if dimension == "structure": amount else: 0)),
+        oracle: _clamp_score(score.oracle - (if dimension == "oracle": amount else: 0)),
+        traceability: _clamp_score(score.traceability - (if dimension == "traceability": amount else: 0)),
+        evidence: _clamp_score(score.evidence - (if dimension == "evidence": amount else: 0)),
+        coverage: _clamp_score(score.coverage - (if dimension == "coverage": amount else: 0)),
+        maintainability: _clamp_score(score.maintainability - (if dimension == "maintainability": amount else: 0)),
+        aggregate: score.aggregate, blockers: blockers)
+
+fn _aggregate(score: SspecDocumentizationScore) -> SspecDocumentizationScore:
+    var total = (score.narrative * 15 + score.structure * 15 + score.oracle * 20 +
+        score.traceability * 15 + score.evidence * 15 + score.coverage * 10 +
+        score.maintainability * 10) / 100
+    if score.blockers > 0 and total > 49:
+        total = 49
+    SspecDocumentizationScore(narrative: score.narrative, structure: score.structure,
+        oracle: score.oracle, traceability: score.traceability, evidence: score.evidence,
+        coverage: score.coverage, maintainability: score.maintainability,
+        aggregate: total, blockers: score.blockers)
+
+fn analyze_sspec_text(path: text, source: text) -> SspecDocumentizationReport:
+    var findings: [SspecDocumentizationFinding] = []
+    var score = empty_score()
+
+    if not source.contains("## Purpose and audience"):
+        findings.push(_finding(path, "SSDOC-NAR-001", "narrative", "warning",
+            "missing Purpose and audience section", "Add an authored purpose and audience section.", false, true))
+        score = _deduct(score, "narrative", 35, false)
+    elif source.contains("TODO: describe the operator"):
+        findings.push(_finding(path, "SSDOC-NAR-002", "narrative", "warning",
+            "purpose section is still a scaffold", "Replace TODO text with authored facts.", false, false))
+        score = _deduct(score, "narrative", 25, false)
+    if not source.contains("## Preconditions"):
+        findings.push(_finding(path, "SSDOC-STR-001", "structure", "warning",
+            "missing Preconditions section", "Describe setup and preconditions.", false, true))
+        score = _deduct(score, "structure", 25, false)
+    if not source.contains("describe \"") or not source.contains("it \""):
+        findings.push(_finding(path, "SSDOC-STR-002", "structure", "blocker",
+            "missing executable describe/it structure", "Add executable SSpec scenarios.", true, false))
+        score = _deduct(score, "structure", 70, true)
+    if not source.contains("expect("):
+        findings.push(_finding(path, "SSDOC-ORC-001", "oracle", "blocker",
+            "no executable expectation", "Replace placeholders with observable assertions.", true, false))
+        score = _deduct(score, "oracle", 100, true)
+    if source.contains("expect(true).to_equal(true)") or source.contains("pass_todo"):
+        findings.push(_finding(path, "SSDOC-ORC-002", "oracle", "blocker",
+            "placeholder assertion", "Assert an observable product result.", true, false))
+        score = _deduct(score, "oracle", 100, true)
+    if not source.contains("REQ-"):
+        findings.push(_finding(path, "SSDOC-TRC-001", "traceability", "warning",
+            "no REQ-NNN identity", "Link scenarios to selected requirements.", false, false))
+        score = _deduct(score, "traceability", 50, false)
+    if not source.contains("step(\""):
+        findings.push(_finding(path, "SSDOC-EVD-001", "evidence", "warning",
+            "no visible operator steps", "Use literal step(\"...\") calls for docgen evidence.", false, false))
+        score = _deduct(score, "evidence", 40, false)
+    if not source.contains("## Evidence and provenance"):
+        findings.push(_finding(path, "SSDOC-COV-001", "coverage", "advice",
+            "missing evidence provenance", "Record evidence paths and provenance.", false, true))
+        score = _deduct(score, "coverage", 30, false)
+    if not source.contains("## Compatibility and limitations"):
+        findings.push(_finding(path, "SSDOC-MNT-001", "maintainability", "advice",
+            "missing compatibility and limitations", "State compatibility and known limits.", false, true))
+        score = _deduct(score, "maintainability", 25, false)
+
+    SspecDocumentizationReport(schema_version: "sspec-maintain/v1", tool_version: "1",
+        source_path: path, source_hash: sha256_text(source),
+        mirror_path: derive_manual_path(path), mirror_state: "unchecked",
+        score: _aggregate(score), findings: findings)
+
+fn derive_manual_path(path: text) -> text:
+    var out = path.replace("test/", "doc/06_spec/")
+    if out.ends_with(".spl"):
+        out = out[:-4] + ".md"
+    out
+
+fn analyze_sspec_pair_text(path: text, source: text, mirror: Option<text>) -> SspecDocumentizationReport:
+    val base = analyze_sspec_text(path, source)
+    var state = "missing"
+    match mirror:
+        case Some(content):
+            if content.contains(base.source_hash):
+                state = "current"
+            else:
+                state = "stale"
+        case None:
+            pass
+    SspecDocumentizationReport(schema_version: base.schema_version,
+        tool_version: base.tool_version, source_path: base.source_path,
+        source_hash: base.source_hash, mirror_path: base.mirror_path,
+        mirror_state: state, score: base.score, findings: base.findings)

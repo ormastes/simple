@@ -1627,6 +1627,16 @@ NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.
 
 ## Verification tiering (build infra)
 
+## SSpec documentization maintenance tool
+
+`simple sspec-maintain` is the maintenance-level peer of lint and
+duplicate-check. `scan` emits deterministic human, JSON, or SARIF findings and
+seven explainable scores. `improve` is preview-only unless confirmed with
+`--apply`; it preserves rollback material and cannot change scenario semantics.
+`scaffold` maps reference Markdown and REQ IDs to modern fail-fast SSpec.
+`documentize` adds scoring/provenance; SPipe owns the complete scenario manual.
+LLM suggestions are optional, preview-only, and excluded from scoring.
+
 Match the verification gate to the size of the change — a small pure-Simple lib
 edit is NOT a full bootstrap. See `.claude/rules/bootstrap.md` § "Verification
 tiering": T0 hosted seed probe (seconds) for logic changes; T1 incremental kernel

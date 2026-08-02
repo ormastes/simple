@@ -210,3 +210,7 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 
 - Verification report in `.spipe/<feature>/state.md`
 - Any minor fixes applied (test/doc only)
+
+Changed SSpec/manual pairs require one deterministic `simple sspec-maintain
+scan` gate. Blockers, threshold regression, stale mirrors, impure JSON/SARIF,
+or non-failing generated placeholders prevent PASS.

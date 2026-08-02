@@ -1,5 +1,9 @@
 # Lint Guide
 
+Lint retains ownership of `SPIPE001..007`. For professional SSpec/manual
+quality, also run `simple sspec-maintain scan <spec>`; it references those IDs
+without cloning them and adds seven-dimensional `SSDOC-*` scoring.
+
 The Simple compiler includes a multi-layer lint system for detecting code quality issues, performance anti-patterns, and stub/dummy implementations.
 
 Lint configuration is fail-closed: inside `simple.sdn`'s `[lints]` section,

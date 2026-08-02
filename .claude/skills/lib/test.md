@@ -118,3 +118,10 @@ Key files: `src/lib/nogc_sync_mut/ui_test/client.spl`, `src/app/ui.test_api/hand
 
 - `/spipe` skill, `.claude/templates/spipe_template.spl`
 - `doc/07_guide/infra/testing/testing.md`
+
+## SSpec maintenance
+
+Use `simple sspec-maintain scan <spec>` to score narrative, structure, oracle,
+traceability, evidence, coverage, and maintainability. Reference scaffolds keep
+REQ IDs and source hashes and fail fast for unresolved oracles. Preview safe
+improvements before confirmation. SPipe remains the full-manual generator.

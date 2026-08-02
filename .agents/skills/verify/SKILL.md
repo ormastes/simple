@@ -212,3 +212,10 @@ not create, rewrite, or weaken SPipe after verification.
   shape, embedded SQLite facade boundary, and explicit absence statuses. Run
   `scripts/check/check-llm-tooling-public-absence-rendering.shs`.
 - Do not mark PASS for compiler/core/lib or MCP/LSP work unless the matching smoke checks passed
+
+## SSpec maintenance verification
+
+Run `simple sspec-maintain scan` once for changed SSpec/manual pairs. Blockers,
+threshold failures, stale mirrors, placeholder scaffolds presented as passing,
+or machine-output contamination fail verification. Confirm preview/apply and
+rollback evidence for automatic changes.

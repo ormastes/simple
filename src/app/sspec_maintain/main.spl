@@ -1,0 +1,177 @@
+# REQ-001, REQ-005, REQ-010: command surface, policy, and compatibility.
+use std.cli.cli_util.{get_cli_args}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write, file_exists}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir}
+use app.io.cli_ops.{_cli_eprint}
+use app.sspec_maintain.*
+use app.spipe_docgen.spipe_docgen.main.{run_spipe_docgen}
+
+fn _usage():
+    print "SSpec documentization maintenance"
+    print "Usage: simple sspec-maintain <scan|improve|scaffold|documentize> <path> [options]"
+    print "  scan <spec> [--format human|json|sarif] [--min-score N]"
+    print "  improve <spec> [--apply] [--rollback <path>]"
+    print "  scaffold <reference.md> --output <spec.spl> [--preview|--overwrite]"
+    print "  documentize <spec> [--output <manual.md>]"
+    print "Improve is preview-only unless --apply is explicit."
+
+fn _option(args: [text], name: text, fallback: text) -> text:
+    var i = 0
+    while i + 1 < args.len():
+        if args[i] == name:
+            return args[i + 1]
+        i = i + 1
+    fallback
+
+fn _has(args: [text], name: text) -> bool:
+    args.contains(name)
+
+fn _severity_rank(value: text) -> i64:
+    if value == "advice": return 1
+    if value == "warning": return 2
+    if value == "error": return 3
+    if value == "blocker": return 4
+    0
+
+fn _denied(report: SspecDocumentizationReport, deny: text) -> bool:
+    val threshold = _severity_rank(deny)
+    if threshold == 0:
+        return false
+    for finding in report.findings:
+        if _severity_rank(finding.severity) >= threshold:
+            return true
+    false
+
+fn _read(path: text) -> Result<text, text>:
+    if not file_exists(path):
+        return Err("file does not exist: {path}")
+    val value = file_read(path)
+    match value:
+        case Some(content): Ok(content)
+        case None: Err("cannot read: {path}")
+
+fn _scan_paths(scope: text) -> [text]:
+    if not is_dir(scope):
+        return [scope]
+    var paths: [text] = []
+    for path in dir_walk(scope):
+        if path.ends_with("_spec.spl"):
+            paths.push(path)
+    paths.sort()
+    paths
+
+fn _run_scan(path: text, args: [text]) -> i64:
+    var reports: [SspecDocumentizationReport] = []
+    for spec_path in _scan_paths(path):
+        match _read(spec_path):
+            case Err(message):
+                _cli_eprint("sspec-maintain: {message}")
+                return 3
+            case Ok(source):
+                reports.push(analyze_sspec_pair_text(spec_path, source,
+                    file_read(derive_manual_path(spec_path))))
+    if reports.len() == 0:
+        _cli_eprint("sspec-maintain: scope contains no *_spec.spl files")
+        return 3
+    val format = _option(args, "--format", "human")
+    if format == "json":
+        print render_json_reports(reports)
+    elif format == "sarif":
+        print render_sarif_reports(reports)
+    elif format == "human":
+        var rendered: [text] = []
+        for report in reports:
+            rendered.push(render_human_report(report))
+        print rendered.join("\n\n")
+    else:
+        _cli_eprint("sspec-maintain: invalid format '{format}'")
+        return 2
+    val min_score = _option(args, "--min-score", "-1").to_i64() ?? -1
+    val deny = _option(args, "--deny-severity", "off")
+    for report in reports:
+        if (min_score >= 0 and report.score.aggregate < min_score) or _denied(report, deny):
+            return 1
+    0
+
+fn _run_improve(path: text, args: [text]) -> i64:
+    match _read(path):
+        case Err(message):
+            _cli_eprint("sspec-maintain: {message}")
+            3
+        case Ok(source):
+            val change = preview_sspec_text(path, source)
+            if not _has(args, "--apply"):
+                print change.content
+                return 0
+            if not change.changed:
+                _cli_eprint("sspec-maintain: no safe changes")
+                return 0
+            val rollback = _option(args, "--rollback", path + ".sspec-maintain.rollback")
+            if not file_atomic_write(rollback, change.rollback_content):
+                _cli_eprint("sspec-maintain: cannot write rollback material")
+                return 3
+            if not file_atomic_write(path, change.content):
+                _cli_eprint("sspec-maintain: cannot apply atomic change")
+                return 3
+            val verified = analyze_sspec_text(path, change.content)
+            if verified.source_hash == analyze_sspec_text(path, source).source_hash:
+                _cli_eprint("sspec-maintain: post-apply verification failed")
+                return 4
+            _cli_eprint("sspec-maintain: applied safe changes; rollback: {rollback}")
+            0
+
+fn _run_scaffold(path: text, args: [text]) -> i64:
+    match _read(path):
+        case Err(message):
+            _cli_eprint("sspec-maintain: {message}")
+            3
+        case Ok(reference):
+            val output = _option(args, "--output", "")
+            val content = scaffold_reference_text(path, reference)
+            if output == "" or _has(args, "--preview"):
+                print content
+                return 0
+            if file_exists(output) and not _has(args, "--overwrite"):
+                _cli_eprint("sspec-maintain: output exists; use --overwrite")
+                return 3
+            if file_atomic_write(output, content): 0 else: 3
+
+fn _run_documentize(path: text, args: [text]) -> i64:
+    match _read(path):
+        case Err(message):
+            _cli_eprint("sspec-maintain: {message}")
+            3
+        case Ok(source):
+            val report = analyze_sspec_text(path, source)
+            val output = _option(args, "--output", derive_manual_path(path))
+            val generated = run_spipe_docgen([path, "--output", "doc/06_spec", "--no-index"])
+            if generated != 0:
+                _cli_eprint("sspec-maintain: SPipe manual generation failed")
+                return 3
+            val spipe_manual = file_read(derive_manual_path(path)) ?? ""
+            val scorecard = "\n<!-- sspec-maintain:scorecard:start -->\n" + render_professional_manual(report) + "\n<!-- sspec-maintain:scorecard:end -->\n"
+            if file_atomic_write(output, spipe_manual + scorecard):
+                _cli_eprint("sspec-maintain: wrote {output}")
+                0
+            else:
+                _cli_eprint("sspec-maintain: cannot write {output}")
+                3
+
+fn run_sspec_maintain(args: [text]) -> i64:
+    if args.len() == 0 or _has(args, "--help") or _has(args, "-h"):
+        _usage()
+        return 0
+    if args.len() < 2:
+        _cli_eprint("sspec-maintain: operation and path are required")
+        return 2
+    val operation = args[0]
+    val path = args[1]
+    if operation == "scan": return _run_scan(path, args)
+    if operation == "improve": return _run_improve(path, args)
+    if operation == "scaffold": return _run_scaffold(path, args)
+    if operation == "documentize": return _run_documentize(path, args)
+    _cli_eprint("sspec-maintain: unknown operation '{operation}'")
+    2
+
+fn main() -> i64:
+    run_sspec_maintain(get_cli_args())
