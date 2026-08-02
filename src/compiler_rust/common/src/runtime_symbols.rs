@@ -525,6 +525,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_substr",
     "rt_string_substr_from",
     "rt_reverse",
+    "rt_sort",
     "rt_take",
     "rt_drop",
     "rt_string_sorted",

@@ -553,6 +553,7 @@ int64_t  rt_string_find_all(int64_t value, int64_t needle);
 int64_t  rt_string_substr(int64_t value, int64_t start, int64_t length);
 int64_t  rt_string_substr_from(int64_t value, int64_t start);
 int64_t  rt_reverse(int64_t receiver);
+int64_t  rt_sort(int64_t receiver);
 int64_t  rt_take(int64_t receiver, int64_t n);
 int64_t  rt_drop(int64_t receiver, int64_t n);
 int64_t  rt_string_sorted(int64_t value);

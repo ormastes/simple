@@ -470,6 +470,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_substr", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_substr_from", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sort", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_take", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_drop", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_sorted", &[I64], &[I64]),

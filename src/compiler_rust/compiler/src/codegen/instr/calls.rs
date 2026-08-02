@@ -3386,7 +3386,17 @@ pub fn compile_call<M: Module>(
                 "keys" => Some("rt_dict_keys"),
                 "values" => Some("rt_dict_values"),
                 "filter" => Some("rt_array_filter"),
-                "sort" => Some("rt_array_sort"),
+                // `sort` used to route to `rt_array_sort` for EVERY receiver.
+                // That helper sorts IN PLACE and returns a bool, so text got
+                // the `false` receiver-mismatch answer, an array had its
+                // receiver mutated, and on the native lane the symbol did not
+                // exist in runtime_native.c at all. Identical in shape to the
+                // `reverse` defect below. `rt_sort` copies, matching the
+                // interpreter, and refuses any other receiver loudly. `sort`
+                // is also removed from the codegen `in_place` sets — leaving it
+                // there would discard the new collection and yield the
+                // unmodified receiver.
+                "sort" => Some("rt_sort"),
                 // `reverse` used to route to `rt_array_reverse` for EVERY
                 // receiver. That helper reverses IN PLACE and returns a bool,
                 // so text got the `false` receiver-mismatch answer and an array

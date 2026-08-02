@@ -4016,6 +4016,98 @@ int64_t rt_reverse(int64_t receiver) {
     return rt_string_reverse_chars(s);
 }
 
+/* A receiver `sort` has no compiled implementation for. Loud, never a value.
+ * Separate from rt_refuse_non_text_receiver because `sort` is the opposite
+ * shape: text is the INVALID receiver here, not the valid one. */
+static void rt_refuse_non_array_sort_receiver(void) {
+    fprintf(stderr,
+            "Runtime error: sort() was called on a receiver that is not an array. "
+            "The interpreter refuses this outright (\"method `sort` not found on "
+            "type `str`\"), so there is no correct value to return. Refusing to "
+            "substitute one.\n");
+    exit(70);
+}
+
+/* Ordering for `sort`, pinned to the interpreter's comparator.
+ *
+ * interpreter_method/collections.rs "sort" is the spec:
+ *   (Int, Int)     => a.cmp(b)
+ *   (Float, Float) => a.partial_cmp(b) or Equal
+ *   (Str, Str)     => a.cmp(b)
+ *   _              => Equal
+ *
+ * MIXED types compare Equal and the sort is STABLE, so a mixed array keeps its
+ * original relative order. */
+static int rt_sort_cmp(int64_t a, int64_t b) {
+    if (rt_core_is_int(a) && rt_core_is_int(b)) {
+        int64_t x = rt_core_as_int(a), y = rt_core_as_int(b);
+        return x < y ? -1 : (x > y ? 1 : 0);
+    }
+    if (rt_core_is_float(a) && rt_core_is_float(b)) {
+        double x = rt_core_as_float(a), y = rt_core_as_float(b);
+        if (x < y) return -1;
+        if (x > y) return 1;
+        return 0; /* equal, or a NaN pair -> Equal, matching unwrap_or(Equal) */
+    }
+    RtCoreString* sa = rt_core_as_string(a);
+    RtCoreString* sb = rt_core_as_string(b);
+    if (sa && sb) {
+        uint64_t n = sa->len < sb->len ? sa->len : sb->len;
+        int c = n ? memcmp(sa->data, sb->data, (size_t)n) : 0;
+        if (c != 0) return c < 0 ? -1 : 1;
+        if (sa->len == sb->len) return 0;
+        return sa->len < sb->len ? -1 : 1;
+    }
+    return 0;
+}
+
+/* sort: sort an ARRAY in place and return that same array.
+ *
+ * `sort` used to point at rt_array_sort on every type-blind dispatch table.
+ * This file has never defined that symbol, so arr.sort() was an unresolved
+ * symbol on the native lane; on the Rust lane it resolved to an in-place sort
+ * returning a BOOL, for every receiver including text, and the value only came
+ * out right because codegen substituted the receiver vreg via its in_place set
+ * -- which also silently handed back an unsorted TEXT receiver.
+ *
+ * The interpreter is the spec, and reading interpreter_method/collections.rs
+ * alone gets it WRONG: that arm copies, but interpreter_method/mod.rs then
+ * writes the result back to the receiver binding because "sort" is in its
+ * MUTATING_METHODS list. Measured end to end on the interpreter:
+ *
+ *   var a = [3, 1, 2]
+ *   val b = a.sort()     // b = [1, 2, 3]  AND  a = [1, 2, 3]
+ *   "cba".sort()         // error: method `sort` not found on type `str` (rc=1)
+ *
+ * So: sort in place, return the receiver, refuse anything that is not an array.
+ *
+ * Insertion sort, because it is STABLE (matching Rust's sort_by) and the
+ * comparator is a plain function; array sizes here are the same ones the rest
+ * of this file already handles element-at-a-time. */
+int64_t rt_sort(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (!arr) rt_refuse_non_array_sort_receiver();
+    int64_t n = rt_array_len(arr);
+    if (n < 0) n = 0;
+    if (n < 2) return receiver;
+    int64_t* buf = (int64_t*)malloc((size_t)n * sizeof(int64_t));
+    if (!buf) return receiver;
+    for (int64_t i = 0; i < n; i++) buf[i] = rt_array_get(arr, i);
+    for (int64_t i = 1; i < n; i++) {
+        int64_t key = buf[i];
+        int64_t j = i - 1;
+        /* strict `> 0` keeps equal elements in original order = stable */
+        while (j >= 0 && rt_sort_cmp(buf[j], key) > 0) {
+            buf[j + 1] = buf[j];
+            j--;
+        }
+        buf[j + 1] = key;
+    }
+    for (int64_t i = 0; i < n; i++) rt_array_set(arr, i, buf[i]);
+    free(buf);
+    return receiver;
+}
+
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
  * A negative n yields an empty result, matching the saturating eval_arg_usize. */
 int64_t rt_take(int64_t receiver, int64_t n) {

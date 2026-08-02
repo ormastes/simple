@@ -2303,3 +2303,58 @@ fn rt_reverse_copies_and_leaves_the_receiver_alone() {
     let rev_text = rt_reverse(rt_string_new(s.as_ptr(), s.len() as u64));
     assert_eq!(super::rt_string_len(rev_text), 3);
 }
+
+/// `rt_sort` is what the `sort` METHOD now lowers to.
+///
+/// Expectations are hand-computed against the interpreter's OBSERVED end-to-end
+/// behaviour, not against `interpreter_method/collections.rs` in isolation —
+/// reading that arm alone says `sort` copies and leaves the receiver alone,
+/// which is WRONG for the language. `interpreter_method/mod.rs` lists `"sort"`
+/// in `MUTATING_METHODS` and writes the result back to the receiver binding, so
+/// what a program actually sees is:
+///
+/// ```text
+/// var a = [3, 1, 2]
+/// val b = a.sort()     // b = [1, 2, 3]  AND  a = [1, 2, 3]
+/// ```
+///
+/// The receiver-is-sorted assertion is therefore the half that a "make it copy
+/// like reverse" change gets wrong.
+#[test]
+fn rt_sort_sorts_in_place_and_returns_the_receiver() {
+    use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_sort};
+    use crate::value::core::RuntimeValue;
+
+    // [3, 1, 2] -> [1, 2, 3], and the RECEIVER is the sorted array.
+    let a = rt_array_new(3);
+    rt_array_push(a, RuntimeValue::from_int(3));
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+
+    let sorted = rt_sort(a);
+    assert_eq!(rt_array_len(sorted), 3);
+    assert_eq!(rt_array_get(sorted, 0).as_int(), 1);
+    assert_eq!(rt_array_get(sorted, 1).as_int(), 2);
+    assert_eq!(rt_array_get(sorted, 2).as_int(), 3);
+
+    // The receiver IS sorted, matching the interpreter's write-back.
+    assert_eq!(rt_array_get(a, 0).as_int(), 1, "receiver must be sorted in place");
+    assert_eq!(rt_array_get(a, 1).as_int(), 2, "receiver must be sorted in place");
+    assert_eq!(rt_array_get(a, 2).as_int(), 3, "receiver must be sorted in place");
+
+    // Negatives: Int compares by value, so -5 sorts first.
+    let n = rt_array_new(3);
+    rt_array_push(n, RuntimeValue::from_int(2));
+    rt_array_push(n, RuntimeValue::from_int(-5));
+    rt_array_push(n, RuntimeValue::from_int(0));
+    let ns = rt_sort(n);
+    assert_eq!(rt_array_get(ns, 0).as_int(), -5);
+    assert_eq!(rt_array_get(ns, 1).as_int(), 0);
+    assert_eq!(rt_array_get(ns, 2).as_int(), 2);
+
+    // A TEXT receiver is NOT exercised here on purpose: `rt_sort` refuses it
+    // with exit(70), matching the interpreter's hard "method `sort` not found
+    // on type `str`". A process-exit cannot be asserted from an in-process
+    // unit test without a fork harness; the refusal is covered by the
+    // end-to-end probe recorded in the bug doc.
+}

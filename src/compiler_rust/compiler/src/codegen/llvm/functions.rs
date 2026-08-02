@@ -2445,7 +2445,10 @@ impl LlvmBackend {
                     "values" => Some("rt_dict_values"),
                     "remove" => Some("rt_dict_remove"),
                     "filter" => Some("rt_array_filter"),
-                    "sort" => Some("rt_array_sort"),
+                    // See rt_sort: `rt_array_sort` sorts IN PLACE and returns a
+                    // bool, applied here to every receiver; the interpreter
+                    // mutates nothing and returns a new collection.
+                    "sort" => Some("rt_sort"),
                     // See rt_reverse: `rt_array_reverse` reverses IN PLACE and
                     // returns a bool, applied here to every receiver; the
                     // interpreter mutates nothing and returns a new collection.
@@ -2583,15 +2586,20 @@ impl LlvmBackend {
                     // (unmodified) receiver instead, which is the one way this
                     // remap could have become a silent wrong answer.
                     //
-                    // `sort` is left alone deliberately: it still lowers to the
-                    // in-place `rt_array_sort`, so its result vreg must stay
-                    // the receiver. The interpreter's array `"sort"` also
-                    // copies (`interpreter_method/collections.rs`), so `sort`
-                    // carries the same divergence `reverse` had — recorded in
-                    // doc/08_tracking/bug/jit_in_operator_unboxed_needle_2026-08-01.md
-                    // rather than changed here, because a different runtime
-                    // symbol would have to exist first.
-                    let in_place = matches!(method, "push" | "clear" | "sort");
+                    // `sort` is NO LONGER in this set either, but for a
+                    // different reason than `reverse`. `sort` DOES leave the
+                    // receiver sorted — `interpreter_method/mod.rs` lists
+                    // `"sort"` in `MUTATING_METHODS` and writes the result back
+                    // to the receiver binding, so `var a = [3,1,2]; a.sort()`
+                    // leaves `a == [1,2,3]` on the interpreter. What the
+                    // substitution got WRONG is the non-array case: the
+                    // interpreter refuses `"cba".sort()` outright ("method
+                    // `sort` not found on type `str`", rc=1) while
+                    // `rt_array_sort` returned `false` and this substitution
+                    // silently handed back the unsorted text. `rt_sort` sorts
+                    // in place, returns the receiver itself, and refuses a
+                    // non-array loudly — so it must supply its own return value.
+                    let in_place = matches!(method, "push" | "clear");
                     if let Some(d) = dest {
                         if in_place {
                             let recv_val = self.get_vreg(receiver, vreg_map)?;
@@ -2864,7 +2872,16 @@ impl LlvmBackend {
                     ("Tuple" | "tuple", "set") => Some("rt_tuple_set"),
                     ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice"),
                     ("Array" | "array", "join") => Some("rt_array_join"),
-                    ("Array" | "array", "sort") => Some("rt_array_sort"),
+                    // `rt_sort`, NOT `rt_array_sort`: the latter returns a
+                    // BOOL, so it was only ever correct while `sort` sat in the
+                    // `in_place` set that substitutes the receiver vreg. With
+                    // `sort` removed from that set (so a text receiver can be
+                    // refused instead of silently handed back), the callee has
+                    // to return the array itself. `rt_sort` sorts in place and
+                    // returns the receiver, which is what the interpreter does
+                    // once `interpreter_method/mod.rs`'s `MUTATING_METHODS`
+                    // write-back is accounted for.
+                    ("Array" | "array", "sort") => Some("rt_sort"),
                     // `rt_array_reversed`, NOT `rt_array_reverse`: the
                     // interpreter's array `"rev" | "reverse"` copies the vector
                     // and reverses the COPY (`Value::array(new_arr)`), leaving

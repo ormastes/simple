@@ -267,7 +267,10 @@ impl LlvmEmitter<'_> {
             // runtime defines — `rt_array_reverse` has never existed there, so
             // `arr.reverse()` did not even link on the native lane.
             "reverse" => Some("rt_reverse"),
-            "sort" => Some("rt_array_sort"),
+            // Same defect, same shape: `rt_array_sort` sorts IN PLACE, returns
+            // a bool, was applied to every receiver, and has never existed in
+            // runtime_native.c. `rt_sort` copies, matching the interpreter.
+            "sort" => Some("rt_sort"),
             "first" => Some("rt_array_first"),
             "last" => Some("rt_array_last"),
             // Receiver-polymorphic. Routing the bare name to the string-only
@@ -2314,6 +2317,10 @@ mod tests {
 
         // `reverse`: `rt_array_reverse` reverses IN PLACE and returns a bool.
         assert_eq!(LlvmEmitter::runtime_method_name("reverse"), Some("rt_reverse"));
+
+        // `sort`: same shape — `rt_array_sort` sorts IN PLACE, returns a bool,
+        // and does not exist in runtime_native.c at all.
+        assert_eq!(LlvmEmitter::runtime_method_name("sort"), Some("rt_sort"));
 
         // Already-fixed siblings, asserted here so the family stays together.
         assert_eq!(LlvmEmitter::runtime_method_name("map"), Some("rt_map"));

@@ -1131,9 +1131,30 @@ mod tests {
         assert!(closures.contains("\"reverse\" => \"rt_reverse\""), "bare `reverse` must reach rt_reverse");
         assert!(!closures.contains("\"reverse\" => \"rt_array_reverse\""));
 
+        // --- sort ------------------------------------------------------------
+        // `sort` carried the identical divergence `reverse` had: the bare-name
+        // tables routed it to `rt_array_sort`, which sorts IN PLACE, returns a
+        // bool, applies to every receiver, and does not exist in
+        // runtime_native.c at all. It used to sit below as this test's
+        // "true-positive control" — which is exactly how a known-wrong mapping
+        // gets PINNED by the test meant to protect the family. `rt_sort` copies,
+        // matching the interpreter's `arr.to_vec()` -> `Value::array(new_arr)`.
+        assert!(
+            calls.contains("\"sort\" => Some(\"rt_sort\")"),
+            "calls.rs must route `sort` to the copying rt_sort"
+        );
+        assert!(
+            !calls.contains("\"sort\" => Some(\"rt_array_sort\")"),
+            "rt_array_sort mutates in place and returns a bool"
+        );
+        assert!(closures.contains("\"sort\" => \"rt_sort\""), "bare `sort` must reach rt_sort");
+        assert!(!closures.contains("\"sort\" => \"rt_array_sort\""));
+
         // True-positive control: receiver-SPECIFIC methods must STAY specific,
         // so this cannot be satisfied by a table that renamed everything.
-        assert!(calls.contains("\"sort\" => Some(\"rt_array_sort\")"));
+        // `first`/`filter` take an array receiver in both tables and have no
+        // text counterpart, so unlike `sort` they are genuinely specific.
+        assert!(calls.contains("\"first\" => Some(\"rt_array_first\")"));
         assert!(closures.contains("\"filter\" => \"rt_array_filter\""));
     }
 }
@@ -1533,7 +1554,11 @@ fn try_compile_builtin_method_call<M: Module>(
             return Ok(None);
         }
         "filter" => "rt_array_filter",
-        "sort" => "rt_array_sort",
+        // See calls.rs: `rt_array_sort` sorts IN PLACE and returns a bool, for
+        // every receiver, and does not exist in runtime_native.c. The
+        // interpreter mutates nothing and returns a new collection, which is
+        // what `rt_sort` does.
+        "sort" => "rt_sort",
         // See calls.rs: `rt_array_reverse` reverses IN PLACE and returns a
         // bool, for every receiver. The interpreter mutates nothing and returns
         // a new collection, which is what `rt_reverse` does.
@@ -1732,6 +1757,11 @@ fn try_compile_builtin_method_call<M: Module>(
     // Methods that mutate in-place (clear, reverse, sort) return the receiver.
     // push is special: rt_array_push may return a NEW pointer when the array
     // grows, so we must use the actual return value from the call.
+    // NOTE: `rt_array_reverse` / `rt_array_sort` remain listed because they ARE
+    // in-place if some caller names them directly. Nothing dispatches the
+    // `reverse` or `sort` METHOD to them any more — both now route to the
+    // copying `rt_reverse` / `rt_sort`, which must yield their RETURN value,
+    // not the receiver.
     let in_place_mutating_no_push = matches!(runtime_func, "rt_array_clear" | "rt_array_reverse" | "rt_array_sort");
 
     if runtime_func == "rt_array_push" {

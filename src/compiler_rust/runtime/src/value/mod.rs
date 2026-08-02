@@ -145,7 +145,7 @@ pub use collections::{
     rt_string_squeeze, rt_string_swapcase, rt_string_title, rt_string_trim_end_matches, rt_string_trim_start_matches,
     rt_string_center, rt_string_find_all, rt_string_pad_left, rt_string_pad_right,
     rt_string_substr, rt_string_substr_from, rt_string_zfill,
-    rt_drop, rt_reverse, rt_string_partition, rt_string_rpartition, rt_string_sorted, rt_take,
+    rt_drop, rt_reverse, rt_sort, rt_string_partition, rt_string_rpartition, rt_string_sorted, rt_take,
     rt_string_split, rt_string_starts_with, rt_string_to_float, rt_string_to_int, rt_string_to_int_lenient,
     rt_string_to_lower, rt_string_to_upper, rt_string_trim, rt_string_trim_end, rt_string_trim_start, rt_to_string,
     rt_tuple_get, rt_tuple_len, rt_tuple_new, rt_tuple_set, rt_typed_bytes_u8_data_at, rt_typed_bytes_u8_push,

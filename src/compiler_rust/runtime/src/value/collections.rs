@@ -2576,6 +2576,61 @@ pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// A receiver `sort` has no compiled implementation for. Loud, never a value.
+///
+/// Distinct from `refuse_non_text_receiver` because `sort` is the opposite
+/// shape: text is the INVALID receiver here, not the valid one.
+fn refuse_non_array_sort_receiver() -> ! {
+    eprintln!(
+        "Runtime error: sort() was called on a receiver that is not an array. \
+         The interpreter refuses this outright (\"method `sort` not found on \
+         type `str`\"), so there is no correct value to return. Refusing to \
+         substitute one."
+    );
+    std::process::exit(70);
+}
+
+/// `sort`: sort an ARRAY in place and return that same array.
+///
+/// The interpreter is the spec, and the spec is NOT what reading
+/// `interpreter_method/collections.rs` alone suggests. That arm builds a copy
+/// (`arr.to_vec()` -> `Value::array(new_arr)`), but `interpreter_method/mod.rs`
+/// then WRITES THE RESULT BACK to the receiver binding, because `"sort"` is in
+/// its `MUTATING_METHODS` list. Measured end to end on the interpreter:
+///
+/// ```text
+/// var a = [3, 1, 2]
+/// val b = a.sort()     // b = [1, 2, 3]  AND  a = [1, 2, 3]
+/// "cba".sort()         // error: method `sort` not found on type `str`  (rc=1)
+/// ```
+///
+/// So `sort` must (a) leave the receiver sorted and (b) evaluate to the sorted
+/// array, and (c) refuse a text receiver rather than inventing an answer.
+/// Returning a fresh copy and leaving the receiver alone would satisfy only
+/// (b) — a silent wrong answer on the aliasing axis.
+///
+/// What was actually broken about `"sort" => rt_array_sort`:
+///   * `rt_array_sort` returns a `bool`, not a collection, so the value was
+///     only correct while `sort` sat in the codegen `in_place` set that
+///     substitutes the receiver vreg.
+///   * On a TEXT receiver it returned `false` and the `in_place` substitution
+///     handed back the unsorted receiver — silently, where the interpreter
+///     errors.
+///   * `runtime_native.c` has never defined `rt_array_sort`, so `arr.sort()`
+///     did not link at all on the native lane.
+///
+/// `rt_sort` fixes all three and returns the right value on its own, which is
+/// why `sort` is also removed from the `in_place` set: with `rt_sort` the
+/// substitution would defeat the text refusal.
+#[no_mangle]
+pub extern "C" fn rt_sort(receiver: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        rt_array_sort(receiver);
+        return receiver;
+    }
+    refuse_non_array_sort_receiver()
+}
+
 /// `take` / `taken`: first `n` CHARACTERS of text, or first `n` ELEMENTS of an
 /// array. Receiver-dispatched. A negative `n` yields an empty result, matching
 /// the saturating `eval_arg_usize` the interpreter now uses.
