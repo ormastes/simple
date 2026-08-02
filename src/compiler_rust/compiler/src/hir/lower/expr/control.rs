@@ -682,7 +682,22 @@ impl Lowerer {
                 ty: TypeId::BOOL,
             }),
             Pattern::Typed { pattern, .. } => self.lower_pattern_condition(subject_idx, subject_ty, pattern, ctx),
-            Pattern::Tuple(_) | Pattern::Array(_) | Pattern::Struct { .. } => Ok(HirExpr {
+            // Kept in sync with the statement-form twin
+            // `lower_pattern_condition_stmt` (hir/lower/stmt_lowering.rs): match
+            // ARMS route through that one, this is the expression form.
+            Pattern::Tuple(elements) => Ok(self
+                .sequence_condition(&subject_ref, elements, false, ctx)
+                .unwrap_or(HirExpr {
+                    kind: HirExprKind::Bool(true),
+                    ty: TypeId::BOOL,
+                })),
+            Pattern::Array(elements) => Ok(self
+                .sequence_condition(&subject_ref, elements, true, ctx)
+                .unwrap_or(HirExpr {
+                    kind: HirExprKind::Bool(true),
+                    ty: TypeId::BOOL,
+                })),
+            Pattern::Struct { .. } => Ok(HirExpr {
                 kind: HirExprKind::Bool(true),
                 ty: TypeId::BOOL,
             }),
@@ -957,14 +972,153 @@ impl Lowerer {
                 }
                 self.struct_fields_condition(slot, name, &positional, ctx)
             }
-            // Still irrefutable in payload position. Tracked in
-            // doc/08_tracking/bug/nested_payload_subpattern_always_matches_2026-08-01.md
-            // — the blocker is that array/tuple destructuring emits no binding
-            // on this path either, so a length test alone would swap a
-            // wrong-arm answer for a right-arm-with-zero-binders answer:
-            // strictly a different wrong answer, not a fix.
-            Pattern::Tuple(_) | Pattern::Array(_) => None,
+            Pattern::Tuple(elements) => self.sequence_condition(slot, elements, false, ctx),
+            Pattern::Array(elements) => self.sequence_condition(slot, elements, true, ctx),
         }
+    }
+
+    /// `rt_array_len(slot)` as an i64 expression.
+    pub(crate) fn array_len_expr(slot: &HirExpr) -> HirExpr {
+        HirExpr {
+            kind: HirExprKind::BuiltinCall {
+                name: "rt_array_len".to_string(),
+                args: vec![slot.clone()],
+            },
+            ty: TypeId::I64,
+        }
+    }
+
+    fn seq_i64_const(value: i64) -> HirExpr {
+        HirExpr {
+            kind: HirExprKind::Integer(value),
+            ty: TypeId::I64,
+        }
+    }
+
+    /// `(element_expression, sub_pattern)` for every element position of an
+    /// array/tuple pattern whose value sits at `slot`.
+    ///
+    /// This is the SINGLE OWNER of sequence element addressing: both the
+    /// refutability test ([`Self::sequence_condition`]) and the binder emission
+    /// (`bind_sequence` in hir/lower/stmt_lowering.rs) walk it, so an arm can
+    /// never be selected on one element and bound from another.
+    ///
+    /// `Pattern::Rest` (`...`) splits the walk, mirroring the tree-walk
+    /// interpreter in `interpreter_patterns.rs`: leading elements keep their
+    /// literal index, trailing elements are addressed from the END as
+    /// `rt_array_len(slot) - k`. The parser only ever produces `Pattern::Rest`
+    /// inside an ARRAY pattern (`parser_patterns.rs`, `LBracket` arm), so a
+    /// rest with trailing elements in a non-array sequence has no addressable
+    /// form; that shape returns `None` and leaves the caller at its previous
+    /// irrefutable/unbound behaviour rather than inventing an index.
+    pub(crate) fn sequence_element_slots<'p>(
+        slot: &HirExpr,
+        patterns: &'p [Pattern],
+        is_array: bool,
+    ) -> Option<Vec<(HirExpr, &'p Pattern)>> {
+        let index_at = |index: HirExpr| HirExpr {
+            kind: HirExprKind::Index {
+                receiver: Box::new(slot.clone()),
+                index: Box::new(index),
+            },
+            ty: TypeId::ANY,
+        };
+
+        let rest_index = patterns.iter().position(|p| matches!(p, Pattern::Rest));
+        let mut out: Vec<(HirExpr, &Pattern)> = Vec::new();
+        match rest_index {
+            None => {
+                for (i, p) in patterns.iter().enumerate() {
+                    out.push((index_at(Self::seq_i64_const(i as i64)), p));
+                }
+            }
+            Some(rest_idx) => {
+                for (i, p) in patterns[..rest_idx].iter().enumerate() {
+                    out.push((index_at(Self::seq_i64_const(i as i64)), p));
+                }
+                let after = &patterns[rest_idx + 1..];
+                if !after.is_empty() && !is_array {
+                    return None;
+                }
+                for (j, p) in after.iter().enumerate() {
+                    let from_end = (after.len() - j) as i64;
+                    let index = HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: BinOp::Sub,
+                            left: Box::new(Self::array_len_expr(slot)),
+                            right: Box::new(Self::seq_i64_const(from_end)),
+                        },
+                        ty: TypeId::I64,
+                    };
+                    out.push((index_at(index), p));
+                }
+            }
+        }
+        Some(out)
+    }
+
+    /// Refutability test for an array/tuple pattern whose value sits at `slot`,
+    /// or `None` when every element is irrefutable and no length test applies.
+    ///
+    /// The length discriminator is ARRAYS ONLY, and that asymmetry is load
+    /// bearing:
+    ///
+    /// * An array's length is a runtime property, so `case [a, b]` must reject
+    ///   `[1, 2, 3]`. Without it the first array arm swallowed every array.
+    /// * A TUPLE's arity is fixed by its type, so an arity test is always true
+    ///   for a well-typed program — and `rt_array_len` returns `-1` on a Tuple
+    ///   heap object (the `as_typed_ptr!` tag check fails), so emitting one
+    ///   would make every tuple arm fail to match. Tuple patterns take their
+    ///   refutability from their ELEMENTS only.
+    ///
+    /// A length test on its own is NOT a fix for the destructuring gap: it only
+    /// moves `[1, 2, 3]` from a `[a, b]` arm to a `[a, b, c]` arm that still
+    /// binds zeros. The binders emitted by `bind_sequence` over the same
+    /// [`Self::sequence_element_slots`] walk are the other required half.
+    pub(crate) fn sequence_condition(
+        &mut self,
+        slot: &HirExpr,
+        patterns: &[Pattern],
+        is_array: bool,
+        ctx: &mut FunctionContext,
+    ) -> Option<HirExpr> {
+        let slots = Self::sequence_element_slots(slot, patterns, is_array)?;
+
+        let mut combined: Option<HirExpr> = None;
+        if is_array {
+            let has_rest = patterns.iter().any(|p| matches!(p, Pattern::Rest));
+            let (op, want) = if has_rest {
+                (BinOp::GtEq, (patterns.len() - 1) as i64)
+            } else {
+                (BinOp::Eq, patterns.len() as i64)
+            };
+            combined = Some(HirExpr {
+                kind: HirExprKind::Binary {
+                    op,
+                    left: Box::new(Self::array_len_expr(slot)),
+                    right: Box::new(Self::seq_i64_const(want)),
+                },
+                ty: TypeId::BOOL,
+            });
+        }
+
+        for (elem_expr, sub) in &slots {
+            let Some(test) = self.subpattern_condition(elem_expr, sub, ctx) else {
+                continue;
+            };
+            combined = Some(match combined {
+                None => test,
+                Some(prev) => HirExpr {
+                    kind: HirExprKind::Binary {
+                        op: BinOp::And,
+                        left: Box::new(prev),
+                        right: Box::new(test),
+                    },
+                    ty: TypeId::BOOL,
+                },
+            });
+        }
+        combined
     }
 
     /// Declared `(name, type)` field list of the struct/class named `name`.
@@ -1229,8 +1383,17 @@ impl Lowerer {
                 }
             }
             Pattern::Array(patterns) => {
+                // Resolve the declared element type when the subject is a known
+                // array, so the `Let` emitted by `bind_sequence` carries a
+                // concrete type instead of ANY. An ANY-typed binding makes MIR
+                // pick generic boxing and can surface an i64 element as a
+                // misformatted value at use sites.
+                let element_ty = match self.module.types.get(expected_ty) {
+                    Some(HirType::Array { element, .. }) => *element,
+                    _ => TypeId::ANY,
+                };
                 for p in patterns {
-                    self.collect_pattern_bindings(p, TypeId::ANY, bindings);
+                    self.collect_pattern_bindings(p, element_ty, bindings);
                 }
             }
             Pattern::Or(patterns) => {

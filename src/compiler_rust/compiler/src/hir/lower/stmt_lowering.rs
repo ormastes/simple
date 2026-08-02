@@ -1090,6 +1090,20 @@ impl Lowerer {
             }
             return binding_stmts;
         }
+        // Top-level array/tuple destructuring: `case [a, b]:` / `case (a, b):`.
+        // These had no binder emission at all before — the arm was selected and
+        // then read every name off the zeroed stack. The matching refutability
+        // half lives in `lower_pattern_condition_stmt` below.
+        if let Pattern::Tuple(elements) | Pattern::Array(elements) = binding_pattern {
+            let is_array = matches!(binding_pattern, Pattern::Array(_));
+            let binding_type_map: std::collections::HashMap<String, TypeId> = bindings.iter().cloned().collect();
+            let subject_ref = HirExpr {
+                kind: HirExprKind::Local(subject_idx),
+                ty: subject_ty,
+            };
+            self.bind_sequence(&subject_ref, elements, is_array, &binding_type_map, ctx, &mut binding_stmts);
+            return binding_stmts;
+        }
         if let Pattern::Enum {
             payload: Some(payload_patterns),
             variant: enum_variant,
@@ -1516,6 +1530,29 @@ impl Lowerer {
                             &mut binding_stmts,
                         );
                     }
+                } else {
+                    // Every other sub-pattern kind in payload position —
+                    // notably a TUPLE (`case Pair((0, b)):`) or an ARRAY
+                    // (`case Items([a, b]):`). Before this branch existed the
+                    // loop handled only `Identifier` and nested `Enum`, so an
+                    // array/tuple sub-pattern fell through and emitted no
+                    // initializer: `collect_pattern_bindings` had already
+                    // registered locals for `a`/`b`, and they kept their stack
+                    // zeros. Once `sequence_condition` started emitting the
+                    // length discriminator this became visible as the exact
+                    // half-fix signature the bug doc warns about — the RIGHT
+                    // arm selected, answering 100 instead of 106.
+                    //
+                    // The slot comes from `payload_slot_expr`, the same owner
+                    // the condition side (`nested_payload_condition`) walks, so
+                    // the arm cannot be selected on one slot and bound from
+                    // another.
+                    let subject_ref = HirExpr {
+                        kind: HirExprKind::Local(subject_idx),
+                        ty: subject_ty,
+                    };
+                    let slot_expr = Self::payload_slot_expr(&subject_ref, i, payload_patterns.len());
+                    self.bind_subpattern(&slot_expr, p, &binding_type_map, ctx, &mut binding_stmts);
                 }
             }
         }
@@ -1564,30 +1601,90 @@ impl Lowerer {
                     ty: TypeId::ANY,
                 }
             };
-            match sub {
-                Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name) => {
-                    let Some(&local_idx) = ctx.local_map.get(bound_name) else {
-                        continue;
-                    };
-                    let bound_ty = binding_type_map.get(bound_name).copied().unwrap_or(TypeId::ANY);
-                    out.push(HirStmt::Let {
-                        local_index: local_idx,
+            self.bind_subpattern(&slot, sub, binding_type_map, ctx, out);
+        }
+    }
+
+    /// Emit the `Let` bindings for ONE sub-pattern whose value sits at `slot`.
+    ///
+    /// The single owner of binder construction for sub-pattern positions: enum
+    /// payload slots, array elements and tuple elements all route here, so the
+    /// forms cannot drift apart the way array/tuple destructuring already did.
+    /// `Pattern::Tuple` / `Pattern::Array` previously had NO binder emission
+    /// anywhere — `collect_pattern_bindings` registered locals for `a`/`b` in
+    /// `case [a, b]:` but nothing ever initialised them, so the arm was selected
+    /// and then read both names off the zeroed stack (`1 + 2` answered `0`).
+    ///
+    /// The refutability side of the same walk is
+    /// `subpattern_condition` / `sequence_condition` in
+    /// hir/lower/expr/control.rs, and the two share
+    /// `sequence_element_slots` so an element can never be tested at one index
+    /// and bound from another.
+    pub(crate) fn bind_subpattern(
+        &mut self,
+        slot: &HirExpr,
+        pattern: &Pattern,
+        binding_type_map: &std::collections::HashMap<String, TypeId>,
+        ctx: &mut FunctionContext,
+        out: &mut Vec<HirStmt>,
+    ) {
+        match pattern {
+            Pattern::Identifier(bound_name) | Pattern::MutIdentifier(bound_name) => {
+                let Some(&local_idx) = ctx.local_map.get(bound_name) else {
+                    return;
+                };
+                let bound_ty = binding_type_map.get(bound_name).copied().unwrap_or(TypeId::ANY);
+                out.push(HirStmt::Let {
+                    local_index: local_idx,
+                    ty: bound_ty,
+                    value: Some(HirExpr {
+                        kind: slot.kind.clone(),
                         ty: bound_ty,
-                        value: Some(HirExpr {
-                            kind: slot.kind.clone(),
-                            ty: bound_ty,
-                        }),
-                    });
-                }
-                Pattern::Enum {
-                    variant,
-                    payload: Some(inner_patterns),
-                    ..
-                } if self.is_real_enum_variant_name(variant) => {
-                    self.bind_nested_payload(&slot, inner_patterns, binding_type_map, ctx, out);
-                }
-                _ => {}
+                    }),
+                });
             }
+            Pattern::Typed { pattern, .. } => {
+                self.bind_subpattern(slot, pattern, binding_type_map, ctx, out);
+            }
+            Pattern::Enum {
+                variant,
+                payload: Some(inner_patterns),
+                ..
+            } if self.is_real_enum_variant_name(variant) => {
+                self.bind_nested_payload(slot, inner_patterns, binding_type_map, ctx, out);
+            }
+            Pattern::Tuple(elements) => {
+                self.bind_sequence(slot, elements, false, binding_type_map, ctx, out);
+            }
+            Pattern::Array(elements) => {
+                self.bind_sequence(slot, elements, true, binding_type_map, ctx, out);
+            }
+            // Wildcard / Rest / literals / ranges bind nothing. A struct
+            // sub-pattern nested inside an array or tuple element is NOT bound
+            // here: the struct spellings are already served by the
+            // `class_struct_fields` and `struct_info` paths in
+            // `build_pattern_binding_stmts`, and duplicating them here would
+            // emit the same `Let` twice.
+            _ => {}
+        }
+    }
+
+    /// Emit binders for every element of an array/tuple pattern at `slot`,
+    /// walking the same element addressing as the refutability test.
+    pub(crate) fn bind_sequence(
+        &mut self,
+        slot: &HirExpr,
+        patterns: &[Pattern],
+        is_array: bool,
+        binding_type_map: &std::collections::HashMap<String, TypeId>,
+        ctx: &mut FunctionContext,
+        out: &mut Vec<HirStmt>,
+    ) {
+        let Some(slots) = Self::sequence_element_slots(slot, patterns, is_array) else {
+            return;
+        };
+        for (elem_expr, sub) in slots {
+            self.bind_subpattern(&elem_expr, sub, binding_type_map, ctx, out);
         }
     }
 
@@ -1897,14 +1994,24 @@ impl Lowerer {
                 ty: TypeId::BOOL,
             }),
             Pattern::Typed { pattern, .. } => self.lower_pattern_condition_stmt(subject_idx, subject_ty, pattern, ctx),
-            Pattern::Tuple(_elements) => Ok(HirExpr {
-                kind: HirExprKind::Bool(true),
-                ty: TypeId::BOOL,
-            }),
-            Pattern::Array(_elements) => Ok(HirExpr {
-                kind: HirExprKind::Bool(true),
-                ty: TypeId::BOOL,
-            }),
+            // Array patterns get a real length discriminator; tuple patterns do
+            // not (arity is fixed by the type, and `rt_array_len` returns -1 on
+            // a Tuple heap object). Both get element tests. See
+            // `sequence_condition` in hir/lower/expr/control.rs for why a length
+            // test ALONE would only trade one wrong answer for another — the
+            // binders emitted by `bind_sequence` are the other required half.
+            Pattern::Tuple(elements) => Ok(self
+                .sequence_condition(&subject_ref, elements, false, ctx)
+                .unwrap_or(HirExpr {
+                    kind: HirExprKind::Bool(true),
+                    ty: TypeId::BOOL,
+                })),
+            Pattern::Array(elements) => Ok(self
+                .sequence_condition(&subject_ref, elements, true, ctx)
+                .unwrap_or(HirExpr {
+                    kind: HirExprKind::Bool(true),
+                    ty: TypeId::BOOL,
+                })),
             Pattern::Struct { .. } => Ok(HirExpr {
                 kind: HirExprKind::Bool(true),
                 ty: TypeId::BOOL,

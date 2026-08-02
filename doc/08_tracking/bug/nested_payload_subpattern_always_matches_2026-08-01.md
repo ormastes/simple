@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-01
 **Status:** Fixed for variant sub-patterns at ANY depth, literal sub-patterns,
-range/or sub-patterns, and literals inside struct sub-patterns. Tuple and array
-sub-patterns remain open — see the residue section, which now records a
-DIFFERENT and larger root cause than "irrefutable".
+range/or sub-patterns, literals inside struct sub-patterns, and — as of the
+third pass below — tuple and array destructuring both at top level and in
+payload position.
 **Engines:** JIT wrong. Tree-walk interpreter correct. Native gate-blocked (not wrong).
 **Fixture:** `test/fixtures/compiler/nested_payload_subpattern_matrix.spl`
 
@@ -121,8 +121,8 @@ that proves `check` can still report a mismatch.
 | text literal (`Tag("hi")`) | 1 | 2 | 2 |
 | literal inside struct sub-pattern (`Wrap(Point(0, b))`) | 4 | 107 | 107 |
 | range / or sub-pattern | irrefutable | tested | correct |
-| **tuple sub-pattern** (`V((0, b))`) | 0 | **0 — still open** | correct |
-| **array sub-pattern** (`V([a, b])`) | 0 | **0 — still open** | correct |
+| **tuple sub-pattern** (`V((0, b))`) | 0 | 0 — fixed in round 3 below | correct |
+| **array sub-pattern** (`V([a, b])`) | 0 | 0 — fixed in round 3 below | correct |
 
 Which implementation this reaches was proved by instrumentation, not by
 reading: `SIMPLE_DEBUG_PATTERN_LOWER=1` (default off) makes
@@ -138,34 +138,108 @@ that trips this path.
 
 ### Still open
 
-1. **Tuple and array sub-patterns — the root cause is NOT irrefutability.**
-   Measured on the JIT, base and fixed alike: `match xs: case [a, b]: a + b`
-   over `[1, 2]` returns **0**, and `case (a, b)` over `(1, 2)` returns **0** —
-   at *top level*, with no enum involved at all. The binders are never emitted;
-   array/tuple destructuring has no binding lowering on this path. Adding the
-   length/arity test alone would move `[1,2,3]` from the `[a,b]` arm to the
-   `[a,b,c]` arm and still answer 0 + 100 = 100 instead of 106 — a *different*
-   wrong answer, not a fix. So the condition side deliberately still returns
-   `None` for `Pattern::Tuple` / `Pattern::Array`, and the binding gap must be
-   closed first. Fixture rows exist in the probe set but are intentionally NOT
-   added to the in-tree matrix, which must stay green.
+1. ~~Tuple and array sub-patterns~~ — **FIXED, see "Residue round 3" below.**
 2. **`codegen/instr/pattern.rs:96`** — unchanged, still an independent catch-all
    (`_ => iconst(1)`, "always match for now") on the MIR->Cranelift path with
    `MirPattern::Variant { .. }` discarding its `payload`. Owned by a separate
    lane. The HIR fix covers the lane exercised by `SIMPLE_EXECUTION_MODE=jit`;
    that MIR-level site should be brought to parity before anything relies on it.
 
+## Residue round 3 — array/tuple destructuring, fixed 2026-08-01 (third pass)
+
+The previous pass recorded this correctly: the root cause was **not**
+irrefutability. Array and tuple patterns emitted **no binding statements
+anywhere**. `collect_pattern_bindings` registered locals for `a`/`b` in
+`case [a, b]:`, but nothing ever initialised them, so the arm was selected and
+both names were read off the zeroed stack — `1 + 2` answered `0`, at top level,
+with no enum involved.
+
+Both halves were required, and the fix delivers both:
+
+* **Binders.** `bind_subpattern` (`hir/lower/stmt_lowering.rs`) is now the single
+  owner of sub-pattern binder construction — identifier, nested variant, tuple
+  and array all route through it, and `bind_nested_payload` delegates to it
+  rather than carrying its own duplicate match. `bind_sequence` walks array and
+  tuple elements. Three call sites feed it: the top-level arm pattern, the enum
+  payload loop, and the recursive nested-payload walk.
+* **Length discriminator, arrays only.** `sequence_condition`
+  (`hir/lower/expr/control.rs`) emits `rt_array_len(slot) == N`, or `>= N-1`
+  when a `Pattern::Rest` is present, mirroring `interpreter_patterns.rs`. It is
+  **not** emitted for tuples: a tuple's arity is fixed by its type, and
+  `rt_array_len` returns `-1` on a Tuple heap object (the `as_typed_ptr!` tag
+  check fails), so an arity test there would make every tuple arm fail to match.
+  Tuple patterns take their refutability from their elements only.
+
+Condition and binder share `sequence_element_slots`, so an element can never be
+tested at one index and bound from another — the same discipline
+`payload_slot_expr` enforces for enum payload slots.
+
+**The half-fix signature was observed live.** After the condition half landed
+but before the enum-payload loop routed array/tuple sub-patterns to a binder,
+`payload_arr3` answered exactly **100** — right arm selected, binders still
+zero. That is the documented different-wrong-answer, and it is why `arr3` (106)
+is the row that separates a real fix from a length test.
+
+Fixture: `test/fixtures/compiler/nested_payload_subpattern_depth_matrix.spl`,
+extended with 14 rows. Measured JIT **`BADCOUNT 14 -> 0`** over those rows
+(30 rows total, `BADCOUNT 0`); interpreter `BADCOUNT 0` before and after as the
+true-positive control. `[jit-fallback]` occurrences: 0.
+
+| Row | before (JIT) | after (JIT) | interpreter |
+|---|---|---|---|
+| `arr2` — `case [a, b]` over `[1,2]` | 0 | 3 | 3 |
+| **`arr3` — `[1,2,3]` to the `[a,b,c]` arm** | 0 | **106** | 106 |
+| `arr_too_short` — `[9]` | 0 | -1 | -1 |
+| `arr_too_long` — `[1,2,3,4]` | 0 | -1 | -1 |
+| `tup2` — `case (a, b)` over `(4,5)` | 0 | 9 | 9 |
+| `arr_lit_hit` / `arr_lit_miss` (`[0, b]`) | 0 / 0 | 7 / 107 | 7 / 107 |
+| `arr_rest_one` / `_many` / `_empty` (`[a, ...]`) | 300 / 300 / 300 | 305 / 305 / -1 | 305 / 305 / -1 |
+| `payload_arr2` / `payload_arr3` (`Items([a,b])`) | 0 / 0 | 3 / 106 | 3 / 106 |
+| `payload_tup_hit` / `_miss` (`Pair((0,b))`) | 0 / 0 | 7 / 107 | 7 / 107 |
+
+`arr2`'s correct answer is 3 — the nil sentinel — so it doubles as a second
+value-3 control alongside `d4_value3_ctrl`, while `arr3` at 106 cannot be
+satisfied by a silently-nil binder. The live sentinel row still fires.
+
+Which site the change reaches was proved by the same default-off probe, not by
+reading. `SIMPLE_DEBUG_PATTERN_LOWER=1` on a top-level-only array/tuple program:
+**0 hits on the base binary, 7 on the fixed one** (2 + 3 + 2 elements) — the
+top-level arms previously never entered this walk at all. On the full fixture
+the descent shows as `kind=Identifier` 19 -> 38 and `kind=Literal` 4 -> 6, with
+`kind=Array`/`kind=Tuple` unchanged at 2 each (they were always *entered* in
+payload position; they just returned `None` instead of descending). Still 0 hits
+under `SIMPLE_EXECUTION_MODE=interpreter` and 0 with the flag off.
+
+### Known scope limits (not regressions)
+
+* A **struct** sub-pattern nested inside an array or tuple element
+  (`case [Point(x, y), b]:`) is still not bound. The struct spellings are served
+  by the `class_struct_fields` / `struct_info` paths in
+  `build_pattern_binding_stmts`; duplicating them inside `bind_subpattern` would
+  emit the same `Let` twice. Separate shape, untouched here.
+* A `Pattern::Rest` with trailing elements in a non-array sequence has no
+  addressable form; `sequence_element_slots` returns `None` for it and the
+  caller keeps its previous behaviour. The parser only ever produces
+  `Pattern::Rest` inside an array pattern (`parser_patterns.rs`, `LBracket`
+  arm), so this is unreachable today rather than a silent wrong answer.
+
 ## S4 (native payload arms)
 
 **Still gated, and this change does not ungate it.**
 `is_native_payload_free_enum_match` (`compilability.rs:240`) is untouched and
 still rejects any arm where `payload.as_ref().is_some_and(|p| !p.is_empty())`,
-so `compile --native` continues to fail closed with `[PatternMatch]`. Three
-blockers remain, all of which native would otherwise inherit:
+so `compile --native` continues to fail closed with `[PatternMatch]`. Of the
+three blockers, **blocker 1 is now closed** and two remain:
 
-* tuple/array destructuring emits no bindings (open item 1 above);
-* the MIR->Cranelift catch-all still matches everything (open item 2 above);
+* ~~tuple/array destructuring emits no bindings~~ — **CLOSED** by residue round 3
+  above (HIR lowering; measured on the JIT lane);
+* the MIR->Cranelift catch-all still matches everything (open item 2 above) —
+  `codegen/instr/pattern.rs:96`, owned by a separate lane;
 * the bare-identifier defect
   (`case_bare_ident_is_irrefutable_binding_2026-08-01.md`).
 
-Do not flip the gate on the strength of the depth/literal rows alone.
+Do not flip the gate on the strength of the depth/literal/sequence rows alone.
+The native column for `match` on an enum is **unmeasurable**, not passing:
+native has no `match`-on-enum lowering at all, so `compile --native` refuses
+these programs rather than answering them. Closing blocker 1 removes one reason
+the gate must stay shut; it does not by itself make native correct.
