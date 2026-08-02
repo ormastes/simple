@@ -279,6 +279,21 @@ optional-header `CheckSum` fields so repeated stripped native-build and
 bootstrap outputs can be compared by SHA256.
 
 Use `scripts/bootstrap/bootstrap-from-scratch.sh` for the host bootstrap wrapper.
+
+For long runs, enable the permanent low-overhead progress log:
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --progress --progress-interval=30
+```
+
+The default `build/bootstrap/bootstrap-progress.log` is append-only and uses
+`key=value` records. Milestone records identify Stage 2 through Stage 6 when
+reached. Periodic samples report the bootstrap PID, `alive`/`exited`/`stale`
+state, elapsed time, CPU percentage, RSS KiB, and current main-log byte size.
+Set `--progress=/path/to/log` or `SIMPLE_BOOTSTRAP_PROGRESS_LOG`; adjust cadence
+with `SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL`. The watcher reads only process
+metadata, a two-line state file, and file metadata; it performs no repeated
+source/cache tree scans. The wrapper trap stops it and records the exit status.
 Normal runs reuse the existing Rust seed/runtime and rebuild only the
 pure-Simple stages. Rust seed/runtime rebuilds happen only with
 `--full-bootstrap`.

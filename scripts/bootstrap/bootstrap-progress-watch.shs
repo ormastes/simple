@@ -1,0 +1,92 @@
+#!/bin/sh
+set -eu
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/bootstrap/bootstrap-progress-watch.shs --pid=N --progress-log=PATH [options]
+
+Write low-overhead, machine-checkable bootstrap liveness samples.
+
+Options:
+  --pid=N                 Process to observe (required)
+  --progress-log=PATH     Append-only output log (required)
+  --state-file=PATH       Optional milestone/main_log key-value state file
+  --interval=N            Seconds between samples (default: 30)
+  --expected-start=TEXT   Reject PID reuse when ps start text differs
+  --once                  Emit one sample and exit
+  --help                  Show this help
+EOF
+}
+
+watch_pid=
+progress_log=
+state_file=
+interval=30
+expected_start=
+once=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --pid=*) watch_pid=${arg#*=} ;;
+    --progress-log=*) progress_log=${arg#*=} ;;
+    --state-file=*) state_file=${arg#*=} ;;
+    --interval=*) interval=${arg#*=} ;;
+    --expected-start=*) expected_start=${arg#*=} ;;
+    --once) once=1 ;;
+    --help|-h) usage; exit 0 ;;
+    *) echo "error: unknown option '$arg'" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+case "$watch_pid" in ''|*[!0-9]*) echo "error: --pid requires a numeric PID" >&2; exit 2 ;; esac
+case "$interval" in ''|*[!0-9]*|0) echo "error: --interval requires a positive integer" >&2; exit 2 ;; esac
+[ -n "$progress_log" ] || { echo "error: --progress-log is required" >&2; exit 2; }
+mkdir -p "$(dirname -- "$progress_log")"
+
+process_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
+if [ -n "$expected_start" ] && [ "$process_start" != "$expected_start" ]; then
+  printf 'event=sample status=stale pid=%s expected_start=%s actual_start=%s\n' \
+    "$watch_pid" "$expected_start" "${process_start:-absent}" >>"$progress_log"
+  exit 3
+fi
+
+started_at=$(date +%s)
+while :; do
+  now=$(date +%s)
+  milestone=unknown
+  main_log=
+  if [ -n "$state_file" ] && [ -f "$state_file" ]; then
+    milestone=$(sed -n 's/^milestone=//p' "$state_file" | tail -1)
+    main_log=$(sed -n 's/^main_log=//p' "$state_file" | tail -1)
+    [ -n "$milestone" ] || milestone=unknown
+  fi
+
+  if ! kill -0 "$watch_pid" 2>/dev/null; then
+    printf 'event=sample timestamp=%s status=exited pid=%s elapsed_s=%s milestone=%s\n' \
+      "$now" "$watch_pid" "$((now - started_at))" "$milestone" >>"$progress_log"
+    exit 0
+  fi
+
+  current_start=$(ps -o lstart= -p "$watch_pid" 2>/dev/null | sed 's/^ *//;s/ *$//' || true)
+  if [ -n "$process_start" ] && [ "$current_start" != "$process_start" ]; then
+    printf 'event=sample timestamp=%s status=stale pid=%s elapsed_s=%s milestone=%s\n' \
+      "$now" "$watch_pid" "$((now - started_at))" "$milestone" >>"$progress_log"
+    exit 3
+  fi
+
+  metrics=$(ps -o etime= -o %cpu= -o rss= -p "$watch_pid" 2>/dev/null | awk 'NF {print $1 " " $2 " " $3; exit}')
+  set -- $metrics
+  process_elapsed=${1:-unknown}
+  cpu_pct=${2:-unknown}
+  rss_kb=${3:-unknown}
+  log_bytes=absent
+  if [ -n "$main_log" ] && [ -f "$main_log" ]; then
+    log_bytes=$(ls -ln "$main_log" 2>/dev/null | awk 'NF {print $5; exit}')
+    [ -n "$log_bytes" ] || log_bytes=unknown
+  fi
+  printf 'event=sample timestamp=%s status=alive pid=%s elapsed_s=%s process_elapsed=%s cpu_pct=%s rss_kb=%s milestone=%s main_log_bytes=%s\n' \
+    "$now" "$watch_pid" "$((now - started_at))" "$process_elapsed" "$cpu_pct" "$rss_kb" "$milestone" "$log_bytes" >>"$progress_log"
+
+  [ "$once" -eq 0 ] || exit 0
+  sleep "$interval"
+done

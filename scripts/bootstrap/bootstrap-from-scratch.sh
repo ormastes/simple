@@ -58,6 +58,12 @@ Options:
   --no-mcp           Skip MCP server builds (Stage 5)
   --keep-artifacts   Accepted for compatibility; artifacts are kept
   --no-verify        Accepted for compatibility; hash verification still runs
+  --progress[=<path>]
+                     Append milestone/liveness samples to PATH (default:
+                     <output>/bootstrap-progress.log; env: SIMPLE_BOOTSTRAP_PROGRESS_LOG)
+  --progress-interval=<seconds>
+                     Liveness sample interval (default: 30; env:
+                     SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL)
   --help             Show this help
 EOF
 }
@@ -76,6 +82,8 @@ fresh_cache=0
 release_tests=0
 diagnostic_sweep=0
 diagnostic_roots=""
+progress_log="${SIMPLE_BOOTSTRAP_PROGRESS_LOG:-}"
+progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -159,6 +167,16 @@ while [ "$#" -gt 0 ]; do
       ;;
     --keep-artifacts|--no-verify)
       ;;
+    --progress)
+      progress_log=default
+      ;;
+    --progress=*)
+      progress_log=${1#*=}
+      [ -n "${progress_log}" ] || progress_log=default
+      ;;
+    --progress-interval=*)
+      progress_interval=${1#*=}
+      ;;
     --help|-h)
       usage
       exit 0
@@ -171,6 +189,13 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
+
+case "${progress_interval}" in
+  ''|*[!0-9]*|0)
+    echo "error: --progress-interval requires a positive integer" >&2
+    exit 1
+    ;;
+esac
 
 case "${backend}" in
   llvm|llvm-lib|cranelift) ;;
@@ -250,7 +275,48 @@ if ! mkdir "${bootstrap_lock}" 2>/dev/null; then
   fi
 fi
 echo "$$" > "${bootstrap_lock}/pid"
-trap 'rm -rf "${bootstrap_lock}"' EXIT INT TERM
+bootstrap_progress_pid=
+bootstrap_progress_state=
+bootstrap_progress_mark() {
+  [ -n "${progress_log}" ] || return 0
+  milestone=$1
+  main_log=${2:-}
+  {
+    echo "milestone=${milestone}"
+    echo "main_log=${main_log}"
+  } >"${bootstrap_progress_state}.tmp.$$"
+  mv "${bootstrap_progress_state}.tmp.$$" "${bootstrap_progress_state}"
+  printf 'event=milestone timestamp=%s status=alive pid=%s milestone=%s main_log=%s\n' \
+    "$(date +%s)" "$$" "${milestone}" "${main_log:-absent}" >>"${progress_log}"
+}
+bootstrap_cleanup() {
+  bootstrap_status=$?
+  trap - EXIT INT TERM
+  if [ -n "${progress_log}" ] && [ -n "${bootstrap_progress_state}" ]; then
+    bootstrap_progress_mark "exit-${bootstrap_status}" ""
+  fi
+  if [ -n "${bootstrap_progress_pid}" ]; then
+    kill "${bootstrap_progress_pid}" 2>/dev/null || true
+    wait "${bootstrap_progress_pid}" 2>/dev/null || true
+  fi
+  rm -rf "${bootstrap_lock}"
+  exit "${bootstrap_status}"
+}
+trap bootstrap_cleanup EXIT INT TERM
+
+if [ -n "${progress_log}" ]; then
+  [ "${progress_log}" != default ] || progress_log="${output_dir}/bootstrap-progress.log"
+  mkdir -p "$(dirname -- "${progress_log}")"
+  progress_log="$(CDPATH= cd -- "$(dirname -- "${progress_log}")" && pwd -P)/$(basename -- "${progress_log}")"
+  mkdir -p "${output_dir}"
+  bootstrap_progress_state="$(CDPATH= cd -- "${output_dir}" && pwd -P)/bootstrap-progress.state"
+  : >"${progress_log}"
+  bootstrap_progress_mark starting ""
+  sh "${repo_root}/scripts/bootstrap/bootstrap-progress-watch.shs" \
+    --pid="$$" --state-file="${bootstrap_progress_state}" \
+    --progress-log="${progress_log}" --interval="${progress_interval}" &
+  bootstrap_progress_pid=$!
+fi
 
 normalize_target() {
   case "${1-}" in
@@ -1221,6 +1287,7 @@ else
   # an explicit supported alternative.
   mkdir -p "${output_dir}/stage2/${PLATFORM}"
   echo "Stage 2: seed → bootstrap_main.spl"
+  bootstrap_progress_mark stage2 "$(absolute_path "${log_dir}/stage2-native-build.log")"
   mkdir -p "${stage2_provenance_cache}"
   # Stage 2 failure is reported before Stage 3; no later stage may claim it.
   # the self-hosting frontend now fails closed instead of linking a ret-0 stub
@@ -1403,6 +1470,7 @@ else
   # Stage 4.
   mkdir -p "${output_dir}/stage3/${PLATFORM}"
   echo "Stage 3: stage2 → bootstrap_main.spl (self-host)"
+  bootstrap_progress_mark stage3 "$(absolute_path "${log_dir}/stage3-native-build.log")"
   rm -rf "${stage3_provenance_cache}"
   mkdir -p "${stage3_provenance_cache}"
 
@@ -1681,6 +1749,7 @@ fi
 # ===========================================================================
 
 echo "Stage 4: compiling full CLI (main.spl) with bootstrap compiler..."
+bootstrap_progress_mark stage4 "$(absolute_path "${log_dir}/stage4-native-build.log")"
 full_dir="${output_dir}/full/${PLATFORM}"
 mkdir -p "${full_dir}"
 stage4_source_revision_before="$(stage4_source_revision "${repo_root}")" || {
@@ -1760,6 +1829,7 @@ stage4_verify_candidate_provenance \
 echo "  Stage 4 provenance: ${stage4_provenance}"
 
 echo "Stage 4b: compiling cached UI backend..."
+bootstrap_progress_mark stage4b "$(absolute_path "${log_dir}/stage4b-ui-backend.log")"
 ui_backend_bin="${full_dir}/simple_ui_backend${exe_suffix}"
 prepare_native_cache stage4b-ui-backend
 run_logged stage4b-ui-backend env RUST_LOG="${RUST_LOG:-error}" \
@@ -1784,6 +1854,7 @@ echo "Full CLI binary: ${full_bin}"
 mcp_build_ok=1
 if [ "${build_mcp}" -eq 1 ]; then
   echo "Stage 5: compiling MCP servers..."
+  bootstrap_progress_mark stage5 "$(absolute_path "${log_dir}/stage51-mcp-native-build.log")"
 
   # Build both servers before failing so both logs are available. The shared
   # fresh-artifact smoke below is the single fail-closed Stage 5 gate.
@@ -1947,6 +2018,7 @@ if [ "${deploy}" -eq 1 ]; then
 
   if [ "${release_tests}" -eq 1 ]; then
     echo "Stage 6: running release whole-test gate..."
+    bootstrap_progress_mark stage6 ""
     run_logged stage6-whole-tests "${deployed_bin}" test test --whole --mode=interpreter
   fi
 fi
@@ -1972,3 +2044,4 @@ if [ "${stage3_ok:-0}" -eq 0 ]; then
   echo "  Treat any binary deployed by this run as unverified." >&2
   exit 2
 fi
+bootstrap_progress_mark complete ""
