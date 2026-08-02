@@ -1126,3 +1126,32 @@ Focused resolver tests pass. A source-matched generation-1 benchmark still
 requires rebuilding the Rust bootstrap seed with that fix; do not credit the
 multi-file performance gate or full Stage4 until that rebuild and benchmark
 complete.
+
+## UPDATE 2026-08-02: claimed — generated-facade hint scan retains lines for
+## every source
+
+- **Claim:** `stage4_perf_profile` owns this narrow fix. Other Stage 4 resolver
+  work must not edit `module_surface_export_origin_hints` concurrently.
+- **Observed profile:** the legacy Phase-2 trace parsed about 1,198 files in
+  148.5 seconds and grew `heap_registry` to 49,245,805. Separate progress
+  samples show the pre-streaming process rising monotonically to 19,219,784
+  KiB RSS. Current streaming attempts finish the failing boundary in about
+  three minutes but still reach roughly 8 GiB RSS and run the parse/surface
+  stage primarily on one CPU.
+- **Concrete avoidable allocation:**
+  `module_surface_export_origin_hints` calls `source.content.split("\\n")`
+  for every parsed source. On the no-GC self-hosted runtime the resulting line
+  texts remain registered even though only files containing the exact
+  `# Re-exported from ` marker can produce an origin hint.
+- **Corpus discriminator:** 11,200 of 11,510 `.spl` files under the Stage-4
+  source roots do not contain the marker; those files total 79,498,687 of
+  80,263,679 bytes. More directly, among the 1,197 files completed by the
+  retained Phase-2 trace, only 8 files / 89,214 bytes contain the marker; the
+  fast path avoids splitting 1,189 files / 16,346,111 bytes. They can return
+  an empty hint dictionary before splitting without changing provenance
+  behavior.
+- **Fix/acceptance:** guard the split with an exact marker `contains` check;
+  retain generated-facade and explanatory-suffix behavior; add a source-order
+  regression that fails if the split moves ahead of the guard. This is one
+  bounded contributor, not a claim that transient string ownership or the
+  remaining Stage-4 peak is solved.
