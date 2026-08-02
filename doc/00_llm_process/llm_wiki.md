@@ -38,6 +38,28 @@ verify that the caller actually crosses the worker/library boundary.
 Add a compact entry here when repeated ambiguity causes an agent to choose the
 wrong repository subsystem. Link detailed guides instead of duplicating them.
 
+## SimpleOS I/O and audio
+
+- **Canonical event owner:** `std.common.io.simple_device_event`.
+- **Audio contracts:** `std.common.engine.audio.simple_audio_*`.
+- **Guest drivers:** `os.drivers.virtio.virtio_input_*`,
+  `os.drivers.virtio.virtio_snd_*`, and the retained x86 HDA service.
+- **Hosted event backends:** GLFW and SDL3 are distinct dynamic adapters; one
+  must never silently substitute for the other.
+- **CUDA audio:** the guest submits bounded Q15 work through a second QEMU
+  `ivshmem-plain` device to the pure-Simple host daemon. This is host-driver
+  offload, not an in-guest CUDA runtime claim.
+- **Two-wire rule:** render/host-GPU owns ivshmem ordinal `0`; audio owns ordinal
+  `1`. A first-match or shared mapper aliases the protocols and is invalid.
+- **Primary guide:** `doc/07_guide/platform/simpleos/io_audio.md`.
+
+### Verification rule
+
+Run `test/03_system/io_audio/simple_audio_qemu_transport_contract_spec.spl`
+after changing PCI/ivshmem ownership. A source check or QEMU preflight does not
+replace a live device-origin readback receipt. Non-native platform rows must
+report unavailable or pending, never fabricated PASS.
+
 ## PostgreSQL mimic / Simple DB server
 
 - **Protocol/session owner:** `std.database.postgres_mimic`.

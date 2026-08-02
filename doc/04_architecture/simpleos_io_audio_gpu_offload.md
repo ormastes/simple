@@ -30,6 +30,12 @@ Device state is `Closed → Open → Negotiated → Running → Draining → Clo
 
 Callbacks and IRQ handlers perform no allocation, discovery, environment read, subprocess, shader compilation, unbounded scan, or unbounded lock. They consume preallocated bounded rings. Event sequence and device-clock timestamps are monotonic per device. CPU fallback for each offloaded period is ready before the 60%-period deadline.
 
+QEMU render/GPU and audio transports are separate capsules even though both use
+`ivshmem-plain`. The render wire owns matching-device ordinal `0`; the audio
+wire owns ordinal `1`. Each mapper programs and returns its own BAR2 window.
+Neither capsule may use a generic first-match mapper or reuse the other wire's
+base address because their headers, payload ownership, and lifecycle differ.
+
 <!-- sdn-diagram:id=simpleos_io_audio_gpu_offload.architecture -->
 <details class="sdn-source"><summary>SDN source</summary>
 

@@ -24,6 +24,12 @@ VirtIO sound uses control/event/tx/rx queues over the shared VirtIO transport. T
 
 Desktop capsules use direct OS APIs through minimal ABI modules: PipeWire with ALSA fallback, CoreAudio, WASAPI, sndio with OSS-family fallback. Capability negotiation never silently substitutes a different API or mode.
 
+For x86 QEMU host offload, enumerate matching QEMU ivshmem PCI functions in
+stable bus/device/function order. Map ordinal `0` for render/host-GPU and
+ordinal `1` for audio. Pass the ordinal into the BAR64 mapper so distinct
+window bases are programmed. Absence of ordinal `1` makes audio offload
+unavailable; it must not fall back to ordinal `0`.
+
 ## Error and resource model
 
 Errors are typed as unavailable, unsupported, invalid-format, invalid-state, queue-full, stale-generation, malformed-completion, timeout, disconnected, underrun, overrun, and internal. All externally supplied lengths/counts are overflow-checked before mapping/allocation. Device loss is idempotent; teardown proves zero live handles, mappings, DMA descriptors, queues, callbacks, and offload tokens.
@@ -60,4 +66,3 @@ commands -> coarse GPU work -> deadline gate +-> device ring -> completion event
 ## Observability
 
 Receipts expose warm p95/p99 event latency, render/offload duration as period fractions, jitter, underruns/overruns, CPU/GPU utilization, PCM/parity hashes, maximum RSS, queue high-water marks, fallback reason/count, and resource totals. Environmental receipts bind target, host/guest ISA, accelerator, device/backend, binary/source hashes, argv, and evidence hashes.
-
