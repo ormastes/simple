@@ -278,3 +278,41 @@ that caught it. Case C proves no false positive on a genuine self-hosted build.
 
 Scope note: this change touches only the deploy decision. Stage-3 compile
 behaviour is untouched (two other lanes were active there).
+
+## Correction 2026-08-02 — recommended guard #3 (`lint`) does NOT discriminate, and is fail-open
+
+The "Recommended guard" section above proposes three checks. A bootstrap lane
+ran all three against the Rust seed as a **negative control** before deploying.
+Seed at that moment: `sha256
+4385f9121ad6d2cf1f605f285872d71461c86a8599d91ae9a28294e54543ed63`,
+57,348,488 B, identity probe = 0.
+
+| Guard | Seed result | Discriminates seed from self-hosted? |
+|-------|-------------|--------------------------------------|
+| 1. `test <passing spec>` | exit 0, `2 passed` | NO — seed passes |
+| 2. `test <failing spec>` | exit 1, `1 failed` | NO — seed passes |
+| 3. `lint <file with findings>` | **exit 0**, `Lint passed: all files clean` | NO — and it is fail-open |
+
+Guard #3 fails worse than merely not discriminating: **`lint <file>` never
+analysed the named file.** The fixture path appeared **zero** times in 344 lines
+of output. What it printed was a project-wide warning dump over `src/**`,
+followed by `Lint passed: all files clean`, exit 0. A gate asserting only "lint
+exits nonzero" reads that as a clean pass while the requested file was never
+linted — the same fail-open shape as the defect this doc records.
+
+Two consequences for anyone writing a deploy gate:
+
+1. **A lint-based check must assert the fixture is NAMED in the output**, not
+   just the exit code. `exit != 0` alone is satisfiable with no analysis having
+   happened at all.
+2. **Guards 1-3 are jointly insufficient as an identity gate.** All three are
+   behavioural and the seed passes 1 and 2 outright. Identity must be decided by
+   the marker probe added in `e368233763c` (documented in the section above).
+   Behavioural probes are still required — they catch a linked-but-miscompiled
+   self-hosted binary that the marker alone would pass — but they cannot tell
+   seed from self-hosted. **Both classes are required; neither substitutes for
+   the other.**
+
+Separately, `lint` not analysing its file argument is an open defect in its own
+right, and is why the deployed binary's lint surface is not currently usable as
+evidence of anything.
