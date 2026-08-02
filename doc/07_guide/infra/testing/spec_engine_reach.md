@@ -143,3 +143,35 @@ an explicit per-tier import — a single bare `use std.X` covers exactly one.
       Four defects survived it.)
 - [ ] Which tier does each `use std.X` resolve to — verified by sabotage?
 - [ ] Has each new assertion been observed RED?
+
+## What actually runs the probes
+
+`scripts/check/check-runnable-probes.shs`. Until 2026-08-02 the answer was
+**nothing**: no hook and no workflow named a single `*_jit_probe.spl`, so the
+only regression cover for the defect class specs cannot observe was asserting
+nothing in practice.
+
+The gate discovers probes by a union of two conventions under `test/` — a
+basename matching `*_jit_probe.spl`, or a non-`*_spec.spl` file containing the
+literal marker `PROBE VERDICT` — runs each under `interpret` **and** `jit`, and
+scores the verdict LINE, never the exit code. It fails CLOSED: a missing binary,
+zero probes discovered, a count below the floor, or an unrecognised engine name
+is an ERROR (exit 2), never a pass. There is deliberately no opt-out file — a
+suppression baseline would recreate exactly the blindness the probes exist to
+close.
+
+Wiring:
+
+- Full run — `.github/workflows/core-mcp-dev-pipeline.yml`, which builds a
+  bootstrap binary. Needs `SIMPLE_LIB=src`.
+- Scorer self-test — `.github/workflows/repo-hygiene.yml`. `--self-test` drives
+  25 synthetic assertions through the real scorer and enumerator, needs no
+  binary, and goes red under all 14 of the branch sabotages it was checked
+  against.
+
+**Run the probes against the source root the binary will actually use.** On
+2026-08-02 running them against a stale working copy reported 17 failures in
+`utf8_index_space_jit_probe.spl`; every one was a fix that had already landed
+upstream (`1ba2e7af34a`, `e16517c5454`, `c4a748ab774`). Against the current tree
+all three probes pass on both engines. A probe failure is strong evidence, which
+is exactly why the source root has to be pinned before you believe it.

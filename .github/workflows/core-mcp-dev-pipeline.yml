@@ -14,6 +14,8 @@ on:
       - 'src/compiler_rust/runtime/**'
       - 'scripts/check/check-cranelift-aot-aggregates.shs'
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
+      - 'scripts/check/check-runnable-probes.shs'
+      - 'test/**/*_jit_probe.spl'
       - 'test/fixtures/compiler/stage4_struct_enum_array_probe.spl'
       - 'test/fixtures/compiler/cranelift_array_oob.spl'
       - 'test/fixtures/compiler/native_runtime_local_name_collision.spl'
@@ -42,6 +44,8 @@ on:
       - 'src/compiler_rust/runtime/**'
       - 'scripts/check/check-cranelift-aot-aggregates.shs'
       - 'scripts/check/check-cranelift-aot-aggregate-cross.shs'
+      - 'scripts/check/check-runnable-probes.shs'
+      - 'test/**/*_jit_probe.spl'
       - 'test/fixtures/compiler/stage4_struct_enum_array_probe.spl'
       - 'test/fixtures/compiler/cranelift_array_oob.spl'
       - 'test/fixtures/compiler/native_runtime_local_name_collision.spl'
@@ -133,3 +137,26 @@ jobs:
         run: |
           sh scripts/check/check-cranelift-aot-aggregates.shs
           sh scripts/check/check-cranelift-aot-aggregate-cross.shs
+
+      # Runnable-probe gate, FULL RUN. This is the job that has a built binary,
+      # and the probes exist to reach an engine a spec cannot: describe/it/expect
+      # are Rust interpreter intrinsics, and a module with no `fn main` de-JITs
+      # regardless, so a *_spec.spl is green by construction against a JIT-only
+      # defect. Every probe runs under BOTH interpret and jit -- two engines
+      # agreeing is the evidence, one engine passing is not.
+      #
+      # Fails CLOSED: a missing binary, zero probes discovered, a probe count
+      # below the floor, or an unrecognised engine name is an ERROR (exit 2), not
+      # a pass. There is deliberately NO suppression baseline: a failing probe is
+      # a live defect that specs cannot see, so it is reported and left red.
+      #
+      # SIMPLE_LIB=src matters. Without it the probes resolve std.* against a
+      # different source root; on 2026-08-02 running them against a stale lib
+      # produced 17 false failures that were entirely fixes already landed.
+      - name: Runnable regression probes (interpret + jit)
+        if: ${{ !cancelled() }}
+        env:
+          SIMPLE_BINARY: ${{ github.workspace }}/src/compiler_rust/target/bootstrap/simple
+          SIMPLE_LIB: src
+        run: |
+          sh scripts/check/check-runnable-probes.shs
