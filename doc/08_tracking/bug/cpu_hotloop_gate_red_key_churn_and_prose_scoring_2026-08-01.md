@@ -214,11 +214,87 @@ not a mechanical rewrite. Prioritised:
 Until (1)-(3) land, the gate stays red at 158 by design. It must **not** be
 absorbed, weakened, or given an env hatch.
 
+### 6.1 Paydown landed 2026-08-02 — new 166 → 16
+
+Steps (1)-(3) were executed as a **triage**, not a rewrite. All 269 flagged
+loops across the nine designated files were read in place; **260 carry an
+annotation naming what the loop walks and what its bound is**, and 9 were
+deliberately left unannotated because they are real defects (§6.2). The change
+was **comments only** — with `#`-comments and blank lines stripped, every
+touched file is byte-identical to its parent. Baseline, file list, gate script
+and spec untouched; `--update-baseline` was not used.
+
+**The "126 in 3 renderers" concentration was one un-triaged file designation,
+not 126 independent problems.** The three renderer files hold two different
+subsystems — a CSS parse/cascade engine (`_core`) and a paint/DrawIR emitter
+(`_paint_layout`) — so no single file-level verdict could be right for both.
+
+**The mixing is organisational, not a runtime defect (PROVED).**
+`simple_web_layout_rerender_retained` gates `compute_styles_with_material`
+behind `dirty_stage == "css"` and reuses `prior.hit_index.styles` on paint-only
+frames. Cascade does **not** run per paint frame.
+
+**§3's "none is a false positive" is REFUTED.** Several flagged loops are not
+bounded by any pixel, element or string length:
+
+| site | actual bound |
+|---|---|
+| `os/compositor/compositor.spl` PS/2 keyboard drain | 8042 status-register output-full bit |
+| `os/compositor/compositor.spl` PS/2 mouse drain | hardware queue, hard-capped at 64 packets |
+| `_paint_layout` `while row < 4:` ×2, `while index < 2:` | literal constants |
+| `_core:60` `props.substring(pos, line_end)` (the 1 SUBSTR) | per **line**, advanced by `find_from`, i.e. already the bulk scan the rule asks for — matched only because the cursor is named `pos` |
+
+Design §6 states a **bound-based** rule ("a loop whose bound is a pixel-count /
+element-count / string length"); the implementation approximates it with an
+any-loop-header grep. These are false positives *of the approximation*. They
+are annotated with the discrepancy stated explicitly. **The detector was not
+weakened to drop them** — narrowing `LOOP` to a bound-based test would be a
+loosening and is deliberately not done here.
+
+Two more §6 assumptions refuted, recorded so they are not re-derived:
+`_sort_candidates_by_specificity` / `_sort_positive_z_indices` /
+`_sort_style_order_indices` are **bottom-up merge sorts** (O(n log n)), not
+insertion sorts; and `draw_image_blend` does **not** bypass the bulk span
+primitives — its five span loops are the SIMD gather, the SIMD scatter, two
+scalar fallbacks and the clip/mask slow path around
+`engine2d_simd_blend_row_u32`.
+
+### 6.2 The residue: 16 scored, all filed, none annotated
+
+The gate stays red at **`new=16`** on purpose. Each is a defect, not an
+un-examined loop:
+
+| site | defect |
+|---|---|
+| `_core:101` `_cb_chars_between` | **dead code** — exactly one occurrence in `src/` (its own definition). Delete it. |
+| `_core:161` `_css_collect_custom_props` | backward selector rescan per declaration block |
+| `_core:840` `_extract_css_vw_with_rule_limit` | O(n²) dedup rescan over emitted groups |
+| `renderer:1020,1057,1058,1078` `_apply_css_animations` | 5-level nesting: per animated style × per keyframe × per declaration |
+| `renderer:2439` `_web_gpu_solid_fill_ops` | `ops = ops.push(...)` — arrays are value types, so this clones the whole op list per node |
+| `_paint_layout:1405,1417` `_html_draw_ir_nth_int` | **parse work on the paint path** — re-parses ints out of a text value per call, per node |
+| `_paint_layout:1878,2146,2408,2754` | repeated linear scans that should be an index: `_html_draw_ir_image_index` walks the whole image list per node **inside** `for layer in background_layers`, i.e. O(nodes × layers × images) |
+| `_paint_layout:316,344,368` input-text visual map | repeated boundary rescans per glyph |
+
+Fixing these changes behaviour, so each needs a parity check rather than a
+mechanical rewrite — they are intentionally left scored and red.
+
+One perf TODO recorded in place rather than filed here:
+`backend_emu.spl` `_emu_gradient_color_at` does a linear gradient-stop search
+**per pixel**. A 1001-entry permille LUT makes it O(1) per pixel and is
+bit-exact, because `pos_permille` is already an integer permille value.
+
 ## 7. Status
 
 - FIXED: prose scoring in BYTE/SUBSTR/CHAIN.
 - FIXED: baseline staleness (381 → 207, stale 113 → 0).
-- OPEN: 158 genuine hot-loop violations, plan in §6.
+- PAID DOWN (2026-08-02): 260 of 269 flagged loops triaged and annotated,
+  `new` 166 → **16**. Comments only; baseline/file-list/script/spec untouched.
+  See §6.1.
+- OPEN: **16** scored violations, all filed as concrete defects in §6.2. The
+  gate remains red on the merits and must not be absorbed or weakened.
+- REFUTED (2026-08-02): §3's "none of the 158 is a false positive" — see the
+  table in §6.1. Also refuted: the sorts are merge sorts, not insertion sorts;
+  and `draw_image_blend` does not bypass the bulk span primitives.
 - FIXED (2026-08-02): degenerate `while (` multi-line key (§3.1), totals unchanged.
 - CONFIRMED (2026-08-02): re-measured at origin tip `e4b4561c803`, independently
   of this document — `baselined=207 current=365 new=158`, and the 158 split
