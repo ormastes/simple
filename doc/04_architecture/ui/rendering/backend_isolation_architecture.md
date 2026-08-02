@@ -94,6 +94,30 @@ paths are reached unchanged through the facades and must never gain a per-call h
 | NEON/SSE2 row kernels | `simd_fill_row` `simd_kernels.spl:11` → `fill_row_neon/copy_row_neon` `engine2d_simd_ops.rs:95,161` | runtime-feature-detected span fills |
 | Browser pixel cache | `WebRenderPixelArtifactCache` `web_render_pixel_backend.spl:111` → `SimpleWebEngine2DStaticPixelCache.pixels_for_html` `simple_web_engine2d_renderer.spl:66` | single-slot last-html memo, cache-first per frame |
 
+## Effective theme snapshot invariant (2026-08-02)
+
+Theme selection is a producer input, not a backend-local color mutation. Before
+WM, GUI, or Web lowers a frame, it must resolve one effective
+`ThemeRenderSnapshot`. The same snapshot identity `(id, source manifest SHA-256,
+material SHA-256)` must reach WM chrome, themed HTML/install wire, DrawIR style
+provenance, and any retained renderer/cache receipt. A material-only change
+must therefore invalidate every output cache/revision even when the package
+source manifest is unchanged.
+
+`DrawIrComposition` remains renderer-neutral: it may carry durable theme/style
+provenance and solid fallback color, but never CSS parser state, browser cache
+handles, font atlases, or transient GPU material. v2 is the authoring/replay
+oracle and v3 is additive packed GPU encoding; Web does not gain a parallel
+render path merely to apply a theme.
+
+The current six-token CSS override is explicitly **palette-only**. It updates
+`--wm-*` and their Web-facing aliases, but does not yet model Stitch glass
+blur/saturation, border, radius, shadow, or gradient fields. A future full
+glass override must either parse/project each output-relevant field into
+`ThemeMaterialSemantics` and its material hash, or attach a separate effective
+CSS digest to HTML/cache/receipt identity. Unmodelled CSS must never change
+visible output while retaining the same cache identity.
+
 ## Known intentional exception (lint must special-case)
 
 `simple_web_engine2d_render_html_pixels` (`simple_web_engine2d_renderer.spl:808`) draws a narrow set

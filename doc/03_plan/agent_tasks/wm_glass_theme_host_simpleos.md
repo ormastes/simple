@@ -42,6 +42,24 @@ Package/snapshot -> WM/bootstrap -> Web/Draw IR -> evidence -> spec/manual.
 Each lane supplies focused passing tests once; the merge owner resolves shared
 types and verifies no concurrent unrelated work was absorbed.
 
+## Renderer/IR design checkpoint — 2026-08-02
+
+`origin/sync-renderer-ir-spec-update` is already an ancestor of this lane; no
+separate renderer-IR merge is pending. Keep the accepted DrawIR boundary:
+`DrawIrComposition`/v2 is authoring and replay truth, v3 is additive packed
+GPU encoding, and backend receipts report the actual execution/readback path
+without silent fallback. See
+`doc/04_architecture/ui/rendering/draw_ir_backend_native_layout.md` and
+`doc/05_design/ui/rendering/draw_ir_multibackend_design.md`.
+
+The next open Web/DrawIR item is not protocol merge work: current CSS override
+parsing is palette-only. Implement a full Stitch glass material contract only
+after it names durable `ThemeMaterialSemantics` fields and a cache-safe
+effective CSS/material identity. Do not put atlas/cache handles or CSS parser
+state in Draw IR. The Web canonical-DrawIR cutover remains RED until
+`BrowserBackend.render_frame_with_composition` consumes its composition rather
+than rebuilding an independent HTML/pixel path.
+
 ## Continuation State — 2026-07-24
 
 Authoritative integration worktree:
