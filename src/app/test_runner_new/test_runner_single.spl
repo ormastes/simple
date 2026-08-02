@@ -468,7 +468,27 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
     val content = rt_file_read_text(path)
     if content == "":
         return "coverage: {path} 0% (0/0 lines)"
+    # The seed collector records calls ONLY on the function_exec path: free
+    # functions (column-0 `fn`/`gen`) and `static fn`. Instance-method dispatch
+    # (`me`, or indented non-static `fn`/`gen` inside class/impl) never reaches
+    # record_function_call, so method names can never appear in the dump —
+    # gating method bodies on `called` vetoes every one of their hits (dom.spl
+    # measured 28% while its spec ran 38/38 green). Method bodies are instead
+    # gated on line-hit + per-file evidence: at least one of THIS file's
+    # recordable functions appears in the called set. That keeps line-number-
+    # conflated hits from attaching to files the run never exercised.
+    var file_called = false
+    for raw0 in content.split("\n"):
+        val t0 = raw0.trim()
+        var h0 = t0
+        if h0.starts_with("static "):
+            h0 = h0.substring(7)
+        if h0.starts_with("fn ") or h0.starts_with("me ") or h0.starts_with("gen "):
+            val recorded0 = t0.starts_with("static ") or raw0.starts_with("fn ") or raw0.starts_with("gen ")
+            if recorded0 and called.contains_key(_cov_fn_name(h0)):
+                file_called = true
     var current_fn = ""
+    var current_recorded = true
     var in_doc = false
     var total = 0
     var hit = 0
@@ -495,12 +515,18 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
             h = h.substring(7)
         if h.starts_with("fn ") or h.starts_with("me ") or h.starts_with("gen "):
             current_fn = _cov_fn_name(h)
+            current_recorded = t.starts_with("static ") or raw.starts_with("fn ") or raw.starts_with("gen ")
             continue
         if not _cov_is_recordable(t):
             continue
         total = total + 1
         if hits.contains_key("{line_no}"):
-            if current_fn == "" or called.contains_key(current_fn):
+            if current_fn == "":
+                hit = hit + 1
+            elif current_recorded:
+                if called.contains_key(current_fn):
+                    hit = hit + 1
+            elif file_called:
                 hit = hit + 1
     if total == 0:
         return "coverage: {path} 0% (0/0 lines)"

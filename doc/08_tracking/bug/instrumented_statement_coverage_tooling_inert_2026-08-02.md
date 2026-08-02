@@ -48,3 +48,27 @@ against it (warn or fail on shortfall).
   `doc/08_tracking/bug/` sspec notes and memory refs), so coverage
   instrumentation must hook the engine that actually executes `it` bodies
   (tree-walk interpreter under `bin/simple test`).
+
+## GPU branch-coverage follow-up (2026-08-02)
+
+The current dirty test-runner lane can emit heuristic per-file statement rows
+when the daemon is bypassed, but it still emits no source decision inventory or
+branch numerator/denominator. Focused Vulkan, CUDA, and Metal tests therefore
+must retain `branch_coverage_percent=unavailable`; statement percentages and
+scenario counts cannot satisfy the GPU backend NFR-008 threshold. Completion
+requires compiler-owned decision-site enumeration plus true/false outcome
+attribution to the original source file, including never-executed decisions.
+
+## Update 2026-08-02 (later): under-attribution root-caused and fixed
+
+Instance methods never reach the seed's `record_function_call`
+(`interpreter_call/core/function_exec.rs` records free functions and
+`static fn` only), so the attribution's `called.contains_key(fn)` gate
+structurally vetoed every hit inside a method body — dom.spl read 1-28%
+despite a 38/38 exercising spec. Fix in `test_runner_single.spl`: headers
+classified recordable (column-0 `fn`/`gen`, `static`) vs instance method;
+recordable keep the exact called gate, method bodies attribute on line-hit
+plus per-file evidence (>=1 recordable function of the same file in the
+called set). Measured: dom.spl 28% -> 87%, dom_identity_index 40% -> 83%,
+non-imported control 0/108, previously-gated modules byte-identical,
+no-env-var output byte-clean.
