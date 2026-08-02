@@ -920,21 +920,30 @@ pub(super) fn eval_bdd_builtin(
                 }
             }
             // General `expect <expr>` / method-form receiver path.
-            // Do NOT eagerly mark failure for plain identifiers/literals — the
-            // `.to_*()` matcher chain in interpreter_method/mod.rs is
-            // authoritative and will set or clear BDD_EXPECT_FAILED based on
-            // the actual comparison result.  Eagerly marking Bool(false) here
-            // caused `expect(false).to_equal(false)` to fail even though the
-            // assertion passes.
             //
-            // EXCEPTION: `expect(<call expr>)` with no matcher chain is a
-            // hollow false-green — the call result is returned but never
-            // checked.  For `Expr::Call` / `Expr::MethodCall` nodes we eagerly
-            // check truthiness so `expect(always_fails())` with no chain
-            // actually fails.  A downstream `.to_*()` chain is safe: it always
-            // overwrites BDD_EXPECT_FAILED with its own result, so pre-marking
-            // here is harmless for chained forms.
-            let is_call_expr = matches!(arg_expr, Expr::Call { .. } | Expr::MethodCall { .. });
+            // A matcher-less `expect(<subject>)` asserts that the subject is
+            // truthy. That is not a new rule invented here: it is what the
+            // three sibling subject shapes handled above already mean. An
+            // equality/inequality subject (`expect(a == b)`), an ordered
+            // comparison (`expect(a < b)`) and a call subject
+            // (`expect(f())`) each mark a falsy result PROVISIONAL and fail
+            // the example when no matcher follows. A plain literal or
+            // identifier subject was the only shape that asserted nothing, so
+            // `expect(flag)` with `flag == false` reported PASS
+            // (doc/08_tracking/bug/bare_assert_statement_vacuity_2026-08-02.md
+            // OPEN 2). Marking it PROVISIONAL restores consistency across the
+            // four shapes rather than adding a fourth semantics.
+            //
+            // PROVISIONAL, never hard: the `.to_*()` matcher arm in
+            // interpreter_method/mod.rs clears BDD_EXPECT_PROVISIONAL and sets
+            // BDD_MATCHER_RAN before evaluating, so a chained form stays
+            // authoritative. This is why the historical objection recorded in
+            // this comment's earlier revision — that eagerly marking
+            // `Bool(false)` broke `expect(false).to_equal(false)` — no longer
+            // applies: that objection predates BDD_EXPECT_PROVISIONAL and
+            // described eagerly setting the HARD BDD_EXPECT_FAILED flag, which
+            // a passing matcher does NOT clear. Nothing here sets the hard
+            // flag.
             let value = eval_arg(
                 args,
                 0,
@@ -945,15 +954,15 @@ pub(super) fn eval_bdd_builtin(
                 enums,
                 impl_methods,
             )?;
-            if is_call_expr && !value.truthy() {
+            if !value.truthy() {
                 // Provisional only: if a `.to_*()` matcher follows, it clears this
-                // (the call IS being checked, and a falsy result like 0/false/""
+                // (the subject IS being checked, and a falsy value like 0/false/""
                 // may be exactly what the matcher expects). If no matcher follows,
-                // it stands as a hollow-call failure at example end.
+                // it stands as a hollow-expect failure at example end.
                 BDD_EXPECT_PROVISIONAL.with(|cell| *cell.borrow_mut() = true);
                 BDD_FAILURE_MSG.with(|cell| {
                     *cell.borrow_mut() = Some(format!(
-                        "expected call result to be truthy, got {}",
+                        "expected subject to be truthy, got {}",
                         value.to_display_string(),
                     ));
                 });
