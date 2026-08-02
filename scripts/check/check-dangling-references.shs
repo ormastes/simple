@@ -210,6 +210,8 @@ function decl_name(line,   cnt, w, i, saw_fn, t) {
 }
 FNR == 1 {
     in_export_use = 0
+    in_type_block = 0
+    type_indent = -1
     p = FILENAME
     sub(/\.spl$/, "", p)
     n = split(p, seg, "/")
@@ -231,6 +233,16 @@ FNR == 1 {
 }
 {
     line = $0
+    # Track whether we are inside a type BODY (struct/class/enum/... fields
+    # and variants). The indented-bare-name rule at the bottom of this block
+    # is only sound there; applied to a function body it reads an indented
+    # CALL as a declaration, so a function that exists nowhere defines itself
+    # away and the check goes silently fail-open for it. Dedent to at or past
+    # the type's own indent ends the body.
+    if (line ~ /[^ \t]/) {
+        cur_ind = match(line, /[^ \t]/) - 1
+        if (in_type_block && cur_ind <= type_indent) in_type_block = 0
+    }
     # `export use m.{A as B}` DEFINES B here: the re-exporting file is the only
     # place B is ever spelled, so without this every consumer of B is reported
     # "declared in no src file". Only the `export` form re-exports (the parser
@@ -252,12 +264,15 @@ FNR == 1 {
     }
     if (line ~ /^[ \t]*([a-z]+[ \t]+)*(fn|me)[ \t]/) {
         nm = decl_name(line)
-        if (nm != "") { emit_fn(nm); emit_def(nm); next }
+        # A method body is not a field list -- leave any enclosing type body.
+        if (nm != "") { in_type_block = 0; emit_fn(nm); emit_def(nm); next }
     }
     if (match(line, /^[ \t]*(pub[ \t]+)?(export[ \t]+)?(struct|enum|class|trait|mixin|actor|interface|impl|type|const|effect|union|module|namespace)[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
         s = substr(line, RSTART, RLENGTH)
         cnt = split(s, w, /[ \t]+/)
         emit_def(w[cnt])
+        in_type_block = 1
+        type_indent = cur_ind
         next
     }
     if (match(line, /^[ \t]*(pub[ \t]+)?(export[ \t]+)?(val|var|let)[ \t]+[A-Za-z_][A-Za-z0-9_]*/)) {
@@ -268,7 +283,8 @@ FNR == 1 {
     }
     # Indented bare names: struct/class fields and enum variants. Counted as
     # definitions so closure-valued fields and imported variants stay quiet.
-    if (match(line, /^[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*[:(]/)) {
+    # Restricted to an actual type body -- see the in_type_block note above.
+    if (in_type_block && match(line, /^[ \t]+[A-Za-z_][A-Za-z0-9_]*[ \t]*[:(]/)) {
         s = substr(line, RSTART, RLENGTH)
         sub(/^[ \t]+/, "", s)
         sub(/[ \t]*[:(]$/, "", s)
