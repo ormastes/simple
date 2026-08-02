@@ -181,3 +181,80 @@ describe "markdown_slugify":
 
     it "handles already-slug input":
         expect(markdown_slugify("hello-world")).to_equal("hello-world")
+
+# ============================================================================
+# UTF-8 index-space regression: the inline scanner must be BYTE-indexed
+# throughout. It previously mixed spaces -- `len()`/`slice()` count BYTES while
+# `char_at()` counts CHARACTERS -- so every multi-byte character desynced the
+# marker scan from the interior slice.
+#
+# Every expectation below is HAND-COMPUTED from the UTF-8 encoding:
+#   e-acute  U+00E9  = C3 A9        2 bytes, 1 character
+#   CJK zhong U+4E2D = E4 B8 AD     3 bytes, 1 character
+#   party    U+1F389 = F0 9F 8E 89  4 bytes, 1 character
+#   BOM      U+FEFF  = EF BB BF     3 bytes, 1 character
+# ============================================================================
+
+describe "markdown_inline_text UTF-8 index space":
+    # "\u{e9}*x*" is 5 BYTES (C3 A9 2A 78 2A) but 4 CHARACTERS. With the old
+    # character-indexed scan the italic interior was slice(2,3) = "*" and the
+    # len()-bounded loop then ran one index past the last character.
+    it "keeps a 2-byte character before an italic span":
+        expect(markdown_inline_text("\u{e9}*x*")).to_equal("\u{e9}<em>x</em>")
+
+    it "keeps a 3-byte character before an italic span":
+        expect(markdown_inline_text("\u{4e2d}*x*")).to_equal("\u{4e2d}<em>x</em>")
+
+    it "keeps a 4-byte character before an italic span":
+        expect(markdown_inline_text("\u{1f389}*x*")).to_equal("\u{1f389}<em>x</em>")
+
+    # ASCII control: the same shape with a 1-byte leading character was always
+    # correct, which is what hid the defect.
+    it "ASCII control -- same shape, single-byte leading character":
+        expect(markdown_inline_text("e*x*")).to_equal("e<em>x</em>")
+
+    it "carries a 2-byte character inside an italic span":
+        expect(markdown_inline_text("*\u{e9}*")).to_equal("<em>\u{e9}</em>")
+
+    it "carries a multi-byte character inside a bold span":
+        expect(markdown_inline_text("**h\u{e9}llo**")).to_equal("<strong>h\u{e9}llo</strong>")
+
+    it "carries a multi-byte character inside a code span":
+        expect(markdown_inline_text("`caf\u{e9}`")).to_equal("<code>caf\u{e9}</code>")
+
+    # Pure literal text: each character must be copied whole, never split and
+    # never truncated by the byte-length loop bound.
+    it "passes multi-byte literal text through byte-for-byte":
+        expect(markdown_inline_text("h\u{e9}llo w\u{f6}rld")).to_equal("h\u{e9}llo w\u{f6}rld")
+
+    it "passes a CJK literal through unchanged":
+        expect(markdown_inline_text("\u{4e2d}\u{6587}")).to_equal("\u{4e2d}\u{6587}")
+
+    it "passes a 4-byte emoji literal through unchanged":
+        expect(markdown_inline_text("\u{1f389}\u{1f389}")).to_equal("\u{1f389}\u{1f389}")
+
+    # A literal BOM is a 3-byte character like any other and must survive whole.
+    it "passes a literal BOM character through unchanged":
+        expect(markdown_inline_text("\u{feff}hi")).to_equal("\u{feff}hi")
+
+    # Byte length is preserved for marker-free input: proves nothing was split,
+    # dropped, or appended as nil.
+    # "caf" 3 + e-acute 2 + " " 1 + CJK 3 + " " 1 + emoji 4 = 14 BYTES.
+    it "preserves byte length of marker-free multi-byte text":
+        expect(markdown_inline_text("caf\u{e9} \u{4e2d} \u{1f389}").len()).to_equal(14)
+
+describe "markdown_plain_inline UTF-8 index space":
+    it "strips italic markers around ASCII after a 2-byte character":
+        expect(markdown_plain_inline("\u{e9}*x*")).to_equal("\u{e9}x")
+
+    it "strips bold markers around multi-byte content":
+        expect(markdown_plain_inline("**h\u{e9}llo**")).to_equal("h\u{e9}llo")
+
+    it "strips code markers around multi-byte content":
+        expect(markdown_plain_inline("`caf\u{e9}`")).to_equal("caf\u{e9}")
+
+    it "ASCII control -- strips italic markers":
+        expect(markdown_plain_inline("e*x*")).to_equal("ex")
+
+    it "passes multi-byte literal text through unchanged":
+        expect(markdown_plain_inline("h\u{e9}llo w\u{f6}rld")).to_equal("h\u{e9}llo w\u{f6}rld")
