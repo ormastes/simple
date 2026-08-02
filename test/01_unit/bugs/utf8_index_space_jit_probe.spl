@@ -1,0 +1,130 @@
+"""
+# UTF-8 byte-vs-character index space — executable probe
+
+**Category:** Runtime / library correctness
+**Research:** doc/08_tracking/bug/divergence_byte_char_find_option_sweep_2026-08-01.md
+
+## Why this is a runnable program and not an sspec `describe`
+
+The worst form of this defect family is the NIL COLLAPSE: `char_at(i)` past the
+character count returns nil, and `accumulator + nil` yields nil, so a
+byte-length-bounded loop that CONCATENATES `char_at(i)` destroys the entire
+result rather than mangling one character.
+
+**That collapse is not observable from an sspec `describe`.** Measured on
+2026-08-02 against the shipped binary:
+
+  * under `simple run`, `("" + "\u{e9}".char_at(0)) + "\u{e9}".char_at(1)`
+    yields nil and `.len()` returns the -1 nil sentinel;
+  * inside the sspec TEST path the same expression yields `"\u{e9}"` with
+    `.len()` 2 — nil concatenation is a no-op there, so the defect vanishes.
+
+`SIMPLE_EXECUTION_MODE` does NOT move the sspec path off that tier: with the
+value set to `jit`, `native` and `llvm` in turn, a probe example asserting the
+-1 sentinel failed and the one asserting 2 passed in all three runs. A
+regression spec for the nil-collapse sites is therefore structurally vacuous,
+which is exactly why an earlier sabotage run of this lane came back GREEN
+against the known-broken implementation.
+
+This file is consequently a plain program, meant to be run per engine:
+
+    SIMPLE_EXECUTION_MODE=interpret <simple> test/01_unit/bugs/utf8_index_space_jit_probe.spl
+    SIMPLE_EXECUTION_MODE=jit       <simple> test/01_unit/bugs/utf8_index_space_jit_probe.spl
+
+Both must print `PROBE VERDICT: PASS`. Do NOT score this by exit code — read
+the verdict line. `SIMPLE_EXECUTION_MODE` takes `interpret`, not `interp`; an
+unrecognised value silently selects the JIT and makes an A/B comparison look
+like agreement.
+
+Run it from the repository root. A driver placed OUTSIDE the repo tree
+resolves `std.*` against a different source root and will silently measure a
+copy of the library you did not edit.
+
+## The index-space contract this pins
+
+`len()` and `slice(a, b)` count BYTES. `char_at` / `char_code_at` count
+CHARACTERS. `byte_at` counts BYTES. Byte widths below are hand-computed from
+the UTF-8 encoding, never taken from a reference implementation and never from
+cross-engine agreement:
+
+    e-acute  U+00E9  = C3 A9        2 bytes, 1 character
+    CJK      U+4E2D  = E4 B8 AD     3 bytes, 1 character
+    party    U+1F389 = F0 9F 8E 89  4 bytes, 1 character
+    BOM      U+FEFF  = EF BB BF     3 bytes, 1 character
+"""
+
+use std.editor.services.lsp_transport.*
+
+var failures = 0
+
+fn check_text(name: text, got: text, want: text) -> void:
+    # Compare LENGTH first: a nil-collapsed result reports the -1 sentinel, and
+    # comparing it directly to the wanted text would only say "not equal"
+    # without distinguishing collapse from mojibake.
+    if got.len() == want.len() and got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got len " + str(got.len()) + ", want len " + str(want.len()) + ")")
+        failures = failures + 1
+
+fn check_i64(name: text, got: i64, want: i64) -> void:
+    if got == want:
+        print("  ok   " + name)
+    else:
+        print("  FAIL " + name + " (got " + str(got) + ", want " + str(want) + ")")
+        failures = failures + 1
+
+fn main() -> void:
+    print("utf8 index space probe")
+
+    # ---------------------------------------------------------------
+    # Contract: the two index spaces really are different here.
+    # "h" 1 + e-acute 2 + "llo" 3 = 6 BYTES but 5 CHARACTERS.
+    # ---------------------------------------------------------------
+    val s = "h\u{e9}llo"
+    check_i64("len is BYTES", s.len(), 6)
+    check_i64("char_code_at(1) is CHARACTERS", s.char_code_at(1), 233)
+    check_i64("byte_at(1) is BYTES (C3 lead)", s.byte_at(1), 195)
+    check_i64("byte_at(2) is BYTES (A9 cont.)", s.byte_at(2), 169)
+
+    # ---------------------------------------------------------------
+    # `_lsp_transport_escape` — the JSON-RPC escaper on every outgoing LSP
+    # payload. It bounded a CHARACTER accessor by a BYTE length, so the tail
+    # iterations read past the last character and collapsed the accumulator to
+    # nil. Any LSP message carrying one non-ASCII byte was lost in full.
+    # ---------------------------------------------------------------
+
+    # ASCII control: this shape always worked, which is what hid the defect.
+    check_text("escape ASCII control quote", _lsp_transport_escape("a\"b"), "a\\\"b")
+    check_text("escape ASCII control plain", _lsp_transport_escape("hello"), "hello")
+
+    check_text("escape 2-byte character", _lsp_transport_escape("\u{e9}"), "\u{e9}")
+    check_text("escape 3-byte character", _lsp_transport_escape("\u{4e2d}"), "\u{4e2d}")
+    check_text("escape 4-byte character", _lsp_transport_escape("\u{1f389}"), "\u{1f389}")
+    check_text("escape leading BOM", _lsp_transport_escape("\u{feff}x"), "\u{feff}x")
+    check_text("escape mixed-width run", _lsp_transport_escape("a\u{e9}b\u{4e2d}c\u{1f389}d"), "a\u{e9}b\u{4e2d}c\u{1f389}d")
+
+    # "caf" 3 + e-acute 2 = 5 BYTES in, nothing escaped, 5 BYTES out.
+    check_i64("escape preserves byte length", _lsp_transport_escape("caf\u{e9}").len(), 5)
+
+    # Escapes must still fire AFTER a multi-byte character: e-acute 2 bytes
+    # plus backslash-n 2 bytes = 4 BYTES.
+    check_text("escape newline after 2-byte char", _lsp_transport_escape("\u{e9}\n"), "\u{e9}\\n")
+    check_text("escape quote after 3-byte char", _lsp_transport_escape("\u{4e2d}\""), "\u{4e2d}\\\"")
+    check_text("escape backslash after 4-byte char", _lsp_transport_escape("\u{1f389}\\"), "\u{1f389}\\\\")
+
+    # Through the public builders, so the wiring is covered too.
+    check_i64("did_open keeps non-ASCII content", boolnum(lsp_build_did_open_params("file:///t.spl", "simple", 1, "caf\u{e9}").contains("caf\u{e9}")), 1)
+    check_i64("did_change keeps non-ASCII content", boolnum(lsp_build_did_change_params("file:///t.spl", 2, "\u{4e2d}\u{6587}").contains("\u{4e2d}\u{6587}")), 1)
+    check_i64("workspace_symbol keeps non-ASCII query", boolnum(lsp_build_workspace_symbol_params("\u{e9}t\u{e9}").contains("\u{e9}t\u{e9}")), 1)
+    check_i64("rename keeps non-ASCII new name", boolnum(lsp_build_rename_params("file:///t.spl", 1, 2, "caf\u{e9}").contains("caf\u{e9}")), 1)
+
+    if failures == 0:
+        print("PROBE VERDICT: PASS")
+    else:
+        print("PROBE VERDICT: FAIL (" + str(failures) + " checks wrong)")
+
+fn boolnum(b: bool) -> i64:
+    if b:
+        return 1
+    0

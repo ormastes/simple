@@ -352,21 +352,41 @@ impl StdioProcessTransport:
         rt_process_kill(me.pid)
 
 fn _lsp_transport_escape(s: text) -> text:
+    # INDEX SPACE: BYTE-indexed throughout. `s.len()` and `s.slice(a, b)` count
+    # BYTES while `char_at` counts CHARACTERS, so the previous loop ran a
+    # byte-length bound over a character accessor. On any non-ASCII input the
+    # tail iterations index past the last character, `char_at` returns NIL, and
+    # `result + nil` collapses to nil -- destroying the ENTIRE accumulated
+    # payload, not merely mangling one character. Every JSON escape below is
+    # ASCII and UTF-8 is self-synchronizing (continuation bytes are always
+    # >= 0x80), so a byte scan matches the escapees exactly.
     var result = ""
     var i = 0
-    while i < s.len():
-        val ch = s.char_at(i)
-        if ch == "\"":
+    val n = s.len()
+    while i < n:
+        val cb = s.byte_at(i)
+        # Advance by the whole UTF-8 sequence so a character is never split.
+        # A stray continuation byte (0x80..0xBF) advances by 1 to resync.
+        var e = i + 1
+        if cb >= 240:
+            e = i + 4
+        elif cb >= 224:
+            e = i + 3
+        elif cb >= 192:
+            e = i + 2
+        if e > n:
+            e = n
+        if cb == 34:
             result = result + "\\\""
-        elif ch == "\\":
+        elif cb == 92:
             result = result + "\\\\"
-        elif ch == "\n":
+        elif cb == 10:
             result = result + "\\n"
-        elif ch == "\r":
+        elif cb == 13:
             result = result + "\\r"
-        elif ch == "\t":
+        elif cb == 9:
             result = result + "\\t"
         else:
-            result = result + ch
-        i = i + 1
+            result = result + s.slice(i, e)
+        i = e
     result
