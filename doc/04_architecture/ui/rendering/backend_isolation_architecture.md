@@ -118,6 +118,28 @@ glass override must either parse/project each output-relevant field into
 CSS digest to HTML/cache/receipt identity. Unmodelled CSS must never change
 visible output while retaining the same cache identity.
 
+### Proposed Stitch glass patch contract
+
+The next override grammar is a typed, per-property `--wm-*` patch over the
+already active snapshot: `--wm-backdrop-blur` (integer px),
+`--wm-backdrop-saturation` (decimal factor), `--wm-border-width` (integer px),
+`--wm-border-color` (literal supported color), `--wm-radius` (integer px),
+`--wm-shadow-active`, `--wm-shadow-inactive` (supported box-shadow subset),
+and `--wm-window-gradient` (`none` or a literal two-stop vertical gradient).
+Absent or invalid properties retain the active material field; a file with no
+valid known property is a no-op. The patch projects only into
+`ThemeMaterialSemantics`, recomputes its material hash, and appends canonical
+CSS aliases/selector overrides. No raw parsed CSS aggregate is embedded in
+DrawIR.
+
+Source+material identity alone is insufficient: two overrides that differ only
+in `--wm-error` have identical material but different emitted CSS/pixels.
+Owner-local Web/host cache, revision, and readiness contracts therefore also
+use `theme_render_snapshot_effective_css_sha256(snapshot)`, derived from the
+canonical `composed_css`. Where DrawIR also exposes non-CSS semantic colors,
+its provenance uses a separately defined effective-render identity rather than
+misusing CSS digest as a universal render key.
+
 ## Known intentional exception (lint must special-case)
 
 `simple_web_engine2d_render_html_pixels` (`simple_web_engine2d_renderer.spl:808`) draws a narrow set
