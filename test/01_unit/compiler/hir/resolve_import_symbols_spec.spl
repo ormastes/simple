@@ -55,6 +55,71 @@ describe "resolve_import_symbols 2-pass import resolver":
         val hir = lowering.lower_module(consumer)
         expect(hir.symbols.lookup("answer").?).to_be_truthy()
 
+    it "resolves plain facade exports to their unique package sibling":
+        val log = make_logger()
+        val provider_source = "struct TickSpan:\n    value: i64\npub fn tick() -> i64:\n    42\npub fn locate() -> TickSpan:\n    TickSpan(value: 1)"
+        val facade_source = "export tick, TickSpan, locate"
+        val provider = parse_full_frontend(provider_source, "pkg.time_ops", "pkg.time_ops", log)
+        val facade = parse_full_frontend(facade_source, "pkg.__init__", "pkg.__init__", log)
+        val consumer = parse_full_frontend(
+            "use pkg.\{tick, TickSpan, locate\}\nfn main() -> i64:\n    val span: TickSpan = locate()\n    tick() + span.value",
+            "plain.consumer", "plain.consumer", log)
+        var modules: Dict<text, Module> = {}
+        modules["pkg.time_ops"] = provider
+        modules["pkg.__init__"] = facade
+        val sources = [
+            SourceFile(path: "pkg/time_ops.spl", content: provider_source, module_name: "pkg.time_ops"),
+            SourceFile(path: "pkg/__init__.spl", content: facade_source, module_name: "pkg.__init__")
+        ]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+        val facade_surface = surfaces.surfaces[surfaces.index_by_name["pkg.__init__"]]
+        expect(facade_surface.export_origins["tick"].owner_module).to_equal("pkg.time_ops")
+        expect(facade_surface.export_origins["TickSpan"].owner_module).to_equal("pkg.time_ops")
+
+        var lowering = hirlowering_for_module("plain.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("tick").?).to_be_truthy()
+        expect(hir.symbols.lookup("TickSpan").?).to_be_truthy()
+        expect(hir.symbols.lookup("locate").?).to_be_truthy()
+
+    it "prefers a facade declaration over a same-named sibling":
+        val log = make_logger()
+        val sibling_source = "pub fn answer() -> i64:\n    1"
+        val facade_source = "pub fn answer() -> i64:\n    2\nexport answer"
+        val sibling = parse_full_frontend(sibling_source, "shadow.sibling", "shadow.sibling", log)
+        val facade = parse_full_frontend(facade_source, "shadow.__init__", "shadow.__init__", log)
+        var modules: Dict<text, Module> = {}
+        modules["shadow.sibling"] = sibling
+        modules["shadow.__init__"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "shadow/sibling.spl", content: sibling_source, module_name: "shadow.sibling"),
+            SourceFile(path: "shadow/__init__.spl", content: facade_source, module_name: "shadow.__init__")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        val facade_surface = surfaces.surfaces[surfaces.index_by_name["shadow.__init__"]]
+        expect(facade_surface.export_origins["answer"].owner_module).to_equal("shadow.__init__")
+
+    it "fails closed when a plain facade export has two sibling owners":
+        val log = make_logger()
+        val owner_source = "pub fn duplicate() -> i64:\n    1"
+        val facade_source = "export duplicate"
+        val first = parse_full_frontend(owner_source, "amb.first", "amb.first", log)
+        val second = parse_full_frontend(owner_source, "amb.second", "amb.second", log)
+        val facade = parse_full_frontend(facade_source, "amb.__init__", "amb.__init__", log)
+        var modules: Dict<text, Module> = {}
+        modules["amb.first"] = first
+        modules["amb.second"] = second
+        modules["amb.__init__"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "amb/first.spl", content: owner_source, module_name: "amb.first"),
+            SourceFile(path: "amb/second.spl", content: owner_source, module_name: "amb.second"),
+            SourceFile(path: "amb/__init__.spl", content: facade_source, module_name: "amb.__init__")
+        ])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("ambiguous facade export")
+
     it "bootstrap resolves one uniquely owned flat-global declaration":
         val log = make_logger()
         val src_provider = "struct FlatType:\n    value: i64\npub fn flat_answer() -> i64:\n    42"

@@ -39,6 +39,30 @@ describe "module surfaces":
         expect(surfaces.index_by_name["lib_alias"]).to_equal(0)
         expect(surfaces.index_by_name["std_alias"]).to_equal(0)
 
+    it "coalesces physical aliases before resolving one plain facade owner":
+        val body = "pub fn shared_tick() -> i64:\n    1\n"
+        val provider = parse_and_build_module(body, "src/lib/nogc_async_mut/io.spl")
+        val facade_body = "export shared_tick\n"
+        val facade = parse_and_build_module(facade_body, "pkg/__init__.spl")
+        val modules = {
+            "pkg.lib_owner": provider,
+            "pkg.std_owner": provider,
+            "pkg.__init__": facade
+        }
+        val sources = [
+            SourceFile(path: "src/lib/nogc_async_mut/io.spl", content: body, module_name: "pkg.lib_owner"),
+            SourceFile(path: "src/std/nogc_async_mut/io.spl", content: body, module_name: "pkg.std_owner"),
+            SourceFile(path: "pkg/__init__.spl", content: facade_body, module_name: "pkg.__init__")
+        ]
+
+        val result = module_surfaces_from_modules(modules, sources)
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        expect(surfaces.surfaces.len()).to_equal(2)
+        expect(surfaces.index_by_name["pkg.lib_owner"]).to_equal(surfaces.index_by_name["pkg.std_owner"])
+        val facade_surface = surfaces.surfaces[surfaces.index_by_name["pkg.__init__"]]
+        expect(facade_surface.export_origins["shared_tick"].owner_module).to_equal("pkg.lib_owner")
+
     it "resolves aliases by physical source identity before declaration shape":
         val first_body = "fn shared() -> i64:\n    1\n"
         val second_body = "fn shared() -> i64:\n    2\n"

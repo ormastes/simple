@@ -98,6 +98,11 @@ struct ModuleSurfaceTypeAlias:
     is_public: bool
     span: Span
 
+struct ModuleSurfaceExportOrigin:
+    owner_module: text
+    source_name: text
+    resolution_kind: text
+
 struct ModuleSurface:
     source_index: i64
     canonical_path: text
@@ -113,6 +118,7 @@ struct ModuleSurface:
     impls: [ModuleSurfaceImpl]
     type_aliases: Dict<text, ModuleSurfaceTypeAlias>
     constants: Dict<text, ModuleSurfaceConst>
+    export_origins: Dict<text, ModuleSurfaceExportOrigin>
 
 struct ModuleSurfacesByName:
     surfaces: [ModuleSurface]
@@ -163,6 +169,169 @@ impl ModuleSurfaceBuilder:
 
     me finish() -> ModuleSurfacesByName:
         ModuleSurfacesByName(surfaces: self.surfaces, index_by_name: self.index_by_name)
+
+    me resolve_export_origins() -> Result<(), text>:
+        # Build one package/name owner index up front. Stage4 carries thousands
+        # of exports, so scanning every surface for every plain export turns
+        # this boundary into O(exports * surfaces).
+        var owner_by_package_name: Dict<text, i64> = {}
+        var owner_surface_index = 0
+        while owner_surface_index < self.surfaces.len():
+            val owner_surface = self.surfaces[owner_surface_index]
+            val owner_package = module_surface_package_name(owner_surface)
+            var declaration_names: [text] = []
+            declaration_names = declaration_names + owner_surface.callables.keys()
+            declaration_names = declaration_names + owner_surface.composites.keys()
+            declaration_names = declaration_names + owner_surface.enums.keys()
+            declaration_names = declaration_names + owner_surface.traits.keys()
+            declaration_names = declaration_names + owner_surface.type_aliases.keys()
+            declaration_names = declaration_names + owner_surface.constants.keys()
+            for declaration_name in declaration_names:
+                val owner_key = "{owner_package}::{declaration_name}"
+                if owner_by_package_name.contains_key(owner_key):
+                    val previous_index = owner_by_package_name[owner_key]
+                    if previous_index >= 0 and
+                       self.surfaces[previous_index].canonical_path != owner_surface.canonical_path:
+                        owner_by_package_name[owner_key] = -2
+                else:
+                    owner_by_package_name[owner_key] = owner_surface_index
+            owner_surface_index = owner_surface_index + 1
+
+        var surface_index = 0
+        while surface_index < self.surfaces.len():
+            var surface = self.surfaces[surface_index]
+            var origins: Dict<text, ModuleSurfaceExportOrigin> = surface.export_origins
+            for export_decl in surface.exports:
+                for export_item in export_decl.items:
+                    if export_item.ends_with(".*"):
+                        continue
+                    var source_name = export_item
+                    var local_name = export_item
+                    if export_item.contains(":"):
+                        val parts = export_item.split(":")
+                        source_name = parts[0]
+                        if parts.len() > 1:
+                            local_name = parts[1]
+
+                    if module_surface_declares_item(surface, source_name):
+                        origins[local_name] = ModuleSurfaceExportOrigin(
+                            owner_module: surface.module_name,
+                            source_name: source_name,
+                            resolution_kind: "direct"
+                        )
+                        continue
+
+                    val imported_origin = module_surface_explicit_import_origin(
+                        self.surfaces, self.index_by_name, surface,
+                        source_name, local_name)
+                    if imported_origin != nil:
+                        origins[local_name] = imported_origin.unwrap()
+                        continue
+
+                    val sibling_result = module_surface_unique_sibling_origin(
+                        self.surfaces, owner_by_package_name,
+                        surface, source_name)
+                    if sibling_result.is_err():
+                        return Err(sibling_result.unwrap_err())
+                    val sibling_origin = sibling_result.unwrap()
+                    if sibling_origin != nil:
+                        origins[local_name] = sibling_origin.unwrap()
+            surface.export_origins = origins
+            self.surfaces[surface_index] = surface
+            surface_index = surface_index + 1
+        Ok(())
+
+fn module_surface_declares_item(surface: ModuleSurface, name: text) -> bool:
+    surface.callables.contains_key(name) or
+        surface.composites.contains_key(name) or
+        surface.enums.contains_key(name) or
+        surface.traits.contains_key(name) or
+        surface.type_aliases.contains_key(name) or
+        surface.constants.contains_key(name)
+
+fn module_surface_explicit_import_origin(
+    surfaces: [ModuleSurface],
+    index_by_name: Dict<text, i64>,
+    facade: ModuleSurface,
+    source_name: text,
+    local_name: text
+) -> ModuleSurfaceExportOrigin?:
+    for import_decl in facade.imports:
+        if not index_by_name.contains_key(import_decl.module):
+            continue
+        val owner_index = index_by_name[import_decl.module]
+        if owner_index < 0 or owner_index >= surfaces.len():
+            continue
+        val owner = surfaces[owner_index]
+        for item in import_decl.items:
+            val imported_local = if item.has_alias: item.alias else: item.name
+            if (imported_local == source_name or imported_local == local_name) and
+               module_surface_declares_item(owner, item.name):
+                return Some(ModuleSurfaceExportOrigin(
+                    owner_module: owner.module_name,
+                    source_name: item.name,
+                    resolution_kind: if item.has_alias: "alias" else: "explicit"
+                ))
+    nil
+
+fn module_surface_canonical_module_name(name: text) -> text:
+    var dotted = name
+    if dotted.ends_with(".spl"):
+        dotted = dotted[0:dotted.len() - 4]
+    dotted = dotted.replace("/", ".")
+    if dotted.starts_with("src."):
+        dotted = dotted.substring(4)
+    var result: [text] = []
+    for segment in dotted.split("."):
+        var digits_only = segment != ""
+        var i = 0
+        while i < segment.len():
+            val code = segment.char_code_at(i)
+            if code < 48 or code > 57:
+                digits_only = false
+            i = i + 1
+        if not digits_only:
+            result = result.push(segment)
+    val canonical = result.join(".")
+    if canonical == "std":
+        return "lib"
+    if canonical.starts_with("std."):
+        return "lib." + canonical.substring(4)
+    canonical
+
+fn module_surface_package_name(surface: ModuleSurface) -> text:
+    var name = module_surface_canonical_module_name(surface.module_name)
+    if name.ends_with(".__init__"):
+        return name[0:name.len() - 9]
+    val segments = name.split(".")
+    if segments.len() <= 1:
+        return ""
+    segments[0:segments.len() - 1].join(".")
+
+fn module_surface_unique_sibling_origin(
+    surfaces: [ModuleSurface],
+    owner_by_package_name: Dict<text, i64>,
+    facade: ModuleSurface,
+    source_name: text
+) -> Result<ModuleSurfaceExportOrigin?, text>:
+    val facade_package = module_surface_package_name(facade)
+    if facade_package == "":
+        return Ok(nil)
+    val owner_key = "{facade_package}::{source_name}"
+    if not owner_by_package_name.contains_key(owner_key):
+        return Ok(nil)
+    val matching_index = owner_by_package_name[owner_key]
+    if matching_index == -2:
+        return Err(
+            "ambiguous facade export: module={facade.module_name} item={source_name} package={facade_package}")
+    if matching_index < 0 or matching_index >= surfaces.len():
+        return Ok(nil)
+    val owner = surfaces[matching_index]
+    Ok(Some(ModuleSurfaceExportOrigin(
+        owner_module: owner.module_name,
+        source_name: source_name,
+        resolution_kind: "plain-sibling"
+    )))
 
 fn module_surface_callable_from_function(function_: ParserFunction) -> ModuleSurfaceCallable:
     var params: [ModuleSurfaceParam] = []
@@ -299,7 +468,8 @@ fn module_surface_from_module(module: ParserModule, source: SourceFile, source_i
         traits: traits,
         impls: impls,
         type_aliases: type_aliases,
-        constants: constants
+        constants: constants,
+        export_origins: {}
     )
 
 fn module_surface_source_matches(surface: ModuleSurface, source: SourceFile, index: i64) -> bool:
@@ -419,6 +589,9 @@ fn module_surfaces_from_modules(modules: Dict<text, ParserModule>, sources: [Sou
         if alias_result.is_err():
             return Err(alias_result.unwrap_err())
         builder.index_by_name = alias_result.unwrap()
+    val origin_result = builder.resolve_export_origins()
+    if origin_result.is_err():
+        return Err(origin_result.unwrap_err())
     Ok(builder.finish())
 
 fn module_surface_promote(surface: ModuleSurface) -> bool:
