@@ -15,3 +15,9 @@ Fresh Stage 4 cycle 1 found the same staged-parser incompatibility in
 write-code lambda and detached closing parenthesis. This occurrence is owned by
 the same bug claim and normalized consistently; the focused regression checks
 both the exact adapter source and the adjacent multiline declaration shape.
+
+Cycle 2 then exposed the identical form in the ARM sibling. Before the final
+x86_64 cycle, the whole owned replay-controller family was scanned and all 16
+remaining `src/lib/nogc_sync_mut` and `src/lib/nogc_async_mut` adapter copies
+were normalized together. The family regression enumerates every changed
+source so another sibling cannot silently reintroduce the staged parse error.
