@@ -315,6 +315,233 @@ fn read_test_result_evidence(path: text) -> (i64, i64, i64):
         return (0, 0, 0)
     (passed, failed, 1)
 
+# --- SIMPLE_COVERAGE measured line coverage (2026-08-02) -------------------
+# The seed interpreter already records executed statement lines in a global
+# collector when SIMPLE_COVERAGE=1 (driver real_main -> init_coverage_from_env,
+# node_exec -> record_node_coverage). Two gaps kept it inert on `simple test`:
+# the `run` child never dumped the collector, and span_to_location attributes
+# every hit to the placeholder file "<source>" (line numbers stay
+# module-relative). This block wires the dormant mechanism without touching
+# the Rust seed (unbuildable while WC conflict markers sit in base crates):
+#  1. inject a tiny epilogue into the child spec copy that prints the SDN dump
+#     between sentinel markers (rt_coverage_dump_sdn is a registered extern),
+#  2. strip that region from the echoed child output,
+#  3. re-attribute hits per target source file: a recordable line counts as
+#     covered when its line number was hit AND it sits inside a function the
+#     collector recorded as called (or in module top-level code). Targets come
+#     from `# @cover <path>` annotations plus the spec's use-imports.
+# Attribution is heuristic (line numbers are conflated across files), but
+# function-call attribution is exact and bounds the error.
+
+fn _cov_enabled() -> bool:
+    val v = env_get("SIMPLE_COVERAGE") ?? ""
+    v != "" and v != "0"
+
+fn _cov_instrument_for_coverage(current: text, original: text) -> text:
+    """Append a coverage-dump epilogue to the child spec copy. When `current`
+    is already a temp copy (infix preprocessing), append in place; otherwise
+    create a fresh temp copy next to the original so imports still resolve."""
+    val content = rt_file_read_text(current)
+    if content == "":
+        return current
+    var epilogue = "\n\n# --- coverage epilogue injected by test_runner_single (SIMPLE_COVERAGE) ---\n"
+    epilogue = epilogue + "extern fn rt_coverage_dump_sdn() -> text\n"
+    epilogue = epilogue + "print \"__SIMPLE_COV_SDN_BEGIN__\"\n"
+    epilogue = epilogue + "print rt_coverage_dump_sdn()\n"
+    epilogue = epilogue + "print \"__SIMPLE_COV_SDN_END__\"\n"
+    if current != original:
+        val _ = rt_file_write_text(current, content + epilogue)
+        return current
+    val slash = _single_last_slash(original)
+    val dir = if slash >= 0: original.substring(0, slash + 1) else: ""
+    val base = if slash >= 0: original.substring(slash + 1) else: original
+    val tmp = dir + ".spipe_cov_{rt_getpid()}_{rt_time_now_unix_micros()}_" + base
+    if rt_file_write_text(tmp, content + epilogue):
+        return tmp
+    current
+
+fn _cov_split_output(output: text) -> (text, text):
+    """Split child stdout into (clean output, coverage SDN region)."""
+    val lines = output.split("\n")
+    var clean = ""
+    var sdn = ""
+    var in_cov = false
+    var first_clean = true
+    for line in lines:
+        if line.contains("__SIMPLE_COV_SDN_BEGIN__"):
+            in_cov = true
+            continue
+        if line.contains("__SIMPLE_COV_SDN_END__"):
+            in_cov = false
+            continue
+        if in_cov:
+            sdn = sdn + line + "\n"
+        else:
+            if first_clean:
+                clean = line
+                first_clean = false
+            else:
+                clean = clean + "\n" + line
+    (clean, sdn)
+
+fn _cov_dots_to_slashes(s: text) -> text:
+    var out = ""
+    var i = 0
+    while i < s.len():
+        val ch = s.substring(i, i + 1)
+        if ch == ".":
+            out = out + "/"
+        else:
+            out = out + ch
+        i = i + 1
+    out
+
+fn _cov_targets(spec_src: text) -> [text]:
+    """Target source files: `@cover <path>` annotations plus std./lib./app.
+    use-imports mapped to src/ paths. Only existing .spl files, deduped."""
+    var seen: dict<text, bool> = {}
+    var targets: [text] = []
+    for raw in spec_src.split("\n"):
+        val t = raw.trim()
+        var path = ""
+        val cov_idx = find_raw(t, "@cover ")
+        if cov_idx >= 0:
+            val rest = t.substring(cov_idx + 7).trim()
+            val sp = find_raw(rest, " ")
+            path = if sp >= 0: rest.substring(0, sp) else: rest
+        elif t.starts_with("use "):
+            var module = t.substring(4)
+            val sp = find_raw(module, " ")
+            if sp >= 0:
+                module = module.substring(0, sp)
+            val brace = find_raw(module, ".{")
+            if brace >= 0:
+                module = module.substring(0, brace)
+            var rel = ""
+            if module.starts_with("std."):
+                rel = "src/lib/" + _cov_dots_to_slashes(module.substring(4))
+            elif module.starts_with("lib."):
+                rel = "src/lib/" + _cov_dots_to_slashes(module.substring(4))
+            elif module.starts_with("app."):
+                rel = "src/app/" + _cov_dots_to_slashes(module.substring(4))
+            if rel != "":
+                path = rel + ".spl"
+        if path != "" and path.ends_with(".spl") and rt_file_exists(path):
+            if not seen.contains_key(path):
+                seen[path] = true
+                targets.push(path)
+    targets
+
+fn _cov_fn_name(header: text) -> text:
+    """Extract function name from a `fn `/`me `/`gen ` header line."""
+    var rest = ""
+    if header.starts_with("fn "):
+        rest = header.substring(3)
+    elif header.starts_with("me "):
+        rest = header.substring(3)
+    else:
+        rest = header.substring(4)
+    var name = ""
+    var i = 0
+    while i < rest.len():
+        val ch = rest.substring(i, i + 1)
+        if ch == "(" or ch == ":" or ch == " " or ch == "<":
+            return name
+        name = name + ch
+        i = i + 1
+    name
+
+fn _cov_is_recordable(t: text) -> bool:
+    """Approximate the statement kinds the interpreter collector records
+    (Let/Assignment/If/While/For/Loop/Return/Break/Continue/Match/With).
+    Bare expression statements, case arms, else branches, prints, and struct
+    fields are never recorded, so they stay out of the denominator."""
+    if (t.starts_with("val ") or t.starts_with("var ") or t.starts_with("if ") or
+        t.starts_with("elif ") or t.starts_with("while ") or t.starts_with("for ") or
+        t.starts_with("loop") or t.starts_with("return") or t.starts_with("break") or
+        t.starts_with("continue") or t.starts_with("match ") or t.starts_with("with ")):
+        return true
+    # plain assignment statement: `lhs = rhs` (not `==`)
+    t.contains(" = ") and not t.contains(" == ")
+
+fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, bool>) -> text:
+    val content = rt_file_read_text(path)
+    if content == "":
+        return "coverage: {path} 0% (0/0 lines)"
+    var current_fn = ""
+    var in_doc = false
+    var total = 0
+    var hit = 0
+    var line_no = 0
+    for raw in content.split("\n"):
+        line_no = line_no + 1
+        val t = raw.trim()
+        if t == "":
+            continue
+        if t.starts_with("#"):
+            continue
+        if t.starts_with("\"\"\""):
+            if in_doc:
+                in_doc = false
+            elif not (t.len() >= 6 and t.ends_with("\"\"\"")):
+                in_doc = true
+            continue
+        if in_doc:
+            if t.ends_with("\"\"\""):
+                in_doc = false
+            continue
+        var h = t
+        if h.starts_with("static "):
+            h = h.substring(7)
+        if h.starts_with("fn ") or h.starts_with("me ") or h.starts_with("gen "):
+            current_fn = _cov_fn_name(h)
+            continue
+        if not _cov_is_recordable(t):
+            continue
+        total = total + 1
+        if hits.contains_key("{line_no}"):
+            if current_fn == "" or called.contains_key(current_fn):
+                hit = hit + 1
+    if total == 0:
+        return "coverage: {path} 0% (0/0 lines)"
+    val pct = (hit * 100) / total
+    "coverage: {path} {pct}% ({hit}/{total} lines)"
+
+fn _cov_print_report(spec_path: text, sdn: text):
+    var hits: dict<text, bool> = {}
+    var called: dict<text, bool> = {}
+    var section = ""
+    for raw in sdn.split("\n"):
+        val t = raw.trim()
+        if t.starts_with("lines |"):
+            section = "lines"
+            continue
+        if t.starts_with("functions |"):
+            section = "functions"
+            continue
+        if t.starts_with("sffi_calls |") or t.starts_with("summary"):
+            section = ""
+            continue
+        if t == "":
+            continue
+        if section == "lines":
+            val parts = t.split(", ")
+            if parts.len() >= 3:
+                hits[parts[parts.len() - 2]] = true
+        elif section == "functions":
+            val parts = t.split(", ")
+            if parts.len() >= 2:
+                called[parts[0]] = true
+    val spec_src = rt_file_read_text(spec_path)
+    if spec_src == "":
+        return
+    val targets = _cov_targets(spec_src)
+    if targets.len() == 0:
+        return
+    print ""
+    for tpath in targets:
+        print _cov_report_for_file(tpath, hits, called)
+
 fn main() -> i64:
     var run = parse_child_run(clean_args())
     if not run.valid:
@@ -355,7 +582,10 @@ fn main() -> i64:
     # Rewrite legacy word-infix `expect X to_equal Y` to method form so the
     # interpreter `run` path evaluates the matcher (else it drops it → false-red
     # on falsy calls, silent false-green otherwise).
-    val exec_path = preprocess_infix_for_child(run.path)
+    var exec_path = preprocess_infix_for_child(run.path)
+    val cov_on = _cov_enabled()
+    if cov_on:
+        exec_path = _cov_instrument_for_coverage(exec_path, run.path)
     val assert_ran = env_get("SIMPLE_TEST_ASSERT_RAN") == "1"
     var evidence_path = ""
     var previous_evidence_path = ""
@@ -398,11 +628,17 @@ fn main() -> i64:
         val _ = rt_file_delete(evidence_path)
     if exec_path != run.path and rt_file_exists(exec_path):
         val _ = rt_file_delete(exec_path)
-    if stdout != "":
-        print stdout
+    var child_stdout = stdout
+    var cov_sdn = ""
+    if cov_on:
+        val (cov_clean, cov_extracted) = _cov_split_output(stdout)
+        child_stdout = cov_clean
+        cov_sdn = cov_extracted
+    if child_stdout != "":
+        print child_stdout
     if stderr != "":
         print stderr
-    val combined = stdout + "\n" + stderr
+    val combined = child_stdout + "\n" + stderr
     val (real_passed, real_failed) = count_real_examples(combined)
     val real_executed = real_passed + real_failed
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
@@ -474,6 +710,8 @@ fn main() -> i64:
         if failed > 0:
             print "error: test-runner: spec failed"
     print_summary(run.path, passed, failed, 0, 0, duration_ms)
+    if cov_on and cov_sdn != "":
+        _cov_print_report(run.path, cov_sdn)
     if failed == 0:
         return 0
     1

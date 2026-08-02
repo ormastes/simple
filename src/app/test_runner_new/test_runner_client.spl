@@ -2,6 +2,7 @@
 
 use std.sffi.cli.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded, process_run_timeout}
+use app.io.mod.{env_get}
 use std.test_runner.test_runner_args.{parse_test_args}
 use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
@@ -267,10 +268,18 @@ fn main() -> i64:
     # The light daemon may be unable to start (e.g. it relies on runtime
     # methods the seed interpreter lacks). Degrade to direct execution rather
     # than refusing, but decide once for the whole batch.
-    val daemon_ok = ensure_daemon()
+    # SIMPLE_COVERAGE: the daemon's environment predates this request, so a
+    # daemon-run child would not have coverage enabled. Bypass the daemon and
+    # run directly so the child inherits SIMPLE_COVERAGE=1.
+    val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
+    val cov_bypass = cov_env != "" and cov_env != "0"
+    val daemon_ok = if cov_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
-        print "WARNING: test daemon unavailable; running directly"
+        if cov_bypass:
+            print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
+        else:
+            print "WARNING: test daemon unavailable; running directly"
         binary = simple_binary()
     var worst = 0
     var executed = 0
