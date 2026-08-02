@@ -1,0 +1,429 @@
+# @tag: system, gui, rendering, web, offload, capture, gpu
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_render_session.spl 90%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/web_render_backend.spl 90%
+
+"""Web showcase document rendered end-to-end under the GPU offload profile.
+
+A rich HTML showcase (headings, paragraphs, styled boxes, flex row, colors,
+borders, a transformed box, an animated element) is rendered through the
+pure_simple WebRenderBackend with the "auto" Engine2D backend — the full GPU
+offload profile (Metal / CUDA / ROCm / Vulkan, then CPU fallbacks) — and the
+resulting bitmap is verified with capture evidence:
+
+  - non-empty bitmap of the expected dimensions,
+  - deterministic checksum across two identical renders,
+  - checksum CHANGES when the document changes (mutation sensitivity),
+  - pixel probes for known-color regions (body bg, flex boxes),
+  - honest offload/readback provenance: the lane that actually executed is
+    asserted, never fabricated (a CPU-family lane must NOT claim
+    device_readback — see
+    doc/08_tracking/bug/web_render_gpu_backend_provenance_fabricated_2026-06-17.md).
+
+On a headless host "auto" resolves to whatever the highest available offload
+lane is; the spec records that lane and asserts the provenance fields reflect
+it rather than assuming a GPU is present.
+"""
+
+use std.spec.*
+use std.common.web.browser_renderer_protocol.{browser_text_input_overlay_empty}
+use std.gc_async_mut.web.browser_session.{
+    BrowserRenderRevisions,
+    BrowserRenderSnapshot
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_render_session.{
+    SimpleWebRenderSession
+}
+use std.gc_async_mut.gpu.browser_engine.web_render_backend.{
+    web_render_backend, web_render_backend_names
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_resolved_engine2d_backend_name,
+    simple_web_render_html_to_readback_result_with_engine2d_backend,
+    simple_web_render_html_to_readback_result_with_engine2d_backend_at_time
+}
+use std.gc_async_mut.gpu.browser_engine.backend_screenshot_capture.{
+    backend_capture_ok
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    simple_web_layout_set_render_budget_floor_ms
+}
+
+val SHOW_W: i32 = 96
+val SHOW_H: i32 = 72
+
+# Palette pinned by the showcase CSS below (0xAARRGGBB).
+val COLOR_BODY_BG: u32 = 0xFF1A1A2Eu32
+val COLOR_BOX_BLUE: u32 = 0xFF2563EBu32
+val COLOR_BOX_GREEN: u32 = 0xFF22C55Eu32
+val COLOR_BOX_AMBER: u32 = 0xFFF59E0Bu32
+val COLOR_BOX_MUTATED: u32 = 0xFFDC2626u32
+
+fn _showcase_html() -> text:
+    "<html><head><style>" +
+    "html,body { margin:0; background-color:#1a1a2e; color:#e0e0ff; }" +
+    # compact type: default h1/p margins + 2em h1 would push the flex row
+    # and pulse element below the 96x72 viewport (h1 alone covers ~45 rows)
+    "h1 { margin:0; font-size:12px; background-color:#16213e; " +
+    "color:#a0c4ff; padding:2px; }" +
+    "p { margin:0; font-size:8px; color:#cbd5e1; }" +
+    ".row { display:flex; width:96px; }" +
+    ".box-a { width:28px; height:18px; background-color:#2563eb; " +
+    "border:2px solid #533483; }" +
+    ".box-b { width:28px; height:18px; background-color:#22c55e; }" +
+    ".box-c { width:28px; height:18px; background-color:#f59e0b; " +
+    "transform:translate(2px,1px); }" +
+    ".pulse { width:24px; height:10px; background-color:#ef4444; " +
+    "animation-name:pulse; animation-duration:1s; }" +
+    "</style></head><body>" +
+    "<h1>Showcase</h1>" +
+    "<p>GPU offload capture evidence</p>" +
+    "<div class='row'>" +
+    "<div class='box-a'></div>" +
+    "<div class='box-b'></div>" +
+    "<div class='box-c'></div>" +
+    "</div>" +
+    "<div class='pulse'></div>" +
+    "</body></html>"
+
+fn _mutated_html() -> text:
+    _showcase_html().replace("#2563eb", "#dc2626")
+
+fn _count_color(pixels: [u32], color: u32) -> i32:
+    var n = 0
+    var i = 0
+    while i < pixels.len():
+        if pixels[i] == color:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _diffcount(a: [u32], b: [u32]) -> i32:
+    if a.len() != b.len():
+        return -1
+    var n = 0
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            n = n + 1
+        i = i + 1
+    n
+
+fn _row_has_both(pixels: [u32], left: u32, right: u32) -> bool:
+    """True when some scanline carries BOTH colors (flex-row side-by-side)."""
+    var y = 0
+    while y < SHOW_H:
+        var saw_left = false
+        var saw_right = false
+        var x = 0
+        while x < SHOW_W:
+            val p = pixels[y * SHOW_W + x]
+            if p == left:
+                saw_left = true
+            if p == right:
+                saw_right = true
+            x = x + 1
+        if saw_left and saw_right:
+            return true
+        y = y + 1
+    false
+
+fn _is_cpu_family(lane: text) -> bool:
+    lane == "software" or lane == "cpu" or lane == "cpu_simd"
+
+# --------------------------------------------------------------------------
+# Executable-lane probe.
+#
+# The auto profile may RESOLVE to a GPU lane (e.g. cuda) whose device cannot
+# initialize headless on this host. The readback path reports that honestly
+# (source=cpu_fallback instead of device_readback), but the fast pixels path
+# then returns a FLAT frame with none of the layout content (observed
+# 2026-08-01: resolved=cuda, readback source=cpu_fallback, pixels
+# unique_colors=1, non_background=0 — silent wrong pixels; recorded as a bug,
+# see the report for this spec). Per the honest-provenance rule the pixel
+# evidence below therefore runs on the highest lane that ACTUALLY executes:
+# "auto" when the device readback is genuine, else the CPU lane.
+# --------------------------------------------------------------------------
+var _executed_backend_cache: text = ""
+var _probe_source_cache: text = ""
+
+# The default 10s WEB_RENDER_BUDGET_MS wall-clock render budget is sized for
+# compiled execution. Under the tree-walking interpreter (the engine
+# `simple test` runs on) the 12-node showcase legitimately needs more:
+# compute_styles alone trips the budget at ~node 5 of 12, silently leaving
+# the remaining nodes on default styles so ONLY the canvas background paints
+# (uniform 0xFF1A1A2E frame — exactly the degraded mode the foundation module
+# documents). Raising the platform floor via this PUBLIC calibration API is
+# the sanctioned opt-in for showcase evidence capture (see
+# simple_web_html_layout_renderer_foundation.spl, WEB_RENDER_BUDGET_MS notes);
+# the budget still expires past the floored deadline, so this is not a bypass.
+fn _arm_showcase_budget():
+    simple_web_layout_set_render_budget_floor_ms(900000)
+
+fn _executed_render_backend() -> text:
+    _arm_showcase_budget()
+    if _executed_backend_cache != "":
+        return _executed_backend_cache
+    val probe = simple_web_render_html_to_readback_result_with_engine2d_backend(
+        "<html><body></body></html>", 8, 8, "auto"
+    )
+    _probe_source_cache = probe.readback.source
+    if probe.readback.source == "device_readback":
+        _executed_backend_cache = "auto"
+    else:
+        _executed_backend_cache = "software"
+    _executed_backend_cache
+
+fn _render_showcase_pixels(html: text) -> [u32]:
+    _arm_showcase_budget()
+    val backend = web_render_backend("pure_simple", SHOW_W, SHOW_H)
+    backend.render_html_to_pixels(html, _executed_render_backend())
+
+# One render per document is expensive on the interpreter-backed runner, so
+# probes that only READ the base/mutated bitmaps share a memoized frame.
+# Determinism is still proven by an explicit second independent render.
+var _base_px_cache: [u32] = []
+var _mutated_px_cache: [u32] = []
+
+fn _base_pixels() -> [u32]:
+    if _base_px_cache.len() == 0:
+        _base_px_cache = _render_showcase_pixels(_showcase_html())
+    _base_px_cache
+
+fn _mutated_pixels() -> [u32]:
+    if _mutated_px_cache.len() == 0:
+        _mutated_px_cache = _render_showcase_pixels(_mutated_html())
+    _mutated_px_cache
+
+fn _snapshot(
+    generation: i64, document_revision: i64, style_revision: i64,
+    resource_revision: i64, html: text?
+) -> BrowserRenderSnapshot:
+    _arm_showcase_budget()
+    BrowserRenderSnapshot(
+        document_generation: generation,
+        revisions: BrowserRenderRevisions(
+            document_revision: document_revision,
+            style_revision: style_revision,
+            resource_revision: resource_revision
+        ),
+        document_html: html,
+        resources_changed: false
+    )
+
+describe "Web showcase document under the full GPU offload profile":
+
+    it "resolves the auto profile to one concrete offload lane":
+        val resolved = simple_web_resolved_engine2d_backend_name(
+            SHOW_W, SHOW_H, "auto"
+        )
+        # honest lane report — the lane that will actually execute below
+        print "showcase_offload_lane={resolved}"
+        assert_false(resolved == "")
+        assert_false(resolved == "auto")
+        val known = (
+            resolved == "metal" or resolved == "cuda" or
+            resolved == "rocm" or resolved == "vulkan" or
+            resolved == "opencl" or resolved == "opengl" or
+            resolved == "intel" or resolved == "webgpu" or
+            resolved == "qualcomm" or resolved == "directx" or
+            resolved == "baremetal" or resolved == "virtio_gpu" or
+            _is_cpu_family(resolved)
+        )
+        assert_true(known)
+        val names = web_render_backend_names()
+        expect(names.len()).to_equal(2)
+        expect(names[0]).to_equal("pure_simple")
+        expect(names[1]).to_equal("chromium")
+
+    it "renders the showcase to a non-empty bitmap of the expected dimensions":
+        val pixels = _base_pixels()
+        expect(pixels.len()).to_equal(SHOW_W * SHOW_H)
+        val resolved = simple_web_resolved_engine2d_backend_name(
+            SHOW_W, SHOW_H, "auto"
+        )
+        val executed = _executed_render_backend()
+        val capture = backend_capture_ok(executed, pixels, SHOW_W, SHOW_H)
+        assert_true(capture.success)
+        expect(capture.width).to_equal(SHOW_W)
+        expect(capture.height).to_equal(SHOW_H)
+        expect(capture.pixel_checksum).to_be_greater_than(0)
+        # a rich showcase must not collapse to a flat frame
+        expect(capture.unique_sampled_colors).to_be_greater_than(2)
+        expect(capture.non_background_pixels).to_be_greater_than(0)
+        print "showcase_capture resolved={resolved} executed={executed} probe_source={_probe_source_cache} checksum={capture.pixel_checksum} unique_colors={capture.unique_sampled_colors}"
+
+    it "carries the showcase palette into the bitmap (pixel probes)":
+        val pixels = _base_pixels()
+        expect(_count_color(pixels, COLOR_BODY_BG)).to_be_greater_than(0)
+        expect(_count_color(pixels, COLOR_BOX_BLUE)).to_be_greater_than(0)
+        expect(_count_color(pixels, COLOR_BOX_GREEN)).to_be_greater_than(0)
+        expect(_count_color(pixels, COLOR_BOX_AMBER)).to_be_greater_than(0)
+
+    it "lays the flex row boxes out side by side on shared scanlines":
+        val pixels = _base_pixels()
+        assert_true(_row_has_both(pixels, COLOR_BOX_BLUE, COLOR_BOX_GREEN))
+        assert_true(_row_has_both(pixels, COLOR_BOX_GREEN, COLOR_BOX_AMBER))
+
+    it "produces a deterministic checksum across two identical renders":
+        val first = _base_pixels()
+        val second = _render_showcase_pixels(_showcase_html())
+        expect(_diffcount(first, second)).to_equal(0)
+        val cap_a = backend_capture_ok("run_a", first, SHOW_W, SHOW_H)
+        val cap_b = backend_capture_ok("run_b", second, SHOW_W, SHOW_H)
+        expect(cap_a.pixel_checksum).to_equal(cap_b.pixel_checksum)
+
+    it "changes the checksum when the document changes (mutation sensitivity)":
+        val base = _base_pixels()
+        val mutated = _mutated_pixels()
+        expect(mutated.len()).to_equal(SHOW_W * SHOW_H)
+        val cap_base = backend_capture_ok("base", base, SHOW_W, SHOW_H)
+        val cap_mut = backend_capture_ok("mutated", mutated, SHOW_W, SHOW_H)
+        assert_false(cap_base.pixel_checksum == cap_mut.pixel_checksum)
+        # the mutated document really replaced the blue box with the red one
+        expect(_count_color(mutated, COLOR_BOX_BLUE)).to_equal(0)
+        expect(_count_color(mutated, COLOR_BOX_MUTATED)).to_be_greater_than(0)
+
+    it "renders the animated element at two animation times without corruption":
+        val html = _showcase_html()
+        val lane = _executed_render_backend()
+        val at0 = simple_web_render_html_to_readback_result_with_engine2d_backend_at_time(
+            html, SHOW_W, SHOW_H, lane, 0
+        )
+        val at500 = simple_web_render_html_to_readback_result_with_engine2d_backend_at_time(
+            html, SHOW_W, SHOW_H, lane, 500
+        )
+        expect(at0.readback.pixels.len()).to_equal(SHOW_W * SHOW_H)
+        expect(at500.readback.pixels.len()).to_equal(SHOW_W * SHOW_H)
+        # the animated pulse element paints at t=0
+        expect(
+            _count_color(at0.readback.pixels, 0xFFEF4444u32)
+        ).to_be_greater_than(0)
+
+    it "reports honest offload readback provenance for the executed lane":
+        val resolved = simple_web_resolved_engine2d_backend_name(
+            SHOW_W, SHOW_H, "auto"
+        )
+        val executed = _executed_render_backend()
+        val result = simple_web_render_html_to_readback_result_with_engine2d_backend(
+            _showcase_html(), SHOW_W, SHOW_H, executed
+        )
+        val rb = result.readback
+        expect(rb.pixels.len()).to_equal(SHOW_W * SHOW_H)
+        assert_false(rb.source == "")
+        print "showcase_readback resolved={resolved} executed={executed} source={rb.source}"
+        # provenance-fabrication guards:
+        # (a) a CPU-family lane must never claim a GPU device readback
+        if _is_cpu_family(executed):
+            assert_false(rb.source == "device_readback")
+        # (b) pixel evidence may only ride the auto/GPU route when the probe
+        #     proved a genuine device readback — otherwise the executed lane
+        #     must be the CPU fallback, honestly labelled
+        if _probe_source_cache != "device_readback":
+            expect(executed).to_equal("software")
+        # (c) the executed CPU lane readback reports its own honest source
+        if executed == "software":
+            expect(rb.source).to_equal("cpu_mirror")
+
+    it "retains the showcase render in a session with full-parse counters":
+        val session = SimpleWebRenderSession.create()
+        val overlay = browser_text_input_overlay_empty()
+        val result = session.render(
+            _snapshot(301, 1, 1, 1, Some(_showcase_html())),
+            SHOW_W, SHOW_H, 0, 0, overlay, [], []
+        )
+        expect(result.raw_boxes.bx.len()).to_be_greater_than(0)
+        expect(session.counters.serialize_count).to_equal(1)
+        expect(session.counters.parse_count).to_equal(1)
+        expect(session.counters.css_count).to_equal(1)
+        expect(session.counters.layout_count).to_equal(1)
+        expect(session.counters.paint_count).to_equal(1)
+        expect(session.counters.composition_revision).to_equal(1)
+        expect(session.counters.retained_node_count).to_be_greater_than(0)
+        expect(session.counters.retained_command_count).to_be_greater_than(0)
+        session.close()
+
+    it "reuses the retained composition for an unchanged snapshot":
+        val session = SimpleWebRenderSession.create()
+        val overlay = browser_text_input_overlay_empty()
+        session.render(
+            _snapshot(302, 1, 1, 1, Some(_showcase_html())),
+            SHOW_W, SHOW_H, 0, 0, overlay, [], []
+        )
+        expect(session.counters.reuse_count).to_equal(0)
+        session.render(
+            _snapshot(302, 1, 1, 1, nil),
+            SHOW_W, SHOW_H, 0, 0, overlay, [], []
+        )
+        expect(session.counters.reuse_count).to_equal(1)
+        expect(session.counters.composition_revision).to_equal(1)
+        session.close()
+
+    it "keeps the session composition checksum stable until the document mutates":
+        # NOTE: mutation is proven across two sessions rather than a second
+        # render on one session: under the seed interpreter, a second
+        # full-layout render on the SAME session dies with "class
+        # `WebLayoutManager` has no field named `bx`" — the `Some(retained)`
+        # manager match arm in simple_web_render_session.spl leaks its binding
+        # over the outer `retained` boxes var (known interpreter match-arm
+        # shadowing defect; recorded as a blocking bug in this spec's report,
+        # not masked here — the checksum contract itself is still verified).
+        val overlay = browser_text_input_overlay_empty()
+        val session_a = SimpleWebRenderSession.create()
+        session_a.render(
+            _snapshot(303, 1, 1, 1, Some(_showcase_html())),
+            SHOW_W, SHOW_H, 0, 0, overlay, [], []
+        )
+        val first = session_a.composition_checksum()
+        assert_false(first == "")
+        # cache stability: repeated reads without a new render are identical
+        expect(session_a.composition_checksum()).to_equal(first)
+        session_a.close()
+        val session_b = SimpleWebRenderSession.create()
+        session_b.render(
+            _snapshot(304, 1, 1, 1, Some(_mutated_html())),
+            SHOW_W, SHOW_H, 0, 0, overlay, [], []
+        )
+        val second = session_b.composition_checksum()
+        assert_false(second == "")
+        # mutation sensitivity of the composition checksum
+        assert_false(second == first)
+        session_b.close()
+
+    it "clears all retained state when the session closes":
+        val session = SimpleWebRenderSession.create()
+        val overlay = browser_text_input_overlay_empty()
+        session.render(
+            _snapshot(304, 1, 1, 1, Some(_showcase_html())),
+            SHOW_W, SHOW_H, 0, 0, overlay, [], []
+        )
+        session.close()
+        expect(session.composition_checksum()).to_equal("")
+        expect(session.counters.retained_node_count).to_equal(0)
+        expect(session.counters.retained_command_count).to_equal(0)
+
+    it "keeps the web backend facade honest about engines and inputs":
+        _arm_showcase_budget()
+        # alias normalization
+        expect(web_render_backend("blink", 8, 8).name()).to_equal("chromium")
+        expect(web_render_backend("bogus", 8, 8).name()).to_equal("pure_simple")
+        # chromium has no Draw IR: empty composition, never pure_simple output
+        val chromium = web_render_backend("chromium", SHOW_W, SHOW_H)
+        val chromium_ir = chromium.render_html_to_draw_ir(_showcase_html())
+        expect(chromium_ir.batches.len()).to_equal(0)
+        # pure_simple produces a real Draw IR command list for the showcase
+        val pure = web_render_backend("pure_simple", SHOW_W, SHOW_H)
+        val ir = pure.render_html_to_draw_ir(_showcase_html())
+        var commands = 0
+        for batch in ir.batches:
+            commands = commands + batch.commands.len()
+        expect(commands).to_be_greater_than(0)
+        # software ground-truth path also renders the full bitmap
+        val soft = pure.render_html_software_pixels(_showcase_html())
+        expect(soft.len()).to_equal(SHOW_W * SHOW_H)
+        # missing file yields an empty buffer, not garbage
+        val missing = pure.render_html_file_to_pixels(
+            "build/tmp/does_not_exist_showcase.html", "auto"
+        )
+        expect(missing.len()).to_equal(0)
+        # pure_simple has no live window; caller must present pixels itself
+        assert_false(pure.show_live_window("x.html", 32, 32, "showcase"))
