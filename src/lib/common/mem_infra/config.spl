@@ -31,7 +31,15 @@ struct MemInfraPlan:
 fn mem_infra_matrix() -> [MemInfraRow]:
     [
         MemInfraRow(name: "attr", interpreter: true, cranelift: true, llvm: true),
-        MemInfraRow(name: "guard", interpreter: true, cranelift: true, llvm: true),
+        # guard is interpreter-ONLY. The guard-page allocator lives in
+        # `src/compiler_rust/compiler/src/interpreter_extern/mem_guard.rs`
+        # (mmap + mprotect(PROT_NONE)); cranelift and llvm both resolve
+        # `rt_alloc` to the C runtime, which has no guard-page mechanism at
+        # all. Measured behaviourally, not read off the source tree — see
+        # `test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl`, which
+        # commits a real use-after-free per backend and records which ones
+        # actually trap.
+        MemInfraRow(name: "guard", interpreter: true, cranelift: false, llvm: false),
         MemInfraRow(name: "harden", interpreter: true, cranelift: true, llvm: true),
         MemInfraRow(name: "genarena", interpreter: true, cranelift: true, llvm: true),
         MemInfraRow(name: "strict", interpreter: true, cranelift: false, llvm: false),
@@ -40,10 +48,18 @@ fn mem_infra_matrix() -> [MemInfraRow]:
     ]
 
 # Row names the `auto` shorthand expands to, given the target backend.
+#
+# `auto` only ever expands to rows that are actually supported on `backend`,
+# so it can never advertise a protection the backend does not have. `guard` is
+# therefore interpreter-only here: including it on cranelift/llvm is what made
+# plain `--mem-infra=auto` silently claim use-after-free coverage on native
+# builds that had none.
 fn mem_infra_auto_rows(backend: text) -> [text]:
     if backend == "llvm":
-        return ["attr", "guard", "genarena", "asan"]
-    ["attr", "guard", "genarena"]
+        return ["attr", "genarena", "asan"]
+    if backend == "interpreter":
+        return ["attr", "guard", "genarena"]
+    ["attr", "genarena"]
 
 # True when `name` is one of the seven known capability-matrix rows.
 fn mem_infra_row_known(name: text) -> bool:
@@ -64,9 +80,16 @@ fn mem_infra_row_supported(name: text, backend: text) -> bool:
     false
 
 # Closest runtime-level equivalent for a row unsupported on `backend`, per the
-# feature doc's degradation notes. Empty text means "no equivalent" (should
-# not happen for the three rows that can ever be unsupported: strict, asan,
-# memprof).
+# feature doc's degradation notes. Empty text means "no equivalent", and the
+# caller turns that into a loud error rather than a silent downgrade.
+#
+# `guard` deliberately has NO fallback on cranelift/llvm. `harden` looks like
+# the obvious analog, but a guard page traps the faulting access at the
+# instruction that commits the use-after-free, whereas harden only notices
+# afterwards, when something calls `rt_mem_harden_check()`. Substituting one
+# for the other silently would answer "yes, you have UAF detection" to someone
+# who asked for the trapping kind — the exact false-safety failure this row was
+# corrected to remove. Erroring sends them to a backend that really has it.
 fn mem_infra_degrade_target(name: text, backend: text) -> text:
     if name == "asan": return "harden"
     if name == "memprof": return "attr"
