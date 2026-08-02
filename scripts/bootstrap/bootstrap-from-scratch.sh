@@ -40,7 +40,7 @@ Options:
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --incremental-unlimited
-                     Reuse incremental caches and target about 80% of host CPUs;
+                     Reuse incremental caches and use every detected host CPU;
                      remove the Stage 4 low-memory throttle (single-agent mode)
   --clean-release    Final release proof: deploy and test a clean build while
                      clearing every reusable native cache before each batch
@@ -450,11 +450,9 @@ esac
 if [ -z "${jobs}" ]; then
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     jobs=2
-  elif [ "${execution_profile}" = "incremental-unlimited" ]; then
-    jobs=$((host_cpus * 4 / 5))
-    if [ "${jobs}" -lt 1 ]; then
-      jobs=1
-    fi
+  elif [ "${execution_profile}" = "incremental-unlimited" ] ||
+    [ "${execution_profile}" = "clean-release" ]; then
+    jobs="${host_cpus}"
   else
     jobs=$((host_cpus / 2))
     if [ "${jobs}" -lt 1 ]; then
@@ -470,7 +468,7 @@ case "${jobs}" in
 esac
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
 selfhost_jobs="${jobs}"
-if [ "${execution_profile}" != "incremental-unlimited" ] && [ "${selfhost_jobs}" -gt 2 ]; then
+if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
   selfhost_jobs=2
 fi
 echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
@@ -626,7 +624,8 @@ bootstrap_native_build_main() {
   compiler=$1
   output=$2
   stage4_low_memory=1
-  if [ "${execution_profile}" = "incremental-unlimited" ]; then
+  if [ "${execution_profile}" = "incremental-unlimited" ] ||
+    [ "${execution_profile}" = "clean-release" ]; then
     stage4_low_memory=0
   fi
   set -- native-build \

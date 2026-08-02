@@ -18,12 +18,14 @@ Next: classify phase3 `hir_lower` segfault and either bisect or escalate with co
 
 - The default remains incremental and cache-preserving.
 - `--incremental-unlimited` is the single-agent fast lane: it reuses native
-  caches, selects about 80% of online CPUs when `--jobs` is omitted, removes
-  the two Stage 4 low-memory switches, and leaves memory to the host scheduler.
+  caches, selects every online CPU when `--jobs` is omitted, removes the two
+  Stage 4 low-memory switches, and leaves all available memory to the host
+  scheduler.
   An explicit `--jobs` still wins.
 - `--clean-release` is the final proof after an incremental bootstrap succeeds:
   it clears the reusable native cache before every native batch, deploys the
-  result, and runs release tests. It must not be substituted for iterative
+  result, uses the same full-resource scheduling, and runs release tests. It
+  must not be substituted for iterative
   diagnosis because it deliberately gives up cache reuse.
 
 ## 2026-08-01 Stage2/Stage3 continuation
