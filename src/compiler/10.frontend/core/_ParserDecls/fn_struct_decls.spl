@@ -26,6 +26,7 @@ use compiler.core.tokens.{TOK_SEMICOLON}
 use compiler.core.tokens.{TOK_KW_SELF, TOK_KW_CLASS, TOK_KW_IMPL, TOK_KW_STATIC, TOK_KW_ME}
 use compiler.core.tokens.{TOK_KW_ASYNC}
 use compiler.core.tokens.{TOK_KW_CONST, TOK_KW_WHERE}
+use compiler.core.tokens.{TOK_KW_PASS}
 use compiler.core.tokens.{TOK_KW_LAZY, TOK_KW_EXTEND, TOK_KW_NEWTYPE, TOK_KW_NEWUNIT}
 use compiler.core.tokens.{TOK_KW_CE}
 use compiler.core.tokens.{TOK_KW_CLI}
@@ -411,6 +412,19 @@ fn has_seen_name(names: [text], target: text) -> bool:
 
 # ===== Function Declarations =====
 
+# Class-body keywords are contextual: `type Item = T` and a bare `pass` are
+# declarations/placeholders, while `type: text` and `pass: bool` are ordinary
+# fields.  Peek without consuming parser/lexer state so the body dispatcher can
+# distinguish those forms before it commits to either route.
+fn parser_class_member_followed_by_colon() -> bool:
+    val (cm_snap_nums, cm_snap_texts) = lex_snapshot_save()
+    val (cm_tok_nums, cm_tok_text) = parser_tok_save()
+    parser_advance()
+    val followed_by_colon = par_kind_get() == TOK_COLON
+    lex_snapshot_restore(cm_snap_nums, cm_snap_texts)
+    parser_tok_restore(cm_tok_nums, cm_tok_text)
+    followed_by_colon
+
 fn parse_fn_decl(is_async: i64) -> i64:
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
@@ -749,8 +763,10 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             parser_skip_newlines_and_semicolons()
             continue
 
-        # Associated types: type Item = T (skip for now, just parse and ignore)
-        if par_kind_get() == 35:
+        # Associated types: type Item = T (skip for now, just parse and ignore).
+        # `type: T` is instead a keyword-named field, as in the canonical Rust
+        # parser's parse_field/expect_identifier path.
+        if par_kind_get() == 35 and not parser_class_member_followed_by_colon():
             parser_advance()
             # Skip: 'type IDENT' or 'type IDENT = Type'
             if par_kind_get() == 6:
@@ -766,44 +782,64 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
         val is_pass_dn: bool = cb_kind == 185
         val is_pass_todo: bool = cb_kind == 183
         val is_pass_dn2: bool = cb_kind == 184
-        val is_pass_kw: bool = cb_kind == 174
+        val is_pass_kw: bool = cb_kind == TOK_KW_PASS
         val is_any_pass: bool = is_pass_dn or is_pass_todo
         val is_any_pass2: bool = is_pass_dn2 or is_pass_kw
         val is_pass: bool = is_any_pass or is_any_pass2
-        if is_pass:
+        if is_pass and not parser_class_member_followed_by_colon():
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
+
+        # Public class members share the same body routes as private members.
+        # Keep the marker so public methods retain visibility on their decl.
+        var class_member_is_pub = false
+        if par_kind_get() == TOK_KW_PUB:
+            class_member_is_pub = true
+            parser_advance()
 
         # Handle methods in class/struct body
         if par_kind_get() == 30:
             val sm_id = parse_class_body_method(struct_name, true, false)
             if sm_id >= 0:
+                if class_member_is_pub:
+                    decl_set_visibility_text(sm_id, "pub")
                 class_method_ids.push(sm_id)
             continue
         if par_kind_get() == 20:
             val fm_id = parse_class_body_method(struct_name, false, false)
             if fm_id >= 0:
+                if class_member_is_pub:
+                    decl_set_visibility_text(fm_id, "pub")
                 class_method_ids.push(fm_id)
             continue
         if par_kind_get() == 34:
             val mm_id = parse_class_body_method(struct_name, false, true)
             if mm_id >= 0:
+                if class_member_is_pub:
+                    decl_set_visibility_text(mm_id, "pub")
                 class_method_ids.push(mm_id)
             continue
 
-        # Field prefixes: `val name: T` / `var name: T`
-        if par_kind_get() == 21 or par_kind_get() == 22:
+        # Field prefixes: `val name: T` / `var name: T`.  A colon immediately
+        # after the keyword means the keyword itself is the field name.
+        val is_field_prefix = par_kind_get() == TOK_KW_VAL or par_kind_get() == TOK_KW_VAR
+        if is_field_prefix and not parser_class_member_followed_by_colon():
             parser_advance()
-        if par_kind_get() != 6:
+        var fname = par_text_get()
+        val fname_kw = use_kw_segment_text(par_kind_get())
+        if par_kind_get() != TOK_IDENT and fname_kw == "":
             # Unparseable member: report once and advance so the loop cannot
             # stall on the same token for the full iteration budget.
             parser_error("unexpected token in class body")
             parser_advance()
             parser_skip_newlines_and_semicolons()
             continue
-        val fname = par_text_get()
-        parser_expect(6)
+        if fname_kw != "":
+            fname = fname_kw
+            parser_advance()
+        else:
+            parser_expect(TOK_IDENT)
         parser_expect(161)
         val ftype = parser_parse_type()
         field_names.push(fname)
