@@ -786,3 +786,75 @@ shas, and the 118 failure NAMES `diff` clean — the pre-existing set is
 unchanged, not merely the count.
 
 Native is unmeasurable for every row above, for the reason in §21.
+
+### 24. §15 "known gap" FIXED: the shape diagnostic now names a source location
+
+§15 recorded that the `option-pattern-shape` warning "carries no source span, so
+a hit names the *run*, not the offending line", and that this had to be closed
+before any warn -> error triage. It is closed.
+
+`Pattern` carries no span, but its spanned AST owners do — `MatchArm.span`,
+`IfStmt.span`, `WhileStmt.span`. A `current_pattern_span: Option<(line, column)>`
+on the `Lowerer` is set by every entry point that owns one (statement `match`
+arm, expression `match` arm, `if val`, `elif val`, `while val`) and read by
+`report_if_never_option` through a `DiagLocation` carrying file, function, line
+and column.
+
+Two deliberate limits, both stated rather than hidden:
+
+* The expression-form `if val` is handed the pattern and condition, not the
+  statement, so it has no span. That entry point CLEARS the field rather than
+  leaving a previous arm's location in place, and the warning degrades to
+  `file (fn name)`. A stale location is worse than none.
+* `elif_branches` is `(Option<Pattern>, Expr, Block)` in the AST with no span of
+  its own, so an `elif val` hit reports the enclosing `if` statement.
+
+Before / after on the same 4-site probe (3 bare-`int` sites plus a legitimate
+`i64?` control), gate `SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1`:
+
+```
+base   warning[option-pattern-shape]: `Some(...)` pattern (statement form) ...
+fixed  warning[option-pattern-shape]: probe/d4_diag.spl:14:9 (fn m_arm): `Some(...)` ...
+       warning[option-pattern-shape]: probe/d4_diag.spl:19:5 (fn if_form): ...
+       warning[option-pattern-shape]: probe/d4_diag.spl:25:5 (fn elif_form): ...
+```
+
+Still 3 warnings, not 4 — the legitimate `i64?` site is not flagged, so the
+under-report property of §12 is intact. Gate OFF: 0 warnings and stdout
+byte-identical to the gate-ON run, so the diagnostic still changes no behaviour.
+Nothing was promoted to an error.
+
+### 25. §18 NOT fixed — root cause located, and it is not in pattern lowering
+
+§18 recorded "`rt_is_some` on a raw `i64?` holding 3 answers false on the JIT".
+That is a symptom. The cause is one step earlier and is a REPRESENTATION
+collision, measured at `e4b4561c803` on a 6-row probe:
+
+| row | JIT | interpreter | correct |
+|---|---|---|---|
+| a `fn f() -> i64?: return 3` | **none** | some 3 | some 3 |
+| b `fn f() -> i64?: return Some(3)` | some 3 | some 3 | some 3 |
+| c `val x: i64? = 3` | **none** | **none** | some 3 |
+| d `[3, 9].at(0)` | some 3 | some 3 | some 3 |
+| e `val s = Some(3)` | some 3 | some 3 | some 3 |
+| f `val x: i64? = 4` (control) | some 4 | **none** | some 4 |
+
+Rows b, d and e are correct on both engines, so the boxed `Some` form is fine
+everywhere and `rt_is_some` itself is not wrong: `rt_is_none` tests
+`value.is_nil()`, and `NIL` is `(SPECIAL_NIL << 3) | TAG_SPECIAL` = the integer
+**3**, while a BOXED int `v` is `v << 3` and can never be 3.
+
+Rows a and c are the defect: an IMPLICIT coercion of a bare scalar into a
+declared `T?` slot (a `return` in a `-> T?` function, a `val x: T? = <scalar>`)
+leaves the value unboxed. `Some(3)` is then bit-identical to `nil` and no
+runtime test can separate them — which is why no fix belongs in pattern
+lowering. Fixing it means making the implicit coercion produce the same boxed
+form the other three producers already produce, i.e. changing the "raw
+migration form" for scalar optionals. That has tree-wide blast radius (every
+`??`, `.?`, `.unwrap()` and arithmetic consumer of a `T?`) and touches exactly
+the representation the native/stage-4 lane is working in, so it is filed here
+with the locus named rather than attempted from a pattern-lowering lane.
+
+Row f is a second, separate finding: the INTERPRETER gets `val x: i64? = 4`
+wrong (answers `_`) while the JIT gets it right. That is §13's defect, now
+confirmed to be independent of the value 3.

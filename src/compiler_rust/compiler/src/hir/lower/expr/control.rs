@@ -122,6 +122,11 @@ impl Lowerer {
             value: Some(subject_hir),
         };
 
+        // The expression-form `if val` reaches here without a span of its own
+        // (`lower_if_let_expr` takes the pattern and condition, not the
+        // statement), so CLEAR rather than leave the previous arm's span in
+        // place -- a stale location is worse than none.
+        self.current_pattern_span = None;
         let cond_hir = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
 
         // Register the bindings BEFORE lowering the then-branch: this is the step
@@ -402,6 +407,7 @@ impl Lowerer {
         }
 
         // Generate the condition for this pattern
+        self.current_pattern_span = Some((arm.span.line, arm.span.column));
         let condition = self.lower_pattern_condition(subject_idx, subject_ty, &arm.pattern, ctx)?;
 
         // Extract pattern bindings and add them to context
@@ -572,6 +578,12 @@ impl Lowerer {
                     variant,
                     self.module.types.get(subject_ty),
                     "expression form",
+                    crate::hir::lower::option_pattern_shape_diag::DiagLocation {
+                        file: self.current_file.as_deref(),
+                        function: self.current_function_name.as_deref(),
+                        line: self.current_pattern_span.map(|(line, _)| line),
+                        column: self.current_pattern_span.map(|(_, column)| column),
+                    },
                 );
                 // Does the subject's own enum type declare this variant name?
                 // This must be decided BEFORE the `Some`/`None` fast paths below:

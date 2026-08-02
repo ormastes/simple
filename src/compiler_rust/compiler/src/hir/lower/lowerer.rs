@@ -44,6 +44,12 @@ pub struct Lowerer {
     /// `lenient_types` unresolved-name fallback can attribute the global it
     /// emits to a source location; `Expr::Identifier` carries no span of its own.
     pub(super) current_function_line: Option<usize>,
+    /// `(line, column)` of the pattern currently being lowered into a
+    /// pattern-condition test. Set by every entry point that owns a spanned
+    /// pattern (match arm, `if val`, `elif val`, `while val`) so
+    /// `option_pattern_shape_diag` can name a source location instead of only
+    /// the run. `Pattern` itself carries no span; `MatchArm` and `IfStmt` do.
+    pub(super) current_pattern_span: Option<(usize, usize)>,
     /// Module resolver for loading types from imports (optional for backward compatibility)
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
@@ -148,6 +154,7 @@ impl Lowerer {
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
+            current_pattern_span: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
@@ -194,6 +201,7 @@ impl Lowerer {
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
+            current_pattern_span: None,
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
@@ -263,6 +271,7 @@ impl Lowerer {
             current_class_type: None,
             current_function_name: None,
             current_function_line: None,
+            current_pattern_span: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),

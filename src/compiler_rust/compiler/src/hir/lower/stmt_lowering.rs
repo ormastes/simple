@@ -411,6 +411,7 @@ impl Lowerer {
                     };
 
                     // 3. Generate pattern condition (rt_is_some for Some, etc.)
+                    self.current_pattern_span = Some((if_stmt.span.line, if_stmt.span.column));
                     let condition = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
 
                     // 4. Extract + register bindings
@@ -450,6 +451,10 @@ impl Lowerer {
                         None
                     };
 
+                    // `elif val` branches carry no span of their own in the AST
+                    // (`elif_branches` is `(Option<Pattern>, Expr, Block)`), so the
+                    // enclosing `if` statement is the finest location available.
+                    self.current_pattern_span = Some((if_stmt.span.line, if_stmt.span.column));
                     let else_block = self.lower_elif_chain(&if_stmt.elif_branches, else_block, ctx)?;
 
                     let mut result = vec![store_stmt];
@@ -470,6 +475,10 @@ impl Lowerer {
                         None
                     };
 
+                    // `elif val` branches carry no span of their own in the AST
+                    // (`elif_branches` is `(Option<Pattern>, Expr, Block)`), so the
+                    // enclosing `if` statement is the finest location available.
+                    self.current_pattern_span = Some((if_stmt.span.line, if_stmt.span.column));
                     let else_block = self.lower_elif_chain(&if_stmt.elif_branches, else_block, ctx)?;
 
                     Ok(vec![HirStmt::If {
@@ -540,6 +549,7 @@ impl Lowerer {
                         value: Some(subject_hir),
                     };
 
+                    self.current_pattern_span = Some((while_stmt.span.line, while_stmt.span.column));
                     let condition = self.if_let_pattern_condition(subject_idx, subject_ty, pattern, ctx)?;
 
                     let bindings = self.extract_pattern_bindings(pattern, subject_ty);
@@ -1864,6 +1874,7 @@ impl Lowerer {
         }
 
         // Generate the condition for this pattern
+        self.current_pattern_span = Some((arm.span.line, arm.span.column));
         let condition = self.lower_pattern_condition_stmt(subject_idx, subject_ty, &arm.pattern, ctx)?;
 
         // Extract pattern bindings and add them to context
@@ -2138,6 +2149,12 @@ impl Lowerer {
                     variant,
                     self.module.types.get(subject_ty),
                     "statement form",
+                    crate::hir::lower::option_pattern_shape_diag::DiagLocation {
+                        file: self.current_file.as_deref(),
+                        function: self.current_function_name.as_deref(),
+                        line: self.current_pattern_span.map(|(line, _)| line),
+                        column: self.current_pattern_span.map(|(_, column)| column),
+                    },
                 );
                 // Does the subject's own enum type declare this variant name?
                 // Decided BEFORE the `Some`/`None` fast paths: a user-defined

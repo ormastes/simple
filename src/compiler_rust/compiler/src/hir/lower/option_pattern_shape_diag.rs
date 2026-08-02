@@ -71,12 +71,56 @@ fn never_option_type_name(ty: &HirType) -> Option<&'static str> {
     }
 }
 
+/// Where a report came from, as much of it as the lowerer actually knows.
+///
+/// Until 2026-08-02 the warning carried nothing at all, so a hit named the RUN
+/// and not the offending line — recorded as the known gap in §15 of the bug
+/// doc, and the reason the measured JIT fallout ("8 warnings in 2 files") could
+/// not be triaged: neither spec file contained a `Some(` of its own, and there
+/// was no way to say which line of which imported library produced it.
+///
+/// `line`/`column` come from the spanned AST owner of the pattern (`MatchArm`
+/// for a `case`, `IfStmt` for `if val`/`elif val`, `WhileStmt` for
+/// `while val`) — `Pattern` itself carries no span. They are `None` for the
+/// expression-form `if val`, whose lowering entry point is handed the pattern
+/// and condition rather than the statement; that case degrades to
+/// `file (fn name)` rather than reporting a stale location from a previous arm.
+pub(crate) struct DiagLocation<'a> {
+    pub file: Option<&'a std::path::Path>,
+    pub function: Option<&'a str>,
+    pub line: Option<usize>,
+    pub column: Option<usize>,
+}
+
+impl DiagLocation<'_> {
+    fn render(&self) -> String {
+        let file = self
+            .file
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "<unknown file>".to_string());
+        let mut out = match (self.line, self.column) {
+            (Some(line), Some(column)) => format!("{file}:{line}:{column}"),
+            (Some(line), None) => format!("{file}:{line}"),
+            _ => file,
+        };
+        if let Some(function) = self.function {
+            out.push_str(&format!(" (fn {function})"));
+        }
+        out
+    }
+}
+
 /// Report an `Option`/`Result` pattern lowered against a scrutinee whose static
 /// type can never be one. Warn-only and default off; see the module docs.
 ///
 /// `subject_ty` is the resolved `HirType` of the scrutinee, or `None` when the
 /// lowerer could not resolve it (in which case nothing is reported).
-pub(crate) fn report_if_never_option(variant: &str, subject_ty: Option<&HirType>, form: &str) {
+pub(crate) fn report_if_never_option(
+    variant: &str,
+    subject_ty: Option<&HirType>,
+    form: &str,
+    location: DiagLocation<'_>,
+) {
     if !matches!(variant, "Some" | "None" | "Ok" | "Err") {
         return;
     }
@@ -87,8 +131,9 @@ pub(crate) fn report_if_never_option(variant: &str, subject_ty: Option<&HirType>
     let Some(kind) = never_option_type_name(ty) else {
         return;
     };
+    let at = location.render();
     eprintln!(
-        "warning[option-pattern-shape]: `{variant}(...)` pattern ({form}) tested against a \
+        "warning[option-pattern-shape]: {at}: `{variant}(...)` pattern ({form}) tested against a \
          scrutinee statically typed `{kind}`, which is never an Option/Result; this pattern \
          can never legitimately match and the default (JIT) engine answers it silently by \
          taking the arm and binding a corrupt value"
