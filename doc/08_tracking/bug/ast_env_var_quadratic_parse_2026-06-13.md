@@ -233,11 +233,54 @@ RED was produced by sabotaging the *implementation* (removing the
 counter stayed at its fixed value of 3 during that run, proving the two clears
 are independent and neither is carrying the other.
 
-### Still open
+### Four zero-call-site resets — RESOLVED 2026-08-02 (all four DELETED)
 
-- `intern_reset()`, `mono_cache_reset()`, `alloc_inference_reset()` and
-  `bootstrap_fn_ret_types_reset()` have **zero call sites** — accumulators with
-  a reset function that nothing ever calls. Not yet fixed.
+`intern_reset()`, `mono_cache_reset()`, `alloc_inference_reset()` and
+`bootstrap_fn_ret_types_reset()` were filed here as "accumulators with a reset
+function that nothing ever calls".
+
+The zero-call-site claim is **PROVED** for all four — a repo-wide
+`/usr/bin/grep` returns 16 lines total: 4 definitions, 3 export re-exports, 4
+lines inside two fully commented-out dead specs, and this doc. No `.rs`
+definition exists for any of them; all four are `.spl`-only.
+
+The implied defect, however, does **not** hold. Wiring them was the wrong fix in
+every case, so all four were deleted (repo rule: implement or delete).
+
+| reset | disposition | why |
+|---|---|---|
+| `intern_reset` | deleted | whole module vestigial — `intern()`/`intern_resolve()` themselves have 0 callers and `intern.spl` is not exported by any `__init__`; nothing writes the state at runtime |
+| `mono_cache_reset` | deleted | it clears a **cache whose entire purpose is to persist**; `mono_cache_find` exists to avoid regenerating instances. Resetting it per-instantiation would defeat it, and nothing outside `type_erasure.spl` imports the module |
+| `alloc_inference_reset` | deleted | **redundant even if called** — `alloc_inference_analyze()` already reinitializes all six vars itself (clears `ai_direct_alloc`/`ai_alloc_result`, reassigns `ai_fn_names`/`ai_fn_count`/`ai_fn_index` from `ceu_get_*`, reassigns `ai_callees`) |
+| `bootstrap_fn_ret_types_reset` | deleted | **zero call sites by explicit design**, per an in-tree note at `bootstrap_globals.spl`: the registry must accumulate across ALL closure modules because cross-module call sites need the callee module's declared types, and the native-build worker is one process per build. Calling it would have *broken* cross-module lowering |
+
+#### Both hazards from the env-mirror fix were checked, per reset
+
+**(a) Reader consults a different source first (fix present-but-inert).** Only
+`bootstrap_fn_ret_types_reset` has this shape, and it is decisive against
+wiring it: the reader at `_MirLoweringExpr/switch_operators_calls.spl` consults
+the **HIR symbol table first** (`self.symbols.get_symbol_raw(...)` →
+`HirTypeKind.Function(_, ret, _)`) and only falls through to
+`bootstrap_fn_ret_type_lookup` afterwards, with two further fallbacks below
+that. Registration is also **`Str`-returns only**. So a reset there would have
+been inert for every case the symbol table answers — exactly the
+present-and-inert failure the env-mirror fix had to avoid.
+
+**(b) `*_count_set(0)` erasing a high-water mark.** None of the four has this
+hazard: `alloc_inference_reset`'s `ai_fn_count = 0` and `intern_reset`'s
+`intern_count = 0` were each paired with clearing every backing array, so no
+stale tail could survive. (The sibling that *is* called,
+`bootstrap_mir_functions_reset`, does zero a count — but likewise clears all
+seven parallel arrays alongside it.)
+
+A design note recording why `_bootstrap_fn_ret_types` has no reset was added at
+its declaration in `mir_data.spl`, so the affordance is not re-added by a later
+lane reading the same "missing reset" signal.
+
+Sibling resets that *are* wired, for reference: `type_subst_reset`
+(`type_erasure.spl`, per-instantiation), `ceu_reset` (`alloc_inference.spl`,
+per-run), `bootstrap_mir_functions_reset` (`bootstrap_globals.spl`, per-build
+and per-module).
 
 ### Sibling: `ast_reset()` inside a live transient array scope — ENUMERATED, NOT FIXED
 
