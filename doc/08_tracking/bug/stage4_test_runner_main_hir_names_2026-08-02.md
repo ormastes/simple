@@ -127,3 +127,19 @@ and `shell_int` behavior alongside its live system-resource assertions. The
 single focused command stopped at the deployed runtime ABI probe before test
 parsing and is non-evidence. Final admission remains the next no-stub full
 Stage 4 build.
+
+## Random-access file owner follow-up
+
+The subsequent Stage 4 cycle passed the system-monitor blocker, reached 400
+HIR modules, and then proved `file_size` and `file_read_text_at` unresolved in
+`test_runner_async.spl`. All five adjacent file helpers in that module now
+come directly from `std.nogc_sync_mut.io.file_ops`; the mutability siblings are
+re-export-only facades and require no duplicate edit. The related
+`test_runner_execute.spl` size/mtime pair was already on the concrete owner.
+
+`random_access_file_owner_behavior_spec.spl` writes a real file larger than the
+capture cap, verifies its exact size, and proves the async reader retains the
+HEAD and TAIL while reporting the eight omitted bytes. Its single bounded
+diagnostic passed 1/1, but the executable identified itself as the Rust seed;
+this is supporting behavior evidence, not pure-Simple Stage 4 admission. The
+next no-stub full build is the final cycle in this continuation.
