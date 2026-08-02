@@ -54,6 +54,7 @@ cross-engine agreement:
 """
 
 use std.editor.services.lsp_transport.*
+use std.editor.services.command_palette.{fuzzy_match, fuzzy_score}
 
 var failures = 0
 
@@ -118,6 +119,66 @@ fn main() -> void:
     check_i64("did_change keeps non-ASCII content", boolnum(lsp_build_did_change_params("file:///t.spl", 2, "\u{4e2d}\u{6587}").contains("\u{4e2d}\u{6587}")), 1)
     check_i64("workspace_symbol keeps non-ASCII query", boolnum(lsp_build_workspace_symbol_params("\u{e9}t\u{e9}").contains("\u{e9}t\u{e9}")), 1)
     check_i64("rename keeps non-ASCII new name", boolnum(lsp_build_rename_params("file:///t.spl", 1, 2, "caf\u{e9}").contains("caf\u{e9}")), 1)
+
+    # ---------------------------------------------------------------
+    # `fuzzy_match` / `fuzzy_score` — the command palette filter. `qi` counted
+    # matched CHARACTERS but the loop bound and the final test used `q.len()`,
+    # a BYTE count.
+    #
+    # REFUTED, by sabotage on 2026-08-02: the sweep record claimed a non-ASCII
+    # query "can never match". It matched. Past the character count BOTH sides
+    # return nil and `nil == nil` is TRUE, so each surplus byte of the query is
+    # consumed by a free nil-match. The candidate always carries at least as
+    # much byte surplus as the query it contains, so the accident holds and the
+    # boolean answer was already correct. Those checks below are regression
+    # cover, not evidence of a fix.
+    #
+    # What was GENUINELY wrong is the SCORE, because each free nil-match also
+    # paid out `10 + streak`. Measured, query "e-acute", before -> after:
+    #     "caf<e-acute>"        20 -> 8
+    #     "<e-acute>a"          21 -> 11
+    #     "<CJK><e-acute>"      22 -> 10
+    #     "xx<e-acute>"         21 -> 9
+    # Before the fix "<CJK><e-acute>" (match at position 1) outranked
+    # "<e-acute>a" (match at position 0) purely because the candidate held a
+    # 3-byte character, and "xx<e-acute>" tied with it. The palette ordered
+    # results by how WIDE a candidate's characters were. ASCII scores are
+    # unchanged by the fix (8 and 11 both before and after).
+    # ---------------------------------------------------------------
+
+    # `.lower()` must not itself corrupt the operand.
+    check_i64("lower keeps 2-byte width", "\u{e9}".lower().len(), 2)
+
+    # ASCII controls: these shapes always worked.
+    check_i64("fuzzy ASCII control subsequence", boolnum(fuzzy_match("cf", "cafe")), 1)
+    check_i64("fuzzy ASCII control non-match", boolnum(fuzzy_match("z", "cafe")), 0)
+
+    check_i64("fuzzy matches a 2-byte query", boolnum(fuzzy_match("\u{e9}", "caf\u{e9}")), 1)
+    check_i64("fuzzy matches a 3-byte query", boolnum(fuzzy_match("\u{4e2d}", "\u{4e2d}\u{6587}")), 1)
+    check_i64("fuzzy matches a 4-byte query", boolnum(fuzzy_match("\u{1f389}", "a\u{1f389}b")), 1)
+    check_i64("fuzzy matches a mixed-width query", boolnum(fuzzy_match("c\u{e9}", "caf\u{e9}")), 1)
+
+    # Absent must stay absent -- the fix must not make everything match.
+    check_i64("fuzzy rejects an absent 2-byte query", boolnum(fuzzy_match("\u{e9}", "cafe")), 0)
+    check_i64("fuzzy rejects an absent 3-byte query", boolnum(fuzzy_match("\u{4e2d}", "cafe")), 0)
+    # A continuation byte of one character must not match a different
+    # character that happens to share it; U+00E9 is C3 A9 and U+00E8 is C3 A8.
+    check_i64("fuzzy does not confuse e-acute with e-grave", boolnum(fuzzy_match("\u{e9}", "caf\u{e8}")), 0)
+
+    # `fuzzy_score` returns -1 for "no match"; a real match must score above 0.
+    check_i64("fuzzy_score ASCII control matches", boolnum(fuzzy_score("cf", "cafe") > 0), 1)
+    check_i64("fuzzy_score scores a 2-byte query", boolnum(fuzzy_score("\u{e9}", "caf\u{e9}") > 0), 1)
+    check_i64("fuzzy_score rejects an absent 2-byte query", fuzzy_score("\u{e9}", "cafe"), -1)
+
+    # RANKING -- the genuinely-wrong half, and the only non-vacuous evidence
+    # here. Hand-computed: a match at position 0 must outrank a match at a
+    # later position, whatever the byte width of the characters around it.
+    check_i64("score: position-0 match beats position-1 match", boolnum(fuzzy_score("\u{e9}", "\u{e9}a") > fuzzy_score("\u{e9}", "\u{4e2d}\u{e9}")), 1)
+    check_i64("score: position-0 match beats position-2 match", boolnum(fuzzy_score("\u{e9}", "\u{e9}a") > fuzzy_score("\u{e9}", "xx\u{e9}")), 1)
+    check_i64("score: candidate width does not buy rank", boolnum(fuzzy_score("\u{e9}", "\u{4e2d}\u{e9}") <= fuzzy_score("\u{e9}", "\u{e9}a")), 1)
+    # ASCII control: the fix must leave ASCII scores bit-identical.
+    check_i64("score ASCII control caf-e", fuzzy_score("e", "cafe"), 8)
+    check_i64("score ASCII control e-a", fuzzy_score("e", "ea"), 11)
 
     if failures == 0:
         print("PROBE VERDICT: PASS")
