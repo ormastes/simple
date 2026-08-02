@@ -1,6 +1,8 @@
 # Seed parser accepts `match` keyword as an identifier — divergence detonates at bootstrap Stage 4
 
 **Status:** open
+**Fix owner:** `codex-par-match-keyword` — CLAIMED 2026-08-02; do not edit the
+seed keyword-binding parser or focused regression in parallel until resolved.
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H bootstrap redeploy)
 **Area:** Rust seed parser (`src/compiler_rust/`) vs pure-Simple parser
 **Severity:** medium — lets invalid code land, then fails the full-CLI stage of every bootstrap

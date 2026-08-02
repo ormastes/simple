@@ -8,6 +8,8 @@ array, and rejects the natural, statically-typed `[u8]` value real code
 produces (e.g. any `wire.spl`-style `ByteWriter.to_bytes()` codec output)
 **Status:** Open — worked around at the call site in
 `src/lib/nogc_sync_mut/game_net/udp_transport.spl`; no interpreter fix yet
+**Fix owner:** `codex-par-u8-marshal` — CLAIMED 2026-08-02; do not edit
+`extract_bytes` or its focused regression in parallel until resolved.
 
 ## Summary
 

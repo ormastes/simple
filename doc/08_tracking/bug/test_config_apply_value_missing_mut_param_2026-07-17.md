@@ -6,9 +6,11 @@ changes runtime behavior for the keys routed through this helper, though the
 one current call site, `load_test_config_from_path`, has ALSO been hard-bypassed
 with an early `return config` before it ever calls the parser — see Notes — so
 this is not currently reachable in production)
-**Status:** open — language/runtime defect, not fixed here (found while writing
-new hardening unit specs for `src/lib/nogc_sync_mut/test_runner/test_config.spl`,
-out of scope for that task)
+**Status:** fixed — owner `codex-par-testconfig` RESOLVED (2026-08-02).
+
+The config-core migration removed the mutation helpers. Typed entries now flow
+through `test_config_resolve` into a newly constructed `TestConfig`; the
+deterministic-startup bypass remains unchanged.
 
 ## Symptom
 
@@ -81,12 +83,12 @@ contributor to whatever motivated that bypass. If/when the bypass is lifted,
 this defect would silently make every boolean/threshold key in
 `config/simple.test.sdn`'s `test:` section a no-op.
 
-## Suggested fix direction (not implemented here)
+## Resolution
 
-Add `mut` to the `config` parameter of `apply_test_config_value` and
-`_apply_session_max`, then re-verify `parse_test_config_content` end-to-end
-(a real regression test, not just checking the function compiles) before
-lifting the `load_test_config_from_path` bypass.
+Regression coverage parses and resolves both `run_sdoctests` and nested
+`session_max_sessions.qemu_vm`, proving the former top-level and nested paths
+end to end without lifting the unrelated startup bypass. Focused tests passed
+10/10 and source lint passed.
 
 ## Cross-refs
 

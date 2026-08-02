@@ -3,7 +3,11 @@
 **Date:** 2026-07-20
 **Severity:** high (silently wrong boolean result; `.?` is the prescribed
 idiom per `.claude/rules/language.md`: "Use `.?` over `is_*` predicates")
-**Status:** open
+**Status:** superseded — current language contract intentionally returns `T?`
+(value if present, nil if absent), not `bool`; see the canonical quick reference
+and `exists_check_value_return_spec.spl`.
+**Fix owner:** RESOLVED (`codex-par-optionquery`, policy review 2026-08-02; no
+boolean-conversion implementation accepted)
 **Found by:** whole-suite triage campaign, `test/feature/plugin/` cluster
 (`plugin_startup_block_spec.spl` / `runtime_api_plugin_spec.spl` /
 `sugar_plugin_spec.spl`)

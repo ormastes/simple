@@ -2,8 +2,10 @@
 
 **Date:** 2026-07-20
 **Severity:** low (single missing convenience export; text-based sibling has it)
-**Status:** open — needs a product decision (add the export, or fix the test's
-import path), not a mechanical test-only fix
+**Status:** fixed — `std.crypto.sha1.sha1_hex_upper(text)` now mirrors the
+text-based sibling API while retaining the array-based module's existing
+`sha1_hex(text)` conversion path
+**Fix owner:** RESOLVED (`codex-par-sha1`)
 **Found by:** whole-suite `test/unit/` triage campaign, `lib/common` cluster
 
 ## Symptom
@@ -34,24 +36,14 @@ The spec imports from `std.crypto.sha1` (the array-based module), which is
 missing the uppercase-hex convenience wrapper that only the
 `std.common.crypto.sha1` (text-based) sibling has.
 
-## Fix needed (not attempted — out of test-triage scope)
+## Resolution
 
-Either:
-1. Add `sha1_hex_upper` to `src/lib/crypto/sha1.spl` — trivial in isolation
-   (`bytes_to_hex(sha1(...)).to_upper()`), but that module's `sha1()` takes
-   `[i64]` not `text`, so the wrapper also needs a `text -> [i64]` encode
-   step matching this module's existing `sha1_hex(text)` convention (see
-   line 107 of that file for the pattern to mirror); or
-2. Point the spec at `std.common.crypto.sha1` instead, if that is the
-   intended canonical module — but that changes every other call in the
-   spec too (their signatures are `text`-based vs `[i64]`-based, not just
-   this one function), so it's not a 1-line import fix.
-
-Deciding which of the two SHA-1 modules is canonical (or whether both should
-exist and stay API-parity'd) is a product/architecture call, not something
-to guess at from test-triage scope. Left the spec unmodified.
+Added `sha1_hex_upper(msg: text) -> text` to `src/lib/crypto/sha1.spl`. It
+delegates to the module's existing `sha1_hex(msg)` conversion and digest path,
+then uppercases the hexadecimal result. The existing FIPS/RFC `"abc"`
+regression passed 11/11; source lint also passed.
 
 ## Affected
 
-- `test/unit/lib/common/crypto/sha1_spec.spl` — 1 of 11 examples
+- `test/01_unit/lib/common/crypto/sha1_spec.spl` — uppercase digest example
   ("'abc' uppercase hex").
