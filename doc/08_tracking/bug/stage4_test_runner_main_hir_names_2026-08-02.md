@@ -18,3 +18,30 @@ the same time, conversion, and duration-scope fixes.
 
 `test_runner_main_hir_contract_spec.spl` checks concrete owners, conversion,
 scope order, and mirror parity.
+
+## Grouped library test-runner follow-up
+
+The same broad-facade failure shape remained across the library test-runner
+subtree. The grouped repair routes directory walking through
+`std.io_runtime`, time reads through the concrete `time_ops` owner, atomic
+file writes through the concrete `file_ops` owner, and the system monitor's
+previously undeclared raw file read through `std.io_runtime.file_read`.
+
+Behavioral regression coverage is executable rather than a source-text
+assertion:
+
+- `test/01_unit/lib/test_runner/bootstrap_facade_owner_behavior_spec.spl`
+  recursively discovers a real nested Markdown fixture and reads live system
+  metrics through the repaired modules.
+- `test/01_unit/lib/test_runner/source_doctest_runner_spec.spl` exercises real
+  doctest extraction through `doctest_runner`, whose time, directory, and
+  atomic-file dependencies now use bootstrap-visible owners.
+
+The focused no-stub native build compiled 45 modules with 0 failures, and its
+fresh executable ran 2 examples with 0 failures. The retained build log is
+`build/focused-stage4-facade/logs/native-build.log`.
+
+Bare `to_int(text)` repairs are intentionally handled by a separate non-
+overlapping lane. `dir_walk_native` in `test_manifest_scanner.spl` remains a
+similar but unproven broad-facade risk because `std.io_runtime` does not expose
+that distinct native-walk surface.
