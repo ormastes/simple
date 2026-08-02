@@ -35,6 +35,19 @@ Status: OPEN (tracking list; items close individually)
    | Windows hosted | shared C runtime -> MSVCRT/UCRT libc | `free` reached |
    | SimpleOS/bare metal | pure allocator/platform owner | arena reference released; platform policy retained |
    | Pure-Simple GC variants | `GcHeap` -> `ArenaAllocator.release` | empty heap releases; next allocation restores lazily |
+
+   **CLAIMED 2026-08-02 (compiled wiring follow-up):** owner
+   `codex-memory-deallocation-audit-a` is reproducing the remaining compiler
+   backend GC allocation wiring gap. This claim excludes Stage 4 resolver work.
+   **PARTIAL FIX 2026-08-02 (compiled wiring):** the compiler backend's
+   `gc_malloc` wrapper no longer returns a hard-coded null for every valid
+   request; it now reaches the already-declared `rt_gc_malloc` target ABI while
+   retaining negative-size rejection. The ownership guard covers this exact
+   regression plus adjacent init/collect forwarding. Whole-program GC remains
+   OPEN: no hosted runtime implementation of those three target ABI symbols is
+   present, and MIR/codegen does not yet carry the root/drop information needed
+   for safe reclamation. Adding an unrooted collector or freeing all allocations
+   at `collect` would introduce use-after-free, so this audit does not do that.
 2. **HIGH — boundary not enforced at compile/run time.** gc-boundary runs only in
    `bin/simple lint`; `compile --native` of a violating file exits 0.
 
