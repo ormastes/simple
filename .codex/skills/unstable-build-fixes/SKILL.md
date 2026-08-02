@@ -9,6 +9,15 @@ Goal: produce the requested Simple executable without throwing away useful cache
 
 ## Rules
 
+- Profile the whole execution path before optimizing a slow leaf. Identify the
+  actual executable, host/runtime, execution mode, orchestration overhead, and
+  semantic work. In particular, a checker launched from source may be evaluated
+  by the Rust interpreter; compare that path with a cached compiled checker
+  before attributing latency to checking logic, Rust, Python, AOP, or linking.
+- Measure one representative file cold and warm, then a small manifest. Record
+  wall time, max RSS, files/second, exit status, and output parity. Optimize the
+  dominant layer first; do not infer a per-file compiler cost from end-to-end
+  source-run startup time.
 - Keep one main cache-backed build as source of truth:
   `--cache-dir build/bootstrap/native_cache --mode dynload`.
 - Do not delete the cache between retries unless a concrete stale-cache bug is proven.
