@@ -50,6 +50,7 @@ use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{array_generic_type_register}
 use compiler.core.types.{result_type_register}
 use compiler.core.types.{isolated_type_register}
+use compiler.core.types.{exclusive_type_register}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -451,6 +452,16 @@ fn parser_parse_tuple_element_type() -> i64:
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
+    # Canonical exclusive-capability type `mut T`. Unlike `mut name: T`
+    # parameter-binding syntax, this modifier follows the colon and belongs to
+    # the type. Preserve it through the flat type registry for the AST bridge.
+    if kind == TOK_IDENT and par_text_get() == "mut":
+        parser_advance()
+        val exclusive_inner = parser_parse_type_impl(allow_spaced_generics)
+        val exclusive_tag = exclusive_type_register(exclusive_inner)
+        if exclusive_tag < 0:
+            return exclusive_inner
+        return exclusive_tag
     # LANE ISO2 (2026-07-29): capability-prefixed type `iso T`. `iso` lexes
     # as a plain identifier (kind 6) -- it is not a reserved keyword token
     # (doc/08_tracking/bug/iso_mut_capability_prefix_not_parsed_2026-07-29.md).
@@ -713,6 +724,10 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     if kind == 144:
         # Array type: [i64], [text], etc.
         parser_advance()
+        # Canonical empty array annotation `[]` means `[Any]`.
+        if par_kind_get() == 145:
+            parser_advance()
+            return parser_absorb_optional_suffix(TYPE_ARRAY_ANY)
         val elem_type = parser_parse_type()
         # Sized array type: [T; N] — accept and drop the size expression
         # (stage4 arrays are dynamic; N is a literal or const ident).
