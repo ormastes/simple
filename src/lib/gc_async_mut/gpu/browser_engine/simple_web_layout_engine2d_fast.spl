@@ -12,11 +12,17 @@
 # single FFI hop.
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    SimpleWebLayoutDrawIrResult,
     SimpleWebLayoutMaterialWitness,
     simple_web_layout_last_render_degraded,
     simple_web_layout_material_provenance_after_backend_execution,
     simple_web_layout_render_html_draw_ir_result_with_images,
     simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    simple_web_layout_render_budget_floor_ms,
+    simple_web_layout_restore_render_budget_floor_ms,
+    simple_web_layout_set_render_budget_floor_ms
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
     WebGpuPaintTimingEvidence,
@@ -244,21 +250,84 @@ fn _simple_web_layout_render_draw_ir_composition(
     engine.shutdown()
     render
 
+fn _simple_web_layout_draw_ir_once(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    if animation_time_ms >= 0:
+        return simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images(
+            html, width, height, animation_time_ms, animation_instances,
+            image_resources
+        )
+    simple_web_layout_render_html_draw_ir_result_with_images(
+        html, width, height, image_resources
+    )
+
+# One bounded retry floor for a budget-truncated cascade, matching the
+# sanctioned showcase calibration (simple_web_layout_set_render_budget_floor_ms
+# in web_showcase_full_gpu_offload_spec.spl). See
+# _simple_web_layout_draw_ir_with_degraded_retry below.
+val WEB_LAYOUT_DEGRADED_RETRY_FLOOR_MS: i64 = 900000
+
+# A budget-truncated style cascade leaves every node past the break on
+# renderer-default styles, so class/id-selector styling silently vanishes
+# from the frame while the readback still reports plausible pixels (the
+# "seems able but can't" family: observed 2026-08-01 as class-selector boxes
+# dropping to 0 painted pixels on the readback-result entry under the
+# interpreter, load-dependent). Documents needing selector matching must
+# reach the REAL resolved cascade: retry the layout ONCE with the platform
+# budget floor raised to the showcase calibration, then restore the caller's
+# floor. If the retry still trips its (floored) deadline, render_degraded
+# stays latched and is propagated — honest fallback, never a silent publish
+# of dropped styling.
+#
+# Scope: the READBACK-RESULT entry only. The pixels parity lanes (cpu oracle
+# vs offload lane in web_engine2d_gpu_offload_parity_spec) deliberately keep
+# the single-pass layout: a retry there doubles interpreted layout ops per
+# render and blows the spec runner's per-example operation limit, and both
+# lanes of a parity comparison run the identical single-pass cascade anyway.
+fn _simple_web_layout_draw_ir_with_degraded_retry(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    image_resources: [SimpleOsHostGpuImageResource]
+) -> SimpleWebLayoutDrawIrResult:
+    val first = _simple_web_layout_draw_ir_once(
+        html, width, height, animation_time_ms, animation_instances,
+        image_resources
+    )
+    if not simple_web_layout_last_render_degraded():
+        return first
+    val saved_floor = simple_web_layout_render_budget_floor_ms()
+    if saved_floor >= WEB_LAYOUT_DEGRADED_RETRY_FLOOR_MS:
+        # The first pass already ran under an adequate floor; a retry under
+        # the same wall-clock budget cannot resolve more styles.
+        return first
+    simple_web_layout_set_render_budget_floor_ms(WEB_LAYOUT_DEGRADED_RETRY_FLOOR_MS)
+    val retried = _simple_web_layout_draw_ir_once(
+        html, width, height, animation_time_ms, animation_instances,
+        image_resources
+    )
+    simple_web_layout_restore_render_budget_floor_ms(saved_floor)
+    retried
+
 fn _simple_web_layout_render_html_engine2d_execution(
     html: text, width: i32, height: i32, backend_name: text,
     animation_time_ms: i64,
     animation_instances: [BrowserCssAnimationInstance],
-    image_resources: [SimpleOsHostGpuImageResource]
+    image_resources: [SimpleOsHostGpuImageResource],
+    retry_degraded: bool
 ) -> SimpleWebLayoutEngine2DExecutionResult:
     val _phase_on = (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
-    val layout_result = if animation_time_ms >= 0:
-        simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images(
+    val layout_result = if retry_degraded:
+        _simple_web_layout_draw_ir_with_degraded_retry(
             html, width, height, animation_time_ms, animation_instances,
             image_resources
         )
     else:
-        simple_web_layout_render_html_draw_ir_result_with_images(
-            html, width, height, image_resources
+        _simple_web_layout_draw_ir_once(
+            html, width, height, animation_time_ms, animation_instances,
+            image_resources
         )
     val _phase_paint_start_us = time_now_micros()
     val _phase_execution = _simple_web_layout_execute_draw_ir_composition(
@@ -525,7 +594,7 @@ pub fn web_draw_ir_gpu_route_sample(
 # download path rather than the shrunken mirror.
 pub fn simple_web_layout_render_html_engine2d_result(html: text, width: i32, height: i32, backend_name: text) -> Engine2dDrawIrAdvResult:
     _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, -1, [], []
+        html, width, height, backend_name, -1, [], [], false
     ).render
 
 pub fn simple_web_layout_render_html_engine2d_result_with_images(
@@ -533,7 +602,7 @@ pub fn simple_web_layout_render_html_engine2d_result_with_images(
     images: [SimpleOsHostGpuImageResource]
 ) -> Engine2dDrawIrAdvResult:
     _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, -1, [], images
+        html, width, height, backend_name, -1, [], images, false
     ).render
 
 pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, height: i32, backend_name: text) -> [u32]:
@@ -561,7 +630,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_with_images(
     if width <= 0 or height <= 0:
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, -1, [], images
+        html, width, height, backend_name, -1, [], images, false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -571,7 +640,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time(html: text, width: 
     if width <= 0 or height <= 0:
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, [], []
+        html, width, height, backend_name, animation_time_ms, [], [], false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -584,7 +653,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_images(
     if width <= 0 or height <= 0:
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, [], images
+        html, width, height, backend_name, animation_time_ms, [], images, false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -599,7 +668,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_animations(
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, animation_time_ms,
-        animation_instances, []
+        animation_instances, [], false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -615,7 +684,7 @@ pub fn simple_web_layout_render_html_pixels_engine2d_at_time_with_animations_wit
         return []
     val execution = _simple_web_layout_render_html_engine2d_execution(
         html, width, height, backend_name, animation_time_ms,
-        animation_instances, images
+        animation_instances, images, false
     )
     if execution.render.skipped_command_count != 0:
         return []
@@ -636,7 +705,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             vector_font_promotion_ready: false
         )
     val execution = _simple_web_layout_render_html_engine2d_execution(
-        html, width, height, backend_name, animation_time_ms, [], []
+        html, width, height, backend_name, animation_time_ms, [], [], true
     )
     if execution.render.skipped_command_count != 0:
         return SimpleWebLayoutEngine2DReadbackResult(

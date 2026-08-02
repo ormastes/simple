@@ -8,6 +8,9 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
     simple_web_layout_set_render_budget_floor_ms
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_readback_result_with_engine2d_backend
+}
 
 # Sanctioned opt-in floor (same as the showcase spec): under interpreter +
 # box contention the default 10s style budget breaks mid-cascade and leaves
@@ -186,3 +189,33 @@ describe "SimpleWebEngine2DRenderer":
         val style = "div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }"
         expect(_render_selector_color(style, "<div><span class='badge'></span></div>", 0xFF0E7490u32)).to_equal(true)
         expect(_render_selector_color(style, "<div><section><span class='badge'></span></section></div>", 0xFF0E7490u32)).to_equal(false)
+
+    it "paints class-selector boxes on the readback path instead of a budget-truncated near-empty frame":
+        # Regression (2026-08-02): under the interpreter a wall-clock budget
+        # break mid-cascade left class-styled nodes on default styles, so the
+        # engine2d readback entry published a frame where element selectors
+        # (body/h1) painted but class-selector boxes dropped to 0 pixels —
+        # while the pure_simple path (budget-floor armed) painted them all.
+        # The layout now retries ONCE with a bounded floor on a degraded
+        # cascade (simple_web_layout_engine2d_fast) and propagates
+        # render_degraded honestly if even the retry trips.
+        val html = "<html><head><style>" +
+            "body{margin:0;background-color:#1a1a2e} " +
+            ".box{width:28px;height:18px;background-color:#2563eb}" +
+            "</style></head><body><div class='box'></div></body></html>"
+        val result = simple_web_render_html_to_readback_result_with_engine2d_backend(
+            html, 64, 48, "software")
+        assert_false result.render_degraded
+        expect(result.readback.pixels.len()).to_equal(64 * 48)
+        expect(_count_color(result.readback.pixels, 0xFF2563EBu32)).to_be_greater_than(0)
+        expect(_count_color(result.readback.pixels, 0xFF1A1A2Eu32)).to_be_greater_than(0)
+        # Same document through the pixels entry must agree (parity with the
+        # route the showcase spec proves green).
+        val pixels = simple_web_engine2d_render_html_pixels(html, 64, 48, "software")
+        expect(_count_color(pixels, 0xFF2563EBu32)).to_be_greater_than(0)
+        # Explicit-GPU-backend branch parity (coordinator capture evidence
+        # 2026-08-02): an explicit "vulkan" backend name must not reroute the
+        # document away from the real cascade — same styled box pixels as
+        # "software" (provenance may differ; pixels must not).
+        val vk_pixels = simple_web_engine2d_render_html_pixels(html, 64, 48, "vulkan")
+        expect(_count_color(vk_pixels, 0xFF2563EBu32)).to_equal(_count_color(pixels, 0xFF2563EBu32))
