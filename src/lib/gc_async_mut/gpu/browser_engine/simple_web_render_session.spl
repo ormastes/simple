@@ -239,8 +239,12 @@ pub class SimpleWebRenderSession:
         val resource_changed = (
             revisions.resource_revision != self.resource_revision
         )
+        # Arm binding kept distinct from the later `val manager` (interpreter
+        # match-arm binding leak family — never same-name an arm binding with
+        # another local in this function).
         val generation_changed = match self.web_layout_manager_state:
-            Some(manager): manager.generation != snapshot.document_generation
+            Some(prior_manager):
+                prior_manager.generation != snapshot.document_generation
             nil: false
         val viewport_changed = width != self.width or height != self.height
         val scroll_changed = scroll_y != self.scroll_y
@@ -318,10 +322,16 @@ pub class SimpleWebRenderSession:
                 _simple_web_layout_execution_profile(prepared.nodes.len()),
                 SIMPLE_WEB_LAYOUT_FIXED_POINT_CAP
             )
+            # NOTE: the arm binding is deliberately NOT named `retained` —
+            # under the tree-walk interpreter a match-arm binding leaks over a
+            # same-named live outer (here the retained boxes above), which made
+            # the SECOND full-layout render die with "WebLayoutManager has no
+            # field bx". See doc/08_tracking/bug/
+            # render_session_second_render_match_arm_shadowing_bx_2026-08-02.md
             val manager = match self.web_layout_manager_state:
-                Some(retained):
-                    if retained.generation == snapshot.document_generation:
-                        retained
+                Some(retained_manager):
+                    if retained_manager.generation == snapshot.document_generation:
+                        retained_manager
                     else:
                         web_layout_manager(snapshot.document_generation)
                 nil: web_layout_manager(snapshot.document_generation)

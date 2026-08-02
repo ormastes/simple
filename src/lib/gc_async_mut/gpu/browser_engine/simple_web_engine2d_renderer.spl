@@ -900,10 +900,90 @@ fn _style_block_has_class_or_id_selector(html: text) -> bool:
         pos = close + 8
     false
 
+fn _selector_boundary_before(html: text, pos: i64) -> bool:
+    if pos == 0:
+        return true
+    val prev = html.char_at(pos - 1)
+    prev == " " or prev == "\t" or prev == "\n" or prev == "\r" or
+    prev == ">" or prev == "," or prev == "{" or prev == "}" or prev == ";"
+
+# After a selector token: skip whitespace (and a grouped-selector tail like
+# "html, body") up to the rule's opening brace. Returns -1 when the token is
+# not a bare element selector for this rule (descendant/class-qualified forms
+# like "body div" or "body.dark" are rejected).
+fn _selector_rule_open_brace(html: text, sel_end: i64, limit: i64) -> i64:
+    var i = sel_end
+    var in_group_tail = false
+    while i < limit:
+        val ch = html.char_at(i)
+        if ch == "{":
+            return i
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            i = i + 1
+        elif ch == ",":
+            in_group_tail = true
+            i = i + 1
+        elif in_group_tail:
+            i = i + 1
+        else:
+            return -1
+    -1
+
+fn _style_range_selector_color(html: text, start: i64, end: i64, selector: text, fallback: u32) -> u32:
+    var color = fallback
+    var pos = start
+    var guard = 0
+    val sel_len = selector.len()
+    while guard < 1000:
+        guard = guard + 1
+        val found = _find_text_from(html, selector, pos)
+        if found < 0 or found >= end:
+            return color
+        pos = found + sel_len
+        if _selector_boundary_before(html, found):
+            val brace = _selector_rule_open_brace(html, found + sel_len, end)
+            if brace >= 0:
+                val close = _find_char_from(html, "}", brace + 1)
+                if close >= 0 and close <= end:
+                    val rule = html.substring(brace + 1, close)
+                    color = _declaration_background_color(rule, color)
+    color
+
+# Document background from `body { ... }` / `html { ... }` rules inside
+# <style> blocks — the standard shape for stylesheet-driven pages (including
+# the build/tmp missing-file fallback pages). Later rules win; a `body` rule
+# wins over an `html` rule. Boundary checks keep `tbody`/`.body` out.
+fn _style_body_rule_color(html: text, fallback: u32) -> u32:
+    var html_color = fallback
+    var body_color = fallback
+    var pos = 0
+    var guard = 0
+    while guard < 1000:
+        guard = guard + 1
+        val style_start = _find_text_from(html, "<style", pos)
+        if style_start < 0:
+            break
+        val open = _find_char_from(html, ">", style_start)
+        if open < 0:
+            break
+        val css_start = open + 1
+        val close = _find_text_from(html, "</style", css_start)
+        if close < 0:
+            break
+        body_color = _style_range_selector_color(html, css_start, close, "body", body_color)
+        html_color = _style_range_selector_color(html, css_start, close, "html", html_color)
+        pos = close + 8
+    if body_color != fallback:
+        return body_color
+    html_color
+
 pub fn simple_web_html_background_color(html: text) -> u32:
     val bg = _html_background_color(html)
     if bg != 0xFFFFFFFFu32:
         return bg
+    val style_bg = _style_body_rule_color(html, 0xFFFFFFFFu32)
+    if style_bg != 0xFFFFFFFFu32:
+        return style_bg
     _first_block_color(html, bg)
 
 fn _solid_fill_pixels(width: i32, height: i32, color: u32) -> [u32]:
@@ -931,6 +1011,39 @@ fn _toolbar_modal_grid_pixels(width: i32, height: i32) -> [u32]:
     val pixels = engine.read_pixels()
     engine.shutdown()
     pixels
+
+# First `prop: <N>px` declaration in the document, or `fallback` when absent,
+# non-px, or only present as a hyphenated property (max-width/border-width...).
+# The heuristic fast path below previously honored only a whitelist of sizes
+# (width 12/80/120, height 4/8/40/60) and silently painted 24x16 for every
+# other declared size; this parses the declared value instead.
+fn _first_px_dimension(html: text, prop: text, fallback: i32) -> i32:
+    val lo = html.lower()
+    val key = prop + ":"
+    val idx = lo.index_of(key)
+    if idx < 0:
+        return fallback
+    if idx > 0 and lo.char_code_at(idx - 1) == 45:
+        return fallback
+    var pos = idx + key.len()
+    val n = lo.len()
+    while pos < n and lo.char_code_at(pos) == 32:
+        pos = pos + 1
+    var value: i64 = 0
+    var digits = 0
+    while pos < n:
+        val c = lo.char_code_at(pos)
+        if c >= 48 and c <= 57:
+            value = value * 10 + (c - 48)
+            digits = digits + 1
+            pos = pos + 1
+        else:
+            break
+    if digits == 0:
+        return fallback
+    if pos + 2 <= n and lo.substring(pos, pos + 2) == "px":
+        return value.to_i32()
+    fallback
 
 # Generic HTML goes through the real layout/paint engine
 # (simple_web_html_layout_renderer): parse -> CSS cascade -> block layout ->
@@ -986,30 +1099,9 @@ pub fn simple_web_engine2d_render_html_pixels(html: text, width: i32, height: i3
 
     if block_color != 0u32 and block_color != bg:
         val has_margin_zero = html.contains("margin:0") or html.contains("margin: 0")
-        val has_width_12 = html.contains("width: 12px") or html.contains("width:12px")
-        val has_width_80 = html.contains("width: 80px") or html.contains("width:80px")
-        val has_width_120 = html.contains("width: 120px") or html.contains("width:120px")
-        val has_height_4 = html.contains("height: 4px") or html.contains("height:4px")
-        val has_height_8 = html.contains("height: 8px") or html.contains("height:8px")
-        val has_height_40 = html.contains("height: 40px") or html.contains("height:40px")
-        val has_height_60 = html.contains("height: 60px") or html.contains("height:60px")
         val margin = if has_margin_zero: 0 else: 8
-        var block_w = 24
-        var block_h = 16
-        if has_width_12:
-            block_w = 12
-        elif has_width_80:
-            block_w = 80
-        elif has_width_120:
-            block_w = 120
-        if has_height_4:
-            block_h = 4
-        elif has_height_8:
-            block_h = 8
-        elif has_height_40:
-            block_h = 40
-        elif has_height_60:
-            block_h = 60
+        val block_w = _first_px_dimension(html, "width", 24)
+        val block_h = _first_px_dimension(html, "height", 16)
         engine.draw_rect_filled(margin, margin, block_w, block_h, block_color)
         val block = _find_next_visual_tag(html, 0)
         val second_color = if block >= 0: _second_hex_color_after_from(html, "background-color", block, 0u32) else: 0u32
@@ -1063,7 +1155,11 @@ pub fn simple_web_engine2d_render_html_readback(html: text, width: i32, height: 
 pub fn simple_web_engine2d_resolved_backend_name(width: i32, height: i32, backend_name: text) -> text:
     val canonical = backend_canonical_name(backend_name)
     if canonical == "auto":
-        return Engine2D.detect_best_backend()
+        # Viability-gated auto-resolution: a GPU backend that inits but cannot
+        # render (e.g. CUDA headless) is rejected with a logged reason and the
+        # next GPU candidate (cuda -> vulkan -> ...) is tried before CPU lanes.
+        # Memoized in Engine2D, so this costs one probe pass per process.
+        return Engine2D.detect_best_backend_viable()
     if canonical == "cpu" or canonical == "software":
         return canonical
     val probe = Engine2D.probe_backend(width, height, canonical)

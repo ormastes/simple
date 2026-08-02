@@ -1,9 +1,22 @@
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_engine2d_renderer.{
     SimpleWebEngine2DStaticPixelCache, simple_web_engine2d_render_html_pixels,
-    simple_web_engine2d_resolved_backend_name, simple_web_engine2d_render_html_readback}
+    simple_web_engine2d_resolved_backend_name, simple_web_engine2d_render_html_readback,
+    simple_web_html_background_color}
 use std.gc_async_mut.gpu.browser_engine.html_string_parser.{browser_renderer_normalize_style_rules}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_attr_by_id}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{
+    simple_web_layout_set_render_budget_floor_ms
+}
+
+# Sanctioned opt-in floor (same as the showcase spec): under interpreter +
+# box contention the default 10s style budget breaks mid-cascade and leaves
+# nodes unstyled, failing whichever real-engine case the break lands on.
+val _budget_armed: bool = _arm_render_budget()
+
+fn _arm_render_budget() -> bool:
+    simple_web_layout_set_render_budget_floor_ms(900000)
+    true
 
 fn _count_color(pixels: [u32], color: u32) -> i32:
     var count: i32 = 0
@@ -131,6 +144,43 @@ describe "SimpleWebEngine2DRenderer":
         val second = simple_web_engine2d_render_html_pixels(html, 32, 20, "software")
         expect(first).to_equal(second)
         expect(_count_color(first, 0xFFEF4444u32)).to_be_greater_than(0)
+
+    it "extracts the document background from a body rule in a style block":
+        # Regression (2026-08-02): the extractor only read inline body style=
+        # and leaked the first block's class-rule color (or white) for the
+        # standard `<style>body { background-color: ... }</style>` shape.
+        val html = "<html><head><style>" +
+            "body { background-color: #1a1a2e; color: #e0e0ff; }" +
+            ".card { background-color: #0f3460; padding: 8px; }" +
+            "</style></head><body><div class='card'>x</div></body></html>"
+        expect(simple_web_html_background_color(html)).to_equal(0xFF1A1A2Eu32)
+
+    it "extracts the compact fallback-page body background shorthand":
+        # build/tmp missing-file fallback-page shape: body{background:#hex}
+        val html = "<html><head><style>body{background:#202833;color:#e6e6e6}" +
+            ".err{background:#3b1d1d;padding:4px}</style></head>" +
+            "<body><div class='err'>file missing</div></body></html>"
+        expect(simple_web_html_background_color(html)).to_equal(0xFF202833u32)
+
+    it "extracts a body rule background when no block rules exist":
+        val html = "<html><head><style>body { background-color: #204060; }</style></head>" +
+            "<body><div>plain</div></body></html>"
+        expect(simple_web_html_background_color(html)).to_equal(0xFF204060u32)
+
+    it "resolves a grouped html, body selector background":
+        val html = "<html><head><style>html, body { margin: 0; background-color: #0b1220; }</style></head>" +
+            "<body><div>x</div></body></html>"
+        expect(simple_web_html_background_color(html)).to_equal(0xFF0B1220u32)
+
+    it "does not mistake a tbody rule for the document background":
+        val html = "<html><head><style>tbody { background-color: #ff0000; }</style></head>" +
+            "<body><table><tbody><tr><td>x</td></tr></tbody></table></body></html>"
+        expect(simple_web_html_background_color(html)).to_equal(0xFFFFFFFFu32)
+
+    it "keeps inline body style precedence over a style-block body rule":
+        val html = "<html><head><style>body { background-color: #111111; }</style></head>" +
+            "<body style='background-color: #123456'></body></html>"
+        expect(simple_web_html_background_color(html)).to_equal(0xFF123456u32)
 
     it "matches direct child :has selector for first block":
         val style = "div:has(> .badge) { width: 12px; height: 8px; background-color: #0e7490; }"
