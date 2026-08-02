@@ -1993,6 +1993,32 @@ impl Lowerer {
                         },
                         ty: TypeId::BOOL,
                     })
+                } else if self.bare_case_name_is_certainly_not_a_binding(subject_ty, name) {
+                    // See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+                    //
+                    // The subject IS a known enum, its variant list IS known and
+                    // non-empty, and `name` is NOT one of its variants but IS
+                    // spelled as a type/variant/const (Capitalized or
+                    // SCREAMING_SNAKE). Simple's convention is lowercase =
+                    // binding, so this can never have been an intended binder.
+                    // Falling through to `Bool(true)` here is what made the arm
+                    // an irrefutable binding that swallows every later arm --
+                    // including `case _:` -- with no diagnostic at all.
+                    //
+                    // Deliberately narrow: a lowercase `case other:` is a real
+                    // binding and is untouched, and a subject whose type is not
+                    // a resolved enum (the `match opcode: case WS_OPCODE_TEXT:`
+                    // const shape) is NOT reported here, because this seam
+                    // cannot tell a const pattern from a binder without const
+                    // resolution. Under-reporting is correct; a false positive
+                    // would reject valid code.
+                    Err(LowerError::Unsupported(format!(
+                        "`case {name}:` is not a variant of the matched enum, so it is an \
+                         irrefutable BINDING that matches every remaining value and makes \
+                         every later arm (including `case _:`) unreachable. Use a qualified \
+                         variant (`case Enum.{name}:`), or a lowercase name if a binding was \
+                         really intended."
+                    )))
                 } else {
                     // Plain binding - always matches
                     Ok(HirExpr {

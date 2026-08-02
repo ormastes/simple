@@ -1328,9 +1328,18 @@ impl LlvmBackend {
                             .build_int_z_extend(cmp, i64_type, "pat_ext")
                             .map_err(|e| format!("pattern zext: {e}"))?
                     }
+                    // Same fail-closed policy as the Cranelift twin in
+                    // `codegen/instr/pattern.rs`: `Tuple`/`Struct`/`Or`/`Guard`/
+                    // `Union` have no verified lowering, nothing constructs them
+                    // today, and a silent `const 1` here is an always-match --
+                    // a wrong answer that announces nothing.
                     _ => {
-                        // Struct/tuple/other: always match (destructuring handled by PatternBind)
-                        i64_type.const_int(1, false)
+                        return Err(
+                            "codegen: no LLVM lowering for this pattern test shape \
+                             (only `Wildcard`, `Binding`, `Literal` and `Variant` are supported); \
+                             refusing to emit an always-match test"
+                                .to_string(),
+                        );
                     }
                 };
                 vreg_map.insert(*dest, result.into());

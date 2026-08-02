@@ -451,8 +451,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     // Pattern matching
     // =========================================================================
     fn emit_pattern_test(&mut self, dest: VReg, subject: VReg, pattern: &MirPattern) -> Result<(), String> {
-        super::instr::pattern::compile_pattern_test(self.ctx, self.builder, dest, subject, pattern);
-        Ok(())
+        super::instr::pattern::compile_pattern_test(self.ctx, self.builder, dest, subject, pattern)
     }
     fn emit_pattern_bind(&mut self, dest: VReg, subject: VReg, binding: &PatternBinding) -> Result<(), String> {
         super::instr::pattern::compile_pattern_bind(self.ctx, self.builder, dest, subject, binding);

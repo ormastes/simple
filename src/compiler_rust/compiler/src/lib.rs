@@ -53,6 +53,7 @@ pub mod macro_validation;
 pub mod mcp;
 pub mod method_registry;
 pub mod mir;
+pub mod pattern_case_naming;
 pub mod mock;
 pub mod module_resolver;
 pub mod monomorphize;

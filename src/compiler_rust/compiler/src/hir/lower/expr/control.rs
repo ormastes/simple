@@ -1336,6 +1336,37 @@ impl Lowerer {
             })
     }
 
+    /// Is a bare `case <name>:` arm provably NOT an intended binding?
+    ///
+    /// True only when all of the following hold, so that an under-report is the
+    /// failure mode rather than a false positive:
+    ///
+    /// * the subject's static type resolves to `HirType::Enum`,
+    /// * that enum's variant list is known and non-empty (an empty list means
+    ///   the summary was never populated, not that the enum has no variants),
+    /// * `name` is not one of those variants, and
+    /// * `name` is spelled as a type/variant/const, i.e. it starts with an
+    ///   uppercase letter or is `SCREAMING_SNAKE_CASE`.
+    ///
+    /// Bug: `doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md`
+    ///
+    /// Membership tests use `char::is_ascii_uppercase`, never a `>= 'A' && <= 'Z'`
+    /// range comparison -- see that bug doc's note on the JIT text-ordering
+    /// defect that made range checks on derived text silently false.
+    pub(crate) fn bare_case_name_is_certainly_not_a_binding(&self, subject_ty: TypeId, name: &str) -> bool {
+        let Some(HirType::Enum { variants, .. }) = self.module.types.get(subject_ty) else {
+            return false;
+        };
+        if variants.is_empty() {
+            // Variant list not populated -- we cannot conclude anything.
+            return false;
+        }
+        if variants.iter().any(|(variant, _)| variant == name) {
+            return false;
+        }
+        crate::pattern_case_naming::case_name_is_spelled_like_a_variant(name)
+    }
+
     fn pattern_binding_is_mutable(pattern: &Pattern, name: &str) -> bool {
         match pattern {
             Pattern::MutIdentifier(binding) => binding == name,

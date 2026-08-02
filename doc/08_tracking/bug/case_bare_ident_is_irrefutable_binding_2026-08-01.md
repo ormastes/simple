@@ -1,6 +1,9 @@
 # Bare identifier in `case` position is an irrefutable binding, silently
 
-- **Status:** OPEN
+- **Status:** FIXED on the Rust seed's two engines 2026-08-02 (see
+  "Rust-seed fix" below). Still OPEN for the pure-Simple compiler seams
+  (`50.mir/_MirLoweringExpr/expr_dispatch.spl` `lower_match_case`,
+  `10.frontend/_FlatAstBridge/convert_nodes.spl` `convert_flat_pattern`).
 - **Date:** 2026-08-01
 - **Severity:** CRITICAL (silent wrong-code, whole-language scope)
 - **Component:** language / pattern matching; lint `35.semantics/lint/match_exhaustiveness.spl`
@@ -598,3 +601,76 @@ Recommended follow-up: run `MEXH006` over `src/**` once the pure-Simple
 `bin/simple` is redeployed. The name-existence sweep cannot see the
 `tco.spl`-class defect (a real variant of the *wrong* enum), which is where the
 remaining 20,360 unresolved arms live.
+
+## Rust-seed fix (2026-08-02) — both engines now refuse
+
+The lint (`MEXH006`) reports; it does not stop the wrong code from running. The
+seed's own two engines now refuse the shape outright.
+
+### Why fixing one engine was not enough — measured, and it matters
+
+The first attempt fixed only the HIR seam
+(`hir/lower/stmt_lowering.rs` `lower_pattern_condition_stmt`), which is the
+JIT/native lane. Measured result on Probe A's shape:
+
+```
+[jit-fallback] HIR lowering error: `case NotAVariant:` is not a variant ...
+              : whole module dropped to the interpreter (~100-1000x slowdown)
+RED
+BOGUS      <- still the wrong answer
+BOGUS
+rc=0
+```
+
+The JIT refusal is **caught by the `[jit-fallback]` path**, which drops the whole
+module to the tree-walk interpreter — which still had the defect. So the
+"fix" bought nothing and cost a 100-1000x slowdown. A refusal on one engine of a
+pair with automatic fallback is worse than no refusal at all. Both seams were
+therefore changed together:
+
+| Seam | Keyed on | File |
+|---|---|---|
+| JIT / native | subject's static `TypeId` | `hir/lower/stmt_lowering.rs` `lower_pattern_condition_stmt` |
+| interpreter | runtime `Value::Enum` | `interpreter_patterns.rs` `Pattern::Identifier` |
+
+The shared spelling predicate lives in one place so the two cannot drift:
+`compiler/src/pattern_case_naming.rs` (`case_name_is_spelled_like_a_variant`,
+with unit tests).
+
+### Rule, deliberately narrow
+
+Refuse only when ALL hold, so under-reporting is the failure mode:
+
+- the subject resolves to an enum (static type on the HIR side, `Value::Enum` on
+  the interpreter side), **and**
+- that enum's variant list is known and **non-empty** (an empty list means the
+  summary was never populated, not that the enum has no variants), **and**
+- the identifier is not one of those variants, **and**
+- the identifier is spelled `Capitalized` or `SCREAMING_SNAKE_CASE`.
+
+Consequently a lowercase `case other:` is untouched, and **Probe B's const shape
+(`match opcode: case WS_OPCODE_TEXT:`, subject `i64`) is deliberately NOT
+reported here** — this seam cannot tell a const pattern from a binder without
+const resolution, and a false positive would reject valid code. Probe B remains
+open and is still the highest user-facing item; `MEXH006` continues to flag it.
+
+### Verification (execution, not reading)
+
+| Fixture | base binary | fixed binary |
+|---|---|---|
+| Probe-A shape (`case NotAVariant:`) | `RED / BOGUS / BOGUS`, **rc=0** | loud refusal, **rc=1**, both engines |
+| lowercase `case other:` | `RED / BOUND` | `RED / BOUND` (unchanged) |
+| bare `case Red:` where `Red` IS a variant | correct | correct (still a variant TEST) |
+| qualified `case Color.Red/Green/_` | `10 / 20 / 30` | `10 / 20 / 30` |
+| `c is Color.Red` | `1 / 0` | `1 / 0` |
+| payload `case Shape.Line(n)` | binds `7`, and `3` | binds `7`, and `3` |
+
+Regression fixture: `test/fixtures/compiler/bare_case_ident_binding_controls.spl`
+— 14 rows, `BADCOUNT 0` on JIT **and** interpreter, `[jit-fallback]` = 0. It
+guards the *opposite* direction (shapes that must keep working), because the
+refusal aborts the module and cannot be a row in a running fixture.
+
+Rust suite: `cargo test -p simple-compiler --lib` = **3457 passed / 118 failed**
+against the 3455/118 baseline — the +2 are this change's own unit tests, and the
+118 failure **name sets are byte-identical** (`diff`, not counts).
+`-- hir:: compilability::` = **327 / 7**, exactly baseline.

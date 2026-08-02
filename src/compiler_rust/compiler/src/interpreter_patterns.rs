@@ -142,6 +142,27 @@ pub(crate) fn pattern_matches(
                         // and the value has no payload (unit variant)
                         return Ok(variant == name && payload.is_none());
                     }
+                    // See doc/08_tracking/bug/case_bare_ident_is_irrefutable_binding_2026-08-01.md
+                    //
+                    // The value IS an enum, its definition IS known, `name` is
+                    // NOT one of its variants, and `name` is spelled like a
+                    // variant/const. Binding here is what silently swallowed
+                    // every later arm (including `case _:`). Refuse, matching
+                    // the JIT/native lane's refusal in
+                    // `hir/lower/stmt_lowering.rs` -- the two engines must agree,
+                    // or the `[jit-fallback]` path just reroutes the program
+                    // into the same wrong answer.
+                    if !enum_def.variants.is_empty()
+                        && crate::pattern_case_naming::case_name_is_spelled_like_a_variant(name)
+                    {
+                        return Err(CompileError::Semantic(format!(
+                            "`case {name}:` is not a variant of enum `{enum_name}`, so it is an \
+                             irrefutable BINDING that matches every remaining value and makes \
+                             every later arm (including `case _:`) unreachable. Use a qualified \
+                             variant (`case {enum_name}.{name}:`), or a lowercase name if a \
+                             binding was really intended."
+                        )));
+                    }
                 }
             }
             // Normal identifier pattern - bind the value

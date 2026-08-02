@@ -962,7 +962,7 @@ pub fn compile_instruction<M: Module>(
         }
 
         MirInst::PatternTest { dest, subject, pattern } => {
-            compile_pattern_test(ctx, builder, *dest, *subject, pattern);
+            compile_pattern_test(ctx, builder, *dest, *subject, pattern)?;
         }
 
         MirInst::PatternBind { dest, subject, binding } => {

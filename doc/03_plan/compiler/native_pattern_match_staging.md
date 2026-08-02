@@ -332,6 +332,57 @@ Independent, orthogonal follow-ups surfaced by this work:
   but it will need the same predicate once the self-hosted binary owns
   `--native`.
 
+## 7.1 `codegen/instr/pattern.rs` is NOT on the `match` path (proved 2026-08-02)
+
+The MIR->Cranelift catch-all in `compile_pattern_test` was carried as a native
+blocker. It is not one: **a `match` never reaches that function at all.**
+
+Proved by a probe that FIRES (the earlier 11-site probe recorded 0 here, which
+reads identically to "not instrumented"). Reusing the existing default-off
+`SIMPLE_DEBUG_PATTERN_LOWER` switch:
+
+| fixture | `[pattern-codegen]` hits |
+|---|---|
+| `c is Color.Red` | **1**, `kind=Variant` |
+| `match c: case Color.Red / Green / _` | **0** |
+| `c is Color.Red`, flag OFF | 0 |
+
+Static census agrees and explains it: across the whole workspace, outside tests,
+`MirInst::PatternTest` has exactly **one** producer —
+`mir/lower/lowering_expr_ops.rs:104` — and it only ever builds
+`MirPattern::Variant { payload: None }`, for `x is Enum.Variant` / `x ==
+Enum.Variant`. `codegen/bytecode/compiler.rs`, `llvm/functions.rs`,
+`native_project/mangle.rs` and `instr/pattern.rs` are all consumers. Enum
+`match` instead lowers in HIR to `rt_enum_check_discriminant` + an If-chain (§4),
+so `Tuple`/`Struct`/`Or`/`Guard`/`Union` are unconstructible today.
+
+**Disposition: not a blocker; it was a latent silent-wrong-answer.** The arm
+returned `iconst 1` — "always match" — so the day a front end started emitting
+one of those shapes it would have mis-dispatched silently. Both twins now fail
+closed with a named error instead (`codegen/instr/pattern.rs`,
+`codegen/llvm/functions.rs`), matching the isel `case _:` precedent in §7.
+`compile_pattern_test` returns `InstrResult<()>` for this.
+
+## 7.2 Gate status after blockers 2 and 3 — STILL GATED
+
+Native Stage 4 remains gated, and `compilability.rs` was deliberately **not**
+touched. Measured with the fixed binary:
+
+- payload-free `match` (Stage 1) -> compiles, real ELF PIE, **runs**, prints
+  `10 / 20 / 30`;
+- payload-binding `case Shape.Line(n)` (Stage 4) -> still
+  `cannot compile to standalone native binary: 1 function(s) ... - size: [PatternMatch]`.
+
+The bare-identifier slice (547 functions) also cannot be admitted by the gate,
+for a **structural** reason worth recording: `compilability.rs` contains zero
+references to `TypeId`, `TypeRegistry` or `HirType` — it is a pure AST walker
+that runs before type resolution. Whether a bare `case Foo:` is a variant test
+or a binding is decided downstream by
+`subject_enum_has_variant(subject_ty, name)`, using a type the gate cannot see.
+Admitting `Pattern::Identifier` on name shape alone would be exactly the
+half-fix this plan forbids. Threading types into the gate is the prerequisite,
+and is not attempted here.
+
 ## 8. What this plan deliberately does not do
 
 No attempt at a full pattern-match codegen path. The measured gap (§3) and the

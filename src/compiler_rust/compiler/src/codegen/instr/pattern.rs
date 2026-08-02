@@ -15,8 +15,16 @@ pub(crate) fn compile_pattern_test<M: Module>(
     dest: VReg,
     subject: VReg,
     pattern: &MirPattern,
-) {
+) -> InstrResult<()> {
     let subject_val = ctx.vreg_values[&subject];
+
+    // Default-off reachability probe, sharing the `subpattern_condition` switch
+    // in `hir/lower/expr/control.rs` so one run instruments both seams. This
+    // arm fires only for `x is Enum.Variant` / `x == Enum.Variant`; a `match`
+    // never reaches here (see the module note on `compile_pattern_test`).
+    if std::env::var_os("SIMPLE_DEBUG_PATTERN_LOWER").is_some() {
+        eprintln!("[pattern-codegen] compile_pattern_test kind={}", mir_pattern_kind(pattern));
+    }
 
     let result = match pattern {
         MirPattern::Wildcard => builder.ins().iconst(types::I8, 1),
@@ -93,12 +101,41 @@ pub(crate) fn compile_pattern_test<M: Module>(
                 .icmp(cranelift_codegen::ir::condcodes::IntCC::Equal, enum_id, expected_id);
             builder.ins().band(disc_matches, id_matches)
         }
-        _ => {
-            // Struct/tuple patterns: always match for now (destructuring handled separately)
-            builder.ins().iconst(types::I8, 1)
+        // Tuple / Struct / Or / Guard / Union previously fell into a silent
+        // `iconst 1` ("always match"). Nothing in the pipeline constructs those
+        // today -- `MirInst::PatternTest` has exactly one non-test producer
+        // (`mir/lower/lowering_expr_ops.rs`) and it only ever builds
+        // `MirPattern::Variant { payload: None }` for `x is Enum.Variant`. So
+        // the arm was unreachable AND, if a future front end started emitting
+        // one of these, it would have mis-dispatched silently rather than
+        // failing. Fail closed instead, matching the isel `case _:` precedent
+        // in `doc/03_plan/compiler/native_pattern_match_staging.md` §7.
+        other => {
+            return Err(format!(
+                "codegen: no Cranelift lowering for pattern test `{}` \
+                 (only `Wildcard`, `Literal`, `Binding` and `Variant` are supported); \
+                 refusing to emit an always-match test",
+                mir_pattern_kind(other)
+            ));
         }
     };
     ctx.vreg_values.insert(dest, result);
+    Ok(())
+}
+
+/// Stable name for a `MirPattern` shape, for probes and error messages.
+fn mir_pattern_kind(pattern: &MirPattern) -> &'static str {
+    match pattern {
+        MirPattern::Wildcard => "Wildcard",
+        MirPattern::Literal(_) => "Literal",
+        MirPattern::Binding(_) => "Binding",
+        MirPattern::Variant { .. } => "Variant",
+        MirPattern::Tuple(_) => "Tuple",
+        MirPattern::Struct { .. } => "Struct",
+        MirPattern::Or(_) => "Or",
+        MirPattern::Guard { .. } => "Guard",
+        MirPattern::Union { .. } => "Union",
+    }
 }
 
 pub(crate) fn compile_pattern_bind<M: Module>(
