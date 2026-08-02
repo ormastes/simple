@@ -289,3 +289,53 @@ describe "resolve_import_symbols 2-pass import resolver":
                                 assert_true(false)
                     case _:
                         assert_true(false)
+
+    it "keeps private named imports out of directory siblings while sharing declarations":
+        val log = make_logger()
+        val hidden_source = "struct NestedPayload:\n    value: i64\nenum PrivateEvent:\n    Wrapped(NestedPayload)\nenum PublicSignal:\n    Ready\nstruct UserGlobVisible:\n    value: i64"
+        val private_glob_source = "struct PrivateGlobType:\n    value: i64"
+        val sibling_a_source = "use hidden.defs.\{PrivateEvent, UserGlobVisible\}\nuse hidden.private_glob.*\nexport use hidden.defs.\{PublicSignal as SiblingSignal\}\nfn sibling_value() -> i64:\n    42"
+        val sibling_b_source = "pub fn own_value() -> i64:\n    7"
+        val sibling_c_source = "fn adjacent_value() -> i64:\n    sibling_value()"
+        val explicit_consumer_source = "use shared_pkg.a.*\nfn accept(value: UserGlobVisible) -> UserGlobVisible:\n    value"
+
+        val hidden = parse_full_frontend(hidden_source, "hidden.defs", "hidden.defs", log)
+        val private_glob = parse_full_frontend(private_glob_source, "hidden.private_glob", "hidden.private_glob", log)
+        val sibling_a = parse_full_frontend(sibling_a_source, "shared_pkg.a", "shared_pkg.a", log)
+        val sibling_b = parse_full_frontend(sibling_b_source, "shared_pkg.b", "shared_pkg.b", log)
+        val sibling_c = parse_full_frontend(sibling_c_source, "shared_pkg.c", "shared_pkg.c", log)
+        val explicit_consumer = parse_full_frontend(explicit_consumer_source, "explicit.consumer", "explicit.consumer", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["hidden.defs"] = hidden
+        modules["hidden.private_glob"] = private_glob
+        modules["shared_pkg.a"] = sibling_a
+        modules["shared_pkg.b"] = sibling_b
+        modules["shared_pkg.c"] = sibling_c
+        val sources = [
+            SourceFile(path: "hidden/defs.spl", content: hidden_source, module_name: "hidden.defs"),
+            SourceFile(path: "hidden/private_glob.spl", content: private_glob_source, module_name: "hidden.private_glob"),
+            SourceFile(path: "shared_pkg/a.spl", content: sibling_a_source, module_name: "shared_pkg.a"),
+            SourceFile(path: "shared_pkg/b.spl", content: sibling_b_source, module_name: "shared_pkg.b"),
+            SourceFile(path: "shared_pkg/c.spl", content: sibling_c_source, module_name: "shared_pkg.c")
+        ]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+
+        var lowering_b = hirlowering_for_module("shared_pkg.b", surfaces)
+        val hir_b = lowering_b.lower_module(sibling_b)
+        expect(lowering_b.errors.len()).to_equal(0)
+        expect(hir_b.symbols.lookup("PrivateEvent").?).to_be(false)
+        expect(hir_b.symbols.lookup("PrivateGlobType").?).to_be(false)
+        expect(hir_b.symbols.lookup("SiblingSignal").?).to_be_truthy()
+        expect(hir_b.symbols.lookup("PublicSignal").?).to_be(false)
+
+        var lowering_c = hirlowering_for_module("shared_pkg.c", surfaces)
+        val hir_c = lowering_c.lower_module(sibling_c)
+        expect(lowering_c.errors.len()).to_equal(0)
+        expect(hir_c.symbols.lookup("sibling_value").?).to_be_truthy()
+        expect(hir_c.symbols.lookup("SiblingSignal").?).to_be_truthy()
+
+        var explicit_lowering = hirlowering_for_module("explicit.consumer", surfaces)
+        val explicit_hir = explicit_lowering.lower_module(explicit_consumer)
+        expect(explicit_lowering.errors.len()).to_equal(0)
+        expect(explicit_hir.symbols.lookup("UserGlobVisible").?).to_be_truthy()
