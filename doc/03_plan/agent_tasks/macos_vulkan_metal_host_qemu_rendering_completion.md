@@ -94,6 +94,31 @@ peer reports.
   lanes → guest x86/ARM QEMU. QEMU needs a guest framebuffer/capture and
   guest-side SIMD/execution receipt; host GPU output is not QEMU evidence.
 
+### 2026-08-02 live-gate admission audit
+
+- Upstream Vulkan fix `87a4809438` is required by the strict path and is now
+  applied: post-present host-cache readback retains the real framebuffer and
+  device identities. Without those positive identities a frame cannot satisfy
+  strict resident-GPU evidence, even if its pixels are correct.
+- The incremental Stage3 producer is
+  `SIMPLE_NO_STUB_FALLBACK=1 sh scripts/bootstrap/bootstrap-from-scratch.sh
+  --pure-simple --backend=llvm --mode=dynload
+  --output=build/wm-to-i64-bootstrap --jobs=1 --no-mcp`. It must run only after
+  the shared source/checkout is stable because its provenance binds the complete
+  input snapshot. It never substitutes the Rust seed or performs a full Cargo
+  bootstrap.
+- Stage3 alone does not admit the Vulkan native builder. Before the first strict
+  Vulkan 2D run, provide its three canonical `build/sffi` dylib providers and
+  build `build/macos_gpu_2d_live_native/vulkan/trusted-build.env` with
+  `scripts/check/build-macos-gpu-2d-live-native.shs vulkan`.
+- Vulkan web and GUI additionally require the provenance-bound full GUI driver
+  at `build/bootstrap/full/<platform>/provenance/gui-driver.env`. Do not claim
+  a WM child/web CPU-SIMD capture as standalone GPU web or GUI evidence.
+- The next likely source-level gate after admission is the current in-repo
+  bounds-checked replacement for the old SPIR-V reflection abort. It has no
+  current native/live evidence yet, so preserve it as a focused post-admission
+  diagnostic rather than asserting a Vulkan PASS in advance.
+
 ### Render design / IR alignment addendum (2026-08-01)
 
 - DrawIR/GPU design control changed in the local branch and is now the source
