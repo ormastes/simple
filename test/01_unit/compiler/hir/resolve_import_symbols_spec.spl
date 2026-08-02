@@ -144,7 +144,7 @@ describe "resolve_import_symbols 2-pass import resolver":
 
     it "deduplicates slash variants through one canonical physical path":
         val log = make_logger()
-        val source = "pub fn separator_answer() -> i64:\n    42"
+        val source = "pub struct SeparatorCounter:\n    value: i64\nimpl SeparatorCounter:\n    fn separator_answer() -> i64:\n        42"
         val primary = parse_full_frontend(
             source, "separator.primary", "separator.primary", log)
         val alias = parse_full_frontend(
@@ -159,8 +159,27 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(result.is_ok()).to_equal(true)
         val surfaces = result.unwrap()
         expect(surfaces.surfaces.len()).to_equal(1)
+        expect(surfaces.surfaces[0].impls.len()).to_equal(1)
         expect(surfaces.index_by_name["separator.primary"]).to_equal(
             surfaces.index_by_name["separator.alias"])
+
+    it "rejects same-path aliases with different implementation counts":
+        val log = make_logger()
+        val first_source = "struct ImplCounter:\n    value: i64\nimpl ImplCounter:\n    fn first() -> i64:\n        1"
+        val second_source = first_source + "\nimpl ImplCounter:\n    fn second() -> i64:\n        2"
+        val first = parse_full_frontend(
+            first_source, "impl_count.first", "impl_count.first", log)
+        val second = parse_full_frontend(
+            second_source, "impl_count.second", "impl_count.second", log)
+        var modules: Dict<text, Module> = {}
+        modules["impl_count.first"] = first
+        modules["impl_count.second"] = second
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "impl_count\\owner.spl", content: first_source, module_name: "impl_count.first"),
+            SourceFile(path: "impl_count/owner.spl", content: second_source, module_name: "impl_count.second")
+        ])
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_contain("conflicting declaration metadata")
 
     it "rejects different declarations behind one canonical physical path":
         val log = make_logger()
