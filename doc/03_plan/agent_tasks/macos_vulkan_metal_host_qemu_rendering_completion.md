@@ -68,6 +68,32 @@ peer reports.
 - Metal host prerequisites are present (Apple Metal toolchain), but its canonical
   build refuses to run until the same manifest-bound Stage3 artifact exists.
 
+### 2026-08-02 current engine and IR follow-up
+
+- `build/bootstrap/stage3/aarch64-apple-darwin/simple` now has passing local
+  provenance/sanity, but it is not the builder authority. The Vulkan and Metal
+  native builders require an admitted deployment at
+  `build/wm-to-i64-bootstrap/stage3/aarch64-apple-darwin/` with its own
+  `provenance.env`; create that binding incrementally before attempting a live
+  gate. Do not substitute a direct native-build, the Rust seed, or the merely
+  adjacent Stage3 artifact.
+- Current source keeps one canonical path: web semantic/layout, GUI scene, and
+  WM shared scene producers emit `DrawIrComposition`; Engine2D executes it;
+  the selected strict backend owns device/session handles. Vector text lowers
+  through `Engine2D.draw_text` and transient `FontRenderer`/
+  `FontRenderBatch` material. Draw IR carries semantic font/run identity only,
+  never atlas/cache bytes, device handles, DOM state, or event state.
+- A 2D/GUI/WM device-readback capture is Engine2D verification evidence and
+  must identify its backend, device, completion, dimensions, DPI, revision,
+  hash, non-background bounds, and ordered delivered events. A production
+  resident WebScene result is not certified by CPU pixels: it records compact
+  route/epoch/fault/overflow receipts and hashes; any web pixel snapshot is
+  explicitly test/shadow-only.
+- Keep the execution order: strict Vulkan 2D (including vector glyph proof at
+  96 and 300 DPI) → Vulkan web → Vulkan GUI → Vulkan host WM → matching Metal
+  lanes → guest x86/ARM QEMU. QEMU needs a guest framebuffer/capture and
+  guest-side SIMD/execution receipt; host GPU output is not QEMU evidence.
+
 ### Render design / IR alignment addendum (2026-08-01)
 
 - DrawIR/GPU design control changed in the local branch and is now the source
