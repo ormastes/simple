@@ -42,7 +42,6 @@ const EXTRA_KEEP: &[&str] = &[
     "link_to_smf",
     "link_to_self_contained",
     "run_monomorphization",
-    "run_effect_pass",
     "run_compile",
     "generate_cmake_for_modules",
     "SmfHeader.new_v1_1",

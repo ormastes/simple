@@ -20,7 +20,7 @@ falsely closed by a vacuous spec.
 | Item | Claimed | Actual (verified) | What is really in the tree |
 |------|---------|-------------------|----------------------------|
 | STUB-001 | Fixed | **Fix real, evidence vacuous** | Lambda present at `builder.spl:74`; spec only asserts `_parser != nil` and never invokes it |
-| STUB-002 | Fixed | **FALSELY CLOSED** (reopened by sibling lane) | Only call site is bootstrap-only; pass body is an unconditional early return |
+| STUB-002 | Fixed | **WITHDRAWN 2026-08-02** (was falsely closed) | Pass deleted as dead code: body unreachable behind an unconditional early return (measured), sole call site bootstrap-only, no consumer of the field it wrote |
 | STUB-003 | Fixed | **Genuinely fixed** | 3 `Value.Array/Tuple/Dict` ctors, 0 stubs; spec asserts variant + arity |
 | STUB-004 | Fixed, "wired in driver" | **FALSELY CLOSED** | Reachable only via `run_typecheck_warn_pass`, gated behind `SIMPLE_TYPECHECK_WARN=1`; **zero** test call sites repo-wide |
 | STUB-005 | Fixed | **Genuinely fixed** | Main-path call at `driver_orchestration.spl:151,206`; real 4-step pass body; one non-vacuous spec |
@@ -69,8 +69,9 @@ file and STUB-002's bug doc), so this audit covers the whole ledger.
 
 #### STUB-002: Effect Inference Not Wired
 - **File:** `src/compiler/80.driver/driver.spl`
-- **Status:** NOT FIXED — reopened 2026-08-01. The previous "Fixed — wired
-  `run_effect_pass(self.ctx.hir_modules)`" claim does not match the tree:
+- **Status:** WITHDRAWN 2026-08-02 — closed by DELETING the subject, not by
+  implementing it. Reopened 2026-08-01 when the previous "Fixed — wired
+  `run_effect_pass(self.ctx.hir_modules)`" claim was found not to match the tree:
   1. The only call site is
      `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:204`, and it passes
      `bootstrap_hir_modules` on the **bootstrap-only** branch — the main
@@ -82,6 +83,16 @@ file and STUB-002's bug doc), so this audit covers the whole ledger.
   `test/02_integration/compiler/driver/effect_inference_wiring_spec.spl` passes
   **vacuously** (empty dict in, empty warnings out) and therefore never detected
   either problem.
+- **Ruling (2026-08-02):** DELETE, not implement. Measured, not read: a probe
+  print placed immediately before the early return fired; one placed immediately
+  after it never did, so the 356 lines past the return are unreachable with a
+  live positive control. Every symbol the file defined was enumerated —
+  `build_function_effect_info`, `BodyScanResult`, `empty_scan` and `merge_scans`
+  had zero referents outside the file, and the `scan_expr` / `scan_block` /
+  `scan_stmt` hits in `40.mono` and `70.backend` are `me` methods on a different
+  class reached through `self.`, a bare-name collision and not callers. Wiring
+  the pass would have required first inventing a consumer, since no site branches
+  on `HirFunction.effects`; that is a new feature, not a repair of this item.
 - **Details:** `doc/08_tracking/bug/effect_pass_dead_and_stub002_falsely_fixed_2026-08-01.md`
 
 #### STUB-003: Literal Converter Stubs

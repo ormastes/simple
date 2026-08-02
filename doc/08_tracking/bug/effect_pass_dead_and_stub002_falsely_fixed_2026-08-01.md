@@ -1,7 +1,8 @@
 # Effect inference pass is dead code; STUB-002 falsely marked Fixed
 
 **Date:** 2026-08-01
-**Status:** Open — needs an owner ruling (delete vs implement)
+**Status:** RESOLVED 2026-08-02 — ruled DELETE, executed. See "Resolution" at
+the end of this file.
 **Severity:** P2 — no wrong compiler output today, but a tracked P1 requirement
 is recorded as Fixed when it is not, and its guarding spec is false-green.
 **Files:**
@@ -152,3 +153,90 @@ Retracted: `HirModule.types` is `[text]` (`20.hir/hir_types.spl:45`), is
 constructed empty at every HIR construction site, and has no reader. The
 `module.types.keys()` uses in the VHDL and C backends are `MirModule`, a
 different type. `types: []` is therefore harmless and was left unchanged.
+
+## Resolution — 2026-08-02: DELETED
+
+The delete-vs-implement ruling was taken and executed. Recorded here so the next
+reader does not re-derive it.
+
+### Reachability re-established by MEASUREMENT, not reading
+
+The earlier finding was based on reading the arm. It was re-proved by execution,
+with a live positive control, because reading an arm alone produced wrong
+predictions twice elsewhere on 2026-08-01:
+
+- a probe print placed immediately BEFORE the early return **fired**
+- a probe print placed immediately AFTER it, as the first statement of the
+  claimed-dead region, **never fired**
+
+Both from one `bin/simple run` driver calling `run_effect_pass({})`. The positive
+half is what makes it evidence: the function is entered, the return is reached,
+and nothing past it executes. 356 lines, unreachable.
+
+### Caller enumeration, per symbol, before deleting
+
+Required because deleting a reimplementation REROUTES its callers rather than
+deduplicating them. Enumerated with `/usr/bin/grep` (ugrep is the interactive
+default and was not used):
+
+| Symbol | Referents outside `effect_pass.spl` |
+|---|---|
+| `run_effect_pass` | facade re-export, driver import + sole call site, `stubs.rs` keep-list, 2 duplicate spec files — all removed together |
+| `build_function_effect_info` | none |
+| `BodyScanResult` | none |
+| `empty_scan` | none |
+| `merge_scans` | none |
+| `scan_expr` / `scan_block` / `scan_stmt` | **no callers.** The `40.mono/monomorphize_integration.spl` and `70.backend/backend/interpreter.spl` hits are `me` methods on a different class, invoked as `self.scan_expr(...)` — a bare-name collision, not a shared helper |
+
+Nothing rerouted: every referent was deleted with the definition.
+
+### What was deleted
+
+- `src/compiler/30.types/type_system/effect_pass.spl`
+- its facade re-export in `30.types/type_system/__init__.spl`
+- its import and sole call site in `80.driver/driver_hir_pipeline_lowering.spl`
+- `"run_effect_pass"` from the `EXTRA_KEEP` list in
+  `src/compiler_rust/compiler/src/linker/native_binary/stubs.rs`
+- both copies of the vacuous wiring spec (`test/02_integration/...` and the
+  legacy `test/integration/...` duplicate) and both copies of the placeholder
+  `effect_pass_spec.spl`, plus their stale `summary.txt` artifacts
+
+The call site removal is semantics-preserving and provably so: the pass was the
+identity function, so `updated_hir_boot` was `bootstrap_hir_modules`. The second
+binding, `effect_warnings_boot`, was never read.
+
+### What was NOT deleted, and why
+
+The `00.common/effects*.spl` family (`effects.spl`, `effects_solver.spl`,
+`effects_cache.spl`, `effects_scanner.spl`, `effects_env.spl`,
+`effects_promises.spl`, `effects_phase3a.spl`, `effects_v1_simple.spl`, ~931
+lines) is now consumer-free, but is deliberately left for a separate measured
+lane. `00.common/__init__.spl` re-exports **the same names** — `EffectTag`,
+`EffectEnv`, `EffectStats`, `FunctionEffectInfo` — from FOUR different modules
+(lines 62, 65, 68, 80). Removing any one of them reroutes that name to whichever
+export survives. Measured: no file imports those names through the
+`compiler.common` facade today, so the reroute is currently unobservable — which
+is the argument for doing it as its own change with its own controls, not for
+bundling it blind into this one.
+
+### Verification performed (and one trap caught)
+
+No bootstrap was run; another lane owns that. `bin/simple check` and
+`bin/simple lint` both refuse on the seed ("pure-Simple tool unavailable;
+refusing Rust fallback"), so the compile-level check is NOT available here and is
+NOT claimed. What was verified:
+
+- **Negative control:** a driver that IMPORTS AND CALLS `run_effect_pass` runs
+  and prints against the pristine tree (exit 0) and fails against the edited tree
+  (exit 1, marker absent). The symbol is genuinely gone.
+- **Positive control:** a driver importing the type_system facade, the edited
+  driver module, the edited `declaration_lowering.spl`, `effects.spl` and
+  `effects_scanner.spl` loads with **zero** unresolved-import warnings, identical
+  to pristine.
+
+**Trap caught, recorded because it nearly produced a false PROVED:** an
+unresolved `use` is only a `[WARN] Failed to load imported types` — the program
+still runs and **exits 0**. So an import-only probe scored by exit code is
+fail-open and cannot tell a deleted module from a present one. The controls above
+score a CALL and a warning count instead. The `stubs.rs` edit removes one element
+from a `&[&str]` array and is not compile-verified here.
