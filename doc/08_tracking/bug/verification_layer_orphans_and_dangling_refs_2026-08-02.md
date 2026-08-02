@@ -350,7 +350,7 @@ Largest SYMBOL clusters still open (module -> count):
 | Import target | Count | Notes |
 |---|---|---|
 | `app.dashboard.main` | 18 | Class (b). SDN table load/write + date helpers. `main.spl` is a 14-line CLI entry that never declared them. Needs a real `dashboard/tables.spl`; the contract is recoverable from call sites but it is a day of work, not a repoint. |
-| `std.error` | 16 | Newly surfaced by the guard fix. Needs its own triage — likely a missing shared error module, same shape as `async_core`. |
+| ~~`std.error`~~ | ~~16~~ | **Withdrawn in pass 3 — all 16 were false positives.** `SimpleError` is declared as `extern class`, which the guard could not see. The real defect is a constructor link failure, filed separately. |
 | `std.math.bignum.bignat` | 8 | `bn_zero`, `mod_exp`, `to_bytes_be`, `modulo`. Crypto-adjacent — **must not be stubbed**; a wrong bignum is a silent security defect. |
 | `compiler.core` | 7 | Newly surfaced. |
 | `common.window_protocol.window_protocol` | 7 | `WM_*` constants + `wm_input_event`. |
@@ -404,3 +404,73 @@ this bug is about. Filed, not worked around: the specs here use
 `assert_false`, and SPIPE007 needs either a reachable `expect_not` or a
 changed suggestion. 282 existing `expect_not(` call sites in `test/` are
 presumably affected the same way and were NOT audited.
+
+---
+
+# Pass 3 — the census ALSO over-reports: `extern class` is invisible to it
+
+The pass-1 claim **"false-positive rate 0%, these are all real"** is
+**REFUTED**. The guard's type-declaration rule was
+
+    /^[ \t]*(pub[ \t]+)?(export[ \t]+)?(struct|enum|class|...)[ \t]+NAME/
+
+which permits only `pub` and `export` as prefixes. It therefore does not match
+
+    extern class SimpleError:
+
+PROVED by running the guard's own regex against that exact line: **NO MATCH**.
+There are **20** `extern`-prefixed and **2** `abstract`-prefixed type
+declarations in `src`, all invisible to the index. (The other leading words a
+naive `[a-z]+` prefix would pick up — `this`, `the`, `where`, `widget` — are
+prose inside comments and docstrings, so the fix names `extern` and `abstract`
+explicitly rather than generalising.)
+
+Effect: **16 of the reported findings were false positives**, every one of
+them `SimpleError`, imported across `src/lib/gc_async_mut/net/`. After the fix
+the count drops 204 -> 188 and the diff of findings is exactly those 16
+removed, **0 added**.
+
+Both guard fixes were then verified together on one run, since the second
+could have re-opened the first:
+
+| Probe | Want | Got |
+|---|---|---|
+| absent symbol called from an indented line | reported | **1** |
+| `extern class` type consumed by another file | not reported | **0** |
+
+## The real defect behind those 16
+
+`SimpleError` is declared twice and its constructor **does not link**:
+
+    error[E1002]: function `SimpleError` not found
+    HIR lowering: cannot infer field type ... struct 'SimpleError' field 'message'
+
+**Refuted: the import path is wrong.** `use std.error` and
+`use std.common.error` fail **identically** — the module and the `error`
+function both resolve; the `SimpleError(...)` construction inside `error()` is
+what fails. Repointing fixes nothing, so this is **not** class (a).
+
+Filed as `doc/08_tracking/bug/extern_class_constructor_not_found_simpleerror_2026-08-02.md`.
+Not stubbed: a shadowing plain `class SimpleError` would compile and return an
+object that is not what the SFFI boundary hands back — a silent wrong answer
+traded for a loud failure.
+
+## Corrected running totals
+
+| Tree | Guard | Total |
+|---|---|---|
+| pristine | pass-1 guard (fail-open, extern-blind) | 173 |
+| pristine | both fixes | **209** |
+| after passes 2-3 | both fixes | **188** |
+
+So the pass-1 figure of 173 was wrong in **both** directions at once: it
+missed 52 real findings and invented 16 that were not real. The corrected
+pristine backlog is 209. Two clusters were then genuinely fixed (`async_core`
+12, `unicode.codepoint` 8) and one cluster of 16 dissolved as measurement
+error, leaving 188.
+
+**Lesson worth keeping:** a census whose declaration index is a regex will be
+wrong in both directions, and a "0% false positives" claim derived by
+re-running a *similar* regex is not independent — pass 1's re-index used the
+same prefix assumption and so inherited the same blind spot. Confirming a
+census against a second copy of its own model confirms nothing.
