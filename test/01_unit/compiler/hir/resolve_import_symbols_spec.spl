@@ -120,6 +120,49 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_contain("ambiguous facade export")
 
+    it "uses generated facade provenance when sibling owners are ambiguous":
+        val log = make_logger()
+        val owner_source = "pub fn file_append() -> bool:\n    true"
+        val facade_source = "# Re-exported from file_ops.spl\nexport file_append"
+        val first = parse_full_frontend(owner_source, "hint.io.file_ops", "hint.io.file_ops", log)
+        val second = parse_full_frontend(owner_source, "hint.io.mod_stub", "hint.io.mod_stub", log)
+        val facade = parse_full_frontend(facade_source, "hint.io", "hint.io", log)
+        var modules: Dict<text, Module> = {}
+        modules["hint.io.file_ops"] = first
+        modules["hint.io.mod_stub"] = second
+        modules["hint.io"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "hint/io/file_ops.spl", content: owner_source, module_name: "hint.io.file_ops"),
+            SourceFile(path: "hint/io/mod_stub.spl", content: owner_source, module_name: "hint.io.mod_stub"),
+            SourceFile(path: "hint/io.spl", content: facade_source, module_name: "hint.io")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        val origin = surfaces.surfaces[surfaces.index_by_name["hint.io"]].export_origins["file_append"]
+        expect(origin.owner_module).to_equal("hint.io.file_ops")
+        expect(origin.resolution_kind).to_equal("generated-comment")
+
+    it "accepts explanatory text after a generated provenance filename":
+        val log = make_logger()
+        val owner_source = "pub fn shell() -> bool:\n    true"
+        val facade_source = "# Re-exported from file_shell.spl. Mutation stays elsewhere.\nexport shell"
+        val first = parse_full_frontend(owner_source, "hinted.io.file_shell", "hinted.io.file_shell", log)
+        val second = parse_full_frontend(owner_source, "hinted.io.process_ops", "hinted.io.process_ops", log)
+        val facade = parse_full_frontend(facade_source, "hinted.io", "hinted.io", log)
+        var modules: Dict<text, Module> = {}
+        modules["hinted.io.file_shell"] = first
+        modules["hinted.io.process_ops"] = second
+        modules["hinted.io"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "hinted/io/file_shell.spl", content: owner_source, module_name: "hinted.io.file_shell"),
+            SourceFile(path: "hinted/io/process_ops.spl", content: owner_source, module_name: "hinted.io.process_ops"),
+            SourceFile(path: "hinted/io.spl", content: facade_source, module_name: "hinted.io")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        val origin = surfaces.surfaces[surfaces.index_by_name["hinted.io"]].export_origins["shell"]
+        expect(origin.owner_module).to_equal("hinted.io.file_shell")
+
     it "resolves a file facade against its same-named sibling directory":
         val log = make_logger()
         val provider_source = "pub fn dir_create() -> bool:\n    true"

@@ -228,6 +228,12 @@ impl ModuleSurfaceBuilder:
                         origins[local_name] = imported_origin.unwrap()
                         continue
 
+                    # Generated facade comments carry the precise source file
+                    # when two sibling modules intentionally expose the same
+                    # declaration. Keep that provenance ahead of inference.
+                    if origins.contains_key(local_name):
+                        continue
+
                     val sibling_result = module_surface_unique_sibling_origin(
                         self.surfaces, owner_by_package_name,
                         surface, source_name)
@@ -407,6 +413,40 @@ fn module_surface_impl_from_impl(impl_: Impl) -> ModuleSurfaceImpl:
         span: impl_.span
     )
 
+fn module_surface_export_origin_hints(source: SourceFile) -> Dict<text, ModuleSurfaceExportOrigin>:
+    var origins: Dict<text, ModuleSurfaceExportOrigin> = {}
+    var owner_file = ""
+    var facade_name = module_surface_canonical_module_name(source.module_name)
+    if facade_name.ends_with(".__init__"):
+        facade_name = facade_name[0:facade_name.len() - 9]
+    for raw_line in source.content.split("\n"):
+        val line = raw_line.trim()
+        if line.starts_with("# Re-exported from ") and line.contains(".spl"):
+            val owner_parts = line.substring(19).split(".spl")
+            owner_file = owner_parts[0]
+            continue
+        if owner_file != "" and line.starts_with("export "):
+            val owner_module = facade_name + "." + owner_file.replace("/", ".")
+            for raw_item in line.substring(7).split(","):
+                val item = raw_item.trim()
+                if item != "" and not item.ends_with(".*"):
+                    var source_name = item
+                    var local_name = item
+                    if item.contains(":"):
+                        val parts = item.split(":")
+                        source_name = parts[0].trim()
+                        if parts.len() > 1:
+                            local_name = parts[1].trim()
+                    origins[local_name] = ModuleSurfaceExportOrigin(
+                        owner_module: owner_module,
+                        source_name: source_name,
+                        resolution_kind: "generated-comment"
+                    )
+            owner_file = ""
+        elif line != "" and not line.starts_with("#"):
+            owner_file = ""
+    origins
+
 fn module_surface_from_module(module: ParserModule, source: SourceFile, source_index: i64) -> ModuleSurface:
     var callables: Dict<text, ModuleSurfaceCallable> = {}
     for name in module.functions.keys():
@@ -479,7 +519,7 @@ fn module_surface_from_module(module: ParserModule, source: SourceFile, source_i
         impls: impls,
         type_aliases: type_aliases,
         constants: constants,
-        export_origins: {}
+        export_origins: module_surface_export_origin_hints(source)
     )
 
 fn module_surface_source_matches(surface: ModuleSurface, source: SourceFile, index: i64) -> bool:
