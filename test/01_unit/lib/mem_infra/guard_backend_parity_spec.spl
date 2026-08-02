@@ -65,17 +65,31 @@ val FIXTURE = "test/fixture/mem_infra/guard_uaf_probe.spl"
 val SURVIVED = "uaf_probe: survived"
 
 # The SIMPLE_TEST_BINARY override is expanded by the CHILD SHELL
-# (`${SIMPLE_TEST_BINARY:-bin/simple}`), not read Simple-side via `env_get`.
+# (`${SIMPLE_TEST_BINARY:-bin/simple}`) rather than read Simple-side via
+# `env_get`. Either spelling works now; this one is kept only because it makes
+# the default visible at the point of use.
 #
-# This is not a style choice. The first version of this spec resolved the
-# override with `env_get("SIMPLE_TEST_BINARY")` — copied from the sibling specs
-# — and it silently did nothing: the spec runner does not surface that variable
-# to the spec body, so `env_get` returned "" and every run fell back to
-# `bin/simple` no matter what the caller asked for. That was caught only
-# because the sabotage check below pointed the override at a deliberately
-# broken binary and the spec still passed. Resolving it in the shell means an
-# override that fails to take effect changes the observed result instead of
-# being swallowed.
+# CORRECTION (2026-08-02). An earlier version of this comment claimed the shell
+# form was load-bearing — that "the spec runner does not surface that variable
+# to the spec body", so `env_get` returned "" while the shell form worked. That
+# diagnosis was wrong, and acting on it would have left every sibling spec
+# broken while looking fixed.
+#
+# The real defect was never about how the override is spelled. `bin/simple test`
+# hands the spec to a long-lived helper process (src/app/test_daemon/light_daemon.spl)
+# over a request that carries NO environment, and that helper's own environment
+# is frozen at whichever invocation first started it. The spec body therefore
+# ran under a stale environment — and so did any shell it forked, since the
+# shell inherits the daemon's environment too. Measured: with a daemon already
+# running, a spec body saw the PREVIOUS run's value through `env_get` AND
+# through `$SIMPLE_TEST_BINARY` in a child shell, on the same run. Kill the
+# daemon and both spellings immediately read the caller's value.
+#
+# Fixed in `test_runner_client.spl`: naming any binary-override variable now
+# takes the direct lane instead of the daemon lane, so the override reaches the
+# spec body whichever way it is read. Full write-up, including why the
+# original sabotage check passed for the wrong reason:
+# doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md
 fn survived_uaf(engine: text, guard_on: bool) -> bool:
     val gate = if guard_on: "SIMPLE_MEM_GUARD_RATE=1 " else: ""
     # NB: the `{{`/`}}` are escaped braces — a bare `{...}` in a Simple text

@@ -261,6 +261,31 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64) -> i64:
     print "ERROR: test daemon timed out: {path}"
     1
 
+# Environment variables by which a caller selects WHICH binary (or compiler) a
+# spec exercises. These are the names specs resolve in a `contract_binary()` /
+# `simple_binary()` helper; see test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl
+# and the ~39 sibling specs sharing the convention. None of them is set in a
+# normal run, so this list is inert on the hot path and costs the daemon lane
+# nothing — it only diverts the runs that actually asked for an override.
+fn _binary_override_vars() -> [text]:
+    ["SIMPLE_TEST_BINARY", "SIMPLE_BINARY", "SIMPLE_BIN",
+     "SIMPLE_SEED_BINARY", "SIMPLE_SPEC_COMPILER"]
+
+fn _has_binary_override() -> bool:
+    for name in _binary_override_vars():
+        val v = env_get(name) ?? ""
+        if v != "":
+            return true
+    false
+
+fn _binary_override_names() -> text:
+    var names: [text] = []
+    for name in _binary_override_vars():
+        val v = env_get(name) ?? ""
+        if v != "":
+            names.push(name)
+    names.join(", ")
+
 fn main() -> i64:
     val cleaned = clean_args()
     if has_spl_doctest_flag(cleaned):
@@ -294,14 +319,37 @@ fn main() -> i64:
     # run directly so the child inherits SIMPLE_COVERAGE=1.
     val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
     val cov_bypass = cov_env != "" and cov_env != "0"
+    # Same defect class as SIMPLE_COVERAGE, one step worse because it fails
+    # SILENTLY instead of just under-reporting.
+    #
+    # The light daemon is a long-lived process whose environment is frozen at
+    # whichever invocation happened to start it; the v1 request
+    # (light_request_encode) carries only a header, an expiry and a path — no
+    # environment at all. So a spec that resolves "which binary do I exercise"
+    # from the environment reads the DAEMON's stale value, not the caller's.
+    # Measured 2026-08-02 on the Rust seed: with a daemon already running,
+    # `SIMPLE_TEST_BINARY=VALUE_SIX bin/simple test <spec>` had the spec body
+    # observe VALUE_FIVE (the previous run's value), and a child
+    # `process_run("/bin/sh", ...)` saw VALUE_FIVE too. Resolving the override
+    # in the child shell rather than via env_get does NOT help — the shell
+    # inherits the daemon's environment either way. Kill the daemon first and
+    # both forms immediately read the caller's value.
+    #
+    # A silently-ignored binary override means the spec exercised the default
+    # binary while claiming to test the selected one, so a sabotage check can
+    # pass for the wrong reason. Fail-safe: any request that names one of these
+    # overrides takes the direct lane, where the child really does inherit it.
+    val binary_override_bypass = _has_binary_override()
     # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
     # (the request would be clamped and the spec killed at ~600s); run
     # directly so the full requested timeout is honored.
-    val daemon_ok = if cov_bypass or long_timeout_bypass: false else: ensure_daemon()
+    val daemon_ok = if cov_bypass or binary_override_bypass or long_timeout_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
+        elif binary_override_bypass:
+            print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
         elif long_timeout_bypass:
             print "timeout: --timeout {run.timeout_secs}s exceeds daemon cap; running directly"
         else:

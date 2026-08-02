@@ -1,0 +1,115 @@
+# @req REQ-TEST-DAEMON-ENV-OVERRIDE-001
+"""
+# A Binary Override Named on the Command Line Must Reach the Spec Body
+
+## Overview
+
+Around 39 specs in this tree decide *which binary they exercise* from the
+environment — `SIMPLE_TEST_BINARY`, `SIMPLE_BINARY`, `SIMPLE_BIN`,
+`SIMPLE_SEED_BINARY`, `SIMPLE_SPEC_COMPILER` — in a `contract_binary()` helper
+that falls back to `bin/simple`. The whole point of such a spec is to be
+re-runnable against a *chosen* binary: a seed, a bootstrap candidate, or a
+deliberately sabotaged one.
+
+`bin/simple test <spec>` does not, by default, run the spec in the process you
+launched. It hands the path to a long-lived helper — `src/app/test_daemon/light_daemon.spl`
+— over a request file whose v1 encoding (`light_request_encode`) carries a
+header, an expiry and a path, and **no environment at all**. The daemon's own
+environment is whatever the invocation that first started it happened to have,
+and it then outlives that invocation for minutes.
+
+So a caller-supplied override is not merely late, it is *invisible*: the spec
+body reads the daemon's stale value and exercises the wrong binary while
+reporting under the name of the right one.
+
+## Why this is a measurement bug, not a convenience bug
+
+A dead override fails **silently and green**. Point it at a binary that does
+not exist and the spec still passes, because it quietly went on testing
+`bin/simple`. That is the exact shape of a sabotage control that passes for the
+wrong reason: the sabotaged binary was never the one under test, so the "it
+went red when I broke it, therefore the check is real" argument evaporates.
+
+## The workaround that does not work
+
+Resolving the override in the child shell (`"${SIMPLE_TEST_BINARY:-bin/simple}"`)
+instead of via `env_get` looks like it dodges the problem. It does not. The
+child shell is forked *by the daemon*, so it inherits the daemon's frozen
+environment too. Measured 2026-08-02 on the Rust seed: with a daemon already
+running, a spec body saw `direct=[VALUE_FIVE]` **and** `shell=[VALUE_FIVE]`
+while the caller had passed `VALUE_SIX`. Both channels are asserted below for
+that reason.
+
+## Contract
+
+Whenever any binary-override variable is set, the run takes the direct lane
+instead of the daemon lane (`test_runner_client.spl`), so the value the caller
+passed is the value the spec body observes — even when a daemon seeded by an
+earlier, differently-configured invocation is still alive.
+
+## Related Specifications
+
+- test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl — a sabotage control that this defect had made vacuous
+- doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md
+"""
+
+# @tag: system, check, test-runner, test-daemon, measurement-integrity
+
+use std.spec.*
+use std.io_runtime.process_run
+
+val TARGET = "test/fixtures/mem_infra/env_override_target_spec.spl"
+
+# @step: Run the target fixture with an explicit SIMPLE_TEST_BINARY value
+#
+# `--no-db` keeps these nested runs out of the shared test database (parallel
+# writers corrupt it). The override is placed in the child's environment by the
+# shell, which is the strictest form of the question: if even an env var set
+# directly on the `bin/simple test` process fails to reach the spec body, no
+# spec-side spelling of the lookup can rescue it.
+fn run_target_with(value: text) -> text:
+    val cmd = "SIMPLE_TEST_BINARY={value} bin/simple test '{TARGET}' --no-db 2>&1"
+    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    out
+
+# Seeds a daemon whose environment carries NO override, so that a subsequent
+# overridden run has a stale daemon available to be wrongly reused.
+fn seed_daemon_without_override():
+    val cmd = "bin/simple test '{TARGET}' --no-db >/dev/null 2>&1"
+    val (_o, _e, _c) = process_run("/bin/sh", ["-c", cmd])
+
+fn observed_direct(output: text, value: text) -> bool:
+    output.contains("OVERRIDE_TARGET direct=[{value}]")
+
+fn observed_shell(output: text, value: text) -> bool:
+    output.contains("OVERRIDE_TARGET shell=[{value}]")
+
+describe "a binary override on the command line reaches the spec body":
+
+    it "delivers the override even when a daemon seeded without one is alive":
+        step("Seed a test daemon from an invocation that carries no override")
+        seed_daemon_without_override()
+
+        step("Run the same target again, this time naming an explicit binary override")
+        val out = run_target_with("OVERRIDE_ALPHA")
+
+        step("The spec body's own env_get must observe the value the caller passed")
+        assert_true(observed_direct(out, "OVERRIDE_ALPHA"))
+
+        step("A child shell forked from the spec body must observe it too")
+        assert_true(observed_shell(out, "OVERRIDE_ALPHA"))
+
+    it "delivers a DIFFERENT override on the very next run rather than replaying the first":
+        step("Run the target with a first override value")
+        val first = run_target_with("OVERRIDE_ONE")
+        assert_true(observed_direct(first, "OVERRIDE_ONE"))
+
+        step("Run it again with a second value, with the previous run's process still warm")
+        val second = run_target_with("OVERRIDE_TWO")
+
+        step("The second run must observe the second value - replaying the first is the bug")
+        assert_true(observed_direct(second, "OVERRIDE_TWO"))
+        assert_true(observed_shell(second, "OVERRIDE_TWO"))
+
+        step("And it must not still be carrying the first value")
+        assert_equal(observed_direct(second, "OVERRIDE_ONE"), false)
