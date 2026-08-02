@@ -2,6 +2,7 @@
 
 - **Date:** 2026-08-01
 - **Status:** OPEN
+- **Owner:** `codex-stage4-bootstrap-close` (claimed 2026-08-02)
 - **Severity:** HIGH — this is the blocker standing in FRONT of the
   `unresolved type` layer. Three lanes are chasing symbols that a stage4 build
   cannot currently reach.

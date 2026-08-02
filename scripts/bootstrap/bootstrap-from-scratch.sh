@@ -39,6 +39,11 @@ Options:
                      (supported on native Linux and macOS hosts).
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
+  --incremental-unlimited
+                     Reuse incremental caches and target about 80% of host CPUs;
+                     remove the Stage 4 low-memory throttle (single-agent mode)
+  --clean-release    Final release proof: deploy and test a clean build while
+                     clearing every reusable native cache before each batch
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --release          Deploy, then run the release-blocking whole test suite
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
@@ -64,6 +69,7 @@ full_bootstrap=0
 full_cli=0
 fresh_cache=0
 release_tests=0
+execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
@@ -102,6 +108,15 @@ while [ "$#" -gt 0 ]; do
       ;;
     --fresh-cache|--no-cache)
       fresh_cache=1
+      ;;
+    --incremental-unlimited)
+      execution_profile=incremental-unlimited
+      ;;
+    --clean-release)
+      execution_profile=clean-release
+      fresh_cache=1
+      release_tests=1
+      deploy=1
       ;;
     --mode=*)
       bootstrap_mode=${1#*=}
@@ -151,6 +166,14 @@ case "${bootstrap_mode}" in
   dynload|one-binary) ;;
   *)
     echo "error: unknown --mode '${bootstrap_mode}' (expected dynload or one-binary)" >&2
+    exit 1
+    ;;
+esac
+
+case "${execution_profile}" in
+  incremental|incremental-unlimited|clean-release) ;;
+  *)
+    echo "error: unknown bootstrap execution profile '${execution_profile}'" >&2
     exit 1
     ;;
 esac
@@ -427,6 +450,11 @@ esac
 if [ -z "${jobs}" ]; then
   if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     jobs=2
+  elif [ "${execution_profile}" = "incremental-unlimited" ]; then
+    jobs=$((host_cpus * 4 / 5))
+    if [ "${jobs}" -lt 1 ]; then
+      jobs=1
+    fi
   else
     jobs=$((host_cpus / 2))
     if [ "${jobs}" -lt 1 ]; then
@@ -442,9 +470,10 @@ case "${jobs}" in
 esac
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
 selfhost_jobs="${jobs}"
-if [ "${selfhost_jobs}" -gt 2 ]; then
+if [ "${execution_profile}" != "incremental-unlimited" ] && [ "${selfhost_jobs}" -gt 2 ]; then
   selfhost_jobs=2
 fi
+echo "Bootstrap execution profile: ${execution_profile} (self-host jobs: ${selfhost_jobs})"
 
 native_cache_dir="${output_dir}/native_cache"
 native_cache_stamp="${native_cache_dir}/bootstrap-wide-inputs.sha256"
@@ -464,6 +493,12 @@ bootstrap_wide_inputs_hash() {
 
 prepare_native_cache() {
   label=$1
+  if [ "${execution_profile}" = "clean-release" ]; then
+    echo "  ${label}: clearing native cache (clean-release profile)"
+    rm -rf "${native_cache_dir}/"
+    mkdir -p "${native_cache_dir}"
+    return
+  fi
   if [ "${bootstrap_mode}" = "one-binary" ]; then
     echo "  ${label}: clearing native cache (one-binary mode)"
     rm -rf "${native_cache_dir}/"
@@ -590,11 +625,31 @@ bootstrap_stage_sanity() (
 bootstrap_native_build_main() {
   compiler=$1
   output=$2
+  stage4_low_memory=1
+  if [ "${execution_profile}" = "incremental-unlimited" ]; then
+    stage4_low_memory=0
+  fi
+  set -- native-build \
+    --target "${PLATFORM}" \
+    --backend "${backend}" \
+    --runtime-bundle core-c-bootstrap \
+    --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
+    --entry-closure
+  if [ "${stage4_low_memory}" -eq 1 ]; then
+    set -- "$@" --low-memory
+  fi
+  set -- "$@" \
+    --threads "${selfhost_jobs}" \
+    --cache-dir "${native_cache_dir}" \
+    --mode one-binary \
+    --entry src/app/cli/main.spl \
+    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
+    -o "${output}"
   env RUST_LOG="${RUST_LOG:-error}" \
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_BOOTSTRAP_STAGE4=1 \
-    SIMPLE_BOOTSTRAP_LOW_MEMORY=1 \
+    SIMPLE_BOOTSTRAP_LOW_MEMORY="${stage4_low_memory}" \
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
@@ -605,19 +660,7 @@ bootstrap_native_build_main() {
     LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING=1 \
     SIMPLE_NO_STUB_FALLBACK=1 \
     SIMPLE_BINARY="$(absolute_path "${compiler}")" \
-    "${compiler}" native-build \
-    --target "${PLATFORM}" \
-    --backend "${backend}" \
-    --runtime-bundle core-c-bootstrap \
-    --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
-    --entry-closure \
-    --low-memory \
-    --threads "${selfhost_jobs}" \
-    --cache-dir "${native_cache_dir}" \
-    --mode one-binary \
-    --entry src/app/cli/main.spl \
-    --runtime-path "$(pwd)/src/compiler_rust/target/bootstrap" \
-    -o "${output}"
+    "${compiler}" "$@"
 }
 
 # ===========================================================================

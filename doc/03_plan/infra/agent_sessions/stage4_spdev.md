@@ -14,6 +14,18 @@ Recent commands:
 
 Next: classify phase3 `hir_lower` segfault and either bisect or escalate with compiler/runtime team; do not re-run full native-build until blocker is isolated/fixed.
 
+## Bootstrap execution profiles (2026-08-02)
+
+- The default remains incremental and cache-preserving.
+- `--incremental-unlimited` is the single-agent fast lane: it reuses native
+  caches, selects about 80% of online CPUs when `--jobs` is omitted, removes
+  the two Stage 4 low-memory switches, and leaves memory to the host scheduler.
+  An explicit `--jobs` still wins.
+- `--clean-release` is the final proof after an incremental bootstrap succeeds:
+  it clears the reusable native cache before every native batch, deploys the
+  result, and runs release tests. It must not be substituted for iterative
+  diagnosis because it deliberately gives up cache reuse.
+
 ## 2026-08-01 Stage2/Stage3 continuation
 
 - GDB localized the earlier SIGILL to `module_surfaces_from_modules`, where a
