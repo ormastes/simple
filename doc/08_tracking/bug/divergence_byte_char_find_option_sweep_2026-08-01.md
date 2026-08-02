@@ -233,3 +233,139 @@ returns NIL past the character count and string concatenation with nil yields
 nil, so a byte-bounded loop that CONCATENATES `char_at(i)` does not merely
 mis-slice — it destroys the entire accumulated result. Loops that only COMPARE
 `char_at(i)` degrade harmlessly, which is why bucket 2 is as large as it is.
+
+## Wave 2026-08-02b — ranked remainder, the blind spec tier, the inert instrument
+
+### The measurement finding that reframes this whole sweep
+
+**sspec `describe` blocks CANNOT observe the nil-collapse form of this defect.**
+Proved by discriminating probes against the shipped binary, not inferred:
+
+| expression | `simple run` | inside sspec TEST |
+|---|---|---|
+| byte-bounded `char_at` concat of `"\u{e9}"`, `.len()` | **-1** (nil sentinel) | **2** |
+| `expect(false).to_equal(true)` | — | correctly FAILS |
+
+So `accumulator + nil` is a no-op on the sspec tier and nil-collapsing on the
+run tier. The DSL is sound — the sanity controls fail correctly — the *tier* is
+different. `SIMPLE_EXECUTION_MODE` does not move it: set to `jit`, `native` and
+`llvm` in turn, an example asserting the -1 sentinel failed and one asserting 2
+passed in **all three** runs.
+
+**Consequence: this lane's first sabotage run came back GREEN against the
+known-broken `_lsp_transport_escape`.** A spec-based regression for sites 1, 4
+and 6 of the ranked list is structurally vacuous. Regression cover for the
+nil-collapse family therefore lives in
+`test/01_unit/bugs/utf8_index_space_jit_probe.spl`, a runnable program in the
+convention of `text_ordering_jit_probe.spl`, not in a `describe`. **There is no
+CI hook that runs `*_jit_probe.spl` files** — neither the pre-existing probe nor
+this one — which is an open gap, recorded here rather than papered over.
+
+Second trap, same class: **a driver `.spl` placed OUTSIDE the repo tree resolves
+`std.*` against a different source root.** Running one from the scratch
+directory silently measured an unedited copy of the library and made a correct
+fix look like it had failed. Run probes from the repository root.
+
+### Landed this wave
+
+- `1ba2e7af34a` — `_lsp_transport_escape` (ranked #1). PROVED on the shipped
+  module: every non-ASCII input returned the -1 nil-length sentinel — the whole
+  LSP payload destroyed, not one character mangled — while the ASCII control
+  returned a correct 4. All four public builders (didOpen, didChange,
+  workspace/symbol, rename) shown dropping their content. Sabotage: 13 checks
+  flip red under `SIMPLE_EXECUTION_MODE=jit`, ASCII controls stay green.
+- `e16517c5454` — `fuzzy_match` + `fuzzy_score` (ranked #5, **partly refuted**,
+  see below).
+- `c4a748ab774` — safetensors `_array_body` and the shape-field scanner
+  (previously undecided, now **decided as genuinely wrong**).
+- `dc002baecf9` — `pem.spl` (previously undecided, now **proved safe**, and
+  `_trim_text` in the same file fixed as a genuine defect).
+- `scripts/check/check-utf8-slice-audit-live.shs` — makes the inert audit loud.
+
+### Refuted this wave
+
+- **Ranked #5 `fuzzy_match` "any non-ASCII query can never match" — REFUTED.**
+  It matched. Past the character count BOTH `char_at` calls return nil and
+  `nil == nil` is TRUE, so each surplus query byte is consumed by a free
+  nil-match; a candidate containing the query always carries at least as much
+  byte surplus as the query, so the accident holds and the boolean answer was
+  already correct. Correct-by-accident, not correct-by-design.
+  What IS genuinely wrong is the **score**, because each free nil-match also
+  paid `10 + streak`. Measured for query `é`, before → after:
+  `"café"` 20→8, `"éa"` 21→11, `"中é"` 22→10, `"xxé"` 21→9. Before the fix
+  `"中é"` (match at position 1) **outranked** `"éa"` (match at position 0)
+  purely because the candidate held a 3-byte character. The palette ordered
+  results by character WIDTH. ASCII scores are unchanged by the fix.
+- **`pem.spl` "roughly 1-in-65 chance of dropping a base64 character" —
+  REFUTED for RFC 7468 conformant input.** For the skewed newline probe to drop
+  base64 it must skip when `body_start` already points at base64. It cannot:
+  RFC 7468 requires an EOL immediately after the BEGIN marker, so that byte is
+  always CR or LF, and with 64-character wrapping the skewed read lands on a
+  base64 character, matching neither. The misread makes the code skip LESS,
+  never more, and a retained leading newline is removed by `line_unwrap` /
+  `_trim_text`. Fixed anyway, as hardening, to remove the accident.
+  The genuine defect in that file is `_trim_text`: on `"  \u{e9}"` (4 BYTES /
+  3 CHARACTERS) it returned only the LEAD BYTE of the `é` — invalid UTF-8 fed
+  to a base64 decoder.
+
+### `SIMPLE_UTF8_SLICE_AUDIT` — the mechanism, and the exact fix
+
+Not compiled out, and not unwired. `runtime/src/lib.rs` declares
+`pub mod text_slice_audit;` **unconditionally, with no `cfg` gate**, and three
+call sites reference it unconditionally (`interpreter/expr/collections.rs:934`,
+`interpreter_method/string.rs:331`, `runtime/src/value/collections.rs:3989`).
+The module landed in `2ca6b4da3a9` on 2026-08-01 and `git cat-file -t` confirms
+it is an ancestor of `main`.
+
+It was **LOST IN DEPLOYMENT**: `bin/release/x86_64-unknown-linux-gnu/simple` was
+never rebuilt from a tree containing it. Two independent measurements:
+
+- static — `SIMPLE_UTF8_SLICE_AUDIT`, `interp_bracket`, `interp_method`,
+  `rt_slice_rust` and `self_test` all occur **0** times in the binary, while the
+  control string `SIMPLE_EXECUTION_MODE` occurs **3** times, so the absence is
+  real and not an artifact of the search;
+- dynamic — with `SIMPLE_UTF8_SLICE_AUDIT=1` and `=2` the binary emitted **0**
+  audit lines, so the module's own once-per-process `site=self_test` liveness
+  violation — built precisely to distinguish a real zero from an inert one —
+  never fired.
+
+**Exact fix: rebuild the Rust runtime and redeploy the seed binary.** That is
+another lane's; it was NOT run here. Until it happens,
+`scripts/check/check-utf8-slice-audit-live.shs` fails loudly (exit 1) on both
+the static and the dynamic check, so the instrument can no longer report a
+vacuous clean. It also fails closed when no binary is found, and aborts when its
+own control string is missing.
+
+### Remaining genuinely-wrong sites, ranked (still NOT fixed)
+
+Numbering follows the previous wave. #1 and #5 landed; #5 with the refutation
+above. The rest are untouched and carry their mechanisms:
+
+2. `src/compiler_rust/lib/std/src/mcp/simple_lang/dependencies.spl:448-458`
+   `contains_symbol` — `text.substring(i, i + symbol.len())` matches at a BYTE
+   offset `i`, then `text.char_at(i - 1)` / `char_at(i + symbol.len())` use that
+   same `i` as a CHARACTER offset for the word-boundary test. With any non-ASCII
+   earlier in the haystack the boundary probe reads the wrong character, so a
+   present symbol is reported absent (or an embedded one reported present).
+3. `src/lib/common/js/engine/lexer.spl:204` `_unescape_string` — `\uXXXX` is
+   read with `raw.slice(i + 1, i + 5)`, a BYTE slice, at a CHARACTER index `i`.
+   The hardcoded `é` / `世` / `界` special cases at :207-212 are an existing
+   band-aid over exactly this and should be deleted by the fix, not kept.
+4. `src/lib/common/archive/zip.spl:53` `_ascii_to_bytes` — byte-bounded loop
+   over `char_at`, then `char_code_at(0).to_u8()`, i.e. codepoint-mod-256 plus
+   overrun garbage. Used for entry names AND `ZipFile.data` (:297), so archived
+   UTF-8 CONTENT is corrupted, not just filenames. Needs a real UTF-8 encoder,
+   not an index-space swap — the widest of the remaining items.
+6. `.../browser_engine/script/js_transpiler.spl:236` `_safe_replace` and
+   `:210-220` `_convert_line_comment` — nil-collapse family: a JS line
+   containing non-ASCII returns nil, silently DELETING the line from transpiled
+   output. Verify with the runnable probe, never a `describe`.
+7. `src/lib/common/markdown/adapter.spl:182,186` `_adapt_trim` — same shape as
+   the `pem.spl` `_trim_text` fixed this wave (BYTE `start`/`end` bounds read
+   with `char_at`, result taken with `slice`), so the fix there is the template.
+8. `src/lib/gc_async_mut/http_client/types.spl:67` `url_decode` — `len` is
+   `text.length()` (BYTES) while `text.char_at(i)` is CHARACTERS, and the `%XX`
+   branch takes `substring(i + 1, i + 3)` in byte space off the same `i`.
+
+Sites 2, 3, 6, 7 and 8 are index-space swaps of the kind already landed five
+times; site 4 needs an encoder and should be scoped separately.
