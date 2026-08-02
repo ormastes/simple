@@ -663,3 +663,30 @@ opaque-string destination. Keep the non-optional helper until that comparison
 proves or disproves it. Remove all temporary `[mir-method-call]`,
 `[hir-field-type]`, `[mir-field-type]`, and `[mir-optional-inner]` receipts
 before exact Stage4 verification.
+
+## 2026-08-02 caller-boundary diagnostics and explicit postponement
+
+- Cycle 18 proved `emit_call_value` creates a valid destination, builder
+  writeback succeeds, and both `trim()` and `lower()` return valid local IDs.
+  The nil dereference occurs after `lower_method_call` returns. Stage2
+  admission SHA-256:
+  `a1531173945765ab884d939db15c9769c316478b397e4842a5e591d3c7d2c8cc`.
+- Cycle 19 proved the `lower()` result survives the `MethodCall` dispatch and
+  the complete `lower_expr` span save/restore wrapper. The next caller is the
+  statement-level initializer path. Stage2 admission SHA-256:
+  `5d5981d33f65e4d58e6cb5da79b2b8fdb79fbef5d2a39d17c8fdc057f97896d7`.
+- Added an explicit nil guard before the early-Let path reuses a staged
+  `HirType?` payload and reads `declared_type.kind`. The focused source
+  contract passed. Cycle 20 Stage2 passed the four bootstrap admission gates
+  with SHA-256:
+  `60e82b6d4bc7912a069e35e0308a8bb9e56d1fda6b4400d2b35dc0e44058e3d9`.
+- At the user's explicit request to push the current state, the in-progress
+  Cycle 20 Stage3 build was stopped with exit 130. Stage3/Stage4 completion,
+  essential-tools smoke, diagnostic removal, and final verification are
+  postponed and remain unproven. This is a WIP handoff, not a PASS claim.
+
+Resume: start a fresh Stage2/Stage3 cycle from the early-Let guard, then build
+the exact Stage4 CLI. Remove all temporary diagnostic receipts, run
+`scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
+fresh Stage4 binary, add/execute the focused regressions, and complete final
+verification before any release claim.
