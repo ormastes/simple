@@ -175,4 +175,46 @@ host-only shell) so the core stays offloadable. Details, ban list, and the
 phase-by-phase GPU-reality audit:
 [gpu_offload_check feature expert](../../feature_expert/gpu_offload_check/skill.md).
 
+## Session update 2026-08-02 (backend auto-resolution, heuristic sizing, position:fixed, platform nil-guard)
+
+- **Viable-probe "auto" backend resolution** (`b0ef8e6aee5` engine2d +
+  `6eb19236c05` browser side): engine2d `engine.spl` "auto" now deep-probes
+  each candidate (create 8x8 → clear+rect+submit+present → readback) and
+  requires device provenance plus a pixel round-trip before selecting; a
+  lane that looks available but cannot render is rejected with a
+  **`[backend-resolve] <name> rejected: <why>`** line (grep for that prefix
+  when diagnosing lane selection) and the next candidate is tried. Result is
+  memoized per process; **explicitly named backends are never silently
+  swapped**. The browser shim's auto branch
+  (`simple_web_engine2d_renderer` via `simple_web_renderer.spl` /
+  `simple_web_resolved_engine2d_backend_name`) routes through this
+  resolution.
+- **Heuristic fast path fixes + one OPEN misroute:** the whitelist-of-sizes
+  trap is fixed — `_first_px_dimension` now parses the declared
+  `prop: <N>px` value (char_code_at, not char_at), so animated
+  width/height ticks paint pixel-exact; background resolution now scans
+  style-range selectors for a body rule color (`_style_body_rule_color`).
+  **Open defect (fix in flight):** with an explicit GPU backend name the
+  heuristic fast path still misroutes class-selector docs — don't treat a
+  heuristic-path render of class-selector HTML under an explicit GPU
+  backend as evidence either way until that lands.
+- **`Style.position_fixed`** (`d05b29b46d0`): new field threaded through all
+  Style constructors (the three field-consistent call sites noted above now
+  include it), with decl parsing and a "fixed" arm in position resolution
+  (was falling through to absolute/static). Same commit made the margin
+  family honor CSS source order (last-declared wins per side via
+  `decl_tbl_last_index` — a longhand only beats a `margin` shorthand when
+  declared after it).
+- **platform.spl nil-guard trap** (`30971e2f946`, both nogc tiers):
+  `detect_os()`/`detect_arch()` guarded `env_get` results only with
+  `!= ""` — **nil passes that guard**, so any host without OS/OSTYPE
+  exported crashed `.lower()` in the interpreter on the first shallow probe
+  of every "auto" resolution. Pattern to copy: `if x == nil: "" else:
+  x.lower()`. Same commit gates probe `shutdown()` by
+  `engine2d_shutdown_has_typed_route` (duck-typed virtual shutdown SIGILLs
+  in renderer-bearing JIT units).
+- Second-render corruption fixed by renaming match-arm bindings in
+  `simple_web_render_session` (interpreter arm-binding leak; see
+  `doc/08_tracking/bug/render_session_second_render_match_arm_shadowing_bx_2026-08-02.md`).
+
 Template: `.spipe/spipe/doc/00_llm_process/template/layer_skill.md`

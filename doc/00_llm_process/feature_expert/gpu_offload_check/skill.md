@@ -34,19 +34,26 @@ evaluated and rejected as infeasible today (research D2).
 ## The tool: how to run
 
 ```bash
-bin/simple run src/app/gpu_lint/gpu_runnable_scan.spl
+bin/simple run src/app/gpu_lint/gpu_runnable_scan.spl -- --report=PATH  # full ranked report (default /tmp path)
+sh scripts/check/check-gpu-runnable.shs   # warn-only gate; report at build/gpu_runnable_report.txt
 ```
 
-Text-level prototype: scans **top-level `.spl` files** of
-`src/lib/gc_async_mut/gpu/engine2d` + `src/lib/gc_async_mut/gpu/browser_engine`
-(hardcoded in `main()`), builds a conservative **name-match** call graph, and
+Productionized 2026-08-02 (`2e3e249e1e3`): scans **top-level `.spl` files** of
+`src/lib/gc_async_mut/gpu/engine2d` + `src/lib/gc_async_mut/gpu/browser_engine`,
+builds an **owner-aware, import-filtered** call graph (see next section), and
 propagates blockage transitively from roots (`is_root_name`: draw primitives,
 tile/pixel/glyph checksums, draw_ir exec/apply/dispatch, cull).
-Prints a ≤30-line summary to stdout; the full report `file_write` path near the
-end of `main()` is **hardcoded to a session scratchpad** — repoint `out_path`
-before running. Known caveats (in the report header): same-name defs on
-unrelated types are merged; trait signature decls count as empty runnable
-bodies; cycle marking includes nodes that merely reach a cycle.
+Prints a ≤30-line summary to stdout; `--report=PATH` writes the full ranked
+report (no session-scratchpad hardcode anymore). The pre-commit-shaped gate
+`scripts/check/check-gpu-runnable.shs` runs the same scan and reports BLOCKED
+names but is **warn-only** (`gpu_runnable_gate=warn_only_pass`) per the staged
+plan `doc/03_plan/ui/rendering/gpu_runnable_check_impl_plan.md` — inventory and
+ratchet first, hard-fail only after whitelist calibration settles. Known
+caveats (in the report header): dotted calls with unresolvable receivers still
+weak-edge to all reachable same-name defs (over-connects taint); the import
+filter is a line-based substring match on file basenames (short names like
+`mod` over-match; re-exports not followed transitively); trait signature decls
+count as empty runnable bodies.
 
 ## Ban list / whitelist (scanner `line_violations`)
 
@@ -59,34 +66,53 @@ bodies; cycle marking includes nodes that merely reach a cycle.
   recursion or any call cycle; **non-GPU FFI** — any `*sffi*`, `ffi_*`, `rt_*`,
   `extern_*` not on the whitelist.
 - **Whitelisted GPU intrinsics** (`is_gpu_intrinsic`): `vulkan_*`, `cuda_*`,
-  `vk_*`, `sffi_vulkan*`, `sffi_cuda*`, and anything containing `vulkan_sffi` /
-  `cuda_sffi`. (Metal SFFI is currently NOT whitelisted — the
-  `metal_sffi_*` hits in the report are classified banned-FFI; decide
-  deliberately before "fixing" those rows.)
+  `vk_*`, `sffi_vulkan*`, `sffi_cuda*`, anything containing `vulkan_sffi` /
+  `cuda_sffi`, and — since `2e3e249e1e3` — `webgpu_sffi_*` and `metal_sffi_*`
+  (the earlier banned-FFI classification of metal hits was a calibration gap,
+  now resolved deliberately in the whitelist).
 - This mirrors `gpu_checker.spl`'s set (heap alloc, literals, closures, string
   machinery, recursion, dyn dispatch, async, throw, yield, print, FFI,
   non-scalar params), which matches the W1 plan's accept/reject table and
   SPIR-V reality.
 
-## Overload-taint rule
+## Owner-aware graph + overload-taint rule (2026-08-02, `7f9fe07e9be`)
 
-Registration is **by NAME**: if any function named N is a root (or reachable),
-ALL defs of N are checked, and if **any def of N is blocked, every caller of N
-is tainted** ("any-def-blocked"). This is deliberate: the name-keyed call graph
-cannot resolve which overload a call hits. Option A must key by name+arity and
-report per-signature (the name-keyed `gpu_function_targets` table is a known
-overload-blind trap, `hir_types.spl:233-244`).
+Graph nodes are **per-def `(file, name)`**, with receiver-kind-prefixed
+callees:
 
-## Current inventory (scan of 2026-08-02)
+- **Strong (resolved) edges:** plain/`self` calls resolve same-file first,
+  then import-reachable. Cycle detection runs on strong edges ONLY — real
+  recursion is always a resolved call. This killed the merged-name self-loop
+  false positives: recursion-cycle blocked names **249 → 40**; all five paint
+  roots (`clear`, `draw_rect_filled`, `draw_line`, `emu_draw_line`,
+  `emu_draw_ellipse`) lost their phantom recursion verdicts and now report
+  owner-tagged chains ending in real FFI violations. True-recursion control
+  (`be_dom_find_by_id`, self-call `dom_accessors.spl:310`) stays BLOCKED.
+- **Weak edges:** dotted calls with unresolvable receivers edge to every
+  reachable same-name def EXCEPT the caller — so delegation like
+  `engine.clear -> backend.clear` is a **cross edge, never a self-loop**.
+  Weak edges skip cycle detection but still propagate the **any-def-blocked
+  overload taint**: if any def of N is blocked, every caller of N is tainted.
+- **Documented residual:** ambiguous dotted MUTUAL recursion is not
+  cycle-checked (weak edges don't feed cycle detection) — the conservative
+  trade for −209 false positives.
 
-187 files, 4142 defs (3146 unique names); **1463/3146 names blocked**;
-**133 tainted overloaded names**; roots: 24 total → **10 BLOCKED,
-14 OFFLOADABLE**. Top blocking constructs: string-op 1089, list-push 442,
-text-interpolation 437, recursion-cycle 422, closure 170, print 101, io-call 55,
-then metal_sffi_* / rt_time_now_micros FFI. Healthy roots include the
-vector/bitmap font checksum lanes and draw_ir dispatch-only entry points;
-blocked roots include `clear`/`draw_rect_filled` (reach
-`webgpu_sffi_compute_draw`) and the baremetal draw_* family (cycles).
+Option A must still key by name+arity and report per-signature (the
+name-keyed `gpu_function_targets` table is a known overload-blind trap,
+`hir_types.spl:233-244`).
+
+## Current inventory (scan of 2026-08-02, post owner-aware graph)
+
+4155 defs (3159 unique names, 4155 graph nodes); **1398/3159 names blocked**;
+**113 tainted overloaded names**; roots: 28 total → **14 BLOCKED,
+14 OFFLOADABLE**. Dominant blockers remain string ops, list-push, and
+text-interpolation; recursion-cycle is down to 40 names (was 422 under the
+name-merged graph, 249 immediately before the owner-aware fix). Healthy roots
+include the vector/bitmap font checksum lanes and draw_ir dispatch-only entry
+points; the vulkan clear/draw_line dispatch chain
+(`_enqueue_framebuffer_compute`/`_dispatch_framebuffer_checked`/
+`_flush_pending_compute`) was cleared by the `b0ef8e6aee5` pending-compute
+preallocation (`.push()` growth → 16-slot arrays + live-count cursor).
 
 ## Phase-audit reality (2026-08-02 — which phases have real GPU impls)
 
