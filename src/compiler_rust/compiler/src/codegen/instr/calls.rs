@@ -3405,7 +3405,17 @@ pub fn compile_call<M: Module>(
                 // `"rev" | "reverse"` copies then reverses, and the string arm
                 // builds a new text. `rt_reverse` does exactly that and refuses
                 // any other receiver loudly.
-                "reverse" => Some("rt_reverse"),
+                // `reverse` is the MUTATING spelling and does NOT share a
+                // runtime helper with `rev`/`reversed` above. `interpreter_method/
+                // mod.rs` lists `"reverse"` in `MUTATING_METHODS` and omits
+                // `"rev"`/`"reversed"`, so the interpreter rebinds the receiver
+                // for `reverse` only. Both spellings share ONE arm in
+                // `interpreter_method/collections.rs`, which is why they look
+                // identical there and are not. Routing `reverse` to the copying
+                // `rt_reverse` left the receiver unmodified here while the
+                // interpreter rebound it. Measured: `a.reverse()` leaves
+                // `a == [3,2,1]`; `a.rev()` leaves `a == [1,2,3]`.
+                "reverse" => Some("rt_reverse_mut"),
                 "first" => Some("rt_array_first"),
                 "last" => Some("rt_array_last"),
                 // (The dead second `"find" => rt_array_find` arm that used to

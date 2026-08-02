@@ -1113,13 +1113,30 @@ mod tests {
             calls.contains("\"find_str\" => Some(\"rt_string_find\")"),
             "`find_str` is text-only and must keep its direct route"
         );
+        // `reverse` vs `rev`/`reversed` are DIFFERENT contracts, not synonyms.
+        // These assertions previously demanded `"reverse" => rt_reverse`, i.e.
+        // they PINNED the divergence: `interpreter_method/mod.rs` lists
+        // `"reverse"` in `MUTATING_METHODS` and omits `"rev"`/`"reversed"`, so
+        // the interpreter rebinds the receiver for `reverse` alone, while the
+        // copying helper left it untouched. Measured: `a.reverse()` leaves
+        // `a == [3,2,1]`, `a.rev()` leaves `a == [1,2,3]`.
         assert!(
-            calls.contains("\"reverse\" => Some(\"rt_reverse\")"),
-            "calls.rs must route `reverse` to the copying rt_reverse"
+            calls.contains("\"reverse\" => Some(\"rt_reverse_mut\")"),
+            "calls.rs must route the MUTATING `reverse` to rt_reverse_mut"
+        );
+        assert!(
+            !calls.contains("\"reverse\" => Some(\"rt_reverse\")"),
+            "the copying rt_reverse does not rebind the receiver; that is the rev/reversed contract"
         );
         assert!(
             !calls.contains("\"reverse\" => Some(\"rt_array_reverse\")"),
-            "rt_array_reverse mutates in place and returns a bool"
+            "rt_array_reverse returns a bool and is absent from runtime_native.c"
+        );
+        // The pure spellings must NOT follow `reverse` — the whole point of the
+        // split. This is the true-positive control for this pair.
+        assert!(
+            calls.contains("\"rev\" | \"reversed\" => Some(\"rt_reverse\")"),
+            "rev/reversed must keep the copying rt_reverse"
         );
 
         // --- closures_structs.rs -------------------------------------------
@@ -1128,8 +1145,16 @@ mod tests {
             !closures.contains("\"find\" => \"rt_string_find\""),
             "the text-only route made every array find answer -1"
         );
-        assert!(closures.contains("\"reverse\" => \"rt_reverse\""), "bare `reverse` must reach rt_reverse");
+        assert!(
+            closures.contains("\"reverse\" => \"rt_reverse_mut\""),
+            "bare mutating `reverse` must reach rt_reverse_mut"
+        );
+        assert!(!closures.contains("\"reverse\" => \"rt_reverse\""));
         assert!(!closures.contains("\"reverse\" => \"rt_array_reverse\""));
+        assert!(
+            closures.contains("\"rev\" | \"reversed\" => \"rt_reverse\""),
+            "rev/reversed must keep the copying rt_reverse"
+        );
 
         // --- sort ------------------------------------------------------------
         // `sort` carried the identical divergence `reverse` had: the bare-name
@@ -1562,7 +1587,8 @@ fn try_compile_builtin_method_call<M: Module>(
         // See calls.rs: `rt_array_reverse` reverses IN PLACE and returns a
         // bool, for every receiver. The interpreter mutates nothing and returns
         // a new collection, which is what `rt_reverse` does.
-        "reverse" => "rt_reverse",
+        // MUTATING spelling — see calls.rs. `rev`/`reversed` keep `rt_reverse`.
+        "reverse" => "rt_reverse_mut",
         "first" => "rt_array_first",
         "last" => "rt_array_last",
         // Receiver-polymorphic. This table had no array arm for `find` at all,

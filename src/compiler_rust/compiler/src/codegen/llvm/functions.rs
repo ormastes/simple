@@ -2452,7 +2452,8 @@ impl LlvmBackend {
                     // See rt_reverse: `rt_array_reverse` reverses IN PLACE and
                     // returns a bool, applied here to every receiver; the
                     // interpreter mutates nothing and returns a new collection.
-                    "reverse" => Some("rt_reverse"),
+                    // MUTATING spelling — see instr/calls.rs.
+                    "reverse" => Some("rt_reverse_mut"),
                     "first" => Some("rt_array_first"),
                     "last" => Some("rt_array_last"),
                     // (The dead second `"find" => rt_array_find` arm that used
@@ -2889,7 +2890,14 @@ impl LlvmBackend {
                     // in-place helper returns a bool and mutates the receiver,
                     // so it disagreed with the interpreter on both the result
                     // and on aliasing.
-                    ("Array" | "array", "reverse") => Some("rt_array_reversed"),
+                    // `rt_reverse_mut`, NOT `rt_array_reversed`. Two defects in
+                    // one arm: (1) `reverse` is the MUTATING spelling, so a
+                    // copying helper left the receiver unmodified while the
+                    // interpreter rebound it; (2) `rt_array_reversed` has never
+                    // existed in `runtime_native.c`, so this arm did not even
+                    // link on the native lane. `rt_reverse_mut` is defined in
+                    // BOTH runtimes and returns the receiver it just reversed.
+                    ("Array" | "array", "reverse") => Some("rt_reverse_mut"),
                     ("Array" | "array", "filter") => Some("rt_array_filter"),
                     ("Array" | "array", "map") => Some("rt_array_map"),
                     ("Array" | "array", "each") | ("Array" | "array", "for_each") => Some("rt_array_each"),

@@ -270,7 +270,9 @@ impl LlvmEmitter<'_> {
             // `rt_reverse` does. It is also the only one of the two that the C
             // runtime defines — `rt_array_reverse` has never existed there, so
             // `arr.reverse()` did not even link on the native lane.
-            "reverse" => Some("rt_reverse"),
+            // MUTATING spelling — see instr/calls.rs. `rev`/`reversed` keep the
+            // copying `rt_reverse`; only `reverse` rebinds the receiver.
+            "reverse" => Some("rt_reverse_mut"),
             // Same defect, same shape: `rt_array_sort` sorts IN PLACE, returns
             // a bool, was applied to every receiver, and has never existed in
             // runtime_native.c. `rt_sort` copies, matching the interpreter.
@@ -2320,7 +2322,21 @@ mod tests {
         assert_eq!(LlvmEmitter::runtime_method_name("find_str"), Some("rt_string_find"));
 
         // `reverse`: `rt_array_reverse` reverses IN PLACE and returns a bool.
-        assert_eq!(LlvmEmitter::runtime_method_name("reverse"), Some("rt_reverse"));
+        // `reverse` is the MUTATING spelling and must NOT share a helper with
+        // `rev`/`reversed`. This assertion used to demand `rt_reverse` for
+        // `reverse`, pinning the divergence: only `reverse` is in the
+        // interpreter's `MUTATING_METHODS`, so only it rebinds the receiver.
+        assert_eq!(LlvmEmitter::runtime_method_name("reverse"), Some("rt_reverse_mut"));
+        assert_ne!(
+            LlvmEmitter::runtime_method_name("reverse"),
+            Some("rt_reverse"),
+            "the copying helper is the rev/reversed contract, not reverse's"
+        );
+        // NOTE: this table has no `rev`/`reversed` arm at all, unlike the two
+        // Cranelift tables. That gap is recorded in the bug tracker; it is NOT
+        // filled here because this lane has no measurement of the LLVM path for
+        // those spellings, and adding an unverified route would be the same
+        // class of mistake this change is undoing.
 
         // `sort`: same shape — `rt_array_sort` sorts IN PLACE, returns a bool,
         // and does not exist in runtime_native.c at all.

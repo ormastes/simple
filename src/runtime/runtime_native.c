@@ -4016,6 +4016,44 @@ int64_t rt_reverse(int64_t receiver) {
     return rt_string_reverse_chars(s);
 }
 
+/* reverse: the MUTATING spelling. Reverses an ARRAY in place and returns that
+ * same array.
+ *
+ * `reverse` and `rev`/`reversed` are NOT synonyms here. interpreter_method/mod.c
+ * -- interpreter_method/mod.rs -- lists "reverse" in MUTATING_METHODS and
+ * deliberately does NOT list "rev"/"reversed", so the interpreter writes the
+ * result back to the receiver binding for `reverse` only. Both spellings share
+ * ONE arm in interpreter_method/collections.rs, which is exactly why reading
+ * that arm alone makes them look identical. Measured:
+ *
+ *   var a = [1, 2, 3]
+ *   a.reverse()   -> [3,2,1] AND a == [3,2,1]   (mutating spelling)
+ *   a.rev()       -> [3,2,1] AND a == [1,2,3]   (pure spelling)
+ *
+ * Routing `reverse` to the copying rt_reverse left the receiver unmodified on
+ * JIT/native while the interpreter rebound it -- a silent wrong answer on the
+ * aliasing axis. rt_reverse itself is CORRECT: it is the rev/reversed helper.
+ *
+ * TEXT passes through to the copying behaviour UNCHANGED. The interpreter also
+ * rebinds a text receiver, contradicting its own documented rule that strings
+ * are value types with no mutating methods; that affects string push/pop/clear
+ * too and is recorded in the bug tracker rather than decided here. */
+int64_t rt_reverse_mut(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr) {
+        int64_t n = rt_array_len(arr);
+        for (int64_t i = 0, j = n - 1; i < j; i++, j--) {
+            int64_t tmp = rt_array_get(arr, i);
+            rt_array_set(arr, i, rt_array_get(arr, j));
+            rt_array_set(arr, j, tmp);
+        }
+        return receiver;
+    }
+    RtCoreString* s = rt_core_as_string(receiver);
+    if (!s) rt_refuse_non_text_receiver("reverse");
+    return rt_string_reverse_chars(s);
+}
+
 /* A receiver `sort` has no compiled implementation for. Loud, never a value.
  * Separate from rt_refuse_non_text_receiver because `sort` is the opposite
  * shape: text is the INVALID receiver here, not the valid one. */

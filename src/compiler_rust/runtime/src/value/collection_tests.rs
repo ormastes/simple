@@ -2272,13 +2272,28 @@ fn rt_find_dispatches_on_receiver_without_changing_text() {
     assert_eq!(rt_find(a123, text("x")), rt_string_find(a123, text("x")));
 }
 
-/// `rt_reverse` is what the `reverse` METHOD now lowers to. `rt_array_reverse`
-/// stays in the runtime with its in-place semantics for callers that name it,
-/// but nothing dispatches `reverse` to it any more: it returns a bool and
-/// MUTATES the receiver, while the interpreter (`interpreter_method/
-/// collections.rs` `"rev" | "reverse"`) copies first and leaves the receiver
-/// alone. The non-mutation assertion is the half that a "just swap the callee"
-/// change would get wrong.
+/// `rt_reverse` is the `rev` / `reversed` helper: it COPIES and leaves the
+/// receiver alone. Every assertion below is correct and is kept.
+///
+/// What was wrong was the sentence this comment used to open with — that
+/// `rt_reverse` "is what the `reverse` METHOD now lowers to". `reverse` and
+/// `rev`/`reversed` are NOT synonyms. `interpreter_method/mod.rs` lists
+/// `"reverse"` in `MUTATING_METHODS` and deliberately omits `"rev"` and
+/// `"reversed"`, so the interpreter writes the result back to the receiver
+/// binding for `reverse` alone. The two spellings share ONE arm in
+/// `interpreter_method/collections.rs`, which is exactly why reading that arm
+/// made them look identical. Measured on the interpreter:
+///
+/// ```text
+/// var a = [1, 2, 3]
+/// a.reverse()   # -> [3,2,1] AND a == [3,2,1]
+/// a.rev()       # -> [3,2,1] AND a == [1,2,3]
+/// ```
+///
+/// So routing `reverse` here left the receiver unmodified under JIT/native
+/// while the interpreter rebound it. `reverse` now lowers to `rt_reverse_mut`
+/// (see the test below); this function keeps serving `rev`/`reversed`, which is
+/// the contract these assertions actually describe.
 #[test]
 fn rt_reverse_copies_and_leaves_the_receiver_alone() {
     use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_reverse, rt_string_new};
@@ -2357,4 +2372,47 @@ fn rt_sort_sorts_in_place_and_returns_the_receiver() {
     // on type `str`". A process-exit cannot be asserted from an in-process
     // unit test without a fork harness; the refusal is covered by the
     // end-to-end probe recorded in the bug doc.
+}
+
+/// `rt_reverse_mut` is what the MUTATING `reverse` spelling lowers to: it
+/// reverses the ARRAY in place and returns that same array.
+///
+/// Hand-computed against the interpreter's observed end-to-end behaviour, not
+/// against `interpreter_method/collections.rs` in isolation — that arm is
+/// shared with `rev`/`reversed` and shows a copy either way. The receiver-IS-
+/// reversed assertion is the half that a copying helper gets wrong, and it is
+/// the exact divergence this symbol exists to close.
+#[test]
+fn rt_reverse_mut_reverses_in_place_and_returns_the_receiver() {
+    use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_reverse_mut};
+    use crate::value::core::RuntimeValue;
+
+    // [1, 2, 3] -> [3, 2, 1], and the RECEIVER is the reversed array.
+    let a = rt_array_new(3);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+    rt_array_push(a, RuntimeValue::from_int(3));
+
+    let rev = rt_reverse_mut(a);
+    assert_eq!(rt_array_len(rev), 3);
+    assert_eq!(rt_array_get(rev, 0).as_int(), 3);
+    assert_eq!(rt_array_get(rev, 1).as_int(), 2);
+    assert_eq!(rt_array_get(rev, 2).as_int(), 1);
+
+    // The receiver IS reversed, matching the interpreter's write-back.
+    assert_eq!(rt_array_get(a, 0).as_int(), 3, "receiver must be reversed in place");
+    assert_eq!(rt_array_get(a, 1).as_int(), 2, "receiver must be reversed in place");
+    assert_eq!(rt_array_get(a, 2).as_int(), 1, "receiver must be reversed in place");
+
+    // Odd length keeps the middle element fixed; even length has no middle.
+    let b = rt_array_new(2);
+    rt_array_push(b, RuntimeValue::from_int(7));
+    rt_array_push(b, RuntimeValue::from_int(8));
+    rt_reverse_mut(b);
+    assert_eq!(rt_array_get(b, 0).as_int(), 8);
+    assert_eq!(rt_array_get(b, 1).as_int(), 7);
+
+    // Empty array is a no-op, not a crash.
+    let e = rt_array_new(0);
+    assert_eq!(rt_array_len(rt_reverse_mut(e)), 0);
 }

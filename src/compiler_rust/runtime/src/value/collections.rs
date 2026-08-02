@@ -2576,6 +2576,47 @@ pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
     }
 }
 
+/// `reverse`: the MUTATING spelling. Reverses an ARRAY in place and returns
+/// that same array.
+///
+/// `reverse` and `rev`/`reversed` are NOT synonyms in this language, and that
+/// is the whole reason this function exists separately from `rt_reverse`.
+/// `interpreter_method/mod.rs` lists `"reverse"` in `MUTATING_METHODS` and
+/// deliberately does NOT list `"rev"` or `"reversed"`, so the interpreter
+/// writes the result back to the receiver binding for `reverse` only. The two
+/// spellings share one arm in `interpreter_method/collections.rs`, which is why
+/// reading that arm alone makes them look identical — they are not. Measured:
+///
+/// ```text
+/// var a = [1, 2, 3]
+/// a.reverse()   # -> [3,2,1] AND a == [3,2,1]   (mutating spelling)
+/// a.rev()       # -> [3,2,1] AND a == [1,2,3]   (pure spelling)
+/// ```
+///
+/// Routing `reverse` to the copying `rt_reverse` therefore left the receiver
+/// unmodified under JIT/native while the interpreter rebound it — a silent
+/// wrong answer on the aliasing axis. `rt_reverse` itself is CORRECT; it is
+/// the `rev`/`reversed` helper and keeps every one of its guarantees.
+///
+/// TEXT is passed through to the copying behaviour unchanged. The interpreter
+/// currently also rebinds a text receiver here, but that contradicts its own
+/// documented rule that "strings in Simple are value types with NO mutating
+/// methods" (`interpreter_method/mod.rs`), and the same rebinding affects
+/// string `push`/`pop`/`clear` too. That is a separate, larger defect recorded
+/// in the bug tracker rather than decided here — this change deliberately
+/// leaves text behaviour byte-for-byte as it was.
+#[no_mangle]
+pub extern "C" fn rt_reverse_mut(receiver: RuntimeValue) -> RuntimeValue {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
+        rt_array_reverse(receiver);
+        return receiver;
+    }
+    match string_as_str(receiver) {
+        Some(s) => new_string(&s.chars().rev().collect::<String>()),
+        None => refuse_non_text_receiver("reverse"),
+    }
+}
+
 /// A receiver `sort` has no compiled implementation for. Loud, never a value.
 ///
 /// Distinct from `refuse_non_text_receiver` because `sort` is the opposite

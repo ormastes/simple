@@ -1950,7 +1950,8 @@ impl LlvmBackend {
             // place, return a bool, and neither exists in runtime_native.c.
             // The interpreter is the spec and copies for both.
             "sort" => Some("rt_sort"),
-            "reverse" => Some("rt_reverse"),
+            // MUTATING spelling — see instr/calls.rs.
+            "reverse" => Some("rt_reverse_mut"),
             "join" => Some("rt_array_join"),
             "clear" => Some("rt_array_clear"),
             "slice" => Some("rt_slice"),
@@ -2115,7 +2116,8 @@ impl LlvmBackend {
                 // Type-BLIND table: receiver-dispatched copying helpers, not
                 // the in-place bool-returning ones. See the sibling table above.
                 "sort" => Some("rt_sort"),
-                "reverse" => Some("rt_reverse"),
+                // MUTATING spelling — see instr/calls.rs.
+                "reverse" => Some("rt_reverse_mut"),
                 "clear" => Some("rt_array_clear"),
                 "slice" => Some("rt_slice"),
                 "len" => Some("rt_len"),
