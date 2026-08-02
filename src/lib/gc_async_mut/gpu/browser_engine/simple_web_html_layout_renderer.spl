@@ -31,6 +31,7 @@ use std.common.color.types.{from_rgba}
 use std.common.animation.timing.{
     TimingFunction, evaluate_timing, parse_timing_function
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{tile_paint_flag_enabled}
 use std.gc_async_mut.gpu.browser_engine.style_block_parse.{extract_keyframes, KeyframeRegistry}
 use std.gc_async_mut.gpu.browser_engine.style.animation.{
     BrowserCssAnimationInstance, CSSDeclaration, CSSValue,
@@ -1412,11 +1413,6 @@ fn _simple_web_layout_compose_retained(
     raw_boxes: LayoutResult,
     animation_registry: KeyframeRegistry,
     animation_schedule: _SimpleWebAnimationSchedule,
-    # Animation clock for nested iframe child documents (`< 0` = no animation).
-    # This parameter was missing while the body already referenced the name, so
-    # every build resolved it to a non-existent global -- see
-    # doc/08_tracking/bug/web_renderer_compose_retained_missing_animation_time_param_2026-08-01.md
-    animation_time_ms: i64,
     animation_property_work_count: i64,
     material_entries: [text],
     material_counts: [i64],
@@ -1817,8 +1813,7 @@ fn _simple_web_layout_compose_document(
         print "[web-phase] phase=layout elapsed_ms={(rt_time_now_micros() - render_start_us) / 1000}"
     val _phase_composed = _simple_web_layout_compose_retained(
         html, nodes, rules, child_index, base_styles, styles, raw_boxes,
-        animation_registry, animation_schedule, animation_time_ms,
-        animation_property_work_count,
+        animation_registry, animation_schedule, animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, vector_fonts, scroll_y,
         overlay, images, depth
@@ -1841,9 +1836,6 @@ pub class SimpleWebRetainedLayoutPreparation:
     styles: [Style]
     animation_registry: KeyframeRegistry
     animation_schedule: _SimpleWebAnimationSchedule
-    # Carried so the retained compose path can propagate the animation clock into
-    # nested iframe child documents; `< 0` means "no animation time".
-    animation_time_ms: i64
     animation_property_work_count: i64
     material_entries: [text]
     material_counts: [i64]
@@ -1909,7 +1901,6 @@ pub fn simple_web_layout_prepare_retained(
         base_styles: base_styles, styles: styles,
         animation_registry: animation_registry,
         animation_schedule: animation_schedule,
-        animation_time_ms: animation_time_ms,
         animation_property_work_count: animation_property_work_count,
         material_entries: material_entries, material_counts: material_counts,
         cpu_material_nodes: cpu_material_nodes,
@@ -1932,7 +1923,6 @@ pub fn simple_web_layout_compose_prepared(
         prepared.html, prepared.nodes, prepared.rules, prepared.child_index,
         prepared.base_styles, prepared.styles, raw_boxes,
         prepared.animation_registry, prepared.animation_schedule,
-        prepared.animation_time_ms,
         prepared.animation_property_work_count,
         prepared.material_entries, prepared.material_counts,
         prepared.cpu_material_nodes, prepared.solid_material_nodes,
@@ -2077,7 +2067,6 @@ pub fn simple_web_layout_rerender_retained(
     _simple_web_layout_compose_retained(
         prior.document_html, nodes, rules, child_index, base_styles, styles,
         raw_boxes, prior.animation_registry, animation_schedule,
-        animation_time_ms,
         animation_property_work_count,
         material_entries, material_counts, cpu_material_nodes,
         solid_material_nodes, width, height, true, scroll_y, overlay, images, 0
@@ -2318,7 +2307,14 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
     val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
     var fb = browser_layout_framebuffer_filled(base, width, height)
     val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
-    var painted = paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    # Tile-render-culling dispatch site (doc/03_plan/ui/rendering/
+    # tile_render_culling_plan.md): SIMPLE_WEB_TILE_PAINT=1 routes the paint
+    # through the tiled lane. Default off — the flag-off path below is the
+    # unmodified classic painter, byte-identical to before this feature.
+    var painted = if tile_paint_flag_enabled() and not widget_mode:
+        paint_tiled(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode, 0, height)
+    else:
+        paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
     painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
     val material_witness = _simple_web_visible_material_witness(
         material_entries, cpu_material_nodes, solid_material_nodes,
@@ -2329,6 +2325,43 @@ pub fn simple_web_layout_render_html_software_result(html: text, width: i32, hei
         material_fallback: simple_web_layout_material_provenance_after_execution(
             material_witness, 0, painted.len(), width * height, 0)
     )
+
+# Spec/benchmark entry for the CPU tile-render-culling lane: renders `html`
+# into a full document-space framebuffer (width x height) and, when `tiled`,
+# rasters only ops visible in the tiles intersecting viewport rows
+# [viewport_y, viewport_y + viewport_h) plus the 512px prefetch margin
+# (occlusion-culled ops are skipped too). `tiled` false runs the classic
+# paint() on the exact same pipeline — the non-tiled baseline for the
+# pixel-parity oracle. Same-budget on both lanes keeps runs deterministic.
+pub fn simple_web_layout_render_html_software_pixels_tile_lane(
+    html: text, width: i32, height: i32,
+    viewport_y: i32, viewport_h: i32, tiled: bool
+) -> [u32]:
+    # A deliberately huge fixed budget: the tiled-vs-classic comparison must
+    # be deterministic, and a wall-clock budget break that lands differently
+    # in the two lanes would fake a parity diff. Degraded-render behavior is
+    # covered by the production entry, not this oracle.
+    val lane_budget_ms: i64 = 3600000
+    _web_budget_begin(lane_budget_ms)
+    val nodes = parse_html(html)
+    val rules = extract_css_vw(html, width, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = layout(nodes, styles, child_index, 0, 0, 0, width, height, zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), zero_i32_list(node_count), empty_starts, empty_ends, neg_one_i32_list(node_count))
+    val white = argb(255, 255, 255)
+    val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
+    val base = if widget_mode: argb(245, 245, 245) else: _web_canvas_background(nodes, styles, white)
+    var fb = browser_layout_framebuffer_filled(base, width, height)
+    val wrap_cache = TextWrapCache(starts: boxes.wrap_starts, ends: boxes.wrap_ends)
+    var painted = if tiled:
+        paint_tiled(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode, viewport_y, viewport_h)
+    else:
+        paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    painted
 
 pub fn simple_web_layout_render_html_software_pixels(html: text, width: i32, height: i32, budget_ms: i64 = WEB_RENDER_BUDGET_MS) -> [u32]:
     simple_web_layout_render_html_software_result(html, width, height, budget_ms).pixels

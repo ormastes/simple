@@ -9,6 +9,11 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 # same import the sibling SIMPLE_TRACE_FONT_STYLE traces use in
 # simple_web_html_layout_renderer_core.spl:3.
 use std.gc_async_mut.io.mod_stub.{env_get}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{
+    TILE_MARGIN_PX, TileOp, tile_bin_ops, tile_count, tile_grid_make,
+    tile_live_set, tile_occluder_slot, tile_op, tile_stats_record,
+    tile_survivors
+}
 use common.ui.draw_ir.{
     DrawIrCommand, DrawIrStyleProp, draw_ir_box_with_style, draw_ir_image_command,
     draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text_styled_clipped
@@ -1036,6 +1041,309 @@ fn paint(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [
     out
 
 # ---------------------------------------------------------------------------
+# Tiled paint lane (T2 of tile_render_culling_plan): op-level culling on the
+# 256px tile core, then rasterization through the unmodified paint(), so the
+# surviving output is pixel-identical to the classic painter by construction.
+# Gated by SIMPLE_WEB_TILE_PAINT at the render-entry dispatch site (default
+# off; flag-off never enters this function).
+# ---------------------------------------------------------------------------
+
+fn _tile_style_hash(st: Style) -> i64:
+    var h = st.bg as i64
+    h = h ^ ((st.fg as i64) << 16)
+    h = h ^ ((st.border_color_t as i64) << 8)
+    h = h ^ ((st.opacity_pct as i64) << 48)
+    h
+
+fn _tile_abs_i32(v: i32) -> i32:
+    if v < 0: -v else: v
+
+fn _tile_hidden_op(i: i32) -> TileOp:
+    tile_op(0, i, 0, 0, 0, 0, true, false, 0, -1)
+
+# Culling record for one node's box-phase paint (backgrounds, borders,
+# outlines, shadows, widget panel/button fills). Mirrors the per-pass
+# predicates of paint() — the same visibility checks, not a reimplementation
+# of different ones — and inflates the rect for paint that lands outside the
+# border box (outline offset, box shadow). Non-widget path only: paint_tiled
+# falls back to paint() for widget_mode.
+fn _tile_box_op(
+    nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32],
+    clip_cache: PaintClipCache, fbh: i32, i: i32, has_widget_panel: bool
+) -> TileOp:
+    val nd = nodes[i]
+    val st = styles[i]
+    val x = bx[i]
+    val y = by[i]
+    val w = bw[i]
+    val h = bh[i]
+    val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
+    val visible_node = (
+        st.display != "none" and not st.visibility_hidden and
+        not content_paint_hidden_by_ancestor(nodes, styles, i)
+    )
+    val visible_box = visible_node and nd.tag != "#text" and y < fbh
+    val paint_bg = (
+        not skip_widget_page_bg and
+        (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32))
+    )
+    val paint_border = st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0
+    val paint_outline = st.outline_w > 0 and st.outline_color != 0u32
+    val paint_shadow = st.box_shadow_color != 0u32
+    val paint_body_radial = skip_widget_page_bg and nd.tag == "body" and st.bg_layers_raw != ""
+    val paint_panel = (
+        visible_node and y < fbh and
+        (nd.has_widget_panel_class or nd.has_widget_button_class) and
+        st.bg == 0u32 and st.background_gradient_from == 0u32
+    )
+    val paints = (
+        (visible_box and (paint_bg or paint_border or paint_outline or paint_shadow or paint_body_radial)) or
+        paint_panel
+    )
+    if not paints:
+        return _tile_hidden_op(i)
+    var ix0 = x
+    var iy0 = y
+    var ix1 = x + w
+    var iy1 = y + h
+    if paint_outline:
+        val o = st.outline_w + _tile_abs_i32(st.outline_offset_px)
+        ix0 = ix0 - o
+        iy0 = iy0 - o
+        ix1 = ix1 + o
+        iy1 = iy1 + o
+    if paint_shadow:
+        val spread = _tile_abs_i32(st.box_shadow_x_px) + _tile_abs_i32(st.box_shadow_y_px) + st.box_shadow_blur_px + 8
+        ix0 = ix0 - spread
+        iy0 = iy0 - spread
+        ix1 = ix1 + spread
+        iy1 = iy1 + spread
+    # Panel/button fills paint through fb_rect (no clip); everything else
+    # honors the ancestor clip, so clip-intersecting the rect keeps the bins
+    # tight while staying conservative.
+    if not paint_panel:
+        val clip = paint_clip_at(clip_cache, i)
+        if ix0 < clip.x0:
+            ix0 = clip.x0
+        if iy0 < clip.y0:
+            iy0 = clip.y0
+        if ix1 > clip.x1:
+            ix1 = clip.x1
+        if iy1 > clip.y1:
+            iy1 = clip.y1
+    # T3 opaque-occluder candidate: a plain full-alpha color fill over the
+    # whole border box, nothing translucent/rounded/offset about it.
+    val opaque = (
+        visible_box and paint_bg and not paint_panel and
+        not paint_shadow and not paint_outline and not paint_border and
+        not paint_body_radial and
+        st.background_gradient_from == 0u32 and st.background_gradient_to == 0u32 and
+        st.bg_layers_raw == "" and st.background_image_uri == "" and
+        st.background_clip == "border-box" and
+        st.border_radius_px == 0 and st.border_radius_tl_px == 0 and
+        st.border_radius_tr_px == 0 and st.border_radius_br_px == 0 and
+        st.border_radius_bl_px == 0 and
+        st.opacity_pct >= 100 and (((st.bg as i64) >> 24) & 255) == 255
+    )
+    tile_op(0, i, ix0, iy0, ix1 - ix0, iy1 - iy0, false, opaque, _tile_style_hash(st), -1)
+
+# Culling record for one node's content-on-top phase (the text pass): #text
+# runs, input text/accent controls, widget image placeholders, icon chips.
+# Text may overflow its layout box horizontally (nowrap, ellipsis, spacing),
+# so #text ops use a conservative full-clip-width band around the box's y
+# range instead of the exact box rect.
+fn _tile_text_op(
+    nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32],
+    clip_cache: PaintClipCache, fbh: i32, i: i32
+) -> TileOp:
+    val nd = nodes[i]
+    val st = styles[i]
+    val visible_node = (
+        st.display != "none" and not st.visibility_hidden and
+        not content_paint_hidden_by_ancestor(nodes, styles, i)
+    )
+    if not visible_node:
+        return _tile_hidden_op(i)
+    if nd.tag == "#text":
+        val raw_txt: text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
+        if raw_txt.len() == 0 or by[i] >= fbh:
+            return _tile_hidden_op(i)
+        val clip = paint_clip_at(clip_cache, i)
+        val overhang = 16 + _tile_abs_i32(st.text_shadow_y_px) + _tile_abs_i32(st.text_underline_offset_px)
+        var y0 = by[i] - overhang
+        var y1 = by[i] + bh[i] + overhang
+        if y0 < clip.y0:
+            y0 = clip.y0
+        if y1 > clip.y1:
+            y1 = clip.y1
+        return tile_op(
+            1, i, clip.x0, y0, clip.x1 - clip.x0, y1 - y0,
+            false, false, _tile_style_hash(st), -1
+        )
+    val is_content = (
+        nd.tag == "input" or (nd.tag == "img" and nd.has_widget_image_class) or
+        nd.has_icon_image_class
+    )
+    if not is_content:
+        return _tile_hidden_op(i)
+    val clip = paint_clip_at(clip_cache, i)
+    var x0 = bx[i] - 8
+    var y0 = by[i] - 8
+    var x1 = bx[i] + bw[i] + 8
+    var y1 = by[i] + bh[i] + 8
+    if x0 < clip.x0:
+        x0 = clip.x0
+    if y0 < clip.y0:
+        y0 = clip.y0
+    if x1 > clip.x1:
+        x1 = clip.x1
+    if y1 > clip.y1:
+        y1 = clip.y1
+    tile_op(1, i, x0, y0, x1 - x0, y1 - y0, false, false, _tile_style_hash(st), -1)
+
+# Emit culling records in paint() order — normal-flow boxes, relative-root
+# boxes, absolute z<=0, absolute z>0 (z-sorted), scrollbars, then the text
+# pass — so "later op occludes earlier op" in a tile bin matches real paint
+# order (text paints after every box and is never occlusion-culled).
+fn _tile_paint_ops(
+    nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32],
+    clip_cache: PaintClipCache, fbh: i32, has_widget_panel: bool
+) -> [TileOp]:
+    val node_count = nodes.len()
+    var ops: [TileOp] = []
+    var i = 0
+    while i < node_count:
+        val st = styles[i]
+        if not st.position_absolute and not has_relative_paint_root(nodes, styles, i):
+            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+        i = i + 1
+    i = 0
+    while i < node_count:
+        if has_relative_paint_root(nodes, styles, i) and not styles[i].position_absolute:
+            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+        i = i + 1
+    i = 0
+    var positive_z_indices: [i32] = [0; node_count]
+    var positive_z_count = 0
+    while i < node_count:
+        val st = styles[i]
+        if st.position_absolute and st.z_index <= 0:
+            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i, has_widget_panel))
+        elif st.position_absolute:
+            positive_z_indices[positive_z_count] = i
+            positive_z_count = positive_z_count + 1
+        i = i + 1
+    if positive_z_count > 0:
+        val sorted_z = _sort_positive_z_indices(positive_z_indices, positive_z_count, styles)
+        var zp = 0
+        while zp < positive_z_count:
+            ops.push(_tile_box_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, sorted_z[zp], has_widget_panel))
+            zp = zp + 1
+    i = 0
+    while i < node_count:
+        val nd = nodes[i]
+        val st = styles[i]
+        if (
+            st.overflow_auto_y and st.overflow_hidden and nd.tag != "#text" and
+            st.display != "none" and not st.visibility_hidden and
+            not content_paint_hidden_by_ancestor(nodes, styles, i) and
+            bw[i] >= 15 and bh[i] >= 8 and by[i] < fbh
+        ):
+            val clip = paint_clip_at(clip_cache, i)
+            var sx0 = bx[i] + bw[i] - st.border_r - 15
+            var sy0 = by[i]
+            var sx1 = bx[i] + bw[i]
+            var sy1 = by[i] + bh[i]
+            if sx0 < clip.x0:
+                sx0 = clip.x0
+            if sy0 < clip.y0:
+                sy0 = clip.y0
+            if sx1 > clip.x1:
+                sx1 = clip.x1
+            if sy1 > clip.y1:
+                sy1 = clip.y1
+            ops.push(tile_op(2, i, sx0, sy0, sx1 - sx0, sy1 - sy0, false, false, _tile_style_hash(st), -1))
+        i = i + 1
+    i = 0
+    while i < node_count:
+        ops.push(_tile_text_op(nodes, styles, bx, by, bw, bh, clip_cache, fbh, i))
+        i = i + 1
+    ops
+
+fn paint_tiled(
+    nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32],
+    wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool,
+    viewport_y: i32, viewport_h: i32
+) -> [u32]:
+    # Widget chrome framebuffers are tiny (< one tile) and use unclipped
+    # chrome overdraw; tiling buys nothing there — keep the classic painter.
+    if widget_mode:
+        return paint(nodes, styles, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, widget_mode)
+    val need_widget_text = false
+    val widget_flags = compute_widget_paint_flags(nodes, false, need_widget_text)
+    val clip_cache = build_ancestor_clip_cache(nodes, styles, bx, by, bw, bh, fbw, fbh)
+    val ops = _tile_paint_ops(
+        nodes, styles, bx, by, bw, bh, clip_cache, fbh, widget_flags.has_widget_panel
+    )
+    val grid = tile_grid_make(0, 0, fbw, fbh)
+    val bins = tile_bin_ops(ops, grid)
+    val live = tile_live_set(grid, 0, viewport_y, fbw, viewport_h, TILE_MARGIN_PX)
+    val surv = tile_survivors(ops, bins, grid, live)
+    val node_count = nodes.len()
+    var keep: [bool] = [false; node_count]
+    var ops_total: i64 = 0
+    var ops_painted: i64 = 0
+    val op_count = ops.len()
+    var oi = 0
+    while oi < op_count:
+        val op = ops[oi]
+        if not op.hidden:
+            ops_total = ops_total + 1
+            if surv[oi]:
+                ops_painted = ops_painted + 1
+                keep[op.node] = true
+        oi = oi + 1
+    val tiles = tile_count(grid)
+    var tiles_live: i64 = 0
+    var tiles_occluded: i64 = 0
+    var t = 0
+    while t < tiles:
+        if live[t]:
+            tiles_live = tiles_live + 1
+            if tile_occluder_slot(ops, bins, grid, t) > bins.starts[t]:
+                tiles_occluded = tiles_occluded + 1
+        t = t + 1
+    tile_stats_record(
+        ops_total, ops_painted, tiles as i64, tiles_live,
+        (tiles as i64) - tiles_live, tiles_occluded
+    )
+    # Cull by marking non-survivors visibility:hidden for the duration of the
+    # paint: that suppresses exactly the node's own paint in every paint()
+    # pass without touching pass structure, clip cache, z-order, or sibling
+    # paint — then the unmodified paint() rasters the survivors, so surviving
+    # output is identical to the untiled painter by construction. Original
+    # values are restored afterwards in case Style is shared by reference.
+    var culled_styles = styles
+    var prev_hidden: [bool] = [false; node_count]
+    var ci = 0
+    while ci < node_count:
+        prev_hidden[ci] = culled_styles[ci].visibility_hidden
+        if not keep[ci]:
+            var cst = culled_styles[ci]
+            cst.visibility_hidden = true
+            culled_styles[ci] = cst
+        ci = ci + 1
+    var out = paint(nodes, culled_styles, bx, by, bw, bh, wrap_cache, fb, fbw, fbh, false)
+    ci = 0
+    while ci < node_count:
+        if culled_styles[ci].visibility_hidden != prev_hidden[ci]:
+            var rst = culled_styles[ci]
+            rst.visibility_hidden = prev_hidden[ci]
+            culled_styles[ci] = rst
+        ci = ci + 1
+    out
+
+# ---------------------------------------------------------------------------
 # Render entry
 # ---------------------------------------------------------------------------
 
@@ -1187,25 +1495,6 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
     val shadow_parse = parse_box_shadow_layers(
         st.box_shadow_raw, st.fg
     )
-    # GAP-2: encode the N-stop/angle/radial gradient model as flat text style
-    # props (colors then positions, both decimal-int lists) so draw_ir_adv.spl
-    # can rebuild the stop arrays with the same `_engine2d_draw_ir_nth_int`
-    # helper it already uses for the legacy 2-stop from/to pair. Built with
-    # plain string concatenation, not array push/join (that pattern triggers a
-    # known compile hang in this module tree, see
-    # doc/08_tracking/bug/compiler_cross_tier_diamond_import_hang_2026-07-31.md).
-    val gradient_stop_count = st.background_gradient_stop_colors.len()
-    var gradient_stops_encoded = ""
-    var gse_i = 0
-    while gse_i < gradient_stop_count:
-        if gse_i > 0:
-            gradient_stops_encoded = gradient_stops_encoded + ","
-        gradient_stops_encoded = gradient_stops_encoded + "{st.background_gradient_stop_colors[gse_i]}"
-        gse_i = gse_i + 1
-    gse_i = 0
-    while gse_i < gradient_stop_count:
-        gradient_stops_encoded = gradient_stops_encoded + "," + "{st.background_gradient_stop_positions[gse_i]}"
-        gse_i = gse_i + 1
     var props = [
         draw_ir_style_prop("tag", node.tag),
         draw_ir_style_prop("id", node.id_attr),
@@ -1231,10 +1520,6 @@ fn _html_draw_ir_style_props(node: HNode, st: Style) -> [DrawIrStyleProp]:
         draw_ir_style_prop("background-position-y", "{st.background_position_y_px}"),
         draw_ir_style_prop("background-color", "{st.bg}"),
         draw_ir_style_prop("background-image", if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32: "linear-gradient({st.background_gradient_from},{st.background_gradient_to})" else: "none"),
-        draw_ir_style_prop("background-gradient-stop-count", "{gradient_stop_count}"),
-        draw_ir_style_prop("background-gradient-stops", gradient_stops_encoded),
-        draw_ir_style_prop("background-gradient-angle-deg", "{st.background_gradient_angle_deg}"),
-        draw_ir_style_prop("background-gradient-is-radial", if st.background_gradient_is_radial: "1" else: "0"),
         draw_ir_style_prop("background-layers-raw", st.bg_layers_raw),
         draw_ir_style_prop("background-origin", st.background_origin),
         # Preserve the legacy aggregate projection and authored CSS for
