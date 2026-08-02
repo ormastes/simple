@@ -415,7 +415,18 @@ if let Value::Str(ref s) = recv_val {
             // `while i < s.len(): s.char_code_at(i)` loop O(n^2). Inside an
             // ASCII prefix a character index IS a byte index, so answer straight
             // out of the buffer; fall back to the original walk otherwise.
-            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            // A negative index is OUT OF RANGE, not index 0. `eval_arg_usize`
+            // saturates negatives to 0, which is right for the count/width
+            // callers it was written for but wrong for an index accessor: it
+            // made `"abc".char_code_at(-1)` return 97, a REAL codepoint, where
+            // the compiled lane returns 0. Guarded the same way as `char_at`
+            // above and as the native impl (`runtime_native.c`:
+            // `if (index < 0) return 0;`), so all engines agree.
+            let raw_idx = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            if raw_idx < 0 {
+                return Ok(Value::Int(0));
+            }
+            let idx = raw_idx as usize;
             let bytes = s.as_bytes();
             if shared_text_is_ascii(s) {
                 return Ok(Value::Int(bytes.get(idx).map_or(0, |b| *b as i64)));
@@ -442,7 +453,17 @@ if let Value::Str(ref s) = recv_val {
             // in a payload.
             //
             // Out-of-range yields 0, matching `char_code_at`'s convention.
-            let idx = eval_arg_usize(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            //
+            // A NEGATIVE index is out of range too, so it must also yield 0.
+            // Reading it through `eval_arg_usize` saturated negatives to 0 and
+            // returned a REAL byte -- `"abc".byte_at(-1)` was 97 -- diverging
+            // from the native impl (`runtime_native.c`: `if (index < 0)
+            // return 0;`) and silently turning a bad index into plausible data.
+            let raw_idx = eval_arg_int(args, 0, 0, env, functions, classes, enums, impl_methods)?;
+            if raw_idx < 0 {
+                return Ok(Value::Int(0));
+            }
+            let idx = raw_idx as usize;
             return Ok(Value::Int(s.as_bytes().get(idx).map_or(0, |b| *b as i64)));
         }
         "pad_left" | "pad_start" => {

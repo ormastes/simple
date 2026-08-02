@@ -28,7 +28,35 @@ describe "interpreter text.byte_at dispatch":
         expect(s.byte_at(3)).to_not_equal(s.char_code_at(3))
         # Out-of-range reads 0, matching char_code_at's convention.
         expect(s.byte_at(99)).to_equal(0)
-        expect(s.byte_at(-1)).to_equal(0)
+
+    it "treats a NEGATIVE index as out of range, not as index 0":
+        # Regression pin, 2026-08-02. The interpreter arms read the index
+        # through eval_arg_usize, which SATURATES negatives to 0 -- correct for
+        # the count/width callers it was written for (it fixed a pad_left(-5)
+        # capacity panic), but for an index accessor it turned an out-of-range
+        # index into real data. Measured before the fix:
+        #   "abc".byte_at(-1)      -> 97   (should be 0)
+        #   "abc".char_code_at(-1) -> 97   (should be 0)
+        #   "ébc".byte_at(-1)      -> 195  (should be 0)
+        #   "ébc".char_code_at(-1) -> 233  (should be 0)
+        # while the compiled lane returned 0 throughout, because the native
+        # impl guards `if (index < 0) return 0;` (runtime_native.c). A silent
+        # wrong answer, and exactly the hazard byte_at exists to remove, so it
+        # is pinned on both the ASCII fast path and the non-ASCII walk.
+        val ascii_text = "abc"
+        expect(ascii_text.byte_at(-1)).to_equal(0)
+        expect(ascii_text.byte_at(-5)).to_equal(0)
+        expect(ascii_text.char_code_at(-1)).to_equal(0)
+        expect(ascii_text.char_code_at(-5)).to_equal(0)
+        # Non-ASCII receiver: exercises the codepoint-walk branch, not the
+        # ASCII fast path. 'é' is C3 A9, so an unguarded read yields 195/233.
+        val utf8_text = "ébc"
+        expect(utf8_text.byte_at(-1)).to_equal(0)
+        expect(utf8_text.char_code_at(-1)).to_equal(0)
+        # Positive controls: the guard must not swallow legal reads.
+        expect(ascii_text.byte_at(0)).to_equal(97)
+        expect(utf8_text.byte_at(0)).to_equal(195)
+        expect(utf8_text.char_code_at(0)).to_equal(233)
 
     it "the LIVE interpreter dispatch table has a byte_at arm reading raw bytes":
         # Structural guard on the file that ACTUALLY RUNS. The sole call site
