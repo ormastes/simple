@@ -1,7 +1,9 @@
 # `.has()` / `.contains()` / `in` answer membership questions with an untagged key
 
-- **Status:** OPEN — root cause PROVED, fix NOT attempted (emitter not located; see
-  "Why no fix is proposed")
+- **Status:** OPEN — root cause PROVED, **emitter LOCATED 2026-08-02** (Rust seed
+  LLVM backend `bare_rt_redirect`, see "The emitter, LOCATED"), codegen fix
+  specified but NOT landed (no host pipeline can verify it; see "Reproduction
+  gap")
 - **Found:** 2026-08-02, follow-up to the `--source`-less `native-build` hang
   recorded in `stage3_selfhost_tuple_positional_field_segv_2026-08-02.md`
 - **Severity:** high — a silent wrong answer in BOTH directions on a core
@@ -103,29 +105,160 @@ all hand-computed), so the replica does not demonstrate the chain. Confirming it
 requires observing `visited.has` returning false for a visited block inside the
 real compiler run, which this lane did not do.
 
-## Why no fix is proposed
+## Why no fix was proposed originally
 
 The fix is "tag the value operand before `rt_contains`, as `lower_dict_key`
-already does for the index path". The blocker is that **the emitter was not
+already does for the index path". The blocker was that **the emitter was not
 located**. The pure-Simple compiler contains exactly one contains-related
 runtime symbol emission — `MirConstValue.Str("rt_dict_contains")` at
 `method_calls_literals.spl:1282`, correctly tagged via `lower_dict_key` and gated
 on `receiver_is_dict` — and the string `rt_contains` does not appear anywhere in
 `src/compiler/**/*.spl` or `src/compiler/70.backend/**`. Yet the emitted binary
-calls `rt_contains`. Until that path is found, any patch would be a guess.
+calls `rt_contains`.
 
-Concrete next steps for the lane that picks this up:
-1. Find what turns `.has`/`.contains`/`in` into a call to the `simple_core`
-   `pub fn rt_contains` symbol (name resolution against the compiled-in
-   `simple_core` exports is the leading suspect; note the existing
-   `codegen_rt_prefix_local_function_collision_sigsegv_2026-07-12` bug in the
-   same area).
-2. Tag the value operand there with `box_runtime_value`, or make
-   `receiver_is_dict` true for these receivers so the existing correct
-   `rt_dict_contains` arm at :1278 fires instead.
-3. Arrays need their own answer: `rt_array_contains` is declared in
-   `llvm_lib_translate.spl` but never implemented, so an array `.contains` has
-   no correct destination today.
+## The emitter, LOCATED (2026-08-02 follow-up lane) — PROVED
 
-Regression probes for whoever fixes it: the seven rows in the symptom table
-above, each with a hand-computed expectation.
+`rt_contains` is absent from `src/compiler/**` because **it is not emitted by
+pure-Simple code at all**. The pure-Simple self-hosted compiler links in and
+uses the *Rust seed's* LLVM backend for native-build IR emission, and that
+backend owns the mapping.
+
+Proof that the Rust LLVM backend is inside the pure-Simple binary (positive
+capability probe, not a size heuristic): the string
+`missing receiver for runtime redirect` occurs in exactly ONE place in the whole
+tree — `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs:1972`,
+inside the `bare_rt_redirect` block — and `strings -a` finds it in **every**
+pure-Simple stage binary checked (`bin/release/x86_64-unknown-linux-gnu/
+simple.bootstrap-main-stage-2026-08-01.bak`,
+`build/bootstrap/stage2/x86_64-unknown-linux-gnu/simple`,
+`build/bootstrap/release_beta_verify/stage2/x86_64-unknown-linux-gnu/simple`),
+all three of which carry `enum construction: unregistered enum` = 2 and no
+`bootstrap seed only` banner, i.e. they are genuinely pure-Simple builds.
+
+Inside that block, `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs`
+carries **two independent defects**, either of which produces a wrong answer in
+both directions:
+
+1. **Untagged key (the ABI mismatch this bug reports).** The table at ~:1928
+   maps `"contains" => Some("rt_contains")`, and the argument loop at ~:1980
+   passes every argument through `coerce_value_to_type(val, i64)` only — there is
+   **no** tag-box. The Cranelift path does the opposite and documents exactly this
+   failure: `codegen/instr/methods.rs:339-357` calls `wrap_value(...)` with the
+   comment *"Box the search value so an int key/element matches what `get`/`set`
+   stored — a raw i64 would hash/compare as a bogus tagged value and
+   `Dict<i64,_>.has(k)` would always miss"*, and
+   `codegen/instr/closures_structs.rs:1717` sets
+   `box_dict_key = matches!(runtime_func, "rt_index_get" | "rt_dict_remove" | "rt_contains")`.
+   The LLVM `qualified_rt_redirect` sibling at ~:2178 has the same omission.
+   This reproduces the disassembly in the table above exactly: a bare MIR
+   `Call { target: "contains" }` (which is what the pure-Simple lowering emits
+   when it fails to classify the receiver) becomes `mov $0x7,%esi; call rt_contains`.
+
+2. **`int8_t` return read as `i64`.** In the same block the `returns_bool`
+   list at ~:1987 is
+   `"rt_array_push" | "rt_array_clear" | "rt_array_reverse" | "rt_array_sort" | "rt_index_set"`
+   — it **omits `rt_contains`**, so the callee is declared to return `i64`. Family
+   check against `src/runtime/runtime.h`: of every target in `bare_rt_redirect`,
+   the `int8_t`-returning ones are exactly `rt_contains`, `rt_array_push`,
+   `rt_array_clear`, `rt_index_set`; `rt_contains` is the **only** member of that
+   family missing from the list. Under SysV x86-64 an `int8_t` result leaves the
+   upper 56 bits of `%rax` undefined, so the truthiness test reads garbage. That
+   this is an oversight and not intent is settled by the sibling
+   `qualified_rt_redirect` block 200 lines below (~:2186), whose otherwise
+   identical `returns_bool` list DOES include `"rt_contains"`.
+
+### REFUTED hypotheses (recorded so nobody re-derives them)
+
+- **"Name resolution against compiled-in `simple_core` exports"** (the previous
+  lane's leading suspect, and the `rt_prefix_local_function_collision` link) —
+  **REFUTED**. `rt_contains` exists in Simple only as a *definition*
+  (`src/runtime/simple_core/core_string.spl:600`) and in C
+  (`runtime_native.c:3479`); `nm` on a pure-Simple stage binary shows it as
+  `T rt_contains`, a linked runtime definition, never an emitter-table entry.
+  No pure-Simple path constructs the name, and no `"rt_" +` concatenation exists
+  anywhere under `src/compiler/`.
+- **"The Rust seed does not have this bug"** (asserted in the Root cause section
+  above from the `common_backend.rs:608` comment) — **REFUTED for the LLVM
+  backend**. That comment describes the Cranelift path only. The seed's LLVM
+  backend is the emitter.
+
+### Negative results from this lane — where the bug is NOT
+
+All seven probe rows were re-run and every one is **CORRECT** on:
+- the seed interpreter (`simple p1.spl`),
+- the seed JIT (`SIMPLE_EXECUTION_MODE=native`),
+- the Rust `native-build` LLVM path
+  (`SIMPLE_NATIVE_BUILD_RUST=1 simple native-build --source . --entry p1.spl`),
+  including a 64-key dict (0 of 64 missing), a 130-key dict (0 of 130 missing)
+  and a 2-key dict holding 8 and 9.
+
+Those shapes take the typed `BuiltinMethod` path (`methods.rs`), which boxes
+correctly, so they never reach `bare_rt_redirect`. Only a MIR-emitted bare
+`Call { target: "contains" }` does — which is why the defect is exclusive to the
+pure-Simple lowering feeding the Rust LLVM backend.
+
+### Reproduction gap — why the codegen patch is still NOT landed
+
+No compiler on this host can drive the affected pipeline end to end:
+`simple.bootstrap-main-stage-2026-08-01.bak` reaches MIR (it prints
+`[mir-lower] WARNING: unresolved method call 'has' lowered to const-0
+placeholder` for a plain `var b: {i64: i64}` receiver — see below) and then
+SIGILLs; `build/bootstrap/stage2/.../simple` fails with
+`AOT compile error in p1: <invalid-heap:...>`;
+`build/bootstrap/release_beta_verify/stage2/.../simple` exits 0 with
+`[WARN] no mode matched, falling through` and emits nothing. Rebuilding the seed
+to verify a codegen change belongs to the bootstrap lane. The patch is fully
+specified above (add `"rt_contains"` to the `returns_bool` list; `wrap_value`
+the search operand in both `bare_rt_redirect` and `qualified_rt_redirect`) and
+must NOT be landed unverified — an incorrect box would double-tag an
+already-tagged operand and trade one silent wrong answer for another.
+
+### Additional PROVED defect found while probing (separate from the ABI bug)
+
+On the pure-Simple lowering at tip, a plain `var b: {i64: i64} = {}` receiver is
+**not classified as a dict**: `receiver_is_dict`
+(`method_calls_literals.spl:1160-1190`) is false for it, so `.has`/`.contains`/
+`.keys` fall through to `case Unresolved:` instead of the correct
+`rt_dict_contains` arm at :1278. Live evidence: eleven
+`[mir-lower] WARNING: unresolved method call '<has|keys|contains>' lowered to
+const-0 placeholder` lines from
+`simple.bootstrap-main-stage-2026-08-01.bak native-build p1.spl`. At tip that
+fallback emits `rt_panic` (fails closed), but it is what produces the bare
+`Call { target: "contains" }` in builds that predate the panic, and it is the
+reason the correct dict arm never fires. Fixing `receiver_is_dict` for this shape
+is next step 2 below and is independent of the codegen fix.
+
+## Concrete next steps
+
+1. ~~Find what turns `.has`/`.contains`/`in` into a call to `rt_contains`.~~
+   DONE — `src/compiler_rust/compiler/src/codegen/llvm/functions/calls.rs`
+   `bare_rt_redirect` (~:1928/:1980/:1987) and `qualified_rt_redirect` (~:2178).
+2. Make `receiver_is_dict` true for a declared `{K: V}` receiver so the existing
+   correct `rt_dict_contains` arm at `method_calls_literals.spl:1278` fires
+   instead of the unresolved fallback.
+3. Arrays: `rt_array_contains` is declared in `llvm_lib_translate.spl:412` but
+   never implemented in `runtime_native.c`, and nothing emits a call to it — it
+   is a dead declaration and a landmine, not a destination. The correct
+   destination for an array `.contains` is the receiver-dispatching
+   `rt_contains` (`runtime_native.c:3479` scans the array with `rt_native_eq`),
+   which is correct once the needle is tagged — i.e. the same one fix serves
+   dict and array. Until that lands, the array path must keep failing LOUDLY
+   (the `rt_panic` fallback), never returning a plausible `false`.
+
+## Regression coverage
+
+`test/01_unit/compiler/dict_array_membership_tagged_key_spec.spl` — all seven
+rows of the symptom table, each expectation hand-computed. Status on the
+deployed seed: **7 total, 7 passed**; sabotaging one expectation
+(`expect(b.has(9)).to_equal(false)`) turns it red (`6 passed, 1 failed`), so the
+assertions are live. Read the lane-coverage warning in the spec header: like its
+sibling `dict_get_miss_returns_nil_spec.spl`, it is green on the interpreter
+before and after the codegen fix and is therefore NOT by itself a native-lane
+gate — the native lane is gated by building the same cases with `native-build`
+and running the ELF.
+
+**Vacuity trap found while writing it:** a bare `assert <expr> == <literal>`
+inside an `it` block is silently INERT in this spec DSL — `assert 1 == 2` still
+reported `7 passed, 0 failed`. Only `expect(...).to_equal(...)` actually
+asserts. Any spec in this tree written with bare `assert` should be treated as
+unverified until converted.
