@@ -949,6 +949,20 @@ impl<'a> MirLowerer<'a> {
         receiver_type_name: Option<&str>,
     ) -> Option<(u32, Vec<crate::hir::TypeId>, crate::hir::TypeId)> {
         let infos = self.trait_infos?;
+        let duck_dbg = std::env::var("SIMPLE_DEBUG_DUCK").is_ok();
+        if duck_dbg {
+            eprintln!(
+                "[DUCK] fn-lookup method={} recv={:?} traits={:?} dep_impls={:?} local_impls={:?}",
+                method_name,
+                receiver_type_name,
+                infos.keys().collect::<Vec<_>>(),
+                infos
+                    .keys()
+                    .map(|t| (t.as_str(), self.dependency_graph.get_implementations(t).map(|i| i.len()).unwrap_or(0)))
+                    .collect::<Vec<_>>(),
+                self.local_trait_impls.keys().collect::<Vec<_>>()
+            );
+        }
         let trait_is_implemented = |trait_name: &str| {
             self.dependency_graph
                 .get_implementations(trait_name)
@@ -962,17 +976,62 @@ impl<'a> MirLowerer<'a> {
             }
         };
         let Some(recv) = receiver_type_name else {
-            // Unknown receiver type: legacy name-based virtual dispatch.
+            // Unknown receiver type: name-based virtual dispatch.
+            //
+            // Do NOT take the first HashMap hit: iteration order is random per
+            // process, so when several traits declare a same-named method the
+            // winner used to be a coin flip. If an IMPL-LESS trait won, the
+            // call lowered to the duck-dispatch sentinel and trapped at
+            // runtime even though an implemented trait (whose vtable real
+            // objects actually carry — only implemented traits ever get their
+            // vtable written by a constructor) also declared the method.
+            // Measured 6/12 pass vs 6/12 SIGILL on the same engine2d probe
+            // before this fix (bug
+            // jit_game2d_backend_method_dispatch_sigsegv_2026-07-02).
+            // Prefer an implemented trait; tie-break lexicographically by
+            // trait name so lowering is deterministic run to run.
+            let mut best: Option<(&String, &crate::hir::HirMethodSignature)> = None;
             for (trait_name, info) in infos {
                 if let Some(sig) = info.get_method(method_name) {
-                    return Some((slot_for(trait_name, sig), sig.param_types.clone(), sig.return_type));
+                    let replace = match best {
+                        None => true,
+                        Some((best_name, _)) => {
+                            let cand_impl = trait_is_implemented(trait_name);
+                            let best_impl = trait_is_implemented(best_name);
+                            (cand_impl && !best_impl) || (cand_impl == best_impl && trait_name < best_name)
+                        }
+                    };
+                    if replace {
+                        best = Some((trait_name, sig));
+                    }
                 }
+            }
+            if let Some((trait_name, sig)) = best {
+                if duck_dbg {
+                    eprintln!(
+                        "[DUCK] path1 unknown-recv method={} matched_trait={} slot={} implemented={} SENTINEL={}",
+                        method_name,
+                        trait_name,
+                        sig.vtable_slot,
+                        trait_is_implemented(trait_name),
+                        !trait_is_implemented(trait_name)
+                    );
+                }
+                return Some((slot_for(trait_name, sig), sig.param_types.clone(), sig.return_type));
             }
             return None;
         };
         // Receiver statically typed as the trait itself → virtual through it.
         if let Some(info) = infos.get(recv) {
             if let Some(sig) = info.get_method(method_name) {
+                if duck_dbg {
+                    eprintln!(
+                        "[DUCK] path2 recv-is-trait recv={} slot={} implemented={}",
+                        recv,
+                        sig.vtable_slot,
+                        trait_is_implemented(recv)
+                    );
+                }
                 return Some((slot_for(recv, sig), sig.param_types.clone(), sig.return_type));
             }
         }
@@ -982,6 +1041,9 @@ impl<'a> MirLowerer<'a> {
         // jit_game2d_backend_method_dispatch_sigsegv_2026-07-02: `b.init(...)`
         // on a statically-typed SoftwareBackend jumped through a bogus vtable).
         if self.available_functions.contains(&format!("{}.{}", recv, method_name)) {
+            if duck_dbg {
+                eprintln!("[DUCK] path3 devirtualize {}.{}", recv, method_name);
+            }
             return None;
         }
         // Concrete receiver: virtual only via a trait it implements IN THIS

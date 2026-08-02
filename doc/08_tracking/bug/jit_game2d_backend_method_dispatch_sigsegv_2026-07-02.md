@@ -185,3 +185,28 @@ The same run shows `content-provenance-rejected 0` and `window-degraded 0`,
 down from 3 and 3. The Aetheric material-admission contract is working; this
 trap is a separate and later failure. Anyone bisecting this cell should not
 confuse the two.
+
+## Update 2026-08-02: root cause found — nondeterministic trait selection, fixed
+
+The "unit-composition dependence" was a mirage. A trait-typed field
+(`backend: RenderBackend`) lowers to TypeId::ANY (trait names alias to ANY,
+type_registration.rs:480), so dispatch reaches MIR with an unknown receiver;
+`find_trait_for_method_on_receiver` (mir/lower/lowering_core.rs) then took
+the FIRST trait in HashMap iteration order declaring a same-named method.
+Impl-less traits (DrawIrRenderTarget, ComputeSession, VirtioGpu2DSurface)
+share method names with RenderBackend but get DUCK_DISPATCH_UNSUPPORTED_SLOT
+(the trap at codegen/instr/closures_structs.rs:1700-1719). Std HashMap order
+is randomly seeded PER PROCESS: the same probe passed 6/12 and SIGILL'd 6/12
+runs unchanged. Adding browser_engine imports just added more colliding trait
+names — the false "unit evicts the vtable" signal.
+
+Fixed in lowering_core.rs: scan ALL traits declaring the method, prefer an
+IMPLEMENTED trait (only implemented traits ever get their vtable written),
+tie-break lexicographically. Probe 12/12 after (was 6/12). Env-gated
+SIMPLE_DEBUG_DUCK logging added (default off).
+
+Residual family defects still open: bare-name `trait_infos.insert` last-wins
+(three traits named RenderBackend exist with different slot layouts — two
+IMPLEMENTED same-named traits can still silently misdispatch), and
+import_loader.rs:454-478 dropping impl metadata for imported impl blocks.
+Deployed binaries built before this fix still coin-flip.
