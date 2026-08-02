@@ -38,6 +38,26 @@ fn test_let_mut_statement() {
     }
 }
 
+#[test]
+fn test_val_match_keyword_is_rejected_but_contextual_distinctions_remain() {
+    let error = parse("val match = 5").expect_err("match is reserved for immutable bindings");
+    assert!(error.to_string().contains("reserved keyword 'match'"));
+
+    let module = parse("var match = 5").expect("grammar note G33 permits contextual var match");
+    let Node::Let(stmt) = &module.items[0] else {
+        panic!("expected var declaration, got {:?}", module.items[0]);
+    };
+    assert_eq!(stmt.pattern, Pattern::Identifier("match".to_string()));
+    assert_eq!(stmt.mutability, Mutability::Mutable);
+
+    let contextual = parse("val class = 5").expect("class remains a contextual val binding name");
+    let Node::Let(stmt) = &contextual.items[0] else {
+        panic!("expected val declaration, got {:?}", contextual.items[0]);
+    };
+    assert_eq!(stmt.pattern, Pattern::Identifier("class".to_string()));
+    assert!(parse("val case = 5").is_err(), "case remains hard-reserved");
+}
+
 // Bug fix a1397571773 (parser_patterns.rs, parse_keyword_as_pattern): the
 // plain-identifier fallback used to bind keyword-named locals with the
 // PascalCase spelling passed in by callers for the enum-variant branches

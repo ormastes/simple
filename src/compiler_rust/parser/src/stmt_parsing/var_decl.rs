@@ -48,6 +48,18 @@ impl Parser<'_> {
         let start_span = self.current.span;
         self.expect(&TokenKind::Val)?;
 
+        // The self-hosted parser treats `match` as an expression starter here.
+        // Reject the immutable binding in the seed too, so invalid source does
+        // not survive until bootstrap Stage 4. Grammar note G33 still permits
+        // `var match`, hence this deliberately lives only in parse_val.
+        if self.check(&TokenKind::Match) {
+            return Err(ParseError::contextual_error(
+                "val binding",
+                "reserved keyword 'match' cannot be used as a val binding name",
+                self.current.span,
+            ));
+        }
+
         // Check for `val generic T ...` — type constraint declaration
         if self.check_identifier("generic") {
             return self.parse_val_generic(start_span);

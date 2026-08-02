@@ -6,10 +6,11 @@
 I/O) silently only works when the caller passes an untyped/`[i64]` integer
 array, and rejects the natural, statically-typed `[u8]` value real code
 produces (e.g. any `wire.spl`-style `ByteWriter.to_bytes()` codec output)
-**Status:** Open — worked around at the call site in
-`src/lib/nogc_sync_mut/game_net/udp_transport.spl`; no interpreter fix yet
-**Fix owner:** `codex-par-u8-marshal` — CLAIMED 2026-08-02; do not edit
-`extract_bytes` or its focused regression in parallel until resolved.
+**Status:** FIXED (2026-08-02)
+**Fix owner:** `codex-par-u8-marshal` — RESOLVED
+
+`extract_bytes` accepts `Value::UInt { width: 8 }`, while wider unsigned
+integers and non-integer values remain rejected.
 
 ## Summary
 
@@ -80,3 +81,13 @@ typed Simple array actually uses (`Value::U8`, if that is the boxed
 representation) alongside `Value::Int`, so callers do not need to manually
 downgrade a typed byte array to an untyped integer array before any
 byte-taking extern call.
+
+## Boundary ownership and regression evidence
+
+The pure-Simple ABI already correctly declares both UDP send and filesystem
+write payloads as `[u8]`. Pre-fix execution of both scenarios in
+`test/02_integration/compiler/native_io_typed_u8_spec.spl` failed with
+`byte array element must be integer, got u8`, proving the defect lies below
+that boundary. Focused Rust tests cover genuine `u8`, legacy `Int`, and
+fail-closed `u16` and passed 3/3. A post-fix driver run remains pending because
+an unrelated conflict marker in `runtime_symbols.rs` blocked rebuilding.

@@ -137,6 +137,11 @@ pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError
             for v in arr.iter() {
                 match v {
                     Value::Int(i) => bytes.push(*i as u8),
+                    // fix-owner: codex-par-u8-marshal
+                    // Typed `u8` values retain their unsigned width at runtime.
+                    // Accept exactly that representation; wider UInt values are
+                    // not byte elements and must continue to fail closed.
+                    Value::UInt { value, width: 8 } => bytes.push(*value as u8),
                     _ => {
                         let ctx = ErrorContext::new()
                             .with_code(codes::TYPE_MISMATCH)
@@ -152,6 +157,35 @@ pub fn extract_bytes(args: &[Value], idx: usize) -> Result<Vec<u8>, CompileError
         }
         Some(Value::Str(s)) => Ok(s.as_bytes().to_vec()),
         _ => Err(crate::error::factory::argument_must_be(idx, "bytes or string")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::extract_bytes;
+    use crate::value::Value;
+    use std::sync::Arc;
+
+    #[test]
+    fn extract_bytes_accepts_typed_u8_elements() {
+        let args = [Value::Array(Arc::new(vec![
+            Value::UInt { value: 0, width: 8 },
+            Value::UInt { value: 255, width: 8 },
+        ]))];
+        assert_eq!(extract_bytes(&args, 0).unwrap(), vec![0, 255]);
+    }
+
+    #[test]
+    fn extract_bytes_preserves_untyped_integer_compatibility() {
+        let args = [Value::Array(Arc::new(vec![Value::Int(1), Value::Int(258)]))];
+        assert_eq!(extract_bytes(&args, 0).unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn extract_bytes_rejects_non_byte_unsigned_elements() {
+        let args = [Value::Array(Arc::new(vec![Value::UInt { value: 1, width: 16 }]))];
+        let err = extract_bytes(&args, 0).unwrap_err().to_string();
+        assert!(err.contains("byte array element must be integer, got u16"));
     }
 }
 

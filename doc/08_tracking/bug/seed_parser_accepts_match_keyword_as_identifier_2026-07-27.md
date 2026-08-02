@@ -1,8 +1,7 @@
 # Seed parser accepts `match` keyword as an identifier — divergence detonates at bootstrap Stage 4
 
-**Status:** open
-**Fix owner:** `codex-par-match-keyword` — CLAIMED 2026-08-02; do not edit the
-seed keyword-binding parser or focused regression in parallel until resolved.
+**Status:** fixed / RESOLVED 2026-08-02
+**Fix owner:** `codex-par-match-keyword` (RESOLVED)
 **Found:** 2026-07-27 (Simple RISC-V hardening campaign, Lane H bootstrap redeploy)
 **Area:** Rust seed parser (`src/compiler_rust/`) vs pure-Simple parser
 **Severity:** medium — lets invalid code land, then fails the full-CLI stage of every bootstrap
@@ -42,6 +41,16 @@ Reserve `match` (and audit other keywords) as identifiers in the seed parser so
 seed-compiled code is a strict subset of self-hosted-compilable code. A cheap
 interim guard: a lint/CI grep for `\b(val|var) match =` and keyword-binding
 patterns.
+
+## Resolution
+
+The pure-Simple statement parser now explicitly rejects `match` at the
+immutable `val` binding boundary before its general contextual-keyword path.
+The Rust seed mirrors that val-only rule. Paired focused regressions preserve
+the documented distinctions: `var match` and `val class` parse, while
+`val case` remains rejected. Both implementations need the explicit rule
+because both otherwise route statement-local binding names through permissive
+keyword-pattern handling.
 
 ## Interim guard (landed)
 
