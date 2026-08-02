@@ -110,3 +110,20 @@ failing on the next resolver step.
 verifies the cached result becomes stale. The single focused command exited
 before parsing because the Stage 3 CLI does not expose `test`; it is retained
 as non-evidence. Final admission remains the next no-stub full Stage 4 build.
+
+## Shell and process helper owner sweep
+
+The next no-stub Stage 4 cycle passed `app.test_cache_shared`, reached 398 HIR
+modules, and then proved `shell_int` unresolved through the broad `std.io`
+facade in `test_runner/system_monitor.spl`. A bounded production sweep found
+the same ownership defect for shell and process helpers in 65 modules across
+test-runner, debug/T32/DAP, QEMU, replay, MCP, package, and process-monitor
+surfaces. Those modules now import only the affected names from the concrete
+`std.nogc_sync_mut.io.process_ops` owner; unrelated file and environment names
+remain on their existing imports, and re-export-only facades were not changed.
+
+`bootstrap_facade_owner_behavior_spec.spl` now executes canonical `shell_bool`
+and `shell_int` behavior alongside its live system-resource assertions. The
+single focused command stopped at the deployed runtime ABI probe before test
+parsing and is non-evidence. Final admission remains the next no-stub full
+Stage 4 build.
