@@ -166,6 +166,22 @@ pub fn runtime_funcs_for_target(_target: &simple_common::target::Target) -> Vec<
     RUNTIME_FUNCS.iter().collect()
 }
 
+/// Look up the declared spec for a runtime symbol by exact name.
+///
+/// This exists so a backend can declare a runtime import with the signature the
+/// runtime actually has instead of assuming every slot is a `RuntimeValue`-wide
+/// integer. `codegen/llvm/emitter.rs::call_runtime_void` assumed exactly that
+/// and declared `void(i64, ...)` for symbols such as
+/// `rt_decision_probe(u64, bool)` and `rt_condition_probe(u64, u32, bool)`.
+///
+/// Returns `None` for symbols with no spec, which is a real answer and not an
+/// error: several emitted names (`rt_contract_check`, `rt_unit_bound_check`,
+/// `rt_generator_yield`) have no entry here and no definition in either
+/// runtime, and must keep failing loudly rather than acquire a fabricated one.
+pub fn spec_for(name: &str) -> Option<&'static RuntimeFuncSpec> {
+    RUNTIME_FUNCS.iter().find(|spec| spec.name == name)
+}
+
 /// Specification for a runtime SFFI function signature.
 #[derive(Debug, Clone)]
 pub struct RuntimeFuncSpec {
@@ -251,6 +267,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_last", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_filter", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_find", &[I64, I64], &[I64]),
+    // Receiver-polymorphic find, for the type-BLIND dispatch tables that cannot
+    // see a static receiver type. NOTE the return SHAPE differs by receiver —
+    // tagged element for an array, raw index for text — which is the contract
+    // hir/lower/expr/mod.rs already encodes. See rt_find.
+    RuntimeFuncSpec::new("rt_find", &[I64, I64], &[I64]),
     // rt_array_map(array, closure) -> array; rt_array_each(array, closure) -> receiver.
     RuntimeFuncSpec::new("rt_array_map", &[I64, I64], &[I64]),
     // Receiver-polymorphic map (array or Option), for the two type-BLIND
@@ -260,7 +281,13 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // rt_array_reduce(array, init, closure): `init` FIRST, matching the
     // interpreter's `reduce(init, func)` argument order.
     RuntimeFuncSpec::new("rt_array_reduce", &[I64, I64, I64], &[I64]),
+    // In-place reverse, returns bool. Nothing dispatches the `reverse` METHOD
+    // here any more — that goes to rt_reverse / rt_array_reversed, matching the
+    // interpreter, which never mutates the receiver.
     RuntimeFuncSpec::new("rt_array_reverse", &[I64], &[I8]),
+    // Copying reverse, returns the new array. Emitted by the type-AWARE LLVM
+    // table for ("Array", "reverse").
+    RuntimeFuncSpec::new("rt_array_reversed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_sort", &[I64], &[I8]),
     // Bug seed_array_local_alias_cow_bypass_2026-07-17: private shallow copy
     // used by `HirStmt::Let` lowering to break the local-alias COW bypass

@@ -111,18 +111,113 @@ impl LlvmEmitter<'_> {
         Ok(widened.into())
     }
 
+    /// Map a Cranelift-typed runtime SFFI slot onto the matching LLVM int type.
+    ///
+    /// Only the integer widths the runtime SFFI table actually uses for scalar
+    /// slots are handled. `F64` returns `None` on purpose: `rt_value_float` is
+    /// declared `f64` in the Rust runtime but raw-bits `int64_t` in the C one
+    /// (recorded in the bug doc, not reconciled here), so silently picking one
+    /// of those two for a void call would be exactly the kind of guess this
+    /// change exists to remove.
+    fn llvm_int_type_for_sffi(&self, ty: cranelift_codegen::ir::Type) -> Option<inkwell::types::IntType<'static>> {
+        use cranelift_codegen::ir::types;
+        let ctx = self.backend.context_ref();
+        match ty {
+            types::I8 => Some(ctx.i8_type()),
+            types::I16 => Some(ctx.i16_type()),
+            types::I32 => Some(ctx.i32_type()),
+            types::I64 => Some(ctx.i64_type()),
+            _ => None,
+        }
+    }
+
     /// Call a runtime function that returns void.
+    ///
+    /// The declaration is built from the runtime SFFI spec when one exists and
+    /// its arity matches what the caller is actually passing. Before this, every
+    /// parameter was declared `runtime_int_type()` (i64) regardless of the real
+    /// signature, so `rt_decision_probe(u64, bool)` was declared
+    /// `void(i64, i64)` and `rt_condition_probe(u64, u32, bool)` was declared
+    /// `void(i64, i64, i64)`. Those happen to survive on the SysV and AArch64
+    /// ABIs the values travel over, because the low bits land in the right
+    /// place, but the declaration was simply not the runtime's signature and
+    /// nothing forced the two to agree.
+    ///
+    /// Two cases deliberately keep the old blind i64 shape rather than being
+    /// "fixed":
+    ///
+    /// - **No spec at all** (`rt_contract_check`, `rt_unit_bound_check`,
+    ///   `rt_generator_yield`): these are defined in neither runtime. Inventing
+    ///   a signature would dress up a symbol that must keep failing loudly.
+    /// - **Spec arity disagrees with the call** (`rt_par_for_each`: this emitter
+    ///   passes 2 operands against 4 declared, dropping `input_len` and
+    ///   `backend`). That mismatch is a KNOWN unfixed defect and the symbol is
+    ///   undefined in both runtimes on purpose. Quietly declaring the 4-arg
+    ///   form here would hide the drop, so the arity check must fail closed.
+    ///
+    /// A spec return type that is non-void is honoured too: `rt_actor_reply` is
+    /// `(RuntimeValue) -> RuntimeValue`, and declaring it `void` here — while
+    /// some other site may declare it correctly — left two disagreeing
+    /// declarations of one symbol in play. The result is simply discarded.
     fn call_runtime_void(&self, name: &str, args: &[BasicValueEnum<'static>]) -> Result<(), String> {
         let i64_type = self.backend.runtime_int_type();
+        let void_type = self.backend.context_ref().void_type();
+
+        // The declared slot types, when the spec exists AND its arity matches
+        // what we are about to pass. `None` means "fall back to the blind i64
+        // shape", which keeps a loud symbol loud.
+        let spec = crate::codegen::runtime_sffi::spec_for(name).filter(|s| s.params.len() == args.len());
+        let slot_types: Option<Vec<inkwell::types::IntType<'static>>> = spec.and_then(|s| {
+            s.params
+                .iter()
+                .map(|&ty| self.llvm_int_type_for_sffi(ty))
+                .collect::<Option<Vec<_>>>()
+        });
 
         let func = self.module.get_function(name).unwrap_or_else(|| {
-            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> =
-                args.iter().map(|_| i64_type.into()).collect();
-            let fn_type = self.backend.context_ref().void_type().fn_type(&param_types, false);
+            let param_types: Vec<inkwell::types::BasicMetadataTypeEnum> = match &slot_types {
+                Some(tys) => tys.iter().map(|t| (*t).into()).collect(),
+                None => args.iter().map(|_| i64_type.into()).collect(),
+            };
+            let fn_type = match spec.map(|s| s.returns) {
+                Some([]) | None => void_type.fn_type(&param_types, false),
+                Some([ret]) => match self.llvm_int_type_for_sffi(*ret) {
+                    Some(int_ty) => int_ty.fn_type(&param_types, false),
+                    None => void_type.fn_type(&param_types, false),
+                },
+                Some(_) => void_type.fn_type(&param_types, false),
+            };
             self.module.add_function(name, fn_type, None)
         });
 
-        let call_args: Vec<BasicMetadataValueEnum> = args.iter().map(|a| (*a).into()).collect();
+        // Narrow each argument to the slot it is being passed in. Without this
+        // the call would not verify once a slot is narrower than i64 — and a
+        // truncation here is not a value change: these are the same low bits
+        // the old i64 declaration was already relying on the ABI to deliver.
+        let call_args: Vec<BasicMetadataValueEnum> = match &slot_types {
+            Some(tys) => {
+                let mut out = Vec::with_capacity(args.len());
+                for (arg, slot) in args.iter().zip(tys.iter()) {
+                    let coerced = match arg {
+                        BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() > slot.get_bit_width() => self
+                            .builder
+                            .build_int_truncate(*iv, *slot, "sffi_arg")
+                            .map_err(|e| format!("LLVM narrowing for '{}' failed: {}", name, e))?
+                            .into(),
+                        BasicValueEnum::IntValue(iv) if iv.get_type().get_bit_width() < slot.get_bit_width() => self
+                            .builder
+                            .build_int_z_extend(*iv, *slot, "sffi_arg")
+                            .map_err(|e| format!("LLVM widening for '{}' failed: {}", name, e))?
+                            .into(),
+                        other => *other,
+                    };
+                    out.push(coerced.into());
+                }
+                out
+            }
+            None => args.iter().map(|a| (*a).into()).collect(),
+        };
+
         self.builder
             .build_call(func, &call_args, name)
             .map_err(|e| format!("LLVM call to '{}' failed: {}", name, e))?;
@@ -162,11 +257,27 @@ impl LlvmEmitter<'_> {
             "push" => Some("rt_array_push"),
             "pop" => Some("rt_array_pop"),
             "clear" => Some("rt_array_clear"),
-            "reverse" => Some("rt_array_reverse"),
+            // Receiver-polymorphic. `rt_array_reverse` reverses IN PLACE and
+            // returns a bool, and this table applied it to EVERY receiver, so
+            // text got the `false` receiver-mismatch answer and an array had
+            // its receiver mutated. The interpreter mutates nothing
+            // (`interpreter_method/collections.rs` `"rev" | "reverse"` copies
+            // then reverses; the string arm builds a new text), which is what
+            // `rt_reverse` does. It is also the only one of the two that the C
+            // runtime defines — `rt_array_reverse` has never existed there, so
+            // `arr.reverse()` did not even link on the native lane.
+            "reverse" => Some("rt_reverse"),
             "sort" => Some("rt_array_sort"),
             "first" => Some("rt_array_first"),
             "last" => Some("rt_array_last"),
-            "find" => Some("rt_string_find"),
+            // Receiver-polymorphic. Routing the bare name to the string-only
+            // `rt_string_find` made every `[T].find(pred)` answer the -1
+            // receiver-mismatch sentinel under LLVM, match at index 0 included,
+            // while the type-AWARE table in functions.rs answered with the
+            // element. `rt_find` tests receiver AND argument; the return shape
+            // differs by receiver, which is the contract hir/lower/expr/mod.rs
+            // already encodes. See rt_find.
+            "find" => Some("rt_find"),
             "any" => Some("rt_array_any"),
             "all" => Some("rt_array_all"),
             "filter" => Some("rt_array_filter"),
@@ -2188,6 +2299,72 @@ mod tests {
         assert_eq!(LlvmEmitter::runtime_method_name("repeat"), None);
         assert_eq!(LlvmEmitter::runtime_method_name("unwrap_err"), Some("rt_enum_payload"));
         assert_eq!(LlvmEmitter::runtime_method_name("to_string"), Some("rt_to_string"));
+    }
+
+    /// The type-BLIND table must not send a receiver-polymorphic method to a
+    /// receiver-SPECIFIC helper. Each assertion pairs the dead name being gone
+    /// with the live emission still being there, so deleting an arm cannot
+    /// satisfy this test.
+    #[test]
+    fn llvm_bare_names_route_polymorphic_methods_to_polymorphic_helpers() {
+        // `find`: `rt_string_find` answers -1 for every array receiver.
+        assert_eq!(LlvmEmitter::runtime_method_name("find"), Some("rt_find"));
+        // ...but the text-only spelling still goes straight to the text helper.
+        assert_eq!(LlvmEmitter::runtime_method_name("find_str"), Some("rt_string_find"));
+
+        // `reverse`: `rt_array_reverse` reverses IN PLACE and returns a bool.
+        assert_eq!(LlvmEmitter::runtime_method_name("reverse"), Some("rt_reverse"));
+
+        // Already-fixed siblings, asserted here so the family stays together.
+        assert_eq!(LlvmEmitter::runtime_method_name("map"), Some("rt_map"));
+        assert_eq!(LlvmEmitter::runtime_method_name("index_of"), Some("rt_index_of"));
+        assert_eq!(LlvmEmitter::runtime_method_name("at"), Some("rt_at"));
+
+        // Receiver-SPECIFIC methods must stay on their specific helpers; this is
+        // the true-positive control that stops the test passing on a table that
+        // simply routed everything through a polymorphic name.
+        assert_eq!(LlvmEmitter::runtime_method_name("push"), Some("rt_array_push"));
+        assert_eq!(LlvmEmitter::runtime_method_name("split"), Some("rt_string_split"));
+        assert_eq!(LlvmEmitter::runtime_method_name("keys"), Some("rt_dict_keys"));
+    }
+
+    /// `call_runtime_void` used to declare every parameter as
+    /// `runtime_int_type()`. These are the specs it now reads instead; if the
+    /// spec table stops carrying the real widths, the narrowing it does becomes
+    /// a no-op again and this catches it.
+    #[test]
+    fn runtime_sffi_specs_carry_the_real_void_call_widths() {
+        use crate::codegen::runtime_sffi::spec_for;
+        use cranelift_codegen::ir::types;
+
+        // rt_decision_probe(decision_id: u64, result: bool)
+        let d = spec_for("rt_decision_probe").expect("rt_decision_probe spec");
+        assert_eq!(d.params, &[types::I64, types::I8]);
+        assert!(d.returns.is_empty(), "rt_decision_probe is void");
+
+        // rt_condition_probe(decision_id: u64, condition_id: u32, result: bool)
+        let c = spec_for("rt_condition_probe").expect("rt_condition_probe spec");
+        assert_eq!(c.params, &[types::I64, types::I32, types::I8]);
+
+        // rt_actor_reply RETURNS a value; call_runtime_void used to declare it
+        // void, leaving two disagreeing declarations of one symbol in play.
+        let r = spec_for("rt_actor_reply").expect("rt_actor_reply spec");
+        assert_eq!(r.returns, &[types::I64]);
+
+        // rt_par_for_each: the emitter passes 2 operands against 4 declared.
+        // The arity check in call_runtime_void must therefore FAIL CLOSED and
+        // leave the symbol loud rather than quietly declaring the 4-arg form.
+        let p = spec_for("rt_par_for_each").expect("rt_par_for_each spec");
+        assert_eq!(p.params.len(), 4, "operand-dropping emitter must stay visible");
+
+        // Symbols with no spec at all must report None rather than a guess.
+        assert!(spec_for("rt_contract_check").is_none());
+        assert!(spec_for("rt_unit_bound_check").is_none());
+        assert!(spec_for("rt_generator_yield").is_none());
+
+        // Positive control: the lookup really does find things.
+        assert_eq!(spec_for("rt_find").map(|s| s.params.len()), Some(2));
+        assert!(spec_for("rt_this_symbol_does_not_exist").is_none());
     }
 
     #[test]

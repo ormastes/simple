@@ -3362,7 +3362,23 @@ pub fn compile_call<M: Module>(
                 // `index_of` is receiver-polymorphic (array or text): routing it
                 // to rt_string_find made every `[T].index_of(v)` return -1.
                 "index_of" => Some("rt_index_of"),
-                "find" | "find_str" => Some("rt_string_find"),
+                // Receiver-polymorphic, like `index_of` above. This match used
+                // to hold TWO `"find"` arms — this one and `"find" =>
+                // rt_array_find` further down — and Rust `match` is
+                // first-match-wins, so the array arm was UNREACHABLE and every
+                // `arr.find(pred)` answered the -1 receiver-mismatch sentinel
+                // of the string-only helper, including when the match sat at
+                // index 0. `rt_find` tests the receiver AND the argument:
+                // array + callable closure gets the element, everything else
+                // keeps `rt_string_find`'s exact raw-index answer. The return
+                // SHAPE therefore differs by receiver, which is the contract
+                // hir/lower/expr/mod.rs already encodes (`find` is typed I64
+                // only inside its `if is_string` arm).
+                "find" => Some("rt_find"),
+                // `find_str` is text-only in the interpreter
+                // (interpreter_method/string.rs `"find_str" | "find" |
+                // "index_of"`), so it keeps the direct string route.
+                "find_str" => Some("rt_string_find"),
                 "rfind" | "last_index_of" => Some("rt_string_rfind"),
                 "to_string" | "to_text" | "str" => Some("rt_to_string"),
                 "slice" | "substring" => Some("rt_slice"),
@@ -3371,10 +3387,20 @@ pub fn compile_call<M: Module>(
                 "values" => Some("rt_dict_values"),
                 "filter" => Some("rt_array_filter"),
                 "sort" => Some("rt_array_sort"),
-                "reverse" => Some("rt_array_reverse"),
+                // `reverse` used to route to `rt_array_reverse` for EVERY
+                // receiver. That helper reverses IN PLACE and returns a bool,
+                // so text got the `false` receiver-mismatch answer and an array
+                // had its receiver mutated. The interpreter is the spec and
+                // mutates nothing: `interpreter_method/collections.rs`
+                // `"rev" | "reverse"` copies then reverses, and the string arm
+                // builds a new text. `rt_reverse` does exactly that and refuses
+                // any other receiver loudly.
+                "reverse" => Some("rt_reverse"),
                 "first" => Some("rt_array_first"),
                 "last" => Some("rt_array_last"),
-                "find" => Some("rt_array_find"),
+                // (The dead second `"find" => rt_array_find` arm that used to
+                // sit here was unreachable behind the `"find"` arm above; the
+                // live route is now the receiver-polymorphic `rt_find`.)
                 "any" => Some("rt_array_any"),
                 "all" => Some("rt_array_all"),
                 // `rt_array_enumerate` has always existed in the runtime

@@ -3992,9 +3992,14 @@ static int64_t rt_string_reverse_chars(RtCoreString* s) {
 /* rev / reversed: reverse by CHARACTER for text, by ELEMENT for an array.
  * Receiver-dispatched, following the rt_at/rt_array_at precedent.
  *
- * The pre-existing `reverse` mapping is deliberately left alone -- it points at
- * rt_array_reverse, which this file has never defined, so `arr.reverse()` is
- * unresolved on the native lane today and is tracked separately. */
+ * `reverse` now routes here too, on every type-blind dispatch table. It used to
+ * point at rt_array_reverse, which this file has never defined, so
+ * `arr.reverse()` was an unresolved symbol on the native lane; on the Rust lane
+ * it resolved to an IN-PLACE reverse returning a bool, for every receiver
+ * including text. The interpreter is the spec and mutates nothing --
+ * interpreter_method/collections.rs "rev" | "reverse" copies then reverses, and
+ * the string arm builds a new text -- which is exactly what this function
+ * does. */
 int64_t rt_reverse(int64_t receiver) {
     /* rt_core_as_array validates the header; SplArray* carries the tagged
      * value directly, exactly as rt_array_len_safe does. */
@@ -6124,6 +6129,93 @@ int64_t rt_array_any(SplArray* array, int64_t closure_value) {
         if (rt_core_value_truthy(func(closure_value, rt_array_get(array, i)))) return 1;
     }
     return 0;
+}
+
+/* ---------------------------------------------------------------------------
+ * Receiver-polymorphic collection entry points, at parity with the Rust
+ * runtime's rt_find / rt_map / rt_index_of.
+ *
+ * Every symbol below is implemented rather than left to fail at link ONLY
+ * because its emitters were first shown to pass their operands verbatim: the
+ * LLVM sites build `receiver + args` with get_vreg + coerce_value_to_type
+ * (codegen/llvm/emitter.rs, codegen/llvm/functions.rs) and the Cranelift sites
+ * do the same (codegen/instr/calls.rs, codegen/instr/closures_structs.rs). The
+ * rt_par_map / rt_par_filter / rt_par_for_each / rt_par_reduce family is
+ * DELIBERATELY still absent from this file: those emitters drop operands
+ * (2 passed against 4 declared, 3 against 5), and an emitter that discards
+ * operands must keep failing loudly rather than be handed a receiver.
+ *
+ * Signature divergence from the Rust runtime, recorded not reconciled: the
+ * entry points here take a raw int64_t or an SplArray pointer where Rust takes
+ * a tagged RuntimeValue, so the receiver test is rt_core_array_ptr rather than
+ * the Rust as_typed_ptr heap-type check, and value equality is rt_native_eq
+ * here against the Rust rt_value_eq. Behaviour is matched, the C types are not.
+ * ------------------------------------------------------------------------- */
+
+/* Index of the first element equal to `value`, or -1. Mirrors the Rust
+ * rt_array_index_of, whose -1 doubles as the receiver-mismatch sentinel. This
+ * had a runtime_sffi spec and a Rust definition but no definition here at all,
+ * so `arr.index_of(v)` was an unresolved symbol on the C lane. */
+int64_t rt_array_index_of(SplArray* array, int64_t value) {
+    if (!rt_core_array_ptr(array)) return -1;
+    for (int64_t i = 0; i < rt_array_len(array); i++) {
+        if (rt_native_eq(rt_array_get(array, i), value)) return i;
+    }
+    return -1;
+}
+
+/* Receiver-polymorphic index_of: array first, then text. Dispatch is by trial
+ * rather than a kind test because both callees are total and answer -1 on a
+ * receiver mismatch, exactly as the Rust rt_index_of does. Both return a RAW
+ * index, so there is no return-shape question here. */
+int64_t rt_index_of(int64_t haystack, int64_t needle) {
+    int64_t as_array = rt_array_index_of((SplArray*)(uintptr_t)haystack, needle);
+    if (as_array >= 0) return as_array;
+    return rt_string_find(haystack, needle);
+}
+
+/* Receiver-polymorphic find. See the Rust rt_find for the full rationale; the
+ * one thing that must not be lost in a summary is that the RETURN SHAPE
+ * DIFFERS BY RECEIVER and that this is the pre-existing contract, not a new
+ * choice: an array receiver yields the tagged ELEMENT, a text receiver yields a
+ * RAW index. hir/lower/expr/mod.rs types `find` as I64 only under `is_string`,
+ * so the consumer already interprets the word by receiver type. Requiring a
+ * callable closure for the array branch keeps every other argument shape on its
+ * exact previous answer. */
+int64_t rt_find(int64_t receiver, int64_t arg) {
+    SplArray* arr = rt_core_array_ptr((SplArray*)(uintptr_t)receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr && rt_closure_func_ptr(arg)) {
+        return rt_array_find(arr, arg);
+    }
+    return rt_string_find(receiver, arg);
+}
+
+/* Option::map. Absent from this file entirely until now, which is why the
+ * type-blind `map` dispatch could not link on the C lane at all. Semantics are
+ * pinned to the Rust rt_option_map (runtime/src/value/objects.rs): None/nil is
+ * returned UNCHANGED with the closure never invoked, a null closure yields nil,
+ * and otherwise the payload is passed to the closure and the result re-wrapped
+ * in Some. Some is (enum_id 1, discriminant 0) and None is (1, 1) — the same
+ * constants rt_array_at in this file already builds its Option with. */
+int64_t rt_option_map(int64_t value, int64_t closure_value) {
+    if (rt_is_none(value)) return value;
+    int64_t payload = rt_enum_payload(value);
+    int64_t func_ptr = rt_closure_func_ptr(closure_value);
+    if (!func_ptr) return rt_core_nil();
+    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
+    return rt_enum_new(1, 0, func(closure_value, payload));
+}
+
+/* Receiver-polymorphic map: arrays go to rt_array_map, everything else keeps
+ * the exact rt_option_map result. Mirrors the Rust rt_map. The in-tree comment
+ * that claimed rt_option_map "also works for arrays" was WRONG in the silent
+ * direction — rt_enum_payload of an array is nil, so the closure ran exactly
+ * ONCE, on a value never in the receiver, and the result came back Some-wrapped
+ * with no error and exit 0. */
+int64_t rt_map(int64_t receiver, int64_t closure_value) {
+    SplArray* arr = rt_core_array_ptr((SplArray*)(uintptr_t)receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (arr) return rt_array_map(arr, closure_value);
+    return rt_option_map(receiver, closure_value);
 }
 
 static int64_t rt_bdd_passed = 0;

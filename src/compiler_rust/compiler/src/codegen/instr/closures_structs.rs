@@ -1075,6 +1075,67 @@ mod tests {
         assert!(!is_bare_builtin_collection_method("index_of", 0));
         assert!(!is_bare_builtin_collection_method("index_of", 2));
     }
+
+    /// The two Cranelift bare-name dispatch tables must not send a
+    /// receiver-polymorphic method to a receiver-SPECIFIC helper, and must not
+    /// contain a SECOND arm for a name already matched earlier — Rust `match`
+    /// is first-match-wins, so a second arm is dead code that reads like a
+    /// working array route. `calls.rs` carried exactly that for `find`.
+    ///
+    /// Each check pairs "the dead mapping is gone" with "the live mapping is
+    /// present", so deleting an arm cannot satisfy the test.
+    ///
+    /// Self-matching is impossible by construction rather than by excluding a
+    /// region: every needle contains `"` characters, which in THIS file's source
+    /// are written `\"`, so the assertion text never contains the needle it
+    /// searches for. (Region-excluding would not work here anyway —
+    /// `calls.rs` declares its `mod tests` near the TOP of the file, above the
+    /// dispatch table being checked.)
+    #[test]
+    fn cranelift_bare_name_tables_have_no_dead_or_receiver_specific_find_reverse() {
+        let calls = include_str!("calls.rs");
+        let closures = include_str!("closures_structs.rs");
+
+        // --- calls.rs -------------------------------------------------------
+        assert!(
+            calls.contains("\"find\" => Some(\"rt_find\")"),
+            "calls.rs must route the bare `find` to the polymorphic rt_find"
+        );
+        assert!(
+            !calls.contains("\"find\" => Some(\"rt_array_find\")"),
+            "the dead second `find` arm must not come back — it is unreachable"
+        );
+        assert!(
+            !calls.contains("\"find\" | \"find_str\" => Some(\"rt_string_find\")"),
+            "the bare `find` must not be folded back into the text-only arm"
+        );
+        assert!(
+            calls.contains("\"find_str\" => Some(\"rt_string_find\")"),
+            "`find_str` is text-only and must keep its direct route"
+        );
+        assert!(
+            calls.contains("\"reverse\" => Some(\"rt_reverse\")"),
+            "calls.rs must route `reverse` to the copying rt_reverse"
+        );
+        assert!(
+            !calls.contains("\"reverse\" => Some(\"rt_array_reverse\")"),
+            "rt_array_reverse mutates in place and returns a bool"
+        );
+
+        // --- closures_structs.rs -------------------------------------------
+        assert!(closures.contains("\"find\" => \"rt_find\""), "bare `find` must reach rt_find");
+        assert!(
+            !closures.contains("\"find\" => \"rt_string_find\""),
+            "the text-only route made every array find answer -1"
+        );
+        assert!(closures.contains("\"reverse\" => \"rt_reverse\""), "bare `reverse` must reach rt_reverse");
+        assert!(!closures.contains("\"reverse\" => \"rt_array_reverse\""));
+
+        // True-positive control: receiver-SPECIFIC methods must STAY specific,
+        // so this cannot be satisfied by a table that renamed everything.
+        assert!(calls.contains("\"sort\" => Some(\"rt_array_sort\")"));
+        assert!(closures.contains("\"filter\" => \"rt_array_filter\""));
+    }
 }
 
 /// Try to compile a builtin method call (String, Array methods)
@@ -1473,10 +1534,18 @@ fn try_compile_builtin_method_call<M: Module>(
         }
         "filter" => "rt_array_filter",
         "sort" => "rt_array_sort",
-        "reverse" => "rt_array_reverse",
+        // See calls.rs: `rt_array_reverse` reverses IN PLACE and returns a
+        // bool, for every receiver. The interpreter mutates nothing and returns
+        // a new collection, which is what `rt_reverse` does.
+        "reverse" => "rt_reverse",
         "first" => "rt_array_first",
         "last" => "rt_array_last",
-        "find" => "rt_string_find",
+        // Receiver-polymorphic. This table had no array arm for `find` at all,
+        // so `arr.find(pred)` took the string route and answered -1. `rt_find`
+        // routes an array receiver with a callable closure to `rt_array_find`
+        // and leaves every other shape on `rt_string_find`'s exact answer; the
+        // return shape differs by receiver, which is the pre-existing contract.
+        "find" => "rt_find",
         "any" => "rt_array_any",
         "all" => "rt_array_all",
         // `rt_array_enumerate` has always existed in the runtime but had no

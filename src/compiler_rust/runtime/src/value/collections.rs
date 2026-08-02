@@ -2553,12 +2553,18 @@ fn refuse_non_text_receiver(method: &str) -> ! {
 /// Receiver-dispatched, following the `rt_at`/`rt_array_at` precedent: the
 /// dispatch table cannot tell the two receivers apart, so the runtime must.
 ///
-/// NOTE the pre-existing `reverse` mapping is deliberately left alone. It points
-/// at `rt_array_reverse`, which reverses IN PLACE and returns a bool, for EVERY
-/// receiver including text. That is a separate wrong mapping tracked in
-/// doc/08_tracking/bug/jit_text_repeat_dispatch_and_silent_error_substitution_2026-08-01.md;
-/// changing it here would also change `arr.reverse()`'s return value, which is
-/// out of scope for this fix.
+/// `reverse` now routes here too, on every type-blind dispatch table. It used
+/// to route to `rt_array_reverse`, which reverses IN PLACE and returns a
+/// `bool`, for EVERY receiver including text — so text got the `false`
+/// receiver-mismatch answer, and an array got its receiver MUTATED. The
+/// interpreter is the spec and it mutates nothing: `interpreter_method/
+/// collections.rs` `"rev" | "reverse"` copies then reverses
+/// (`Value::array(new_arr)`), `interpreter_method/string.rs` `"rev" |
+/// "reverse"` builds a new text, and the tuple arm builds a new tuple. This
+/// function matches that: a NEW array (via `rt_array_reversed`), a NEW text, or
+/// a loud refusal on any other receiver. `rt_array_reverse` keeps its in-place
+/// semantics for callers that ask for it by name; nothing dispatches `reverse`
+/// to it any more.
 #[no_mangle]
 pub extern "C" fn rt_reverse(receiver: RuntimeValue) -> RuntimeValue {
     if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some() {
@@ -4083,6 +4089,48 @@ pub extern "C" fn rt_array_find(array: RuntimeValue, closure: RuntimeValue) -> R
         }
     }
     RuntimeValue::NIL
+}
+
+/// Receiver-polymorphic `find`, in the same shape as the in-tree `rt_at`,
+/// `rt_index_of` and `rt_map` precedents — with ONE difference that is stated
+/// here rather than hidden: the two receivers return DIFFERENT SHAPES in the
+/// same machine word.
+///
+/// - ARRAY receiver AND a callable closure argument → `rt_array_find`, i.e. the
+///   matching ELEMENT as a tagged `RuntimeValue`, or tagged NIL when no element
+///   matches.
+/// - EVERYTHING ELSE → `rt_string_find`, i.e. a RAW `i64` byte index, or -1.
+///   Text behaviour is bit-for-bit what it was before this symbol existed.
+///
+/// The dual shape is not a new design choice, it is the PRE-EXISTING contract:
+/// `hir/lower/expr/mod.rs` types `find` as `TypeId::I64` only inside its
+/// `if is_string` arm, and the array arm gives `find` no type at all, so the
+/// consumer's interpretation is already derived from the receiver's static
+/// type. Returning one tagged shape for both would therefore have CHANGED text
+/// `find`, which is exactly what this fix must not do.
+///
+/// Why the symbol is needed: `codegen/instr/calls.rs` and the type-blind table
+/// in `codegen/llvm/functions.rs` each contained TWO `"find"` arms in one
+/// `match` — `"find" | "find_str" => rt_string_find` and, further down,
+/// `"find" => rt_array_find`. Rust `match` is first-match-wins, so the array
+/// arm was UNREACHABLE; `instr/closures_structs.rs` and `llvm/emitter.rs`
+/// mapped the bare name to `rt_string_find` with no array arm at all. Every
+/// `arr.find(pred)` on a type-blind path therefore answered the `-1`
+/// receiver-mismatch sentinel — including when the match sat at index 0 —
+/// while the type-AWARE LLVM table answered with the element. Same source, two
+/// answers per backend, no error, exit 0.
+///
+/// The array branch requires BOTH an array receiver and a callable closure, so
+/// an array receiver with a non-closure argument keeps its exact previous
+/// answer instead of silently acquiring a new one.
+#[no_mangle]
+pub extern "C" fn rt_find(receiver: RuntimeValue, arg: RuntimeValue) -> i64 {
+    if get_typed_ptr::<RuntimeArray>(receiver, HeapObjectType::Array).is_some()
+        && !rt_closure_func_ptr(arg).is_null()
+    {
+        return rt_array_find(receiver, arg).to_raw() as i64;
+    }
+    rt_string_find(receiver, arg)
 }
 
 /// Apply `closure` to every element and return a NEW array of the results.

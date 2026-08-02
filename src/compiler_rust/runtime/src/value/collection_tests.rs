@@ -2198,3 +2198,108 @@ fn transient_heap_promotion_retains_reachable_cycle_only() {
     super::rt_array_free(kept_a);
     super::rt_array_free(kept_b);
 }
+
+/// `rt_find` is the receiver-polymorphic `find` the type-blind dispatch tables
+/// now emit. Two things have to hold at once and they pull in opposite
+/// directions, which is why they are asserted together:
+///
+/// 1. an ARRAY receiver with a callable closure yields the matching ELEMENT
+///    (before this symbol existed the type-blind tables sent it to
+///    `rt_string_find`, which answered the -1 receiver-mismatch sentinel for
+///    every array, match at index 0 included);
+/// 2. TEXT keeps its RAW index answer, bit for bit. A fix that bought the array
+///    answer by tagging the text one would be a regression, not a fix.
+///
+/// The predicate call COUNT is asserted too, so an implementation that answers
+/// correctly while never invoking the predicate — the exact shape of the
+/// `any`/`all` defect — cannot pass.
+#[test]
+fn rt_find_dispatches_on_receiver_without_changing_text() {
+    use super::{rt_array_new, rt_array_push, rt_find, rt_string_find, rt_string_new};
+    use crate::value::core::RuntimeValue;
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    static CALLS: AtomicI64 = AtomicI64::new(0);
+
+    extern "C" fn gt1(_c: RuntimeValue, item: RuntimeValue) -> RuntimeValue {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        RuntimeValue::from_bool(item.as_int() > 1)
+    }
+    extern "C" fn gt99(_c: RuntimeValue, item: RuntimeValue) -> RuntimeValue {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        RuntimeValue::from_bool(item.as_int() > 99)
+    }
+    fn closure(f: extern "C" fn(RuntimeValue, RuntimeValue) -> RuntimeValue) -> RuntimeValue {
+        crate::value::objects::rt_closure_new(f as *const () as *const u8, 0)
+    }
+    fn array(items: &[i64]) -> RuntimeValue {
+        let a = rt_array_new(items.len().max(1) as u64);
+        for v in items {
+            rt_array_push(a, RuntimeValue::from_int(*v));
+        }
+        a
+    }
+    fn text(s: &str) -> RuntimeValue {
+        rt_string_new(s.as_ptr(), s.len() as u64)
+    }
+
+    let a123 = array(&[1, 2, 3]);
+
+    // Array + closure: the first element greater than 1 is 2, and the predicate
+    // is decisive on the SECOND element, so it runs exactly twice — not once.
+    CALLS.store(0, Ordering::SeqCst);
+    let found = RuntimeValue::from_raw(rt_find(a123, closure(gt1)) as u64);
+    assert_eq!(found.as_int(), 2, "array find must return the matching ELEMENT");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 2, "predicate must run until decisive");
+
+    // No match: tagged NIL, predicate seen every element.
+    CALLS.store(0, Ordering::SeqCst);
+    let missing = RuntimeValue::from_raw(rt_find(a123, closure(gt99)) as u64);
+    assert!(missing.is_nil(), "array find with no match must be nil");
+    assert_eq!(CALLS.load(Ordering::SeqCst), 3, "predicate must see every element");
+
+    // Text: identical to calling rt_string_find directly. These are the values a
+    // tagging-based "fix" would have broken.
+    let hay = text("hello world");
+    assert_eq!(rt_find(hay, text("world")), 6);
+    assert_eq!(rt_find(hay, text("world")), rt_string_find(hay, text("world")));
+    assert_eq!(rt_find(hay, text("zzz")), -1);
+    assert_eq!(rt_find(hay, text("")), 0);
+
+    // Array receiver with a NON-closure argument keeps its exact previous
+    // answer rather than silently acquiring a new one.
+    assert_eq!(rt_find(a123, text("x")), -1);
+    assert_eq!(rt_find(a123, text("x")), rt_string_find(a123, text("x")));
+}
+
+/// `rt_reverse` is what the `reverse` METHOD now lowers to. `rt_array_reverse`
+/// stays in the runtime with its in-place semantics for callers that name it,
+/// but nothing dispatches `reverse` to it any more: it returns a bool and
+/// MUTATES the receiver, while the interpreter (`interpreter_method/
+/// collections.rs` `"rev" | "reverse"`) copies first and leaves the receiver
+/// alone. The non-mutation assertion is the half that a "just swap the callee"
+/// change would get wrong.
+#[test]
+fn rt_reverse_copies_and_leaves_the_receiver_alone() {
+    use super::{rt_array_get, rt_array_len, rt_array_new, rt_array_push, rt_reverse, rt_string_new};
+    use crate::value::core::RuntimeValue;
+
+    let a = rt_array_new(3);
+    rt_array_push(a, RuntimeValue::from_int(1));
+    rt_array_push(a, RuntimeValue::from_int(2));
+    rt_array_push(a, RuntimeValue::from_int(3));
+
+    let rev = rt_reverse(a);
+    assert_eq!(rt_array_len(rev), 3);
+    assert_eq!(rt_array_get(rev, 0).as_int(), 3);
+    assert_eq!(rt_array_get(rev, 2).as_int(), 1);
+
+    // The receiver is untouched — the in-place helper would have reversed it.
+    assert_eq!(rt_array_get(a, 0).as_int(), 1, "receiver must NOT be mutated");
+    assert_eq!(rt_array_get(a, 2).as_int(), 3, "receiver must NOT be mutated");
+
+    // Text receiver reverses by character and yields a new string.
+    let s = "abc";
+    let rev_text = rt_reverse(rt_string_new(s.as_ptr(), s.len() as u64));
+    assert_eq!(super::rt_string_len(rev_text), 3);
+}

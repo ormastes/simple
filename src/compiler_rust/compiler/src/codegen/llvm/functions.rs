@@ -2416,7 +2416,18 @@ impl LlvmBackend {
                     // -1 receiver-mismatch sentinel under LLVM while the
                     // Cranelift/JIT path returned the true index.
                     "index_of" => Some("rt_index_of"),
-                    "find" | "find_str" => Some("rt_string_find"),
+                    // Receiver-polymorphic, like `index_of` above. This match
+                    // held TWO `"find"` arms — this one and `"find" =>
+                    // rt_array_find` below — and Rust `match` is
+                    // first-match-wins, so the array arm was UNREACHABLE and
+                    // every type-blind `arr.find(pred)` answered the -1
+                    // receiver-mismatch sentinel of the string-only helper.
+                    // See rt_find: array + callable closure gets the element,
+                    // everything else keeps `rt_string_find`'s exact answer.
+                    "find" => Some("rt_find"),
+                    // Text-only in the interpreter, so it keeps the direct
+                    // string route.
+                    "find_str" => Some("rt_string_find"),
                     "rfind" | "last_index_of" => Some("rt_string_rfind"),
                     "to_string" | "to_text" | "str" => Some("rt_to_string"),
                     "slice" | "substring" => Some("rt_slice"),
@@ -2426,15 +2437,30 @@ impl LlvmBackend {
                     "remove" => Some("rt_dict_remove"),
                     "filter" => Some("rt_array_filter"),
                     "sort" => Some("rt_array_sort"),
-                    "reverse" => Some("rt_array_reverse"),
+                    // See rt_reverse: `rt_array_reverse` reverses IN PLACE and
+                    // returns a bool, applied here to every receiver; the
+                    // interpreter mutates nothing and returns a new collection.
+                    "reverse" => Some("rt_reverse"),
                     "first" => Some("rt_array_first"),
                     "last" => Some("rt_array_last"),
-                    "find" => Some("rt_array_find"),
+                    // (The dead second `"find" => rt_array_find` arm that used
+                    // to sit here was unreachable behind the `"find"` arm
+                    // above; the live route is now `rt_find`.)
                     "any" => Some("rt_array_any"),
                     "all" => Some("rt_array_all"),
                     // LLVM-specific mappings (not in Cranelift, verified to exist)
                     "repeat" => Some("lib__common__string_core__str_repeat"),
-                    "map" => Some("rt_option_map"),
+                    // Receiver-polymorphic. This is the type-BLIND table, and
+                    // it was the last site still routing the bare name `map`
+                    // straight to the Option-only `rt_option_map` after the
+                    // sibling arms in `llvm/emitter.rs` and
+                    // `instr/closures_structs.rs` were corrected — an
+                    // enumeration gap, not a different defect. `rt_is_none` of
+                    // an array is false and `rt_enum_payload` of an array is
+                    // NIL, so `[1,2,3].map(f)` called the closure EXACTLY ONCE,
+                    // on a value never in the receiver, and Some-wrapped the
+                    // result, with no error and exit 0.
+                    "map" => Some("rt_map"),
                     // Option/Result methods (LLVM-specific)
                     "unwrap" | "unwrap_or" | "unwrap_err" => Some("rt_enum_payload"),
                     "is_none" => Some("rt_is_none"),
@@ -2538,8 +2564,25 @@ impl LlvmBackend {
                             .build_call(rt_func, &arg_vals, "rtcall")
                             .map_err(|e| crate::error::factory::llvm_build_failed("rt method call", &e))?
                     };
-                    // For in-place mutating methods, return receiver
-                    let in_place = matches!(method, "push" | "clear" | "reverse" | "sort");
+                    // For in-place mutating methods, return receiver.
+                    //
+                    // `reverse` is NO LONGER in this set. It now lowers to
+                    // `rt_reverse` / `rt_array_reversed`, both of which build a
+                    // NEW collection and return it — matching the interpreter,
+                    // which never mutates the receiver. Leaving it here would
+                    // have DISCARDED that new collection and yielded the
+                    // (unmodified) receiver instead, which is the one way this
+                    // remap could have become a silent wrong answer.
+                    //
+                    // `sort` is left alone deliberately: it still lowers to the
+                    // in-place `rt_array_sort`, so its result vreg must stay
+                    // the receiver. The interpreter's array `"sort"` also
+                    // copies (`interpreter_method/collections.rs`), so `sort`
+                    // carries the same divergence `reverse` had — recorded in
+                    // doc/08_tracking/bug/jit_in_operator_unboxed_needle_2026-08-01.md
+                    // rather than changed here, because a different runtime
+                    // symbol would have to exist first.
+                    let in_place = matches!(method, "push" | "clear" | "sort");
                     if let Some(d) = dest {
                         if in_place {
                             let recv_val = self.get_vreg(receiver, vreg_map)?;
@@ -2813,7 +2856,14 @@ impl LlvmBackend {
                     ("Array" | "array", "slice") | ("String" | "string", "slice") => Some("rt_slice"),
                     ("Array" | "array", "join") => Some("rt_array_join"),
                     ("Array" | "array", "sort") => Some("rt_array_sort"),
-                    ("Array" | "array", "reverse") => Some("rt_array_reverse"),
+                    // `rt_array_reversed`, NOT `rt_array_reverse`: the
+                    // interpreter's array `"rev" | "reverse"` copies the vector
+                    // and reverses the COPY (`Value::array(new_arr)`), leaving
+                    // the receiver untouched, and returns the new array. The
+                    // in-place helper returns a bool and mutates the receiver,
+                    // so it disagreed with the interpreter on both the result
+                    // and on aliasing.
+                    ("Array" | "array", "reverse") => Some("rt_array_reversed"),
                     ("Array" | "array", "filter") => Some("rt_array_filter"),
                     ("Array" | "array", "map") => Some("rt_array_map"),
                     ("Array" | "array", "each") | ("Array" | "array", "for_each") => Some("rt_array_each"),
