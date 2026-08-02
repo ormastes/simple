@@ -1127,14 +1127,88 @@ tests are independent and neither is carrying the other.
 
   A binary predating the commit agreed with the interpreter on both. So this is
   a **live silent wrong answer on the aliasing axis**, of exactly the shape the
-  `reverse` fix was written to remove. Not changed here: it means revisiting
-  another lane's landed decision and its
-  `rt_reverse_copies_and_leaves_the_receiver_alone` test, which should be a
-  deliberate call rather than a side effect of the `sort` work. The likely
-  resolution is the one `sort` took — reverse in place, return the receiver,
-  refuse non-array/non-text loudly — but that must be confirmed against
-  `interpreter_method/string.rs`, since **text** `reverse` genuinely copies and
-  has no receiver to rebind.
+  `reverse` fix was written to remove.
+
+  **CLOSED 2026-08-02 for ARRAY receivers — and the predicted resolution was
+  again wrong.** The guess above ("the one `sort` took") assumed `reverse` and
+  `rev`/`reversed` are one method. They are not, and that is the whole defect:
+  `interpreter_method/mod.rs` lists `"reverse"` in `MUTATING_METHODS` and
+  **deliberately omits `"rev"` and `"reversed"`**, so the interpreter rebinds
+  the receiver for `reverse` alone. Both spellings share ONE arm in
+  `interpreter_method/collections.rs` — the single-layer read that produced the
+  wrong prediction for `sort` produced a wrong one here too. Measured:
+
+  ```text
+  var a = [1, 2, 3]
+  a.reverse()   ->  [3,2,1]  AND  a == [3,2,1]     mutating spelling
+  a.rev()       ->  [3,2,1]  AND  a == [1,2,3]     pure spelling
+  ```
+
+  Fixed by **splitting the symbols**, not by changing `rt_reverse`: new
+  `rt_reverse_mut` in both runtimes (reverse the array in place, return that
+  same array) serves `reverse`; `rt_reverse` keeps serving `rev`/`reversed`.
+  The type-aware LLVM arm `("Array","reverse")` had a second, independent
+  defect — `rt_array_reversed` has **never existed in `runtime_native.c`**, so
+  that arm did not link on the native lane at all — closed by the same routing.
+
+  **Verdict on the landed test `rt_reverse_copies_and_leaves_the_receiver_alone`:
+  it pinned CORRECT semantics on a FALSE premise.** Every assertion in it is
+  right — they describe `rt_reverse`, the `rev`/`reversed` helper — so all of
+  them are kept. Only its opening sentence, that `rt_reverse` "is what the
+  `reverse` METHOD now lowers to", was false, and that sentence is corrected in
+  place. By contrast the three **codegen guard assertions** demanding
+  `"reverse" => rt_reverse` genuinely **pinned the bug** and were replaced, with
+  negative assertions added plus a new true-positive control that
+  `rev`/`reversed` must not follow `reverse`. Nothing was weakened or deleted.
+
+  Non-vacuity: after the fix `rev` still leaves `a == [1,2,3]` while `reverse`
+  now leaves `a == [3,2,1]`. The two spellings moved apart, which no blanket
+  semantics change could produce.
+
+### Mutating-method family sweep (2026-08-02)
+
+All 33 names in `interpreter_method/mod.rs`'s `MUTATING_METHODS` were checked
+against the five codegen dispatch tables. Only **8** have any codegen route;
+the other 25 (`push_front`, `insert`, `extend`, `dedup`, `retain`, `swap`,
+`rotate_*`, `truncate`, `drain`, `merge`, …) have **no lowering at all** and are
+out of scope here. Per-symbol verdict, measured on both engines with
+`jit-fallback` asserted 0:
+
+| method | route | JIT vs interp | verdict |
+|---|---|---|---|
+| `reverse` (array) | `rt_reverse_mut` | agree after fix | **FIXED here** |
+| `rev` / `reversed` | `rt_reverse` | agree | correct, left alone |
+| `sort` | `rt_sort` | agree | fixed earlier |
+| `push` | `rt_array_push` | agree | correct, left alone |
+| `pop` | `rt_array_pop` | agree | correct, left alone |
+| `append` | `rt_array_push` | agree | correct, left alone |
+| `clear` | `rt_array_clear` | agree | correct, left alone |
+| `set` | `rt_dict_set` / `rt_index_set` / `rt_tuple_set` | not measured | **untested**, left alone |
+
+- **OPEN — TEXT receivers diverge for all four string mutators.** Deliberately
+  not fixed with `reverse`, because it is one design question spanning four
+  methods, not a `reverse` bug. Measured `var t = "abc"`:
+
+  ```text
+  method    JIT expr/recv        interp expr/recv
+  push      0 / abc              abcd / abcd
+  pop       nil / abc            Option::Some(c) / abc
+  clear     abc / abc            (empty) / (empty)
+  reverse   cba / abc            cba / cba
+  ```
+
+  The interpreter rebinds a `Str` receiver because the write-back rule is
+  `MUTATING_METHODS.contains(method) && discriminant(result)==discriminant(recv)`
+  and `Str == Str` passes — even though the same file documents that "strings in
+  Simple are value types with NO mutating methods". So the interpreter
+  contradicts its own stated rule, and the JIT answers garbage (`0`, `nil`) from
+  array helpers applied to text. **Both sides are wrong here**, in different
+  ways, which is why this needs a decision rather than a patch. Text behaviour
+  was left byte-for-byte unchanged by the `reverse` fix.
+- **OPEN — the LLVM emitter table has no `rev`/`reversed` arm at all**, unlike
+  the two Cranelift tables. Not filled in, because this lane has no measurement
+  of the LLVM path for those spellings and adding an unverified route is the
+  same class of mistake being undone here.
 - **`rt_value_float` signature divergence** (§6) — unchanged.
 - **`rt_par_*`** — must stay undefined until their emitters thread the real
   operands.
