@@ -63,6 +63,44 @@ check() { # <label> <actual> <expected>
 check "7-char markers rejected"  "$(marker_case '<<<<<<<' '>>>>>>>')"       1
 check "10-char markers rejected" "$(marker_case '<<<<<<<<<<' '>>>>>>>>>>')" 1
 
+# The LABEL is optional as well. `git merge-file -L '' -L '' -L ''` emits
+# "<<<<<<< " / ">>>>>>> " -- marker, space, empty label -- and any
+# trailing-whitespace strip (formatters, this repo's own fmt/lint, editors on
+# save) reduces those to a bare "<<<<<<<" / ">>>>>>>". Requiring a space at the
+# END of the marker run was the same fixed-shape mistake as requiring one at
+# column 8: a real conflict block that survived a formatter went unseen.
+# Built here from the REAL `git merge-file` output, then stripped, so the case
+# is the actual artefact and not a hand-typed approximation.
+bare_case() { # <extra-open-chars> <extra-close-chars> -> guard exit code
+    env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
+    printf 'a\nX\nc\n' > "$TMPD/m1"
+    printf 'a\nb\nc\n' > "$TMPD/m2"
+    printf 'a\nY\nc\n' > "$TMPD/m3"
+    env -u GIT_DIR git merge-file -p -L '' -L '' -L '' \
+        "$TMPD/m1" "$TMPD/m2" "$TMPD/m3" > "$TMPD/raw" 2>/dev/null || true
+    # widen the marker runs, then strip trailing whitespace exactly as a
+    # formatter would
+    sed -e "s/^<<<<<<</<<<<<<<$1/" -e "s/^>>>>>>>/>>>>>>>$2/" -e 's/[ 	]*$//' \
+        "$TMPD/raw" > "$repo/f.txt"
+    env -u GIT_DIR git -C "$repo" add -A
+    env -u GIT_DIR git -C "$repo" commit -qm bare
+    tip=$(env -u GIT_DIR git -C "$repo" rev-parse HEAD)
+    rc=0
+    ( cd "$repo" && "$GUARD" "$BASE..$tip" ) >/dev/null 2>&1 || rc=$?
+    echo "$rc"
+}
+
+check "bare 7-char markers (empty label, whitespace-stripped) rejected" \
+      "$(bare_case '' '')"        1
+check "bare 10-char markers (empty label, whitespace-stripped) rejected" \
+      "$(bare_case '<<<' '>>>')"  1
+
+# Negative controls for the relaxed pattern: a run of 6 is not a marker, and a
+# run of 7 glued to other text is not a marker line. Neither may be flagged.
+check "6-char run not flagged"     "$(marker_case '<<<<<<' '>>>>>>')"   0
+check "marker glued to text not flagged" \
+      "$(marker_case '<<<<<<<x' '>>>>>>>x')" 0
+
 # Prose that merely MENTIONS marker syntax (no matching pair) must still pass --
 # this file and the guard's own header do exactly that.
 env -u GIT_DIR git -C "$repo" reset -q --hard "$BASE"
@@ -74,4 +112,4 @@ prose=$( cd "$repo" && "$GUARD" "$BASE..$ptip" >/dev/null 2>&1; echo $? )
 check "prose-only mention passes" "$prose" 0
 
 [ "$fails" -eq 0 ] || exit 1
-echo "PASS - 3/3"
+echo "PASS - 7/7"

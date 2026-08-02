@@ -242,8 +242,22 @@ while IFS= read -r line; do
     # space at column 8 and so silently missed every marker longer than 7. That
     # is not hypothetical: .spipe/scv-remaining/impl_ws_a.md reached origin with
     # a 10-char pair while this guard reported clean (found 2026-08-02).
-    open_lines=$("$GREP" -n '^<<<<<<<<* ' "$TMPD/content" 2>/dev/null)
-    close_lines=$("$GREP" -n '^>>>>>>>>* ' "$TMPD/content" 2>/dev/null)
+    #
+    # The label is optional too. `git merge-file -L '' -L '' -L ''` emits
+    # "<<<<<<< " / ">>>>>>> " -- marker, space, EMPTY label -- and any
+    # trailing-whitespace strip (every formatter, this repo's own fmt/lint, most
+    # editors on save) turns those into a bare "<<<<<<<" / ">>>>>>>". PROVED
+    # 2026-08-02: the pre-strip block matched, the post-strip block did not, so a
+    # real conflict block survived a formatter and became invisible. Requiring a
+    # space at the end of the run was the same fixed-shape mistake as requiring
+    # it at column 8.
+    #
+    # `^<{7,}( |$)` accepts >=7 markers followed by a space OR end of line, and
+    # still rejects a shorter run and a run glued to other text ("<<<<<<<x").
+    # Measured across all 109,516 files of the tree at 4834c449124: zero files
+    # gain a matching pair from the relaxation, so it costs no false positive.
+    open_lines=$("$GREP" -nE '^<{7,}( |$)' "$TMPD/content" 2>/dev/null)
+    close_lines=$("$GREP" -nE '^>{7,}( |$)' "$TMPD/content" 2>/dev/null)
     if [ -n "$open_lines" ] && [ -n "$close_lines" ]; then
         echo "CONFLICT MARKERS: $path" >&2
         printf '%s\n' "$open_lines" | while IFS=: read -r ln _; do
