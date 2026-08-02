@@ -163,6 +163,11 @@ impl MirLowering:
             enum_variant_index: {},
             enum_variant_discriminants: {},
             enum_bare_name_collisions: {},
+            enum_variant_index_q: {},
+            enum_variant_discriminants_q: {},
+            enum_runtime_id_index_q: {},
+            enum_runtime_to_bare: {},
+            enum_bare_ambiguous: {},
             enum_runtime_id_index: {},
             enum_runtime_id_names: {},
             lambda_bindings: {},
@@ -217,9 +222,41 @@ impl MirLowering:
             return
         self.enum_runtime_id_names[id_key] = runtime_name
         self.enum_runtime_id_index[enum_name] = runtime_id
+        # Dual key (step c): runtime_name is unique per declaration, so this
+        # write never evicts another enum's identity the way the bare-keyed
+        # write above does.
+        self.enum_runtime_id_index_q[runtime_name] = runtime_id
 
     me register_enum_runtime_id(enum_def: HirEnum):
         self.register_enum_runtime_name(enum_def.runtime_name, enum_def.name, Some(enum_def.span))
+
+    me register_builtin_enum_dual(bare_name: text, names: [text], discriminants: [i64], runtime_id: i64):
+        """Mirror a BUILT-IN enum seed (Option/Result) into the qualified maps.
+
+        Option and Result are not carried in `module.enums`, so they never reach
+        `register_enum_variants` and would otherwise be absent from the
+        runtime_name-keyed maps -- making every qualified-first read for them
+        fall back to the bare key. They have no owner module, so their
+        runtime_name IS their bare name (declaration_lowering.spl:755 returns
+        the bare name when owner_module is empty); seeding under `bare_name`
+        therefore uses the same key the real registration would have used.
+
+        Seeds only what is missing, exactly like the bare seeds it accompanies,
+        so user code that legitimately declares its own `Option` still wins."""
+        if not self.enum_variant_index_q.has(bare_name):
+            var vq = self.enum_variant_index_q
+            vq[bare_name] = names
+            self.enum_variant_index_q = vq
+            var dq = self.enum_variant_discriminants_q
+            dq[bare_name] = discriminants
+            self.enum_variant_discriminants_q = dq
+            var rb = self.enum_runtime_to_bare
+            rb[bare_name] = bare_name
+            self.enum_runtime_to_bare = rb
+        if not self.enum_runtime_id_index_q.has(bare_name):
+            var rq = self.enum_runtime_id_index_q
+            rq[bare_name] = runtime_id
+            self.enum_runtime_id_index_q = rq
 
     me register_enum_variants(enum_def: HirEnum):
         """Register names and resolved portable runtime discriminants."""
@@ -267,6 +304,28 @@ impl MirLowering:
                 var collisions = self.enum_bare_name_collisions
                 collisions[enum_def.name] = "previously registered as [{prior_text}], now overwritten by [{new_text}] (runtime_name '{enum_def.runtime_name}')"
                 self.enum_bare_name_collisions = collisions
+                # Step (c) ambiguity flag. Readers that could not derive a
+                # runtime_name and fell back to the bare key consult this to
+                # tell "one enum owns this name" from "the survivor of a
+                # contest". Set only on DIVERGENCE, so the 192 benign identical
+                # re-registrations never raise it.
+                var ambiguous = self.enum_bare_ambiguous
+                ambiguous[enum_def.name] = true
+                self.enum_bare_ambiguous = ambiguous
+        # Dual key (step c): the qualified maps are keyed by runtime_name, which
+        # is unique per declaration, so BOTH sides of a bare-name contest are
+        # retained here in full. Written before the bare maps below purely so a
+        # reader observing a half-updated state sees the complete set, never a
+        # partial one.
+        var variant_index_q = self.enum_variant_index_q
+        variant_index_q[enum_def.runtime_name] = names
+        self.enum_variant_index_q = variant_index_q
+        var variant_discriminants_q = self.enum_variant_discriminants_q
+        variant_discriminants_q[enum_def.runtime_name] = discriminants
+        self.enum_variant_discriminants_q = variant_discriminants_q
+        var runtime_to_bare = self.enum_runtime_to_bare
+        runtime_to_bare[enum_def.runtime_name] = enum_def.name
+        self.enum_runtime_to_bare = runtime_to_bare
         var variant_index = self.enum_variant_index
         variant_index[enum_def.name] = names
         self.enum_variant_index = variant_index
@@ -703,6 +762,12 @@ impl MirLowering:
         self.builder = builder
         if not bootstrap_mode:
             self.enum_runtime_id_index = {}
+            # The qualified sibling must be cleared by the SAME gate as the bare
+            # map it shadows. Leaving it populated here would let a qualified-
+            # first read return a runtime ID from a previous module after the
+            # bare map was reset -- a stale hit is worse than the miss it
+            # replaces.
+            self.enum_runtime_id_index_q = {}
         if bootstrap_trace:
             print "[mir-lower] builder-done"
 
@@ -814,6 +879,7 @@ impl MirLowering:
             self.enum_variant_discriminants["Result"] = [0, 1]
         if not self.enum_runtime_id_index.has("Result"):
             self.enum_runtime_id_index["Result"] = 0
+        self.register_builtin_enum_dual("Result", ["Ok", "Err"], [0, 1], 0)
 
         # Register the built-in Option enum so bare-variant construction
         # (`Some(v)` / `None`) and `match o: case Some(v)/None` resolve the same
@@ -825,6 +891,7 @@ impl MirLowering:
             self.enum_variant_discriminants["Option"] = [0, 1]
         if not self.enum_runtime_id_index.has("Option"):
             self.enum_runtime_id_index["Option"] = 1
+        self.register_builtin_enum_dual("Option", ["Some", "None"], [0, 1], 1)
 
         # Build (struct NAME, method name) -> method SymbolId lookup from
         # module.impls. Bug #138/#156: a receiver with no HIR type inference
@@ -1287,9 +1354,12 @@ impl MirLowering:
             return "Result"
         if name == "Some" or name == "None":
             return "Option"
-        for ename in self.enum_variant_index.keys():
-            if self.enum_variant_discriminant(ename, name) >= 0:
-                return ename
+        # Step (c): scan the QUALIFIED keyspace so an evicted same-bare-named
+        # declaration is still found, and return the BARE owner name -- this
+        # prescan's result feeds struct_field_type_name, which is bare-keyed.
+        val owner_keys = self.variant_owner_keys(name)
+        if owner_keys.len() > 0:
+            return self.enum_bare_of(owner_keys[0])
         ""
 
     me prescan_block_for_struct_types(block: HirBlock):

@@ -319,3 +319,171 @@ at `bin/simple` is the **Rust-built driver** — it prints its own
 (`strings | grep "enum construction: unregistered enum"` returns 0 for it and 2
 for the bootstrap-stage binaries). It therefore cannot produce a repo-wide
 fallout number for this change.
+
+## 9. Step (c) LANDED: dual key by `runtime_name`
+
+Base `1a6c1e362a5`. The lowering now carries a **second, qualified keyspace**
+alongside the bare one. The bare maps are unchanged and still last-wins; nothing
+was re-keyed in place, and the loud-miss machinery from step (b) is untouched.
+
+### The five new maps (`50.mir/mir_lowering_types.spl`)
+
+| Map | Key | Why |
+|---|---|---|
+| `enum_variant_index_q` | `runtime_name` | variant names, one entry per DECLARATION |
+| `enum_variant_discriminants_q` | `runtime_name` | discriminants, parallel |
+| `enum_runtime_id_index_q` | `runtime_name` | runtime identity |
+| `enum_runtime_to_bare` | `runtime_name` | lets a scan hand a bare name back |
+| `enum_bare_ambiguous` | bare name | the ambiguity flag, set on DIVERGENCE only |
+
+`runtime_name` is `"{owner_module}.{Name}"` (`declaration_lowering.spl:755`) and
+is unique per declaration, so **nothing is ever evicted from the qualified
+maps** — both sides of a bare-name contest survive registration.
+
+### Why this could not become a new silent wrong answer
+
+Every reader is **qualified-first with a bare fallback**, and the fallback is
+*exactly the pre-dual-key behaviour*. An un-migrated caller, or a caller whose
+derived key is absent (module-name normalization drift), degrades to what it did
+before — never to something new. The key is a full `"module.Name"` string, so a
+mis-normalized prefix produces a **miss**, never a wrong hit.
+
+One deliberate asymmetry: `enum_variant_discriminant_for` falls back only when
+the qualified key is **not registered**, *not* when the qualified lookup
+returned `-1`. If a declaration is registered and genuinely lacks the variant,
+that stays a miss — letting the bare last-wins map rescue it would silently
+borrow a same-named variant from a *different* enum, i.e. reintroduce the defect.
+Pinned by the spec case *"does NOT let the bare map rescue a genuine qualified
+miss"*.
+
+### The four `.keys()` scans — the actual design problem
+
+`module_lowering.prescan_enum_owner_for_variant`, the `expr_dispatch` binding
+reclassification, and two in `switch_operators_calls`
+(`resolve_enum_pattern_owner`, `lower_enum_match`) search for the enum that owns
+a **bare** variant. They **cannot be handed a `runtime_name` by construction** —
+the owner is the unknown they are searching for.
+
+**Resolution: they do not produce a qualified key, they CONSUME the qualified
+keyspace.** All four now route through one shared helper
+`variant_owner_keys(variant)`. The bare map held one entry per bare *name*, so
+two distinct same-named enums collapsed into a single survivor and the scans
+reported *"exactly one owner"* for something genuinely ambiguous — then silently
+emitted the survivor's discriminant. Counting over the per-declaration keyspace
+makes the count truthful, so a real ambiguity now reaches the **already-existing
+loud error** instead of a silent borrow. No new silence, and no new fatal.
+
+`variant_owner_keys` collapses entries that would give the **same answer** (same
+bare name **and** same discriminant). Without that dedup the 192 benign
+identical re-registrations — and the built-in `Option`/`Result` seeds sitting
+beside their real stdlib declarations — would each report a spurious ambiguity
+and turn ordinary `case Some(x)` into a compile error.
+
+### Read-site migration count
+
+Of the **110** hits (102 code + 8 comment), **18 lines referencing the bare maps
+were replaced** (counted from the diff, not estimated). Everything else is
+untouched and keeps working through the bare fallback. Diffstat: 5 files,
++368/−55.
+
+Those 18 lines span **9 read sites**:
+
+- **2 central readers** re-pointed qualified-first
+  (`enum_variant_discriminant`, `enum_runtime_id`) — this alone covers their
+  ~15 indirect callers without touching any of them.
+- **4 owner-search scans** → the shared `variant_owner_keys`.
+- **2 symbol-holding call sites** now derive a key (`lower_enum_lit`,
+  `lower_enum_match`); `resolve_enum_pattern_owner` is the third and is counted
+  among the scans.
+- **1 diagnostic scan** in `enum_variant_miss_detail` — it can now name the
+  **evicted** declaration by runtime_name, which was previously impossible
+  because the bare map no longer contained it.
+
+Plus **7 new helper methods** (`enum_qualified_key`, `enum_bare_of`,
+`variant_owner_keys`, `enum_has_variants`, `enum_variant_names`,
+`enum_variant_discriminant_for`, `register_builtin_enum_dual`) and **9
+write/seed/propagate sites**: the two registration functions, the per-module
+reset gate, the 4 built-in Option/Result seed calls (2 in `module_lowering`, 2
+in `bootstrap_globals`), and the lambda sub-lowering propagation.
+
+Of the **41** hardcoded `"Option"`/`"Result"` lookups, only the 4 seed sites are
+touched; the other 37 stay on the bare key **deliberately** — the built-ins have
+no owner module, so their `runtime_name` *is* their bare name
+(`declaration_lowering.spl:755` returns the bare name when `owner_module` is
+empty) and both keys agree by construction.
+
+`enum_qualified_key` reuses the existing MIR-layer normalizer
+`bootstrap_mir_logical_module_name` rather than adding a **fifth** copy of a
+helper whose own in-tree comment says to keep every copy byte-identical.
+
+Two consistency traps were handled explicitly, both instances of *gate the clear
+to match the writer*:
+
+1. `enum_runtime_id_index` is reset per module; `enum_runtime_id_index_q` is now
+   reset by the **same gate**. Leaving it populated would let a qualified read
+   return a *stale* identity from a previous module — a stale hit is worse than
+   the miss it replaces.
+2. The lambda sub-lowering copies the bare maps into a child `MirLowering`; it
+   now copies the qualified maps too, or every read inside a lambda body would
+   silently degrade to the bare fallback.
+3. In `lower_enum_lit` the runtime **identity** and the **discriminant** are
+   resolved from the same key — pairing enum A's identity with enum B's
+   discriminant is the same class of silent wrong value.
+
+`enum_name` is kept **bare** wherever it also keys `enum_payload_struct_names`
+(`"{enum_name}::{variant}"`); qualifying it there would turn every
+payload-struct lookup into a miss. `enum_bare_of` exists for exactly the sites
+that compare a resolved owner against a bare literal (`== "Option"`).
+
+### Evidence
+
+- **Lever is live — PROVED.** `bin/simple_seed test <spec>` on a spec importing
+  `compiler.mir.mir_lowering` executes `src/compiler/**.spl`: sabotaging
+  `enum_variant_discriminant` (an early `return -999` in the **implementation**,
+  not a shim) took the step-(b) spec from 11/11 to 9/11, rc=1.
+- **RED before GREEN — PROVED.** Sabotaging the qualified **write** side
+  (`variant_index_q["__sabotage__"]`) took the new spec from 16/16 to 8/16.
+  Eight distinct examples depend on the real dual-key write.
+- **MIR surface true-positive control — PROVED.** In the same object that
+  resolves `web.layout.Style.Bold` → 0, the **bare** lookup
+  `("Style", "Bold")` still returns **-1**. The qualified hit therefore cannot
+  be the bare map quietly answering.
+- **Interpreter surface true-positive control — PROVED.** `enum_table_register`
+  still drops the second divergent declaration **first-wins**
+  (`enum_table_lookup("Style") == "Bold,Italic"`), the exact opposite of MIR's
+  last-wins, with a fresh-name control registering normally in the same process.
+- **Rust seed surface — INFERRED (static).** Pinned at source: the seed's
+  `enum_variant_discriminant(variant_name: &str)` hashes the **variant name
+  alone** and masks to 32 bits. This is a source pin, **not** runtime evidence;
+  it is not presented as such.
+- **Hand-computed expectations.** Every discriminant assertion is derived from
+  the declared variant order, and **no** assertion has 3 as its correct answer
+  (3 is the nil sentinel). One expectation of the author's was **wrong and the
+  spec caught it**: two enums whose colliding variant sits at the *same* index
+  are not a real ambiguity, because either choice emits the same discriminant.
+  The case was rewritten to make the indices differ (0 vs 1), which is the
+  actual hazard.
+- **Native column — UNMEASURABLE.** `match` on an enum has no native lowering
+  (`compile --native` fails closed with `[PatternMatch]`). Not claimed either way.
+
+### Fallout — measured, ZERO
+
+At base `1a6c1e362a5`, `test/01_unit/compiler/mir` run before and after:
+
+- 8 files up to the pre-existing runner abort in
+  `chr_native_lowering_contract_spec` (aborts identically both sides):
+  failure name sets and per-example counts **identical**.
+- The remaining **44** files run explicitly: **17 pre-existing failures before,
+  17 after, failure NAME SETS identical**, and per-example `(passed, failed)`
+  counts identical.
+- The two enum specs: **16/16** and **11/11** green on the new tip.
+
+### Deliberately NOT done
+
+- **The fall-through warning is still warn-only.** Promoting it to fatal remains
+  blocked on resolving the 332 duplicated names, which is downstream of this.
+- **No bare map was removed or re-keyed in place.** The 332 duplicates still
+  exist; this step gives readers a keyspace in which they no longer have to
+  collide, it does not eliminate the collisions.
+- **The interpreter's first-wins table is untouched**, so the two engines still
+  disagree. That reconciliation is not step (c).

@@ -64,19 +64,150 @@ fn enum_variant_disc(names: [text], variant: text) -> i64:
     -1
 
 impl MirLowering:
-    me enum_variant_discriminant(enum_name: text, variant: text) -> i64:
-        if not self.enum_variant_index.has(enum_name):
+    me enum_qualified_key(symbol: SymbolId) -> text:
+        """The `runtime_name` key ("{owner_module}.{Name}") for an enum SYMBOL,
+        or "" when the symbol has no defining module (then the bare name IS the
+        runtime_name and the qualified lookup would be redundant).
+
+        This is how a call site that only ever had a bare name obtains a key
+        that distinguishes two same-bare-named enums."""
+        val info = self.symbols.get_symbol_raw(symbol.id)
+        if not info.?:
+            return ""
+        val sym = info.unwrap()
+        val defining_module = sym.defining_module ?? ""
+        if defining_module == "":
+            return ""
+        # `defining_module` is a SOURCE PATH; HIR built `runtime_name` from the
+        # dotted logical name (`hir_module_logical_name_from_path`, whose
+        # 50.mir-layer copy is `bootstrap_mir_logical_module_name` -- reused
+        # here rather than adding a FIFTH copy of a helper whose own comment
+        # says to keep every copy byte-identical).
+        #
+        # A drift between the two can only produce a MISS in the qualified map,
+        # never a wrong hit: the key is a full "module.Name" string, so a
+        # mis-normalized prefix simply is not present and the caller falls back
+        # to the bare key -- i.e. to the pre-dual-key behaviour.
+        val owner_module = bootstrap_mir_logical_module_name(defining_module)
+        if owner_module == "":
+            return ""
+        "{owner_module}.{sym.name}"
+
+    me enum_bare_of(enum_key: text) -> text:
+        """The BARE name behind a key that may be a runtime_name.
+
+        The owner-search scans now yield runtime_names (see
+        `variant_owner_keys`), but several call sites compare the resolved owner
+        against a bare literal (`== "Option"`) or use it to key a bare-name map.
+        Those sites route through this instead of being left to compare a
+        qualified string against a bare one -- which would silently take the
+        wrong branch."""
+        if self.enum_runtime_to_bare.has(enum_key):
+            return self.enum_runtime_to_bare[enum_key]
+        enum_key
+
+    me variant_owner_keys(variant: text) -> [text]:
+        """Every DISTINCT enum declaring `variant`, as runtime_name keys.
+
+        This is how the owner-search scans are fixed. Such a scan cannot be
+        HANDED a runtime_name -- the owner is the unknown it is searching for --
+        but it can CONSUME the qualified keyspace, and that is what makes the
+        count truthful: the bare-keyed map holds one entry per bare NAME, so two
+        distinct enums sharing a name collapsed to a single survivor and the
+        scan reported "exactly one owner" for something genuinely ambiguous,
+        then silently borrowed the survivor's discriminant.
+
+        Entries that would give the SAME answer -- same bare name AND same
+        discriminant for `variant` -- are collapsed to one. Without that, the
+        192 benign identical re-registrations (and the built-in Option/Result
+        seeds sitting alongside their real stdlib declarations) would each
+        report a spurious ambiguity and turn ordinary `case Some(x)` into a
+        compile error. Only genuine divergence survives the dedup."""
+        var keys: [text] = []
+        var bares: [text] = []
+        var discs: [i64] = []
+        for qname in self.enum_variant_index_q.keys():
+            val d = self.enum_variant_discriminant(qname, variant)
+            if d >= 0:
+                val bare = self.enum_bare_of(qname)
+                var seen = false
+                var i = 0
+                while i < bares.len():
+                    if bares[i] == bare and discs[i] == d:
+                        seen = true
+                    i = i + 1
+                if not seen:
+                    keys = keys.push(qname)
+                    bares = bares.push(bare)
+                    discs = discs.push(d)
+        keys
+
+    me enum_has_variants(enum_key: text) -> bool:
+        """"Is `enum_key` a registered enum?", accepting EITHER a runtime_name
+        or a bare name. Qualified first so a contested bare name resolves to
+        the right declaration."""
+        if self.enum_variant_index_q.has(enum_key):
+            return true
+        self.enum_variant_index.has(enum_key)
+
+    me enum_variant_names(enum_key: text) -> [text]:
+        """Declared variant names for `enum_key` (runtime_name or bare name),
+        or [] when unregistered. Qualified first."""
+        if self.enum_variant_index_q.has(enum_key):
+            return self.enum_variant_index_q[enum_key]
+        if self.enum_variant_index.has(enum_key):
+            return self.enum_variant_index[enum_key]
+        []
+
+    me enum_variant_discriminant(enum_key: text, variant: text) -> i64:
+        """Runtime discriminant of `variant` within `enum_key`, or -1.
+
+        `enum_key` may be a runtime_name ("{owner_module}.{Name}") OR a bare
+        name. The QUALIFIED maps are consulted first; only if the key is absent
+        there does this fall back to the bare, last-wins maps. That fallback is
+        exactly the pre-dual-key behaviour, so an un-migrated caller is never
+        made worse -- and a caller that can derive a runtime_name now reaches
+        its own enum even when the bare name is contested."""
+        if self.enum_variant_discriminants_q.has(enum_key) and self.enum_variant_index_q.has(enum_key):
+            val q_names = self.enum_variant_index_q[enum_key]
+            val q_discs = self.enum_variant_discriminants_q[enum_key]
+            var qi = 0
+            while qi < q_names.len() and qi < q_discs.len():
+                if q_names[qi] == variant:
+                    return q_discs[qi]
+                qi = qi + 1
             return -1
-        if not self.enum_variant_discriminants.has(enum_name):
+        if not self.enum_variant_index.has(enum_key):
             return -1
-        val names = self.enum_variant_index[enum_name]
-        val discriminants = self.enum_variant_discriminants[enum_name]
+        if not self.enum_variant_discriminants.has(enum_key):
+            return -1
+        val names = self.enum_variant_index[enum_key]
+        val discriminants = self.enum_variant_discriminants[enum_key]
         var i = 0
         while i < names.len() and i < discriminants.len():
             if names[i] == variant:
                 return discriminants[i]
             i = i + 1
         -1
+
+    me enum_variant_discriminant_for(symbol: SymbolId, bare_name: text, variant: text) -> i64:
+        """Discriminant lookup for a call site that holds the enum's SYMBOL.
+
+        Tries the symbol's runtime_name first, then the bare name. This is the
+        migration entry point: a site that previously called
+        `enum_variant_discriminant(bare_name, variant)` becomes correct for
+        contested bare names simply by passing its symbol here.
+
+        Note the fallback condition: it is "the qualified key is not REGISTERED",
+        not "the qualified lookup returned -1". If the symbol's own declaration
+        is registered and does not declare `variant`, that is a genuine miss for
+        this enum and must stay a miss -- letting the bare, last-wins map rescue
+        it would silently borrow a same-named variant from a DIFFERENT enum,
+        which is precisely the defect being fixed."""
+        val qualified = self.enum_qualified_key(symbol)
+        if qualified != "" and self.enum_variant_index_q.has(qualified):
+            return self.enum_variant_discriminant(qualified, variant)
+        self.enum_variant_discriminant(bare_name, variant)
 
     me enum_variant_miss_detail(enum_name: text, variant: text) -> text:
         """Explain a variant-lookup miss by NAMING the colliding owner.
@@ -96,19 +227,28 @@ impl MirLowering:
             detail = "; bare enum name '{enum_name}' is declared by MORE THAN ONE enum with divergent variants: {collision}"
         var others = ""
         var other_count = 0
-        for ename in self.enum_variant_index.keys():
-            if ename != enum_name:
-                if enum_variant_disc(self.enum_variant_index[ename], variant) >= 0:
+        # Step (c): scan the QUALIFIED keyspace. The bare-keyed map holds one
+        # entry per bare NAME, so an evicted declaration that really does
+        # declare `variant` was invisible to this scan and the diagnostic could
+        # not name it. The qualified map holds one entry per DECLARATION, so
+        # every owner is reported, by its runtime_name.
+        # A same-bare-named sibling is NOT excluded here: when the lookup key was
+        # the bare name, the EVICTED declaration that actually declares
+        # `variant` is the single most useful thing to name, and it is reported
+        # by its runtime_name so the two are told apart.
+        for qname in self.enum_variant_index_q.keys():
+            if qname != enum_name:
+                if enum_variant_disc(self.enum_variant_index_q[qname], variant) >= 0:
                     other_count = other_count + 1
                     if others == "":
-                        others = ename
+                        others = qname
                     else:
-                        others = "{others}, {ename}"
+                        others = "{others}, {qname}"
         if other_count > 0:
             detail = "{detail}; variant '{variant}' IS declared by: {others}"
         if detail == "":
-            if self.enum_variant_index.has(enum_name):
-                val known_text = self.enum_variant_index[enum_name].join(", ")
+            if self.enum_has_variants(enum_name):
+                val known_text = self.enum_variant_names(enum_name).join(", ")
                 detail = "; registered variants for '{enum_name}': [{known_text}]"
             else:
                 detail = "; no enum named '{enum_name}' is registered in this lowering unit"
@@ -235,6 +375,11 @@ fn struct_construct_spread_base(e: HirExpr) -> HirExpr:
 
 impl MirLowering:
     me enum_runtime_id(enum_name: text) -> i64:
+        # Qualified first (step c): `enum_name` may be a runtime_name or a bare
+        # name. Index read rather than `.get()` -- `.get()` on a Dict is
+        # unreliable under native codegen (doc/07_guide/language/dict_native_pitfalls.md).
+        if self.enum_runtime_id_index_q.has(enum_name):
+            return self.enum_runtime_id_index_q[enum_name]
         val found = self.enum_runtime_id_index.get(enum_name)
         if found != nil:
             return found
@@ -1475,25 +1620,30 @@ impl MirLowering:
         determined — the caller then makes the arm permanently dead instead of
         silently always-matching."""
         var ename = ""
+        var equalified = ""
         match etype.kind:
             case Named(esym, _):
                 val s = self.symbols.get_symbol_raw(esym.id)
                 ename = if s.?: s.name else: ""
+                equalified = self.enum_qualified_key(esym)
             case _:
                 ()
-        if ename != "" and self.enum_variant_index.has(ename):
-            if self.enum_variant_discriminant(ename, variant) >= 0:
-                return ename
-            val known_variants = self.enum_variant_index[ename]
+        # Step (c): prefer the pattern type's own runtime_name so a contested
+        # bare name resolves to THIS declaration, not the last one registered.
+        val elookup = if equalified != "" and self.enum_variant_index_q.has(equalified): equalified else: ename
+        if elookup != "" and self.enum_has_variants(elookup):
+            if self.enum_variant_discriminant(elookup, variant) >= 0:
+                return elookup
+            val known_variants = self.enum_variant_names(elookup)
             val known_text = known_variants.join(", ")
-            self.error("enum match: nested pattern enum '{ename}' has no variant '{variant}' (known variants: {known_text})", Some(span))
+            self.error("enum match: nested pattern enum '{elookup}' has no variant '{variant}' (known variants: {known_text})", Some(span))
             return ""
-        var owner = ""
-        var owner_count = 0
-        for ename2 in self.enum_variant_index.keys():
-            if self.enum_variant_discriminant(ename2, variant) >= 0:
-                owner = ename2
-                owner_count = owner_count + 1
+        # Scan the QUALIFIED keyspace so the owner count is truthful (see
+        # `variant_owner_keys`). Returns a runtime_name; callers that need the
+        # bare name route through `enum_bare_of`.
+        val owner_keys = self.variant_owner_keys(variant)
+        val owner_count = owner_keys.len()
+        var owner = if owner_count > 0: owner_keys[0] else: ""
         if owner_count == 1:
             return owner
         if owner_count > 1:
@@ -1578,7 +1728,9 @@ impl MirLowering:
                     bd.switch_to_block(dead_block)
                     self.builder = bd
                     return
-                if nested_ename == "Option":
+                # `resolve_enum_pattern_owner` yields a runtime_name, so this
+                # built-in check compares the BARE name behind it (step c).
+                if self.enum_bare_of(nested_ename) == "Option":
                     # Dual-ABI Option (see the Option normalization in
                     # lower_enum_match): a FLAT Option word has no boxed
                     # discriminant at all, so test presence via rt_is_some,
@@ -1742,6 +1894,12 @@ impl MirLowering:
         var has_default = false
         var default_body = HirBlock(stmts: [], value: nil, span: scrutinee.span)
         var enum_name = ""
+        # Step (c): the runtime_name key for `enum_name`, used ONLY for
+        # discriminant lookups. `enum_name` itself stays BARE because it also
+        # keys `enum_payload_struct_names` ("{enum_name}::{variant}"), which the
+        # construction site writes under the bare name -- qualifying it here
+        # would turn every payload-struct lookup into a miss.
+        var enum_key = ""
         var ai = 0
         while ai < arms.len():
             val arm = arms[ai]
@@ -1753,10 +1911,23 @@ impl MirLowering:
                                 val s = self.symbols.get_symbol_raw(esym.id)
                                 if s.?: s.name else: ""
                             case _: ""
+                        enum_key = match etype.kind:
+                            case Named(esym2, _):
+                                self.enum_qualified_key(esym2)
+                            case _: ""
+                        if enum_key != "" and not self.enum_variant_index_q.has(enum_key):
+                            # The symbol's derived runtime_name is not registered
+                            # (a normalization drift, or an enum reached through
+                            # a path HIR qualified differently). Degrade to the
+                            # bare key -- i.e. to the pre-dual-key behaviour --
+                            # rather than reporting a miss the old code would not
+                            # have reported.
+                            enum_key = ""
+                    val lookup_key = if enum_key != "": enum_key else: enum_name
                     var d: i64 = -1
-                    val enum_name_known = self.enum_variant_index.has(enum_name)
+                    val enum_name_known = self.enum_has_variants(lookup_key)
                     if enum_name_known:
-                        d = self.enum_variant_discriminant(enum_name, variant)
+                        d = self.enum_variant_discriminant(lookup_key, variant)
                     if d < 0 and enum_name_known:
                         # pattern-truth lane (2026-07-29): the scrutinee's enum
                         # is DEFINITIVELY known here -- either an explicit
@@ -1774,7 +1945,7 @@ impl MirLowering:
                         # see doc/08_tracking/bug/option_pattern_accepted_on_non_option_scrutinee_2026-07-27.md).
                         # Known enum + unknown variant name is now a loud
                         # compile error instead of a silent wrong-enum borrow.
-                        val known_variants = self.enum_variant_index[enum_name]
+                        val known_variants = self.enum_variant_names(lookup_key)
                         val known_text = known_variants.join(", ")
                         self.error("enum match: '{enum_name}' has no variant '{variant}' (known variants: {known_text})", Some(arm.pattern.span))
                     elif d < 0:
@@ -1784,26 +1955,32 @@ impl MirLowering:
                         # variant name against every registered enum. Exactly
                         # one owner -> use it; otherwise emit a LOUD error
                         # instead of silently falling through.
-                        var owner = ""
-                        var owner_count = 0
-                        for ename in self.enum_variant_index.keys():
-                            if self.enum_variant_discriminant(ename, variant) >= 0:
-                                owner = ename
-                                owner_count = owner_count + 1
+                        # Step (c): scan the QUALIFIED keyspace (see
+                        # `variant_owner_keys`). Under the old bare-keyed scan
+                        # two distinct same-named enums collapsed to one
+                        # surviving entry, so this reported "exactly one owner"
+                        # for a genuinely ambiguous variant and silently
+                        # borrowed the survivor's discriminant. The count is now
+                        # truthful, so that case reaches the loud ambiguity
+                        # error below instead.
+                        val owner_keys = self.variant_owner_keys(variant)
+                        val owner_count = owner_keys.len()
+                        var owner = if owner_count > 0: owner_keys[0] else: ""
                         if owner_count == 1:
                             d = self.enum_variant_discriminant(owner, variant)
                             if enum_name == "":
-                                enum_name = owner
-                            # The sole-owner search runs over the BARE-keyED,
-                            # last-wins enum_variant_index, so "exactly one
-                            # owner" is only trustworthy when that owner's bare
-                            # name was not contested. If it WAS, the real owner
-                            # may have been evicted before this search ran and
-                            # this arm silently borrows the survivor's
-                            # discriminant. Loud, non-fatal -- gated on a
-                            # recorded divergent collision so the ordinary
-                            # unqualified `case Circle(r)` stays quiet.
-                            if self.enum_bare_name_collisions.has(owner):
+                                # BARE name here -- `enum_name` also keys
+                                # enum_payload_struct_names (see its
+                                # declaration above).
+                                enum_name = self.enum_bare_of(owner)
+                            # The sole owner is now resolved against the
+                            # per-declaration keyspace, so a contested bare name
+                            # no longer makes this answer a guess. The warning
+                            # is kept, narrowed to the case it still describes:
+                            # the qualified maps were not populated for this
+                            # owner (bare fallback), so the eviction hazard is
+                            # still live for it.
+                            if not self.enum_variant_index_q.has(owner) and self.enum_bare_name_collisions.has(owner):
                                 val owner_collision = self.enum_bare_name_collisions[owner]
                                 self.error("enum variant lookup miss: bare pattern '{variant}' resolved to sole owner '{owner}', but that bare enum name is CONTESTED so the resolved owner may be the wrong enum: {owner_collision}", Some(arm.pattern.span))
                         elif owner_count > 1:
@@ -2536,13 +2713,23 @@ impl MirLowering:
                 val s = self.symbols.get_symbol_raw(symbol.id)
                 if s.?: s.name else: ""
             case _: ""
-        if not self.enum_variant_index.has(enum_name):
+        # Step (c): resolve against THIS declaration's runtime_name when the
+        # symbol carries a defining module, so `Shape.Circle(7)` constructs the
+        # discriminant of the `Shape` this expression actually names rather than
+        # whichever `Shape` was registered last. `enum_name` stays bare below --
+        # it keys enum_payload_struct_names and appears in diagnostics.
+        val enum_qkey = match type_.kind:
+            case Named(qsymbol, _):
+                self.enum_qualified_key(qsymbol)
+            case _: ""
+        val enum_key = if enum_qkey != "" and self.enum_variant_index_q.has(enum_qkey): enum_qkey else: enum_name
+        if not self.enum_has_variants(enum_key):
             self.error("enum construction: unregistered enum '{enum_name}'", nil)
             var be = self.builder
             val te = be.emit_const_int(0)
             self.builder = be
             return te
-        val disc = self.enum_variant_discriminant(enum_name, variant)
+        val disc = self.enum_variant_discriminant(enum_key, variant)
         if disc < 0:
             # Was a SILENT -1: the enum is registered but this variant is not
             # among its (bare-name, last-wins) variant set, so a -1 discriminant
@@ -2557,7 +2744,13 @@ impl MirLowering:
         # made the rt_enum_new call fail cranelift verification (i32 arg vs
         # all-i64 import signature) for every payload enum construct.
         val enum_id_local = b.new_temp(MirType.i64())
-        b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(enum_name)), MirType.i64())
+        # The runtime ID must come from the SAME declaration as `disc` above:
+        # pairing enum A's identity with enum B's discriminant would be a new
+        # silent wrong value. Falls back to the bare name only when the
+        # qualified key has no identity registered (see `enum_runtime_id`,
+        # whose qualified map is reset per module).
+        val rt_id_key = if self.enum_runtime_id_index_q.has(enum_key): enum_key else: enum_name
+        b.emit_const(enum_id_local, MirConstValue.Int(self.enum_runtime_id(rt_id_key)), MirType.i64())
         val disc_local = b.new_temp(MirType.i64())
         b.emit_const(disc_local, MirConstValue.Int(disc), MirType.i64())
         self.builder = b
@@ -3529,6 +3722,16 @@ impl MirLowering:
                 # miss diagnostics lose the colliding-owner half of the message.
                 lw.enum_bare_name_collisions = self.enum_bare_name_collisions
                 lw.enum_variant_discriminants = self.enum_variant_discriminants
+                # Step (c): the qualified maps must be carried by the SAME
+                # propagation as the bare maps they shadow. Leaving them empty
+                # here would make every qualified-first read inside the
+                # sub-lowering degrade to the bare fallback -- silently
+                # reinstating the eviction hazard for lambda bodies only.
+                lw.enum_variant_index_q = self.enum_variant_index_q
+                lw.enum_variant_discriminants_q = self.enum_variant_discriminants_q
+                lw.enum_runtime_id_index_q = self.enum_runtime_id_index_q
+                lw.enum_runtime_to_bare = self.enum_runtime_to_bare
+                lw.enum_bare_ambiguous = self.enum_bare_ambiguous
                 lw.canonical_type_symbols = self.canonical_type_symbols
                 lw.next_canonical_type_symbol = self.next_canonical_type_symbol
                 lw.global_symbol_ids = self.global_symbol_ids

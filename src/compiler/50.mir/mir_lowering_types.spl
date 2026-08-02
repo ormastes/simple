@@ -231,6 +231,34 @@ struct MirLowering:
     # the colliding owner in the miss diagnostic. See
     # doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
     enum_bare_name_collisions: Dict<text, text>
+    # --- Step (c), 2026-08-02: DUAL KEY by runtime_name --------------------
+    # The three maps above are keyed by the BARE enum name and are last-wins,
+    # so two enums sharing a bare name cannot both be represented. These
+    # parallel maps are keyed by `HirEnum.runtime_name`
+    # ("{owner_module}.{name}", declaration_lowering.spl:755), which is unique
+    # per declaration, so EVERY declaration survives registration -- nothing is
+    # ever evicted here.
+    #
+    # The bare maps are deliberately KEPT and still written exactly as before.
+    # Readers are migrated incrementally: every reader goes through
+    # `enum_variant_discriminant` / `enum_variant_names` / `enum_runtime_id`,
+    # which try the QUALIFIED key first and fall back to the bare key. A caller
+    # that cannot derive a runtime_name therefore behaves exactly as it did
+    # before this change, and a caller that can derive one gets the right enum.
+    # Degrading to the bare key can never be a NEW silent wrong answer -- it is
+    # the pre-existing behaviour -- and when the bare name is contested the
+    # fallback is reported through `enum_bare_ambiguous` below.
+    enum_variant_index_q: Dict<text, [text]>
+    enum_variant_discriminants_q: Dict<text, [i64]>
+    enum_runtime_id_index_q: Dict<text, i64>
+    # runtime_name -> bare name. Lets the owner-search scans iterate the
+    # QUALIFIED keyspace (where owner counts are truthful) while still handing
+    # a bare name back to call sites that key other maps by it.
+    enum_runtime_to_bare: Dict<text, text>
+    # Bare name -> true once two DIVERGENT declarations have claimed it. This is
+    # the ambiguity flag: readers that fell back to the bare key consult it
+    # rather than silently picking the survivor.
+    enum_bare_ambiguous: Dict<text, bool>
     # Active-module enum name -> runtime ID, plus a shared collision registry.
     enum_runtime_id_index: Dict<text, i64>
     enum_runtime_id_names: Dict<text, text>
