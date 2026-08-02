@@ -206,13 +206,28 @@ fn run_scoped_spl_doctest(args: [text]) -> i64:
         return 0
     1
 
+# Mirror test_runner_single.spl's slow_it floor so the outer bounded wait
+# never undercuts the inner runner's raised per-file bound.
+fn effective_timeout_secs(path: text, timeout_secs: i64) -> i64:
+    if timeout_secs < 600 and rt_file_read_text(path).contains("slow_it "):
+        return 600
+    timeout_secs
+
 # Run one spec file directly, bypassing the daemon. `--no-session-daemon`
 # routes to test_runner_single.spl (no daemon, no recursion).
-fn run_one_direct(binary: text, path: text, timeout_ms: i64) -> i64:
+# The requested --timeout is forwarded UNCLAMPED to the inner single-runner
+# (which imposes the per-file bound on the spec child and reports on its own
+# timeout); the outer bounded wait gets 30s of grace on top so the inner
+# runner wins the race instead of this wait killing it mid-report. See
+# doc/08_tracking/bug/
+# seed_test_runner_kills_child_at_600s_ignoring_timeout_2026-08-02.md.
+fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
+    val child_timeout_secs = effective_timeout_secs(path, timeout_secs)
+    val outer_timeout_ms = child_timeout_secs * 1000 + 30000
     val (out, err, code) = process_run_bounded(
         binary,
-        ["test", "--no-session-daemon", path],
-        timeout_ms,
+        ["test", "--no-session-daemon", "--timeout", "{child_timeout_secs}", path],
+        outer_timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
     if out != "":
@@ -263,7 +278,13 @@ fn main() -> i64:
         print "Simple Test Runner client"
         print "ERROR: dropped spec path(s) while parsing arguments: {requested_count} requested, {requested.len()} parsed"
         return 1
+    # Daemon-lane timeout only: the light-request protocol clamps to
+    # LIGHT_REQUEST_MAX_TIMEOUT_MS (600s). The direct lane must honor the
+    # full requested --timeout — see long_timeout_bypass below and
+    # doc/08_tracking/bug/
+    # seed_test_runner_kills_child_at_600s_ignoring_timeout_2026-08-02.md.
     val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
+    val long_timeout_bypass = run.timeout_secs * 1000 > timeout_ms
     ensure_dirs()
     # The light daemon may be unable to start (e.g. it relies on runtime
     # methods the seed interpreter lacks). Degrade to direct execution rather
@@ -273,11 +294,16 @@ fn main() -> i64:
     # run directly so the child inherits SIMPLE_COVERAGE=1.
     val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
     val cov_bypass = cov_env != "" and cov_env != "0"
-    val daemon_ok = if cov_bypass: false else: ensure_daemon()
+    # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
+    # (the request would be clamped and the spec killed at ~600s); run
+    # directly so the full requested timeout is honored.
+    val daemon_ok = if cov_bypass or long_timeout_bypass: false else: ensure_daemon()
     var binary = ""
     if not daemon_ok:
         if cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
+        elif long_timeout_bypass:
+            print "timeout: --timeout {run.timeout_secs}s exceeds daemon cap; running directly"
         else:
             print "WARNING: test daemon unavailable; running directly"
         binary = simple_binary()
@@ -289,7 +315,7 @@ fn main() -> i64:
         if daemon_ok:
             code = run_one_via_daemon(p, timeout_ms, seq)
         else:
-            code = run_one_direct(binary, p, timeout_ms)
+            code = run_one_direct(binary, p, run.timeout_secs)
         executed = executed + 1
         seq = seq + 1
         # Aggregate: any failing spec fails the whole run. Keep going so the
