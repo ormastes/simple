@@ -22,7 +22,18 @@ printf 'milestone=stage-test\nmain_log=%s\n' "$tmp_dir/main.log" >"$tmp_dir/stat
 printf 'abc' >"$tmp_dir/main.log"
 sh "$watcher" --pid="$live_pid" --state-file="$tmp_dir/state" \
   --progress-log="$tmp_dir/live.progress" --interval=1 --once
-grep -Eq 'status=alive .*milestone=stage-test .*main_log_bytes=3$' "$tmp_dir/live.progress" || fail "live sample missing metrics/state"
+# Assert the three live-sample facts as whole FIELDS, not by position.
+#
+# This assertion previously ended in `main_log_bytes=3$`, anchoring on
+# main_log_bytes being the LAST field on the line. The watcher later gained
+# phase/unit_kind/done/total/tasks_*/failed/cached/current/terminal fields,
+# which pushed main_log_bytes into the middle of the sample and made this
+# guard fail on a watcher that was working correctly. Nothing ran the guard,
+# so the drift went unnoticed until it was wired (2026-08-02).
+#
+# The `( |$)` tail keeps the match exact -- main_log_bytes=30 still fails --
+# so this repairs the coupling to field ORDER without weakening the check.
+grep -Eq 'status=alive .*milestone=stage-test .*main_log_bytes=3( |$)' "$tmp_dir/live.progress" || fail "live sample missing metrics/state"
 
 wait "$live_pid" 2>/dev/null || true
 sh "$watcher" --pid="$live_pid" --progress-log="$tmp_dir/exited.progress" --once

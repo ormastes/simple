@@ -177,3 +177,62 @@ jobs:
         if: ${{ !cancelled() }}
         run: |
           sh scripts/check/check-extern-registration.shs
+
+      # ---------------------------------------------------------------------
+      # Guard-wiring debt paydown, batch 1 (2026-08-02).
+      #
+      # These four guards were the entire set that check-guard-wiring.shs
+      # reported as unwired AND unexcused at 66974acc (7 reported; the other
+      # three need a built bin/simple or a Stage-4 corpus and cannot run in
+      # this job). They are pure textual/structural checks -- sh, grep, find,
+      # awk, and rg which this job already installs -- so there was never a
+      # capability reason for them to sit outside CI.
+      #
+      # Each was verified non-vacuous by sabotaging the IMPLEMENTATION it
+      # guards and confirming it goes red; see the wiring batch commit body.
+      # ---------------------------------------------------------------------
+
+      # Memory deallocation ownership: every arena tier must reach its owning
+      # free operation and drop its backing reference, and the hosted/native/
+      # SimpleOS free families must keep their shared native owner. A tier that
+      # allocates but never reaches sys_free leaks silently -- nothing else in
+      # the tree tests that the release path is CONNECTED rather than present.
+      - name: Memory deallocation ownership gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-memory-deallocation-ownership.shs
+
+      # rt_free ABI: pure-Simple declarations and calls must pass exactly ONE
+      # pointer. rt_free is defined in five places (native runtime, hosted
+      # runtime, SimpleOS libc, the Cranelift RuntimeFuncSpec table, and the
+      # Rust SFFI shim); an arity drift in any one of them is a silent
+      # miscompile, not a link error, because -z muldefs makes duplicate C
+      # symbols first-definition-wins.
+      - name: rt_free ABI consistency gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-rt-free-abi.shs
+
+      # Stage-4 generated-facade hint-scan fast path: the exact-marker guard
+      # must precede the empty return, which must precede the line split, and
+      # the marker test must keep the generator's COMPLETE prefix
+      # ("# Re-exported from ", trailing space included). Widening it to
+      # "# Re-exported" admits ordinary prose comments into the facade scan.
+      - name: Module-surface hint-scan fast-path gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-module-surface-hint-scan-fast-path.shs
+
+      # Bootstrap progress watcher: live / exited / stale-PID coverage.
+      #
+      # Wiring this one was a truth reveal. It had rotted while orphaned: its
+      # live-sample assertion ended in `main_log_bytes=3$`, anchoring on that
+      # field being LAST on the line, and the watcher has since gained
+      # phase/unit_kind/tasks_* fields. The guard failed against a watcher that
+      # was working correctly. Fixed by matching main_log_bytes as a whole
+      # field instead of by position -- exactness preserved, ordering coupling
+      # removed. This is precisely the decay an unwired guard accumulates.
+      - name: Bootstrap progress-watcher coverage gate
+        if: ${{ !cancelled() }}
+        run: |
+          sh scripts/check/check-bootstrap-progress-watch.shs
