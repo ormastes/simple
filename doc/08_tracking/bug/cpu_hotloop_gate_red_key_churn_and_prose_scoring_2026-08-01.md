@@ -283,6 +283,81 @@ One perf TODO recorded in place rather than filed here:
 **per pixel**. A 1001-entry permille LUT makes it O(1) per pixel and is
 bit-exact, because `pos_permille` is already an integer permille value.
 
+### 6.3 Working the residue (2026-08-02): `new` 16 → 14, and two entries above are wrong
+
+Three of the eight rows in §6.2 were re-examined against evidence. **Two were
+not defects of the kind recorded, and one measurement refutes its premise
+outright.** §6.2 is left standing above as written so the correction is
+legible; read it together with this section.
+
+**Landed — both were dead code, not optimisation targets** (`d881261b`):
+
+- `_cb_chars_between` and `_html_draw_ir_nth_int` each have **exactly one
+  occurrence in `src/`** — their own definition — and **zero in `test/`**.
+  Neither is `pub`, neither is exported. §6.2 filed `_html_draw_ir_nth_int` as
+  "parse work on the paint path" needing an optimisation with a parity check;
+  **nothing calls it.** Both deleted, per the repo rule that dead code is
+  deleted completely.
+- Parity was established on real input, not by compiling:
+  `test/01_unit/browser_engine/browser_renderer_spec.spl`, four runs
+  alternating a pristine export of the parent (control) with the modified
+  tree. All four arms report **10 examples, 2 failures**, and the two failures
+  are the **same two by name** in both arms, so they are pre-existing and
+  common-mode. Control-vs-control runs are byte-identical after normalising
+  absolute paths. The only cross-arm output differences are diagnostic line
+  numbers (which shift by exactly the deleted line count) and
+  `web-style-producer budget-break` probe lines, which are wall-clock-budget
+  dependent.
+- **Measurement trap hit and recorded:** a first attempt had three of four arms
+  SIGTERM-killed at **exit 143** by the 60 s `kill_simple_monitor` CPU guard,
+  which truncated the outputs at different points and produced a *plausible
+  but meaningless* "115 lines differ". Set `SIMPLE_TIMEOUT_SECONDS=0` for any
+  A/B on this path, and assert every arm emitted a verdict line before
+  comparing.
+
+**REFUTED — `ops = ops.push(...)` does not clone** (§6.2 row 5):
+
+The row claims "arrays are value types, so this clones the whole op list per
+node". Measured externally, per process, alternating arms:
+
+- `x = x.push(v)` versus a bare `x.push(v)` statement, identical total work
+  asserted by both arms printing the same accumulator: **1.00x**, no
+  measurable difference.
+- Scaling test with **total pushes held constant at 120,000** while list
+  length varies 500 → 2,000 → 8,000: relative cost **1.00x / 1.11x / 1.04x**,
+  i.e. **flat across a 16x range of list length**. A clone-per-push would make
+  the n=8,000 arm ~16x the n=500 arm. It does not.
+
+So `x = x.push(v)` is **amortised O(1)** on this runtime, and the form is the
+repo-wide idiom (**14,640 occurrences** of `X = X.push(` in `src/`). Singling
+out this one site was wrong; there is nothing to fix here. This also
+contradicts the older "seed `.push()` always clones, no fast path" note for
+this form on this binary — treat that note as needing re-measurement rather
+than as established.
+
+**Not landed, and why** — the remaining rows all need a signature-threading
+refactor (`_html_draw_ir_image_index` is called from three sites, two of them
+inside per-node helpers, so hoisting the lookup into a prepared URI→index map
+changes several signatures). The image list is genuinely **uncapped** — it
+comes from the GPU host daemon's decoded resource payload — so
+O(nodes-with-background × layers × images) is a real term and the row stands.
+But this path's spec output is timing-noisy and already carries two
+pre-existing failures, so a refactor of that blast radius cannot be held to
+the parity bar used above. **Filed, not landed** — per the rule that a change
+whose parity cannot be proved is not landed.
+
+The `_emu_gradient_color_at` LUT is likewise **not** landed: a 1001-entry
+table costs 1001 stop-scans to build, so it is a *pessimisation* for any
+gradient smaller than ~1001 px (e.g. 32×32). Making it conditional on pixel
+count adds a branch and a second code path for a per-pixel scan over ≤5 stops.
+The TODO stays in place; it is not worth the complexity as stated.
+
+**Binary-identity note for anyone repeating this:** the binary at
+`bin/release/x86_64-unknown-linux-gnu/simple` currently prints *"this
+Rust-built Simple binary is a bootstrap seed only"*. All arms above used the
+same binary, so the comparisons are common-mode and valid, but none of these
+numbers describe the pure-Simple self-hosted tool.
+
 ## 7. Status
 
 - FIXED: prose scoring in BYTE/SUBSTR/CHAIN.
@@ -290,11 +365,20 @@ bit-exact, because `pos_permille` is already an integer permille value.
 - PAID DOWN (2026-08-02): 260 of 269 flagged loops triaged and annotated,
   `new` 166 → **16**. Comments only; baseline/file-list/script/spec untouched.
   See §6.1.
-- OPEN: **16** scored violations, all filed as concrete defects in §6.2. The
-  gate remains red on the merits and must not be absorbed or weakened.
+- FIXED (2026-08-02): two of the §6.2 rows were **dead code**, deleted with
+  spec parity proved on real input — `new` 16 → **14**. See §6.3.
+- OPEN: **14** scored violations. The gate remains red on the merits and must
+  not be absorbed or weakened. The largest remaining item
+  (`_html_draw_ir_image_index`, O(nodes × layers × images) over an uncapped
+  image list) is filed rather than landed because a signature-threading
+  refactor cannot be held to this lane's parity bar — §6.3.
 - REFUTED (2026-08-02): §3's "none of the 158 is a false positive" — see the
   table in §6.1. Also refuted: the sorts are merge sorts, not insertion sorts;
-  and `draw_image_blend` does not bypass the bulk span primitives.
+  `draw_image_blend` does not bypass the bulk span primitives; §6.2's
+  `_html_draw_ir_nth_int` row ("parse work on the paint path") described a
+  function nothing calls; and §6.2's `ops = ops.push(...)` row is wrong —
+  measured flat across a 16x list-length range, i.e. amortised O(1), not a
+  clone per push (§6.3).
 - FIXED (2026-08-02): degenerate `while (` multi-line key (§3.1), totals unchanged.
 - CONFIRMED (2026-08-02): re-measured at origin tip `e4b4561c803`, independently
   of this document — `baselined=207 current=365 new=158`, and the 158 split
