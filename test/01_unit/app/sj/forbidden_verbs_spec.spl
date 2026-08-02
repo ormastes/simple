@@ -1,56 +1,34 @@
 """
 # Forbidden Verbs Specification
 #
+# Subject: the client-facing `app.sj.policy` API (`check_forbidden`).
+#
 # Tests the policy enforcement for dangerous git verbs that should
 # be blocked or redirected to safer jj equivalents.
+#
+# History: this file used to carry a 40-line local copy of `check_forbidden`
+# plus the `PolicyResult` struct, `policy_allow`, `policy_forbid` and `_has_arg`,
+# and imported nothing but `std.io_runtime`. All 14 examples passed against the
+# copy and could never observe shipped code. The copy had NOT drifted — it was
+# byte-equivalent to `src/app/sj_daemon/forbidden.spl` — which is exactly why it
+# is worth recording: a faithful shim is still fully vacuous, because nothing
+# makes it stay faithful.
+#
+# IMPORTANT — where these calls actually land. This spec imports
+# `app.sj.policy`, but `src/app/sj/policy.spl:15` is only a one-line delegation
+#     fn check_forbidden(argv) -> PolicyResult: forbidden.check_forbidden(argv)
+# and policy.spl itself does `use app.sj_daemon.forbidden`, which defines
+# `check_forbidden` with an IDENTICAL signature. Under first-import-wins the
+# daemon definition serves every call site here, and the policy.spl wrapper is
+# dead code: replacing its body with `policy_allow()` outright does not move a
+# single example. So the implementation under test is
+# `src/app/sj_daemon/forbidden.spl`, and that is the file a sabotage-based
+# non-vacuity proof of this spec must target.
+# See doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
 """
 
-use std.io_runtime
-
-# --- Inline policy types and logic ---
-
-struct PolicyResult:
-    allowed: bool
-    exit_code: i64
-    message: text
-
-fn policy_allow() -> PolicyResult:
-    PolicyResult(allowed: true, exit_code: 0i64, message: "")
-
-fn policy_forbid(message: text) -> PolicyResult:
-    PolicyResult(allowed: false, exit_code: 1i64, message: message)
-
-fn _has_arg(argv: [text], needle: text) -> bool:
-    var i = 0i64
-    while i < argv.len():
-        if argv[i] == needle:
-            return true
-        i = i + 1i64
-    false
-
-fn check_forbidden(argv: [text]) -> PolicyResult:
-    if argv.len() < 2i64:
-        return policy_allow()
-    if argv[0i64] != "git":
-        return policy_allow()
-    val verb = argv[1i64]
-    if verb == "rebase" and _has_arg(argv, "-i"):
-        return policy_forbid("ERROR[FORBIDDEN]: git rebase -i is not supported here. Use sj split, sj squash --into, or sj rebase --onto instead.")
-    if verb == "push" and (_has_arg(argv, "--force") or _has_arg(argv, "-f")):
-        return policy_forbid("ERROR[FORBIDDEN]: force-push is prohibited. To move a bookmark backward use: jj bookmark move <name> --to <rev> --allow-backwards then: sj git push origin <name>")
-    if verb == "push" and argv.len() == 2i64 and not _has_arg(argv, "--bookmark") and not _has_arg(argv, "--via-worktree"):
-        return policy_forbid("ERROR[FORBIDDEN]: bare 'sj git push' is ambiguous in a jj repo. The project push pattern is: jj bookmark set main -r @- && sj git push origin main")
-    if verb == "checkout" and argv.len() == 2i64:
-        return policy_forbid("ERROR[FORBIDDEN]: bare 'git checkout' with no arguments is not meaningful in a jj-managed repo. Use sj git checkout <rev> or sj git checkout -b <branch> [base]")
-    if verb == "filter-branch":
-        return policy_forbid("ERROR[FORBIDDEN]: git filter-branch rewrites history outside jj's operation log. Use sj raw git filter-branch only if you accept the risk.")
-    if verb == "stash":
-        return policy_forbid("ERROR[FORBIDDEN]: use 'jj new -m wip-<topic>' instead - jj's working-copy-as-commit makes stash unnecessary")
-    policy_allow()
-
-# ============================================================================
-# Tests
-# ============================================================================
+use std.spec.*
+use app.sj.policy.{check_forbidden}
 
 describe "Forbidden Verbs - Interactive Rebase":
     it "forbids git rebase -i":
@@ -121,3 +99,49 @@ describe "Forbidden Verbs - Passthrough":
     it "allows single git with no verb":
         val result = check_forbidden(["git"])
         expect(result.allowed).to_equal(true)
+
+# ---------------------------------------------------------------------------
+# Coverage the shim never had: the PolicyResult contract itself.
+# The local copy asserted only `.allowed` and `.message`; `exit_code` was
+# never observed by any example, on either mirror.
+# ---------------------------------------------------------------------------
+
+describe "Forbidden Verbs - PolicyResult contract":
+    it "an allowed result carries exit_code 0 and an empty message":
+        val result = check_forbidden(["git", "rebase", "main"])
+        expect(result.allowed).to_equal(true)
+        expect(result.exit_code).to_equal(0i64)
+        expect(result.message).to_equal("")
+
+    it "a forbidden result carries exit_code 1":
+        val result = check_forbidden(["git", "stash"])
+        expect(result.allowed).to_equal(false)
+        expect(result.exit_code).to_equal(1i64)
+
+    it "every forbidden message is prefixed ERROR[FORBIDDEN]":
+        expect(check_forbidden(["git", "rebase", "-i"]).message).to_start_with("ERROR[FORBIDDEN]:")
+        expect(check_forbidden(["git", "push", "--force"]).message).to_start_with("ERROR[FORBIDDEN]:")
+        expect(check_forbidden(["git", "push"]).message).to_start_with("ERROR[FORBIDDEN]:")
+        expect(check_forbidden(["git", "checkout"]).message).to_start_with("ERROR[FORBIDDEN]:")
+        expect(check_forbidden(["git", "filter-branch"]).message).to_start_with("ERROR[FORBIDDEN]:")
+        expect(check_forbidden(["git", "stash"]).message).to_start_with("ERROR[FORBIDDEN]:")
+
+describe "Forbidden Verbs - argument-scan edges":
+    it "rebase -i is caught wherever -i appears in argv":
+        val result = check_forbidden(["git", "rebase", "--onto", "main", "-i"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("rebase -i")
+
+    it "force-push is caught behind other flags":
+        val result = check_forbidden(["git", "push", "origin", "main", "--force"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("force-push")
+
+    it "a non-bare push with a rev is allowed":
+        val result = check_forbidden(["git", "push", "origin", "main"])
+        expect(result.allowed).to_equal(true)
+
+    it "stash is forbidden regardless of trailing arguments":
+        val result = check_forbidden(["git", "stash", "pop"])
+        expect(result.allowed).to_equal(false)
+        expect(result.message).to_contain("jj new")

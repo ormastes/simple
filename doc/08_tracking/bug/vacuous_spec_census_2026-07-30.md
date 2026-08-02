@@ -646,3 +646,188 @@ defining module the two engines **differ**, which is how the first-wins/
 last-wins question got settled. Specs still cannot reach JIT or native from the
 test runner — and per the section above, that is now known to be enforced by an
 unconditional `set_var`, not merely a default.
+
+# Addendum 2026-08-02 (fourth shim lane) — `app/sj`, and a hijack inside shipped code
+
+## Detector re-derivation (PROVED for the counts, INFERRED for the verdict)
+
+Re-derived from scratch on origin tip `6006374a09c`, corpus 18,709
+`*_spec.spl` under `test/` and 13,800 non-vendor `.spl` under `src/`
+(77,099 distinct `fn` names defined under `src/`). Base rule as before —
+*spec defines a `fn` whose name is also defined under `src/`, and the spec does
+not import an implementation*.
+
+The prior lane's exact numbers did **not** reproduce, and the reason is that
+"does not import an implementation" was never pinned down; its scratch tooling
+was not committed. Three defensible readings, all measured:
+
+| "imports nothing" means | RAW | FILT | TIER-A files / unique / examples |
+|---|---|---|---|
+| no `use` line at all | 1,481 | 924 | **121 / 79 / 2,681** |
+| no non-`std.*` `use` | 7,702 | 1,619 | **222 / 149 / 4,763** |
+| no first-party `use` (`app.`/`compiler.`/`runtime.`/…) | 8,290 | 2,177 | **248 / 166 / 5,313** |
+| *prior lane, for comparison* | 5,603 | 1,204 | *155 / 109 / 3,497* |
+
+The prior lane's 155 sits inside this band and its **ratios** match the middle
+row most closely (RAW→FILT 4.7× vs 4.76×; FILT→TIER-A 7.8× vs 7.29×), so
+"no non-`std.*` `use`" is the closest reconstruction. **The honest statement is
+that the target is 121–248 files / 79–166 unique specs / ~2,700–5,300 examples,
+depending on how the import predicate is drawn**, not a single number. Every
+tier remains an upper bound, because a locally-defined function that merely
+shares a name with a `src/` function is often a genuine helper.
+
+Exclusion list: the same ~120 generic names (reproduced at the second
+addendum). Independently re-measured, it is again dominated by exactly two
+names — under this lane's rule `check` (3,277 files) and `verify` (2,801), the
+next largest being `main` at 62. That confirms the prior lane's central point
+and its ordering caution: **any census keyed on a bare identifier is wrong
+until these two are excluded.**
+
+## Batch 3 — `app/sj` policy and flag injection (PROVED)
+
+Three specs, both mirrors, byte-identical across mirrors at base (6 files):
+
+| spec | subject | base | after |
+|---|---|---|---|
+| `forbidden_verbs_spec.spl` | `app.sj.policy.check_forbidden` | 14 total, 0 failed | **21 total, 0 failed** |
+| `submodule_policy_spec.spl` | `app.sj.policy.classify_submodule` | 13 total, 0 failed | **18 total, 0 failed** |
+| `ignore_working_copy_spec.spl` | `app.sj.jj_exec.{is_read_bypass,inject_flags,build_command}` | 19 total, 0 failed | **29 total, 0 failed** |
+
+All three imported nothing but `std.io_runtime` and carried a local copy of the
+subject (40, 30 and 45 lines). All three were green against their own copy.
+
+### Drift found, per spec
+
+- **`forbidden_verbs_spec.spl` — zero drift.** The 40-line copy was
+  byte-equivalent to `src/app/sj_daemon/forbidden.spl`. Second independent
+  instance of the *faithful shim* (the first was `llm_caret/types`): fidelity
+  is not coverage. **Not defending a defect.**
+- **`submodule_policy_spec.spl` — drifted, three ways.**
+  1. Non-submodule early returns used `LEASE_SHARED` (1); shipped code returns
+     `LEASE_EXCLUSIVE` (0) via `submodule_plan_none()`. The shim never asserted
+     `lease_kind` on a non-submodule plan, so the divergence was invisible.
+     Now pinned.
+  2. The shim had a dedicated `update` branch that no shipped module has. The
+     example `"submodule update uses exclusive lease"` still passes, because the
+     shipped fallback returns the same value — it agreed **by coincidence, not
+     by coverage**. Kept, with that recorded in place.
+  3. The shim's `add` path fallback was `argv[4]` else `"submodule"`, missing
+     the `argv[3]` step the daemon has.
+  **Not defending a defect** in the shipped code — but see below, because (3)
+  turned out to be a live divergence *inside* `src/`.
+- **`ignore_working_copy_spec.spl` — functionally faithful, structurally
+  refactored.** The copy hoisted the verb-key computation into a `_verb_key`
+  helper; shipped `is_read_bypass` inlines it. **Not defending a defect.**
+  Notably, `is_read_bypass` was reimplemented locally and then **never called
+  directly by any example** — all 19 went through `inject_flags`, so the
+  predicate's own contract had zero coverage on either mirror.
+
+`_has_flag` in `ignore_working_copy_spec.spl` is a **genuine test helper**, not
+a reimplementation of the subject, and was kept — the kind of case that makes
+every tier above an upper bound.
+
+## A fourth-shape hijack, this time between two SHIPPED modules (PROVED)
+
+The previous addendum's hijack was spec→library. This one is library→library,
+and it makes shipped code dead.
+
+`src/app/sj/policy.spl` is the client-facing API. It does
+`use app.sj_daemon.forbidden` and `use app.sj_daemon.submodule_policy`, and
+then defines its **own** `check_forbidden([text]) -> PolicyResult` and
+`classify_submodule([text]) -> SubmodulePlan` — identical signatures to the two
+it imports. Under first-import-wins, the daemon definitions serve every call
+site, and policy.spl's own bodies are unreachable.
+
+Proved by discriminating sabotage, not by reading:
+
+- **`check_forbidden`** — replacing the body of `src/app/sj/policy.spl:15` with
+  an unconditional `policy_allow()` moved **zero** examples in a spec that
+  imports `app.sj.policy`. Sabotaging `src/app/sj_daemon/forbidden.spl` moved
+  them. policy.spl's wrapper is a one-line delegation, so this one is dead but
+  harmless.
+- **`classify_submodule`** — this one is **not** harmless. policy.spl's copy is
+  not a delegation, it is a divergent 24-line reimplementation, and it has
+  drifted from the daemon: the daemon's `add` path falls back
+  `argv[4]` → `argv[3]` → `"submodule"`, policy.spl's falls back
+  `argv[4]` → `"submodule"`, losing the `argv[3]` step. Discriminating probe
+  `classify_submodule(["git","submodule","add","vendor/lib"])` yields
+  `pin submodule vendor/lib` — i.e. the **daemon** definition is the one that
+  resolves, and policy.spl's is dead *and* wrong. Pinned by
+  `"a two-argument submodule add uses argv[3] as the pinned path"`.
+
+**Not absorbed.** Both are recorded as defects below rather than fixed here:
+deleting policy.spl's duplicate bodies is a behaviour-preserving change only if
+first-import-wins holds on every engine, and specs cannot reach JIT or native.
+
+**The diagnostic does not fire on this.** `SIMPLE_DIAG_SAME_SIGNATURE_COLLISION=1`
+is present in both parsers in source (`module_loader.rs:1422`,
+`eval_tables.spl:191`) but **absent from the deployed binary** — `strings
+bin/release/x86_64-unknown-linux-gnu/simple | grep -c
+SIMPLE_DIAG_SAME_SIGNATURE_COLLISION` is **0**. Running the probe with the flag
+set emits collision warnings only for *differing* signatures (`shell`,
+`shell_output`, `skip`) and says nothing about `check_forbidden` or
+`classify_submodule`. So on the binary that produced every number in this
+document, the fourth shape is still silent. Re-deploy before relying on it.
+
+## Non-vacuity proof — the base row is the argument (PROVED)
+
+Three one-line sabotages of the **real implementations** (not the delegating
+wrappers), applied together, same binary, same command
+(`bin/simple test <spec>`), restored and `diff -q`-verified afterwards:
+
+- `src/app/sj_daemon/forbidden.spl` — stash message text changed
+- `src/app/sj_daemon/submodule_policy.spl` — `status` lease `LEASE_SHARED` → `LEASE_EXCLUSIVE`
+- `src/app/sj/jj_exec.spl` — `"status"` removed from the read-verb set
+
+| spec | clean | under sabotage | Δ |
+|---|---|---|---|
+| `forbidden_verbs_spec.spl` (rewritten) | 21 total, 0 failed | 21 total, **2 failed** | **+2** |
+| `forbidden_verbs_spec.spl` **as it was at base** (shim) | 14 total, 0 failed | 14 total, 0 failed | **0** |
+| `ignore_working_copy_spec.spl` (rewritten) | 29 total, 0 failed | 29 total, **2 failed** | **+2** |
+| `ignore_working_copy_spec.spl` **as it was at base** (shim) | 19 total, 0 failed | 19 total, 0 failed | **0** |
+| `submodule_policy_spec.spl` (rewritten) | 18 total, 0 failed | 18 total, **1 failed** | **+1** |
+| `submodule_policy_spec.spl` **as it was at base** (shim) | 13 total, 0 failed | 13 total, 0 failed | **0** |
+
+Three base rows, all **0**. The 46 base examples are provably blind to a
+three-point sabotage of the code they claim to test.
+
+## Corrections in both directions
+
+- **+29 examples newly load-bearing** (46 → 68 across the three specs, plus
+  strengthened bodies): the `PolicyResult.exit_code` contract and the
+  `ERROR[FORBIDDEN]:` prefix (never asserted by any example on either mirror);
+  the full `is_read_bypass` contract including the two-word families and their
+  mutating siblings; the exact emitted argv, element by element, including
+  length; `build_command`'s rendered line as an exact string.
+- **1 example newly correct-but-still-green**: `"submodule update uses
+  exclusive lease"` asserted a value the shim produced from a dedicated
+  `update` branch that shipped code does not have. It now asserts the same
+  value produced by the shipped fallback. A failure-count metric scores this as
+  nothing happening; it is the difference between agreeing by coincidence and
+  agreeing by coverage.
+- **0 examples newly red.** Unlike Batch 1, no shim assertion here contradicted
+  shipped behaviour, so nothing had to be replaced. **No assertion was
+  weakened, relaxed or deleted** — all 46 base assertions survive in the
+  rewrite.
+
+## Defects recorded, not absorbed
+
+6. **`src/app/sj/policy.spl` carries two unreachable duplicate definitions.**
+   `check_forbidden` (a dead one-line delegation) and `classify_submodule` (a
+   dead *and* drifted 24-line copy that lost the daemon's `argv[3]` path
+   fallback). Any reader of policy.spl believes it defines this behaviour; it
+   does not. Fixing it means deleting the duplicates and re-exporting, which
+   needs the first-import-wins guarantee verified on JIT and native first.
+7. **The same-signature collision diagnostic is not in the deployed binary.**
+   Landed in source by the third lane, `strings`-count 0 in
+   `bin/release/x86_64-unknown-linux-gnu/simple`. Every fourth-shape instance
+   is silent until a redeploy.
+
+## Engine reach
+
+Unchanged and restated: every number above is `bin/simple test` on the Rust
+bootstrap seed (`enum construction: unregistered enum` probe = 0). No spec in
+this batch reaches the JIT or the native lane; that is a property of the test
+runner, not of these specs. The two hijack findings are therefore established
+for the interpreter path only, which is precisely why defect 6 is filed rather
+than fixed.

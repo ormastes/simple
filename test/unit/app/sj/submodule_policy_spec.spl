@@ -1,59 +1,36 @@
 """
 # Submodule Policy Specification
 #
+# Subject: the client-facing `app.sj.policy` API (`classify_submodule`).
+#
 # Tests the submodule detection, exclusive lease, warning,
 # and auto-pin behavior.
+#
+# History: this file used to carry a 30-line local copy of `classify_submodule`
+# plus the `SubmodulePlan` struct and local `LEASE_EXCLUSIVE`/`LEASE_SHARED`
+# constants, and imported nothing but `std.io_runtime`. All 13 examples passed
+# against the copy and could never observe shipped code. Unlike the sibling
+# forbidden-verbs shim, this copy HAD drifted, three ways — see the pins below.
+#
+# IMPORTANT — where these calls actually land. There are THREE definitions of
+# `classify_submodule([text]) -> SubmodulePlan` in the tree: this spec's former
+# copy, `src/app/sj/policy.spl:18`, and `src/app/sj_daemon/submodule_policy.spl:22`.
+# policy.spl does `use app.sj_daemon.submodule_policy`, so under first-import-wins
+# the DAEMON definition serves every call site here and policy.spl's own body is
+# dead code. That matters because policy.spl's dead copy has itself drifted from
+# the daemon: it lacks the `argv[3]` path fallback the daemon has. Pinned below.
+# See doc/08_tracking/bug/vacuous_spec_census_2026-07-30.md.
+#
+# Lease values are asserted as literals rather than via
+# `std.service.lease_manager.{LEASE_EXCLUSIVE, LEASE_SHARED}` on purpose: `use
+# std.*` resolves to a frozen out-of-project snapshot, so importing them would
+# make these expectations depend on a tree that is not the one under test.
+# LEASE_EXCLUSIVE == 0i64, LEASE_SHARED == 1i64
+# (src/lib/nogc_sync_mut/service/lease_manager.spl:16).
 """
 
-use std.io_runtime
-
-# --- Inline constants ---
-val LEASE_EXCLUSIVE: i64 = 0i64
-val LEASE_SHARED: i64 = 1i64
-
-# --- Inline submodule types ---
-
-struct SubmodulePlan:
-    is_submodule: bool
-    lease_kind: i64
-    warning: text
-    auto_pin_cmd: text
-
-fn classify_submodule(argv: [text]) -> SubmodulePlan:
-    if argv.len() < 3i64:
-        return SubmodulePlan(is_submodule: false, lease_kind: LEASE_SHARED, warning: "", auto_pin_cmd: "")
-    if argv[0i64] != "git" or argv[1i64] != "submodule":
-        return SubmodulePlan(is_submodule: false, lease_kind: LEASE_SHARED, warning: "", auto_pin_cmd: "")
-    if argv[2i64] == "add":
-        val path = if argv.len() > 4i64:
-            argv[4i64]
-        else:
-            "submodule"
-        return SubmodulePlan(
-            is_submodule: true,
-            lease_kind: LEASE_EXCLUSIVE,
-            warning: "WARN[SUBMODULE]: submodule add is pinned immediately to preserve the gitlink in jj-managed repos",
-            auto_pin_cmd: "git commit --no-verify -m 'chore: pin submodule {path}'"
-        )
-    if argv[2i64] == "status":
-        return SubmodulePlan(
-            is_submodule: true,
-            lease_kind: LEASE_SHARED,
-            warning: "",
-            auto_pin_cmd: ""
-        )
-    if argv[2i64] == "update":
-        return SubmodulePlan(
-            is_submodule: true,
-            lease_kind: LEASE_EXCLUSIVE,
-            warning: "",
-            auto_pin_cmd: ""
-        )
-    SubmodulePlan(is_submodule: true, lease_kind: LEASE_EXCLUSIVE, warning: "", auto_pin_cmd: "")
-
-# ============================================================================
-# Tests
-# ============================================================================
+use std.spec.*
+use app.sj.policy.{classify_submodule}
 
 describe "Submodule Policy - Detection":
     it "detects git submodule add":
@@ -75,15 +52,19 @@ describe "Submodule Policy - Detection":
 describe "Submodule Policy - Exclusive Lease":
     it "submodule add uses exclusive lease":
         val plan = classify_submodule(["git", "submodule", "add", "url", "path"])
-        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+        expect(plan.lease_kind).to_equal(0i64)
 
     it "submodule status uses shared lease":
         val plan = classify_submodule(["git", "submodule", "status"])
-        expect(plan.lease_kind).to_equal(LEASE_SHARED)
+        expect(plan.lease_kind).to_equal(1i64)
 
     it "submodule update uses exclusive lease":
+        # NOTE: the shipped code has no dedicated `update` branch — this reaches
+        # the exclusive-lease fallback. The removed shim DID have a dedicated
+        # `update` branch; it returned the same value, so this example agreed
+        # with shipped behaviour by coincidence rather than by coverage.
         val plan = classify_submodule(["git", "submodule", "update"])
-        expect(plan.lease_kind).to_equal(LEASE_EXCLUSIVE)
+        expect(plan.lease_kind).to_equal(0i64)
 
 describe "Submodule Policy - Warning":
     it "submodule add produces WARN":
@@ -113,3 +94,46 @@ describe "Submodule Policy - Read Negative":
     it "empty argv returns non-submodule":
         val plan = classify_submodule([])
         expect(plan.is_submodule).to_equal(false)
+
+# ---------------------------------------------------------------------------
+# Drift pins — behaviour the removed shim asserted differently, or not at all.
+# ---------------------------------------------------------------------------
+
+describe "Submodule Policy - drift pins":
+    it "a non-submodule plan carries the EXCLUSIVE lease, not the shared one":
+        # DRIFT 1. The removed shim returned LEASE_SHARED (1) from both
+        # non-submodule early returns; the shipped code returns LEASE_EXCLUSIVE
+        # (0) via `submodule_plan_none()`. The shim never asserted lease_kind on
+        # a non-submodule plan, so the divergence was invisible in both
+        # directions. This pins the shipped value.
+        expect(classify_submodule(["git", "status"]).lease_kind).to_equal(0i64)
+        expect(classify_submodule([]).lease_kind).to_equal(0i64)
+        expect(classify_submodule(["describe", "-m", "x"]).lease_kind).to_equal(0i64)
+
+    it "a two-argument submodule add uses argv[3] as the pinned path":
+        # DRIFT 2, and it is a live divergence inside shipped code, not just in
+        # the removed shim. `src/app/sj_daemon/submodule_policy.spl` falls back
+        # argv[4] -> argv[3] -> "submodule"; `src/app/sj/policy.spl` falls back
+        # argv[4] -> "submodule" only, losing the argv[3] step. The daemon
+        # definition wins here, so this asserts "vendor/lib". If policy.spl's
+        # copy ever became the one that resolves, this example goes red — which
+        # is the point.
+        val plan = classify_submodule(["git", "submodule", "add", "vendor/lib"])
+        expect(plan.is_submodule).to_equal(true)
+        expect(plan.auto_pin_cmd).to_contain("pin submodule vendor/lib")
+
+    it "a bare submodule add with no path falls back to the literal 'submodule'":
+        val plan = classify_submodule(["git", "submodule", "add"])
+        expect(plan.is_submodule).to_equal(true)
+        expect(plan.auto_pin_cmd).to_contain("pin submodule submodule")
+
+    it "the auto-pin command is a --no-verify commit":
+        val plan = classify_submodule(["git", "submodule", "add", "url", "vendor/lib"])
+        expect(plan.auto_pin_cmd).to_start_with("git commit --no-verify -m ")
+
+    it "an unrecognised submodule verb is a submodule with an exclusive lease and no warning":
+        val plan = classify_submodule(["git", "submodule", "deinit", "vendor/lib"])
+        expect(plan.is_submodule).to_equal(true)
+        expect(plan.lease_kind).to_equal(0i64)
+        expect(plan.warning).to_equal("")
+        expect(plan.auto_pin_cmd).to_equal("")
