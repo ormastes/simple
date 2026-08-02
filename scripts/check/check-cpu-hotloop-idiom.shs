@@ -193,7 +193,42 @@ fi
 # difference avoids double-counting a single-line header and avoids a fragile
 # "does-not-end-in-colon" regex (trailing-comment case).
 awk -v SF="$loop_single" 'FILENAME==SF { seen[$0]=1; next } !($0 in seen)' "$loop_single" "$loop_all" >"$tmp_dir/loop_multi.txt" || true
-cat "$loop_single" "$tmp_dir/loop_multi.txt" >"$loop_hits" || true
+
+# Multi-line headers key on their FULL header text, not the first line alone.
+# The first line of a `while (\n ... ):` continuation form is just `while (`, so
+# every such loop in a file collapsed to one degenerate key that could not say
+# WHICH loop changed (recorded OPEN as §3.1 of
+# doc/08_tracking/bug/cpu_hotloop_gate_red_key_churn_and_prose_scoring_2026-08-01.md).
+# Join continuation lines up to and including the one that closes with `:`.
+# Bounded at 12 lines so a malformed header cannot run away; if no closing line
+# is found the original first-line content is kept (fail to the old behaviour,
+# never to zero hits). This refines keys only — it adds no hit and drops none,
+# so the scored total is unchanged.
+loop_multi_keyed="$tmp_dir/loop_multi_keyed.txt"
+: >"$loop_multi_keyed"
+while IFS= read -r mhit; do
+    [ -n "$mhit" ] || continue
+    mfile="${mhit%%:*}"
+    mrest="${mhit#*:}"
+    mline="${mrest%%:*}"
+    mcontent="${mrest#*:}"
+    mjoined=$(awk -v start="$mline" '
+        NR < start { next }
+        NR >= start + 12 { exit }
+        {
+            line=$0;
+            gsub(/\t/, " ", line);
+            gsub(/^[ ]+/, "", line);
+            gsub(/[ ]+$/, "", line);
+            out = (out == "" ? line : out " " line);
+            if (line ~ /:[ ]*(#.*)?$/) { print out; exit }
+        }
+    ' "$mfile" 2>/dev/null) || mjoined=""
+    [ -n "$mjoined" ] || mjoined="$mcontent"
+    printf '%s:%s:%s\n' "$mfile" "$mline" "$mjoined" >>"$loop_multi_keyed"
+done <"$tmp_dir/loop_multi.txt"
+
+cat "$loop_single" "$loop_multi_keyed" >"$loop_hits" || true
 
 # Byte-array element reads: names declared `name: [u8]` (as a field or a
 # param), then indexed in that same file as `name[...]`. Keep each name paired

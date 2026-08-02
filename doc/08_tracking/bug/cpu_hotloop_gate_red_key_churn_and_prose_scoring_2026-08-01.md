@@ -95,14 +95,40 @@ would be exactly the cover-up this gate exists to prevent, and would also
 silently bless any genuine regression mixed into the refactor. They remain
 scored. See §6 for the paydown plan.
 
-### 3.1 A keying weakness worth noting
+### 3.1 A keying weakness worth noting (PROVED, FIXED 2026-08-02)
 
 Five distinct multi-line loop headers in
-`simple_web_html_layout_renderer_core.spl` collapse to the single degenerate key
-`while (`, because the key is the trimmed text of the header's first line. The
-count ratchet still works, but the key carries no information and cannot
-distinguish which of the five loops changed. Not fixed here (fixing it re-keys
-the baseline again); recorded so it is not rediscovered.
+`simple_web_html_layout_renderer_core.spl` collapsed to the single degenerate key
+`while (`, because the key was the trimmed text of the header's first line. The
+count ratchet still worked, but the key carried no information and could not
+distinguish which of the five loops changed.
+
+**Fixed.** The gate now joins a multi-line header's continuation lines up to and
+including the one that closes with `:`, so the key is the full header text
+(bounded at 12 lines; if no closing line is found the old first-line content is
+kept, so the failure mode is the previous behaviour, never zero hits).
+
+Safe to do now because the ratcheted baseline contains **no** multi-line key
+(verified: every one of its 142 entries ends in `:`), so re-keying migrates
+nothing. The refinement changes keys only, never the scored total:
+
+* Real designated set, before and after: `baselined=207 current=365 new=158` —
+  byte-identical totals. The degenerate `while (` (count 5) became four distinct
+  keys summing to 5; reported violation *lines* went 133 → 136.
+* All nine pre-existing fixture controls return identical
+  `current`/`new`/`ok` triples before and after.
+* Non-vacuity is durable, not just observed: fixture
+  `multiline_distinct_offender.spl` holds two headers whose first line is the
+  bare token `while (`. Old gate: one key `while (` count=2. New gate: two
+  distinct keys, count=1 each. `new=2` in **both** — the fix refines keys, it
+  does not loosen the gate. Asserted by
+  `test/03_system/app/ui/feature/cpu_hotloop_gate_spec.spl`.
+
+> Measurement trap hit while proving this: running the pre-change copy of the
+> script from a scratch directory made it resolve `ROOT_DIR` outside the repo
+> and exit 2 with no output, which read as "old gate found nothing" and would
+> have faked a much larger improvement. The A/B is only valid with both copies
+> under `scripts/check/`.
 
 ## 4. Rule defect: the gate scored comments and string literals (PROVED, FIXED)
 
@@ -193,4 +219,15 @@ absorbed, weakened, or given an env hatch.
 - FIXED: prose scoring in BYTE/SUBSTR/CHAIN.
 - FIXED: baseline staleness (381 → 207, stale 113 → 0).
 - OPEN: 158 genuine hot-loop violations, plan in §6.
-- OPEN: degenerate `while (` multi-line key (§3.1).
+- FIXED (2026-08-02): degenerate `while (` multi-line key (§3.1), totals unchanged.
+- CONFIRMED (2026-08-02): re-measured at origin tip `e4b4561c803`, independently
+  of this document — `baselined=207 current=365 new=158`, and the 158 split
+  126 / 32 exactly as §3 records. The count is **158**; `207/142` is the
+  baseline total / key count, not a replacement figure for it. The committed
+  baseline is a strict subset of current detections (0 keys present in the
+  baseline but absent from a fresh regeneration; 122 keys new plus 20 count
+  increases = 158), which independently confirms §6's "0 added, 0 raised".
+- NOTE (2026-08-02): the gate spec's last example,
+  "ratchets clean on the real designated file set", asserts `new=0` and is
+  therefore RED for as long as §6's paydown is open. That is the gate working as
+  designed, not a spec defect — do not relax the assertion to make it pass.
