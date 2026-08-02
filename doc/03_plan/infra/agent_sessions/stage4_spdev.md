@@ -704,3 +704,35 @@ the exact Stage4 CLI. Remove all temporary diagnostic receipts, run
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
 fresh Stage4 binary, add/execute the focused regressions, and complete final
 verification before any release claim.
+
+## 2026-08-02 unlimited incremental Stage4 handoff
+
+- The 32-thread incremental lane completed Stage2 and Stage3 with the preserved
+  727-object native cache. The direct Stage4 continuation reached phase 2, then
+  stopped on grouped multiline call closures in
+  `src/std/nogc_sync_mut/test_runner/test_executor_composite_jit_generic.spl`.
+  Exact evidence is
+  `build/mini_builds/stage4-unlimited-direct-cycle3-resume1.log`: eight calls
+  report `expected ), got Newline` at the trailing disconnect lambda.
+- The pure-Simple source was normalized so each final lambda and call-closing
+  parenthesis share a line. Exact call and adjacent multiline declaration
+  regressions pass 2/2 in
+  `test/01_unit/compiler/bootstrap/stage4_multiline_call_paren_spec.spl`.
+- This lane has exhausted its three bootstrap verify/fix cycles. Do not resume
+  it in this session. Stage4 output, essential-tools smoke, and clean-release
+  verification remain unproven.
+
+Fresh-session continuation (preserves the successful Stage2/Stage3 cache and
+uses all 32 detected CPUs):
+
+```bash
+env SIMPLE_BOOTSTRAP=1 SIMPLE_BOOTSTRAP_STAGE4=1 \
+  SIMPLE_BOOTSTRAP_LOW_MEMORY=0 SIMPLE_STAGE4_STREAMING_SURFACES=1 \
+  SIMPLE_NATIVE_ARENA_DECLS=1 SIMPLE_NO_STUB_FALLBACK=1 \
+  SIMPLE_NATIVE_BUILD_THREADS=32 SIMPLE_NATIVE_LINK_THREADS=32 \
+  SIMPLE_NATIVE_BUILD_CACHE=build/bootstrap-stage4-close/native_cache \
+  build/bootstrap-stage4-close/stage3/x86_64-unknown-linux-gnu/simple \
+  native-build --source src/compiler --source src/app --source src/lib \
+  --entry-closure --entry src/app/cli/main.spl --strip \
+  --output build/bootstrap-stage4-close/full/x86_64-unknown-linux-gnu/simple
+```
