@@ -31,3 +31,8 @@ green. Generated facades therefore also repeat the authoritative provenance
 comment before continuation export lines that contain ambiguous compatibility
 names. This makes every such export independently attributable on old native
 bootstrap compilers and remains compatible with the grouped parser.
+
+The root `io.spl` facade is a separate module from `io/__init__.spl`. Its broad
+self-glob now has explicit imports for the concrete `file_ops`, `dir_ops`, and
+`file_shell` owners, so compatibility stubs cannot win or make those exports
+ambiguous during Stage4 extraction.

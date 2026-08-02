@@ -142,6 +142,29 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(origin.owner_module).to_equal("hint.io.file_ops")
         expect(origin.resolution_kind).to_equal("generated-comment")
 
+    it "uses explicit concrete imports over compatibility stubs in a root facade":
+        val log = make_logger()
+        val concrete_source = "pub fn file_append() -> bool:\n    true\npub fn file_remove() -> bool:\n    true"
+        val stub_source = "pub fn file_append() -> bool:\n    false\npub fn file_remove() -> bool:\n    false"
+        val facade_source = "use root.io.file_ops.\{file_append, file_remove\}\nexport file_append, file_remove"
+        val concrete = parse_full_frontend(concrete_source, "root.io.file_ops", "root.io.file_ops", log)
+        val stub = parse_full_frontend(stub_source, "root.io.mod_stub", "root.io.mod_stub", log)
+        val facade = parse_full_frontend(facade_source, "root.io", "root.io", log)
+        var modules: Dict<text, Module> = {}
+        modules["root.io.file_ops"] = concrete
+        modules["root.io.mod_stub"] = stub
+        modules["root.io"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "root/io/file_ops.spl", content: concrete_source, module_name: "root.io.file_ops"),
+            SourceFile(path: "root/io/mod_stub.spl", content: stub_source, module_name: "root.io.mod_stub"),
+            SourceFile(path: "root/io.spl", content: facade_source, module_name: "root.io")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        val root_surface = surfaces.surfaces[surfaces.index_by_name["root.io"]]
+        expect(root_surface.export_origins["file_append"].owner_module).to_equal("root.io.file_ops")
+        expect(root_surface.export_origins["file_remove"].owner_module).to_equal("root.io.file_ops")
+
     it "accepts explanatory text after a generated provenance filename":
         val log = make_logger()
         val owner_source = "pub fn shell() -> bool:\n    true"
