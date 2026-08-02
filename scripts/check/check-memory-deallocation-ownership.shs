@@ -1,0 +1,29 @@
+#!/bin/sh
+set -eu
+
+fail() {
+    echo "memory deallocation ownership: FAIL: $*" >&2
+    exit 1
+}
+
+for mode in gc_async_mut nogc_async_mut nogc_sync_mut; do
+    allocator="src/lib/$mode/allocator.spl"
+    gc="src/lib/$mode/gc.spl"
+
+    grep -q 'me release():' "$allocator" || fail "$mode arena has no release operation"
+    grep -q 'sys_free(self.buffer, self.capacity, 8)' "$allocator" || fail "$mode arena does not reach its owning free operation"
+    grep -q 'self.buffer = \[\]' "$allocator" || fail "$mode arena retains its managed backing reference"
+
+    grep -q 'if not self.objects.?:' "$gc" || fail "$mode GC does not detect an empty heap"
+    grep -q 'self.young_alloc.release()' "$gc" || fail "$mode empty-heap sweep does not release its arena"
+    grep -q 'if self.young_alloc.capacity == 0:' "$gc" || fail "$mode GC does not lazily restore a released arena"
+done
+
+# Adjacent explicit allocation families must retain their shared native owner.
+grep -q 'void rt_free(uint8_t\* ptr)' src/runtime/runtime_memory.c || fail 'hosted runtime lacks rt_free'
+grep -q 'free(ptr);' src/runtime/runtime_memory.c || fail 'hosted rt_free does not reach libc free'
+grep -q 'rt_array_free_deep(int64_t value)' src/runtime/runtime_native.c || fail 'deep array deallocator is missing'
+grep -q 'rt_string_free(int64_t value)' src/runtime/runtime_native.c || fail 'string deallocator is missing'
+grep -q 'void spl_free(void\* ptr)' src/runtime/runtime.c || fail 'runtime allocator owner is missing'
+
+echo 'memory deallocation ownership: PASS'

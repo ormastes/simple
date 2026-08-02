@@ -16,6 +16,25 @@ Status: OPEN (tracking list; items close individually)
    pure-Simple mark-sweep (doc/05_design/runtime/gc_pure_simple_implementation.md) is
    opt-in and unwired. A real reclamation strategy for gc_* trees is prerequisite to
    any leak SLO. HeapHeader tri-color bits + SHARED_ROOTS are dead machinery (B4).
+   **CLAIMED 2026-08-02:** owner `codex-memory-deallocation-audit-a` is tracing
+   pure-Simple and runtime allocator/deallocator reachability before any fix.
+   **PARTIAL FIX 2026-08-02:** the opt-in pure-Simple `GcHeap` now releases its
+   young arena when a sweep removes the last object and recreates it lazily on
+   the next allocation. `ArenaAllocator.release()` reaches its owning
+   `sys_free` and drops the managed buffer reference in all three concrete
+   mutability variants. Hosted raw/string/array frees were audited and already
+   reach libc `free` on Linux, macOS, Windows, and BSD; SimpleOS continues
+   through its platform allocator owner. Guard:
+   `scripts/check/check-memory-deallocation-ownership.shs`. The larger compiler
+   wiring/codegen portion of this item remains open; this fix does not claim
+   that ordinary compiled gc-mode programs now use `GcHeap`.
+
+   | Target family | Deallocation owner audited | Result |
+   |---|---|---|
+   | Linux/macOS/BSD hosted | `runtime_memory.c` / `runtime_native.c` -> libc | `free` reached |
+   | Windows hosted | shared C runtime -> MSVCRT/UCRT libc | `free` reached |
+   | SimpleOS/bare metal | pure allocator/platform owner | arena reference released; platform policy retained |
+   | Pure-Simple GC variants | `GcHeap` -> `ArenaAllocator.release` | empty heap releases; next allocation restores lazily |
 2. **HIGH — boundary not enforced at compile/run time.** gc-boundary runs only in
    `bin/simple lint`; `compile --native` of a violating file exits 0.
 

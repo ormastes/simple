@@ -256,6 +256,11 @@ class GcHeap:
         if self.should_collect():
             self.collect()
 
+        # Empty-heap collection releases the backing arena. Recreate it lazily
+        # so an idle heap does not retain its full young-generation reservation.
+        if self.young_alloc.capacity == 0:
+            self.young_alloc = ArenaAllocator.new(capacity: self.config.young_size)
+
         # Allocate with header
         val total_size = size + header_size()
         val ptr = self.young_alloc.allocate(total_size, 8)?
@@ -519,6 +524,12 @@ class GcHeap:
         self.stats.objects_freed = self.stats.objects_freed + freed_count
         self.stats.bytes_freed = self.stats.bytes_freed + freed_bytes
         self.allocated = self.allocated - freed_bytes
+
+        # An arena cannot reclaim individual holes while live pointers remain.
+        # Once the heap is empty, however, every pointer into the backing block
+        # is dead, so return that block. allocate() restores it on demand.
+        if not self.objects.?:
+            self.young_alloc.release()
 
     me finalize_object(ptr: [u8], header: GcObjectHeader):
         """Run finalizer for object before deallocation.
