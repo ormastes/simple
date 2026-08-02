@@ -116,14 +116,24 @@ fn _array_body(source: text, key: text) -> text:
     if start < 0:
         return ""
     val body_start = start + marker.len()
+    # INDEX SPACE: BYTE-indexed. `start` comes from `find` and `body_start`
+    # from `len()`, both BYTE offsets, and `i` is handed straight to
+    # `slice(body_start, i)`, which is byte-based -- but `i` used to be read
+    # with `char_at`, which is CHARACTER-based. safetensors headers carry a
+    # free-form `__metadata__` JSON string map, so one model shipping a UTF-8
+    # description desyncs the two spaces and the closing bracket is found at
+    # the wrong `i`, cutting the shape array at the wrong BYTE. "[" is 91 and
+    # "]" is 93; both are ASCII and UTF-8 continuation bytes are always
+    # >= 0x80, so a byte scan matches the brackets exactly.
     var i = body_start
     var nested_arrays: i64 = 0
-    while i < source.len():
-        val ch = source.char_at(i)
-        if ch == "[":
+    val n = source.len()
+    while i < n:
+        val cb = source.byte_at(i)
+        if cb == 91:
             nested_arrays = nested_arrays + 1
         else:
-            if ch == "]":
+            if cb == 93:
                 if nested_arrays == 0:
                     return source.slice(body_start, i)
                 nested_arrays = nested_arrays - 1
@@ -195,21 +205,25 @@ fn _shape_field(source: text) -> [i64]:
     val start = source.find(marker)
     if start < 0:
         return []
+    # BYTE-indexed for the same reason as `_array_body` above: `start` is a
+    # byte offset from `find`, and a UTF-8 `__metadata__` value ahead of the
+    # array desyncs a character-space cursor. Digits are 48..57 and "]" is 93.
     var i = start + marker.len()
     var out: [i64] = []
     var value: i64 = 0
     var seen = false
-    while i < source.len():
-        val ch = source.char_at(i)
-        if ch >= "0" and ch <= "9":
-            value = (value * 10) + (ch.ord() - "0".ord())
+    val n = source.len()
+    while i < n:
+        val cb = source.byte_at(i)
+        if cb >= 48 and cb <= 57:
+            value = (value * 10) + (cb - 48)
             seen = true
         else:
             if seen:
                 out.push(value)
                 value = 0
                 seen = false
-            if ch == "]":
+            if cb == 93:
                 return out
         i = i + 1
     out

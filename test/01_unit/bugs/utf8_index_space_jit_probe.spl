@@ -55,6 +55,7 @@ cross-engine agreement:
 
 use std.editor.services.lsp_transport.*
 use std.editor.services.command_palette.{fuzzy_match, fuzzy_score}
+use std.gc_async_mut.svllm.model_executor.model_loader.manifest.{_array_body}
 
 var failures = 0
 
@@ -179,6 +180,27 @@ fn main() -> void:
     # ASCII control: the fix must leave ASCII scores bit-identical.
     check_i64("score ASCII control caf-e", fuzzy_score("e", "cafe"), 8)
     check_i64("score ASCII control e-a", fuzzy_score("e", "ea"), 11)
+
+    # ---------------------------------------------------------------
+    # safetensors `_array_body` — `start`/`body_start`/`i` are BYTE offsets
+    # (from `find`, `len()`, and fed to `slice`) but `i` was read with
+    # `char_at`, a CHARACTER accessor. A safetensors header carries a free-form
+    # `__metadata__` JSON string map, so one model shipping a UTF-8
+    # description desyncs the two cursors and the shape array is cut at the
+    # wrong BYTE -- wrong tensor shapes, silently.
+    #
+    # Hand-computed. In the header below the metadata value holds one 3-byte
+    # CJK character, so from that point on the byte offset runs 2 ahead of the
+    # character offset and a character-space scan finds "]" two bytes late.
+    # ---------------------------------------------------------------
+    val ascii_hdr = "{\"__metadata__\":{\"d\":\"ok\"},\"shape\":[2,3]}"
+    val utf8_hdr = "{\"__metadata__\":{\"d\":\"\u{4e2d}\"},\"shape\":[2,3]}"
+    check_text("array_body ASCII control", _array_body(ascii_hdr, "shape"), "2,3")
+    check_text("array_body after a 3-byte metadata value", _array_body(utf8_hdr, "shape"), "2,3")
+    val utf8_hdr4 = "{\"__metadata__\":{\"d\":\"\u{1f389}\"},\"shape\":[10,20]}"
+    check_text("array_body after a 4-byte metadata value", _array_body(utf8_hdr4, "shape"), "10,20")
+    val nested = "{\"__metadata__\":{\"d\":\"\u{4e2d}\"},\"shape\":[[1,2],[3,4]]}"
+    check_text("array_body keeps nested arrays after non-ASCII", _array_body(nested, "shape"), "[1,2],[3,4]")
 
     if failures == 0:
         print("PROBE VERDICT: PASS")
