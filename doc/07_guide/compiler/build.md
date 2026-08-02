@@ -388,3 +388,20 @@ bin/simple task ci              # Full CI check
 
 - [CLI Reference](cli.md) -- command-line arguments and subcommands
 - [Getting Started](getting_started.md) -- installation and first program
+# Bootstrap diagnostic sweep
+
+When a staged bootstrap stops at the first broken module, run the check-only
+diagnostic mode to discover independent errors in one pass:
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --diagnostic-sweep \
+  --diagnostic-root=src/compiler --jobs=4
+```
+
+The mode invokes `check` in an isolated process for every selected `.spl` file,
+continues after failures, groups captured output by source path, and exits `1`
+when any check fails. Each path has a stable private directory below
+`<output>/diagnostic-cache`, so incremental state survives later sweeps while
+parallel workers never write the same cache. This is intentionally diagnostic
+only: combining it with `--deploy`, `--release`, or `--full-cli` is rejected,
+and the mode has no artifact admission or deployment path.

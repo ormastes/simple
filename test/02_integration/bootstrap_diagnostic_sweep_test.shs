@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-test.XXXXXX")
+trap 'rm -rf "$work"' EXIT INT TERM
+mkdir -p "$work/input" "$work/cache"
+
+printf '%s\n' 'fn good() -> i64: 1' > "$work/input/adjacent_good.spl"
+printf '%s\n' 'fn broken_one(:' > "$work/input/exact_failure.spl"
+printf '%s\n' 'val match = 1' > "$work/input/second_failure.spl"
+
+fake="$work/fake-simple"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'echo "$2" >> "$FAKE_INVOCATIONS"' \
+  'case "$2" in' \
+  '  *adjacent_good.spl) exit 0 ;;' \
+  '  *exact_failure.spl) echo "error[E100]: exact parser failure" >&2; exit 1 ;;' \
+  '  *second_failure.spl) echo "error[E200]: adjacent semantic failure" >&2; exit 1 ;;' \
+  'esac' \
+  'exit 2' > "$fake"
+chmod +x "$fake"
+
+output="$work/output.txt"
+set +e
+FAKE_INVOCATIONS="$work/invocations" sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2 >"$output" 2>&1
+status=$?
+set -e
+
+[ "$status" -eq 1 ] || { echo "expected aggregate failure exit 1, got $status" >&2; exit 1; }
+[ "$(wc -l < "$work/invocations" | tr -d ' ')" -eq 3 ] || { echo "not every independent file was checked" >&2; exit 1; }
+grep -Fq 'diagnostic failure:'" $work/input/exact_failure.spl" "$output"
+grep -Fq 'error[E100]: exact parser failure' "$output"
+grep -Fq 'diagnostic failure:'" $work/input/second_failure.spl" "$output"
+grep -Fq 'error[E200]: adjacent semantic failure' "$output"
+grep -Fq 'bootstrap diagnostic summary: checked=3 passed=1 failed=2' "$output"
+[ "$(find "$work/cache" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -eq 3 ] || {
+  echo "workers did not receive isolated per-file caches" >&2
+  exit 1
+}
+touch "$work/cache/preserved-marker"
+set +e
+FAKE_INVOCATIONS="$work/invocations-second" sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --cache-dir="$work/cache" --jobs=2 >/dev/null 2>&1
+second_status=$?
+set -e
+[ "$second_status" -eq 1 ]
+[ -f "$work/cache/preserved-marker" ] || { echo "diagnostic sweep cleared reusable cache state" >&2; exit 1; }
+
+echo "PASS bootstrap diagnostic sweep aggregation"

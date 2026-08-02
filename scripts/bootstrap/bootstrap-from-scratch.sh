@@ -42,6 +42,11 @@ Options:
   --incremental-unlimited
                      Reuse incremental caches and use every detected host CPU;
                      remove the Stage 4 low-memory throttle (single-agent mode)
+  --diagnostic-sweep Continue checking independent .spl files after failures,
+                     group all diagnostics, and never build or deploy artifacts
+  --diagnostic-root=<path>
+                     File or directory selected by --diagnostic-sweep
+                     (default: src/compiler; repeatable)
   --clean-release    Final release proof: deploy and test a clean build while
                      clearing every reusable native cache before each batch
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
@@ -69,6 +74,8 @@ full_bootstrap=0
 full_cli=0
 fresh_cache=0
 release_tests=0
+diagnostic_sweep=0
+diagnostic_roots=""
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
@@ -111,6 +118,17 @@ while [ "$#" -gt 0 ]; do
       ;;
     --incremental-unlimited)
       execution_profile=incremental-unlimited
+      ;;
+    --diagnostic-sweep)
+      diagnostic_sweep=1
+      ;;
+    --diagnostic-root=*)
+      diagnostic_root=${1#*=}
+      if [ -z "${diagnostic_root}" ]; then
+        echo "error: --diagnostic-root requires a path" >&2
+        exit 1
+      fi
+      diagnostic_roots="${diagnostic_roots} --root=${diagnostic_root}"
       ;;
     --clean-release)
       execution_profile=clean-release
@@ -669,6 +687,30 @@ bootstrap_native_build_main() {
 seed_bin="src/compiler_rust/target/bootstrap/simple${exe_suffix}"
 native_all_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_native_all${archive_suffix}"
 compiler_backfill_lib="src/compiler_rust/target/bootstrap/${archive_prefix}simple_compiler_backfill${archive_suffix}"
+
+if [ "${diagnostic_sweep}" -eq 1 ]; then
+  if [ "${deploy}" -eq 1 ] || [ "${release_tests}" -eq 1 ] || [ "${full_cli}" -eq 1 ]; then
+    echo "error: --diagnostic-sweep is check-only and cannot deploy, release, or relink" >&2
+    exit 1
+  fi
+  if [ ! -x "${seed_bin}" ]; then
+    echo "error: diagnostic sweep requires an existing compiler: ${seed_bin}" >&2
+    exit 1
+  fi
+  # Parser and semantic globals cannot safely recover from an arbitrary broken
+  # module in-process. Independent compiler processes are therefore the owner
+  # boundary; stable per-file cache directories isolate concurrent writers.
+  # This mode has no output-artifact or deployment path.
+  # shellcheck disable=SC2086
+  if sh scripts/check/bootstrap-diagnostic-sweep.shs \
+    --compiler="${seed_bin}" --cache-dir="${output_dir}/diagnostic-cache" \
+    --jobs="${jobs}" ${diagnostic_roots}; then
+    exit 0
+  else
+    diagnostic_status=$?
+    exit "${diagnostic_status}"
+  fi
+fi
 
 # Detect stale seed OR stale runtime library by CONTENT, not mtime.
 #
