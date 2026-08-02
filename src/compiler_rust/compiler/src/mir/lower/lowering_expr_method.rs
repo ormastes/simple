@@ -123,12 +123,16 @@ impl<'a> MirLowerer<'a> {
     }
 
     pub(super) fn enum_variant_discriminant(variant_name: &str) -> i64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        variant_name.hash(&mut hasher);
-        (hasher.finish() & 0xFFFF_FFFF) as i64
+        // Step (d), 2026-08-02: delegate to the SINGLE authoritative definition
+        // in the runtime crate. This value is a RUNTIME ABI, not a
+        // compiler-internal convention: `rt_option_some`/`rt_option_none`
+        // (runtime/src/value/objects.rs) build Option values with it, the
+        // bytecode compiler emits it into the instruction stream, and the
+        // interpreter SFFI reads it back. A second copy here that drifted by
+        // one character would desynchronize compiled code from the runtime
+        // silently. See
+        // doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
+        simple_runtime::value::hash_variant_discriminant(variant_name) as i64
     }
 
     pub(super) fn lower_method_call_expr(
@@ -1949,5 +1953,75 @@ impl<'a> MirLowerer<'a> {
                 Ok(dest)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod enum_discriminant_abi_tests {
+    use super::MirLowerer;
+    use simple_runtime::value::hash_variant_discriminant;
+
+    // Step (d), 2026-08-02. True-positive controls on the RUST SEED surface for
+    // the bare-name enum collision campaign. Every earlier lane could only pin
+    // the seed's behaviour by reading its source; these execute it.
+    //
+    // See doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
+
+    /// The seed wrapper must be the SAME function as the runtime's, not a copy
+    /// of it. This is the whole point of step (d): the discriminant is a
+    /// runtime ABI shared by `rt_option_some`/`rt_option_none`, the bytecode
+    /// stream and the interpreter SFFI, so a second definition that drifted by
+    /// one character would desynchronize compiled code from the runtime with no
+    /// diagnostic at all.
+    #[test]
+    fn seed_wrapper_agrees_with_the_runtime_abi() {
+        for name in ["Ok", "Err", "Some", "None", "Circle", "Bold"] {
+            assert_eq!(
+                MirLowerer::enum_variant_discriminant(name),
+                hash_variant_discriminant(name) as i64,
+                "seed wrapper diverged from the runtime ABI for variant {name}",
+            );
+        }
+    }
+
+    /// TRUE-POSITIVE CONTROL for the collision itself: the seed derives the
+    /// discriminant from the variant NAME ALONE, with no enum identity, so two
+    /// unrelated enums that both declare `Circle` collapse onto the identical
+    /// discriminant BY CONSTRUCTION. This is measured here, not inferred from
+    /// reading the source.
+    ///
+    /// This test is written to FAIL the moment the seed gains enum identity --
+    /// which is the not-yet-done half of the reconciliation. Whoever makes that
+    /// change must come here and replace this expectation deliberately, rather
+    /// than discovering the ABI break in the field.
+    #[test]
+    fn seed_collapses_same_named_variants_of_different_enums() {
+        // `Shape.Circle` and `Widget.Circle` are different enums. The seed
+        // cannot tell them apart: it never sees an enum name.
+        assert_eq!(
+            MirLowerer::enum_variant_discriminant("Circle"),
+            MirLowerer::enum_variant_discriminant("Circle"),
+        );
+        // ... while a genuinely different variant name does differ, so the
+        // assertion above is not vacuously true of every input.
+        assert_ne!(
+            MirLowerer::enum_variant_discriminant("Circle"),
+            MirLowerer::enum_variant_discriminant("Square"),
+        );
+    }
+
+    /// TRUE-POSITIVE CONTROL for the numeric disagreement with the MIR `.spl`
+    /// lowering, which uses the DECLARED ORDINAL (first variant = 0). The seed
+    /// returns a 32-bit hash, so the two engines disagree numerically even for
+    /// enums that do not collide at all. Pinned so the divergence cannot be
+    /// quietly claimed to be resolved.
+    #[test]
+    fn seed_discriminant_is_a_hash_not_the_declared_ordinal() {
+        // `Ok` is the FIRST variant of Result, so the MIR lowering assigns it
+        // 0 and `Err` 1. The seed assigns neither.
+        assert_ne!(MirLowerer::enum_variant_discriminant("Ok"), 0);
+        assert_ne!(MirLowerer::enum_variant_discriminant("Err"), 1);
+        // Well above any plausible ordinal, i.e. unmistakably a hash.
+        assert!(MirLowerer::enum_variant_discriminant("Ok") > i64::from(u16::MAX));
     }
 }

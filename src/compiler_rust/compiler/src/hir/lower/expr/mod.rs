@@ -90,12 +90,16 @@ impl Lowerer {
     }
 
     fn enum_variant_discriminant_for_builtin_method(&self, variant_name: &str) -> i64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-
-        let mut hasher = DefaultHasher::new();
-        variant_name.hash(&mut hasher);
-        (hasher.finish() & 0xFFFF_FFFF) as i64
+        // Step (d), 2026-08-02: delegate to the SINGLE authoritative definition
+        // in the runtime crate. This value is a RUNTIME ABI, not a
+        // compiler-internal convention: `rt_option_some`/`rt_option_none`
+        // (runtime/src/value/objects.rs) build Option values with it, the
+        // bytecode compiler emits it into the instruction stream, and the
+        // interpreter SFFI reads it back. A second copy here that drifted by
+        // one character would desynchronize compiled code from the runtime
+        // silently. See
+        // doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
+        simple_runtime::value::hash_variant_discriminant(variant_name) as i64
     }
 
     /// Main expression lowering dispatcher

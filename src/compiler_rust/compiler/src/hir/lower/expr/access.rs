@@ -4,8 +4,6 @@
 //! (struct fields, thread_group, SIMD swizzle, neighbor access) and indexing.
 
 use simple_parser::Expr;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use crate::hir::lifetime::ReferenceOrigin;
 use crate::hir::lower::context::FunctionContext;
@@ -714,9 +712,16 @@ impl Lowerer {
     }
 
     fn enum_variant_discriminant(&self, variant: &str) -> i64 {
-        let mut hasher = DefaultHasher::new();
-        variant.hash(&mut hasher);
-        (hasher.finish() & 0xFFFFFFFF) as i64
+        // Step (d), 2026-08-02: delegate to the SINGLE authoritative definition
+        // in the runtime crate. This value is a RUNTIME ABI, not a
+        // compiler-internal convention: `rt_option_some`/`rt_option_none`
+        // (runtime/src/value/objects.rs) build Option values with it, the
+        // bytecode compiler emits it into the instruction stream, and the
+        // interpreter SFFI reads it back. A second copy here that drifted by
+        // one character would desynchronize compiled code from the runtime
+        // silently. See
+        // doc/08_tracking/bug/enum_bare_name_collision_registry_2026-08-01.md.
+        simple_runtime::value::hash_variant_discriminant(variant) as i64
     }
 
     /// Lower thread_group field access to GPU intrinsics

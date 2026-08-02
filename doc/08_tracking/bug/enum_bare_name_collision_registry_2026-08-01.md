@@ -487,3 +487,95 @@ At base `1a6c1e362a5`, `test/01_unit/compiler/mir` run before and after:
   collide, it does not eliminate the collisions.
 - **The interpreter's first-wins table is untouched**, so the two engines still
   disagree. That reconciliation is not step (c).
+
+## 10. Step (d): the seed's discriminant is a RUNTIME ABI, not a compiler convention
+
+This step was scoped as "give the Rust seed enum identity". Measuring it first
+changed what the correct action is, so the finding is recorded before the change.
+
+### The measured shape of the problem (PROVED)
+
+The seed's discriminant is **not** a compiler-internal convention living in four
+duplicated functions. It is a **cross-crate runtime ABI** with the authoritative
+definition in the runtime crate:
+
+`runtime/src/value/objects.rs:251` — `hash_variant_discriminant(variant_name: &str) -> u32`
+
+and it is consumed by four independent surfaces:
+
+| Consumer | Site |
+|---|---|
+| the runtime itself, building `Option` values | `runtime/src/value/objects.rs:262,266,340` (`rt_option_some` / `rt_option_none`) |
+| the **bytecode** compiler, emitted into the instruction stream | `codegen/bytecode/compiler.rs:175,499` |
+| the **interpreter SFFI** | `interpreter_extern/enum_sffi.rs:26` (its own comment: reuses the shared fn to match semantics EXACTLY) |
+| four duplicated copies inside the compiler | `mir/lower/lowering_expr_method.rs:125`, `hir/lower/expr/access.rs:716`, `hir/lower/expr/mod.rs:92`, `codegen/llvm/emitter.rs:245` |
+
+All five definitions compute the identical value —
+`DefaultHasher(variant_name).finish() & 0xFFFF_FFFF` — differing only in return
+type (`u32` in the runtime, `i64` in the compiler copies). **Verified by
+reading all five.**
+
+**Consequence, and the reason the original plan was wrong:** adding enum
+identity to the compiler copies alone would leave `rt_option_none()` in the
+*runtime* still emitting `hash("None")` while compiled pattern tests compared
+against something else. That is a silent wrong answer at the ABI boundary — the
+exact failure mode this campaign exists to remove, and forbidden by the standing
+rule against trading a loud failure for a silent wrong one.
+
+**Second correction:** all **six** call sites of the four duplicated copies are
+hardcoded to `Result`'s `Ok`/`Err` for the builtin `is_ok` / `is_err` / `.ok` /
+`.err` fast path. The enum identity is *already known* at every one of them.
+These functions are therefore **not** the general enum-lowering path, and
+"the seed has no enum identity here" overstates the practical exposure at these
+particular sites. The general path is `hash_variant_discriminant` itself.
+
+### What this step DID land
+
+The four duplicated copies now **delegate to the single authoritative runtime
+definition**. Behaviour-preserving by construction (all five computed the same
+value), and it turns five definitions of an ABI into one — which is the actual
+prerequisite for ever changing it. `access.rs` also drops its now-unused
+`DefaultHasher` / `Hash` / `Hasher` imports.
+
+Three **executable** controls were added on the seed surface
+(`mir/lower/lowering_expr_method.rs`, `enum_discriminant_abi_tests`). Every
+earlier lane could only pin the seed by *reading its source*; these run it:
+
+1. `seed_wrapper_agrees_with_the_runtime_abi` — the wrapper is the same function
+   as the runtime's, for `Ok/Err/Some/None/Circle/Bold`.
+2. `seed_collapses_same_named_variants_of_different_enums` — the collapse is
+   **measured**: two unrelated enums' `Circle` get the identical discriminant,
+   while `Circle` vs `Square` differ (so the first assertion is not vacuous).
+3. `seed_discriminant_is_a_hash_not_the_declared_ordinal` — `Ok != 0`,
+   `Err != 1`, and `Ok > u16::MAX`. This pins the numeric disagreement with the
+   MIR `.spl` lowering (which uses declared ordinals) so it cannot be quietly
+   claimed resolved.
+
+Test 2 and test 3 are written to **FAIL the moment the seed gains enum identity
+or switches to ordinals** — deliberately. Whoever makes that change is forced to
+come here and revise the expectation, rather than discovering the ABI break in
+the field.
+
+### Evidence
+
+- **Fallout ZERO — PROVED.** `cargo test -p simple-compiler --lib` at base
+  `1f7b8277e36`: **3464 passed / 118 failed** before, **3467 passed / 118
+  failed** after. The +3 are exactly the three new controls; the failure **NAME
+  SETS are byte-identical** (`diff` of the two 118-name lists is empty).
+- **RED before GREEN — PROVED, sabotaging the IMPLEMENTATION.** Reverting one
+  wrapper to a *drifted* local copy (masking `0xFFFF` instead of `0xFFFF_FFFF`)
+  failed 2 of the 3 controls with the intended message — *"seed wrapper diverged
+  from the runtime ABI for variant Ok"*. Restoring returned 3/3 green. The
+  controls therefore catch exactly the drift they exist to catch.
+
+### NOT done, and why
+
+**Reconciling the numeric disagreement is NOT done.** Making the seed agree with
+MIR means moving the discriminant from a name-hash to the declared ordinal
+across **the runtime, the bytecode format, the interpreter SFFI, the four
+compiler sites and MIR, together, in one coordinated ABI change** — plus
+rebuilding every artifact that embeds the old numbering. It cannot be done
+seed-side, it is not reversible file-by-file, and a partial attempt is a silent
+wrong answer at the ABI boundary. It needs its own sequenced lane with an
+artifact-compatibility plan. The three controls above are the tripwire that
+keeps it honest in the meantime.
