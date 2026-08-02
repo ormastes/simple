@@ -1,475 +1,90 @@
 # GC Safety Analysis Tests
 #
-# Tests for the GC safety analysis system including
-# root tracking, write barriers, and escape analysis.
+# Tests for the GC safety analysis system: escape state, allocation sites,
+# and points-to sets, from src/compiler/55.borrow/gc_analysis/escape.spl.
+#
+# HISTORY: every example in this file used to be a comment plus `pass`, so all
+# 81 of them reported green while executing nothing. Reviving them proved that
+# most of the gc_analysis subsystem does not run at all: 30 call sites across
+# escape.spl, barriers.spl, roots.spl and mod.spl invoke mangled helper names
+# (`self.points_to_get`, `result_add`, `pts_add`, ...) that no pass ever
+# generates, and the `impl EscapeState:` block was dropped entirely.
+#
+# See doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md
+#
+# This file therefore covers only the surface that is actually executable
+# today. It must NOT be padded with `pass` again: the uncovered API is tracked
+# in the bug above, not hidden here.
 
-
-# ============================================================================
-# Escape State Tests
-# ============================================================================
+use std.spec
+use compiler.borrow.gc_analysis.escape.{
+    EscapeState,
+    AllocationSite,
+    PointsToSet,
+    EscapeAnalysis,
+    allocationsite_create
+}
 
 describe "EscapeState":
-    it "identifies non-escaping state":
-        # EscapeState.NoEscape.escapes() == false
-        # EscapeState.NoEscape.can_stack_allocate() == true
-        pass
+    it "distinguishes every escape variant":
+        expect(EscapeState.NoEscape == EscapeState.NoEscape).to_equal(true)
+        expect(EscapeState.NoEscape == EscapeState.ArgEscape).to_equal(false)
+        expect(EscapeState.ArgEscape == EscapeState.ReturnEscape).to_equal(false)
+        expect(EscapeState.ReturnEscape == EscapeState.GlobalEscape).to_equal(false)
+        expect(EscapeState.GlobalEscape == EscapeState.FieldEscape).to_equal(false)
+        expect(EscapeState.FieldEscape == EscapeState.Unknown).to_equal(false)
 
-    it "identifies escaping states":
-        # EscapeState.ArgEscape.escapes() == true
-        # EscapeState.ReturnEscape.escapes() == true
-        # EscapeState.GlobalEscape.escapes() == true
-        # EscapeState.FieldEscape.escapes() == true
-        pass
-
-    it "merges escape states correctly":
-        # NoEscape + NoEscape = NoEscape
-        # NoEscape + ArgEscape = ArgEscape
-        # ArgEscape + GlobalEscape = GlobalEscape
-        # Any + Unknown = Unknown
-        pass
-
-    it "converts to text":
-        # EscapeState.NoEscape.to_text() == "no_escape"
-        # EscapeState.GlobalEscape.to_text() == "global_escape"
-        pass
-
-# ============================================================================
-# Allocation Site Tests
-# ============================================================================
+    it "treats Unknown as distinct from every concrete state":
+        expect(EscapeState.Unknown == EscapeState.NoEscape).to_equal(false)
+        expect(EscapeState.Unknown == EscapeState.ArgEscape).to_equal(false)
+        expect(EscapeState.Unknown == EscapeState.ReturnEscape).to_equal(false)
+        expect(EscapeState.Unknown == EscapeState.GlobalEscape).to_equal(false)
+        expect(EscapeState.Unknown == EscapeState.FieldEscape).to_equal(false)
+        expect(EscapeState.Unknown == EscapeState.Unknown).to_equal(true)
 
 describe "AllocationSite":
-    it "creates allocation site":
-        # AllocationSite.create(0, 10, 100)
-        # site.id == 0
-        # site.program_point == 10
-        # site.type_id == 100
-        pass
+    it "records the id, program point and type it was created with":
+        val site = allocationsite_create(7, 11, 13)
+        expect(site.id).to_equal(7)
+        expect(site.program_point).to_equal(11)
+        expect(site.type_id).to_equal(13)
 
-    it "starts with unknown escape state":
-        # site.escape_state == EscapeState.Unknown
-        pass
+    it "starts in the Unknown escape state before analysis runs":
+        val site = allocationsite_create(1, 2, 3)
+        expect(site.escape_state == EscapeState.Unknown).to_equal(true)
+        expect(site.escape_state == EscapeState.NoEscape).to_equal(false)
 
-    it "formats allocation site":
-        # site.to_text() contains id and program point
-        pass
-
-# ============================================================================
-# Points-To Set Tests
-# ============================================================================
+    it "keeps distinct ids for distinct allocations":
+        val a = allocationsite_create(0, 100, 5)
+        val b = allocationsite_create(1, 100, 5)
+        expect(a.id == b.id).to_equal(false)
+        expect(a.program_point).to_equal(b.program_point)
+        expect(a.type_id).to_equal(b.type_id)
 
 describe "PointsToSet":
-    it "creates empty set":
-        # PointsToSet.empty().is_empty() == true
-        pass
+    it "starts empty":
+        val empty = PointsToSet.empty()
+        expect(empty.allocations.len()).to_equal(0)
 
-    it "creates singleton set":
-        # PointsToSet.singleton(5).contains(5) == true
-        pass
+    it "holds exactly the allocation it was seeded with":
+        val one = PointsToSet.singleton(4)
+        expect(one.allocations.len()).to_equal(1)
+        expect(one.allocations[0]).to_equal(4)
 
-    it "adds allocations":
-        # pts.add(1); pts.add(2)
-        # pts.contains(1) and pts.contains(2)
-        pass
-
-    it "unions sets":
-        # pts1 = {1, 2}, pts2 = {2, 3}
-        # union = {1, 2, 3}
-        pass
-
-    it "avoids duplicates":
-        # pts.add(1); pts.add(1)
-        # pts.all().len() == 1
-        pass
-
-# ============================================================================
-# Escape Analysis Tests
-# ============================================================================
+    it "keeps singletons independent":
+        val a = PointsToSet.singleton(4)
+        val b = PointsToSet.singleton(9)
+        expect(a.allocations[0]).to_equal(4)
+        expect(b.allocations[0]).to_equal(9)
+        expect(a.allocations[0] == b.allocations[0]).to_equal(false)
 
 describe "EscapeAnalysis":
-    it "records allocations":
-        # analysis.record_allocation(point, type_id, local)
-        # returns allocation id
-        pass
-
-    it "records copies":
-        # analysis.record_copy(from, to)
-        # to now points to same allocations as from
-        pass
-
-    it "marks field stores as escaping":
-        # analysis.record_field_store(base, field, value, type)
-        # value allocations marked as FieldEscape
-        pass
-
-    it "marks call args as escaping":
-        # analysis.record_call_arg(local)
-        # allocations in local marked as ArgEscape
-        pass
-
-    it "marks returns as escaping":
-        # analysis.record_return(local)
-        # allocations marked as ReturnEscape
-        pass
-
-    it "marks global stores as escaping":
-        # analysis.record_global_store(local)
-        # allocations marked as GlobalEscape
-        pass
-
-    it "finalizes unknown as non-escaping":
-        # After finalize(), Unknown becomes NoEscape
-        pass
-
-    it "computes stack allocation ratio":
-        # With 3 total, 2 non-escaping
-        # ratio == 0.666...
-        pass
-
-    it "gets non-escaping allocations":
-        # analysis.get_non_escaping() returns only NoEscape sites
-        pass
-
-    it "gets escaping allocations":
-        # analysis.get_escaping() returns all escaping sites
-        pass
-
-# ============================================================================
-# Root Kind Tests
-# ============================================================================
-
-describe "RootKind":
-    it "creates local root":
-        # RootKind.Local(5).to_text() == "local_5"
-        pass
-
-    it "creates parameter root":
-        # RootKind.Parameter(0).to_text() == "param_0"
-        pass
-
-    it "creates global root":
-        # RootKind.Global("counter").to_text() == "global_counter"
-        pass
-
-    it "creates temporary root":
-        # RootKind.Temporary(3).to_text() == "temp_3"
-        pass
-
-    it "creates return root":
-        # RootKind.Return.to_text() == "return"
-        pass
-
-# ============================================================================
-# GC Root Tests
-# ============================================================================
-
-describe "GcRoot":
-    it "creates local root":
-        # GcRoot.local(5, 100)
-        # root.kind == RootKind.Local(5)
-        pass
-
-    it "creates parameter root":
-        # GcRoot.parameter(0, 100)
-        # root.live_range == (0, i64.max())
-        pass
-
-    it "checks liveness at point":
-        # root with live_range = (10, 20)
-        # root.is_live_at(15) == true
-        # root.is_live_at(5) == false
-        pass
-
-    it "formats root description":
-        # root.to_text() includes kind and type
-        pass
-
-# ============================================================================
-# Root Set Tests
-# ============================================================================
-
-describe "RootSet":
-    it "creates empty root set":
-        # RootSet.create().count() == 0
-        pass
-
-    it "adds roots":
-        # set.add_root(root)
-        # set.count() == 1
-        pass
-
-    it "removes roots":
-        # set.add_root(root); set.remove_root(root.kind)
-        # set.count() == 0
-        pass
-
-    it "gets root by kind":
-        # set.add_root(local_root)
-        # set.get_root(RootKind.Local(5)) != nil
-        pass
-
-    it "gets live roots at point":
-        # set.live_roots_at(15) returns only roots live at 15
-        pass
-
-# ============================================================================
-# GC Point Tests
-# ============================================================================
-
-describe "GcPoint":
-    it "creates call gc point":
-        # GcPoint.call(10)
-        # gc_point.kind == GcPointKind.Call
-        pass
-
-    it "creates allocation gc point":
-        # GcPoint.allocation(15)
-        # gc_point.kind == GcPointKind.Allocation
-        pass
-
-    it "formats gc point":
-        # gc_point.to_text() contains kind and point
-        pass
-
-# ============================================================================
-# Root Analysis Tests
-# ============================================================================
-
-describe "RootAnalysis":
-    it "records roots at program points":
-        # analysis.record_root(10, root)
-        # analysis.get_roots_at(10) contains root
-        pass
-
-    it "records gc points":
-        # analysis.record_gc_point(gc_point)
-        # analysis.get_gc_points() contains gc_point
-        pass
-
-    it "propagates roots between points":
-        # analysis.propagate_roots(from, to)
-        # Live roots flow from source to destination
-        pass
-
-    it "verifies gc points have required roots":
-        # analysis.verify_gc_points()
-        # Returns true if all required roots present
-        pass
-
-    it "reports missing roots as errors":
-        # gc_point with required_roots that are missing
-        # analysis.get_errors() contains RootError
-        pass
-
-# ============================================================================
-# Barrier Kind Tests
-# ============================================================================
-
-describe "BarrierKind":
-    it "identifies barrier types":
-        # BarrierKind.PreWrite.to_text() == "pre_write"
-        # BarrierKind.PostWrite.to_text() == "post_write"
-        pass
-
-    it "checks old value requirement":
-        # BarrierKind.PreWrite.requires_old_value() == true
-        # BarrierKind.PostWrite.requires_old_value() == false
-        pass
-
-    it "checks new value requirement":
-        # BarrierKind.PostWrite.requires_new_value() == true
-        # BarrierKind.PreWrite.requires_new_value() == false
-        pass
-
-# ============================================================================
-# Write Site Tests
-# ============================================================================
-
-describe "WriteSite":
-    it "creates field write site":
-        # WriteSite.field_write(10, 100, 0, 200)
-        # site.program_point == 10
-        # site.field_index == Some(0)
-        pass
-
-    it "creates array write site":
-        # WriteSite.array_write(15, 100, 200)
-        # site.is_array_element == true
-        pass
-
-    it "formats write site":
-        # site.to_text() contains write type and point
-        pass
-
-# ============================================================================
-# Barrier Analysis Tests
-# ============================================================================
-
-describe "BarrierAnalysis":
-    it "records write sites":
-        # analysis.record_write(site)
-        pass
-
-    it "requires no barriers for stop-the-world GC":
-        # With GcStrategy.StopTheWorld
-        # No barriers required for any writes
-        pass
-
-    it "requires post-write for incremental GC":
-        # With GcStrategy.Incremental
-        # Reference writes need PostWrite barrier
-        pass
-
-    it "requires generational barrier for old->young":
-        # With GcStrategy.Generational
-        # Cross-generation writes need Generational barrier
-        pass
-
-    it "requires pre-write for concurrent GC":
-        # With GcStrategy.Concurrent
-        # Reference writes need PreWrite barrier
-        pass
-
-    it "verifies emitted barriers match requirements":
-        # analysis.verify_barriers(emitted)
-        # Returns true if all required barriers present
-        pass
-
-    it "reports missing barriers as errors":
-        # Required barrier not emitted
-        # analysis.get_errors() contains BarrierError
-        pass
-
-# ============================================================================
-# GC Safety Config Tests
-# ============================================================================
-
-describe "GcSafetyConfig":
-    it "creates default config":
-        # GcSafetyConfig.default_config()
-        # All analyses enabled, Incremental mode
-        pass
-
-    it "creates minimal config":
-        # GcSafetyConfig.minimal()
-        # Only root tracking enabled, StopTheWorld mode
-        pass
-
-    it "creates generational config":
-        # GcSafetyConfig.generational()
-        # All analyses enabled, Generational mode
-        pass
-
-# ============================================================================
-# GC Safety Analyzer Tests
-# ============================================================================
-
-describe "GcSafetyAnalyzer":
-    it "creates analyzer with config":
-        # GcSafetyAnalyzer.create(config)
-        pass
-
-    it "registers GC types":
-        # analyzer.register_gc_type(type_id)
-        # analyzer.is_gc_type(type_id) == true
-        pass
-
-    it "analyzes MIR function":
-        # analyzer.analyze_function(mir_func)
-        # Returns GcSafetyReport
-        pass
-
-    it "processes allocations":
-        # Alloc instruction creates GC root
-        # Records as GC point
-        pass
-
-    it "processes calls as GC points":
-        # Call instruction is a potential GC point
-        pass
-
-    it "processes field operations":
-        # SetField triggers escape and barrier analysis
-        # GetField tracks pointer flow
-        pass
-
-# ============================================================================
-# GC Safety Report Tests
-# ============================================================================
-
-describe "GcSafetyReport":
-    it "reports safety status":
-        # report.is_safe() == true when no errors
-        pass
-
-    it "counts errors":
-        # report.error_count() == root_errors + barrier_errors
-        pass
-
-    it "formats summary":
-        # report.format_summary() includes all statistics
-        pass
-
-    it "includes gc points":
-        # report.gc_points lists all safepoints
-        pass
-
-    it "includes barrier requirements":
-        # report.barrier_requirements lists all needed barriers
-        pass
-
-    it "reports allocation statistics":
-        # report.total_allocations
-        # report.stack_eligible_allocations
-        # report.escape_ratio
-        pass
-
-# ============================================================================
-# Integration Tests
-# ============================================================================
-
-describe "GC Safety Integration":
-    it "analyzes function with no GC types":
-        # Function with only primitives
-        # No GC points, no barriers needed
-        pass
-
-    it "analyzes function with allocations":
-        # Function allocates GC-managed objects
-        # Tracks roots at GC points
-        pass
-
-    it "analyzes function with field stores":
-        # Function stores references in fields
-        # Generates appropriate barriers
-        pass
-
-    it "identifies stack-eligible allocations":
-        # Non-escaping allocations can be stack-allocated
-        pass
-
-    it "identifies heap-required allocations":
-        # Escaping allocations must be heap-allocated
-        pass
-
-describe "real-world GC patterns":
-    it "handles linked list construction":
-        # Building linked list - all nodes escape
-        pass
-
-    it "handles temporary allocations":
-        # Local-only allocations can be stack-allocated
-        pass
-
-    it "handles closure captures":
-        # Captured variables may escape
-        pass
-
-    it "handles collection operations":
-        # Items added to collections escape
-        pass
-
-# ============================================================================
-# Exports
-# ============================================================================
-
-export describe
+    it "starts with no allocations and no stack-eligible sites":
+        val analysis = EscapeAnalysis.create()
+        expect(analysis.next_alloc_id).to_equal(0)
+        expect(analysis.total_allocations).to_equal(0)
+        expect(analysis.stack_eligible).to_equal(0)
+
+    it "hands out allocation ids starting from zero":
+        val analysis = EscapeAnalysis.create()
+        expect(analysis.next_alloc_id).to_equal(0)
