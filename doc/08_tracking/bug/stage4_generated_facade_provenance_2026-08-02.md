@@ -22,3 +22,12 @@ higher precedence, and an unhinted duplicate still fails closed.
 `resolve_import_symbols_spec.spl` covers the exact concrete-vs-stub duplicate,
 the explanatory-comment variant, and the existing unhinted ambiguity case.
 Focused result: 16 examples, 0 failures.
+
+## Native bootstrap compatibility
+
+The Stage2 native compiler produced byte-identical resolver objects after a
+loop-carried owner retention change, although the interpreter regression was
+green. Generated facades therefore also repeat the authoritative provenance
+comment before continuation export lines that contain ambiguous compatibility
+names. This makes every such export independently attributable on old native
+bootstrap compilers and remains compatible with the grouped parser.
