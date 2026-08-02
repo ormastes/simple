@@ -1,7 +1,7 @@
 # Lane: 1.0.0 beta release (ex-codex 019fb160)
 Goal: next 1.0.0 beta (beta2 if version unchanged): local release process, fix memory/perf bugs, full bootstrap for all platforms (except mac), GH Actions release must actually succeed.
 Status: development/documentation lane complete in draft PR 21; strict bootstrap,
-final verification, tag, and publication remain open under TODO 652. No beta
+final verification, tag, and publication remain open under TODO 654. No beta
 publication is permitted from the partial evidence below.
 
 Latest fresh rebuild: `scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload --output=build/bootstrap/release_beta_verify --no-mcp --jobs=min`
@@ -53,4 +53,4 @@ Blocked audit: this shared-authority condition persisted for three consecutive g
 - Draft PR 21 is mergeable at `847e879c2e7`; the Windows-invalid duplicate paths are removed and Windows checkout succeeds.
 - Focused release checker/platform contracts and the guard-wiring registry pass. Red PR checks inspected during handoff are current-main baseline failures outside the release-beta delta; they are not release qualification evidence in either direction.
 - The thread goal was closed only after the user explicitly scoped completion to the development lane and required all remaining qualification work to stay in the TODO database.
-- TODO 652 is the authoritative resume boundary: exact source-matched Stage 2→3→4 with stub fallback disabled and timing/RSS receipts, exact Stage-4 SPipe/manual generation, `/verify STATUS: PASS`, then tag, prerelease, artifacts, and final GitHub attestation.
+- TODO 654 is the authoritative resume boundary: exact source-matched Stage 2→3→4 with stub fallback disabled and timing/RSS receipts, exact Stage-4 SPipe/manual generation, `/verify STATUS: PASS`, then tag, prerelease, artifacts, and final GitHub attestation.

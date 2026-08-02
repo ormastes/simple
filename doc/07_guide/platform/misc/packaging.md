@@ -324,7 +324,7 @@ gate in one open TODO that names the exact resume commands, prerequisites,
 artifacts, owner, and reviewer. The handoff must say `development lane
 complete`; it must not say the beta, verification, or release is complete.
 
-For the current non-macOS beta, TODO 652 is authoritative. Stage 2/3 output is
+For the current non-macOS beta, TODO 654 is authoritative. Stage 2/3 output is
 bounded diagnostic evidence only. Until an exact source-matched Stage 4 binary
 produces the SPipe/manual and `/verify` reports `STATUS: PASS`, do not create a
 tag, prerelease, artifact publication, or GitHub success receipt. Unrelated red
