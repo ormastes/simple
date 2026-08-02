@@ -78,7 +78,7 @@ pub fn simple_web_layout_debug_layout_by_id(html: text, width: i32, height: i32,
         neg_one_i32_list(node_count)
     )
     var i = 0
-    while i < node_count:
+    while i < node_count:  # cpu-lane-loop-ok: linear id lookup over the parsed node list in the debug-only layout query entry; bound is node_count, single pass, not on any paint path
         val node = nodes[i]
         if node.id_attr == id:
             val x = boxes.bx[i]
@@ -106,7 +106,7 @@ fn _simple_web_element_child_ordinal(
 ) -> i32:
     var ordinal = 0
     var child = child_index.first_child[parent_index]
-    while child >= 0:
+    while child >= 0:  # cpu-lane-loop-ok: walks one parent's sibling chain to find a child's element ordinal; bound is that parent's child count, not the document
         if _simple_web_layout_element(nodes[child]):
             if child == target_index:
                 return ordinal
@@ -120,7 +120,7 @@ fn _simple_web_node_target_key(
     if node_index < 0 or node_index >= nodes.len():
         return ""
     var body = node_index
-    while body >= 0 and nodes[body].tag != "body":
+    while body >= 0 and nodes[body].tag != "body":  # cpu-lane-loop-ok: ancestor walk from a node up to <body>; bound is tree depth, not an element count - flagged by the gate's any-loop-header approximation of the design's bound-based rule
         body = nodes[body].parent.to_i32()
     if body < 0:
         return ""
@@ -129,7 +129,7 @@ fn _simple_web_node_target_key(
     var reversed: [i32] = [0; nodes.len()]
     var depth = 0
     var current = node_index
-    while current != body and current >= 0:
+    while current != body and current >= 0:  # cpu-lane-loop-ok: ancestor walk emitting one path ordinal per level; bound is tree depth - flagged by the gate's any-loop-header approximation of the design's bound-based rule
         val parent = nodes[current].parent.to_i32()
         if parent < 0:
             return ""
@@ -143,7 +143,7 @@ fn _simple_web_node_target_key(
         current = parent
     var path = "path:"
     var part = depth - 1
-    while part >= 0:
+    while part >= 0:  # cpu-lane-loop-ok: reverses the depth-many path ordinals collected above into the target-key text; bound is tree depth, not an element count
         if part < depth - 1:
             path = path + "/"
         path = path + reversed[part].to_text()
@@ -170,7 +170,7 @@ fn _simple_web_animation_target_keys(
     var target_keys = [""; nodes.len()]
     var body_index = -1
     var node_index = 0
-    while node_index < nodes.len():
+    while node_index < nodes.len():  # cpu-lane-loop-ok: one scan for the <body> node, breaks on first hit; bound is node_count, runs once per animation frame-index build
         if nodes[node_index].tag == "body":
             body_index = node_index
             target_keys[node_index] = "path:"
@@ -180,11 +180,11 @@ fn _simple_web_animation_target_keys(
         return target_keys
 
     var parent_index = body_index
-    while parent_index < nodes.len():
+    while parent_index < nodes.len():  # cpu-lane-loop-ok: single top-down pass assigning every node its animation target key; bound is node_count - this IS the bulk replacement for the per-node path walk
         if target_keys[parent_index] != "":
             var ordinal = 0
             var child = child_index.first_child[parent_index]
-            while child >= 0:
+            while child >= 0:  # cpu-lane-loop-ok: inner sibling chain of the current parent; every node is visited exactly once as a child, so the enclosing pass stays O(node_count)
                 if _simple_web_layout_element(nodes[child]):
                     val separator = if target_keys[parent_index] == "path:":
                         ""
@@ -210,7 +210,7 @@ fn _simple_web_hit_target_key(
     var best = -1
     var best_z = -2147483647
     var i = 0
-    while i < nodes.len():
+    while i < nodes.len():  # cpu-lane-loop-ok: one pass over nodes picking the topmost hit box; bound is node_count and it runs per pointer event, not per frame
         val node = nodes[i]
         val style = styles[i]
         val clip = paint_clip_at(clip_cache, i)
@@ -333,7 +333,7 @@ fn _simple_web_root_sticky_admitted(
     nodes: [HNode], node_index: i32
 ) -> bool:
     var ancestor = nodes[node_index].parent as i32
-    while ancestor >= 0 and ancestor < nodes.len():
+    while ancestor >= 0 and ancestor < nodes.len():  # cpu-lane-loop-ok: ancestor walk that bails at the first non-root/html/body ancestor; bound is tree depth, not an element count - flagged by the gate's any-loop-header approximation of the design's bound-based rule
         val tag = nodes[ancestor].tag
         if tag != "#root" and tag != "html" and tag != "body":
             return false
@@ -351,7 +351,7 @@ fn _simple_web_scrolled_layout(
 ) -> _SimpleWebScrolledLayout:
     var raw_bottom = boxes.height.to_i64()
     var i = 0
-    while i < boxes.by.len():
+    while i < boxes.by.len():  # cpu-lane-loop-ok: first of two box passes: computes the raw document bottom; bound is the box count (== node_count), once per compose
         val bottom = boxes.by[i].to_i64() + boxes.bh[i].to_i64()
         if bottom > raw_bottom:
             raw_bottom = bottom
@@ -369,7 +369,7 @@ fn _simple_web_scrolled_layout(
 
     var content_bottom = viewport_height.to_i64()
     i = 0
-    while i < boxes.by.len():
+    while i < boxes.by.len():  # cpu-lane-loop-ok: second box pass: clips each box against its ancestor clip for the scrollable content bottom; needs the clip cache derived from pass one so it cannot be merged; bound is the box count
         val clip = paint_clip_at(clip_cache, i)
         val node_x0 = boxes.bx[i].to_i64()
         val node_y0 = boxes.by[i].to_i64()
@@ -392,7 +392,7 @@ fn _simple_web_scrolled_layout(
         resolved = max_scroll
     var has_top_sticky = false
     var has_top_sticky_index = 0
-    while has_top_sticky_index < styles.len():
+    while has_top_sticky_index < styles.len():  # cpu-lane-loop-ok: scans styles for a root-scroll top-inset sticky box; bound is the style count (== node_count), once per compose
         val style = styles[has_top_sticky_index]
         if (
             style.position_sticky and
@@ -411,7 +411,7 @@ fn _simple_web_scrolled_layout(
         var subtree_delta: [i32] = [0; nodes.len()]
         var has_sticky_ancestor: [bool] = [false; nodes.len()]
         var node_index = 0
-        while node_index < styles.len():
+        while node_index < styles.len():  # cpu-lane-loop-ok: top-down sticky-shift pass propagating subtree deltas from the parent entry; bound is the style count, runs only when a top sticky box exists
             val parent = nodes[node_index].parent as i32
             val inherited_delta = if parent >= 0:
                 subtree_delta[parent]
@@ -477,7 +477,7 @@ fn _simple_web_input_text_hit_build(
         width, height
     )
     var i = 0
-    while i < nodes.len():
+    while i < nodes.len():  # cpu-lane-loop-ok: one pass over nodes building the text-input hit map; bound is node_count and the target-key/paint-plan work fires only for <input> elements
         if (
             nodes[i].tag == "input" and
             input_accepts_text_overlay(nodes[i]) and
@@ -618,7 +618,7 @@ fn _simple_web_visible_material_witness(
     var solid_filtered_count = 1
     var counts: [i64] = [0, 0]
     var i = 0
-    while i < cpu_nodes.len() and i + 1 < cpu_lines.len():
+    while i < cpu_nodes.len() and i + 1 < cpu_lines.len():  # cpu-lane-loop-ok: filters the cpu-composited material sidecar down to visible nodes; bound is the recorded cpu material node count, not the document
         val node = cpu_nodes[i]
         if node >= 0 and node < visible_nodes.len() and visible_nodes[node]:
             cpu_filtered[cpu_filtered_count] = cpu_lines[i + 1]
@@ -626,7 +626,7 @@ fn _simple_web_visible_material_witness(
             counts[0] = counts[0] + 1
         i = i + 1
     i = 0
-    while i < solid_nodes.len() and i + 1 < solid_lines.len():
+    while i < solid_nodes.len() and i + 1 < solid_lines.len():  # cpu-lane-loop-ok: same filter for the solid material sidecar; bound is the recorded solid material node count
         val node = solid_nodes[i]
         if node >= 0 and node < visible_nodes.len() and visible_nodes[node]:
             solid_filtered[solid_filtered_count] = solid_lines[i + 1]
@@ -738,7 +738,7 @@ fn _simple_web_animation_frame_index(
     else:
         []
     var style_index = 0
-    while style_index < styles.len():
+    while style_index < styles.len():  # cpu-lane-loop-ok: optional animation-signature pass over styles; bound is the style count and only the reconcile caller requests signatures
         if (include_signatures and
             styles[style_index].animation_name != "none" and
             styles[style_index].animation_duration_ms > 0
@@ -750,7 +750,7 @@ fn _simple_web_animation_frame_index(
 
     var keyframes_by_name: Dict<text, i32> = {}
     var keyframe_index = 0
-    while keyframe_index < registry.entries.len():
+    while keyframe_index < registry.entries.len():  # cpu-lane-loop-ok: builds the keyframe-name to index dict; bound is the declared @keyframes count
         keyframes_by_name[registry.entries[keyframe_index].name] = (
             keyframe_index
         )
@@ -758,7 +758,7 @@ fn _simple_web_animation_frame_index(
 
     var instances_by_target: Dict<text, i32> = {}
     var instance_index = 0
-    while instance_index < instances.len():
+    while instance_index < instances.len():  # cpu-lane-loop-ok: builds the target-key to instance index dict; bound is the live animation instance count (capacity-capped)
         instances_by_target[instances[instance_index].target_key] = (
             instance_index
         )
@@ -788,7 +788,7 @@ pub fn simple_web_layout_reconcile_animation_instances(
     )
     var reconciled: [BrowserCssAnimationInstance] = []
     var style_index = 0
-    while style_index < styles.len():
+    while style_index < styles.len():  # cpu-lane-loop-ok: one pass over styles reconciling declared animations against the previous instance list; bound is the style count, runs on animation reconcile, not on paint
         val st = styles[style_index]
         val keyframe_index = (
             frame_index.keyframes_by_name.get(st.animation_name) ?? -1
@@ -1124,7 +1124,7 @@ pub fn simple_web_layout_animation_instances_next_ms(
     instances: [BrowserCssAnimationInstance], current_time_ms: i64
 ) -> i64:
     var next_ms: i64 = -1
-    for instance in instances:
+    for instance in instances:  # cpu-lane-loop-ok: min over the live animation instances' next-tick times; bound is the instance count
         val candidate_ms = _simple_web_css_animation_instance_next_ms(
             instance, current_time_ms
         )
@@ -1140,7 +1140,7 @@ fn _simple_web_layout_animation_schedule(
     var latest_end: i64 = -1
     var next_change: i64 = -1
     var style_index = 0
-    while style_index < styles.len():
+    while style_index < styles.len():  # cpu-lane-loop-ok: one pass over styles computing the frame's animation end/next timestamps; bound is the style count, once per animation-schedule build
         val st = styles[style_index]
         val keyframe_index = (
             frame_index.keyframes_by_name.get(st.animation_name) ?? -1
@@ -1242,7 +1242,7 @@ fn _simple_web_fractional_opacity_command_roots(
     var node_roots: [i32] = [-1; nodes.len()]
     var has_root = false
     var i: i32 = 0
-    while i < nodes.len():
+    while i < nodes.len():  # cpu-lane-loop-ok: single top-down pass assigning each node its fractional-opacity surface root; bound is node_count, once per compose
         val parent = nodes[i].parent as i32
         val parent_root = if parent >= 0 and parent < i:
             node_roots[parent]
@@ -1273,7 +1273,7 @@ fn _simple_web_fractional_opacity_command_roots(
     var closed: [bool] = [false; nodes.len()]
     var previous = -1
     var root_count = 0
-    for owner in owner_nodes:
+    for owner in owner_nodes:  # cpu-lane-loop-ok: maps each emitted DrawIR command to its owner's opacity root and detects reopened runs; bound is the command count
         if owner < 0 or owner >= node_roots.len():
             return (false, [], 0)
         val root = node_roots[owner]
@@ -1307,7 +1307,7 @@ fn _simple_web_fractional_opacity_root_bounded(
     )
 
 fn _simple_web_draw_ir_css_background(command: DrawIrCommand) -> bool:
-    for prop in command.computed_style:
+    for prop in command.computed_style:  # cpu-lane-loop-ok: scans one command's computed_style list for the css-background image role; bound is that command's property count
         if prop.key == "image-role" and prop.value == "css-background":
             return true
     false
@@ -1336,7 +1336,7 @@ fn _simple_web_iframe_fractional_ancestor(
     nodes: [HNode], styles: [Style], node_index: i32
 ) -> bool:
     var current = node_index
-    while current >= 0 and current < styles.len():
+    while current >= 0 and current < styles.len():  # cpu-lane-loop-ok: ancestor walk looking for a fractional-opacity ancestor of an iframe; bound is tree depth, not an element count - flagged by the gate's any-loop-header approximation of the design's bound-based rule
         if styles[current].opacity_pct < 100:
             return true
         current = nodes[current].parent
@@ -1345,9 +1345,9 @@ fn _simple_web_iframe_fractional_ancestor(
 fn _simple_web_draw_ir_has_material_request(
     composition: DrawIrComposition
 ) -> bool:
-    for batch in composition.batches:
-        for command in batch.commands:
-            for prop in command.computed_style:
+    for batch in composition.batches:  # cpu-lane-loop-ok: batch level of a single linear scan of one admitted iframe child composition; total work is that child composition's size, once per embedded iframe
+        for command in batch.commands:  # cpu-lane-loop-ok: command level of the same one-shot material-request scan over an iframe child composition
+            for prop in command.computed_style:  # cpu-lane-loop-ok: property level of the same scan; bound is one command's computed_style count and it returns on the first match
                 if prop.key == "wm-material-request":
                     return true
     false
@@ -1361,7 +1361,7 @@ fn _simple_web_layout_merge_material_witness(
     var solid_parts: [text] = []
     var cpu_single_hash = ""
     var solid_single_hash = ""
-    for witness in witnesses:
+    for witness in witnesses:  # cpu-lane-loop-ok: folds the parent witness plus one witness per embedded iframe; bound is the iframe child count
         if witness.cpu_composited_count > 0:
             cpu_count = cpu_count + witness.cpu_composited_count
             cpu_parts.push("{witness.cpu_composited_count}:{witness.cpu_composited_sha256}")
@@ -1468,7 +1468,7 @@ fn _simple_web_layout_compose_retained(
         val viewport_pixel_work = width.to_i64() * height.to_i64()
         var pooled_width = -1
         var pooled_height = -1
-        while admission_index < commands.len():
+        while admission_index < commands.len():  # cpu-lane-loop-ok: opacity-surface admission scan over the emitted commands; bound is the command count and it runs only when more than one opacity root exists
             val root = opacity_command_roots[admission_index]
             if root >= 0 and (
                 not _simple_web_fractional_opacity_root_bounded(
@@ -1499,7 +1499,7 @@ fn _simple_web_layout_compose_retained(
     # quadratic on pages with many independently painted replaced elements.
     var last_command_index_by_owner: [i32] = [-1; nodes.len()]
     var command_index = 0
-    while command_index < command_owner_nodes.len():
+    while command_index < command_owner_nodes.len():  # cpu-lane-loop-ok: backwards-free prepass recording each owner's last command index; bound is the command count and it exists precisely to replace a former quadratic suffix rescan (see comment above)
         val owner = command_owner_nodes[command_index]
         if owner >= 0 and owner < last_command_index_by_owner.len():
             last_command_index_by_owner[owner] = command_index
@@ -1511,7 +1511,7 @@ fn _simple_web_layout_compose_retained(
     var run_commands: [DrawIrCommand] = [canvas]
     var segment_index = 0
     command_index = 0
-    while command_index < commands.len():
+    while command_index < commands.len():  # cpu-lane-loop-ok: the main compose pass: one visit per emitted DrawIR command to cut opacity/iframe batch boundaries; bound is the command count, CPU lane builds DrawIR by design
         val next_root = if opacity_supported:
             opacity_command_roots[command_index]
         else:
@@ -1604,7 +1604,7 @@ fn _simple_web_layout_compose_retained(
                             visible, "{owner_id}:iframe:{depth + 1}",
                             owner_id, 0
                         )
-                        for batch in embedded:
+                        for batch in embedded:  # cpu-lane-loop-ok: appends the batches produced by one embedded iframe composition; bound is that child's batch count
                             batches.push(batch)
                         child_witnesses.push(child.material_witness)
         command_index = command_index + 1
@@ -1704,7 +1704,7 @@ fn _simple_web_layout_compose_document(
         val split_parts = html.split("<").len()
         var lt_portable = 0
         var lt_scan = 0
-        while lt_scan < html.len():
+        while lt_scan < html.len():  # cpu-lane-loop-ok: per-character '<' count over the source; runs only inside the degenerate-parse diagnostic branch (nodes.len() <= 1), which is a defect receipt, never a healthy frame
             if html.char_code_at(lt_scan) == 60:
                 lt_portable = lt_portable + 1
             lt_scan = lt_scan + 1
@@ -1717,14 +1717,14 @@ fn _simple_web_layout_compose_document(
         # the document actually is.
         var head_codes = ""
         var dump_i = 0
-        while dump_i < 96 and dump_i < html.len():
+        while dump_i < 96 and dump_i < html.len():  # cpu-lane-loop-ok: fixed 96-character head dump, min(96, html.len()) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
             head_codes = "{head_codes} {html.char_code_at(dump_i)}"
             dump_i = dump_i + 1
         print "[web-layout] degenerate-head-codes{head_codes}"
         var mid_codes = ""
         var mid_i = html.len() / 2
         val mid_end = mid_i + 96
-        while mid_i < mid_end and mid_i < html.len():
+        while mid_i < mid_end and mid_i < html.len():  # cpu-lane-loop-ok: fixed 96-character mid-document dump (mid_end = mid_i + 96) - a literal bound, not a string length, and only on the degenerate-parse diagnostic branch
             mid_codes = "{mid_codes} {html.char_code_at(mid_i)}"
             mid_i = mid_i + 1
         print "[web-layout] degenerate-mid-codes{mid_codes}"
@@ -1736,11 +1736,11 @@ fn _simple_web_layout_compose_document(
         # guest run shows which parts the parser mis-classified.
         val dump_parts = html.split("<")
         var part_i = 1
-        while part_i < dump_parts.len():
+        while part_i < dump_parts.len():  # cpu-lane-loop-ok: one diagnostic line per '<'-split part; degenerate-parse branch only, where the document is by definition tiny (the receipt fires at nodes.len() <= 1)
             val part = dump_parts[part_i]
             var part_codes = ""
             var pc = 0
-            while pc < 12 and pc < part.len():
+            while pc < 12 and pc < part.len():  # cpu-lane-loop-ok: fixed 12-character prefix dump per split part - a literal bound, not a string length; degenerate-parse diagnostic branch only
                 part_codes = "{part_codes} {part.char_code_at(pc)}"
                 pc = pc + 1
             print "[web-layout] degenerate-part i={part_i} len={part.len()} codes{part_codes}"
@@ -1964,13 +1964,13 @@ pub fn simple_web_layout_animation_needs_layout(
 ) -> bool:
     var registry_index_by_name: Dict<text, i32> = {}
     var registry_index = 0
-    while registry_index < prior.animation_registry.entries.len():
+    while registry_index < prior.animation_registry.entries.len():  # cpu-lane-loop-ok: builds the keyframe-name to index dict; bound is the declared @keyframes count
         registry_index_by_name[
             prior.animation_registry.entries[registry_index].name
         ] = registry_index
         registry_index = registry_index + 1
     var active_entries = [false; prior.animation_registry.entries.len()]
-    for style in prior.base_styles:
+    for style in prior.base_styles:  # cpu-lane-loop-ok: marks which @keyframes entries any base style actually activates; bound is the base style count, once per needs-layout decision
         if style.animation_name != "none" and style.animation_duration_ms > 0:
             val active_index = (
                 registry_index_by_name.get(style.animation_name) ?? -1
@@ -1978,12 +1978,12 @@ pub fn simple_web_layout_animation_needs_layout(
             if active_index >= 0:
                 active_entries[active_index] = true
     registry_index = 0
-    for entry in prior.animation_registry.entries:
+    for entry in prior.animation_registry.entries:  # cpu-lane-loop-ok: per-@keyframes-entry scan deciding whether any animated property forces layout; bound is the declared @keyframes count
         if not active_entries[registry_index]:
             registry_index = registry_index + 1
             continue
-        for frame in entry.frames:
-            for declaration in frame.properties:
+        for frame in entry.frames:  # cpu-lane-loop-ok: per-keyframe scan inside one active @keyframes entry; bound is that entry's declared keyframes
+            for declaration in frame.properties:  # cpu-lane-loop-ok: per-declaration scan inside one keyframe; bound is that keyframe's declared properties and it returns on the first layout-affecting property
                 val property = declaration.property.trim().lower()
                 if (
                     property != "background-color" and
@@ -2227,7 +2227,7 @@ pub fn simple_web_layout_render_html_software_pixels_traced(html: text, width: i
     val t4 = rt_time_now_micros()
     print "[layout-trace] layout_ms={(t4 - t3) / 1000}"
     var trace_i = 0
-    while trace_i < node_count:
+    while trace_i < node_count:  # cpu-lane-loop-ok: one pass over nodes printing the html/body/main box receipt; bound is node_count and this is the stage-timed diagnostic render entry point only
         val trace_node = nodes[trace_i]
         if trace_node.tag == "html" or trace_node.tag == "body" or trace_node.tag == "main":
             val trace_style = styles[trace_i]
@@ -2393,7 +2393,7 @@ fn _web_gpu_paint_state(
     var subtree_allowed: [bool] = [false; node_count]
     var visits = 0
     var i: i32 = 0
-    while i < node_count:
+    while i < node_count:  # cpu-lane-loop-ok: single top-down pass deriving per-node visible/opaque/subtree-allowed flags from the parent's entry; bound is node_count and it replaces per-node ancestor rewalks
         val parent = nodes[i].parent as i32
         val ancestor_allowed = parent < 0 or subtree_allowed[parent]
         val ancestor_opaque = parent < 0 or opaque[parent]
@@ -2461,7 +2461,7 @@ fn _web_gpu_solid_only_frame(nodes: [HNode], styles: [Style], widget_mode: bool,
         return false
     val node_count = nodes.len() as i32
     var i: i32 = 0
-    while i < node_count:
+    while i < node_count:  # cpu-lane-loop-ok: one pass over nodes testing whether the frame is entirely solid fills; bound is node_count and every disqualifying node returns immediately
         val nd = nodes[i]
         val st = styles[i]
         val visible = paint_visible[i]

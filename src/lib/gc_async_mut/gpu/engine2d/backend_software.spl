@@ -144,6 +144,7 @@ impl RenderBackend for SoftwareBackend:
 
     me clear(color: u32):
         var row = 0
+        # cpu-lane-loop-ok: framebuffer clear walks one scanline per row and delegates each row to sw_fill_raw_span; the per-row bulk fill is already the bulk idiom, a whole-buffer memset is blocked on N5
         while row < self.h:
             self.sw_fill_raw_span(row * self.w, self.w, color)
             row = row + 1
@@ -414,6 +415,7 @@ impl RenderBackend for SoftwareBackend:
             return
         val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
         var row = 0
+        # cpu-lane-loop-ok: one iteration per source image row while blitting; each row body delegates to sw_copy_raw_span, so the per-pixel work is already bulk
         while row < h:
             val py = y + row
             if py >= 0 and py < self.h:
@@ -431,6 +433,7 @@ impl RenderBackend for SoftwareBackend:
                     val src_off = src_row_base + src_x
                     if slow_checked:
                         var col = 0
+                        # cpu-lane-loop-ok: clipped/masked slow path only (slow_checked): per-pixel sw_set_pixel is required because clip and mask tests are per-pixel predicates
                         while col < count:
                             self.sw_set_pixel(start_x + col, py, pixels[src_off + col])
                             col = col + 1
@@ -591,6 +594,7 @@ impl RenderBackend for SoftwareBackend:
         val pixels_len = pixels.len()
         val slow_checked = self.clip_enabled or self.mask_buf.len() > 0
         var row = 0
+        # cpu-lane-loop-ok: one iteration per source image row while alpha-blitting; each row body delegates to the SIMD row blend or its scalar fallback below
         while row < h:
             val py = y + row
             if py >= 0 and py < self.h:
@@ -607,6 +611,7 @@ impl RenderBackend for SoftwareBackend:
                 if count > 0 and src_row_base + src_x + count <= pixels_len:
                     var col = 0
                     if slow_checked:
+                        # cpu-lane-loop-ok: clipped/masked slow path only (slow_checked): per-pixel sw_set_pixel_blend is required because clip and mask tests are per-pixel predicates
                         while col < count:
                             self.sw_set_pixel_blend(start_x + col, py, pixels[src_row_base + src_x + col])
                             col = col + 1
@@ -616,6 +621,7 @@ impl RenderBackend for SoftwareBackend:
                         if self.native_simd_spans and native_pixel_rows_enabled() and active_arch_text() == "x86_64":
                             var dst_row: [u32] = [0u32; count]
                             var src_row: [u32] = [0u32; count]
+                            # cpu-lane-loop-ok: SIMD gather: materialises the dst and src spans for engine2d_simd_blend_row_u32; bound is the clipped span width and it feeds the bulk path
                             while col < count:
                                 dst_row[col] = self.buf[dst_off + col]
                                 src_row[col] = pixels[src_off + col]
@@ -624,17 +630,20 @@ impl RenderBackend for SoftwareBackend:
                             if blended.len() == count:
                                 record_simd_alpha_hit()
                                 col = 0
+                                # cpu-lane-loop-ok: SIMD scatter: writes the bulk-blended row back to the framebuffer; bound is the clipped span width
                                 while col < count:
                                     self.buf[dst_off + col] = blended[col]
                                     col = col + 1
                             else:
                                 col = 0
+                                # cpu-lane-loop-ok: scalar fallback taken when the SIMD row blend returned a short row; correctness fallback for the bulk path, not a replacement for it
                                 while col < count:
                                     val src = pixels[src_off + col]
                                     if color_a(src) > 0:
                                         self.buf[dst_off + col] = blend(src, self.buf[dst_off + col])
                                     col = col + 1
                         else:
+                            # cpu-lane-loop-ok: scalar fallback taken when SIMD spans are unavailable on this arch; this is the reference blend body the SIMD path is checked against
                             while col < count:
                                 val src = pixels[src_off + col]
                                 if color_a(src) > 0:
@@ -747,6 +756,7 @@ impl SoftwareBackend:
             self.buf = rt_engine2d_simd_copy_span_u32(self.buf, dst_offset as i64, src, src_offset as i64, safe_count as i64)
             return
         var i = 0
+        # cpu-lane-loop-ok: scalar fallback inside sw_copy_raw_span itself, taken only when rt_engine2d_simd_copy_span_u32 is unavailable; this IS the bulk span primitive
         while i < safe_count:
             self.buf[dst_offset + i] = src[src_offset + i]
             i = i + 1
@@ -760,19 +770,23 @@ impl SoftwareBackend:
             var dst_row: [u32] = [0; safe_count]
             var src_row: [u32] = [color; safe_count]
             var j = 0
+            # cpu-lane-loop-ok: SIMD gather inside the sw_blend_const_raw_span bulk primitive; materialises the dst span for engine2d_simd_blend_row_u32
             while j < safe_count:
                 dst_row[j] = self.buf[offset + j]
                 j = j + 1
             val row = engine2d_simd_blend_row_u32(dst_row, src_row)
             j = 0
+            # cpu-lane-loop-ok: SIMD scatter inside sw_blend_const_raw_span, length-guarded against a short blended row
             while j < safe_count and j < row.len():
                 self.buf[offset + j] = row[j]
                 j = j + 1
+            # cpu-lane-loop-ok: tail fallback for the elements a short SIMD blended row did not cover; normally zero iterations
             while j < safe_count:
                 self.buf[offset + j] = blend(color, self.buf[offset + j])
                 j = j + 1
             return
         var i = 0
+        # cpu-lane-loop-ok: scalar fallback inside sw_blend_const_raw_span when SIMD spans are unavailable; this IS the bulk span primitive
         while i < safe_count:
             self.buf[offset + i] = blend(color, self.buf[offset + i])
             i = i + 1
