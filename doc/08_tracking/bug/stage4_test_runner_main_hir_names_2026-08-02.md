@@ -143,3 +143,13 @@ HEAD and TAIL while reporting the eight omitted bytes. Its single bounded
 diagnostic passed 1/1, but the executable identified itself as the Rust seed;
 this is supporting behavior evidence, not pure-Simple Stage 4 admission. The
 next no-stub full build is the final cycle in this continuation.
+
+## MIR target-family type blocker
+
+The final permitted cycle passed both preceding file/process owner blockers and
+advanced to 424 HIR modules. It then stopped in
+`compiler.mir_opt.mir_opt.target_family` because `GpuBarrierScope`,
+`GpuAtomicOpKind`, and `VhdlProcessKind` were unresolved. No candidate binary
+was produced. In accordance with the three-cycle guard, this grouped type-owner
+family is recorded for the next fresh continuation; no fourth repair/build
+cycle was attempted.
