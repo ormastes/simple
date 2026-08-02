@@ -5,16 +5,20 @@
 #
 # HISTORY: every example in this file used to be a comment plus `pass`, so all
 # 81 of them reported green while executing nothing. Reviving them proved that
-# most of the gc_analysis subsystem does not run at all: 30 call sites across
-# escape.spl, barriers.spl, roots.spl and mod.spl invoke mangled helper names
+# most of the gc_analysis subsystem did not run at all: call sites across
+# escape.spl, barriers.spl, roots.spl and mod.spl invoked mangled helper names
 # (`self.points_to_get`, `result_add`, `pts_add`, ...) that no pass ever
-# generates, and the `impl EscapeState:` block was dropped entirely.
+# generates, and the `impl EscapeState:` block had been dropped entirely.
+#
+# escape.spl is now repaired: EscapeState.escapes/can_stack_allocate/merge_with/
+# to_text are restored and every mangled call site in that file is spelled as a
+# real method call, so the whole escape-analysis pipeline executes. The examples
+# below exercise that pipeline for real.
 #
 # See doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md
 #
-# This file therefore covers only the surface that is actually executable
-# today. It must NOT be padded with `pass` again: the uncovered API is tracked
-# in the bug above, not hidden here.
+# This file must NOT be padded with `pass` again: any still-uncovered API is
+# tracked in the bug above, not hidden here.
 
 use std.spec
 use compiler.borrow.gc_analysis.escape.{
@@ -88,3 +92,184 @@ describe "EscapeAnalysis":
     it "hands out allocation ids starting from zero":
         val analysis = EscapeAnalysis.create()
         expect(analysis.next_alloc_id).to_equal(0)
+
+describe "EscapeState lattice":
+    it "treats only NoEscape as non-escaping":
+        expect(EscapeState.NoEscape.escapes()).to_equal(false)
+        expect(EscapeState.ArgEscape.escapes()).to_equal(true)
+        expect(EscapeState.ReturnEscape.escapes()).to_equal(true)
+        expect(EscapeState.GlobalEscape.escapes()).to_equal(true)
+        expect(EscapeState.FieldEscape.escapes()).to_equal(true)
+
+    it "treats Unknown as escaping, because it is unproven":
+        expect(EscapeState.Unknown.escapes()).to_equal(true)
+        expect(EscapeState.Unknown.can_stack_allocate()).to_equal(false)
+
+    it "allows stack allocation only for NoEscape":
+        expect(EscapeState.NoEscape.can_stack_allocate()).to_equal(true)
+        expect(EscapeState.ArgEscape.can_stack_allocate()).to_equal(false)
+        expect(EscapeState.GlobalEscape.can_stack_allocate()).to_equal(false)
+
+    it "joins Unknown with any concrete state to give that state":
+        expect(EscapeState.Unknown.merge_with(EscapeState.NoEscape) == EscapeState.NoEscape).to_equal(true)
+        expect(EscapeState.Unknown.merge_with(EscapeState.ArgEscape) == EscapeState.ArgEscape).to_equal(true)
+        expect(EscapeState.Unknown.merge_with(EscapeState.GlobalEscape) == EscapeState.GlobalEscape).to_equal(true)
+
+    it "keeps the more escaping side when joining two concrete states":
+        expect(EscapeState.NoEscape.merge_with(EscapeState.ArgEscape) == EscapeState.ArgEscape).to_equal(true)
+        expect(EscapeState.GlobalEscape.merge_with(EscapeState.ArgEscape) == EscapeState.GlobalEscape).to_equal(true)
+        expect(EscapeState.ArgEscape.merge_with(EscapeState.ReturnEscape) == EscapeState.ReturnEscape).to_equal(true)
+
+    it "is commutative and idempotent":
+        expect(EscapeState.ArgEscape.merge_with(EscapeState.FieldEscape) == EscapeState.FieldEscape.merge_with(EscapeState.ArgEscape)).to_equal(true)
+        expect(EscapeState.ArgEscape.merge_with(EscapeState.ArgEscape) == EscapeState.ArgEscape).to_equal(true)
+
+    it "names every state":
+        expect(EscapeState.NoEscape.to_text()).to_equal("NoEscape")
+        expect(EscapeState.ArgEscape.to_text()).to_equal("ArgEscape")
+        expect(EscapeState.ReturnEscape.to_text()).to_equal("ReturnEscape")
+        expect(EscapeState.GlobalEscape.to_text()).to_equal("GlobalEscape")
+        expect(EscapeState.FieldEscape.to_text()).to_equal("FieldEscape")
+        expect(EscapeState.Unknown.to_text()).to_equal("Unknown")
+
+describe "PointsToSet operations":
+    it "adds allocations without duplicating them":
+        var pts = PointsToSet.empty()
+        pts.add(3)
+        pts.add(3)
+        pts.add(5)
+        expect(pts.allocations.len()).to_equal(2)
+        expect(pts.contains(3)).to_equal(true)
+        expect(pts.contains(5)).to_equal(true)
+        expect(pts.contains(9)).to_equal(false)
+
+    it "reports emptiness":
+        var pts = PointsToSet.empty()
+        expect(pts.is_empty()).to_equal(true)
+        pts.add(1)
+        expect(pts.is_empty()).to_equal(false)
+
+    it "unions two sets without duplicating shared members":
+        var a = PointsToSet.empty()
+        a.add(1)
+        a.add(2)
+        var b = PointsToSet.empty()
+        b.add(2)
+        b.add(3)
+        val u = a.union(b)
+        expect(u.allocations.len()).to_equal(3)
+        expect(u.contains(1)).to_equal(true)
+        expect(u.contains(2)).to_equal(true)
+        expect(u.contains(3)).to_equal(true)
+
+    it "exposes all members":
+        var a = PointsToSet.empty()
+        a.add(8)
+        expect(a.all().len()).to_equal(1)
+        expect(a.all()[0]).to_equal(8)
+
+describe "EscapeAnalysis pipeline":
+    it "records allocations and hands out increasing ids":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 10)
+        val b = ea.record_allocation(2, 101, 10)
+        expect(a).to_equal(0)
+        expect(b).to_equal(1)
+        expect(ea.total_allocations).to_equal(2)
+
+    it "leaves an untouched allocation Unknown until finalize demotes it":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 10)
+        expect(ea.get_escape_state(a) == EscapeState.Unknown).to_equal(true)
+        ea.finalize()
+        expect(ea.get_escape_state(a) == EscapeState.NoEscape).to_equal(true)
+        expect(ea.can_stack_allocate(a)).to_equal(true)
+
+    it "marks a returned local as ReturnEscape":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 20)
+        ea.record_return(20)
+        expect(ea.get_escape_state(a) == EscapeState.ReturnEscape).to_equal(true)
+        expect(ea.can_stack_allocate(a)).to_equal(false)
+
+    it "marks a local passed as a call argument as ArgEscape":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 21)
+        ea.record_call_arg(21)
+        expect(ea.get_escape_state(a) == EscapeState.ArgEscape).to_equal(true)
+
+    it "marks a local stored to a global as GlobalEscape":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 22)
+        ea.record_global_store(22)
+        expect(ea.get_escape_state(a) == EscapeState.GlobalEscape).to_equal(true)
+
+    it "propagates points-to through a copy so the copy escapes too":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 30)
+        ea.record_copy(30, 31)
+        ea.record_return(31)
+        expect(ea.get_escape_state(a) == EscapeState.ReturnEscape).to_equal(true)
+
+    it "marks a value stored into a field as FieldEscape":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 40)
+        ea.record_field_store(41, 0, 40, 7)
+        expect(ea.get_escape_state(a) == EscapeState.FieldEscape).to_equal(true)
+
+    it "recovers a field-stored allocation through a matching field load":
+        # The store already pins the value at FieldEscape, so the load is proved
+        # to have propagated the points-to set by escalating to GlobalEscape,
+        # which strictly dominates FieldEscape in the lattice.
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 40)
+        ea.record_field_store(41, 0, 40, 7)
+        expect(ea.get_escape_state(a) == EscapeState.FieldEscape).to_equal(true)
+        ea.record_field_load(41, 0, 50, 7)
+        ea.record_global_store(50)
+        expect(ea.get_escape_state(a) == EscapeState.GlobalEscape).to_equal(true)
+
+    it "does not recover a field-stored allocation through a different field":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 40)
+        ea.record_field_store(41, 0, 40, 7)
+        ea.record_field_load(41, 1, 50, 7)
+        ea.record_global_store(50)
+        expect(ea.get_escape_state(a) == EscapeState.FieldEscape).to_equal(true)
+
+    it "keeps the most escaping state when a local escapes twice":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 60)
+        ea.record_call_arg(60)
+        ea.record_global_store(60)
+        expect(ea.get_escape_state(a) == EscapeState.GlobalEscape).to_equal(true)
+
+    it "reports Unknown for an allocation id that was never recorded":
+        val ea = EscapeAnalysis.create()
+        expect(ea.get_escape_state(999) == EscapeState.Unknown).to_equal(true)
+
+    it "partitions allocations into escaping and non-escaping":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 70)
+        val b = ea.record_allocation(2, 101, 71)
+        ea.record_return(71)
+        ea.finalize()
+        expect(ea.get_non_escaping().len()).to_equal(1)
+        expect(ea.get_escaping().len()).to_equal(1)
+        expect(ea.get_non_escaping()[0].id).to_equal(a)
+        expect(ea.get_escaping()[0].id).to_equal(b)
+
+    it "counts stack-eligible sites and reports their ratio":
+        var ea = EscapeAnalysis.create()
+        val a = ea.record_allocation(1, 100, 80)
+        val b = ea.record_allocation(2, 101, 81)
+        ea.record_return(81)
+        ea.finalize()
+        expect(ea.stack_eligible).to_equal(1)
+        expect(ea.total_allocations).to_equal(2)
+        expect(ea.stack_allocation_ratio()).to_equal(0.5)
+
+    it "reports a zero ratio when nothing was allocated":
+        var ea = EscapeAnalysis.create()
+        ea.finalize()
+        expect(ea.stack_allocation_ratio()).to_equal(0.0)

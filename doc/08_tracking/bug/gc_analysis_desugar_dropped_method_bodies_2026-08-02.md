@@ -124,6 +124,127 @@ identically on both this binary and the Rust seed.
 
 Do not re-pad the spec with `pass` bodies. The uncovered API is tracked here.
 
+## The converter that did this (2026-08-02)
+
+**`scripts/tools/desugarer.py`** — a one-shot Python "Automated Desugarer Tool"
+(Full Simple to Core Simple) from 2025. Its Pass 1, "Extract and convert `impl`
+blocks to module functions", is what emitted the `# X Methods (was: impl X:)`
+headers. Documented at `doc/09_report/2025/historical/IMPLEMENTATION_COMPLETE.md:41`,
+invoked as `python3 scripts/tools/desugarer.py --dir src/compiler --output-dir
+src/compiler_core_legacy`. Its other fingerprints are all over the tree: the
+`# DESUGARED: <field>` markers, the `has_<field>: bool` optional-field split,
+the `X_op(X, ...)` free-function form, and the already-repaired `0.0` to `0[0]`
+float-literal damage.
+
+**It cannot strike again.** PROVED: `scripts/tools/` does not exist anywhere in
+the tree, tracked or untracked; no CI workflow, git hook, or `bin/simple`
+subcommand invokes it; and no file of any type constructs the header string.
+REFUTED as culprits: `bin/simple desugar` (`src/app/desugar/static_methods.spl`
+reconstructs `impl <type>:` verbatim and never emits the header), `bin/simple
+migrate` (dispatch points at a `src/app/migrate/main.spl` that does not exist),
+and any live compiler pass (the headers are committed source; the Rust seed only
+tolerates the output).
+
+Proof limit, stated honestly: the script itself could not be recovered, because
+both clones are shallow at root commit `97a9358145f` (2026-07-01) and the
+desugarer ran in 2025. So "absent from the current tree" is PROVED; "present in
+history" is not obtainable here. The original method bodies are therefore in no
+reachable git object and had to be reconstructed from their call sites, not
+recovered.
+
+**Body-drop mechanism (INFERRED, code unavailable):** Pass 1 emitted the header
+comment unconditionally *before* extraction, so any method whose signature did
+not match its expected shapes produced no output and no error, leaving a
+tombstone header. The skew supports this: enum receivers lost their bodies at a
+far higher rate than structs or classes.
+
+## The family is much larger than this subsystem
+
+A mechanical census of the whole tree at origin `34072a5098` — predicate
+`/usr/bin/grep -rnI --binary-files=without-match -e '(was: impl' .`, receivers
+parsed with `\(was:\s*impl\s+([A-Za-z_]\w*)\s*:?\s*\)` — found **142 headers**:
+
+| class | count |
+|---|---|
+| BODY-PRESENT | 76 |
+| **BODY-EMPTY** | **45** |
+| BODY-MANGLED | 11 |
+| stale header above a surviving literal `impl X:` | 6 |
+| prose mentions in `doc/*.md` | 4 |
+
+Of the 45 BODY-EMPTY, **43 are true deletions** (no `<recv>_*` free function
+anywhere in the file); 2 were relocated to free functions
+(`ConcreteType` to `concretetype_Named`, `OptLevel` to `optlevel_name`). All 45
+are under `src/compiler/**`. All of them were already empty at the shallow-clone
+root commit.
+
+Confirmed dangling calls into deleted blocks, beyond this subsystem:
+`target_is_float` (`semantics/cast_rules.spl`), `kind_can_follow` and
+`kind_to_text` (`macro_check/template.spl`, `gc_analysis/roots.spl`) are called
+but defined nowhere.
+
+This bug covers only the four `gc_analysis` files. **The other 41 deleted blocks
+are unfixed and still shipping**; each needs its own reconstruction, because the
+bodies are not recoverable from history.
+
+## Additional desugar damage classes found while repairing (2026-08-02)
+
+Beyond the mangled `X_op(X, ..)` calls and the dropped bodies, repairing this
+subsystem exposed three more artefact classes in the same files:
+
+- **Broken tuple-type desugar.** `roots.spl` `struct GcRoot` contains
+  `val _tv_0 = [i64, i64]` as a *field*, with `live_range: _tv_0` beneath it.
+  The original was a `(i64, i64)` tuple type.
+- **Mangled optional type.** `roots.spl` has `fn get_root(kind: RootKind) ->
+  has_GcRoot:`; `has_GcRoot` is not a type. The original was `GcRoot?`.
+- **Optional-field split left inconsistent.** `AllocationSite` and `RootError`
+  were split into `has_<field>: bool` plus a non-optional `<field>`, but the
+  constructors never set either, so construction could not have type-checked.
+  `escape.spl` is now consistent; `roots.spl` `rooterror_unrooted` is not.
+- **Dict key type mismatch.** `escape.spl` declared
+  `field_points_to: Dict<(i64, i64), PointsToSet>` but indexed it with an array
+  `[type_id, field_idx]` — further proof the file had never executed.
+
+## Repair status (2026-08-02)
+
+**`escape.spl`: FIXED and proved executable.**
+
+- `EscapeState.escapes()`, `.can_stack_allocate()`, `.merge_with()`, `.to_text()`
+  reconstructed from their call sites, plus a `rank()` helper making the lattice
+  explicit. `Unknown` is the bottom element, so merging a freshly recorded
+  allocation with any concrete state yields that state, and `finalize()` demotes
+  any surviving `Unknown` to `NoEscape`. `escapes()` reports `true` for
+  `Unknown`, because an unproven site must never be treated as local.
+- Every mangled call site in the file now spells a real method call.
+- Dict reads go through `contains_key` + index, never `Dict.get()`, per
+  `doc/07_guide/language/dict_native_pitfalls.md` — both dicts here hold
+  struct/class values.
+- The `field_points_to` key is now the declared `(i64, i64)` tuple.
+
+`gc_safety_spec.spl` grew from 10 examples to 35, all green, exercising the
+lattice, `PointsToSet` operations, and the full `EscapeAnalysis` pipeline
+(allocation, copy, field store/load, return, call-arg and global-store escape,
+finalize, partitioning and the stack-eligible ratio).
+
+Non-vacuity proved by four independent sabotages of the *restored* code, each
+run against the repaired spec:
+
+| sabotage | failing examples |
+|---|---|
+| `escapes()` always `false` | 3 |
+| `merge_with()` returns `self` (no join) | 13 |
+| `PointsToSet.union()` drops the other set | 3 |
+| `can_stack_allocate()` always `true` | 4 |
+| *(restored baseline)* | **0** |
+
+**`roots.spl`, `barriers.spl`, `mod.spl`: STILL BROKEN.** `RootKind.to_text()`,
+`GcRoot.is_live_at()`, the `BarrierKind` methods and the `GcSafetyReport`
+methods are still missing, and those files still carry mangled call sites plus
+the tuple-type and optional-type damage listed above. They are left failing
+loudly rather than stubbed: a nil-returning `is_live_at` or a constant
+`to_text` would turn a loud semantic-analysis failure into a silently wrong
+GC-root analysis, which is strictly worse.
+
 ## Related
 
 - `doc/08_tracking/bug/vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02.md`

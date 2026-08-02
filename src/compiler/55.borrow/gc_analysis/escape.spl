@@ -24,10 +24,48 @@ enum EscapeState:
     FieldEscape     # Stored in escaping object's field
     Unknown         # Cannot determine
 
+    fn rank() -> i64:
+        """Lattice rank of this state; higher means "escapes more widely".
 
-# ============================================================================
-# EscapeState Methods (was: impl EscapeState:)
-# ============================================================================
+        Unknown is the bottom element, not the top: a freshly recorded
+        allocation starts Unknown, and merging it with any concrete state must
+        yield that concrete state. finalize() demotes any state still Unknown
+        at the end of the analysis to NoEscape.
+        """
+        if self == EscapeState.Unknown: return 0
+        if self == EscapeState.NoEscape: return 1
+        if self == EscapeState.ArgEscape: return 2
+        if self == EscapeState.ReturnEscape: return 3
+        if self == EscapeState.FieldEscape: return 4
+        5
+
+    fn escapes() -> bool:
+        """Whether the allocation escapes the function that allocated it.
+
+        Unknown counts as escaping: a site that has not been proven local must
+        never be treated as local.
+        """
+        if self == EscapeState.NoEscape: return false
+        true
+
+    fn can_stack_allocate() -> bool:
+        """Only a provably non-escaping allocation may be stack-allocated."""
+        self == EscapeState.NoEscape
+
+    fn merge_with(other: EscapeState) -> EscapeState:
+        """Lattice join: keep whichever of the two states escapes more."""
+        if other.rank() > self.rank(): return other
+        self
+
+    fn to_text() -> text:
+        """Human-readable name of the state."""
+        if self == EscapeState.NoEscape: return "NoEscape"
+        if self == EscapeState.ArgEscape: return "ArgEscape"
+        if self == EscapeState.ReturnEscape: return "ReturnEscape"
+        if self == EscapeState.GlobalEscape: return "GlobalEscape"
+        if self == EscapeState.FieldEscape: return "FieldEscape"
+        "Unknown"
+
 
 # ============================================================================
 # Allocation Site
@@ -49,11 +87,17 @@ struct AllocationSite:
 # ============================================================================
 
 fn allocationsite_create(id: i64, point: i64, type_id: i64) -> AllocationSite:
+        """Create an allocation site whose size is not yet known.
+
+        has_size_bytes is the presence flag for the optional size_bytes field;
+        it is false until a size is recorded.
+        """
         AllocationSite(
             id: id,
             program_point: point,
             type_id: type_id,
-            #  # DESUGARED: size_bytes: nil
+            has_size_bytes: false,
+            size_bytes: 0,
             escape_state: EscapeState.Unknown
         )
 
@@ -74,21 +118,21 @@ class PointsToSet:
 
     me add(alloc_id: i64):
         """Add an allocation to the set."""
-        if not self.allocations_contains(allocations, alloc_id):
-            self.allocations = self.allocations_push(allocations, alloc_id)
+        if not self.allocations.contains(alloc_id):
+            self.allocations = self.allocations.push(alloc_id)
 
     fn union(other: PointsToSet) -> PointsToSet:
         """Union two points-to sets."""
         var result = PointsToSet(allocations: self.allocations)
         for id in other.allocations:
-            result_add(result, id)
+            result.add(id)
         result
 
     fn is_empty() -> bool:
-        self.allocations_is_empty(allocations)
+        self.allocations.is_empty()
 
     fn contains(alloc_id: i64) -> bool:
-        self.allocations_contains(allocations, alloc_id)
+        self.allocations.contains(alloc_id)
 
     fn all() -> [i64]:
         self.allocations
@@ -137,74 +181,90 @@ class EscapeAnalysis:
         self.allocations[id] = site
 
         # Initialize points-to for destination
-        var pts = self.points_to_get(points_to, dest_local) ?? pointstoset_empty()
-        pts_add(pts, id)
+        var pts = self.points_to_at(dest_local)
+        pts.add(id)
         self.points_to[dest_local] = pts
 
         id
 
+    fn points_to_at(local: i64) -> PointsToSet:
+        """Points-to set for a local, or an empty set if it has none yet.
+
+        Reads via contains_key + index rather than Dict.get(): under native
+        codegen Dict.get() on a class/struct value is corrupt.
+        See doc/07_guide/language/dict_native_pitfalls.md
+        """
+        if self.points_to.contains_key(local):
+            return self.points_to[local]
+        PointsToSet.empty()
+
+    fn field_points_to_at(key: (i64, i64)) -> PointsToSet:
+        """Points-to set for a (type, field) pair, or an empty set."""
+        if self.field_points_to.contains_key(key):
+            return self.field_points_to[key]
+        PointsToSet.empty()
+
     me record_copy(from_local: i64, to_local: i64):
         """Record a copy (to = from)."""
-        val from_pts = self.points_to_get(points_to, from_local) ?? pointstoset_empty()
-        var to_pts = self.points_to_get(points_to, to_local) ?? pointstoset_empty()
-        to_pts = to_pts_union(to_pts, from_pts)
+        val from_pts = self.points_to_at(from_local)
+        var to_pts = self.points_to_at(to_local)
+        to_pts = to_pts.union(from_pts)
         self.points_to[to_local] = to_pts
 
     me record_field_store(base_local: i64, field_idx: i64, value_local: i64, type_id: i64):
         """Record a field store (base.field = value)."""
-        val value_pts = self.points_to_get(points_to, value_local) ?? pointstoset_empty()
-        val base_pts = self.points_to_get(points_to, base_local) ?? pointstoset_empty()
+        val value_pts = self.points_to_at(value_local)
 
         # Value escapes to field
-        for alloc_id in value_pts_all(value_pts):
+        for alloc_id in value_pts.all():
             self.mark_escape(alloc_id, EscapeState.FieldEscape)
 
         # Store in field points-to
-        val key = [type_id, field_idx]
-        var field_pts = self.field_points_to_get(field_points_to, key) ?? pointstoset_empty()
-        field_pts = field_pts_union(field_pts, value_pts)
+        val key = (type_id, field_idx)
+        var field_pts = self.field_points_to_at(key)
+        field_pts = field_pts.union(value_pts)
         self.field_points_to[key] = field_pts
 
     me record_field_load(base_local: i64, field_idx: i64, dest_local: i64, type_id: i64):
         """Record a field load (dest = base.field)."""
-        val key = [type_id, field_idx]
-        val field_pts = self.field_points_to_get(field_points_to, key) ?? pointstoset_empty()
+        val key = (type_id, field_idx)
+        val field_pts = self.field_points_to_at(key)
 
-        var dest_pts = self.points_to_get(points_to, dest_local) ?? pointstoset_empty()
-        dest_pts = dest_pts_union(dest_pts, field_pts)
+        var dest_pts = self.points_to_at(dest_local)
+        dest_pts = dest_pts.union(field_pts)
         self.points_to[dest_local] = dest_pts
 
     me record_return(local: i64):
         """Record a return of a local."""
-        val pts = self.points_to_get(points_to, local) ?? pointstoset_empty()
-        for alloc_id in pts_all(pts):
+        val pts = self.points_to_at(local)
+        for alloc_id in pts.all():
             self.mark_escape(alloc_id, EscapeState.ReturnEscape)
 
     me record_call_arg(local: i64):
         """Record passing a local as a call argument."""
-        val pts = self.points_to_get(points_to, local) ?? pointstoset_empty()
-        for alloc_id in pts_all(pts):
+        val pts = self.points_to_at(local)
+        for alloc_id in pts.all():
             self.mark_escape(alloc_id, EscapeState.ArgEscape)
 
     me record_global_store(local: i64):
         """Record storing a local to a global variable."""
-        val pts = self.points_to_get(points_to, local) ?? pointstoset_empty()
-        for alloc_id in pts_all(pts):
+        val pts = self.points_to_at(local)
+        for alloc_id in pts.all():
             self.mark_escape(alloc_id, EscapeState.GlobalEscape)
 
     me mark_escape(alloc_id: i64, state: EscapeState):
         """Mark an allocation as escaping."""
-        match self.allocations_get(allocations, alloc_id):
-            case site:
-                val new_state = site.escape_state_merge_with(escape_state, state)
-                self.allocations[alloc_id] = AllocationSite(
-                    id: site.id,
-                    program_point: site.program_point,
-                    type_id: site.type_id,
-                    size_bytes: site.size_bytes,
-                    escape_state: new_state
-                )
-            case nil:
+        if self.allocations.contains_key(alloc_id):
+            val site = self.allocations[alloc_id]
+            val new_state = site.escape_state.merge_with(state)
+            self.allocations[alloc_id] = AllocationSite(
+                id: site.id,
+                program_point: site.program_point,
+                type_id: site.type_id,
+                has_size_bytes: site.has_size_bytes,
+                size_bytes: site.size_bytes,
+                escape_state: new_state
+            )
 
     me finalize():
         """Finalize analysis and compute statistics."""
@@ -217,6 +277,7 @@ class EscapeAnalysis:
                     id: site.id,
                     program_point: site.program_point,
                     type_id: site.type_id,
+                    has_size_bytes: site.has_size_bytes,
                     size_bytes: site.size_bytes,
                     escape_state: EscapeState.NoEscape
                 )
@@ -226,14 +287,14 @@ class EscapeAnalysis:
         for _for_item_1 in self.allocations:
             val _unused_1 = _for_item_1[0]
             val site = _for_item_1[1]
-            if site.escape_state_can_stack_allocate(escape_state):
+            if site.escape_state.can_stack_allocate():
                 self.stack_eligible = self.stack_eligible + 1
 
     fn get_escape_state(alloc_id: i64) -> EscapeState:
         """Get escape state for an allocation."""
-        match self.allocations_get(allocations, alloc_id):
-            case site: site.escape_state
-            case nil: EscapeState.Unknown
+        if self.allocations.contains_key(alloc_id):
+            return self.allocations[alloc_id].escape_state
+        EscapeState.Unknown
 
     fn can_stack_allocate(alloc_id: i64) -> bool:
         """Check if allocation can be stack-allocated."""
@@ -245,7 +306,7 @@ class EscapeAnalysis:
         for _for_item_2 in self.allocations:
             val _unused_2 = _for_item_2[0]
             val site = _for_item_2[1]
-            if not site.escape_state_escapes(escape_state):
+            if not site.escape_state.escapes():
                 result = result.push(site)
         result
 
@@ -255,7 +316,7 @@ class EscapeAnalysis:
         for _for_item_3 in self.allocations:
             val _unused_3 = _for_item_3[0]
             val site = _for_item_3[1]
-            if site.escape_state_escapes(escape_state):
+            if site.escape_state.escapes():
                 result = result.push(site)
         result
 
@@ -264,7 +325,7 @@ class EscapeAnalysis:
         if self.total_allocations == 0:
             0.0
         else:
-            self.stack_eligible_to_f64(stack_eligible) / self.total_allocations_to_f64(total_allocations)
+            self.stack_eligible.to_f64() / self.total_allocations.to_f64()
 
 # ============================================================================
 # Exports
