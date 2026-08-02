@@ -2,21 +2,20 @@
 
 ## Reproduction
 
-After facade extraction progressed, Stage4 lowered
-`src/lib/nogc_async_mut/async/future.spl`, collected four fatal HIR errors, and
-then printed `functions=-1`. The driver retained that partial module and stayed
-at 99.9% CPU while RSS grew to 16,562,144 KiB at 20:20 elapsed.
+After facade extraction progressed, Stage4 printed `functions=-1`, retained the
+module, and stayed at 99.9% CPU while RSS grew to 16,562,144 KiB at 20:20
+elapsed. A fail-fast probe then reproduced the same `-1` for `app.cli.main`.
 
 ## Cause and fix
 
-The non-streaming HIR loop collected diagnostics but did not take the fatal
-error exit used by the streaming path. It continued into `phase_hir_modules`
-retention and downstream work. The driver now returns immediately after fatal
-HIR diagnostics, preserving those original errors, and separately rejects any
-negative function-dictionary length before retention.
+The aggregate was not corrupt. Native bootstrap `Dict.len()` is documented to
+return `-1`; the HIR lowering code already uses `functions.keys().len()` for
+this reason, but the driver called `hir_module.functions.len()` directly. The
+driver now counts a typed key array instead. The independently valid fatal HIR
+diagnostic exit remains before retention, preserving original errors.
 
 ## Regression evidence
 
-`hir_retention_gate_spec.spl` covers the observed `-1` length plus valid empty
-and populated dictionaries. The driver source orders the fatal-error exit
-before shared-trait and phase-module retention.
+`hir_function_count_spec.spl` covers empty, populated, and replacement cases
+through the native-safe typed-key helper. The driver source orders the fatal
+error exit before shared-trait and phase-module retention.
