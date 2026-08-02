@@ -26,7 +26,7 @@ use os.kernel.types.capability_types.{CapabilitySet}
 use os.kernel.arch.arch_context.{Architecture}
 use os.kernel.memory.user_address_space.{create_user_address_space, destroy_user_address_space}
 use os.kernel.memory.vmm_address_space.{stage_user_address_space_scalars, staged_user_address_space_root, staged_user_address_space_id}
-use os.kernel.memory.vmm.{vmm_cow_clone_pages}
+use os.kernel.memory.vmm.{vmm_cow_clone_pages, vmm_space_fork_allowed}
 use os.kernel.loader.segment_mapper.{verify_direct_load_entry}
 use os.kernel.loader.process_image.{
     stage_user_process_image_for_scheduler,
@@ -59,7 +59,8 @@ use os.kernel.scheduler.scheduler_task_mgmt.{
 }
 
 use os.kernel.scheduler.capability_bridge.{cap_init_task_record}
-use os.kernel.ipc.capability.{register_task_vmspace}
+use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
+use os.kernel.lifecycle.task_cleanup.{task_has_noninheritable_device_memory}
 
 @cfg(arm64)
 extern fn rt_arm64_record_user_handoff(entry: u64, sp: u64, ttbr0_root: u64)
@@ -394,6 +395,12 @@ pub fn sched_clone_task_impl(
     if parent_tcb == nil:
         return (TaskId(id: 0), tasks, -1)
     val parent = parent_tcb
+    if task_has_noninheritable_device_memory(parent_id.id):
+        return (TaskId(id: 0), tasks, -1)
+    val registered_parent_space = task_vmspace_of(parent_id.id.to_u32())
+    if val Some(parent_space) = registered_parent_space:
+        if not vmm_space_fork_allowed(parent_space):
+            return (TaskId(id: 0), tasks, -1)
     val child_id = TaskId(id: scheduler_next_task_id_take())
     val child_slot = _find_empty_slot_in(tasks)
     if child_slot < 0:

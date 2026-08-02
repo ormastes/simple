@@ -44,3 +44,15 @@ The live fix must add device-VMA ownership. Generic unmap currently returns
 detached pages to PMM, which is invalid for MMIO, and current fork/COW risks
 inheriting mapping authority. Shipping syscall 88 without both invariants would
 not safely resolve this bug.
+
+## Device ownership progress
+
+`VMA_DEVICE` now prevents PMM release during kind-aware VMA unmap and blocks
+COW/fork. The lifecycle resource policy also blocks fork/exec while BAR or DMA
+resources are live. Compatibility syscall 83 now registers BAR mappings,
+rolls back partial work, and includes USER|UC|NX permissions.
+
+The bug remains open: compatibility syscall 83 still accepts raw physical
+coordinates and maps the active address space. Required remaining work is the
+explicit-space device-VMA transaction, collision preflight and dedicated
+unmap, followed by BDF/BAR-authorized syscall 88 and VirtIO-GPU migration.

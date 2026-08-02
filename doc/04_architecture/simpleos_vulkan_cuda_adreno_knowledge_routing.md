@@ -127,6 +127,22 @@ fork/COW without independent authority. Existing syscall 83 cannot satisfy
 these invariants because it accepts caller-provided physical addresses and
 checks a fixed capability tuple; it remains compatibility-only.
 
+Device address-space ownership is now explicit through `VMA_DEVICE` and the
+`vmm_device` policy owner. A detached device leaf never releases a PMM
+reference. Any registered device VMA blocks COW cloning, while lifecycle-owned
+BAR and DMA resources independently block fork and exec. This second gate is
+required because compatibility MapBar predates VMA registration and DMA has a
+separate allocation registry. Notification and IRQ handles remain inheritable;
+unknown future resource kinds fail closed.
+
+Compatibility MapBar now supplies USER|WRITABLE|UC|NX leaves, rolls back an
+incomplete mapping, and records `RES_BAR_MAPPING` so exit can detach MMIO
+without freeing its physical aperture. It still maps the active address space
+from caller-provided physical coordinates and is not the production Venus
+path. Syscall 88 must use an explicit `ProcessVmSpace`, collision preflight,
+device-VMA reservation, exact BDF/BAR authority, and dedicated unmap/resource
+retirement.
+
 Promotion to `VirtioGpuVenusAdapter` remains blocked on all of the following:
 
 1. negotiated virtio-gpu blob-resource and context-init support;

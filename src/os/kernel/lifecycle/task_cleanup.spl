@@ -14,6 +14,7 @@ use os.kernel.memory.vmm.{vmm_unmap_page, vmm_read_pte, PAGE_SIZE, PTE_ADDR_MASK
 use os.kernel.memory.pmm.{pmm_free_page}
 use os.kernel.types.memory_types.{PageFrame, PhysAddr, VirtAddr}
 use os.kernel.types.task_types.{TaskId}
+use os.kernel.lifecycle.resource_fork_policy.{resource_fork_inheritable}
 
 use os.kernel.log.klog_api.{log_raw_println}
 
@@ -37,10 +38,10 @@ val RES_BAR_MAPPING: u8 = 4
 # ============================================================================
 
 # Flat 2D layout: task T, slot S -> index = T * MAX_RESOURCES_PER_TASK + S
-var task_res_type: [u8; 4096]       # resource type (RES_*)
-var task_res_id: [u64; 4096]        # resource ID (notification ID, IRQ vector, etc.)
-var task_res_aux: [u64; 4096]       # auxiliary data (size for DMA/BAR, phys addr, etc.)
-var task_res_count: [u64; 256]      # number of resources registered per task
+var task_res_type: [u8; 4096] = [0u8; 4096]       # resource type (RES_*)
+var task_res_id: [u64; 4096] = [0u64; 4096]       # notification ID, IRQ, VA
+var task_res_aux: [u64; 4096] = [0u64; 4096]      # mapping size / auxiliary
+var task_res_count: [u64; 256] = [0u64; 256]      # live slots per task
 
 # ============================================================================
 # Resource Registration
@@ -182,3 +183,16 @@ fn task_resource_count(task_id: u64) -> u64:
     if task_id >= MAX_TASKS:
         return 0
     task_res_count[task_id]
+
+fn task_has_noninheritable_device_memory(task_id: u64) -> bool:
+    """Fail closed when fork could alias device/DMA ownership."""
+    if task_id >= MAX_TASKS:
+        return true
+    val count = task_res_count[task_id]
+    var index: u64 = 0
+    while index < count:
+        val slot = task_id * MAX_RESOURCES_PER_TASK + index
+        if not resource_fork_inheritable(task_res_type[slot]):
+            return true
+        index = index + 1
+    false

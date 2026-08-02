@@ -15,7 +15,7 @@
   provisional because docgen was bootstrap-seed-built
 - Runtime integration: canonical QEMU guest probe constructs `ProcessingIr` and
   routes CUDA/Vulkan through `ProcessingDevicePort`; Vulkan adapter unit 3/3
-- Coverage: tracked decision inventory 152/154 outcomes = 98%, gate 2/2; two
+- Coverage: tracked decision inventory 162/164 outcomes = 98%, gate 2/2; two
   valid-submission outcomes remain assigned to live MMIO evidence
 - Venus transport slice: protocol admission 4/4, exact binary encoding and
   typed response/fence validation 8/8, bounded controlq admission 4/4. Native
@@ -44,3 +44,14 @@
 - Live mapping remains open: syscall 88, serialized/restored PCI probing,
   caller-owned device VMAs, MMIO-safe unmap, and fork non-inheritance are
   required before the resolver can authorize a CPU mapping.
+- Device-VMA ownership slice: `VMA_DEVICE` and pure PMM-release/fork policies
+  are implemented. Kind-aware VMA unmap detaches device leaves without
+  `pmm_put_page`; COW and scheduler fork deny registered device VMAs. BAR/DMA
+  task resources also deny fork/exec, and compatibility MapBar now maps USER,
+  rolls back partial mappings, and registers BAR cleanup ownership.
+- Verification limits: the two focused pure-policy test processes completed,
+  but their summaries were lost by the parallel command-output wrapper and are
+  not claimed as captured PASS evidence. Focused source checks passed for both
+  pure owners and task cleanup; wider VMM/IPC checks hit the repository's 60 s
+  bootstrap monitor rather than a code diagnostic. Do not release from this
+  provisional evidence.

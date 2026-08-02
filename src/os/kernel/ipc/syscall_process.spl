@@ -26,16 +26,16 @@ use os.kernel.loader.builtin_binary_registry.{resolve_builtin_binary}
 use os.kernel.loader.process_image.{build_user_process_image}
 use os.kernel.loader.loader_api.{loader_dynopen_bytes, loader_dynsym, loader_dynclose}
 use os.kernel.arch.arch_context.{Architecture}
-use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_packed_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values}
+use os.kernel.memory.vmm.{vmm_new_process_space, vmm_teardown_user_space, vmm_verify_user_write, vmm_copyin_string_vector, vmm_copyin_packed_string_vector, vmm_copyin_bytes_from_space, vmm_copy_string_vector_result_ok, vmm_copy_string_vector_result_errno, vmm_copy_string_vector_result_values, vmm_space_fork_allowed}
 use os.kernel.boot.mmio.{mmio_read16, mmio_read32, mmio_write16, mmio_write32}
 use os.kernel.ipc.capability.{register_task_vmspace, task_vmspace_of}
 use os.kernel.pipe_compat.{posix_pipe}
 use os.kernel.fd_io.{posix_close, posix_dup, posix_dup2, posix_lseek}
 use os.kernel.fd_table.{fd_prepare_fork_to_task, fd_dup_from, fd_is_valid, fd_get_cloexec, fd_set_cloexec, fd_get_status_flags, fd_set_status_flags, fd_get_object_id, fd_poll_ready, fd_poll_notification, MAX_FDS}
-use os.kernel.errno.{EACCES, EFAULT, EINVAL, ENAMETOOLONG}
+use os.kernel.errno.{EACCES, EBUSY, EFAULT, EINVAL, ENAMETOOLONG}
 use os.kernel.ipc.syscall.{_u64_to_priority, g_scheduler_next_task_id, CURRENT_EXEC_ARCH, MAX_BINARY_PATH_LEN, MAX_EXEC_ARG_COUNT, MAX_EXEC_ENV_COUNT, MAX_EXEC_STRING_LEN, MAX_EXEC_TOTAL_STRING_BYTES, _is_userspace_ptr, _is_userspace_range, g_current_vmspace, _use_x86_64_direct_spawn_handoff, _alloc_x86_64_direct_spawn_pid}
 use os.kernel.ipc.syscall_device.{_dma_release_task_allocs}
-use os.kernel.lifecycle.task_cleanup.{task_cleanup}
+use os.kernel.lifecycle.task_cleanup.{task_cleanup, task_has_noninheritable_device_memory}
 use os.kernel.ipc.capability.{_vma_range_readable}
 use os.kernel.types.task_types.{TaskState}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_process_spawn_decision}
@@ -243,6 +243,12 @@ fn _handle_fork(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
     val _a = args
     var sched = scheduler
     val parent = sched.get_current()
+    if task_has_noninheritable_device_memory(parent.id):
+        return SyscallResult(value: 0 - EBUSY as i64)
+    val registered_parent_space = task_vmspace_of(parent.id.to_u32())
+    if val Some(parent_space) = registered_parent_space:
+        if not vmm_space_fork_allowed(parent_space):
+            return SyscallResult(value: 0 - EBUSY as i64)
     val child = sched.clone_task(parent)
     if child.id == 0:
         return SyscallResult(value: -12)
@@ -303,6 +309,10 @@ fn _handle_exec(args: SyscallArgs, scheduler: Scheduler) -> SyscallResult:
 
     var sched = scheduler
     val current = sched.get_current()
+    # Exec swaps the active page-table root before legacy BAR cleanup could
+    # safely detach its PTEs. Require explicit DMA/BAR release first.
+    if task_has_noninheritable_device_memory(current.id):
+        return SyscallResult(value: 0 - EBUSY as i64)
     val result = sched.exec_image(current, image_result.unwrap())
     if result == 0:
         _close_cloexec_fds_with_backends()

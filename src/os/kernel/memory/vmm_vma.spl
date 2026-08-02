@@ -22,6 +22,7 @@ use os.kernel.memory.vmm_address_space.{
     vmm_cow_clone_pages
 }
 use os.kernel.memory.pmm.{pmm_alloc_page_raw, pmm_free_page_raw, pmm_put_page, pmm_ref_page}
+use os.kernel.memory.vmm_device.{vmm_vma_kind_releases_leaf, vmm_space_fork_allowed}
 use os.kernel.memory.vmm_shared.{
     SHM_OK, SHM_RIGHT_READ, SHM_RIGHT_WRITE,
     vmm_shared_map, vmm_shared_unmap,
@@ -318,6 +319,7 @@ fn vmm_munmap_result(space: ProcessVmSpace, vaddr: u64, len: u64) -> VmmMunmapRe
     val as_handle = AddressSpace(phys_root: updated.pml4, id: updated.id)
     var detached_vaddrs: [u64] = []
     var detached_ptes: [u64] = []
+    var detached_release: [bool] = []
     var pg = aligned_start
     while pg < aligned_end:
         val virt = VirtAddr(addr: pg)
@@ -340,13 +342,17 @@ fn vmm_munmap_result(space: ProcessVmSpace, vaddr: u64, len: u64) -> VmmMunmapRe
                 return VmmMunmapResult(code: -14, space: updated)  # -EFAULT
             detached_vaddrs.push(pg)
             detached_ptes.push(pte)
+            var release_leaf = true
+            if val Some(owner_area) = vma_find(updated, pg):
+                release_leaf = vmm_vma_kind_releases_leaf(owner_area.kind)
+            detached_release.push(release_leaf)
         pg = pg + PAGE_SIZE
 
     # PTE ownership is detached successfully; release each leaf exactly once.
     var fi: i32 = 0
     while (fi as u64) < detached_ptes.len():
         val pa = detached_ptes[fi] & PTE_ADDR_MASK
-        if pa != 0:
+        if pa != 0 and detached_release[fi]:
             pmm_put_page(pa)
         fi = fi + 1
 
@@ -369,6 +375,12 @@ fn vmm_remove_vma_metadata(space: ProcessVmSpace, vaddr: u64, len: u64) -> Proce
 
 fn vmm_cow_clone_result(parent_space: ProcessVmSpace) -> VmmCowCloneResult:
     """Create a COW child and return the parent's updated VMA metadata."""
+    if not vmm_space_fork_allowed(parent_space):
+        return VmmCowCloneResult(
+            ok: false,
+            parent: parent_space,
+            child: ProcessVmSpace(pml4: 0, id: 0, vma_count: 0, areas: [])
+        )
     val child_pml4 = vmm_cow_clone_pages(parent_space.pml4)
     if child_pml4 == 0:
         return VmmCowCloneResult(

@@ -1,0 +1,64 @@
+# @req REQ-001 REQ-003 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/kernel/memory/vmm_device.spl 80%
+# @tag: unit, simpleos, kernel, vmm, device, mmio, fork
+
+use std.spec.*
+use os.kernel.types.vmspace_types.{VmArea, ProcessVmSpace, VMA_ANON,
+    VMA_FILE, VMA_SHARED, VMA_SHARED_FILE, VMA_DEVICE, VMA_READ, VMA_WRITE}
+use os.kernel.memory.vmm_device.*
+
+fn area(kind: u32, start: u64) -> VmArea:
+    VmArea(start: start, len: 0x1000u64, kind: kind,
+        flags: VMA_READ | VMA_WRITE, backing: 0u64, backing_offset: 0u64)
+
+fn space(areas: [VmArea], count: u64) -> ProcessVmSpace:
+    ProcessVmSpace(pml4: 0x1000u64, id: 7u64,
+        vma_count: count, areas: areas)
+
+describe "device VMA physical ownership and fork authority":
+    it "never releases a device MMIO leaf through PMM":
+        # @covers DVM_RELEASE:false
+        expect(vmm_vma_kind_releases_leaf(VMA_DEVICE)).to_be(false)
+
+    it "continues releasing PMM-owned anonymous, file, and shared leaves":
+        # @covers DVM_RELEASE:true
+        expect(vmm_vma_kind_releases_leaf(VMA_ANON)).to_be(true)
+        expect(vmm_vma_kind_releases_leaf(VMA_FILE)).to_be(true)
+        expect(vmm_vma_kind_releases_leaf(VMA_SHARED)).to_be(true)
+        expect(vmm_vma_kind_releases_leaf(VMA_SHARED_FILE)).to_be(true)
+
+    it "finds a device area at the first, middle, or last live slot":
+        # @covers DVM_PRESENT:true
+        val anon = area(VMA_ANON, 0x1000u64)
+        val device = area(VMA_DEVICE, 0x2000u64)
+        val file = area(VMA_FILE, 0x3000u64)
+        expect(vmm_space_has_device_vma(space([device, anon, file], 3u64))).to_be(true)
+        expect(vmm_space_has_device_vma(space([anon, device, file], 3u64))).to_be(true)
+        expect(vmm_space_has_device_vma(space([anon, file, device], 3u64))).to_be(true)
+
+    it "ignores storage beyond the declared live VMA count":
+        # @covers DVM_PRESENT:false
+        val anon = area(VMA_ANON, 0x1000u64)
+        val device = area(VMA_DEVICE, 0x2000u64)
+        expect(vmm_space_has_device_vma(space([anon, device], 1u64))).to_be(false)
+
+    it "handles an inconsistent count without indexing beyond stored areas":
+        val anon = area(VMA_ANON, 0x1000u64)
+        expect(vmm_space_has_device_vma(space([anon], 99u64))).to_be(false)
+
+    it "allows fork for empty and ordinary address spaces":
+        # @covers DVM_FORK:true
+        expect(vmm_space_fork_allowed(space([], 0u64))).to_be(true)
+        expect(vmm_space_fork_allowed(space([area(VMA_ANON, 0x1000u64)], 1u64))).to_be(true)
+
+    it "denies fork when any live device VMA exists":
+        # @covers DVM_FORK:false
+        val areas = [area(VMA_ANON, 0x1000u64), area(VMA_DEVICE, 0x2000u64)]
+        expect(vmm_space_fork_allowed(space(areas, 2u64))).to_be(false)
+
+    it "keeps device kind distinct from existing VMA kinds and flags":
+        expect(VMA_DEVICE).to_equal(4u32)
+        expect(VMA_SHARED_FILE).to_equal(3u32)
+        expect(VMA_DEVICE == VMA_ANON).to_be(false)
+        expect(VMA_DEVICE == VMA_FILE).to_be(false)
+        expect(VMA_DEVICE == VMA_SHARED).to_be(false)

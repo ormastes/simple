@@ -5,7 +5,7 @@
 
 use os.kernel.types.syscall_types.{SyscallArgs, SyscallResult}
 use os.kernel.types.task_types.{TaskId}
-use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_NO_EXECUTE, VM_CACHE_DISABLE}
+use os.kernel.types.memory_types.{PhysAddr, VirtAddr, VmFlags, VM_PRESENT, VM_WRITABLE, VM_USER, VM_NO_EXECUTE, VM_CACHE_DISABLE}
 use os.kernel.memory.vmm.{vmm_map_page, vmm_unmap_page, vmm_verify_user_write, PAGE_SIZE}
 use os.kernel.memory.pmm.{pmm_alloc_pages, pmm_free_page_range}
 use os.kernel.memory.memory_dma_pages.{memory_dma_free_partial_pages}
@@ -14,7 +14,7 @@ use os.kernel.boot.mmio.{mmio_write8, mmio_write16, mmio_write32, mmio_write64}
 use os.drivers.pci.pci.{pci_read_config, pci_read_vendor, pci_read_device_id, pci_read_class, pci_read_header_type, pci_read_irq, pci_read_bar, pci_write_config}
 use os.kernel.interrupts.irq_routing.{irq_route_register}
 use os.kernel.interrupts.idt.{VEC_IRQ_BASE}
-use os.kernel.lifecycle.task_cleanup.{task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER}
+use os.kernel.lifecycle.task_cleanup.{task_register_resource, task_unregister_resource, RES_NOTIFICATION, RES_IRQ_ROUTE, RES_DMA_BUFFER, RES_BAR_MAPPING}
 use os.kernel.ipc.notification.{notification_create}
 use os.kernel.ipc.notif_global.{g_notification_table}
 use os.kernel.ipc.syscall.{_next_mmap_addr, _is_userspace_ptr, _is_kernel_addr, PCI_MMIO_FLOOR}
@@ -270,7 +270,7 @@ fn _handle_device_grant(args: SyscallArgs, scheduler: Scheduler, caller: TaskId)
 
     SyscallResult(value: 0)
 
-fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
+fn _handle_map_bar(args: SyscallArgs, caller: TaskId) -> SyscallResult:
     """Map a physical BAR into the caller's address space."""
     val bar_phys = args.arg0 as u64
     val size = args.arg1 as u64
@@ -291,7 +291,7 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
     if base_virt == 0:
         base_virt = _next_mmap_addr
 
-    val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_CACHE_DISABLE | VM_NO_EXECUTE)
+    val flags = VmFlags(bits: VM_PRESENT | VM_WRITABLE | VM_USER | VM_CACHE_DISABLE | VM_NO_EXECUTE)
 
     var offset: u64 = 0
     while offset < page_count:
@@ -299,11 +299,23 @@ fn _handle_map_bar(args: SyscallArgs) -> SyscallResult:
         val phys = PhysAddr(addr: bar_phys + offset * PAGE_SIZE)
         val ok = vmm_map_page(virt, phys, flags)
         if !ok:
+            var rollback: u64 = 0
+            while rollback < offset:
+                _ = vmm_unmap_page(VirtAddr(addr: base_virt + rollback * PAGE_SIZE))
+                rollback = rollback + 1
             return SyscallResult(value: -12)
         offset = offset + 1
 
+    val mapped_len = page_count * PAGE_SIZE
+    if not task_register_resource(caller.id, RES_BAR_MAPPING, base_virt, mapped_len):
+        var rollback: u64 = 0
+        while rollback < page_count:
+            _ = vmm_unmap_page(VirtAddr(addr: base_virt + rollback * PAGE_SIZE))
+            rollback = rollback + 1
+        return SyscallResult(value: -28)
+
     if hint == 0:
-        _next_mmap_addr = base_virt + page_count * PAGE_SIZE
+        _next_mmap_addr = base_virt + mapped_len
 
     SyscallResult(value: base_virt as i64)
 

@@ -7,7 +7,7 @@
 | REQ-006..009 | deterministic knowledge routing unit/integration scenario |
 | REQ-010 | environment matrix with exact resume metadata |
 | NFR-001..002 | device-origin, identity, handle, correlation, backend/class rejection |
-| NFR-003 | owned decision inventory: 152/154 outcomes = 98% |
+| NFR-003 | owned decision inventory: 162/164 outcomes = 98% |
 | NFR-004..005 | probe-cache and invalidation tests |
 | NFR-006 | repeatable receipt/hash ordering test across input permutations |
 | NFR-007..008 | environment, stub, facade, duplication, and file-size gates |
@@ -32,6 +32,15 @@ assigned nonzero aperture, checked containment, and physical-addition overflow.
 It includes BAR0/BAR5, a 64-bit BAR above 4 GiB, exact-final-byte admission,
 one-byte escape, offset-underflow defense, duplicate rows, and exact provenance.
 This proves policy only; syscall, VMA, unmap, fork, and live PCI tests remain.
+
+The device-memory ownership lane adds ten tracked outcomes: device versus
+PMM-owned leaf release, device-VMA present/absent, fork allowed/denied, resource
+kind inheritable/non-inheritable, and all-resource-set allowed/denied. Fixtures
+cover empty/ordinary VMAs, inconsistent live counts, device slots at every
+position, anonymous/file/shared kinds, notification/IRQ resources, DMA/BAR at
+either position, and unknown future resources. Integration evidence still must
+prove USER|UC|NX PTEs, collision rejection, partial-map rollback, no PMM delta,
+fork/exec `EBUSY`, explicit release restoring fork, and teardown ordering.
 
 The implemented bounded integration lane is `virtio_gpu_venus_controlq`; its
 device-free admission and source-boundary contract is followed by the remaining
