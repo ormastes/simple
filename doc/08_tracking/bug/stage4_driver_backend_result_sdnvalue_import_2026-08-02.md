@@ -22,10 +22,18 @@ Retained log:
 
 `driver_types.spl` explicitly imports `BackendResult` and `BackendError` from
 `compiler.backend.backend_types`. `BackendResult.SdnData` exposes that same
-module's `SdnValue` in its payload, but `SdnValue` is absent from the explicit
-import list. HIR materializes the imported enum's public payload shape, so the
-consumer must import that payload type directly instead of depending on an
-unrelated package sibling's private import.
+module's backend SDN payload in its public shape, but the payload type is absent
+from the explicit import list. HIR materializes the imported enum's payload
+shape, so the consumer had depended on an unrelated package sibling's private
+import.
+
+The underlying ambiguity is a stale collision regression: the documented
+`BackendSdnValue` and `DriverInitSdnValue` repairs existed in orphan commit
+`e18937e064f` but were not on `main`, although the collision audit said they
+were fixed. Current source again declared both as `SdnValue`, colliding with the
+canonical configuration SDN enum. `CompiledUnit` is also multiply declared, so
+the driver must import the backend owner explicitly when it imports
+`BackendResult`.
 
 The existing side-branch attempt `ba55a61c5b46` imports the canonical std SDN
 enum into `driver_api_core`; that is a different type and private sibling-import
@@ -34,8 +42,22 @@ backend-local payload.
 
 ## Required repair
 
-- Import the backend-local `SdnValue` beside `BackendResult` and `BackendError`.
+- Restore the backend and driver-local names `BackendSdnValue` and
+  `DriverInitSdnValue`, including their exports and internal references.
+- Import backend-owner `BackendSdnValue` and `CompiledUnit` beside
+  `BackendResult` and `BackendError`.
+- Remove the dead `Span` and canonical `SdnValue` imports from
+  `driver_api_core`; none of its re-exported signatures exposes either type.
 - Retain a behavioral HIR regression for explicit enum payload dependency
   resolution and the adjacent private-sibling non-leak case.
 - Refresh Stage 3, retry Stage 4 with the existing cache, and keep no-stub
   fallback enabled.
+
+## Focused verification
+
+The behavioral regression
+`test/01_unit/compiler/driver/backend_result_payload_identity_spec.spl` passes
+both scenarios in interpreter mode. The collision audit also reports no
+remaining enum-versus-struct/class `SdnValue` collision. Stage 4 remains the
+authoritative closure gate, so this bug stays claimed until that build crosses
+the former HIR boundary and produces its candidate.
