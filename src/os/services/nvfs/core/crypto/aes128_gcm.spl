@@ -260,7 +260,7 @@ fn aes128_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
 # GF(2^128) Multiplication for GHASH
 # ============================================================================
 
-fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
+fn _nvfs_a128gcm_gf128_mul(x: [u8], y: [u8]) -> [u8]:
     """Multiply two 128-bit elements in GF(2^128)."""
     var z: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
@@ -308,16 +308,16 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
 # GHASH
 # ============================================================================
 
-fn _ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
+fn _nvfs_a128gcm_ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
     """Process one 16-byte block for GHASH: Y_i = (Y_{i-1} XOR X_i) * H."""
     var xored: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
     while i < 16:
         xored.push(_u8_at(y, i) ^ _u8_at(x_block, i))
         i = i + 1
-    gf128_mul(xored, h)
+    _nvfs_a128gcm_gf128_mul(xored, h)
 
-fn _pad_to_16(data: [u8]) -> [u8]:
+fn _nvfs_a128gcm_pad_to_16(data: [u8]) -> [u8]:
     """Pad data to a multiple of 16 bytes with zeros."""
     val padded_len = if (data.len() % 16) == 0:
         data.len()
@@ -345,7 +345,7 @@ fn _nvfs_a128gcm_append_bytes(a: [u8], b: [u8]) -> [u8]:
         i = i + 1
     out
 
-fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
+fn _nvfs_a128gcm_ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     """Compute GHASH for GCM."""
     var y: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
@@ -353,7 +353,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         y.push(0x00)
         i = i + 1
 
-    val padded_aad = _pad_to_16(aad)
+    val padded_aad = _nvfs_a128gcm_pad_to_16(aad)
     i = 0
     while i < padded_aad.len():
         var block: [u8] = rt_array_new_with_cap(16)
@@ -361,10 +361,10 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         while j < 16:
             block.push(_u8_at(padded_aad, i + j))
             j = j + 1
-        y = _ghash_block(h, y, block)
+        y = _nvfs_a128gcm_ghash_block(h, y, block)
         i = i + 16
 
-    val padded_ct = _pad_to_16(ciphertext)
+    val padded_ct = _nvfs_a128gcm_pad_to_16(ciphertext)
     i = 0
     while i < padded_ct.len():
         var block: [u8] = rt_array_new_with_cap(16)
@@ -372,7 +372,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         while j < 16:
             block.push(_u8_at(padded_ct, i + j))
             j = j + 1
-        y = _ghash_block(h, y, block)
+        y = _nvfs_a128gcm_ghash_block(h, y, block)
         i = i + 16
 
     val aad_bits: u64 = aad.len() * 8
@@ -396,14 +396,14 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     len_block.push(((ct_bits >> 8) & 0xFF).to_u8())
     len_block.push((ct_bits & 0xFF).to_u8())
 
-    y = _ghash_block(h, y, len_block)
+    y = _nvfs_a128gcm_ghash_block(h, y, len_block)
     y
 
 # ============================================================================
 # GCTR — AES-CTR with Incrementing Counter
 # ============================================================================
 
-fn _inc32(counter: [u8]) -> [u8]:
+fn _nvfs_a128gcm_inc32(counter: [u8]) -> [u8]:
     """Increment the rightmost 32 bits of a 16-byte counter block."""
     val c = (_u8_at(counter, 12).to_u32() << 24) |
             (_u8_at(counter, 13).to_u32() << 16) |
@@ -439,7 +439,7 @@ fn gctr(round_keys: [u8], icb: [u8], input: [u8]) -> [u8]:
         while j < 16:
             output.push(_u8_at(input, offset + j) ^ _u8_at(enc_cb, j))
             j = j + 1
-        cb = _inc32(cb)
+        cb = _nvfs_a128gcm_inc32(cb)
         i = i + 1
 
     val remaining = input.len() % 16
@@ -457,7 +457,7 @@ fn gctr(round_keys: [u8], icb: [u8], input: [u8]) -> [u8]:
 # AES-128-GCM Encryption
 # ============================================================================
 
-fn _make_j0(nonce: [u8]) -> [u8]:
+fn _nvfs_a128gcm_make_j0(nonce: [u8]) -> [u8]:
     """Construct J0 (initial counter block) from 12-byte nonce."""
     var j0: [u8] = rt_array_new_with_cap(16)
     var i: u64 = 0
@@ -485,10 +485,10 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
         i = i + 1
     val h = aes128_encrypt_block(zero_block, round_keys)
 
-    val j0 = _make_j0(nonce)
-    val icb = _inc32(j0)
+    val j0 = _nvfs_a128gcm_make_j0(nonce)
+    val icb = _nvfs_a128gcm_inc32(j0)
     val ciphertext = gctr(round_keys, icb, plaintext)
-    val s = ghash(h, aad, ciphertext)
+    val s = _nvfs_a128gcm_ghash(h, aad, ciphertext)
     val tag = gctr(round_keys, j0, s)
 
     _nvfs_a128gcm_append_bytes(ciphertext, tag)
@@ -512,8 +512,8 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
         i = i + 1
     val h = aes128_encrypt_block(zero_block, round_keys)
 
-    val j0 = _make_j0(nonce)
-    val s = ghash(h, aad, ciphertext)
+    val j0 = _nvfs_a128gcm_make_j0(nonce)
+    val s = _nvfs_a128gcm_ghash(h, aad, ciphertext)
     val expected_tag = gctr(round_keys, j0, s)
 
     # Constant-time tag comparison
@@ -526,7 +526,7 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     if diff != 0:
         return Aes128GcmResult.Err("authentication tag mismatch")
 
-    val icb = _inc32(j0)
+    val icb = _nvfs_a128gcm_inc32(j0)
     val plaintext = gctr(round_keys, icb, ciphertext)
 
     Aes128GcmResult.Ok(data: plaintext)

@@ -23,7 +23,7 @@ fn _u8_at(buf: [u8], idx: u64) -> u8:
 # AES S-Box (FIPS 197, Section 5.1.1) — inline table, no SFFI
 # ============================================================================
 
-fn _aes_sbox_table() -> [u8]:
+fn _aes_gcm_aes_sbox_table() -> [u8]:
     """Pre-computed AES S-box (256 entries)."""
     var t: [u8] = []
     # Row 0
@@ -110,11 +110,11 @@ fn _aes_sbox_table() -> [u8]:
 
 fn _aes_sbox(index: i64) -> u8:
     """Look up a byte in the AES S-box table."""
-    val tbl = _aes_sbox_table()
+    val tbl = _aes_gcm_aes_sbox_table()
     _u8_at(tbl, (index & 0xFF).to_u64())
 
 # AES Round Constants (RCON)
-fn _aes_rcon_table() -> [u8]:
+fn _aes_gcm_aes_rcon_table() -> [u8]:
     """AES RCON byte values for rounds 1..10."""
     var t: [u8] = []
     t.push(0x01) t.push(0x02) t.push(0x04) t.push(0x08)
@@ -124,7 +124,7 @@ fn _aes_rcon_table() -> [u8]:
 
 fn _aes_rcon_byte(index: i64) -> i64:
     """Return RCON byte for round (index+1) as i64 (the top byte of the Rcon word)."""
-    val tbl = _aes_rcon_table()
+    val tbl = _aes_gcm_aes_rcon_table()
     _u8_at(tbl, index.to_u64()).to_i64() & 0xFF
 
 # ============================================================================
@@ -368,7 +368,7 @@ fn aes256_encrypt_block(plaintext: [u8], round_keys: [u8]) -> [u8]:
 # Polynomial: x^128 + x^7 + x^2 + x + 1  (R = 0xE1000000...)
 # ============================================================================
 
-fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
+fn _aes_gcm_gf128_mul(x: [u8], y: [u8]) -> [u8]:
     """Multiply two 128-bit elements in GF(2^128)."""
     var z: [u8] = []
     var i: u64 = 0
@@ -417,16 +417,16 @@ fn gf128_mul(x: [u8], y: [u8]) -> [u8]:
 # Processes: pad(AAD) || pad(ciphertext) || len(A)||len(C)
 # ============================================================================
 
-fn _ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
+fn _aes_gcm_ghash_block(h: [u8], y: [u8], x_block: [u8]) -> [u8]:
     """Process one 16-byte block: Y_i = (Y_{i-1} XOR X_i) * H."""
     var xored: [u8] = []
     var i: u64 = 0
     while i < 16:
         xored.push(_u8_at(y, i) ^ _u8_at(x_block, i))
         i = i + 1
-    gf128_mul(xored, h)
+    _aes_gcm_gf128_mul(xored, h)
 
-fn _pad_to_16(data: [u8]) -> [u8]:
+fn _aes_gcm_pad_to_16(data: [u8]) -> [u8]:
     """Pad data to a multiple of 16 bytes with zeros."""
     var result: [u8] = []
     var i: u64 = 0
@@ -450,7 +450,7 @@ fn _aesgcm_append_bytes(a: [u8], b: [u8]) -> [u8]:
         i = i + 1
     out
 
-fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
+fn _aes_gcm_ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     """Compute GHASH for GCM: pad(A) || pad(C) || len(A)||len(C)."""
     var y: [u8] = []
     var i: u64 = 0
@@ -459,7 +459,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         i = i + 1
 
     # Process padded AAD blocks
-    val padded_aad = _pad_to_16(aad)
+    val padded_aad = _aes_gcm_pad_to_16(aad)
     i = 0
     while i < padded_aad.len().to_u64():
         var block: [u8] = []
@@ -467,11 +467,11 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         while j < 16:
             block.push(_u8_at(padded_aad, i + j))
             j = j + 1
-        y = _ghash_block(h, y, block)
+        y = _aes_gcm_ghash_block(h, y, block)
         i = i + 16
 
     # Process padded ciphertext blocks
-    val padded_ct = _pad_to_16(ciphertext)
+    val padded_ct = _aes_gcm_pad_to_16(ciphertext)
     i = 0
     while i < padded_ct.len().to_u64():
         var block: [u8] = []
@@ -479,7 +479,7 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
         while j < 16:
             block.push(_u8_at(padded_ct, i + j))
             j = j + 1
-        y = _ghash_block(h, y, block)
+        y = _aes_gcm_ghash_block(h, y, block)
         i = i + 16
 
     # Final block: len(A) || len(C) in bits, each as 64-bit big-endian
@@ -505,13 +505,13 @@ fn ghash(h: [u8], aad: [u8], ciphertext: [u8]) -> [u8]:
     len_block.push(((ct_bits >> 8) & 0xFF).to_u8())
     len_block.push((ct_bits & 0xFF).to_u8())
 
-    _ghash_block(h, y, len_block)
+    _aes_gcm_ghash_block(h, y, len_block)
 
 # ============================================================================
 # GCTR — AES-CTR with Incrementing Counter (NIST SP 800-38D, Section 6.5)
 # ============================================================================
 
-fn _inc32(counter: [u8]) -> [u8]:
+fn _aes_gcm_inc32(counter: [u8]) -> [u8]:
     """Increment the rightmost 32 bits of a 16-byte counter block.
 
     All arithmetic done in i64 to avoid Cranelift u32 miscompile on shifts.
@@ -554,7 +554,7 @@ fn _gctr(round_keys: [u8], icb: [u8], input: [u8], num_rounds: u64) -> [u8]:
         while j < 16:
             output.push(_u8_at(input, offset + j) ^ _u8_at(enc_cb, j))
             j = j + 1
-        cb = _inc32(cb)
+        cb = _aes_gcm_inc32(cb)
         i = i + 1
 
     val remaining = input.len().to_u64() % 16
@@ -572,7 +572,7 @@ fn _gctr(round_keys: [u8], icb: [u8], input: [u8], num_rounds: u64) -> [u8]:
 # J0 Construction (common to both AES-128 and AES-256 GCM)
 # ============================================================================
 
-fn _make_j0(nonce: [u8]) -> [u8]:
+fn _aes_gcm_make_j0(nonce: [u8]) -> [u8]:
     """Construct J0 = nonce || 0x00000001 from a 12-byte nonce."""
     var j0: [u8] = []
     var i: u64 = 0
@@ -603,10 +603,10 @@ fn aes128_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
         i = i + 1
     val h = aes128_encrypt_block(zero_block, round_keys)
 
-    val j0 = _make_j0(nonce)
-    val icb = _inc32(j0)
+    val j0 = _aes_gcm_make_j0(nonce)
+    val icb = _aes_gcm_inc32(j0)
     val ciphertext = _gctr(round_keys, icb, plaintext, 10)
-    val s = ghash(h, aad, ciphertext)
+    val s = _aes_gcm_ghash(h, aad, ciphertext)
     val tag = _gctr(round_keys, j0, s, 10)
 
     _aesgcm_append_bytes(ciphertext, tag)
@@ -625,8 +625,8 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
         i = i + 1
     val h = aes128_encrypt_block(zero_block, round_keys)
 
-    val j0 = _make_j0(nonce)
-    val s = ghash(h, aad, ciphertext)
+    val j0 = _aes_gcm_make_j0(nonce)
+    val s = _aes_gcm_ghash(h, aad, ciphertext)
     val expected_tag = _gctr(round_keys, j0, s, 10)
 
     # Constant-time tag comparison
@@ -639,7 +639,7 @@ fn aes128_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     if diff != 0:
         return AesGcmResult.Err("authentication tag mismatch")
 
-    val icb = _inc32(j0)
+    val icb = _aes_gcm_inc32(j0)
     AesGcmResult.Ok(data: _gctr(round_keys, icb, ciphertext, 10))
 
 # ============================================================================
@@ -661,10 +661,10 @@ fn aes256_gcm_encrypt(key: [u8], nonce: [u8], plaintext: [u8], aad: [u8]) -> [u8
         i = i + 1
     val h = aes256_encrypt_block(zero_block, round_keys)
 
-    val j0 = _make_j0(nonce)
-    val icb = _inc32(j0)
+    val j0 = _aes_gcm_make_j0(nonce)
+    val icb = _aes_gcm_inc32(j0)
     val ciphertext = _gctr(round_keys, icb, plaintext, 14)
-    val s = ghash(h, aad, ciphertext)
+    val s = _aes_gcm_ghash(h, aad, ciphertext)
     val tag = _gctr(round_keys, j0, s, 14)
 
     _aesgcm_append_bytes(ciphertext, tag)
@@ -684,8 +684,8 @@ fn aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
         i = i + 1
     val h = aes256_encrypt_block(zero_block, round_keys)
 
-    val j0 = _make_j0(nonce)
-    val s = ghash(h, aad, ciphertext)
+    val j0 = _aes_gcm_make_j0(nonce)
+    val s = _aes_gcm_ghash(h, aad, ciphertext)
     val expected_tag = _gctr(round_keys, j0, s, 14)
 
     # Constant-time tag comparison
@@ -698,7 +698,7 @@ fn aes256_gcm_decrypt(key: [u8], nonce: [u8], ciphertext: [u8], aad: [u8], tag: 
     if diff != 0:
         return AesGcmResult.Err("authentication tag mismatch")
 
-    val icb = _inc32(j0)
+    val icb = _aes_gcm_inc32(j0)
     AesGcmResult.Ok(data: _gctr(round_keys, icb, ciphertext, 14))
 
 # ============================================================================

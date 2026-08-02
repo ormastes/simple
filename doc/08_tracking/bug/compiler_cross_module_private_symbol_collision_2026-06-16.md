@@ -244,3 +244,77 @@ bounds the interpreter path only).
 `simple test` binds the child's stderr into a value via `process_run_bounded`, so a
 spec's own collision warnings never surface under `test`. All enumeration above was
 done with `simple run` for that reason. Mechanism INFERRED, invisibility PROVED.
+
+## Same-signature collision resolution — batch 2, AES-GCM / GCM-SIV (2026-08-02)
+
+Continued from batch 1 on the same crypto/TLS cluster.
+
+### TOP FINDING — `ed25519_verify` picks its implementation by import order (PROVED)
+
+`ed25519_verify(pubkey: [u8], message: [u8], signature: [u8]) -> bool` has **three
+co-compiled definitions with identical signatures**:
+
+| module | body |
+|---|---|
+| `src/lib/common/crypto/ed25519.spl` | pure-Simple RFC 8032 §5.1.7 verification |
+| `src/os/crypto/ed25519.spl` | pure-Simple RFC 8032 §5.1.7 verification, extra rejects |
+| `src/lib/nogc_sync_mut/io/signature_sffi.spl` | `rt_ed25519_verify(...) == 1` — native extern |
+
+**26 files call it without defining it**, including `src/os/crypto/jwt.spl`,
+`paseto.spl`, `cose.spl`, `src/os/services/update/tuf_signing.spl`,
+`src/os/tls13/_CertVerify/signature_verify.spl`, and the sshd/ssh_client key-exchange
+paths. Every one of them resolves through the bare-name registry, so **import order
+decides whether an Ed25519 signature is verified in pure Simple or handed to the
+native runtime**, with no diagnostic other than the opt-in warning.
+
+This compounds with a known JIT defect: an unregistered `@extern fn` returns nil
+silently under the JIT only, and `signature_sffi`'s body is `result == 1` on exactly
+such a call. A wrong answer here is an authentication-bypass class, not a
+correctness nit.
+
+NOT fixed in this lane: choosing a winner among three verification backends is a
+security-design decision, and the 26 non-defining callers mean a piecemeal rename
+converts the hazard into a build break. Requires a single canonical
+`ed25519_verify` that all callers import explicitly.
+
+### Resolved in batch 2 (disposition b — module-unique renames)
+`ghash`, `gf128_mul`, `_ghash_block`, `_inc32`, `_make_j0`, `_pad_to_16`,
+`_aes_sbox_table`, `_aes_rcon_table`, `_aes128_encrypt_block`,
+`_aes256_encrypt_block` across `src/lib/common/crypto/aes_gcm.spl`,
+`src/lib/nogc_async_mut_noalloc/tls/aes128_gcm.spl`, `src/os/crypto/aes_gcm.spl`,
+`aes128_gcm.spl`, `aes256_gcm.spl`, `aes128_tables.spl`,
+`aes_gcm_siv{,_aes_core,_polyval}.spl`, `src/os/services/nvfs/core/crypto/aes128_gcm.spl`.
+Each of these had **zero non-defining callers** (checked definer-set vs caller-set),
+so no call site was re-pointed and no reroute is possible. All ten names now have
+0 or 1 definition repo-wide.
+
+`_bytes_equal` reduced to a single `src/**` definition (`src/os/crypto/ed25519.spl`).
+
+### Deliberately NOT renamed, with reasons (disposition c — recorded so it stops being re-triaged)
+Each of these has non-defining callers that resolve through the bare name today.
+Renaming them piecemeal trades a silent wrong answer for a build break across the
+crypto stack, which is not an improvement without the canonical-helper work:
+
+| name | definers | non-defining callers |
+|---|---|---|
+| `_u8_at` | 33 | 91 |
+| `ed25519_verify` | 3 | 26 |
+| `_byte_buf` | 9 | 3 |
+| `_copy_range` | 3 | 2 |
+| `_aes_sbox` | 7 | 1 (`src/os/crypto/aes128_gcm.spl`) |
+| `_aes_rcon` | 6 | 1 (`src/os/crypto/aes128_gcm.spl`) |
+| `sha512_hmac` | 2 | 2 (`ecdsa_p521.spl`, `slh_dsa.spl`) |
+
+Also left: spec-local `_bytes_equal` copies under `test/**`. Now that `src/**` has
+exactly one definition, a spec that declares its own still forms a 2-way
+same-signature collision with it — the classic shim-vacuity shape. Resolving that is
+a `test/**` sweep, not part of this crypto lane.
+
+### Verification (PROVED)
+Same 16-spec crypto/TLS set, two worktrees at the same base sha:
+
+| | BASE | batch 1 | batch 1+2 |
+|---|---|---|---|
+| failing example NAME set | 3 | 3 | 3, `diff` clean |
+| per-spec exit codes | — | identical | identical |
+| live same-signature collisions | 50 | 25 | **13** |
