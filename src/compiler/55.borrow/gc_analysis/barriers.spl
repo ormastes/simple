@@ -31,10 +31,18 @@ enum BarrierKind:
     # No barrier needed
     None_
 
+    fn to_text() -> text:
+        """Human-readable name, used in barrier diagnostics."""
+        if self == BarrierKind.PreWrite: return "pre-write"
+        if self == BarrierKind.PostWrite: return "post-write"
+        if self == BarrierKind.CardMark: return "card-mark"
+        if self == BarrierKind.Generational: return "generational"
+        "none"
 
-# ============================================================================
-# BarrierKind Methods (was: impl BarrierKind:)
-# ============================================================================
+    fn is_required() -> bool:
+        """Whether this kind denotes an actual barrier that must be emitted."""
+        self != BarrierKind.None_
+
 
 # ============================================================================
 # Write Site
@@ -151,7 +159,6 @@ class BarrierAnalysis:
     requirements: [BarrierRequirement]
     errors: [BarrierError]
     is_gc_type: fn(i64) -> bool
-    is_young_gen: fn(i64) -> bool  # For generational GC
 
     static fn create(gc_strategy: GcStrategy, is_gc_type: fn(i64) -> bool) -> BarrierAnalysis:
         BarrierAnalysis(
@@ -160,19 +167,18 @@ class BarrierAnalysis:
             requirements: [],
             errors: [],
             is_gc_type: is_gc_type
-            ## DESUGARED: is_young_gen: nil
         )
 
     me record_write(site: WriteSite):
         """Record a write site."""
-        self.write_sites = self.write_sites_push(write_sites, site)
+        self.write_sites = self.write_sites.push(site)
 
     me analyze() -> bool:
         """Analyze all write sites for barrier requirements."""
         for site in self.write_sites:
             self.analyze_write(site)
 
-        self.errors_is_empty(errors)
+        self.errors.is_empty()
 
     me analyze_write(site: WriteSite):
         """Analyze a single write site."""
@@ -224,21 +230,23 @@ class BarrierAnalysis:
         """Verify that required barriers are emitted."""
         for req in self.requirements:
             val point = req.write_site.program_point
-            match emitted_barriers_get(emitted_barriers, point):
-                case nil:
-                    self.errors = self.errors.push(BarrierError.missing(
-                        req.write_site,
-                        req.barrier_kind
+            # contains_key + index read, never Dict.get(): the value type is an
+            # enum. See doc/07_guide/language/dict_native_pitfalls.md
+            if not emitted_barriers.contains_key(point):
+                self.errors = self.errors.push(barriererror_missing(
+                    req.write_site,
+                    req.barrier_kind
+                ))
+            else:
+                val emitted = emitted_barriers[point]
+                if emitted != req.barrier_kind:
+                    self.errors = self.errors.push(BarrierError(
+                        message: "Wrong barrier kind: expected {req.barrier_kind.to_text()}, got {emitted.to_text()}",
+                        write_site: req.write_site,
+                        missing_barrier: req.barrier_kind
                     ))
-                case emitted:
-                    if emitted != req.barrier_kind:
-                        self.errors = self.errors.push(BarrierError(
-                            message: "Wrong barrier kind: expected {req.barrier_kind.to_text()}, got {emitted.to_text()}",
-                            write_site: req.write_site,
-                            missing_barrier: req.barrier_kind
-                        ))
 
-        self.errors_is_empty(errors)
+        self.errors.is_empty()
 
     fn get_requirements() -> [BarrierRequirement]:
         """Get all barrier requirements."""

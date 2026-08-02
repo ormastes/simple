@@ -237,13 +237,90 @@ run against the repaired spec:
 | `can_stack_allocate()` always `true` | 4 |
 | *(restored baseline)* | **0** |
 
-**`roots.spl`, `barriers.spl`, `mod.spl`: STILL BROKEN.** `RootKind.to_text()`,
-`GcRoot.is_live_at()`, the `BarrierKind` methods and the `GcSafetyReport`
-methods are still missing, and those files still carry mangled call sites plus
-the tuple-type and optional-type damage listed above. They are left failing
-loudly rather than stubbed: a nil-returning `is_live_at` or a constant
-`to_text` would turn a loud semantic-analysis failure into a silently wrong
-GC-root analysis, which is strictly worse.
+**`roots.spl`: FIXED and proved executable.** `RootKind.to_text()` (payload
+included, so two distinct locals cannot collapse onto one dict key),
+`GcRoot.is_live_at()` and `GcRoot.to_text()` reconstructed; the `_tv_0`
+pseudo-field replaced by the real `(i64, i64)` tuple type; `has_GcRoot`
+replaced by `GcRoot?`; `RootError.root` restored to a genuine optional; all
+mangled call sites unmangled; dict reads via `contains_key`, counts via
+`keys().len()`.
+
+**`barriers.spl`: PARTIALLY FIXED.** `BarrierKind.to_text()` and
+`.is_required()` restored, all mangled call sites unmangled, and the
+unconstructible `is_young_gen: fn(i64) -> bool` field removed — the only
+constructor never set it and no code ever read it, so the struct could not be
+built. `BarrierAnalysis.analyze()` is still blocked; see OPEN DEFECT 2.
+
+`test/01_unit/compiler/semantics/gc_roots_barriers_spec.spl` is new: 20
+examples, all green, covering `RootKind`, `GcRoot`, `RootSet`, `RootError`,
+`BarrierKind`, `WriteSite` and `BarrierError`. Non-vacuity proved by four
+sabotages of the restored code:
+
+| sabotage | failing examples |
+|---|---|
+| `RootKind.to_text()` drops the payload | 8 |
+| `GcRoot.is_live_at()` always `true` | 2 |
+| `rooterror_unrooted` attaches a root instead of `nil` | 1 |
+| `BarrierKind.to_text()` collapses two names | 1 |
+| *(restored baseline)* | **0** |
+
+**`mod.spl`: STILL BROKEN.** It carries a further damage class not present
+elsewhere: `RootAnalysis.create(\t: false)` and
+`BarrierAnalysis.create(GcStrategy.StopTheWorld, \t: false)` contain a literal
+TAB character as an argument name, and `analyze_function` calls
+`RootAnalysis.create(self.is_gc_type(_1))` where `_1` is a leftover closure
+placeholder. Both are corrupted lambda desugars (`|x| self.is_gc_type(x)`).
+`GcSafetyReport` also still has an empty methods block. Left failing loudly.
+
+## OPEN DEFECT 1 — JIT cannot lower an optional struct-typed field
+
+Making `RootError.root` a proper `GcRoot?` is correct and works under the
+interpreter, but the JIT refuses the module:
+
+    HIR lowering error: Unsupported feature: cannot infer field type
+    while lowering main: struct 'RootError' field 'root'
+
+so the whole module silently drops to the interpreter (~100-1000x slower). The
+same happens for `BarrierRequirement.barrier_kind` (reported as struct `'ANY'`).
+Reproduce with `bin/simple run` on
+`test/01_unit/compiler/semantics/gc_roots_barriers_spec.spl` and read the
+`[jit-fallback]` line. This is a compiler gap, not porter damage, and it is why
+the specs above are interpreter-only evidence.
+
+## OPEN DEFECT 2 — `BarrierAnalysis.analyze()` fails semantic analysis
+
+    error: semantic: unknown symbol self.is_gc_type
+
+raised from `analyze()` to `analyze_write()` at
+`val target_is_gc = (self.is_gc_type)(site.target_type)`. Reproduce:
+
+    use compiler.borrow.gc_analysis.barriers.{GcStrategy, BarrierAnalysis, writesite_field_write}
+    fn gc_all(t: i64) -> bool:
+        true
+    fn main():
+        var b = BarrierAnalysis.create(GcStrategy.Incremental, gc_all)
+        b.record_write(writesite_field_write(5, 1, 0, 2))
+        print(b.analyze().to_text())
+
+`create` and `record_write` both succeed; only `analyze` fails. NOT yet reduced
+to a minimal case: five targeted repros all PASSED, so the trigger is not any
+of them. Refuted as the cause: calling a function-typed field as
+`(self.f)(x)` or `self.f(x)`; doing so from a `me` method; a `create` parameter
+sharing the field's name; a `match` expression on an enum field in the same
+function; and iterating `self.<array field>` to call another `me` method that
+uses the function field. Each of those works standalone.
+
+This is left failing loudly. A hardcoded `true`/`false` in place of the
+predicate would make the barrier analysis silently emit wrong barrier
+requirements, which is far worse than an unrunnable `analyze()`.
+
+## TODO — generational young-gen classification is unimplemented
+
+`is_young_gen` was removed as dead and unconstructible. `analyze_write` already
+handles `GcStrategy.Generational` conservatively (any GC-typed target and source
+gets a `Generational` barrier) without consulting it. Refining that with a real
+young-generation predicate, so old-to-old writes can skip the barrier, is
+unimplemented.
 
 ## Related
 

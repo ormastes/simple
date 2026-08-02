@@ -26,10 +26,19 @@ enum RootKind:
     Temporary(id: i64)       # Temporary value
     Return                   # Return value
 
+    fn to_text() -> text:
+        """Stable, collision-free key for this root kind.
 
-# ============================================================================
-# RootKind Methods (was: impl RootKind:)
-# ============================================================================
+        RootSet keys its dict by this text, so the payload has to be part of
+        the key: two distinct locals must not collapse onto one entry.
+        """
+        match self:
+            Local(id): "local:{id}"
+            Parameter(idx): "param:{idx}"
+            Global(name): "global:{name}"
+            Temporary(id): "temp:{id}"
+            _: "return"
+
 
 # ============================================================================
 # GC Root
@@ -41,13 +50,21 @@ struct GcRoot:
     type_id: i64         # Type of the rooted value
     is_interior: bool    # Interior pointer (points into object)
     is_pinned: bool      # Pinned (cannot be moved)
-    val _tv_0 = [i64, i64]
-    live_range: _tv_0  # (start_point, end_point)
+    live_range: (i64, i64)  # (start_point, end_point), both inclusive
 
+    fn is_live_at(point: i64) -> bool:
+        """Whether this root is live at a program point.
 
-# ============================================================================
-# GcRoot Methods (was: impl GcRoot:)
-# ============================================================================
+        The range is inclusive at both ends: a root created at its start point
+        is already live there, and one ending at a GC point is still live when
+        that point runs.
+        """
+        point >= self.live_range[0] and point <= self.live_range[1]
+
+    fn to_text() -> text:
+        """Human-readable description, used in root-analysis error messages."""
+        "{self.kind.to_text()}:type{self.type_id}"
+
 
 fn gcroot_local(id: i64, type_id: i64) -> GcRoot:
         GcRoot(
@@ -82,17 +99,25 @@ class RootSet:
 
     me add_root(root: GcRoot):
         """Add a root to the set."""
-        val key = root.kind_to_text(kind)
+        val key = root.kind.to_text()
         self.roots[key] = root
 
     me remove_root(kind: RootKind):
         """Remove a root from the set."""
-        val key = kind_to_text(kind)
-        self.roots_remove(roots, key)
+        val key = kind.to_text()
+        self.roots.remove(key)
 
-    fn get_root(kind: RootKind) -> has_GcRoot:
-        """Get a root by kind."""
-        self.roots_get(roots, kind.to_text())
+    fn get_root(kind: RootKind) -> GcRoot?:
+        """Get a root by kind, or nil if this set has none of that kind.
+
+        Reads via contains_key + index rather than Dict.get(): under native
+        codegen Dict.get() on a struct value is corrupt.
+        See doc/07_guide/language/dict_native_pitfalls.md
+        """
+        val key = kind.to_text()
+        if self.roots.contains_key(key):
+            return self.roots[key]
+        nil
 
     fn all_roots() -> [GcRoot]:
         """Get all roots."""
@@ -109,13 +134,16 @@ class RootSet:
         for _for_item_1 in self.roots:
             val _unused_2 = _for_item_1[0]
             val root = _for_item_1[1]
-            if root_is_live_at(root, point):
+            if root.is_live_at(point):
                 result = result.push(root)
         result
 
     fn count() -> i64:
-        """Count roots."""
-        self.roots_len(roots)
+        """Count roots.
+
+        Counts via keys(): Dict.len() returns -1 under native codegen.
+        """
+        self.roots.keys().len()
 
 # ============================================================================
 # GC Point
@@ -163,28 +191,26 @@ struct RootError:
     """Error in root analysis."""
     message: text
     point: i64
-    # # DESUGARED: root: GcRoot
-    has_root: bool
-    root: GcRoot
+    # An unrooted-pointer error names no specific root, so this is optional.
+    # The porter had split it into a has_root flag plus a non-optional GcRoot
+    # that neither constructor ever set, which could not have type-checked.
+    root: GcRoot?
 
-
-# ============================================================================
-# RootError Methods (was: impl RootError:)
-# ============================================================================
 
 fn rooterror_unrooted(point: i64, description: text) -> RootError:
+        """An unrooted pointer was live across a GC point."""
         RootError(
             message: "Unrooted pointer at GC point: {description}",
-            point: point
-            ## DESUGARED: root: nil
+            point: point,
+            root: nil
         )
 
 
 fn rooterror_dangling(point: i64, root: GcRoot) -> RootError:
+        """A recorded root no longer refers to a live value."""
         RootError(
             message: "Dangling root: {root.to_text()}",
             point: point,
-            # # DESUGARED: root: Some(root)
             root: root
         )
 
@@ -209,22 +235,21 @@ class RootAnalysis:
 
     me get_or_create_roots(point: i64) -> RootSet:
         """Get or create root set for a point."""
-        match self.roots_get(roots, point):
-            case set: set
-            case nil:
-                val set = rootset_create()
-                self.roots[point] = set
-                set
+        if self.roots.contains_key(point):
+            return self.roots[point]
+        val set = RootSet.create()
+        self.roots[point] = set
+        set
 
     me record_root(point: i64, root: GcRoot):
         """Record a root at a program point."""
         var set = self.get_or_create_roots(point)
-        set_add_root(set, root)
+        set.add_root(root)
         self.roots[point] = set
 
     me record_gc_point(gc_point: GcPoint):
         """Record a GC safepoint."""
-        self.gc_points = self.gc_points_push(gc_points, gc_point)
+        self.gc_points = self.gc_points.push(gc_point)
 
     me propagate_roots(from_point: i64, to_point: i64):
         """Propagate roots from one point to another."""
@@ -234,8 +259,8 @@ class RootAnalysis:
         for _for_item_2 in from_set.roots:
             val _unused_3 = _for_item_2[0]
             val root = _for_item_2[1]
-            if root_is_live_at(root, to_point):
-                to_set_add_root(to_set, root)
+            if root.is_live_at(to_point):
+                to_set.add_root(root)
 
         self.roots[to_point] = to_set
 
@@ -246,21 +271,19 @@ class RootAnalysis:
 
             # Check required roots are present
             for required_kind in gc_point.required_roots:
-                match roots_get_root(roots, required_kind):
-                    case nil:
-                        self.errors = self.errors.push(RootError.unrooted(
-                            gc_point.program_point,
-                            "Missing required root: {required_kind.to_text()}"
-                        ))
-                    case _:
+                if roots.get_root(required_kind) == nil:
+                    self.errors = self.errors.push(rooterror_unrooted(
+                        gc_point.program_point,
+                        "Missing required root: {required_kind.to_text()}"
+                    ))
 
-        self.errors_is_empty(errors)
+        self.errors.is_empty()
 
     fn get_roots_at(point: i64) -> [GcRoot]:
         """Get all roots at a program point."""
-        match self.roots_get(roots, point):
-            case set: set_all_roots(set)
-            case nil: []
+        if self.roots.contains_key(point):
+            return self.roots[point].all_roots()
+        []
 
     fn get_gc_points() -> [GcPoint]:
         """Get all GC safepoints."""
