@@ -1,8 +1,8 @@
 # Stage 4 database test runtime-facade import gap
 
-Status: open  
+Status: open — self-host parity blocker  
 Severity: P1 bootstrap blocker  
-Fix owner: `/root/stage4-database-test-runtime-facade` — CLAIMED
+Fix owner: `/root/stage4-database-test-runtime-facade` — HANDOFF AFTER ITERATION CAP
 
 ## Reproduction
 
@@ -32,3 +32,22 @@ then compile-check both variants before the final retained-cache Stage 4 retry.
 
 Stage 4 remains the authoritative closure gate, so the claim stays active until
 the final no-stub build crosses this module and produces its candidate.
+
+## Final Stage 4 result for this session
+
+The third and final bounded build cycle rejected the replacement facade name:
+
+```text
+src/lib/nogc_async_mut/database/test.spl:
+unresolved name: time_now_unix_micros
+```
+
+The file explicitly imports that name from `std.io`, and both Rust-seed
+compile checks pass, so the remaining defect is self-host parity in resolving a
+name re-exported by the `std.io` facade. A fresh scoped session should determine
+whether the bounded repair is a direct import from each concrete IO owner or a
+HIR re-export-resolution correction, add a self-host regression, refresh Stage
+3 if compiler code changes, and then begin a new capped Stage 4 cycle set.
+
+Retained final log:
+`build/bootstrap-stage4-b1df-cycle1/logs/x86_64-unknown-linux-gnu/stage4-native-build-runtime-facade-final.log`.
