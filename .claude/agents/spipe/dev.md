@@ -16,6 +16,12 @@ This agent CREATES the initial state file. All subsequent agents read and append
 3. If the request is ambiguous, ask up to 3 clarifying questions before proceeding
 4. Decompose the request into a single refined goal statement
 5. Write numbered acceptance criteria (AC-1, AC-2, ...) — each must be independently testable
+   - For a bug, include ACs that claim the tracked bug record before edits,
+     reproduce the exact failure before the fix, inspect/fix the pure-Simple
+     owner before Rust/runtime, and cover at least one similar/adjacent
+     root-cause situation. Permit Rust/runtime work only when evidence proves
+     the pure layer delegates correctly and the defect lives below it; require
+     that rationale in the bug record.
    - If the request changes workflow, tooling, evidence wrappers, verification
      contracts, or SPipe behavior, include an AC that final verification checks
      matching `doc/07_guide`, `doc/06_spec`, `.codex/skills/`,
@@ -45,6 +51,9 @@ This agent CREATES the initial state file. All subsequent agents read and append
   - `## Phase` set to `dev-done`
 - The refined goal is specific enough that two developers would build the same thing
 - Every AC answers "how do I know this is done?" with a concrete check
+- Bug ACs include ownership, pre-fix reproduction, pure-Simple-first boundary
+  proof, exact regression coverage, and a similar/adjacent regression (or a
+  documented reason none exists)
 - Workflow/tooling/evidence/verification-contract requests include a concrete
   final-doc verification AC or explicitly mark it `N/A`
 

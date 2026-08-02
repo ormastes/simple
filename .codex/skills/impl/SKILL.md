@@ -104,6 +104,11 @@ Skip if exist. See `design` skill for details.
 - Write unit tests alongside implementation
 - Write integration tests for cross-module interactions
 - Add doctests for public API functions
+- Bug fixes must claim their tracking record, reproduce the exact failure
+  before editing, and fix the pure-Simple owner before Rust/runtime. A
+  Rust/runtime fix requires evidence that the pure layer delegates correctly
+  and the defect is below that boundary. Cover the exact reproducer plus at
+  least one similar/adjacent root-cause shape; document why if none exists.
 - For short grammar changes, add interpreter and native coverage separately:
   - Interpreter specs may cover pipe-forward, composition, dynamic lambda dispatch, and no-paren DSL forms.
   - Native specs must avoid forms that only pass through codegen stub fallback.

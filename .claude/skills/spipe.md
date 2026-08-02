@@ -1224,6 +1224,25 @@ fail with the exact symptom in the bug report**, then fix the code and re-run.
 Report both observations (`3 failed → 21/0`, with the failing values quoted);
 "added a spec, suite green" is not evidence the spec covers the defect.
 
+### Pure-Simple-first ownership and adjacent regressions
+
+For every bug, claim the tracking record before editing (`Fix owner: <lane> —
+CLAIMED`) so parallel agents do not fix the same defect concurrently. Resolve
+the tag only when the fix and evidence land.
+
+Fix the pure-Simple owner first: inspect `src/compiler`, `src/lib`, and
+`src/app` before changing `src/compiler_rust` or `src/runtime`. A Rust/runtime
+change is allowed only when the smallest failing reproducer proves the
+pure-Simple layer already delegates correctly and the defect lives below that
+boundary; record that proof in the bug report. Never use a Rust-first patch to
+mask a missing or incorrect pure-Simple implementation.
+
+Regression coverage must include both the exact minimal reproducer observed
+failing before the fix and at least one similar/adjacent situation that could
+share the root cause (for example absent/present option paths, a sibling scalar
+width, a second extern using the same marshaller, or another keyword-binding
+form). If no meaningful adjacent case exists, record why in the bug report.
+
 ## GUI sanity tests (pure-Simple lane)
 
 After any GUI / engine2d / web-render change, sanity-check the **three main GUI

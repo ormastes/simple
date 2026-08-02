@@ -44,6 +44,11 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   `DrawIrComposition`, and the plan-defined frozen SSpec vocabulary; keep
   secondary detail steps folded.
 - 80%+ branch coverage target
+- Bug fixes must claim their tracking record, reproduce the exact failure
+  before editing, and fix the pure-Simple owner before Rust/runtime. A
+  Rust/runtime fix requires evidence that the pure layer delegates correctly
+  and the defect is below that boundary. Cover the exact reproducer plus at
+  least one similar/adjacent root-cause shape; document why if none exists.
 - For scenario-oriented specs, run the generated-manual review loop before
   claiming completion:
   `bin/simple spipe-docgen <spec> --output doc/06_spec --no-index`, read the

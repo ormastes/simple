@@ -15,6 +15,14 @@ goal refinement and acceptance criteria, then continue through research, design,
 SSpec scenarios executed through SPipe, implementation, refactor, verification,
 and ship handoff:
 
+For bug fixes, claim the bug record before source edits, reproduce the exact
+failure first, and fix the pure-Simple owner (`src/compiler`/`src/lib`/`src/app`)
+before Rust/runtime. Rust/runtime edits require evidence that the pure layer
+delegates correctly and the defect is below that boundary. Add both the exact
+reproducer and at least one similar/adjacent root-cause regression; document
+why when no meaningful adjacent case exists. Resolve the ownership tag only
+after the fix and evidence land.
+
 ```
 /sp_dev <description of what to build or fix>
 ```
