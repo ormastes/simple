@@ -41,7 +41,8 @@ The focused no-stub native build compiled 45 modules with 0 failures, and its
 fresh executable ran 2 examples with 0 failures. The retained build log is
 `build/focused-stage4-facade/logs/native-build.log`.
 
-Bare `to_int(text)` repairs are intentionally handled by a separate non-
-overlapping lane. `dir_walk_native` in `test_manifest_scanner.spl` remains a
+Bare `to_int(text)` repairs were handled by a separate non-overlapping lane;
+that lane also routed `checkpoint.spl` through the concrete time owner after
+the batches were integrated. `dir_walk_native` in `test_manifest_scanner.spl` remains a
 similar but unproven broad-facade risk because `std.io_runtime` does not expose
 that distinct native-walk surface.
