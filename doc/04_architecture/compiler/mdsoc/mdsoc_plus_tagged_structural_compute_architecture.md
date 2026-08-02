@@ -688,14 +688,32 @@ A consequence worth stating rather than rediscovering: adding an 18th
 `MappingKind` is a breaking change to `MappingKindSet`, not an additive one, and
 requires a schema-version bump.
 
-Three types in these signatures are deliberately **not** frozen and remain
-tracked open gaps: `MappingShardRef` (`finish()`, and a field of `StageReceipt`
-and `VerificationReceipt`), `SourceOriginSet` (`trace_to_source`) and
-`EntitySetView` (also used by §5's tag index port). They are handle and view
-types rather than parts of the compressed mapping format, and `EntitySetView` in
-particular is shared with the tag and query groups — freezing them from inside
-the mapping group would pre-empt the StageReceipt and QueryIR artifact groups.
-They are recorded here so the gap stays tracked.
+CORRECTED 2026-08-02. This section used to defer three types in these
+signatures as "deliberately not frozen ... tracked open gaps": `MappingShardRef`,
+`SourceOriginSet` and `EntitySetView`. Two of the three have since been frozen
+and implemented by the groups this section handed them to, so the deferral was
+stale prose. Current state, verified against the tree rather than against this
+document:
+
+- `EntitySetView` — **FROZEN and implemented.** Handed to the QueryIR group,
+  which froze it in `doc/05_design/platform/structural_compute/query_contract_v1.md`
+  as 13 bytes, `object_slot u32 | offset u32 | count u32 | order u8`, envelope
+  magic `SQSV`. Implemented in `src/lib/common/structural/query/` — the struct
+  and `EntitySetOrder` in `query_program.spl`, the codec in `query_codec.spl`.
+  Measured 2026-08-02 by round-trip: body length 13, framed length 21, all three
+  u32 fields survive encode/decode, and a corrupted `order` discriminant or a
+  truncated buffer is hard-rejected rather than silently accepted.
+- `MappingShardRef` — **FROZEN and implemented.** Handed to the StageReceipt
+  group. 52 bytes (`SnapshotId` 28 + `shard_index` u32 + `edge_count` u32 +
+  `Hash128` 16, no padding), defined in
+  `src/lib/common/structural/receipt/receipt_types.spl` with an encoder, a
+  decoder and a result type in `receipt_codec.spl`.
+- `SourceOriginSet` — **still open.** Ownership is resolved below (it belongs to
+  MAP), but no struct for it exists anywhere in `src/`; it appears only in prose.
+  This is the one genuine remaining gap of the original three.
+
+All three are handle and view types rather than parts of the compressed mapping
+format, which is why the mapping group did not freeze them itself.
 
 **`SourceOriginSet` ownership is resolved here: it belongs to MAP.** Three
 separate freeze waves each examined it and each declined, on three different

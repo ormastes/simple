@@ -59,7 +59,7 @@ Resolution:
 |---|---|---|
 | `MappingShardRef` | **FROZEN HERE** | §6.4 states in so many words that it is *a field of StageReceipt and VerificationReceipt*. It cannot be left open without leaving a hole in this group's records. |
 | `SourceOriginSet` | **NOT frozen — ownership genuinely ambiguous, reported** | It is the return type of `MappingGraph::trace_to_source` and is referenced by **no receipt field anywhere in §21**. It belongs to MAP or to QUERY, and nothing in §26/§27 decides between them. Guessing would repeat the pre-emption §6.4 was written to avoid. |
-| `EntitySetView` | **NOT frozen — owned elsewhere** | Shared with the tag index port (§5) and the QueryIR group, which a sibling lane is freezing concurrently. |
+| `EntitySetView` | **Frozen elsewhere, not here** | Shared with the tag index port (§5) and the QueryIR group, which froze it in `query_contract_v1.md`: 13 bytes, `object_slot u32 | offset u32 | count u32 | order u8`, magic `SQSV`. Round-trip verified against the implementation 2026-08-02. |
 
 ---
 
