@@ -500,6 +500,21 @@ Current upstream tip noted in this branch as `63c362526c` (latest checked).
   projection and identity, or introduce an effective CSS digest; never allow
   output-visible CSS to retain an unchanged cache identity.
 
+### Required full-glass follow-up contract
+
+- Use typed `--wm-backdrop-blur`, `--wm-backdrop-saturation`,
+  `--wm-border-width`, `--wm-border-color`, `--wm-radius`, active/inactive
+  shadow, and two-stop vertical-gradient patch fields over the active snapshot.
+  Missing/invalid fields preserve the active field and a wholly unrecognized
+  file remains a no-op.
+- Add a derived effective-CSS SHA-256 from canonical `composed_css`. Thread it
+  through BrowserBackend keys, hosted retained-content revision, theme-ready
+  acknowledgement, and Web receipt validation. Regression: sequential
+  `--wm-error`-only overrides retain source/material but must change effective
+  CSS identity and invalidate all Web/host cached output.
+- Do not consume this work through the currently dirty
+  `simple_web_window_renderer.spl`; coordinate with its active owner first.
+
 - `fe481ab069` `refactor(ui): S1 DrawIR Vulkan-canonical enums + ResourceTable.formats u32`
   - `src/lib/common/ui/draw_ir_v3.spl`
   - `src/lib/common/ui/draw_ir_v3_backend_enums.spl`
