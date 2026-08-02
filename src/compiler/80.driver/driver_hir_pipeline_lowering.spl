@@ -47,6 +47,11 @@ fn _driver_collect_hir_errors(ctx: CompileContext, name: text, errors: [Lowering
         else:
             ctx.add_error(_format_hir_lowering_error(name, err))
 
+pub fn driver_hir_retention_error(function_count: i64) -> text?:
+    if function_count < 0:
+        return Some("invalid HIR function dictionary length: {function_count}")
+    nil
+
 fn _driver_validate_value_struct_layouts(ctx: CompileContext):
     for error in validate_value_struct_layouts(ctx.hir_modules):
         ctx.add_error(error)
@@ -319,6 +324,21 @@ impl CompilerDriver:
             if focused_future_driver_diag:
                 eprint("[driver-hir] errors done")
 
+            # Fatal lowering diagnostics belong to the source module and must
+            # stop this phase before its partially-lowered aggregate is kept.
+            # Continuing used to retain async/future's corrupt HirModule and
+            # enter unbounded downstream CPU/RSS growth.
+            if self.ctx.errors.len() > 0:
+                return (self.ctx, false)
+
+            val hir_function_count: i64 = hir_module.functions.len()
+            if focused_future_driver_diag:
+                eprint("[driver-hir] functions={hir_function_count}")
+            val retention_error = driver_hir_retention_error(hir_function_count)
+            if retention_error != nil:
+                self.ctx.add_error("HIR retention error in {name}: {retention_error.unwrap()}")
+                return (self.ctx, false)
+
             # Fold this module's newly-lowered traits back into the shared
             # registry so later modules (which get their own fresh HirLowering
             # instance) can still resolve cross-module trait default methods.
@@ -329,9 +349,6 @@ impl CompilerDriver:
                 eprint("[driver-hir] stored")
             if is_requested_bootstrap_entry:
                 phase_entry_source_index = source_idx
-            val hir_function_count: i64 = hir_module.functions.len()
-            if focused_future_driver_diag:
-                eprint("[driver-hir] functions={hir_function_count}")
             log_phase("phase3:hir:file:done {src.path} module={name} funcs={hir_function_count}")
             log_trace("stored HIR module")
             source_idx = source_idx + 1
