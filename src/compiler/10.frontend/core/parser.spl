@@ -859,7 +859,7 @@ fn parser_parse_type_with_union() -> i64:
 
 # ===== Top-Level Module Entry Points =====
 
-fn _parse_module_with_diagnostics(source: text, path: text, suppress_diagnostics: bool):
+fn _parse_module_with_diagnostics(source: text, path: text, suppress_diagnostics: bool) -> bool:
     val saved_lex_source = rt_env_get("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     val saved_lex_path = rt_env_get("SIMPLE_BOOTSTRAP_LEX_PATH") ?? ""
     val saved_diagnostics_suppressed = parser_diagnostics_suppressed_get()
@@ -867,9 +867,17 @@ fn _parse_module_with_diagnostics(source: text, path: text, suppress_diagnostics
     parser_init_with_path(preprocessed, path)
     parser_diagnostics_suppressed_set(suppress_diagnostics)
     parse_module_body()
+    # Read the error state before returning across the split parser-module
+    # boundary. Module-level writes made by parser_stmts are not guaranteed to
+    # remain visible after that return in self-hosted execution; the process
+    # mirror covers the same split-module case. Returning the verdict by value
+    # makes parse_module_silent_checked reliable for statement-local errors
+    # such as the explicit `val match` rejection.
+    val parse_failed = par_had_error_get() or par_had_error_mirror_get()
     parser_diagnostics_suppressed_set(saved_diagnostics_suppressed)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", saved_lex_source)
     rt_env_set("SIMPLE_BOOTSTRAP_LEX_PATH", saved_lex_path)
+    parse_failed
 
 fn parse_module(source: text, path: text):
     _parse_module_with_diagnostics(source, path, false)
@@ -888,7 +896,6 @@ fn parse_module_silent_checked(source: text, path: text) -> bool:
     par_had_error_mirror_clear()
     par_first_error_mirror_clear()
     _parse_module_with_diagnostics(source, path, true)
-    par_had_error_get() or par_had_error_mirror_get()
 
 fn parse_module_file(source: text, path: text):
     # Parse additional file without resetting AST
