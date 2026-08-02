@@ -28,8 +28,7 @@ pub fn rt_alloc(size: u64) -> *mut u8 {
     unsafe { c_sffi::rt_alloc(size as i64) }
 }
 #[inline(always)]
-pub fn rt_free(ptr: *mut u8, size: u64) {
-    let _ = size;
+pub fn rt_free(ptr: *mut u8) {
     unsafe { c_sffi::rt_free(ptr) }
 }
 #[inline(always)]
@@ -83,5 +82,16 @@ pub extern "C" fn rt_value_to_ptr(v: RuntimeValue) -> *mut u8 {
         v.as_heap_ptr().cast::<u8>()
     } else {
         std::ptr::null_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rt_free_matches_one_pointer_runtime_abi_and_accepts_null() {
+        let free_fn: fn(*mut u8) = rt_free;
+        free_fn(std::ptr::null_mut());
     }
 }
