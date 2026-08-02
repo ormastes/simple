@@ -11,14 +11,14 @@
 # SHA-512 via std.common.crypto.sha512 (sha512_bytes: [i64] -> [i64]).
 #
 # NOTE: std.common.crypto.sha512 exports sha512_bytes([i64])->[i64], not
-#       sha512([u8])->[u8]. The _sha512_u8 wrapper below bridges the types.
+#       sha512([u8])->[u8]. The _pure_ed25519_sha512_u8 wrapper below bridges the types.
 #
 # Public API:
 #   x25519(scalar, u_coord) -> [u8]                        (re-exported)
-#   ed25519_keypair_from_seed(seed) -> ([u8], [u8])
-#   ed25519_sign(private_seed, public_key, message) -> [u8]
-#   ed25519_verify(public_key, message, signature) -> bool
-#   ed25519_self_test() -> Result<bool, text>
+#   pure_ed25519_keypair_from_seed(seed) -> ([u8], [u8])
+#   pure_ed25519_sign(private_seed, public_key, message) -> [u8]
+#   pure_ed25519_verify(public_key, message, signature) -> bool
+#   pure_ed25519_self_test() -> Result<bool, text>
 
 use std.common.crypto.sha512.{sha512_bytes}
 
@@ -26,7 +26,7 @@ use std.common.crypto.sha512.{sha512_bytes}
 # SHA-512 bridge: [u8] -> [u8]  (common/crypto uses [i64] internally)
 # ============================================================================
 
-fn _sha512_u8(data: [u8]) -> [u8]:
+fn _pure_ed25519_sha512_u8(data: [u8]) -> [u8]:
     """SHA-512 over [u8] input, returning [u8].
 
     Bridges the common/crypto sha512_bytes([i64])->[i64] API.
@@ -1231,15 +1231,15 @@ fn sc_muladd(a_bytes: [u8], b_bytes: [u8], c_bytes: [u8]) -> [u8]:
 # SHA-512 mod L helper
 # ============================================================================
 
-fn _sha512_modl(data: [u8]) -> [u8]:
-    val hash = _sha512_u8(data)
+fn _pure_ed25519_sha512_modl(data: [u8]) -> [u8]:
+    val hash = _pure_ed25519_sha512_u8(data)
     sc_reduce(hash)
 
 # ============================================================================
 # Ed25519 Scalar Clamping
 # ============================================================================
 
-fn _ed25519_clamp(h: [u8]) -> [u8]:
+fn _pure_ed25519_clamp(h: [u8]) -> [u8]:
     """Clamp the lower 32 bytes of SHA-512 output per Ed25519 spec."""
     var clamped: [u8] = []
     var i: u64 = 0
@@ -1253,7 +1253,7 @@ fn _ed25519_clamp(h: [u8]) -> [u8]:
         i = i + 1
     clamped
 
-fn _ed25519_reduce_32_to_scalar(s: [u8]) -> [u8]:
+fn _pure_ed25519_reduce_32_to_scalar(s: [u8]) -> [u8]:
     var wide: [u8] = []
     var i: u64 = 0
     while i < 64:
@@ -1268,7 +1268,7 @@ fn _ed25519_reduce_32_to_scalar(s: [u8]) -> [u8]:
 # Internal helpers
 # ============================================================================
 
-fn _sc_is_geq_L(s: [u8]) -> bool:
+fn _pure_ed25519_sc_is_geq_L(s: [u8]) -> bool:
     """Check if 32-byte scalar s >= L (used to reject non-canonical S in verify)."""
     val limbs = _bytes_to_limbs32(s, 8)
     val sub = _sc_sub_L(limbs)
@@ -1289,7 +1289,7 @@ fn _ed25519_bytes_equal(a: [u8], b: [u8]) -> bool:
 # Public API — RFC 8032 §5.1 conformant
 # ============================================================================
 
-fn ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
+fn pure_ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
     """Derive (private_seed, public_key) from a 32-byte seed.
 
     Per RFC 8032 §5.1.5:
@@ -1298,9 +1298,9 @@ fn ed25519_keypair_from_seed(seed: [u8]) -> ([u8], [u8]):
       A = a * B
       encode A as 32 bytes
     """
-    val h = _sha512_u8(seed)
-    val a = _ed25519_clamp(h)
-    val big_a = ed_scalar_mul_basepoint(_ed25519_reduce_32_to_scalar(a))
+    val h = _pure_ed25519_sha512_u8(seed)
+    val a = _pure_ed25519_clamp(h)
+    val big_a = ed_scalar_mul_basepoint(_pure_ed25519_reduce_32_to_scalar(a))
     val pk = ed_point_encode(big_a)
     (seed, pk)
 
@@ -1308,14 +1308,14 @@ fn ed25519_pubkey(seed: [u8]) -> [u8]:
     """Derive the Ed25519 public key from a 32-byte seed.
 
     Convenience wrapper: returns only the public key from
-    ed25519_keypair_from_seed.
+    pure_ed25519_keypair_from_seed.
     """
-    val h = _sha512_u8(seed)
-    val a = _ed25519_clamp(h)
-    val big_a = ed_scalar_mul_basepoint(_ed25519_reduce_32_to_scalar(a))
+    val h = _pure_ed25519_sha512_u8(seed)
+    val a = _pure_ed25519_clamp(h)
+    val big_a = ed_scalar_mul_basepoint(_pure_ed25519_reduce_32_to_scalar(a))
     ed_point_encode(big_a)
 
-fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
+fn pure_ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     """Sign a message with Ed25519. Returns a 64-byte signature (R || S).
 
     Per RFC 8032 §5.1.6:
@@ -1327,8 +1327,8 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
       S = (r + k * a) mod L
       signature = encode(R) || S
     """
-    val h = _sha512_u8(private_seed)
-    val a = _ed25519_clamp(h)
+    val h = _pure_ed25519_sha512_u8(private_seed)
+    val a = _pure_ed25519_clamp(h)
 
     var prefix: [u8] = []
     var i: u64 = 32
@@ -1345,7 +1345,7 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     while i < message.len():
         prefix_msg.push(message[i])
         i = i + 1
-    val r = _sha512_modl(prefix_msg)
+    val r = _pure_ed25519_sha512_modl(prefix_msg)
 
     val big_r = ed_scalar_mul_basepoint(r)
     val r_enc = ed_point_encode(big_r)
@@ -1363,7 +1363,7 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
     while i < message.len():
         k_input.push(message[i])
         i = i + 1
-    val k = _sha512_modl(k_input)
+    val k = _pure_ed25519_sha512_modl(k_input)
 
     val s = sc_muladd(k, a, r)
 
@@ -1377,7 +1377,7 @@ fn ed25519_sign(private_seed: [u8], public_key: [u8], message: [u8]) -> [u8]:
         i = i + 1
     sig
 
-fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
+fn pure_ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
     """Verify an Ed25519 signature. Returns true on success.
 
     Per RFC 8032 §5.1.7:
@@ -1402,7 +1402,7 @@ fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
         s_bytes.push(signature[i])
         i = i + 1
 
-    if _sc_is_geq_L(s_bytes):
+    if _pure_ed25519_sc_is_geq_L(s_bytes):
         return false
 
     val big_a = ed_point_decode(public_key)
@@ -1421,7 +1421,7 @@ fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
     while i < message.len():
         k_input.push(message[i])
         i = i + 1
-    val k = _sha512_modl(k_input)
+    val k = _pure_ed25519_sha512_modl(k_input)
 
     val sb = ed_scalar_mul_basepoint(s_bytes)
     val ka = ed_scalar_mul(k, big_a)
@@ -1435,7 +1435,7 @@ fn ed25519_verify(public_key: [u8], message: [u8], signature: [u8]) -> bool:
 # Self-Test — RFC 8032 Section 7.1 Test Vectors
 # ============================================================================
 
-fn ed25519_self_test() -> Result<bool, text>:
+fn pure_ed25519_self_test() -> Result<bool, text>:
     """Run Ed25519 against RFC 8032 §7.1 test vectors."""
     _ed25519_self_test_pure()
 
@@ -1465,16 +1465,16 @@ fn _ed25519_self_test_pure() -> Result<bool, text>:
     ]
     val msg1: [u8] = []
 
-    val kp1 = ed25519_keypair_from_seed(seed1)
+    val kp1 = pure_ed25519_keypair_from_seed(seed1)
     val pub1 = kp1.1
     if not _ed25519_bytes_equal(a: pub1, b: expected_pub1):
         return Err("Ed25519 self-test FAIL: test vector 1 public key mismatch")
 
-    val sig1 = ed25519_sign(private_seed: seed1, public_key: pub1, message: msg1)
+    val sig1 = pure_ed25519_sign(private_seed: seed1, public_key: pub1, message: msg1)
     if not _ed25519_bytes_equal(a: sig1, b: expected_sig1):
         return Err("Ed25519 self-test FAIL: test vector 1 signature mismatch")
 
-    if not ed25519_verify(public_key: pub1, message: msg1, signature: sig1):
+    if not pure_ed25519_verify(public_key: pub1, message: msg1, signature: sig1):
         return Err("Ed25519 self-test FAIL: test vector 1 verify rejected valid signature")
 
     var bad_sig1: [u8] = []
@@ -1483,7 +1483,7 @@ fn _ed25519_self_test_pure() -> Result<bool, text>:
         bad_sig1.push(sig1[bsi])
         bsi = bsi + 1
     bad_sig1[0] = bad_sig1[0] ^ 0x01
-    if ed25519_verify(public_key: pub1, message: msg1, signature: bad_sig1):
+    if pure_ed25519_verify(public_key: pub1, message: msg1, signature: bad_sig1):
         return Err("Ed25519 self-test FAIL: verify accepted corrupted signature")
 
     # --- Test Vector 2 (RFC 8032 §7.1, TEST 2) ---
@@ -1511,16 +1511,16 @@ fn _ed25519_self_test_pure() -> Result<bool, text>:
     ]
     val msg2: [u8] = [0x72]
 
-    val kp2 = ed25519_keypair_from_seed(seed2)
+    val kp2 = pure_ed25519_keypair_from_seed(seed2)
     val pub2 = kp2.1
     if not _ed25519_bytes_equal(a: pub2, b: expected_pub2):
         return Err("Ed25519 self-test FAIL: test vector 2 public key mismatch")
 
-    val sig2 = ed25519_sign(private_seed: seed2, public_key: pub2, message: msg2)
+    val sig2 = pure_ed25519_sign(private_seed: seed2, public_key: pub2, message: msg2)
     if not _ed25519_bytes_equal(a: sig2, b: expected_sig2):
         return Err("Ed25519 self-test FAIL: test vector 2 signature mismatch")
 
-    if not ed25519_verify(public_key: pub2, message: msg2, signature: sig2):
+    if not pure_ed25519_verify(public_key: pub2, message: msg2, signature: sig2):
         return Err("Ed25519 self-test FAIL: test vector 2 verify rejected valid signature")
 
     Ok(true)
