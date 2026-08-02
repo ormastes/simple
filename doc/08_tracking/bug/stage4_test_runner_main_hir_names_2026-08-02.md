@@ -62,3 +62,14 @@ Existing behavior coverage remains the oracle for the unchanged operations:
 `test_runner_spipe_expect_helper_spec.spl`. Final admission is the no-stub
 Stage 4 full-CLI build; the isolated native owner probe was interrupted before
 producing a verdict and is not recorded as PASS evidence.
+
+## Directory creation owner follow-up
+
+The next Stage 4 pass proved `dir_create_all` unresolved through the broad
+`std.io` facade in `test_runner_coverage.spl`. The same exact family remained
+in `doc_generator.spl`; both now import `std.io_runtime.dir_create_all`, and an
+unused matching import was removed from `test_runner_main.spl`.
+
+The existing coverage aggregation and system coverage specs remain the
+behavioral oracle. The isolated no-stub probe was interrupted without a
+verdict, so only the subsequent full Stage 4 build may admit this repair.
