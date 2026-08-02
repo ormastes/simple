@@ -1,0 +1,66 @@
+# @req REQ-001 REQ-003 REQ-004 REQ-010 NFR-001 NFR-002 NFR-003
+# @cover src/os/drivers/virtio/virtio_gpu_venus_controlq.spl 80%
+# @tag: unit, simpleos, virtio-gpu, venus, controlq
+
+"""Device-free admission and source-boundary contract for the Venus control queue.
+
+Admission remains fail-closed until the driver, DMA buffers, queue, and bounded
+request/response sizes are ready. This test does not claim guest-native Vulkan.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use os.drivers.virtio.virtio_gpu_venus_controlq.*
+
+describe "VirtIO-GPU Venus control-queue admission":
+    it "rejects unavailable transport prerequisites in dependency order":
+        # @covers VQ_DRIVER:true VQ_DRIVER:false
+        # @covers VQ_BUFFERS:true VQ_BUFFERS:false
+        # @covers VQ_QUEUE:true VQ_QUEUE:false
+        val driver_blocked = venus_controlq_admit(24, 24, false, false, false)
+        expect(driver_blocked.admitted).to_be(false)
+        expect(driver_blocked.reason).to_equal("blocked:driver-uninitialized")
+
+        val buffers_blocked = venus_controlq_admit(24, 24, true, false, false)
+        expect(buffers_blocked.admitted).to_be(false)
+        expect(buffers_blocked.reason).to_equal("blocked:dma-buffers-missing")
+
+        val queue_blocked = venus_controlq_admit(24, 24, true, true, false)
+        expect(queue_blocked.admitted).to_be(false)
+        expect(queue_blocked.reason).to_equal("blocked:controlq-unavailable")
+
+    it "rejects request lengths outside the bounded DMA command buffer":
+        # @covers VQ_REQUEST_SIZE:true VQ_REQUEST_SIZE:false
+        val empty = venus_controlq_admit(0, 24, true, true, true)
+        expect(empty.admitted).to_be(false)
+        expect(empty.reason).to_equal("blocked:request-size-invalid")
+
+        val negative = venus_controlq_admit(-1, 24, true, true, true)
+        expect(negative.admitted).to_be(false)
+        expect(negative.reason).to_equal("blocked:request-size-invalid")
+
+        val oversized = venus_controlq_admit(4097, 24, true, true, true)
+        expect(oversized.admitted).to_be(false)
+        expect(oversized.reason).to_equal("blocked:request-size-invalid")
+
+    it "requires a complete bounded response buffer before admission":
+        # @covers VQ_RESPONSE_SIZE:true VQ_RESPONSE_SIZE:false
+        val truncated = venus_controlq_admit(24, 23, true, true, true)
+        expect(truncated.admitted).to_be(false)
+        expect(truncated.reason).to_equal("blocked:response-size-invalid")
+
+        val oversized = venus_controlq_admit(24, 4097, true, true, true)
+        expect(oversized.admitted).to_be(false)
+        expect(oversized.reason).to_equal("blocked:response-size-invalid")
+
+        val admitted = venus_controlq_admit(4096, 4096, true, true, true)
+        expect(admitted.admitted).to_be(true)
+        expect(admitted.reason).to_equal("ready:venus-controlq")
+
+describe "VirtIO-GPU Venus control-queue source boundary":
+    it "validates device responses without claiming guest-native execution":
+        val source = file_read(
+            "src/os/drivers/virtio/virtio_gpu_venus_controlq.spl")
+
+        expect(source).to_contain("venus_validate_response(")
+        expect(source).to_not_contain("evidence_class")

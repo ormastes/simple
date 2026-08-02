@@ -30,6 +30,11 @@ val VIRTIO_GPU_CTX_CREATE_SIZE: i64 = 96
 val VIRTIO_GPU_RESOURCE_CREATE_BLOB_SIZE: i64 = 56
 val VIRTIO_GPU_SUBMIT_3D_PREFIX_SIZE: i64 = 32
 val VIRTIO_GPU_RESOURCE_MAP_BLOB_SIZE: i64 = 40
+val VIRTIO_GPU_FLAG_FENCE: u32 = 1
+val VIRTIO_GPU_BLOB_MEM_HOST3D: u32 = 2
+val VIRTIO_GPU_BLOB_FLAGS_MASK: u32 = 7
+val VIRTIO_GPU_CURRENT_DMA_BYTES: i64 = 4096
+val VIRTIO_GPU_MAX_INLINE_SUBMIT_BYTES: i64 = 4064
 
 struct VenusFeatureSet:
     virgl: bool
@@ -47,6 +52,170 @@ struct VenusCommandPlan:
     admitted: bool
     reason: text
     command_count: i64
+
+struct VenusResponseValidation:
+    accepted: bool
+    reason: text
+    response_type: u32
+    fence_id: u64
+
+fn _venus_push_u32(bytes: [u8], value: u32):
+    bytes.push((value & 0xff).to_u8())
+    bytes.push(((value >> 8) & 0xff).to_u8())
+    bytes.push(((value >> 16) & 0xff).to_u8())
+    bytes.push(((value >> 24) & 0xff).to_u8())
+
+fn _venus_push_u64(bytes: [u8], value: u64):
+    bytes.push((value & 0xff).to_u8())
+    bytes.push(((value >> 8) & 0xff).to_u8())
+    bytes.push(((value >> 16) & 0xff).to_u8())
+    bytes.push(((value >> 24) & 0xff).to_u8())
+    bytes.push(((value >> 32) & 0xff).to_u8())
+    bytes.push(((value >> 40) & 0xff).to_u8())
+    bytes.push(((value >> 48) & 0xff).to_u8())
+    bytes.push(((value >> 56) & 0xff).to_u8())
+
+fn _venus_push_zeroes(bytes: [u8], count: i64):
+    var index: i64 = 0
+    while index < count:
+        bytes.push(0u8)
+        index = index + 1
+
+fn _venus_encode_header(command_type: u32, flags: u32, fence_id: u64,
+        context_id: u32) -> [u8]:
+    var bytes: [u8] = []
+    _venus_push_u32(bytes, command_type)
+    _venus_push_u32(bytes, flags)
+    _venus_push_u64(bytes, fence_id)
+    _venus_push_u32(bytes, context_id)
+    # ring_idx is zero for this single-timeline staged transport, followed by
+    # the three reserved bytes. A future multi-ring owner must admit 0..63.
+    _venus_push_u32(bytes, 0u32)
+    bytes
+
+fn _venus_read_u32(bytes: [u8], offset: i64) -> u32:
+    bytes[offset].to_u32() |
+        (bytes[offset + 1].to_u32() << 8) |
+        (bytes[offset + 2].to_u32() << 16) |
+        (bytes[offset + 3].to_u32() << 24)
+
+fn _venus_read_u64(bytes: [u8], offset: i64) -> u64:
+    bytes[offset].to_u64() |
+        (bytes[offset + 1].to_u64() << 8) |
+        (bytes[offset + 2].to_u64() << 16) |
+        (bytes[offset + 3].to_u64() << 24) |
+        (bytes[offset + 4].to_u64() << 32) |
+        (bytes[offset + 5].to_u64() << 40) |
+        (bytes[offset + 6].to_u64() << 48) |
+        (bytes[offset + 7].to_u64() << 56)
+
+fn venus_encode_get_capset_info(capset_index: u32) -> [u8]:
+    var bytes = _venus_encode_header(VIRTIO_GPU_CMD_GET_CAPSET_INFO, 0u32, 0u64, 0u32)
+    _venus_push_u32(bytes, capset_index)
+    _venus_push_u32(bytes, 0u32)
+    bytes
+
+fn venus_encode_get_capset(capset_id: u32, version: u32) -> [u8]:
+    var bytes = _venus_encode_header(VIRTIO_GPU_CMD_GET_CAPSET, 0u32, 0u64, 0u32)
+    _venus_push_u32(bytes, capset_id)
+    _venus_push_u32(bytes, version)
+    bytes
+
+fn venus_encode_context_create(context_id: u32, capset_id: u32,
+        debug_name: text) -> Result<[u8], text>:
+    val name = debug_name.bytes()
+    # @decision VN_WIRE_CONTEXT
+    if context_id == 0u32 or capset_id != VIRTIO_GPU_CAPSET_VENUS.to_u32() or
+            name.len() == 0 or name.len() > 64:
+        return Err("blocked:venus-context-encoding-invalid")
+    var bytes = _venus_encode_header(VIRTIO_GPU_CMD_CTX_CREATE, 0u32, 0u64, context_id)
+    _venus_push_u32(bytes, name.len().to_u32())
+    _venus_push_u32(bytes, capset_id & 0xff)
+    for byte in name:
+        bytes.push(byte)
+    _venus_push_zeroes(bytes, 64 - name.len().to_i64())
+    Ok(bytes)
+
+fn venus_encode_resource_create_blob(context_id: u32, resource_id: u32,
+        blob_mem: u32, blob_flags: u32, blob_id: u64,
+        size_bytes: u64) -> Result<[u8], text>:
+    # This bounded slice admits only the zero-entry HOST3D profile. Guest and
+    # combined profiles require explicit backing-entry lifetime ownership.
+    # @decision VN_WIRE_BLOB
+    if context_id == 0u32 or resource_id == 0u32 or
+            blob_mem != VIRTIO_GPU_BLOB_MEM_HOST3D or
+            (blob_flags & ~VIRTIO_GPU_BLOB_FLAGS_MASK) != 0u32 or
+            blob_id == 0u64 or size_bytes == 0u64:
+        return Err("blocked:venus-blob-encoding-invalid")
+    var bytes = _venus_encode_header(VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB,
+        0u32, 0u64, context_id)
+    _venus_push_u32(bytes, resource_id)
+    _venus_push_u32(bytes, blob_mem)
+    _venus_push_u32(bytes, blob_flags)
+    _venus_push_u32(bytes, 0u32)
+    _venus_push_u64(bytes, blob_id)
+    _venus_push_u64(bytes, size_bytes)
+    Ok(bytes)
+
+fn venus_encode_submit_3d(context_id: u32, command: [u8],
+        fence_id: u64) -> Result<[u8], text>:
+    # @decision VN_WIRE_SUBMIT
+    if context_id == 0u32 or fence_id == 0u64 or command.len() == 0 or
+            command.len() > VIRTIO_GPU_MAX_INLINE_SUBMIT_BYTES:
+        return Err("blocked:venus-submit-encoding-invalid")
+    var bytes = _venus_encode_header(VIRTIO_GPU_CMD_SUBMIT_3D,
+        VIRTIO_GPU_FLAG_FENCE, fence_id, context_id)
+    _venus_push_u32(bytes, command.len().to_u32())
+    _venus_push_u32(bytes, 0u32)
+    for byte in command:
+        bytes.push(byte)
+    Ok(bytes)
+
+fn venus_encode_resource_map_blob(context_id: u32, resource_id: u32,
+        offset: u64, fence_id: u64) -> Result<[u8], text>:
+    # @decision VN_WIRE_MAP
+    if context_id == 0u32 or resource_id == 0u32 or fence_id == 0u64:
+        return Err("blocked:venus-map-encoding-invalid")
+    var bytes = _venus_encode_header(VIRTIO_GPU_CMD_RESOURCE_MAP_BLOB,
+        VIRTIO_GPU_FLAG_FENCE, fence_id, context_id)
+    _venus_push_u32(bytes, resource_id)
+    _venus_push_u32(bytes, 0u32)
+    _venus_push_u64(bytes, offset)
+    Ok(bytes)
+
+fn _venus_response_blocked(reason: text, response_type: u32,
+        fence_id: u64) -> VenusResponseValidation:
+    VenusResponseValidation(accepted: false, reason: reason,
+        response_type: response_type, fence_id: fence_id)
+
+fn venus_validate_response(data: [u8], expected_type: u32,
+        expected_fence_id: u64) -> VenusResponseValidation:
+    # @decision VN_RESPONSE_LENGTH
+    if data.len() < VIRTIO_GPU_CTRL_HDR_SIZE:
+        return _venus_response_blocked("blocked:response-truncated", 0u32, 0u64)
+    val response_type = _venus_read_u32(data, 0)
+    val flags = _venus_read_u32(data, 4)
+    val fence_id = _venus_read_u64(data, 8)
+    # @decision VN_RESPONSE_ERROR
+    if response_type >= 0x1200u32 and response_type <= 0x1205u32:
+        return _venus_response_blocked("blocked:response-error", response_type, fence_id)
+    # @decision VN_RESPONSE_TYPE
+    if response_type != expected_type:
+        return _venus_response_blocked("blocked:response-type-mismatch", response_type, fence_id)
+    # @decision VN_RESPONSE_FLAGS
+    if (flags & ~VIRTIO_GPU_FLAG_FENCE) != 0u32:
+        return _venus_response_blocked("blocked:response-flags-invalid", response_type, fence_id)
+    # @decision VN_RESPONSE_FENCE_REQUIRED
+    if expected_fence_id != 0u64:
+        if (flags & VIRTIO_GPU_FLAG_FENCE) == 0u32:
+            return _venus_response_blocked("blocked:response-fence-missing", response_type, fence_id)
+        if fence_id != expected_fence_id:
+            return _venus_response_blocked("blocked:response-fence-mismatch", response_type, fence_id)
+    # @decision VN_RESPONSE_FENCE_UNEXPECTED
+    if expected_fence_id == 0u64 and (flags != 0u32 or fence_id != 0u64):
+        return _venus_response_blocked("blocked:response-fence-unexpected", response_type, fence_id)
+    VenusResponseValidation(accepted: true, reason: "ok:venus-response",
+        response_type: response_type, fence_id: fence_id)
 
 fn venus_features_ready(features: VenusFeatureSet) -> bool:
     # @decision VN_FEATURES
@@ -102,8 +271,14 @@ export VIRTIO_GPU_GET_CAPSET_INFO_SIZE, VIRTIO_GPU_RESP_CAPSET_INFO_SIZE
 export VIRTIO_GPU_GET_CAPSET_SIZE, VIRTIO_GPU_CTX_CREATE_SIZE
 export VIRTIO_GPU_RESOURCE_CREATE_BLOB_SIZE, VIRTIO_GPU_SUBMIT_3D_PREFIX_SIZE
 export VIRTIO_GPU_RESOURCE_MAP_BLOB_SIZE
-export VenusFeatureSet, VenusCapsetInfo, VenusCommandPlan
+export VIRTIO_GPU_FLAG_FENCE, VIRTIO_GPU_BLOB_MEM_HOST3D
+export VIRTIO_GPU_CURRENT_DMA_BYTES, VIRTIO_GPU_MAX_INLINE_SUBMIT_BYTES
+export VenusFeatureSet, VenusCapsetInfo, VenusCommandPlan, VenusResponseValidation
 export venus_features_ready, venus_capset_valid, venus_context_valid, venus_blob_valid
 export venus_command_plan
+export venus_encode_get_capset_info, venus_encode_get_capset
+export venus_encode_context_create, venus_encode_resource_create_blob
+export venus_encode_submit_3d, venus_encode_resource_map_blob
+export venus_validate_response
 
 # @req REQ-001 REQ-003 REQ-004 NFR-001 NFR-002 NFR-007

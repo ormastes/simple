@@ -17,7 +17,13 @@ Date: 2026-08-02
 - VirtIO-GPU Venus protocol admission scenarios: 4/4. This proves feature,
   capset, context, blob, submit, and fence planning only; it is not native
   Vulkan execution evidence.
-- Decision-inventory coverage: 60/62 outcomes, 96%, gate 2/2.
+- VirtIO-GPU Venus wire scenarios: 8/8 provisional. They prove exact packed
+  little-endian capset/context/blob/submit/map request bytes and typed rejection
+  of truncated, error, type/flag-invalid, missing/mismatched-fence, and
+  unexpectedly fenced responses. They do not prove a live control queue.
+- Bounded Venus controlq admission/source-boundary scenarios: 4/4 provisional.
+- Typed Venus environment discovery scenarios: 6/6 provisional.
+- Decision-inventory coverage: 110/112 outcomes, 98%, gate 2/2.
 - QEMU generated manual: complete, 116 lines, 0 stubs, 0 warnings.
 - UNO Q generated manual: complete, 125 lines, 0 stubs, 0 warnings.
 - Direct-env working/staged guards: pass.
@@ -29,9 +35,12 @@ Date: 2026-08-02
 
 - Direct guest Vulkan/CUDA: blocked. The installed QEMU 8.2 and broken
   `virtio-gpu-gl` path cannot provide Venus. SimpleOS now owns fail-closed
-  Venus feature/capset/context/blob/submit/fence protocol admission, but still
-  lacks live controlq encoding, shared-memory mapping, a Vulkan ICD, and native
-  readback. The canonical producer remains classified `host-offload-only`.
+  Venus feature/capset/context/blob admission, exact little-endian request
+  encoding, and typed response/fence validation, but still lacks a live
+  admitted feature/config discovery, shared-memory mapping, generalized queue
+  ownership, a Vulkan ICD, real device completion,
+  and native readback. The canonical producer remains classified
+  `host-offload-only`.
 - UNO Q SimpleOS-native Adreno: blocked. The staged adapter does not promote
   beyond board-Linux readiness until firmware, MMU/cache, queue, fence,
   device-origin readback, and display ownership are implemented and observed.
@@ -57,7 +66,7 @@ Expected receipt:
   pure-Simple release docgen gate.
 - Runtime instrumentation still emits no attributable counters. NFR-003 is
   instead proven for new owned decisions by the fail-closed tracked decision
-  inventory: 60/62 outcomes (96%). The two uncovered live-MMIO outcomes are
+  inventory: 110/112 outcomes (98%). The two uncovered live-MMIO outcomes are
   explicit and cannot be promoted by adding marker-only witnesses.
 - Staged variants of git-oriented guards are incompatible with this jj-only
   workspace (`git diff --cached`); their working variants passed.
@@ -70,6 +79,16 @@ Expected receipt:
 - REQ-010: fail-closed blocker rows and UNO Q resume metadata exist.
 - NFR-001..002, NFR-004..008: source/test contracts exist; native evidence and
   pure-selfhost qualification remain incomplete where stated.
-- NFR-003: passed for new owned decisions through the 96% decision inventory.
+- NFR-003: passed for new owned decisions through the 98% decision inventory.
+
+## Next bounded implementation seam
+
+Extend the existing bounded controlq seam with descriptor lifetime, distinct
+queue-full/timeout/reset results, used-ring length/ID validation, and safe PCI
+DEVICE_CFG/SHM discovery backed by kernel BAR grants. Native promotion
+still additionally requires a Venus-capable QEMU/virglrenderer host, negotiated
+capset and blob/context features, a compatible SimpleOS Vulkan ICD, mapped
+shared memory, real fenced submission, and device-origin readback. UNO Q still
+requires physical-board firmware/MMU/cache/queue/fence/readback/display proof.
 
 STATUS: FAIL

@@ -8,6 +8,15 @@ backend plus `evidence_class=host-offload`. The passthrough checker keeps this
 separate from direct guest Vulkan/CUDA, which remains blocked until a real
 Venus or approved VFIO guest receipt exists.
 
+The host-independent direct-guest foundation now lives in
+`virtio_gpu_venus_protocol.spl`, `virtio_gpu_venus_environment.spl`, and
+`virtio_gpu_venus_controlq.spl`. Device-free tests prove exact little-endian
+commands, response/fence rejection, separated feature/capset/SHM discovery,
+and bounded controlq admission. These are structural prerequisites only. The
+current GPU driver still negotiates no Venus feature bits and lacks safe
+DEVICE_CFG/SHM capability discovery, an authorized non-BAR0 mapping, a guest
+Venus ICD, and device-origin readback, so the direct row remains blocked.
+
 UNO Q promotion is owned by
 `test/03_system/os/board/uno_q_adreno_turnip_live_spec.spl`; its default blocked
 result is expected without a prepared physical board and retained receipt.

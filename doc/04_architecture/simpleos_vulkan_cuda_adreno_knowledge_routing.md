@@ -8,7 +8,9 @@ Adopt two independent composition axes.
 GPU session
 ├── VulkanDevicePort                 render/present
 │   ├── QemuVulkanHostAdapter        typed host-offload evidence
-│   ├── VirtioGpuVenusProtocol       staged protocol-admission evidence
+│   ├── VirtioGpuVenusProtocol       exact LE wire codec + typed validation
+│   │   ├── VenusEnvironment         separated discovery/admission evidence
+│   │   ├── VenusControlq            bounded transport seam
 │   │   └── VirtioGpuVenusAdapter    future direct guest-native evidence
 │   └── AdrenoTurnipAdapter          UNO Q staged native adapter
 └── ProcessingDevicePort             ProcessingIr execution
@@ -67,25 +69,47 @@ guest ICD support. The two rows share contracts but not completion status.
 
 `VirtioGpuVenusProtocol` is an MDSOC-only private driver leaf beneath the
 existing virtio-gpu owner. It owns protocol constants, bounded request/response
-records, feature admission, Venus capset admission, identifier validation, and
-the prerequisite ordering for context/blob/3D submission commands. It does not
-own Vulkan semantics, Draw IR, ProcessingIR, presentation policy, or host
-offload.
+records, feature and capset admission, identifier validation, and exact packed
+little-endian encoders for capset discovery, context creation, HOST3D blob
+creation, fenced `SUBMIT_3D`, and fenced blob mapping. Its typed response
+validator rejects truncated/error/type-mismatched headers, unknown flags,
+missing or mismatched fence echoes, and unexpected fences on unfenced requests.
+It does not own Vulkan semantics, Draw IR, ProcessingIR, presentation policy,
+virtqueue transport, or host offload.
 
 Protocol admission is deliberately a third state between “no Venus knowledge”
 and “guest-native Vulkan.” It can establish only that a proposed transaction is
 well-formed and supported by negotiated metadata. It must return a typed
 blocked/unsupported result when required feature bits, capset version/size,
 nonzero identifiers, bounded payloads, or prerequisite ordering are absent.
-Passing this stage does not create a device handle, submit a virtqueue chain,
-signal a fence, or authorize `guest-native` evidence.
+Passing this stage proves deterministic wire bytes and response correlation; it
+does not create a device handle, submit a virtqueue chain, observe an interrupt,
+signal a device fence, or authorize `guest-native` evidence.
+
+The bounded implementation seam is `virtio_gpu_venus_controlq`. It may only
+translate the protocol codec's request bytes into the existing virtio controlq
+descriptor lifecycle and return the device-owned response bytes to the typed
+validator. Queue allocation, descriptor ownership, timeout/reset invalidation,
+used-ring completion, and DMA/cache lifetime remain in the existing virtio-gpu
+transport owner. This seam must not parse Venus commands again or manufacture
+successful responses.
+
+`virtio_gpu_venus_environment` keeps host-offered bits, negotiated bits,
+device-config capset cardinality, the enumerated Venus capset, PCI
+`HOST_VISIBLE` shared memory, and capset-query-fix behavior as separate typed
+observations. It admits exactly one valid Venus and host-visible row only after
+the required feature mask is both offered and negotiated. This pure admission
+does not authorize physical BAR access: the live PCI owner must still validate
+capability lengths and cycles, use checked BAR arithmetic, and obtain a kernel
+grant covering the discovered region.
 
 Promotion to `VirtioGpuVenusAdapter` remains blocked on all of the following:
 
 1. negotiated virtio-gpu blob-resource and context-init support;
 2. Venus capset retrieval and a compatible guest ICD;
 3. guest shared-memory/blob mapping with cache and lifetime ownership;
-4. context/resource attachment and real 3D command submission;
+4. a live controlq adapter, context/resource attachment, and real 3D command
+   submission;
 5. interrupt or polling completion with correlated fence identity;
 6. device-origin readback and exact CPU-oracle parity; and
 7. a QEMU/virglrenderer environment that demonstrably exposes the required path.

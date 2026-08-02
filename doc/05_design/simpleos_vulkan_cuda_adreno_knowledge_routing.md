@@ -26,14 +26,45 @@ cover:
 - legal prerequisite order for capset discovery, context creation, resource
   creation/attachment, command submission, fence completion, and readback.
 
-The admission result contains no fabricated queue index, device address,
-Vulkan handle, fence completion, or readback checksum. An admitted plan remains
-`unsupported` as execution evidence until a transport owner encodes it into
-real virtqueue descriptors and validates the corresponding device response.
+The module now encodes exact packed little-endian request bytes for capset-info,
+capset, context-create, zero-entry HOST3D blob-create, fenced submit-3D, and
+fenced map-blob commands. Context names are zero-filled to the protocol width;
+bounded payload and identifier checks fail before bytes are emitted. Typed
+response validation checks the 24-byte header, response class/type, supported
+flags, and exact submitted-fence correlation. Unfenced requests require both
+the response flag and fence ID to remain zero.
+
+The admission result and wire codec contain no fabricated queue index, device
+address, Vulkan handle, fence completion, or readback checksum. Valid bytes and
+an accepted synthetic response remain `unsupported` as execution evidence
+until the transport owner submits real virtqueue descriptors and validates the
+device-owned response.
 
 Protocol records are invalidated on virtio device reset, feature renegotiation,
 capset change, or protocol-generation change. Submission identifiers are not
 reused across an invalidation boundary.
+
+## Bounded controlq seam
+
+`virtio_gpu_venus_controlq` is the implemented bounded leaf. It accepts already
+encoded request bytes plus expected response type/fence, delegates synchronous
+descriptor submission to the current virtio-gpu controlq owner, and passes the
+returned response header to `venus_validate_response`. Its current transport
+failure is intentionally collapsed to `controlq-timeout-or-sync`; distinct
+queue-full, timeout, reset generation, used length, and ownership results remain
+required before native promotion. It does not duplicate the wire codec, Vulkan
+ICD, blob mapping policy, or evidence promotion policy.
+
+## Environment discovery
+
+`virtio_gpu_venus_environment` normalizes five independent inputs only after
+validation: host feature mask, negotiated feature mask, device-reported capset
+count and rows, PCI shared-memory rows, and capset-query-fix behavior. Required
+bits are VIRGL, RESOURCE_BLOB, and CONTEXT_INIT. Negotiated bits must be a
+subset of offered bits; capset cardinality must match the enumerated rows; and
+exactly one valid Venus capset and one nonzero `HOST_VISIBLE` region must exist.
+The resulting record may open the bounded controlq gate but is not a BAR grant,
+Vulkan ICD, or native execution receipt.
 
 ## Validation order
 
@@ -67,10 +98,16 @@ class, or falls back while preserving device provenance.
   shared processing IR`, `Submit through the selected Vulkan device`, and
   `Verify device-origin readback`.
 - Environment tests retain native QEMU/UNO Q blockers and exact resume commands.
-- Device-free Venus unit tests cover missing feature bits, wrong/unsupported
-  capsets, oversized or truncated payloads, zero/stale identifiers, illegal
-  prerequisite order, valid admission, and invalidation. These tests establish
-  protocol-structure coverage only.
+- Device-free Venus admission tests cover missing feature bits,
+  wrong/unsupported capsets, zero identifiers, empty submission, and valid
+  planning. Eight byte-level scenarios additionally prove exact little-endian
+  layouts, fixed-width zero fill, HOST3D profile bounds, submit-size bounds,
+  typed response rejection, and exact fenced/unfenced correlation. These tests
+  establish protocol and codec coverage only; the current 8/8 result is
+  provisional because it used the bootstrap-seed runner.
+- Six environment-discovery scenarios cover offered/negotiated feature
+  provenance, capset cardinality, exact Venus selection, host-visible SHM, and
+  capset-query-fix admission; they are also provisional device-free evidence.
 - A later QEMU environment test must independently prove negotiated features,
   Venus capset/ICD identity, shared-memory mapping, real virtqueue submission,
   correlated fence completion, and device-origin readback. It is the only test

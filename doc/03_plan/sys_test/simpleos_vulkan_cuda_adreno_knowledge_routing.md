@@ -7,21 +7,32 @@
 | REQ-006..009 | deterministic knowledge routing unit/integration scenario |
 | REQ-010 | environment matrix with exact resume metadata |
 | NFR-001..002 | device-origin, identity, handle, correlation, backend/class rejection |
-| NFR-003 | owned decision inventory: 40/42 outcomes = 95% |
+| NFR-003 | owned decision inventory: 110/112 outcomes = 98% |
 | NFR-004..005 | probe-cache and invalidation tests |
 | NFR-006 | repeatable receipt/hash ordering test across input permutations |
 | NFR-007..008 | environment, stub, facade, duplication, and file-size gates |
-| NFR-009 | Venus protocol-admission tests remain structural-only and the environment row stays blocked without submission/fence/readback proof |
+| NFR-009 | Venus admission/wire tests remain device-free and the environment row stays blocked without live controlq submission/fence/readback proof |
 
 The staged Venus protocol test lane is split deliberately:
 
-- device-free tests validate feature/capset admission, bounds, identifiers,
-  prerequisite ordering, and reset invalidation;
+- device-free admission tests validate feature/capset bounds, identifiers,
+  prerequisite ordering, and fail-closed planning;
+- eight device-free wire scenarios validate exact packed little-endian request
+  bytes plus typed response/type/flag/fence rejection; their current 8/8 pass
+  is provisional pending a pure-Simple self-hosted runner;
 - the native QEMU environment row alone validates the guest ICD, shared memory,
   real virtqueue submission, correlated completion, and device-origin readback.
 
 A green device-free lane must not change the direct guest-native environment
 row from blocked to passing.
+
+The implemented bounded integration lane is `virtio_gpu_venus_controlq`; its
+device-free admission and source-boundary contract is followed by the remaining
+live queue work: explicit descriptor ownership, distinct queue-full/timeout
+results, reset-generation invalidation, used-length validation, and retained
+device-written response evidence. It must
+not claim native Vulkan until a Venus-capable environment also proves ICD,
+mapping, submission, completion, and readback.
 
 Native UNO Q command and artifact paths must be supplied by the board wrapper;
 until then its executable scenario fails closed rather than skips.

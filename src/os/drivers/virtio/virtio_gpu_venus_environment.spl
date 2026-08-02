@@ -1,0 +1,117 @@
+"""Typed, device-independent admission for a VirtIO-GPU Venus environment.
+
+Host features, negotiated features, capset enumeration, PCI shared memory, and
+renderer query semantics remain separate observations. This module normalizes
+them only after every required row is present and internally consistent.
+"""
+
+use os.drivers.virtio.virtio_gpu_venus_protocol.{
+    VenusFeatureSet, VenusCapsetInfo, VIRTIO_GPU_CAPSET_VENUS
+}
+
+val VIRTIO_GPU_SHM_ID_HOST_VISIBLE: i64 = 1
+val VENUS_RENDERER_PROPERTY_CAPSET_QUERY_FIX: i64 = 1
+val VIRTIO_GPU_REQUIRED_FEATURE_MASK: u64 = 25u64
+
+struct VenusPciShmRegion:
+    shm_id: i64
+    base: u64
+    size: u64
+
+struct VenusRendererProperty:
+    property_id: i64
+    enabled: bool
+
+struct VenusEnvironmentObservation:
+    host_feature_mask: u64
+    negotiated_feature_mask: u64
+    num_capsets: i64
+    capsets: [VenusCapsetInfo]
+    pci_shm_regions: [VenusPciShmRegion]
+    renderer_properties: [VenusRendererProperty]
+
+struct VenusEnvironmentDiscovery:
+    admitted: bool
+    reason: text
+    features: VenusFeatureSet
+    capset: VenusCapsetInfo
+    host_visible_base: u64
+    host_visible_size: u64
+
+fn _venus_environment_blocked(reason: text) -> VenusEnvironmentDiscovery:
+    VenusEnvironmentDiscovery(admitted: false, reason: reason,
+        features: VenusFeatureSet(virgl: false, resource_blob: false,
+            context_init: false, capset_query_fix: false, host_visible: false),
+        capset: VenusCapsetInfo(id: 0, max_version: 0, max_size: 0),
+        host_visible_base: 0u64, host_visible_size: 0u64)
+
+fn venus_discover_environment(observation: VenusEnvironmentObservation) -> VenusEnvironmentDiscovery:
+    # @decision VN_ENV_HOST_FEATURES
+    if (observation.host_feature_mask & VIRTIO_GPU_REQUIRED_FEATURE_MASK) !=
+            VIRTIO_GPU_REQUIRED_FEATURE_MASK:
+        return _venus_environment_blocked("blocked:host-features-missing")
+    # @decision VN_ENV_NEGOTIATED_FEATURES
+    if (observation.negotiated_feature_mask & VIRTIO_GPU_REQUIRED_FEATURE_MASK) !=
+            VIRTIO_GPU_REQUIRED_FEATURE_MASK:
+        return _venus_environment_blocked("blocked:negotiated-features-missing")
+    # @decision VN_ENV_NEGOTIATED_SUBSET
+    if (observation.negotiated_feature_mask & ~observation.host_feature_mask) != 0u64:
+        return _venus_environment_blocked("blocked:negotiated-features-not-offered")
+    # @decision VN_ENV_CAPSET_COUNT
+    if observation.num_capsets <= 0 or
+            observation.capsets.len().to_i64() != observation.num_capsets:
+        return _venus_environment_blocked("blocked:num-capsets-invalid")
+
+    var venus_count: i64 = 0
+    var selected_capset = VenusCapsetInfo(id: 0, max_version: 0, max_size: 0)
+    for capset in observation.capsets:
+        if capset.id == VIRTIO_GPU_CAPSET_VENUS:
+            venus_count = venus_count + 1
+            selected_capset = capset
+    # @decision VN_ENV_CAPSET_ROW
+    if venus_count == 0:
+        return _venus_environment_blocked("blocked:venus-capset-row-missing")
+    # @decision VN_ENV_CAPSET_VALID
+    if venus_count != 1 or selected_capset.max_version <= 0 or selected_capset.max_size <= 0:
+        return _venus_environment_blocked("blocked:venus-capset-row-invalid")
+
+    var shm_count: i64 = 0
+    var host_visible_base: u64 = 0u64
+    var host_visible_size: u64 = 0u64
+    for region in observation.pci_shm_regions:
+        if region.shm_id == VIRTIO_GPU_SHM_ID_HOST_VISIBLE:
+            shm_count = shm_count + 1
+            host_visible_base = region.base
+            host_visible_size = region.size
+    # @decision VN_ENV_SHM_ROW
+    if shm_count == 0:
+        return _venus_environment_blocked("blocked:host-visible-shm-row-missing")
+    # @decision VN_ENV_SHM_VALID
+    if shm_count != 1 or host_visible_base == 0u64 or host_visible_size == 0u64:
+        return _venus_environment_blocked("blocked:host-visible-shm-row-invalid")
+
+    var query_fix_count: i64 = 0
+    var query_fix_enabled = false
+    for property in observation.renderer_properties:
+        if property.property_id == VENUS_RENDERER_PROPERTY_CAPSET_QUERY_FIX:
+            query_fix_count = query_fix_count + 1
+            query_fix_enabled = property.enabled
+    # @decision VN_ENV_QUERY_FIX_ROW
+    if query_fix_count == 0:
+        return _venus_environment_blocked("blocked:capset-query-fix-property-missing")
+    # @decision VN_ENV_QUERY_FIX_ENABLED
+    if query_fix_count != 1 or not query_fix_enabled:
+        return _venus_environment_blocked("blocked:capset-query-fix-disabled")
+
+    VenusEnvironmentDiscovery(admitted: true, reason: "ready:venus-environment",
+        features: VenusFeatureSet(virgl: true, resource_blob: true,
+            context_init: true, capset_query_fix: true, host_visible: true),
+        capset: selected_capset, host_visible_base: host_visible_base,
+        host_visible_size: host_visible_size)
+
+export VIRTIO_GPU_SHM_ID_HOST_VISIBLE
+export VENUS_RENDERER_PROPERTY_CAPSET_QUERY_FIX, VIRTIO_GPU_REQUIRED_FEATURE_MASK
+export VenusPciShmRegion, VenusRendererProperty, VenusEnvironmentObservation
+export VenusEnvironmentDiscovery, venus_discover_environment
+
+# @req REQ-001 REQ-003 REQ-004 NFR-001 NFR-002 NFR-007
