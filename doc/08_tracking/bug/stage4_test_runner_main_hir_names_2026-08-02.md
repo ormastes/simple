@@ -46,3 +46,19 @@ that lane also routed `checkpoint.spl` through the concrete time owner after
 the batches were integrated. `dir_walk_native` in `test_manifest_scanner.spl` remains a
 similar but unproven broad-facade risk because `std.io_runtime` does not expose
 that distinct native-walk surface.
+
+## Core execution owner follow-up
+
+The next complete Stage 4 error-collection pass proved the same broad-facade
+failure for `ProcessResult`, bounded process execution, raw file size, and file
+modified time in `test_runner_execute.spl`. The grouped repair routes the exact
+family through `std.nogc_sync_mut.io.process_ops` and
+`std.nogc_sync_mut.io.file_ops` in all seven affected modules, and removes the
+unused `ProcessResult` import from `test_runner_container.spl`.
+
+Existing behavior coverage remains the oracle for the unchanged operations:
+`source_doctest_runner_spec.spl`, `process_tracker_spec.spl`,
+`test_runner_tracked_wait_spec.spl`, and
+`test_runner_spipe_expect_helper_spec.spl`. Final admission is the no-stub
+Stage 4 full-CLI build; the isolated native owner probe was interrupted before
+producing a verdict and is not recorded as PASS evidence.
