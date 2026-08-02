@@ -1334,12 +1334,12 @@ impl LlvmBackend {
                     // today, and a silent `const 1` here is an always-match --
                     // a wrong answer that announces nothing.
                     _ => {
-                        return Err(
+                        return Err(CompileError::Codegen(
                             "codegen: no LLVM lowering for this pattern test shape \
                              (only `Wildcard`, `Binding`, `Literal` and `Variant` are supported); \
                              refusing to emit an always-match test"
                                 .to_string(),
-                        );
+                        ));
                     }
                 };
                 vreg_map.insert(*dest, result.into());
@@ -3219,9 +3219,43 @@ impl LlvmBackend {
 mod tests {
     use super::*;
     use crate::codegen::backend_trait::NativeBackend;
-    use crate::mir::{CallTarget, LocalKind, MirInst, MirLocal, Terminator, VReg};
+    use crate::mir::{CallTarget, LocalKind, MirInst, MirLiteral, MirLocal, MirPattern, Terminator, VReg};
     use simple_common::target::{Target, TargetArch, TargetOS};
     use std::collections::HashMap;
+
+    fn llvm_pattern_probe(pattern: MirPattern, name: &str) -> Result<(), CompileError> {
+        let target = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let backend = LlvmBackend::new(target).unwrap();
+        backend.create_module(name).unwrap();
+        let mut func = MirFunction::new(
+            name.to_string(),
+            crate::hir::TypeId::I64,
+            simple_parser::ast::Visibility::Private,
+        );
+        func.blocks[0].instructions.push(MirInst::ConstInt { dest: VReg(0), value: 7 });
+        func.blocks[0].instructions.push(MirInst::PatternTest {
+            dest: VReg(1),
+            subject: VReg(0),
+            pattern,
+        });
+        func.blocks[0].terminator = Terminator::Return(Some(VReg(1)));
+        backend.compile_function(&func)
+    }
+
+    #[test]
+    fn llvm_pattern_unsupported_test_returns_typed_codegen_error() {
+        let err = llvm_pattern_probe(MirPattern::Tuple(vec![]), "unsupported_pattern").unwrap_err();
+        assert!(matches!(err, CompileError::Codegen(message) if message.contains("refusing to emit an always-match test")));
+    }
+
+    #[test]
+    fn llvm_pattern_adjacent_supported_literal_still_lowers() {
+        llvm_pattern_probe(
+            MirPattern::Literal(MirLiteral::Int(7)),
+            "supported_literal_pattern",
+        )
+        .unwrap();
+    }
 
     #[test]
     fn virtual_call_uses_emitted_vtable_and_object_header() {
