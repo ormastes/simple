@@ -622,3 +622,44 @@ routes through the text-special builtin block between `receiver-type` and
 writeback. Diagnose its nullable result/receiver metadata without changing
 semantics, then run a fresh bounded cycle. Remove all temporary receipts before
 eventual Stage4/release gates.
+
+## 2026-08-02 text-call optional isolation and remaining lower frontier
+
+- Cycle 15 placed sparse receipts through the unresolved text-special arm.
+  Stage3 proved receiver lowering, tagging, operand construction, symbol/type
+  selection, and `emit_call` all complete for `lower`; the nil field access was
+  after the call-result presence check. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle15-stage3/stage3.log`.
+  Stage2 SHA-256:
+  `39dd6d03387a1e9a4c6211de763c9bd7863fc3b36fa1b61970b4dda69de86aeb`.
+- Cycle 16 replaced optional coalescing with explicit `Some(ts_local)` pattern
+  binding. The same frontier remained, proving both staged optional extraction
+  forms can yield a nil payload. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle16-stage3/stage3.log`.
+  Stage2 SHA-256:
+  `f250e6d137688d16764aba2e32a7ce4e473d4fbb35e8e6cc2459f87356f9b39d`.
+- Added `MirBuilder.emit_call_value`, a non-optional result API for guaranteed
+  non-unit calls, and routed the text-special arm through it. The focused
+  source contract passed. Cycle 17 advanced well beyond the original failure
+  through additional text methods, then a later `lower()` still produced a
+  nil `LocalId` immediately after `emit_call_value`; the identical preceding
+  `trim()` completed. Evidence:
+  `build/bootstrap/stage4-spdev-current/typekind-cycle17-stage3/stage3.log`.
+  Stage2 passed version, unsupported-command, frontend-smoke, and immutable
+  hash admission with SHA-256:
+  `dcb5ee3bd4648cd32a64eb4f430afa79d0b52f82785e68bed5b94b6609c15a8f`.
+- Admission clarification: `candidate_frontend_delegate_fidelity` returns 1
+  for both Cycle 15 and Cycle 16 bootstrap CLIs, and the full helper's `-c`
+  probe is unsupported by this minimal bootstrap entrypoint. Do not claim
+  those gates passed; the established lane admission is the four gates above.
+- The mandatory three-cycle cap is exhausted. Stage3 produced no compiler;
+  Stage4, essential-tools smoke, final verification, and push were not run.
+
+Next: in a fresh session, add receipts for the returned `LocalId.id`, builder
+`next_local`, and the statement immediately after the text-special return.
+Compare the successful `trim()` and failing later `lower()` call contexts and
+inspect whether `new_temp` or method return transport corrupts only the second
+opaque-string destination. Keep the non-optional helper until that comparison
+proves or disproves it. Remove all temporary `[mir-method-call]`,
+`[hir-field-type]`, `[mir-field-type]`, and `[mir-optional-inner]` receipts
+before exact Stage4 verification.

@@ -1996,6 +1996,7 @@ impl MirLowering:
         # rt_string_to_upper and rt_string_to_float use the shared tagged-value
         # ABI on both LLVM and Cranelift.
         if (method == "trim" or method == "strip" or method == "lower" or method == "to_lower" or method == "to_upper" or method == "split" or method == "replace" or method == "rfind" or method == "find" or method == "contains" or method == "parse_f64") and (resolution_is_unresolved or (method == "contains" and predicate_receiver_is_text)) and not contains_recv_is_array and not predicate_has_custom_owner:
+            eprint("[mir-method-call] text-special-enter method={method}\n")
             val ts_arity_ok = match method:
                 case "split": args.len() == 1
                 case "rfind": args.len() == 1
@@ -2004,6 +2005,7 @@ impl MirLowering:
                 case "contains": args.len() == 1
                 case _: args.len() == 0
             if ts_arity_ok:
+                eprint("[mir-method-call] text-special-arity method={method}\n")
                 # Bug (native_string_method_var_arg lane, 2026-07-14), part 1:
                 # un-nest `self.tag_str_local_if_raw(self.lower_expr(receiver))`
                 # through an intermediate val -- same seed-interpreter
@@ -2027,10 +2029,14 @@ impl MirLowering:
                 # entirely and is safe for an already-tagged input too (no
                 # double-tag risk), so it is correct for both the literal and
                 # variable cases this arm has to serve.
+                eprint("[mir-method-call] text-special-receiver-before method={method}\n")
                 val ts_recv_raw = if method == "contains": prelowered_method_receiver else: self.lower_expr(receiver)
+                eprint("[mir-method-call] text-special-receiver-after method={method}\n")
                 val ts_recv = self.ensure_tagged_str(ts_recv_raw)
+                eprint("[mir-method-call] text-special-tagged method={method}\n")
                 var ts_ops: [MirOperand] = []
                 ts_ops = ts_ops.push(mir_operand_copy(ts_recv))
+                eprint("[mir-method-call] text-special-ops method={method}\n")
                 for ts_arg in args:
                     val ts_arg_local = self.lower_expr(ts_arg.value)
                     val ts_arg_tagged = self.ensure_tagged_str(ts_arg_local)
@@ -2045,6 +2051,7 @@ impl MirLowering:
                     case "to_upper": "rt_string_to_upper"
                     case "parse_f64": "rt_string_to_float"
                     case _: "rt_string_to_lower"
+                eprint("[mir-method-call] text-special-symbol method={method}\n")
                 # Bug fix (task #178 text3 lane): trim/lower/to_lower/replace
                 # return TAGGED STRING HANDLES, not integers (rfind returns an
                 # i64 index; contains returns a bool; split
@@ -2066,30 +2073,30 @@ impl MirLowering:
                     case "parse_f64":
                         MirType.i64()
                     case _: MirType.i64()
+                eprint("[mir-method-call] text-special-dest method={method}\n")
                 val ts_op = MirOperand(kind: MirOperandKind.Const(
                     MirConstValue.Str(ts_sym),
                     MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [], return_type: ts_dest_ty, is_variadic: false)))
                 ))
+                eprint("[mir-method-call] text-special-call-before method={method}\n")
                 var b_ts = self.builder
-                val ts_res = b_ts.emit_call(ts_op, ts_ops, ts_dest_ty)
+                val ts_local = b_ts.emit_call_value(ts_op, ts_ops, ts_dest_ty)
+                eprint("[mir-method-call] text-special-call-after method={method}\n")
                 self.builder = b_ts
-                if ts_res != nil:
-                    val ts_local = ts_res ?? ts_recv
-                    if method == "parse_f64":
-                        self.mark_runtime_value_local(ts_local.id)
-                        val float_type = HirType(kind: HirTypeKind.Float(64), span: receiver.span)
-                        self.remember_local_hir_type(ts_local.id, HirType(
-                            kind: HirTypeKind.Optional(float_type),
-                            span: receiver.span
-                        ))
-                    # rt_string_split returns a tagged rt_array handle; flag it
-                    # so downstream indexing/for-in routes through rt_array_get.
-                    if method == "split":
-                        self.runtime_array_locals[ts_local.id] = true
-                        val split_hir_type = HirType(kind: HirTypeKind.Str, span: receiver.span)
-                        self.remember_local_hir_type(ts_local.id, HirType(kind: HirTypeKind.Array(split_hir_type, nil), span: receiver.span))
-                    return ts_local
-                return ts_recv
+                if method == "parse_f64":
+                    self.mark_runtime_value_local(ts_local.id)
+                    val float_type = HirType(kind: HirTypeKind.Float(64), span: receiver.span)
+                    self.remember_local_hir_type(ts_local.id, HirType(
+                        kind: HirTypeKind.Optional(float_type),
+                        span: receiver.span
+                    ))
+                # rt_string_split returns a tagged rt_array handle; flag it
+                # so downstream indexing/for-in routes through rt_array_get.
+                if method == "split":
+                    self.runtime_array_locals[ts_local.id] = true
+                    val split_hir_type = HirType(kind: HirTypeKind.Str, span: receiver.span)
+                    self.remember_local_hir_type(ts_local.id, HirType(kind: HirTypeKind.Array(split_hir_type, nil), span: receiver.span))
+                return ts_local
 
         # Bug (pure_simple_text_split_lines_missing, 2026-07-16): `text.split_lines()` / `.lines()`
         # had no MIR lowering at all (fell to the generic Unresolved loud-fail:
