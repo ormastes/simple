@@ -129,13 +129,14 @@ impl VulkanBackend:
 
     me _clear_pending_compute_state():
         self.pending_compute_command = 0
-        self.pending_compute_pipelines = []
-        self.pending_compute_descriptors = []
+        self.pending_compute_pipelines = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        self.pending_compute_descriptors = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        self.pending_compute_count = 0
 
     me _release_pending_compute_descriptors() -> bool:
         var released = true
         var i: i64 = 0
-        while i < self.pending_compute_descriptors.len():
+        while i < self.pending_compute_count:
             if not vulkan_sffi_destroy_descriptor_set(self.pending_compute_descriptors[i]):
                 vulkan_sffi_quarantine_dependencies(
                     self.pending_compute_descriptors[i], 0, 0, 0)
@@ -145,7 +146,7 @@ impl VulkanBackend:
 
     me _quarantine_pending_compute_descriptors():
         var i: i64 = 0
-        while i < self.pending_compute_descriptors.len():
+        while i < self.pending_compute_count:
             vulkan_sffi_quarantine_dependencies(
                 self.pending_compute_descriptors[i], 0, 0, 0)
             i = i + 1
@@ -158,13 +159,13 @@ impl VulkanBackend:
         if not vulkan_sffi_end_compute(cmd):
             val discarded = vulkan_sffi_discard_command(cmd)
             if not discarded:
-                val first_desc = if self.pending_compute_descriptors.len() > 0:
+                val first_desc = if self.pending_compute_count > 0:
                     self.pending_compute_descriptors[0]
                 else:
                     0
                 vulkan_sffi_quarantine_unsubmitted_command(cmd, first_desc, 0)
                 var i: i64 = 1
-                while i < self.pending_compute_descriptors.len():
+                while i < self.pending_compute_count:
                     vulkan_sffi_quarantine_dependencies(
                         self.pending_compute_descriptors[i], 0, 0, 0)
                     i = i + 1
@@ -216,7 +217,7 @@ impl VulkanBackend:
 
         var desc: i64 = 0
         var i: i64 = 0
-        while i < self.pending_compute_pipelines.len():
+        while i < self.pending_compute_count:
             if self.pending_compute_pipelines[i] == pipe:
                 desc = self.pending_compute_descriptors[i]
             i = i + 1
@@ -230,8 +231,17 @@ impl VulkanBackend:
                             desc, 0, 0, 0)
                 val flushed = self._flush_pending_compute()
                 return if flushed < 0: -1 else: 0
-            self.pending_compute_pipelines.push(pipe)
-            self.pending_compute_descriptors.push(desc)
+            if self.pending_compute_count >= 16:
+                # Preallocated cache full (16 slots > total pipeline kinds).
+                # Mirror the bind-failure path: flush and let the caller take
+                # the checked CPU fallback for this primitive.
+                if not vulkan_sffi_destroy_descriptor_set(desc):
+                    vulkan_sffi_quarantine_dependencies(desc, 0, 0, 0)
+                val cache_flushed = self._flush_pending_compute()
+                return if cache_flushed < 0: -1 else: 0
+            self.pending_compute_pipelines[self.pending_compute_count] = pipe
+            self.pending_compute_descriptors[self.pending_compute_count] = desc
+            self.pending_compute_count = self.pending_compute_count + 1
         val cmd = self.pending_compute_command
         val ready = (
             vulkan_sffi_bind_pipeline(cmd, pipe) and

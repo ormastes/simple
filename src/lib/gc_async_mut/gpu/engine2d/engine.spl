@@ -175,6 +175,11 @@ var _vec_text_probe_count: i32 = 0
 var _vec_blit_probe_count: i32 = 0
 var _vec_entry_probe_count: i32 = 0
 var _font_batch_receipt_count: i32 = 0
+# Memoized result of Engine2D.detect_best_backend_viable(). Empty = not yet
+# resolved this process. The deep viability probe (init + draw + present +
+# provenance readback) runs at most once per process; per-render cost is a
+# single text compare afterwards.
+var _viable_auto_backend_cache: text = ""
 # ============================================================================
 # Engine2D
 # ============================================================================
@@ -866,6 +871,89 @@ class Engine2D with DrawIrRenderTarget:
             if probe.status == BackendStatus.Initialized:
                 return name
             idx = idx + 1
+        "cpu"
+
+    static fn probe_backend_viable(backend_name: text) -> BackendProbeResult:
+        """Deep viability probe: init + trivial draw + present + provenance readback.
+
+        Catches the seems-available-but-cannot-render case (e.g. CUDA on a
+        headless host whose runtime inits but whose present/readback path
+        cannot deliver device pixels). A GPU backend passes only when a tiny
+        8x8 surface round-trips a drawn pixel with device provenance
+        (source device_readback or host_cache_after_device_present, and a
+        backend handle or device identity > 0). CPU lanes pass by definition.
+        """
+        val canon = backend_canonical_name(backend_name)
+        if canon == "software" or canon == "cpu" or canon == "cpu_simd":
+            return Engine2D.probe_backend(8, 8, canon)
+        var engine = Engine2D.create_with_backend(8, 8, canon)
+        val created_name = engine.backend_name()
+        if created_name != canon:
+            engine.shutdown()
+            return BackendProbeResult.failed(canon, "init_failed: fell back to " + created_name)
+        # Drive the RenderBackend trait surface directly (engine.backend) so the
+        # probe exercises the same draw/present/readback ops the render lane
+        # uses without the Option-unwrap arms (seed lowers `.?` to bool).
+        var b = engine.backend
+        b.clear(0xFF000000u32)
+        b.draw_rect_filled(0, 0, 8, 8, 0xFF3366CCu32)
+        b.submit_batch()
+        b.present()
+        val rb = b.read_pixels_with_source()
+        engine.shutdown()
+        if rb.source != "device_readback" and rb.source != "host_cache_after_device_present":
+            return BackendProbeResult.failed(canon, "readback_unproven source=" + rb.source)
+        if rb.backend_handle <= 0 and rb.device_identity <= 0:
+            return BackendProbeResult.failed(canon, "readback_unproven handle=0 source=" + rb.source)
+        if rb.pixels.len() != 64:
+            return BackendProbeResult.failed(canon, "readback_unproven size=" + rb.pixels.len().to_text())
+        if rb.pixels[0] != 0xFF3366CCu32:
+            return BackendProbeResult.failed(canon, "wrong_pixels")
+        BackendProbeResult.success(canon, "viable: device provenance + pixel round-trip")
+
+    static fn detect_best_backend_viable() -> text:
+        """Auto-resolution that commits only to a PROVABLY working backend.
+
+        Same priority order as detect_best_backend(), but each GPU candidate
+        must pass probe_backend_viable() (tiny draw + present + provenance
+        readback) before being selected; a candidate that inits but cannot
+        render falls through to the next GPU candidate, then to CPU lanes.
+        Each rejection is logged as "[backend-resolve] <name> rejected: <why>".
+
+        An explicit SIMPLE_2D_BACKEND override keeps the shallow-probe
+        semantics of detect_best_backend() — an explicit user choice is
+        honored, not silently swapped for a deeper-probing sibling.
+
+        Memoized per process; renders after the first pay no probe cost.
+        """
+        if _viable_auto_backend_cache != "":
+            return _viable_auto_backend_cache
+        val override_name = engine2d_env_backend_override()
+        if override_name != "":
+            val override_canon = backend_canonical_name(override_name)
+            val override_probe = Engine2D.probe_backend(1, 1, override_canon)
+            if override_probe.status == BackendStatus.Initialized:
+                _viable_auto_backend_cache = override_canon
+                return override_canon
+            print("[backend-resolve] override {override_canon} rejected: {override_probe.reason}")
+        val order = backend_default_priority_order()
+        var idx = 0
+        val order_len = order.len()
+        while idx < order_len:
+            val name = order[idx]
+            val shallow = Engine2D.probe_backend(1, 1, name)
+            if shallow.status == BackendStatus.Initialized:
+                val deep = Engine2D.probe_backend_viable(name)
+                if deep.status == BackendStatus.Initialized:
+                    print("[backend-resolve] selected {name}")
+                    _viable_auto_backend_cache = name
+                    return name
+                print("[backend-resolve] {name} rejected: {deep.reason}")
+            else:
+                print("[backend-resolve] {name} rejected: unavailable: {shallow.reason}")
+            idx = idx + 1
+        print("[backend-resolve] selected cpu (no viable candidate)")
+        _viable_auto_backend_cache = "cpu"
         "cpu"
 
     static fn list_backends() -> [text]:
