@@ -618,19 +618,253 @@ float. Rewriting it would have corrupted a correct encoding comment.
 No regex sweep was used; every site was edited by line number after reading its
 receiver.
 
+### Confirmed defect class 5: the `X_op(X, …)` residue whose receiver IS provable
+
+The previous lane left 148 sites of this shape as "receiver type unproven" and
+15 as "method provably does not exist". Re-deriving the family at base
+`e4b4561c803` gives **106 unresolved names over 154 sites in 37 files** (direct
+scan; the definition index is anchored on the visibility modifier so `pub fn` is
+not missed).
+
+Most of the 148 are in fact provable, by three kinds of evidence that need no
+type checker:
+
+1. **Same-expression binding.** `expression_evaluator.spl:132-133` binds `lhs`
+   and `rhs` from the *identical* expression `self.eval_expr(_, ctx)?`. Eight
+   lines then call `lhs.as_int()` and eleven call `rhs_as_int(rhs)`. Whatever
+   `lhs` is, `rhs` is. The file does `use compiler.backend.backend_types.*`,
+   where `Value.as_int() -> i64` is defined (`backend_types.spl:344`).
+2. **Same-file self-contradiction on the same variable.**
+   `module_loader.spl:216` calls `reader_result_is_err(reader_result)` while
+   line 217 calls `reader_result.unwrap_err()` — one line apart, same variable.
+   `linker_wrapper_lib_support.spl:86-88` uses `add_result.is_err()` /
+   `.unwrap_err()` correctly, while line 344 uses the broken spelling on a
+   sibling `Result`; lines 356 and 387 use `libraries.len()` / `resolved.len()`
+   correctly while 349 and 380 use `libraries_len(libraries)`.
+   `testing.spl:114-115` uses `expected_errors.len()` and `errors.len()`
+   correctly; line 118 uses `expected_errors_len(expected_errors)`.
+3. **Explicit parameter annotation plus a class that carries the method.**
+   `check_macro_in_hir(checker: MacroChecker, …)` at `macro_check/mod.spl:258`,
+   and `MacroChecker.check_call` at `:173`.
+
+**Correction to the previous lane's triage.** `checker_check_call` was listed
+among the 15 names whose "method genuinely does not exist on the named class".
+It does exist — `MacroChecker.check_call(call: MacroCall) -> MacroCheckResult`,
+`macro_check/mod.spl:173` — and the receiver is an explicitly annotated
+parameter, so it is the single most provable site in the whole cluster. The
+other 14 in that group survive re-checking (see "left loud" below).
+
+#### A trap found by probe: `Result.value` is NOT the accessor
+
+`linker_wrapper_lib_support.spl` and `module_loader.spl` carry a **second**
+porter shape — a bare identifier `X_result_value` (not a call) standing in for
+Rust's `.unwrap()`:
+
+```
+val libraries = lib_result_value          # undefined identifier
+```
+
+The obvious rewrite is `lib_result.value`. Probed against the seed
+(`bin/simple run`), that returns `<value:0x1800000007>` for an `Ok(7)` — a raw
+tagged pointer, **not** `7`. `.unwrap()` returns `7`. Rewriting to `.value`
+would have replaced a link error with a silent wrong answer. All eight sites
+use `.unwrap()`.
+
+#### Probe results (PROVED, seed engine, `bin/simple run`)
+
+| Spelling | Result | Verdict |
+|---|---|---|
+| `r.is_err()`, `r.is_ok()`, `r.unwrap()`, `r.unwrap_err()` on `Result` | correct | safe |
+| `i.to_string()` / `f.to_string()` / `b.to_string()` (i64/f64/bool) | `42` / `1.5` / `true` | safe |
+| `t.trim()`, `t.trim_start()`, `t.replace(a,b)`, `t.len()`, `t.contains()`, `t.starts_with()` | correct | safe |
+| `l.len()`, `l.is_empty()`, `l.map(f)`, `l.contains(v)` | correct | safe |
+| **`r.value` on `Result`** | `<value:0x1800000007>` for `Ok(7)` | **UNSAFE** |
+
+#### Disposition
+
+**75 token replacements over 10 files**, every one a line-for-line identifier
+rewrite (`75 insertions(+), 75 deletions(-)`; no structural change):
+
+| file | sites |
+|---|---|
+| `70.backend/linker/linker_wrapper_lib_support.spl` | 15 |
+| `15.blocks/blocks/testing.spl` | 13 |
+| `70.backend/backend/common/expression_evaluator.spl` | 11 |
+| `99.loader/loader/module_loader.spl` | 10 |
+| `35.semantics/macro_check/mod.spl` | 9 |
+| `15.blocks/blocks/text_transforms.spl` | 5 |
+| `15.blocks/blocks/highlighting.spl` | 4 |
+| `20.hir/inference/serialize.spl` | 4 |
+| `35.semantics/semantics/cast_rules.spl` | 3 |
+| `35.semantics/macro_check/template.spl` | 2 |
+
+#### Validation (PROVED, census A/B at base `e4b4561c803`)
+
+| Metric | before | after |
+|---|---|---|
+| files scanned | 11,284 | 11,284 |
+| parsed ok | 11,241 | 11,241 |
+| parse failed | 43 | 43 |
+| lowering failed | 979 | 979 |
+| distinct names attributed | 1,880 | 1,838 |
+| **undefined tree-wide** | **395** | **353** |
+
+Compared by set: exactly **42 names removed, 0 added**. All four harness
+constants are unchanged, so every edited file still parses and still lowers and
+the delta is comparable. The removed set is *identical* to the predicted set —
+no collateral removals and no misses (`comm` both directions empty).
+
+42, not 75, because the census masks any unbound name that also exists as a
+module-level definition somewhere else in the tree. `rhs_as_int` (11 sites),
+`reader_result_is_err`, `code_result_is_err`, `reader_result_value` and
+`code_result_value` are all masked that way and were fixed without moving the
+count. This is the documented lower-bound effect, measured again here.
+
+**True-positive control.** Five names of the *identical* `X_op(X, …)` shape were
+deliberately left unfixed **inside files that were edited** — `value_type_name`
+(`testing.spl`, 13 replacements), `vars_items` (`text_transforms.spl`, 5),
+`target_is_float` (`cast_rules.spl`, 3), and `kind_to_text` + `kind_can_follow`
+(`template.spl`, 2). After the rewrite all five are **still reported**. Had the
+edit merely blinded the census to this name shape, they would have disappeared
+with the rest. The detector is still live on exactly this class inside edited
+files.
+
+A sixth intended control, `scope_get`, turned out to be **invalid**: it is not
+in the *before* list at all, because some other module defines a `scope_get`
+that masks it. A control has to be verified present in the baseline before it
+can prove anything — an absent name "still absent" proves nothing.
+
+### New defect class: porter emitted `if`/`while` with an EMPTY body
+
+Strictly worse than the link-error family, and the census **structurally cannot
+see it** because no name is left unresolved. Filed here; **assigned to a
+separate lane, not fixed by this one.**
+
+`capability_tracker.spl:70-84`:
+
+```
+for inst in self.instructions:
+    if backend == "cranelift":
+        if inst.cranelift:
+        supported = supported + 1
+```
+
+The inner `if` has no body, and `supported = supported + 1` is dedented to the
+inner `if`'s own level, so it executes for **every** instruction: the
+"supported instructions" count always equals the total instruction count, on
+every backend. Four sites in that one function, one per backend.
+
+Same shape in `effects.spl:117-119`, where the porter flattened Rust's
+`if let Some(v) = x { if v.is_async() {`:
+
+```
+val callee_effect = env_get(env, callee)
+if callee_effect.?:
+    if callee_effect_value_is_async(callee_effect_value):
+    return Effect.Async
+```
+
+`return Effect.Async` fires for any callee present in `env`, async or not, so
+`infer_function_effect` reports `Async` for every function that calls anything
+it knows about. `callee_effect_value` is also a phantom binding the porter never
+emitted.
+
+**Enumeration.** A line matching `^(\s*)(if|while|for|elif)\b.*:\s*$` whose next
+non-blank, non-comment line is indented **at or below** the opener, with
+per-file docstring tracking: **29 sites in 8 files**, all under `src/compiler`:
+
+```
+src/compiler/10.frontend/parser/recovery.spl              8
+src/compiler/70.backend/backend/capability_tracker.spl    4
+src/compiler/30.types/type_system/effects.spl             4
+src/compiler/90.tools/text_diff.spl                       3
+src/compiler/35.semantics/macro_contracts.spl             3
+src/compiler/20.hir/inference/serialize.spl               3
+src/compiler/55.borrow/gc_analysis/barriers.spl           2
+src/compiler/00.common/dependency/resolution.spl          2
+```
+
+Two measurement bugs caught while enumerating it, both recorded because they are
+the exact false-clear/false-alarm pair this campaign keeps hitting:
+
+- **False positives, 46 → 29.** Without docstring tracking the scan returns 46;
+  17 of those are `if` lines inside `"""` example blocks (e.g.
+  `crypto_ffi.spl:141`, which is prose, not code).
+- **False *negatives*, 21.** A first docstring filter leaked its in-docstring
+  flag **across files** — the `next` branches skipped the per-file reset — which
+  silently dropped both of the files whose sites had already been read and
+  confirmed real, and returned 21. Reset parser state on **filename change**,
+  not at EOF. A filter that removes noise can remove signal by the same edit;
+  the tell was that a verified-real site disappeared.
+
+Restoring the intended nesting is a semantic port, not a rename, and each site
+needs its Rust original consulted — hence not fixed here.
+
 ## Follow-ups (not done here)
 
 - `Expr::Identifier` has no span, so attribution is function-granular. Giving
   identifiers a span would make it line-exact.
 - The `enumname_Variant` class is done (61 rewritten, 2 reclassified and filed).
-- The `X_op(X, …)` method-as-free-function class is done for every receiver whose
-  type this lane could prove and whose method was confirmed to exist (134
-  replacements over 21 files). Census now stands at **395** (measured at
-  `dfe952d0afaec367d06e95f3025daaab6f542de6`; the 513 quoted above was measured at
-  `eada96016e2` and other lanes moved the tree in between). Next: the 148 sites of
-  the same shape whose receiver type is still unproven, and the 15 whose method
-  genuinely does not exist on the named class — the latter are real gaps, not
-  spellings.
+- The `X_op(X, …)` method-as-free-function class: the previous lane did 134
+  replacements over 21 files; this lane did 75 more over 10 files, taking the
+  census from **395** to **353** (measured at `e4b4561c803`). What remains of the
+  family is the residue listed under "left loud" below — overwhelmingly *real
+  missing methods*, not spellings.
+- Fix the 29 empty-body `if`/`while` sites (section above). This is the highest
+  severity item left in this document: it is a silent control-flow corruption,
+  and no census can see it.
+- Provide the missing `std.random_utils` module, or port `fuzz.spl` onto an
+  existing RNG (see "left loud" below).
+- Restore the impl blocks the porter emptied: `NumericType`, `FragmentKind`,
+  and the receivers in `escape.spl` / `roots.spl` / `resolution.spl` /
+  `hygiene.spl` / `visibility_checker.spl`. These are the *real missing
+  methods*, and they are now the bulk of what the census still reports.
+
+### Left loud deliberately (disposition d)
+
+A loud link error beats a silent wrong answer. None of these were rewritten to a
+plausible neighbouring spelling.
+
+- **`effects.spl` (5 names: `effect_is_sync`, `effect_value_is_async`,
+  `effect_value_is_sync`, `callee_effect_value_is_async`, `scc_contains`)** —
+  the enclosing `if` bodies are **empty** (new class above). `Effect.is_async()`
+  does exist and line 232 of the same file calls it correctly, so the rename
+  alone would "work" — and would leave an `if` with an empty body while the
+  `return` fires unconditionally. Fixing the name without fixing the nesting
+  converts a loud link error into a silent wrong answer. Blocked on that lane.
+- **`fuzz.spl`: `rng_next_range` ×7, plus `rng_create`, `rng_next`,
+  `random_choice`** — `src/lib/nogc_sync_mut/fuzz.spl:16` does
+  `use std.random_utils.{…}` and **no module `random_utils` exists anywhere in
+  the tree**; `fuzz.spl` is the only file that mentions `rng_next_range`.
+  `src/lib/common/random_pure.spl` exposes an unrelated API (`lcg_*`, scalar
+  returns) rather than the `(new_rng, value)` tuple protocol `fuzz.spl` calls.
+  A missing module, not a spelling.
+  These were also a **false positive of the `X_op(X, …)` scan**: the shape
+  matched only because the local happens to be named `rng`, so `rng_next_range(rng, …)`
+  looks like a flattened method call. The callee is a genuine free function that
+  is merely absent. Any scan keyed on `prefix_method(prefix, …)` will collide
+  with real free functions whose first parameter is named after them.
+- **`cast_rules.spl` `target_is_float`** — `cast_rules.spl:29` reads
+  `# NumericType Methods (was: impl NumericType:)` and the section body is
+  **empty**. The porter dropped the whole impl block, so `is_float()` genuinely
+  does not exist on this enum. (An `is_float()` does exist in `simd_check.spl`,
+  on an unrelated class — rewriting against it would bind the wrong type.)
+- **`template.spl` `kind_to_text`, `kind_can_follow`** — identical: the
+  `# FragmentKind Methods (was: impl FragmentKind:)` block is empty.
+- **`escape.spl`, `roots.spl`, `resolution.spl`, `hygiene.spl`,
+  `visibility_checker.spl`** — every one carries `# X Methods (was: impl X:)`
+  markers with empty bodies. `pts.add/union/all`, `set.add_root/all_roots`,
+  `fs.has_file`, `scope.bind/lookup`, `symbol_table.lookup/get` are real missing
+  methods. This confirms and extends the previous lane's 15-name group (minus
+  `checker_check_call`, corrected above).
+- **`expression_evaluator.spl` `scope_get`** — the receiver is an element of
+  `scopes: [[Dict<text, Value>]]`, i.e. a **list**, not a `Dict`, and
+  `list.get(i)` has its own known defect. Ambiguous receiver, left loud. (Also
+  not census-visible, so it could not serve as a control.)
+- **`text_transforms.spl` `vars_items`** — `Dict.items` does not exist
+  (previous lane's probe), unchanged. Note the enclosing loop is therefore still
+  broken; `result_replace` inside it was still fixed, because that is a strict
+  improvement and `vars_items` keeps the defect visible.
 - The mangled-float class (`0[0]` for `0.0`) is done: 19 of 20 owned sites
   corrected, 1 left alone as a verified false positive (`riscv_rvv.spl:141`,
   RVV bit-field notation). The vendored Rust hits are out of owned-code scope.
