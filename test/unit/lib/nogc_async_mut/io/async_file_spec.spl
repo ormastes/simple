@@ -1,196 +1,111 @@
-# # Async File I/O Specification
+# Async File I/O Specification
 #
-# **Feature IDs:** #IO-ASYNC-FILE
-# **Category:** Stdlib
-# **Difficulty:** 3/5
-# **Status:** Implemented
+# Covers src/lib/nogc_async_mut/io/file.spl: errno translation, filesystem
+# metadata via stat, and the AsyncDir directory operations.
 #
-# ## Overview
+# HISTORY: this file previously held 17 examples, every one of them named
+# "documents <something>", whose entire body was a commented-out snippet
+# followed by `pass`. It imported nothing, so all 17 reported green while
+# executing none of the async file layer. Prose belongs in a comment or a guide;
+# an `it` block that executes nothing is a spec that cannot fail.
 #
-# AsyncFileHandle wraps sync FileHandle with thread pool offload.
-# Regular files don't support epoll, so async file I/O dispatches
-# blocking operations to a thread pool.
-#
-# ## Syntax
-#
-# ```simple
-# val fh = await AsyncFileHandle.open("data.txt", FileMode.ReadOnly)?
-# val content = await fh.read_text()?
-# await fh.close()?
-#
-# # One-shot:
-# val text = await AsyncFile.read("config.sdn")?
-# await AsyncFile.write("output.txt", text)?
-# ```
-#
-# ## Key Concepts
-#
-# | Concept | Description |
-# |---------|-------------|
-# | AsyncFileHandle | Thread-pool async file — AsyncRead+AsyncWrite+AsyncSeek+AsyncClose |
-# | AsyncFile | Static async convenience methods |
-# | ThreadPool | Worker threads for blocking offload |
-#
-# ## Behavior
-#
-# - All operations dispatch to thread pool via pool.spawn()
-# - is_open() remains sync (checks inner handle state)
-# - AsyncFile.read/write/exists/delete wrap handle lifecycle
-# - Mirror of sync API — add `await` prefix
-#
-# ## Sync vs Async Comparison
-#
-# ```simple
-# # Sync:
-# val fh = FileHandle.open("data.txt", FileMode.ReadOnly)?
-# val text = fh.read_text()?
-# fh.close()?
-#
-# # Async — identical names, just add await:
-# val fh = await AsyncFileHandle.open("data.txt", FileMode.ReadOnly)?
-# val text = await fh.read_text()?
-# await fh.close()?
-# ```
+# The async read/write paths (AsyncFile.open/read/write/fsync) take an IoDriver
+# and resolve through the event loop, so they are not reachable from an
+# in-process spec. They are deliberately not covered here rather than being
+# re-stubbed. ThreadPool is also uncovered: it is unusable because of a name
+# collision filed as
+# doc/08_tracking/bug/threadpool_duplicate_export_collapses_type_2026-08-02.md
 
+use std.spec
+use std.nogc_async_mut.io.file.{errno_to_io_error, stat, AsyncDir}
+use std.io.types.{IoError, IoErrorKind}
 
-# ============================================================================
-# ThreadPool
-# ============================================================================
+describe "async file — errno translation":
+    it "maps ENOENT to NotFound":
+        val e = errno_to_io_error(0 - 2)
+        expect(e.kind == IoErrorKind.NotFound).to_equal(true)
+        expect(e.message).to_equal("file not found")
 
-describe "ThreadPool":
-    # ## Worker Thread Pool
-    #
-    # Offloads blocking file I/O to background threads.
+    it "maps EACCES to PermissionDenied":
+        val e = errno_to_io_error(0 - 13)
+        expect(e.kind == IoErrorKind.PermissionDenied).to_equal(true)
+        expect(e.message).to_equal("permission denied")
 
-    context "construction":
-        it "documents thread pool creation":
-            # val pool = ThreadPool.new(4)
-            # val result = await pool.spawn(\\: expensive_computation())
-            pass
+    it "maps EEXIST to AlreadyExists":
+        val e = errno_to_io_error(0 - 17)
+        expect(e.kind == IoErrorKind.AlreadyExists).to_equal(true)
+        expect(e.message).to_equal("already exists")
 
-        it "documents default pool":
-            # val pool = ThreadPool.default()  # 4 threads
-            pass
+    it "maps EISDIR to InvalidInput":
+        val e = errno_to_io_error(0 - 21)
+        expect(e.kind == IoErrorKind.InvalidInput).to_equal(true)
+        expect(e.message).to_equal("is a directory")
 
-# ============================================================================
-# AsyncFileHandle
-# ============================================================================
+    it "maps ENOSPC to Other with a no-space message":
+        val e = errno_to_io_error(0 - 28)
+        expect(e.kind == IoErrorKind.Other).to_equal(true)
+        expect(e.message).to_equal("no space left on device")
 
-describe "AsyncFileHandle":
-    # ## Async File Handle
-    #
-    # Wraps sync FileHandle; dispatches all operations to thread pool.
-    # Implements AsyncRead, AsyncWrite, AsyncSeek, AsyncClose.
+    it "falls back to Other for an unrecognised errno":
+        val e = errno_to_io_error(0 - 99)
+        expect(e.kind == IoErrorKind.Other).to_equal(true)
 
-    context "factory methods":
-        # ### Opening Files Asynchronously
+    it "distinguishes the mapped kinds from one another":
+        val not_found = errno_to_io_error(0 - 2)
+        val denied = errno_to_io_error(0 - 13)
+        val exists = errno_to_io_error(0 - 17)
+        expect(not_found.kind == denied.kind).to_equal(false)
+        expect(denied.kind == exists.kind).to_equal(false)
+        expect(not_found.kind == exists.kind).to_equal(false)
 
-        it "documents open":
-            # val fh = await AsyncFileHandle.open("data.txt", FileMode.ReadOnly)?
-            pass
+describe "async file — stat":
+    it "fails on a path that does not exist":
+        val r = stat("/nonexistent/definitely/missing/path")
+        expect(r.is_err()).to_equal(true)
 
-        it "documents read_file shortcut":
-            # val fh = await AsyncFileHandle.read_file("data.txt")?
-            pass
+    it "succeeds on an existing directory":
+        val r = stat("/tmp")
+        expect(r.is_ok()).to_equal(true)
 
-        it "documents create shortcut":
-            # val fh = await AsyncFileHandle.create("output.txt")?
-            pass
+    it "reports a directory as a directory and not a file":
+        val r = stat("/tmp")
+        expect(r.is_ok()).to_equal(true)
+        match r:
+            case Ok(st):
+                expect(st.is_dir).to_equal(true)
+                expect(st.is_file).to_equal(false)
+            case Err(e):
+                expect("stat /tmp failed").to_equal("stat /tmp to succeed")
 
-    context "AsyncRead operations":
-        # ### Reading Through Thread Pool
-        #
-        # Each read operation is dispatched to the thread pool.
+describe "async file — AsyncDir":
+    it "lists an existing directory":
+        val r = AsyncDir.readdir("/tmp")
+        expect(r.is_ok()).to_equal(true)
 
-        it "documents read":
-            # val fh = await AsyncFileHandle.read_file("data.bin")?
-            # val chunk = await fh.read(1024)?
-            pass
+    it "fails to list a directory that does not exist":
+        val r = AsyncDir.readdir("/nonexistent/definitely/missing/dir")
+        expect(r.is_err()).to_equal(true)
 
-        it "documents read_text":
-            # val fh = await AsyncFileHandle.read_file("data.txt")?
-            # val text = await fh.read_text()?
-            pass
+    it "creates a directory, sees it in the listing, then removes it":
+        val path = "/tmp/vaclane_async_file_spec_dir"
+        val made = AsyncDir.mkdir(path, 493)
+        expect(made.is_ok()).to_equal(true)
+        val after_create = stat(path)
+        expect(after_create.is_ok()).to_equal(true)
+        val removed = AsyncDir.remove(path)
+        expect(removed.is_ok()).to_equal(true)
+        val after_remove = stat(path)
+        expect(after_remove.is_err()).to_equal(true)
 
-        it "documents read_line":
-            # val fh = await AsyncFileHandle.read_file("data.csv")?
-            # val line = await fh.read_line()?
-            pass
-
-    context "AsyncWrite operations":
-        # ### Writing Through Thread Pool
-
-        it "documents write_text":
-            # val fh = await AsyncFileHandle.create("output.txt")?
-            # await fh.write_text("hello async")?
-            # await fh.flush()?
-            # await fh.close()?
-            pass
-
-    context "AsyncSeek operations":
-        # ### Seeking Through Thread Pool
-
-        it "documents seek and rewind":
-            # val fh = await AsyncFileHandle.open("data.txt", FileMode.ReadWrite)?
-            # await fh.write_text("content")?
-            # await fh.rewind()?
-            # val text = await fh.read_text()?
-            pass
-
-    context "is_open remains sync":
-        # ### Sync State Check
-        #
-        # is_open() doesn't need async — it just checks an internal flag.
-
-        it "documents sync is_open":
-            # val fh = await AsyncFileHandle.read_file("data.txt")?
-            # expect fh.is_open() == true  # sync call
-            # await fh.close()?
-            # expect fh.is_open() == false  # sync call
-            pass
-
-# ============================================================================
-# AsyncFile
-# ============================================================================
-
-describe "AsyncFile":
-    # ## Async Static Convenience
-    #
-    # One-shot async file operations — mirrors sync File class.
-
-    context "read and write":
-        it "documents async read":
-            # val text = await AsyncFile.read("config.sdn")?
-            pass
-
-        it "documents async write":
-            # await AsyncFile.write("output.txt", "hello async")?
-            pass
-
-        it "documents async read_bytes":
-            # val data = await AsyncFile.read_bytes("data.bin")?
-            pass
-
-    context "exists and delete":
-        it "documents async exists":
-            # val found = await AsyncFile.exists("config.sdn")
-            pass
-
-        it "documents async delete":
-            # await AsyncFile.delete("temp.txt")?
-            pass
-
-    context "mirrors sync File":
-        # ### Side-by-Side Comparison
-        #
-        # Same method names, same parameters — just add await.
-
-        it "documents sync vs async":
-            # Sync:
-            #   val text = File.read("config.sdn")?
-            #   File.write("out.txt", text)?
-            #
-            # Async:
-            #   val text = await AsyncFile.read("config.sdn")?
-            #   await AsyncFile.write("out.txt", text)?
-            pass
+    it "reports a newly created directory as a directory":
+        val path = "/tmp/vaclane_async_file_spec_dir2"
+        val made = AsyncDir.mkdir(path, 493)
+        expect(made.is_ok()).to_equal(true)
+        val st = stat(path)
+        match st:
+            case Ok(info):
+                expect(info.is_dir).to_equal(true)
+            case Err(e):
+                expect("stat of created dir failed").to_equal("it to succeed")
+        val removed = AsyncDir.remove(path)
+        expect(removed.is_ok()).to_equal(true)
