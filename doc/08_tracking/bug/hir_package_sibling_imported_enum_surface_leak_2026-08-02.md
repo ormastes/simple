@@ -3,6 +3,7 @@
 Status: open  
 Severity: P1 bootstrap blocker  
 Owner: pure-Simple HIR module lowering
+Fix owner: `/root/stage4-hir-sibling-import` — CLAIMED
 
 ## Reproduction
 
