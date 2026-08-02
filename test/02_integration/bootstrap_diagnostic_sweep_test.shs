@@ -4,11 +4,15 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
-mkdir -p "$work/input" "$work/cache" "$work/repo/bin" "$work/missing-child"
+mkdir -p "$work/input" "$work/timeout-input" "$work/cache" "$work/repo/bin" "$work/missing-child"
 
 printf '%s\n' 'fn good() -> i64: 1' > "$work/input/adjacent_good.spl"
 printf '%s\n' 'fn broken_one(:' > "$work/input/exact_failure.spl"
 printf '%s\n' 'val match = 1' > "$work/input/second_failure.spl"
+printf '%s\n' 'fn timeout_one() -> i64: 1' > "$work/timeout-input/01_timeout.spl"
+printf '%s\n' 'fn timeout_failure(:' > "$work/timeout-input/02_failure.spl"
+printf '%s\n' 'fn timeout_two() -> i64: 1' > "$work/timeout-input/03_timeout.spl"
+printf '%s\n' 'fn timeout_success() -> i64: 1' > "$work/timeout-input/04_success.spl"
 
 fake="$work/fake-simple"
 printf '%s\n' \
@@ -18,6 +22,13 @@ printf '%s\n' \
   '  *adjacent_good.spl) exit 0 ;;' \
   '  *exact_failure.spl) echo "error[E100]: exact parser failure" >&2; exit 1 ;;' \
   '  *second_failure.spl) echo "error[E200]: adjacent semantic failure" >&2; exit 1 ;;' \
+  '  *01_timeout.spl|*03_timeout.spl)' \
+  '    trap "" TERM' \
+  '    (trap "" TERM; while :; do /bin/sleep 10; done) &' \
+  '    echo "$!" >> "$FAKE_DESCENDANTS"' \
+  '    while :; do /bin/sleep 10; done ;;' \
+  '  *02_failure.spl) echo "error[E300]: timeout-adjacent failure" >&2; exit 1 ;;' \
+  '  *04_success.spl) exit 0 ;;' \
   'esac' \
   'exit 2' > "$fake"
 chmod +x "$fake"
@@ -57,7 +68,7 @@ grep -Fq 'diagnostic failure:'" $work/input/exact_failure.spl" "$output"
 grep -Fq 'error[E100]: exact parser failure' "$output"
 grep -Fq 'diagnostic failure:'" $work/input/second_failure.spl" "$output"
 grep -Fq 'error[E200]: adjacent semantic failure' "$output"
-grep -Fq 'bootstrap diagnostic summary: checked=3 passed=1 failed=2' "$output"
+grep -Fq 'bootstrap diagnostic summary: checked=3 passed=1 failed=2 timed_out=0' "$output"
 [ "$(find "$work/cache" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" -eq 3 ] || {
   echo "workers did not receive isolated per-file caches" >&2
   exit 1
@@ -73,4 +84,54 @@ set -e
 [ "$second_status" -eq 1 ]
 [ -f "$work/cache/preserved-marker" ] || { echo "diagnostic sweep cleared reusable cache state" >&2; exit 1; }
 
-echo "PASS bootstrap diagnostic sweep aggregation"
+# Exact timeout path: bounded workers are process-group isolated, descendants
+# are killed, later queue items still run, and grouped output remains sorted by
+# the deterministic source index rather than completion order.
+timeout_output="$work/timeout-output.txt"
+set +e
+(cd "$work/repo" && \
+  FAKE_INVOCATIONS="$work/timeout-invocations" \
+  FAKE_DESCENDANTS="$work/timeout-descendants" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/timeout-input" \
+  --cache-dir="$work/timeout-cache" --jobs=2 --timeout=1 --timeout-grace=1) \
+  >"$timeout_output" 2>&1
+timeout_status=$?
+set -e
+[ "$timeout_status" -eq 1 ] || { echo "timeouts did not count as aggregate failure" >&2; exit 1; }
+[ "$(wc -l < "$work/timeout-invocations" | tr -d ' ')" -eq 4 ] || {
+  echo "dynamic queue stopped after timeout" >&2
+  exit 1
+}
+grep -Fq 'diagnostic timeout:'" $work/timeout-input/01_timeout.spl" "$timeout_output"
+grep -Fq 'error: diagnostic timeout after 1s:'" $work/timeout-input/01_timeout.spl" "$timeout_output"
+grep -Fq 'diagnostic failure:'" $work/timeout-input/02_failure.spl" "$timeout_output"
+grep -Fq 'error[E300]: timeout-adjacent failure' "$timeout_output"
+grep -Fq 'diagnostic timeout:'" $work/timeout-input/03_timeout.spl" "$timeout_output"
+grep -Fq 'bootstrap diagnostic summary: checked=4 passed=1 failed=3 timed_out=2' "$timeout_output"
+first_timeout_line=$(grep -nF 'diagnostic timeout:'" $work/timeout-input/01_timeout.spl" "$timeout_output" | cut -d: -f1)
+failure_line=$(grep -nF 'diagnostic failure:'" $work/timeout-input/02_failure.spl" "$timeout_output" | cut -d: -f1)
+second_timeout_line=$(grep -nF 'diagnostic timeout:'" $work/timeout-input/03_timeout.spl" "$timeout_output" | cut -d: -f1)
+[ "$first_timeout_line" -lt "$failure_line" ] && [ "$failure_line" -lt "$second_timeout_line" ] || {
+  echo "timeout/failure groups were not deterministic" >&2
+  exit 1
+}
+/bin/sleep 0.1
+while IFS= read -r descendant_pid; do
+  if kill -0 "$descendant_pid" 2>/dev/null; then
+    echo "timed-out descendant survived process-group cleanup: $descendant_pid" >&2
+    exit 1
+  fi
+done < "$work/timeout-descendants"
+
+# Adjacent option validation must fail before dispatch.
+set +e
+(cd "$work/repo" && FAKE_INVOCATIONS="$work/invalid-timeout-invocations" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --root="$work/input" --timeout=0) >/dev/null 2>&1
+invalid_timeout_status=$?
+set -e
+[ "$invalid_timeout_status" -eq 2 ] || { echo "invalid timeout was accepted" >&2; exit 1; }
+[ ! -e "$work/invalid-timeout-invocations" ] || { echo "invalid timeout dispatched a worker" >&2; exit 1; }
+
+echo "PASS bootstrap diagnostic sweep dynamic aggregation and timeout cleanup"
