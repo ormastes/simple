@@ -69,8 +69,7 @@ void *rt_alloc(spl_i64 size) {
     return malloc((size_t)size);
 }
 
-void rt_free(void *ptr, spl_i64 size) {
-    (void)size;
+void rt_free(void *ptr) {
     free(ptr);
 }
 
