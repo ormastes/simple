@@ -7,6 +7,24 @@ sources that use canonical language surfaces represented in the Rust parser,
 while 147 other individual failures are demonstrably invalid source and 17 are
 intentional SSpec check-surface rejections.
 
+### Type/signature lane update
+
+Claimed by `codex/fix-signature-parser-20260802` from `34072a509817`.
+The refreshed failed-only retry reduced the original route from 62 to 44
+non-passing files after the generic declaration fix. The shared flat parser now
+preserves canonical `mut T` annotations through `TypeKind.Reference(T, true)`
+and accepts canonical empty-array annotations `[]` as `[Any]`.
+
+Focused checker evidence (SHA-256
+`563f5d66a8fb9d3cae9ef6c21f505eff144622b9883e8cf24e17caf01fd58d5d`)
+proves all 11 routed `mut T` files clear their signature diagnostic and all
+eight routed `[]` files clear their type diagnostic. Fourteen complete files
+pass; five `[]` files proceed to unrelated later diagnostics. The two nested
+multiline method signatures remain open: three bounded parser-owner probes
+showed they route through the class-method parser rather than the top-level
+function parser. Resume from that owner without repeating the attempted
+top-level declaration changes.
+
 ## Reproduction
 
 ```bash
@@ -43,4 +61,3 @@ manifest checker; do not modify invalid source merely to hide a parser gap.
 Batch parser-state leakage was investigated and disproved by a two-file minimal
 pair.  The aggregate checker correctly reports one failing file of two; passing
 members of a nonzero batch are not false positives.
-
