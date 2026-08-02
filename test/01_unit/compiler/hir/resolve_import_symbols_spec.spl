@@ -120,6 +120,42 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(result.is_err()).to_equal(true)
         expect(result.unwrap_err()).to_contain("ambiguous facade export")
 
+    it "resolves a file facade against its same-named sibling directory":
+        val log = make_logger()
+        val provider_source = "pub fn dir_create() -> bool:\n    true"
+        val facade_source = "export dir_create"
+        val provider = parse_full_frontend(provider_source, "tree.io.ops", "tree.io.ops", log)
+        val facade = parse_full_frontend(facade_source, "tree.io", "tree.io", log)
+        var modules: Dict<text, Module> = {}
+        modules["tree.io.ops"] = provider
+        modules["tree.io"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "tree/io/ops.spl", content: provider_source, module_name: "tree.io.ops"),
+            SourceFile(path: "tree/io.spl", content: facade_source, module_name: "tree.io")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        val facade_surface = surfaces.surfaces[surfaces.index_by_name["tree.io"]]
+        expect(facade_surface.export_origins["dir_create"].owner_module).to_equal("tree.io.ops")
+
+    it "keeps ordinary named facades on their parent sibling package":
+        val log = make_logger()
+        val provider_source = "pub fn sibling_value() -> i64:\n    1"
+        val facade_source = "export sibling_value"
+        val provider = parse_full_frontend(provider_source, "ordinary.provider", "ordinary.provider", log)
+        val facade = parse_full_frontend(facade_source, "ordinary.facade", "ordinary.facade", log)
+        var modules: Dict<text, Module> = {}
+        modules["ordinary.provider"] = provider
+        modules["ordinary.facade"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "ordinary/provider.spl", content: provider_source, module_name: "ordinary.provider"),
+            SourceFile(path: "ordinary/facade.spl", content: facade_source, module_name: "ordinary.facade")
+        ])
+        expect(result.is_ok()).to_equal(true)
+        val surfaces = result.unwrap()
+        val facade_surface = surfaces.surfaces[surfaces.index_by_name["ordinary.facade"]]
+        expect(facade_surface.export_origins["sibling_value"].owner_module).to_equal("ordinary.provider")
+
     it "bootstrap resolves one uniquely owned flat-global declaration":
         val log = make_logger()
         val src_provider = "struct FlatType:\n    value: i64\npub fn flat_answer() -> i64:\n    42"
