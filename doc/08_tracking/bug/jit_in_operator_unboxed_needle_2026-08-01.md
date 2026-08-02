@@ -772,6 +772,277 @@ and still cannot. That stays a LOUD link failure rather than a fabricated
 half-implementation. `rt_index_of` is likewise still absent from the C runtime —
 a wider parity gap on the same axis, recorded here, not addressed.
 
+**Superseded 2026-08-02** — the C-runtime paragraph above no longer holds. See
+"The four residual defects" below: `rt_option_map` / `rt_map` / `rt_index_of` /
+`rt_array_index_of` / `rt_find` are now defined in the C runtime, because every
+primitive they need was already there and every emitter was shown to pass its
+operands faithfully. The `rt_par_*` family is still deliberately absent.
+
+## The four residual defects (2026-08-02, follow-up lane) — ALL FIXED
+
+Four defects were carried as "recorded, not resolved" by the lanes above. All
+four are closed here. The governing rule was applied first, per symbol: **an
+unresolved symbol is not automatically a missing implementation**, so nothing
+was implemented until its emitters were shown to pass `receiver + args`
+verbatim.
+
+### Emitter-operand verification, per symbol (the gate)
+
+Re-verified this lane by reading the emission code, not inherited:
+
+| symbol | dispatch sites | emitted call | operands faithful? | verdict |
+|---|---|---|---|---|
+| `rt_find` | `instr/calls.rs`, `instr/closures_structs.rs`, `llvm/emitter.rs`, `llvm/functions.rs` (type-blind) | `(receiver, arg)` | yes — `llvm/emitter.rs:1452` builds `rt_args = [recv] + args` via `self.get()`; `functions.rs` builds `all_args_vregs` the same way; Cranelift uses `get_vreg_or_default` over `args` with the receiver already in slot 0 | implement |
+| `rt_reverse` | same four | `(receiver)` | yes | remap (already existed) |
+| `rt_map` | `llvm/functions.rs` (type-blind) — the one site the previous lane missed | `(receiver, closure)` | yes | remap + implement in C |
+| `rt_index_of` / `rt_array_index_of` | `instr/calls.rs`, `llvm/emitter.rs`, `llvm/functions.rs` | `(haystack, needle)` | yes | implement in C |
+| `rt_option_map` | reached only via `rt_map` | `(value, closure)` | yes | implement in C |
+| `rt_par_map` / `rt_par_filter` / `rt_par_for_each` | `llvm/emitter.rs` | passes **2**, `runtime_sffi.rs` declares **4** (`input_len`, `backend` DROPPED) | **NO** | **still loud, deliberately** |
+| `rt_par_reduce` | `llvm/emitter.rs` | passes **3**, declares **5** | **NO** | **still loud, deliberately** |
+
+The `rt_par_*` verdict was re-checked, not inherited: they remain undefined in
+both runtimes and the arity check added to `call_runtime_void` (defect 4)
+deliberately **fails closed** on them so the operand drop cannot be papered
+over by a correct-looking declaration.
+
+### 1. Array `.find()` was UNREACHABLE — fixed without touching text (PROVED)
+
+`codegen/instr/calls.rs` **and** the type-blind table in
+`codegen/llvm/functions.rs` each held TWO `"find"` arms in one `match`:
+`"find" | "find_str" => rt_string_find` and, further down,
+`"find" => rt_array_find`. Rust `match` is first-match-wins, so the array arm
+was dead. `instr/closures_structs.rs` and `llvm/emitter.rs` had no array arm at
+all. Every `arr.find(pred)` on a type-blind path therefore answered the `-1`
+receiver-mismatch sentinel of the text helper — match at index 0 included —
+while the type-AWARE LLVM table answered with the element. Same source, two
+answers per backend, no error, exit 0.
+
+**How the return-shape objection was resolved rather than dodged.** The reason
+the previous lane stopped here is real: array `find` returns the ELEMENT (a
+tagged `RuntimeValue`), text `find` returns an INDEX (a raw `i64`). The
+resolution is that the dual shape is **already the contract**, not something a
+polymorphic symbol would introduce:
+
+- `hir/lower/expr/mod.rs:1071` gates its whole result-type table on
+  `if is_string`, and `find | index_of | find_str | rfind | last_index_of =>
+  TypeId::I64` lives INSIDE that gate;
+- the array arm (`if is_array`, same file) has **no `find` entry at all**, so an
+  array `find` is not typed `I64` and no consumer decodes it as a raw index;
+- every Cranelift runtime call is declared `i64 -> i64` regardless
+  (`instr/calls.rs` signature builder), so the machine word is the same either
+  way — only the consumer's interpretation differs, and that interpretation is
+  already receiver-derived.
+
+So `rt_find(receiver, arg) -> i64` dispatches on **receiver AND argument**:
+
+| receiver | argument | route | before | after |
+|---|---|---|---|---|
+| array | callable closure | `rt_array_find` | `-1` always | the matching element / nil |
+| array | anything else | `rt_string_find` | `-1` | `-1` (unchanged) |
+| text | text | `rt_string_find` | raw index | raw index (**bit-for-bit unchanged**) |
+| anything else | — | `rt_string_find` | `-1` | `-1` (unchanged) |
+
+Requiring a callable closure for the array branch is what keeps "without
+changing text semantics" a provable statement instead of a hope: **the only
+input class whose answer changes is the one that was unconditionally wrong.**
+`find_str` is text-only in the interpreter (`interpreter_method/string.rs`
+`"find_str" | "find" | "index_of"`) and keeps its direct route. The type-AWARE
+LLVM table is untouched — it was already right and is more precise.
+
+### 2. `reverse` → `rt_array_reverse` for EVERY receiver — fixed (PROVED)
+
+`rt_array_reverse` reverses **in place** and returns a **bool**. All four
+type-blind tables applied it to every receiver. Disposition per receiver, with
+semantics pinned to the interpreter, not guessed:
+
+| receiver | interpreter (the spec) | before | after |
+|---|---|---|---|
+| array | `interpreter_method/collections.rs:169` `"rev" \| "reverse"` → `Value::array(new_arr)`: copies, reverses the COPY, receiver untouched | receiver MUTATED, expression value was the receiver (via the `in_place` list) | new array, receiver untouched |
+| text | `interpreter_method/string.rs:357` `"rev" \| "reverse"` → new text | `false` (bool receiver-mismatch answer) | new reversed text |
+| tuple | `interpreter_method/collections.rs:768` → new tuple | `false` | loud refusal (`rt_reverse` refuses a non-array/non-text receiver) — a wrong answer becomes an error, never the reverse |
+| anything else | error | `false` | loud refusal |
+
+`rt_reverse` already existed in **both** runtimes with exactly the right
+behaviour and was carrying a stale comment saying the `reverse` mapping was
+"deliberately left alone"; both comments are corrected. On the C lane this is
+strictly a repair in two directions at once: `rt_array_reverse` has **never**
+been defined in `src/runtime/*.c`, so `arr.reverse()` did not even link there.
+
+The type-AWARE LLVM arm `("Array","reverse")` moves to `rt_array_reversed` (the
+copying twin) for the same reason.
+
+**The trap this fix could have fallen into, and did not:** `functions.rs` kept
+an `in_place` set — `push | clear | reverse | sort` — whose members return the
+RECEIVER as the expression value. Leaving `reverse` in it would have discarded
+the new array and yielded the unmodified receiver, converting the fix into a
+silent wrong answer. `reverse` is removed from that set. `sort` is left in it
+deliberately: it still lowers to the in-place `rt_array_sort`, so it carries the
+identical divergence from the interpreter (which copies) — **recorded here as
+the enumerated sibling, not silently changed**, because closing it needs a
+copying runtime symbol that does not yet exist.
+
+### 3. C-runtime parity — implemented, with the reason it is not a fabrication
+
+**Decision: implement.** The previous lane's "keep it loud" was correct at the
+time and is wrong now, and the difference is verifiable rather than a matter of
+taste. "Keep loud" is right when a receiver would have to invent behaviour. Here
+nothing had to be invented: **every primitive already existed in
+`runtime_native.c`** — `rt_array_map` (5954), `rt_array_find` (6075),
+`rt_closure_func_ptr` (5924), `rt_string_find` (3227), `rt_is_none` (3517),
+`rt_enum_payload` (5827), `rt_enum_new` (5780), `rt_native_eq` (2972) — and
+`rt_array_at` in that same file already builds its Option with
+`rt_enum_new(1, 0, x)` for Some and `rt_enum_new(1, 1, nil)` for None, so even
+the Option encoding is the file's own, not imported from the Rust twin.
+
+Five symbols added: `rt_find`, `rt_index_of`, `rt_array_index_of`,
+`rt_option_map`, `rt_map`. `rt_array_index_of` already had a `runtime_sffi.rs`
+spec and a Rust definition, so its absence here was a plain parity hole.
+
+**Signature divergence recorded, not reconciled:** the C entry points take a raw
+`int64_t` or an `SplArray*` where Rust takes a tagged `RuntimeValue`; the
+receiver test is `rt_core_array_ptr` against Rust's `as_typed_ptr!` heap-type
+check; value equality is `rt_native_eq` here against Rust's `rt_value_eq`.
+Behaviour is matched, the C types are not. This is the same treatment §6 gives
+`rt_value_float` (Rust `f64` vs C raw-bits `int64_t`), which remains open.
+
+**Still deliberately loud in C:** `rt_par_map`, `rt_par_filter`,
+`rt_par_for_each`, `rt_par_reduce` — their emitters drop operands.
+
+### 4. `call_runtime_void` declared every parameter `runtime_int_type()` — fixed
+
+`codegen/llvm/emitter.rs` auto-declared `void(i64, …)` for every symbol,
+regardless of the real signature, so `rt_decision_probe(u64, bool)` was declared
+`void(i64, i64)` and `rt_condition_probe(u64, u32, bool)` was declared
+`void(i64, i64, i64)`. It survived only because the low bits land correctly on
+the SysV and AArch64 ABIs — the declaration was simply never required to agree
+with the runtime.
+
+It now reads `runtime_sffi::spec_for(name)` (new lookup) and declares the real
+slot widths, narrowing or widening each argument to its slot. Three cases are
+deliberately NOT "fixed", because fixing them would hide a defect:
+
+- **no spec at all** (`rt_contract_check`, `rt_unit_bound_check`,
+  `rt_generator_yield` — defined in neither runtime) → keeps the blind i64 shape
+  and stays loud; inventing a signature would dress up a symbol that must fail;
+- **spec arity disagrees with the call** (`rt_par_for_each`: 2 passed against 4
+  declared) → the arity check **fails closed**, so the operand drop stays
+  visible;
+- **`F64` slots** → not mapped, because `rt_value_float` is `f64` in Rust and
+  raw-bits `int64_t` in C (§6) and silently picking one would be exactly the
+  guess this change removes.
+
+A non-void spec return is now honoured too: `rt_actor_reply` is
+`(RuntimeValue) -> RuntimeValue` and was being declared `void`, leaving two
+disagreeing declarations of one symbol in play. The result is discarded at the
+call site, which is what the caller wanted all along.
+
+### 5. Enumerated sibling found and fixed — the last `rt_option_map` misroute
+
+Enumerating the family (rather than fixing the reported site) turned up that the
+type-blind table in `codegen/llvm/functions.rs` was **still** routing the bare
+name `map` to `rt_option_map` after the sibling arms in `llvm/emitter.rs` and
+`instr/closures_structs.rs` had been corrected. Same defect, same silent shape:
+one closure call, on the NIL that `rt_enum_payload` returns for a non-enum,
+Some-wrapped, exit 0. Now `rt_map`.
+
+### Link-level evidence (codegen proves nothing)
+
+Established against BUILT objects, never `nm -u` (blind to weak zero-size
+definitions). Base object compiled from the origin-tip `runtime_native.c` at
+`e4b4561c803`, new object from the same file with these changes, everything else
+identical — the supporting objects are the exact set
+`scripts/check/build-core-c-bootstrap-runtime-capsule.shs` lists, so the link is
+the repo's own capsule shape and not a hand-picked one.
+
+| link (`ld.lld`) | result |
+|---|---|
+| probe vs **BASE** object | `rc=1`; exactly `rt_find`, `rt_index_of`, `rt_array_index_of`, `rt_map`, `rt_option_map` undefined; **no artifact on disk** |
+| probe vs **NEW** object | `rc=0`; `file` → `ELF 64-bit LSB pie executable, x86-64`; `nm --defined-only` shows all five at real addresses plus `rt_reverse`; and it RUNS |
+
+**33 of 33 printed values match hand-computed expectations** — array find
+element and predicate call count, empty-receiver nil, text find hit/miss/empty
+needle, array-with-text-argument keeping its old `-1`, index_of at 0 / middle /
+absent / on text, map length + per-element values + call count, Option
+`Some(5) → Some(10)` in one call, `None` passed through in zero calls, and
+reverse's copy plus the receiver being unmutated.
+
+**Value-level comparison earned its keep again — the failure was MINE.** The
+first run showed `array find element = 0, predicate calls = 3`. The
+implementation was right; the probe's predicate returned a **raw** `1` instead
+of a tagged value, so `rt_core_value_truthy` read tag bits `001` (not `TAG_INT`)
+and every element read falsy. A cross-engine comparison would have scored this
+PASS or blamed the runtime. It is pinned in the probe by a true-positive control
+that calls the pre-existing, untouched `rt_array_find` directly and must agree
+value-for-value.
+
+**Non-vacuity PROVED by sabotaging the IMPLEMENTATION, not a shim:** the array
+branches of `rt_find` and `rt_map` and the comparison inside
+`rt_array_index_of` were reverted in the C source with the probe untouched →
+**11 checks RED**, reproducing the original defect signatures exactly (map
+closure call count `1` instead of `3`; find predicate count `0`; every index_of
+`-1`). The `rt_array_find` control and all text checks stayed GREEN, proving the
+sabotage hit the new dispatch and not a shared helper.
+
+### Regression guards added
+
+- `runtime/src/value/collection_tests.rs` — `rt_find` receiver dispatch
+  (element + call count + text bit-for-bit equality with `rt_string_find`) and
+  `rt_reverse` copying with the receiver asserted UNMUTATED.
+- `codegen/llvm/emitter.rs` — bare-name table routes the polymorphic methods to
+  polymorphic helpers, paired with a true-positive control that
+  receiver-SPECIFIC methods stay specific; plus a guard on the SFFI specs
+  `call_runtime_void` now depends on, including that `rt_par_for_each` still
+  declares 4 params so the fail-closed arity check keeps meaning something.
+- `codegen/instr/closures_structs.rs` — source-region scan of both Cranelift
+  bare-name tables asserting the dead `find`/`reverse` arms are gone AND the
+  live ones present, so deleting an arm cannot satisfy it. The scan skips each
+  file's own `mod tests` region so it cannot match its own text.
+
+### Test results and pre-existing failures, proved at the SAME base sha
+
+Base sha `e4b4561c803f07e3f7cc7a5882876bd78ab6e3c2`, taken from `git ls-remote`.
+
+- `cargo test -p simple-runtime --release --lib` → **1084 passed / 7 failed**.
+  That is the documented `1082 / 7` plus exactly the 2 tests added here, both
+  passing. The 7 failures are the same by name (`executor::` ×2, `loader::` ×2,
+  `value::collections::tests::test_dict_invalid_value`,
+  `value::collections::tests::test_low_heap_tagged_values_do_not_crash_collection_runtime`,
+  `value::heap::attr_tests::owner_attribution_orders_by_live_bytes_and_frees_settle`)
+  — none on any path this change touches.
+- `cargo test -p simple-compiler --features llvm --release --lib codegen:: --
+  --test-threads=1` → the failure **NAME SETS are IDENTICAL** with these
+  changes present and with the five compiler files reverted to their base-sha
+  content and rebuilt: `codegen::common_backend::tests::referenced_empty_extern_is_declared`
+  and `codegen::llvm::functions::tests::rt_value_bool_calls_receive_raw_boolean_bits`,
+  diffed with `diff`, no delta.
+- The suite also **SIGSEGVs at `codegen::local_execution_tests::llvm_jit_tests::
+  test_llvm_jit_basic`** on BOTH builds, at the same test, so it is PROVED
+  pre-existing and is not absorbed into this result. It also reproduces when
+  that test is run alone, so it is not a test-ordering artifact. It is
+  unrelated to these tables (it JITs and runs basic arithmetic) and remains
+  open, recorded here rather than left implicit.
+
+**Guard non-vacuity PROVED by sabotaging the IMPLEMENTATION, not a shim.** Four
+mappings were reverted in the non-test source with every test body untouched —
+`closures_structs.rs` `find` back to `rt_string_find`, `calls.rs` `find` back to
+the dead `rt_array_find`, `emitter.rs` `reverse` back to `rt_array_reverse`, and
+the `rt_decision_probe` spec back to `[I64, I64]` — and **all three codegen
+guards went RED**. Restoring turned them GREEN. Separately, reverting `rt_find`'s
+array branch in the Rust runtime turned `rt_find_dispatches_on_receiver_without_changing_text`
+RED on the exact assertion "array find must return the matching ELEMENT", while
+`rt_reverse_copies_and_leaves_the_receiver_alone` stayed GREEN — so the two
+tests are independent and neither is carrying the other.
+
+### What is still open (recorded, not silently closed)
+
+- **`sort` has the same divergence `reverse` had**: it lowers to the in-place
+  `rt_array_sort` and stays in the `in_place` set, while the interpreter's array
+  `"sort"` copies. Needs a copying runtime symbol first.
+- **`rt_value_float` signature divergence** (§6) — unchanged.
+- **`rt_par_*`** — must stay undefined until their emitters thread the real
+  operands.
+- **`x in <range>` engine divergence** — unchanged, still a language decision.
+
 ### Pre-existing failures, proved at the same base sha
 
 - duplicate `rt_dir_exists` spec in `codegen/runtime_sffi.rs` failing
