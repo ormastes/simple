@@ -462,8 +462,9 @@ SPipe and adds score/provenance; it is not a parallel renderer.
 
 For directory scans, keep deterministic path order and apply the configured
 minimum-score/severity policy per report. Baseline or suppression review must
-name the stable finding, owner, reason, and bounded scope. The persisted
-suppression CLI is not complete yet, so do not invent flags or treat an
-unrecorded exception as PASS. See
-`doc/07_guide/infra/sspec_documentization_maintenance.md` for the current versus
-release-required behavior.
+name the stable finding, owner, reason, and bounded scope. Pass reviewed
+fingerprints with `--baseline`; pass reviewed
+`RULE_ID|owner|reason|optional-fingerprint` records with `--suppressions`.
+Blockers cannot be suppressed, and an unrecorded exception is not PASS. See
+`doc/07_guide/infra/sspec_documentization_maintenance.md` for the complete
+policy and offline/diagnostic boundary.

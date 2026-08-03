@@ -1,10 +1,17 @@
 # REQ-001, REQ-005, REQ-010: command surface, policy, and compatibility.
 use std.cli.cli_util.{get_cli_args}
 use std.nogc_sync_mut.io.file_ops.{file_read, file_atomic_write, file_exists, file_delete}
-use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir, dir_create_all}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, is_dir, dir_create_all, dir_remove}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use app.io.cli_ops.{_cli_eprint}
-use app.sspec_maintain.*
+use app.sspec_maintain.model.{SspecDocumentizationFinding,
+    SspecDocumentizationReport, SspecImprovement}
+use app.sspec_maintain.analyzer.{analyze_sspec_pair_text, derive_manual_path}
+use app.sspec_maintain.score.{score_sspec_findings}
+use app.sspec_maintain.report.{render_human_report, render_json_report,
+    render_json_report_fragments, render_sarif_results_fragment,
+    render_sarif_result_fragments}
+use app.sspec_maintain.scaffold.{scaffold_reference_text}
 use app.spipe_docgen.spipe_docgen.main.{run_spipe_docgen}
 use app.spipe_docgen.spipe_docgen.parser.{parse_spipe_file}
 use app.sspec_maintain.improve.{preview_sspec_text_result, safe_sspec_easyfixes,
@@ -13,7 +20,9 @@ use std.tooling.easy_fix.types.{easyfix_id}
 use std.crypto.sha256.{sha256_text}
 use std.common.text_advanced.{escape_json}
 use app.sspec_maintain.cache.{SspecCacheRecord, encode_sspec_cache_record,
-    decode_sspec_cache_record, parse_sspec_baseline}
+    decode_sspec_cache_record, parse_sspec_baseline, SspecPairCacheKey,
+    build_sspec_pair_cache_key, sspec_pair_cache_path,
+    sspec_pair_cache_reusable, sspec_cache_configuration_identity}
 use app.sspec_maintain.suppression.{parse_sspec_suppressions,
     apply_sspec_suppressions}
 use app.sspec_maintain.documentize.{compose_sspec_documentized_manual}
@@ -25,7 +34,7 @@ fn _usage():
     print "  scan <spec|dir> [--format human|json|sarif] [--min-score N] [--deny-severity LEVEL]"
     print "       [--baseline <fingerprints>] [--suppressions <reviewed-file>]"
     print "       [--rule <SSDOC-ID,...>] [--cache <dir>|--no-cache] [--debug-timings]"
-    print "  improve <spec> [--apply] [--rollback <path>]"
+    print "  improve <spec|dir> [--apply] [--rollback <path-for-single-spec>]"
     print "  scaffold <reference.md> [--output <spec.spl>] [--apply --overwrite]"
     print "  documentize <spec> [--output <manual.md>] [--no-scorecard]"
     print "Scan and improve preview are read-only; writes require explicit --apply."
@@ -59,15 +68,6 @@ fn _severity_rank(value: text) -> i64:
     if value == "error": return 3
     if value == "blocker": return 4
     0
-
-fn _denied(report: SspecDocumentizationReport, deny: text) -> bool:
-    val threshold = _severity_rank(deny)
-    if threshold == 0:
-        return false
-    for finding in report.findings:
-        if not finding.suppressed and _severity_rank(finding.severity) >= threshold:
-            return true
-    false
 
 fn _maximum_severity_rank(report: SspecDocumentizationReport) -> i64:
     var maximum: i64 = 0
@@ -117,24 +117,11 @@ fn _apply_baseline(report: SspecDocumentizationReport,
     updated.resolved_fingerprints = resolved
     updated
 
-fn _render_scan_scope(reports: [SspecDocumentizationReport], format: text) -> text:
-    if format == "json": return render_json_reports(reports)
-    if format == "sarif": return render_sarif_reports(reports)
-    var rendered: [text] = []
-    for report in reports:
-        rendered.push(render_human_report(report))
-    rendered.join("\n\n")
-
-fn _cached_scan_output(record: SspecCacheRecord, format: text) -> text:
-    if format == "json": return record.json_report
-    if format == "sarif": return record.sarif_report
-    record.human_report
-
-fn _cache_policy_denied(record: SspecCacheRecord, min_score: i64,
-        deny: text) -> bool:
-    (min_score >= 0 and record.effective_score < min_score) or
-        (_severity_rank(deny) > 0 and
-            record.maximum_severity_rank >= _severity_rank(deny))
+fn _render_scan_fragments(human_items: [text], json_items: [text],
+        sarif_items: [text], format: text) -> text:
+    if format == "json": return render_json_report_fragments(json_items)
+    if format == "sarif": return render_sarif_result_fragments(sarif_items)
+    human_items.join("\n\n")
 
 fn _read(path: text) -> Result<text, text>:
     if not file_exists(path):
@@ -181,129 +168,166 @@ fn _run_scan(path: text, args: [text]) -> i64:
         case Err(message): return _emit_error(format, message, 2)
         case Ok(value): value
     val filters = _rule_filters(args)
+    val configuration_hash = sspec_cache_configuration_identity(
+        baseline_content, suppressions_content, filters)
+    val cache_dir = _option(args, "--cache", ".simple/cache/sspec-maintain")
+    val cache_enabled = not _has(args, "--no-cache")
     var paths: [text] = []
     var sources: [text] = []
     var mirrors: [Option<text>] = []
-    var identity_parts: [text] = []
-    val parse_started = time_now_unix_micros()
+    var cache_keys: [SspecPairCacheKey] = []
+    var parse_elapsed: i64 = 0
+    var mirror_elapsed: i64 = 0
     for spec_path in _scan_paths(path):
         if not file_exists(spec_path):
             return _emit_error(format, "file does not exist: {spec_path}", 3)
+        val pair_parse_started = time_now_unix_micros()
         match parse_spipe_file(spec_path):
             case Err(message):
                 return _emit_error(format, "cannot parse {spec_path}: {message}", 3)
             case Ok(document):
+                parse_elapsed = parse_elapsed +
+                    (time_now_unix_micros() - pair_parse_started)
                 val source = document.raw_content
+                val mirror_started = time_now_unix_micros()
                 val mirror = file_read(derive_manual_path(spec_path))
+                mirror_elapsed = mirror_elapsed +
+                    (time_now_unix_micros() - mirror_started)
                 paths.push(spec_path)
                 sources.push(source)
                 mirrors.push(mirror)
-                val mirror_hash = match mirror:
-                    case Some(content): sha256_text(content)
-                    case None: "missing"
-                identity_parts.push(spec_path + ":" + sha256_text(source) +
-                    ":" + mirror_hash)
+                cache_keys.push(build_sspec_pair_cache_key(spec_path,
+                    Some(source), derive_manual_path(spec_path), mirror,
+                    "ssdoc-rules/1", configuration_hash, "sspec-maintain/1"))
     if paths.len() == 0:
         return _emit_error(format, "scope contains no *_spec.spl files", 3)
-    val parse_elapsed = time_now_unix_micros() - parse_started
-    val identity = sha256_text(identity_parts.join("\n") +
-        "\nssdoc-rules/1\nsspec-maintain/1\n" + sha256_text(baseline_content) +
-        "\n" + sha256_text(suppressions_content) + "\n" + filters.join(","))
-    val cache_dir = _option(args, "--cache", ".simple/cache/sspec-maintain")
-    val cache_path = cache_dir + "/" + identity + ".cache"
-    if not _has(args, "--no-cache") and file_exists(cache_path):
-        match decode_sspec_cache_record(file_read(cache_path) ?? ""):
-            case Ok(record):
-                if record.identity == identity:
-                    print _cached_scan_output(record, format)
-                    if _has(args, "--debug-timings"):
-                        _cli_eprint("sspec-maintain timings cache=hit parse_mirror_us={parse_elapsed} total_us={time_now_unix_micros() - scan_started} files={paths.len()}")
-                    if _cache_policy_denied(record, min_score, deny): return 1
-                    return 0
-            case Err(_): ()
-    var reports: [SspecDocumentizationReport] = []
+    var human_items: [text] = []
+    var json_items: [text] = []
+    var sarif_items: [text] = []
+    var scores: [i64] = []
+    var severities: [i64] = []
     var index: i64 = 0
+    var hit_count: i64 = 0
+    var miss_count: i64 = 0
     val analysis_started = time_now_unix_micros()
     while index < paths.len():
-        var report = analyze_sspec_pair_text(paths[index], sources[index],
-            mirrors[index])
-        report = inspect_sspec_lifecycle_links(report, sources[index])
-        report = _filter_report(report, filters)
-        report = _apply_baseline(report, baseline)
-        match apply_sspec_suppressions(report, suppressions):
-            case Err(message): return _emit_error(format, message, 2)
-            case Ok(value): report = value
-        report.cache_disposition = if _has(args, "--no-cache"):
-            "bypass"
-        else:
-            "miss"
-        reports.push(report)
+        val key = cache_keys[index]
+        val pair_cache_path = sspec_pair_cache_path(cache_dir, key)
+        var cached: Option<SspecCacheRecord> = None
+        if cache_enabled and file_exists(pair_cache_path):
+            match decode_sspec_cache_record(file_read(pair_cache_path) ?? ""):
+                case Ok(record):
+                    if sspec_pair_cache_reusable(record, key): cached = Some(record)
+                case Err(_): ()
+        match cached:
+            case Some(record):
+                human_items.push(record.human_report)
+                json_items.push(record.json_report)
+                sarif_items.push(record.sarif_report)
+                scores.push(record.effective_score)
+                severities.push(record.maximum_severity_rank)
+                hit_count = hit_count + 1
+            case None:
+                var report = analyze_sspec_pair_text(paths[index], sources[index],
+                    mirrors[index])
+                report = inspect_sspec_lifecycle_links(report, sources[index])
+                report = _filter_report(report, filters)
+                report = _apply_baseline(report, baseline)
+                match apply_sspec_suppressions(report, suppressions):
+                    case Err(message): return _emit_error(format, message, 2)
+                    case Ok(value): report = value
+                report.cache_disposition = if cache_enabled: "miss" else: "bypass"
+                human_items.push(render_human_report(report))
+                json_items.push(render_json_report(report))
+                sarif_items.push(render_sarif_results_fragment(report))
+                val severity = _maximum_severity_rank(report)
+                scores.push(report.score.effective_aggregate)
+                severities.push(severity)
+                miss_count = miss_count + 1
+                if cache_enabled:
+                    var hit_report = report
+                    hit_report.cache_disposition = "hit"
+                    val record = SspecCacheRecord(
+                        schema_version: "sspec-maintain-cache/v1",
+                        identity: key.identity,
+                        effective_score: hit_report.score.effective_aggregate,
+                        maximum_severity_rank: severity,
+                        human_report: render_human_report(hit_report),
+                        json_report: render_json_report(hit_report),
+                        sarif_report: render_sarif_results_fragment(hit_report))
+                    if dir_create_all(cache_dir):
+                        val _ = file_atomic_write(pair_cache_path,
+                            encode_sspec_cache_record(record))
         index = index + 1
     val analysis_elapsed = time_now_unix_micros() - analysis_started
     val render_started = time_now_unix_micros()
-    val rendered_output = _render_scan_scope(reports, format)
+    val rendered_output = _render_scan_fragments(human_items, json_items,
+        sarif_items, format)
     val render_elapsed = time_now_unix_micros() - render_started
     print rendered_output
-    var minimum_score: i64 = 100
-    var maximum_severity: i64 = 0
-    for report in reports:
-        if report.score.effective_aggregate < minimum_score:
-            minimum_score = report.score.effective_aggregate
-        val severity = _maximum_severity_rank(report)
-        if severity > maximum_severity: maximum_severity = severity
-    if not _has(args, "--no-cache"):
-        var hit_reports = reports
-        var hit_index: i64 = 0
-        while hit_index < hit_reports.len():
-            hit_reports[hit_index].cache_disposition = "hit"
-            hit_index = hit_index + 1
-        val record = SspecCacheRecord(schema_version: "sspec-maintain-cache/v1",
-            identity: identity, effective_score: minimum_score,
-            maximum_severity_rank: maximum_severity,
-            human_report: _render_scan_scope(hit_reports, "human"),
-            json_report: _render_scan_scope(hit_reports, "json"),
-            sarif_report: _render_scan_scope(hit_reports, "sarif"))
-        if dir_create_all(cache_dir):
-            val _ = file_atomic_write(cache_path,
-                encode_sspec_cache_record(record))
     if _has(args, "--debug-timings"):
-        val cache_disposition = if _has(args, "--no-cache"): "bypass" else: "miss"
-        _cli_eprint("sspec-maintain timings cache={cache_disposition} parse_mirror_us={parse_elapsed} rules_score_us={analysis_elapsed} render_us={render_elapsed} total_us={time_now_unix_micros() - scan_started} files={paths.len()}")
-    for report in reports:
-        if (min_score >= 0 and report.score.effective_aggregate < min_score) or
-                _denied(report, deny): return 1
+        var cache_disposition = "partial"
+        if not cache_enabled: cache_disposition = "bypass"
+        elif miss_count == 0: cache_disposition = "hit"
+        elif hit_count == 0: cache_disposition = "miss"
+        _cli_eprint("sspec-maintain timings cache={cache_disposition} hits={hit_count} misses={miss_count} parse_us={parse_elapsed} mirror_lookup_us={mirror_elapsed} rules_score_us={analysis_elapsed} render_us={render_elapsed} total_us={time_now_unix_micros() - scan_started} files={paths.len()}")
+    index = 0
+    while index < scores.len():
+        if (min_score >= 0 and scores[index] < min_score) or
+                (_severity_rank(deny) > 0 and severities[index] >= _severity_rank(deny)):
+            return 1
+        index = index + 1
     0
 
 fn _run_improve(path: text, args: [text]) -> i64:
-    match _read(path):
-        case Err(message):
-            _cli_eprint("sspec-maintain: {message}")
-            3
-        case Ok(source):
-            val change_result = preview_sspec_text_result(path, source)
-            val change = match change_result:
-                case Err(message):
-                    _cli_eprint("sspec-maintain: EasyFix conflict: {message}")
-                    return 4
-                case Ok(value): value
-            if not _has(args, "--apply"):
-                print render_sspec_improvement_preview(path, source, change,
-                    safe_sspec_easyfixes(path, source))
-                return 0
-            if not change.changed:
-                _cli_eprint("sspec-maintain: no safe changes")
-                return 0
-            val rollback = _option(args, "--rollback", path + ".sspec-maintain.rollback")
-            var fix_ids: [text] = []
-            for fix in safe_sspec_easyfixes(path, source):
-                fix_ids.push(easyfix_id(fix))
-            val rollback_material = "sspec-maintain-rollback/v1\npath: {path}\nbefore_sha256: {sha256_text(source)}\nafter_sha256: {sha256_text(change.content)}\nrules: {fix_ids.join(",")}\n--- original source ---\n{source}"
-            val current = file_read(path) ?? ""
-            if sspec_source_is_stale(source, current):
-                _cli_eprint("sspec-maintain: source changed after preview; refusing stale edits")
+    val improve_started = time_now_unix_micros()
+    val preview_started = time_now_unix_micros()
+    val paths = _scan_paths(path)
+    if paths.len() == 0:
+        _cli_eprint("sspec-maintain: scope contains no *_spec.spl files")
+        return 3
+    if paths.len() > 1 and _option(args, "--rollback", "") != "":
+        _cli_eprint("sspec-maintain: --rollback names one file and cannot be used for a directory scope")
+        return 2
+    var sources: [text] = []
+    var changes: [SspecImprovement] = []
+    var previews: [text] = []
+    for spec_path in paths:
+        val source = match _read(spec_path):
+            case Err(message):
+                _cli_eprint("sspec-maintain: {message}")
+                return 3
+            case Ok(value): value
+        val change = match preview_sspec_text_result(spec_path, source):
+            case Err(message):
+                _cli_eprint("sspec-maintain: EasyFix conflict in {spec_path}: {message}")
                 return 4
-            val validation_path = path + ".sspec-maintain.validate.spl"
-            if not file_atomic_write(validation_path, change.content):
+            case Ok(value): value
+        sources.push(source)
+        changes.push(change)
+        previews.push("=== {spec_path} ===\n" +
+            render_sspec_improvement_preview(spec_path, source, change,
+                safe_sspec_easyfixes(spec_path, source)))
+    val preview_elapsed = time_now_unix_micros() - preview_started
+    if not _has(args, "--apply"):
+        print previews.join("\n\n")
+        if _has(args, "--debug-timings"):
+            _cli_eprint("sspec-maintain improve timings mode=preview files={paths.len()} preview_us={preview_elapsed} conflict_stale_us=0 reparse_us=0 rollback_write_us=0 total_us={time_now_unix_micros() - improve_started}")
+        return 0
+    val conflict_started = time_now_unix_micros()
+    var index: i64 = 0
+    while index < paths.len():
+        if sspec_source_is_stale(sources[index], file_read(paths[index]) ?? ""):
+            _cli_eprint("sspec-maintain: source changed after preview; refusing stale edits: {paths[index]}")
+            return 4
+        index = index + 1
+    val conflict_elapsed = time_now_unix_micros() - conflict_started
+    val reparse_started = time_now_unix_micros()
+    index = 0
+    while index < paths.len():
+        if changes[index].changed:
+            val validation_path = paths[index] + ".sspec-maintain.validate.spl"
+            if not file_atomic_write(validation_path, changes[index].content):
                 _cli_eprint("sspec-maintain: cannot write isolated validation input")
                 return 3
             val validation = parse_spipe_file(validation_path)
@@ -312,17 +336,58 @@ fn _run_improve(path: text, args: [text]) -> i64:
                 _cli_eprint("sspec-maintain: warning: cannot remove {validation_path}")
             match validation:
                 case Err(message):
-                    _cli_eprint("sspec-maintain: proposed SSpec failed canonical reparse: {message}")
+                    _cli_eprint("sspec-maintain: proposed SSpec failed canonical reparse for {paths[index]}: {message}")
                     return 4
                 case Ok(_): ()
+        index = index + 1
+    val reparse_elapsed = time_now_unix_micros() - reparse_started
+    val write_started = time_now_unix_micros()
+    var changed_count: i64 = 0
+    var rollback_paths: [text] = []
+    index = 0
+    while index < paths.len():
+        if changes[index].changed:
+            val rollback = if paths.len() == 1:
+                _option(args, "--rollback", paths[index] + ".sspec-maintain.rollback")
+            else:
+                paths[index] + ".sspec-maintain.rollback"
+            var fix_ids: [text] = []
+            for fix in safe_sspec_easyfixes(paths[index], sources[index]):
+                fix_ids.push(easyfix_id(fix))
+            val rollback_material = "sspec-maintain-rollback/v1\npath: {paths[index]}\nbefore_sha256: {sha256_text(sources[index])}\nafter_sha256: {sha256_text(changes[index].content)}\nrules: {fix_ids.join(",")}\n--- original source ---\n{sources[index]}"
             if not file_atomic_write(rollback, rollback_material):
-                _cli_eprint("sspec-maintain: cannot write rollback material")
+                _cli_eprint("sspec-maintain: cannot write rollback material: {rollback}")
                 return 3
-            if not file_atomic_write(path, change.content):
-                _cli_eprint("sspec-maintain: cannot apply atomic change")
+            rollback_paths.push(rollback)
+        else:
+            rollback_paths.push("")
+        index = index + 1
+    index = 0
+    while index < paths.len():
+        if changes[index].changed:
+            if not file_atomic_write(paths[index], changes[index].content):
+                var restore_index: i64 = 0
+                var restored = true
+                while restore_index < index:
+                    if changes[restore_index].changed:
+                        if not file_atomic_write(paths[restore_index],
+                                sources[restore_index]):
+                            restored = false
+                    restore_index = restore_index + 1
+                if restored:
+                    _cli_eprint("sspec-maintain: cannot apply atomic change: {paths[index]}; earlier sources restored")
+                else:
+                    _cli_eprint("sspec-maintain: cannot apply atomic change: {paths[index]}; rollback artifacts retained for manual recovery")
                 return 3
-            _cli_eprint("sspec-maintain: applied safe changes; rollback: {rollback}")
-            0
+            _cli_eprint("sspec-maintain: applied safe changes to {paths[index]}; rollback: {rollback_paths[index]}")
+            changed_count = changed_count + 1
+        index = index + 1
+    if changed_count == 0:
+        _cli_eprint("sspec-maintain: no safe changes")
+    val write_elapsed = time_now_unix_micros() - write_started
+    if _has(args, "--debug-timings"):
+        _cli_eprint("sspec-maintain improve timings mode=apply files={paths.len()} changed={changed_count} preview_us={preview_elapsed} conflict_stale_us={conflict_elapsed} reparse_us={reparse_elapsed} rollback_write_us={write_elapsed} total_us={time_now_unix_micros() - improve_started}")
+    0
 
 fn _run_scaffold(path: text, args: [text]) -> i64:
     match _read(path):
@@ -343,6 +408,11 @@ fn _run_scaffold(path: text, args: [text]) -> i64:
                 return 3
             if file_atomic_write(output, content): 0 else: 3
 
+fn _manual_relative_path(path: text) -> text:
+    val canonical = derive_manual_path(path)
+    val prefix = "doc/06_spec/"
+    if canonical.starts_with(prefix): canonical[prefix.len():] else: canonical
+
 fn _run_documentize(path: text, args: [text]) -> i64:
     match _read(path):
         case Err(message):
@@ -350,19 +420,27 @@ fn _run_documentize(path: text, args: [text]) -> i64:
             3
         case Ok(source):
             val output = _option(args, "--output", derive_manual_path(path))
-            val generated = run_spipe_docgen([path, "--output", "doc/06_spec", "--no-index"])
+            val staging_root = "build/sspec-maintain/documentize/" +
+                sha256_text(path + "\n" + source)
+            dir_remove(staging_root, true)
+            val generated = run_spipe_docgen([path, "--output", staging_root,
+                "--no-index"])
             if generated != 0:
+                dir_remove(staging_root, true)
                 _cli_eprint("sspec-maintain: SPipe manual generation failed")
                 return 3
-            val canonical_path = derive_manual_path(path)
-            val spipe_manual = file_read(canonical_path) ?? ""
+            val staged_path = staging_root + "/" + _manual_relative_path(path)
+            val spipe_manual = file_read(staged_path) ?? ""
             if spipe_manual == "":
-                _cli_eprint("sspec-maintain: canonical SPipe manual was not produced at {canonical_path}")
+                dir_remove(staging_root, true)
+                _cli_eprint("sspec-maintain: canonical SPipe manual was not produced at {staged_path}")
                 return 3
+            dir_remove(staging_root, true)
             val result = compose_sspec_documentized_manual(path, source,
                 spipe_manual, not _has(args, "--no-scorecard"))
             val content = result.content
-            if file_atomic_write(output, content):
+            val wrote = file_atomic_write(output, content)
+            if wrote:
                 _cli_eprint("sspec-maintain: wrote {output}")
                 0
             else:

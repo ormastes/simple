@@ -1,4 +1,5 @@
 use std.crypto.sha256.{sha256_text}
+use app.sspec_maintain.analyzer.{normalize_sspec_path}
 
 struct SspecAnalysisIdentityParts:
     path: text
@@ -17,6 +18,16 @@ struct SspecCacheRecord:
     json_report: text
     sarif_report: text
 
+struct SspecPairCacheKey:
+    normalized_path: text
+    source_hash: text
+    mirror_path: text
+    mirror_hash: text
+    rule_version: text
+    configuration_hash: text
+    tool_version: text
+    identity: text
+
 fn sspec_analysis_identity(parts: SspecAnalysisIdentityParts) -> text:
     sspec_cache_identity(parts.path, parts.source, parts.mirror_identity,
         parts.rules_identity, parts.config_identity, parts.tool_identity)
@@ -25,6 +36,44 @@ fn sspec_cache_identity(path: text, source: text, mirror_identity: text,
         rules_identity: text, config_identity: text, tool_identity: text) -> text:
     sha256_text(path + "\n" + sha256_text(source) + "\n" + mirror_identity +
         "\n" + rules_identity + "\n" + config_identity + "\n" + tool_identity)
+
+fn sspec_cache_configuration_identity(baseline_content: text,
+        suppressions_content: text, rule_filters: [text]) -> text:
+    var ordered: [text] = []
+    for rule_id in rule_filters:
+        val normalized = rule_id.trim()
+        if normalized != "" and not ordered.contains(normalized):
+            ordered.push(normalized)
+    ordered.sort()
+    sha256_text(sha256_text(baseline_content) + "\n" +
+        sha256_text(suppressions_content) + "\n" + ordered.join(","))
+
+fn build_sspec_pair_cache_key(path: text, source: Option<text>, mirror_path: text,
+        mirror: Option<text>, rule_version: text, configuration_hash: text,
+        tool_version: text) -> SspecPairCacheKey:
+    val normalized_path = normalize_sspec_path(path)
+    val normalized_mirror_path = normalize_sspec_path(mirror_path)
+    val source_hash = match source:
+        case Some(content): sha256_text(content)
+        case None: "absent"
+    val mirror_hash = match mirror:
+        case Some(content): sha256_text(content)
+        case None: "missing"
+    val identity = sha256_text(normalized_path + "\n" + source_hash + "\n" +
+        normalized_mirror_path + "\n" + mirror_hash + "\n" + rule_version +
+        "\n" + configuration_hash + "\n" + tool_version)
+    SspecPairCacheKey(normalized_path: normalized_path, source_hash: source_hash,
+        mirror_path: normalized_mirror_path, mirror_hash: mirror_hash,
+        rule_version: rule_version, configuration_hash: configuration_hash,
+        tool_version: tool_version, identity: identity)
+
+fn sspec_pair_cache_path(cache_directory: text, key: SspecPairCacheKey) -> text:
+    cache_directory + "/" + key.identity + ".cache"
+
+fn sspec_pair_cache_reusable(record: SspecCacheRecord,
+        key: SspecPairCacheKey) -> bool:
+    record.schema_version == "sspec-maintain-cache/v1" and
+        record.identity == key.identity
 
 fn sspec_finding_baseline_state(fingerprint: text, previous: [text]) -> text:
     if previous.contains(fingerprint): "unchanged" else: "new"

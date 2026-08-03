@@ -6,10 +6,10 @@
 |---|---|---|---|
 | Architecture review | capsule boundaries, SPipe/EasyFix ownership | Codex design sidecar | complete |
 | System-test review | traceability, fixtures, manual policy | Codex test sidecar | complete |
-| Implementation | app capsule, CLI/MCP registration, tests | primary Codex | active |
+| Implementation | app capsule, CLI/MCP registration, tests | primary Codex | complete; source and executable evidence are present |
 | UI design | N/A — CLI maintenance tool; human output is captured as evidence | N/A | N/A |
-| Merge owner | preserve concurrent work and integrate this lane | primary Codex | active |
-| Final reviewer | `$verify`, including docs and stub scan | primary Codex | pending |
+| Merge owner | preserve concurrent work and integrate this lane | primary Codex | ready for scoped sync |
+| Final reviewer | `$verify`, including docs and stub scan | primary Codex | blocked on canonical self-hosted runtime execution |
 
 ## Work packages
 

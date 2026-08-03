@@ -7,8 +7,16 @@ use app.sspec_maintain.cache.{SspecCacheRecord, encode_sspec_cache_record,
     decode_sspec_cache_record}
 use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read, file_delete,
     file_exists}
-use app.io.mod.{process_run}
+use app.io.mod.{process_run, rt_file_rename}
+use std.io_runtime.{env_get}
 use std.nogc_sync_mut.io.dir_ops.{dir_walk, dir_remove, dir_create_all}
+
+fn sspec_maintain_test_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY")
+    if configured != nil and configured != "" and file_exists(configured):
+        return configured
+    if file_exists("/proc/self/exe"): return "/proc/self/exe"
+    "bin/simple"
 
 describe "sspec-maintain CLI contract":
     it "shows compatibility help without requiring a path":
@@ -116,6 +124,41 @@ describe "sspec-maintain CLI contract":
             "--deny-severity", "blocker"])).to_equal(1)
         file_delete(path)
 
+    it "emits pure JSON and SARIF from the public command":
+        val path = "/tmp/sspec_maintain_machine_output_spec.spl"
+        val source = "use std.spec.*\ndescribe \"machine output\":\n" +
+            "    it \"reports ready\":\n        step(\"Run\")\n" +
+            "        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(path, source)).to_equal(true)
+        val (json, json_error, json_status) = process_run(sspec_maintain_test_binary(), [
+            "sspec-maintain", "scan", path, "--no-cache", "--format", "json"])
+        expect(json_status).to_equal(0)
+        expect(json.trim().starts_with("{")).to_equal(true)
+        expect(json).to_contain("\"schema_version\":\"sspec-maintain-scope/v1\"")
+        expect(json).to_contain("\"cache_disposition\":\"bypass\"")
+        expect(json.contains("SSpec documentization maintenance")).to_be(false)
+        expect(json_error.trim()).to_equal("")
+        val (sarif, sarif_error, sarif_status) = process_run(sspec_maintain_test_binary(), [
+            "sspec-maintain", "scan", path, "--no-cache", "--format", "sarif"])
+        expect(sarif_status).to_equal(0)
+        expect(sarif.trim().starts_with("{")).to_equal(true)
+        expect(sarif).to_contain("\"version\":\"2.1.0\"")
+        expect(sarif).to_contain("\"runs\":[")
+        expect(sarif.contains("SSpec documentization maintenance")).to_be(false)
+        expect(sarif_error.trim()).to_equal("")
+        file_delete(path)
+
+    it "leaves source unchanged when rollback material cannot be retained":
+        val path = "/tmp/sspec_maintain_failed_apply_spec.spl"
+        val source = "use std.spipe\ndescribe \"failed apply\":\n" +
+            "    it \"reports ready\":\n        @step \"Run\"\n" +
+            "        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(path, source)).to_equal(true)
+        expect(run_sspec_maintain(["improve", path, "--apply", "--rollback",
+            "/proc/sspec-maintain-unwritable.rollback"])).to_equal(3)
+        expect(file_read(path) ?? "").to_equal(source)
+        file_delete(path)
+
     it "scans deterministic directory scope and fails closed when it is empty":
         val scope = "/tmp/sspec_maintain_scope"
         dir_remove(scope, true)
@@ -160,6 +203,90 @@ describe "sspec-maintain CLI contract":
         file_delete(path)
         file_delete(mirror)
         dir_remove(cache, true)
+
+    it "reuses unchanged pairs when one file in a directory changes":
+        val scope = "/tmp/sspec_maintain_pair_cache_scope"
+        val cache = "/tmp/sspec_maintain_pair_cache_records"
+        dir_remove(scope, true)
+        dir_remove(cache, true)
+        expect(dir_create_all(scope)).to_equal(true)
+        val source = "use std.spec.*\ndescribe \"cache pair\":\n" +
+            "    it \"returns ready\":\n        step(\"Run\")\n" +
+            "        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(scope + "/a_spec.spl", source)).to_equal(true)
+        expect(file_atomic_write(scope + "/b_spec.spl", source)).to_equal(true)
+        expect(run_sspec_maintain(["scan", scope, "--cache", cache])).to_equal(0)
+        val first_count = dir_walk(cache).len()
+        expect(first_count).to_equal(2)
+        expect(run_sspec_maintain(["scan", scope, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(first_count)
+        expect(file_atomic_write(scope + "/a_spec.spl", source + "# edited\n")).to_equal(true)
+        expect(run_sspec_maintain(["scan", scope, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(first_count + 1)
+        expect(file_atomic_write(scope + "/c_spec.spl", source)).to_equal(true)
+        expect(run_sspec_maintain(["scan", scope, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(first_count + 2)
+        expect(file_delete(scope + "/c_spec.spl")).to_equal(true)
+        expect(run_sspec_maintain(["scan", scope, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(first_count + 2)
+        expect(rt_file_rename(scope + "/b_spec.spl", scope + "/renamed_spec.spl")).to_equal(true)
+        expect(run_sspec_maintain(["scan", scope, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(first_count + 3)
+        expect(file_atomic_write(derive_manual_path(scope + "/a_spec.spl"),
+            "# changed manual\n")).to_equal(true)
+        expect(run_sspec_maintain(["scan", scope, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(first_count + 4)
+        dir_remove(scope, true)
+        dir_remove(cache, true)
+
+    it "previews and applies deterministic directory improvements with one rollback per source":
+        val scope = "/tmp/sspec_maintain_improve_scope"
+        dir_remove(scope, true)
+        expect(dir_create_all(scope)).to_equal(true)
+        val source = "use std.spipe\ndescribe \"feature\":\n" +
+            "    it \"reports ready\":\n        @step \"Run\"\n" +
+            "        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(scope + "/b_spec.spl", source)).to_equal(true)
+        expect(file_atomic_write(scope + "/a_spec.spl", source)).to_equal(true)
+        expect(run_sspec_maintain(["improve", scope])).to_equal(0)
+        expect(file_read(scope + "/a_spec.spl") ?? "").to_equal(source)
+        expect(run_sspec_maintain(["improve", scope, "--apply"])).to_equal(0)
+        expect(file_read(scope + "/a_spec.spl") ?? "").to_contain("# @step: Run")
+        expect(file_read(scope + "/b_spec.spl") ?? "").to_contain("# @step: Run")
+        expect(file_exists(scope + "/a_spec.spl.sspec-maintain.rollback")).to_equal(true)
+        expect(file_exists(scope + "/b_spec.spl.sspec-maintain.rollback")).to_equal(true)
+        expect(run_sspec_maintain(["improve", scope, "--apply"])).to_equal(0)
+        dir_remove(scope, true)
+
+    it "keeps improve timing diagnostics on stderr":
+        val path = "/tmp/sspec_maintain_improve_timing_spec.spl"
+        val source = "use std.spipe\ndescribe \"timing\":\n" +
+            "    it \"reports ready\":\n        @step \"Run\"\n" +
+            "        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(path, source)).to_equal(true)
+        val (output, diagnostic, status) = process_run(sspec_maintain_test_binary(), [
+            "sspec-maintain", "improve", path, "--debug-timings"])
+        expect(status).to_equal(0)
+        expect(output.contains("improve timings")).to_equal(false)
+        expect(diagnostic).to_contain("preview_us=")
+        expect(diagnostic).to_contain("conflict_stale_us=0")
+        expect(diagnostic).to_contain("reparse_us=0")
+        file_delete(path)
+
+    it "reports parse and mirror lookup timings separately on stderr":
+        val path = "/tmp/sspec_maintain_scan_timing_spec.spl"
+        val source = "use std.spec.*\ndescribe \"timing\":\n" +
+            "    it \"reports ready\":\n        step(\"Run\")\n" +
+            "        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(path, source)).to_equal(true)
+        val (output, diagnostic, status) = process_run(sspec_maintain_test_binary(), [
+            "sspec-maintain", "scan", path, "--no-cache", "--format", "json",
+            "--debug-timings"])
+        expect(status).to_equal(0)
+        expect(output.contains("parse_us=")).to_equal(false)
+        expect(diagnostic).to_contain("parse_us=")
+        expect(diagnostic).to_contain("mirror_lookup_us=")
+        file_delete(path)
 
     it "applies reviewed non-blocker suppressions but never hides blockers":
         val report = analyze_sspec_text("fixture_spec.spl",

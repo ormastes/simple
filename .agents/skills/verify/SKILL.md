@@ -222,3 +222,8 @@ REQ-to-test traceability. Confirm preview/apply and rollback evidence for
 automatic changes. A suppression needs stable rule, owner, reason, and bounded
 scope. Use the reviewed `--suppressions` file format
 `RULE_ID|owner|reason|optional-fingerprint`; blockers cannot be suppressed.
+Confirm `documentize` reused SPipe and preserved authored prose instead of
+synthesizing missing facts. Confirm scaffold provenance and that unresolved
+oracles still fail. Treat `spec-to-spipe` and compatibility `spec-to-sspec` as
+planned command routing over the Phase 0 contracts, not an available production
+CLI or two semantic importers.

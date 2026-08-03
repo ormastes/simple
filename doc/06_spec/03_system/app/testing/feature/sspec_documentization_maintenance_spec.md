@@ -56,7 +56,10 @@ separate integration obligations.
 ### Scaffold traceable, fail-fast SSpec
 
 Reference intake preserves the reference path, exact SHA-256, and `REQ-001`.
-It emits a visible `step("Review unresolved action for REQ-001")` and an executable failing TODO.
+It retains source line 2, the explicit normative statement as an `Expected`
+comment, a source-to-scenario mapping row, a visible
+`step("Review unresolved action for REQ-001")`, and an executable failing TODO.
+It emits no `expect(...)` from prose.
 The scaffold is therefore reviewable provenance, never a false passing test.
 
 ### Compare stable finding identity
@@ -69,8 +72,9 @@ accepts the reviewed fingerprint ledger with `--baseline` and reviewed
 ### Render the maintenance appendix for the professional manual
 
 The composition scenario starts from a SPipe-owned professional body and checks
-purpose/audience, primary workflow, deterministic generation history, source
-identity, the scorecard, and current mirror state. Maintenance supplies
+that the authored body remains the exact prefix, then checks purpose/audience,
+primary workflow, deterministic generation history, source identity, the
+scorecard, current mirror state, and absence of invented TODO prose. Maintenance supplies
 observed provenance and scoring without duplicating SPipe's scenario renderer.
 
 ## Scorecard interpretation
@@ -97,6 +101,14 @@ than treating the weighted total as the sole acceptance decision.
 | REQ-SSDOC-007 | preview/apply/idempotence | exact source, rollback, and transformed content |
 | REQ-SSDOC-008 | reference scaffold | path, SHA-256, REQ ID, step, failing TODO |
 | REQ-SSDOC-009/011 | professional manual composition | authored sections, generation history, scorecard, and current source identity |
+
+## NFR traceability and open evidence
+
+| NFR | Evidence in this manual/lane | Status boundary |
+|---|---|---|
+| NFR-SSDOC-008 | scaffold never emits a passing oracle; LLM policy is preview-only | Core operations are offline; no network/LLM behavior is claimed by this in-memory spec |
+| NFR-SSDOC-011 | stderr-only scan parse/mirror/rule/render/cache timing and improve preview/conflict/reparse/write timing | Timing output remains operational evidence and never contaminates machine report stdout |
+| NFR-SSDOC-012 | executable scenarios, this operator manual, score dimensions, and REQ mapping | >=80% branch evidence and zero-stub docgen remain focused verification gates |
 
 REQ-SSDOC-001/005/010 and filesystem portions of REQ-SSDOC-007/012 are not
 claimed by these library scenarios; focused unit/integration tests own the
@@ -142,6 +154,11 @@ deterministic scoring, never self-approved, and never self-applied. Reviewed
 suppression records require rule, owner, reason, and optional fingerprint;
 blockers cannot be suppressed. Filesystem conflict, rollback, and
 permission-preservation evidence remains owned by focused integration tests.
+Full external-standard ingestion is planned under canonical `spec-to-spipe`;
+`spec-to-sspec` is the compatibility name that must route to the same semantic
+pipeline when its production command lands. The current Phase 0 contracts are
+not a production CLI. The bounded Markdown scaffold does not claim lossless
+byte coverage or official conformance bindings.
 
 <details><summary>Executable SSpec</summary>
 

@@ -96,7 +96,8 @@ fingerprints, baseline state, and fixes when safe replacements exist.
 ## Cache record
 
 Cache storage uses a versioned deterministic line codec under
-`.simple/cache/sspec-maintain/`. Identity, score, severity, and payload lengths
+`.simple/cache/sspec-maintain/`, with one record per normalized source/manual
+pair. Identity, score, severity, and payload lengths
 precede the human/JSON/SARIF serializations produced from one report model.
 Invalid/truncated/version-mismatched records are misses, never partial reports.
 Cache write is atomic.
@@ -159,26 +160,40 @@ fails if the output exists.
 
 ## Documentize flow
 
-1. Run canonical `run_spipe_docgen` with explicit output and `--no-index`.
-2. Re-read the generated mirror.
-3. Replace prior delimited maintenance provenance/scorecard sections.
-4. Re-analyze the source plus observed generated mirror once.
-5. Write deterministic provenance/history and the optional scorecard.
+1. Derive a path-and-content-addressed staging root under
+   `build/sspec-maintain/documentize/`.
+2. Run canonical `run_spipe_docgen` into that root with `--no-index`.
+3. Re-read the staged generated mirror and remove the staging tree.
+4. Replace prior delimited maintenance provenance/scorecard sections.
+5. Re-analyze the source plus observed generated mirror once.
+6. Write deterministic provenance/history and the optional scorecard to the
+   requested output.
 
 The appendix delimiters make repeated documentize idempotent.
 
 ## Error handling
 
-All reusable operations return `Result<T, text>`. CLI usage errors return 2;
-I/O/parse/apply/generation errors return 3; successful advisory scan returns 0;
-policy failure returns 1. Machine modes serialize errors in their selected
-schema and do not emit human banners.
+Reusable fallible owners return `Result<T, text>`. CLI success is 0, configured
+policy failure is 1, usage is 2, I/O/parse/generation is 3, and stale/fix/parse
+apply conflict is 4. Machine modes serialize errors in their selected schema
+and do not emit human banners.
 
 ## Performance and diagnostics
 
-Rule evaluation is O(lines + findings); path ordering is O(files²) only if the
-runtime lacks a comparator sort, so the implementation must use the existing
-stable path sort helper or record/fix a measured regression. String assembly
+Public complexity contracts are:
+
+| Owner | Complexity |
+|---|---|
+| source/manual fact extraction | O(input bytes + scenarios) |
+| rule evaluation and stable finding order | O(input bytes + findings²) |
+| per-pair cache identity/codec | O(source + manual + serialized payload bytes) |
+| directory scan | one enumeration + stable path sort + sum of pair misses |
+| EasyFix preview/apply | O(source bytes + replacements² conflict validation) |
+| reference scaffold | O(reference bytes + extracted requirements) |
+| JSON/SARIF/manual composition | O(findings + output bytes) |
+
+The quadratic finding sort is bounded by the small catalog; a measured growth
+regression requires replacing it with a stable comparator sort. String assembly
 uses arrays plus `join`, never loop concatenation for large reports.
 
 Diagnostics are level-gated and routed away from machine stdout. Retained perf

@@ -151,15 +151,22 @@ The cache key is SHA-256 over:
 - score weights and relevant configuration;
 - tool version.
 
-One file is parsed once per analysis. A content-addressed cache record stores
+One source/manual pair is parsed once per miss. A per-pair content-addressed
+cache record stores
 all deterministic serializations from one report plus the score/severity policy
-summary needed on a hit. Create/edit/move/rename/delete/manual refresh naturally
-change identity or content. Rule/config/tool changes change the key.
+summary needed on a hit. Directory scans therefore reuse unchanged pairs when a
+sibling changes. Create/edit/move/rename/delete/manual refresh naturally change
+identity or content. Rule/config/tool changes change the key.
 `--no-cache` bypasses lookup/write and must serialize identically except for the
 explicit cache disposition field.
 
 Directory scans enumerate once, normalize and sort paths, and analyze only
 `*_spec.spl`. They do not invoke subprocesses per file.
+
+`documentize` stages canonical SPipe output under a path-and-content identity in
+`build/sspec-maintain/documentize/`, reads it back, removes the staging tree,
+and only then writes the requested manual. The adapter never asks docgen to
+write its intermediate output over a repository manual.
 
 ## Apply safety
 
@@ -173,9 +180,12 @@ read + hash -> collect safe fixes -> apply in memory -> preview
 ```
 
 Only deterministic edits receive `Certain`/`Safe`. Narrative, requirements,
-oracles, and expected values are non-applicable suggestions. Overlap, stale
-source identity, parse/check failure, or rollback-write failure aborts without a
-partial source write.
+oracles, and expected values are non-applicable suggestions. The smallest
+post-edit gate is exactly one canonical reparse of each changed in-memory result
+through an isolated file before replacement. Overlap, stale source identity,
+reparse failure, or rollback-write failure aborts without a partial source
+write; a later directory write failure restores earlier changed sources and
+retains rollback artifacts if restoration itself fails.
 
 ## Scaffold trust boundary
 

@@ -57,10 +57,15 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   generator reports `0 stubs`.
 - Run `simple sspec-maintain scan <spec>` for each changed SSpec/manual pair.
   Review all seven scores and stable findings; blockers, missing/stale mirrors,
-  policy regression, or fail-fast scaffold placeholders prevent completion.
+  policy regression, machine-output contamination, or fail-fast scaffold
+  placeholders prevent completion.
   `improve` is preview-only until an exact patch is confirmed and rollback is
   retained. `documentize` reuses SPipe; optional LLM advice never affects the
-  deterministic score or self-applies.
+  deterministic score or self-applies. `scaffold` preserves source
+  path/hash/line and REQ identity, emits no inferred passing oracle, and remains
+  fail-fast until implemented. The planned external-standard command is
+  `spec-to-spipe`; future `spec-to-sspec` compatibility must delegate to it.
+  Neither is a production CLI yet.
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.

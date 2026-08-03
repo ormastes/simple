@@ -193,6 +193,11 @@ Use the `spec-to-spipe`/compatibility `spec-to-sspec` research architecture for
 full external standards that require byte coverage, source ledgers, adapters,
 or official conformance bindings. Its generated SSpec must pass the same
 maintenance scoring and must never upgrade an unresolved oracle into a pass.
+The canonical research entries are
+`doc/01_research/domain/spec_to_spipe_toolchain.md` and its repository audit at
+`doc/01_research/local/spec_to_spipe_toolchain.md`; `spec-to-sspec` is a
+planned compatibility command/name, not a second semantic importer. Phase 0
+contracts exist, but neither name is a production external-standard CLI yet.
 Never fabricate outcomes, generate skips, or use tautologies. Use literal
 `step("...")` calls, not bare `@step "..."` decorators.
 
@@ -204,3 +209,9 @@ compatibility/limitations, and folded executable detail. Optional LLM
 suggestions must cite source evidence; they are preview-only, excluded from the
 score, never self-approved, and never self-applied. See
 `doc/07_guide/infra/sspec_documentization_maintenance.md`.
+
+Core maintenance is offline: it must not call an LLM or transmit source.
+`--debug-timings` writes separate scan parse/mirror/rule/render/cache and
+improve preview/conflict/reparse/write diagnostics to stderr; machine report
+stdout stays serialization-only. Do not infer documentation-quality acceptance
+from timing output or a zero-stub count alone.

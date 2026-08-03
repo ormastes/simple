@@ -91,14 +91,19 @@ active findings as `new`/`unchanged` and absent prior findings as `resolved`.
 
 ## Preview and apply safety
 
-`simple sspec-maintain improve <spec>` is preview-only. It may propose only
+`simple sspec-maintain improve <spec|dir>` is preview-only. It may propose only
 mechanical edits represented by EasyFix metadata.
 
 ```text
 simple sspec-maintain improve test/path/feature_spec.spl
 simple sspec-maintain improve test/path/feature_spec.spl --apply \
   --rollback build/test-artifacts/feature_spec.rollback
+simple sspec-maintain improve test/path/feature_group --apply
 ```
+
+Directory scope is processed in normalized path order and retains one rollback
+artifact beside each changed source. A custom `--rollback` path is valid only
+for a single specification.
 
 Only explicit `--apply` writes. Review the exact preview first. Assertion
 meaning, requirement mapping, scenario outcome, capture claims, and authored
@@ -121,9 +126,12 @@ simple sspec-maintain scaffold reference.md --output test/path/feature_spec.spl 
 simple sspec-maintain scaffold reference.md --output test/path/feature_spec.spl --apply
 ```
 
-The scaffold records the source path and SHA-256, preserves explicit REQ IDs,
-uses `use std.spec.*`, outcome-oriented scenarios, and literal `step("...")`
-calls. Every unresolved oracle must remain executable and fail fast:
+The scaffold records the source path and SHA-256, preserves explicit REQ IDs
+and source lines, uses `use std.spec.*`, and emits literal `step("...")` calls.
+It uses the upstream requirement title as the initial scenario name; that is
+source preservation, not proof that the title is already outcome-oriented.
+Review and rename it only when the reference supports the clearer wording.
+Every unresolved oracle must remain executable and fail fast:
 
 ```simple
 fail("TODO: replace generated placeholder with an executable assertion")
@@ -134,14 +142,27 @@ the scaffold as traceable intake, not conformance evidence. Replace every
 placeholder with a production-observing oracle and regenerate/review the manual
 before marking its requirement implemented.
 
-For full external standards, follow the lossless `spec-to-spipe` architecture
-in `doc/01_research/domain/spec_to_spipe_toolchain.md`. Its compatibility name
-is `spec-to-sspec`, but both names share one implementation. That pipeline adds
-source snapshots, byte dispositions, semantic adapters, and conformance
+For full external standards, follow the lossless `spec-to-spipe` research in
+`doc/01_research/domain/spec_to_spipe_toolchain.md` and its repository audit in
+`doc/01_research/local/spec_to_spipe_toolchain.md`. The architecture assigns
+`spec-to-sspec` as a compatibility command that must delegate to the same
+semantic implementation when the command surface lands. The current tree has
+Phase 0 contracts and verification models, not a production external-standard
+CLI, so do not advertise either command as available yet. The planned pipeline
+adds source snapshots, byte dispositions, semantic adapters, and conformance
 ledgers; `sspec-maintain scaffold` is the bounded Markdown intake path, not a
-replacement for lossless import. Both must emit the same modern SSpec shape:
-authored manual facts, outcome scenarios, literal steps, stable requirement
-bindings, retained evidence, and fail-fast unresolved oracles.
+replacement for lossless import. Both paths must eventually emit the same
+modern SSpec shape: authored manual facts, outcome scenarios, literal steps,
+stable requirement bindings, retained evidence, and fail-fast unresolved
+oracles.
+
+The generated purpose/workflow/recovery paragraphs are fixed scaffold
+instructions, not domain facts. They must not be presented as authored
+specification prose. Preconditions, actions, outcomes, examples, capture hints,
+REQ identities, and source lines are copied only when explicitly recognized in
+the reference. An unrecognized or ambiguous statement stays available through
+the pinned source and mapping review; the scaffold never converts it into an
+`expect`, passing assertion, skip, or inferred requirement.
 
 ## Canonical documentization and manual review
 
@@ -152,6 +173,11 @@ simple sspec-maintain documentize test/path/feature_spec.spl --output doc/06_spe
 
 `documentize` calls the canonical SPipe generator and appends the maintenance
 scorecard/provenance section. It does not own a parallel scenario renderer.
+The canonical generator writes first to a content-addressed
+`build/sspec-maintain/documentize/` staging directory; maintenance reads and
+removes that staging tree before writing the requested manual. A custom
+`--output` therefore cannot make the intermediate generator overwrite a
+repository manual.
 A professional manual contains:
 
 1. purpose, audience, scope, and freshness;
@@ -169,6 +195,28 @@ and stress detail should be folded; internal plumbing can be skipped from the
 manual while remaining executable. Executable SSpec is folded detail and must
 not dominate the reader-facing flow. See
 `doc/07_guide/infra/sspec_scenario_manual.md`.
+
+## Offline operation and diagnostics
+
+Core scan, score, improve, scaffold, and documentize paths are local and do not
+invoke an LLM or transmit source. Do not add network access to make a core gate
+pass. Optional LLM advice is a separate, opt-in preview channel and is never an
+input to deterministic scores, scaffolds, or generated conformance evidence.
+
+`scan --debug-timings` writes phase diagnostics to stderr so human/JSON/SARIF
+stdout remains pure. Scan diagnostics separately report parse, mirror lookup,
+rule/score, render, cache hit/miss, total time, and file count. Improve
+diagnostics separately report preview, conflict/stale validation, canonical
+reparse, rollback/write, changed-file count, and total time. Cache identities
+cover source, mirror, rules, configuration, tool, baseline, suppression, and
+rule-filter inputs. These diagnostics are operational stderr evidence, not part
+of the deterministic report serialization.
+
+For documentation-quality acceptance, retain the focused branch-coverage
+report, the executable system scenarios, the generated/manual Markdown, and an
+independent operator-manual review. A zero-stub generator result proves only
+that no placeholder was classified as completed; it does not replace the
+seven-score review or requirement-to-test traceability.
 
 ## Failure policy and traceability
 
@@ -188,6 +236,11 @@ The system manual at
 shows the library-level operator contract. Unit and integration suites remain
 authoritative for CLI exits, serialization purity, directory handling, atomic
 file behavior, and malformed inputs.
+
+The deterministic generic-agent inventory is
+`doc/03_plan/sys_test/sspec_documentization_workflow_surfaces.md`. Its audit is
+structural synchronization evidence only; matching command words in an agent
+file never substitutes for executable tool behavior.
 
 ## LLM-assisted improvement policy
 

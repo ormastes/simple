@@ -75,9 +75,15 @@ description: Create architecture, UI design, system tests, and detail design for
   the source test.
 - Run `simple sspec-maintain scan <spec>` and review all seven scores, stable
   findings, blocker cap, mirror state, and REQ-to-scenario traceability. A
-  reference scaffold remains fail-fast until its oracle is implemented. Full
-  external standards use the shared lossless `spec-to-spipe` architecture
-  (`spec-to-sspec` is its compatibility name).
+  blocker, missing/stale mirror, configured policy failure, contaminated
+  machine output, or unresolved scaffold presented as coverage blocks handoff.
+  Reference scaffolds preserve source path/hash, REQ ID, and source line; they
+  never infer a passing oracle. `documentize` delegates the complete manual to
+  SPipe. Full external standards follow the planned lossless `spec-to-spipe`
+  architecture; `spec-to-sspec` must be a compatibility route to that same
+  implementation when its production CLI lands, not a second importer.
+  Design `improve` as preview-only; exact confirmation and rollback are required
+  for apply, and semantic prose/assertion/REQ/evidence edits remain manual.
 - If design changes workflow/tooling, evidence wrappers, generated spec shape,
   or verification contracts, update matching `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,
