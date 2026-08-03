@@ -30,15 +30,16 @@ terminal_exit_raw_mode()
 ```
 """
 
-# `_terminal_stdout_write(text)` is not registered by the self-hosted interpreter
-# (the hosted ABI exposes a tagged-value variant). `print_raw` is the portable
-# language builtin and flushes after each write, which is exactly what a TUI
-# needs for cursor-control sequences.
+# The staged self-hosted frontend requires the portable `print_raw` language ABI
+# to be declared explicitly before resolving calls in this module.
+extern fn print_raw(value: text) -> i64
+
 fn _terminal_stdout_write(data: text):
-    print_raw(data)
+    val _written = print_raw(data)
 
 fn _terminal_stdout_flush():
-    print_raw("")
+    val _written = print_raw("")
+
 extern fn rt_terminal_enable_raw_mode() -> bool
 extern fn rt_terminal_disable_raw_mode() -> bool
 extern fn rt_terminal_get_size() -> (i64, i64)
@@ -234,6 +235,23 @@ fn terminal_draw_at(row: i64, col: i64, content: text):
     terminal_move_cursor(row, col)
     _terminal_stdout_write(content)
 
+fn _terminal_fit_line(content: text, width: i64) -> text:
+    """Return content truncated or padded to exactly width characters."""
+    if width <= 0:
+        return ""
+
+    var fitted = ""
+    var used = 0
+    val content_len = content.len()
+    while used < width and used < content_len:
+        fitted = "{fitted}{content.char_at(used)}"
+        used = used + 1
+
+    while used < width:
+        fitted = "{fitted} "
+        used = used + 1
+    fitted
+
 fn terminal_draw_line(row: i64, col: i64, content: text, width: i64):
     """Draw text at a position, padded or truncated to exact width.
 
@@ -244,19 +262,7 @@ fn terminal_draw_line(row: i64, col: i64, content: text, width: i64):
         width: Exact width to fill
     """
     terminal_move_cursor(row, col)
-    val content_len = len(content)
-    if content_len >= width:
-        _terminal_stdout_write(substring(content, 0, width))
-    else:
-        _terminal_stdout_write(content)
-        # Pad with spaces
-        var spaces = ""
-        var i = 0
-        val pad_count = width - content_len
-        while i < pad_count:
-            spaces = "{spaces} "
-            i = i + 1
-        _terminal_stdout_write(spaces)
+    _terminal_stdout_write(_terminal_fit_line(content, width))
 
 fn terminal_fill_rect(row: i64, col: i64, width: i64, height: i64, ch: text):
     """Fill a rectangular area with a single character.
