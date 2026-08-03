@@ -1,9 +1,9 @@
 # HIR package-sibling imported-enum surface leak
 
-Status: open  
-Severity: P1 bootstrap blocker  
+Status: reopened — public sibling enum bodies still leaked (2026-08-03)
+Severity: P1 bootstrap blocker
 Owner: pure-Simple HIR module lowering
-Fix owner: `/root/stage4-hir-sibling-import` — CLAIMED
+Fix owner: `/root` — CLAIMED (reassigned after prior owner became inactive)
 
 ## Reproduction
 
@@ -53,3 +53,19 @@ attribution.
   assertions.
 - Rebuild Stage 3 incrementally, rerun the no-stub Stage 4 build, then run exact
   candidate sanity and essential-tool smoke before deployment.
+
+## Full-graph recurrence (2026-08-03)
+
+The earlier repair correctly stopped a sibling's private named imports and
+private globs from leaking. It did not stop the sibling's own public enum body
+from being copied into every adjacent module. The x86 Stage 4 build therefore
+lowered `BitfieldError` inside unrelated `compiler.backend.backend_port`; its
+five variants each carry `Span`, a private dependency of `bitfield.spl`, and
+reported five false `unresolved type: Span` diagnostics against backend_port.
+
+Package-sibling enum registration is now declaration-only. Explicit user
+imports and globs still materialize enum bodies, while unrelated siblings see
+the public enum symbol without recursively lowering its private payload graph.
+The existing mini-package regression now includes a public sibling enum with a
+private nested payload and proves both paths: no body materialization in the
+unrelated sibling, and retained materialization for an explicit glob consumer.

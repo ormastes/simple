@@ -602,7 +602,7 @@ impl HirLowering:
             case _:
                 return_scan_empty()
 
-    me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span):
+    me register_imported_symbol(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_name: text, import_span: Span, materialize_enum: bool):
         if imported_mod.composites.contains_key(imported_name):
             val composite = imported_mod.composites[imported_name]
             val already_bound = self.symbols.lookup(local_name).?
@@ -624,8 +624,15 @@ impl HirLowering:
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
-                self.imported_enums[local_name] = hir_surface_enum_to_enum(imported_mod.enums[imported_name], local_name)
-                self.imported_enum_owners[local_name] = imported_mod.module_name
+                # Directory-package siblings share enum declarations, but an
+                # unrelated sibling must not rematerialize the enum body in its
+                # own symbol context. Payload dependencies are private to the
+                # defining sibling (BitfieldError's Span payloads previously
+                # failed while lowering backend_port). Explicit user imports
+                # and globs still request body materialization below.
+                if materialize_enum:
+                    self.imported_enums[local_name] = hir_surface_enum_to_enum(imported_mod.enums[imported_name], local_name)
+                    self.imported_enum_owners[local_name] = imported_mod.module_name
                 self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
         elif imported_mod.traits.contains_key(imported_name):
             self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
@@ -654,7 +661,7 @@ impl HirLowering:
             if hop.found:
                 val source_mod = hir_module_surface_get(self.module_surfaces, hop.module_name)
                 if source_mod != nil:
-                    self.register_imported_symbol(source_mod.unwrap(), hop.module_name, hop.item_name, local_name, import_span)
+                    self.register_imported_symbol(source_mod.unwrap(), hop.module_name, hop.item_name, local_name, import_span, materialize_enum)
 
     me try_register_bootstrap_global_symbol(name: text, span: Span) -> bool:
         """Resolve one uniquely owned flat-global bootstrap declaration."""
@@ -674,7 +681,7 @@ impl HirLowering:
         if matching_index < 0:
             return false
         val owner = self.module_surfaces.surfaces[matching_index]
-        self.register_imported_symbol(owner, owner.module_name, name, name, span)
+        self.register_imported_symbol(owner, owner.module_name, name, name, span, true)
         self.symbols.lookup(name).?
 
     me resolve_module_key(name: text) -> text:
@@ -964,7 +971,7 @@ impl HirLowering:
         # elided, and every root still expands its own closure from scratch.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
-        self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, true)
+        self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, true, true)
 
     me register_package_sibling_symbols(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span):
         # Directory siblings share declarations and explicit exports, but a
@@ -973,9 +980,9 @@ impl HirLowering:
         # implementation details of the sibling that wrote them.
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
-        self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, false)
+        self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, false, false)
 
-    me register_glob_imported_symbols_depth(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span, depth: i64, include_private_named_imports: bool):
+    me register_glob_imported_symbols_depth(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span, depth: i64, include_private_named_imports: bool, materialize_enums: bool):
         if depth > 8:
             return
         # GLB2 (2026-08-01): cycle/re-entry memo -- see glob_expand_memo in
@@ -992,37 +999,37 @@ impl HirLowering:
         var keys = imported_mod.composites.keys()
         var idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.enums.keys()
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.traits.keys()
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.callables.keys()
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.type_aliases.keys()
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.constants.keys()
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span)
+            self.register_imported_symbol(imported_mod, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         # A split module can explicitly re-export names it imports. Register
@@ -1046,13 +1053,13 @@ impl HirLowering:
                             export_key = self.resolve_module_key(export_base)
                     val export_surface = if export_key != "": hir_module_surface_get(self.module_surfaces, export_key) else: nil
                     if export_surface != nil and export_key != imported_mod_name:
-                        self.register_glob_imported_symbols_depth(export_surface.unwrap(), export_key, import_span, depth + 1, include_private_named_imports)
+                        self.register_glob_imported_symbols_depth(export_surface.unwrap(), export_key, import_span, depth + 1, include_private_named_imports, materialize_enums)
                 else:
                     val export_parts = export_item.split(":")
                     val export_source = export_parts[0]
                     val export_local = if export_parts.len() > 1: export_parts[1] else: export_source
                     if export_local != export_source or not hir_module_declares_item(imported_mod, export_source):
-                        self.register_imported_symbol(imported_mod, imported_mod_name, export_source, export_local, import_span)
+                        self.register_imported_symbol(imported_mod, imported_mod_name, export_source, export_local, import_span, materialize_enums)
                 export_item_idx = export_item_idx + 1
             export_idx = export_idx + 1
 
@@ -1122,12 +1129,12 @@ impl HirLowering:
                     val nested_key = self.resolve_module_key_relative(glob_imp.module, imported_mod_name)
                     val nested_surface = if nested_key != "": hir_module_surface_get(self.module_surfaces, nested_key) else: nil
                     if nested_surface != nil and nested_key != imported_mod_name:
-                        self.register_glob_imported_symbols_depth(nested_surface.unwrap(), nested_key, import_span, depth + 1, include_private_named_imports)
+                        self.register_glob_imported_symbols_depth(nested_surface.unwrap(), nested_key, import_span, depth + 1, include_private_named_imports, materialize_enums)
                 var glob_it = 0
                 while glob_it < glob_imp.items.len():
                     val glob_item = glob_imp.items[glob_it]
                     val glob_local = if glob_item.has_alias: glob_item.alias else: glob_item.name
-                    self.register_imported_symbol(imported_mod, imported_mod_name, glob_local, glob_local, import_span)
+                    self.register_imported_symbol(imported_mod, imported_mod_name, glob_local, glob_local, import_span, materialize_enums)
                     glob_it = glob_it + 1
                 glob_imp_idx = glob_imp_idx + 1
 
@@ -1212,7 +1219,7 @@ impl HirLowering:
                     while item_idx < imp.items.len():
                         val item = imp.items[item_idx]
                         val local_name = if item.has_alias: item.alias else: item.name
-                        self.register_imported_symbol(imported_surface, resolved_module_name, item.name, local_name, imp.span)
+                        self.register_imported_symbol(imported_surface, resolved_module_name, item.name, local_name, imp.span, true)
                         item_idx = item_idx + 1
             import_idx = import_idx + 1
 
