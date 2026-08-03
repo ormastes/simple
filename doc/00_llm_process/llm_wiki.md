@@ -41,8 +41,10 @@ verify that the caller actually crosses the worker/library boundary.
 - **Inventory rule:** freeze executable/runtime/source identities and a
   deterministic scoped manifest; continue every isolated task to success,
   failure, crash, or timeout before editing. Persist counts, logs, and resume
-  state. If per-file startup is prohibitive, use coarser module/root tasks that
-  still cover the complete requested scope.
+  state. Prefer `scripts/check/compiled-check-tree.py` with a compiled checker,
+  bounded batches, and durable batch/file results; the legacy shell sweep's
+  temporary rows are not resumable evidence. If compiled batching is still
+  prohibitive, use coarser module/root tasks that cover the complete scope.
 - **Fix rule:** normalize first real diagnostics, collapse cascades/duplicates,
   claim unique categories in the bug database, and assign one category per
   parallel agent with isolated caches and non-overlapping owner files. Fix the

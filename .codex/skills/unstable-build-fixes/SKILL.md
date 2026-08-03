@@ -49,13 +49,19 @@ Goal: produce the requested Simple executable without throwing away useful cache
 1. Freeze the source revision, compiler/runtime identities, target, roots, cache
    paths, and deterministic file/task manifest. Start or keep one main build only
    if it can make useful cache/object progress independently.
-2. Run the whole diagnostic manifest with per-item timeouts and isolated caches:
+2. Run the whole diagnostic manifest with the compiled checker, bounded batches,
+   per-process timeouts, and durable results:
    ```bash
-   sh scripts/check/bootstrap-diagnostic-sweep.shs \
-     --compiler=<compiler> --root=src/compiler --root=src/lib --root=src/app \
-     --cache-dir=build/bootstrap/diagnostic-cache --jobs=<jobs> --timeout=<seconds>
+   python3 scripts/check/compiled-check-tree.py --checker=<compiled-simple-check> \
+     --root=src/compiler --root=src/lib --root=src/app \
+     --output-dir=build/mini_builds/full-tree-check --workers=<jobs> \
+     --batch-size=64 --timeout=<seconds>
    ```
-   Continue after failures. Retain every result, including timeouts and crashes.
+   Continue after failures. Retain `manifest.tsv`, `run.json`, and every batch or
+   isolated-file result, including timeouts and crashes. Use `--resume` only with
+   the same frozen checker and manifest. The legacy
+   `bootstrap-diagnostic-sweep.shs` is suitable for short fail-fast probes, but
+   its temporary rows are not inventory-to-end evidence.
 3. Normalize the first real diagnostic and group repeated symptoms into root-cause
    categories. Separate independent bugs from cascades, duplicates, warning-only
    output, and unavailable-platform results.

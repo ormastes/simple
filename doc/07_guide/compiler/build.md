@@ -421,6 +421,22 @@ parallel workers never write the same cache. This is intentionally diagnostic
 only: combining it with `--deploy`, `--release`, or `--full-cli` is rejected,
 and the mode has no artifact admission or deployment path.
 
+The shell mode is appropriate for short probes. For an inventory-to-end run,
+use the compiled checker so the manifest and terminal rows survive interruption:
+
+```sh
+python3 scripts/check/compiled-check-tree.py \
+  --checker=/absolute/path/to/simple-check \
+  --root=src/compiler --root=src/app --root=src/lib \
+  --output-dir=build/mini_builds/full-tree-check \
+  --workers=4 --batch-size=64 --timeout=120
+```
+
+The runner freezes `manifest.tsv` and `run.json`, writes a terminal result for
+each batch, and isolates members of failed or timed-out batches per file. Resume
+only the same checker/manifest with `--resume`; do not treat the shell sweep's
+temporary rows as durable inventory evidence.
+
 Choose the recovery mode before starting:
 
 - **Fail-fast** is the default for CI, release, and a hard blocker that prevents
@@ -444,7 +460,7 @@ categories. A seed/check sweep never proves Stage 4: record the exact executable
 mode, host, target, and manifest for every claim. Stop after three verify/fix
 cycles; remaining categories are reported, not hidden by an endless retry loop.
 
-When per-file startup cost makes the manifest impractical, preserve its resume
-state and measured ETA, then use coarser module/root tasks that still reach the
-end of the requested scope. Do not fall back to repeatedly fixing only the first
-reported error.
+When per-file startup cost makes the manifest impractical, use bounded compiled
+checker batches first. Preserve resume state and measured ETA if an even coarser
+module/root manifest is required. Do not fall back to repeatedly fixing only the
+first reported error.

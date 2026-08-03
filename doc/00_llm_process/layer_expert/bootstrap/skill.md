@@ -163,6 +163,12 @@ until the manifest reaches its end. If per-file startup makes that impractical,
 retain the resumable manifest and switch to coarser module/root tasks that still
 cover the complete scope; never repeatedly restart from item zero.
 
+The preferred runner is `scripts/check/compiled-check-tree.py` with a compiled
+`src/app/check/main.spl`, bounded batches, and durable `manifest.tsv`, `run.json`,
+batch, and isolated-file results. Use `--resume` only when the checker and
+manifest identities match. The legacy shell diagnostic sweep is for short
+probes; its temporary terminal rows are not resumable inventory evidence.
+
 After the sweep, normalize the first real diagnostic, collapse cascades and
 duplicates, and claim each unique category in the bug database. Assign one
 root-cause category per agent, not one symptom or file per agent. Agents use
