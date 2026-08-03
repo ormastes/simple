@@ -40,8 +40,9 @@ Options:
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --incremental-unlimited
-                     Reuse incremental caches and use every detected host CPU;
-                     retain Stage 4 structural streaming ownership
+                     Reuse incremental caches, including one-binary Stage 4,
+                     and use every detected host CPU; retain Stage 4
+                     structural streaming ownership
   --diagnostic-sweep Continue checking independent .spl files after failures,
                      group all diagnostics, and never build or deploy artifacts
   --diagnostics[=MODE]
@@ -280,6 +281,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
+. "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
 cd "${repo_root}"
 BOOTSTRAP_STAGE3_FACADE_PATH=\
 "${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
@@ -659,7 +661,8 @@ prepare_native_cache() {
     mkdir -p "${native_cache_dir}"
     return
   fi
-  if [ "${bootstrap_mode}" = "one-binary" ]; then
+  if bootstrap_cache_force_clear_one_binary \
+    "${execution_profile}" "${bootstrap_mode}"; then
     echo "  ${label}: clearing native cache (one-binary mode)"
     rm -rf "${native_cache_dir}/"
     return
@@ -681,7 +684,7 @@ prepare_native_cache() {
     mkdir -p "${native_cache_dir}"
     printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
   else
-    echo "  ${label}: reusing native cache (dynload mode)"
+    echo "  ${label}: reusing native cache (${bootstrap_mode} mode)"
   fi
 }
 
