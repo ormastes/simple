@@ -127,7 +127,10 @@ fn parser_expect_param_name():
         parser_advance()
 
 fn is_domain_block_kind(name: text) -> bool:
-    name == "schema" or
+    name == "arch" or
+        name == "config" or
+        name == "metadata" or
+        name == "schema" or
         name == "style" or
         name == "ui" or
         name == "music" or
@@ -136,22 +139,21 @@ fn is_domain_block_kind(name: text) -> bool:
         name == "city" or
         name == "rtl"
 
+fn is_metadata_block_kind(name: text) -> bool:
+    name == "arch" or name == "config" or name == "metadata"
+
 fn current_ident_followed_by_lbrace() -> bool:
-    # NOTE: was lex_pos_get() -- the legacy dict-backed "pos" state that
-    # CoreLexer.next_token() never writes back to, so it read a permanently
-    # stale position here (see current_ident_is_cli_decl below and
-    # lexer.spl's "Live position accessors" note). lex_token_end_get() is
-    # the array-backed slot lex_next() actually updates on every call, and
-    # gives the true offset right after the current (domain-keyword) token.
-    var pos = lex_token_end_get()
-    val source_len = lex_source_len()
-    while pos < source_len:
-        val ch = lex_source_char_at(pos)
-        if ch == " " or ch == "\t" or ch == "\r":
-            pos = pos + 1
-            continue
-        return ch == "{"
-    false
+    # Token offsets are character-indexed while text len/slicing is byte-based
+    # for UTF-8. Raw source lookahead therefore missed `{` whenever a Unicode
+    # comment occurred before the declaration. Token lookahead is both cheaper
+    # and encoding-independent; preserve all lexer/parser state for the caller.
+    val (lb_snap_nums, lb_snap_texts) = lex_snapshot_save()
+    val (lb_tok_nums, lb_tok_text) = parser_tok_save()
+    parser_advance()
+    val followed_by_lbrace = par_kind_get() == TOK_LBRACE
+    lex_snapshot_restore(lb_snap_nums, lb_snap_texts)
+    parser_tok_restore(lb_tok_nums, lb_tok_text)
+    followed_by_lbrace
 
 fn is_ident_start_char(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_"
@@ -264,7 +266,24 @@ fn parse_raw_domain_block_payload(kind: text) -> text:
 
 fn parse_module_domain_block_decl(loop_index: i64, kind: text) -> i64:
     parser_advance()
-    val payload = parse_raw_domain_block_payload(kind)
+    var payload = ""
+    if is_metadata_block_kind(kind):
+        # Metadata/config blocks are compile-time declarations. Consume their
+        # balanced token region rather than source-slicing it: token offsets
+        # are character-indexed, so byte-indexed slicing corrupts blocks after
+        # non-ASCII comments. Rust likewise lowers these blocks to Pass.
+        parser_expect(TOK_LBRACE)
+        var depth: i64 = 1
+        while depth > 0 and par_kind_get() != TOK_EOF:
+            if par_kind_get() == TOK_LBRACE:
+                depth = depth + 1
+            elif par_kind_get() == TOK_RBRACE:
+                depth = depth - 1
+            parser_advance()
+        if depth > 0:
+            parser_error("unterminated {kind}{...} metadata block")
+    else:
+        payload = parse_raw_domain_block_payload(kind)
     val helper = expr_ident("__domain_block", 0)
     var args: [i64] = []
     args.push(expr_string_lit(kind, 0))
@@ -426,6 +445,110 @@ fn parser_class_member_followed_by_colon() -> bool:
     parser_tok_restore(cm_tok_nums, cm_tok_text)
     followed_by_colon
 
+# Keep layout lookahead non-destructive. A colonless declaration followed by a
+# same-level declaration is bodyless, while a newline followed by INDENT is the
+# accepted legacy spelling of an indented body (`fn main()\n    ...`).
+fn parser_newline_starts_indented_block() -> bool:
+    if par_kind_get() != TOK_NEWLINE:
+        return false
+    val (nl_snap_nums, nl_snap_texts) = lex_snapshot_save()
+    val (nl_tok_nums, nl_tok_text) = parser_tok_save()
+    parser_skip_newlines()
+    val starts_indented_block = par_kind_get() == TOK_INDENT
+    lex_snapshot_restore(nl_snap_nums, nl_snap_texts)
+    parser_tok_restore(nl_tok_nums, nl_tok_text)
+    starts_indented_block
+
+# Multi-line signatures may place the body colon on an indented continuation
+# line. Consume that layout only when it really leads to a colon; otherwise
+# restore it so a colonless indented body remains visible to parse_block().
+fn parser_try_skip_signature_layout_before_colon() -> bool:
+    if par_kind_get() != TOK_NEWLINE:
+        return false
+    val (sl_snap_nums, sl_snap_texts) = lex_snapshot_save()
+    val (sl_tok_nums, sl_tok_text) = parser_tok_save()
+    parser_skip_newlines()
+    if par_kind_get() == TOK_INDENT:
+        parser_advance()
+    if par_kind_get() == TOK_COLON:
+        return true
+    lex_snapshot_restore(sl_snap_nums, sl_snap_texts)
+    parser_tok_restore(sl_tok_nums, sl_tok_text)
+    false
+
+# Consume a function where-clause without confusing each constraint's colon
+# (`T: Hash`) with the body colon. The pure parser does not yet lower where
+# metadata, but it must preserve declaration boundaries and balanced generic
+# trait arguments exactly as the canonical parser does.
+fn parser_skip_fn_where_clause():
+    if par_kind_get() != TOK_KW_WHERE:
+        return
+    parser_advance()
+    var expect_subject = true
+    var expect_subject_colon = false
+    var saw_bound_token = false
+    var paren_depth: i64 = 0
+    var bracket_depth: i64 = 0
+    var angle_depth: i64 = 0
+    var guard: i64 = 0
+    while guard < 4096:
+        guard = guard + 1
+        val wk = par_kind_get()
+        val at_end = wk == TOK_NEWLINE or wk == TOK_SEMICOLON or
+            wk == TOK_DEDENT or wk == TOK_EOF
+        if at_end:
+            if expect_subject_colon or (not expect_subject and not saw_bound_token):
+                parser_error("incomplete function where constraint")
+            return
+
+        if expect_subject:
+            val subject = declaration_identifier_text(wk, par_text_get())
+            if subject == "":
+                parser_error("expected type parameter name after where")
+                return
+            parser_advance()
+            expect_subject = false
+            expect_subject_colon = true
+            saw_bound_token = false
+            continue
+
+        if expect_subject_colon:
+            if wk != TOK_COLON:
+                parser_error("expected ':' after where type parameter")
+                return
+            parser_advance()
+            expect_subject_colon = false
+            continue
+
+        val at_top = paren_depth == 0 and bracket_depth == 0 and angle_depth == 0
+        if at_top and wk == TOK_COLON:
+            if not saw_bound_token:
+                parser_error("expected trait bound after where ':'")
+            return
+        if at_top and wk == TOK_COMMA:
+            if not saw_bound_token:
+                parser_error("expected trait bound before where ','")
+                return
+            parser_advance()
+            expect_subject = true
+            continue
+
+        if wk == TOK_LPAREN:
+            paren_depth = paren_depth + 1
+        elif wk == TOK_RPAREN and paren_depth > 0:
+            paren_depth = paren_depth - 1
+        elif wk == TOK_LBRACKET:
+            bracket_depth = bracket_depth + 1
+        elif wk == TOK_RBRACKET and bracket_depth > 0:
+            bracket_depth = bracket_depth - 1
+        elif wk == TOK_LT or wk == TOK_LT_GENERIC:
+            angle_depth = angle_depth + 1
+        elif wk == TOK_GT and angle_depth > 0:
+            angle_depth = angle_depth - 1
+        saw_bound_token = true
+        parser_advance()
+    parser_error("function where clause is too long")
+
 fn parse_fn_decl(is_async: i64) -> i64:
     val decl_start = lex_token_start_get()
     val decl_line = par_line_get()
@@ -500,25 +623,22 @@ fn parse_fn_decl(is_async: i64) -> i64:
         parser_advance()
         ret_type = parser_parse_type_with_union()
         # G11: allow Newline+Indent between `-> Type` and `:` body (multiline fn sig)
-        if par_kind_get() == 180:
-            parser_advance()
-            if par_kind_get() == 181:
-                parser_advance()
+        if par_kind_get() == TOK_NEWLINE:
+            parser_try_skip_signature_layout_before_colon()
 
-    # Skip optional where clause: where T: Bound
-    if par_kind_get() == 189:
+    parser_skip_fn_where_clause()
+
+    # Canonical declarations may be bodyless (forward/extern-style surface),
+    # or may use the legacy colonless indented block spelling. Do not consume
+    # the next same-level declaration while deciding between those forms.
+    var body: [i64] = []
+    if par_kind_get() == TOK_COLON:
         parser_advance()
-        # Skip until the body colon
-        while true:
-            val at_colon: bool = par_kind_get() == 161
-            val at_eof: bool = par_kind_get() == 190
-            if at_colon or at_eof:
-                break
-            parser_advance()
-
-    # Function body
-    parser_expect(161)
-    val body = parse_block()
+        body = parse_block()
+    elif parser_newline_starts_indented_block():
+        body = parse_block()
+    elif par_kind_get() == TOK_SEMICOLON:
+        parser_advance()
 
     val decl_span = flat_span_new(decl_start, lex_token_start_get(), decl_line, decl_col)
     val fn_decl_idx = decl_fn(fn_name, param_names, param_types, ret_type, body, is_async, type_params, decl_span)
@@ -847,8 +967,10 @@ fn parse_struct_or_trait_decl(is_class: bool, is_trait: bool) -> i64:
             parser_advance()
         else:
             parser_expect(TOK_IDENT)
-        parser_expect(161)
-        val ftype = parser_parse_type()
+        var ftype = TYPE_ANY
+        if par_kind_get() == TOK_COLON:
+            parser_advance()
+            ftype = parser_parse_type()
         field_names.push(fname)
         field_types.push(ftype)
         var fbits: i64 = -1
