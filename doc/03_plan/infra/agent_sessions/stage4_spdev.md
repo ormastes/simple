@@ -126,6 +126,48 @@ FreeBSD QEMU, SimpleOS host-driven, and scoped AArch64/RISC-V cross rows are saf
 after x86 PASS; native Linux AArch64, macOS, Windows, and hosted RISC-V remain
 external-host handoffs.
 
+## Bounded continuation evidence (2026-08-03)
+
+- Cycle 1 completed all 1,431 surface files and isolated the
+  `parser_expr::parse_int_text` glob-facade ambiguity. Ownership was pushed as
+  `e461e1a15d6`; the terminal-origin fix was pushed as `13c42480aca`. Exact,
+  reverse-order, and true-ambiguity regressions passed 3/3.
+- Cycle 2 cleared that boundary and reached LLVM code generation in 4:53.74
+  (peak RSS 2,510,948 KiB). It found one failed file:
+  `src/lib/nogc_async_mut/env/paths.spl`, where `variables` escaped HIR as an
+  undeclared LLVM global. Ownership was pushed as `3f215e68979`; retained
+  namespace-owner alignment and its synthetic 3/3 regression were pushed as
+  `98354c3a0c5`.
+- The current-main Stage 3 v10 refresh compiled 725/725 modules with zero
+  failures in 127.6 seconds. Identity, unsupported-command rejection,
+  compile/execute frontend admission, and stable hash passed at SHA-256
+  `7edb495b6bda73f084081c4b3303cac3c1475ba040ff7084b7fa70aa5f48585a`.
+- Cycle 3 reproduced the same real `variables` LLVM failure in 2:33.96 (peak
+  RSS 2,610,832 KiB). Therefore the synthetic owner test is false-green for
+  the real native entry-closure path and no Stage 4 binary exists. The bug was
+  reopened and pushed as `33aaf57438e`; do not claim deployment or PASS.
+- The same cycle emitted two nonfatal `platform_normalize` alias-owner
+  warnings for the sync and async filesystem variants. They are separately
+  tracked as P2/open in `83e45d29527`; they are not the fatal blocker.
+- ARM and RISC-V work was paused for x86 priority. ARM stopped in Stage 1 with
+  2,198 cached files and no Stage 2/3 binary. RISC-V retains an admitted Stage
+  2 (`07a5b0d92995c8de4292c2295218d81b047a619716f41fa8c3d8edea61f29cc3`)
+  and 323/725 partial Stage 3 objects, but no Stage 3 binary.
+
+### Required fresh-session diagnostic
+
+The three-cycle cap is exhausted. Do not rerun unchanged Stage 4 in this
+session. In a fresh scoped session, instrument one real native entry-closure
+pass for `env.paths`: record physical/logical module aliases, import order,
+namespace define attempted/skipped state, symbol-table size and exact
+`variables`/`env_get` entries, `field_module_callable` candidates, HIR
+Call-versus-MethodCall shape, MIR `LoadGlobal variables`, and cache hit state.
+Use the actual env/path/platform sources, real import order, package-sibling
+expansion, bootstrap/entry-closure mode, and enough symbols to match the real
+table size. Current leading hypotheses are compiled-native Option/Dict lookup
+or key enumeration corruption under the full graph, not another source import
+workaround. Keep LLVM fail-closed.
+
 ## Ownership
 
 The parallel lane split, merge owner, and final reviewer are recorded in
