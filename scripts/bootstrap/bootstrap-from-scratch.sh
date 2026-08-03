@@ -41,6 +41,10 @@ Options:
                      (supported on native Linux and macOS hosts).
                      Implied by --deploy and one-binary mode.
   --fresh-cache      Clear the dynload native cache once before rebuilding
+  --incremental-unlimited
+                     Reuse incremental caches, including one-binary Stage 4,
+                     and use every detected host CPU; retain Stage 4
+                     structural streaming ownership
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
   --release          Deploy, then run the release-blocking whole test suite
   --target=<triple>  Target platform (freebsd-x86_64 or simpleos-x86_64)
@@ -66,6 +70,7 @@ full_bootstrap=0
 full_cli=0
 fresh_cache=0
 release_tests=0
+execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
 bootstrap_mode="${SIMPLE_BOOTSTRAP_MODE:-dynload}"
 case "${SIMPLE_NO_STUB_FALLBACK:-0}" in
   1|true|yes|on) strict_bootstrap=1 ;;
@@ -104,6 +109,9 @@ while [ "$#" -gt 0 ]; do
       ;;
     --fresh-cache|--no-cache)
       fresh_cache=1
+      ;;
+    --incremental-unlimited)
+      execution_profile=incremental-unlimited
       ;;
     --mode=*)
       bootstrap_mode=${1#*=}
@@ -162,6 +170,14 @@ case "${bootstrap_mode}" in
     ;;
 esac
 
+case "${execution_profile}" in
+  incremental|incremental-unlimited) ;;
+  *)
+    echo "error: unknown bootstrap execution profile '${execution_profile}'" >&2
+    exit 1
+    ;;
+esac
+
 if [ "${pure_simple}" -eq 1 ] && [ "${full_bootstrap}" -eq 1 ]; then
   echo "error: --pure-simple and --full-bootstrap conflict" >&2
   exit 1
@@ -173,6 +189,7 @@ fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 repo_root=$(CDPATH= cd -- "${script_dir}/../.." && pwd)
+. "${repo_root}/scripts/bootstrap/bootstrap-cache-policy.shs"
 cd "${repo_root}"
 BOOTSTRAP_STAGE3_FACADE_PATH=\
 "${repo_root}/scripts/check/lib/bootstrap-stage3-provenance.shs"
@@ -432,7 +449,9 @@ case "${jobs}" in
     ;;
 esac
 if [ -z "${jobs}" ]; then
-  if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+  if [ "${execution_profile}" = "incremental-unlimited" ]; then
+    jobs="${host_cpus}"
+  elif [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     jobs=2
   else
     jobs=$((host_cpus / 2))
@@ -449,7 +468,7 @@ case "${jobs}" in
 esac
 echo "Native build jobs: ${jobs} (host CPUs: ${host_cpus})"
 selfhost_jobs="${jobs}"
-if [ "${selfhost_jobs}" -gt 2 ]; then
+if [ "${execution_profile}" = "incremental" ] && [ "${selfhost_jobs}" -gt 2 ]; then
   selfhost_jobs=2
 fi
 
@@ -471,7 +490,8 @@ bootstrap_wide_inputs_hash() {
 
 prepare_native_cache() {
   label=$1
-  if [ "${bootstrap_mode}" = "one-binary" ]; then
+  if bootstrap_cache_force_clear_one_binary \
+    "${execution_profile}" "${bootstrap_mode}"; then
     echo "  ${label}: clearing native cache (one-binary mode)"
     rm -rf "${native_cache_dir}/"
     return
@@ -493,7 +513,7 @@ prepare_native_cache() {
     mkdir -p "${native_cache_dir}"
     printf '%s\n' "${current_hash}" > "${native_cache_stamp}"
   else
-    echo "  ${label}: reusing native cache (dynload mode)"
+    echo "  ${label}: reusing native cache (${bootstrap_mode} mode)"
   fi
 }
 
