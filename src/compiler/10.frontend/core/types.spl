@@ -304,6 +304,19 @@ val TYPE_ARRAY_GENERIC_LIMIT = 5000
 # HirTypeKind.Isolated.
 val TYPE_ISOLATED_BASE = 5000
 val TYPE_ISOLATED_LIMIT = 6000
+# Exclusive capability-prefixed type `mut T`. Keep the wrapped type in the
+# flat lane so the bridge can rebuild TypeKind.Reference(T, true) instead of
+# erasing the canonical capability annotation.
+val TYPE_EXCLUSIVE_BASE = 6000
+val TYPE_EXCLUSIVE_LIMIT = 7000
+# Reference types `&T` and `&mut T`.  Keep immutable and mutable references
+# distinct from the capability-prefix spelling `mut T`: both rebuild to
+# TypeKind.Reference, but only the latter is intrinsically mutable.
+val TYPE_REFERENCE_BASE = 7000
+val TYPE_REFERENCE_LIMIT = 8000
+# Raw/shared pointer types `*T`, `*const T`, and `*mut T`.
+val TYPE_POINTER_BASE = 8000
+val TYPE_POINTER_LIMIT = 9000
 val TYPE_NAMED_BASE = 10000
 
 # Helper predicates for encoded type tags
@@ -354,6 +367,24 @@ fn is_isolated_tag(tag: i64) -> bool:
 
 fn isolated_tag_to_id(tag: i64) -> i64:
     tag - TYPE_ISOLATED_BASE
+
+fn is_exclusive_tag(tag: i64) -> bool:
+    tag >= TYPE_EXCLUSIVE_BASE and tag < TYPE_EXCLUSIVE_LIMIT
+
+fn exclusive_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_EXCLUSIVE_BASE
+
+fn is_reference_tag(tag: i64) -> bool:
+    tag >= TYPE_REFERENCE_BASE and tag < TYPE_REFERENCE_LIMIT
+
+fn reference_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_REFERENCE_BASE
+
+fn is_pointer_tag(tag: i64) -> bool:
+    tag >= TYPE_POINTER_BASE and tag < TYPE_POINTER_LIMIT
+
+fn pointer_tag_to_id(tag: i64) -> i64:
+    tag - TYPE_POINTER_BASE
 
 fn type_tag_name(tag: i64) -> text:
     if tag >= TYPE_NAMED_BASE:
@@ -1102,6 +1133,85 @@ fn isolated_type_get_inner(iso_id: i64) -> i64:
         return isolated_inner_tags[iso_id]
     TYPE_ANY
 
+# ===== Exclusive Capability Type Registry =====
+
+var exclusive_inner_tags: [i64] = []
+
+fn exclusive_type_register(inner_tag: i64) -> i64:
+    var existing = 0
+    while existing < exclusive_inner_tags.len():
+        if exclusive_inner_tags[existing] == inner_tag:
+            return TYPE_EXCLUSIVE_BASE + existing
+        existing = existing + 1
+    val idx = exclusive_inner_tags.len()
+    if idx >= TYPE_EXCLUSIVE_LIMIT - TYPE_EXCLUSIVE_BASE:
+        return -1
+    exclusive_inner_tags.push(inner_tag)
+    TYPE_EXCLUSIVE_BASE + idx
+
+fn exclusive_type_get_inner(exclusive_id: i64) -> i64:
+    if exclusive_id >= 0 and exclusive_id < exclusive_inner_tags.len():
+        return exclusive_inner_tags[exclusive_id]
+    TYPE_ANY
+
+# ===== Reference Type Registry =====
+
+var reference_inner_tags: [i64] = []
+var reference_mutable_flags: [i64] = []
+
+fn reference_type_register(inner_tag: i64, mutable: bool) -> i64:
+    val mutable_flag: i64 = if mutable: 1 else: 0
+    var existing = 0
+    while existing < reference_inner_tags.len():
+        if reference_inner_tags[existing] == inner_tag and reference_mutable_flags[existing] == mutable_flag:
+            return TYPE_REFERENCE_BASE + existing
+        existing = existing + 1
+    val idx = reference_inner_tags.len()
+    if idx >= TYPE_REFERENCE_LIMIT - TYPE_REFERENCE_BASE:
+        return -1
+    reference_inner_tags.push(inner_tag)
+    reference_mutable_flags.push(mutable_flag)
+    TYPE_REFERENCE_BASE + idx
+
+fn reference_type_get_inner(reference_id: i64) -> i64:
+    if reference_id >= 0 and reference_id < reference_inner_tags.len():
+        return reference_inner_tags[reference_id]
+    TYPE_ANY
+
+fn reference_type_is_mutable(reference_id: i64) -> bool:
+    if reference_id >= 0 and reference_id < reference_mutable_flags.len():
+        return reference_mutable_flags[reference_id] != 0
+    false
+
+# ===== Pointer Type Registry =====
+
+var pointer_inner_tags: [i64] = []
+var pointer_mutable_flags: [i64] = []
+
+fn pointer_type_register(inner_tag: i64, mutable: bool) -> i64:
+    val mutable_flag: i64 = if mutable: 1 else: 0
+    var existing = 0
+    while existing < pointer_inner_tags.len():
+        if pointer_inner_tags[existing] == inner_tag and pointer_mutable_flags[existing] == mutable_flag:
+            return TYPE_POINTER_BASE + existing
+        existing = existing + 1
+    val idx = pointer_inner_tags.len()
+    if idx >= TYPE_POINTER_LIMIT - TYPE_POINTER_BASE:
+        return -1
+    pointer_inner_tags.push(inner_tag)
+    pointer_mutable_flags.push(mutable_flag)
+    TYPE_POINTER_BASE + idx
+
+fn pointer_type_get_inner(pointer_id: i64) -> i64:
+    if pointer_id >= 0 and pointer_id < pointer_inner_tags.len():
+        return pointer_inner_tags[pointer_id]
+    TYPE_ANY
+
+fn pointer_type_is_mutable(pointer_id: i64) -> bool:
+    if pointer_id >= 0 and pointer_id < pointer_mutable_flags.len():
+        return pointer_mutable_flags[pointer_id] != 0
+    false
+
 # ===== Pool Reset =====
 # Call before parsing a new file to reset all pools.
 
@@ -1169,6 +1279,11 @@ fn reset_all_pools():
     result_type_err = clear_i64_pool(result_type_err)
     array_generic_elem_tags = clear_i64_pool(array_generic_elem_tags)
     isolated_inner_tags = clear_i64_pool(isolated_inner_tags)
+    exclusive_inner_tags = clear_i64_pool(exclusive_inner_tags)
+    reference_inner_tags = clear_i64_pool(reference_inner_tags)
+    reference_mutable_flags = clear_i64_pool(reference_mutable_flags)
+    pointer_inner_tags = clear_i64_pool(pointer_inner_tags)
+    pointer_mutable_flags = clear_i64_pool(pointer_mutable_flags)
 
 export TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT
 export TYPE_U8, TYPE_U16, TYPE_U32, TYPE_U64, TYPE_I8, TYPE_I16, TYPE_I32
@@ -1186,5 +1301,11 @@ export TYPE_ARRAY_GENERIC_BASE, is_array_generic_tag, array_generic_tag_to_id
 export array_generic_type_register, array_generic_type_get_elem
 export TYPE_ISOLATED_BASE, is_isolated_tag, isolated_tag_to_id
 export isolated_type_register, isolated_type_get_inner
+export TYPE_EXCLUSIVE_BASE, is_exclusive_tag, exclusive_tag_to_id
+export exclusive_type_register, exclusive_type_get_inner
+export TYPE_REFERENCE_BASE, is_reference_tag, reference_tag_to_id
+export reference_type_register, reference_type_get_inner, reference_type_is_mutable
+export TYPE_POINTER_BASE, is_pointer_tag, pointer_tag_to_id
+export pointer_type_register, pointer_type_get_inner, pointer_type_is_mutable
 export SYM_UNKNOWN, SYM_FN, SYM_VAL, SYM_VAR, SYM_STRUCT, SYM_ENUM, SYM_CLASS
 export scope_push, scope_pop, scope_depth

@@ -24,6 +24,7 @@ use compiler.core.tokens.{TOK_ARROW, TOK_PIPE}
 use compiler.core.tokens.{TOK_QUESTION, TOK_DOUBLE_QUESTION}
 use compiler.core.tokens.{TOK_NEWLINE, TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.tokens.{TOK_SEMICOLON}
+use compiler.core.tokens.{TOK_AMPERSAND, TOK_STAR, TOK_KW_NIL}
 use compiler.core.lexer_chars.{is_digit}
 use compiler.frontend.core.lexer.{lex_init, lex_init_with_path, lex_next, lex_mark_current_token_as_generic_close}
 use compiler.frontend.core.lexer.{lex_token_kind, lex_token_text, lex_token_line, lex_token_col}
@@ -50,6 +51,9 @@ use compiler.core.types.{tuple_type_register}
 use compiler.core.types.{array_generic_type_register}
 use compiler.core.types.{result_type_register}
 use compiler.core.types.{isolated_type_register}
+use compiler.core.types.{exclusive_type_register}
+use compiler.core.types.{reference_type_register}
+use compiler.core.types.{pointer_type_register}
 use std.string_core.{char_code}
 
 # Import from split modules
@@ -427,6 +431,48 @@ fn parser_parse_tuple_element_type() -> i64:
 fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
     # dyn Trait -- dynamic dispatch type (parsed as named type)
     var kind = par_kind_get()
+    # Canonical reference types.  Register the inner tag and mutability so the
+    # flat bridge can preserve `&T` versus `&mut T` instead of merely consuming
+    # the prefix for checker parity.
+    if kind == TOK_AMPERSAND:
+        parser_advance()
+        var mutable = false
+        if par_kind_get() == TOK_IDENT and par_text_get() == "mut":
+            parser_advance()
+            mutable = true
+        val reference_inner = parser_parse_type_impl(allow_spaced_generics)
+        val reference_tag = reference_type_register(reference_inner, mutable)
+        if reference_tag < 0:
+            parser_error("too many distinct reference type annotations")
+            return reference_inner
+        return reference_tag
+    # Raw/shared pointer types.  The flat type lane carries the inner tag and
+    # the only distinction supported by pure HIR (`Ptr(inner, mutable)`).
+    # `*T` and `*const T` are immutable; `*mut T` is mutable.
+    if kind == TOK_STAR:
+        parser_advance()
+        var pointer_mutable = false
+        if par_text_get() == "const":
+            parser_advance()
+        elif par_text_get() == "mut":
+            parser_advance()
+            pointer_mutable = true
+        val pointer_inner = parser_parse_type_impl(allow_spaced_generics)
+        val pointer_tag = pointer_type_register(pointer_inner, pointer_mutable)
+        if pointer_tag < 0:
+            parser_error("too many distinct pointer type annotations")
+            return pointer_inner
+        return pointer_tag
+    # Canonical exclusive-capability type `mut T`. Unlike `mut name: T`
+    # parameter-binding syntax, this modifier follows the colon and belongs to
+    # the type. Preserve it through the flat type registry for the AST bridge.
+    if kind == TOK_IDENT and par_text_get() == "mut":
+        parser_advance()
+        val exclusive_inner = parser_parse_type_impl(allow_spaced_generics)
+        val exclusive_tag = exclusive_type_register(exclusive_inner)
+        if exclusive_tag < 0:
+            return exclusive_inner
+        return exclusive_tag
     # LANE ISO2 (2026-07-29): capability-prefixed type `iso T`. `iso` lexes
     # as a plain identifier (kind 6) -- it is not a reserved keyword token
     # (doc/08_tracking/bug/iso_mut_capability_prefix_not_parsed_2026-07-29.md).
@@ -465,6 +511,11 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         parser_error("prefix optional type '?T' is not supported; use suffix form 'T?' (e.g. i64?) or Option<T> instead")
         parser_advance()
         return parser_parse_type()
+    # `nil` is a keyword token rather than an identifier, but it is also the
+    # canonical explicit no-value return annotation (`fn f() -> nil`).
+    if kind == TOK_KW_NIL:
+        parser_advance()
+        return TYPE_NIL
     # `fn(T, ...) -> R` function-type annotation (e.g. json's
     # `mapper: fn(any) -> any`). TOK_KW_FN is a keyword, so this used to fall
     # through to the catch-all "expected type annotation" — truncating the
@@ -526,7 +577,8 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
         kind = par_kind_get()
         val has_lt: bool = kind == TOK_LT and (allow_spaced_generics or type_name_end == lex_token_start_get())
         val has_lt_gen: bool = kind == TOK_LT_GENERIC
-        val has_generic: bool = has_lt or has_lt_gen
+        val has_square_generic: bool = kind == TOK_LBRACKET
+        val has_generic: bool = has_lt or has_lt_gen or has_square_generic
         if has_generic:
             parser_advance()
             val inner_type = parser_parse_type()
@@ -543,8 +595,11 @@ fn parser_parse_type_impl(allow_spaced_generics: bool) -> i64:
             # Tell the lexer which meaning the parser established before
             # advancing: otherwise a following newline is treated as a
             # comparison continuation and its structural dedent is swallowed.
-            lex_mark_current_token_as_generic_close()
-            parser_expect(TOK_GT)
+            if has_square_generic:
+                parser_expect(TOK_RBRACKET)
+            else:
+                lex_mark_current_token_as_generic_close()
+                parser_expect(TOK_GT)
             # Handle Option<T>
             if type_name == "Option":
                 if inner_type == TYPE_I64:
