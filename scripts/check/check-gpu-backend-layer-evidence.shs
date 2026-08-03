@@ -1,0 +1,213 @@
+#!/bin/sh
+# Artifact-first GPU backend evidence.  Runtime/device admission is deliberately
+# a separate stage: an unavailable host, tool, or device is never reported PASS.
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+PORTABLE_CHECK="$ROOT_DIR/scripts/check/check-portable-compute-toolchains.shs"
+BUILD_DIR="${GPU_BACKEND_LAYER_BUILD_DIR:-$ROOT_DIR/build/gpu-backend-layer}"
+TARGETS="${GPU_BACKEND_LAYER_TARGETS:-cuda,vulkan,metal,hip,opencl}"
+RUN_RUNTIME=false
+SELF_TEST=false
+
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --targets) TARGETS="$2"; shift 2 ;;
+        --runtime) RUN_RUNTIME=true; shift ;;
+        --self-test) SELF_TEST=true; shift ;;
+        *) echo "unknown argument: $1" >&2; exit 64 ;;
+    esac
+done
+
+field_of() {
+    key="$1" file="$2"
+    sed -n "s/^${key}=//p" "$file" | tail -n 1
+}
+
+has_target() {
+    case ",$TARGETS," in *,"$1",*) return 0 ;; *) return 1 ;; esac
+}
+
+layer_result() {
+    backend="$1" stage="$2" result="$3" reason="$4" probe="$5"
+    printf '%s_%s_result=%s\n' "$backend" "$stage" "$result"
+    printf '%s_%s_reason=%s\n' "$backend" "$stage" "$reason"
+    printf '%s_%s_probe=%s\n' "$backend" "$stage" "$probe"
+}
+
+classify_artifact() {
+    backend="$1" status="$2" reason="$3" artifact="$4"
+    case "$reason" in
+        missing-primary-tool|missing-validator-tool|missing-validator-provenance|\
+        missing-compiler-provenance|missing-metallib-tool|missing-cuda-arch|\
+        glslang-diagnostic-only-missing-clean-loader-provenance)
+            layer_result "$backend" validate SKIP_UNAVAILABLE "$reason" "$artifact"
+            layer_result "$backend" link SKIP_UNAVAILABLE validation-unavailable "$artifact"
+            return
+            ;;
+    esac
+    case "$status" in
+        compiled_artifact_verified)
+            if [ -s "$artifact" ]; then
+                layer_result "$backend" validate PASS artifact-validated "$artifact"
+                layer_result "$backend" link PASS loadable-artifact-produced "$artifact"
+            else
+                layer_result "$backend" validate FAIL verified-status-without-artifact "$artifact"
+                layer_result "$backend" link FAIL missing-artifact "$artifact"
+            fi
+            ;;
+        unavailable)
+            layer_result "$backend" validate SKIP_UNAVAILABLE "$reason" "$artifact"
+            layer_result "$backend" link SKIP_UNAVAILABLE validation-unavailable "$artifact"
+            ;;
+        generated_source_failed)
+            layer_result "$backend" validate FAIL source-emission-failed "$artifact"
+            layer_result "$backend" link FAIL source-emission-failed "$artifact"
+            ;;
+        *)
+            layer_result "$backend" validate FAIL "${reason:-artifact-validation-failed}" "$artifact"
+            layer_result "$backend" link FAIL artifact-not-admitted "$artifact"
+            ;;
+    esac
+}
+
+classify_fixture() {
+    status="$1" artifact="$2" reason="${3:-fixture-reason}"
+    classify_artifact cuda "$status" "$reason" "$artifact"
+}
+
+classify_runtime() {
+    backend="$1" code="$2" stdout_file="$3" stderr_file="$4"
+    if [ "$code" -eq 0 ]; then
+        if grep -Eq '(^|_)status=pass$|readback_status=pass$' "$stdout_file"; then
+            layer_result "$backend" runtime PASS device-readback-verified "$stdout_file"
+        else
+            layer_result "$backend" runtime FAIL zero-exit-without-pass-receipt "$stdout_file"
+        fi
+    elif grep -Eqi 'unavailable|missing-(tool|device|host)|requires .*host|no .*device' "$stdout_file" "$stderr_file"; then
+        layer_result "$backend" runtime SKIP_UNAVAILABLE runtime-capability-unavailable "$stderr_file"
+    else
+        layer_result "$backend" runtime FAIL runtime-check-failed "$stderr_file"
+    fi
+}
+
+self_test() {
+    tmp="${TMPDIR:-/tmp}/gpu-layer-self-test.$$"
+    trap 'rm -f "$tmp" "$tmp.out" "$tmp.err"' EXIT HUP INT TERM
+    printf '.version 8.0\n.visible .entry kernel() {}\n' >"$tmp"
+    pass="$(classify_fixture compiled_artifact_verified "$tmp")"
+    skip="$(classify_fixture unavailable "$tmp.missing")"
+    fail="$(classify_fixture toolchain_failed "$tmp.missing")"
+    missing="$(classify_fixture compiled_artifact_verified "$tmp.missing")"
+    missing_tool="$(classify_fixture invalid "$tmp.missing" missing-validator-tool)"
+    emission_fail="$(classify_fixture generated_source_failed "$tmp.missing")"
+    unknown="$(classify_fixture future_status "$tmp.missing" unknown-artifact-status)"
+    printf '%s\n' "$pass" | grep -q '^cuda_validate_result=PASS$'
+    printf '%s\n' "$pass" | grep -q '^cuda_link_result=PASS$'
+    printf '%s\n' "$skip" | grep -q '^cuda_validate_result=SKIP_UNAVAILABLE$'
+    ! printf '%s\n' "$skip" | grep -q '=PASS$'
+    printf '%s\n' "$fail" | grep -q '^cuda_validate_result=FAIL$'
+    printf '%s\n' "$missing" | grep -q '^cuda_validate_reason=verified-status-without-artifact$'
+    printf '%s\n' "$missing_tool" | grep -q '^cuda_validate_result=SKIP_UNAVAILABLE$'
+    printf '%s\n' "$emission_fail" | grep -q '^cuda_validate_reason=source-emission-failed$'
+    printf '%s\n' "$unknown" | grep -q '^cuda_validate_reason=unknown-artifact-status$'
+    : >"$tmp.out"
+    : >"$tmp.err"
+    printf 'cuda_generated_status=pass\n' >"$tmp.out"
+    runtime_pass="$(classify_runtime cuda 0 "$tmp.out" "$tmp.err")"
+    printf 'no pass receipt\n' >"$tmp.out"
+    runtime_zero_fail="$(classify_runtime cuda 0 "$tmp.out" "$tmp.err")"
+    printf 'missing-device\n' >"$tmp.err"
+    runtime_skip="$(classify_runtime cuda 1 "$tmp.out" "$tmp.err")"
+    printf 'kernel launch failed\n' >"$tmp.err"
+    runtime_fail="$(classify_runtime cuda 1 "$tmp.out" "$tmp.err")"
+    printf '%s\n' "$runtime_pass" | grep -q '^cuda_runtime_result=PASS$'
+    printf '%s\n' "$runtime_zero_fail" | grep -q '^cuda_runtime_reason=zero-exit-without-pass-receipt$'
+    printf '%s\n' "$runtime_skip" | grep -q '^cuda_runtime_result=SKIP_UNAVAILABLE$'
+    printf '%s\n' "$runtime_fail" | grep -q '^cuda_runtime_reason=runtime-check-failed$'
+    printf '%s\n' "$pass" "$skip" "$fail" "$missing" "$missing_tool" "$emission_fail" "$unknown"
+    printf '%s\n' "$runtime_pass" "$runtime_zero_fail" "$runtime_skip" "$runtime_fail"
+    printf '%s\n' 'metal_layer=portable_compute_renderer' 'metal_backend_kind=false'
+    printf '%s\n' 'hip_backend_kind_status=unimplemented' 'opencl_backend_kind_status=implemented'
+    printf '%s\n' 'gpu_backend_layer_self_test=PASS'
+}
+
+if [ "$SELF_TEST" = true ]; then
+    self_test
+    exit 0
+fi
+
+mkdir -p "$BUILD_DIR"
+SUMMARY="$BUILD_DIR/evidence.env"
+: >"$SUMMARY"
+
+for backend in cuda vulkan metal hip opencl; do
+    has_target "$backend" || continue
+    target_dir="$BUILD_DIR/$backend"
+    mkdir -p "$target_dir"
+    portable_out="$target_dir/portable.out"
+    portable_err="$target_dir/portable.err"
+    # The producer must run before any device probe.  Strict admission is
+    # disabled here so missing optional toolchains can be classified as SKIP.
+    if PORTABLE_COMPUTE_TARGETS="$backend" \
+       BUILD_DIR="$target_dir/portable" \
+       REPORT_PATH="$target_dir/portable-report.md" \
+       PORTABLE_COMPUTE_REQUIRE_VERIFIED=0 \
+       sh "$PORTABLE_CHECK" >"$portable_out" 2>"$portable_err"; then
+        producer_code=0
+    else
+        producer_code=$?
+    fi
+    evidence="$target_dir/portable/evidence.env"
+    printf '%s_emit_probe=%s\n' "$backend" "$PORTABLE_CHECK" >>"$SUMMARY"
+    if [ ! -f "$evidence" ]; then
+        layer_result "$backend" emit FAIL "producer-exit-$producer_code-without-evidence" "$portable_err" >>"$SUMMARY"
+        layer_result "$backend" validate FAIL no-producer-evidence "$evidence" >>"$SUMMARY"
+        layer_result "$backend" link FAIL no-producer-evidence "$evidence" >>"$SUMMARY"
+    else
+        if [ "$backend" = vulkan ]; then
+            status="$(field_of vulkan_font_status "$evidence")"
+            reason="$(field_of vulkan_font_reason "$evidence")"
+            artifact="$(field_of vulkan_font_artifact "$evidence")"
+        else
+            status="$(field_of "${backend}_status" "$evidence")"
+            reason="$(field_of "${backend}_reason" "$evidence")"
+            artifact="$(field_of "${backend}_artifact" "$evidence")"
+        fi
+        case "$status" in
+            generated_source_failed|'') layer_result "$backend" emit FAIL "${reason:-missing-emission-status}" "$evidence" ;;
+            *) layer_result "$backend" emit PASS source-emitted "$evidence" ;;
+        esac >>"$SUMMARY"
+        classify_artifact "$backend" "$status" "$reason" "$artifact" >>"$SUMMARY"
+    fi
+
+    if [ "$RUN_RUNTIME" != true ]; then
+        layer_result "$backend" runtime SKIP_UNAVAILABLE runtime-not-requested artifact-first-only >>"$SUMMARY"
+        continue
+    fi
+    case "$backend" in
+        cuda) runtime_check="$ROOT_DIR/scripts/check/check-cuda-generated-2d-readback.shs" ;;
+        vulkan) runtime_check="$ROOT_DIR/scripts/check/check-vulkan-engine2d-readback.shs" ;;
+        metal) runtime_check="$ROOT_DIR/scripts/check/check-metal-generated-2d-readback.shs" ;;
+        hip) runtime_check="$ROOT_DIR/scripts/check/check-rocm-generated-2d-readback.shs" ;;
+        opencl) runtime_check="$ROOT_DIR/scripts/check/check-opencl-generated-2d-readback.shs" ;;
+    esac
+    runtime_out="$target_dir/runtime.out"
+    runtime_err="$target_dir/runtime.err"
+    if [ ! -f "$runtime_check" ]; then
+        layer_result "$backend" runtime SKIP_UNAVAILABLE missing-runtime-check "$runtime_check" >>"$SUMMARY"
+    else
+        if sh "$runtime_check" >"$runtime_out" 2>"$runtime_err"; then runtime_code=0; else runtime_code=$?; fi
+        classify_runtime "$backend" "$runtime_code" "$runtime_out" "$runtime_err" >>"$SUMMARY"
+    fi
+done
+
+{
+    echo 'metal_layer=portable_compute_renderer'
+    echo 'metal_backend_kind=false'
+    echo 'hip_backend_kind_status=unimplemented'
+    echo 'opencl_backend_kind_status=implemented'
+} >>"$SUMMARY"
+
+cat "$SUMMARY"
+if grep -q '_result=FAIL$' "$SUMMARY"; then exit 1; fi
