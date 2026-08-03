@@ -22,9 +22,9 @@ fn named(name: text) -> Type:
 
 fn main() -> i64:
     val log = Logger(level: 0)
-    val support_source = "pub struct GpuBarrierScope:\n    value: i64\npub struct OtherBarrierScope:\n    value: i64\npub struct BoundPayload:\n    value: i64\npub struct DefaultPayload:\n    value: i64\npub trait TraitX:\n    fn trait_value() -> i64\npub trait OtherTraitX:\n    fn other_trait_value() -> i64"
-    val owner_source = "use payload.support.\{GpuBarrierScope, BoundPayload, DefaultPayload, TraitX as AliasT\}\npub enum MirInstKind:\n    Barrier(scope: GpuBarrierScope)\npub enum GenericKind<T>:\n    Item(value: T)\npub enum TraitBoundKind<T>:\n    Item(value: T)"
-    val facade_source = "export use exact.owner.\{MirInstKind, GenericKind, TraitBoundKind\}"
+    val support_source = "pub struct GpuBarrierScope:\n    value: i64\npub struct OtherBarrierScope:\n    value: i64\npub struct BoundPayload:\n    value: i64\npub struct DefaultPayload:\n    value: i64\npub trait TraitX:\n    fn trait_value() -> i64\npub trait OtherTraitX:\n    fn other_trait_value() -> i64\npub enum LintLevel:\n    Allow\n    Warn\n    Deny"
+    val owner_source = "use payload.support.\{GpuBarrierScope, BoundPayload, DefaultPayload, TraitX as AliasT\}\npub enum MirInstKind:\n    Barrier(scope: GpuBarrierScope)\npub enum GenericKind<T>:\n    Item(value: T)\npub enum TraitBoundKind<T>:\n    Item(value: T)\npub enum LintLevel:\n    Allow\n    Warn\n    Deny"
+    val facade_source = "export use exact.owner.\{MirInstKind, GenericKind, TraitBoundKind\}\nexport use payload.support.\{LintLevel\}"
     val consumer_source = "use consumer.facade.\{MirInstKind\}\nfn consume(value: MirInstKind) -> MirInstKind:\n    value"
     val support = parse_full_frontend(support_source, "payload.support", "payload.support", log)
     val owner = parse_full_frontend(owner_source, "exact.owner", "exact.owner", log)
@@ -122,6 +122,42 @@ fn main() -> i64:
     if not collision.symbols.symbols.has(collision_raw): rt_exit(53)
     val collision_symbol = collision.symbols.symbols[collision_raw]
     if collision_symbol.name != "OtherBarrierScope": rt_exit(54)
+
+    # Reaching one enum terminal through its facade and direct owner is
+    # idempotent even when both imports use the same local spelling.
+    var enum_exact = hirlowering_for_module("consumer.main", surfaces)
+    enum_exact.register_imported_symbol(facade_surface, "consumer.facade", "LintLevel", "LintLevel", Span.empty(), true)
+    enum_exact.register_imported_symbol(support_surface, "payload.support", "LintLevel", "LintLevel", Span.empty(), true)
+    if enum_exact.errors.len() != 0: rt_exit(68)
+    val enum_exact_id = enum_exact.symbols.lookup_or_invalid("LintLevel")
+    if not enum_exact_id.is_valid(): rt_exit(69)
+    val enum_exact_raw = enum_exact_id.id
+    if not enum_exact.symbols.symbols.has(enum_exact_raw): rt_exit(70)
+    val enum_exact_symbol = enum_exact.symbols.symbols[enum_exact_raw]
+    if enum_exact_symbol.name != "LintLevel": rt_exit(71)
+    if (enum_exact_symbol.defining_module ?? "") != "payload.support": rt_exit(72)
+
+    # The same spelling from a distinct terminal remains a hard collision.
+    # The diagnostic must identify both owners and retain the first binding.
+    var enum_collision = hirlowering_for_module("consumer.main", surfaces)
+    enum_collision.register_imported_symbol(owner_surface, "exact.owner", "LintLevel", "LintLevel", Span.empty(), true)
+    enum_collision.register_imported_symbol(support_surface, "payload.support", "LintLevel", "LintLevel", Span.empty(), true)
+    if enum_collision.errors.len() != 1: rt_exit(73)
+    var saw_existing_terminal = false
+    var saw_wanted_terminal = false
+    for problem in enum_collision.errors:
+        if problem.message.contains("exact.owner::LintLevel::enum"):
+            saw_existing_terminal = true
+        if problem.message.contains("payload.support::LintLevel::enum"):
+            saw_wanted_terminal = true
+    if not saw_existing_terminal: rt_exit(74)
+    if not saw_wanted_terminal: rt_exit(75)
+    val enum_collision_id = enum_collision.symbols.lookup_or_invalid("LintLevel")
+    if not enum_collision_id.is_valid(): rt_exit(76)
+    val enum_collision_raw = enum_collision_id.id
+    if not enum_collision.symbols.symbols.has(enum_collision_raw): rt_exit(77)
+    val enum_collision_symbol = enum_collision.symbols.symbols[enum_collision_raw]
+    if (enum_collision_symbol.defining_module ?? "") != "exact.owner": rt_exit(78)
 
     rt_exit(30)
     0
