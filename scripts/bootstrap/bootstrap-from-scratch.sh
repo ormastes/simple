@@ -41,7 +41,7 @@ Options:
   --fresh-cache      Clear the dynload native cache once before rebuilding
   --incremental-unlimited
                      Reuse incremental caches and use every detected host CPU;
-                     remove the Stage 4 low-memory throttle (single-agent mode)
+                     retain Stage 4 structural streaming ownership
   --diagnostic-sweep Continue checking independent .spl files after failures,
                      group all diagnostics, and never build or deploy artifacts
   --diagnostic-root=<path>
@@ -737,20 +737,13 @@ bootstrap_stage_sanity() (
 bootstrap_native_build_main() {
   compiler=$1
   output=$2
-  stage4_low_memory=1
-  if [ "${execution_profile}" = "incremental-unlimited" ] ||
-    [ "${execution_profile}" = "clean-release" ]; then
-    stage4_low_memory=0
-  fi
   set -- native-build \
     --target "${PLATFORM}" \
     --backend "${backend}" \
     --runtime-bundle core-c-bootstrap \
     --source src/compiler --source src/app --source src/lib --source examples/10_tooling \
-    --entry-closure
-  if [ "${stage4_low_memory}" -eq 1 ]; then
-    set -- "$@" --low-memory
-  fi
+    --entry-closure \
+    --low-memory
   set -- "$@" \
     --threads "${selfhost_jobs}" \
     --cache-dir "${native_cache_dir}" \
@@ -762,7 +755,7 @@ bootstrap_native_build_main() {
     SIMPLE_BOOTSTRAP=1 \
     SIMPLE_NO_DEPRECATED_WARNINGS=1 \
     SIMPLE_BOOTSTRAP_STAGE4=1 \
-    SIMPLE_BOOTSTRAP_LOW_MEMORY="${stage4_low_memory}" \
+    SIMPLE_BOOTSTRAP_LOW_MEMORY=1 \
     SIMPLE_STAGE4_STREAMING_SURFACES=1 \
     SIMPLE_NATIVE_ARENA_DECLS=1 \
     SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}" \
