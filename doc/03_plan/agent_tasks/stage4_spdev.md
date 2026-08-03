@@ -4,8 +4,8 @@
 
 | Lane | Scope | Status |
 |---|---|---|
-| Correctness | Incremental Stage 3 refresh; Stage 4 HIR/import failures; exact and adjacent regressions | Awaiting fresh run from `545a6c297248` |
-| Performance | Phase timing/RSS, retained compiler graphs, safe pure-Simple optimizations | Sol-high compact-surface change pushed; measurement pending |
+| Correctness | Explicit-enum payload dependency closure; incremental Stage 3 refresh; Stage 4 HIR/import failures; exact and adjacent regressions | Claimed at `9299ca99288`; focused candidate still misses `GpuBarrierScope` |
+| Performance | Phase timing/RSS, retained compiler graphs, safe pure-Simple optimizations | Latest run 43m23s / 22,665,128 KiB; transient-string fix pushed; fresh measurement pending |
 | Cache | Producer and dependency fingerprint correctness | Blocked on complete canonical MIR and direct-interface hashes |
 | Host/ABI | Linux/macOS/Windows/BSD/SimpleOS and x86_64/AArch64 deallocation contracts | Current scoped contracts pass |
 

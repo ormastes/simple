@@ -27,13 +27,39 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
 - No fresh Stage 4 CLI has passed sanity or the essential-tools smoke, and no
   artifact has been deployed.
 
+## Current continuation state (2026-08-03)
+
+- The newest retained full-resource run used source revision `9e22a645a68`,
+  admitted Stage 2 and Stage 3, loaded 2,116 sources, and completed all 1,431
+  Phase-2 module surfaces.
+- Stage 4 HIR reached module 427 of 1,431 and failed in
+  `compiler.mir_opt.mir_opt.var_reassign_analysis`: its explicit facade import
+  materialized `MirInstKind` without registering the payload types
+  `GpuBarrierScope`, `GpuAtomicOpKind`, and `VhdlProcessKind` from the defining
+  module's import context.
+- Stage 4 HIR ran for approximately 26 minutes 34 seconds. The whole command
+  used 43 minutes 23 seconds and peaked at 22,665,128 KiB RSS without swap or
+  an OOM kill.
+- Retained evidence is under
+  `/tmp/simple-stage4-b1df.WmYLW6/build/bootstrap-stage4-b1df-cycle1/`:
+  `stage4-bitcode-full.log`,
+  `logs/x86_64-unknown-linux-gnu/stage4-native-build.log`,
+  `progress-bitcode.log`, and `bootstrap-build-progress.events`.
+- The initial dependency-closure candidate compiled the focused 135-module
+  graph but its behavioral probe still exited 33 with `GpuBarrierScope`
+  absent. It was not committed. Facade payload exports and consumer-local
+  imports remain rejected workarounds.
+- Current `origin/main` is `9299ca99288`. It includes cache-preserving
+  unlimited one-binary mode, 16-module HIR progress, diagnostic-sweep
+  preflight, and transient compiled-runtime string reclamation. These changes
+  have not yet produced or qualified a Stage 4 candidate.
+
 ## Required next run
 
 1. Fetch/rebase current `main` and preserve the existing Stage 3/native cache.
-2. Fix `resolve_package_sibling_symbols` so directory siblings contribute their
-   own public declarations and explicit exports, but not unrelated named
-   imports. Preserve normal explicit/glob import behavior and add a behavioral
-   mini-package regression.
+2. Fix the claimed explicit-enum payload dependency closure in the pure-Simple
+   HIR/module-surface owner. Prove the exact facade route, an adjacent
+   nested/aliased payload, and unrelated-symbol non-leak behavior.
 3. Refresh Stage 3 incrementally because compiler sources changed.
 4. Run one full-resource Stage 4 cycle with the progress/RSS watcher.
 5. On a distinct failure, claim it in the bug DB, fix pure-Simple first, add

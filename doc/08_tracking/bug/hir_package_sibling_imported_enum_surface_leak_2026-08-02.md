@@ -1,9 +1,9 @@
 # HIR package-sibling imported-enum surface leak
 
-Status: reopened — public sibling enum bodies still leaked (2026-08-03)
+Status: reopened — explicit named enum imports lose payload dependency closure (2026-08-03)
 Severity: P1 bootstrap blocker
 Owner: pure-Simple HIR module lowering
-Fix owner: `/root` — CLAIMED (reassigned after prior owner became inactive)
+Fix owner: `/root` — CLAIMED at `9299ca99288`
 
 ## Reproduction
 
@@ -69,3 +69,29 @@ the public enum symbol without recursively lowering its private payload graph.
 The existing mini-package regression now includes a public sibling enum with a
 private nested payload and proves both paths: no body materialization in the
 unrelated sibling, and retained materialization for an explicit glob consumer.
+
+## Explicit-import payload-closure recurrence (2026-08-03)
+
+The sibling declaration-only repair remains valid. The current full-graph
+failure is a distinct adjacent path: HIR module 427 of 1,431,
+`compiler.mir_opt.mir_opt.var_reassign_analysis`, explicitly imports
+`MirInstKind` through `compiler.mir.mir_instructions`, then enum-body lowering
+cannot resolve `GpuBarrierScope`, `GpuAtomicOpKind`, or `VhdlProcessKind` from
+that enum's payloads.
+
+The retained no-stub run reached this failure after 26 minutes 34 seconds of
+Stage 4 HIR work at 22,665,128 KiB maximum RSS. Evidence is under
+`/tmp/simple-stage4-b1df.WmYLW6/build/bootstrap-stage4-b1df-cycle1/`:
+
+- `stage4-bitcode-full.log` — complete outer build transcript;
+- `logs/x86_64-unknown-linux-gnu/stage4-native-build.log` — exact Stage 4
+  compiler diagnostic;
+- `progress-bitcode.log` and `bootstrap-build-progress.events` — frontier and
+  structured progress.
+
+Optimizer-facade payload exports and local source-import reshuffling were
+already disproved as root fixes. A materialized explicit enum import must
+register the named type dependency closure of its variants in the defining
+module's import context. The repair must retain package-sibling
+declaration-only behavior and cover direct, facade, nested, and aliased payload
+dependencies without importing unrelated owner symbols.
