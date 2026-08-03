@@ -319,6 +319,10 @@ fn parse_comparison() -> i64:
             parser_advance()
             val in_right = parse_null_coalesce()
             left = expr_method_call(in_right, "contains", [left], 0)
+        elif par_kind_get() == TOK_KW_IS:
+            parser_advance()
+            val is_right = parse_null_coalesce()
+            left = expr_binary(TOK_KW_IS, left, is_right, 0)
         elif par_kind_get() == 57 and par_text_get() == "not":
             # `a not in b` → not b.contains(a). Postfix `!` shares kind 57
             # but has text "!". Textual `not` after an operand is only
@@ -436,6 +440,10 @@ fn parse_unary() -> i64:
             ref_op = -TOK_AMPERSAND
         val operand = parse_unary()
         return expr_unary(ref_op, operand, 0)
+    if par_kind_get() == TOK_STAR:
+        parser_advance()
+        val operand = parse_unary()
+        return expr_unary(TOK_STAR, operand, 0)
     if par_kind_get() == 61:
         parser_advance()
         val operand = parse_unary()
@@ -591,10 +599,10 @@ fn parse_binary_from(base: i64) -> i64:
             val ni_right = parse_null_coalesce()
             val ni_contains = expr_method_call(ni_right, "contains", [left], 0)
             left = expr_unary(57, ni_contains, 0)
-        elif par_kind_get() == 39:
+        elif par_kind_get() == TOK_KW_IS:
             parser_advance()
-            val cast_type = parser_parse_type()
-            val dummy_bf = cast_type
+            val is_right = parse_null_coalesce()
+            left = expr_binary(TOK_KW_IS, left, is_right, 0)
         else:
             break
     # And
@@ -687,6 +695,19 @@ fn parse_call_arg_raw() -> (i64, text):
         val ident_node = expr_ident(ident, 0)
         val postfix_result = parse_postfix_on(ident_node)
         return (parse_binary_from(postfix_result), "")
+    # Keywords are legal named-argument labels in the canonical parser. Check
+    # the immediate token pair before keyword-specific primary parsing turns
+    # `pass`, `return`, etc. into control/no-op expressions.
+    val ca_keyword_name = tok_kind_name(par_kind_get())
+    if keyword_lookup(ca_keyword_name) == par_kind_get():
+        val (ca_snap_nums, ca_snap_txts) = lex_snapshot_save()
+        val (ca_tok_nums, ca_tok_text) = parser_tok_save()
+        parser_advance()
+        if par_kind_get() == TOK_COLON or par_kind_get() == TOK_ASSIGN:
+            parser_advance()
+            return (parse_expr(), ca_keyword_name)
+        lex_snapshot_restore(ca_snap_nums, ca_snap_txts)
+        parser_tok_restore(ca_tok_nums, ca_tok_text)
     # Keyword used as named arg name: keyword falls through pe_is_kw to EXPR_IDENT,
     # then ':' follows. Detect post-hoc: if parse_expr() produced EXPR_IDENT and
     # next token is ':', consume ':' and return the value expression.
