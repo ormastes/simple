@@ -65,6 +65,16 @@ struct SpecImportDiagnostic:
     recovered: bool
     extensions: [SpecExtensionField]
 
+struct SpecErrorNode:
+    node_kind: text
+    source_span: SourceSpan
+    raw_source: text
+    adapter_rule_id: text
+    diagnostic_id: text
+    recovered: bool
+    children: [SpecErrorNode]
+    extensions: [SpecExtensionField]
+
 struct SpecImportManifest:
     schema_name: text
     schema_version: i64
@@ -73,6 +83,7 @@ struct SpecImportManifest:
     approved_recovery_rule_ids: [text]
     ledger: [SpecLedgerEntry]
     diagnostics: [SpecImportDiagnostic]
+    error_nodes: [SpecErrorNode]
     extensions: [SpecExtensionField]
 
 struct SpecVerificationReport:
@@ -248,6 +259,30 @@ fn _recovery_approved(rule_id: text, approved: [text]) -> bool:
             return true
     false
 
+fn _validate_error_node(node: SpecErrorNode, source_len: i64, strict_mode: bool,
+        approved: [text], path: text) -> SpecContractError?:
+    if node.node_kind == "" or node.adapter_rule_id == "" or node.diagnostic_id == "":
+        return _contract_error("missing-field", path, "error node kind, rule, and diagnostic identities are required")
+    if not _span_valid(node.source_span, source_len) or node.source_span.byte_end <= node.source_span.byte_start:
+        return _contract_error("invalid-span", path + ".source_span", "error node must retain a non-empty raw source span")
+    if node.raw_source == "":
+        return _contract_error("missing-source", path + ".raw_source", "error node must retain raw source")
+    if node.recovered and strict_mode:
+        return _contract_error("strict-recovery", path, "strict mode rejects every recovered error node")
+    if node.recovered and not _recovery_approved(node.adapter_rule_id, approved):
+        return _contract_error("unapproved-recovery", path, "error node recovery is not approved by the manifest")
+    if val err = _extensions_valid(node.extensions, path + ".extensions"):
+        return err
+    var child_index = 0
+    for child in node.children:
+        if child.source_span.byte_start < node.source_span.byte_start or child.source_span.byte_end > node.source_span.byte_end:
+            return _contract_error("invalid-span", path + ".children", "nested error node must remain inside its parent span")
+        if val err = _validate_error_node(child, source_len, strict_mode, approved,
+                path + ".children[" + child_index.to_text() + "]"):
+            return err
+        child_index = child_index + 1
+    nil
+
 fn _validate_source(source: SpecSourceIdentity) -> SpecContractError?:
     if source.standard_family == "":
         return _contract_error("missing-field", "source.standard_family", "standard family is required")
@@ -326,7 +361,26 @@ fn validate_spec_import_manifest(manifest: SpecImportManifest) -> Result<SpecImp
         if val err = _extensions_valid(diagnostic.extensions, path + ".extensions"):
             return Err(err)
         diagnostic_index = diagnostic_index + 1
+    var error_index = 0
+    for node in manifest.error_nodes:
+        if val err = _validate_error_node(node, manifest.source.snapshot.bytes.len(),
+                manifest.strict_mode, manifest.approved_recovery_rule_ids,
+                "error_nodes[" + error_index.to_text() + "]"):
+            return Err(err)
+        error_index = error_index + 1
     Ok(manifest)
+
+fn _canonical_error_node(node: SpecErrorNode, prefix: text) -> text:
+    var out = prefix + "=" + _length_value(node.node_kind) +
+        node.source_span.byte_start.to_text() + ":" + node.source_span.byte_end.to_text() + ":" +
+        _length_value(node.raw_source) + _length_value(node.adapter_rule_id) +
+        _length_value(node.diagnostic_id) + (if node.recovered: "1" else: "0") + ";"
+    for field in node.extensions:
+        out = out + prefix + "-ext=" + _length_value(field.namespace) +
+            _length_value(field.key) + _length_value(field.value) + ";"
+    for child in node.children:
+        out = out + _canonical_error_node(child, prefix + "-child")
+    out
 
 fn canonical_spec_import_manifest(manifest: SpecImportManifest) -> Result<text, SpecContractError>:
     """Serialize a valid manifest to deterministic length-prefixed canonical text."""
@@ -360,6 +414,8 @@ fn canonical_spec_import_manifest(manifest: SpecImportManifest) -> Result<text, 
                     _length_value(diagnostic_span) + (if diagnostic.recovered: "1" else: "0") + ";"
                 for field in diagnostic.extensions:
                     out = out + "diagnostic-ext=" + _length_value(field.namespace) + _length_value(field.key) + _length_value(field.value) + ";"
+            for node in valid.error_nodes:
+                out = out + _canonical_error_node(node, "error-node")
             for field in valid.extensions:
                 out = out + "extension=" + _length_value(field.namespace) + _length_value(field.key) + _length_value(field.value) + ";"
             Ok(out)
@@ -381,6 +437,11 @@ fn verify_spec_import_manifest(manifest: SpecImportManifest) -> SpecVerification
         if diagnostic.recovered:
             recoveries = recoveries + 1
             if not _recovery_approved(diagnostic.adapter_rule_id, manifest.approved_recovery_rule_ids):
+                unapproved = unapproved + 1
+    for node in manifest.error_nodes:
+        if node.recovered:
+            recoveries = recoveries + 1
+            if not _recovery_approved(node.adapter_rule_id, manifest.approved_recovery_rule_ids):
                 unapproved = unapproved + 1
     val schema_valid = manifest.schema_name == SPEC_IMPORT_SCHEMA_NAME and manifest.schema_version == SPEC_IMPORT_SCHEMA_VERSION
     val source_hash_valid = _is_lower_sha256(manifest.source.source_sha256) and sha256_u8_hex(manifest.source.snapshot.bytes) == manifest.source.source_sha256
@@ -411,7 +472,7 @@ fn verify_spec_import_manifest(manifest: SpecImportManifest) -> SpecVerification
 
 export SPEC_IMPORT_SCHEMA_NAME, SPEC_IMPORT_SCHEMA_VERSION
 export SpecDisposition, SpecExtensionField, SpecSourceIdentity, SpecLedgerEntry
-export SpecImportDiagnostic, SpecImportManifest, SpecVerificationReport
+export SpecImportDiagnostic, SpecErrorNode, SpecImportManifest, SpecVerificationReport
 export SpecContractError, SpecSemanticIdentityInput
 export spec_source_identity, spec_disposition_name, choose_spec_semantic_identity
 export validate_spec_import_manifest, canonical_spec_import_manifest

@@ -6,6 +6,7 @@ use app.spec_to_spipe.model.{
     SPEC_IMPORT_SCHEMA_VERSION,
     SpecDisposition,
     SpecExtensionField,
+    SpecErrorNode,
     SpecImportDiagnostic,
     SpecImportManifest,
     SpecLedgerEntry,
@@ -60,6 +61,7 @@ fn sample_manifest() -> SpecImportManifest:
         approved_recovery_rule_ids: [],
         ledger: [sample_entry()],
         diagnostics: [],
+        error_nodes: [],
         extensions: [SpecExtensionField(namespace: "org.example.adapter", key: "dialect", value: "example-v1")]
     )
 
@@ -150,10 +152,40 @@ describe "Spec-to-SPipe Phase-0 manifest contract":
         )]
         expect(manifest_error_code(manifest)).to_equal("strict-recovery")
 
+    it "retains nested malformed nodes inside their parent source span":
+        var manifest = sample_manifest()
+        manifest.approved_recovery_rule_ids = ["MD-TABLE-001"]
+        val child = SpecErrorNode(node_kind: "table-cell",
+            source_span: SourceSpan(byte_start: 1, byte_end: 2),
+            raw_source: "b", adapter_rule_id: "MD-TABLE-001",
+            diagnostic_id: "diag-child", recovered: true, children: [],
+            extensions: [])
+        manifest.error_nodes = [SpecErrorNode(node_kind: "table",
+            source_span: SourceSpan(byte_start: 0, byte_end: 3),
+            raw_source: "abc", adapter_rule_id: "MD-TABLE-001",
+            diagnostic_id: "diag-parent", recovered: true, children: [child],
+            extensions: [])]
+        expect(manifest_valid(manifest)).to_equal(true)
+        expect(canonical_text(manifest)).to_contain("diag-child")
+
+    it "rejects a nested malformed node outside its parent span":
+        var manifest = sample_manifest()
+        manifest.approved_recovery_rule_ids = ["MD-TABLE-001"]
+        val child = SpecErrorNode(node_kind: "table-cell",
+            source_span: SourceSpan(byte_start: 2, byte_end: 3),
+            raw_source: "c", adapter_rule_id: "MD-TABLE-001",
+            diagnostic_id: "diag-child", recovered: true, children: [],
+            extensions: [])
+        manifest.error_nodes = [SpecErrorNode(node_kind: "table",
+            source_span: SourceSpan(byte_start: 0, byte_end: 2),
+            raw_source: "ab", adapter_rule_id: "MD-TABLE-001",
+            diagnostic_id: "diag-parent", recovered: true, children: [child],
+            extensions: [])]
+        expect(manifest_error_code(manifest)).to_equal("invalid-span")
+
     it "reports exact byte coverage from non-overlapping ledger spans":
         val report = verify_spec_import_manifest(sample_manifest())
         expect(report.exact_coverage).to_equal(true)
         expect(report.accounted_source_bytes).to_equal(3)
         expect(report.total_source_bytes).to_equal(3)
         expect(report.passed).to_equal(true)
-

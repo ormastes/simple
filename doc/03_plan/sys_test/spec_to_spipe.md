@@ -1,13 +1,12 @@
 # Spec-to-SPipe Phase 0 Verification Test Plan
 
-Status: Initial verifier slice; A0 shared-model integration remains open.
+Status: Phase 0 verifier gates consume the shared A0 manifest contracts.
 
 ## Scope
 
 This plan covers the A2 fail-closed gates that protect the frozen importer
-contracts before format adapters are allowed to merge. It does not claim that
-the shared A0 manifest and source models are implemented; verifier-owned input
-records are temporary adapters to those forthcoming models.
+contracts before format adapters are allowed to merge. Coverage, recovery, and
+identity gates consume A0's shared ledger, `SpecErrorNode`, and manifest types.
 
 ## Requirement traceability
 
@@ -34,12 +33,9 @@ clock, process, network, or random access.
 
 ## A0 integration boundary
 
-When A0 publishes shared records, adapt `SourceDispositionSpan`,
-`RecoveryRecord`, and `VerificationManifestIdentity` at the verifier boundary.
-Keep `verify_exact_coverage`, `verify_no_silent_recovery`, and
-`verify_manifest_identity` stable. The shared manifest must provide raw byte
-length, ordered disposition spans, recovery diagnostics, approved adapter rule
-IDs, expected schema/version, and independently observed source SHA-256.
+Integration is complete for the Phase 0 gates. The verifier defines only
+`SpecVerificationResult`; all source, ledger, recovery, and identity input
+records come from A0. Future adapters must not restore verifier-private copies.
 
 ## Acceptance command
 

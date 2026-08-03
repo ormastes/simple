@@ -12,8 +12,8 @@ does not implement an adapter or claim that a source has been converted.
 
 The public root records are `SpecImportManifest`, `SpecSourceIdentity`,
 `SpecDisposition`, `SpecLedgerEntry`, `SpecImportDiagnostic`, and
-`SpecVerificationReport`. Version 1 is fail-closed: an unknown schema name or
-version is rejected rather than coerced.
+`SpecErrorNode`, and `SpecVerificationReport`. Version 1 is fail-closed: an
+unknown schema name or version is rejected rather than coerced.
 
 ## Structural parser reuse
 
@@ -51,10 +51,12 @@ they do not justify overlapping top-level byte accounting. Every entry records
 a semantic identity, node kind, disposition, adapter rule, reason, and optional
 conformance binding.
 
-Diagnostics carry their adapter rule IDs and optional source spans. Strict mode
-rejects every recovered diagnostic. Compatibility mode accepts recovery only
-when its rule ID is explicitly approved by the pinned manifest. Malformed bytes
-remain ledger entries with the `Malformed` disposition.
+Diagnostics carry their adapter rule IDs and optional source spans.
+`SpecErrorNode` retains its raw source, exact span, diagnostic/rule identities,
+recovery state, extensions, and nested error children. Children must remain
+inside their parent span. Strict mode rejects every recovery; compatibility
+mode accepts only rule IDs explicitly approved by the pinned manifest.
+Malformed bytes remain ledger entries with the `Malformed` disposition.
 
 ## Deterministic representation
 
@@ -71,6 +73,11 @@ byte accounting, malformed bytes, recovery counts, diagnostics, and one final
 pass/reason. This report is a shared data contract, not the final A2 release
 policy. A2 remains authoritative for round-trip, non-vacuity, deliberate-red,
 license, and generated-artifact gates.
+
+The focused A2 entry points consume A0 records directly:
+`verify_exact_coverage` accepts ordered `SpecLedgerEntry` values,
+`verify_no_silent_recovery` accepts nested `SpecErrorNode` values, and
+`verify_manifest_identity` accepts the canonical `SpecImportManifest`.
 
 ## Evolution
 
