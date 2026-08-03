@@ -1,6 +1,6 @@
 # HIR package-sibling imported-enum surface leak
 
-Status: reopened — explicit named enum imports lose payload dependency closure (2026-08-03)
+Status: implemented — focused native gate passed; full Stage 4 validation pending (2026-08-03)
 Severity: P1 bootstrap blocker
 Owner: pure-Simple HIR module lowering
 Fix owner: `/root` — CLAIMED at `9299ca99288`
@@ -121,3 +121,27 @@ bind the symbol first, so a later explicit import must be able to upgrade that
 binding exactly once when `materialize_enum=true`. The upgrade must remain
 dependency-only, reject a conflicting existing owner, and preserve the sibling
 path's `materialize_enum=false` behavior.
+
+## Focused repair evidence (2026-08-03)
+
+The pure-Simple repair is on `origin/main` at `f485c7dfe3e` (implementation)
+with the direct parser dependency matrix at `b400305d712`. It now:
+
+- extracts named dependencies from every retained `TypeKind` and all three
+  `VariantKind` forms through typed owner-local helpers;
+- upgrades declaration-only enum bindings independently of initial symbol
+  creation, then closes over bounds, defaults, variants, aliases, and facade
+  re-exports with physical `(module, item, kind)` identities;
+- terminates alias/enum recursion, skips local type parameters, resets closure
+  state per lowered module, and fails closed on conflicting or non-type lexical
+  bindings; and
+- keeps unrelated owner imports absent.
+
+The admitted pure Stage 3 compiler
+`62132c47fe04cac8fd9ddfda6d2a57b77995071a9631648350824957ade3cf61`
+built the exact in-memory HIR probe with 4 compiled, 131 cached, and 0 failed
+modules. The executable returned the expected hard-exit code 30 in 0.01 s.
+Build wall time was 20.17 s with 172,288 KiB peak RSS. Static follow-up review
+added alias first-write guarding, per-module reset, stronger non-leak checks,
+and non-type collision rejection without a fourth runtime cycle, honoring the
+three-cycle cap. The full x86 Stage 4 graph remains the final closure proof.

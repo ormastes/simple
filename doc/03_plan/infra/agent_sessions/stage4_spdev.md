@@ -321,6 +321,25 @@ disproved candidates.
   in `/tmp/simple-stage4-enum-closure5-20260803`; do not discard or repeat the
   two already-green setup gates.
 
+### 2026-08-03 enum payload closure implementation
+
+- The retained candidate's three-cycle continuation converged. The final
+  runtime cycle used the admitted pure Stage 3 compiler at SHA-256
+  `62132c47fe04cac8fd9ddfda6d2a57b77995071a9631648350824957ade3cf61`,
+  compiled 4 modules with 131 cached and 0 failed, and the exact HIR probe
+  returned its expected hard-exit code 30. Build wall/RSS were 20.17 seconds
+  and 172,288 KiB; probe wall/RSS were 0.01 seconds and 4,352 KiB.
+- `b400305d712` adds the exhaustive direct-AST parser dependency matrix;
+  `f485c7dfe3e` adds typed `VariantKind` extraction and recursive explicit-enum
+  dependency materialization. Both are pushed to `origin/main`.
+- Independent review blockers were folded in: type-alias registration is
+  first-write guarded, closure identity maps reset per lowered module, existing
+  non-type bindings fail closed, and pre/post unrelated-import assertions are
+  explicit. These last static audit amendments were not runtime-rerun because
+  the mandatory three-cycle cap was reached.
+- A fresh canonical x86 incremental-unlimited Stage 3/Stage 4 run is now the
+  remaining full-graph proof. Do not repeat the focused gate in this session.
+
 ## Ownership
 
 The parallel lane split, merge owner, and final reviewer are recorded in
