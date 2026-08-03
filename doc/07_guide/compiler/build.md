@@ -298,6 +298,50 @@ Normal runs reuse the existing Rust seed/runtime and rebuild only the
 pure-Simple stages. Rust seed/runtime rebuilds happen only with
 `--full-bootstrap`.
 
+### Bootstrap debug and test modes
+
+The default diagnostics mode is `off` and adds no flags, files, scans, or
+subprocesses. Enable bounded test evidence with:
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --diagnostics=test
+```
+
+This implies `--progress` and enables coarse phase timing without parser-level
+trace. For an investigation that also needs detailed phase trace, successful
+LLVM IR, and memory snapshots, use:
+
+```sh
+sh scripts/bootstrap/bootstrap-from-scratch.sh --diagnostics=debug
+# Bare --diagnostics is the same as --diagnostics=debug.
+```
+
+The equivalent environment selector is
+`SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE=debug|test`. Explicit existing flag values
+still win. Debug artifacts can consume substantial disk space; remove them
+after capturing the failing evidence.
+
+AOP instrumentation is deliberately not implied. Enable it only for a scoped
+compiler-weaving investigation, preferably with a filter:
+
+```sh
+SIMPLE_AOP_DEBUG='module_or_function_pattern' \
+SIMPLE_AOP_LOG_CALLS=1 \
+sh scripts/bootstrap/bootstrap-from-scratch.sh --diagnostics=debug
+```
+
+`SIMPLE_AOP_LOG_ASSIGNMENTS=1` is still more verbose and should be added only
+when assignment join points are required. See
+`doc/07_guide/app/testing/logging.md` for AOP log levels and filters.
+
+For a focused check, `simple check --phase-profile <path>` emits coarse
+source-read, parse, lint, teardown, file-total, and command-total records.
+Phase records are suppressed with `--json` so machine-readable stdout remains
+pure. Diagnostic sweeps bind both `SIMPLE_BINARY` and `SIMPLE_BIN` to an
+absolute admitted child executable. In an isolated worktree, select it with
+`--diagnostic-child-compiler=/absolute/path/to/simple` or
+`SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER`.
+
 ```bash
 scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
 scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
@@ -328,6 +372,8 @@ build/bootstrap/full/<triple>/simple
 |------|-------------|
 | `--backend=X` | Select `llvm` (default), `llvm-lib`, or `cranelift` |
 | `--output=DIR` | Write stage outputs to a custom directory |
+| `--diagnostics=MODE` | Select default-off `test` or `debug` observability |
+| `--diagnostic-child-compiler=PATH` | Bind diagnostic checks to an admitted pure-Simple worker |
 | `--seed=PATH` | Seed compiler binary. Use `.exe` on Windows. |
 
 ### Bootstrap Support Files

@@ -2,11 +2,12 @@
 set -u
 
 usage() {
-  echo "Usage: scripts/check/bootstrap-diagnostic-sweep.shs --compiler=<simple> [--root=<path>] [--cache-dir=<dir>] [--jobs=<n>] [--timeout=<seconds>]"
+  echo "Usage: scripts/check/bootstrap-diagnostic-sweep.shs --compiler=<simple> [--child-compiler=<simple>] [--root=<path>] [--cache-dir=<dir>] [--jobs=<n>] [--timeout=<seconds>]"
   echo "Checks independent .spl files, aggregates failures, and never builds or deploys an artifact."
 }
 
 compiler=""
+child_compiler="bin/simple"
 roots=""
 cache_root="build/bootstrap/diagnostic-cache"
 jobs=1
@@ -16,6 +17,7 @@ timeout_grace_seconds=5
 for arg in "$@"; do
   case "$arg" in
     --compiler=*) compiler=${arg#*=} ;;
+    --child-compiler=*) child_compiler=${arg#*=} ;;
     --root=*) roots="${roots}${roots:+
 }${arg#*=}" ;;
     --cache-dir=*) cache_root=${arg#*=} ;;
@@ -44,11 +46,17 @@ command -v perl >/dev/null 2>&1 || { echo "error: perl is required for isolated 
 # The bootstrap seed's `check` command delegates frontend work to the admitted
 # pure-Simple CLI at this canonical repo-relative path. Fail before dispatching
 # thousands of workers when an isolated worktree omitted that ignored artifact.
-[ -x bin/simple ] || {
-  echo "error: diagnostic child compiler is not executable: bin/simple" >&2
+[ -x "$child_compiler" ] || {
+  echo "error: diagnostic child compiler is not executable: $child_compiler" >&2
   echo "Provide an admitted pure-Simple bin/simple before diagnostic sweep." >&2
   exit 2
 }
+child_compiler_dir=$(CDPATH= cd -- "$(dirname -- "$child_compiler")" && pwd -P) || exit 2
+child_compiler="$child_compiler_dir/$(basename -- "$child_compiler")"
+case "${SIMPLE_COMPILER_PHASE_PROFILE:-0}" in
+  1) check_profile_arg="--phase-profile" ;;
+  *) check_profile_arg="" ;;
+esac
 
 mkdir -p "$cache_root" || exit 2
 run_dir=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic.XXXXXX") || exit 2
@@ -113,7 +121,8 @@ run_one() {
   perl -MPOSIX=setsid -e \
     'defined(POSIX::setsid()) or die "setsid failed\n"; exec @ARGV or die "exec failed: $!\n"' \
     env SIMPLE_NATIVE_BUILD_CACHE_DIR="$item_cache" \
-    "$compiler" check "$source_path" >"$run_dir/$item_id.log" 2>&1 &
+    SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
+    "$compiler" check "$source_path" $check_profile_arg >"$run_dir/$item_id.log" 2>&1 &
   compiler_pid=$!
   printf '%s\n' "$compiler_pid" > "$run_dir/$item_id.pgid.tmp"
   mv "$run_dir/$item_id.pgid.tmp" "$run_dir/$item_id.pgid"

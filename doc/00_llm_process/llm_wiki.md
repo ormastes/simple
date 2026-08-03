@@ -59,6 +59,25 @@ verify that the caller actually crosses the worker/library boundary.
 - **Detailed workflow:** `.codex/skills/unstable-build-fixes/SKILL.md` and
   `doc/07_guide/compiler/build.md#bootstrap-diagnostic-sweep`.
 
+## Bootstrap debug/test observability
+
+- Normal builds are `off`: never add deep HIR/MIR/LLVM scans or AOP traversal
+  to the default path merely to improve diagnostics.
+- Use `--diagnostics=test` for progress and coarse phase timing without parser
+  trace. `simple check --phase-profile <path>` exposes read/parse/lint totals;
+  JSON mode suppresses phase records to preserve stdout purity.
+- Use `--diagnostics=debug` (bare `--diagnostics`) when detailed trace,
+  successful LLVM IR, and memory snapshots are needed. Both modes imply the
+  progress watcher; the environment equivalent is
+  `SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE=debug|test`.
+- AOP call/assignment tracing is a separate, scoped opt-in. Prefer
+  `SIMPLE_AOP_DEBUG=<pattern>` and add `SIMPLE_AOP_LOG_CALLS=1` only when the
+  weave is the suspected owner.
+- Bind isolated sweeps with
+  `--diagnostic-child-compiler=/absolute/path/to/simple`; record that child
+  identity separately from the seed/driver.
+- Guide: `doc/07_guide/compiler/build.md#bootstrap-debug-and-test-modes`.
+
 ## Maintenance
 
 Add a compact entry here when repeated ambiguity causes an agent to choose the

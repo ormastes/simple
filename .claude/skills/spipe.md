@@ -919,6 +919,17 @@ wrapper, Rust seed, or stale binary is not evidence. This sanity does not
 replace release `--whole` or repository-wide policy checks, and it must not be
 copied into compiler Stages 2 or 3.
 
+For bootstrap/compiler debugging, keep normal SPipe verification on the
+default-off path. Use `--diagnostics=test` for progress and coarse phase
+timing without parser trace; use `--diagnostics=debug` (or bare `--diagnostics`)
+only when detailed phase trace, retained successful LLVM IR, and memory
+snapshots are needed. Both modes imply `--progress`. AOP call/assignment
+tracing is not implied: scope it with `SIMPLE_AOP_DEBUG=<pattern>` and enable
+the specific AOP log flag only when weaving is under investigation. Never use
+debug-mode output alone as Stage 4 admission or release evidence. Bind an
+isolated sweep with `--diagnostic-child-compiler=<absolute admitted CLI>` and
+record both driver and child identities.
+
 A temporarily deployed Stage 2 compiler may unblock native artifact builds,
 but it is not Stage 4 evidence and cannot qualify `run`, `test`, SPipe docgen,
 or release. Record its exact path, hash, supported commands, and rollback path.

@@ -18,6 +18,7 @@ extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
 extern fn rt_transient_array_scope_begin() -> bool
 extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_time_now_micros() -> i64
 
 fn get_cli_args() -> [text]:
     val raw_args = rt_cli_get_args()
@@ -47,12 +48,14 @@ fn print_help():
     print "Options:"
     print "  --human | --llm | --json     Select log rendering mode"
     print "  --progress <summary|count|dot|none>"
+    print "  --phase-profile              Emit coarse phase timings (suppressed by --json)"
     print "  -h, --help                   Show this help"
 
 fn is_log_option(arg: text) -> bool:
     arg == "--human" or arg == "--llm" or arg == "--json" or
         arg == "--quiet" or arg == "--verbose" or arg == "--dots" or
         arg == "--count" or arg == "--no-progress" or
+        arg == "--phase-profile" or
         arg == "--log-mode" or arg == "--surface" or arg == "--progress" or
         arg.starts_with("--log-mode=") or arg.starts_with("--surface=") or
         arg.starts_with("--progress=")
@@ -67,6 +70,17 @@ fn wants_json(args: [text]) -> bool:
             return true
         i = i + 1
     false
+
+fn wants_phase_profile(args: [text]) -> bool:
+    args.contains("--phase-profile")
+
+fn check_phase_mark(enabled: bool, phase: text, started_us: i64, path: text, done: i64, total: i64, terminal: text) -> i64:
+    if not enabled:
+        return started_us
+    val now_us = rt_time_now_micros()
+    val elapsed_ms = (now_us - started_us) / 1000
+    eprint "event=check_phase phase={phase} elapsed_ms={elapsed_ms} done={done} total={total} current={path} terminal={terminal}"
+    now_us
 
 fn collect_files(args: [text]) -> [text]:
     var files: [text] = []
@@ -178,17 +192,30 @@ fn checker_end_file_scope() -> bool:
     ast_reset()
     ended
 
-fn check_one(path: text, as_json: bool) -> i64:
+fn check_one(path: text, as_json: bool, phase_profile: bool, done: i64, total: i64) -> i64:
+    var file_started_us: i64 = 0
+    var phase_started_us: i64 = 0
+    if phase_profile:
+        file_started_us = rt_time_now_micros()
+        phase_started_us = file_started_us
     if not rt_file_exists(path):
+        if phase_profile:
+            val _marked = check_phase_mark(true, "preflight", phase_started_us, path, done, total, "failed")
         if not as_json:
             print "ERROR: file not found: {path}"
         return 1
     if not checker_begin_file_scope():
+        if phase_profile:
+            val _marked = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "failed")
         if not as_json:
             print "ERROR: checker transient parse scope unavailable: {path}"
         return 1
+    if phase_profile:
+        phase_started_us = check_phase_mark(true, "scope_setup", phase_started_us, path, done, total, "running")
 
     val source = rt_file_read_text(path) ?? ""
+    if phase_profile:
+        phase_started_us = check_phase_mark(true, "source_read", phase_started_us, path, done, total, "running")
     val sspec_guidance = check_sspec_guidance(source, path)
     var failure_count = 0
     if sspec_guidance != "":
@@ -197,8 +224,12 @@ fn check_one(path: text, as_json: bool) -> i64:
         failure_count = 1
     else:
         parse_module(source, path)
+        if phase_profile:
+            phase_started_us = check_phase_mark(true, "parse", phase_started_us, path, done, total, "running")
         val errors = parser_get_errors()
         val concurrency_errors = run_concurrency_api_lint(source, path)
+        if phase_profile:
+            phase_started_us = check_phase_mark(true, "lint", phase_started_us, path, done, total, "running")
         if errors.len() > 0 or concurrency_errors.len() > 0 or parser_has_errors():
             if not as_json:
                 for err in errors:
@@ -214,10 +245,19 @@ fn check_one(path: text, as_json: bool) -> i64:
         if not as_json:
             print "ERROR: checker transient parse scope teardown failed: {path}"
         failure_count = failure_count + 1
+    if phase_profile:
+        val terminal = if failure_count == 0: "succeeded" else: "failed"
+        val _teardown_mark = check_phase_mark(true, "scope_teardown", phase_started_us, path, done, total, terminal)
+        val _total_mark = check_phase_mark(true, "file_total", file_started_us, path, done, total, terminal)
     failure_count
 
 fn main() -> i64:
     val args = get_cli_args()
+    val as_json = wants_json(args)
+    val phase_profile = wants_phase_profile(args) and not as_json
+    var command_started_us: i64 = 0
+    if phase_profile:
+        command_started_us = rt_time_now_micros()
     val option_error = check_option_error(args)
     if option_error != "":
         print "ERROR: {option_error}"
@@ -227,7 +267,6 @@ fn main() -> i64:
         return 0
 
     val raw_files = collect_files(args)
-    val as_json = wants_json(args)
     if raw_files.len() == 0:
         if as_json:
             print "{\"command\":\"check\",\"status\":\"error\",\"checked\":0,\"files\":0,\"errors\":1,\"files_with_errors\":0}"
@@ -244,12 +283,14 @@ fn main() -> i64:
             print "ERROR: {directory}: no Simple source files found"
     for file in files:
         checked = checked + 1
-        val failed = check_one(file, as_json)
+        val failed = check_one(file, as_json, phase_profile, checked, files.len())
         if failed != 0:
             errors = errors + failed
             files_with_errors = files_with_errors + 1
 
     val status = if errors == 0: "ok" else: "error"
+    if phase_profile:
+        val _command_mark = check_phase_mark(true, "command_total", command_started_us, "all", checked, files.len(), status)
     if as_json:
         print "{\"command\":\"check\",\"status\":\"{status}\",\"checked\":{checked},\"files\":{files.len()},\"errors\":{errors},\"files_with_errors\":{files_with_errors}}"
     elif errors == 0:

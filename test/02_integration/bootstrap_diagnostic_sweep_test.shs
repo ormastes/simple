@@ -4,7 +4,7 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 work=$(mktemp -d "${TMPDIR:-/tmp}/simple-bootstrap-diagnostic-test.XXXXXX")
 trap 'rm -rf "$work"' EXIT INT TERM
-mkdir -p "$work/input" "$work/timeout-input" "$work/parent-input" "$work/cache" "$work/repo/bin" "$work/missing-child"
+mkdir -p "$work/input" "$work/timeout-input" "$work/parent-input" "$work/explicit-input" "$work/cache" "$work/repo/bin" "$work/missing-child"
 
 printf '%s\n' 'fn good() -> i64: 1' > "$work/input/adjacent_good.spl"
 printf '%s\n' 'fn broken_one(:' > "$work/input/exact_failure.spl"
@@ -14,13 +14,16 @@ printf '%s\n' 'fn timeout_failure(:' > "$work/timeout-input/02_failure.spl"
 printf '%s\n' 'fn timeout_two() -> i64: 1' > "$work/timeout-input/03_timeout.spl"
 printf '%s\n' 'fn timeout_success() -> i64: 1' > "$work/timeout-input/04_success.spl"
 printf '%s\n' 'fn parent_exit() -> i64: 1' > "$work/parent-input/parent_exit.spl"
+printf '%s\n' 'fn explicit_good() -> i64: 1' > "$work/explicit-input/explicit_good.spl"
 
 fake="$work/fake-simple"
 printf '%s\n' \
   '#!/bin/sh' \
+  'if [ -n "${FAKE_CHILD_IDENTITIES:-}" ]; then printf "%s|%s\n" "${SIMPLE_BINARY:-}" "${SIMPLE_BIN:-}" >> "$FAKE_CHILD_IDENTITIES"; fi' \
   'echo "$2" >> "$FAKE_INVOCATIONS"' \
   'case "$2" in' \
   '  *adjacent_good.spl) exit 0 ;;' \
+  '  *explicit_good.spl) exit 0 ;;' \
   '  *exact_failure.spl) echo "error[E100]: exact parser failure" >&2; exit 1 ;;' \
   '  *second_failure.spl) echo "error[E200]: adjacent semantic failure" >&2; exit 1 ;;' \
   '  *01_timeout.spl|*03_timeout.spl|*parent_exit.spl)' \
@@ -53,6 +56,28 @@ grep -Fq 'diagnostic child compiler is not executable: bin/simple' "$missing_out
 # fixture is sufficient for this harness contract.
 printf '%s\n' '#!/bin/sh' 'exit 0' > "$work/repo/bin/simple"
 chmod +x "$work/repo/bin/simple"
+
+# An isolated worktree may intentionally use an admitted child from another
+# artifact directory. The override is absolute and is bound into both worker
+# identity variables instead of relying on cwd-relative bin/simple lookup.
+explicit_child="$work/explicit-simple"
+printf '%s\n' '#!/bin/sh' 'exit 0' > "$explicit_child"
+chmod +x "$explicit_child"
+set +e
+(cd "$work/missing-child" && \
+  FAKE_INVOCATIONS="$work/explicit-invocations" \
+  FAKE_CHILD_IDENTITIES="$work/explicit-identities" \
+  sh "$repo_root/scripts/check/bootstrap-diagnostic-sweep.shs" \
+  --compiler="$fake" --child-compiler="$explicit_child" \
+  --root="$work/explicit-input" --cache-dir="$work/explicit-cache" --jobs=1) \
+  >"$work/explicit-output.txt" 2>&1
+explicit_status=$?
+set -e
+[ "$explicit_status" -eq 0 ] || { echo "explicit child compiler override failed" >&2; exit 1; }
+[ "$(cat "$work/explicit-identities")" = "$explicit_child|$explicit_child" ] || {
+  echo "explicit child compiler identity was not bound" >&2
+  exit 1
+}
 
 output="$work/output.txt"
 set +e

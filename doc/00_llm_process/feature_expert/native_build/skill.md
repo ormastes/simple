@@ -5,10 +5,19 @@ Compilation of Simple source code to native binaries: the `bin/simple native-bui
 
 ## Source of truth
 - **Observability:** Environment knobs for progress + diagnostics:
+  - `--diagnostics=test` — progress and coarse phase timing, without parser trace
+  - `--diagnostics=debug` (or bare `--diagnostics`) — test mode plus detailed
+    trace, successful LLVM IR retention, and memory snapshots
   - `SIMPLE_COMPILER_TRACE=1` — detailed phase transitions
   - `SIMPLE_COMPILER_PHASE_PROFILE=1` — per-phase timings
+  - `SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE=debug|test` — environment equivalent
   - `--log off` controls **guest-kernel logging, NOT build verbosity**
   - Per-line flush now landed (see `doc/08_tracking/bug/simpleos_harness_silent_native_build_2026-07-26.md`)
+  - AOP call/assignment logs are not implied; enable them separately only for
+    a scoped weave investigation because they can materially affect runtime.
+  - Isolated diagnostic sweeps use
+    `--diagnostic-child-compiler=/absolute/path/to/simple`; never rely on an
+    ambiguous cwd-relative worker identity.
 
 ## Code map
 | File | Role |

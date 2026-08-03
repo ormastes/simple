@@ -28,6 +28,9 @@ This agent CREATES the initial state file. All subsequent agents read and append
      `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and
      `.gemini/commands/` docs are updated and generated SSpec docs read as
      operator manuals.
+   - If the request needs compiler/bootstrap diagnostics, specify whether
+     default-off, `--diagnostics=test`, or `--diagnostics=debug` evidence is
+     required. Keep AOP tracing as a separately justified scoped opt-in.
    - If the request changes SSpec/manual authoring, include ACs for all seven
      `sspec-maintain` scores, blocker/mirror/failure policy, preview/apply and
      rollback safety, fail-fast scaffold provenance, SPipe-owned documentize,

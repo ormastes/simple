@@ -75,6 +75,17 @@ the applicable full lint and duplication gates. If duplicate caching changed,
 the same gate must prove token/cosine create/reuse parity, changed/deleted-file
 invalidation, `--no-cache`, exit parity, and JSON stdout purity.
 
+For bootstrap/compiler debugging, keep normal SPipe verification on the
+default-off path. Use `--diagnostics=test` for progress and coarse phase
+timing without parser trace; use `--diagnostics=debug` (or bare `--diagnostics`)
+only when detailed phase trace, retained successful LLVM IR, and memory
+snapshots are needed. Both modes imply `--progress`. AOP call/assignment
+tracing is not implied: scope it with `SIMPLE_AOP_DEBUG=<pattern>` and enable
+the specific AOP log flag only when weaving is under investigation. Never use
+debug-mode output alone as Stage 4 admission or release evidence. Bind an
+isolated sweep with `--diagnostic-child-compiler=<absolute admitted CLI>` and
+record both driver and child identities.
+
 Use `bin/simple lint <changed .spl files>` and
 `bin/simple duplicate-check <owned-dir> --mode token --min-lines 5` for those
 pure-Simple gates. `bin/simple build lint` and `build check` are Rust workspace

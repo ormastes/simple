@@ -44,9 +44,18 @@ Options:
                      retain Stage 4 structural streaming ownership
   --diagnostic-sweep Continue checking independent .spl files after failures,
                      group all diagnostics, and never build or deploy artifacts
+  --diagnostics[=MODE]
+                     Opt-in compiler observability: debug or test (default:
+                     off; bare --diagnostics selects debug; env:
+                     SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE). Both modes imply
+                     --progress. Debug also keeps LLVM IR and memory snapshots.
   --diagnostic-root=<path>
                      File or directory selected by --diagnostic-sweep
                      (default: src/compiler; repeatable)
+  --diagnostic-child-compiler=<path>
+                     Admitted pure-Simple worker used by diagnostic check
+                     processes (default: bin/simple; env:
+                     SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER)
   --clean-release    Final release proof: deploy and test a clean build while
                      clearing every reusable native cache before each batch
   --deploy           Copy the resulting/compiler artifact into bin/simple when supported
@@ -82,6 +91,8 @@ fresh_cache=0
 release_tests=0
 diagnostic_sweep=0
 diagnostic_roots=""
+diagnostic_child_compiler="${SIMPLE_BOOTSTRAP_DIAGNOSTIC_CHILD_COMPILER:-bin/simple}"
+diagnostics_mode="${SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE:-off}"
 progress_log="${SIMPLE_BOOTSTRAP_PROGRESS_LOG:-}"
 progress_interval="${SIMPLE_BOOTSTRAP_PROGRESS_INTERVAL:-30}"
 execution_profile="${SIMPLE_BOOTSTRAP_EXECUTION_PROFILE:-incremental}"
@@ -130,6 +141,12 @@ while [ "$#" -gt 0 ]; do
     --diagnostic-sweep)
       diagnostic_sweep=1
       ;;
+    --diagnostics)
+      diagnostics_mode=debug
+      ;;
+    --diagnostics=*)
+      diagnostics_mode=${1#*=}
+      ;;
     --diagnostic-root=*)
       diagnostic_root=${1#*=}
       if [ -z "${diagnostic_root}" ]; then
@@ -137,6 +154,13 @@ while [ "$#" -gt 0 ]; do
         exit 1
       fi
       diagnostic_roots="${diagnostic_roots} --root=${diagnostic_root}"
+      ;;
+    --diagnostic-child-compiler=*)
+      diagnostic_child_compiler=${1#*=}
+      if [ -z "${diagnostic_child_compiler}" ]; then
+        echo "error: --diagnostic-child-compiler requires a path" >&2
+        exit 1
+      fi
       ;;
     --clean-release)
       execution_profile=clean-release
@@ -217,6 +241,30 @@ case "${execution_profile}" in
   incremental|incremental-unlimited|clean-release) ;;
   *)
     echo "error: unknown bootstrap execution profile '${execution_profile}'" >&2
+    exit 1
+    ;;
+esac
+
+case "${diagnostics_mode}" in
+  off) ;;
+  test)
+    [ -n "${progress_log}" ] || progress_log=default
+    SIMPLE_COMPILER_PHASE_PROFILE=${SIMPLE_COMPILER_PHASE_PROFILE:-1}
+    export SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE SIMPLE_COMPILER_PHASE_PROFILE
+    ;;
+  debug)
+    [ -n "${progress_log}" ] || progress_log=default
+    SIMPLE_BOOTSTRAP_DIAG=${SIMPLE_BOOTSTRAP_DIAG:-1}
+    SIMPLE_COMPILER_TRACE=${SIMPLE_COMPILER_TRACE:-1}
+    SIMPLE_COMPILER_PHASE_PROFILE=${SIMPLE_COMPILER_PHASE_PROFILE:-1}
+    SIMPLE_KEEP_LLVM_IR=${SIMPLE_KEEP_LLVM_IR:-1}
+    SIMPLE_MEM_SNAPSHOT=${SIMPLE_MEM_SNAPSHOT:-1}
+    export SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE SIMPLE_BOOTSTRAP_DIAG
+    export SIMPLE_COMPILER_TRACE SIMPLE_COMPILER_PHASE_PROFILE
+    export SIMPLE_KEEP_LLVM_IR SIMPLE_MEM_SNAPSHOT
+    ;;
+  *)
+    echo "error: --diagnostics requires off, debug, or test (got '${diagnostics_mode}')" >&2
     exit 1
     ;;
 esac
@@ -793,7 +841,8 @@ if [ "${diagnostic_sweep}" -eq 1 ]; then
   # This mode has no output-artifact or deployment path.
   # shellcheck disable=SC2086
   if sh scripts/check/bootstrap-diagnostic-sweep.shs \
-    --compiler="${seed_bin}" --cache-dir="${output_dir}/diagnostic-cache" \
+    --compiler="${seed_bin}" --child-compiler="${diagnostic_child_compiler}" \
+    --cache-dir="${output_dir}/diagnostic-cache" \
     --jobs="${jobs}" ${diagnostic_roots}; then
     exit 0
   else
@@ -991,6 +1040,10 @@ run_rust_authority_cargo() {
   rust_authority_log=$1
   rust_authority_lto=$2
   shift 2
+  if [ -n "${progress_log}" ]; then
+    bootstrap_progress_mark "rust-${rust_authority_log}" \
+      "$(absolute_path "${log_dir}/${rust_authority_log}.log")"
+  fi
   if [ "${os}" = "windows" ]; then
     set -- "$@" --target "${PLATFORM}"
   fi
@@ -1159,6 +1212,7 @@ echo "  runtime:  ${SIMPLE_RUNTIME_PATH}"
 echo "  platform: ${PLATFORM}"
 echo "  backend:  ${backend}"
 echo "  ps-mode:  ${bootstrap_mode}"
+echo "  diagnose: ${diagnostics_mode}"
 echo "  output:   ${output_dir}"
 if [ "${full_bootstrap}" -eq 1 ]; then
   echo "  rust:     full-bootstrap enabled; seed/runtime may be rebuilt"
