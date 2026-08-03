@@ -1,0 +1,205 @@
+"""
+# Backend Debug Dump Driver Integration
+
+**Requirements:** N/A
+**Plan:** doc/03_plan/infra/agent_sessions/stage4_spdev.md
+**Design:** doc/05_design/backend_layer_artifact_matrix.md
+**Research:** N/A
+
+## Overview
+
+Exercise the public native-build CLI boundary for the ten compiler artifact
+stages without treating a requested name, output path, or silent omission as
+evidence that a layer ran.
+
+## Purpose
+
+Keep the current unsupported state explicit while making the eventual six
+shared-stage implementation prove real intermediate content. The test also
+prevents `--debug-dump=all` from succeeding while silently omitting later
+backend artifacts.
+
+## Audience
+
+Compiler, bootstrap, and release engineers use this specification when adding
+or reviewing layered debug-artifact hooks.
+
+## Preconditions
+
+Run from the repository root with a full CLI capable of the integration test
+runner. The fixture is intentionally small and local; no GPU, network, or
+whole-compiler bootstrap is required.
+
+## Examples
+
+The shared request selects `source,ast,hir,monomorphized-hir,mir,optimized-mir`.
+The full request adds `backend-ir,object,linked-binary,run-readback-receipt`.
+The adjacent negative request uses `source,,mir` and must not start a partial
+build.
+
+## Claim boundaries
+
+On the current public surface, `--debug-dump` is unsupported. That state is
+accepted only as an exact configuration failure with no output and every cell
+accounted as `FAIL`. Once the option is supported, Source through Optimized MIR
+may pass only with real nonempty content-bearing artifacts. Backend IR, Object,
+Linked Binary, and Run/Readback Receipt remain required failures until typed
+validators and producer hooks exist; binary presence alone is `UNVALIDATED`,
+never `PASS` or `SKIP`.
+"""
+
+# codex-system-test
+
+use std.spec
+use app.io.cli_compile.{cli_native_build, cli_native_build_option_error}
+use std.io.{file_exists, file_read, file_write}
+use std.io_runtime.{dir_create_all}
+use app.io.sysinfo_ops.{getpid}
+
+val SHARED_STAGES = "source,ast,hir,monomorphized-hir,mir,optimized-mir"
+val ALL_STAGES = "source,ast,hir,monomorphized-hir,mir,optimized-mir,backend-ir,object,linked-binary,run-readback-receipt"
+
+fn artifact_status(path: text, first_oracle: text, second_oracle: text) -> text:
+    if not file_exists(path):
+        return "FAIL"
+    val content = file_read(path)
+    if content == "":
+        return "FAIL"
+    if not content.contains(first_oracle):
+        return "FAIL"
+    if not content.contains(second_oracle):
+        return "FAIL"
+    "PASS"
+
+fn expected_shared_status(option_error: text) -> text:
+    if option_error == "": "PASS" else: "FAIL"
+
+fn fixture_source() -> text:
+    "fn identity<T>(value: T) -> T:\n" +
+    "    value\n\n" +
+    "fn select_value(enabled: bool) -> i64:\n" +
+    "    if enabled: identity<i64>(41) + 1 else: 0\n\n" +
+    "fn main() -> i64:\n" +
+    "    select_value(true) - 42\n"
+
+fn native_build_args(source: text, output: text, dump: text, stages: text) -> [text]:
+    [
+        "native-build",
+        "--backend=llvm-lib",
+        "--entry", source,
+        "--entry-closure",
+        "--output", output,
+        "--target=x86_64-unknown-linux-gnu",
+        "--opt-level=0",
+        "--no-borrow-check",
+        "--debug-dump={stages}",
+        "--debug-dump-dir", dump
+    ]
+
+fn shared_artifact_statuses(dump: text, run_id: i64, fixture_name: text) -> [text]:
+    val base = "{dump}/llvm-lib/x86_64-unknown-linux-gnu"
+    val lowered = "{base}/build.backend_debug_dump_driver_{run_id}.{fixture_name}"
+    val frontend = "{base}/build_backend_debug_dump_driver_{run_id}_{fixture_name}.spl"
+    [
+        artifact_status("{lowered}.source.spl", "fn identity<T>", "select_value(true)"),
+        artifact_status("{frontend}.ast.ast.json", "\"stage\":\"ast\"", "select_value"),
+        artifact_status("{frontend}.hir.hir.json", "\"stage\":\"hir\"", "select_value"),
+        artifact_status("{frontend}.monomorphized-hir.hir.json", "\"stage\":\"monomorphized-hir\"", "identity"),
+        artifact_status("{lowered}.mir.mir.json", "\"functions\":[", "select_value"),
+        artifact_status("{lowered}.optimized-mir.mir.json", "\"functions\":[", "select_value")
+    ]
+
+fn unsupported_backend_stage_status(path: text) -> text:
+    # Binary object/linked artifacts must eventually use a typed format
+    # validator.  Presence alone is deliberately not promoted to PASS, and the
+    # test never decodes a binary artifact as text.
+    if file_exists(path): "UNVALIDATED" else: "FAIL"
+
+fn backend_artifact_statuses(dump: text, run_id: i64, fixture_name: text) -> [text]:
+    val base = "{dump}/llvm-lib/x86_64-unknown-linux-gnu"
+    val lowered = "{base}/build.backend_debug_dump_driver_{run_id}.{fixture_name}"
+    [
+        unsupported_backend_stage_status("{lowered}.backend-ir.ll"),
+        unsupported_backend_stage_status("{lowered}.object.o"),
+        unsupported_backend_stage_status("{lowered}.linked-binary.bin"),
+        unsupported_backend_stage_status("{lowered}.run-readback-receipt.sdn")
+    ]
+
+fn expect_all_statuses(statuses: [text], expected: text):
+    for status in statuses:
+        expect(status).to_equal(expected)
+
+describe "backend debug dump driver integration":
+    it "accounts for Source through Optimized MIR without false artifact passes":
+        step("compile the layered backend fixture")
+        val run_id = getpid()
+        val root = "build/backend_debug_dump_driver_{run_id}/shared"
+        val dump = "{root}/layers"
+        val output = "{root}/probe"
+        val source = "{root}/probe.spl"
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write(source, fixture_source())).to_equal(true)
+        val args = native_build_args(source, output, dump, SHARED_STAGES)
+        val option_error = cli_native_build_option_error(args)
+        val result = cli_native_build(args)
+        val expected = expected_shared_status(option_error)
+
+        if option_error == "":
+            expect(result).to_equal(0)
+            expect(file_exists(output)).to_equal(true)
+        else:
+            expect(option_error).to_equal("unknown option: --debug-dump={SHARED_STAGES}")
+            expect(result).to_equal(2)
+            expect(file_exists(output)).to_equal(false)
+        expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), expected)
+
+    it "fails closed and accounts for four requested backend layers without hooks":
+        step("validate every emitted compiler layer")
+        val run_id = getpid()
+        val root = "build/backend_debug_dump_driver_{run_id}/all"
+        val dump = "{root}/layers"
+        val output = "{root}/probe"
+        val source = "{root}/probe.spl"
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write(source, fixture_source())).to_equal(true)
+        val shared_args = native_build_args(source, output, dump, SHARED_STAGES)
+        val shared_option_error = cli_native_build_option_error(shared_args)
+        val args = native_build_args(source, output, dump, ALL_STAGES)
+        val option_error = cli_native_build_option_error(args)
+        val result = cli_native_build(args)
+
+        if shared_option_error == "":
+            expect(option_error).to_equal("")
+            expect(result == 0).to_equal(false)
+            expect(file_exists(output)).to_equal(false)
+            expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "PASS")
+        else:
+            expect(option_error).to_equal("unknown option: --debug-dump={ALL_STAGES}")
+            expect(result).to_equal(2)
+            expect(file_exists(output)).to_equal(false)
+            expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "FAIL")
+
+        # Missing backend adapters are required failures, never PASS or SKIP.
+        expect_all_statuses(backend_artifact_statuses(dump, run_id, "probe"), "FAIL")
+
+    it "rejects an adjacent empty stage instead of starting a partial build":
+        step("select all compiler artifact stages")
+        val run_id = getpid()
+        val root = "build/backend_debug_dump_driver_{run_id}/malformed"
+        val dump = "{root}/layers"
+        val output = "{root}/probe"
+        val source = "{root}/probe.spl"
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write(source, fixture_source())).to_equal(true)
+        val malformed = "source,,mir"
+        val args = native_build_args(source, output, dump, malformed)
+        val option_error = cli_native_build_option_error(args)
+        val result = cli_native_build(args)
+
+        if option_error == "":
+            expect(result == 0).to_equal(false)
+        else:
+            expect(option_error).to_equal("unknown option: --debug-dump={malformed}")
+            expect(result).to_equal(2)
+        expect(file_exists(output)).to_equal(false)
+        expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "FAIL")
