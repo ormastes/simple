@@ -256,7 +256,7 @@ fn mark_string_shared(value: RuntimeValue) {
 
 static SHORT_STRING_CACHE: OnceLock<[RuntimeValue; 257]> = OnceLock::new();
 
-fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
+fn rt_string_new_uncached_untracked(bytes: *const u8, len: u64) -> RuntimeValue {
     unsafe {
         let Some(ptr) = alloc_runtime_string(len) else {
             return RuntimeValue::NIL;
@@ -274,14 +274,18 @@ fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
     }
 }
 
+fn rt_string_new_uncached(bytes: *const u8, len: u64) -> RuntimeValue {
+    track_transient_heap(rt_string_new_uncached_untracked(bytes, len))
+}
+
 fn short_string_cache() -> &'static [RuntimeValue; 257] {
     SHORT_STRING_CACHE.get_or_init(|| {
         std::array::from_fn(|index| {
             let value = if index == 0 {
-                rt_string_new_uncached(std::ptr::null(), 0)
+                rt_string_new_uncached_untracked(std::ptr::null(), 0)
             } else {
                 let byte = [(index - 1) as u8];
-                rt_string_new_uncached(byte.as_ptr(), 1)
+                rt_string_new_uncached_untracked(byte.as_ptr(), 1)
             };
             // Process-wide, handed to every len<=1 caller: never freeable.
             mark_string_shared(value);
@@ -1657,6 +1661,9 @@ fn transient_heap_children(value: RuntimeValue) -> Option<Vec<RuntimeValue>> {
 
 fn free_transient_heap(value: RuntimeValue) {
     match value.heap_type() {
+        Some(HeapObjectType::String) => {
+            let _ = rt_string_free(value);
+        }
         Some(HeapObjectType::Array) => rt_array_free(value),
         Some(HeapObjectType::Tuple) => rt_tuple_free(value),
         Some(HeapObjectType::Dict) => super::dict::rt_dict_free(value),
@@ -1933,7 +1940,7 @@ pub extern "C" fn rt_string_new_literal(bytes: *const u8, len: u64) -> RuntimeVa
             return RuntimeValue::from_raw(raw);
         }
     }
-    let value = rt_string_new(bytes, len);
+    let value = rt_string_new_uncached_untracked(bytes, len);
     // Owned by the intern table from here on: every later evaluation of this
     // literal site returns this same object, so rt_string_free must refuse it.
     mark_string_shared(value);
@@ -1980,7 +1987,7 @@ pub(crate) fn rt_string_new_with_len_hash(bytes: *const u8, len: u64) -> Runtime
         }
         (*ptr).hash = len;
 
-        RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader)
+        track_transient_heap(RuntimeValue::from_heap_ptr(ptr as *mut HeapHeader))
     }
 }
 
@@ -5167,7 +5174,16 @@ mod tests;
 /// under the lock; an unlocked absolute count would flake against other tests.
 #[cfg(test)]
 mod string_free_contract_tests {
-    use super::{rt_string_free, rt_string_len, rt_string_new, rt_string_new_literal};
+    use super::{
+        rt_array_new, rt_array_push, rt_string_free, rt_string_len, rt_string_new,
+        rt_string_new_literal, rt_transient_array_scope_begin, rt_transient_array_scope_end,
+        rt_transient_array_scope_pause, rt_transient_heap_promote,
+    };
+    use crate::value::dict::{rt_dict_get, rt_dict_new, rt_dict_set};
+    use crate::value::objects::{
+        rt_closure_get_capture, rt_closure_new, rt_closure_set_capture, rt_enum_new,
+        rt_enum_payload,
+    };
     use crate::value::heap::rt_heap_registry_count;
     use std::sync::Mutex;
 
@@ -5238,6 +5254,102 @@ mod string_free_contract_tests {
         }
         let refreed = (1..N).step_by(2).filter(|&i| rt_string_free(v[i]) == 1).count();
         assert_eq!(refreed, N / 2, "every survivor still found and freed");
+    }
+
+    #[test]
+    fn transient_ordinary_string_is_reclaimed_and_aliases_free_once() {
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        assert!(rt_transient_array_scope_begin());
+        let string = mkstr("transient ordinary rust string");
+        let left = rt_array_new(1);
+        let right = rt_array_new(1);
+        assert!(rt_array_push(left, string));
+        assert!(rt_array_push(right, string));
+        assert_eq!(rt_heap_registry_count(), before + 3);
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_heap_registry_count(), before, "string and aliases reclaim exactly once");
+        assert_eq!(rt_string_len(string), -1, "reclaimed string is no longer readable");
+    }
+
+    #[test]
+    fn promoted_string_and_reachable_alias_graph_survive() {
+        extern "C" fn retained_closure_target() {}
+
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        assert!(rt_transient_array_scope_begin());
+        let text = mkstr("promoted graph string");
+        let unreachable = mkstr("unreachable sibling string");
+        let root = rt_array_new(3);
+        let dict = rt_dict_new(0);
+        let en = rt_enum_new(700_003, 1, text);
+        let closure = rt_closure_new(retained_closure_target as *const () as *const u8, 1);
+        assert!(rt_closure_set_capture(closure, 0, text));
+        assert!(rt_array_push(root, text));
+        assert!(rt_array_push(root, dict));
+        assert!(rt_array_push(root, closure));
+        assert!(rt_dict_set(dict, text, en));
+        assert!(rt_dict_set(dict, en, root));
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(root));
+        assert!(rt_transient_array_scope_end());
+        assert_eq!(rt_string_len(text), 21);
+        assert_eq!(rt_dict_get(dict, text), en);
+        assert_eq!(rt_enum_payload(en), text);
+        assert_eq!(rt_closure_get_capture(closure, 0), text);
+        assert_eq!(rt_string_len(unreachable), -1, "unreachable sibling is reclaimed");
+        assert_eq!(rt_heap_registry_count(), before + 5, "only five promoted graph nodes survive");
+    }
+
+    #[test]
+    fn direct_promoted_shared_interned_and_post_pause_strings_obey_boundaries() {
+        const LIT: &[u8] = b"scope-created shared literal rust";
+        let _g = GUARD.lock().unwrap();
+
+        assert!(rt_transient_array_scope_begin());
+        let direct = mkstr("direct promoted rust string");
+        let short = mkstr("q");
+        let literal = rt_string_new_literal(LIT.as_ptr(), LIT.len() as u64);
+        assert!(rt_transient_array_scope_pause());
+        assert!(rt_transient_heap_promote(direct));
+        let post_pause = mkstr("post pause persistent rust string");
+        assert!(rt_transient_array_scope_end());
+
+        assert_eq!(rt_string_len(direct), 27);
+        assert_eq!(rt_string_len(post_pause), 33);
+        assert_eq!(mkstr("q"), short, "short cache stays pointer-identical");
+        assert_eq!(
+            rt_string_new_literal(b"q".as_ptr(), 1),
+            short,
+            "one-byte literal reuses the ordinary short cache"
+        );
+        assert_eq!(rt_string_new_literal(LIT.as_ptr(), LIT.len() as u64), literal);
+        assert_eq!(rt_string_free(short), 0, "shared short string remains protected");
+        assert_eq!(
+            rt_string_free(rt_string_new_literal(b"q".as_ptr(), 1)),
+            0,
+            "one-byte literal remains shared and refuses free"
+        );
+        assert_eq!(rt_string_free(literal), 0, "interned literal remains protected");
+        assert_eq!(rt_string_free(direct), 1);
+        assert_eq!(rt_string_free(post_pause), 1);
+    }
+
+    #[test]
+    fn repeated_transient_string_scopes_return_to_fixed_registry_bound() {
+        let _g = GUARD.lock().unwrap();
+        let before = rt_heap_registry_count();
+        for round in 0..128 {
+            assert!(rt_transient_array_scope_begin());
+            for item in 0..256 {
+                let value = format!("rust-scope-{round}-transient-{item}");
+                let string = rt_string_new(value.as_ptr(), value.len() as u64);
+                assert!(rt_string_len(string) > 1);
+            }
+            assert!(rt_transient_array_scope_end());
+            assert_eq!(rt_heap_registry_count(), before, "registry drift after round {round}");
+        }
     }
 }
 

@@ -151,6 +151,109 @@ int main(void) {
     check(rt_array_len(outside_control) == 2 && rt_array_get(outside_control, 1) == 42,
           "scope-death CONTROL array is unaffected by the scope");
 
+    int64_t string_base = rt_heap_registry_count();
+    check(rt_transient_array_scope_begin() == 1, "direct-string scope begins");
+    int64_t direct_string = rt_string_new(
+        (const uint8_t*)"transient-direct-string", 23);
+    check(rt_heap_registry_count() == string_base + 1,
+          "ordinary pre-pause string registers in the scope");
+    check(rt_transient_array_scope_end() == 1, "direct-string scope ends");
+    check(rt_heap_registry_count() == string_base,
+          "unpromoted ordinary string is reclaimed");
+
+    check(rt_transient_array_scope_begin() == 1, "aliased-string scope begins");
+    int64_t aliased = rt_string_new((const uint8_t*)"aliased-transient", 17);
+    SplArray* alias_a = rt_array_new(1);
+    SplArray* alias_b = rt_array_new(1);
+    rt_array_push(alias_a, aliased);
+    rt_array_push(alias_b, aliased);
+    check(rt_heap_registry_count() == string_base + 3,
+          "one string alias and two owners register once each");
+    check(rt_transient_array_scope_end() == 1, "aliased-string scope ends");
+    check(rt_heap_registry_count() == string_base,
+          "aliased string graph is reclaimed exactly once");
+
+    check(rt_transient_array_scope_begin() == 1, "direct promoted-string scope begins");
+    int64_t direct_promoted = rt_string_new((const uint8_t*)"direct-promoted", 15);
+    check(rt_transient_array_scope_pause() == 1 &&
+              rt_transient_heap_promote(direct_promoted) == 1,
+          "a direct string root promotes");
+    check(rt_transient_array_scope_end() == 1 && rt_string_len(direct_promoted) == 15,
+          "direct promoted string survives");
+    check(rt_string_free(direct_promoted) == 1,
+          "direct promoted string remains explicitly reclaimable");
+
+    int64_t graph_base = rt_heap_registry_count();
+    check(rt_transient_array_scope_begin() == 1, "promoted-string graph scope begins");
+    int64_t promoted_text = rt_string_new((const uint8_t*)"promoted-text-value", 19);
+    (void)rt_string_new((const uint8_t*)"unreachable-sibling", 19);
+    SplArray* promoted_root = rt_array_new(3);
+    int64_t promoted_dict = rt_dict_new(0);
+    int64_t promoted_enum = rt_enum_new(700003, 1, promoted_text);
+    int64_t promoted_closure = rt_closure_new(1, 1);
+    rt_closure_set_capture(promoted_closure, 0, promoted_text);
+    rt_array_push(promoted_root, promoted_text);
+    rt_array_push(promoted_root, promoted_dict);
+    rt_array_push(promoted_root, promoted_closure);
+    rt_dict_set(promoted_dict, promoted_text, promoted_enum);
+    rt_dict_set(promoted_dict, promoted_enum, (int64_t)(uintptr_t)promoted_root);
+    check(rt_transient_array_scope_pause() == 1, "promoted-string graph pauses");
+    check(rt_transient_heap_promote((int64_t)(uintptr_t)promoted_root) == 1,
+          "promotion walks string aliases, dict keys, enum payloads, and cycle");
+    check(rt_transient_array_scope_end() == 1, "promoted-string graph scope ends");
+    check(rt_string_len(promoted_text) == 19 &&
+              rt_dict_get(promoted_dict, promoted_text) == promoted_enum &&
+              rt_enum_payload(promoted_enum) == promoted_text &&
+              rt_closure_get_capture(promoted_closure, 0) == promoted_text,
+          "promoted string graph survives scope end");
+    check(rt_heap_registry_count() == graph_base + 5,
+          "unreachable sibling string is reclaimed while five graph nodes survive");
+
+    static const uint8_t scoped_literal[] = "scope-shared-literal";
+    int64_t shared_base = rt_heap_registry_count();
+    check(rt_transient_array_scope_begin() == 1, "shared-string scope begins");
+    int64_t shared_short = rt_string_new((const uint8_t*)"q", 1);
+    int64_t shared_literal = rt_string_new_literal(
+        scoped_literal, sizeof(scoped_literal) - 1);
+    check(rt_transient_array_scope_end() == 1, "shared-string scope ends");
+    check(rt_string_len(shared_short) == 1 &&
+              rt_string_len(shared_literal) == (int64_t)sizeof(scoped_literal) - 1,
+          "shared cache and literal-intern strings survive first creation in a scope");
+    check(rt_string_new((const uint8_t*)"q", 1) == shared_short &&
+              rt_string_new_literal(scoped_literal, sizeof(scoped_literal) - 1) == shared_literal,
+          "shared cache and literal intern preserve pointer identity");
+    check(rt_string_new_literal((const uint8_t*)"q", 1) == shared_short &&
+              rt_string_free(shared_short) == 0,
+          "one-byte literal reuses the ordinary short cache and refuses free");
+    check(rt_heap_registry_count() == shared_base + 2,
+          "shared strings remain registered without transient duplicates");
+
+    int64_t paused_base = rt_heap_registry_count();
+    check(rt_transient_array_scope_begin() == 1 &&
+              rt_transient_array_scope_pause() == 1,
+          "post-pause string scope begins and pauses");
+    int64_t post_pause = rt_string_new((const uint8_t*)"post-pause-persistent", 21);
+    check(rt_transient_array_scope_end() == 1, "post-pause string scope ends");
+    check(rt_heap_registry_count() == paused_base + 1 && rt_string_len(post_pause) == 21,
+          "ordinary post-pause string remains persistent by current scope contract");
+    check(rt_string_free(post_pause) == 1 && rt_heap_registry_count() == paused_base,
+          "post-pause test string remains explicitly reclaimable");
+
+    int64_t repeated_base = rt_heap_registry_count();
+    int repeated_ok = 1;
+    for (int round = 0; round < 128; round++) {
+        if (!rt_transient_array_scope_begin()) repeated_ok = 0;
+        for (int item = 0; item < 256; item++) {
+            char dynamic[48];
+            int len = snprintf(dynamic, sizeof(dynamic),
+                "scope-%d-transient-string-%d", round, item);
+            if (rt_string_new((const uint8_t*)dynamic, (uint64_t)len) == 3) repeated_ok = 0;
+        }
+        if (!rt_transient_array_scope_end()) repeated_ok = 0;
+        if (rt_heap_registry_count() != repeated_base) repeated_ok = 0;
+    }
+    check(repeated_ok, "repeated string scopes return the registry to a fixed bound");
+
     enum { PERSISTENT_STRINGS = 100000, PERSISTENT_ARRAYS = 20000, TIMED_SCOPES = 1024 };
     clock_t before_strings = time_empty_scopes(TIMED_SCOPES);
     int64_t persistent_base = rt_heap_registry_count();
