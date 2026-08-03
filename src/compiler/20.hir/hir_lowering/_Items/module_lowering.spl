@@ -115,6 +115,16 @@ struct HirReexportSource:
     module_name: text
     item_name: text
 
+struct HirMaterializedPayloadOrigin:
+    """Terminal declaration behind one enum-payload lexical spelling."""
+    found: bool
+    module_name: text
+    item_name: text
+    item_kind: text
+    # Registry key used to retrieve the surface. This is routing state only;
+    # collision/cycle identity always uses physical module_name above.
+    module_key: text
+
 fn hir_module_surface_get(surfaces: ModuleSurfacesByName, name: text) -> ModuleSurface?:
     if not surfaces.index_by_name.contains_key(name):
         return nil
@@ -139,6 +149,30 @@ fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:
     if m.type_aliases.contains_key(name):
         return true
     m.constants.contains_key(name)
+
+fn hir_module_item_terminal_kind(m: ModuleSurface, name: text) -> text:
+    if m.composites.contains_key(name): return m.composites[name].kind
+    if m.enums.contains_key(name): return "enum"
+    if m.traits.contains_key(name): return "trait"
+    if m.type_aliases.contains_key(name): return "type_alias"
+    if m.callables.contains_key(name): return "callable"
+    if m.constants.contains_key(name): return "const"
+    ""
+
+fn hir_symbol_terminal_kind(kind: SymbolKind) -> text:
+    match kind:
+        case SymbolKind.Class: "class"
+        case SymbolKind.Struct: "struct"
+        case SymbolKind.Enum: "enum"
+        case SymbolKind.Trait: "trait"
+        case SymbolKind.TypeAlias: "type_alias"
+        case SymbolKind.Function: "callable"
+        case SymbolKind.Method: "callable"
+        case SymbolKind.Const: "const"
+        case _: ""
+
+fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
+    "{hir_pkg_canonical_module_name(module_name)}::{item_name}::{item_kind}"
 
 fn hir_surface_param_to_param(param: ModuleSurfaceParam) -> Param:
     Param(name: param.name, has_type_: param.has_type_, type_: param.type_,
@@ -620,27 +654,41 @@ impl HirLowering:
                 self.symbols.rename_symbol(imported_type, imported_name)
                 self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
         elif imported_mod.enums.contains_key(imported_name):
+            if materialize_enum:
+                val root_origin = HirMaterializedPayloadOrigin(
+                    found: true,
+                    module_name: hir_pkg_canonical_module_name(imported_mod.module_name),
+                    item_name: imported_name,
+                    item_kind: "enum",
+                    module_key: imported_mod_name)
+                if not self.claim_materialized_payload_binding(local_name, root_origin, import_span):
+                    return
             val already_bound = self.symbols.lookup(local_name).?
             val imported_type = self.symbols.define(local_name, SymbolKind.Enum, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not already_bound:
                 self.symbols.rename_symbol(imported_type, imported_name)
-                # Directory-package siblings share enum declarations, but an
-                # unrelated sibling must not rematerialize the enum body in its
-                # own symbol context. Payload dependencies are private to the
-                # defining sibling (BitfieldError's Span payloads previously
-                # failed while lowering backend_port). Explicit user imports
-                # and globs still request body materialization below.
-                if materialize_enum:
-                    self.imported_enums[local_name] = hir_surface_enum_to_enum(imported_mod.enums[imported_name], local_name)
-                    self.imported_enum_owners[local_name] = imported_mod.module_name
                 self.register_imported_type_methods(imported_mod, imported_mod_name, imported_name, imported_type, import_span)
+            # A directory-sibling declaration-only prebind may already own the
+            # symbol. A later explicit import must still transition the enum
+            # into materialized state and close over its payload dependencies.
+            if materialize_enum and not self.imported_enums.contains_key(local_name):
+                val surface_enum = imported_mod.enums[imported_name]
+                self.imported_enums[local_name] = hir_surface_enum_to_enum(surface_enum, local_name)
+                self.imported_enum_owners[local_name] = imported_mod.module_name
+                self.register_materialized_enum_payload_dependencies(imported_mod, imported_mod_name, surface_enum, import_span)
         elif imported_mod.traits.contains_key(imported_name):
             self.symbols.define(local_name, SymbolKind.Trait, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
             if not self.imported_traits.contains_key(local_name):
                 self.imported_traits[local_name] = hir_surface_trait_to_trait(imported_mod.traits[imported_name], local_name)
             # lower_impl materializes defaults only when this trait is used.
         elif imported_mod.type_aliases.contains_key(imported_name):
-            self.symbols.define(local_name, SymbolKind.TypeAlias, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+            val already_bound = self.symbols.lookup(local_name).?
+            if not already_bound:
+                # SymbolTable.define's type-level first-write-wins list does
+                # not include TypeAlias. Guard the define itself so an alias
+                # cycle or competing import cannot shadow the first binding.
+                val imported_type = self.symbols.define(local_name, SymbolKind.TypeAlias, nil, import_span, Visibility.Public, false, Some(imported_mod.module_name))
+                self.symbols.rename_symbol(imported_type, imported_name)
         elif imported_mod.callables.contains_key(imported_name):
             val fn_type = self.declared_surface_callable_type(imported_mod.callables[imported_name], nil)
             val imported_fn_sym = self.symbols.define(local_name, SymbolKind.Function, fn_type, import_span, Visibility.Public, false, Some(imported_mod.module_name))
@@ -911,6 +959,120 @@ impl HirLowering:
                 exp_item_idx = exp_item_idx + 1
             exp_idx = exp_idx + 1
         HirReexportSource(found: false, module_name: "", item_name: "")
+
+    me resolve_materialized_enum_payload_origin(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text) -> HirMaterializedPayloadOrigin:
+        """Resolve a payload spelling to its physical terminal declaration."""
+        if hir_module_declares_item(imported_mod, dependency):
+            val kind = hir_module_item_terminal_kind(imported_mod, dependency)
+            return HirMaterializedPayloadOrigin(
+                found: kind != "",
+                module_name: hir_pkg_canonical_module_name(imported_mod.module_name),
+                item_name: dependency,
+                item_kind: kind,
+                module_key: imported_mod_name)
+        val hop = self.find_reexport_source(imported_mod, imported_mod_name, dependency, 0)
+        if hop.found:
+            val source = hir_module_surface_get(self.module_surfaces, hop.module_name)
+            if source != nil:
+                val terminal = source.unwrap()
+                val kind = hir_module_item_terminal_kind(terminal, hop.item_name)
+                if kind != "":
+                    return HirMaterializedPayloadOrigin(
+                        found: true,
+                        module_name: hir_pkg_canonical_module_name(terminal.module_name),
+                        item_name: hop.item_name,
+                        item_kind: kind,
+                        module_key: hop.module_name)
+        HirMaterializedPayloadOrigin(found: false, module_name: "", item_name: "", item_kind: "", module_key: "")
+
+    me claim_materialized_payload_binding(local_name: text, origin: HirMaterializedPayloadOrigin, import_span: Span) -> bool:
+        val wanted = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
+        if self.materialized_payload_bindings.contains_key(local_name):
+            val existing = self.materialized_payload_bindings[local_name]
+            if existing != wanted:
+                self.error("enum payload dependency `{local_name}` conflicts: `{existing}` vs `{wanted}`", import_span)
+                return false
+            return true
+        val existing_id = self.symbols.lookup_or_invalid(local_name)
+        if existing_id.is_valid():
+            # Avoid constructing or unwrapping Option<SymbolId> on the staged
+            # native ABI. lookup_or_invalid keeps the whole path scalar-safe.
+            val existing_raw = existing_id.id
+            # SymbolTable's typed owner predicate plus bracket read avoids the
+            # equally fragile Option<Symbol> return ABI of get_symbol_raw.
+            if self.symbols.symbols.has(existing_raw):
+                val symbol: Symbol = self.symbols.symbols[existing_raw]
+                val existing_kind = hir_symbol_terminal_kind(symbol.kind)
+                val existing_owner = symbol.defining_module ?? ""
+                val existing = hir_payload_terminal_identity(existing_owner, symbol.name, existing_kind)
+                if existing_kind == "":
+                    self.error("enum payload dependency `{local_name}` conflicts with non-type binding `{symbol.name}`", import_span)
+                    return false
+                if existing != wanted:
+                    self.error("enum payload dependency `{local_name}` conflicts: `{existing}` vs `{wanted}`", import_span)
+                    return false
+        self.materialized_payload_bindings[local_name] = wanted
+        true
+
+    me register_materialized_payload_named_dependency(imported_mod: ModuleSurface, imported_mod_name: text, dependency: text, skipped: {text: bool}, import_span: Span):
+        if dependency == "" or skipped.contains_key(dependency): return
+        val origin = self.resolve_materialized_enum_payload_origin(imported_mod, imported_mod_name, dependency)
+        if not origin.found: return
+        if not self.claim_materialized_payload_binding(dependency, origin, import_span): return
+        val identity = hir_payload_terminal_identity(origin.module_name, origin.item_name, origin.item_kind)
+        val expanded = self.materialized_payload_origins.contains_key(identity)
+        val source = hir_module_surface_get(self.module_surfaces, origin.module_key)
+        if source == nil: return
+        val terminal = source.unwrap()
+        # Binding and expansion are deliberately distinct: aliases in a cycle
+        # still need their local symbol even when the physical origin was seen.
+        self.register_imported_symbol(terminal, origin.module_key, origin.item_name, dependency, import_span, true)
+        if expanded: return
+        if origin.item_kind != "type_alias":
+            self.materialized_payload_origins[identity] = true
+            return
+        self.materialized_payload_origins[identity] = true
+        val alias = terminal.type_aliases[origin.item_name]
+        var alias_skipped: {text: bool} = {}
+        for param in alias.type_params:
+            alias_skipped[param.name] = true
+        var nested_names = parser_type_named_dependencies(alias.type_)
+        for param in alias.type_params:
+            for bound in param.bounds:
+                for nested in parser_type_named_dependencies(bound):
+                    nested_names = nested_names.push(nested)
+            if param.has_default:
+                for nested in parser_type_named_dependencies(param.default):
+                    nested_names = nested_names.push(nested)
+        var seen: {text: bool} = {}
+        for nested in nested_names:
+            if not seen.contains_key(nested):
+                seen[nested] = true
+                self.register_materialized_payload_named_dependency(terminal, origin.module_key, nested, alias_skipped, import_span)
+
+    me register_materialized_enum_payload_dependencies(imported_mod: ModuleSurface, imported_mod_name: text, enum_: ModuleSurfaceEnum, import_span: Span):
+        """Materialize the complete named dependency closure of one enum."""
+        val identity = hir_payload_terminal_identity(imported_mod.module_name, enum_.name, "enum")
+        if self.materialized_payload_origins.contains_key(identity): return
+        self.materialized_payload_origins[identity] = true
+        var skipped: {text: bool} = {}
+        var names: [text] = []
+        for param in enum_.type_params:
+            skipped[param.name] = true
+            for bound in param.bounds:
+                for nested in parser_type_named_dependencies(bound):
+                    names = names.push(nested)
+            if param.has_default:
+                for nested in parser_type_named_dependencies(param.default):
+                    names = names.push(nested)
+        for variant in enum_.variants:
+            for nested in parser_variant_named_dependencies(variant):
+                names = names.push(nested)
+        var seen: {text: bool} = {}
+        for name in names:
+            if not seen.contains_key(name):
+                seen[name] = true
+                self.register_materialized_payload_named_dependency(imported_mod, imported_mod_name, name, skipped, import_span)
 
     me register_imported_type_methods(imported_mod: ModuleSurface, imported_mod_name: text, imported_name: text, local_owner: SymbolId, import_span: Span):
         val owner_module = hir_module_logical_name_from_path(imported_mod_name)
@@ -1410,6 +1572,8 @@ impl HirLowering:
         self.imported_traits = {}
         self.imported_enums = {}
         self.imported_enum_owners = {}
+        self.materialized_payload_origins = {}
+        self.materialized_payload_bindings = {}
         # NOTE (moved): the struct field-type pre-scan that used to run HERE
         # now runs AFTER Pass 0 (imports) and the declare pass below — see the
         # "Pass -1 (relocated)" block. Running it first meant every
