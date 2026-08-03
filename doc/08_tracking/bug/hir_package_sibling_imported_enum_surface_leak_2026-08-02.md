@@ -95,3 +95,29 @@ register the named type dependency closure of its variants in the defining
 module's import context. The repair must retain package-sibling
 declaration-only behavior and cover direct, facade, nested, and aliased payload
 dependencies without importing unrelated owner symbols.
+
+## Focused reproduction guard result (2026-08-03)
+
+Three bounded setup probes were retained under
+`/tmp/simple-stage4-enum-closure3-20260803/build/mini_builds/` and no compiler
+source was edited:
+
+- a same-package fixture passed because sibling declaration registration masked
+  the missing explicit-import upgrade;
+- a corrected cross-package fixture passed under ordinary native-build mode,
+  which does not reproduce the Stage 4 streaming/package registration order;
+- setting `SIMPLE_BOOTSTRAP_STAGE4=1` on that fixture exited before HIR because
+  Stage 4 accepts only `src/app/cli/main.spl` or `src/app/os/main.spl` entries.
+
+The next reproducer must therefore be an executable in-memory HIR probe using
+the exact facade/owner/support surfaces, or the cross-package fixture with only
+the streaming-surface/native-arena controls and without the Stage 4 entry
+guard. Do not repeat the three setups above.
+
+Correctness review also identified an independent materialization hazard:
+`register_imported_symbol` currently materializes an enum only inside
+`if not already_bound`. A package-sibling declaration-only registration can
+bind the symbol first, so a later explicit import must be able to upgrade that
+binding exactly once when `materialize_enum=true`. The upgrade must remain
+dependency-only, reject a conflicting existing owner, and preserve the sibling
+path's `materialize_enum=false` behavior.

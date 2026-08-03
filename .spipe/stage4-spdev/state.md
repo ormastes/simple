@@ -90,3 +90,7 @@ dev-done
 
 - dev: Created the missing Stage 4 state file with ten acceptance criteria
   (type: bug) and separated backend-debug work from bootstrap evidence.
+- dev: The bounded enum-payload focused setup exhausted three non-diagnostic
+  reproducer shapes without source edits. Recorded the Stage 4 entry guard,
+  ordinary-mode false green, declaration-only-to-materialized upgrade hazard,
+  and the required executable HIR probe for the next scoped continuation.

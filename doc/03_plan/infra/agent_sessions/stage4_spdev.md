@@ -72,6 +72,28 @@ CLI, and deploy it only after the bounded essential-tools smoke passes.
 7. Deploy only that verified binary, record its path and hash, and update this
    document with the retained logs and evidence.
 
+## 2026-08-03 enum-payload focused-probe continuation
+
+- Three distinct setup probes are retained under
+  `/tmp/simple-stage4-enum-closure3-20260803/build/mini_builds/`; none edited
+  compiler source or wrote the canonical bootstrap cache.
+- The same-package fixture was false green because sibling declarations masked
+  the explicit-import closure. The cross-package fixture was false green in
+  ordinary native-build mode. Adding `SIMPLE_BOOTSTRAP_STAGE4=1` did not reach
+  HIR because the Stage 4 driver restricts entries to the CLI or OS main.
+- Do not repeat those commands. The next scoped continuation must compile an
+  executable in-memory HIR probe, or use only
+  `SIMPLE_BOOTSTRAP=1`, `SIMPLE_STAGE4_STREAMING_SURFACES=1`, and
+  `SIMPLE_NATIVE_ARENA_DECLS=1` without the Stage 4 entry guard.
+- Merge-owner review found that the existing `if not already_bound` guard can
+  prevent a declaration-only sibling binding from being upgraded by a later
+  explicit enum import. The correct repair must combine an owner-safe recursive
+  parser-type walk with a one-time materialization upgrade, exact alias/import
+  resolution, conflict rejection, cycle protection, and unrelated-symbol
+  non-leak behavior.
+- This focused session reached its three-cycle cap. No Stage 3 or Stage 4 build
+  was started, no source fix is claimed, and no deployment exists.
+
 ### Manual Stage 3 refresh invariant
 
 Do not build `src/app/cli/main.spl` directly with a bootstrap-stage compiler and
