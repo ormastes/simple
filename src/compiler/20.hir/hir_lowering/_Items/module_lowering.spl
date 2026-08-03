@@ -729,6 +729,32 @@ impl HirLowering:
         # relative hop landing on a package directory resolves via .__init__.
         self.resolve_module_key(rel_abs)
 
+    me resolve_reexport_module_key(name: text, facade_name: text, facade_mod: ModuleSurface) -> text:
+        """Resolve one facade import without mistaking a file facade for its
+        same-named directory package.
+
+        `io.spl` and `io/__init__.spl` intentionally share the authored import
+        spelling `io`.  In a focused graph containing only the package facade,
+        `use io.*` reaches `io.__init__`; in a full graph the ordinary key wins
+        first and points straight back to `io.spl`.  Re-export chasing then
+        loops on the same physical surface and loses names that the package
+        facade forwards from deeper owners.  Redirect only that proven
+        self-surface collision; ordinary imports of a same-named module keep
+        their existing winner."""
+        var resolved = self.resolve_module_key_relative(name, facade_name)
+        if resolved == "":
+            return ""
+        val resolved_surface = hir_module_surface_get(self.module_surfaces, resolved)
+        if resolved_surface == nil or resolved_surface.unwrap().canonical_path != facade_mod.canonical_path:
+            return resolved
+        val package_key = self.resolve_module_key(facade_name + ".__init__")
+        if package_key == "" or package_key == resolved:
+            return resolved
+        val package_surface = hir_module_surface_get(self.module_surfaces, package_key)
+        if package_surface == nil or package_surface.unwrap().canonical_path == facade_mod.canonical_path:
+            return resolved
+        package_key
+
     me find_reexport_source(facade_mod: ModuleSurface, facade_name: text, wanted: text, depth: i64) -> HirReexportSource:
         """Resolve which transitive module actually DECLARES `wanted` when
         `facade_mod` only re-exports it. Follows the facade's own imports
@@ -771,7 +797,7 @@ impl HirLowering:
                 # parser emits for `export X from types`) normalizes against
                 # the facade's own key, or the chase dead-ends on every
                 # package facade that re-exports its members that way.
-                val next_key = self.resolve_module_key_relative(imp.module, facade_name)
+                val next_key = self.resolve_reexport_module_key(imp.module, facade_name, facade_mod)
                 val next_mod = if next_key != "": hir_module_surface_get(self.module_surfaces, next_key) else: nil
                 if next_mod != nil:
                     if hir_module_declares_item(next_mod.unwrap(), source_item):

@@ -1,0 +1,63 @@
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+
+fn facade_test_logger() -> Logger:
+    Logger(level: 0)
+
+fn facade_test_module(source: text, name: text, log: Logger) -> Module:
+    parse_full_frontend(source, name, name, log)
+
+fn expect_host_facade_chain_resolves(reverse_facades: bool):
+    val log = facade_test_logger()
+    val time_source = "pub fn time_now_unix_micros() -> i64:\n    42"
+    val process_source = "pub fn getpid() -> i64:\n    7"
+    val sync_package_source = "# Re-exported from time_ops.spl\nexport time_now_unix_micros\n# Re-exported from sysinfo_ops.spl\nexport getpid"
+    val sync_file_source = "use graph.sync.io.*\nexport time_now_unix_micros, getpid"
+    val async_package_source = "export use graph.sync.io.\{time_now_unix_micros, getpid\}"
+    val async_file_source = "use graph.async.io.*\nexport time_now_unix_micros, getpid"
+    val consumer_source = "use graph.async.io.\{time_now_unix_micros, getpid\}\nfn main() -> i64:\n    time_now_unix_micros() + getpid()"
+
+    var modules: Dict<text, Module> = {}
+    modules["graph.sync.io.time_ops"] = facade_test_module(time_source, "graph.sync.io.time_ops", log)
+    modules["graph.sync.io.sysinfo_ops"] = facade_test_module(process_source, "graph.sync.io.sysinfo_ops", log)
+    modules["graph.sync.io.__init__"] = facade_test_module(sync_package_source, "graph.sync.io.__init__", log)
+    modules["graph.sync.io"] = facade_test_module(sync_file_source, "graph.sync.io", log)
+    modules["graph.async.io.__init__"] = facade_test_module(async_package_source, "graph.async.io.__init__", log)
+    modules["graph.async.io"] = facade_test_module(async_file_source, "graph.async.io", log)
+
+    val sync_package = SourceFile(path: "graph/sync/io/__init__.spl", content: sync_package_source, module_name: "graph.sync.io.__init__")
+    val sync_file = SourceFile(path: "graph/sync/io.spl", content: sync_file_source, module_name: "graph.sync.io")
+    val async_package = SourceFile(path: "graph/async/io/__init__.spl", content: async_package_source, module_name: "graph.async.io.__init__")
+    val async_file = SourceFile(path: "graph/async/io.spl", content: async_file_source, module_name: "graph.async.io")
+    val owners = [
+        SourceFile(path: "graph/sync/io/time_ops.spl", content: time_source, module_name: "graph.sync.io.time_ops"),
+        SourceFile(path: "graph/sync/io/sysinfo_ops.spl", content: process_source, module_name: "graph.sync.io.sysinfo_ops")
+    ]
+    val sources = if reverse_facades:
+        owners + [async_file, async_package, sync_file, sync_package]
+    else:
+        owners + [sync_package, sync_file, async_package, async_file]
+
+    val surfaces_result = module_surfaces_from_modules(modules, sources)
+    expect(surfaces_result.is_ok()).to_equal(true)
+    val surfaces = surfaces_result.unwrap()
+    val consumer = facade_test_module(consumer_source, "graph.consumer", log)
+    var lowering = hirlowering_for_module("graph.consumer", surfaces)
+    val hir = lowering.lower_module(consumer)
+
+    expect(lowering.errors.len()).to_equal(0)
+    expect(hir.symbols.lookup("time_now_unix_micros").?).to_be_truthy()
+    expect(hir.symbols.lookup("getpid").?).to_be_truthy()
+
+describe "same-named file and directory facade re-exports":
+    it "reaches host owners when package facades are discovered first":
+        expect_host_facade_chain_resolves(false)
+
+    it "reaches host owners when file facades are discovered first":
+        expect_host_facade_chain_resolves(true)
