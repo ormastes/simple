@@ -150,20 +150,38 @@ bridge, and database workers are examples of this carrier pattern.
 ## SSpec documentization maintenance
 
 Treat `simple sspec-maintain` as the SSpec/manual peer of lint and
-duplicate-check. Start with `scan`, review the seven explainable scores and
-stable `SSDOC-*` findings, then use `improve` only as a preview until a human or
-calling agent explicitly confirms `--apply`. Applied changes retain rollback
-material and must not rewrite behavioral meaning.
+duplicate-check. Start with `scan`, review all seven explainable scores—not
+only the aggregate—and inspect stable `SSDOC-*` findings. A blocker caps the
+aggregate at 49. File and directory scopes are supported; a missing/stale
+mirror, an empty directory scope, machine-output contamination, or a configured
+score/severity failure is not a clean result.
+
+MCP callers use read-only `simple_sspec_scan` for scoring. Reserve the
+conservative write-capable `simple_sspec_maintain` surface for an explicitly
+approved preview/apply, scaffold, or documentize workflow.
+
+Use `improve` only as a preview until a human or calling agent confirms the
+exact `--apply` patch. Applied changes retain rollback material and must not
+rewrite behavioral meaning, assertions, REQ bindings, evidence claims, or
+authored narrative. A reviewed `--suppressions` file uses
+`RULE_ID|owner|reason|optional-fingerprint`; blockers cannot be suppressed.
+Use `--baseline` for the reviewed fingerprint ledger and never hide a finding.
 
 For reference Markdown, use `scaffold`; preserve explicit REQ IDs and source
 hashes, and leave every unresolved oracle as executable
 `fail("TODO: replace generated placeholder with an executable assertion")`.
+Use the `spec-to-spipe`/compatibility `spec-to-sspec` research architecture for
+full external standards that require byte coverage, source ledgers, adapters,
+or official conformance bindings. Its generated SSpec must pass the same
+maintenance scoring and must never upgrade an unresolved oracle into a pass.
 Never fabricate outcomes, generate skips, or use tautologies. Use literal
 `step("...")` calls, not bare `@step "..."` decorators.
 
-`documentize` supplies scorecard and provenance while SPipe remains the
-canonical complete-manual generator. Professional manuals include purpose,
-preconditions, workflow, narratives, scorecard, remediation, evidence, and
-compatibility. Optional LLM suggestions are preview-only, excluded from the
-score, and never self-applied. See
+`documentize` invokes SPipe, the canonical complete-manual generator, then adds
+scorecard and provenance. Read the generated Markdown as an operator manual:
+verify purpose/audience, preconditions, visible workflow, narratives,
+requirement-test traceability, score/remediation, evidence/provenance,
+compatibility/limitations, and folded executable detail. Optional LLM
+suggestions must cite source evidence; they are preview-only, excluded from the
+score, never self-approved, and never self-applied. See
 `doc/07_guide/infra/sspec_documentization_maintenance.md`.

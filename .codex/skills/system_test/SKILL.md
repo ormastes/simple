@@ -479,9 +479,18 @@ SIMPLE_NO_STUB_FALLBACK=1 bin/simple test path/to/spec.spl --mode=native
 ## Documentization quality gate
 
 After changing an SSpec, run `simple sspec-maintain scan <spec>` and inspect the
-seven scores, blocker cap, mirror state, and `SSDOC-*` findings. Professional
+seven scores independently, the blocker cap (49), mirror state, and stable
+`SSDOC-*` findings. A missing/stale mirror or fail-fast scaffold cannot count as
+coverage. Professional
 manuals contain purpose/audience, preconditions, operator workflow, scenario
 narratives, scorecard, findings/remediation, evidence/provenance, and
 compatibility/limitations. Use literal `step("...")`, never bare `@step "..."`.
 Reference scaffolds preserve REQ IDs and source hashes and fail fast for every
-unresolved result. SPipe remains the full-manual generator.
+unresolved result. SPipe remains the full-manual generator; `documentize` adds
+score/provenance through that owner. Baseline review uses `--baseline`;
+suppression review uses `--suppressions` records with stable rule ID, owner,
+reason, and optional fingerprint. Blockers cannot be suppressed. LLM advice is
+source-evidenced preview only, excluded from scoring, and never self-applies.
+For lossless external-standard intake, follow the shared
+`spec-to-spipe`/compatibility `spec-to-sspec` architecture; do not treat the
+bounded Markdown scaffold as byte-complete conversion.

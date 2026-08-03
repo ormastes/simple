@@ -96,9 +96,10 @@ fingerprints, baseline state, and fixes when safe replacements exist.
 ## Cache record
 
 Cache storage uses a versioned deterministic line codec under
-`.simple/cache/sspec-maintain/`. Text fields are escaped; score/count/header
-records precede sorted finding records. Invalid/truncated/version-mismatched
-records are misses, never partial reports. Cache write is atomic.
+`.simple/cache/sspec-maintain/`. Identity, score, severity, and payload lengths
+precede the human/JSON/SARIF serializations produced from one report model.
+Invalid/truncated/version-mismatched records are misses, never partial reports.
+Cache write is atomic.
 
 ## Baseline
 
@@ -112,19 +113,24 @@ operation is not implicit in scan.
 Safe initial changes:
 
 - convert a standalone invalid `@step "Label"` line to `# @step: Label`;
-- reuse existing compiler EasyFixes for boolean-wrapper assertions;
 - normalize an exact legacy `use std.spipe` import to canonical
-  `use std.spec.*` only when the file uses no symbol outside the re-exported
-  surface and focused compatibility tests prove equivalence.
+  `use std.spec.*`; the alias module explicitly re-exports the same surface.
 
 Generic narrative insertion is never safe. Preview renders replacements and
-the resulting source hash. Interactive uses the existing input/prompt
-primitive. Explicit apply selects all safe filtered fixes.
+before/after hashes. Explicit `--apply` selects the reviewed certain fixes.
 
-Before source write, save a rollback artifact containing path, before/after
-hash, rule IDs, and the complete original source. Then atomically write and run
-the canonical parser plus focused lint once. On failure, report the rollback
-artifact and return nonzero.
+Before source replacement, reject stale bytes, validate the proposed content
+through the canonical SPipe parser in an isolated file, and remove that file.
+Then save a rollback artifact containing path, before/after hash, rule IDs, and
+the complete original source before the atomic mode-preserving write. On
+failure, report diagnostics and return nonzero with the source unchanged.
+
+## Reviewed suppressions
+
+`--suppressions` parses `RULE_ID|owner|reason|optional-fingerprint`. Unknown
+rules and incomplete records are usage errors. Matching non-blockers retain the
+finding plus owner/reason metadata but are excluded from score/policy; blockers
+are rejected. The suppression content participates in cache identity.
 
 ## Reference Markdown extraction
 
@@ -153,19 +159,19 @@ fails if the output exists.
 
 ## Documentize flow
 
-1. Analyze source/manual baseline.
-2. Run canonical `run_spipe_docgen` with explicit output and `--no-index`.
-3. Re-read the generated mirror and re-analyze once.
-4. Append/update a delimited maintenance appendix when requested.
-5. Return generated path, score, stubs/blockers, and source/manual identities.
+1. Run canonical `run_spipe_docgen` with explicit output and `--no-index`.
+2. Re-read the generated mirror.
+3. Replace prior delimited maintenance provenance/scorecard sections.
+4. Re-analyze the source plus observed generated mirror once.
+5. Write deterministic provenance/history and the optional scorecard.
 
 The appendix delimiters make repeated documentize idempotent.
 
 ## Error handling
 
 All reusable operations return `Result<T, text>`. CLI usage errors return 2;
-I/O/parse/apply/generation errors return 1; successful advisory scan returns 0;
-policy failure returns 3. Machine modes serialize errors in their selected
+I/O/parse/apply/generation errors return 3; successful advisory scan returns 0;
+policy failure returns 1. Machine modes serialize errors in their selected
 schema and do not emit human banners.
 
 ## Performance and diagnostics
@@ -176,7 +182,8 @@ stable path sort helper or record/fix a measured regression. String assembly
 uses arrays plus `join`, never loop concatenation for large reports.
 
 Diagnostics are level-gated and routed away from machine stdout. Retained perf
-fixtures cover one 2,000-line file and 1,000 source/manual pairs.
+fixtures cover warm single-pair analysis and 1,000 source/manual pairs,
+including elapsed time and Linux peak RSS.
 
 ## Documentation synchronization
 

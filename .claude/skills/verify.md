@@ -319,3 +319,13 @@ Treat any of these as **FAIL** when reviewing runtime/concurrency/AOP changes
   lifecycle without rechecking the matching `src/verification/*` model
   (`scripts/check/check-lean-proofs.shs` must stay green, zero sorry) or
   recording an explicit model/toolchain blocker.
+
+## SSpec documentization verification
+
+Changed SSpec/manual pairs require one deterministic
+`simple sspec-maintain scan`. Fail blockers, configured policy regression,
+missing/stale mirrors, impure machine output, or unresolved scaffolds presented
+as coverage. Review all seven scores and REQ-to-test mappings. Confirm exact
+approval/rollback for applied fixes and rule/owner/reason/bounded-scope for
+suppressions. Use `--suppressions` with reviewed
+`RULE_ID|owner|reason|optional-fingerprint` records; blockers cannot be suppressed.

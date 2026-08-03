@@ -64,6 +64,9 @@ Load the spec, load the target file, write code, run test. That is all.
 - [ ] Code compiles cleanly: `bin/simple build check` passes
 - [ ] State file updated: `phase: implement` marked complete, `impl_files:` listed
 - [ ] State records doc/process freshness handoff for verify, or `N/A`
+- [ ] Changed SSpec/manual pairs have one reviewed `simple sspec-maintain scan`;
+      previewed edits apply only after exact confirmation with rollback, and
+      `documentize` reuses SPipe
 
 ## Output
 

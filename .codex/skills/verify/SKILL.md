@@ -318,5 +318,9 @@ STATUS: FAIL (3 failures, 1 warning)
 
 For changed SSpec/manual pairs, run deterministic `sspec-maintain scan` once.
 A blocker, threshold failure, stale/missing mirror, non-pure machine output, or
-baseline regression is FAIL. Verify preview and explicit confirmation, rollback
-evidence, fail-fast scaffolds, and all eight professional manual sections.
+baseline regression is FAIL. Review all seven component scores; a blocker cap
+cannot be waived by the aggregate. Verify preview and explicit confirmation,
+rollback evidence, fail-fast scaffolds, requirement-test traceability, and all
+eight professional manual sections. Suppressions use reviewed
+`RULE_ID|owner|reason|optional-fingerprint` records passed with
+`--suppressions`; blockers cannot be suppressed.

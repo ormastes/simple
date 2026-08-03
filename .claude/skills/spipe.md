@@ -1619,10 +1619,10 @@ instead of hand-tracing resolution.
 
 ## Session update 2026-07-18
 
-SimpleOS desktop bring-up knowledge lives in the C1-C8 baremetal codegen 
-landmine catalog (doc/08_tracking/bug/). Canonical reference: 
-doc/07_guide/os/baremetal_simple_codegen_landmines.md (in progress). Recent 
-fixes: seed import-alias (method dispatch), receiver-binding under --entry-closure, 
+SimpleOS desktop bring-up knowledge lives in the C1-C8 baremetal codegen
+landmine catalog (doc/08_tracking/bug/). Canonical reference:
+doc/07_guide/os/baremetal_simple_codegen_landmines.md (in progress). Recent
+fixes: seed import-alias (method dispatch), receiver-binding under --entry-closure,
 NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.
 
 ## Verification tiering (build infra)
@@ -1631,11 +1631,19 @@ NVMe DMA phys=0 guard, interpreter stack overflow, i64 print truncation.
 
 `simple sspec-maintain` is the maintenance-level peer of lint and
 duplicate-check. `scan` emits deterministic human, JSON, or SARIF findings and
-seven explainable scores. `improve` is preview-only unless confirmed with
-`--apply`; it preserves rollback material and cannot change scenario semantics.
-`scaffold` maps reference Markdown and REQ IDs to modern fail-fast SSpec.
-`documentize` adds scoring/provenance; SPipe owns the complete scenario manual.
-LLM suggestions are optional, preview-only, and excluded from scoring.
+seven explainable scores; blockers cap the aggregate at 49, and missing/stale
+mirrors or configured policy failures are incomplete. `improve` is preview-only
+unless the exact patch is confirmed with `--apply`; retain rollback and never
+rewrite semantics, REQ bindings, evidence, or prose mechanically. `scaffold`
+preserves reference hash and REQ IDs in fail-fast modern SSpec. `documentize`
+adds scoring/provenance through SPipe, the complete-manual owner. Baseline or
+suppression records use the reviewed `--suppressions` file format
+`RULE_ID|owner|reason|optional-fingerprint`; blockers cannot be suppressed.
+LLM suggestions are source-evidenced
+previews, excluded from scoring, and never self-apply.
+Full external standards use the shared lossless `spec-to-spipe` architecture
+(`spec-to-sspec` is its compatibility name); the Markdown scaffold is not a
+byte-coverage importer.
 
 Match the verification gate to the size of the change — a small pure-Simple lib
 edit is NOT a full bootstrap. See `.claude/rules/bootstrap.md` § "Verification

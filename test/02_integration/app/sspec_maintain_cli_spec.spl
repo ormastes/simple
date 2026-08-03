@@ -1,12 +1,196 @@
+# REQ-SSDOC-001, REQ-SSDOC-005, REQ-SSDOC-007, REQ-SSDOC-008, REQ-SSDOC-010
 use std.spec.*
 use app.sspec_maintain.main.{run_sspec_maintain}
+use app.sspec_maintain.{preview_sspec_text_result, scaffold_reference_text,
+    analyze_sspec_text, parse_sspec_suppressions, apply_sspec_suppressions}
+use app.sspec_maintain.cache.{SspecCacheRecord, encode_sspec_cache_record,
+    decode_sspec_cache_record}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, file_read, file_delete,
+    file_exists}
+use app.io.mod.{process_run}
+use std.nogc_sync_mut.io.dir_ops.{dir_walk, dir_remove, dir_create_all}
 
 describe "sspec-maintain CLI contract":
-    it "shows help without requiring a path":
+    it "shows compatibility help without requiring a path":
         expect(run_sspec_maintain(["--help"])).to_equal(0)
 
     it "rejects an unknown operation with usage status":
         expect(run_sspec_maintain(["unknown", "fixture.spl"])).to_equal(2)
 
     it "reports missing input as an IO failure":
-        expect(run_sspec_maintain(["scan", "build/sspec-maintain/missing_spec.spl"])).to_equal(3)
+        expect(run_sspec_maintain([
+            "scan", "build/sspec-maintain/missing_spec.spl"])).to_equal(3)
+
+    it "routes safe mechanical edits through EasyFix":
+        val source = "use std.spipe\ndescribe \"feature\":\n" +
+            "    it \"reports the result\":\n        @step \"Run it\"\n" +
+            "        expect(run_product()).to_equal(1)\n"
+        match preview_sspec_text_result("fixture_spec.spl", source):
+            case Err(message): fail(message)
+            case Ok(change):
+                expect(change.changed).to_equal(true)
+                expect(change.content).to_contain("use std.spec.*")
+                expect(change.content).to_contain("# @step: Run it")
+                expect(change.rollback_content).to_equal(source)
+
+    it "applies atomically only after explicit confirmation and keeps rollback":
+        val path = "/tmp/sspec_maintain_apply_spec.spl"
+        val rollback = "/tmp/sspec_maintain_apply.rollback"
+        val source = "use std.spipe\ndescribe \"feature\":\n" +
+            "    it \"reports the result\":\n        @step \"Run it\"\n" +
+            "        expect(run_product()).to_equal(1)\n"
+        expect(file_atomic_write(path, source)).to_equal(true)
+        val (_, _, chmod_status) = process_run("/usr/bin/chmod", ["750", path])
+        expect(chmod_status).to_equal(0)
+        expect(run_sspec_maintain(["improve", path, "--apply", "--rollback",
+            rollback])).to_equal(0)
+        val changed = file_read(path) ?? ""
+        val rollback_content = file_read(rollback) ?? ""
+        expect(changed).to_contain("# @step: Run it")
+        expect(rollback_content).to_contain("before_sha256:")
+        expect(rollback_content).to_contain("--- original source ---")
+        val (mode, _, stat_status) = process_run(
+            "/usr/bin/stat", ["-c", "%a", path])
+        expect(stat_status).to_equal(0)
+        expect(mode.trim()).to_equal("750")
+        expect(run_sspec_maintain(["improve", path, "--apply", "--rollback",
+            rollback])).to_equal(0)
+        expect(file_read(path) ?? "").to_equal(changed)
+        file_delete(path)
+        file_delete(rollback)
+
+    it "scaffolds provenance structured steps and fail-fast review mappings":
+        val reference = "# Feature\n## REQ-101: reports status\n" +
+            "Precondition: a project exists\nAction: Run the checker\n" +
+            "Expected: The status is visible in the log\nExample: green project\n"
+        val scaffold = scaffold_reference_text("reference.md", reference)
+        expect(scaffold).to_contain("Reference SHA-256:")
+        expect(scaffold).to_contain("# @req: REQ-101")
+        expect(scaffold).to_contain("step(\"Given a project exists\")")
+        expect(scaffold).to_contain("step(\"Run the checker\")")
+        expect(scaffold).to_contain("# @capture:")
+        expect(scaffold).to_contain("REQ-101 <- reference.md:2")
+        expect(scaffold).to_contain("fail(\"TODO:")
+
+    it "previews scaffold writes and requires apply plus overwrite confirmation":
+        val reference_path = "/tmp/sspec_maintain_reference.md"
+        val output_path = "/tmp/sspec_maintain_scaffold_spec.spl"
+        file_delete(output_path)
+        expect(file_atomic_write(reference_path,
+            "# Feature\n## REQ-202: reports health\nAction: Probe health\nExpected: Health is visible\n")).to_equal(true)
+        expect(run_sspec_maintain(["scaffold", reference_path,
+            "--output", output_path])).to_equal(0)
+        expect(file_exists(output_path)).to_equal(false)
+        expect(run_sspec_maintain(["scaffold", reference_path,
+            "--output", output_path, "--apply"])).to_equal(0)
+        expect(file_read(output_path) ?? "").to_contain("# @req: REQ-202")
+        expect(run_sspec_maintain(["scaffold", reference_path,
+            "--output", output_path, "--apply"])).to_equal(3)
+        expect(run_sspec_maintain(["scaffold", reference_path,
+            "--output", output_path, "--apply", "--overwrite"])).to_equal(0)
+        file_delete(reference_path)
+        file_delete(output_path)
+
+    it "round trips deterministic multi-format cache payloads":
+        val record = SspecCacheRecord(schema_version: "sspec-maintain-cache/v1",
+            identity: "identity", effective_score: 73,
+            maximum_severity_rank: 2, human_report: "human\nreport",
+            json_report: "{\"score\":73}", sarif_report: "{\"runs\":[]}")
+        match decode_sspec_cache_record(encode_sspec_cache_record(record)):
+            case Err(message): fail(message)
+            case Ok(decoded):
+                expect(decoded.identity).to_equal("identity")
+                expect(decoded.effective_score).to_equal(73)
+                expect(decoded.human_report).to_equal("human\nreport")
+                expect(decoded.json_report).to_equal("{\"score\":73}")
+
+    it "keeps scan advisory while score and severity policies fail independently":
+        val path = "/tmp/sspec_maintain_policy_spec.spl"
+        val source = "use std.spec.*\ndescribe \"weak\":\n" +
+            "    it \"has no oracle\":\n        step(\"Run\")\n"
+        expect(file_atomic_write(path, source)).to_equal(true)
+        expect(run_sspec_maintain(["scan", path, "--no-cache"])).to_equal(0)
+        expect(run_sspec_maintain(["scan", path, "--no-cache",
+            "--min-score", "100"])).to_equal(1)
+        expect(run_sspec_maintain(["scan", path, "--no-cache",
+            "--deny-severity", "blocker"])).to_equal(1)
+        file_delete(path)
+
+    it "scans deterministic directory scope and fails closed when it is empty":
+        val scope = "/tmp/sspec_maintain_scope"
+        dir_remove(scope, true)
+        expect(dir_create_all(scope)).to_equal(true)
+        val source = "use std.spec.*\ndescribe \"scope\":\n" +
+            "    it \"returns ready\":\n        step(\"Run\")\n" +
+            "        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(scope + "/b_spec.spl", source)).to_equal(true)
+        expect(file_atomic_write(scope + "/a_spec.spl", source)).to_equal(true)
+        expect(file_atomic_write(scope + "/ignored.spl", source)).to_equal(true)
+        expect(run_sspec_maintain(["scan", scope, "--no-cache"])).to_equal(0)
+        file_delete(scope + "/a_spec.spl")
+        file_delete(scope + "/b_spec.spl")
+        expect(run_sspec_maintain(["scan", scope, "--no-cache"])).to_equal(3)
+        dir_remove(scope, true)
+
+    it "reuses content-addressed cache and invalidates source and mirror changes":
+        val path = "/tmp/sspec_maintain_cache_spec.spl"
+        val mirror = "/tmp/sspec_maintain_cache_spec.md"
+        val cache = "/tmp/sspec_maintain_cache_records"
+        dir_remove(cache, true)
+        file_delete(mirror)
+        expect(file_atomic_write(path,
+            "use std.spec.*\ndescribe \"cache\":\n    it \"returns ready\":\n" +
+            "        step(\"Run\")\n        expect(status()).to_equal(\"ready\")\n")).to_equal(true)
+        expect(run_sspec_maintain(["scan", path, "--cache", cache])).to_equal(0)
+        val first_count = dir_walk(cache).len()
+        expect(first_count).to_be_greater_than(0)
+        expect(run_sspec_maintain(["scan", path, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(first_count)
+        expect(file_atomic_write(path, (file_read(path) ?? "") + "\n# changed\n")).to_equal(true)
+        expect(run_sspec_maintain(["scan", path, "--cache", cache])).to_equal(0)
+        val source_changed_count = dir_walk(cache).len()
+        expect(source_changed_count).to_be_greater_than(first_count)
+        expect(file_atomic_write(mirror, "# Manual\n")).to_equal(true)
+        expect(run_sspec_maintain(["scan", path, "--cache", cache])).to_equal(0)
+        expect(dir_walk(cache).len()).to_be_greater_than(source_changed_count)
+        val before_bypass = dir_walk(cache).len()
+        expect(run_sspec_maintain(["scan", path, "--cache", cache,
+            "--no-cache"])).to_equal(0)
+        expect(dir_walk(cache).len()).to_equal(before_bypass)
+        file_delete(path)
+        file_delete(mirror)
+        dir_remove(cache, true)
+
+    it "applies reviewed non-blocker suppressions but never hides blockers":
+        val report = analyze_sspec_text("fixture_spec.spl",
+            "use std.spec.*\ndescribe \"named behavior\":\n" +
+            "    it \"returns ready\":\n        step(\"Run\")\n" +
+            "        expect(product_status()).to_equal(\"ready\")\n")
+        match parse_sspec_suppressions("SSDOC-NAR-001|docs-owner|covered externally\n"):
+            case Err(message): fail(message)
+            case Ok(suppressions):
+                match apply_sspec_suppressions(report, suppressions):
+                    case Err(message): fail(message)
+                    case Ok(updated):
+                        expect(updated.suppressed_count).to_equal(1)
+                        expect(updated.findings[0].suppression_owner).to_equal("docs-owner")
+
+    it "applies reviewed CLI suppressions to the selected non-blocker rule":
+        val path = "/tmp/sspec_maintain_suppression_spec.spl"
+        val suppressions_path = "/tmp/sspec_maintain_suppressions.txt"
+        val source = "\"\"\"## Audience\n## Operator workflow\n# @manual: primary\n" +
+            "REQ-001\ndoc/01_research/x.md\ndoc/03_plan/x.md\n" +
+            "doc/04_architecture/x.md\ndoc/05_design/x.md\n\"\"\"\n" +
+            "use std.spec.*\ndescribe \"behavior\":\n    it \"returns ready\":\n" +
+            "        # @req: REQ-001\n        # @capture(text)\n" +
+            "        step(\"Run\")\n        expect(status()).to_equal(\"ready\")\n"
+        expect(file_atomic_write(path, source)).to_equal(true)
+        expect(file_atomic_write(suppressions_path,
+            "SSDOC-NAR-001|docs-owner|audience-only fixture\n")).to_equal(true)
+        expect(run_sspec_maintain(["scan", path, "--no-cache", "--rule",
+            "SSDOC-NAR-001", "--min-score", "100"])).to_equal(1)
+        expect(run_sspec_maintain(["scan", path, "--no-cache", "--rule",
+            "SSDOC-NAR-001", "--min-score", "100", "--suppressions",
+            suppressions_path])).to_equal(0)
+        file_delete(path)
+        file_delete(suppressions_path)

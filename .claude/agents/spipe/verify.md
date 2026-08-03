@@ -213,4 +213,7 @@ If a fix requires significant code changes, flag it for Phase 5 re-entry.
 
 Changed SSpec/manual pairs require one deterministic `simple sspec-maintain
 scan` gate. Blockers, threshold regression, stale mirrors, impure JSON/SARIF,
-or non-failing generated placeholders prevent PASS.
+or non-failing generated placeholders prevent PASS. Review all seven scores,
+requirement-test traceability, and any suppression record (rule, owner, reason,
+bounded scope). Confirm exact approval/rollback for applied edits and that
+`documentize` reused SPipe.

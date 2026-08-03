@@ -127,6 +127,10 @@ specs:
 4. Update `@step`, `@capture`, `@inline`, `@prev`, helper/checker names, and
    manual visibility until the primary flow is understandable without opening
    the source test and the generator reports `0 stubs`.
+5. Run `simple sspec-maintain scan <spec>` and design against all seven score
+   dimensions, stable findings, mirror state, and blocker cap. Record the
+   requirement-to-scenario mapping; a scaffold with an unresolved oracle stays
+   fail-fast and cannot satisfy an AC.
 
 Reference: `doc/07_guide/infra/sspec_scenario_manual.md`.
 

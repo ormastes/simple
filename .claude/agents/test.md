@@ -114,3 +114,11 @@ bin/simple test --only-slow              # Slow tests only
 - `/spipe` - Full SPipe BDD framework guide
 - `/test` - Test methodology and coverage
 - `.claude/templates/spipe_template.spl` - Template for new specs
+
+## SSpec documentization gate
+
+For changed SSpec/manual pairs, run `simple sspec-maintain scan <spec>` and
+review all seven scores, blockers, stable findings, mirror state, and REQ
+traceability. Scaffolds preserve source hash/REQ IDs and fail fast until real
+assertions exist. `improve` requires exact confirmation and rollback;
+`documentize` reuses SPipe.

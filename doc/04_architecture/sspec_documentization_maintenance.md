@@ -67,12 +67,14 @@ owns deterministic analysis and edit/scaffold results.
 
 | Module | Responsibility |
 |---|---|
-| `src/app/sspec_maintain/types.spl` | Stable report, score, options, scaffold/apply result types |
-| `source_model.spl` | Single-pass structural facts from SSpec and mirrored manual text |
+| `src/app/sspec_maintain/model.spl` | Stable report, score, options, scaffold/apply result types |
+| `source_facts.spl` | Single-pass structural facts from SSpec and mirrored manual text |
 | `rules.spl` | Stable `SSDOC-*` findings; no rendering or I/O |
 | `score.spl` | Seven components, weights, deductions, blocker cap |
 | `report.spl` | Human/JSON/SARIF-compatible serializers and exit-policy helpers |
-| `cache.spl` | Content-addressed report cache and baseline fingerprints |
+| `cache.spl` | Content-addressed multi-format report cache and baseline fingerprints |
+| `suppression.spl` | Reviewed owner/reason suppression codec and blocker guard |
+| `lifecycle.spl` | Repository-backed lifecycle-link resolution |
 | `improve.spl` | EasyFix collection, preview, confirmation, atomic apply, rollback record |
 | `scaffold.spl` | Markdown requirement extraction and fail-fast modern SSpec generation |
 | `documentize.spl` | Canonical SPipe docgen adapter and scorecard appendix |
@@ -149,9 +151,10 @@ The cache key is SHA-256 over:
 - score weights and relevant configuration;
 - tool version.
 
-One file is read once per analysis. A content-addressed cache record stores the
-report model, not rendered output. Create/edit/move/rename/delete/manual refresh
-naturally change identity or content. Rule/config/tool changes change the key.
+One file is parsed once per analysis. A content-addressed cache record stores
+all deterministic serializations from one report plus the score/severity policy
+summary needed on a hit. Create/edit/move/rename/delete/manual refresh naturally
+change identity or content. Rule/config/tool changes change the key.
 `--no-cache` bypasses lookup/write and must serialize identically except for the
 explicit cache disposition field.
 
@@ -165,7 +168,8 @@ The write path is:
 ```text
 read + hash -> collect safe fixes -> apply in memory -> preview
             -> confirm/apply -> verify source hash unchanged
-            -> write rollback artifact -> atomic write -> reparse/check once
+            -> isolated canonical reparse -> write rollback artifact
+            -> atomic mode-preserving write
 ```
 
 Only deterministic edits receive `Certain`/`Safe`. Narrative, requirements,
@@ -196,9 +200,10 @@ It never synthesizes stakeholder prose.
 ## CLI/MCP startup and hot paths
 
 The CLI is file-delegated like `spipe-docgen`; startup imports the maintenance
-capsule only when invoked. MCP exposes a read-only scan tool and a separate
-mutating improve/scaffold tool classification. Normal MCP startup does not scan
-the repository or warm the cache.
+capsule only when invoked. MCP exposes read-only `simple_sspec_scan` and
+conservative write-capable `simple_sspec_maintain` classifications over the
+same CLI owner. Normal MCP startup does not scan the repository or warm the
+cache.
 
 Maintenance analysis is not a request-handler hot path. IDE/MCP changed-file
 calls use the content cache and never run docgen, subprocess verification, or a

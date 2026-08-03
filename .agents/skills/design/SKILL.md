@@ -73,6 +73,11 @@ description: Create architecture, UI design, system tests, and detail design for
 - Generate/read mirrored `doc/06_spec/...` for scenario-oriented specs and
   update steps/captures/visibility until the manual is usable without opening
   the source test.
+- Run `simple sspec-maintain scan <spec>` and review all seven scores, stable
+  findings, blocker cap, mirror state, and REQ-to-scenario traceability. A
+  reference scaffold remains fail-fast until its oracle is implemented. Full
+  external standards use the shared lossless `spec-to-spipe` architecture
+  (`spec-to-sspec` is its compatibility name).
 - If design changes workflow/tooling, evidence wrappers, generated spec shape,
   or verification contracts, update matching `doc/07_guide`, `doc/06_spec`,
   `.codex/skills/`, `.agents/skills/`, `.claude/skills/`,

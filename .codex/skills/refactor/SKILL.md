@@ -84,7 +84,14 @@ Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
 ## SSpec documentization maintenance
 
 For changed `*_spec.spl`, run `simple sspec-maintain scan <spec>` beside lint
-and duplicate-check. Treat its seven dimensions and `SSDOC-*` findings as
-refactoring evidence. `improve` is preview-only; require confirmation before
-`--apply` and retain rollback material. Never mechanically rewrite scenario
-meaning, assertions, REQ mappings, or authored narrative.
+and duplicate-check. Review narrative, structure, oracle, traceability,
+evidence, coverage, and maintainability separately; a blocker caps the
+aggregate at 49. Directory scans must not pass on empty scope, missing/stale
+mirrors, configured threshold/severity failure, or machine-output pollution.
+Compare stable finding fingerprints with the reviewed baseline; any suppression
+must name rule, owner, reason, and bounded scope. `improve` is preview-only;
+require confirmation before `--apply`, retain rollback material, and rerun the
+focused gate once. Never mechanically rewrite scenario meaning, assertions,
+REQ mappings, evidence claims, or authored narrative. Use `--baseline` for a
+reviewed fingerprint ledger and `--suppressions` only with
+`RULE_ID|owner|reason|optional-fingerprint`; blockers cannot be suppressed.

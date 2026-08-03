@@ -145,3 +145,9 @@ active.
 - Avoid full-tree scans and per-request subprocesses in hot request handlers unless explicitly designed and justified
 - When adding caches or indexes tied to writable files, add invalidation on all relevant mutation paths
 - Add perf smoke checks for startup and representative tool requests when touching performance-sensitive tooling
+
+Changed SSpec/manual pairs require one reviewed
+`simple sspec-maintain scan <spec>`. Inspect all seven dimensions, stable
+findings, blocker/mirror state, and traceability. Preview automatic improvement,
+apply only after exact confirmation with rollback, and keep reference scaffolds
+fail-fast. `documentize` must reuse the SPipe manual owner.

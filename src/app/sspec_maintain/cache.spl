@@ -1,5 +1,26 @@
 use std.crypto.sha256.{sha256_text}
 
+struct SspecAnalysisIdentityParts:
+    path: text
+    source: text
+    mirror_identity: text
+    rules_identity: text
+    config_identity: text
+    tool_identity: text
+
+struct SspecCacheRecord:
+    schema_version: text
+    identity: text
+    effective_score: i64
+    maximum_severity_rank: i64
+    human_report: text
+    json_report: text
+    sarif_report: text
+
+fn sspec_analysis_identity(parts: SspecAnalysisIdentityParts) -> text:
+    sspec_cache_identity(parts.path, parts.source, parts.mirror_identity,
+        parts.rules_identity, parts.config_identity, parts.tool_identity)
+
 fn sspec_cache_identity(path: text, source: text, mirror_identity: text,
         rules_identity: text, config_identity: text, tool_identity: text) -> text:
     sha256_text(path + "\n" + sha256_text(source) + "\n" + mirror_identity +
@@ -14,3 +35,63 @@ fn sspec_resolved_fingerprints(active: [text], previous: [text]) -> [text]:
         if not active.contains(fingerprint):
             resolved.push(fingerprint)
     resolved
+
+fn encode_sspec_cache_record(record: SspecCacheRecord) -> text:
+    "schema={record.schema_version}\nidentity={record.identity}\n" +
+        "score={record.effective_score}\nseverity={record.maximum_severity_rank}\n" +
+        "human_len={record.human_report.len()}\njson_len={record.json_report.len()}\n" +
+        "sarif_len={record.sarif_report.len()}\n--payload--\n" +
+        record.human_report + record.json_report + record.sarif_report
+
+fn _cache_header_value(lines: [text], key: text) -> text:
+    val prefix = key + "="
+    for line in lines:
+        if line.starts_with(prefix):
+            return line[prefix.len():]
+    ""
+
+fn decode_sspec_cache_record(content: text) -> Result<SspecCacheRecord, text>:
+    val marker = "\n--payload--\n"
+    val marker_offset = content.find(marker)
+    if marker_offset < 0:
+        return Err("truncated SSpec cache record")
+    val lines = content[:marker_offset].split("\n")
+    val schema = _cache_header_value(lines, "schema")
+    if schema != "sspec-maintain-cache/v1":
+        return Err("unsupported SSpec cache schema")
+    val identity = _cache_header_value(lines, "identity")
+    val score = _cache_header_value(lines, "score").to_i64() ?? -1
+    val severity = _cache_header_value(lines, "severity").to_i64() ?? -1
+    val human_len = _cache_header_value(lines, "human_len").to_i64() ?? -1
+    val json_len = _cache_header_value(lines, "json_len").to_i64() ?? -1
+    val sarif_len = _cache_header_value(lines, "sarif_len").to_i64() ?? -1
+    if identity == "" or score < 0 or severity < 0 or human_len < 0 or
+            json_len < 0 or sarif_len < 0:
+        return Err("invalid SSpec cache header")
+    val payload = content[marker_offset + marker.len():]
+    if payload.len() != human_len + json_len + sarif_len:
+        return Err("truncated SSpec cache payload")
+    val json_start = human_len
+    val sarif_start = human_len + json_len
+    Ok(SspecCacheRecord(schema_version: schema, identity: identity,
+        effective_score: score, maximum_severity_rank: severity,
+        human_report: payload[:json_start],
+        json_report: payload[json_start:sarif_start],
+        sarif_report: payload[sarif_start:]))
+
+fn render_sspec_baseline(fingerprints: [text]) -> text:
+    var ordered: [text] = []
+    for fingerprint in fingerprints:
+        if fingerprint != "" and not ordered.contains(fingerprint):
+            ordered.push(fingerprint)
+    ordered.sort()
+    ordered.join("\n") + (if ordered.len() > 0: "\n" else: "")
+
+fn parse_sspec_baseline(content: text) -> [text]:
+    var fingerprints: [text] = []
+    for line in content.split("\n"):
+        val fingerprint = line.trim()
+        if fingerprint != "" and not fingerprints.contains(fingerprint):
+            fingerprints.push(fingerprint)
+    fingerprints.sort()
+    fingerprints

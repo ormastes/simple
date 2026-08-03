@@ -55,6 +55,12 @@ type metadata. `LLVM001` must stay clean in LLVM emitter files.
   output like a manual, then revise steps/captures/visibility until primary
   flows are manual-quality, noisy details are folded or skipped, and the
   generator reports `0 stubs`.
+- Run `simple sspec-maintain scan <spec>` for each changed SSpec/manual pair.
+  Review all seven scores and stable findings; blockers, missing/stale mirrors,
+  policy regression, or fail-fast scaffold placeholders prevent completion.
+  `improve` is preview-only until an exact patch is confirmed and rollback is
+  retained. `documentize` reuses SPipe; optional LLM advice never affects the
+  deterministic score or self-applies.
 - If design introduced shared interface or manual setup/checker helper
   placeholders, implement them or keep them failing explicitly with
   `assert(false)` or `fail(...)`. Silent no-op helpers are not valid coverage.

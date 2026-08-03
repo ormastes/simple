@@ -821,10 +821,10 @@ works; in-guest exec is blocked. Full guide + verified commands:
 
 ## Session update 2026-07-18
 
-SimpleOS desktop bring-up continues through the C1-C8 baremetal codegen 
-landmine catalog (doc/08_tracking/bug/). Recent fixes shipped: seed 
-import-alias resolution, receiver-binding under --entry-closure, NVMe DMA 
-zero-address guard, interpreter stack overflow, i64 print precision. Canonical 
+SimpleOS desktop bring-up continues through the C1-C8 baremetal codegen
+landmine catalog (doc/08_tracking/bug/). Recent fixes shipped: seed
+import-alias resolution, receiver-binding under --entry-closure, NVMe DMA
+zero-address guard, interpreter stack overflow, i64 print precision. Canonical
 reference guide (in progress): doc/07_guide/os/baremetal_simple_codegen_landmines.md.
 
 ## Verification tiering (build infra)
@@ -866,8 +866,17 @@ caveats".
 
 For SSpec authoring or cleanup, run `simple sspec-maintain scan <spec>` as the
 quality peer of lint and duplicate-check. Review all seven scores and stable
-`SSDOC-*` findings. `improve` previews; write only after explicit confirmation
-and retain rollback material. `scaffold` converts reference Markdown into
-traceable, fail-fast modern SSpec. `documentize` adds professional scoring and
-provenance while SPipe remains the canonical full-manual generator. Optional
-LLM advice is preview-only, excluded from scoring, and never self-applies.
+`SSDOC-*` findings; blockers cap the aggregate at 49. Directory/CI policy must
+fail closed for empty scope, missing/stale mirrors, configured thresholds, and
+machine-output contamination. `improve` previews; write only after explicit
+confirmation, retain rollback material, and rerun the focused evidence once.
+`scaffold` preserves reference hash and REQ identity and keeps unresolved
+oracles fail-fast. `documentize` adds professional scoring/provenance through
+the canonical SPipe manual owner. Baseline review uses `--baseline`;
+suppression review uses `--suppressions` with rule, owner, reason, and optional
+fingerprint, and blockers cannot be suppressed. Optional LLM advice is
+source-evidenced preview only, excluded
+from scoring, and never self-applies.
+Full external-standard imports follow the shared `spec-to-spipe` architecture
+(`spec-to-sspec` is a compatibility name) and retain source-ledger coverage;
+the maintenance scaffold alone is not a lossless importer.

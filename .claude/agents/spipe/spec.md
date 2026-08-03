@@ -178,6 +178,11 @@ If the answer is no to any of these, rewrite the helpers and metadata.
 - **Capture kinds match the spec type** (see Evidence Kinds table)
 - **Inline/prev chains** connect setup to dependent scenarios
 - `spipe-docgen` generated mirrored `doc/06_spec/...` manuals with `0 stubs`
+- `simple sspec-maintain scan <spec>` was reviewed across all seven scores,
+  stable findings, blocker cap, mirror state, and requirement traceability;
+  reference scaffolds remain explicitly fail-fast until implemented; full
+  external standards use the shared lossless `spec-to-spipe` architecture
+  (`spec-to-sspec` is its compatibility name)
 - All specs WOULD FAIL (no implementation exists yet)
 - State file contains `## Specs` with file list, generated manual paths, AC
   coverage matrix, and manual shape

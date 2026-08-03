@@ -102,5 +102,10 @@ Run after EACH phase. NEVER skip failing tests. Fix refactoring, not tests.
 ## SSpec maintenance
 
 For changed SSpec sources, include `simple sspec-maintain scan <spec>` beside
-lint and duplicate-check. `improve` previews only; confirm before `--apply` and
-retain rollback material. Do not auto-rewrite behavior or assertions.
+lint and duplicate-check. Review all seven scores, stable findings, blocker cap,
+mirror state, and REQ traceability. Empty directory scope, missing/stale mirror,
+or configured policy failure is not clean. `improve` previews only; confirm the
+exact patch before `--apply` and retain rollback material. Suppressions use a
+reviewed `--suppressions` file with
+`RULE_ID|owner|reason|optional-fingerprint`; blockers cannot be suppressed. Do
+not auto-rewrite behavior, assertions, requirements, evidence, or prose.

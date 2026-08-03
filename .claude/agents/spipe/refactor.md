@@ -85,5 +85,7 @@ If a refactoring risks breaking behavior, skip it and note in state file.
 - Updated `.spipe/<feature>/state.md`
 
 For changed SSpec, include `simple sspec-maintain scan` in the refactor
-inventory. Preview improvements, obtain explicit confirmation before apply,
-retain rollback material, and record the post-change scorecard/mirror state.
+inventory. Review all seven scores, stable findings, blocker cap, mirror state,
+and REQ traceability. Preview improvements, obtain explicit confirmation before
+apply, retain rollback material, and record the post-change scorecard/mirror
+state. Suppressions require rule, owner, reason, and bounded scope.

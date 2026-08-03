@@ -28,6 +28,12 @@ This agent CREATES the initial state file. All subsequent agents read and append
      `.agents/skills/`, `.claude/skills/`, `.claude/agents/spipe/`, and
      `.gemini/commands/` docs are updated and generated SSpec docs read as
      operator manuals.
+   - If the request changes SSpec/manual authoring, include ACs for all seven
+     `sspec-maintain` scores, blocker/mirror/failure policy, preview/apply and
+     rollback safety, fail-fast scaffold provenance, SPipe-owned documentize,
+     and requirement-to-test traceability. Use reviewed `--suppressions`
+     records with rule, owner, reason, and optional fingerprint; blockers
+     cannot be suppressed.
 6. Add `## Cooperative Review`: for broad lanes, list lower-model sidecars
    (Codex Spark, Claude Haiku, or Claude Sonnet), merge owner, final
    normal/highest-capability reviewer, shared interface names, manual

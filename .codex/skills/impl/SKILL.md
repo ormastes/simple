@@ -126,6 +126,14 @@ bin/simple lint <changed .spl files>
 bin/simple duplicate-check <owned-dir> --mode token --min-lines 5
 ```
 
+For every changed SSpec/manual pair, also run
+`simple sspec-maintain scan <spec>` once. Inspect all seven component scores,
+blockers, stable findings, mirror state, and requirement traceability. Preview
+`improve`; apply only an exact confirmed patch with rollback. Reference
+scaffolds must preserve provenance and fail fast until real oracles exist.
+`documentize` must reuse SPipe, and the mirrored manual must pass a human
+operator-manual review before verification.
+
 For compiler backend changes, add or refresh focused lint/spec coverage for
 invalid target text such as `call nil`, `phi nil`, `getelementptr nil`, and raw
 LLVM result type metadata. `LLVM001` must stay clean in LLVM emitter files. If

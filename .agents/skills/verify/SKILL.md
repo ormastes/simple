@@ -217,5 +217,8 @@ not create, rewrite, or weaken SPipe after verification.
 
 Run `simple sspec-maintain scan` once for changed SSpec/manual pairs. Blockers,
 threshold failures, stale mirrors, placeholder scaffolds presented as passing,
-or machine-output contamination fail verification. Confirm preview/apply and
-rollback evidence for automatic changes.
+or machine-output contamination fail verification. Review all seven scores and
+REQ-to-test traceability. Confirm preview/apply and rollback evidence for
+automatic changes. A suppression needs stable rule, owner, reason, and bounded
+scope. Use the reviewed `--suppressions` file format
+`RULE_ID|owner|reason|optional-fingerprint`; blockers cannot be suppressed.

@@ -444,3 +444,26 @@ Every named setup or checker helper used by a displayed scenario must be
 understandable from the manual itself: show it as a visible step or include its
 complete implementation in folded executable source. A missing or empty helper
 flow is incomplete documentation even when scenario and stub counts are zero.
+# SSpec maintenance score before handoff
+
+After generating and reading a changed scenario manual, run:
+
+```text
+simple sspec-maintain scan test/path/feature_spec.spl
+```
+
+Treat the seven scores as separate review lenses: narrative, structure, oracle,
+traceability, evidence, coverage, and maintainability. Do not accept a high
+aggregate while an oracle blocker, unresolved scaffold, missing/stale mirror,
+or unbound requirement remains. Use `improve` only to preview mechanical edits;
+semantic prose, behavior, assertions, REQ mappings, and evidence claims require
+an explicitly confirmed patch. `documentize` delegates the full manual to
+SPipe and adds score/provenance; it is not a parallel renderer.
+
+For directory scans, keep deterministic path order and apply the configured
+minimum-score/severity policy per report. Baseline or suppression review must
+name the stable finding, owner, reason, and bounded scope. The persisted
+suppression CLI is not complete yet, so do not invent flags or treat an
+unrecorded exception as PASS. See
+`doc/07_guide/infra/sspec_documentization_maintenance.md` for the current versus
+release-required behavior.

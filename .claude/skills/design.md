@@ -41,3 +41,8 @@ instructions before implementation handoff.
 
 - Never design without approved architecture (`/arch`)
 - If another LLM already created artifacts, review and extend — never overwrite
+
+For scenario-oriented design, generate/read the mirror, then run
+`simple sspec-maintain scan <spec>`. Review all seven scores, blockers, mirror
+state, and REQ-to-scenario traceability. Preserve reference provenance and keep
+unresolved scaffold oracles fail-fast.
