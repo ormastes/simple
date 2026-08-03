@@ -52,12 +52,40 @@ validate_cpu_matrix() {
             "emit backend IR" "validate backend IR" "emit object" \
             "validate object" "link artifact" "run or read back"
         do
-            count="$(grep -Ec "^backend=$backend step=$stage status=(PASS|FAIL|SKIP_UNAVAILABLE) " "$matrix_file" || true)"
+            count="$(grep -Ec "^backend=$backend step=$stage status=(PASS|FAIL|SKIP_UNAVAILABLE|NOT_APPLICABLE) reason=[^ ]+ artifact=.+$" "$matrix_file" || true)"
             [ "$count" -eq 1 ] || return 1
         done
     done
     summary_count="$(grep -Ec '^cpu_backend_matrix status=(PASS|FAIL|SKIP_UNAVAILABLE) ' "$matrix_file" || true)"
-    [ "$summary_count" -eq 1 ]
+    [ "$summary_count" -eq 1 ] || return 1
+    summary="$(grep -E '^cpu_backend_matrix status=(PASS|FAIL|SKIP_UNAVAILABLE) ' "$matrix_file")"
+    summary_status="$(printf '%s\n' "$summary" | sed -n 's/^cpu_backend_matrix status=\([^ ]*\).*/\1/p')"
+    summary_failures="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^failures=//p')"
+    summary_skips="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^skips=//p')"
+    summary_required="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^require_all=//p')"
+    summary_not_applicable="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^not_applicable=//p')"
+    case "$summary_failures:$summary_skips:$summary_required" in
+        *[!0-9:]*|'') return 1 ;;
+    esac
+    [ "$summary_required" = 0 ] || [ "$summary_required" = 1 ] || return 1
+    failures="$(grep -Ec '^backend=.* status=FAIL ' "$matrix_file" || true)"
+    skips="$(grep -Ec '^backend=.* status=SKIP_UNAVAILABLE ' "$matrix_file" || true)"
+    not_applicable="$(grep -Ec '^backend=.* status=NOT_APPLICABLE ' "$matrix_file" || true)"
+    [ "$summary_failures" -eq "$failures" ] || return 1
+    [ "$summary_skips" -eq "$skips" ] || return 1
+    if [ "$not_applicable" -gt 0 ]; then
+        [ "$summary_not_applicable" = "$not_applicable" ] || return 1
+    elif [ -n "$summary_not_applicable" ]; then
+        [ "$summary_not_applicable" = 0 ] || return 1
+    fi
+    if [ "$failures" -gt 0 ] || { [ "$summary_required" = 1 ] && [ "$skips" -gt 0 ]; }; then
+        expected_status=FAIL
+    elif [ "$skips" -gt 0 ]; then
+        expected_status=SKIP_UNAVAILABLE
+    else
+        expected_status=PASS
+    fi
+    [ "$summary_status" = "$expected_status" ]
 }
 
 validate_gpu_matrix() {
@@ -66,12 +94,55 @@ validate_gpu_matrix() {
     [ "$row_total" -eq 20 ] || return 1
     for backend in cuda vulkan metal hip opencl; do
         for stage in emit validate link runtime; do
-            count="$(grep -Ec "^${backend}_${stage}_result=(PASS|FAIL|SKIP_UNAVAILABLE)$" "$matrix_file" || true)"
+            count="$(grep -Ec "^${backend}_${stage}_result=(PASS|FAIL|SKIP_UNAVAILABLE|NOT_APPLICABLE)$" "$matrix_file" || true)"
             [ "$count" -eq 1 ] || return 1
+            reason_count="$(grep -Ec "^${backend}_${stage}_reason=.+$" "$matrix_file" || true)"
+            probe_count="$(grep -Ec "^${backend}_${stage}_probe=.+$" "$matrix_file" || true)"
+            [ "$reason_count" -eq 1 ] || return 1
+            [ "$probe_count" -eq 1 ] || return 1
         done
     done
     summary_count="$(grep -Ec '^gpu_backend_matrix status=(PASS|FAIL|SKIP_UNAVAILABLE) ' "$matrix_file" || true)"
-    [ "$summary_count" -eq 1 ]
+    [ "$summary_count" -eq 1 ] || return 1
+    summary="$(grep -E '^gpu_backend_matrix status=(PASS|FAIL|SKIP_UNAVAILABLE) ' "$matrix_file")"
+    summary_status="$(printf '%s\n' "$summary" | sed -n 's/^gpu_backend_matrix status=\([^ ]*\).*/\1/p')"
+    summary_backends="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^backends=//p')"
+    summary_layers="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^layers=//p')"
+    summary_unique="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^unique=//p')"
+    summary_expected="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^expected=//p')"
+    summary_pass="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^pass=//p')"
+    summary_failures="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^failures=//p')"
+    summary_skips="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^skips=//p')"
+    summary_not_applicable="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^not_applicable=//p')"
+    summary_runtime="$(printf '%s\n' "$summary" | tr ' ' '\n' | sed -n 's/^runtime=//p')"
+    case "$summary_backends:$summary_layers:$summary_unique:$summary_expected:$summary_pass:$summary_failures:$summary_skips" in
+        *[!0-9:]*|'') return 1 ;;
+    esac
+    [ "$summary_backends" -eq 5 ] || return 1
+    [ "$summary_layers" -eq 20 ] || return 1
+    [ "$summary_unique" -eq 20 ] || return 1
+    [ "$summary_expected" -eq 20 ] || return 1
+    [ "$summary_runtime" = true ] || [ "$summary_runtime" = false ] || return 1
+    passes="$(grep -Ec '_result=PASS$' "$matrix_file" || true)"
+    failures="$(grep -Ec '_result=FAIL$' "$matrix_file" || true)"
+    skips="$(grep -Ec '_result=SKIP_UNAVAILABLE$' "$matrix_file" || true)"
+    not_applicable="$(grep -Ec '_result=NOT_APPLICABLE$' "$matrix_file" || true)"
+    [ "$summary_pass" -eq "$passes" ] || return 1
+    [ "$summary_failures" -eq "$failures" ] || return 1
+    [ "$summary_skips" -eq "$skips" ] || return 1
+    if [ "$not_applicable" -gt 0 ]; then
+        [ "$summary_not_applicable" = "$not_applicable" ] || return 1
+    elif [ -n "$summary_not_applicable" ]; then
+        [ "$summary_not_applicable" = 0 ] || return 1
+    fi
+    if [ "$failures" -gt 0 ]; then
+        expected_status=FAIL
+    elif [ "$skips" -gt 0 ]; then
+        expected_status=SKIP_UNAVAILABLE
+    else
+        expected_status=PASS
+    fi
+    [ "$summary_status" = "$expected_status" ]
 }
 
 validate_cpu_matrix "$CPU_MATRIX" || fail cpu-matrix-incomplete-or-malformed

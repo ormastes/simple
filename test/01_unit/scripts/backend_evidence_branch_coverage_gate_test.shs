@@ -28,9 +28,40 @@ write_gpu_matrix() {
     for backend in cuda vulkan metal hip opencl; do
         for stage in emit validate link runtime; do
             echo "${backend}_${stage}_result=SKIP_UNAVAILABLE" >>"$output"
+            echo "${backend}_${stage}_reason=test" >>"$output"
+            echo "${backend}_${stage}_probe=none" >>"$output"
         done
     done
     echo "gpu_backend_matrix status=SKIP_UNAVAILABLE backends=5 layers=20 unique=20 expected=20 pass=0 failures=0 skips=20 runtime=false" >>"$output"
+}
+
+write_mixed_cpu_matrix() {
+    output="$1"
+    : >"$output"
+    for backend in llvm cranelift wasm; do
+        echo "backend=$backend step=emit backend IR status=PASS reason=verified artifact=ir" >>"$output"
+        echo "backend=$backend step=validate backend IR status=FAIL reason=invalid artifact=ir" >>"$output"
+        echo "backend=$backend step=emit object status=SKIP_UNAVAILABLE reason=missing-tool artifact=none" >>"$output"
+        echo "backend=$backend step=validate object status=NOT_APPLICABLE reason=capability-boundary artifact=none" >>"$output"
+        echo "backend=$backend step=link artifact status=PASS reason=verified artifact=bin" >>"$output"
+        echo "backend=$backend step=run or read back status=PASS reason=verified artifact=receipt" >>"$output"
+    done
+    echo "cpu_backend_matrix status=FAIL failures=3 skips=3 require_all=0 not_applicable=3" >>"$output"
+}
+
+write_mixed_gpu_matrix() {
+    output="$1"
+    : >"$output"
+    for backend in cuda vulkan metal hip opencl; do
+        for cell in 'emit PASS' 'validate FAIL' 'link SKIP_UNAVAILABLE' 'runtime NOT_APPLICABLE'; do
+            stage="${cell% *}"
+            status="${cell#* }"
+            echo "${backend}_${stage}_result=$status" >>"$output"
+            echo "${backend}_${stage}_reason=test-$status" >>"$output"
+            echo "${backend}_${stage}_probe=test-profile" >>"$output"
+        done
+    done
+    echo "gpu_backend_matrix status=FAIL backends=5 layers=20 unique=20 expected=20 pass=5 failures=5 skips=5 not_applicable=5 runtime=true" >>"$output"
 }
 
 write_coverage() {
@@ -72,6 +103,28 @@ sh "$CHECK" --coverage "$TMP_DIR/pass.info" \
 grep -Fq 'status=PASS threshold=95 covered=57 reachable=60 percent=95.00' "$TMP_DIR/pass.out"
 grep -Fq 'cpu_matrix=18/18 gpu_matrix=20/20' "$TMP_DIR/pass.out"
 
+write_mixed_cpu_matrix "$TMP_DIR/cpu-mixed.log"
+write_mixed_gpu_matrix "$TMP_DIR/gpu-mixed.log"
+sh "$CHECK" --coverage "$TMP_DIR/pass.info" \
+    --cpu-matrix "$TMP_DIR/cpu-mixed.log" --gpu-matrix "$TMP_DIR/gpu-mixed.log" \
+    >"$TMP_DIR/mixed.out"
+grep -Fq 'status=PASS' "$TMP_DIR/mixed.out"
+
+sed 's/require_all=0/require_all=1/; s/cpu_backend_matrix status=SKIP_UNAVAILABLE/cpu_backend_matrix status=FAIL/' \
+    "$TMP_DIR/cpu.log" >"$TMP_DIR/cpu-required.log"
+sh "$CHECK" --coverage "$TMP_DIR/pass.info" \
+    --cpu-matrix "$TMP_DIR/cpu-required.log" --gpu-matrix "$TMP_DIR/gpu.log" \
+    >"$TMP_DIR/required.out"
+grep -Fq 'status=PASS' "$TMP_DIR/required.out"
+
+sed 's/cpu_backend_matrix status=FAIL/cpu_backend_matrix status=SKIP_UNAVAILABLE/' \
+    "$TMP_DIR/cpu-required.log" >"$TMP_DIR/cpu-required-contradiction.log"
+expect_code 1 "$TMP_DIR/cpu-required-contradiction.out" sh "$CHECK" \
+    --coverage "$TMP_DIR/pass.info" --cpu-matrix "$TMP_DIR/cpu-required-contradiction.log" \
+    --gpu-matrix "$TMP_DIR/gpu.log"
+grep -Fq 'status=FAIL reason=cpu-matrix-incomplete-or-malformed' \
+    "$TMP_DIR/cpu-required-contradiction.out"
+
 expect_code 2 "$TMP_DIR/missing.out" sh "$CHECK" \
     --coverage "$TMP_DIR/missing.info" --cpu-matrix "$TMP_DIR/cpu.log" --gpu-matrix "$TMP_DIR/gpu.log"
 grep -Fq 'status=MEASUREMENT_UNAVAILABLE reason=coverage-evidence-missing' "$TMP_DIR/missing.out"
@@ -111,5 +164,19 @@ sed '/^cuda_emit_result=/p' "$TMP_DIR/gpu.log" >>"$TMP_DIR/gpu.log"
 expect_code 1 "$TMP_DIR/gpu-duplicate.out" sh "$CHECK" \
     --coverage "$TMP_DIR/pass.info" --cpu-matrix "$TMP_DIR/cpu.log" --gpu-matrix "$TMP_DIR/gpu.log"
 grep -Fq 'status=FAIL reason=gpu-matrix-incomplete-or-malformed' "$TMP_DIR/gpu-duplicate.out"
+
+write_gpu_matrix "$TMP_DIR/gpu-missing-probe.log"
+sed '/^metal_link_probe=/d' "$TMP_DIR/gpu-missing-probe.log" >"$TMP_DIR/gpu-missing-probe-edited.log"
+expect_code 1 "$TMP_DIR/gpu-missing-probe.out" sh "$CHECK" \
+    --coverage "$TMP_DIR/pass.info" --cpu-matrix "$TMP_DIR/cpu.log" \
+    --gpu-matrix "$TMP_DIR/gpu-missing-probe-edited.log"
+grep -Fq 'status=FAIL reason=gpu-matrix-incomplete-or-malformed' "$TMP_DIR/gpu-missing-probe.out"
+
+write_gpu_matrix "$TMP_DIR/gpu-counter.log"
+sed 's/pass=0 failures=0/pass=1 failures=0/' "$TMP_DIR/gpu-counter.log" >"$TMP_DIR/gpu-counter-edited.log"
+expect_code 1 "$TMP_DIR/gpu-counter.out" sh "$CHECK" \
+    --coverage "$TMP_DIR/pass.info" --cpu-matrix "$TMP_DIR/cpu.log" \
+    --gpu-matrix "$TMP_DIR/gpu-counter-edited.log"
+grep -Fq 'status=FAIL reason=gpu-matrix-incomplete-or-malformed' "$TMP_DIR/gpu-counter.out"
 
 echo "backend-evidence-branch-coverage-gate-test: pass"
