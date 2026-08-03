@@ -90,4 +90,39 @@ if SIMPLE_MCP_PACKAGE_ROOT="$TMP/packages" SIMPLE_MCP_RELEASE_ASSET_DIR="$TMP/mc
     fail "bad MCP checksum accepted"
 fi
 
+# Aggregate readiness: positive and deliberate-red fixtures are built by the
+# checker itself. Required executable package roles must remain fail closed in
+# the workflow instead of being relabeled as source-only success.
+sh "$ROOT/scripts/check/check-release-beta-readiness.shs" --self-test >/dev/null
+grep -F "FULL_RUNTIME=\$(find bootstrap-artifact -path '*/bin/simple-runtime' -type f -print -quit)" "$ROOT/.github/workflows/release.yml" >/dev/null || fail "full package no longer discovers simple-runtime"
+grep -F 'test -x "$FULL_RUNTIME"' "$ROOT/.github/workflows/release.yml" >/dev/null || fail "full package no longer requires simple-runtime"
+grep -F 'test -x "$FULL_SIMPLE"' "$ROOT/.github/workflows/release.yml" >/dev/null || fail "full package no longer requires simple"
+if grep -Fq 'creating source-only full package' "$ROOT/.github/workflows/release.yml"; then
+    fail "full executable package can silently degrade to source-only"
+fi
+
+# GitHub evidence: only a successful run for the exact revision and published
+# tag may produce the final remote receipt.
+mkdir -p "$TMP/fake-gh-bin" "$TMP/github-evidence"
+cat > "$TMP/fake-gh-bin/gh" <<'EOF'
+#!/bin/sh
+if [ "$1 $2" = "run view" ]; then
+    printf '123\thttps://github.example/actions/runs/123\texact-revision\tsuccess\n'
+elif [ "$1 $2" = "release view" ]; then
+    printf 'v1.0.0-beta.2\tfalse\ttrue\n'
+else
+    exit 1
+fi
+EOF
+chmod +x "$TMP/fake-gh-bin/gh"
+PATH="$TMP/fake-gh-bin:$PATH" sh "$ROOT/scripts/check/record-release-beta-github-evidence.shs" \
+    --run-id 123 --evidence-dir "$TMP/github-evidence" \
+    --source-revision exact-revision --version 1.0.0-beta.2 >/dev/null
+grep -F -x 'conclusion=success' "$TMP/github-evidence/github_release.env" >/dev/null || fail "successful GitHub run receipt missing"
+if PATH="$TMP/fake-gh-bin:$PATH" sh "$ROOT/scripts/check/record-release-beta-github-evidence.shs" \
+    --run-id 123 --evidence-dir "$TMP/github-evidence-bad" \
+    --source-revision wrong-revision --version 1.0.0-beta.2 >/dev/null 2>&1; then
+    fail "mismatched GitHub run revision accepted"
+fi
+
 echo "release_checker_contract_test: PASS"

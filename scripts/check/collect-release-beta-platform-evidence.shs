@@ -1,0 +1,88 @@
+#!/bin/sh
+set -eu
+
+usage() {
+    echo "usage: $0 --artifacts-dir DIR --evidence-dir DIR --source-revision SHA --version VERSION" >&2
+    exit 2
+}
+
+fail() {
+    echo "release_beta_platform_evidence_status=fail reason=$1${2:+ $2}" >&2
+    exit 1
+}
+
+receipt_value() {
+    receipt_file=$1
+    receipt_key=$2
+    count=$(awk -F= -v key="$receipt_key" '$1 == key { count += 1 } END { print count + 0 }' "$receipt_file")
+    [ "$count" -eq 1 ] || fail malformed-artifact-role "file=$receipt_file key=$receipt_key count=$count"
+    awk -F= -v key="$receipt_key" '$1 == key { sub(/^[^=]*=/, ""); print; exit }' "$receipt_file"
+}
+
+sha256_file() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "$1" | awk '{print $1}'
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "$1" | awk '{print $1}'
+    else
+        fail missing-sha256-tool
+    fi
+}
+
+[ "$#" -eq 8 ] || usage
+[ "$1" = --artifacts-dir ] || usage
+artifacts_dir=$2
+[ "$3" = --evidence-dir ] || usage
+evidence_dir=$4
+[ "$5" = --source-revision ] || usage
+source_revision=$6
+[ "$7" = --version ] || usage
+version=$8
+[ -d "$artifacts_dir" ] || fail missing-artifacts-directory "path=$artifacts_dir"
+[ -n "$source_revision" ] || fail missing-source-revision
+[ -n "$version" ] || fail missing-version
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+mkdir -p "$evidence_dir"
+receipt_tmp="$evidence_dir/platforms.env.tmp.$$"
+work_dir=$(mktemp -d "${TMPDIR:-/tmp}/release-beta-platforms.XXXXXX")
+trap 'rm -f "$receipt_tmp"; rm -rf "$work_dir"' EXIT HUP INT TERM
+: > "$receipt_tmp"
+
+for platform in linux-x86_64 linux-aarch64 linux-riscv64 freebsd-x86_64 freebsd-x86 windows-x86_64 windows-aarch64; do
+    matches=$(find "$artifacts_dir" -type f -name "simple-bootstrap-${version}-${platform}.spk" -print)
+    match_count=$(printf '%s\n' "$matches" | awk 'NF { count += 1 } END { print count + 0 }')
+    [ "$match_count" -eq 1 ] || fail platform-artifact-count "platform=$platform count=$match_count"
+    archive=$matches
+    bash "$repo_root/scripts/check_release_payload.shs" --tar "$archive" >/dev/null
+    manifest_entry=$(tar -tzf "$archive" | awk '/(^|\/)artifact-role\.env$/ { print }')
+    manifest_count=$(printf '%s\n' "$manifest_entry" | awk 'NF { count += 1 } END { print count + 0 }')
+    [ "$manifest_count" -eq 1 ] || fail artifact-role-count "platform=$platform count=$manifest_count"
+    manifest="$work_dir/${platform}.env"
+    tar -xOzf "$archive" "$manifest_entry" > "$manifest"
+    if awk 'index($0, "=") == 0 || $0 ~ /^[[:space:]]/ || $0 ~ /[[:space:]]$/' "$manifest" | grep -q .; then
+        fail malformed-artifact-role-line "platform=$platform"
+    fi
+    [ "$(receipt_value "$manifest" source_revision)" = "$source_revision" ] || fail artifact-revision-mismatch "platform=$platform"
+    [ "$(receipt_value "$manifest" version)" = "$version" ] || fail artifact-version-mismatch "platform=$platform"
+    [ "$(receipt_value "$manifest" platform)" = "$platform" ] || fail artifact-platform-mismatch "platform=$platform"
+    [ "$(receipt_value "$manifest" role)" = executable ] || fail artifact-role-mismatch "platform=$platform"
+    [ "$(receipt_value "$manifest" payload_kind)" = executable ] || fail artifact-payload-kind-mismatch "platform=$platform"
+    archive_dir=$(CDPATH= cd -- "$(dirname -- "$archive")" && pwd)
+    archive_path="$archive_dir/$(basename -- "$archive")"
+    digest=$(sha256_file "$archive_path")
+    key=$(printf '%s' "$platform" | tr '-' '_')
+    cat >> "$receipt_tmp" <<EOF
+platform_${key}_status=pass
+platform_${key}_role=executable
+platform_${key}_artifact=$archive_path
+platform_${key}_sha256=$digest
+platform_${key}_payload_kind=executable
+EOF
+done
+
+mv "$receipt_tmp" "$evidence_dir/platforms.env"
+trap - EXIT HUP INT TERM
+rm -rf "$work_dir"
+echo "release_beta_platform_evidence_status=pass version=$version source_revision=$source_revision"

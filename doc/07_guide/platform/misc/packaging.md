@@ -250,7 +250,9 @@ simple install test-pkg
 
 ## CI/CD Release Workflow
 
-The release workflow (`.github/workflows/release.yml`) builds packages for all platforms automatically.
+The release workflow (`.github/workflows/release.yml`) builds and classifies the
+selected platform artifacts. A release is published only when every required
+build, full package, SimpleOS, installer, and whole-test job succeeds.
 
 **Trigger:** Tag push (`git tag vX.Y.Z && git push --tags`) or manual dispatch.
 
@@ -260,12 +262,19 @@ The release workflow (`.github/workflows/release.yml`) builds packages for all p
 |----------|--------|--------|
 | linux-x86_64 | x86_64-unknown-linux-gnu | ubuntu-latest |
 | linux-aarch64 | aarch64-unknown-linux-gnu | ubuntu-latest (cross) |
-| darwin-arm64 | aarch64-apple-darwin | macos-latest |
-| darwin-x86_64 | x86_64-apple-darwin | macos-15 |
+| linux-riscv64 | riscv64gc-unknown-linux-gnu | ubuntu-latest (cross) |
+| freebsd-x86_64 | x86_64-unknown-freebsd | ubuntu-latest (cross) |
+| freebsd-x86 | i686-unknown-freebsd | ubuntu-latest (cross) |
 | windows-x86_64 | x86_64-pc-windows-msvc | windows-latest |
 | windows-aarch64 | aarch64-pc-windows-msvc | windows-latest (cross) |
 
-**Release artifacts** include platform-specific `.tar.gz` packages plus `.sha256` checksums.
+The current beta lane excludes macOS. Cross-platform outputs must be explicitly
+classified as executable or source artifacts; source-only output cannot satisfy
+an executable package role. SimpleOS consumes the checked Linux x86_64 bootstrap
+artifact rather than relying on an undeployed repository wrapper.
+
+**Release artifacts** include platform-specific `.spk`/installer packages,
+SimpleOS and full-package tarballs, plus checksums.
 
 ### Verification
 
@@ -276,6 +285,59 @@ sha256sum -c simple-bootstrap-0.5.0-linux-x86_64.tar.gz.sha256
 # Verify no Rust files in package
 tar -tzf simple-bootstrap-0.5.0-linux-x86_64.tar.gz | grep -E '\.(rs|toml)$'
 # Should return nothing
+```
+
+Before release, validate the collected receipts:
+
+```bash
+sh scripts/check/check-release-beta-readiness.shs --evidence-dir build/release-beta/evidence
+```
+
+Derive the platform receipt from artifacts downloaded from the completed run:
+
+```bash
+sh scripts/check/collect-release-beta-platform-evidence.shs \
+  --artifacts-dir build/release-beta/artifacts \
+  --evidence-dir build/release-beta/evidence \
+  --source-revision COMMIT_SHA --version VERSION
+```
+
+Qualify and record the exact Stage 4 command surface:
+
+```bash
+sh scripts/check/record-release-beta-essential-tools.shs \
+  --simple build/bootstrap/release-beta/full/x86_64-unknown-linux-gnu/simple \
+  --evidence-dir build/release-beta/evidence \
+  --log build/release-beta/evidence/essential-tools.log
+```
+
+The checker binds bootstrap, essential-tool, platform, verification, and GitHub
+workflow receipts to the same revision, version, and Stage 4 executable digest.
+It also rejects isolated Stage 3 runs above 254 seconds or strict stages above
+24 GiB maximum RSS.
+
+### Postponed qualification handoff
+
+A development/documentation lane may be handed off as complete only when the
+user explicitly scopes completion that narrowly. Keep every unproved release
+gate in one open TODO that names the exact resume commands, prerequisites,
+artifacts, owner, and reviewer. The handoff must say `development lane
+complete`; it must not say the beta, verification, or release is complete.
+
+For the current non-macOS beta, TODO 654 is authoritative. Stage 2/3 output is
+bounded diagnostic evidence only. Until an exact source-matched Stage 4 binary
+produces the SPipe/manual and `/verify` reports `STATUS: PASS`, do not create a
+tag, prerelease, artifact publication, or GitHub success receipt. Unrelated red
+baseline checks also neither qualify nor invalidate the release-beta evidence;
+record them separately and avoid folding their fixes into the release lane.
+
+After the workflow and tag publication complete, record the authoritative
+remote result before running the aggregate checker:
+
+```bash
+sh scripts/check/record-release-beta-github-evidence.shs \
+  --run-id RUN_ID --evidence-dir build/release-beta/evidence \
+  --source-revision COMMIT_SHA --version VERSION
 ```
 
 ---

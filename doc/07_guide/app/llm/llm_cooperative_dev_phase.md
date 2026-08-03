@@ -43,6 +43,22 @@ the thread goal is complete. Report the short session ID, turn state, goal
 state, summarized objective, and latest task without reproducing secrets or
 unrelated prompts.
 
+### Scope-qualified completion and postponed gates
+
+Postponement alone never proves a requirement. If a user explicitly narrows
+completion to a development, documentation, or publication-handoff lane, an LLM
+may close that narrower goal only after all work in the named scope is complete
+and pushed. First update one authoritative TODO/database row with the exact
+commit and every remaining acceptance criterion, resume command, prerequisite,
+retained artifact, owner, and final reviewer.
+
+Keep the umbrella feature, verification status, and release qualification open.
+Use precise labels such as `development lane complete; strict bootstrap and
+verify postponed`. Never translate a scoped goal completion into `STATUS: PASS`,
+a tag, a release, or qualified artifacts. Unrelated failing baseline checks
+should be reported separately and preserved rather than silently absorbed into
+the feature lane.
+
 ---
 
 ## Phase 1: Research

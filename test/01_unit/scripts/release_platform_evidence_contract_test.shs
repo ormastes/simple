@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+TMP=$(mktemp -d "${TMPDIR:-/tmp}/simple-release-platform-evidence.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+fail() {
+    echo "release_platform_evidence_contract_test: FAIL: $*" >&2
+    exit 1
+}
+
+VERSION=1.0.0-beta.2
+REVISION=fixture-revision
+mkdir -p "$TMP/artifacts" "$TMP/font-source/family"
+printf 'font-bytes' > "$TMP/font-source/family/test.ttf"
+
+for platform in linux-x86_64 linux-aarch64 linux-riscv64 freebsd-x86_64 freebsd-x86 windows-x86_64 windows-aarch64; do
+    package="simple-bootstrap-${VERSION}-${platform}"
+    root="$TMP/build/$package"
+    mkdir -p "$root/assets/fonts/family"
+    cp "$TMP/font-source/family/test.ttf" "$root/assets/fonts/family/test.ttf"
+    cp "$ROOT/LICENSE" "$ROOT/THIRD_PARTY_NOTICES.md" "$root/"
+    cat > "$root/artifact-role.env" <<EOF
+source_revision=$REVISION
+version=$VERSION
+platform=$platform
+role=executable
+payload_kind=executable
+EOF
+    tar -czf "$TMP/artifacts/$package.spk" -C "$TMP/build" "$package"
+done
+
+RELEASE_PAYLOAD_FONT_SOURCE_DIR="$TMP/font-source" \
+    sh "$ROOT/scripts/check/collect-release-beta-platform-evidence.shs" \
+    --artifacts-dir "$TMP/artifacts" --evidence-dir "$TMP/evidence" \
+    --source-revision "$REVISION" --version "$VERSION" >/dev/null
+grep -F -x 'platform_windows_aarch64_status=pass' "$TMP/evidence/platforms.env" >/dev/null || fail "complete receipt missing"
+
+if RELEASE_PAYLOAD_FONT_SOURCE_DIR="$TMP/font-source" \
+    sh "$ROOT/scripts/check/collect-release-beta-platform-evidence.shs" \
+    --artifacts-dir "$TMP/artifacts" --evidence-dir "$TMP/evidence-bad" \
+    --source-revision wrong-revision --version "$VERSION" >/dev/null 2>&1; then
+    fail "mismatched source revision accepted"
+fi
+
+echo "release_platform_evidence_contract_test: PASS"

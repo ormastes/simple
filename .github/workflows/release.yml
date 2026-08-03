@@ -57,7 +57,7 @@ jobs:
           fi
 
   build-bootstrap:
-    name: Build Bootstrap Package (legacy matrix)
+    name: Build Bootstrap Package
     needs: check-version
     if: needs.check-version.outputs.changed == 'true'
     strategy:
@@ -67,32 +67,33 @@ jobs:
           # Linux platforms
           - os: ubuntu-latest
             platform: linux-x86_64
+            role: executable
           - os: ubuntu-latest
             platform: linux-aarch64
             cross_compile: true
+            role: executable
           - os: ubuntu-latest
             platform: linux-riscv64
             cross_compile: true
-
-          # macOS platforms
-          - os: macos-latest
-            platform: darwin-arm64
-          - os: macos-15-intel  # Intel Mac (until Aug 2027)
-            platform: darwin-x86_64
+            role: executable
 
           # FreeBSD (uses Linux binary via Linuxulator)
           - os: ubuntu-latest
             platform: freebsd-x86_64
+            role: executable
           - os: ubuntu-latest
             platform: freebsd-x86
             cross_compile: true
+            role: executable
 
           # Windows platforms
           - os: windows-latest
             platform: windows-x86_64
+            role: executable
           - os: windows-latest
             platform: windows-aarch64
             cross_compile: true
+            role: executable
 
     runs-on: ${{ matrix.os }}
 
@@ -100,12 +101,12 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Rust toolchain (macOS/Windows)
-        if: runner.os == 'macOS' || runner.os == 'Windows'
+      - name: Setup Rust toolchain (Windows)
+        if: runner.os == 'Windows'
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache Rust build artifacts (macOS/Windows)
-        if: runner.os == 'macOS' || runner.os == 'Windows'
+      - name: Cache Rust build artifacts (Windows)
+        if: runner.os == 'Windows'
         uses: actions/cache@v4
         with:
           path: |
@@ -264,22 +265,59 @@ jobs:
           echo "Checking committed release binary"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # The repo commits bin/release/simple — the self-hosted binary
-          if [ -f "bin/release/simple" ]; then
-            chmod +x bin/release/simple
+          # Package the admitted runtime, not bin/release/simple: that file is
+          # a repository wrapper whose relative target is not copied alone.
+          RELEASE_RUNTIME="bin/release/x86_64-unknown-linux-gnu/simple"
+          if [ -f "$RELEASE_RUNTIME" ]; then
+            chmod +x "$RELEASE_RUNTIME"
             echo "NEW_RUNTIME_BUILT=true" >> $GITHUB_ENV
-            echo "NEW_RUNTIME_PATH=$(pwd)/bin/release/simple" >> $GITHUB_ENV
+            echo "NEW_RUNTIME_PATH=$(pwd)/$RELEASE_RUNTIME" >> $GITHUB_ENV
+            echo "HAVE_BOOTSTRAP=true" >> $GITHUB_ENV
 
-            if bin/release/simple --version; then
+            if "$RELEASE_RUNTIME" --version; then
               echo "✓ Committed release binary verified"
             else
-              echo "✓ Committed release binary exists (version check may differ)"
+              echo "Committed release binary failed its version check" >&2
+              exit 1
             fi
-            ls -lh bin/release/simple
+            ls -lh "$RELEASE_RUNTIME"
           else
-            echo "⚠ No committed release binary found"
-            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            echo "No committed release runtime found: $RELEASE_RUNTIME" >&2
+            exit 1
           fi
+
+      - name: Build Linux cross-compile binary via Rust
+        if: runner.os == 'Linux' && startsWith(matrix.platform, 'linux-') && matrix.cross_compile
+        shell: bash
+        run: |
+          case "${{ matrix.platform }}" in
+            linux-aarch64)
+              RUST_TARGET="aarch64-unknown-linux-gnu"
+              CROSS_CC="aarch64-linux-gnu-gcc"
+              CROSS_PKG="gcc-aarch64-linux-gnu"
+              ;;
+            linux-riscv64)
+              RUST_TARGET="riscv64gc-unknown-linux-gnu"
+              CROSS_CC="riscv64-linux-gnu-gcc"
+              CROSS_PKG="gcc-riscv64-linux-gnu"
+              ;;
+            *)
+              echo "Unsupported Linux cross platform: ${{ matrix.platform }}" >&2
+              exit 1
+              ;;
+          esac
+          rustup target add "$RUST_TARGET"
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "$CROSS_PKG"
+          LINKER_ENV="CARGO_TARGET_$(printf '%s' "$RUST_TARGET" | tr '[:lower:]-' '[:upper:]_')_LINKER"
+          export "${LINKER_ENV}=${CROSS_CC}"
+          cargo build --manifest-path src/compiler_rust/Cargo.toml \
+            --profile bootstrap -p simple-driver --target "$RUST_TARGET"
+          CROSS_RUNTIME="src/compiler_rust/target/${RUST_TARGET}/bootstrap/simple"
+          test -f "$CROSS_RUNTIME"
+          echo "NEW_RUNTIME_BUILT=true" >> "$GITHUB_ENV"
+          echo "NEW_RUNTIME_PATH=$(pwd)/$CROSS_RUNTIME" >> "$GITHUB_ENV"
+          echo "HAVE_BOOTSTRAP=true" >> "$GITHUB_ENV"
 
       - name: Install LLVM (macOS)
         if: runner.os == 'macOS'
@@ -406,19 +444,19 @@ jobs:
           # 1. Build Rust seed
           cd src/compiler_rust
           if [ -n "$CROSS_TARGET" ]; then
-            cargo build --profile bootstrap -p simple-driver --target "$CROSS_TARGET" || true
+            rustup target add "$CROSS_TARGET"
+            cargo build --profile bootstrap -p simple-driver --target "$CROSS_TARGET"
           else
-            cargo build --profile bootstrap -p simple-driver || true
+            cargo build --profile bootstrap -p simple-driver
             # 2. Build native_all library (only for native builds, not cross)
-            cargo build --profile bootstrap -p simple-native-all --features driver-compat || true
+            cargo build --profile bootstrap -p simple-native-all --features driver-compat
           fi
           cd ../..
 
           SEED="src/compiler_rust/target/${TARGET_DIR}/simple.exe"
           if [ ! -f "$SEED" ]; then
-            echo "⚠ Rust seed build failed — no binary produced, skipping native build"
-            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
-            exit 0
+            echo "Rust seed build failed — no binary produced" >&2
+            exit 1
           fi
 
           echo "Rust seed built:"
@@ -534,9 +572,8 @@ jobs:
               CLANG_TARGET="i686-unknown-freebsd13.2"
               ;;
             *)
-              echo "Unsupported FreeBSD platform: ${{ matrix.platform }}"
-              echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
-              exit 0
+              echo "Unsupported FreeBSD platform: ${{ matrix.platform }}" >&2
+              exit 1
               ;;
           esac
 
@@ -581,8 +618,8 @@ jobs:
             file "$SEED"
             ls -lh "$SEED"
           else
-            echo "Cross-compilation failed"
-            echo "NEW_RUNTIME_BUILT=false" >> $GITHUB_ENV
+            echo "Cross-compilation failed" >&2
+            exit 1
           fi
 
       - name: Create distribution package
@@ -596,11 +633,8 @@ jobs:
           echo "Version: ${VERSION}"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
-          # Check if we have a bootstrap runtime available
-          if [ "${HAVE_BOOTSTRAP:-false}" != "true" ]; then
-            echo "⚠ No bootstrap runtime available for ${PLATFORM}"
-            echo "  Creating source-only package for this platform"
-          fi
+          [ "${{ matrix.role }}" = executable ] || { echo "Unsupported release role: ${{ matrix.role }}" >&2; exit 1; }
+          [ "${HAVE_BOOTSTRAP:-false}" = true ] || { echo "No executable bootstrap runtime for ${PLATFORM}" >&2; exit 1; }
 
           # Create package structure
           PKG_DIR="simple-bootstrap-${VERSION}-${PLATFORM}"
@@ -646,9 +680,23 @@ jobs:
               echo "⚠ Warning: No binary available for this platform"
               echo "  Package will contain source code only"
             fi
-          else
-            echo "ℹ Creating source-only package (no binary available for ${PLATFORM})"
           fi
+          [ -n "$BINARY_TO_PACKAGE" ] || { echo "No runtime selected for ${PLATFORM}" >&2; exit 1; }
+          [ -f "$BINARY_TO_PACKAGE" ] || { echo "Selected runtime is missing: $BINARY_TO_PACKAGE" >&2; exit 1; }
+          if [[ "$PLATFORM" == windows-* ]]; then
+            test -f "${PKG_DIR}/bin/simple.exe"
+          else
+            test -x "${PKG_DIR}/bin/simple-runtime"
+            test -x "${PKG_DIR}/bin/simple"
+          fi
+
+          cat > "${PKG_DIR}/artifact-role.env" <<EOF
+          source_revision=${GITHUB_SHA}
+          version=${VERSION}
+          platform=${PLATFORM}
+          role=executable
+          payload_kind=executable
+          EOF
 
           # Build and package native MCP entrypoints for host-native jobs.
           # npm launchers prefer these binaries so installed packages do not
@@ -734,7 +782,8 @@ jobs:
           elif command -v shasum &>/dev/null; then
             shasum -a 256 "${PKG}" > "${PKG}.sha256"
           else
-            echo "no-checksum-tool  ${PKG}" > "${PKG}.sha256"
+            echo "No SHA-256 tool is available" >&2
+            exit 1
           fi
           cat "${PKG}.sha256"
 
@@ -747,10 +796,36 @@ jobs:
             simple-bootstrap-*.spk.sha256
           retention-days: 7
 
+  freebsd-bootstrap:
+    name: Native FreeBSD Pure-Simple Bootstrap
+    needs: check-version
+    if: needs.check-version.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 100
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install QEMU prerequisites
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            genisoimage openssh-client qemu-system-x86 qemu-utils rsync xz-utils
+          if [ -e /dev/kvm ]; then sudo chmod 666 /dev/kvm; fi
+          mkdir -p "$HOME/.ssh"
+          if [ ! -f "$HOME/.ssh/id_ed25519" ]; then
+            ssh-keygen -q -t ed25519 -N '' -f "$HOME/.ssh/id_ed25519"
+          fi
+
+      - name: Run canonical full FreeBSD bootstrap
+        timeout-minutes: 90
+        run: sh scripts/check/check-freebsd-bootstrap-qemu.shs --full
+
   build-installers:
     name: Build Installation Packages
     needs: [check-version, build-bootstrap]
-    if: always() && needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result != 'cancelled'
+    if: always() && needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result == 'success'
     runs-on: ubuntu-latest
 
     steps:
@@ -762,14 +837,12 @@ jobs:
         with:
           name: bootstrap-linux-x86_64
           path: bootstrap-artifact
-        continue-on-error: true
 
       - name: Download Windows x86_64 bootstrap artifact
         uses: actions/download-artifact@v4
         with:
           name: bootstrap-windows-x86_64
           path: bootstrap-artifact-win
-        continue-on-error: true
 
       - name: Extract version
         id: version
@@ -797,6 +870,7 @@ jobs:
             fi
             cd ..
           fi
+          test -x bin/release/simple
 
           # Extract Windows binary
           mkdir -p bin/release/windows-x86_64
@@ -810,6 +884,7 @@ jobs:
             fi
             cd ..
           fi
+          test -f bin/release/windows-x86_64/simple.exe
 
       - name: Install packaging tools (FPM + NSIS)
         run: |
@@ -856,7 +931,8 @@ jobs:
 
             echo "deb=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠ No Linux binary found, skipping .deb"
+            echo "No Linux binary found for .deb" >&2
+            exit 1
           fi
 
       - name: Build RPM package (.rpm)
@@ -879,24 +955,8 @@ jobs:
 
             echo "rpm=true" >> $GITHUB_OUTPUT
           else
-            echo "⚠ No staging dir, skipping .rpm"
-          fi
-
-      - name: Build macOS package (.pkg)
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-
-          if [ -d staging-deb/usr ]; then
-            fpm -s dir -t osxpkg \
-              --name simple-lang \
-              --version "${VERSION}" \
-              --description "Simple Language Compiler and Runtime" \
-              --maintainer "Simple Language Team <team@simple-lang.org>" \
-              --url "https://simple-lang.org" \
-              --license MIT \
-              --architecture amd64 \
-              --package build/installers/ \
-              -C staging-deb . || echo "⚠ macOS .pkg build failed (expected on Linux)"
+            echo "No staging directory for .rpm" >&2
+            exit 1
           fi
 
       - name: Build FreeBSD package (.txz)
@@ -913,7 +973,10 @@ jobs:
               --license MIT \
               --architecture amd64 \
               --package build/installers/ \
-              -C staging-deb . || echo "⚠ FreeBSD .txz build failed"
+              -C staging-deb .
+          else
+            echo "No staging directory for FreeBSD package" >&2
+            exit 1
           fi
 
       - name: Build Windows installer (.exe)
@@ -942,18 +1005,22 @@ jobs:
                 -e "s|\${OUTPUT_DIR}|build/installers|g" \
                 config/packaging/windows/simple.nsi > build/installers/simple-installer.nsi
 
-            makensis -NOCD build/installers/simple-installer.nsi || echo "⚠ NSIS build failed"
+            makensis -NOCD build/installers/simple-installer.nsi
           else
-            echo "⚠ No Windows binary found, skipping .exe installer"
+            echo "No Windows binary found for installer" >&2
+            exit 1
           fi
 
       - name: Calculate checksums
         run: |
           cd build/installers
-          for f in *.deb *.rpm *.pkg *.txz *.exe; do
+          for extension in deb rpm txz exe; do
+            compgen -G "*.${extension}" >/dev/null || { echo "Missing required .${extension} installer" >&2; exit 1; }
+          done
+          for f in *.deb *.rpm *.txz *.exe; do
             [ -f "$f" ] && sha256sum "$f" > "$f.sha256"
           done
-          ls -lh . || true
+          ls -lh .
 
       - name: Upload installer artifacts
         uses: actions/upload-artifact@v4
@@ -962,12 +1029,11 @@ jobs:
           path: |
             build/installers/*.deb
             build/installers/*.rpm
-            build/installers/*.pkg
             build/installers/*.txz
             build/installers/*.exe
             build/installers/*.sha256
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
 
   build-full:
     name: Build Full Package
@@ -1007,12 +1073,16 @@ jobs:
             mkdir -p "$PKG_ROOT/bin"
             FULL_ARCHIVE=$(find bootstrap-artifact -maxdepth 1 -name 'simple-bootstrap-*-linux-x86_64.spk' -print -quit)
             test -n "$FULL_ARCHIVE"
-            FULL_BOOTSTRAP_ROOT="${FULL_ARCHIVE%.spk}"
+            test -f "$FULL_ARCHIVE"
             tar -xzf "$FULL_ARCHIVE" -C bootstrap-artifact
-            test -x "$FULL_BOOTSTRAP_ROOT/bin/simple-runtime"
-            test -x "$FULL_BOOTSTRAP_ROOT/bin/simple"
-            cp "$FULL_BOOTSTRAP_ROOT/bin/simple-runtime" "$PKG_ROOT/bin/"
-            cp "$FULL_BOOTSTRAP_ROOT/bin/simple" "$PKG_ROOT/bin/"
+            FULL_SIMPLE=$(find bootstrap-artifact -path '*/bin/simple' -type f -print -quit)
+            FULL_RUNTIME=$(find bootstrap-artifact -path '*/bin/simple-runtime' -type f -print -quit)
+            test -n "$FULL_SIMPLE"
+            test -n "$FULL_RUNTIME"
+            test -x "$FULL_SIMPLE"
+            test -x "$FULL_RUNTIME"
+            cp "$FULL_RUNTIME" "$PKG_ROOT/bin/simple-runtime"
+            cp "$FULL_SIMPLE" "$PKG_ROOT/bin/simple"
             cp bin/README.md "$PKG_ROOT/bin/" 2>/dev/null || true
             cp bin/FILE.md "$PKG_ROOT/bin/" 2>/dev/null || true
 
@@ -1029,6 +1099,9 @@ jobs:
           PKG=$(ls simple-full-*.tar.gz dist/simple-full-*.tar.gz 2>/dev/null | head -1)
           if [ -n "$PKG" ]; then
             bash scripts/check_release_payload.shs --tar "$PKG"
+          else
+            echo "No executable full package was produced" >&2
+            exit 1
           fi
 
       - name: Calculate checksums
@@ -1038,7 +1111,8 @@ jobs:
             sha256sum "${PKG}" > "${PKG}.sha256"
             cat "${PKG}.sha256"
           else
-            echo "⚠ No full package found — skipping checksum"
+            echo "No full package found" >&2
+            exit 1
           fi
 
       - name: Upload artifact
@@ -1051,28 +1125,37 @@ jobs:
             dist/simple-full-*.tar.gz
             dist/simple-full-*.tar.gz.sha256
           retention-days: 7
+          if-no-files-found: error
 
   simpleos-build:
     name: SimpleOS x86_64 Kernel Build
-    needs: check-version
-    if: needs.check-version.outputs.changed == 'true'
+    needs: [check-version, build-bootstrap]
+    if: always() && needs.check-version.outputs.changed == 'true' && needs.build-bootstrap.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    continue-on-error: true
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Download Linux x86_64 bootstrap artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: bootstrap-linux-x86_64
+          path: bootstrap-artifact
+
       - name: Setup bootstrap runtime
         run: |
-          if [ -f bin/release/simple ]; then
-            chmod +x bin/release/simple
-          fi
-          if [ -f bin/simple ]; then
-            chmod +x bin/simple
-          fi
-          ./bin/simple --version || true
+          BOOTSTRAP_ARCHIVE=$(find bootstrap-artifact -name 'simple-bootstrap-*-linux-x86_64.spk' -print -quit)
+          test -n "$BOOTSTRAP_ARCHIVE"
+          tar -xzf "$BOOTSTRAP_ARCHIVE" -C bootstrap-artifact
+          BOOTSTRAP_SIMPLE=$(find bootstrap-artifact -path '*/bin/simple' -type f -print -quit)
+          BOOTSTRAP_RUNTIME=$(find bootstrap-artifact -path '*/bin/simple-runtime' -type f -print -quit)
+          test -n "$BOOTSTRAP_SIMPLE"
+          test -n "$BOOTSTRAP_RUNTIME"
+          chmod +x "$BOOTSTRAP_SIMPLE" "$BOOTSTRAP_RUNTIME"
+          "$BOOTSTRAP_SIMPLE" --version
+          echo "SIMPLEOS_BOOTSTRAP_SIMPLE_BIN=$BOOTSTRAP_SIMPLE" >> "$GITHUB_ENV"
 
       - name: Install QEMU + LLVM toolchain
         run: |
@@ -1089,9 +1172,8 @@ jobs:
           VERSION="${{ needs.check-version.outputs.version }}"
           PKG="simpleos-${VERSION}-x86_64"
           mkdir -p "${PKG}"
-          if [ -f build/os/simpleos_x86_64.elf ]; then
-            cp build/os/simpleos_x86_64.elf "${PKG}/"
-          fi
+          test -s build/os/simpleos_x86_64.elf
+          cp build/os/simpleos_x86_64.elf "${PKG}/"
           if compgen -G "build/os/*.img.zst" > /dev/null; then
             cp build/os/*.img.zst "${PKG}/"
           fi
@@ -1107,12 +1189,21 @@ jobs:
             simpleos-*.tar.gz
             simpleos-*.tar.gz.sha256
           retention-days: 7
-          if-no-files-found: warn
+          if-no-files-found: error
 
   create-release:
     name: Create GitHub Release
-    needs: [build-bootstrap, build-installers, simpleos-build, whole-tests]
-    if: always() && needs.build-bootstrap.result != 'cancelled' && needs.whole-tests.result == 'success'
+    needs: [check-version, build-bootstrap, freebsd-bootstrap, build-installers, build-full, simpleos-build, whole-tests, test-installation]
+    if: >-
+      always() &&
+      needs.check-version.result == 'success' &&
+      needs.build-bootstrap.result == 'success' &&
+      needs.freebsd-bootstrap.result == 'success' &&
+      needs.build-installers.result == 'success' &&
+      needs.build-full.result == 'success' &&
+      needs.simpleos-build.result == 'success' &&
+      needs.whole-tests.result == 'success' &&
+      needs.test-installation.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -1129,6 +1220,10 @@ jobs:
       - name: Prepare release assets
         run: |
           mkdir -p release
+          if [ ! -d artifacts ] || [ -z "$(find artifacts -type f | head -n 1)" ]; then
+            echo "No artifacts found for release upload" >&2
+            exit 1
+          fi
           find artifacts -name '*.spk' -exec cp {} release/ \;
           find artifacts -name '*.sha256' -exec cp {} release/ \;
           find artifacts -name '*.tar.gz' -exec cp {} release/ \;
@@ -1139,14 +1234,19 @@ jobs:
           find artifacts -name '*.pkg' -exec cp {} release/ \;
           find artifacts -name '*.txz' -exec cp {} release/ \;
           find artifacts -name '*.exe' -exec cp {} release/ \;
+          mkdir -p build/release-beta/evidence
+          sh scripts/check/collect-release-beta-platform-evidence.shs \
+            --artifacts-dir artifacts \
+            --evidence-dir build/release-beta/evidence \
+            --source-revision "$GITHUB_SHA" \
+            --version "${{ needs.check-version.outputs.version }}"
+          cp build/release-beta/evidence/platforms.env \
+            release/release-beta-platforms.env
           ls -lh release/
 
       - name: Extract version
         id: version
-        run: |
-          VERSION=${GITHUB_REF#refs/tags/v}
-          echo "version=${VERSION}" >> $GITHUB_OUTPUT
-          echo "Version: ${VERSION}"
+        run: echo "version=${{ needs.check-version.outputs.version }}" >> "$GITHUB_OUTPUT"
 
       - name: Generate Claude plugin release bundles
         run: |
@@ -1171,9 +1271,9 @@ jobs:
           them.
 
           ### Key Features
-          ✅ Multi-platform support (Linux, macOS, Windows, FreeBSD)
+          ✅ Selected non-macOS support (Linux, Windows, FreeBSD)
           ✅ Built with the current Rust seed / self-hosted bootstrap flow
-          ✅ Comprehensive test suite (4000+ tests)
+          ✅ Release-bound whole interpreter suite
           ✅ Full source code included
 
           ## 📦 Downloads
@@ -1183,16 +1283,15 @@ jobs:
           Choose the package for your platform:
 
           - **Linux x86_64**: \`simple-bootstrap-${VERSION}-linux-x86_64.spk\` ✅
-          - **Linux ARM64**: \`simple-bootstrap-${VERSION}-linux-aarch64.spk\` (source-only, requires build)
-          - **Linux RISC-V**: \`simple-bootstrap-${VERSION}-linux-riscv64.spk\` (source-only, requires build)
-          - **macOS ARM64** (Apple Silicon): \`simple-bootstrap-${VERSION}-darwin-arm64.spk\` ✅
-          - **macOS x86_64** (Intel): \`simple-bootstrap-${VERSION}-darwin-x86_64.spk\` ✅
+          - **Linux ARM64**: \`simple-bootstrap-${VERSION}-linux-aarch64.spk\` ✅
+          - **Linux RISC-V**: \`simple-bootstrap-${VERSION}-linux-riscv64.spk\` ✅
           - **FreeBSD x86_64**: \`simple-bootstrap-${VERSION}-freebsd-x86_64.spk\` ✅
+          - **FreeBSD x86**: \`simple-bootstrap-${VERSION}-freebsd-x86.spk\` ✅
           - **Windows x86_64**: \`simple-bootstrap-${VERSION}-windows-x86_64.spk\` ✅
-          - **Windows ARM64**: \`simple-bootstrap-${VERSION}-windows-aarch64.spk\` (source-only, requires build)
+          - **Windows ARM64**: \`simple-bootstrap-${VERSION}-windows-aarch64.spk\` ✅
 
-          **Note:** Some platforms provide source-only packages that require local compilation.
-          Platforms marked with ✅ include pre-built binaries.
+          Every listed beta package contains an executable payload and an
+          embedded revision/version/role manifest.
 
           ### Native Installation Packages
 
@@ -1200,7 +1299,6 @@ jobs:
 
           - **Debian/Ubuntu**: \`simple-lang_${VERSION}_amd64.deb\` — \`sudo dpkg -i simple-lang_${VERSION}_amd64.deb\`
           - **Fedora/RHEL**: \`simple-lang-${VERSION}-1.x86_64.rpm\` — \`sudo rpm -i simple-lang-${VERSION}-1.x86_64.rpm\`
-          - **macOS**: \`simple-lang-${VERSION}.pkg\` — \`sudo installer -pkg simple-lang-${VERSION}.pkg -target /\`
           - **FreeBSD**: \`simple-lang-${VERSION}.txz\` — \`pkg add simple-lang-${VERSION}.txz\`
           - **Windows**: \`simple-lang-${VERSION}-setup.exe\` — Run the installer
 
@@ -1285,12 +1383,20 @@ jobs:
 
       - name: Create Release
         run: |
+          shopt -s nullglob
+          assets=(release/*)
+          if [ ${#assets[@]} -eq 0 ]; then
+            echo "No release assets found, aborting GitHub release create" >&2
+            exit 1
+          fi
+
           VERSION="${{ steps.version.outputs.version }}"
           gh release create "v${VERSION}" \
             --repo="${{ github.repository }}" \
             --title="Simple Language v${VERSION}" \
+            --prerelease \
             --notes-file=release-notes.md \
-            release/*
+            "${assets[@]}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -1299,7 +1405,6 @@ jobs:
     needs: [build-bootstrap, create-release]
     if: always() && needs.create-release.result == 'success'
     runs-on: ubuntu-latest
-    continue-on-error: true
     permissions:
       packages: write
       contents: read
@@ -1325,7 +1430,7 @@ jobs:
 
       - name: Extract version
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+        run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"
 
       - name: Publish bootstrap packages to GHCR
         run: |
@@ -1402,8 +1507,6 @@ jobs:
           echo "| Package | Reference |" >> $GITHUB_STEP_SUMMARY
           echo "|---------|-----------|" >> $GITHUB_STEP_SUMMARY
           echo "| Bootstrap (linux) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-linux-x86_64\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Bootstrap (macOS ARM) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-darwin-arm64\` |" >> $GITHUB_STEP_SUMMARY
-          echo "| Bootstrap (macOS Intel) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-darwin-x86_64\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Bootstrap (FreeBSD) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-freebsd-x86_64\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Bootstrap (Windows) | \`ghcr.io/${OWNER}/simple-bootstrap:${VERSION}-windows-x86_64\` |" >> $GITHUB_STEP_SUMMARY
           echo "| Full Package | \`ghcr.io/${OWNER}/simple-full:${VERSION}\` |" >> $GITHUB_STEP_SUMMARY
@@ -1480,7 +1583,8 @@ jobs:
           if [ -n "$BINARY" ]; then
             chmod +x "$BINARY"
             echo "Testing binary: $BINARY"
-            "$BINARY" --version || echo "⚠ --version failed (may need lib path)"
+            "$BINARY" --version
           else
-            echo "⚠ No simple binary found in package"
+            echo "No simple binary found in package" >&2
+            exit 1
           fi

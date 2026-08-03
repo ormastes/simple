@@ -6,6 +6,7 @@ use compiler.common.driver_core_types.{SourceFile}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use compiler.core.ast.{ast_reset}
+use compiler.core.types.{reset_all_pools}
 use compiler.core.parser.{par_had_error_get}
 use compiler.frontend.parser_types.*
 use compiler.hir.hir_lowering.module_surface.{
@@ -34,6 +35,13 @@ extern fn rt_transient_array_scope_pause() -> bool
 extern fn rt_transient_array_scope_end() -> bool
 
 class ParsedEntryModuleBox:
+    """Heap-backed transport for ParserModule values across alias fan-out.
+
+    The staged native compiler corrupts value-struct reads from
+    `[ParserModule]` at larger closure sizes (the sixth retained module reads
+    back nil). Arrays of class handles remain stable, so keep each parsed value
+    behind one handle while the scalar physical-key index selects it.
+    """
     value: ParserModule
 
     static fn new(value: ParserModule) -> ParsedEntryModuleBox:
@@ -68,6 +76,15 @@ pub fn driver_end_transient_parse_scope() -> bool:
     ast_reset()
     ended
 
+pub fn driver_prepare_transient_parse_scope():
+    # Native module globals are nil/zero-initialized.  If their first backing
+    # arrays are allocated after the transient scope begins, scope teardown
+    # frees those arrays while the globals keep dangling handles; the next
+    # module then faults in reset_all_pools/ast_reset.  Materialize and clear
+    # every reusable parser arena before allocations become reclaimable.
+    reset_all_pools()
+    ast_reset()
+
 impl CompilerDriver:
     me add_streaming_module_surface(
         builder: ModuleSurfaceBuilder,
@@ -75,6 +92,7 @@ impl CompilerDriver:
         source_index: i64,
         canonical_path: text
     ) -> Result<ModuleSurfaceBuilder, text>:
+        driver_prepare_transient_parse_scope()
         if not rt_transient_array_scope_begin():
             return Err("transient parser scope unavailable for {source.path}")
         val module = parse_full_frontend(
@@ -171,9 +189,13 @@ impl CompilerDriver:
                 entry_sources)
             log_phase(
                 "phase2:parse:closure:sources collected={entry_sources.len()} unique={unique_entry_sources.len()}")
-            # Avoid native Dict bracket-read corruption with a scalar
-            # open-addressed table. Keep ParserModule values behind class
-            # handles because large staged-native value arrays also corrupt.
+            # Physical key -> index into `parsed_entry_modules`. Built once here
+            # so the alias fan-out loop below is a scalar hash lookup instead of the
+            # now-removed `_driver_text_list_index` linear scan, which was
+            # O(entry_sources x unique_entry_sources) (~8.9e7 full-path text
+            # compares on a whole-tree closure). Do not use Dict here: staged
+            # native bracket reads have returned a wrong i64 index. Flat scalar
+            # arrays keep the cache O(n) while avoiding that bootstrap hazard.
             val parsed_entry_index_capacity = unique_entry_sources.len() * 2 + 1
             var parsed_entry_index_keys: [text] = []
             var parsed_entry_index_values: [i64] = []
