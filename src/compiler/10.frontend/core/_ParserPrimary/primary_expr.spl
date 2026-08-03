@@ -17,7 +17,7 @@ use compiler.core.tokens.{TOK_KW_SELF}
 use compiler.core.tokens.{TOK_KW_ASYNC, TOK_KW_AWAIT, TOK_KW_YIELD, TOK_KW_SPAWN}
 use compiler.core.tokens.{TOK_KW_NEW}
 use compiler.core.tokens.{TOK_KW_ASM}
-use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_AMPERSAND, TOK_NOT}
+use compiler.core.tokens.{TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_AMPERSAND, TOK_NOT, TOK_CARET}
 use compiler.core.tokens.{TOK_EQ, TOK_LT, TOK_GEQ}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
@@ -31,7 +31,7 @@ use compiler.core.tokens.{TOK_AT, TOK_KW_KEYOF, TOK_KW_MIXIN}
 use compiler.core.tokens.{TOK_AMP_COLON, TOK_BACKSLASH}
 use compiler.core.tokens.{TOK_KW_FOR, TOK_KW_IF, TOK_KW_IN}
 use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit, expr_raw_string_lit}
-use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
+use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident, expr_custom_block}
 use compiler.core.ast.{expr_unary, expr_call, expr_array_lit, expr_array_repeat, expr_method_call, expr_lambda}
 use compiler.core.ast.{expr_block, expr_tuple}
 use compiler.core.ast.{expr_return_expr, expr_break_expr, expr_continue_expr}
@@ -44,7 +44,7 @@ use compiler.core.ast.{expr_asm, expr_asm_match, expr_asm_assert}
 use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
 use compiler.core.ast.{module_get_path}
 use compiler.frontend.core.lexer.{lex_cur_suffix_get}
-use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice, lex_token_start_get, lex_cur_no_interp_get}
+use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice, lex_token_start_get, lex_token_end_get, lex_cur_no_interp_get}
 use compiler.frontend.core.lexer.{lex_enable_forced_indentation, lex_disable_forced_indentation, lex_pop_indent}
 use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_warn, parser_skip_newlines}
@@ -65,6 +65,16 @@ fn parser_primary_trace_enabled() -> bool:
 
 fn parser_primary_trace_line_enabled() -> bool:
     parser_primary_trace_enabled() and par_line_get() >= 60
+
+fn parser_is_canonical_custom_block_kind(kind: text) -> bool:
+    # Keep this list in parity with the canonical Rust lexer
+    # try_scan_custom_block(). Adjacency is checked separately, so ordinary
+    # identifiers followed by a spaced struct/dict brace remain untouched.
+    (kind == "m" or kind == "sh" or kind == "sql" or kind == "re" or
+        kind == "md" or kind == "html" or kind == "graph" or kind == "img" or
+        kind == "schema" or kind == "style" or kind == "ui" or kind == "music" or
+        kind == "bim" or kind == "cad" or kind == "city" or kind == "rtl" or
+        kind == "loss" or kind == "lean" or kind == "nograd")
 
 # Parses the tail of a `fn` lambda after the `fn` keyword itself has already
 # been consumed by the caller: `(param: Type, ...) -> RetType: body`.
@@ -398,10 +408,25 @@ fn parse_primary_expr() -> i64:
         val id_name = par_text_get()
         if parser_primary_trace_line_enabled():
             eprint("[parser-primary] ident:start name={id_name}")
+        val custom_block_adjacent = parser_is_canonical_custom_block_kind(id_name) and
+            lex_source_char_at(lex_token_end_get()) == "{"
         parser_advance()
+        if custom_block_adjacent:
+            if par_kind_get() != TOK_LBRACE:
+                parser_error("expected { after custom block kind")
+                return expr_nil_lit(0)
+            val raw_payload = parse_raw_braced_payload(id_name)
+            return expr_custom_block(id_name, raw_payload, 0)
         if parser_primary_trace_line_enabled():
             eprint("[parser-primary] ident:advanced name={id_name}")
         return expr_ident(id_name, 0)
+
+    # The core lexer deliberately maps textual `xor` onto TOK_CARET so infix
+    # `a xor b` and `a ^ b` share one operator. In primary/callee position the
+    # same spelling remains an identifier (`xor(a, b)`), matching the seed.
+    if par_kind_get() == TOK_CARET and par_text_get() == "xor":
+        parser_advance()
+        return expr_ident("xor", 0)
 
     if par_kind_get() == 38:
         parser_advance()
