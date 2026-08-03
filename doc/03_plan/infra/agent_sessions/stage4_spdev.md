@@ -154,19 +154,29 @@ external-host handoffs.
   2 (`07a5b0d92995c8de4292c2295218d81b047a619716f41fa8c3d8edea61f29cc3`)
   and 323/725 partial Stage 3 objects, but no Stage 3 binary.
 
-### Required fresh-session diagnostic
+### 2026-08-03 fresh-session result
 
-The three-cycle cap is exhausted. Do not rerun unchanged Stage 4 in this
-session. In a fresh scoped session, instrument one real native entry-closure
-pass for `env.paths`: record physical/logical module aliases, import order,
-namespace define attempted/skipped state, symbol-table size and exact
-`variables`/`env_get` entries, `field_module_callable` candidates, HIR
-Call-versus-MethodCall shape, MIR `LoadGlobal variables`, and cache hit state.
-Use the actual env/path/platform sources, real import order, package-sibling
-expansion, bootstrap/entry-closure mode, and enough symbols to match the real
-table size. Current leading hypotheses are compiled-native Option/Dict lookup
-or key enumeration corruption under the full graph, not another source import
-workaround. Keep LLVM fail-closed.
+- The requested pure-Simple trace proved that `path`, `variables`, and
+  `platform` namespaces are defined with retained owners; `env_get` resolves
+  twice as a direct HIR call. No namespace global escapes into the preserved
+  LLVM IR. The earlier `Option<SymbolId>` hypothesis is not supported by this
+  evidence.
+- Three diagnostic Stage 3 compilers rebuilt 725/725 while isolating the next
+  boundary. Snapshotting `LlvmTargetTriple.to_text()` and reconstructing before
+  calling the same method both remained false green under the Rust interpreter.
+- Commit `a5f86301593` removes the retained target composite and composes the
+  target triple inside `emit_module_header`. The compiled-native shard emits
+  exact `x86_64-unknown-linux-gnu`; the `<invalid-heap:...>` target is fixed.
+- `llc` now advances to generated IR line 2874 and rejects
+  `%t281 = bitcast i1 %l162 to ptr` in `env.platform.detect_os`. The P1 owner,
+  reproducer, and adjacent-test requirements are claimed in
+  `llvm_bool_bitcast_to_ptr_invalid_ir_2026_08_03`.
+
+The fresh session's three-cycle cap is exhausted. Do not rerun unchanged Stage
+4. In the next scoped session, fix the claimed boolean-to-pointer lowering with
+exact and adjacent pointer/integer tests, retry only the 1.4-second
+`env/paths.spl` pure shard, refresh admitted Stage 3 once, then run one true
+Stage 4 with `SIMPLE_BOOTSTRAP_STAGE4=1`. Keep LLVM fail-closed.
 
 ## Ownership
 
