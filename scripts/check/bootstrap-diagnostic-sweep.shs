@@ -89,6 +89,34 @@ trap cleanup_sweep EXIT
 trap 'cleanup_sweep 130' INT
 trap 'cleanup_sweep 143' TERM
 trap 'cleanup_sweep 129' HUP
+
+# Prove the exact seed -> delegated pure-Simple child route once before
+# dispatching the full file inventory. An executable but stale/incomplete
+# child can otherwise return a silent nonzero for every input, fabricating a
+# whole-tree source failure inventory (observed: 76/76 MIR optimizer files).
+preflight_source="$run_dir/diagnostic_preflight.spl"
+preflight_log="$run_dir/diagnostic_preflight.log"
+printf '%s\n' 'fn diagnostic_preflight() -> i64: 1' > "$preflight_source"
+preflight_status=0
+if command -v timeout >/dev/null 2>&1; then
+  env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
+    timeout -k 1s 30s "$compiler" check "$preflight_source" \
+    >"$preflight_log" 2>&1 || preflight_status=$?
+elif command -v gtimeout >/dev/null 2>&1; then
+  env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
+    gtimeout -k 1s 30s "$compiler" check "$preflight_source" \
+    >"$preflight_log" 2>&1 || preflight_status=$?
+else
+  env SIMPLE_BINARY="$child_compiler" SIMPLE_BIN="$child_compiler" \
+    "$compiler" check "$preflight_source" >"$preflight_log" 2>&1 ||
+    preflight_status=$?
+fi
+if [ "$preflight_status" -ne 0 ]; then
+  echo "error: diagnostic compiler/child preflight failed with exit $preflight_status" >&2
+  sed -n '1,40p' "$preflight_log" >&2
+  exit 2
+fi
+
 files_list="$run_dir/files"
 : > "$files_list"
 
