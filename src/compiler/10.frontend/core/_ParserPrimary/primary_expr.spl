@@ -101,6 +101,11 @@ fn parse_fn_lambda_after_kw() -> i64:
     if par_kind_get() == 167:
         parser_advance()
         parser_parse_type()
+    # Anonymous `fn(...)` block lambdas can appear inside a call's parens.
+    # Match the backslash-lambda path below: enable forced indentation before
+    # consuming `:` so the following newline/body indentation is not suppressed
+    # by paren_depth (parser_anonymous_fn_block_call_arg_2026-08-03).
+    lex_enable_forced_indentation()
     # Expect ':' then body
     parser_expect(161)
     # Block body or expression body (same pattern as backslash lambda)
@@ -108,8 +113,10 @@ fn parse_fn_lambda_after_kw() -> i64:
     if par_kind_get() == 180 or par_kind_get() == 181:
         parser_skip_newlines()
         var fn_blk: [i64] = []
+        var fn_lam_saw_indent = false
         if par_kind_get() == 181:
             parser_advance()
+            fn_lam_saw_indent = true
         while true:
             parser_skip_newlines()
             val fn_bk = par_kind_get()
@@ -117,6 +124,8 @@ fn parse_fn_lambda_after_kw() -> i64:
                 parser_advance()
                 break
             if fn_bk == 141 or fn_bk == 160 or fn_bk == 190:
+                if fn_lam_saw_indent:
+                    lex_pop_indent()
                 break
             val fn_s = parse_statement()
             fn_blk.push(fn_s)
@@ -124,9 +133,11 @@ fn parse_fn_lambda_after_kw() -> i64:
                 break
             parser_skip_newlines()
         fn_lam_stmts.push(expr_block(fn_blk, -1, 0))
+        lex_disable_forced_indentation()
     else:
         val fn_body_e = parse_expr()
         fn_lam_stmts.push(fn_body_e)
+        lex_disable_forced_indentation()
     expr_lambda(fn_param_names, fn_lam_stmts, 0)
 
 # Integer literal token text -> value, supporting _ separators and
