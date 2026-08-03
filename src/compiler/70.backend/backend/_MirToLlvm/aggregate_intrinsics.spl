@@ -18,6 +18,28 @@ use compiler.backend.common.mir_text_codegen.MirTextCodegen
 
 extern fn rt_env_get(key: text) -> text
 
+fn llvm_inline_asm_rewrite_template(
+    asm_template: text, output_names: [text], input_names: [text]
+) -> text:
+    """Map Simple `{name}`/`{N}` operands to LLVM inline-asm `$N` operands.
+
+    LLVM numbers outputs before inputs because its constraint list has that
+    order, even when the Simple source lists its input constraints first.
+    """
+    var rewritten = asm_template
+    var operand_index = 0
+    for name in output_names:
+        val llvm_operand = "$" + operand_index.to_string()
+        rewritten = rewritten.replace("{" + name + "}", llvm_operand)
+        rewritten = rewritten.replace("{" + operand_index.to_string() + "}", llvm_operand)
+        operand_index = operand_index + 1
+    for name in input_names:
+        val llvm_operand = "$" + operand_index.to_string()
+        rewritten = rewritten.replace("{" + name + "}", llvm_operand)
+        rewritten = rewritten.replace("{" + operand_index.to_string() + "}", llvm_operand)
+        operand_index = operand_index + 1
+    rewritten
+
 # ============================================================================
 # MIR to LLVM IR Translation
 # ============================================================================
@@ -504,10 +526,13 @@ impl MirToLlvm:
         var constraint_parts: [text] = []
         var arg_values: [text] = []
         var arg_types: [text] = []
+        var output_names: [text] = []
+        var input_names: [text] = []
 
         for output in outputs:
             val constraint = self.build_output_constraint(output)
             constraint_parts.push(constraint)
+            output_names.push(output.name)
 
         for input in inputs:
             val constraint = self.build_input_constraint(input)
@@ -515,11 +540,14 @@ impl MirToLlvm:
             val operand_value = self.translate_operand(input.operand)
             arg_values.push(operand_value)
             arg_types.push(self.native_int())
+            input_names.push(input.name)
 
         for clobber in clobbers:
             constraint_parts.push("~{{clobber}}")
 
         val constraints = constraint_parts.join(",")
+        val llvm_asm_template = llvm_inline_asm_rewrite_template(
+            asm_template, output_names, input_names)
 
         var arg_list_parts: [text] = []
         for i in 0..arg_values.len():
@@ -530,14 +558,14 @@ impl MirToLlvm:
 
         if outputs.len() == 0:
             # No outputs: call void
-            val asm_call = "  call void asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            val asm_call = "  call void asm{volatile_flag} \"{llvm_asm_template}\", \"{constraints}\"({arg_list})"
             self.builder.emit(asm_call)
         elif outputs.len() == 1:
             # Single output: capture result directly
             val out_op = outputs[0]
             val out_val = self.translate_operand(out_op.operand)
             val out_ty = self.native_int()
-            val asm_call = "  {out_val} = call {out_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            val asm_call = "  {out_val} = call {out_ty} asm{volatile_flag} \"{llvm_asm_template}\", \"{constraints}\"({arg_list})"
             self.builder.emit(asm_call)
         else:
             # Multiple outputs: use struct return type
@@ -547,7 +575,7 @@ impl MirToLlvm:
             val struct_ty = "{{ " + out_types.join(", ") + " }}"
             val first_out_val = self.translate_operand(outputs[0].operand)
             val tmp_name = "{first_out_val}.asm_ret"
-            val asm_call = "  {tmp_name} = call {struct_ty} asm{volatile_flag} \"{asm_template}\", \"{constraints}\"({arg_list})"
+            val asm_call = "  {tmp_name} = call {struct_ty} asm{volatile_flag} \"{llvm_asm_template}\", \"{constraints}\"({arg_list})"
             self.builder.emit(asm_call)
             # Extract each output value
             var out_idx = 0
@@ -695,3 +723,5 @@ impl MirToLlvm:
 # ============================================================================
 # LLVM-Specific Helpers (not part of trait)
 # ============================================================================
+
+export llvm_inline_asm_rewrite_template
