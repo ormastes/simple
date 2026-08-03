@@ -18,6 +18,12 @@ node maps back to raw byte spans. A parser recovery creates a nested
 `ErrorNode`; it cannot erase malformed input. Strict mode rejects recovery and
 compatibility mode accepts only recovery rules named by the pinned manifest.
 
+The source and mapping layer shall extend the existing pure-Simple contracts in
+`src/lib/common/structural/parse/` (`SourceSnapshot`, byte `SourceSpan`,
+`SourceAnchor`, `TextEdit`, mappings, diagnostics, and malformed receipts).
+Introducing parallel incompatible source-span or edit contracts requires an ADR
+and an explicit migration plan.
+
 ## Package boundaries
 
 ```text
@@ -137,10 +143,13 @@ controls release policy. Adapter fixtures and extensions cannot bypass them.
 Generated files are never hand-edited, and legacy implementations are removed
 only after differential parity.
 
+The architecture owner also owns compatibility with the structural parser
+contracts. Adapter agents consume those contracts through the frozen IR; they
+do not create private byte cursors, source maps, or recovery ledgers.
+
 ## Pure-Simple failure policy
 
 Canonical components are pure Simple. When self-hosted Simple cannot process a
 fixture, minimize it, record affected modes, add a regression, keep the import
 blocked, fix the owning compiler/library/runtime layer, then remove the
 workaround. Bootstrap oracles do not establish production validation.
-
