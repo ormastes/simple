@@ -47,3 +47,6 @@ dev-done
 - dev: Pushed LLVM cast hardening, staged-native SSA store retention, and 181s-to-2.70s authority fingerprint batching.
 - dev: Admitted current pure-Simple Stage 3 at aa0586ed281ae271b6254b8c21e3e0d847639dbdf644e7bef6c5ec07e1a43cf6.
 - dev: True Stage 4 completed 2,116 source loads and 1,431 surfaces, then isolated one Array-to-Named HIR routing defect; three candidate cycles stayed red, so the mandatory session cap stopped further edits. No Stage 4 binary or deploy exists.
+- dev: Pushed typed enum-payload closure and trait terminal-identity fixes through `4505aec902a`; exact focused pure-Simple regressions passed.
+- dev: Admitted Stage 3 at `daa98e2b841a28ada30663ed817b9b3ec39d7dfcc3b919a47cbc72813c84cbbd` and ran the full graph. Stage 4 stopped at HIR 43/1,431 on grouped `LintLevel`/`LintCategory` terminal collisions; no candidate or deployment exists.
+- dev: Remaining execution plan is `doc/03_plan/agent_tasks/stage4_spdev.md`; post-admission frozen SDK work is `doc/03_plan/design/bootstrap_sdk_capsule.md`.

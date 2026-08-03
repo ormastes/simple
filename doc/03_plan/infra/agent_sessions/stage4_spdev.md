@@ -344,3 +344,11 @@ disproved candidates.
 
 The parallel lane split, merge owner, and final reviewer are recorded in
 `doc/03_plan/agent_tasks/stage4_spdev.md`.
+
+## Post-Stage-4 future architecture
+
+After the current exact x86 Stage 4 binary is admitted, continue with
+`doc/03_plan/design/bootstrap_sdk_capsule.md`: a Clang-style, provenance-bound
+frozen SDK -> candidate compiler -> rebuilt SDK/compiler -> reproducibility ->
+atomic promotion flow. This future lane must complete the typed SHB authority
+first; it must not narrow or replace the current full-source Stage 4 proof.
