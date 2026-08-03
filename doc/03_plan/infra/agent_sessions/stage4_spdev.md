@@ -178,6 +178,34 @@ exact and adjacent pointer/integer tests, retry only the 1.4-second
 `env/paths.spl` pure shard, refresh admitted Stage 3 once, then run one true
 Stage 4 with `SIMPLE_BOOTSTRAP_STAGE4=1`. Keep LLVM fail-closed.
 
+### 2026-08-03 x86 continuation result
+
+- Pushed defined-SSA LLVM conversion hardening as `1a218e04c43` (focused 4/4
+  PASS) without claiming it fixed the separate missing-store corruption.
+- Pushed the staged-native SSA alloca transport repair as `cfef9087884`; named
+  typed results retain definition/store flow in the focused native oracle.
+- Pushed batched bootstrap authority hashing as `88bff46a6e2`: the complete
+  43,191-file inventory fell from 181 seconds to 2.70 seconds without excluding
+  vendor inputs.
+- Rebuilt the bootstrap-only Rust authority, then admitted pure-Simple Stage 3.
+  Sanity, capability, and provenance passed at SHA-256
+  `aa0586ed281ae271b6254b8c21e3e0d847639dbdf644e7bef6c5ec07e1a43cf6`.
+- True Stage 4 loaded 2,116/2,116 sources and completed all 1,431 Phase 2
+  surfaces, then failed in the third HIR module. The only distinct diagnostic
+  is `GlobalFlags.mem_infra_requested: [text]` being routed from Array into the
+  Named arm. The focused retry retained its command/log/resource receipt and
+  reproduced rc=1 in 2:52.22 at 829,044 KiB peak RSS.
+- Three bounded candidates remained red after fresh pure-Simple compiler
+  rebuilds: direct discriminant dispatch, typed prescan field rebind, and both
+  combined. They are not merged. The session cap is reached; no Stage 4 CLI or
+  deployment exists.
+
+Next fresh session: instrument the exact parsed `ParserField.type_` immediately
+before `lower_module` and at direct `lower_type` entry. Isolate parser storage,
+field extraction, or method-call ABI before editing; reuse the exact Array plus
+adjacent bool/custom/generic hard-exit regression. Do not retry the three
+disproved candidates.
+
 ## Ownership
 
 The parallel lane split, merge owner, and final reviewer are recorded in
