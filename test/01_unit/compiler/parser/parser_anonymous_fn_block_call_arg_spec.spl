@@ -1,0 +1,60 @@
+"""
+Regression coverage for parser_anonymous_fn_block_call_arg_2026-08-03.
+
+Anonymous `fn(...)` block lambdas inside call parentheses must retain their
+own NEWLINE/INDENT/DEDENT stream, just like backslash block lambdas.
+"""
+
+use std.spec
+use compiler.core.parser.{parse_module, parser_has_errors, parser_set_had_error}
+
+fn parses_clean(name: text, source: text) -> bool:
+    parser_set_had_error(false)
+    parse_module(source, name)
+    not parser_has_errors()
+
+fn exact_sort_source() -> text:
+    "class SnapshotEntry:\n" +
+        "    module_key: text\n" +
+        "    symbol_name: text\n\n" +
+        "fn snapshot_modules(all_entries: [SnapshotEntry]) -> [SnapshotEntry]:\n" +
+        "    val sorted: [SnapshotEntry] = all_entries.sort_by(fn(a: SnapshotEntry, b: SnapshotEntry) -> i64:\n" +
+        "        if a.module_key < b.module_key:\n" +
+        "            return -1\n" +
+        "        if a.module_key > b.module_key:\n" +
+        "            return 1\n" +
+        "        if a.symbol_name < b.symbol_name:\n" +
+        "            return -1\n" +
+        "        if a.symbol_name > b.symbol_name:\n" +
+        "            return 1\n" +
+        "        return 0\n" +
+        "    )\n" +
+        "    sorted\n"
+
+describe "anonymous fn block call arguments":
+    it "parses the api surface snapshot sort comparator exactly":
+        expect(parses_clean("anonymous_fn_exact_sort.spl", exact_sort_source())).to_equal(true)
+
+    it "ends the lambda at a comma and parses the adjacent call argument":
+        val source = "fn apply() -> i64:\n" +
+            "    val result = choose(fn(x: i64) -> i64:\n" +
+            "        val doubled = x * 2\n" +
+            "        doubled + 1\n" +
+            "    , 7)\n" +
+            "    result\n"
+        expect(parses_clean("anonymous_fn_comma_terminator.spl", source)).to_equal(true)
+
+    it "keeps expression-bodied anonymous fn syntax unchanged":
+        val source = "fn apply() -> i64:\n" +
+            "    val callback = fn(x: i64) -> i64: x + 1\n" +
+            "    callback(2)\n"
+        expect(parses_clean("anonymous_fn_expression_body.spl", source)).to_equal(true)
+
+    it "reports a malformed block then clears parser error state for a valid parse":
+        val malformed = "fn broken() -> i64:\n" +
+            "    val callback = consume(fn(x: i64) -> i64:\n" +
+            "        val missing =\n" +
+            "    )\n" +
+            "    callback\n"
+        expect(parses_clean("anonymous_fn_malformed.spl", malformed)).to_equal(false)
+        expect(parses_clean("anonymous_fn_recovery.spl", exact_sort_source())).to_equal(true)
