@@ -83,6 +83,9 @@ impl CompilerDriver:
         var phase_hir_modules: Dict<text, HirModule> = self.ctx.hir_modules
         var phase_entry_hir: HirModule? = self.ctx.bootstrap_entry_hir
         var source_index = 0
+        var progress_hir_done = 0
+        log_build_progress("hir", "modules", 0, surfaces.surfaces.len(),
+            "pending", 2, 6, 0, 0, "running")
 
         while source_index < self.ctx.sources.len():
             val source = self.ctx.sources[source_index]
@@ -118,10 +121,19 @@ impl CompilerDriver:
             if self.ctx.errors.len() > 0:
                 return (self.ctx, false)
             lowered_by_surface[surface_index] = hir_module
+            progress_hir_done = progress_hir_done + 1
             phase_hir_modules[source.module_name] = hir_module
             if is_requested_bootstrap_entry:
                 phase_entry_hir = Some(hir_module)
             log_phase("phase3:hir:file:done {source.path} module={source.module_name} funcs={hir_module.functions.len()}")
+            # Sixteen modules keeps the append-only progress receipt current
+            # even when the next compiler/parser module takes several minutes.
+            # This writes at most ~90 tiny records for the present 1,431-module
+            # Stage 4 graph, so it has no measurable compiler-loop overhead.
+            if progress_hir_done % 16 == 0 or progress_hir_done == surfaces.surfaces.len():
+                log_build_progress("hir", "modules", progress_hir_done,
+                    surfaces.surfaces.len(), source.module_name,
+                    2, 6, 0, 0, "running")
             source_index = source_index + 1
 
         var phase_ctx: CompileContext = self.ctx
