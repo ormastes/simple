@@ -2,7 +2,7 @@
 
 Status: reopened — full-graph facade collision reproduced (2026-08-03)
 Severity: P1 bootstrap blocker  
-Fix owner: `/root/option_native_codegen_rootcause` — CLAIMED
+Fix owner: `/root` — CLAIMED (reassigned 2026-08-03 after the prior owner became inactive)
 
 ## Reproduction
 
@@ -112,3 +112,29 @@ same two-pass result holds with the relevant discovery order reversed. Package
 `__init__` facades are deliberately excluded from the promoted-child index;
 otherwise a later pass would incorrectly report the stable facade and its real
 child as two owners of the same package export.
+
+### Current x86 Stage 4 recurrence (2026-08-03)
+
+The full-resource build from pushed revision `7fa67048898` passed all 1,431
+surface modules and reproduced the same unresolved
+`time_now_unix_micros` name while declaring
+`lib.nogc_async_mut.database.test`. The prior owner is no longer active, so the
+x86 Stage 4 root lane has taken over this existing claim. Consumer-level import
+changes remain out of scope: the repair must retain delayed explicit and glob
+facade exports while restoring full-graph, discovery-order-independent origin
+convergence.
+
+The recurrence was the missing physical-alias case. The manifest indexes the
+same async `io.spl` surface under both `lib.nogc_async_mut.io` and
+`std.nogc_async_mut.io`. The latter spelling made the root compatibility glob
+resolve back to its own canonical path; delayed-route logic then treated that
+self-cycle as an explicit syntactic promise and permanently suppressed sibling
+owner inference. Export-origin resolution now ignores only imports whose owner
+is the same physical surface, for named and glob routes. Non-self delayed
+explicit/glob precedence is unchanged.
+
+The combined native regression asserts that both logical keys share one
+surface, then verifies late time/sysinfo compatibility children resolve in
+both discovery orders. The freshly compiled pure-Simple probe passed four
+examples with zero failures (137-module cold build; 3 compiled/134 cached on
+the matcher-only retry). Full Stage 4 remains the admission gate.
