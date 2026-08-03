@@ -5,6 +5,8 @@
 
 use compiler.core.parser.{parse_module, parser_has_errors, parser_get_errors}
 use compiler.core.ast.{ast_reset}
+use compiler.core.types.{reset_all_pools}
+use compiler.frontend.core.lexer.{lexer_release_parse_source_globals}
 use std.nogc_sync_mut.io.file_discovery.{find_spl_files}
 use app.check.sspec_source.{check_sspec_guidance}
 use app.check.targets.{expand_check_targets}
@@ -14,6 +16,8 @@ use app.check.concurrency_lint.{run_concurrency_api_lint}
 extern fn rt_cli_get_args() -> [text]
 extern fn rt_file_exists(path: text) -> bool
 extern fn rt_file_read_text(path: text) -> text
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_end() -> bool
 
 fn get_cli_args() -> [text]:
     val raw_args = rt_cli_get_args()
@@ -159,32 +163,58 @@ fn concurrency_api_lint_errors(source: text) -> [text]:
         msgs.push("error[E-PAR-006]: multicore_green_spawn_sliced closure must not capture shared mutable state")
     msgs
 
+fn checker_begin_file_scope() -> bool:
+    # Native module globals can start nil. Materialize reusable parser arenas
+    # before allocations become owned by the per-file transient scope.
+    reset_all_pools()
+    ast_reset()
+    rt_transient_array_scope_begin()
+
+fn checker_end_file_scope() -> bool:
+    # Drop source roots first, reclaim the file-owned heap second, then rebuild
+    # process-lifetime arenas outside the ended scope for the next file.
+    lexer_release_parse_source_globals()
+    val ended = rt_transient_array_scope_end()
+    ast_reset()
+    ended
+
 fn check_one(path: text, as_json: bool) -> i64:
     if not rt_file_exists(path):
         if not as_json:
             print "ERROR: file not found: {path}"
         return 1
+    if not checker_begin_file_scope():
+        if not as_json:
+            print "ERROR: checker transient parse scope unavailable: {path}"
+        return 1
+
     val source = rt_file_read_text(path) ?? ""
     val sspec_guidance = check_sspec_guidance(source, path)
+    var failure_count = 0
     if sspec_guidance != "":
         if not as_json:
             print sspec_guidance
-        return 1
-    ast_reset()
-    parse_module(source, path)
-    val errors = parser_get_errors()
-    val concurrency_errors = run_concurrency_api_lint(source, path)
-    if errors.len() == 0 and concurrency_errors.len() == 0 and not parser_has_errors():
-        return 0
-    if not as_json:
-        for err in errors:
-            print "{path}: {err}"
-        for concurrency_err in concurrency_errors:
-            print "{path}: {concurrency_err}"
-        if errors.len() == 0 and concurrency_errors.len() == 0:
-            print "{path}: check failed"
-    val total = errors.len() + concurrency_errors.len()
-    if total > 0: total else: 1
+        failure_count = 1
+    else:
+        parse_module(source, path)
+        val errors = parser_get_errors()
+        val concurrency_errors = run_concurrency_api_lint(source, path)
+        if errors.len() > 0 or concurrency_errors.len() > 0 or parser_has_errors():
+            if not as_json:
+                for err in errors:
+                    print "{path}: {err}"
+                for concurrency_err in concurrency_errors:
+                    print "{path}: {concurrency_err}"
+                if errors.len() == 0 and concurrency_errors.len() == 0:
+                    print "{path}: check failed"
+            val total = errors.len() + concurrency_errors.len()
+            failure_count = if total > 0: total else: 1
+
+    if not checker_end_file_scope():
+        if not as_json:
+            print "ERROR: checker transient parse scope teardown failed: {path}"
+        failure_count = failure_count + 1
+    failure_count
 
 fn main() -> i64:
     val args = get_cli_args()
