@@ -254,6 +254,44 @@ field extraction, or method-call ABI before editing; reuse the exact Array plus
 adjacent bool/custom/generic hard-exit regression. Do not retry the three
 disproved candidates.
 
+### 2026-08-03 enum-closure and backend-evidence continuation
+
+- The executable in-memory HIR probe now reproduces the real state transition:
+  a package sibling registers facade declarations with enum materialization
+  disabled, then an authored explicit facade import requests the body. The
+  admitted pure-Simple Stage 3 compiler built 135 modules in 45.0 seconds at
+  389,256 KiB peak RSS; the pre-fix probe exited 34 at the first missing
+  `GpuBarrierScope` dependency.
+- Three bounded implementation/probe cycles did not produce an acceptable
+  compiler change. The first closure draft advanced to exit 35, then direct
+  walker assertions isolated `parser_variant_named_dependencies` at exit 60.
+  An owner-local raw-discriminant draft still exited 60. No compiler source or
+  unverified regression was committed.
+- Highest-capability read-only review confirmed that the probe is exact and the
+  recursive type/alias closure is structurally sound, but rejected the draft:
+  collision identity compared only defining modules rather than terminal
+  `(module, item, kind)` identity, and direct origins used lookup aliases rather
+  than the physical `ModuleSurface.module_name`. Coverage also still needs
+  bounds/defaults, every retained `TypeKind` form, same-owner/different-item
+  collision, and module-surface alias-key cases.
+- Next fresh session must first define owner-local typed `VariantKind` payload
+  extraction in `parser_types.spl`, then add those missing adjacent cases. It
+  must canonicalize every origin to the physical surface owner and fail closed
+  on full terminal-identity conflicts. Reuse retained logs under
+  `/tmp/simple-stage4-enum-closure4-20260803/build/mini_builds/stage4-enum-hir-probe/`;
+  do not rerun the three failed drafts unchanged.
+- Backend evidence was expanded independently: `796e6db366f` validates wrong
+  LLVM/Cranelift lineage, real LLVM text-to-bitcode-to-object identity,
+  malformed/tampered IR rejection, x86_64/AArch64 target separation, and
+  CUDA/Vulkan/Metal artifact receipts without promoting unavailable hardware.
+  `64280515b3f` adds five Source-through-optimized-MIR boundary scenarios and a
+  synchronized generated/manual integration document.
+- That coverage exposed and fixed a checker defect in `b6d694abc7b`: POSIX
+  shell function-global arguments in `layer_result` clobbered the producer's
+  Metal unavailability reason. Exact Metal plus adjacent CUDA/Vulkan reason
+  preservation and generated-source fail-closed checks pass. The canonical bug
+  row `gpu_backend_layer_result_reason_clobber_2026_08_03` is fixed.
+
 ## Ownership
 
 The parallel lane split, merge owner, and final reviewer are recorded in

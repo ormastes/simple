@@ -94,3 +94,13 @@ dev-done
   reproducer shapes without source edits. Recorded the Stage 4 entry guard,
   ordinary-mode false green, declaration-only-to-materialized upgrade hazard,
   and the required executable HIR probe for the next scoped continuation.
+- dev: The executable HIR probe reproduced the exact declaration-only upgrade
+  at exit 34 with admitted pure-Simple Stage 3. Three bounded closure drafts
+  ended at walker exit 60, so no compiler source was accepted. Review requires
+  typed owner-local VariantKind extraction, physical-surface canonical owners,
+  full terminal identity collision checks, and the missing TypeKind adjacent
+  coverage before the next Stage 4 retry.
+- dev: Added backend artifact identity and intermediate-layer boundary
+  coverage. Fixed the discovered layer_result reason-clobber bug with exact
+  Metal and adjacent CUDA/Vulkan fail-closed regressions; these tests are
+  diagnostic evidence and do not satisfy the Stage 4 binary acceptance gates.
