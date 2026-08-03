@@ -1,11 +1,10 @@
 # Stage 4 CLI HIR misclassifies an Array field as Named
 
 - **Date:** 2026-08-03
-- **Status:** OPEN — CLAIMED by the x86 Stage 4 root lane
+- **Status:** FIXED — exact parser/field/HIR native boundary passes
 - **Severity:** P1
-- **Area:** pure-Simple HIR type lowering
-- **Owner frontier:** parser `ParserField.type_` transport into
-  `src/compiler/20.hir/hir_lowering/types.spl::lower_type`
+- **Area:** pure-Simple flat parser declaration storage
+- **Owner:** `src/compiler/10.frontend/core/_ParserDecls/fn_struct_decls.spl`
 - **Reproducer:** true `SIMPLE_BOOTSTRAP_STAGE4=1` full-CLI lowering of
   `src/app/cli/_CliMain/args_and_os_commands.spl`
 
@@ -23,7 +22,19 @@ rebuilds: direct `rt_enum_discriminant` calls in `lower_type`, a typed
 `ParserField`/`Type` rebind in `prescan_composite_field_types`, and both changes
 together. All experimental edits remain isolated and unmerged.
 
-A fresh session must instrument the parsed `GlobalFlags` field before
-`lower_module`, then at direct `lower_type` entry, to determine whether the
-Array tag is lost in parser-module storage, field extraction, or the method-call
-ABI. Do not retry the three rejected candidates.
+The exact boundary probe localized the loss before HIR. `field_types` is a
+flat `[i64]` table, but its `ftype` temporary was inferred from the global
+`TYPE_ANY` constant. On the staged native path that provenance survived the
+later `parser_parse_type()` assignment, so `field_types.push(ftype)` passed a
+raw type tag to the tagged array ABI. Array reads then decoded it with `>> 3`.
+Making the temporary explicitly `i64` restores the required scalar boxing.
+
+Verified with a freshly rebuilt pure-Simple compiler:
+
+- `stage4_parser_field_hir_boundary_probe.spl`: all eight mismatches removed;
+  direct `lower_type` and whole-module lowering both report zero errors.
+- `array_i64_call_result_push.spl`: direct call-result and reassigned-local
+  `[i64]` pushes preserve positive, negative, and literal values.
+
+The full x86 Stage 4 bootstrap remains the enclosing lane's deployment gate;
+it is not needed to keep this now-localized bug open.
