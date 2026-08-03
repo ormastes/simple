@@ -1,5 +1,12 @@
 # Pure-Simple LLVM lane emits invalid IR for every program
 
+- **Status:** defect 2 FIXED with compiled-native proof on 2026-08-03;
+  defects 3 and 4 remain open
+- **Owner:** Codex `/root/symbolid_zero_spec/simpleos_unoq_stage3`
+- **Claim scope:** stop retaining the target composite, reconstruct a fresh
+  header target from the scalar requested target, and compose triple text
+  inline in `emit_module_header`; cover GNU, nil-env and SimpleOS neighbors
+  without changing the Rust runtime.
 - **Date:** 2026-08-01
 - **Base:** `63c362526c2b01c5bc63697ab80aea1501ae65fe` (the
   `llvm_ir_builder.spl` blob is byte-identical at `205b35e474a`, where the
@@ -103,7 +110,7 @@ broken `return` guard working.
 fixed and does not regress anything; it is not on its own sufficient to make the
 lane work.
 
-### 2. `target triple` is a corrupt heap value — OPEN
+### 2. `target triple` is a corrupt heap value — FIXED
 
 `llvm_ir_builder.spl:99` emits `target triple = "{self.target.to_text()}"` and
 gets `<invalid-heap:0x...>`, the runtime's marker (`src/compiler_rust/runtime/
@@ -113,6 +120,42 @@ shape (struct with `text` fields plus a `text?` matched via `Some(e)`/`nil`)
 compiled by the same seed prints `x86_64-unknown-linux-gnu` correctly, so the
 corruption is in `self.target` reaching `emit_module_header`, not in `to_text()`
 itself. Not yet located.
+
+The first proposed repair snapshotted `target.to_text()` inside
+`LlvmIRBuilder.create()`. A rebuilt 725/725 diagnostic Stage 3 rejected that
+approach: the resulting pure-Simple shard still emitted
+`target triple = "<invalid-heap:...>"`. The incoming composite is therefore
+already unsafe at that boundary; moving the same conversion earlier is not a
+fix.
+
+Reconstructing a fresh local, the shape previously used by `6087e7a9d83`, was
+also falsified by a second rebuilt 725/725 diagnostic Stage 3: calling
+`target.to_text()` on that local still emitted `<invalid-heap:...>`. The defect
+is the newly interpolated text crossing the compiled `to_text()` method return
+boundary, not only composite retention.
+
+The current source candidate keeps the useful part of that repair:
+`LlvmIRBuilder` no longer stores the composite target, and
+`emit_module_header()` reconstructs a fresh local `LlvmTargetTriple` from the
+scalar `SIMPLE_NATIVE_BUILD_TARGET`. The selector covers hosted x86-64,
+AArch64, RISC-V 64/32, x86, ARM, Wasm 64/32 and SimpleOS; bare-metal target
+strings use `from_target_baremetal`. Header emission calls `datalayout()` (which
+returns stable literals), but composes arch/vendor/os/optional-env directly in
+the caller and never calls `to_text()`.
+
+Focused regression evidence:
+
+- pre-fix Rust-seed interpreter diagnostic: 2/4 passed, with the structural
+  retained-composite assertion red;
+- repaired Rust-seed interpreter diagnostic: 4/4 passed for exact GNU x86-64,
+  nil-env AArch64 bare metal, SimpleOS, and no retained builder composite;
+- final pure-Simple proof: diagnostic Stage 3 rebuilt 725/725, compiled the
+  exact `env/paths` shard through the repaired builder, and emitted
+  `target triple = "x86_64-unknown-linux-gnu"` with no `<invalid-heap:` value;
+- `llc` consumed that header and advanced to the independent invalid
+  `%t281 = bitcast i1 %l162 to ptr` error at generated IR line 2874. That
+  progression is the compiled-native proof that defect 2 is closed, not a
+  claim that the full shard or Stage 4 now passes.
 
 ### 3. Constants are lost — every `ret` is `ret i64 0` — OPEN
 

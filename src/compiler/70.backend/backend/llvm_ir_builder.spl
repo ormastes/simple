@@ -8,6 +8,8 @@
 # - mir_to_llvm.spl: MirToLlvm translation class
 
 use compiler.backend.llvm_target.{LlvmTargetTriple}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+use compiler.common.mir_target_context.{mir_target_context_os_from}
 use compiler.common.attributes.FunctionAttr
 
 extern fn rt_env_get(key: text) -> text
@@ -24,6 +26,29 @@ var _llvm_simpleos_header: bool = false
 pub fn llvm_ir_builder_set_simpleos_header(enabled: bool):
     _llvm_simpleos_header = enabled
 
+fn llvm_builder_target() -> CodegenTarget:
+    val requested = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+    if requested.contains("simpleos"):
+        CodegenTarget.SimpleOS_X86_64
+    elif requested.starts_with("aarch64-") or requested.starts_with("arm64-"):
+        CodegenTarget.AArch64
+    elif requested.starts_with("riscv64-") or requested.starts_with("rv64-"):
+        CodegenTarget.Riscv64
+    elif requested.starts_with("riscv32-") or requested.starts_with("rv32-"):
+        CodegenTarget.Riscv32
+    elif requested.starts_with("wasm64-") or requested == "wasm64":
+        CodegenTarget.Wasm64
+    elif requested.starts_with("wasm32-") or requested == "wasm32":
+        CodegenTarget.Wasm32
+    elif requested.starts_with("i686-") or requested.starts_with("i386-") or requested == "x86":
+        CodegenTarget.X86
+    elif requested.starts_with("armv") or requested.starts_with("thumbv") or requested == "arm":
+        CodegenTarget.Arm
+    elif requested.starts_with("x86_64-") or requested.starts_with("amd64-") or requested == "x64":
+        CodegenTarget.X86_64
+    else:
+        CodegenTarget.Host
+
 # Re-import from split module for re-export (backward compatibility)
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
 
@@ -34,7 +59,6 @@ use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
 class LlvmIRBuilder:
     """Builds LLVM IR from MIR."""
     module_name: text
-    target: LlvmTargetTriple
     # IR text accumulator: rt_string_builder handle, NOT a [text] array.
     # Arrays are value types — `self.x = self.x.push(line)` re-copies the
     # whole array per emitted line under the seed interpreter, O(M^2) over
@@ -78,7 +102,6 @@ class LlvmIRBuilder:
         _llvm_bootstrap_ir_text = ""
         LlvmIRBuilder(
             module_name: name,
-            target: target,
             sb: rt_string_builder_new(),
             current_function: nil,
             local_counter: 0,
@@ -104,14 +127,34 @@ class LlvmIRBuilder:
 
     me emit_module_header():
         """Emit module header."""
+        # Do not retain or snapshot the incoming LlvmTargetTriple across the
+        # builder class boundary. On the compiled pure-Simple lane its optional
+        # env payload can already be corrupt at create(), while reconstructing
+        # a fresh local from the scalar requested-target environment is stable.
+        val target = LlvmTargetTriple.from_target(llvm_builder_target())
+        val requested = rt_env_get("SIMPLE_NATIVE_BUILD_TARGET") ?? ""
+        val header_target = if mir_target_context_os_from(requested, "") == "baremetal":
+            LlvmTargetTriple.from_target_baremetal(llvm_builder_target())
+        else:
+            target
+        # LlvmTargetTriple.to_text() returns newly interpolated text across a
+        # compiled method boundary, which can arrive here as <invalid-heap>.
+        # Compose the fresh local's scalar fields in this caller instead.
+        var target_triple_text = "{header_target.arch}-{header_target.vendor}-{header_target.os}"
+        match header_target.env:
+            Some(target_env):
+                if target_env != "":
+                    target_triple_text = "{target_triple_text}-{target_env}"
+            nil:
+                ()
         self.emit("; ModuleID = '{self.module_name}'")
         self.emit("source_filename = \"{self.module_name}.spl\"")
         if _llvm_simpleos_header:
             self.emit("target datalayout = \"e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128\"")
             self.emit("target triple = \"x86_64-unknown-simpleos\"")
         else:
-            self.emit("target datalayout = \"{self.target.datalayout()}\"")
-            self.emit("target triple = \"{self.target.to_text()}\"")
+            self.emit("target datalayout = \"{header_target.datalayout()}\"")
+            self.emit("target triple = \"{target_triple_text}\"")
         self.emit("")
         self.header_emitted = true
         # Flush any bare-metal attributes queued before the header existed
