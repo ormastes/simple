@@ -1,11 +1,11 @@
 # Pure-Simple LLVM shard emits invalid `bitcast i1` to `ptr`
 
 - **Date:** 2026-08-03
-- **Status:** OPEN — CLAIMED by the x86 Stage 4 root lane
+- **Status:** FIXED
 - **Severity:** P1
 - **Area:** pure-Simple LLVM MIR lowering
-- **Likely owner:**
-  `src/compiler/70.backend/backend/_MirToLlvm/aggregate_intrinsics.spl::translate_bitcast`
+- **Verified owner:**
+  `src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl::value_as_type`
 - **Reproducer:** `src/lib/nogc_async_mut/env/paths.spl` compiled as the
   focused pure-Simple Stage 4 shard
 
@@ -31,18 +31,29 @@ new downstream blocker; it is not a recurrence of the former
 
 ## Root-cause direction
 
-`translate_bitcast` currently emits a raw LLVM `bitcast` whenever source and
-target types differ. LLVM does not permit an integer boolean to be bitcast to a
-pointer. Adjacent comparison lowering already records the valid conversion
-shape: zero-extend `i1` to the target native integer, then use `inttoptr`.
+`translate_terminator` routes return coercions through `value_as_type`, whose
+generic cast selector falls back to LLVM `bitcast` whenever no known cast
+matches. LLVM does not permit an integer boolean to be bitcast to a pointer.
+Adjacent comparison lowering already records the valid conversion shape:
+zero-extend `i1` to the target native integer, then use `inttoptr`.
 
 Do not weaken LLVM verification or replace the value with zero. A repair must
 preserve the boolean value, handle the reverse pointer/integer neighbor where
 applicable, and add exact plus adjacent lowering tests before retrying only the
 failed shard.
 
-## Scope boundary
+The focused regression models a defined SSA value only. The observed
+`env/paths` diagnostic IR also contains a separate upstream missing-store/value
+loss defect; legal cast emission must not be used as evidence that that defect
+is fixed.
 
-This session records and claims the P1 blocker only. It intentionally makes no
-source change for the cast and does not claim that the `env/paths` shard or
-Stage 4 succeeds beyond this next LLVM verifier frontier.
+## Verification
+
+`llvm_bitcast_pointer_bool_spec.spl` passes all four focused examples in strict
+interpreter mode: exact `i1 -> native-int -> ptr`, reverse `ptr -> i1`
+truthiness, and adjacent `i64 -> ptr` / `ptr -> i64` conversions. Unsupported
+value coercions now fail closed instead of falling through to `bitcast`.
+
+This result closes only the LLVM cast-emission defect. It does not claim the
+separate `env/paths` missing-store/value-loss defect, shard, or full Stage 4 is
+fixed.
