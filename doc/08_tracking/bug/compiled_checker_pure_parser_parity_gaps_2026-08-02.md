@@ -48,6 +48,51 @@ SHA-256 is
 the immutable 43-path manifest digest is
 `b1c9a865e8c13196821a32aaa87e9c2d212abd47e5b1cf6a3c78850b9ebd357e`.
 
+### Core type-grammar lane claim
+
+Claimed by `codex/stage4-type-batch-20260803` from `5e7c57e9c89a`.  The
+immutable failed-only manifest contains 38 individually reproduced paths:
+26 type-or-multiline-signature, nine reference-type, two fixed-array-type, and
+one type-test routes.  Before editing, compiled checker SHA-256
+`56ccc1509d372162c5f53a54e2fa2262afa03df52b45fe064dc250dab8f43f57`
+failed all 38 paths; the manifest SHA-256 is
+`e3fe4863a3e87767f1d1da1fd1dcc00dc4145548e2971aa8c17e1af47f932d4e`.
+
+This lane owns only shared type parsing rooted in `parser_parse_type*` and its
+direct type-helper splits.  Diagnostics that actually originate in class
+members, primary expressions, statements, imports, structured expressions, or
+lambda parsing will be rerouted rather than hidden by broad recovery.
+
+The lane is complete.  Shared parser/type-registry/flat-bridge roots now
+preserve `&T` and `&mut T`, explicit `-> nil`, legacy `Type[T]` generics, and
+`*T`/`*const T`/`*mut T`.  Raw pointers use an explicit appended
+`TypeKind.Pointer(Type, bool)` and lower to `HirTypeKind.Ptr`; they are not
+misrepresented as references.  Exact, adjacent, bridge-shape, malformed, and
+recovery coverage passes 10/10.
+
+Fresh compiled checker SHA-256
+`7af6262ecf92cd5f2835ac6594cd7e67d7fb89cac7ca740a83602afddef58d41`
+accepts all five changed production files.  On the immutable 38-path manifest,
+the original type diagnostic clears from 21 paths and three multiline-lambda
+paths were already cleared by the claimed base revision.  Whole-file outcomes
+therefore improve from 0 pass / 38 fail to 23 pass / 15 fail; the raw-pointer
+loader file progresses to later `unsafe:`/dereference expression diagnostics.
+
+The 15 non-passing files are explicitly rerouted, with no remaining core
+type-grammar owner:
+
+- 2 uninitialized fixed-array declarations: the array type parses, then the
+  declaration policy requires an initializer (`riscv/startup.spl` variants).
+- 1 reference expression/pattern (`src/app/interpreter/parser.spl`).
+- 5 multiline declaration signatures (three DAP variants, WM demo, and GPU
+  backend adapter).
+- 5 structured/named expression literals (syscall specs, three benchmark
+  variants, and NAND status test).
+- 1 unsafe-block/raw-dereference expression
+  (`src/compiler/99.loader/loader/smf_mmap_native.spl`).
+- 1 `is` type-test comparison expression
+  (`src/app/interpreter/ffi/eval_slice.spl`).
+
 ## Reproduction
 
 ```bash
