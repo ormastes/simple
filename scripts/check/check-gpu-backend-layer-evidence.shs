@@ -4,20 +4,43 @@
 set -eu
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
-PORTABLE_CHECK="$ROOT_DIR/scripts/check/check-portable-compute-toolchains.shs"
+PORTABLE_CHECK="${GPU_BACKEND_LAYER_PORTABLE_CHECK:-$ROOT_DIR/scripts/check/check-portable-compute-toolchains.shs}"
 BUILD_DIR="${GPU_BACKEND_LAYER_BUILD_DIR:-$ROOT_DIR/build/gpu-backend-layer}"
 TARGETS="${GPU_BACKEND_LAYER_TARGETS:-cuda,vulkan,metal,hip,opencl}"
 RUN_RUNTIME=false
 SELF_TEST=false
+MATRIX_SELF_TEST=false
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --targets) TARGETS="$2"; shift 2 ;;
         --runtime) RUN_RUNTIME=true; shift ;;
         --self-test) SELF_TEST=true; shift ;;
+        --matrix-self-test) MATRIX_SELF_TEST=true; shift ;;
         *) echo "unknown argument: $1" >&2; exit 64 ;;
     esac
 done
+
+validate_targets() {
+    case "$TARGETS" in
+        ''|,*|*,|*,,*)
+            echo "invalid backend target list: $TARGETS" >&2
+            exit 64
+            ;;
+    esac
+    invalid_targets="$(printf '%s\n' "$TARGETS" | tr ',' '\n' | grep -Ev '^(cuda|vulkan|metal|hip|opencl)$' || true)"
+    if [ -n "$invalid_targets" ]; then
+        echo "unknown backend target: $(printf '%s\n' "$invalid_targets" | head -n 1)" >&2
+        exit 64
+    fi
+    duplicate_targets="$(printf '%s\n' "$TARGETS" | tr ',' '\n' | sort | uniq -d | head -n 1)"
+    if [ -n "$duplicate_targets" ]; then
+        echo "duplicate backend target: $duplicate_targets" >&2
+        exit 64
+    fi
+}
+
+validate_targets
 
 field_of() {
     key="$1" file="$2"
@@ -91,6 +114,61 @@ classify_runtime() {
     fi
 }
 
+matrix_summary() {
+    summary_file="$1"
+    runtime_requested="$2"
+    selected_count=0
+    for backend in cuda vulkan metal hip opencl; do
+        has_target "$backend" && selected_count=$((selected_count + 1))
+    done
+    expected_count=$((selected_count * 4))
+    actual_count="$(grep -Ec '_(emit|validate|link|runtime)_result=(PASS|FAIL|SKIP_UNAVAILABLE)$' "$summary_file" || true)"
+    unique_count="$(sed -n 's/^\([^=]*_\(emit\|validate\|link\|runtime\)_result\)=.*/\1/p' "$summary_file" | sort -u | wc -l | tr -d ' ')"
+    pass_count="$(grep -Ec '_result=PASS$' "$summary_file" || true)"
+    failure_count="$(grep -Ec '_result=FAIL$' "$summary_file" || true)"
+    skip_count="$(grep -Ec '_result=SKIP_UNAVAILABLE$' "$summary_file" || true)"
+
+    if [ "$actual_count" -ne "$expected_count" ] || [ "$unique_count" -ne "$expected_count" ]; then
+        printf 'gpu_backend_matrix status=FAIL backends=%s layers=%s unique=%s expected=%s pass=%s failures=%s skips=%s runtime=%s reason=incomplete-matrix\n' \
+            "$selected_count" "$actual_count" "$unique_count" "$expected_count" \
+            "$pass_count" "$failure_count" "$skip_count" "$runtime_requested"
+        return 1
+    fi
+    if [ "$failure_count" -gt 0 ]; then
+        matrix_status=FAIL
+    elif [ "$skip_count" -gt 0 ]; then
+        matrix_status=SKIP_UNAVAILABLE
+    else
+        matrix_status=PASS
+    fi
+    printf 'gpu_backend_matrix status=%s backends=%s layers=%s unique=%s expected=%s pass=%s failures=%s skips=%s runtime=%s\n' \
+        "$matrix_status" "$selected_count" "$actual_count" "$unique_count" \
+        "$expected_count" "$pass_count" "$failure_count" "$skip_count" "$runtime_requested"
+    [ "$failure_count" -eq 0 ]
+}
+
+matrix_self_test() {
+    tmp_dir="${TMPDIR:-/tmp}/gpu-layer-matrix-self-test.$$"
+    mkdir -p "$tmp_dir"
+    trap 'rm -rf "$tmp_dir"' EXIT HUP INT TERM
+    artifact="$tmp_dir/artifact.bin"
+    stdout_file="$tmp_dir/runtime.out"
+    stderr_file="$tmp_dir/runtime.err"
+    summary_file="$tmp_dir/evidence.env"
+    printf 'artifact\n' >"$artifact"
+    : >"$stderr_file"
+    : >"$summary_file"
+    for backend in cuda vulkan metal hip opencl; do
+        has_target "$backend" || continue
+        layer_result "$backend" emit PASS source-emitted "$artifact" >>"$summary_file"
+        classify_artifact "$backend" compiled_artifact_verified verified "$artifact" >>"$summary_file"
+        printf '%s_status=pass\n' "$backend" >"$stdout_file"
+        classify_runtime "$backend" 0 "$stdout_file" "$stderr_file" >>"$summary_file"
+    done
+    cat "$summary_file"
+    matrix_summary "$summary_file" true
+}
+
 self_test() {
     tmp="${TMPDIR:-/tmp}/gpu-layer-self-test.$$"
     trap 'rm -f "$tmp" "$tmp.out" "$tmp.err"' EXIT HUP INT TERM
@@ -135,6 +213,11 @@ self_test() {
 if [ "$SELF_TEST" = true ]; then
     self_test
     exit 0
+fi
+
+if [ "$MATRIX_SELF_TEST" = true ]; then
+    matrix_self_test
+    exit $?
 fi
 
 mkdir -p "$BUILD_DIR"
@@ -210,4 +293,4 @@ done
 } >>"$SUMMARY"
 
 cat "$SUMMARY"
-if grep -q '_result=FAIL$' "$SUMMARY"; then exit 1; fi
+matrix_summary "$SUMMARY" "$RUN_RUNTIME"
