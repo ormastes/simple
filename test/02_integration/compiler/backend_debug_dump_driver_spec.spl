@@ -35,8 +35,10 @@ whole-compiler bootstrap is required.
 
 The shared request selects `source,ast,hir,monomorphized-hir,mir,optimized-mir`.
 The full request adds `backend-ir,object,linked-binary,run-readback-receipt`.
-The adjacent negative request uses `source,,mir` and must not start a partial
-build.
+The exact valid fixture retains a generic call and a conditional through both
+MIR checkpoints. Adjacent failures stop at parse and HIR boundaries without
+publishing later checkpoints. The malformed stage request uses `source,,mir`
+and must not start a partial build.
 
 ## Claim boundaries
 
@@ -46,7 +48,8 @@ accounted as `FAIL`. Once the option is supported, Source through Optimized MIR
 may pass only with real nonempty content-bearing artifacts. Backend IR, Object,
 Linked Binary, and Run/Readback Receipt remain required failures until typed
 validators and producer hooks exist; binary presence alone is `UNVALIDATED`,
-never `PASS` or `SKIP`.
+never `PASS` or `SKIP`. A failed layer may retain earlier requested evidence,
+but it must never publish the failed checkpoint or any downstream checkpoint.
 """
 
 # codex-system-test
@@ -97,17 +100,28 @@ fn native_build_args(source: text, output: text, dump: text, stages: text) -> [t
         "--debug-dump-dir", dump
     ]
 
-fn shared_artifact_statuses(dump: text, run_id: i64, fixture_name: text) -> [text]:
+fn shared_artifact_paths(dump: text, run_id: i64, fixture_name: text) -> [text]:
     val base = "{dump}/llvm-lib/x86_64-unknown-linux-gnu"
     val lowered = "{base}/build.backend_debug_dump_driver_{run_id}.{fixture_name}"
     val frontend = "{base}/build_backend_debug_dump_driver_{run_id}_{fixture_name}.spl"
     [
-        artifact_status("{lowered}.source.spl", "fn identity<T>", "select_value(true)"),
-        artifact_status("{frontend}.ast.ast.json", "\"stage\":\"ast\"", "select_value"),
-        artifact_status("{frontend}.hir.hir.json", "\"stage\":\"hir\"", "select_value"),
-        artifact_status("{frontend}.monomorphized-hir.hir.json", "\"stage\":\"monomorphized-hir\"", "identity"),
-        artifact_status("{lowered}.mir.mir.json", "\"functions\":[", "select_value"),
-        artifact_status("{lowered}.optimized-mir.mir.json", "\"functions\":[", "select_value")
+        "{lowered}.source.spl",
+        "{frontend}.ast.ast.json",
+        "{frontend}.hir.hir.json",
+        "{frontend}.monomorphized-hir.hir.json",
+        "{lowered}.mir.mir.json",
+        "{lowered}.optimized-mir.mir.json"
+    ]
+
+fn shared_artifact_statuses(dump: text, run_id: i64, fixture_name: text) -> [text]:
+    val paths = shared_artifact_paths(dump, run_id, fixture_name)
+    [
+        artifact_status(paths[0], "fn identity<T>", "select_value(true)"),
+        artifact_status(paths[1], "\"stage\":\"ast\"", "select_value"),
+        artifact_status(paths[2], "\"stage\":\"hir\"", "select_value"),
+        artifact_status(paths[3], "\"stage\":\"monomorphized-hir\"", "identity"),
+        artifact_status(paths[4], "\"functions\":[", "select_value"),
+        artifact_status(paths[5], "\"functions\":[", "select_value")
     ]
 
 fn unsupported_backend_stage_status(path: text) -> text:
@@ -125,6 +139,12 @@ fn backend_artifact_statuses(dump: text, run_id: i64, fixture_name: text) -> [te
         unsupported_backend_stage_status("{lowered}.linked-binary.bin"),
         unsupported_backend_stage_status("{lowered}.run-readback-receipt.sdn")
     ]
+
+fn expect_paths_absent(paths: [text], first_index: i64):
+    var index = first_index
+    while index < paths.len():
+        expect_not(file_exists(paths[index]))
+        index = index + 1
 
 fn expect_all_statuses(statuses: [text], expected: text):
     for status in statuses:
@@ -151,8 +171,67 @@ describe "backend debug dump driver integration":
         else:
             expect(option_error).to_equal("unknown option: --debug-dump={SHARED_STAGES}")
             expect(result).to_equal(2)
-            expect(file_exists(output)).to_equal(false)
+            expect_not(file_exists(output))
         expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), expected)
+        expect_all_statuses(backend_artifact_statuses(dump, run_id, "probe"), "FAIL")
+        if option_error == "":
+            val paths = shared_artifact_paths(dump, run_id, "probe")
+            val mir = file_read(paths[4])
+            val optimized_mir = file_read(paths[5])
+            expect(mir).to_contain("\"If\":")
+            expect(mir).to_contain("select_value")
+            expect(optimized_mir).to_contain("\"If\":")
+            expect(optimized_mir).to_contain("select_value")
+
+    it "stops a parse error before AST HIR and every downstream checkpoint":
+        step("fail the fixture at the parser boundary")
+        val run_id = getpid()
+        val root = "build/backend_debug_dump_driver_{run_id}/parse_failure"
+        val dump = "{root}/layers"
+        val output = "{root}/probe"
+        val source = "{root}/parse_failure.spl"
+        val invalid_source = "fn main() -> i64:\n    if true\n        1\n"
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write(source, invalid_source)).to_equal(true)
+        val args = native_build_args(source, output, dump, SHARED_STAGES)
+        val option_error = cli_native_build_option_error(args)
+        val result = cli_native_build(args)
+
+        if option_error == "":
+            expect(result).to_be_greater_than(0)
+        else:
+            expect(option_error).to_equal("unknown option: --debug-dump={SHARED_STAGES}")
+            expect(result).to_equal(2)
+        expect_not(file_exists(output))
+        val paths = shared_artifact_paths(dump, run_id, "parse_failure")
+        expect_paths_absent(paths, 1)
+        expect_all_statuses(backend_artifact_statuses(dump, run_id, "parse_failure"), "FAIL")
+
+    it "stops a HIR type error before monomorphized HIR MIR optimization and backend checkpoints":
+        step("fail the fixture at the HIR boundary")
+        val run_id = getpid()
+        val root = "build/backend_debug_dump_driver_{run_id}/hir_failure"
+        val dump = "{root}/layers"
+        val output = "{root}/probe"
+        val source = "{root}/hir_failure.spl"
+        val invalid_source = "fn main() -> MissingLayerType:\n    nil\n"
+        expect(dir_create_all(root)).to_equal(true)
+        expect(file_write(source, invalid_source)).to_equal(true)
+        val args = native_build_args(source, output, dump, SHARED_STAGES)
+        val option_error = cli_native_build_option_error(args)
+        val result = cli_native_build(args)
+        val paths = shared_artifact_paths(dump, run_id, "hir_failure")
+
+        if option_error == "":
+            expect(result).to_be_greater_than(0)
+            expect(artifact_status(paths[0], "fn main", "MissingLayerType")).to_equal("PASS")
+            expect(artifact_status(paths[1], "\"stage\":\"ast\"", "MissingLayerType")).to_equal("PASS")
+        else:
+            expect(option_error).to_equal("unknown option: --debug-dump={SHARED_STAGES}")
+            expect(result).to_equal(2)
+        expect_not(file_exists(output))
+        expect_paths_absent(paths, 3)
+        expect_all_statuses(backend_artifact_statuses(dump, run_id, "hir_failure"), "FAIL")
 
     it "fails closed and accounts for four requested backend layers without hooks":
         step("validate every emitted compiler layer")
@@ -171,13 +250,13 @@ describe "backend debug dump driver integration":
 
         if shared_option_error == "":
             expect(option_error).to_equal("")
-            expect(result == 0).to_equal(false)
-            expect(file_exists(output)).to_equal(false)
+            expect(result).to_be_greater_than(0)
+            expect_not(file_exists(output))
             expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "PASS")
         else:
             expect(option_error).to_equal("unknown option: --debug-dump={ALL_STAGES}")
             expect(result).to_equal(2)
-            expect(file_exists(output)).to_equal(false)
+            expect_not(file_exists(output))
             expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "FAIL")
 
         # Missing backend adapters are required failures, never PASS or SKIP.
@@ -198,9 +277,9 @@ describe "backend debug dump driver integration":
         val result = cli_native_build(args)
 
         if option_error == "":
-            expect(result == 0).to_equal(false)
+            expect(result).to_be_greater_than(0)
         else:
             expect(option_error).to_equal("unknown option: --debug-dump={malformed}")
             expect(result).to_equal(2)
-        expect(file_exists(output)).to_equal(false)
+        expect_not(file_exists(output))
         expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "FAIL")
