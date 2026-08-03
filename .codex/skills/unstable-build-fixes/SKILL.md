@@ -1,11 +1,24 @@
 ---
 name: unstable-build-fixes
-description: Use when a Simple bootstrap/native-build is unstable, slow, or failing one bug at a time and needs cache-preserving retry loops, isolated parallel mini builds, grouped compiler errors, and repeat fix/rebuild cycles until a Simple executable is produced.
+description: Use when a Simple bootstrap/native-build is unstable, slow, or exposes many errors and needs an inventory-to-end sweep, grouped root-cause fixes, isolated parallel mini builds, cache-preserving retries, or fail-fast release gates until a verified executable is produced.
 ---
 
 # Unstable Build Fixes
 
 Goal: produce the requested Simple executable without throwing away useful cache.
+
+## Modes
+
+- Use **fail-fast** for normal CI/release gates and when one hard failure prevents
+  later work from being observed. Stop at the first real root cause.
+- Use **inventory-to-end** when the build is failing one file at a time, many
+  errors are expected, or the user asks to find as many bugs as possible. Freeze
+  the source/runtime/compiler identities and a deterministic manifest, check the
+  entire requested scope in isolated processes, and do not edit until the sweep
+  reaches the end.
+- Label all evidence with compiler executable, execution mode, target, host, and
+  manifest. A Rust-seed/static/check sweep is diagnostic evidence, not proof that
+  a pure-Simple Stage 4 binary builds or runs.
 
 ## Rules
 
@@ -25,26 +38,59 @@ Goal: produce the requested Simple executable without throwing away useful cache
   `build/mini_cache_<entry>`.
 - If a source fix lands while a build is still before object output, prefer letting it fail or finish. Restart only when no cache/output can be lost.
 - Keep every log under `build/mini_builds/` or `build/native_probe/`.
+- Publish low-overhead progress as manifest total, completed, failed, remaining,
+  throughput, and ETA. Persist per-item status so an interrupted sweep resumes
+  instead of restarting successful work.
 - Set `SIMPLE_NO_STUB_FALLBACK=1` for every candidate or verification build;
   a binary containing generated unresolved stubs is debug evidence only.
 
-## Loop
+## Inventory-To-End Loop
 
-1. Start or keep the main build:
+1. Freeze the source revision, compiler/runtime identities, target, roots, cache
+   paths, and deterministic file/task manifest. Start or keep one main build only
+   if it can make useful cache/object progress independently.
+2. Run the whole diagnostic manifest with per-item timeouts and isolated caches:
+   ```bash
+   sh scripts/check/bootstrap-diagnostic-sweep.shs \
+     --compiler=<compiler> --root=src/compiler --root=src/lib --root=src/app \
+     --cache-dir=build/bootstrap/diagnostic-cache --jobs=<jobs> --timeout=<seconds>
+   ```
+   Continue after failures. Retain every result, including timeouts and crashes.
+3. Normalize the first real diagnostic and group repeated symptoms into root-cause
+   categories. Separate independent bugs from cascades, duplicates, warning-only
+   output, and unavailable-platform results.
+4. Record and claim each category in the bug database before edits. Assign one
+   independent category to one agent; never assign one agent per repeated file,
+   and never let agents write the same owner files or cache concurrently.
+5. Fix the smallest shared owner/root cause for all affected files in one batch.
+   Add an exact reproducer plus adjacent/similar-situation regression tests for
+   every category. A batch may span many symptoms, but still needs one merge
+   owner to review shared compiler/runtime changes.
+6. Rerun only failed shards first with their existing caches. Then run the main
+   build once with its existing cache:
    ```bash
    SIMPLE_NO_STUB_FALLBACK=1 bin/simple native-build --backend cranelift --source src/compiler --source src/app --source src/lib \
      --entry-closure --threads 8 --cache-dir build/bootstrap/native_cache --mode dynload \
      --entry src/app/cli/_CliMain/main_and_help.spl -o build/native_probe/simple
    ```
-2. Run parallel mini builds with separate caches for early failures:
+7. If the CLI is produced, sanity-check it, then exercise as many supported
+   commands/features as the artifact and host allow. Categorize new runtime bugs
+   and repeat the failed-shard-first cycle.
+8. Stop after at most three verify/fix cycles. Success requires the scoped
+   inventory to be complete, every unique category fixed or explicitly recorded
+   as blocked/unavailable, failed shards green, and the requested artifact and
+   sanity gates green. Do not rerun an already-green criterion.
+
+Useful independent mini-build shards include:
+
    - `src/app/cli/bootstrap_main.spl` -> `build/mini_cache_bootstrap`
    - `src/app/cli/native_build_main.spl` -> `build/mini_cache_native_build`
    - `src/app/mcp/main.spl` -> `build/mini_cache_mcp`
-3. For each failure, group by the first real error, not warnings.
-4. Fix the smallest shared root cause. Add one focused regression.
-5. Rerun only failed shards first, with the same shard cache.
-6. Rerun the main build with the same main cache.
-7. Stop when `build/native_probe/simple` or the requested deployed `bin/simple` exists.
+
+If a complete per-file sweep is too expensive, do not silently switch to
+one-error-at-a-time repair. Preserve the manifest and resume state, report the
+measured throughput/ETA, and use a coarser module/root manifest that still
+reaches the end of the requested scope.
 
 ## Patterns
 

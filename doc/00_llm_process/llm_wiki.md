@@ -33,6 +33,30 @@ Direct interpretation of the database hot path is an explicit diagnostic
 fallback only. A carrier *plan* or readiness probe is not proof of offloading;
 verify that the caller actually crosses the worker/library boundary.
 
+## Bootstrap multi-error recovery
+
+- **Fail-fast:** normal CI/release mode, or one hard blocker prevents later work.
+- **Inventory-to-end:** use when a bootstrap exposes many errors, fails one file
+  at a time, or the request is to find as many bugs as possible.
+- **Inventory rule:** freeze executable/runtime/source identities and a
+  deterministic scoped manifest; continue every isolated task to success,
+  failure, crash, or timeout before editing. Persist counts, logs, and resume
+  state. If per-file startup is prohibitive, use coarser module/root tasks that
+  still cover the complete requested scope.
+- **Fix rule:** normalize first real diagnostics, collapse cascades/duplicates,
+  claim unique categories in the bug database, and assign one category per
+  parallel agent with isolated caches and non-overlapping owner files. Fix the
+  shared root cause across all affected instances, with exact and similar-case
+  regression tests.
+- **Evidence rule:** retry failed shards first, then one authoritative build and
+  produced-CLI feature sweep. Always name compiler, mode, target, host, and
+  manifest; seed/static evidence is not a self-hosted Stage-4 pass.
+- **Stop rule:** at most three verify/fix cycles. Finish when the manifest ends,
+  all categories are fixed or explicitly blocked/unavailable, failed shards are
+  green, and the requested artifact passes sanity. Do not rerun green gates.
+- **Detailed workflow:** `.codex/skills/unstable-build-fixes/SKILL.md` and
+  `doc/07_guide/compiler/build.md#bootstrap-diagnostic-sweep`.
+
 ## Maintenance
 
 Add a compact entry here when repeated ambiguity causes an agent to choose the

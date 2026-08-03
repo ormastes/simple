@@ -148,6 +148,35 @@ the env var points to the correct seed target.
    `doc/08_tracking/bug/smf_stub_shadowing_unresolved_describe_2026-07-24.md`
    and `doc/07_guide/infra/testing.md` § Troubleshooting.
 
+## Multi-Error Recovery Strategy
+
+Bootstrap recovery has two explicit modes. Use **fail-fast** for normal
+CI/release gates or a hard blocker that prevents later diagnostics. Use
+**inventory-to-end** when failures appear one at a time, many bugs are likely,
+or the task asks for the broadest possible error inventory.
+
+In inventory-to-end mode, freeze the source/compiler/runtime identities and a
+deterministic task manifest, then run the whole requested scope with isolated
+per-task processes, cache directories, and timeouts. Continue after errors and
+persist total/completed/failed/remaining counts plus logs. Do not begin edits
+until the manifest reaches its end. If per-file startup makes that impractical,
+retain the resumable manifest and switch to coarser module/root tasks that still
+cover the complete scope; never repeatedly restart from item zero.
+
+After the sweep, normalize the first real diagnostic, collapse cascades and
+duplicates, and claim each unique category in the bug database. Assign one
+root-cause category per agent, not one symptom or file per agent. Agents use
+separate caches and must not edit the same compiler/runtime owner. Fix all
+affected instances through the smallest shared owner, add an exact reproducer
+and similar-situation tests, rerun only failed shards, then run one authoritative
+main build. A diagnostic seed/check pass is not Stage-4 authority: every result
+must name the executable, mode, target, host, and manifest.
+
+Convergence requires the scoped inventory to be complete, every category fixed
+or explicitly recorded as blocked/platform-unavailable, failed shards green,
+and the requested CLI plus sanity gates green. Apply the repository's three-cycle
+cap and do not rerun already-green criteria.
+
 ## Session update 2026-07-18
 
 **Release-mode interpreter stack-overflow guard now default-ON:** interpreter 

@@ -420,3 +420,31 @@ when any check fails. Each path has a stable private directory below
 parallel workers never write the same cache. This is intentionally diagnostic
 only: combining it with `--deploy`, `--release`, or `--full-cli` is rejected,
 and the mode has no artifact admission or deployment path.
+
+Choose the recovery mode before starting:
+
+- **Fail-fast** is the default for CI, release, and a hard blocker that prevents
+  later compilation.
+- **Inventory-to-end** is for many-error incidents. Freeze the source revision,
+  compiler/runtime identities, target, roots, and deterministic manifest; let
+  every selected task finish or time out before changing source.
+
+For inventory-to-end runs, retain per-task state and expose manifest total,
+completed, failed, remaining, throughput, and ETA. Group results by normalized
+first real diagnostic after the sweep. Collapse duplicate/cascade failures,
+record and claim each unique root-cause category in the bug database, and assign
+categories—not individual files—to parallel agents. Agents use isolated caches
+and non-overlapping owner files. Each category fix needs an exact reproducer and
+adjacent/similar-situation tests.
+
+Rerun only failed shards with their existing caches, then run the main bootstrap
+once. If it produces a CLI, sanity-check it and exercise all supported feature
+commands available on the host; feed new runtime failures back into the same
+categories. A seed/check sweep never proves Stage 4: record the exact executable,
+mode, host, target, and manifest for every claim. Stop after three verify/fix
+cycles; remaining categories are reported, not hidden by an endless retry loop.
+
+When per-file startup cost makes the manifest impractical, preserve its resume
+state and measured ETA, then use coarser module/root tasks that still reach the
+end of the requested scope. Do not fall back to repeatedly fixing only the first
+reported error.
