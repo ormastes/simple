@@ -1,0 +1,38 @@
+#!/bin/sh
+set -eu
+
+ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+cd "$ROOT_DIR"
+
+TMP_DIR="$(mktemp -d /tmp/simple-cpu-backend-result-test.XXXXXX)"
+trap 'rm -rf "$TMP_DIR"' EXIT HUP INT TERM
+
+SIMPLE_BIN="$TMP_DIR/missing-simple" BUILD_DIR="$TMP_DIR/build-optional" \
+    sh scripts/check/check-cpu-backend-artifacts.shs --backend llvm \
+    >"$TMP_DIR/optional.log" 2>&1
+grep -Fq 'backend=llvm step=emit backend IR status=SKIP_UNAVAILABLE reason=simple-binary-unavailable' \
+    "$TMP_DIR/optional.log"
+grep -Fq 'cpu_backend_matrix status=SKIP_UNAVAILABLE' "$TMP_DIR/optional.log"
+if grep -Fq 'status=PASS' "$TMP_DIR/optional.log"; then
+    echo "missing compiler was incorrectly reported as PASS" >&2
+    exit 1
+fi
+
+set +e
+SIMPLE_BIN="$TMP_DIR/missing-simple" BUILD_DIR="$TMP_DIR/build-required" \
+    sh scripts/check/check-cpu-backend-artifacts.shs --backend llvm --require-all \
+    >"$TMP_DIR/required.log" 2>&1
+required_code=$?
+set -e
+test "$required_code" -ne 0
+grep -Fq 'cpu_backend_matrix status=FAIL failures=0 skips=6 require_all=1' \
+    "$TMP_DIR/required.log"
+
+set +e
+sh scripts/check/check-cpu-backend-artifacts.shs --backend unknown \
+    >"$TMP_DIR/invalid.log" 2>&1
+invalid_code=$?
+set -e
+test "$invalid_code" -eq 2
+
+echo "cpu-backend-artifact-environment-result-test: pass"
