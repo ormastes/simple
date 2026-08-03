@@ -304,9 +304,13 @@ impl ModuleSurfaceBuilder:
 
                     # A matching named import has higher precedence than
                     # package inference even when its re-export owner is not
-                    # resolved until a later fixpoint pass.
+                    # resolved until a later fixpoint pass. A glob import is
+                    # also explicit when its owner declares or exports this
+                    # name; empty ParserImport.items is the parser's glob
+                    # representation.
                     if module_surface_has_explicit_import_route(
-                        surface, source_name, local_name):
+                        self.surfaces, self.index_by_name, surface,
+                        source_name, local_name):
                         continue
 
                     val sibling_result = module_surface_unique_sibling_origin(
@@ -423,7 +427,8 @@ impl ModuleSurfaceBuilder:
                                 origin_changed = true
                             continue
                         if module_surface_has_explicit_import_route(
-                            revisit_surface, source_name, local_name):
+                            self.surfaces, self.index_by_name, revisit_surface,
+                            source_name, local_name):
                             continue
                         if revisit_origins.contains_key(local_name) and
                            revisit_origins[local_name].resolution_kind != "plain-sibling":
@@ -471,61 +476,146 @@ fn module_surface_explicit_import_origin(
     source_name: text,
     local_name: text
 ) -> Result<ModuleSurfaceExportOrigin?, text>:
+    # Named imports are the strict first tier. If a matching named route is
+    # delayed, do not let a currently-resolved glob route replace it.
+    var has_named_route = false
+    for import_decl in facade.imports:
+        for item in import_decl.items:
+            val imported_local = if item.has_alias: item.alias else: item.name
+            if imported_local == source_name or imported_local == local_name:
+                has_named_route = true
+
     var found = false
     var selected = ModuleSurfaceExportOrigin(
         owner_module: "", source_name: "", resolution_kind: "")
+    if has_named_route:
+        for import_decl in facade.imports:
+            if not index_by_name.contains_key(import_decl.module):
+                continue
+            val owner_index = index_by_name[import_decl.module]
+            if owner_index < 0 or owner_index >= surfaces.len():
+                continue
+            val owner = surfaces[owner_index]
+            for item in import_decl.items:
+                val imported_local = if item.has_alias: item.alias else: item.name
+                if imported_local != source_name and imported_local != local_name:
+                    continue
+                var candidate_found = false
+                var candidate = ModuleSurfaceExportOrigin(
+                    owner_module: "", source_name: "", resolution_kind: "")
+                if module_surface_declares_item(owner, item.name):
+                    candidate = ModuleSurfaceExportOrigin(
+                        owner_module: owner.module_name,
+                        source_name: item.name,
+                        resolution_kind: if item.has_alias: "alias" else: "explicit"
+                    )
+                    candidate_found = true
+                elif owner.export_origins.contains_key(item.name):
+                    val terminal = owner.export_origins[item.name]
+                    candidate = ModuleSurfaceExportOrigin(
+                        owner_module: terminal.owner_module,
+                        source_name: terminal.source_name,
+                        resolution_kind: if item.has_alias: "alias" else: "explicit"
+                    )
+                    candidate_found = true
+                if not candidate_found:
+                    continue
+                if not found:
+                    selected = candidate
+                    found = true
+                elif (selected.owner_module != candidate.owner_module or
+                      selected.source_name != candidate.source_name):
+                    return Err(
+                        "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
+        if found:
+            return Ok(Some(selected))
+        return Ok(nil)
+
+    # A wildcard import is encoded with no ImportItems. Resolve all matching
+    # wildcard owners and deduplicate them by terminal declaration identity;
+    # two distinct terminals remain a real ambiguity.
     for import_decl in facade.imports:
-        if not index_by_name.contains_key(import_decl.module):
+        if import_decl.items.len() != 0 or
+           not index_by_name.contains_key(import_decl.module):
             continue
         val owner_index = index_by_name[import_decl.module]
         if owner_index < 0 or owner_index >= surfaces.len():
             continue
         val owner = surfaces[owner_index]
-        for item in import_decl.items:
-            val imported_local = if item.has_alias: item.alias else: item.name
-            if imported_local != source_name and imported_local != local_name:
-                continue
-            var candidate_found = false
-            var candidate = ModuleSurfaceExportOrigin(
-                owner_module: "", source_name: "", resolution_kind: "")
-            if module_surface_declares_item(owner, item.name):
-                candidate = ModuleSurfaceExportOrigin(
-                    owner_module: owner.module_name,
-                    source_name: item.name,
-                    resolution_kind: if item.has_alias: "alias" else: "explicit"
-                )
-                candidate_found = true
-            elif owner.export_origins.contains_key(item.name):
-                val terminal = owner.export_origins[item.name]
-                candidate = ModuleSurfaceExportOrigin(
-                    owner_module: terminal.owner_module,
-                    source_name: terminal.source_name,
-                    resolution_kind: if item.has_alias: "alias" else: "explicit"
-                )
-                candidate_found = true
-            if not candidate_found:
-                continue
-            if not found:
-                selected = candidate
-                found = true
-            elif (selected.owner_module != candidate.owner_module or
-                  selected.source_name != candidate.source_name):
-                return Err(
-                    "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
+        var candidate_found = false
+        var candidate = ModuleSurfaceExportOrigin(
+            owner_module: "", source_name: "", resolution_kind: "")
+        if module_surface_declares_item(owner, source_name):
+            candidate = ModuleSurfaceExportOrigin(
+                owner_module: owner.module_name,
+                source_name: source_name,
+                resolution_kind: "glob"
+            )
+            candidate_found = true
+        elif owner.export_origins.contains_key(source_name):
+            val terminal = owner.export_origins[source_name]
+            candidate = ModuleSurfaceExportOrigin(
+                owner_module: terminal.owner_module,
+                source_name: terminal.source_name,
+                resolution_kind: "glob"
+            )
+            candidate_found = true
+        if not candidate_found:
+            continue
+        if not found:
+            selected = candidate
+            found = true
+        elif (selected.owner_module != candidate.owner_module or
+              selected.source_name != candidate.source_name):
+            return Err(
+                "ambiguous explicit facade export: module={facade.module_name} item={local_name}")
     if found:
         Ok(Some(selected))
     else:
         Ok(nil)
 
 fn module_surface_has_explicit_import_route(
+    surfaces: [ModuleSurface],
+    index_by_name: Dict<text, i64>,
     facade: ModuleSurface,
     source_name: text,
     local_name: text
 ) -> bool:
+    # A named item is unconditionally explicit, including while its owner is
+    # pending. It must retain precedence over every wildcard route.
     for import_decl in facade.imports:
         for item in import_decl.items:
             val imported_local = if item.has_alias: item.alias else: item.name
             if imported_local == source_name or imported_local == local_name:
+                return true
+    # An unrelated wildcard must not block valid sibling inference. Treat it
+    # as a matching route only when the owner already declares/resolves the
+    # name or syntactically promises that exported spelling for a later pass.
+    for import_decl in facade.imports:
+        if import_decl.items.len() != 0 or
+           not index_by_name.contains_key(import_decl.module):
+            continue
+        val owner_index = index_by_name[import_decl.module]
+        if owner_index < 0 or owner_index >= surfaces.len():
+            continue
+        val owner = surfaces[owner_index]
+        if module_surface_declares_item(owner, source_name) or
+           owner.export_origins.contains_key(source_name) or
+           module_surface_syntactically_exports(owner, source_name):
+            return true
+    false
+
+fn module_surface_syntactically_exports(surface: ModuleSurface, name: text) -> bool:
+    for export_decl in surface.exports:
+        for export_item in export_decl.items:
+            if export_item == "*" or export_item.ends_with(".*"):
+                return true
+            var local_name = export_item
+            if export_item.contains(":"):
+                val parts = export_item.split(":")
+                if parts.len() > 1:
+                    local_name = parts[1]
+            if local_name == name:
                 return true
     false
 
