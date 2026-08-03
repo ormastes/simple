@@ -222,6 +222,77 @@ describe "resolve_import_symbols 2-pass import resolver":
         expect(root_surface.export_origins["file_append"].owner_module).to_equal("root.io.file_ops")
         expect(root_surface.export_origins["file_remove"].owner_module).to_equal("root.io.file_ops")
 
+    it "follows all seven Stage 4 app io delayed explicit imports":
+        val log = make_logger()
+        val names = "context_generate, context_stats, context_index_packs, context_query_index, context_sql_index_packs, context_sql_query_packs, context_sql_query_packs_by_source"
+        val context_source = "pub fn context_generate() -> i64: 1\npub fn context_stats() -> i64: 2\npub fn context_index_packs() -> i64: 3\npub fn context_query_index() -> i64: 4\npub fn context_sql_index_packs() -> i64: 5\npub fn context_sql_query_packs() -> i64: 6\npub fn context_sql_query_packs_by_source() -> i64: 7"
+        val cli_source = "export use app.io.context_ops.\{" + names + "\}"
+        val facade_source = "use app.io.cli_ops.\{" + names + "\}\nexport " + names
+        val context_ops = parse_full_frontend(context_source, "app.io.context_ops", "app.io.context_ops", log)
+        val cli_ops = parse_full_frontend(cli_source, "app.io.cli_ops", "app.io.cli_ops", log)
+        val facade = parse_full_frontend(facade_source, "app.io.mod", "app.io.mod", log)
+        var modules: Dict<text, Module> = {}
+        modules["app.io.context_ops"] = context_ops
+        modules["app.io.cli_ops"] = cli_ops
+        modules["app.io.mod"] = facade
+        # Exact retained Stage 4 release order for this graph.
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "src/app/io/cli_ops.spl", content: cli_source, module_name: "app.io.cli_ops"),
+            SourceFile(path: "src/app/io/context_ops.spl", content: context_source, module_name: "app.io.context_ops"),
+            SourceFile(path: "src/app/io/mod.spl", content: facade_source, module_name: "app.io.mod")
+        ])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val surfaces = result.unwrap()
+            val facade_surface = surfaces.surfaces[surfaces.index_by_name["app.io.mod"]]
+            for name in names.split(", "):
+                expect(facade_surface.export_origins[name].owner_module).to_equal("app.io.context_ops")
+                expect(facade_surface.export_origins[name].source_name).to_equal(name)
+
+    it "follows an aliased delayed explicit import in reverse discovery order":
+        val log = make_logger()
+        val context_source = "pub fn context_generate() -> i64: 1"
+        val cli_source = "export use app.io.context_ops.\{context_generate as generate_alias\}"
+        val facade_source = "use app.io.cli_ops.\{generate_alias as public_generate\}\nexport public_generate"
+        val context_ops = parse_full_frontend(context_source, "app.io.context_ops", "app.io.context_ops", log)
+        val cli_ops = parse_full_frontend(cli_source, "app.io.cli_ops", "app.io.cli_ops", log)
+        val facade = parse_full_frontend(facade_source, "app.io.mod", "app.io.mod", log)
+        var modules: Dict<text, Module> = {}
+        modules["app.io.context_ops"] = context_ops
+        modules["app.io.cli_ops"] = cli_ops
+        modules["app.io.mod"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "src/app/io/mod.spl", content: facade_source, module_name: "app.io.mod"),
+            SourceFile(path: "src/app/io/context_ops.spl", content: context_source, module_name: "app.io.context_ops"),
+            SourceFile(path: "src/app/io/cli_ops.spl", content: cli_source, module_name: "app.io.cli_ops")
+        ])
+        expect(result.is_ok()).to_be(true)
+        if result.is_ok():
+            val surfaces = result.unwrap()
+            val origin = surfaces.surfaces[surfaces.index_by_name["app.io.mod"]].export_origins["public_generate"]
+            expect(origin.owner_module).to_equal("app.io.context_ops")
+            expect(origin.source_name).to_equal("context_generate")
+
+    it "keeps true sibling ambiguity closed without an explicit import route":
+        val log = make_logger()
+        val owner_source = "pub fn context_generate() -> text:\n    \"owner\""
+        val facade_source = "export context_generate"
+        val first = parse_full_frontend(owner_source, "app.io.context_ops", "app.io.context_ops", log)
+        val second = parse_full_frontend(owner_source, "app.io.mod_stub", "app.io.mod_stub", log)
+        val facade = parse_full_frontend(facade_source, "app.io.mod", "app.io.mod", log)
+        var modules: Dict<text, Module> = {}
+        modules["app.io.context_ops"] = first
+        modules["app.io.mod_stub"] = second
+        modules["app.io.mod"] = facade
+        val result = module_surfaces_from_modules(modules, [
+            SourceFile(path: "src/app/io/context_ops.spl", content: owner_source, module_name: "app.io.context_ops"),
+            SourceFile(path: "src/app/io/mod_stub.spl", content: owner_source, module_name: "app.io.mod_stub"),
+            SourceFile(path: "src/app/io/mod.spl", content: facade_source, module_name: "app.io.mod")
+        ])
+        expect(result.is_err()).to_be(true)
+        if result.is_err():
+            expect(result.unwrap_err()).to_contain("ambiguous facade export")
+
     it "pins root environment exports to env_ops instead of compatibility stubs":
         val log = make_logger()
         val env_source = "pub fn cwd() -> text:\n    \"/real\"\npub fn home() -> text:\n    \"/home\"\npub fn host_arch() -> text:\n    \"x86_64\""
