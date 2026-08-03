@@ -24,6 +24,11 @@ extern fn rt_file_write_text_at(path: text, offset: i64, data: text) -> i64
 fn llvm_bootstrap_last_object_path() -> text:
     "{_get_temp_dir()}/simple_llvm_{getpid()}.o"
 
+pub fn llvm_debug_artifact_paths() -> (text, text, text):
+    """Current process's textual IR, bitcode, and object artifact paths."""
+    val prefix = "{_get_temp_dir()}/simple_llvm_{getpid()}"
+    ("{prefix}.ll", "{prefix}.bc", "{prefix}.o")
+
 # ============================================================================
 # LLVM IR → Object Code Compilation (via llc CLI)
 # ============================================================================
@@ -125,10 +130,7 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
             "  Windows: choco install llvm\n" +
             probed
         )
-    val pid = getpid()
-    val tmp_dir = _get_temp_dir()
-    val ir_path = "{tmp_dir}/simple_llvm_{pid}.ll"
-    val obj_path = "{tmp_dir}/simple_llvm_{pid}.o"
+    val (ir_path, bitcode_path, obj_path) = llvm_debug_artifact_paths()
     if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") == "1":
         print "[llvm-tools] ir {ir_path}"
         print "[llvm-tools] obj {obj_path}"
@@ -148,6 +150,31 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
             print "[llvm-tools] write-failed"
         return Err("Failed to write LLVM IR to {ir_path}")
 
+    # Optional pure-Simple diagnostic pipeline:
+    # MIR -> textual .ll -> llvm-as .bc -> opt verify -> llc object.
+    # This isolates malformed text, invalid bitcode, and target-codegen errors.
+    val bitcode_debug = (rt_env_get("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") == "1"
+    var compile_input_path = ir_path
+    if bitcode_debug:
+        val llvm_as = find_llvm_as()
+        if llvm_as == "":
+            return Err("SIMPLE_LLVM_BITCODE_DEBUG requires llvm-as; textual IR preserved at {ir_path}")
+        val (as_out, as_err, as_code) = process_run(llvm_as, [ir_path, "-o", bitcode_path])
+        if as_code != 0:
+            return Err("llvm-as failed (exit {as_code}); textual IR preserved at {ir_path}:\n{as_out}{as_err}")
+
+        val opt_tool = find_opt()
+        if opt_tool == "":
+            return Err("SIMPLE_LLVM_BITCODE_DEBUG requires opt; IR={ir_path} bitcode={bitcode_path}")
+        val (verify_out, verify_err, verify_code) = process_run(
+            opt_tool, ["-passes=verify", "-disable-output", bitcode_path]
+        )
+        if verify_code != 0:
+            return Err("LLVM bitcode verify failed (exit {verify_code}); IR={ir_path} bitcode={bitcode_path}:\n{verify_out}{verify_err}")
+        compile_input_path = bitcode_path
+        print "[llvm-bitcode-debug] ir {ir_path}"
+        print "[llvm-bitcode-debug] bitcode {bitcode_path}"
+
     # Determine optimization flag
     var opt_flag = "-O0"
     if opt_level == OptimizationLevel.Size:
@@ -166,9 +193,9 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
         cpu = "x86-64"
     val target_flags = llvm_target_flags(config)
     val cmd = if bootstrap_io:
-        "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -o {obj_path} {ir_path} 2>&1"
+        "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -o {obj_path} {compile_input_path} 2>&1"
     else:
-        "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {ir_path} 2>&1"
+        "{llc} --filetype=obj --relocation-model=pic --function-sections --data-sections -mtriple={triple} -mcpu={cpu}{target_flags} {opt_flag} -o {obj_path} {compile_input_path} 2>&1"
     var llc_out = ""
     var llc_err = ""
     var llc_code = 0
@@ -176,7 +203,7 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     if target.ends_with("-simpleos"):
         var llc_args: [text] = [
             "--filetype=obj", "--relocation-model=pic", "--function-sections", "--data-sections",
-            "-mtriple={triple}", "-mcpu={cpu}", opt_flag, "-o", obj_path, ir_path
+            "-mtriple={triple}", "-mcpu={cpu}", opt_flag, "-o", obj_path, compile_input_path
         ]
         if config.features.len() > 0:
             llc_args.push("-mattr={config.to_feature_string()}")
@@ -207,8 +234,10 @@ pub fn compile_ir_to_object(llvm_ir: text, config: LlvmTargetConfig, opt_level: 
     # Clean up IR file only after successful llc. On failure, preserve it so
     # native-build diagnostics can point at the malformed IR.
     # SIMPLE_KEEP_LLVM_IR=1 preserves the .ll even on success for debugging.
-    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and (rt_env_get("SIMPLE_KEEP_LLVM_IR") ?? "") != "1":
+    if (rt_env_get("SIMPLE_BOOTSTRAP") ?? "") != "1" and (rt_env_get("SIMPLE_KEEP_LLVM_IR") ?? "") != "1" and not bitcode_debug:
         file_delete(ir_path)
+        if file_exists(bitcode_path):
+            file_delete(bitcode_path)
 
     # Extract symbols before deleting the object file
     val symbols = extract_symbols_nm(obj_path)

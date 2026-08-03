@@ -1098,8 +1098,30 @@ impl LlvmBackend {
         Ok(module.print_to_string().to_string())
     }
 
+    /// Persist the current module as LLVM bitcode for offline verification.
+    #[cfg(feature = "llvm")]
+    pub fn write_bitcode_to_path(&self, path: &std::path::Path) -> Result<(), CompileError> {
+        let module = self.module.borrow();
+        let module = module
+            .as_ref()
+            .ok_or_else(crate::error::factory::llvm_module_not_created)?;
+        if module.write_bitcode_to_path(path) {
+            Ok(())
+        } else {
+            Err(crate::error::factory::llvm_build_failed(
+                "write LLVM bitcode",
+                &path.display().to_string(),
+            ))
+        }
+    }
+
     #[cfg(not(feature = "llvm"))]
     pub fn get_ir(&self) -> Result<String, CompileError> {
+        Err(crate::error::factory::llvm_feature_not_enabled())
+    }
+
+    #[cfg(not(feature = "llvm"))]
+    pub fn write_bitcode_to_path(&self, _path: &std::path::Path) -> Result<(), CompileError> {
         Err(crate::error::factory::llvm_feature_not_enabled())
     }
 

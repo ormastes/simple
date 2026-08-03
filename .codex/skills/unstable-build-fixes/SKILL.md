@@ -43,6 +43,23 @@ Goal: produce the requested Simple executable without throwing away useful cache
   instead of restarting successful work.
 - Set `SIMPLE_NO_STUB_FALLBACK=1` for every candidate or verification build;
   a binary containing generated unresolved stubs is debug evidence only.
+- At an LLVM failure, inspect the earliest broken IR boundary before changing
+  the backend. An unresolved owner or undeclared `GlobalLoad` is HIR/MIR input,
+  malformed `.ll` is text generation, rejected bitcode is LLVM validity, and
+  verified bitcode rejected by `llc` is target code generation. During a
+  seed-assisted bootstrap, `SIMPLE_LLVM_DIAGNOSTIC_DIR=<dir>` preserves partial
+  `.ll`/`.bc`, MIR, and an error receipt. Add
+  `SIMPLE_LLVM_DIAGNOSTIC_MODE=all` only when complete successful-module
+  artifacts justify its I/O cost. Replay text/bitcode with
+  `sh scripts/check/replay-llvm-artifact.shs <module.ll|module.bc> <out-dir>`.
+  Rust-seed artifacts are diagnostic only; acceptance still requires the
+  produced pure-Simple executable and its smoke gates.
+- Prefer the pure-Simple LLVM boundary when it is reachable:
+  `SIMPLE_LLVM_BITCODE_DEBUG=1 SIMPLE_KEEP_LLVM_IR=1 <pure-simple> native-build
+  --backend llvm ...` must run Simple MIR-to-text emission, `llvm-as` to `.bc`,
+  `opt -passes=verify`, then `llc` on bitcode. The first failing stage owns the
+  bug category. Use the Rust seed capture only when an earlier bootstrap stage
+  prevents the pure-Simple path from running.
 
 ## Inventory-To-End Loop
 

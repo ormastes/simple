@@ -19,6 +19,129 @@ use super::imports::{build_suffix_index, build_use_map_from_ast};
 use super::mangle::{mangle_mir, qualify_enum_runtime_names};
 use super::module_global_init::inject_freestanding_module_global_init;
 
+fn llvm_diagnostic_artifact_stem(file_path: &Path, source_root: &Path) -> String {
+    let logical = module_prefix_from_path(file_path, source_root);
+    logical
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod llvm_diagnostic_tests {
+    use super::llvm_diagnostic_artifact_stem;
+    use std::path::Path;
+
+    #[test]
+    fn artifact_stem_is_stable_and_path_safe() {
+        let stem = llvm_diagnostic_artifact_stem(
+            Path::new("/repo/src/lib/nogc_async_mut/env/paths.spl"),
+            Path::new("/repo/src/lib"),
+        );
+        assert_eq!(stem, "nogc_async_mut__env__paths");
+        assert!(!stem.contains('/'));
+        assert!(!stem.contains('.'));
+    }
+}
+
+#[cfg(feature = "llvm")]
+fn persist_llvm_codegen_failure(
+    llvm: &crate::codegen::llvm::LlvmBackend,
+    mir: &crate::mir::MirModule,
+    file_path: &Path,
+    source_root: &Path,
+    error: &crate::error::CompileError,
+) -> Result<PathBuf, String> {
+    let raw_dir = std::env::var_os("SIMPLE_LLVM_DIAGNOSTIC_DIR")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "SIMPLE_LLVM_DIAGNOSTIC_DIR is not set".to_string())?;
+    let output_dir = PathBuf::from(raw_dir);
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("create LLVM diagnostic directory {}: {e}", output_dir.display()))?;
+
+    let stem = llvm_diagnostic_artifact_stem(file_path, source_root);
+    let ll_path = output_dir.join(format!("{stem}.partial.ll"));
+    let bitcode_path = output_dir.join(format!("{stem}.partial.bc"));
+    let mir_path = output_dir.join(format!("{stem}.mir.txt"));
+    let error_path = output_dir.join(format!("{stem}.error.txt"));
+
+    let ir = llvm
+        .get_ir()
+        .map_err(|e| format!("render partial LLVM IR for {}: {e}", file_path.display()))?;
+    std::fs::write(&ll_path, ir).map_err(|e| format!("write partial LLVM IR {}: {e}", ll_path.display()))?;
+    llvm.write_bitcode_to_path(&bitcode_path)
+        .map_err(|e| format!("write partial LLVM bitcode {}: {e}", bitcode_path.display()))?;
+    std::fs::write(&mir_path, format!("{mir:#?}\n"))
+        .map_err(|e| format!("write MIR diagnostic {}: {e}", mir_path.display()))?;
+    std::fs::write(
+        &error_path,
+        format!(
+            "source={}\nmodule={}\nerror={}\nllvm_ir={}\nllvm_bitcode={}\nmir={}\n",
+            file_path.display(),
+            module_prefix_from_path(file_path, source_root),
+            error,
+            ll_path.display(),
+            bitcode_path.display(),
+            mir_path.display()
+        ),
+    )
+    .map_err(|e| format!("write LLVM diagnostic receipt {}: {e}", error_path.display()))?;
+
+    eprintln!(
+        "[llvm-diagnostic] codegen failed; partial_ir={} partial_bitcode={} mir={} error={}",
+        ll_path.display(),
+        bitcode_path.display(),
+        mir_path.display(),
+        error_path.display()
+    );
+    Ok(ll_path)
+}
+
+#[cfg(feature = "llvm")]
+fn persist_llvm_codegen_success(
+    llvm: &crate::codegen::llvm::LlvmBackend,
+    mir: &crate::mir::MirModule,
+    file_path: &Path,
+    source_root: &Path,
+) -> Result<(), String> {
+    if std::env::var("SIMPLE_LLVM_DIAGNOSTIC_MODE").as_deref() != Ok("all") {
+        return Ok(());
+    }
+    let raw_dir = std::env::var_os("SIMPLE_LLVM_DIAGNOSTIC_DIR")
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "SIMPLE_LLVM_DIAGNOSTIC_DIR is not set".to_string())?;
+    let output_dir = PathBuf::from(raw_dir);
+    std::fs::create_dir_all(&output_dir)
+        .map_err(|e| format!("create LLVM diagnostic directory {}: {e}", output_dir.display()))?;
+
+    let stem = llvm_diagnostic_artifact_stem(file_path, source_root);
+    let ll_path = output_dir.join(format!("{stem}.ll"));
+    let bitcode_path = output_dir.join(format!("{stem}.bc"));
+    let mir_path = output_dir.join(format!("{stem}.mir.txt"));
+    let ir = llvm
+        .get_ir()
+        .map_err(|e| format!("render LLVM IR for {}: {e}", file_path.display()))?;
+    std::fs::write(&ll_path, ir).map_err(|e| format!("write LLVM IR {}: {e}", ll_path.display()))?;
+    llvm.write_bitcode_to_path(&bitcode_path)
+        .map_err(|e| format!("write LLVM bitcode {}: {e}", bitcode_path.display()))?;
+    std::fs::write(&mir_path, format!("{mir:#?}\n"))
+        .map_err(|e| format!("write MIR diagnostic {}: {e}", mir_path.display()))?;
+    eprintln!(
+        "[llvm-diagnostic] module={} llvm_ir={} llvm_bitcode={} mir={}",
+        module_prefix_from_path(file_path, source_root),
+        ll_path.display(),
+        bitcode_path.display(),
+        mir_path.display()
+    );
+    Ok(())
+}
+
 fn persist_compiled_object(cache_path: &Path, object: &[u8]) -> Result<(), String> {
     let parent = cache_path
         .parent()
@@ -514,6 +637,7 @@ pub(crate) fn compile_file_to_object(
     // reached via the global import map (no `use` import) get a real result
     // type instead of ANY (Pass 0.5c in module_pass.rs resolves them).
     lowerer.set_global_fn_return_types(std::sync::Arc::clone(&imports.fn_return_types));
+    lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map.clone()));
     // W15-H: seed the lowerer with the project-wide enum table and
     // eagerly register every entry into `module.types` + `self.globals`
     // before `lower_module(&ast)` runs. Pass 0 of `module_pass.rs`
@@ -716,9 +840,26 @@ pub(crate) fn compile_file_to_object(
             if !no_mangle {
                 llvm.set_module_prefix(module_prefix.clone());
             }
-            let obj = llvm
-                .compile(&mir)
-                .map_err(|e| format!("{}: llvm codegen: {e}", file_path.display()))?;
+            let obj = match llvm.compile(&mir) {
+                Ok(object) => object,
+                Err(error) => {
+                    if std::env::var_os("SIMPLE_LLVM_DIAGNOSTIC_DIR").is_some() {
+                        if let Err(dump_error) =
+                            persist_llvm_codegen_failure(&llvm, &mir, file_path, source_root, &error)
+                        {
+                            eprintln!(
+                                "[llvm-diagnostic] failed to preserve artifacts for {}: {}",
+                                file_path.display(),
+                                dump_error
+                            );
+                        }
+                    }
+                    return Err(format!("{}: llvm codegen: {error}", file_path.display()));
+                }
+            };
+            if let Err(dump_error) = persist_llvm_codegen_success(&llvm, &mir, file_path, source_root) {
+                return Err(format!("{}: LLVM diagnostic emission: {dump_error}", file_path.display()));
+            }
 
             if is_entry && std::env::var("SIMPLE_DEBUG_LLVM").is_ok() {
                 if let Ok(ir) = llvm.get_ir() {

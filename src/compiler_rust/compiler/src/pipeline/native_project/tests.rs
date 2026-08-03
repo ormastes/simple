@@ -3837,6 +3837,46 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
 }
 
 #[test]
+fn module_import_maps_qualified_calls_to_exact_duplicate_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let sync_root = lib_root.join("nogc_sync_mut/env");
+    let async_root = lib_root.join("nogc_async_mut/env");
+    let facade_root = lib_root.join("env");
+    std::fs::create_dir_all(&sync_root).unwrap();
+    std::fs::create_dir_all(&async_root).unwrap();
+    std::fs::create_dir_all(&facade_root).unwrap();
+
+    let sync_variables = sync_root.join("variables.spl");
+    let async_variables = async_root.join("variables.spl");
+    let facade_variables = facade_root.join("variables.spl");
+    let consumer = async_root.join("paths.spl");
+    std::fs::write(&sync_variables, "fn env_get(name: text) -> text:\n    \"sync\"\n").unwrap();
+    std::fs::write(&async_variables, "fn env_get(name: text) -> text:\n    \"async\"\n").unwrap();
+    std::fs::write(&facade_variables, "export use std.nogc_async_mut.env.variables.*\n").unwrap();
+    std::fs::write(
+        &consumer,
+        "import std.env.variables\nfn read_path() -> text:\n    variables.env_get(\"PATH\")\n",
+    )
+    .unwrap();
+
+    let file_sources = [&sync_variables, &async_variables, &facade_variables, &consumer]
+        .into_iter()
+        .map(|path| (path.clone(), std::fs::read_to_string(path).unwrap()))
+        .collect::<Vec<_>>();
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&consumer).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports);
+    let expected = format!("{}__env_get", module_prefix_from_path(&async_variables, &lib_root));
+
+    assert_eq!(use_map.get("variables.env_get"), Some(&expected));
+    assert_ne!(use_map.get("variables.env_get"), result.map.get("env_get"));
+}
+
+#[test]
 fn private_glob_import_does_not_acquire_native_ownership() {
     let temp = tempfile::tempdir().unwrap();
     let src_root = temp.path().join("project/src");

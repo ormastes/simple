@@ -16,6 +16,7 @@ type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, Type)>>>;
 type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, Type)>>>>;
 type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
 type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<Vec<Type>>)>>>;
+pub(crate) type QualifiedImportFunctions = std::sync::Arc<HashMap<String, String>>;
 
 pub struct Lowerer {
     pub(super) module: HirModule,
@@ -93,6 +94,10 @@ pub struct Lowerer {
     /// their call results become ANY and field access on them fails. Resolved
     /// into `method_return_types` in Pass 0.5c (additive: upgrade-only).
     pub(super) global_fn_return_types: Option<std::sync::Arc<HashMap<String, Type>>>,
+    /// Module-qualified source call (`variables.env_get`) to its exact native
+    /// owner. Native-project builds populate this before expression lowering
+    /// so duplicate bare functions do not turn the namespace into a global.
+    pub(super) qualified_import_functions: Option<QualifiedImportFunctions>,
     /// When true, unknown types resolve to ANY instead of erroring.
     /// This allows compilation to proceed even when imports can't be fully resolved.
     pub(super) lenient_types: bool,
@@ -172,6 +177,7 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
+            qualified_import_functions: None,
             lenient_types: false,
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
@@ -219,6 +225,7 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
+            qualified_import_functions: None,
             lenient_types: false,
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
@@ -289,6 +296,7 @@ impl Lowerer {
             method_return_types: HashMap::new(),
             fn_param_defaults: HashMap::new(),
             global_fn_return_types: None,
+            qualified_import_functions: None,
             lenient_types: false,
             lenient_globals: LenientGlobalCollector::new(),
             extern_fn_names: HashSet::new(),
@@ -372,6 +380,10 @@ impl Lowerer {
     /// Set the whole-program free-function return-type map (see field doc).
     pub fn set_global_fn_return_types(&mut self, defs: std::sync::Arc<HashMap<String, Type>>) {
         self.global_fn_return_types = Some(defs);
+    }
+
+    pub(crate) fn set_qualified_import_functions(&mut self, functions: QualifiedImportFunctions) {
+        self.qualified_import_functions = Some(functions);
     }
 
     pub fn set_duplicate_global_struct_defs(&mut self, defs: DuplicateGlobalStructDefs) {

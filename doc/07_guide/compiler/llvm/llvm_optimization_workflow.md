@@ -79,6 +79,27 @@ opt -verify-each -passes='default<O2>' input.ll -o output.bc
 opt -time-passes -passes='default<O2>' input.ll -o output.bc
 ```
 
+The repository wrapper checks the same module boundary and retains replayable
+artifacts:
+
+```bash
+sh scripts/check/replay-llvm-artifact.shs input.ll build/check/llvm-replay
+sh scripts/check/replay-llvm-artifact.shs input.bc build/check/llvm-replay
+```
+
+To exercise that boundary inside the pure-Simple backend, set
+`SIMPLE_LLVM_BITCODE_DEBUG=1`: Simple emits `.ll`, `llvm-as` creates `.bc`,
+`opt -passes=verify` validates it, and `llc` compiles the bitcode. Add
+`SIMPLE_KEEP_LLVM_IR=1` to retain successful artifacts.
+
+During a seed-assisted bootstrap only, set `SIMPLE_LLVM_DIAGNOSTIC_DIR` to
+preserve partial LLVM text/bitcode, MIR, and an error receipt when LLVM lowering stops.
+Add `SIMPLE_LLVM_DIAGNOSTIC_MODE=all` to emit complete `.ll`, `.bc`, and MIR for
+successful modules too; omit it for the lower-overhead failure-only mode.
+Those artifacts diagnose the seed boundary; they do not replace the required
+pure-Simple Stage 4 binary and smoke checks. See
+[`../../app/llm/llm_bootstrap_llvm_debugging.md`](../../app/llm/llm_bootstrap_llvm_debugging.md).
+
 ## Benchmark Acceptance Gate
 
 For algorithm-port work, speed numbers count only after checksum parity passes.
@@ -143,7 +164,9 @@ Use this order when a Simple algorithm is slower than the C/Rust reference:
 
 These are not blockers for the 2026-05-12 Phase 6 acceptance gate, but they are the next useful work:
 
-- Add an LLVM IR dump mode so external `opt -verify` and `opt -verify-each` can be run on Simple-generated modules.
+- Add a pure-Simple CLI surface for complete LLVM IR emission; seed failures can
+  already preserve partial IR/MIR receipts and complete `.ll`/`.bc` artifacts
+  can be checked with `scripts/check/replay-llvm-artifact.shs`.
 - Generalize typed byte/index proof beyond the benchmark hot paths.
 - Lower more fixed-size byte-buffer patterns to stack/native storage.
 - Keep explicit pass lists available as diagnostics, while the production LLVM path uses `default<O*>`.

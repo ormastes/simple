@@ -643,6 +643,32 @@ impl Lowerer {
     ) -> LowerResult<HirExpr> {
         // Check for intrinsic calls on special identifiers
         if let Expr::Identifier(recv_name) = receiver {
+            // Module imports are compile-time namespaces. Resolve the exact
+            // qualified free-function owner before lowering the receiver;
+            // lenient receiver lowering would otherwise create
+            // Global("variables") and MIR GlobalLoad("variables").
+            if ctx.lookup(recv_name).is_none() {
+                let qualified = format!("{recv_name}.{method}");
+                let resolved = self
+                    .qualified_import_functions
+                    .as_ref()
+                    .and_then(|functions| functions.get(&qualified))
+                    .cloned();
+                if let Some(target) = resolved {
+                    let args_hir = self.lower_call_args(args, ctx)?;
+                    let ret_ty = self.named_callable_return_type(method).unwrap_or(TypeId::ANY);
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Call {
+                            func: Box::new(HirExpr {
+                                kind: HirExprKind::Global(target),
+                                ty: TypeId::ANY,
+                            }),
+                            args: args_hir,
+                        },
+                        ty: ret_ty,
+                    });
+                }
+            }
             // this.* intrinsics
             if recv_name == "this" {
                 if let Some(result) = self.lower_this_method(method, args)? {

@@ -964,6 +964,17 @@ fn collect_use_imports(
             if let Some(mangled) = resolve_import_name(name, &segments, all_mangled, re_exports) {
                 use_map.insert(name.clone(), mangled);
             }
+            // A module-only import (`import std.env.variables`) is encoded as
+            // path `std.env` plus Single(`variables`). Preserve collision-safe
+            // qualified call ownership for `variables.env_get(...)` instead
+            // of exposing the ambiguous bare `env_get` name.
+            let mut module_segments = segments.clone();
+            module_segments.push(name.as_str());
+            for raw_name in all_mangled.keys().filter(|raw_name| !raw_name.contains('.')) {
+                if let Some(mangled) = resolve_import_name_strict(raw_name, &module_segments, all_mangled, re_exports) {
+                    use_map.insert(format!("{name}.{raw_name}"), mangled);
+                }
+            }
             let prefix = format!("{}.", name);
             for (raw_name, _candidates) in all_mangled.iter() {
                 if raw_name.starts_with(&prefix) {
