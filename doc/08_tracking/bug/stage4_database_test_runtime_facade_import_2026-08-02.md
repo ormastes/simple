@@ -85,3 +85,30 @@ row later without damaging existing records.
 
 Retained final log:
 `build/bootstrap-stage4-b1df-cycle1/logs/x86_64-unknown-linux-gnu/stage4-native-build-runtime-facade-final.log`.
+
+### Exact 1,431-source graph correction
+
+The retained cycle-2 graph does **not** load either
+`lib.nogc_async_mut.io.__init__` or `std.nogc_sync_mut.io.__init__`. Its
+relevant discovery order is the database consumer, the async `io.spl` root,
+the concrete sync time/sysinfo owners, the sync `io.spl` root, then the async
+sysinfo/time compatibility children. Consequently the earlier regression was
+not representative: it supplied both missing `__init__` surfaces and direct
+package owners, so the re-export chase never exercised a plain root export
+whose transitive child origin becomes known later.
+
+The shared defect is discovery-order sensitivity in
+`ModuleSurfaceBuilder.resolve_export_origins`: its package/name index contains
+only direct declarations and its single pass visits the early async root before
+the late compatibility child has recorded the concrete sync owner. The repair
+must converge export origins across the loaded surface graph with a strict
+module-count bound and fail closed on ambiguity; it must not add another
+consumer- or runtime-tier-specific HIR fallback.
+
+The exact focused graph converges in two fixpoint passes after the initial
+direct/import-origin pass: the first promotes the late async time/sysinfo child
+origins and resolves the early root, and the second observes no changes. The
+same two-pass result holds with the relevant discovery order reversed. Package
+`__init__` facades are deliberately excluded from the promoted-child index;
+otherwise a later pass would incorrectly report the stable facade and its real
+child as two owners of the same package export.
