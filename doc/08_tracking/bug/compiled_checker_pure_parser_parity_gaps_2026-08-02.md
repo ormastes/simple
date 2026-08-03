@@ -25,6 +25,29 @@ showed they route through the class-method parser rather than the top-level
 function parser. Resume from that owner without repeating the attempted
 top-level declaration changes.
 
+### Category C declaration/import/export lane update
+
+Claimed by `codex/parser-category-c-20260803` from `4d2762f589e`. The strict
+fresh-checker retry was limited to the 43 cycle3 parser rows in keyword
+identifier, keyword receiver, relative import, and structured/keyword export
+routes; the checker-entry argv collision was reassigned to memory lane A.
+
+The shared pure-Simple declaration-name helper, export parser, and top-level
+plus inline relative-import consumers clear 28 files. Structured/keyword
+exports fall from 17 to zero, relative import falls from one to zero, keyword
+identifier falls from 21 to eight, and keyword receiver remains four. The
+remaining 15 diagnostics are owned by later class, pattern, comprehension, or
+primary-expression lanes, including six `static fn nil` methods, two `me fn`
+methods, tuple binding, comprehension `_`, three keyword receivers, one
+`while val` pattern, and one generic-call surface.
+
+Focused exact, adjacent, and malformed-to-valid recovery coverage passes 8/8
+in `test/01_unit/compiler/parser/parser_category_c_spec.spl`. Strict checker
+SHA-256 is
+`f2a03be721ecd28162a08187e9413356456ec644496b4ada4aa78e9c3df9d593`;
+the immutable 43-path manifest digest is
+`b1c9a865e8c13196821a32aaa87e9c2d212abd47e5b1cf6a3c78850b9ebd357e`.
+
 ## Reproduction
 
 ```bash

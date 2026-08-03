@@ -14,7 +14,7 @@ use compiler.core.tokens.{TOK_STAR, TOK_MINUS, TOK_SLASH, TOK_ASSIGN, TOK_ARROW,
 use compiler.core.tokens.{TOK_LT, TOK_GT, TOK_LT_GENERIC}
 use compiler.core.tokens.{TOK_LPAREN, TOK_RPAREN, TOK_LBRACKET, TOK_RBRACKET}
 use compiler.core.tokens.{TOK_LBRACE, TOK_RBRACE}
-use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT}
+use compiler.core.tokens.{TOK_COLON, TOK_COMMA, TOK_DOT, TOK_DOTDOT, TOK_DOTDOTDOT}
 use compiler.core.tokens.{TOK_INDENT, TOK_DEDENT, TOK_EOF}
 use compiler.core.parser_decls.{parse_type_params, parse_type_param_constraint_list, parser_skip_mut_if_present}
 use compiler.core.parser_decls.{parser_expect_param_name}
@@ -34,6 +34,7 @@ use compiler.core.ast.{decl_get_imports, module_add_decl}
 use compiler.core.ast.{decl_val_binding, decl_lazy_val_binding, decl_var_binding}
 use compiler.core.ast.{decl_fn, decl_impl_block, decl_ce_block, decl_set_impl_trait, decl_set_type_params}
 use compiler.core.ast.{decl_set_param_defaults, decl_set_param_muts}
+use compiler.frontend.core.parser_identifiers.{declaration_identifier_text}
 
 # ===== Use/Export Declarations =====
 
@@ -48,6 +49,37 @@ fn use_kw_segment_text(kind: i64) -> text:
         return kn
     return ""
 
+fn take_export_identifier() -> text:
+    val name = declaration_identifier_text(par_kind_get(), par_text_get())
+    if name == "":
+        parser_expect(TOK_IDENT)
+        return ""
+    parser_advance()
+    name
+
+fn parse_export_source_module() -> text:
+    var module_path = ""
+    if par_kind_get() == TOK_DOTDOTDOT:
+        module_path = "..."
+        parser_advance()
+    elif par_kind_get() == TOK_DOTDOT:
+        module_path = ".."
+        parser_advance()
+    elif par_kind_get() == TOK_DOT:
+        module_path = "."
+        parser_advance()
+
+    val first = take_export_identifier()
+    module_path = module_path + first
+    var saw_dot = false
+    while par_kind_get() == TOK_DOT:
+        parser_advance()
+        module_path = module_path + "." + take_export_identifier()
+        saw_dot = true
+    if not saw_dot and not module_path.starts_with("."):
+        module_path = "." + module_path
+    module_path
+
 fn parse_use_decl() -> i64:
     parser_advance()
     # Check for 'use lazy' modifier
@@ -57,7 +89,10 @@ fn parse_use_decl() -> i64:
         parser_advance()
     # Handle relative imports: use .X or use ..X
     var module_path: text = ""
-    if par_kind_get() == 165:
+    if par_kind_get() == TOK_DOTDOTDOT:
+        parser_advance()
+        module_path = "..."
+    elif par_kind_get() == 165:
         parser_advance()
         module_path = ".."
         if par_kind_get() == 164:
@@ -224,9 +259,42 @@ fn parse_export_decl() -> i64:
     # G13: export use path.{names} or export use path.*  — delegate to use-decl parser
     if par_kind_get() == 27:
         return _export_record_reexport_surface(parse_use_decl())
+    if par_kind_get() == TOK_LPAREN:
+        parser_advance()
+        parser_expect(TOK_RPAREN)
+        return decl_export_names([], 0)
+    if par_kind_get() == TOK_STAR:
+        parser_advance()
+        val star_from = par_kind_get() == TOK_IDENT and par_text_get() == "from"
+        if star_from:
+            parser_advance()
+            return _export_record_reexport_surface(decl_use_import(parse_export_source_module(), [], 0))
+        return decl_export_names(["*"], 0)
+    if par_kind_get() == TOK_LBRACE:
+        parser_advance()
+        var brace_items: [text] = []
+        while par_kind_get() != TOK_RBRACE and par_kind_get() != TOK_EOF:
+            val item_name = take_export_identifier()
+            if item_name != "":
+                if par_kind_get() == TOK_KW_AS:
+                    parser_advance()
+                    val alias_name = take_export_identifier()
+                    brace_items.push(item_name + ":" + alias_name)
+                else:
+                    brace_items.push(item_name)
+            if par_kind_get() == TOK_COMMA:
+                parser_advance()
+            elif par_kind_get() != TOK_RBRACE:
+                parser_error("expected ',' or '}' in export list")
+                parser_advance()
+        parser_expect(TOK_RBRACE)
+        val brace_from = par_kind_get() == TOK_IDENT and par_text_get() == "from"
+        if brace_from:
+            parser_advance()
+            return _export_record_reexport_surface(decl_use_import(parse_export_source_module(), brace_items, 0))
+        return decl_export_names(brace_items, 0)
     var names: [text] = []
-    val first_name = par_text_get()
-    parser_expect(6)
+    val first_name = take_export_identifier()
     var export_name = first_name
     while true:
         if par_kind_get() != TOK_DOT:
@@ -281,8 +349,7 @@ fn parse_export_decl() -> i64:
         if par_kind_get() != 160:
             break
         parser_advance()
-        var loop_name = par_text_get()
-        parser_expect(6)
+        var loop_name = take_export_identifier()
         while true:
             if par_kind_get() != TOK_DOT:
                 break
@@ -337,18 +404,7 @@ fn parse_export_decl() -> i64:
     val at_from: bool = par_kind_get() == TOK_IDENT and par_text_get() == "from"
     if at_from:
         parser_advance()  # consume 'from'
-        var from_module: text = par_text_get()
-        parser_expect(TOK_IDENT)
-        var saw_dot: bool = false
-        while true:
-            if par_kind_get() != TOK_DOT:
-                break
-            parser_advance()  # consume '.'
-            from_module = from_module + "." + par_text_get()
-            parser_expect(TOK_IDENT)
-            saw_dot = true
-        if not saw_dot:
-            from_module = "." + from_module
+        val from_module = parse_export_source_module()
         return _export_record_reexport_surface(decl_use_import(from_module, names, 0))
     decl_export_names(names, 0)
 
