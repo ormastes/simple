@@ -1,0 +1,91 @@
+use std.spec.*
+use app.spec_to_spipe.verify.*
+
+val SHA_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val SHA_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+fn manifest(version: text = "1.0", sha: text = SHA_A) -> VerificationManifestIdentity:
+    VerificationManifestIdentity(schema_version: "spec-to-spipe/manifest-v1",
+        standard_family: "fixture", published_version: version,
+        edition: "2026-08-03", source_uri: "https://example.invalid/spec",
+        source_revision: "fixture-v1", source_sha256: sha,
+        adapter_version: "fixture@1", preprocess_rule_set_version: "rules@1")
+
+describe "Spec-to-SPipe Phase 0 verification gates":
+    describe "REQ-S2S-COV-001: exact source coverage":
+        it "should accept adjacent spans that account for every source byte":
+            step("Verify a ledger containing parsed and justified ignored bytes")
+            val result = verify_exact_coverage(10, [
+                SourceDispositionSpan(start_byte: 0, end_byte: 6, disposition: "parsed", reason: ""),
+                SourceDispositionSpan(start_byte: 6, end_byte: 10, disposition: "ignore", reason: "editorial navigation")])
+            expect(result.accepted).to_equal(true)
+            expect(result.rule_ids.len()).to_equal(0)
+
+        it "should reject a dropped byte range":
+            step("Leave bytes 4 through 6 absent from the ledger")
+            val result = verify_exact_coverage(10, [
+                SourceDispositionSpan(start_byte: 0, end_byte: 4, disposition: "parsed", reason: ""),
+                SourceDispositionSpan(start_byte: 6, end_byte: 10, disposition: "parsed", reason: "")])
+            expect(result.accepted).to_equal(false)
+            expect(result.rule_ids).to_contain("SPEC-COV-004")
+
+        it "should reject overlapping bytes and an unreasoned exclusion":
+            step("Overlap two entries and omit the exclusion rationale")
+            val result = verify_exact_coverage(10, [
+                SourceDispositionSpan(start_byte: 0, end_byte: 7, disposition: "parsed", reason: ""),
+                SourceDispositionSpan(start_byte: 6, end_byte: 10, disposition: "unsupported", reason: "")])
+            expect(result.rule_ids).to_contain("SPEC-COV-003")
+            expect(result.rule_ids).to_contain("SPEC-COV-006")
+
+    describe "REQ-S2S-REC-001: explicit tolerant-parser recovery":
+        it "should accept a source-preserving manifest-approved recovery":
+            step("Verify a diagnostic-bearing ErrorNode recovery in compatibility mode")
+            val result = verify_no_silent_recovery([
+                RecoveryRecord(start_byte: 12, end_byte: 19, raw_source: "|broken",
+                    adapter_rule_id: "MD-TABLE-001", diagnostic_emitted: true,
+                    nested_error_count: 1)], false, ["MD-TABLE-001"])
+            expect(result.accepted).to_equal(true)
+
+        it "should reject every recovery in strict mode":
+            step("Submit an otherwise valid recovery to strict mode")
+            val result = verify_no_silent_recovery([
+                RecoveryRecord(start_byte: 12, end_byte: 19, raw_source: "|broken",
+                    adapter_rule_id: "MD-TABLE-001", diagnostic_emitted: true,
+                    nested_error_count: 0)], true, ["MD-TABLE-001"])
+            expect(result.rule_ids).to_contain("SPEC-REC-006")
+
+        it "should reject silent or unapproved recovery":
+            step("Omit diagnostic evidence and manifest approval")
+            val result = verify_no_silent_recovery([
+                RecoveryRecord(start_byte: 2, end_byte: 3, raw_source: "?",
+                    adapter_rule_id: "MD-UNKNOWN-999", diagnostic_emitted: false,
+                    nested_error_count: 0)], false, ["MD-TABLE-001"])
+            expect(result.rule_ids).to_contain("SPEC-REC-004")
+            expect(result.rule_ids).to_contain("SPEC-REC-007")
+
+    describe "REQ-S2S-ID-001: reproducible manifest identity":
+        it "should accept a fully pinned matching identity":
+            step("Compare the manifest with the selected version and observed source hash")
+            val result = verify_manifest_identity(manifest(),
+                "spec-to-spipe/manifest-v1", "1.0", SHA_A)
+            expect(result.accepted).to_equal(true)
+
+        it "should reject an unknown schema and stale source hash":
+            step("Verify the manifest against a newer schema and different observed bytes")
+            val result = verify_manifest_identity(manifest(),
+                "spec-to-spipe/manifest-v2", "1.0", SHA_B)
+            expect(result.rule_ids).to_contain("SPEC-ID-001")
+            expect(result.rule_ids).to_contain("SPEC-ID-006")
+
+        it "should reject a floating or stale published version":
+            step("Use a floating published version where a pinned version is required")
+            val result = verify_manifest_identity(manifest(version: "latest"),
+                "spec-to-spipe/manifest-v1", "1.0", SHA_A)
+            expect(result.rule_ids).to_contain("SPEC-ID-003")
+            expect(result.rule_ids).to_contain("SPEC-ID-004")
+
+        it "should reject malformed digest identity":
+            step("Use a digest that cannot identify immutable source bytes")
+            val result = verify_manifest_identity(manifest(sha: "not-a-sha"),
+                "spec-to-spipe/manifest-v1", "1.0", "not-a-sha")
+            expect(result.rule_ids).to_contain("SPEC-ID-005")

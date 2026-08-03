@@ -1,0 +1,49 @@
+use app.spec_to_spipe.verify.contracts.*
+
+fn _known_disposition(value: text) -> bool:
+    value == "parsed" or value == "passthrough" or value == "preprocessed" or
+        value == "skip" or value == "blocked" or value == "unsupported" or
+        value == "ignore" or value == "malformed"
+
+fn _requires_reason(value: text) -> bool:
+    value == "preprocessed" or value == "skip" or value == "blocked" or
+        value == "unsupported" or value == "ignore" or value == "malformed"
+
+# The input ledger is canonical source order. Rejecting out-of-order entries
+# avoids an implicit sort that could hide overlaps or make diagnostics unstable.
+fn verify_exact_coverage(total_bytes: i64, spans: [SourceDispositionSpan]) -> SpecVerificationResult:
+    var rules: [text] = []
+    var messages: [text] = []
+    if total_bytes < 0:
+        rules.push("SPEC-COV-001")
+        messages.push("total source byte count must not be negative")
+        return verification_result(rules, messages)
+
+    var covered_until: i64 = 0
+    var index: i64 = 0
+    for span in spans:
+        if span.start_byte < 0 or span.end_byte > total_bytes or span.end_byte <= span.start_byte:
+            rules.push("SPEC-COV-002")
+            messages.push("span {index} is outside the source or has zero width")
+        elif span.start_byte < covered_until:
+            rules.push("SPEC-COV-003")
+            messages.push("span {index} overlaps or is out of source order")
+        elif span.start_byte > covered_until:
+            rules.push("SPEC-COV-004")
+            messages.push("bytes {covered_until}..{span.start_byte} have no disposition")
+
+        if not _known_disposition(span.disposition):
+            rules.push("SPEC-COV-005")
+            messages.push("span {index} has unknown disposition '{span.disposition}'")
+        elif _requires_reason(span.disposition) and span.reason.trim().len() == 0:
+            rules.push("SPEC-COV-006")
+            messages.push("span {index} disposition '{span.disposition}' has no reason")
+
+        if span.end_byte > covered_until:
+            covered_until = span.end_byte
+        index = index + 1
+
+    if covered_until < total_bytes:
+        rules.push("SPEC-COV-004")
+        messages.push("bytes {covered_until}..{total_bytes} have no disposition")
+    verification_result(rules, messages)

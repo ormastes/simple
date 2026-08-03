@@ -1,0 +1,418 @@
+# codex-impl
+# Phase-0 shared contracts for lossless specification import.
+#
+# SourceSnapshot and SourceSpan intentionally come from the structural parser
+# framework. Adapters must not introduce private alternatives.
+
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.common.structural.parse.contracts.{SourceSnapshot, SourceSpan}
+
+val SPEC_IMPORT_SCHEMA_NAME: text = "simple-spec-import"
+val SPEC_IMPORT_SCHEMA_VERSION: i64 = 1
+
+enum SpecDisposition:
+    Normative
+    Informative
+    Editorial
+    LicenseRestricted
+    GeneratedNavigation
+    Passthrough
+    Preprocessed
+    Skipped
+    Blocked
+    Unsupported
+    Ignored
+    Malformed
+    NeedsOracle
+    NeedsReview
+
+struct SpecExtensionField:
+    namespace: text
+    key: text
+    value: text
+
+struct SpecSourceIdentity:
+    source_id: text
+    standard_family: text
+    published_version: text
+    edition_date: text
+    source_uri: text
+    repository_revision: text
+    source_sha256: text
+    adapter_id: text
+    adapter_version: text
+    preprocess_rule_set_version: text
+    license: text
+    redistribution_policy: text
+    snapshot: SourceSnapshot
+
+struct SpecLedgerEntry:
+    semantic_id: text
+    node_kind: text
+    source_span: SourceSpan
+    disposition: SpecDisposition
+    adapter_rule_id: text
+    reason: text
+    conformance_binding: text
+    extensions: [SpecExtensionField]
+
+struct SpecImportDiagnostic:
+    diagnostic_id: text
+    severity: text
+    adapter_rule_id: text
+    message: text
+    source_span: SourceSpan?
+    recovered: bool
+    extensions: [SpecExtensionField]
+
+struct SpecImportManifest:
+    schema_name: text
+    schema_version: i64
+    source: SpecSourceIdentity
+    strict_mode: bool
+    approved_recovery_rule_ids: [text]
+    ledger: [SpecLedgerEntry]
+    diagnostics: [SpecImportDiagnostic]
+    extensions: [SpecExtensionField]
+
+struct SpecVerificationReport:
+    schema_valid: bool
+    source_hash_valid: bool
+    exact_coverage: bool
+    total_source_bytes: i64
+    accounted_source_bytes: i64
+    malformed_bytes: i64
+    recovery_count: i64
+    unapproved_recovery_count: i64
+    diagnostic_count: i64
+    passed: bool
+    reason: text
+
+struct SpecContractError:
+    code: text
+    path: text
+    message: text
+
+struct SpecSemanticIdentityInput:
+    upstream_id: text
+    registry_id: text
+    structural_path: text
+    adapter_semantic_key: text
+    content_fingerprint: text
+    neighborhood_fingerprint: text
+
+fn _contract_error(code: text, path: text, message: text) -> SpecContractError:
+    SpecContractError(code: code, path: path, message: message)
+
+fn _is_lower_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    val allowed = "0123456789abcdef"
+    var i = 0
+    while i < value.len():
+        if not allowed.contains(value[i:i + 1]):
+            return false
+        i = i + 1
+    true
+
+fn _length_value(value: text) -> text:
+    value.len().to_text() + ":" + value
+
+fn _identity_material(
+    standard_family: text,
+    published_version: text,
+    edition_date: text,
+    source_uri: text,
+    repository_revision: text,
+    source_sha256: text,
+    adapter_id: text,
+    adapter_version: text,
+    preprocess_rule_set_version: text
+) -> text:
+    _length_value(standard_family) + _length_value(published_version) +
+        _length_value(edition_date) + _length_value(source_uri) +
+        _length_value(repository_revision) + _length_value(source_sha256) +
+        _length_value(adapter_id) + _length_value(adapter_version) +
+        _length_value(preprocess_rule_set_version)
+
+fn spec_source_identity(
+    standard_family: text,
+    published_version: text,
+    edition_date: text,
+    source_uri: text,
+    repository_revision: text,
+    adapter_id: text,
+    adapter_version: text,
+    preprocess_rule_set_version: text,
+    license: text,
+    redistribution_policy: text,
+    snapshot: SourceSnapshot
+) -> SpecSourceIdentity:
+    """Create a pinned source identity directly from immutable snapshot bytes."""
+    val source_sha256 = sha256_u8_hex(snapshot.bytes)
+    val source_id = sha256_text(_identity_material(
+        standard_family, published_version, edition_date, source_uri,
+        repository_revision, source_sha256, adapter_id, adapter_version,
+        preprocess_rule_set_version
+    ))
+    SpecSourceIdentity(
+        source_id: source_id,
+        standard_family: standard_family,
+        published_version: published_version,
+        edition_date: edition_date,
+        source_uri: source_uri,
+        repository_revision: repository_revision,
+        source_sha256: source_sha256,
+        adapter_id: adapter_id,
+        adapter_version: adapter_version,
+        preprocess_rule_set_version: preprocess_rule_set_version,
+        license: license,
+        redistribution_policy: redistribution_policy,
+        snapshot: snapshot
+    )
+
+fn spec_disposition_name(disposition: SpecDisposition) -> text:
+    match disposition:
+        case Normative: "normative"
+        case Informative: "informative"
+        case Editorial: "editorial"
+        case LicenseRestricted: "license-restricted"
+        case GeneratedNavigation: "generated-navigation"
+        case Passthrough: "passthrough"
+        case Preprocessed: "preprocessed"
+        case Skipped: "skipped"
+        case Blocked: "blocked"
+        case Unsupported: "unsupported"
+        case Ignored: "ignored"
+        case Malformed: "malformed"
+        case NeedsOracle: "needs-oracle"
+        case NeedsReview: "needs-review"
+
+fn choose_spec_semantic_identity(input: SpecSemanticIdentityInput) -> text:
+    """Choose the first stable semantic key in the architecture priority order."""
+    if input.upstream_id != "":
+        return "upstream:" + input.upstream_id
+    if input.registry_id != "":
+        return "registry:" + input.registry_id
+    if input.structural_path != "":
+        return "path:" + input.structural_path
+    if input.adapter_semantic_key != "":
+        return "adapter:" + input.adapter_semantic_key
+    if input.content_fingerprint != "":
+        return "fingerprint:" + sha256_text(
+            _length_value(input.content_fingerprint) +
+            _length_value(input.neighborhood_fingerprint)
+        )
+    ""
+
+fn _extensions_valid(fields: [SpecExtensionField], path: text) -> SpecContractError?:
+    var previous = ""
+    for field in fields:
+        if field.namespace == "" or not field.namespace.contains("."):
+            return _contract_error("invalid-extension-namespace", path, "extension namespace must be a non-empty dotted name")
+        if field.key == "":
+            return _contract_error("missing-field", path, "extension key is required")
+        val identity = field.namespace + "\u{0}" + field.key
+        if previous != "" and identity <= previous:
+            return _contract_error("invalid-sequence", path, "extension fields must be unique and sorted by namespace and key")
+        previous = identity
+    nil
+
+fn _span_valid(span: SourceSpan, source_len: i64) -> bool:
+    span.byte_start >= 0 and span.byte_end >= span.byte_start and span.byte_end <= source_len
+
+fn _disposition_requires_reason(disposition: SpecDisposition) -> bool:
+    match disposition:
+        case Preprocessed: true
+        case Skipped: true
+        case Blocked: true
+        case Unsupported: true
+        case Ignored: true
+        case Malformed: true
+        case LicenseRestricted: true
+        case _: false
+
+fn _disposition_requires_binding(disposition: SpecDisposition) -> bool:
+    match disposition:
+        case Normative: true
+        case NeedsOracle: true
+        case NeedsReview: true
+        case Skipped: true
+        case Blocked: true
+        case Unsupported: true
+        case _: false
+
+fn _recovery_approved(rule_id: text, approved: [text]) -> bool:
+    for candidate in approved:
+        if candidate == rule_id:
+            return true
+    false
+
+fn _validate_source(source: SpecSourceIdentity) -> SpecContractError?:
+    if source.standard_family == "":
+        return _contract_error("missing-field", "source.standard_family", "standard family is required")
+    if source.published_version == "" or source.published_version.lower() == "latest":
+        return _contract_error("unpinned-version", "source.published_version", "a reproducible published version is required")
+    if source.repository_revision == "":
+        return _contract_error("unpinned-version", "source.repository_revision", "a source revision or release tag is required")
+    if source.adapter_id == "" or source.adapter_version == "":
+        return _contract_error("missing-field", "source.adapter", "adapter identity and version are required")
+    if source.preprocess_rule_set_version == "":
+        return _contract_error("missing-field", "source.preprocess_rule_set_version", "preprocess rule-set version is required")
+    if source.license == "" or source.redistribution_policy == "":
+        return _contract_error("missing-field", "source.license", "license and redistribution policy are required")
+    if not _is_lower_sha256(source.source_sha256):
+        return _contract_error("invalid-hash", "source.source_sha256", "source SHA-256 must be lowercase hexadecimal")
+    if sha256_u8_hex(source.snapshot.bytes) != source.source_sha256:
+        return _contract_error("stale-hash", "source.source_sha256", "source SHA-256 does not match immutable snapshot bytes")
+    val expected_id = sha256_text(_identity_material(
+        source.standard_family, source.published_version, source.edition_date,
+        source.source_uri, source.repository_revision, source.source_sha256,
+        source.adapter_id, source.adapter_version,
+        source.preprocess_rule_set_version
+    ))
+    if source.source_id != expected_id:
+        return _contract_error("invalid-identity", "source.source_id", "source identity does not match pinned provenance")
+    nil
+
+fn validate_spec_import_manifest(manifest: SpecImportManifest) -> Result<SpecImportManifest, SpecContractError>:
+    """Validate the frozen v1 manifest in deterministic fail-closed order."""
+    if manifest.schema_name != SPEC_IMPORT_SCHEMA_NAME:
+        return Err(_contract_error("unsupported-version", "schema_name", "unsupported spec import schema"))
+    if manifest.schema_version != SPEC_IMPORT_SCHEMA_VERSION:
+        return Err(_contract_error("unsupported-version", "schema_version", "unsupported spec import schema version"))
+    if val err = _validate_source(manifest.source):
+        return Err(err)
+    if val err = _extensions_valid(manifest.extensions, "extensions"):
+        return Err(err)
+    var previous_end = 0
+    var previous_id = ""
+    var entry_index = 0
+    for entry in manifest.ledger:
+        val path = "ledger[" + entry_index.to_text() + "]"
+        if entry.semantic_id == "":
+            return Err(_contract_error("missing-field", path + ".semantic_id", "semantic identity is required"))
+        if not _span_valid(entry.source_span, manifest.source.snapshot.bytes.len()):
+            return Err(_contract_error("invalid-span", path + ".source_span", "source span is outside the immutable snapshot"))
+        if entry.source_span.byte_end <= entry.source_span.byte_start:
+            return Err(_contract_error("invalid-span", path + ".source_span", "top-level ledger entries must cover at least one byte"))
+        if entry.adapter_rule_id == "":
+            return Err(_contract_error("missing-field", path + ".adapter_rule_id", "adapter rule identity is required"))
+        if _disposition_requires_reason(entry.disposition) and entry.reason == "":
+            return Err(_contract_error("missing-reason", path + ".reason", "this disposition requires an explicit reason"))
+        if _disposition_requires_binding(entry.disposition) and entry.conformance_binding == "":
+            return Err(_contract_error("missing-binding", path + ".conformance_binding", "applicable conformance content requires an explicit binding or status"))
+        if entry.source_span.byte_start < previous_end:
+            return Err(_contract_error("overlapping-coverage", path + ".source_span", "top-level ledger spans must not overlap"))
+        if entry.source_span.byte_start == previous_end and previous_id != "" and entry.semantic_id <= previous_id:
+            return Err(_contract_error("invalid-sequence", path + ".semantic_id", "equal-boundary entries must use stable semantic order"))
+        if val err = _extensions_valid(entry.extensions, path + ".extensions"):
+            return Err(err)
+        previous_end = entry.source_span.byte_end
+        previous_id = entry.semantic_id
+        entry_index = entry_index + 1
+    var diagnostic_index = 0
+    for diagnostic in manifest.diagnostics:
+        val path = "diagnostics[" + diagnostic_index.to_text() + "]"
+        if diagnostic.diagnostic_id == "" or diagnostic.adapter_rule_id == "":
+            return Err(_contract_error("missing-field", path, "diagnostic and adapter rule identities are required"))
+        if diagnostic.recovered and manifest.strict_mode:
+            return Err(_contract_error("strict-recovery", path, "strict mode rejects every recovered diagnostic"))
+        if diagnostic.recovered and not _recovery_approved(diagnostic.adapter_rule_id, manifest.approved_recovery_rule_ids):
+            return Err(_contract_error("unapproved-recovery", path, "compatibility recovery is not approved by the manifest"))
+        if val span = diagnostic.source_span:
+            if not _span_valid(span, manifest.source.snapshot.bytes.len()):
+                return Err(_contract_error("invalid-span", path + ".source_span", "diagnostic span is outside the immutable snapshot"))
+        if val err = _extensions_valid(diagnostic.extensions, path + ".extensions"):
+            return Err(err)
+        diagnostic_index = diagnostic_index + 1
+    Ok(manifest)
+
+fn canonical_spec_import_manifest(manifest: SpecImportManifest) -> Result<text, SpecContractError>:
+    """Serialize a valid manifest to deterministic length-prefixed canonical text."""
+    match validate_spec_import_manifest(manifest):
+        case Err(err): Err(err)
+        case Ok(valid):
+            var out = "schema=" + _length_value(valid.schema_name) + ";version=" + valid.schema_version.to_text() + ";"
+            val source = valid.source
+            out = out + "source=" + _length_value(source.source_id) + _length_value(source.standard_family) +
+                _length_value(source.published_version) + _length_value(source.edition_date) +
+                _length_value(source.source_uri) + _length_value(source.repository_revision) +
+                _length_value(source.source_sha256) + _length_value(source.adapter_id) +
+                _length_value(source.adapter_version) + _length_value(source.preprocess_rule_set_version) +
+                _length_value(source.license) + _length_value(source.redistribution_policy) + ";"
+            out = out + "strict=" + (if valid.strict_mode: "1" else: "0") + ";"
+            for rule_id in valid.approved_recovery_rule_ids:
+                out = out + "recovery=" + _length_value(rule_id) + ";"
+            for entry in valid.ledger:
+                out = out + "ledger=" + _length_value(entry.semantic_id) + _length_value(entry.node_kind) +
+                    entry.source_span.byte_start.to_text() + ":" + entry.source_span.byte_end.to_text() + ":" +
+                    _length_value(spec_disposition_name(entry.disposition)) + _length_value(entry.adapter_rule_id) +
+                    _length_value(entry.reason) + _length_value(entry.conformance_binding) + ";"
+                for field in entry.extensions:
+                    out = out + "entry-ext=" + _length_value(field.namespace) + _length_value(field.key) + _length_value(field.value) + ";"
+            for diagnostic in valid.diagnostics:
+                var diagnostic_span = "none"
+                if val span = diagnostic.source_span:
+                    diagnostic_span = span.byte_start.to_text() + ":" + span.byte_end.to_text()
+                out = out + "diagnostic=" + _length_value(diagnostic.diagnostic_id) + _length_value(diagnostic.severity) +
+                    _length_value(diagnostic.adapter_rule_id) + _length_value(diagnostic.message) +
+                    _length_value(diagnostic_span) + (if diagnostic.recovered: "1" else: "0") + ";"
+                for field in diagnostic.extensions:
+                    out = out + "diagnostic-ext=" + _length_value(field.namespace) + _length_value(field.key) + _length_value(field.value) + ";"
+            for field in valid.extensions:
+                out = out + "extension=" + _length_value(field.namespace) + _length_value(field.key) + _length_value(field.value) + ";"
+            Ok(out)
+
+fn verify_spec_import_manifest(manifest: SpecImportManifest) -> SpecVerificationReport:
+    """Compute the Phase-0 exact-coverage and recovery contract report."""
+    val total = manifest.source.snapshot.bytes.len()
+    var accounted = 0
+    var malformed = 0
+    for entry in manifest.ledger:
+        val width = entry.source_span.byte_end - entry.source_span.byte_start
+        accounted = accounted + width
+        match entry.disposition:
+            case Malformed: malformed = malformed + width
+            case _: ()
+    var recoveries = 0
+    var unapproved = 0
+    for diagnostic in manifest.diagnostics:
+        if diagnostic.recovered:
+            recoveries = recoveries + 1
+            if not _recovery_approved(diagnostic.adapter_rule_id, manifest.approved_recovery_rule_ids):
+                unapproved = unapproved + 1
+    val schema_valid = manifest.schema_name == SPEC_IMPORT_SCHEMA_NAME and manifest.schema_version == SPEC_IMPORT_SCHEMA_VERSION
+    val source_hash_valid = _is_lower_sha256(manifest.source.source_sha256) and sha256_u8_hex(manifest.source.snapshot.bytes) == manifest.source.source_sha256
+    val exact_coverage = accounted == total
+    val valid = match validate_spec_import_manifest(manifest):
+        case Ok(_): true
+        case Err(_): false
+    val passed = valid and exact_coverage and unapproved == 0
+    var reason = "ok"
+    if not schema_valid: reason = "unsupported schema"
+    else if not source_hash_valid: reason = "source hash mismatch"
+    else if not valid: reason = "manifest validation failed"
+    else if not exact_coverage: reason = "source bytes are not exactly covered"
+    else if unapproved > 0: reason = "unapproved parser recovery"
+    SpecVerificationReport(
+        schema_valid: schema_valid,
+        source_hash_valid: source_hash_valid,
+        exact_coverage: exact_coverage,
+        total_source_bytes: total,
+        accounted_source_bytes: accounted,
+        malformed_bytes: malformed,
+        recovery_count: recoveries,
+        unapproved_recovery_count: unapproved,
+        diagnostic_count: manifest.diagnostics.len(),
+        passed: passed,
+        reason: reason
+    )
+
+export SPEC_IMPORT_SCHEMA_NAME, SPEC_IMPORT_SCHEMA_VERSION
+export SpecDisposition, SpecExtensionField, SpecSourceIdentity, SpecLedgerEntry
+export SpecImportDiagnostic, SpecImportManifest, SpecVerificationReport
+export SpecContractError, SpecSemanticIdentityInput
+export spec_source_identity, spec_disposition_name, choose_spec_semantic_identity
+export validate_spec_import_manifest, canonical_spec_import_manifest
+export verify_spec_import_manifest

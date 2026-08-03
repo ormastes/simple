@@ -1,0 +1,47 @@
+use app.spec_to_spipe.verify.contracts.*
+
+fn _is_lower_hex_sha256(value: text) -> bool:
+    if value.len() != 64:
+        return false
+    var index: i64 = 0
+    while index < value.len():
+        val ch = value.char_at(index)
+        if not ((ch >= "0" and ch <= "9") or (ch >= "a" and ch <= "f")):
+            return false
+        index = index + 1
+    true
+
+fn _missing_identity_fields(identity: VerificationManifestIdentity) -> bool:
+    identity.standard_family.trim().len() == 0 or
+        identity.published_version.trim().len() == 0 or
+        identity.edition.trim().len() == 0 or
+        identity.source_uri.trim().len() == 0 or
+        identity.source_revision.trim().len() == 0 or
+        identity.adapter_version.trim().len() == 0 or
+        identity.preprocess_rule_set_version.trim().len() == 0
+
+fn verify_manifest_identity(identity: VerificationManifestIdentity,
+        expected_schema_version: text, expected_published_version: text,
+        observed_source_sha256: text) -> SpecVerificationResult:
+    var rules: [text] = []
+    var messages: [text] = []
+    if identity.schema_version != expected_schema_version:
+        rules.push("SPEC-ID-001")
+        messages.push("manifest schema version is unknown or stale")
+    if _missing_identity_fields(identity):
+        rules.push("SPEC-ID-002")
+        messages.push("manifest identity is missing a required reproducibility field")
+    if identity.published_version == "latest" or identity.source_revision == "latest" or
+            identity.source_revision == "HEAD":
+        rules.push("SPEC-ID-003")
+        messages.push("floating source versions are not reproducible")
+    if identity.published_version != expected_published_version:
+        rules.push("SPEC-ID-004")
+        messages.push("published version does not match the selected import version")
+    if not _is_lower_hex_sha256(identity.source_sha256):
+        rules.push("SPEC-ID-005")
+        messages.push("source SHA-256 must be 64 lowercase hexadecimal characters")
+    elif identity.source_sha256 != observed_source_sha256:
+        rules.push("SPEC-ID-006")
+        messages.push("source SHA-256 is stale")
+    verification_result(rules, messages)
