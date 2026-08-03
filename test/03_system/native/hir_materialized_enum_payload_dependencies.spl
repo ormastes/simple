@@ -22,9 +22,9 @@ fn named(name: text) -> Type:
 
 fn main() -> i64:
     val log = Logger(level: 0)
-    val support_source = "pub struct GpuBarrierScope:\n    value: i64\npub struct OtherBarrierScope:\n    value: i64\npub struct BoundPayload:\n    value: i64\npub struct DefaultPayload:\n    value: i64"
-    val owner_source = "use payload.support.\{GpuBarrierScope, BoundPayload, DefaultPayload\}\npub enum MirInstKind:\n    Barrier(scope: GpuBarrierScope)\npub enum GenericKind<T>:\n    Item(value: T)"
-    val facade_source = "export use exact.owner.\{MirInstKind, GenericKind\}"
+    val support_source = "pub struct GpuBarrierScope:\n    value: i64\npub struct OtherBarrierScope:\n    value: i64\npub struct BoundPayload:\n    value: i64\npub struct DefaultPayload:\n    value: i64\npub trait TraitX:\n    fn trait_value() -> i64\npub trait OtherTraitX:\n    fn other_trait_value() -> i64"
+    val owner_source = "use payload.support.\{GpuBarrierScope, BoundPayload, DefaultPayload, TraitX as AliasT\}\npub enum MirInstKind:\n    Barrier(scope: GpuBarrierScope)\npub enum GenericKind<T>:\n    Item(value: T)\npub enum TraitBoundKind<T>:\n    Item(value: T)"
+    val facade_source = "export use exact.owner.\{MirInstKind, GenericKind, TraitBoundKind\}"
     val consumer_source = "use consumer.facade.\{MirInstKind\}\nfn consume(value: MirInstKind) -> MirInstKind:\n    value"
     val support = parse_full_frontend(support_source, "payload.support", "payload.support", log)
     val owner = parse_full_frontend(owner_source, "exact.owner", "exact.owner", log)
@@ -75,6 +75,40 @@ fn main() -> i64:
     if generic_lowering.symbols.lookup("BoundPayload") == nil: rt_exit(48)
     if generic_lowering.symbols.lookup("DefaultPayload") == nil: rt_exit(49)
     if generic_lowering.symbols.lookup("T") != nil: rt_exit(50)
+
+    # Freeze the trait bound directly in the retained surface, matching the
+    # adjacent generic bounds/defaults probe above. The source parser does not
+    # preserve this bound on the focused Stage3 path.
+    var trait_bound = owner_surface.enums["TraitBoundKind"]
+    trait_bound.type_params = [ParserTypeParam(name: "T", bounds: [named("AliasT")],
+        has_default: false, default: named("T"), span: Span.empty())]
+
+    # The same terminal trait prebound under the owner's lexical alias must be
+    # accepted. Its stored name remains the physical declaration name so the
+    # payload closure compares terminal identity rather than alias spelling.
+    var trait_exact = hirlowering_for_module("consumer.main", surfaces)
+    trait_exact.register_imported_symbol(support_surface, "payload.support", "TraitX", "AliasT", Span.empty(), false)
+    trait_exact.register_materialized_enum_payload_dependencies(owner_surface, "exact.owner", trait_bound, Span.empty())
+    if trait_exact.errors.len() != 0: rt_exit(60)
+    val trait_exact_id = trait_exact.symbols.lookup_or_invalid("AliasT")
+    if not trait_exact_id.is_valid(): rt_exit(61)
+    val trait_exact_raw = trait_exact_id.id
+    if not trait_exact.symbols.symbols.has(trait_exact_raw): rt_exit(62)
+    val trait_exact_symbol = trait_exact.symbols.symbols[trait_exact_raw]
+    if trait_exact_symbol.name != "TraitX": rt_exit(63)
+
+    # An adjacent binding with the same owner and local alias but a different
+    # terminal trait must still fail closed and preserve the first binding.
+    var trait_collision = hirlowering_for_module("consumer.main", surfaces)
+    trait_collision.register_imported_symbol(support_surface, "payload.support", "OtherTraitX", "AliasT", Span.empty(), false)
+    trait_collision.register_materialized_enum_payload_dependencies(owner_surface, "exact.owner", trait_bound, Span.empty())
+    if trait_collision.errors.len() == 0: rt_exit(64)
+    val trait_collision_id = trait_collision.symbols.lookup_or_invalid("AliasT")
+    if not trait_collision_id.is_valid(): rt_exit(65)
+    val trait_collision_raw = trait_collision_id.id
+    if not trait_collision.symbols.symbols.has(trait_collision_raw): rt_exit(66)
+    val trait_collision_symbol = trait_collision.symbols.symbols[trait_collision_raw]
+    if trait_collision_symbol.name != "OtherTraitX": rt_exit(67)
 
     # Same physical owner but different item must fail closed and preserve the
     # first lexical binding rather than treating owner equality as sufficient.
