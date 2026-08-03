@@ -1,8 +1,8 @@
 # Stage 4 database test runtime-facade import gap
 
-Status: fixed — next Stage 4 closure pending  
+Status: reopened — full-graph facade collision reproduced (2026-08-03)
 Severity: P1 bootstrap blocker  
-Fix owner: `/root/stage4-database-test-runtime-facade` — CLAIMED
+Fix owner: `/root/option_native_codegen_rootcause` — CLAIMED
 
 ## Reproduction
 
@@ -67,6 +67,21 @@ not re-open this facade/import compile blocker.
 
 The full Stage 4 build was not repeated after the repository's three-cycle cap;
 the next scoped Stage 4 session must provide the authoritative closure result.
+
+## Reopened full-graph diagnosis (2026-08-03)
+
+The 50-module probe does not contain the same module-key collision as the full
+graph.  With both `io.spl` and `io/__init__.spl` loaded, the file facade's
+`use ...io.*` hop resolves back to the file facade instead of the directory
+facade.  Its plain host-helper exports therefore form a self-cycle and HIR
+never reaches the concrete `time_ops.spl` / `sysinfo_ops.spl` declarations.
+The reserved canonical bug identifier is
+`stage4_database_test_runtime_facade_import`; this owner has reopened the same
+incident rather than creating a second competing bug.  The deployed seed's
+canonical `bug_add` app was not allowed to retain its write: its SDN serializer
+truncated unrelated existing long rows while checkpointing.  Both attempted
+DB/WAL mutations were restored, so a working pure-Simple bug app must add this
+row later without damaging existing records.
 
 Retained final log:
 `build/bootstrap-stage4-b1df-cycle1/logs/x86_64-unknown-linux-gnu/stage4-native-build-runtime-facade-final.log`.
