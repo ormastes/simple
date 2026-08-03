@@ -19,8 +19,8 @@ Exercise the public native-build CLI boundary for the ten compiler artifact stag
 |-------|-------|
 | Category | Compiler |
 | Status | Active |
-| Requirements | N/A |
-| Plan | doc/03_plan/infra/agent_sessions/stage4_spdev.md |
+| Requirements | doc/02_requirements/feature/backend_layer_artifact_matrix.md |
+| Plan | doc/03_plan/sys_test/backend_layer_artifact_matrix.md |
 | Design | doc/05_design/backend_layer_artifact_matrix.md |
 | Research | N/A |
 | Source | `test/02_integration/compiler/backend_debug_dump_driver_spec.spl` |
@@ -227,7 +227,8 @@ expect_all_statuses(shared_artifact_statuses(dump, run_id, "probe"), "FAIL")
 
 ## Related Documentation
 
-- **Plan:** `doc/03_plan/infra/agent_sessions/stage4_spdev.md`
+- **Requirements:** `doc/02_requirements/feature/backend_layer_artifact_matrix.md`
+- **Plan:** `doc/03_plan/sys_test/backend_layer_artifact_matrix.md`
 - **Design:** `doc/05_design/backend_layer_artifact_matrix.md`
 
 

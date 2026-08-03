@@ -12,7 +12,7 @@ Independent checker artifacts are supporting evidence and never promote a
 missing canonical hook to PASS, SKIP_UNAVAILABLE, or NOT_APPLICABLE.
 """
 
-use std.spec.{describe, it, expect, step}
+use std.spec.{describe, it, expect, expect_not, step}
 use std.io_runtime.{file_exists, process_run}
 
 struct BackendArtifactFixture:
@@ -80,8 +80,8 @@ fn count_cpu_checker_rows(output: text) -> i64:
     for backend in ["llvm", "cranelift", "wasm"]:
         for stage in ["emit backend IR", "validate backend IR", "emit object",
                 "validate object", "link artifact", "run or read back"]:
-            if count_rows_with_prefix(output,
-                    "backend={backend} step={stage} status=") == 1:
+            val prefix = "backend={backend} step={stage} status="
+            if count_rows_with_prefix(output, prefix) == 1:
                 count = count + 1
     count
 
@@ -91,8 +91,9 @@ fn count_gpu_checker_rows(output: text) -> i64:
         for stage in ["emit", "validate", "link", "runtime"]:
             val prefix = "{backend}_{stage}_result="
             val value = output_value(output, prefix)
-            if count_rows_with_prefix(output, prefix) == 1 and
-                    (value == "PASS" or value == "FAIL" or value == "SKIP_UNAVAILABLE"):
+            val exactly_one = count_rows_with_prefix(output, prefix) == 1
+            val known_status = value == "PASS" or value == "FAIL" or value == "SKIP_UNAVAILABLE"
+            if exactly_one and known_status:
                 count = count + 1
     count
 
@@ -120,28 +121,30 @@ fn check_backend_stage_artifacts(compilation: BackendArtifactCompilation) -> Bac
     for backend in ["llvm", "cranelift", "wasm"]:
         for stage in ["emit backend IR", "validate backend IR", "emit object",
                 "validate object", "link artifact", "run or read back"]:
-            if compilation.cpu_stdout.contains(
-                    "backend={backend} step={stage} status=SKIP_UNAVAILABLE"):
+            val skip_marker = "backend={backend} step={stage} status=SKIP_UNAVAILABLE"
+            if compilation.cpu_stdout.contains(skip_marker):
                 required_cpu_skips = required_cpu_skips + 1
     for backend in ["cuda", "vulkan", "metal", "hip", "opencl"]:
         for stage in ["emit", "validate", "link", "runtime"]:
-            val result = output_value(compilation.gpu_stdout,
-                "{backend}_{stage}_result=")
+            val result_prefix = "{backend}_{stage}_result="
+            val reason_prefix = "{backend}_{stage}_reason="
+            val probe_prefix = "{backend}_{stage}_probe="
+            val result = output_value(compilation.gpu_stdout, result_prefix)
             if result == "SKIP_UNAVAILABLE":
-                val reason = output_value(compilation.gpu_stdout,
-                    "{backend}_{stage}_reason=")
-                val probe = output_value(compilation.gpu_stdout,
-                    "{backend}_{stage}_probe=")
+                val reason = output_value(compilation.gpu_stdout, reason_prefix)
+                val probe = output_value(compilation.gpu_stdout, probe_prefix)
                 if reason == "" or probe == "":
                     invalid_optional_skips = invalid_optional_skips + 1
     for stage in ["BackendIR", "Object", "LinkedBinary", "RunReadbackReceipt"]:
-        if compilation.cpu_stdout.contains("canonical_hook={stage} status=PASS") or
-                compilation.gpu_stdout.contains("canonical_hook={stage} status=PASS"):
+        val pass_marker = "canonical_hook={stage} status=PASS"
+        val skip_marker = "canonical_hook={stage} status=SKIP_UNAVAILABLE"
+        val not_applicable_marker = "canonical_hook={stage} status=NOT_APPLICABLE"
+        val hook_pass = compilation.cpu_stdout.contains(pass_marker) or compilation.gpu_stdout.contains(pass_marker)
+        val hook_invalid_skip = compilation.cpu_stdout.contains(skip_marker) or compilation.gpu_stdout.contains(skip_marker)
+        val hook_invalid_na = compilation.cpu_stdout.contains(not_applicable_marker) or compilation.gpu_stdout.contains(not_applicable_marker)
+        if hook_pass:
             canonical_hooks = canonical_hooks + 1
-        if compilation.cpu_stdout.contains("canonical_hook={stage} status=SKIP_UNAVAILABLE") or
-                compilation.cpu_stdout.contains("canonical_hook={stage} status=NOT_APPLICABLE") or
-                compilation.gpu_stdout.contains("canonical_hook={stage} status=SKIP_UNAVAILABLE") or
-                compilation.gpu_stdout.contains("canonical_hook={stage} status=NOT_APPLICABLE"):
+        if hook_invalid_skip or hook_invalid_na:
             invalid_hook_statuses = invalid_hook_statuses + 1
     BackendArtifactCheck(
         status: if canonical_hooks == 4 and required_cpu_skips == 0: "PASS" else: "FAIL",
@@ -167,10 +170,8 @@ fn check_runtime_readback_receipt(compilation: BackendArtifactCompilation) -> Ba
             val probe = output_value(compilation.gpu_stdout, "{backend}_runtime_probe=")
             if reason == "" or probe == "" or reason == "runtime-not-requested":
                 invalid_skips = invalid_skips + 1
-    val canonical_receipt = (
-        compilation.cpu_stdout.contains("canonical_hook=RunReadbackReceipt status=PASS") or
-        compilation.gpu_stdout.contains("canonical_hook=RunReadbackReceipt status=PASS")
-    )
+    val receipt_marker = "canonical_hook=RunReadbackReceipt status=PASS"
+    val canonical_receipt = compilation.cpu_stdout.contains(receipt_marker) or compilation.gpu_stdout.contains(receipt_marker)
     BackendArtifactCheck(
         status: if canonical_receipt: "PASS" else: "FAIL",
         reason: if canonical_receipt: "canonical-runtime-receipt-published" else: "canonical-run-readback-receipt-hook-absent",
@@ -185,10 +186,8 @@ fn check_complete_matrix_ledger(compilation: BackendArtifactCompilation) -> Back
     val gpu_rows = count_gpu_checker_rows(compilation.gpu_stdout)
     val checker_rows = cpu_rows + gpu_rows
     val checker_complete = checker_rows == 38
-    val has_canonical_ledger = (
-        compilation.cpu_stdout.contains("backend_artifact_matrix_ledger status=PASS") or
-        compilation.gpu_stdout.contains("backend_artifact_matrix_ledger status=PASS")
-    )
+    val ledger_marker = "backend_artifact_matrix_ledger status=PASS"
+    val has_canonical_ledger = compilation.cpu_stdout.contains(ledger_marker) or compilation.gpu_stdout.contains(ledger_marker)
     BackendArtifactCheck(
         status: if checker_complete and has_canonical_ledger: "PASS" else: "FAIL",
         reason: if not checker_complete: "checker-row-accounting-incomplete" else: "canonical-ten-stage-ledger-absent",
@@ -210,8 +209,8 @@ describe "Backend layer artifact and runtime matrix":
         val compilation = compile_backend_artifact_fixture(fixture)
         expect(compilation.cpu_exit).to_be_less_than(2)
         expect(compilation.gpu_exit).to_be_less_than(2)
-        expect(compilation.cpu_stdout.contains("status=UNKNOWN")).to_equal(false)
-        expect(compilation.gpu_stdout.contains("_result=UNKNOWN")).to_equal(false)
+        expect_not(compilation.cpu_stdout.contains("status=UNKNOWN"))
+        expect_not(compilation.gpu_stdout.contains("_result=UNKNOWN"))
 
         step("validate every emitted compiler layer")
         val shared = check_shared_stage_artifacts(compilation)
@@ -223,8 +222,8 @@ describe "Backend layer artifact and runtime matrix":
         expect(backend.status).to_equal("FAIL")
         expect(backend.reason).to_equal("required-canonical-backend-hooks-absent")
         expect(backend.accounted).to_equal(backend.expected)
-        expect(backend.expected).to_equal(
-            fixture.expected_cpu_rows + fixture.expected_gpu_rows)
+        val expected_checker_rows = fixture.expected_cpu_rows + fixture.expected_gpu_rows
+        expect(backend.expected).to_equal(expected_checker_rows)
         expect(backend.invalid_skips).to_equal(0)
         expect(backend.missing_required).to_be_greater_than(3)
 
@@ -241,8 +240,7 @@ describe "Backend layer artifact and runtime matrix":
         expect(ledger.status).to_equal("FAIL")
         expect(ledger.reason).to_equal("canonical-ten-stage-ledger-absent")
         expect(ledger.accounted).to_equal(ledger.expected)
-        expect(ledger.expected).to_equal(
-            fixture.expected_cpu_rows + fixture.expected_gpu_rows)
+        expect(ledger.expected).to_equal(expected_checker_rows)
         expect(ledger.missing_required).to_equal(1)
         expect(compilation.cpu_stdout).to_contain("cpu_backend_matrix status=")
         expect(compilation.gpu_stdout).to_contain("gpu_backend_matrix status=")
