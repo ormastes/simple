@@ -168,3 +168,48 @@ Status:
 - **NOT PROVED (open):** an end-to-end exit-0-with-a-wrong-value run. Neither
   attempt reached codegen. Until someone demonstrates it, the fail-open path is
   a strongly-evidenced mechanism, not an observed wrong answer.
+
+## 2026-08-03 Stage 4 ownership claim
+
+Claimed by `codex/stage4-x86-phase4` at source revision `69757e3aae7` before
+production edits. A retained Stage-3 bootstrap-flat native build now closes the
+previous evidence gap:
+
+- an unsupported `Future<T>.map<U>` call emitted the Task #145 warning;
+- native-build nevertheless reported `6 compiled, 0 failed` and exited 0;
+- the linked executable exited 1 with empty stdout/stderr rather than producing
+  a compile-time diagnostic.
+
+The current unresolved-method site does emit `rt_panic`, so this is no longer
+the exact historical const-0 runtime behavior. The architectural defect remains:
+`bootstrap_lower_flat_hir_module_to_mir` lowers every function with a local
+`MirLowering`, then discards its function-lowering errors. Its two sibling
+bootstrap-global/extra paths have the same post-function gap. The normal driver
+collects those errors and already classifies `unresolved method call:` as fatal.
+
+The owned repair is therefore narrower than making all `self.error` calls fatal:
+
+1. mark the unresolved-method site explicitly with `error_fatal`;
+2. after function lowering, make every bootstrap flat/global/extra helper scan
+   `MirError.fatal`, emit the diagnostic on stderr, and stop before codegen;
+3. retain advisory MIR diagnostics as non-fatal;
+4. prove an unsupported method is rejected during native-build while a supported
+   non-generic method and the Stage 4 Future declaration-containment fixture
+   still compile.
+
+Retained pre-fix evidence:
+`build/focused/stage4-nogc-async-future/contract-attempt3-negative.log`,
+`.stdout`, and `.stderr`.
+
+### Repair in progress
+
+The owned pure-Simple repair now marks the terminal unresolved-method
+diagnostic fatal and drains fatal `MirLowering.errors` in all three
+bootstrap flat/global/extra function-lowering helpers. Advisory diagnostics
+remain non-fatal. A source regression asserts the fatal site and propagation
+boundaries.
+
+The retained Stage 3 compiler necessarily still embeds the old lowering. It
+accepted the fresh negative fixture and produced an executable that segfaulted
+with exit 139 and empty output. Therefore compile-time rejection is not yet
+claimed; it must be proven with the rebuilt Stage 4 candidate.

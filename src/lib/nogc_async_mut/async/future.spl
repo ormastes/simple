@@ -64,6 +64,7 @@ class Future<T>:
         """
         self.poll().is_ready()
 
+    @cfg(interpreter)
     fn map<U>(f: fn(T) -> U) -> Future<U>:
         """Transform future value.
 
@@ -79,6 +80,7 @@ class Future<T>:
             case Poll.Pending:
                 Future.pending<U>()
 
+    @cfg(interpreter)
     fn then<U>(f: fn(T) -> Future<U>) -> Future<U>:
         """Chain futures (flatMap).
 
@@ -102,7 +104,7 @@ class Future<T>:
         Err(IoError(TimedOut)) if the wall-clock deadline expired
         before the value was consumed.
 
-        Note: this is a post-completion deadline check via `then`.
+        Note: this is a post-completion deadline check.
         If the inner future never completes, the timeout never fires.
         For preemptive timeout on pending futures, use
         `std.async.runtime.timeout()` which races against a timer.
@@ -115,17 +117,19 @@ class Future<T>:
         """
         val deadline = _future_time_now_ms() + ms
         val timeout_ms = ms
-        self.then(\v:
-            if _future_time_now_ms() > deadline:
-                Future.from_value(
-                    Err(IoError(
-                        kind: IoErrorKind.TimedOut,
-                        message: "future timed out after {timeout_ms}ms",
-                        source: nil
-                    )))
-            else:
-                Future.from_value(Ok(v))
-        )
+        match self.poll_result:
+            case Poll.Ready(value):
+                if _future_time_now_ms() > deadline:
+                    Future.from_value(
+                        Err(IoError(
+                            kind: IoErrorKind.TimedOut,
+                            message: "future timed out after {timeout_ms}ms",
+                            source: nil
+                        )))
+                else:
+                    Future.from_value(Ok(value))
+            case Poll.Pending:
+                Future.pending<Result<T, IoError>>()
 
     me drop():
         """Drop future."""

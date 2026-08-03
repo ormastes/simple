@@ -870,6 +870,24 @@ impl MirLowering:
 
         nil
 
+    me lower_unresolved_array_push(push_recv: LocalId, push_value: HirExpr, wb_kind: i64, wb_base: LocalId, wb_index: LocalId, wb_field_idx: i64) -> LocalId:
+        val push_val_raw = self.lower_expr(push_value)
+        self.note_container_elem_type(push_recv, push_val_raw)
+        val push_val_tagged = self.box_runtime_value(push_val_raw)
+        val push_op = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_array_push"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(
+                params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
+                return_type: MirType(kind: MirTypeKind.I8),
+                is_variadic: false
+            )))
+        ))
+        var b_push = self.builder
+        b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_val_tagged)], MirType(kind: MirTypeKind.I8))
+        self.builder = b_push
+        self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
+        push_recv
+
     me lower_method_call(receiver: HirExpr, method: text, args: [HirCallArg], resolution: MethodResolution) -> LocalId:
         """Lower method call based on resolution.
 
@@ -2570,25 +2588,11 @@ impl MirLowering:
                     # (which always un-boxes via `>>3`) recovers the true
                     # value instead of corrupting a small untagged int (e.g.
                     # push(7) stored raw 7, then read-side `7 >> 3 == 0`).
-                    val push_recv = unresolved_receiver_local
-                    val push_val_raw = self.lower_expr(args[0].value)
-                    self.note_container_elem_type(push_recv, push_val_raw)
-                    val push_val_tagged = self.box_runtime_value(push_val_raw)
-                    val push_op = MirOperand(kind: MirOperandKind.Const(
-                        MirConstValue.Str("rt_array_push"),
-                        MirType(kind: MirTypeKind.FuncPtr(MirSignature(
-                            params: [MirType.ptr(MirType.i64(), false), MirType.i64()],
-                            return_type: MirType(kind: MirTypeKind.I8),
-                            is_variadic: false
-                        )))
-                    ))
-                    var b_push = self.builder
-                    b_push.emit_call(push_op, [mir_operand_copy(push_recv), mir_operand_copy(push_val_tagged)], MirType(kind: MirTypeKind.I8))
-                    self.builder = b_push
-                    self.emit_method_writeback(wb_kind, wb_base, wb_index, wb_field_idx, push_recv)
-                    return push_recv
-                self.error("unresolved method call: {method}", nil)
-                # Task #145: self.error only COLLECTS -- both the bootstrap
+                    return self.lower_unresolved_array_push(
+                        unresolved_receiver_local, args[0].value,
+                        wb_kind, wb_base, wb_index, wb_field_idx)
+                self.error_fatal("unresolved method call: {method}", nil)
+                # Task #145: a non-fatal error only COLLECTS -- both the bootstrap
                 # lane (driver_bootstrap.spl reads ctx.errors, never
                 # MirLowering.errors) and the native-build worker drop the
                 # list (see mir_lowering_stmts.spl lower_for_iterator's
@@ -2599,7 +2603,7 @@ impl MirLowering:
                 print "[mir-lower] WARNING: unresolved method call '{method}' lowered to const-0 placeholder (silent-null risk, Task #145)"
                 var b = self.builder
                 val temp = b.new_temp(MirType.i64())
-                # FAIL CLOSED (Task #145). The collected self.error above is
+                # FAIL CLOSED (Task #145). The fatal error above is
                 # dropped by every pipeline that does not read
                 # MirLowering.errors -- concretely
                 # driver_bootstrap.bootstrap_lower_to_mir_context, which

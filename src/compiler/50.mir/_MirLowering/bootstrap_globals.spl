@@ -323,6 +323,22 @@ fn bootstrap_register_flat_function_values():
                 bootstrap_fn_ret_hir_type_register(func.name, func.return_type)
         module_index = module_index + 1
 
+fn bootstrap_abort_on_fatal_mir_errors(errors: [MirError], module_name: text):
+    """Stop bootstrap codegen when MIR lowering emitted a fatal diagnostic.
+
+    The normal driver drains `MirLowering.errors` into `CompileContext`; the
+    bootstrap flat/global helpers lower function bodies directly and therefore
+    must enforce the same fatality at their boundary. Advisory errors remain
+    collected without aborting.
+    """
+    var i = 0
+    while i < errors.len():
+        val err = errors[i]
+        if err.fatal:
+            eprint("error: bootstrap MIR lowering failed in {module_name}: {err.message}\n")
+            rt_exit(1)
+        i = i + 1
+
 fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: MirTargetContext, is_entry: bool) -> (MirModule, i64):
     val module_name = bootstrap_hir_module_name_at(module_index)
     val logical_module_name = bootstrap_mir_logical_module_name(module_name)
@@ -375,6 +391,7 @@ fn bootstrap_lower_flat_hir_module_to_mir(module_index: i64, target_context: Mir
         builder.module = lowered_module
         lowering.builder = builder
 
+    bootstrap_abort_on_fatal_mir_errors(lowering.errors, module_name)
     lowered_module = lowering.builder.module
     lowered_module.name = module_name
     bootstrap_mir_modules_add(lowered_module)
@@ -746,6 +763,7 @@ fn bootstrap_lower_hir_globals_to_mir_module_for_target(target_context: MirTarge
                 if trace_enabled:
                     print "[mir-lower-free] function:added"
             fki = fki + 1
+        bootstrap_abort_on_fatal_mir_errors(lowering.errors, hir_module.name)
         if trace_enabled:
             print "[mir-lower-free] done instr-total={real_instr_total}"
         # Loud-failure guard: the bootstrap entry must never lower to an all-stub
@@ -876,5 +894,6 @@ fn bootstrap_lower_extra_hir_module_to_mir_for_target(hir_module: HirModule, tar
             if trace_enabled:
                 print "[mir-lower-extra] function:added {fn_name}"
         fki = fki + 1
+    bootstrap_abort_on_fatal_mir_errors(lowering.errors, hir_module.name)
     bootstrap_mir_modules_add(lowering.builder.module)
     added_instr_total
