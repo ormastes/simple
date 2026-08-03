@@ -1,8 +1,9 @@
-# OPEN: "constants are lost — every function comes out `ret i64 0`" — LLVM text backend CLEARED, cause is upstream
+# FIX IMPLEMENTED, STAGE 4 REVALIDATION PENDING: staged-native SSA rewrite loses definitions and stores
 
 - **Date:** 2026-08-01
-- **Status:** OPEN — root cause NOT yet identified. This doc records what has
-  been **eliminated**, with transcripts, so the search space is not re-walked.
+- **Status:** PURE-SIMPLE ROOT FIX IMPLEMENTED 2026-08-03; the focused native
+  oracle passes, but the x86 Stage 4 owner must rebuild the pure-Simple Stage 3
+  compiler and repeat the failed shard before this becomes CLOSED.
 - **Related:** `llvm_bootstrap_ir_buffer_not_reset_2026-08-01.md` (the sibling
   "corrupt target triple" defect, FIXED — it was a *different* bug).
 
@@ -93,6 +94,34 @@ native codegen.
    correct. Note an unregistered `@extern fn` returns nil **silently** in this
    repo. Probe the bridge's output before blaming codegen.
 3. Constant folding / MIR opt upstream of the backend.
+
+## 2026-08-03 root-cause update: heterogeneous tuple transport in the alloca rewrite
+
+The preserved flat-bootstrap IR narrowed the loss to
+`ssa_alloca_transform_blocks`, not constant construction or LLVM text emission.
+`lib.nogc_async_mut.env.platform.detect_os` contained 27 generated `alloca`
+instructions and 26 read-side `load` instructions, but zero `store`
+instructions and zero defining constants. This asymmetric shape matters:
+`ssa_alloca_rewrite_inst_operands` was still returning its prepended loads, while
+the nested tuple returned through `ssa_alloca_apply_def_store` and
+`ssa_alloca_rewrite_inst` lost the core `MirInst` and appended `[MirInst]`
+fields under staged-native execution.
+
+The exact hard-exit oracle constructs a cross-block-live boolean definition;
+the adjacent case uses a text-pointer constant. Both require this complete
+sequence to survive: entry `Alloc`, renamed `Const`, `Store`; successor `Load`;
+`Ret` of the loaded local. The same oracle compiled natively by the Rust seed
+passed before the fix, proving the transform algorithm itself was sound and
+isolating the divergence to pure-Simple staged-native value transport.
+
+The pure-Simple fix replaces the two heterogeneous anonymous tuple results with
+named `SsaAllocaDefStoreResult` and `SsaAllocaRewriteInstResult` records. The
+block rewrite consumes named fields, so a core definition and its store travel
+as one typed value-flow unit. No LLVM legalization or source-level fallback is
+used; legalizing the later `i1 -> ptr` symptom alone would have masked an
+uninitialized slot and returned address zero or one as text.
+
+Regression: `test/01_unit/compiler/mir_opt/ssa_alloca_store_retention_native_check.spl`.
 
 ## Not the cause (checked, ruled out)
 

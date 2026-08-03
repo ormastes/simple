@@ -25,6 +25,21 @@ struct SsaVarTransformResult:
     phi_required_count: i64
     phi_required_locals: [i64]
 
+# Keep the staged-native alloca rewrite's heterogeneous values in named
+# records. Returning MirInst + [MirInst] through nested anonymous tuples can
+# preserve the scalar/load fields while losing the defining instruction and
+# appended Store in a pure-Simple bootstrap binary.
+struct SsaAllocaDefStoreResult:
+    instruction: MirInst
+    stores: [MirInst]
+    next_temp: i64
+
+struct SsaAllocaRewriteInstResult:
+    prepended: [MirInst]
+    instruction: MirInst
+    appended: [MirInst]
+    next_temp: i64
+
 struct SsaPhiPlan:
     join_block_id: i64
     original_local_id: i64
@@ -1491,7 +1506,7 @@ fn ssa_alloca_rename_dest(inst: MirInst, original_id: i64, new_id: i64) -> MirIn
         case _:
             inst
 
-fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> (MirInst, [MirInst], i64):
+fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> SsaAllocaDefStoreResult:
     """If `inst` defines a reassigned local, redirect its dest to a fresh
     temp and append a Store of that temp into the local's stack slot.
 
@@ -1513,10 +1528,9 @@ fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64
     stack memory. An explicit `match` on the Option's variant tag sidesteps
     the payload-truthiness collapse entirely."""
     val written_sentinel = _ssa_written_local_id(inst)
-    # Statement-form accumulation, single tail tuple: a tuple constructed as a
-    # match-arm TAIL expression came back nil through this fn under the
-    # bootstrap seed (anon-tuple-return landmine), nil-poisoning
-    # ssa_alloca_rewrite_inst's def_step.
+    # Statement-form accumulation plus a named result record: tuple-shaped
+    # transport previously let staged-native execution keep read-side loads
+    # while dropping this defining instruction and its appended Store.
     var out_inst = inst
     var out_stores: [MirInst] = []
     var out_next = next_temp
@@ -1533,14 +1547,14 @@ fn ssa_alloca_apply_def_store(inst: MirInst, slot_keys: [i64], slot_values: [i64
                     span: nil
                 )]
                 out_next = next_temp + 1
-    (out_inst, out_stores, out_next)
+    SsaAllocaDefStoreResult(out_inst, out_stores, out_next)
 
-fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirInst, [MirInst], i64):
+fn ssa_alloca_rewrite_inst(inst: MirInst, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> SsaAllocaRewriteInstResult:
     """Full per-instruction rewrite: (loads to prepend, core inst, stores to
     append, next free temp id)."""
     val op_step = ssa_alloca_rewrite_inst_operands(inst, slot_keys, slot_values, next_temp)
     val def_step = ssa_alloca_apply_def_store(op_step[0], slot_keys, slot_values, op_step[2])
-    (op_step[1], def_step[0], def_step[1], def_step[2])
+    SsaAllocaRewriteInstResult(op_step[1], def_step.instruction, def_step.stores, def_step.next_temp)
 
 fn ssa_alloca_rewrite_term(term: MirTerminator, slot_keys: [i64], slot_values: [i64], next_temp: i64) -> ([MirInst], MirTerminator, i64):
     match term:
@@ -1574,12 +1588,12 @@ fn ssa_alloca_rewrite_block(block: MirBlock, slot_keys: [i64], slot_values: [i64
     var next_temp = next_temp_start
     for inst in block.instructions:
         val step = ssa_alloca_rewrite_inst(inst, slot_keys, slot_values, next_temp)
-        for p in step[0]:
+        for p in step.prepended:
             new_insts = new_insts.push(p)
-        new_insts = new_insts.push(step[1])
-        for s in step[2]:
+        new_insts = new_insts.push(step.instruction)
+        for s in step.appended:
             new_insts = new_insts.push(s)
-        next_temp = step[3]
+        next_temp = step.next_temp
     val term_step = ssa_alloca_rewrite_term(block.terminator, slot_keys, slot_values, next_temp)
     for p in term_step[0]:
         new_insts = new_insts.push(p)
