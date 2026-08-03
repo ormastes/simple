@@ -15,7 +15,8 @@ Source code coverage and documentation coverage tools for the Simple language.
 7. [Documentation Coverage](#documentation-coverage)
 8. [SDoctest Enforcement](#sdoctest-enforcement)
 9. [CI/CD Integration](#cicd-integration)
-10. [Troubleshooting](#troubleshooting)
+10. [Backend Evidence Checker Coverage](#backend-evidence-checker-coverage)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -378,6 +379,31 @@ fi
 ```
 
 ---
+
+## Backend Evidence Checker Coverage
+
+The CPU and GPU backend artifact checkers are POSIX shell programs, so Simple's
+MIR coverage and Rust's `cargo llvm-cov` cannot measure them. Use an external
+shell tracer that exports LCOV branch records, then admit the measurement with:
+
+```bash
+sh scripts/check/check-backend-evidence-branch-coverage.shs \
+  --coverage build/coverage/backend-checkers.info \
+  --cpu-matrix build/evidence/cpu-checker.log \
+  --gpu-matrix build/evidence/gpu-checker.log
+```
+
+The default gate is 95% reachable branch coverage for **each** checker, not only
+for their combined total. It also requires one result for all 18 CPU
+backend/stage cells and all 20 GPU backend/layer cells. PASS, FAIL, and
+SKIP_UNAVAILABLE are all valid matrix outcomes; completeness is independent of
+backend availability.
+
+The gate consumes measured LCOV `SF`, `BRF`, and `BRH` records. A missing file
+or source record with no branch counts returns `MEASUREMENT_UNAVAILABLE` with
+exit 2. Malformed counts, duplicate or missing checker records, incomplete
+matrices, and coverage below threshold return FAIL with exit 1. It never derives
+coverage percentages from the number of tests or matrix rows.
 
 ## Troubleshooting
 
