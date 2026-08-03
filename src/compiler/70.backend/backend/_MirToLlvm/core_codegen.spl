@@ -656,6 +656,35 @@ impl MirTextCodegen for MirToLlvm:
             return callee
         "@{callee}"
 
+    me emit_value_type_conversion(value: text, src_ty: text, dst_ty: text, src_unsigned: bool) -> text:
+        """Emit a verified scalar conversion for value_as_type callers."""
+        if src_ty == "i1" and dst_ty == "ptr":
+            # LLVM cannot bitcast i1 to ptr. Preserve the boolean through the
+            # target's native integer width before converting to a pointer.
+            val native_ty = self.native_int()
+            val widened = self.builder.fresh_local()
+            val converted = self.builder.fresh_local()
+            self.builder.emit("  {widened} = zext i1 {value} to {native_ty}")
+            self.builder.emit("  {converted} = inttoptr {native_ty} {widened} to ptr")
+            return converted
+        if src_ty == "ptr" and dst_ty == "i1":
+            # Pointer-to-bool is truthiness, not a lossy pointer bitcast.
+            val converted = self.builder.fresh_local()
+            self.builder.emit("  {converted} = icmp ne ptr {value}, null")
+            return converted
+
+        var cast_inst = self.select_cast_instruction(src_ty, dst_ty)
+        if src_unsigned and cast_inst == "sext":
+            cast_inst = "zext"
+        if src_unsigned and cast_inst == "sitofp":
+            cast_inst = "uitofp"
+        if cast_inst.len() == 0:
+            panic("compile error: unsupported LLVM value conversion from {src_ty} to {dst_ty}")
+            return value
+        val tmp = self.builder.fresh_local()
+        self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
+        tmp
+
     me value_as_type_signed(value: text, from_ty: text, to_ty: text, src_unsigned: bool) -> text:
         """Same as value_as_type, but widening picks zext when src_unsigned
         is set (MIR-level U8/U16/U32 source) instead of always sext'ing.
@@ -674,14 +703,7 @@ impl MirTextCodegen for MirToLlvm:
         # must zext, not sext -- select_cast_instruction has no signedness
         # input and always sext's i8/i16/i32 widening (only correct for
         # signed sources). See is_unsigned_mir_kind.
-        var cast_inst = self.select_cast_instruction(src_ty, dst_ty)
-        if src_unsigned and cast_inst == "sext":
-            cast_inst = "zext"
-        if src_unsigned and cast_inst == "sitofp":
-            cast_inst = "uitofp"
-        val tmp = self.builder.fresh_local()
-        self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
-        tmp
+        self.emit_value_type_conversion(value, src_ty, dst_ty, src_unsigned)
 
     fn get_operand_unsigned(operand: MirOperand) -> bool:
         """Best-effort MIR-level signedness for an operand: true for a Const
@@ -712,10 +734,7 @@ impl MirTextCodegen for MirToLlvm:
             return self.ret_value_for_type(dst_ty, value)
         if value == "0":
             return self.ret_value_for_type(dst_ty, "0")
-        val cast_inst = self.select_cast_instruction(src_ty, dst_ty)
-        val tmp = self.builder.fresh_local()
-        self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
-        tmp
+        self.emit_value_type_conversion(value, src_ty, dst_ty, false)
 
     # floatedge lane (-0.0 sign-loss fix): translate_cast's shared body
     # (aggregate_intrinsics.spl -- out of scope for this lane, see
