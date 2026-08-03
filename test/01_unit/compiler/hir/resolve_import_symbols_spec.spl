@@ -31,6 +31,33 @@ fn resolve_import_symbols_spec_build_surfaces(modules: Dict<text, Module>, sourc
 
 describe "resolve_import_symbols 2-pass import resolver":
     """The import pre-pass must preserve module identity before HIR lowering resolves symbol uses."""
+    it "preserves wildcard re-export surfaces and enum payload dependencies":
+        val log = make_logger()
+        val owner_source = "struct Payload:\n    value: i64\nenum Event:\n    Wrapped(Payload)\nexport Payload, Event"
+        val facade_source = "export use wildcard.owner.*\nexport Event"
+        val consumer_source = "use wildcard.facade.*\nfn accept(value: Event) -> Event:\n    value"
+        val owner = parse_full_frontend(owner_source, "wildcard.owner", "wildcard.owner", log)
+        val facade = parse_full_frontend(facade_source, "wildcard.facade", "wildcard.facade", log)
+        val consumer = parse_full_frontend(consumer_source, "wildcard.consumer", "wildcard.consumer", log)
+
+        expect(facade.exports.len()).to_equal(2)
+        expect(facade.exports[0].items).to_equal(["wildcard.owner.*"])
+
+        var modules: Dict<text, Module> = {}
+        modules["wildcard.owner"] = owner
+        modules["wildcard.facade"] = facade
+        val sources = [
+            SourceFile(path: "wildcard/owner.spl", content: owner_source, module_name: "wildcard.owner"),
+            SourceFile(path: "wildcard/facade.spl", content: facade_source, module_name: "wildcard.facade")
+        ]
+        val surfaces = resolve_import_symbols_spec_build_surfaces(modules, sources)
+        var lowering = hirlowering_for_module("wildcard.consumer", surfaces)
+        val hir = lowering.lower_module(consumer)
+        expect(lowering.errors.len()).to_equal(0)
+        expect(hir.symbols.lookup("Event") != nil).to_equal(true)
+        expect(hir.symbols.lookup("Payload") != nil).to_equal(true)
+        expect(hir.enums.keys().len()).to_be_greater_than(0)
+
     it "registers an explicitly imported public function":
         val log = make_logger()
         val src_provider = "pub fn answer() -> i64:\n    42"
