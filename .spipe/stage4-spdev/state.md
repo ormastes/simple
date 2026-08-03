@@ -104,3 +104,9 @@ dev-done
   coverage. Fixed the discovered layer_result reason-clobber bug with exact
   Metal and adjacent CUDA/Vulkan fail-closed regressions; these tests are
   diagnostic evidence and do not satisfy the Stage 4 binary acceptance gates.
+- dev: Corrected the false unlabeled enum payload fixture and proved both the
+  labeled source path and exhaustive direct-AST dependency matrix with admitted
+  pure-Simple Stage 3. The exact facade/prebind gate now compiles but crashes in
+  the optional SymbolId aggregate lookup inside claim_materialized_payload_binding.
+  No compiler draft was accepted; next fresh cycle must use get_symbol_raw on
+  the unwrapped raw ID and retry only that retained exact binary gate.

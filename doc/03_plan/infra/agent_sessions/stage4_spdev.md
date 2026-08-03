@@ -292,6 +292,35 @@ disproved candidates.
   preservation and generated-source fail-closed checks pass. The canonical bug
   row `gpu_backend_layer_result_reason_clobber_2026_08_03` is fixed.
 
+### 2026-08-03 typed VariantKind continuation
+
+- Read-only parser audit found that the retained probe's original unlabeled
+  payload syntax was invalid for the flat enum bridge: `Variant(Type)` records
+  no payload, while `Variant(value: Type)` records the expected tuple payload.
+  This fully explains the earlier walker exit 60 and replaces the prior theory
+  that raw VariantKind payload extraction alone was losing valid source data.
+- Cycle 1 corrected the labeled-payload sibling probe. The admitted pure-Simple
+  Stage 3 compiler (`62132c47fe04cac8fd9ddfda6d2a57b77995071a9631648350824957ade3cf61`)
+  compiled 135 modules with zero failures and the executable exited 30.
+- Cycle 2 added a direct-AST executable matrix for all 13 retained `TypeKind`
+  forms and all three `VariantKind` forms. Its incremental native build compiled
+  six modules in 2.5 seconds with zero failures and exited 30. The companion
+  SSpec test-only commit is retained as `d00f0e00d164511276b06b0709cc3e149c24068f`;
+  it is not merged until the helper implementation and a usable test runner are
+  present together.
+- Cycle 3 compiled the exact explicit-facade plus declaration-only-prebind HIR
+  gate (135/135, 45.65 seconds, 397,288 KiB peak RSS), then crashed at runtime
+  with signal 11/exit 139 after 1.16 seconds. GDB isolated the crash to
+  `HirLowering.claim_materialized_payload_binding`, called by
+  `register_imported_symbol`; the candidate used the fragile optional aggregate
+  path `symbols.get_symbol(existing_id)`.
+- The bounded cycle is exhausted and no implementation was committed. The next
+  fresh continuation must replace that lookup with the established raw-ID path
+  `existing_id.unwrap().id` plus `get_symbol_raw(raw)`, then rerun only the exact
+  retained gate. Candidate source, exact/adjacent probes, and artifacts remain
+  in `/tmp/simple-stage4-enum-closure5-20260803`; do not discard or repeat the
+  two already-green setup gates.
+
 ## Ownership
 
 The parallel lane split, merge owner, and final reviewer are recorded in
