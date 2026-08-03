@@ -1,5 +1,10 @@
 # Pure-Simple LLVM lane emits invalid IR for every program
 
+- **Status:** defect 2 CLAIMED on 2026-08-03
+- **Owner:** Codex `/root/symbolid_zero_spec/simpleos_unoq_stage3`
+- **Claim scope:** snapshot the target triple text and datalayout when
+  `LlvmIRBuilder` is created, then cover the original GNU target plus nil-env
+  and SimpleOS neighbors without changing the Rust runtime.
 - **Date:** 2026-08-01
 - **Base:** `63c362526c2b01c5bc63697ab80aea1501ae65fe` (the
   `llvm_ir_builder.spl` blob is byte-identical at `205b35e474a`, where the
