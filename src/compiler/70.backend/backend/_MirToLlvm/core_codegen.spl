@@ -9,13 +9,15 @@ use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
-use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at}
+use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at,
+    bootstrap_mir_static_count, bootstrap_mir_static_module_at, bootstrap_mir_static_symbol_id_at,
+    bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at}
 use compiler.mir_opt.{ssa_var_transform_blocks, ssa_alloca_transform_blocks}
 use compiler.backend.backend_api.*
 use compiler.backend.backend.llvm_target.{LlvmTargetTriple, LlvmTargetConfig}
 use compiler.backend.llvm_type_mapper.LlvmTypeMapper
 use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integer_type, is_signed_int_type, is_float_type,
-    llvm_ir_builder_build}
+    llvm_ir_builder_build, llvm_ir_builder_push_line}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
 
@@ -341,7 +343,9 @@ impl MirTextCodegen for MirToLlvm:
         name: text,
         body: MirBody,
         return_type: text,
-        return_unsigned: bool
+        return_unsigned: bool,
+        module_index: i64,
+        ir_handle: i64
     ):
         """Translate a flat-bootstrap body through its scalar ABI projection.
 
@@ -351,9 +355,12 @@ impl MirTextCodegen for MirToLlvm:
         empty span (line 0) yields the same dbg_line 1 as a nil span.
         """
         self.select_bootstrap_return_abi(return_type, return_unsigned)
-        self.translate_function(name, body, Span.empty())
+        self.translate_function_with_ir_handle(name, body, Span.empty(), module_index, ir_handle)
 
     me translate_function(name: text, body: MirBody, span: Span):
+        self.translate_function_with_ir_handle(name, body, span, -1, -1)
+
+    me translate_function_with_ir_handle(name: text, body: MirBody, span: Span, module_index: i64, ir_handle: i64):
         """Translate a MIR function with optimization attributes.
 
         Renames 'main' to '__simple_main' so the entry point wrapper
@@ -518,21 +525,38 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit_di_subprogram(sub_id, name, dbg_line)
             dbg_id = Some(sub_id)
 
-        self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
+        if ir_handle >= 0:
+            val param_str = params.join(", ")
+            var attrs = " nounwind"
+            if is_readonly:
+                attrs = attrs + " readonly"
+            if is_small:
+                attrs = attrs + " alwaysinline"
+            var dbg_suffix = ""
+            match dbg_id:
+                Some(id): dbg_suffix = " !dbg !{id}"
+                nil: ()
+            llvm_ir_builder_push_line(ir_handle, "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{")
+        else:
+            self.builder.start_function_opt(fn_name, params, effective_ret_ty, is_readonly, is_small, dbg_id)
         if bootstrap_debug:
             print "[mir-to-llvm] function:started {name}"
 
         val is_start = name == "_start"
         var block_i = 0
         while block_i < body.blocks.len():
-            self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id)
+            self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id, module_index)
             block_i = block_i + 1
 
-        self.builder.end_function()
+        if ir_handle >= 0:
+            llvm_ir_builder_push_line(ir_handle, "}")
+            llvm_ir_builder_push_line(ir_handle, "")
+        else:
+            self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
 
-    me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64):
+    me translate_block_at(blocks: [MirBlock], block_index: i64, return_type_text: text, is_start: bool, return_slot_id: i64, module_index: i64):
         """Translate a MIR basic block."""
         val block = blocks[block_index]
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
@@ -547,7 +571,7 @@ impl MirTextCodegen for MirToLlvm:
         while bootstrap_inst_i < bootstrap_instructions.len():
             if bootstrap_debug:
                 print "[mir-to-llvm] block:instruction-before bb{bootstrap_block_id} index={bootstrap_inst_i}"
-            self.translate_instruction_at(bootstrap_instructions, bootstrap_inst_i)
+            self.translate_instruction_at(bootstrap_instructions, bootstrap_inst_i, module_index)
             if bootstrap_debug:
                 print "[mir-to-llvm] block:instruction-after bb{bootstrap_block_id} index={bootstrap_inst_i}"
             bootstrap_inst_i = bootstrap_inst_i + 1
@@ -557,7 +581,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] block:terminator-after bb{bootstrap_block_id}"
 
-    me translate_instruction_at(instructions: [MirInst], index: i64):
+    me translate_instruction_at(instructions: [MirInst], index: i64, module_index: i64):
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:entry index={index}"
@@ -600,7 +624,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] instruction:store-global-discriminant index={index}"
         if rt_enum_discriminant(inst_kind) == store_global_disc:
-            self.translate_store_global_at(instructions, index)
+            self.translate_store_global_at(instructions, index, module_index)
             return
 
         val load_global_disc = rt_enum_discriminant(MirInstKind.LoadGlobal(LocalId(id: 0), SymbolId(id: 0)))
@@ -624,7 +648,7 @@ impl MirTextCodegen for MirToLlvm:
             val load_symbol_id = rt_value_as_int(load_symbol_slot >> 32)
             if bootstrap_debug:
                 print "[mir-to-llvm] load-global:symbol-decoded index={index} slot={load_symbol_slot} symbol={load_symbol_id}"
-            self.translate_load_global_ids(load_dest_id, load_symbol_id)
+            self.translate_load_global_ids(load_dest_id, load_symbol_id, module_index)
             return
 
         match inst_kind:
@@ -1996,21 +2020,26 @@ impl MirTextCodegen for MirToLlvm:
             self.mark_ptr_local(dest_id)
         self.builder.emit_load(dest_name, g_ty, g_name)
 
-    me translate_load_global_ids(dest_id: i64, symbol_id: i64):
+    me translate_load_global_ids(dest_id: i64, symbol_id: i64, module_index: i64):
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] load-global:scalar dest={dest_id} symbol={symbol_id}"
-        val g_key = self.global_static_key(symbol_id)
         var g_name = "@g_undeclared_{symbol_id}"
-        if self.global_static_names.has(g_key):
-            val recorded_name = self.global_static_names[g_key]
-            if recorded_name != nil and recorded_name != "":
-                g_name = recorded_name
         var g_ty = self.native_int_type
-        if self.global_static_types.has(g_key):
-            val recorded_type = self.global_static_types[g_key]
-            if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
-                g_ty = recorded_type
+        val static_index = bootstrap_llvm_static_index(module_index, symbol_id)
+        if static_index >= 0:
+            g_name = "@g_{bootstrap_mir_static_name_at(static_index)}"
+            g_ty = bootstrap_llvm_static_type_text(bootstrap_mir_static_type_tag_at(static_index), self.native_int_type)
+        else:
+            val g_key = self.global_static_key(symbol_id)
+            if self.global_static_names.has(g_key):
+                val recorded_name = self.global_static_names[g_key]
+                if recorded_name != nil and recorded_name != "":
+                    g_name = recorded_name
+            if self.global_static_types.has(g_key):
+                val recorded_type = self.global_static_types[g_key]
+                if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
+                    g_ty = recorded_type
         val dest_name = "%l{dest_id}"
         self.local_types[dest_id] = g_ty
         self.value_types[dest_name] = g_ty
@@ -2029,7 +2058,7 @@ impl MirTextCodegen for MirToLlvm:
         val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
         self.builder.emit_store(g_ty, value_val, g_name)
 
-    me translate_store_global_at(instructions: [MirInst], index: i64):
+    me translate_store_global_at(instructions: [MirInst], index: i64, module_index: i64):
         val bootstrap_debug = (rt_env_get("SIMPLE_BOOTSTRAP_DEBUG") ?? "") == "1"
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:entry index={index}"
@@ -2038,17 +2067,22 @@ impl MirTextCodegen for MirToLlvm:
         val value_kind = inst.bootstrap_store_global_value_kind()
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:scalar index={index} symbol={symbol_id} kind={value_kind}"
-        val g_key = self.global_static_key(symbol_id)
         var g_name = "@g_undeclared_{symbol_id}"
-        if self.global_static_names.has(g_key):
-            val recorded_name = self.global_static_names[g_key]
-            if recorded_name != nil and recorded_name != "":
-                g_name = recorded_name
         var g_ty = self.native_int_type
-        if self.global_static_types.has(g_key):
-            val recorded_type = self.global_static_types[g_key]
-            if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
-                g_ty = recorded_type
+        val static_index = bootstrap_llvm_static_index(module_index, symbol_id)
+        if static_index >= 0:
+            g_name = "@g_{bootstrap_mir_static_name_at(static_index)}"
+            g_ty = bootstrap_llvm_static_type_text(bootstrap_mir_static_type_tag_at(static_index), self.native_int_type)
+        else:
+            val g_key = self.global_static_key(symbol_id)
+            if self.global_static_names.has(g_key):
+                val recorded_name = self.global_static_names[g_key]
+                if recorded_name != nil and recorded_name != "":
+                    g_name = recorded_name
+            if self.global_static_types.has(g_key):
+                val recorded_type = self.global_static_types[g_key]
+                if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
+                    g_ty = recorded_type
         var value_text = "0"
         if value_kind == 1 or value_kind == 2:
             val local_id = inst.bootstrap_store_global_value_local_id()
@@ -2067,3 +2101,26 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit_store(g_ty, value_text, g_name)
         if bootstrap_debug:
             print "[mir-to-llvm] store-global:emit index={index} type={g_ty}"
+
+fn bootstrap_llvm_static_index(module_index: i64, symbol_id: i64) -> i64:
+    if module_index < 0:
+        return -1
+    var index = 0
+    while index < bootstrap_mir_static_count():
+        if bootstrap_mir_static_module_at(index) == module_index and bootstrap_mir_static_symbol_id_at(index) == symbol_id:
+            return index
+        index = index + 1
+    -1
+
+fn bootstrap_llvm_static_type_text(type_tag: i64, fallback: text) -> text:
+    match type_tag:
+        case 1: "i64"
+        case 2: "i32"
+        case 3: "i16"
+        case 4: "i8"
+        case 5: "double"
+        case 6: "float"
+        case 7: "i1"
+        case 8: "void"
+        case 9: "ptr"
+        case _: fallback
