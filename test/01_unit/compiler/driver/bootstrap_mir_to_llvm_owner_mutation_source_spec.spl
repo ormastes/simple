@@ -1,3 +1,7 @@
+use compiler.mir.mir_instruction_graph.{MirBlock}
+use compiler.mir.mir_instruction_support.{BlockId}
+use compiler.mir.mir_instruction_kinds.{MirTerminator}
+
 extern fn rt_file_read_text(path: text) -> text
 
 describe "bootstrap MIR-to-LLVM owner mutation":
@@ -124,3 +128,36 @@ describe "bootstrap MIR-to-LLVM owner mutation":
         expect(globals).to_contain("case MirTypeKind.Struct(_) | MirTypeKind.Enum(_) | MirTypeKind.Tuple(_)")
         expect(globals).to_contain("fn bootstrap_mir_function_return_unsigned_at(index: i64) -> bool:")
         expect(globals).to_contain("ret_unsigned={{_bootstrap_mir_function_return_unsigned.len()}}")
+
+    it "projects nested block ids through the MirBlock owner":
+        val block = MirBlock(
+            id: BlockId(id: 37),
+            label: nil,
+            instructions: [],
+            terminator: MirTerminator.Unreachable
+        )
+        expect(block.bootstrap_block_id_value()).to_equal(37)
+
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+        val block_owner = rt_file_read_text(
+            "src/compiler/50.mir/mir_instruction_graph.spl"
+        ) ?? ""
+        expect(codegen).to_contain("block.bootstrap_block_id_value()")
+        expect(codegen.contains("self.block_id_value(block.id)")).to_equal(false)
+        expect(block_owner).to_contain("me bootstrap_block_id_value() -> i64:")
+        expect(block_owner).to_contain("self.id.id")
+
+    it "keeps reusable block boundary traces bootstrap-debug gated":
+        val codegen = rt_file_read_text(
+            "src/compiler/70.backend/backend/_MirToLlvm/core_codegen.spl"
+        ) ?? ""
+
+        expect(codegen).to_contain("val bootstrap_debug = (rt_env_get(\"SIMPLE_BOOTSTRAP_DEBUG\") ?? \"\") == \"1\"")
+        expect(codegen).to_contain("[mir-to-llvm] block:label-before")
+        expect(codegen).to_contain("[mir-to-llvm] block:label-after")
+        expect(codegen).to_contain("[mir-to-llvm] block:instruction-before")
+        expect(codegen).to_contain("[mir-to-llvm] block:instruction-after")
+        expect(codegen).to_contain("[mir-to-llvm] block:terminator-before")
+        expect(codegen).to_contain("[mir-to-llvm] block:terminator-after")
